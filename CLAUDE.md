@@ -1,0 +1,122 @@
+# Sporely Web — Claude Code instructions
+
+## Supabase project
+
+- **URL:** `https://zkpjklzfwzefhjluvhfw.supabase.co`
+- **Publishable (anon) key:** `sb_publishable_nZrERVFN3WR4Aqn2yggc7Q_siAG1TCV`
+- The client is created once in `src/supabase.js` and imported everywhere. Never recreate it.
+- Never use raw `fetch` for Supabase — always use the SDK client.
+
+## Schema mapping decisions
+
+The Supabase schema mirrors the desktop SQLite `observations` table column-for-column,
+with these additions:
+- `user_id uuid` — always set to `auth.uid()`, never trust client-supplied value
+- `desktop_id int` — the local SQLite `id`; used for dedup during desktop ↔ cloud sync
+- `location_public bool` — controls GPS visibility to friends
+- `visibility text` — cloud sharing scope (`private` / `friends` / `public`)
+
+SQLite uses integers (0/1) for booleans; PostgreSQL uses real booleans.
+When pushing from desktop to cloud, always coerce: `bool(sqlite_value)`.
+
+`spore_statistics` is stored as `TEXT` (JSON) in SQLite, but `jsonb` in Postgres.
+Deserialise before pushing from desktop.
+
+`private_comment` is a local-only column — never read or write it from the web app.
+
+## Taxa / species lookup
+
+- Tables: `public.taxa` + `public.taxa_vernacular` — imported from `vernacular_multilanguage_unified.sqlite3`
+- Search via Supabase RPC: `supabase.rpc('search_taxa', { q, lang, lim })`
+- All logic lives in `src/artsorakel.js`: `searchTaxa()`, `runArtsorakel()`, `formatDisplayName()`
+- Artsdata AI (`https://ai.artsdatabanken.no`) is called directly from the browser — CORS is open
+- Languages supported in vernacular DB: no, sv, da, de, en, es, fi, fr, it, pl, pt
+- External IDs on `taxa`: `norwegian_taxon_id`, `swedish_taxon_id`, `inaturalist_taxon_id`, `artportalen_taxon_id`
+- To re-import taxa: `export SUPABASE_SERVICE_ROLE_KEY=... && python database/import_taxa_to_supabase.py`
+
+## RLS approach
+
+- Every table has RLS enabled. Default: owner only (`auth.uid() = user_id`).
+- Friend access is granted via a join on `friendships WHERE status = 'accepted'`.
+- Never bypass RLS in application code. If a query returns nothing, it should be because
+  the user doesn't have access, not because of a missing filter.
+- The `observations_friend_view` nulls out GPS and `private_comment` for non-owners.
+  Query this view (not the table directly) when building friend-facing UI.
+- `taxa` and `taxa_vernacular` are read-only for all authenticated users (no user_id).
+
+## Coding conventions
+
+- **Vanilla JS, no framework.** No React, no Vue, no Svelte. Keep it that way.
+- **One module per screen** in `src/screens/`. Each exports an `init*()` function
+  called once on app boot, and any public functions needed by the router.
+- **No inline event handlers in HTML.** All event wiring goes in the screen's `init*()`
+  or in `main.js`.
+- **State lives in `src/state.js`.** Don't attach state to DOM nodes or `window`.
+- **Navigation** is done by calling `navigate(screenName)` from `src/router.js`.
+  Never manually toggle `.active` classes or show/hide screens elsewhere.
+- **Errors surface as toasts** for transient issues (`showToast` from `src/toast.js`).
+  Auth errors go in the `#auth-error` div via `showError()` in `auth.js`.
+- CSS: use `var(--token-name)` from `:root` in `style.css`. Don't hardcode colours.
+  The design uses a dark green palette — see `:root` for all tokens.
+- Don't add `console.log` calls in production paths. `console.warn` / `console.error`
+  is fine for genuine error paths.
+
+## Auth rules
+
+- Session check happens in `main.js` `init()` — don't duplicate it in screen modules.
+- After any Supabase auth call that might fail, read `error.message` and map it to a
+  user-friendly string. Raw Supabase errors (e.g. "Invalid login credentials") are
+  acceptable to show as-is; internal codes are not.
+- `handleUrlHashError()` must run before `getSession()` in `init()` so expired-link
+  redirects are caught before the app tries to read a non-existent session.
+- Token refresh is handled automatically by the Supabase client. Don't manually
+  manage `access_token` / `refresh_token` in the web app.
+
+## Email / SMTP
+
+- Transactional email via Resend (smtp.resend.com, port 587, username `resend`)
+- Sender: `noreply@sporely.no` (domain verified in Resend)
+- API key stored as SMTP password in Supabase Authentication → SMTP settings
+
+## Storage
+
+- Bucket name: `observation-images` (private, RLS enabled)
+- Path convention: `{user_id}/{observation_id}/{index}_{timestamp}.jpg`
+- Always upload with `{ upsert: true }` so retries don't fail.
+- Check that the blob is a real `Blob` instance before uploading — demo-mode captures
+  have `blob: null`.
+- RLS policy: `(storage.foldername(name))[1] = auth.uid()::text` on SELECT + INSERT
+- Bucket name: `avatars` (public read, owner-scoped writes)
+- Path convention: `{user_id}/avatar.jpg`
+- Profile screen stores `profiles.avatar_url` and may fall back to a signed URL if the
+  direct avatar URL cannot be loaded immediately after upload.
+
+## Camera / capture
+
+- `startCamera()` in `capture.js` tries high-res constraints first, falls back to bare
+  `{ facingMode: 'environment' }` if `NotReadableError` — handles Android driver quirks.
+- Requires HTTPS — Vite is configured with `@vitejs/plugin-basic-ssl` for LAN testing.
+- Permission-denied overlay (`#camera-denied`) shows platform-specific instructions.
+- Blobs are wrapped in `blobPromise` (canvas.toBlob) and resolved in `review.js`.
+
+## Review screen / Artsorakel
+
+- Each captured photo in `state.capturedPhotos` has: `{ blob, blobPromise, gps, ts, emoji, taxon }`
+- `taxon` is set when user picks from autocomplete or Artsorakel result:
+  `{ genus, specificEpithet, vernacularName, scientificName, displayName, ... }`
+- Thumbnails load asynchronously from blobPromise after grid renders.
+- "Done" button calls `finishAndSync()`: inserts observation with genus/species/common_name,
+  uploads blob to Storage, inserts observation_images row.
+
+## Desktop sync notes (for context, not implemented in web)
+
+- Desktop push/pull is handled by `MycoLog/utils/cloud_sync.py`.
+- `desktop_id` on cloud rows is the bridge: desktop sets it, web must never overwrite it.
+- `sync_status` on local SQLite rows: `'local'` | `'synced'` | `'dirty'`.
+  Call `mark_observation_dirty(id)` after any local edit.
+- Desktop cloud sync can upload the selected observation images plus optional generated
+  media (measure plot, thumbnail gallery, plate), depending on the desktop publish settings.
+- The desktop stores a local media signature so later syncs can skip unchanged cloud media
+  without re-rendering or re-uploading it.
+- If the same linked observation changed on both desktop and web, the desktop now reports
+  a conflict and skips the automatic overwrite.

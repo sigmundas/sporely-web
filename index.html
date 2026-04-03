@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0d1109">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Sporely">
+<title>Sporely</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ═══════════════════════ AUTH OVERLAY ═══════════════════════ -->
+  <div id="auth-overlay">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="brand-icon">🍄</div>
+        <span>Sporely</span>
+      </div>
+      <p class="auth-tagline">Field observations, everywhere.</p>
+
+      <div id="auth-error" class="auth-error" style="display:none"></div>
+
+      <!-- Login form -->
+      <form id="login-form" class="auth-form">
+        <h2 class="auth-title">Sign in</h2>
+        <label class="auth-label">Email
+          <input type="email" id="login-email" class="auth-input" placeholder="you@example.com" required autocomplete="email">
+        </label>
+        <label class="auth-label">Password
+          <input type="password" id="login-password" class="auth-input" placeholder="••••••••" required autocomplete="current-password">
+        </label>
+        <button type="submit" class="auth-btn" id="login-btn">Sign in</button>
+        <p class="auth-switch">No account? <a href="#" id="show-signup">Create one</a></p>
+      </form>
+
+      <!-- Signup form -->
+      <form id="signup-form" class="auth-form" style="display:none">
+        <h2 class="auth-title">Create account</h2>
+        <label class="auth-label">Email
+          <input type="email" id="signup-email" class="auth-input" placeholder="you@example.com" required autocomplete="email">
+        </label>
+        <label class="auth-label">Password
+          <input type="password" id="signup-password" class="auth-input" placeholder="At least 6 characters" required autocomplete="new-password">
+        </label>
+        <button type="submit" class="auth-btn" id="signup-btn">Create account</button>
+        <p class="auth-switch">Already have one? <a href="#" id="show-login">Sign in</a></p>
+      </form>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════ APP SHELL ═══════════════════════════ -->
+  <div id="app-shell" style="display:none; width:100%; height:100%; position:relative;">
+
+    <!-- ════════════════════════════ HOME ════════════════════════════ -->
+    <div class="screen active" id="screen-home">
+      <div class="app-header">
+        <div class="header-brand">
+          <div class="brand-icon">🍄</div>
+          Sporely
+          <div class="header-sync-tag" id="header-sync-tag" style="display:none">
+            <div class="sync-dot"></div>
+            <span>Sync</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button class="icon-btn" id="settings-btn" aria-label="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="18" height="18"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="home-content">
+        <div class="quick-action-card" id="qa-new-obs">
+          <div>
+            <div class="qa-label">Quick Action</div>
+            <div class="qa-title">New Observation</div>
+          </div>
+          <div class="qa-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M20.94 13a9 9 0 1 1-1.2-4.06"/><path d="M22 6h-4v4"/></svg>
+          </div>
+        </div>
+
+        <div class="action-grid">
+          <div class="action-card" id="ac-view-obs">
+            <div class="action-card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            </div>
+            <div class="action-card-label">View Observations</div>
+          </div>
+          <div class="action-card" id="ac-import">
+            <div class="action-card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <div class="action-card-label">Import Photos</div>
+          </div>
+        </div>
+
+        <div class="section-header">
+          <div class="section-title">Recent Finds</div>
+          <div class="section-link" id="recent-history-link">History →</div>
+        </div>
+
+        <div id="recent-finds-list">
+          <!-- populated by home.js -->
+        </div>
+
+        <div class="section-header home-section-gap">
+          <div class="section-title">Recent Comments</div>
+        </div>
+
+        <div id="recent-comments-list">
+          <!-- populated by home.js -->
+        </div>
+
+        <div class="home-stats-row">
+          <div class="home-stat">
+            <div class="home-stat-val" id="hstat-obs">—</div>
+            <div class="home-stat-lbl">Finds</div>
+          </div>
+          <div class="home-stat-div"></div>
+          <div class="home-stat">
+            <div class="home-stat-val" id="hstat-sp">—</div>
+            <div class="home-stat-lbl">Species</div>
+          </div>
+          <div class="home-stat-div"></div>
+          <div class="home-stat">
+            <div class="home-stat-val" id="hstat-friends">—</div>
+            <div class="home-stat-lbl">Friends active</div>
+          </div>
+        </div>
+
+        <input type="file" id="import-file-input" accept="image/*" multiple style="display:none">
+      </div>
+    </div>
+
+    <!-- ════════════════════════════ FINDS ════════════════════════════ -->
+    <div class="screen" id="screen-finds">
+      <div class="app-header">
+        <div class="header-brand">
+          <div class="brand-icon">🍄</div>
+          Sporely
+        </div>
+        <div class="header-actions">
+          <button class="icon-btn" id="finds-search-btn" aria-label="Search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="18" height="18"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="finds-search-bar" id="finds-search-bar">
+        <div class="finds-search-inner">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="search" id="finds-search-input" placeholder="Search species, location, notes…" autocomplete="off">
+          <button class="finds-search-clear" id="finds-search-clear" aria-label="Clear search">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="scope-tabs">
+        <button class="scope-tab active" data-scope="mine">Mine</button>
+        <button class="scope-tab" data-scope="friends">Friends</button>
+        <button class="scope-tab" data-scope="community">Community</button>
+      </div>
+
+      <div class="finds-topbar">
+        <div class="finds-subtitle-bar" id="finds-subtitle">Documented specimens.</div>
+        <div class="finds-view-btns">
+          <button class="finds-view-btn active" id="finds-view-cards" title="Card view" aria-label="Card view">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="8" height="10" rx="1.5"/><rect x="13" y="3" width="8" height="10" rx="1.5"/><rect x="3" y="16" width="8" height="5" rx="1.5"/><rect x="13" y="16" width="8" height="5" rx="1.5"/></svg>
+          </button>
+          <button class="finds-view-btn" id="finds-view-tiles" title="Tile view" aria-label="Tile view">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="4" height="4" rx="0.5"/><rect x="10" y="3" width="4" height="4" rx="0.5"/><rect x="17" y="3" width="4" height="4" rx="0.5"/><rect x="3" y="10" width="4" height="4" rx="0.5"/><rect x="10" y="10" width="4" height="4" rx="0.5"/><rect x="17" y="10" width="4" height="4" rx="0.5"/><rect x="3" y="17" width="4" height="4" rx="0.5"/><rect x="10" y="17" width="4" height="4" rx="0.5"/><rect x="17" y="17" width="4" height="4" rx="0.5"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="finds-list">
+        <!-- populated by finds.js -->
+      </div>
+
+      <button class="finds-fab" id="finds-fab" aria-label="New observation">+</button>
+    </div>
+
+    <!-- ════════════════════════════ CAPTURE ════════════════════════════ -->
+    <div class="screen" id="screen-capture">
+      <div class="capture-viewfinder">
+        <video id="camera-video" autoplay playsinline muted></video>
+        <canvas id="camera-canvas" style="display:none"></canvas>
+
+        <div id="camera-denied" style="display:none">
+          <div class="camera-denied-icon">📷</div>
+          <h3 class="camera-denied-title">Camera access needed</h3>
+          <p class="camera-denied-body" id="camera-denied-body"></p>
+          <button class="camera-denied-retry" id="camera-retry-btn">Try again</button>
+        </div>
+
+        <div class="capture-header">
+          <div class="capture-brand">Sporely</div>
+        </div>
+
+        <div class="capture-top-overlays" style="margin-top:52px">
+          <div class="gps-pill">
+            <div class="gps-dot"></div>
+            <div class="gps-text" id="gps-display">Acquiring…</div>
+          </div>
+          <div class="light-pill" id="light-display">LIGHT: — / F: —</div>
+        </div>
+
+        <div class="batch-badge-area" id="batch-area" style="display:none">
+          <div class="batch-stack">
+            <div class="batch-stack-img">🍄</div>
+            <div class="batch-stack-img" style="z-index:2">🍄</div>
+            <div class="batch-count-badge" id="batch-count">0</div>
+          </div>
+          <div class="batch-active-label">Batch Active</div>
+        </div>
+
+        <div class="capture-controls">
+          <button class="capture-side-btn" id="flash-btn" aria-label="Toggle flash">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="18" height="18"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          </button>
+          <button class="shutter-btn" id="shutter-btn" aria-label="Capture photo">
+            <div class="shutter-inner"></div>
+          </button>
+          <button class="done-btn" id="done-btn">DONE</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════ BATCH REVIEW ════════════════════════════ -->
+    <div class="screen" id="screen-review">
+      <div class="review-header">
+        <div>
+          <div class="review-session-label">Review</div>
+          <div class="review-time" id="review-time">—</div>
+        </div>
+        <div class="close-btn" id="review-close">×</div>
+      </div>
+
+      <div class="review-body">
+        <div class="review-stats">
+          <div class="review-count" id="review-count">0 Specimens</div>
+          <button class="ai-id-btn" id="ai-id-btn">
+            <div class="ai-dot"></div>
+            Artsorakel all
+          </button>
+        </div>
+        <span id="review-coords-text" style="display:none"></span>
+        <span id="review-location" style="display:none"></span>
+
+        <div class="specimen-grid" id="specimen-grid"></div>
+
+        <div class="field-meta-section">
+          <div class="field-meta-header">Field Metadata</div>
+          <div class="field-meta-row">
+            <div class="field-meta-key">Location</div>
+            <div class="field-meta-val location-field-val">
+              <input id="location-name-input" type="text" placeholder="—" class="location-name-input" autocomplete="off" spellcheck="false">
+              <button id="location-apply-btn" class="location-apply-btn" style="display:none">Use lookup</button>
+            </div>
+          </div>
+          <div class="field-meta-row">
+            <div class="field-meta-key">GPS Accuracy</div>
+            <div class="field-meta-val green" id="meta-accuracy">± — m</div>
+          </div>
+          <div class="field-meta-row">
+            <div class="field-meta-key">Altitude</div>
+            <div class="field-meta-val" id="meta-altitude">— ASL</div>
+          </div>
+          <div class="field-meta-row">
+            <div class="field-meta-key">Sharing</div>
+            <div class="field-meta-val">
+              <div class="vis-radio-group" id="review-visibility">
+                <label class="vis-option"><input type="radio" name="review-vis" value="private"> <span>Private</span></label>
+                <label class="vis-option"><input type="radio" name="review-vis" value="friends" checked> <span>Friends</span></label>
+                <label class="vis-option"><input type="radio" name="review-vis" value="public"> <span>Public</span></label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="review-actions">
+        <div class="review-action-btns">
+          <button class="btn-secondary" id="save-draft-btn">Save Draft</button>
+          <button class="btn-primary" id="finish-sync-btn">Done</button>
+        </div>
+        <div class="sync-footer-text">Saves to Sporely Cloud</div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════ FIND DETAIL ════════════════════════════ -->
+    <div class="screen" id="screen-find-detail">
+      <div class="review-header">
+        <button class="detail-back-btn" id="detail-back" type="button" aria-label="Back">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+          Finds
+        </button>
+        <div class="review-time" id="detail-date">—</div>
+      </div>
+
+      <div class="review-body">
+        <div class="detail-gallery" id="detail-gallery"></div>
+        <div class="detail-coords-bar" id="detail-coords" style="display:none"></div>
+
+        <div class="detail-form">
+          <div class="detail-field">
+            <div class="detail-field-label">Species</div>
+            <div class="taxon-field-wrap">
+              <input id="detail-taxon-input" class="taxon-input detail-taxon-input" type="text"
+                placeholder="Unknown species" autocomplete="off" spellcheck="false">
+              <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
+            </div>
+          </div>
+
+          <div class="detail-field">
+            <div class="detail-field-label">Location</div>
+            <input id="detail-location" class="detail-text-input" type="text" placeholder="—">
+          </div>
+
+          <div class="detail-field">
+            <div class="detail-field-label">Habitat</div>
+            <input id="detail-habitat" class="detail-text-input" type="text" placeholder="—">
+          </div>
+
+          <div class="detail-field">
+            <div class="detail-field-label">Notes</div>
+            <textarea id="detail-notes" class="detail-textarea" placeholder="Field notes…" rows="4"></textarea>
+          </div>
+
+          <div class="field-meta-section" style="margin-top:12px">
+            <div class="field-meta-row">
+              <div class="field-meta-key">ID Needed</div>
+              <label class="detail-toggle">
+                <input type="checkbox" id="detail-uncertain">
+                <span class="detail-toggle-track"><span class="detail-toggle-thumb"></span></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="detail-field" style="margin-top:8px">
+            <div class="detail-field-label">Sharing</div>
+            <div class="vis-radio-group" id="detail-visibility">
+              <label class="vis-option"><input type="radio" name="detail-vis" value="private"> <span>Private</span></label>
+              <label class="vis-option"><input type="radio" name="detail-vis" value="friends"> <span>Friends</span></label>
+              <label class="vis-option"><input type="radio" name="detail-vis" value="public"> <span>Public</span></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="comments-section" id="comments-section">
+          <div class="comments-title">Comments</div>
+          <div class="comments-list" id="comments-list"></div>
+          <div class="comment-input-row">
+            <input id="comment-input" class="comment-input" type="text" placeholder="Add a comment…" autocomplete="off">
+            <button id="comment-send-btn" class="comment-send-btn">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="detail-footer">
+        <div class="detail-btns-row">
+          <button class="btn-danger btn-sm" id="detail-delete-btn">Delete</button>
+          <button class="btn-secondary btn-sm" id="detail-cancel-btn">Cancel</button>
+          <button class="btn-primary btn-sm" id="detail-save-btn">Save</button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════════════ IMPORT REVIEW ═══════════════════════════ -->
+    <div class="screen" id="screen-import-review">
+      <div class="review-header">
+        <button class="detail-back-btn" id="import-back" type="button">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+          Home
+        </button>
+        <div class="review-time" id="import-session-count">0 groups</div>
+      </div>
+
+      <div class="review-body">
+        <div id="import-session-list"></div>
+      </div>
+
+      <div class="review-actions">
+        <div class="review-action-btns">
+          <button class="btn-secondary" id="import-cancel-btn">Cancel</button>
+          <button class="btn-primary" id="import-save-btn">Save All</button>
+        </div>
+        <div class="sync-footer-text">Creates observations in Sporely Cloud</div>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════ MAP ════════════════════════════════ -->
+    <div class="screen" id="screen-map">
+      <div class="map-overlay-top">
+        <div class="map-search-row">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="search" id="map-search-input" placeholder="Filter map…" autocomplete="off">
+          <button class="map-search-clear" id="map-search-clear" style="display:none" aria-label="Clear">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="map-scope-bar">
+          <button class="map-scope-btn active" data-scope="mine">Mine</button>
+          <button class="map-scope-btn" data-scope="friends">Friends</button>
+          <button class="map-scope-btn" data-scope="all">All</button>
+        </div>
+      </div>
+      <div id="map-container"></div>
+    </div>
+
+    <!-- ═══════════════════════════ PROFILE ═══════════════════════════ -->
+    <div class="screen" id="screen-profile">
+      <div class="app-header">
+        <div class="header-brand">
+          <div class="brand-icon">🍄</div>
+          Profile
+        </div>
+      </div>
+      <div class="profile-body">
+
+        <div class="profile-identity">
+          <div class="profile-avatar-wrap">
+            <div class="profile-avatar-circle" id="profile-avatar-circle">
+              <span id="profile-avatar-initials">?</span>
+              <img id="profile-avatar-img" alt="" style="display:none">
+            </div>
+            <button class="profile-avatar-btn" id="profile-avatar-btn" aria-label="Change photo">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            </button>
+            <input type="file" id="profile-avatar-input" accept="image/*" style="display:none">
+          </div>
+          <div class="profile-identity-fields">
+            <input id="profile-username" class="profile-field-input" type="text" placeholder="@username" autocomplete="off" spellcheck="false">
+            <input id="profile-fullname" class="profile-field-input" type="text" placeholder="Full name (optional)">
+            <div class="profile-email-display" id="profile-email-display"></div>
+            <button id="profile-save-btn" class="btn-primary" style="width:100%;margin-top:6px;padding:9px">Save profile</button>
+          </div>
+        </div>
+
+        <div class="profile-stats-row">
+          <div class="profile-stat">
+            <div class="profile-stat-val" id="stat-obs-count">—</div>
+            <div class="profile-stat-lbl">Finds</div>
+          </div>
+          <div class="profile-stat">
+            <div class="profile-stat-val" id="stat-species-count">—</div>
+            <div class="profile-stat-lbl">Species</div>
+          </div>
+          <div class="profile-stat">
+            <div class="profile-stat-val" id="stat-friends-count">—</div>
+            <div class="profile-stat-lbl">Friends</div>
+          </div>
+        </div>
+
+        <div class="profile-section">
+          <div class="profile-section-title">Add Friend</div>
+          <div class="friend-search-row">
+            <input id="friend-search-input" class="friend-search-input" type="text" placeholder="Email, name or @username…" autocomplete="off">
+            <button id="friend-search-btn" class="btn-primary" style="padding:8px 14px;flex-shrink:0">Search</button>
+          </div>
+          <div id="friend-search-results"></div>
+        </div>
+
+        <div class="profile-section" id="pending-section" style="display:none">
+          <div class="profile-section-title">Pending Requests</div>
+          <div id="pending-list"></div>
+        </div>
+
+        <div class="profile-section">
+          <div class="profile-section-title">Friends</div>
+          <div id="friends-list"><div style="color:var(--text-dim);font-size:13px">No friends yet.</div></div>
+        </div>
+
+        <div class="profile-section">
+          <div class="field-meta-section">
+            <div class="field-meta-header">Connection</div>
+            <div class="field-meta-row">
+              <div class="field-meta-key">Supabase</div>
+              <div class="field-meta-val green" id="profile-sync-status">Checking…</div>
+            </div>
+          </div>
+        </div>
+
+        <button class="sign-out-btn" id="sign-out-btn">Sign out</button>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════ AVATAR CROP ═════════════════════════════ -->
+    <div id="avatar-crop-overlay" class="avatar-crop-overlay" style="display:none">
+      <div class="avatar-crop-modal">
+        <div class="avatar-crop-header">Crop Photo</div>
+        <div class="avatar-crop-viewport" id="avatar-crop-viewport">
+          <img id="avatar-crop-img" draggable="false" alt="" style="position:absolute;touch-action:none;user-select:none">
+          <div class="avatar-crop-frame"></div>
+        </div>
+        <div class="avatar-crop-hint">Pinch to zoom · Drag to reposition</div>
+        <div class="avatar-crop-btns">
+          <button class="btn-secondary" id="avatar-crop-cancel">Cancel</button>
+          <button class="btn-primary" id="avatar-crop-confirm">Use Photo</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════ BOTTOM NAV ════════════════════════════ -->
+    <nav id="bottom-nav">
+      <button class="nav-item active" id="nav-home">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        <span class="nav-label">Home</span>
+      </button>
+      <button class="nav-item" id="nav-finds">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+        <span class="nav-label">Finds</span>
+      </button>
+      <button class="nav-item" id="nav-map">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
+        <span class="nav-label">Map</span>
+      </button>
+      <button class="nav-item" id="nav-profile">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <span class="nav-label">Profile</span>
+      </button>
+    </nav>
+
+    <!-- ════════════════════════ IMPORT PROGRESS ════════════════════════════ -->
+    <div id="import-progress" style="display:none">
+      <div class="import-progress-card">
+        <div class="import-progress-label" id="import-progress-label">Processing…</div>
+        <div class="import-progress-track">
+          <div class="import-progress-fill" id="import-progress-fill"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════ SETTINGS PANEL ════════════════════════════ -->
+    <div id="settings-overlay">
+      <div id="settings-sheet">
+        <div class="settings-handle"></div>
+        <div class="settings-title">Settings</div>
+
+        <div class="settings-section-label">Appearance</div>
+        <div class="theme-segment">
+          <button class="theme-seg-btn" data-theme="auto">Auto</button>
+          <button class="theme-seg-btn" data-theme="light">Light</button>
+          <button class="theme-seg-btn" data-theme="dark">Dark</button>
+        </div>
+
+        <div class="settings-section-label" style="margin-top:22px">Photo Import</div>
+        <div class="settings-gap-row">
+          <div class="settings-gap-label">New observation after</div>
+          <input type="number" id="settings-gap-input" class="settings-gap-input" min="1" max="120" value="1">
+          <span class="settings-gap-unit">min</span>
+        </div>
+        <p class="settings-gap-hint">Photos taken within this window are grouped into one observation.</p>
+      </div>
+    </div>
+
+  </div><!-- /app-shell -->
+
+  <!-- ══════════════════════════ PHOTO VIEWER ════════════════════════════ -->
+  <div id="photo-viewer" style="display:none">
+    <button id="photo-viewer-close" aria-label="Close">×</button>
+    <button id="photo-viewer-prev" class="photo-nav-btn" aria-label="Previous">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+    <div id="photo-viewer-wrap">
+      <img id="photo-viewer-img" alt="" draggable="false">
+    </div>
+    <button id="photo-viewer-next" class="photo-nav-btn" aria-label="Next">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+    </button>
+    <div id="photo-viewer-counter"></div>
+  </div>
+
+  <div id="toast"></div>
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

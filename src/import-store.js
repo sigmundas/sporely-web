@@ -1,0 +1,98 @@
+// Persists pending import sessions to IndexedDB so they survive app suspension.
+// Blobs are converted to ArrayBuffers for storage (Blobs themselves aren't transferable).
+// All async work happens OUTSIDE the IDB transaction to avoid auto-commit.
+
+const DB_NAME = 'sporely'
+const DB_VERSION = 1
+const STORE = 'pending_import'
+
+function _open() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION)
+    req.onupgradeneeded = ({ target: { result: db } }) => {
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: 'id' })
+      }
+    }
+    req.onsuccess = ({ target: { result } }) => resolve(result)
+    req.onerror = ({ target: { error } }) => reject(error)
+  })
+}
+
+function _txComplete(tx) {
+  return new Promise((res, rej) => {
+    tx.oncomplete = res
+    tx.onerror = () => rej(tx.error)
+    tx.onabort = () => rej(tx.error)
+  })
+}
+
+export async function saveImportSessions(sessions) {
+  try {
+    // Convert all blobs → ArrayBuffers before opening the transaction
+    // (awaiting inside an IDB transaction causes auto-commit)
+    const records = await Promise.all(sessions.map(async s => ({
+      id: s.id,
+      ts: s.ts.getTime(),
+      locationName: s.locationName || '',
+      taxon: s.taxon || null,
+      visibility: s.visibility || 'friends',
+      blobs: await Promise.all(s.files.map(f => f.arrayBuffer())),
+    })))
+
+    const db = await _open()
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    store.clear()
+    for (const r of records) store.put(r)
+    await _txComplete(tx)
+    db.close()
+  } catch (err) {
+    console.warn('saveImportSessions failed:', err)
+  }
+}
+
+export async function loadImportSessions() {
+  try {
+    const db = await _open()
+    const tx = db.transaction(STORE, 'readonly')
+    const records = await new Promise((res, rej) => {
+      const req = tx.objectStore(STORE).getAll()
+      req.onsuccess = () => res(req.result)
+      req.onerror = () => rej(req.error)
+    })
+    db.close()
+    if (!records?.length) return []
+
+    return records
+      .sort((a, b) => a.ts - b.ts)
+      .map(r => {
+        const files = r.blobs.map(ab => new Blob([ab], { type: 'image/jpeg' }))
+        const blobUrls = files.map(b => URL.createObjectURL(b))
+        return {
+          id: r.id,
+          ts: new Date(r.ts),
+          locationName: r.locationName,
+          taxon: r.taxon,
+          visibility: r.visibility,
+          files,
+          blobUrls,
+        }
+      })
+  } catch (err) {
+    console.warn('loadImportSessions failed:', err)
+    return []
+  }
+}
+
+export async function clearImportSessions() {
+  try {
+    const db = await _open()
+    const tx = db.transaction(STORE, 'readwrite')
+    tx.objectStore(STORE).clear()
+    await _txComplete(tx)
+    db.close()
+  } catch (err) {
+    console.warn('clearImportSessions failed:', err)
+  }
+}

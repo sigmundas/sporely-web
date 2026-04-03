@@ -1,0 +1,183 @@
+# Sporely Web — Supabase / Postgres Database
+
+## Overview
+This document is the source of truth for the Supabase/Postgres side of Sporely Web:
+- schema inventory (tables, views, functions/RPCs)
+- ownership rules ("who can read/write")
+- RLS behavior (descriptions only; **no policy SQL**)
+- Storage bucket conventions (folder/path rules)
+- operational checklist for maintaining the cloud DB
+
+See also:
+- `ARCHITECTURE.md` for product-level architecture
+- `CLAUDE.md` for repo/agent usage conventions
+
+---
+
+## Supabase project
+- Project URL: `https://zkpjklzfwzefhjluvhfw.supabase.co`
+- Client access from the web app uses the **publishable anon key**.
+- All client data access is enforced by **RLS** and Storage policies.
+
+---
+
+## Schema inventory
+
+### Core application tables
+- `observations`
+  - Cloud counterpart of the desktop SQLite `observations`
+  - Mobile writes: `user_id, date, gps_latitude, gps_longitude, source_type`
+  - Additional cloud-only columns:
+    - `user_id` (FK to `auth.users`, enforced by RLS)
+    - `desktop_id` (desktop SQLite `id`, used for dedup and sync)
+    - `location_public` (controls whether GPS is visible outside private mode)
+    - `visibility` (text, default `'private'` — visibility scope: `'private'`, `'friends'`, `'public'`)
+- `observation_images`
+  - Metadata rows for images uploaded to Storage
+  - Columns:
+    - `storage_path` (path inside the Storage bucket)
+    - `image_type` (`'field' | 'microscope'`)
+    - microscope metadata columns exist but are populated primarily by desktop sync
+- `comments`
+  - Community comments on observations
+  - Columns: `observation_id` (bigint FK), `user_id` (uuid FK), `body` (text), `created_at`
+  - Visibility enforced by RLS: same access rules as the parent observation
+
+### Profiles / social graph
+- `profiles`
+  - Auto-created by a Postgres trigger on `auth.users` insert
+  - Columns: `username` (unique), `display_name`, `avatar_url`, `bio`
+  - Avatar initials derived from `username` or `email` on the client
+- `friendships`
+  - Bidirectional friendship rows with status gating: `pending` / `accepted` / `blocked`
+  - Columns: `requester_id` (uuid), `addressee_id` (uuid), `status`
+  - Used to compute friend visibility
+- `observation_shares`
+  - Grants access to specific users (including location access edge cases)
+
+### Taxonomy / search
+- `reference_values`
+  - Readable by authenticated users (used for taxonomy/search support)
+- `taxa` and `taxa_vernacular`
+  - Populated with ~110k taxa + ~70k vernacular names
+- `search_taxa` (RPC)
+  - Deployed and used by the web app for autocomplete/search
+
+---
+
+## Views
+- `observations_friend_view`
+  - Used by the web app to show observations that friends can see
+  - GPS handling:
+    - GPS coordinates are nulled out in the view when `location_public = false`
+    - location access can be explicitly granted via `observation_shares`
+- `observations_community_view`
+  - Exposes observations where `visibility = 'public'` to all authenticated users
+
+---
+
+## Storage inventory
+
+### Buckets
+- `observation-images`
+  - Stores image binaries for observations
+  - The web app uploads field capture images; desktop sync uploads microscope images when applicable
+- `avatars`
+  - Stores profile avatar images
+  - Public bucket — avatars are readable without authentication
+  - Upload path convention: `${uid}/avatar.jpg`
+
+### Image path / folder convention
+Upload paths follow:
+- Observations: `${uid}/{obs_id}/{index}_{timestamp}.jpg`
+- Avatars: `${uid}/avatar.jpg`
+
+Storage folder-prefix policies rely on the first folder segment matching `auth.uid()::text` via `storage.foldername(name)[1]`.
+
+---
+
+## Security model (RLS + Storage)
+
+### RLS: who can read what
+All tables have RLS enabled and default "owner-only" access unless overridden by explicit policies.
+
+- `observations` — accepted friends can read; `visibility` controls observation visibility and comment access
+- `observation_images` — follow the same ownership/sharing model as their parent observation
+- `comments` — readable by the observation owner, plus anyone who can see the observation based on `visibility` and friendship status
+- `profiles` — friends can read (accepted friendships)
+- `reference_values` — all authenticated users
+- `observation_shares` — scoped to the `shared_with_id` user
+
+**Note:** `private_comment` is never read by the web app and should remain desktop-only.
+
+### RLS: who can write what (high level)
+- Client writes are constrained to rows owned by the authenticated user (`user_id`)
+- Images: allowed only when the Storage object path prefix matches the authenticated user UUID
+- Client code must never rely on setting `user_id` from the client as a trust boundary; RLS is the enforcement
+
+### Storage policy behavior (high level)
+For `observation-images`:
+- Upload/Delete: allowed only if the object's folder prefix matches `auth.uid()::text`
+- Read: allowed when the requesting user has friend access to the underlying observation(s)
+
+For `avatars`:
+- Single `FOR ALL` policy (`avatars_owner`): all operations (SELECT, INSERT, UPDATE, DELETE) allowed only if the first path segment matches `auth.uid()::text`
+- Read: public (no auth required — bucket is public)
+- Note: separate INSERT + UPDATE policies are insufficient for upsert because Supabase internally does a SELECT to check existence; the unified `FOR ALL` policy is required
+
+---
+
+## Sync-related invariants (important)
+
+### Desktop ↔ Mobile dedup
+- `desktop_id` is the desktop SQLite row identifier
+- Mobile creates cloud rows with `desktop_id = NULL` initially
+- Desktop sync assigns `desktop_id` on pull so future syncs deduplicate properly
+- Pulled cloud observations are imported directly into the local desktop database, including local image rows and thumbnails
+- The system expects a uniqueness strategy around `(desktop_id, user_id)` to keep upserts reliable and fast
+
+### Conflict rule
+- Desktop sync stores a last-seen cloud snapshot for linked observations
+- If the same linked observation changed on both desktop and web, automatic overwrite is skipped and the conflict is reported instead
+- Desktop pull/import is seamless: there is no separate cloud inbox view in the desktop table
+
+### What the mobile app uploads
+- Field photos: inserted as `observations` + `observation_images`, uploaded to Storage under the user UUID folder convention
+- Microscope photos: typically skipped by default in mobile capture; populated primarily by desktop sync
+
+---
+
+## Operational checklist (recommended)
+
+1. **Run unique constraints SQL**
+   - File: `MycoLog/database/supabase_unique_constraints.sql`
+   - Purpose: add/ensure `UNIQUE (desktop_id, user_id)` (or equivalent)
+   - Reason: needed for desktop sync upsert performance and correctness
+2. **Verify Storage bucket existence**
+   - `observation-images` ✅ exists
+   - `avatars` ✅ exists (public bucket, created 2026-04)
+3. **Verify Storage policies**
+   - `observation-images`: folder-prefix INSERT/DELETE + friend-access SELECT
+   - `avatars`: single `avatars_owner` FOR ALL policy, folder-prefix = `auth.uid()::text` ✅
+4. **Verify RLS enabled**
+   - Ensure tables/views referenced by the web app still have RLS enabled
+5. **Verify RPC availability**
+   - Ensure `search_taxa` remains deployed and callable by the web app
+6. **Regression tests for sharing / visibility**
+   - Owner can see own observations and images
+   - Accepted friends can see what's intended
+   - `location_public = false` friends see null GPS unless sharing explicitly grants access
+   - `visibility = 'private'` observations do not appear in friend or community views
+   - `visibility = 'public'` observations appear in `observations_community_view`
+
+---
+
+## Where the "real SQL" lives (for maintainers)
+Do not copy policy SQL into this doc.
+Instead, policy/DDL changes live in:
+- `MycoLog/database/` (schema migrations / DDL artifacts)
+- any standalone SQL files referenced in `MycoLog/database/` for constraints/RPCs
+
+If you need exact definitions:
+- update the appropriate SQL files under `MycoLog/database/`
+- then (optionally) update this doc's descriptions/invariants accordingly

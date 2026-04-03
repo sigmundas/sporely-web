@@ -1,0 +1,128 @@
+/**
+ * Artsorakel — species identification + taxon search
+ *
+ * AI:     POST image → https://ai.artsdatabanken.no (direct, no proxy needed if CORS open)
+ * Search: Supabase RPC search_taxa (prefix match on vernacular + scientific names)
+ */
+
+import { supabase } from './supabase.js'
+
+const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
+
+// ── Language helpers ──────────────────────────────────────────────────────────
+
+export function normalizeLang(code = 'no') {
+  const raw = String(code).toLowerCase().replace('-', '_')
+  if (raw.startsWith('nb') || raw.startsWith('nn') || raw.startsWith('no')) return 'no'
+  if (raw.startsWith('sv')) return 'sv'
+  if (raw.startsWith('da')) return 'da'
+  if (raw.startsWith('de')) return 'de'
+  if (raw.startsWith('en')) return 'en'
+  return raw.slice(0, 2) || 'no'
+}
+
+export function formatDisplayName(genus, specificEpithet, vernacularName) {
+  const sci  = `${genus} ${specificEpithet}`.trim()
+  const vern = vernacularName?.trim()
+  if (vern && vern.toLowerCase() !== sci.toLowerCase()) return `${vern} (${sci})`
+  return sci
+}
+
+// ── Taxon search (Supabase RPC) ───────────────────────────────────────────────
+
+export async function searchTaxa(q, lang = 'no') {
+  if (!q || q.trim().length < 2) return []
+  const { data, error } = await supabase.rpc('search_taxa', {
+    q:    q.trim(),
+    lang: normalizeLang(lang),
+    lim:  20,
+  })
+  if (error) { console.warn('Taxa search error:', error.message); return [] }
+  return (data || []).map(row => ({
+    taxonId:            row.taxon_id,
+    genus:              row.genus,
+    specificEpithet:    row.specific_epithet,
+    family:             row.family,
+    vernacularName:     row.vernacular_name || null,
+    scientificName:     row.canonical_scientific_name || `${row.genus} ${row.specific_epithet}`.trim(),
+    norwegianTaxonId:   row.norwegian_taxon_id  || null,
+    swedishTaxonId:     row.swedish_taxon_id    || null,
+    inaturalistTaxonId: row.inaturalist_taxon_id|| null,
+    artportalenTaxonId: row.artportalen_taxon_id|| null,
+    displayName:        formatDisplayName(row.genus, row.specific_epithet, row.vernacular_name),
+    matchType:          row.match_type,
+  }))
+}
+
+// ── Artsdata AI ───────────────────────────────────────────────────────────────
+
+function pickVernacular(taxon, lang) {
+  const map = taxon.vernacularNames || {}
+  // Exact language match first
+  if (map[lang]?.trim()) return map[lang].trim()
+  for (const [code, v] of Object.entries(map)) {
+    if (normalizeLang(code) === lang && v?.trim()) return v.trim()
+  }
+  // Fallback: root vernacularName, then any available
+  if (taxon.vernacularName?.trim()) return taxon.vernacularName.trim()
+  for (const v of Object.values(map)) {
+    if (typeof v === 'string' && v.trim()) return v.trim()
+  }
+  return null
+}
+
+function pickUrl(pred, taxon) {
+  for (const obj of [pred, taxon]) {
+    if (!obj) continue
+    for (const key of ['infoURL', 'infoUrl', 'info_url', 'url', 'link', 'href', 'uri']) {
+      if (typeof obj[key] === 'string' && obj[key].startsWith('http')) return obj[key]
+    }
+  }
+  const id = taxon.taxonId || taxon.id
+  if (id) return `https://artsdatabanken.no/arter/takson/${id}`
+  return 'https://artsdatabanken.no'
+}
+
+/**
+ * POST a Blob to Artsdata AI and return up to 5 normalized predictions.
+ * Returns null if blob is not a real Blob (demo mode).
+ * Throws on network/API error.
+ */
+export async function runArtsorakel(blob, lang = 'no') {
+  if (!(blob instanceof Blob)) return null
+
+  const langNorm = normalizeLang(lang)
+
+  async function tryPost(fieldName) {
+    const form = new FormData()
+    form.append(fieldName, blob, 'photo.jpg')
+    return fetch(ARTSDATA_AI_URL, {
+      method: 'POST',
+      headers: { 'User-Agent': 'Sporely/1.0' },
+      body: form,
+    })
+  }
+
+  let res = await tryPost('image')
+  if (!res.ok) res = await tryPost('file')
+  if (!res.ok) throw new Error(`Artsdata AI ${res.status}`)
+
+  const data = await res.json()
+
+  return (data.predictions || [])
+    .filter(p => p?.taxon?.vernacularName !== '*** Utdatert versjon ***')
+    .slice(0, 5)
+    .map(pred => {
+      const taxon = pred.taxon || {}
+      const sci   = (taxon.scientificName || taxon.scientific_name || taxon.name || '').trim()
+      const vern  = pickVernacular(taxon, langNorm)
+      return {
+        probability:    Number(pred.probability || 0),
+        scientificName: sci || null,
+        vernacularName: vern || null,
+        displayName:    vern && sci && vern.toLowerCase() !== sci.toLowerCase()
+                          ? `${vern} (${sci})` : vern || sci || 'Unknown',
+        adbUrl:         pickUrl(pred, taxon),
+      }
+    })
+}
