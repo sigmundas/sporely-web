@@ -48,8 +48,8 @@ export async function handleFileSelect(event) {
   // Read EXIF capture time + GPS for each file.
   // Android/iOS often set file.lastModified to sync date, not shutter time.
   const withTimes = await Promise.all(files.map(async f => {
-    const { time, lat, lon } = await _captureExif(f);
-    return { file: f, captureTime: time, lat, lon };
+    const { time, lat, lon, dbg } = await _captureExif(f);
+    return { file: f, captureTime: time, lat, lon, dbg };
   }));
 
   // Sort by actual capture time
@@ -84,6 +84,8 @@ export async function handleFileSelect(event) {
     const exifGps = grp.find(f => f.lat !== null);
     const gpsLat = exifGps?.lat ?? null;
     const gpsLon = exifGps?.lon ?? null;
+    // Collect debug info from all photos in group for diagnostics
+    const exifDebug = grp.map(f => f.dbg).filter(Boolean);
 
     const ts = new Date(grp[0].captureTime);
     sessions.push({
@@ -96,6 +98,7 @@ export async function handleFileSelect(event) {
       locationName: '',
       taxon: null,
       visibility: 'friends',
+      exifDebug,
     });
   }
 
@@ -105,8 +108,9 @@ export async function handleFileSelect(event) {
   if (sessions.length === 1) {
     const obsId = await _saveSingleAndOpen(sessions[0]);
     if (obsId) {
+      const dbg = sessions[0].exifDebug;
       sessions = [];
-      openFindDetail(obsId);
+      openFindDetail(obsId, dbg);
     }
     return;
   }
@@ -157,25 +161,57 @@ async function _captureExif(file) {
   let time = file.lastModified;
   let lat  = null;
   let lon  = null;
+  let dbg  = { fileSize: file.size, fileType: file.type, bufSize: 0, gpsResult: null, gpsError: null, exifError: null };
 
   // Read the full file into an ArrayBuffer before passing to exifr.
   // exifr uses chunked reads in the browser and can miss GPS data in HEIC files
   // if the GPS box falls outside the initial chunk window.
   let buf;
-  try { buf = await file.arrayBuffer() } catch (_) { return { time, lat, lon } }
+  try {
+    buf = await file.arrayBuffer();
+    dbg.bufSize = buf.byteLength;
+  } catch (e) {
+    dbg.bufError = String(e);
+    console.warn('[EXIF] arrayBuffer() failed:', e);
+    return { time, lat, lon, dbg };
+  }
 
   try {
     const exif = await parseExif(buf, { pick: ['DateTimeOriginal'] });
     if (exif?.DateTimeOriginal instanceof Date) time = exif.DateTimeOriginal.getTime();
-  } catch (_) {}
+  } catch (e) {
+    dbg.exifError = String(e);
+    console.warn('[EXIF] parseExif failed:', e);
+  }
 
+  // Try parseGps() first; fall back to parse({gps:true}) for formats where gps() alone may fail
   try {
-    const gps = await parseGps(buf);
-    if (gps?.latitude  != null) lat = gps.latitude;
-    if (gps?.longitude != null) lon = gps.longitude;
-  } catch (_) {}
+    const gpsResult = await parseGps(buf);
+    console.log('[EXIF] parseGps result:', gpsResult);
+    dbg.gpsResult = gpsResult ? JSON.stringify(gpsResult) : 'null';
+    if (gpsResult?.latitude  != null) lat = gpsResult.latitude;
+    if (gpsResult?.longitude != null) lon = gpsResult.longitude;
+  } catch (e) {
+    dbg.gpsError = String(e);
+    console.warn('[EXIF] parseGps failed:', e);
+  }
 
-  return { time, lat, lon };
+  // Second attempt using parse({gps:true}) if parseGps returned nothing
+  if (lat === null) {
+    try {
+      const fallback = await parseExif(buf, { gps: true, tiff: true });
+      console.log('[EXIF] parse({gps:true}) fallback:', fallback);
+      dbg.gpsFallback = fallback ? JSON.stringify(fallback) : 'null';
+      if (fallback?.latitude  != null) lat = fallback.latitude;
+      if (fallback?.longitude != null) lon = fallback.longitude;
+    } catch (e) {
+      dbg.gpsFallbackError = String(e);
+      console.warn('[EXIF] parse({gps:true}) fallback failed:', e);
+    }
+  }
+
+  console.log(`[EXIF] ${file.name}: lat=${lat}, lon=${lon}, buf=${dbg.bufSize}/${file.size}`);
+  return { time, lat, lon, dbg };
 }
 
 async function _reverseGeocode(lat, lon) {

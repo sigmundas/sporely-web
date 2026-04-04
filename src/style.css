@@ -782,7 +782,14 @@ html, body {
 }
 .detail-coords-bar {
   font-family: 'DM Mono', monospace; font-size: 11px;
-  color: var(--text-dim); margin-bottom: 16px;
+  color: var(--text-dim); margin-bottom: 8px;
+}
+.detail-exif-debug {
+  font-family: 'DM Mono', monospace; font-size: 10px;
+  color: var(--text-dim); background: var(--card);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 12px;
+  white-space: pre-wrap; word-break: break-all;
 }
 .detail-form { display: flex; flex-direction: column; gap: 4px; }
 .detail-field {

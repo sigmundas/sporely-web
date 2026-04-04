@@ -40,7 +40,7 @@ export function initFindDetail() {
   _initMentions(commentInput)
 }
 
-export async function openFindDetail(obsId) {
+export async function openFindDetail(obsId, exifDebug) {
   currentObs    = null
   selectedTaxon = null
 
@@ -94,6 +94,27 @@ export async function openFindDetail(obsId) {
   const coordsEl = document.getElementById('detail-coords')
   if (coordsEl) coordsEl.textContent = coords || ''
   if (coordsEl) coordsEl.style.display = coords ? 'block' : 'none'
+
+  // Show EXIF debug panel when GPS is missing (from single-photo import)
+  const dbgEl = document.getElementById('detail-exif-debug')
+  if (dbgEl) {
+    if (exifDebug?.length) {
+      const rows = exifDebug.map((d, i) => {
+        const lines = [
+          `Photo ${i + 1}: ${d.fileType || '?'} ${d.fileSize ? Math.round(d.fileSize/1024) + 'KB' : ''}`,
+          `Buffer read: ${d.bufSize ? Math.round(d.bufSize/1024) + 'KB' : 'FAILED'} ${d.bufError ? '⚠ ' + d.bufError : ''}`,
+          `parseGps(): ${d.gpsResult || (d.gpsError ? '⚠ ' + d.gpsError : 'null')}`,
+          d.gpsFallback ? `parse({gps:true}): ${d.gpsFallback}` : '',
+          d.gpsFallbackError ? `parse({gps:true}) error: ${d.gpsFallbackError}` : '',
+        ].filter(Boolean).join('\n')
+        return lines
+      }).join('\n\n')
+      dbgEl.textContent = rows
+      dbgEl.style.display = 'block'
+    } else {
+      dbgEl.style.display = 'none'
+    }
+  }
 
   // Set visibility radio
   const vis = obs.visibility || 'friends'
