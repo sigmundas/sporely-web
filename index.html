@@ -13,6 +13,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/src/style.css">
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <body>
 <div id="app">
@@ -53,6 +54,9 @@
         <button type="submit" class="auth-btn" id="signup-btn">Create account</button>
         <p class="auth-switch">Already have one? <a href="#" id="show-login">Sign in</a></p>
       </form>
+
+      <!-- Turnstile CAPTCHA -->
+      <div id="turnstile-container" style="margin-top:12px;display:flex;justify-content:center"></div>
 
       <!-- Install hint (mobile only, injected by JS) -->
       <div class="auth-install-hint" id="auth-install-hint" style="display:none">

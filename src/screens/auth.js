@@ -1,5 +1,31 @@
 import { supabase } from '../supabase.js'
 
+const TURNSTILE_SITE_KEY = '0x4AAAAAAC0h9RON_lYu5ib_'
+let _captchaToken      = null
+let _turnstileWidgetId = null
+
+async function _initTurnstile() {
+  for (let i = 0; i < 100; i++) {
+    if (window.turnstile) break
+    await new Promise(r => setTimeout(r, 50))
+  }
+  if (!window.turnstile) return
+  _turnstileWidgetId = window.turnstile.render('#turnstile-container', {
+    sitekey:            TURNSTILE_SITE_KEY,
+    theme:              'dark',
+    callback:           token  => { _captchaToken = token },
+    'expired-callback': ()     => { _captchaToken = null },
+    'error-callback':   ()     => { _captchaToken = null },
+  })
+}
+
+function _resetTurnstile() {
+  _captchaToken = null
+  if (window.turnstile && _turnstileWidgetId !== null) {
+    window.turnstile.reset(_turnstileWidgetId)
+  }
+}
+
 // Email waiting for confirmation (needed for resend)
 let _pendingEmail = null
 
@@ -115,6 +141,8 @@ export function initAuth(onAuthenticated) {
   loginBtn.dataset.label  = 'Sign in'
   signupBtn.dataset.label = 'Create account'
 
+  _initTurnstile()
+
   document.getElementById('show-signup').addEventListener('click', e => {
     e.preventDefault()
     switchToSignup()
@@ -133,8 +161,12 @@ export function initAuth(onAuthenticated) {
     const password = document.getElementById('login-password').value
 
     setLoading(loginBtn, true)
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    const { error } = await supabase.auth.signInWithPassword({
+      email, password,
+      options: { captchaToken: _captchaToken },
+    })
     setLoading(loginBtn, false)
+    _resetTurnstile()
 
     if (!error) {
       onAuthenticated()
@@ -157,8 +189,12 @@ export function initAuth(onAuthenticated) {
     const password = document.getElementById('signup-password').value
 
     setLoading(signupBtn, true)
-    const { data, error } = await supabase.auth.signUp({ email, password })
+    const { data, error } = await supabase.auth.signUp({
+      email, password,
+      options: { captchaToken: _captchaToken },
+    })
     setLoading(signupBtn, false)
+    _resetTurnstile()
 
     if (error) {
       // "User already registered" — send them to login instead
