@@ -183,19 +183,25 @@ async function _processFile(file) {
 // Save a single session immediately and return the new observation ID.
 async function _saveSingleAndOpen(session) {
   try {
-    const { data: obsData, error } = await supabase
-      .from('observations')
-      .insert({
-        user_id: state.user.id,
-        date: _localDate(session.ts),
-        captured_at: session.ts.toISOString(),
-        gps_latitude: state.gps?.lat ?? null,
-        gps_longitude: state.gps?.lon ?? null,
-        source_type: 'personal',
-        visibility: session.visibility || 'friends',
-      })
-      .select('id')
-      .single();
+    const obsPayload = {
+      user_id: state.user.id,
+      date: _localDate(session.ts),
+      captured_at: session.ts.toISOString(),
+      gps_latitude: state.gps?.lat ?? null,
+      gps_longitude: state.gps?.lon ?? null,
+      source_type: 'personal',
+      visibility: session.visibility || 'friends',
+    };
+
+    let { data: obsData, error } = await supabase
+      .from('observations').insert(obsPayload).select('id').single();
+
+    // Fallback: if captured_at column doesn't exist yet, retry without it
+    if (error?.message?.includes('captured_at')) {
+      const { captured_at: _, ...payloadWithout } = obsPayload;
+      ({ data: obsData, error } = await supabase
+        .from('observations').insert(payloadWithout).select('id').single());
+    }
 
     if (error) throw error;
 
