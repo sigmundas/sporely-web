@@ -158,13 +158,19 @@ async function _captureExif(file) {
   let lat  = null;
   let lon  = null;
 
+  // Read the full file into an ArrayBuffer before passing to exifr.
+  // exifr uses chunked reads in the browser and can miss GPS data in HEIC files
+  // if the GPS box falls outside the initial chunk window.
+  let buf;
+  try { buf = await file.arrayBuffer() } catch (_) { return { time, lat, lon } }
+
   try {
-    const exif = await parseExif(file, { pick: ['DateTimeOriginal'] });
+    const exif = await parseExif(buf, { pick: ['DateTimeOriginal'] });
     if (exif?.DateTimeOriginal instanceof Date) time = exif.DateTimeOriginal.getTime();
   } catch (_) {}
 
   try {
-    const gps = await parseGps(file);
+    const gps = await parseGps(buf);
     if (gps?.latitude  != null) lat = gps.latitude;
     if (gps?.longitude != null) lon = gps.longitude;
   } catch (_) {}
