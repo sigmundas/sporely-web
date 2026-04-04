@@ -5,7 +5,7 @@ import { showToast } from '../toast.js';
 import { searchTaxa, formatDisplayName, runArtsorakel } from '../artsorakel.js';
 import { loadFinds } from './finds.js';
 import { openFindDetail } from './find_detail.js';
-import { parse as parseExif } from 'exifr';
+import { parse as parseExif, gps as parseGps } from 'exifr';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 
 let sessions = [];
@@ -150,25 +150,26 @@ function _hideProgress() {
 }
 
 // ── EXIF / capture time + GPS ─────────────────────────────────────────────────
-// Read DateTimeOriginal + GPS from EXIF; fall back to file.lastModified / null for GPS.
-// Note: `gps: true` tells exifr to parse the GPS IFD block and return computed
-// `latitude` / `longitude` decimal values. These are NOT valid `pick` tag names.
+// Read DateTimeOriginal and GPS separately.
+// exifr.gps() is specifically designed to reliably return {latitude, longitude}
+// across JPEG, HEIC/HEIF and other formats — more robust than parse() + gps:true.
 async function _captureExif(file) {
+  let time = file.lastModified;
+  let lat  = null;
+  let lon  = null;
+
   try {
-    const exif = await parseExif(file, {
-      pick: ['DateTimeOriginal'],
-      gps:  true,
-    });
-    const time = exif?.DateTimeOriginal instanceof Date
-      ? exif.DateTimeOriginal.getTime()
-      : file.lastModified;
-    return {
-      time,
-      lat: exif?.latitude  ?? null,
-      lon: exif?.longitude ?? null,
-    };
+    const exif = await parseExif(file, { pick: ['DateTimeOriginal'] });
+    if (exif?.DateTimeOriginal instanceof Date) time = exif.DateTimeOriginal.getTime();
   } catch (_) {}
-  return { time: file.lastModified, lat: null, lon: null };
+
+  try {
+    const gps = await parseGps(file);
+    if (gps?.latitude  != null) lat = gps.latitude;
+    if (gps?.longitude != null) lon = gps.longitude;
+  } catch (_) {}
+
+  return { time, lat, lon };
 }
 
 async function _reverseGeocode(lat, lon) {
