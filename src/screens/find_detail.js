@@ -448,12 +448,20 @@ async function _sendComment() {
     mentionedUserIds = (profiles || []).map(p => p.id)
   }
 
-  const { error } = await supabase.from('comments').insert({
+  let { error } = await supabase.from('comments').insert({
     observation_id: currentObs.id,
     user_id: state.user.id,
     body,
     mentioned_user_ids: mentionedUserIds.length ? mentionedUserIds : null,
   })
+  // Fallback: column may not exist yet — retry without it
+  if (error?.message?.includes('mentioned_user_ids')) {
+    ;({ error } = await supabase.from('comments').insert({
+      observation_id: currentObs.id,
+      user_id: state.user.id,
+      body,
+    }))
+  }
   btn.disabled = false
   if (error) { showToast(`Could not post comment: ${error.message}`); return }
   input.value = ''

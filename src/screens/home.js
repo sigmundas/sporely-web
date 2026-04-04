@@ -110,13 +110,14 @@ async function loadRecentComments() {
     return
   }
 
-  // Also fetch comments that mention the current user
+  // Also fetch comments that mention the current user (column may not exist yet — ignore error)
   const { data: mentionData } = await supabase
     .from('comments')
     .select('id, body, created_at, user_id, observation_id')
     .contains('mentioned_user_ids', [state.user.id])
     .order('created_at', { ascending: false })
     .limit(3)
+    .then(r => r.error?.message?.includes('mentioned_user_ids') ? { data: [] } : r)
 
   // Merge and deduplicate by id, sort by created_at desc, limit 5
   const seen = new Set((data || []).map(c => c.id))

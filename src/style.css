@@ -592,6 +592,9 @@ html, body {
   flex-shrink: 0;
 }
 .friend-email { flex: 1; font-size: 13px; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.friend-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.friend-name { font-size: 13px; font-weight: 500; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.friend-handle { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .friend-remove-btn {
   font-size: 11px; padding: 4px 8px; border-radius: 6px;
   background: transparent; border: 1px solid var(--border);
