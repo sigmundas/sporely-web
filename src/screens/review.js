@@ -9,7 +9,7 @@ import { refreshHome } from './home.js'
 export function initReview() {
   document.getElementById('review-close')
     .addEventListener('click', () => navigate('home'))
-  document.getElementById('ai-id-btn').addEventListener('click', runAllArtsorakel)
+  document.getElementById('add-photo-btn').addEventListener('click', () => navigate('capture'))
   document.getElementById('save-draft-btn').addEventListener('click', saveDraft)
   document.getElementById('finish-sync-btn').addEventListener('click', finishAndSync)
   initLocationField()
@@ -21,8 +21,7 @@ export function buildReviewGrid() {
   const photos = state.capturedPhotos
   const count  = photos.length
 
-  document.getElementById('review-count').textContent =
-    `${count} Specimen${count !== 1 ? 's' : ''}`
+  // title stays "New observation" — count shown via card carousel
 
   if (state.sessionStart) {
     const fmt = t => t.toLocaleTimeString('no-NO', { hour: '2-digit', minute: '2-digit' })
@@ -86,20 +85,7 @@ export function buildReviewGrid() {
     })
   }
 
-  html += `<div class="specimen-card" id="add-photo-card">
-    <div class="specimen-photo specimen-add">
-      <div class="specimen-add-icon">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
-      </div>
-    </div>
-    <div class="specimen-info">
-      <div class="specimen-name" style="font-style:normal;font-size:12px;color:var(--text-dim)">Add Photo</div>
-      <div class="specimen-meta">Manual Entry</div>
-    </div>
-  </div>`
-
   grid.innerHTML = html
-  document.getElementById('add-photo-card')?.addEventListener('click', () => navigate('capture'))
 
   wireCardEvents()
   loadThumbnails(photos)

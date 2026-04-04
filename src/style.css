@@ -900,7 +900,7 @@ html, body {
   background: #111;
 }
 #camera-video {
-  width: 100%; height: 100%; object-fit: contain; background: #000;
+  width: 100%; height: 100%; object-fit: cover;
 }
 .capture-overlay {
   position: absolute; inset: 0;
@@ -1070,9 +1070,34 @@ html, body {
 .ai-id-btn:active { background: var(--green-mid); }
 .ai-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green-accent); animation: pulse 1.5s infinite; }
 
-.specimen-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 24px; }
+.btn-add-photo {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 8px;
+  background: var(--green-deep);
+  border: 1px solid var(--green-mid);
+  cursor: pointer; color: var(--green-accent);
+  font-family: 'Outfit', sans-serif;
+  font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+  transition: background 0.15s;
+}
+.btn-add-photo:active { background: var(--green-mid); }
+html.light .btn-add-photo { color: #ffffff; }
+
+.specimen-grid {
+  display: flex;
+  gap: 12px;
+  margin: 0 -18px 20px;   /* bleed to screen edges */
+  padding: 0 18px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.specimen-grid::-webkit-scrollbar { display: none; }
 .specimen-card {
-  border-radius: 10px; overflow: hidden;
+  flex: 0 0 calc(100% - 36px);  /* one card fills visible width */
+  scroll-snap-align: start;
+  border-radius: 12px; overflow: hidden;
   background: var(--card);
   border: 1px solid var(--border);
   cursor: pointer;
@@ -1080,7 +1105,7 @@ html, body {
 }
 .specimen-card:active { border-color: var(--green-bright); }
 .specimen-photo {
-  width: 100%; aspect-ratio: 1;
+  width: 100%; aspect-ratio: 4/3;
   background: var(--card-raised);
   display: flex; align-items: center; justify-content: center;
   font-size: 36px;
@@ -1093,7 +1118,7 @@ html, body {
   box-shadow: 0 0 6px var(--green-accent);
 }
 .specimen-precision.med { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
-.specimen-info { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 4px; }
+.specimen-info { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
 .specimen-name { font-size: 13px; font-weight: 500; color: var(--text-primary); font-family: 'Instrument Serif', serif; font-style: italic; }
 .specimen-meta { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text-dim); }
 
