@@ -6,13 +6,22 @@ import { showAuthOverlay } from './auth.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
 import { openFindDetail } from './find_detail.js'
-import { openImportPicker } from './import_review.js'
+import { openPhotoImportPicker, openFileImportPicker } from './import_review.js'
 
 export async function initHome() {
   document.getElementById('qa-new-obs').addEventListener('click', () => navigate('capture'))
   document.getElementById('ac-view-obs').addEventListener('click', () => navigate('finds'))
-  document.getElementById('ac-import').addEventListener('click', openImportPicker)
+  document.getElementById('ac-import').addEventListener('click', _openImportSourceSheet)
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
+  document.getElementById('import-source-close').addEventListener('click', _closeImportSourceSheet)
+  document.getElementById('import-source-photos').addEventListener('click', () => {
+    _closeImportSourceSheet()
+    openPhotoImportPicker()
+  })
+  document.getElementById('import-source-files').addEventListener('click', () => {
+    _closeImportSourceSheet()
+    openFileImportPicker()
+  })
 
   await refreshHome()
 }
@@ -31,13 +40,13 @@ async function loadRecentFinds() {
   const [myRes, friendRes] = await Promise.all([
     supabase
       .from('observations')
-      .select('id, date, genus, species, common_name, gps_latitude, gps_longitude, location')
+      .select('id, user_id, date, genus, species, common_name, gps_latitude, gps_longitude, location, visibility')
       .eq('user_id', state.user.id)
       .order('date', { ascending: false })
       .limit(3),
     supabase
       .from('observations_friend_view')
-      .select('id, date, genus, species, common_name, gps_latitude, gps_longitude, location')
+      .select('id, user_id, date, genus, species, common_name, gps_latitude, gps_longitude, location, visibility')
       .neq('user_id', state.user.id)
       .order('date', { ascending: false })
       .limit(3),
@@ -73,6 +82,7 @@ async function loadRecentFinds() {
       ? `<img class="find-thumb" src="${imgUrl}" loading="lazy" alt="">`
       : `<div class="find-thumb-placeholder">🍄</div>`
 
+    const owner = _ownershipMeta(obs)
     const dot = `<div class="find-owner-dot ${obs._owner}"></div>`
 
     return `<div class="find-row" data-id="${obs.id}" style="cursor:pointer">
@@ -80,6 +90,7 @@ async function loadRecentFinds() {
       <div class="find-meta">
         <div class="find-common${isIdentified ? '' : ' unidentified'}" style="display:flex;align-items:center;gap:5px">${dot}${displayName}</div>
         ${subtitle ? `<div class="find-latin">${subtitle}</div>` : ''}
+        <div class="find-owner-badge ${owner.className}">${owner.label}</div>
         <div class="find-location">
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
           ${loc}
@@ -215,4 +226,24 @@ async function checkSyncStatus() {
 
 function _esc(str) {
   return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function _ownershipMeta(obs) {
+  if (obs._owner === 'mine' || obs.user_id === state.user?.id) {
+    return { label: 'Your observation', className: 'mine' }
+  }
+  if (obs.visibility === 'public') {
+    return { label: 'Public observation', className: 'public' }
+  }
+  return { label: 'Shared observation', className: 'shared' }
+}
+
+function _openImportSourceSheet() {
+  const sheet = document.getElementById('import-source-sheet')
+  if (sheet) sheet.style.display = 'flex'
+}
+
+function _closeImportSourceSheet() {
+  const sheet = document.getElementById('import-source-sheet')
+  if (sheet) sheet.style.display = 'none'
 }

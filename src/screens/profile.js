@@ -12,6 +12,7 @@ export function initProfile() {
     state.user = null
     showAuthOverlay()
   })
+  document.getElementById('delete-account-btn').addEventListener('click', _deleteAccount)
   document.getElementById('friend-search-btn').addEventListener('click', _searchFriend)
   document.getElementById('friend-search-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') _searchFriend()
@@ -501,6 +502,41 @@ async function _removeFriend(friendUserId) {
     .or(`and(requester_id.eq.${uid},addressee_id.eq.${friendUserId}),and(requester_id.eq.${friendUserId},addressee_id.eq.${uid})`)
   showToast('Friend removed')
   loadProfile()
+}
+
+async function _deleteAccount() {
+  const email = state.user?.email || 'this account'
+  const confirmed = window.confirm(
+    `Delete ${email} permanently?\n\nThis removes your profile, observations, comments, friendships, and uploaded images. This cannot be undone.`
+  )
+  if (!confirmed) return
+
+  const btn = document.getElementById('delete-account-btn')
+  btn.disabled = true
+  const originalLabel = btn.textContent
+  btn.textContent = 'Deleting…'
+
+  const { error } = await supabase.functions.invoke('delete-account', {
+    body: {},
+  })
+
+  if (error) {
+    btn.disabled = false
+    btn.textContent = originalLabel
+    if (String(error.message || '').toLowerCase().includes('failed to send')) {
+      showToast('Delete account function is not deployed yet')
+    } else {
+      showToast(`Could not delete account: ${error.message}`)
+    }
+    return
+  }
+
+  await supabase.auth.signOut()
+  state.user = null
+  showAuthOverlay()
+  btn.disabled = false
+  btn.textContent = originalLabel
+  showToast('Account deleted')
 }
 
 function _esc(str) {

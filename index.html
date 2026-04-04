@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="Sporely">
 <title>Sporely</title>
 <link rel="manifest" href="/manifest.json">
-<link rel="apple-touch-icon" href="/icon-192-v2.png">
+<link rel="apple-touch-icon" href="/icon-192-v3.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/src/style.css">
@@ -171,7 +171,25 @@
           </div>
         </div>
 
-        <input type="file" id="import-file-input" accept="image/*" multiple style="display:none">
+        <input type="file" id="import-photo-input" accept="image/*" multiple style="display:none">
+        <input type="file" id="import-browse-input" accept=".jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif" multiple style="display:none">
+      </div>
+    </div>
+
+    <div class="sheet-overlay" id="import-source-sheet" style="display:none">
+      <button class="sheet-backdrop" id="import-source-close" aria-label="Close import options"></button>
+      <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="import-source-title">
+        <div class="sheet-handle"></div>
+        <div class="sheet-title" id="import-source-title">Import photos</div>
+        <div class="sheet-subtitle">Choose the fastest path, or browse files when you want the best shot at keeping original metadata.</div>
+        <button class="sheet-option" id="import-source-photos">
+          <span class="sheet-option-title">Photos &amp; videos</span>
+          <span class="sheet-option-copy">Quick picker from your gallery.</span>
+        </button>
+        <button class="sheet-option" id="import-source-files">
+          <span class="sheet-option-title">Browse files</span>
+          <span class="sheet-option-copy">Best for original HEIC metadata on some Android phones.</span>
+        </button>
       </div>
     </div>
 
@@ -298,8 +316,8 @@
           <div class="field-meta-row">
             <div class="field-meta-key">Location</div>
             <div class="field-meta-val location-field-val">
-              <input id="location-name-input" type="text" placeholder="—" class="location-name-input" autocomplete="off" spellcheck="false">
-              <button id="location-apply-btn" class="location-apply-btn" style="display:none">Use lookup</button>
+              <input id="location-name-input" type="text" placeholder="—" class="location-name-input" autocomplete="off" spellcheck="false" readonly>
+              <button id="location-apply-btn" class="location-apply-btn" style="display:none">Current location</button>
             </div>
           </div>
           <div class="field-meta-row">
@@ -339,8 +357,9 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
           Finds
         </button>
-        <div class="detail-date-time">
+        <div class="detail-header-meta">
           <span id="detail-date">—</span><span id="detail-time" style="display:none"> · <span id="detail-time-val"></span></span>
+          <div class="detail-observation-badge" id="detail-readonly-note" style="display:none"></div>
         </div>
       </div>
 
@@ -366,6 +385,7 @@
           <div class="detail-field">
             <div class="detail-field-label">Location</div>
             <input id="detail-location" class="detail-text-input" type="text" placeholder="—">
+            <button id="detail-current-location-btn" class="location-apply-btn detail-location-btn" style="display:none">Current location</button>
           </div>
 
           <div class="detail-field">
@@ -533,7 +553,10 @@
           </div>
         </div>
 
-        <button class="sign-out-btn" id="sign-out-btn">Sign out</button>
+        <div class="profile-danger-zone">
+          <button class="sign-out-btn" id="sign-out-btn">Sign out</button>
+          <button class="sign-out-btn sign-out-btn-danger" id="delete-account-btn">Delete account</button>
+        </div>
       </div>
     </div>
 
@@ -604,7 +627,7 @@
         </div>
         <p class="settings-gap-hint">Photos taken within this window are grouped into one observation.</p>
 
-        <div class="settings-version">v0.03</div>
+        <div class="settings-version">v0.1.11</div>
       </div>
     </div>
 

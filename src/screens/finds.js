@@ -94,7 +94,7 @@ export async function loadFinds() {
 async function _fetchMine() {
   const { data, error } = await supabase
     .from('observations')
-    .select('id, date, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
+    .select('id, user_id, date, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
     .eq('user_id', state.user.id)
     .order('date', { ascending: false })
     .limit(100)
@@ -106,7 +106,7 @@ async function _fetchMine() {
 async function _fetchFriends() {
   const { data, error } = await supabase
     .from('observations_friend_view')
-    .select('id, date, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
+    .select('id, user_id, date, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
     .neq('user_id', state.user.id)
     .order('date', { ascending: false })
     .limit(100)
@@ -118,7 +118,7 @@ async function _fetchFriends() {
 async function _fetchCommunity() {
   const { data, error } = await supabase
     .from('observations_community_view')
-    .select('id, date, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
+    .select('id, user_id, date, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
     .order('date', { ascending: false })
     .limit(100)
 
@@ -254,6 +254,7 @@ function _renderCards(list, subtitle, data, isFriends) {
             <div class="find-card-photo-wrap">${photoInner}</div>
             <div class="find-card-body">
               ${nameHtml}
+              <div class="find-owner-badge ${_ownershipMeta(obs).className}">${_ownershipMeta(obs).label}</div>
               ${loc || visIcon ? `<div class="find-card-loc">
                 ${loc ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
                 <span class="find-card-loc-text">${loc}</span>` : '<span></span>'}
@@ -273,4 +274,14 @@ function _renderCards(list, subtitle, data, isFriends) {
       card.addEventListener('click', () => openFindDetail(card.dataset.id))
     })
   })
+}
+
+function _ownershipMeta(obs) {
+  if (obs.user_id === state.user?.id) {
+    return { label: 'Your observation', className: 'mine' }
+  }
+  if (obs.visibility === 'public') {
+    return { label: 'Public observation', className: 'public' }
+  }
+  return { label: 'Shared observation', className: 'shared' }
 }

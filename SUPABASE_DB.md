@@ -63,6 +63,15 @@ See also:
 - `search_taxa` (RPC)
   - Deployed and used by the web app for autocomplete/search
 
+### Edge Functions
+- `delete-account`
+  - Authenticated self-service account deletion endpoint
+  - Verifies the caller with the request JWT, then uses the service role to:
+    - remove the user's Storage files from `observation-images` and `avatars`
+    - delete friendships, comments, profile row, and owned observations/image rows
+    - delete the underlying `auth.users` account
+  - Required by the Profile screen's `Delete account` button
+
 ---
 
 ## Views
@@ -114,6 +123,8 @@ All tables have RLS enabled and default "owner-only" access unless overridden by
 - Client writes are constrained to rows owned by the authenticated user (`user_id`)
 - Images: allowed only when the Storage object path prefix matches the authenticated user UUID
 - Client code must never rely on setting `user_id` from the client as a trust boundary; RLS is the enforcement
+- Account deletion is not performed directly from the client; it goes through the `delete-account`
+  Edge Function because deleting `auth.users` requires elevated privileges
 
 ### Storage policy behavior (high level)
 For `observation-images`:
@@ -163,7 +174,9 @@ For `avatars`:
    - Ensure tables/views referenced by the web app still have RLS enabled
 5. **Verify RPC availability**
    - Ensure `search_taxa` remains deployed and callable by the web app
-6. **Regression tests for sharing / visibility**
+6. **Verify Edge Function availability**
+   - Ensure `delete-account` is deployed if the web app exposes the Profile → Delete account action
+7. **Regression tests for sharing / visibility**
    - Owner can see own observations and images
    - Accepted friends can see what's intended
    - `location_public = false` friends see null GPS unless sharing explicitly grants access

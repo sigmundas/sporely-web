@@ -387,6 +387,73 @@ html, body {
   background: var(--card); border: 1px solid var(--border);
   border-radius: 12px; margin-bottom: 10px; overflow: hidden;
 }
+.sheet-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.58);
+}
+.sheet-card {
+  position: relative;
+  width: min(100%, 520px);
+  padding: 12px 18px calc(18px + env(safe-area-inset-bottom, 0px));
+  border-top-left-radius: 24px;
+  border-top-right-radius: 24px;
+  border: 1px solid color-mix(in srgb, var(--border) 90%, #fff 10%);
+  border-bottom: none;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--card) 94%, #111 6%), var(--card));
+  box-shadow: 0 -18px 50px rgba(0, 0, 0, 0.45);
+}
+.sheet-handle {
+  width: 44px;
+  height: 5px;
+  border-radius: 999px;
+  margin: 0 auto 14px;
+  background: color-mix(in srgb, var(--text-dim) 55%, transparent);
+}
+.sheet-title {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.sheet-subtitle {
+  margin-top: 8px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.sheet-option {
+  width: 100%;
+  display: grid;
+  gap: 4px;
+  padding: 16px;
+  margin-top: 10px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card-raised) 82%, transparent);
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+}
+.sheet-option-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.sheet-option-copy {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
 .import-card-main {
   display: flex; align-items: center; gap: 14px;
   padding: 14px; cursor: pointer; position: relative;
@@ -411,6 +478,12 @@ html, body {
 .import-card-datetime { display: flex; justify-content: space-between; align-items: baseline; gap: 4px; margin-bottom: 4px; font-size: 12px; font-family: 'DM Mono', monospace; color: var(--text-data); }
 .import-card-time { font-size: 12px; font-family: 'DM Mono', monospace; color: var(--text-data); margin-bottom: 4px; }
 .import-card-loc { font-size: 13px; color: var(--text-secondary); margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.import-location-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
 .import-card-species { font-size: 12px; color: var(--text-dim); font-style: italic; }
 .import-card-species.identified { font-style: normal; color: var(--text-primary); }
 .import-card-delete {
@@ -444,6 +517,22 @@ html, body {
   transition: color 0.15s, border-color 0.15s;
 }
 .sign-out-btn:active { color: var(--red); border-color: var(--red); }
+.profile-danger-zone {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+}
+.profile-danger-zone .sign-out-btn {
+  margin: 0 auto;
+}
+.sign-out-btn-danger {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border));
+}
+.sign-out-btn-danger:active {
+  color: #ffb4b4;
+  border-color: var(--red);
+}
 
 /* ── SCOPE TABS (Finds + Map) ── */
 .scope-tabs {
@@ -776,6 +865,12 @@ html, body {
   height: 220px; width: auto; min-width: 160px; border-radius: 10px;
   object-fit: cover; flex-shrink: 0;
 }
+.detail-header-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
 .detail-date-time {
   font-family: 'DM Mono', monospace; font-size: 12px; color: var(--text-dim);
   white-space: nowrap;
@@ -790,6 +885,42 @@ html, body {
   border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px; margin-bottom: 12px;
   white-space: pre-wrap; word-break: break-all;
+}
+.detail-observation-badge,
+.find-owner-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+.detail-observation-badge {
+  align-self: flex-end;
+}
+.find-owner-badge {
+  margin-top: 6px;
+}
+.find-owner-badge.mine,
+.detail-observation-badge.mine {
+  color: var(--green-accent);
+  border-color: rgba(126,200,122,0.35);
+}
+.find-owner-badge.shared,
+.detail-observation-badge.shared {
+  color: #9dc7ff;
+  border-color: rgba(157,199,255,0.3);
+}
+.find-owner-badge.public,
+.detail-observation-badge.public {
+  color: var(--amber);
+  border-color: rgba(212,146,74,0.32);
 }
 .detail-form { display: flex; flex-direction: column; gap: 4px; }
 .detail-field {
@@ -915,6 +1046,10 @@ html, body {
 }
 #camera-video {
   width: 100%; height: 100%; object-fit: cover;
+}
+#camera-video.camera-video-full-frame {
+  object-fit: contain;
+  background: #000;
 }
 .capture-overlay {
   position: absolute; inset: 0;
@@ -1255,6 +1390,13 @@ html.light .btn-add-photo { color: #ffffff; }
   font-size: 10px; padding: 2px 7px; border-radius: 4px;
   border: 1px solid var(--green-accent); color: var(--green-accent);
   background: transparent; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+}
+.location-apply-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.detail-location-btn {
+  margin-top: 8px;
 }
 
 .review-actions {

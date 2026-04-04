@@ -85,7 +85,9 @@ Deserialise before pushing from desktop.
 - Always upload with `{ upsert: true }` so retries don't fail.
 - Check that the blob is a real `Blob` instance before uploading — demo-mode captures
   have `blob: null`.
-- RLS policy: `(storage.foldername(name))[1] = auth.uid()::text` on SELECT + INSERT
+- Storage RLS policies:
+  - SELECT: `bucket_id = 'observation-images' AND auth.role() = 'authenticated'` — any logged-in user can fetch signed URLs (needed for friend/community thumbnails)
+  - INSERT/UPDATE/DELETE: `(storage.foldername(name))[1] = auth.uid()::text` — owner only
 - Bucket name: `avatars` (public read, owner-scoped writes)
 - Path convention: `{user_id}/avatar.jpg`
 - Profile screen stores `profiles.avatar_url` and may fall back to a signed URL if the

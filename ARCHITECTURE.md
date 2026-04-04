@@ -28,6 +28,11 @@ Artsobservasjoner / Artportalen.
 sporely-web/
 ├── index.html              Full app shell + auth overlay HTML (no JS inline)
 ├── package.json
+├── supabase/
+│   ├── config.toml         Supabase local/deploy config for Edge Functions
+│   └── functions/
+│       └── delete-account/
+│           └── index.ts    Self-service account deletion (service-role Edge Function)
 ├── vite.config.js
 └── src/
     ├── main.js             Entry point — hash parsing, session check, boot
@@ -43,7 +48,7 @@ sporely-web/
         ├── finds.js        Full observation list from Supabase
         ├── capture.js      Camera (getUserMedia), shutter, batch capture
         ├── review.js       Review captured batch, upload to Supabase
-        └── profile.js      Profile editing, avatar crop/upload, friends
+        └── profile.js      Profile editing, avatar crop/upload, friends, delete-account action
 ```
 
 ---
@@ -114,6 +119,8 @@ Auto-created by a Postgres trigger on `auth.users` insert.
 Profile UI reads `username`, `display_name`, and `avatar_url`.
 Avatar initials are derived on the client, and avatar rendering prefers the stored URL
 with a signed-URL fallback if the direct image fetch fails.
+The profile screen also exposes a self-service account deletion action, which calls the
+`delete-account` Supabase Edge Function.
 
 ### `friendships`
 Bidirectional, status-gated (`pending` / `accepted` / `blocked`).
@@ -203,12 +210,15 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 | Observation insert to Supabase | ✅ Real |
 | Image upload to Supabase Storage | ✅ Real |
 | Profile avatar upload/crop | ✅ Real |
+| Self-service account deletion | ✅ Real — via Supabase Edge Function `delete-account` |
 | Finds list from Supabase | ✅ Real |
 | Recent finds on home screen | ✅ Real |
 | Desktop ↔ cloud sync | ✅ Real (desktop side) |
 | Artsorakel (Artsdata AI species ID) | ✅ Real — direct browser→AI call, CORS open |
 | Taxa autocomplete search | ✅ Real — 110k taxa in Supabase, RPC search_taxa |
 | Camera permission denied overlay | ✅ Real — platform-specific instructions |
+| Friends finds + thumbnails | ✅ Real — `observations_friend_view` + authenticated Storage SELECT |
+| Community finds | ✅ Real — `observations_community_view` (visibility = public) |
 | Map view | 🟡 Stubbed — toast only |
 | Friends feed | 🟡 Stubbed — toast only |
 | Draft save (IndexedDB) | 🟡 Stubbed — toast only |
@@ -223,10 +233,11 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 |---|---|
 | Supabase project | ✅ Live (`zkpjklzfwzefhjluvhfw`) |
 | Email via Resend SMTP | ✅ Configured (`noreply@sporely.no`, domain verified) |
-| `observation-images` Storage bucket | ✅ Created, RLS policies set |
+| `observation-images` Storage bucket | ✅ Created — SELECT: any authenticated user; INSERT/DELETE: owner only |
 | `avatars` Storage bucket | ✅ Created, public read + owner-scoped writes |
 | `taxa` + `taxa_vernacular` tables | ✅ Populated (110k taxa, 70k vernacular names) |
 | `search_taxa` RPC | ✅ Deployed |
+| `delete-account` Edge Function | ⚠️ In repo — must be deployed in Supabase before the UI button works |
 | Unique constraints on observations | ⚠️ Not yet run — see `supabase_unique_constraints.sql` |
 
 ## Next steps

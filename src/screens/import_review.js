@@ -5,10 +5,12 @@ import { showToast } from '../toast.js';
 import { searchTaxa, formatDisplayName, runArtsorakel } from '../artsorakel.js';
 import { loadFinds } from './finds.js';
 import { openFindDetail } from './find_detail.js';
-import { parse as parseExif, gps as parseGps } from 'exifr';
+import exifr from 'exifr/dist/full.esm.mjs';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 
 let sessions = [];
+const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
+const RAW_GPS_PICK = ['GPSLatitude', 'GPSLatitudeRef', 'GPSLongitude', 'GPSLongitudeRef', 'latitude', 'longitude'];
 
 function sessionById(sid) {
   return sessions.find(s => s.id === sid);
@@ -18,7 +20,8 @@ export function initImportReview() {
   document.getElementById('import-back').addEventListener('click', _cancelImport);
   document.getElementById('import-cancel-btn').addEventListener('click', _cancelImport);
   document.getElementById('import-save-btn').addEventListener('click', saveAll);
-  document.getElementById('import-file-input').addEventListener('change', handleFileSelect);
+  document.getElementById('import-photo-input').addEventListener('change', handleFileSelect);
+  document.getElementById('import-browse-input').addEventListener('change', handleFileSelect);
 }
 
 function _cancelImport() {
@@ -34,13 +37,49 @@ export function restoreImportSessions(savedSessions) {
   renderSessions();
 }
 
-export function openImportPicker() {
-  document.getElementById('import-file-input').click();
+export function openPhotoImportPicker() {
+  document.getElementById('import-photo-input').click();
+}
+
+export async function openFileImportPicker() {
+  if (window.showOpenFilePicker) {
+    try {
+      const handles = await window.showOpenFilePicker({
+        multiple: true,
+        excludeAcceptAllOption: false,
+        types: [{
+          description: 'Photos',
+          accept: {
+            'image/jpeg': ['.jpg', '.jpeg'],
+            'image/png': ['.png'],
+            'image/webp': ['.webp'],
+            'image/heic': ['.heic'],
+            'image/heif': ['.heif'],
+          },
+        }],
+      });
+      const files = await Promise.all(handles.map(handle => handle.getFile()));
+      await handleSelectedFiles(files);
+      return;
+    } catch (err) {
+      if (err?.name !== 'AbortError') {
+        console.warn('showOpenFilePicker failed, falling back to input:', err);
+      } else {
+        return;
+      }
+    }
+  }
+
+  document.getElementById('import-browse-input').click();
 }
 
 export async function handleFileSelect(event) {
-  const files = Array.from(event.target.files);
-  event.target.value = '';
+  const files = Array.from(event.target.files || []);
+  if (event.target) event.target.value = '';
+  await handleSelectedFiles(files);
+}
+
+async function handleSelectedFiles(files) {
   if (!files.length) return;
 
   _setProgress(0, files.length, 'Reading timestamps…');
@@ -157,11 +196,67 @@ function _hideProgress() {
 // Read DateTimeOriginal and GPS separately.
 // exifr.gps() is specifically designed to reliably return {latitude, longitude}
 // across JPEG, HEIC/HEIF and other formats — more robust than parse() + gps:true.
+function _isHeicLike(file) {
+  return /\.(heic|heif)$/i.test(file?.name || '') || /heic|heif/i.test(file?.type || '');
+}
+
+function _coerceExifNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+  if (value && typeof value === 'object') {
+    if (Number.isFinite(value.numerator) && Number.isFinite(value.denominator) && value.denominator) {
+      return value.numerator / value.denominator;
+    }
+    if (Number.isFinite(value.num) && Number.isFinite(value.den) && value.den) {
+      return value.num / value.den;
+    }
+  }
+  return null;
+}
+
+function _toDecimalDegrees(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (Array.isArray(value)) {
+    const parts = value.map(_coerceExifNumber).filter(part => part !== null);
+    if (!parts.length) return null;
+    if (parts.length === 1) return parts[0];
+    if (parts.length === 2) return parts[0] + (parts[1] / 60);
+    return parts[0] + (parts[1] / 60) + (parts[2] / 3600);
+  }
+  return _coerceExifNumber(value);
+}
+
+function _withHemisphere(value, ref, negativeRef) {
+  if (value === null) return null;
+  const normalized = String(ref || '').trim().toUpperCase();
+  if (normalized === negativeRef) return -Math.abs(value);
+  return Math.abs(value);
+}
+
+function _extractLatLonFromRawGps(rawGps) {
+  if (!rawGps || typeof rawGps !== 'object') return { lat: null, lon: null };
+
+  let lat = rawGps.latitude;
+  let lon = rawGps.longitude;
+
+  if (lat == null) lat = _withHemisphere(_toDecimalDegrees(rawGps.GPSLatitude), rawGps.GPSLatitudeRef, 'S');
+  if (lon == null) lon = _withHemisphere(_toDecimalDegrees(rawGps.GPSLongitude), rawGps.GPSLongitudeRef, 'W');
+
+  lat = _coerceExifNumber(lat);
+  lon = _coerceExifNumber(lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return { lat: null, lon: null };
+  return { lat, lon };
+}
+
 async function _captureExif(file) {
   let time = file.lastModified;
   let lat  = null;
   let lon  = null;
-  let dbg  = { fileSize: file.size, fileType: file.type, bufSize: 0, gpsResult: null, gpsError: null, exifError: null };
+  let dbg  = { fileName: file.name, fileSize: file.size, fileType: file.type, bufSize: 0, gpsResult: null, gpsError: null, exifError: null };
+  const fullRead = _isHeicLike(file) ? { chunked: false } : {};
 
   // Read the full file into an ArrayBuffer before passing to exifr.
   // exifr uses chunked reads in the browser and can miss GPS data in HEIC files
@@ -176,37 +271,118 @@ async function _captureExif(file) {
     return { time, lat, lon, dbg };
   }
 
+  // Try the original File first. exifr officially supports HEIC/HEIF blobs/files,
+  // and this path lets it follow container pointers itself instead of depending on
+  // our manual buffer strategy.
   try {
-    const exif = await parseExif(buf, { pick: ['DateTimeOriginal'] });
-    if (exif?.DateTimeOriginal instanceof Date) time = exif.DateTimeOriginal.getTime();
+    const exif = await exifr.parse(file, { pick: EXIF_DATETIME_PICK, ...fullRead });
+    const dt = exif?.DateTimeOriginal || exif?.CreateDate || exif?.ModifyDate;
+    if (dt instanceof Date) time = dt.getTime();
+    dbg.exifFile = exif ? JSON.stringify(exif) : 'null';
+  } catch (e) {
+    dbg.exifFileError = String(e);
+    console.warn('[EXIF] parseExif(file) failed:', e);
+  }
+
+  try {
+    const exif = await exifr.parse(buf, { pick: EXIF_DATETIME_PICK });
+    const dt = exif?.DateTimeOriginal || exif?.CreateDate || exif?.ModifyDate;
+    if (dt instanceof Date) time = dt.getTime();
   } catch (e) {
     dbg.exifError = String(e);
-    console.warn('[EXIF] parseExif failed:', e);
+    console.warn('[EXIF] parseExif(buffer) failed:', e);
   }
 
   // Try parseGps() first; fall back to parse({gps:true}) for formats where gps() alone may fail
   try {
-    const gpsResult = await parseGps(buf);
-    console.log('[EXIF] parseGps result:', gpsResult);
+    const gpsResult = await exifr.gps(file, fullRead);
+    console.log('[EXIF] parseGps(file) result:', gpsResult);
     dbg.gpsResult = gpsResult ? JSON.stringify(gpsResult) : 'null';
     if (gpsResult?.latitude  != null) lat = gpsResult.latitude;
     if (gpsResult?.longitude != null) lon = gpsResult.longitude;
   } catch (e) {
     dbg.gpsError = String(e);
-    console.warn('[EXIF] parseGps failed:', e);
+    console.warn('[EXIF] parseGps(file) failed:', e);
+  }
+
+  if (lat === null) {
+    try {
+      const gpsResult = await exifr.gps(buf);
+      console.log('[EXIF] parseGps(buffer) fallback result:', gpsResult);
+      dbg.gpsBufferResult = gpsResult ? JSON.stringify(gpsResult) : 'null';
+      if (gpsResult?.latitude  != null) lat = gpsResult.latitude;
+      if (gpsResult?.longitude != null) lon = gpsResult.longitude;
+    } catch (e) {
+      dbg.gpsBufferError = String(e);
+      console.warn('[EXIF] parseGps(buffer) failed:', e);
+    }
   }
 
   // Second attempt using parse({gps:true}) if parseGps returned nothing
   if (lat === null) {
     try {
-      const fallback = await parseExif(buf, { gps: true, tiff: true });
-      console.log('[EXIF] parse({gps:true}) fallback:', fallback);
+      const fallback = await exifr.parse(file, { gps: true, tiff: true, xmp: true, ...fullRead });
+      console.log('[EXIF] parse(file, {gps:true}) fallback:', fallback);
       dbg.gpsFallback = fallback ? JSON.stringify(fallback) : 'null';
       if (fallback?.latitude  != null) lat = fallback.latitude;
       if (fallback?.longitude != null) lon = fallback.longitude;
     } catch (e) {
       dbg.gpsFallbackError = String(e);
-      console.warn('[EXIF] parse({gps:true}) fallback failed:', e);
+      console.warn('[EXIF] parse(file, {gps:true}) fallback failed:', e);
+    }
+  }
+
+  if (lat === null) {
+    try {
+      const fallback = await exifr.parse(buf, { gps: true, tiff: true, xmp: true });
+      console.log('[EXIF] parse(buffer, {gps:true}) fallback:', fallback);
+      dbg.gpsBufferFallback = fallback ? JSON.stringify(fallback) : 'null';
+      if (fallback?.latitude  != null) lat = fallback.latitude;
+      if (fallback?.longitude != null) lon = fallback.longitude;
+    } catch (e) {
+      dbg.gpsBufferFallbackError = String(e);
+      console.warn('[EXIF] parse(buffer, {gps:true}) fallback failed:', e);
+    }
+  }
+
+  // Last attempt: read raw GPS tags and convert them ourselves, mirroring the
+  // Python app's HEIC path where we decode GPS IFD data and then derive decimal coords.
+  if (lat === null) {
+    try {
+      const rawGps = await exifr.parse(file, {
+        pick: RAW_GPS_PICK,
+        gps: true,
+        tiff: true,
+        reviveValues: false,
+        translateValues: false,
+        ...fullRead,
+      });
+      dbg.rawGpsFile = rawGps ? JSON.stringify(rawGps) : 'null';
+      const extracted = _extractLatLonFromRawGps(rawGps);
+      if (extracted.lat != null) lat = extracted.lat;
+      if (extracted.lon != null) lon = extracted.lon;
+    } catch (e) {
+      dbg.rawGpsFileError = String(e);
+      console.warn('[EXIF] raw GPS file parse failed:', e);
+    }
+  }
+
+  if (lat === null) {
+    try {
+      const rawGps = await exifr.parse(buf, {
+        pick: RAW_GPS_PICK,
+        gps: true,
+        tiff: true,
+        reviveValues: false,
+        translateValues: false,
+      });
+      dbg.rawGpsBuffer = rawGps ? JSON.stringify(rawGps) : 'null';
+      const extracted = _extractLatLonFromRawGps(rawGps);
+      if (extracted.lat != null) lat = extracted.lat;
+      if (extracted.lon != null) lon = extracted.lon;
+    } catch (e) {
+      dbg.rawGpsBufferError = String(e);
+      console.warn('[EXIF] raw GPS buffer parse failed:', e);
     }
   }
 
@@ -297,15 +473,6 @@ async function _saveSingleAndOpen(session) {
 
     session.blobUrls.forEach(url => URL.revokeObjectURL(url));
 
-    // Reverse-geocode and patch location in the background (doesn't block opening)
-    if (session.gpsLat !== null) {
-      _reverseGeocode(session.gpsLat, session.gpsLon).then(name => {
-        if (name) {
-          supabase.from('observations').update({ location: name }).eq('id', obsId).then(() => {});
-        }
-      });
-    }
-
     return obsId;
   } catch (err) {
     console.error('Single import failed:', err);
@@ -370,10 +537,25 @@ export function renderSessions() {
     });
   });
 
-  list.querySelectorAll('.import-loc-input[data-sid]').forEach(input => {
-    input.addEventListener('input', () => {
-      const session = sessionById(input.dataset.sid);
-      if (session) session.locationName = input.value;
+  list.querySelectorAll('.import-current-location-btn[data-sid]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const sid = btn.dataset.sid;
+      const session = sessionById(sid);
+      if (!session) return;
+      if (!state.gps) {
+        showToast('Current GPS unavailable');
+        return;
+      }
+      if (session.locationName) {
+        const confirmed = window.confirm('Current location will overwrite the EXIF location. Continue?');
+        if (!confirmed) return;
+      }
+      const name = await _reverseGeocode(state.gps.lat, state.gps.lon);
+      session.gpsLat = state.gps.lat;
+      session.gpsLon = state.gps.lon;
+      session.locationName = name || `${state.gps.lat.toFixed(4)}° N, ${state.gps.lon.toFixed(4)}° E`;
+      saveImportSessions(sessions);
+      renderSessions();
     });
   });
 
@@ -409,6 +591,12 @@ function buildCardHTML(session) {
   const taxonVal = session.taxon ? escHtml(session.taxon.displayName) : '';
   const locVal = escHtml(session.locationName);
   const visChecked = v => session.visibility === v ? 'checked' : '';
+  const heicWithoutGps = session.gpsLat === null && (session.exifDebug || []).some(d =>
+    /\.(heic|heif)$/i.test(d?.fileName || '') || /heic|heif/i.test(d?.fileType || '')
+  );
+  const missingGpsHint = heicWithoutGps
+    ? `<div class="import-location-hint">No photo GPS found in this HEIC. On some iPhone web uploads, location metadata is not exposed to the browser.</div>`
+    : '';
 
   return `<div class="import-card" data-sid="${sid}">
   <div class="import-card-main" data-sid="${sid}">
@@ -444,8 +632,10 @@ function buildCardHTML(session) {
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">Location</div>
       <input class="detail-text-input import-loc-input" type="text"
-        data-sid="${sid}" placeholder="—"
+        data-sid="${sid}" placeholder="—" readonly
         value="${locVal}">
+      ${missingGpsHint}
+      <button class="location-apply-btn import-current-location-btn" data-sid="${sid}" style="margin-top:8px">Current location</button>
     </div>
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">Sharing</div>

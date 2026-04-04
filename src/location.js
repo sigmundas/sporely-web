@@ -1,6 +1,5 @@
 // Location name lookup via Artsdatabanken place-name service.
-// Auto-fills the location field when GPS coords are available,
-// preserving any manual edits the user has made.
+// Current location is only applied when the user explicitly asks for it.
 
 let resolvedName = ''
 let lastApplied  = ''
@@ -25,14 +24,21 @@ export function initLocationField() {
   const btn   = document.getElementById('location-apply-btn')
   if (!input || !btn) return
 
-  input.addEventListener('input', _updateApplyBtn)
+  btn.textContent = 'Current location'
 
   btn.addEventListener('click', () => {
     if (!resolvedName) return
+    const current = input.value.trim()
+    if (current && current !== resolvedName.trim()) {
+      const confirmed = window.confirm('Current location will overwrite the existing location. Continue?')
+      if (!confirmed) return
+    }
     input.value = resolvedName
     lastApplied = resolvedName
     _updateApplyBtn()
   })
+
+  _updateApplyBtn()
 }
 
 // Call in buildReviewGrid() after GPS coords are known.
@@ -55,13 +61,6 @@ export function startLocationLookup(lat, lon) {
       const input = document.getElementById('location-name-input')
       if (!input) return
 
-      // Auto-apply only when field is empty or still shows the last auto-applied value
-      const current = input.value.trim()
-      const shouldApply = !current || current === lastApplied.trim()
-      if (shouldApply) {
-        input.value = name
-        lastApplied = name
-      }
       _updateApplyBtn()
     } catch { /* silent — location name is optional */ }
   }, 500)
@@ -71,6 +70,6 @@ function _updateApplyBtn() {
   const input = document.getElementById('location-name-input')
   const btn   = document.getElementById('location-apply-btn')
   if (!input || !btn) return
-  const canApply = !!resolvedName && input.value.trim() !== resolvedName.trim()
-  btn.style.display = canApply ? 'inline-block' : 'none'
+  btn.style.display = resolvedName ? 'inline-block' : 'none'
+  btn.disabled = !resolvedName || input.value.trim() === resolvedName.trim()
 }

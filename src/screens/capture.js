@@ -6,21 +6,22 @@ export function initCapture() {
   document.getElementById('flash-btn').addEventListener('click', toggleFlash)
   document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
   document.getElementById('done-btn').addEventListener('click', finishCapture)
-document.getElementById('camera-retry-btn').addEventListener('click', () => {
+  document.getElementById('camera-retry-btn').addEventListener('click', () => {
     document.getElementById('camera-denied').style.display = 'none'
     startCamera()
   })
 }
 
 async function tryGetUserMedia() {
-  // Request portrait-oriented video so object-fit:cover doesn't over-crop.
-  // zoom:1 is ignored on platforms that don't support it (iOS), but helps on Android.
+  // Prefer the rear camera and explicitly ask for 1x zoom when supported.
+  // We avoid biasing too hard toward a portrait stream because that can make
+  // the live preview feel more cropped than the captured frame.
   try {
     return await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: 'environment',
-        width:  { ideal: 1080 },
-        height: { ideal: 1920 },
+        width:  { ideal: 1920 },
+        height: { ideal: 1440 },
         advanced: [{ zoom: 1 }],
       },
       audio: false,
@@ -28,7 +29,7 @@ async function tryGetUserMedia() {
   } catch {
     try {
       return await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1080 }, height: { ideal: 1920 } },
+        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1440 } },
         audio: false,
       })
     } catch {
@@ -42,7 +43,12 @@ export async function startCamera() {
     const stream = await tryGetUserMedia()
     state.cameraStream = stream
     const video = document.getElementById('camera-video')
+    video.classList.remove('camera-video-full-frame')
     video.srcObject = stream
+    video.onloadedmetadata = async () => {
+      try { await video.play() } catch (_) {}
+      _syncPreviewFit(video)
+    }
     state.sessionStart = new Date()
     state.batchCount = 0
     state.capturedPhotos = []
@@ -81,6 +87,11 @@ export function stopCamera() {
   if (state.cameraStream) {
     state.cameraStream.getTracks().forEach(t => t.stop())
     state.cameraStream = null
+  }
+  const video = document.getElementById('camera-video')
+  if (video) {
+    video.onloadedmetadata = null
+    video.classList.remove('camera-video-full-frame')
   }
 }
 
@@ -138,4 +149,17 @@ function simulateLightReading() {
   const el  = document.getElementById('light-display')
   if (el) el.textContent = `LIGHT: ${lux} LUX / F-STOP: ${f}`
   setTimeout(simulateLightReading, 3000)
+}
+
+function _syncPreviewFit(video) {
+  const vf = document.querySelector('.capture-viewfinder')
+  if (!vf || !video?.videoWidth || !video?.videoHeight) return
+
+  const videoAspect = video.videoWidth / video.videoHeight
+  const viewportAspect = vf.clientWidth / Math.max(vf.clientHeight, 1)
+
+  // Most rear camera sensors are closer to 4:3 than the tall phone viewport.
+  // When the aspect ratios differ a lot, prefer showing the full frame over
+  // filling the screen, so the preview matches the captured image more closely.
+  video.classList.toggle('camera-video-full-frame', Math.abs(videoAspect - viewportAspect) > 0.18)
 }
