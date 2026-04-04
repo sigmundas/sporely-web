@@ -79,10 +79,11 @@ export async function handleFileSelect(event) {
       processed.push(await _processFile(file));
       doneCount++;
     }
-    // Pick GPS from first photo in group that has it, fallback to live GPS
+    // Use GPS from the first photo in the group that has EXIF GPS.
+    // Do NOT fall back to state.gps — gallery photos have their own location.
     const exifGps = grp.find(f => f.lat !== null);
-    const gpsLat = exifGps?.lat ?? state.gps?.lat ?? null;
-    const gpsLon = exifGps?.lon ?? state.gps?.lon ?? null;
+    const gpsLat = exifGps?.lat ?? null;
+    const gpsLon = exifGps?.lon ?? null;
 
     const ts = new Date(grp[0].captureTime);
     sessions.push({
@@ -149,11 +150,14 @@ function _hideProgress() {
 }
 
 // ── EXIF / capture time + GPS ─────────────────────────────────────────────────
-// Read DateTimeOriginal + GPS from EXIF; fall back to file.lastModified / null.
+// Read DateTimeOriginal + GPS from EXIF; fall back to file.lastModified / null for GPS.
+// Note: `gps: true` tells exifr to parse the GPS IFD block and return computed
+// `latitude` / `longitude` decimal values. These are NOT valid `pick` tag names.
 async function _captureExif(file) {
   try {
     const exif = await parseExif(file, {
-      pick: ['DateTimeOriginal', 'latitude', 'longitude'],
+      pick: ['DateTimeOriginal'],
+      gps:  true,
     });
     const time = exif?.DateTimeOriginal instanceof Date
       ? exif.DateTimeOriginal.getTime()
