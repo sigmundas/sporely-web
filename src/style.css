@@ -1909,6 +1909,11 @@ html.light .ai-id-btn { color: #ffffff; }
 .settings-gap-hint {
   margin-top: 8px; font-size: 11px; color: var(--text-dim); line-height: 1.5;
 }
+.settings-version {
+  margin-top: 24px; font-size: 11px; color: var(--text-dim);
+  text-align: center; font-family: 'DM Mono', monospace;
+  opacity: 0.5;
+}
 
 /* ── PHOTO VIEWER ── */
 #photo-viewer {

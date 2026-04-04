@@ -1,0 +1,9 @@
+# PWA manifest and icons — short cache so updates are picked up quickly
+/manifest.json
+  Cache-Control: no-cache
+
+/icon-192.png
+  Cache-Control: no-cache
+
+/icon-512.png
+  Cache-Control: no-cache
