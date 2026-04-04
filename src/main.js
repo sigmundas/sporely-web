@@ -87,6 +87,7 @@ function initNav() {
 
 async function bootApp(user) {
   state.user = user
+
   hideAuthOverlay()
   initSettings()
   initNav()

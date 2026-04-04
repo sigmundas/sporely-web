@@ -4,7 +4,45 @@ const TURNSTILE_SITE_KEY = '0x4AAAAAAC0h9RON_lYu5ib_'
 let _captchaToken      = null
 let _turnstileWidgetId = null
 
+function _isLocalTestingHost(hostname = window.location.hostname) {
+  if (!hostname) return false
+
+  if (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '::1' ||
+    hostname === '[::1]' ||
+    hostname.endsWith('.local')
+  ) {
+    return true
+  }
+
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) return false
+  const [a, b] = hostname.split('.').map(Number)
+
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 192 && b === 168) ||
+    (a === 172 && b >= 16 && b <= 31)
+  )
+}
+
+const BYPASS_TURNSTILE = import.meta.env.DEV && _isLocalTestingHost()
+const PERSIST_AUTH_DRAFTS = import.meta.env.DEV
+const AUTH_DRAFT_KEY = 'sporely-auth-draft'
+
 async function _initTurnstile() {
+  const container = document.getElementById('turnstile-container')
+
+  if (BYPASS_TURNSTILE) {
+    _captchaToken = null
+    if (container) container.style.display = 'none'
+    return
+  }
+
+  if (container) container.style.display = 'flex'
+
   for (let i = 0; i < 100; i++) {
     if (window.turnstile) break
     await new Promise(r => setTimeout(r, 50))
@@ -42,6 +80,79 @@ function showError(msg, allowHtml = false, info = false) {
   el.style.display = msg ? 'block' : 'none'
 }
 
+function _readAuthDraft() {
+  if (!PERSIST_AUTH_DRAFTS) return {}
+  try {
+    return JSON.parse(sessionStorage.getItem(AUTH_DRAFT_KEY) || '{}') || {}
+  } catch {
+    return {}
+  }
+}
+
+function _writeAuthDraft(patch) {
+  if (!PERSIST_AUTH_DRAFTS) return
+  const next = { ..._readAuthDraft(), ...patch }
+  sessionStorage.setItem(AUTH_DRAFT_KEY, JSON.stringify(next))
+}
+
+function _clearAuthDraft() {
+  if (!PERSIST_AUTH_DRAFTS) return
+  sessionStorage.removeItem(AUTH_DRAFT_KEY)
+}
+
+function _restoreAuthDraft() {
+  const draft = _readAuthDraft()
+  if (draft.mode === 'signup') {
+    switchToSignup(draft.signupEmail || '')
+  } else {
+    switchToLogin(draft.loginEmail || '')
+  }
+
+  if (typeof draft.loginEmail === 'string') {
+    document.getElementById('login-email').value = draft.loginEmail
+  }
+  if (typeof draft.loginPassword === 'string') {
+    document.getElementById('login-password').value = draft.loginPassword
+  }
+  if (typeof draft.signupEmail === 'string') {
+    document.getElementById('signup-email').value = draft.signupEmail
+  }
+  if (typeof draft.signupPassword === 'string') {
+    document.getElementById('signup-password').value = draft.signupPassword
+  }
+}
+
+function _persistAuthInputs() {
+  if (!PERSIST_AUTH_DRAFTS) return
+
+  const sync = () => {
+    _writeAuthDraft({
+      mode: document.getElementById('signup-form').style.display === 'none' ? 'login' : 'signup',
+      loginEmail: document.getElementById('login-email').value,
+      loginPassword: document.getElementById('login-password').value,
+      signupEmail: document.getElementById('signup-email').value,
+      signupPassword: document.getElementById('signup-password').value,
+    })
+  }
+
+  ;['login-email', 'login-password', 'signup-email', 'signup-password'].forEach(id => {
+    document.getElementById(id).addEventListener('input', sync)
+  })
+
+  sync()
+}
+
+function _captchaErrorMessage(message) {
+  const text = String(message || '')
+  const lower = text.toLowerCase()
+
+  if (BYPASS_TURNSTILE && (lower.includes('captcha') || lower.includes('turnstile') || lower.includes('challenge'))) {
+    return 'Local dev is hiding Turnstile, but Supabase still requires CAPTCHA on the server. For phone testing, use your deployed URL or temporarily disable CAPTCHA in Supabase Auth.'
+  }
+
+  return text
+}
+
 function setLoading(btn, loading) {
   btn.disabled    = loading
   btn.textContent = loading ? 'Please wait…' : btn.dataset.label
@@ -52,6 +163,7 @@ function switchToLogin(prefillEmail = '') {
   document.getElementById('signup-form').style.display = 'none'
   document.getElementById('login-form').style.display  = 'block'
   if (prefillEmail) document.getElementById('login-email').value = prefillEmail
+  _writeAuthDraft({ mode: 'login', loginEmail: prefillEmail || document.getElementById('login-email').value })
 }
 
 function switchToSignup(prefillEmail = '') {
@@ -59,6 +171,7 @@ function switchToSignup(prefillEmail = '') {
   document.getElementById('login-form').style.display  = 'none'
   document.getElementById('signup-form').style.display = 'block'
   if (prefillEmail) document.getElementById('signup-email').value = prefillEmail
+  _writeAuthDraft({ mode: 'signup', signupEmail: prefillEmail || document.getElementById('signup-email').value })
 }
 
 // ── Resend confirmation ────────────────────────────────────────────────────────
@@ -141,6 +254,8 @@ export function initAuth(onAuthenticated) {
   loginBtn.dataset.label  = 'Sign in'
   signupBtn.dataset.label = 'Create account'
 
+  _restoreAuthDraft()
+  _persistAuthInputs()
   _initTurnstile()
 
   document.getElementById('show-signup').addEventListener('click', e => {
@@ -161,14 +276,16 @@ export function initAuth(onAuthenticated) {
     const password = document.getElementById('login-password').value
 
     setLoading(loginBtn, true)
-    const { error } = await supabase.auth.signInWithPassword({
-      email, password,
-      options: { captchaToken: _captchaToken },
-    })
+    const signInPayload = { email, password }
+    if (!BYPASS_TURNSTILE) {
+      signInPayload.options = { captchaToken: _captchaToken }
+    }
+    const { error } = await supabase.auth.signInWithPassword(signInPayload)
     setLoading(loginBtn, false)
     _resetTurnstile()
 
     if (!error) {
+      _clearAuthDraft()
       onAuthenticated()
       return
     }
@@ -177,7 +294,7 @@ export function initAuth(onAuthenticated) {
     if (error.message.toLowerCase().includes('not confirmed')) {
       showResendPrompt(email)
     } else {
-      showError(error.message)
+      showError(_captchaErrorMessage(error.message))
     }
   })
 
@@ -189,10 +306,11 @@ export function initAuth(onAuthenticated) {
     const password = document.getElementById('signup-password').value
 
     setLoading(signupBtn, true)
-    const { data, error } = await supabase.auth.signUp({
-      email, password,
-      options: { captchaToken: _captchaToken },
-    })
+    const signUpPayload = { email, password }
+    if (!BYPASS_TURNSTILE) {
+      signUpPayload.options = { captchaToken: _captchaToken }
+    }
+    const { data, error } = await supabase.auth.signUp(signUpPayload)
     setLoading(signupBtn, false)
     _resetTurnstile()
 
@@ -205,7 +323,7 @@ export function initAuth(onAuthenticated) {
         switchToLogin(email)
         showError('An account with that email already exists. Sign in, or use "Forgot password" to reset it.')
       } else {
-        showError(error.message)
+        showError(_captchaErrorMessage(error.message))
       }
       return
     }
@@ -214,6 +332,7 @@ export function initAuth(onAuthenticated) {
     // Check whether we actually got a session.
     const { data: { session } } = await supabase.auth.getSession()
     if (session) {
+      _clearAuthDraft()
       onAuthenticated()
       return
     }

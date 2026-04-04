@@ -34,6 +34,7 @@ export async function loadProfile() {
   await Promise.all([_loadProfileData(), _loadStats(), _loadFriends(), _loadPending(), _checkSync()])
 }
 
+
 // ── Profile data (username, full_name, avatar) ────────────────────────────────
 
 async function _loadProfileData() {
@@ -46,10 +47,7 @@ async function _loadProfileData() {
     .single()
   if (!data) return
 
-  // Keep email in sync on profiles table so friend search by email works
-  if (state.user?.email) {
-    supabase.from('profiles').update({ email: state.user.email }).eq('id', uid).then(() => {})
-  }
+
   document.getElementById('profile-username').value  = data.username     || ''
   document.getElementById('profile-fullname').value  = data.display_name || ''
   document.getElementById('profile-email-display').textContent = state.user?.email || ''
@@ -439,8 +437,8 @@ async function _searchFriend() {
 
   const { data, error } = await supabase
     .from('profiles')
-    .select('id, username, display_name, email')
-    .or(`username.ilike.%${q}%,display_name.ilike.%${q}%,email.ilike.%${q}%`)
+    .select('id, username, display_name')
+    .or(`username.ilike.%${q}%,display_name.ilike.%${q}%`)
     .neq('id', state.user.id)
     .limit(5)
 
