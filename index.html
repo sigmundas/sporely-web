@@ -339,7 +339,9 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
           Finds
         </button>
-        <div class="review-time" id="detail-date">—</div>
+        <div class="detail-date-time">
+          <span id="detail-date">—</span><span id="detail-time" style="display:none"> · <span id="detail-time-val"></span></span>
+        </div>
       </div>
 
       <div class="review-body">
@@ -354,6 +356,10 @@
                 placeholder="Unknown species" autocomplete="off" spellcheck="false">
               <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
             </div>
+            <button class="ai-id-btn" id="detail-ai-btn" style="margin-top:8px;width:100%">
+              <div class="ai-dot"></div> Identify with Artsorakel AI
+            </button>
+            <div id="detail-ai-results" style="display:none"></div>
           </div>
 
           <div class="detail-field">

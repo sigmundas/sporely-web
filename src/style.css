@@ -773,6 +773,10 @@ html, body {
   height: 220px; width: auto; min-width: 160px; border-radius: 10px;
   object-fit: cover; flex-shrink: 0;
 }
+.detail-date-time {
+  font-family: 'DM Mono', monospace; font-size: 12px; color: var(--text-dim);
+  white-space: nowrap;
+}
 .detail-coords-bar {
   font-family: 'DM Mono', monospace; font-size: 11px;
   color: var(--text-dim); margin-bottom: 16px;

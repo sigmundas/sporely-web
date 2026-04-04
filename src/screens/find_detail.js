@@ -2,7 +2,7 @@ import { supabase } from '../supabase.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, formatDisplayName } from '../artsorakel.js'
+import { searchTaxa, formatDisplayName, runArtsorakel } from '../artsorakel.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { loadFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
@@ -30,6 +30,8 @@ export function initFindDetail() {
     setTimeout(() => { dropdown.style.display = 'none' }, 200)
   })
 
+  document.getElementById('detail-ai-btn').addEventListener('click', _runAI)
+
   const commentInput = document.getElementById('comment-input')
   document.getElementById('comment-send-btn').addEventListener('click', _sendComment)
   commentInput.addEventListener('keydown', e => {
@@ -52,7 +54,7 @@ export async function openFindDetail(obsId) {
 
   const { data: obs, error } = await supabase
     .from('observations')
-    .select('id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility')
+    .select('id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility')
     .eq('id', obsId)
     .single()
 
@@ -74,6 +76,17 @@ export async function openFindDetail(obsId) {
   document.getElementById('detail-date').textContent = obs.date
     ? new Date(obs.date).toLocaleDateString('no-NO', { day: 'numeric', month: 'short', year: 'numeric' })
     : '—'
+
+  // Show capture time from EXIF if available
+  const timeEl  = document.getElementById('detail-time')
+  const timeVal = document.getElementById('detail-time-val')
+  if (obs.captured_at) {
+    const t = new Date(obs.captured_at)
+    timeVal.textContent = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    timeEl.style.display = 'inline'
+  } else {
+    timeEl.style.display = 'none'
+  }
 
   const coords = obs.gps_latitude && obs.gps_longitude
     ? `${obs.gps_latitude.toFixed(4)}° N, ${obs.gps_longitude.toFixed(4)}° E`
@@ -122,8 +135,79 @@ export async function openFindDetail(obsId) {
     })
   }
 
+  // Reverse-geocode if location is blank but GPS is present
+  if (!obs.location && obs.gps_latitude && obs.gps_longitude) {
+    _geocodeAndFill(obsId, obs.gps_latitude, obs.gps_longitude)
+  }
+
   // Load comments async (don't await)
   _loadComments(obsId)
+}
+
+async function _geocodeAndFill(obsId, lat, lon) {
+  try {
+    const res = await fetch(
+      `https://stedsnavn.artsdatabanken.no/v1/punkt?lat=${lat}&lng=${lon}&zoom=55`
+    )
+    if (!res.ok) return
+    const data = await res.json()
+    const name = data?.navn
+    if (!name) return
+    document.getElementById('detail-location').value = name
+    // Persist to DB in background
+    supabase.from('observations').update({ location: name }).eq('id', obsId).then(() => {})
+  } catch (_) {}
+}
+
+async function _runAI() {
+  const btn       = document.getElementById('detail-ai-btn')
+  const resultsEl = document.getElementById('detail-ai-results')
+  const firstImg  = document.querySelector('#detail-gallery img')
+  if (!firstImg?.src) { showToast('No photo to identify'); return }
+
+  btn.disabled = true
+  btn.innerHTML = '<div class="ai-dot"></div> Identifying…'
+  resultsEl.style.display = 'none'
+
+  try {
+    const resp = await fetch(firstImg.src)
+    const blob = await resp.blob()
+    const predictions = await runArtsorakel(blob, 'no')
+
+    if (!predictions?.length) {
+      showToast('No match found')
+      return
+    }
+
+    resultsEl.innerHTML = predictions.map((p, i) =>
+      `<div class="ai-result" data-idx="${i}">
+        <span class="ai-prob">${Math.round(p.probability * 100)}%</span>
+        <span class="ai-name">${_esc(p.displayName)}</span>
+      </div>`
+    ).join('')
+    resultsEl.style.display = 'block'
+    resultsEl._predictions = predictions
+
+    resultsEl.querySelectorAll('.ai-result').forEach((el, i) => {
+      el.addEventListener('click', () => {
+        const p = predictions[i]
+        const parts = (p.scientificName || '').trim().split(' ')
+        selectedTaxon = {
+          genus:           parts[0] || null,
+          specificEpithet: parts[1] || null,
+          vernacularName:  p.vernacularName || null,
+          displayName:     p.displayName,
+        }
+        document.getElementById('detail-taxon-input').value = p.displayName
+        resultsEl.style.display = 'none'
+      })
+    })
+  } catch (err) {
+    showToast(`Artsorakel: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.innerHTML = '<div class="ai-dot"></div> Identify with Artsorakel AI'
+  }
 }
 
 function _goBack(event) {
@@ -141,6 +225,8 @@ function _resetForm() {
   document.getElementById('detail-uncertain').checked = false
   document.getElementById('detail-date').textContent  = '—'
   document.getElementById('detail-gallery').innerHTML = ''
+  const aiResults = document.getElementById('detail-ai-results')
+  if (aiResults) { aiResults.style.display = 'none'; aiResults.innerHTML = '' }
 
   // Reset visibility to default
   const r = document.querySelector('input[name="detail-vis"][value="friends"]')

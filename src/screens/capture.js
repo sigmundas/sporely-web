@@ -43,7 +43,6 @@ export async function startCamera() {
     state.cameraStream = stream
     const video = document.getElementById('camera-video')
     video.srcObject = stream
-    video.addEventListener('loadedmetadata', _fixVideoOrientation, { once: true })
     state.sessionStart = new Date()
     state.batchCount = 0
     state.capturedPhotos = []
@@ -78,32 +77,10 @@ export async function startCamera() {
   }
 }
 
-function _fixVideoOrientation() {
-  const video = document.getElementById('camera-video')
-  if (!video || video.videoWidth <= video.videoHeight) return // already portrait
-
-  // Android delivers a landscape-oriented stream even when held in portrait.
-  // Rotate the video element 90° and swap its logical dimensions so it fills
-  // the portrait viewfinder without letterboxing.
-  const container = video.parentElement
-  video.style.position  = 'absolute'
-  video.style.top       = '50%'
-  video.style.left      = '50%'
-  video.style.width     = container.clientHeight + 'px'
-  video.style.height    = container.clientWidth  + 'px'
-  video.style.transform = 'translate(-50%, -50%) rotate(90deg)'
-  video.style.objectFit = 'contain'
-}
-
 export function stopCamera() {
   if (state.cameraStream) {
     state.cameraStream.getTracks().forEach(t => t.stop())
     state.cameraStream = null
-  }
-  const video = document.getElementById('camera-video')
-  if (video) {
-    video.style.cssText = ''  // reset any orientation overrides
-    video.srcObject = null
   }
 }
 

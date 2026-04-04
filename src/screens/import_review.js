@@ -45,12 +45,12 @@ export async function handleFileSelect(event) {
 
   _setProgress(0, files.length, 'Reading timestamps…');
 
-  // Read EXIF capture time for each file.
+  // Read EXIF capture time + GPS for each file.
   // Android/iOS often set file.lastModified to sync date, not shutter time.
-  const withTimes = await Promise.all(files.map(async f => ({
-    file: f,
-    captureTime: await _captureTime(f),
-  })));
+  const withTimes = await Promise.all(files.map(async f => {
+    const { time, lat, lon } = await _captureExif(f);
+    return { file: f, captureTime: time, lat, lon };
+  }));
 
   // Sort by actual capture time
   withTimes.sort((a, b) => a.captureTime - b.captureTime);
@@ -79,12 +79,19 @@ export async function handleFileSelect(event) {
       processed.push(await _processFile(file));
       doneCount++;
     }
+    // Pick GPS from first photo in group that has it, fallback to live GPS
+    const exifGps = grp.find(f => f.lat !== null);
+    const gpsLat = exifGps?.lat ?? state.gps?.lat ?? null;
+    const gpsLon = exifGps?.lon ?? state.gps?.lon ?? null;
+
     const ts = new Date(grp[0].captureTime);
     sessions.push({
       id: 's' + idx,
       files: processed.map(p => p.blob),
       blobUrls: processed.map(p => p.url),
       ts,
+      gpsLat,
+      gpsLon,
       locationName: '',
       taxon: null,
       visibility: 'friends',
@@ -109,24 +116,21 @@ export async function handleFileSelect(event) {
   navigate('import-review');
   renderSessions();
 
-  // Reverse geocode current GPS position to pre-fill location
-  if (state.gps) {
-    const { lat, lon } = state.gps;
-    try {
-      const res = await fetch(
-        `https://stedsnavn.artsdatabanken.no/v1/punkt?lat=${lat}&lng=${lon}&zoom=55`
-      );
-      if (res.ok) {
-        const data = await res.json();
-        const name = data?.navn;
-        if (name) {
-          sessions.forEach(s => { s.locationName = name; });
-          saveImportSessions(sessions);
-          renderSessions();
-        }
-      }
-    } catch (_) {}
-  }
+  // Reverse geocode each session's GPS position (EXIF or live) to pre-fill location name.
+  // Run in parallel — each resolves independently and re-renders when done.
+  sessions.forEach(async session => {
+    if (session.gpsLat === null) return;
+    const name = await _reverseGeocode(session.gpsLat, session.gpsLon);
+    if (name && !session.locationName) {
+      session.locationName = name;
+      // Update just this card's location input without full re-render
+      const input = document.querySelector(`.import-loc-input[data-sid="${session.id}"]`);
+      const locEl = document.querySelector(`.import-card[data-sid="${session.id}"] .import-card-loc`);
+      if (input) input.value = name;
+      if (locEl) locEl.textContent = name;
+    }
+    saveImportSessions(sessions);
+  });
 }
 
 // ── Progress overlay ─────────────────────────────────────────────────────────
@@ -144,14 +148,36 @@ function _hideProgress() {
   if (overlay) overlay.style.display = 'none';
 }
 
-// ── EXIF / capture time ───────────────────────────────────────────────────────
-// Read EXIF DateTimeOriginal; fall back to file.lastModified.
-async function _captureTime(file) {
+// ── EXIF / capture time + GPS ─────────────────────────────────────────────────
+// Read DateTimeOriginal + GPS from EXIF; fall back to file.lastModified / null.
+async function _captureExif(file) {
   try {
-    const exif = await parseExif(file, { pick: ['DateTimeOriginal'] });
-    if (exif?.DateTimeOriginal instanceof Date) return exif.DateTimeOriginal.getTime();
+    const exif = await parseExif(file, {
+      pick: ['DateTimeOriginal', 'latitude', 'longitude'],
+    });
+    const time = exif?.DateTimeOriginal instanceof Date
+      ? exif.DateTimeOriginal.getTime()
+      : file.lastModified;
+    return {
+      time,
+      lat: exif?.latitude  ?? null,
+      lon: exif?.longitude ?? null,
+    };
   } catch (_) {}
-  return file.lastModified;
+  return { time: file.lastModified, lat: null, lon: null };
+}
+
+async function _reverseGeocode(lat, lon) {
+  try {
+    const res = await fetch(
+      `https://stedsnavn.artsdatabanken.no/v1/punkt?lat=${lat}&lng=${lon}&zoom=55`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      return data?.navn ?? null;
+    }
+  } catch (_) {}
+  return null;
 }
 
 // Convert file to a displayable JPEG blob.
@@ -187,8 +213,9 @@ async function _saveSingleAndOpen(session) {
       user_id: state.user.id,
       date: _localDate(session.ts),
       captured_at: session.ts.toISOString(),
-      gps_latitude: state.gps?.lat ?? null,
-      gps_longitude: state.gps?.lon ?? null,
+      gps_latitude: session.gpsLat ?? null,
+      gps_longitude: session.gpsLon ?? null,
+      location: session.locationName || null,
       source_type: 'personal',
       visibility: session.visibility || 'friends',
     };
@@ -222,6 +249,16 @@ async function _saveSingleAndOpen(session) {
     }
 
     session.blobUrls.forEach(url => URL.revokeObjectURL(url));
+
+    // Reverse-geocode and patch location in the background (doesn't block opening)
+    if (session.gpsLat !== null) {
+      _reverseGeocode(session.gpsLat, session.gpsLon).then(name => {
+        if (name) {
+          supabase.from('observations').update({ location: name }).eq('id', obsId).then(() => {});
+        }
+      });
+    }
+
     return obsId;
   } catch (err) {
     console.error('Single import failed:', err);
@@ -251,7 +288,7 @@ export function renderSessions() {
         expanded.style.display = 'none';
       } else {
         expanded.style.display = 'block';
-        wireTaxonInput(sid);
+        _wireCard(sid);
       }
     });
   });
@@ -303,6 +340,7 @@ export function renderSessions() {
 
 function buildCardHTML(session) {
   const sid = session.id;
+  const dateStr = session.ts.toLocaleDateString([], { month: 'short', day: 'numeric' });
   const timeStr = session.ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const photoCount = session.files.length;
   const speciesText = session.taxon
@@ -323,6 +361,7 @@ function buildCardHTML(session) {
 
   const taxonVal = session.taxon ? escHtml(session.taxon.displayName) : '';
   const locVal = escHtml(session.locationName);
+  const visChecked = v => session.visibility === v ? 'checked' : '';
 
   return `<div class="import-card" data-sid="${sid}">
   <div class="import-card-main" data-sid="${sid}">
@@ -330,7 +369,7 @@ function buildCardHTML(session) {
       ${polaroids}
     </div>
     <div class="import-card-info">
-      <div class="import-card-time">${timeStr} · ${photoCount} photo${photoCount !== 1 ? 's' : ''}</div>
+      <div class="import-card-datetime"><span>${dateStr}</span><span>${timeStr} · ${photoCount} photo${photoCount !== 1 ? 's' : ''}</span></div>
       <div class="import-card-loc">${session.locationName ? escHtml(session.locationName) : '—'}</div>
       <div class="import-card-species">${speciesText}</div>
     </div>
@@ -364,16 +403,16 @@ function buildCardHTML(session) {
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">Sharing</div>
       <div class="vis-radio-group">
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="private"> <span>Private</span></label>
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="friends" checked> <span>Friends</span></label>
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="public"> <span>Public</span></label>
+        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="private" ${visChecked('private')}> <span>Private</span></label>
+        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="friends" ${visChecked('friends')}> <span>Friends</span></label>
+        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="public" ${visChecked('public')}> <span>Public</span></label>
       </div>
     </div>
   </div>
 </div>`;
 }
 
-function wireTaxonInput(sid) {
+function _wireCard(sid) {
   const card = document.querySelector(`.import-card[data-sid="${sid}"]`);
   if (!card) return;
   const input = card.querySelector(`.import-taxon-input[data-sid="${sid}"]`);
@@ -489,8 +528,8 @@ async function saveAll() {
         user_id: state.user.id,
         date: _localDate(session.ts),
         captured_at: session.ts.toISOString(),
-        gps_latitude: state.gps?.lat ?? null,
-        gps_longitude: state.gps?.lon ?? null,
+        gps_latitude: session.gpsLat ?? null,
+        gps_longitude: session.gpsLon ?? null,
         location: session.locationName || null,
         source_type: 'personal',
         genus: session.taxon?.genus || null,
