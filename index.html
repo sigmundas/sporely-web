@@ -53,8 +53,38 @@
         <button type="submit" class="auth-btn" id="signup-btn">Create account</button>
         <p class="auth-switch">Already have one? <a href="#" id="show-login">Sign in</a></p>
       </form>
+
+      <!-- Install hint (mobile only, injected by JS) -->
+      <div class="auth-install-hint" id="auth-install-hint" style="display:none">
+        <div class="auth-install-icon" id="auth-install-icon"></div>
+        <div class="auth-install-text" id="auth-install-text"></div>
+      </div>
     </div>
   </div>
+
+  <script>
+    (function() {
+      const ua = navigator.userAgent
+      const isIOS     = /iphone|ipad|ipod/i.test(ua)
+      const isAndroid = /android/i.test(ua)
+      const isStandalone = window.navigator.standalone === true ||
+                           window.matchMedia('(display-mode: standalone)').matches
+      if ((!isIOS && !isAndroid) || isStandalone) return
+
+      const hint = document.getElementById('auth-install-hint')
+      const icon = document.getElementById('auth-install-icon')
+      const text = document.getElementById('auth-install-text')
+
+      if (isIOS) {
+        icon.textContent = '📲'
+        text.innerHTML = '<strong>Install on iPhone:</strong> Tap the share button <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> in Safari, then <strong>"Add to Home Screen"</strong>'
+      } else {
+        icon.textContent = '📲'
+        text.innerHTML = '<strong>Install on Android:</strong> Tap the menu <strong>⋮</strong> in Chrome, then <strong>"Add to Home screen"</strong>'
+      }
+      hint.style.display = 'flex'
+    })()
+  </script>
 
   <!-- ═══════════════════════ APP SHELL ═══════════════════════════ -->
   <div id="app-shell" style="display:none; width:100%; height:100%; position:relative;">

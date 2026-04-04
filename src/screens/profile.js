@@ -17,9 +17,9 @@ export function initProfile() {
     if (e.key === 'Enter') _searchFriend()
   })
   document.getElementById('profile-save-btn').addEventListener('click', _saveProfile)
-  document.getElementById('profile-avatar-btn').addEventListener('click', () => {
-    document.getElementById('profile-avatar-input').click()
-  })
+  const _openPicker = () => document.getElementById('profile-avatar-input').click()
+  document.getElementById('profile-avatar-btn').addEventListener('click', _openPicker)
+  document.getElementById('profile-avatar-circle').addEventListener('click', _openPicker)
   document.getElementById('profile-avatar-input').addEventListener('change', e => {
     const file = e.target.files?.[0]
     if (file) _showCrop(file)
