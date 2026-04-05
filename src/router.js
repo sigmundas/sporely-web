@@ -7,6 +7,7 @@ import { loadMap } from './screens/map.js'
 const navStack = []
 
 function _show(screen) {
+  const prevScreen = state.currentScreen
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'))
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'))
 
@@ -19,7 +20,7 @@ function _show(screen) {
 
   state.currentScreen = screen
 
-  if (screen === 'capture') startCamera()
+  if (screen === 'capture') startCamera({ preserveBatch: prevScreen === 'review' && state.capturedPhotos.length > 0 })
   else stopCamera()
 
   if (screen === 'review') buildReviewGrid()
@@ -41,4 +42,3 @@ export function goBack() {
   _show(prev)
   return prev
 }
-

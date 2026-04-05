@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Sporely</string>
+    <string name="title_activity_main">Sporely</string>
+    <string name="package_name">app.sporely.no</string>
+    <string name="custom_url_scheme">app.sporely.no</string>
+</resources>

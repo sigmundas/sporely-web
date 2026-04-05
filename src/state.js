@@ -1,6 +1,12 @@
 export const state = {
   currentScreen: 'home',
   capturedPhotos: [],
+  captureDraft: {
+    habitat: '',
+    notes: '',
+    uncertain: false,
+    visibility: 'friends',
+  },
   batchCount: 0,
   sessionStart: null,
   gps: null,

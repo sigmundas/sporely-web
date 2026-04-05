@@ -1,0 +1,19 @@
+.DS_Store
+node_modules/
+dist/
+
+# Local Capacitor output
+android/.idea/
+android/.gradle/
+android/app/build/
+android/build/
+android/capacitor-cordova-android-plugins/
+android/local.properties
+android/capacitor.settings.gradle
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+
+# Gradle
+*.apk
+*.aab

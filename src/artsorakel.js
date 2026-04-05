@@ -117,6 +117,7 @@ export async function runArtsorakel(blob, lang = 'no') {
       const sci   = (taxon.scientificName || taxon.scientific_name || taxon.name || '').trim()
       const vern  = pickVernacular(taxon, langNorm)
       return {
+        taxonId:        taxon.taxonId || taxon.id || null,
         probability:    Number(pred.probability || 0),
         scientificName: sci || null,
         vernacularName: vern || null,
@@ -125,4 +126,52 @@ export async function runArtsorakel(blob, lang = 'no') {
         adbUrl:         pickUrl(pred, taxon),
       }
     })
+}
+
+export async function runArtsorakelForBlobs(blobs, lang = 'no') {
+  const realBlobs = (blobs || []).filter(blob => blob instanceof Blob)
+  if (!realBlobs.length) return null
+
+  if (realBlobs.length === 1) {
+    return runArtsorakel(realBlobs[0], lang)
+  }
+
+  const responses = await Promise.all(realBlobs.map(blob => runArtsorakel(blob, lang)))
+  const totalBlobs = realBlobs.length
+  const combined = new Map()
+
+  responses
+    .filter(predictions => Array.isArray(predictions))
+    .forEach(predictions => {
+      predictions.forEach(prediction => {
+        const key = prediction.taxonId
+          || prediction.scientificName?.toLowerCase()
+          || prediction.displayName?.toLowerCase()
+        if (!key) return
+
+        const existing = combined.get(key) || {
+          ...prediction,
+          probabilitySum: 0,
+          hitCount: 0,
+        }
+
+        existing.probabilitySum += Number(prediction.probability || 0)
+        existing.hitCount += 1
+        existing.probability = existing.probabilitySum / totalBlobs
+        if (!existing.scientificName && prediction.scientificName) existing.scientificName = prediction.scientificName
+        if (!existing.vernacularName && prediction.vernacularName) existing.vernacularName = prediction.vernacularName
+        if (!existing.displayName && prediction.displayName) existing.displayName = prediction.displayName
+        if (!existing.adbUrl && prediction.adbUrl) existing.adbUrl = prediction.adbUrl
+        combined.set(key, existing)
+      })
+    })
+
+  return Array.from(combined.values())
+    .sort((a, b) =>
+      b.probabilitySum - a.probabilitySum
+      || b.hitCount - a.hitCount
+      || b.probability - a.probability
+    )
+    .slice(0, 5)
+    .map(({ probabilitySum, hitCount, ...prediction }) => prediction)
 }

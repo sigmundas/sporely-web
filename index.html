@@ -224,12 +224,14 @@
       </div>
 
       <div class="finds-topbar">
-        <div class="finds-subtitle-bar" id="finds-subtitle">Documented specimens.</div>
+        <div class="finds-subtitle-bar" id="finds-subtitle">Documented observations.</div>
         <div class="finds-view-btns">
-          <button class="finds-view-btn active" id="finds-view-cards" title="Card view" aria-label="Card view">
+          <button class="finds-view-btn active" id="finds-view-cards" title="Single column view" aria-label="Single column view">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="8" height="10" rx="1.5"/><rect x="13" y="3" width="8" height="10" rx="1.5"/><rect x="3" y="16" width="8" height="5" rx="1.5"/><rect x="13" y="16" width="8" height="5" rx="1.5"/></svg>
           </button>
-          <button class="finds-view-btn" id="finds-view-tiles" title="Tile view" aria-label="Tile view">
+          <button class="finds-view-btn finds-view-btn-text" id="finds-view-two" title="Two columns" aria-label="Two columns">2</button>
+          <button class="finds-view-btn finds-view-btn-text" id="finds-view-three" title="Three columns" aria-label="Three columns">3</button>
+          <button class="finds-view-btn" id="finds-view-tiles" title="Tiny grid view" aria-label="Tiny grid view">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="4" height="4" rx="0.5"/><rect x="10" y="3" width="4" height="4" rx="0.5"/><rect x="17" y="3" width="4" height="4" rx="0.5"/><rect x="3" y="10" width="4" height="4" rx="0.5"/><rect x="10" y="10" width="4" height="4" rx="0.5"/><rect x="17" y="10" width="4" height="4" rx="0.5"/><rect x="3" y="17" width="4" height="4" rx="0.5"/><rect x="10" y="17" width="4" height="4" rx="0.5"/><rect x="17" y="17" width="4" height="4" rx="0.5"/></svg>
           </button>
         </div>
@@ -309,7 +311,7 @@
         <span id="review-coords-text" style="display:none"></span>
         <span id="review-location" style="display:none"></span>
 
-        <div class="specimen-grid" id="specimen-grid"></div>
+        <div class="observation-grid" id="observation-grid"></div>
 
         <div class="field-meta-section">
           <div class="field-meta-header">Field Metadata</div>
@@ -339,14 +341,34 @@
             </div>
           </div>
         </div>
+
+        <div class="detail-field" style="margin-bottom:12px">
+          <div class="detail-field-label">Habitat</div>
+          <input id="review-habitat" class="detail-text-input" type="text" placeholder="—">
+        </div>
+
+        <div class="detail-field" style="margin-bottom:12px">
+          <div class="detail-field-label">Notes</div>
+          <textarea id="review-notes" class="detail-textarea" placeholder="Field notes…" rows="4"></textarea>
+        </div>
+
+        <div class="field-meta-section" style="margin-bottom:20px">
+          <div class="field-meta-row">
+            <div class="field-meta-key">ID Needed</div>
+            <label class="detail-toggle">
+              <input type="checkbox" id="review-uncertain">
+              <span class="detail-toggle-track"><span class="detail-toggle-thumb"></span></span>
+            </label>
+          </div>
+        </div>
       </div>
 
       <div class="review-actions">
         <div class="review-action-btns">
-          <button class="btn-secondary" id="save-draft-btn">Save Draft</button>
-          <button class="btn-primary" id="finish-sync-btn">Done</button>
+          <button class="btn-secondary" id="save-draft-btn">Cancel</button>
+          <button class="btn-primary" id="finish-sync-btn">Save</button>
         </div>
-        <div class="sync-footer-text">Saves to Sporely Cloud</div>
+        <div class="sync-footer-text">Creates one observation in Sporely Cloud</div>
       </div>
     </div>
 
@@ -357,16 +379,18 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
           Finds
         </button>
-        <div class="detail-header-meta">
-          <span id="detail-date">—</span><span id="detail-time" style="display:none"> · <span id="detail-time-val"></span></span>
-          <div class="detail-observation-badge" id="detail-readonly-note" style="display:none"></div>
-        </div>
       </div>
 
       <div class="review-body">
+        <div class="detail-intro">
+          <div class="detail-title" id="detail-title">Unknown species</div>
+          <div class="detail-date-time">
+            <span id="detail-date">—</span><span id="detail-time" style="display:none"> · <span id="detail-time-val"></span></span>
+          </div>
+          <div class="detail-observation-badge" id="detail-readonly-note" style="display:none"></div>
+        </div>
         <div class="detail-gallery" id="detail-gallery"></div>
         <div class="detail-coords-bar" id="detail-coords" style="display:none"></div>
-        <div class="detail-exif-debug" id="detail-exif-debug" style="display:none"></div>
 
         <div class="detail-form">
           <div class="detail-field">
@@ -627,7 +651,7 @@
         </div>
         <p class="settings-gap-hint">Photos taken within this window are grouped into one observation.</p>
 
-        <div class="settings-version">v0.1.11</div>
+        <div class="settings-version">v0.1.13</div>
       </div>
     </div>
 

@@ -2,16 +2,32 @@ import { supabase } from '../supabase.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, runArtsorakel, formatDisplayName } from '../artsorakel.js'
+import { searchTaxa, runArtsorakelForBlobs, formatDisplayName } from '../artsorakel.js'
+import { uploadObservationImageVariants } from '../images.js'
 import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
+import { loadFinds } from './finds.js'
 
 export function initReview() {
   document.getElementById('review-close')
-    .addEventListener('click', () => navigate('home'))
+    .addEventListener('click', cancelReview)
   document.getElementById('add-photo-btn').addEventListener('click', () => navigate('capture'))
-  document.getElementById('save-draft-btn').addEventListener('click', saveDraft)
+  document.getElementById('save-draft-btn').addEventListener('click', cancelReview)
   document.getElementById('finish-sync-btn').addEventListener('click', finishAndSync)
+  document.getElementById('review-habitat').addEventListener('input', event => {
+    state.captureDraft.habitat = event.target.value
+  })
+  document.getElementById('review-notes').addEventListener('input', event => {
+    state.captureDraft.notes = event.target.value
+  })
+  document.getElementById('review-uncertain').addEventListener('change', event => {
+    state.captureDraft.uncertain = event.target.checked
+  })
+  document.querySelectorAll('input[name="review-vis"]').forEach(radio => {
+    radio.addEventListener('change', event => {
+      if (event.target.checked) state.captureDraft.visibility = event.target.value
+    })
+  })
   initLocationField()
 }
 
@@ -20,6 +36,15 @@ export function initReview() {
 export function buildReviewGrid() {
   const photos = state.capturedPhotos
   const count  = photos.length
+  const reviewCount = document.getElementById('review-count')
+  const sharedTaxon = photos.find(photo => photo.taxon)?.taxon || null
+  const speciesLabel = sharedTaxon?.displayName
+    || (sharedTaxon ? formatDisplayName(sharedTaxon.genus, sharedTaxon.specificEpithet, sharedTaxon.vernacularName) : '')
+    || 'Unknown species'
+
+  if (reviewCount) {
+    reviewCount.textContent = speciesLabel
+  }
 
   // title stays "New observation" — count shown via card carousel
 
@@ -42,47 +67,59 @@ export function buildReviewGrid() {
     startLocationLookup(state.gps.lat, state.gps.lon)
   }
 
-  const grid = document.getElementById('specimen-grid')
+  document.getElementById('review-habitat').value = state.captureDraft.habitat || ''
+  document.getElementById('review-notes').value = state.captureDraft.notes || ''
+  document.getElementById('review-uncertain').checked = !!state.captureDraft.uncertain
+  const visibility = state.captureDraft.visibility || 'friends'
+  const visibilityRadio = document.querySelector(`input[name="review-vis"][value="${visibility}"]`)
+  if (visibilityRadio) visibilityRadio.checked = true
+
+  const grid = document.getElementById('observation-grid')
+  grid.classList.add('review-session-grid')
   let html = ''
 
   if (count === 0) {
-    html = `<div class="specimen-card" style="opacity:0.4;pointer-events:none">
-      <div class="specimen-photo" style="aspect-ratio:1;display:flex;align-items:center;justify-content:center;font-size:32px">📷</div>
-      <div class="specimen-info"><div class="specimen-name" style="font-style:normal;font-size:12px;color:var(--text-dim)">No captures yet</div></div>
+    html = `<div class="capture-session-card" style="opacity:0.4;pointer-events:none">
+      <div class="capture-session-empty">No captures yet</div>
     </div>`
   } else {
-    photos.forEach((p, i) => {
-      const t   = p.ts ? p.ts.toLocaleTimeString('no-NO', { hour: '2-digit', minute: '2-digit' }) : '—'
-      const gps = p.gps ? `${p.gps.lat.toFixed(3)}° N` : 'No GPS'
-      const hasBlob = p.blobPromise || (p.blob instanceof Blob)
-      const displayName = p.taxon
-        ? formatDisplayName(p.taxon.genus, p.taxon.specificEpithet, p.taxon.vernacularName)
-        : ''
+    const displayName = sharedTaxon
+      ? formatDisplayName(sharedTaxon.genus, sharedTaxon.specificEpithet, sharedTaxon.vernacularName)
+      : ''
+    const firstTime = photos[0]?.ts
+      ? photos[0].ts.toLocaleTimeString('no-NO', { hour: '2-digit', minute: '2-digit' })
+      : '—'
+    const lastTime = photos[count - 1]?.ts
+      ? photos[count - 1].ts.toLocaleTimeString('no-NO', { hour: '2-digit', minute: '2-digit' })
+      : '—'
+    const hasBlob = photos.some(photo => photo.blobPromise || (photo.blob instanceof Blob))
+    const summary = count === 1
+      ? `1 photo · ${firstTime}`
+      : `${count} photos · ${firstTime} - ${lastTime}`
 
-      html += `<div class="specimen-card" data-idx="${i}">
-        <div class="specimen-photo" id="specimen-photo-${i}">
-          <div class="specimen-precision"></div>
-          <span class="specimen-emoji" style="font-size:36px">${p.emoji || '🍄'}</span>
+    html = `<div class="capture-session-card">
+      <div class="detail-gallery capture-session-gallery" id="review-gallery"></div>
+      <div class="capture-session-summary">${summary}</div>
+      <div class="detail-field capture-session-species">
+        <div class="detail-field-label">Species</div>
+        <div class="taxon-field-wrap">
+          <input
+            class="taxon-input detail-taxon-input"
+            type="text"
+            placeholder="Unknown species"
+            value="${displayName}"
+            data-idx="0"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
         </div>
-        <div class="specimen-info">
-          <div class="taxon-field-wrap">
-            <input
-              class="taxon-input"
-              type="text"
-              placeholder="Unknown species"
-              value="${displayName}"
-              data-idx="${i}"
-              autocomplete="off"
-              spellcheck="false"
-            />
-            <ul class="taxon-dropdown" data-idx="${i}" style="display:none"></ul>
-          </div>
-          ${hasBlob ? `<button class="artsorakel-btn" data-idx="${i}">Artsorakel</button>` : ''}
-          <div class="artsorakel-results" data-idx="${i}" style="display:none"></div>
-          <div class="specimen-meta">${t} · ${gps}</div>
-        </div>
-      </div>`
-    })
+        ${hasBlob ? `<button class="ai-id-btn" id="review-ai-btn" style="margin-top:8px;width:100%">
+          <div class="ai-dot"></div> Identify with Artsorakel AI
+        </button>` : ''}
+        <div class="artsorakel-results" data-idx="0" style="display:none"></div>
+      </div>
+    </div>`
   }
 
   grid.innerHTML = html
@@ -92,34 +129,39 @@ export function buildReviewGrid() {
 }
 
 function loadThumbnails(photos) {
-  photos.forEach(async (p, i) => {
-    const container = document.getElementById(`specimen-photo-${i}`)
-    if (!container) return
+  const gallery = document.getElementById('review-gallery')
+  if (!gallery) return
 
-    let blob = p.blob instanceof Blob ? p.blob : null
-    if (!blob && p.blobPromise) blob = await p.blobPromise
+  gallery.innerHTML = ''
+  ;(async () => {
+    for (const p of photos) {
+      let blob = p.blob instanceof Blob ? p.blob : null
+      if (!blob && p.blobPromise) blob = await p.blobPromise
 
-    if (!(blob instanceof Blob)) return
+      if (blob instanceof Blob) {
+        const url = URL.createObjectURL(blob)
+        const img = document.createElement('img')
+        img.className = 'detail-gallery-img'
+        img.src = url
+        img.loading = 'lazy'
+        img.alt = ''
+        gallery.appendChild(img)
+        continue
+      }
 
-    const url = URL.createObjectURL(blob)
-    const img = document.createElement('img')
-    img.src = url
-    img.style.cssText = 'width:100%;height:100%;object-fit:cover;position:absolute;inset:0;border-radius:8px 8px 0 0'
-    img.onload = () => {
-      const emoji = container.querySelector('.specimen-emoji')
-      if (emoji) emoji.style.display = 'none'
-      container.appendChild(img)
+      const placeholder = document.createElement('div')
+      placeholder.className = 'capture-session-thumb-placeholder'
+      placeholder.textContent = p.emoji || '🍄'
+      gallery.appendChild(placeholder)
     }
-  })
+  })()
 }
 
 // ── Per-card event wiring ─────────────────────────────────────────────────────
 
 function wireCardEvents() {
-  // Artsorakel buttons
-  document.querySelectorAll('.artsorakel-btn').forEach(btn => {
-    btn.addEventListener('click', () => handleArtsorakelBtn(Number(btn.dataset.idx)))
-  })
+  const aiBtn = document.getElementById('review-ai-btn')
+  if (aiBtn) aiBtn.addEventListener('click', () => handleArtsorakelBtn(0))
 
   // Taxon autocomplete inputs
   document.querySelectorAll('.taxon-input').forEach(input => {
@@ -141,6 +183,10 @@ async function handleTaxonInput(input) {
   const ul  = document.querySelector(`.taxon-dropdown[data-idx="${i}"]`)
   if (!ul) return
 
+  if (!q) {
+    applyTaxon(i, null)
+    return
+  }
   if (q.length < 2) { ul.style.display = 'none'; return }
 
   const results = await searchTaxa(q, 'no')
@@ -168,10 +214,18 @@ function hideDropdown(i) {
 }
 
 function applyTaxon(i, taxon) {
-  state.capturedPhotos[i].taxon = taxon
-  const input = document.querySelector(`.taxon-input[data-idx="${i}"]`)
-  if (input) input.value = taxon.displayName
-  hideDropdown(i)
+  state.capturedPhotos.forEach(photo => {
+    photo.taxon = taxon ? { ...taxon } : null
+  })
+  document.querySelectorAll('.taxon-input').forEach(input => {
+    input.value = taxon?.displayName || ''
+  })
+  document.querySelectorAll('.taxon-dropdown').forEach(dropdown => {
+    dropdown.style.display = 'none'
+  })
+  document.querySelectorAll('.artsorakel-results').forEach(result => {
+    result.style.display = 'none'
+  })
 }
 
 // ── Artsorakel AI ─────────────────────────────────────────────────────────────
@@ -183,17 +237,23 @@ async function resolveBlob(photo) {
 }
 
 async function handleArtsorakelBtn(i) {
-  const btn = document.querySelector(`.artsorakel-btn[data-idx="${i}"]`)
+  const btn = document.getElementById('review-ai-btn')
   const resultsEl = document.querySelector(`.artsorakel-results[data-idx="${i}"]`)
   if (!btn || !resultsEl) return
 
-  btn.disabled = true
-  btn.textContent = 'Identifying…'
-  resultsEl.style.display = 'none'
+  const buttons = [btn]
+  buttons.forEach(actionBtn => {
+    actionBtn.disabled = true
+    actionBtn.innerHTML = '<div class="ai-dot"></div> Identifying…'
+  })
+  document.querySelectorAll('.artsorakel-results').forEach(result => {
+    result.style.display = 'none'
+  })
 
   try {
-    const blob = await resolveBlob(state.capturedPhotos[i])
-    const predictions = await runArtsorakel(blob, 'no')
+    const blobs = (await Promise.all(state.capturedPhotos.map(resolveBlob)))
+      .filter(blob => blob instanceof Blob)
+    const predictions = await runArtsorakelForBlobs(blobs, 'no')
 
     if (!predictions || predictions.length === 0) {
       showToast('No match found')
@@ -232,8 +292,10 @@ async function handleArtsorakelBtn(i) {
     }
     console.warn('Artsorakel error:', err)
   } finally {
-    btn.disabled = false
-    btn.textContent = 'Artsorakel'
+    buttons.forEach(actionBtn => {
+      actionBtn.disabled = false
+      actionBtn.innerHTML = '<div class="ai-dot"></div> Identify with Artsorakel AI'
+    })
   }
 }
 
@@ -248,15 +310,41 @@ async function runAllArtsorakel() {
 
 // ── Draft / sync ──────────────────────────────────────────────────────────────
 
-async function saveDraft() {
-  showToast('Draft saved locally')
+function cancelReview() {
+  state.capturedPhotos = []
+  state.batchCount = 0
+  state.captureDraft = {
+    habitat: '',
+    notes: '',
+    uncertain: false,
+    visibility: 'friends',
+  }
+  resetLocationState()
+  navigate('home')
 }
 
-async function uploadBlob(blob, storagePath) {
-  const { error } = await supabase.storage
-    .from('observation-images')
-    .upload(storagePath, blob, { contentType: 'image/jpeg', upsert: true })
-  if (error) throw new Error(`Storage upload failed: ${error.message}`)
+function _localDate(ts) {
+  return `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}`
+}
+
+async function _insertObservation(obsPayload) {
+  let { data: obsData, error } = await supabase
+    .from('observations')
+    .insert(obsPayload)
+    .select('id')
+    .single()
+
+  if (error?.message?.includes('captured_at')) {
+    const { captured_at: _, ...payloadWithoutCapturedAt } = obsPayload
+    ;({ data: obsData, error } = await supabase
+      .from('observations')
+      .insert(payloadWithoutCapturedAt)
+      .select('id')
+      .single())
+  }
+
+  if (error) throw new Error(`Observation insert failed: ${error.message}`)
+  return obsData.id
 }
 
 async function finishAndSync() {
@@ -275,55 +363,60 @@ async function finishAndSync() {
       }))
     )
 
-    const visibility = document.querySelector('input[name="review-vis"]:checked')?.value || 'friends'
-
-    for (const [i, photo] of photos.entries()) {
-      const taxon = photo.taxon || {}
-      const obsPayload = {
-        user_id:       state.user.id,
-        date:          (photo.ts || new Date()).toISOString().slice(0, 10),
-        gps_latitude:  photo.gps?.lat  ?? null,
-        gps_longitude: photo.gps?.lon  ?? null,
-        location:      getLocationName() || null,
-        source_type:   'personal',
-        genus:         taxon.genus          || null,
-        species:       taxon.specificEpithet|| null,
-        common_name:   taxon.vernacularName || null,
-        visibility,
-      }
-
-      const { data: obsData, error: obsError } = await supabase
-        .from('observations')
-        .insert(obsPayload)
-        .select('id')
-        .single()
-
-      if (obsError) throw new Error(`Observation insert failed: ${obsError.message}`)
-      const obsId = obsData.id
-
-      if (photo.blob instanceof Blob) {
-        const storagePath = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`
-        await uploadBlob(photo.blob, storagePath)
-
-        const { error: imgError } = await supabase
-          .from('observation_images')
-          .insert({
-            observation_id: obsId,
-            user_id:        state.user.id,
-            storage_path:   storagePath,
-            image_type:     'field',
-            sort_order:     0,
-          })
-        if (imgError) console.warn('Image metadata insert failed:', imgError.message)
-      }
+    const visibility = state.captureDraft.visibility || 'friends'
+    const leadGps = photos.find(photo => photo.gps)?.gps || null
+    const leadPhoto = photos[0] || {}
+    const taxon = photos.find(photo => photo.taxon)?.taxon || {}
+    const obsPayload = {
+      user_id:       state.user.id,
+      date:          _localDate(leadPhoto.ts || new Date()),
+      captured_at:   (leadPhoto.ts || new Date()).toISOString(),
+      gps_latitude:  leadGps?.lat ?? null,
+      gps_longitude: leadGps?.lon ?? null,
+      location:      getLocationName() || null,
+      habitat:       state.captureDraft.habitat.trim() || null,
+      notes:         state.captureDraft.notes.trim() || null,
+      uncertain:     !!state.captureDraft.uncertain,
+      source_type:   'personal',
+      genus:         taxon.genus || null,
+      species:       taxon.specificEpithet || null,
+      common_name:   taxon.vernacularName || null,
+      visibility,
     }
 
-    showToast(`Synced ${photos.length} observation${photos.length !== 1 ? 's' : ''} ✓`)
+    const obsId = await _insertObservation(obsPayload)
+
+    for (const [i, photo] of photos.entries()) {
+      if (!(photo.blob instanceof Blob)) continue
+
+      const storagePath = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`
+      await uploadObservationImageVariants(photo.blob, storagePath)
+
+      const { error: imgError } = await supabase
+        .from('observation_images')
+        .insert({
+          observation_id: obsId,
+          user_id:        state.user.id,
+          storage_path:   storagePath,
+          image_type:     'field',
+          sort_order:     i,
+        })
+      if (imgError) console.warn('Image metadata insert failed:', imgError.message)
+    }
+
+    showToast(`Synced 1 observation with ${photos.length} photo${photos.length !== 1 ? 's' : ''} ✓`)
     state.capturedPhotos = []
     state.batchCount = 0
+    state.captureDraft = {
+      habitat: '',
+      notes: '',
+      uncertain: false,
+      visibility: 'friends',
+    }
     resetLocationState()
     await refreshHome()
-    setTimeout(() => navigate('home'), 800)
+    navigate('finds')
+    loadFinds()
   } catch (err) {
     showToast(`Sync failed: ${err.message}`)
     console.error('Sync error:', err)

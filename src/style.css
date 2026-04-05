@@ -326,6 +326,12 @@ html, body {
   cursor: pointer;
 }
 .find-row:last-child { border-bottom: none; }
+.find-thumb-wrap {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+}
 .find-thumb {
   width: 48px; height: 48px; border-radius: 8px;
   object-fit: cover; flex-shrink: 0;
@@ -592,6 +598,13 @@ html, body {
   display: flex; align-items: center;
   transition: background 0.15s, color 0.15s;
 }
+.finds-view-btn-text {
+  min-width: 28px;
+  justify-content: center;
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
 .finds-view-btn.active {
   background: var(--card-raised); color: var(--green-accent);
 }
@@ -764,9 +777,22 @@ html, body {
   gap: 16px;
   padding: 0 14px;
 }
+.finds-grid--cards {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+.finds-grid--two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.finds-grid--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
 
 /* Card wrapper — provides space above for photo overflow */
 .find-card-wrap { padding-top: 28px; }
+.find-card-wrap--two,
+.find-card-wrap--three { padding-top: 0; }
 
 /* Card itself */
 .find-card {
@@ -787,6 +813,7 @@ html, body {
   overflow: hidden;
   background: var(--card);
   box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+  position: relative;
 }
 .find-card-photo-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .find-card-photo-placeholder {
@@ -797,12 +824,30 @@ html, body {
 
 /* Card content — hanging indent */
 .find-card-body { padding-left: 18px; }
+.find-card-body--two,
+.find-card-body--three { padding-left: 0; }
 .find-card-name {
   font-family: 'Outfit', sans-serif;
   font-size: 17px; font-weight: 700; color: var(--white);
   margin-bottom: 5px; line-height: 1.3; display: block;
 }
+.find-card-name--compact {
+  font-size: 14px;
+  margin-bottom: 6px;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .find-card-name.unidentified { font-weight: 400; color: var(--text-secondary); }
+.find-card-author {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--green-accent);
+  margin-bottom: 6px;
+}
 .find-card-scientific {
   font-family: 'Instrument Serif', serif;
   font-style: italic; font-weight: 400;
@@ -818,6 +863,89 @@ html, body {
 .find-card-vis-icon {
   width: 13px; height: 13px; flex-shrink: 0;
   stroke: var(--text-dim); opacity: 0.7;
+}
+.find-card--two {
+  border-radius: 14px;
+  padding: 10px;
+}
+.find-card-photo-wrap--two {
+  margin-top: 0;
+  height: 140px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+}
+.find-card-body--two .find-card-author {
+  margin-bottom: 5px;
+}
+.find-card-body--two .find-card-loc {
+  font-size: 9px;
+  margin-bottom: 0;
+}
+.find-card--three {
+  border-radius: 12px;
+  padding: 8px;
+}
+.find-card-photo-wrap--three {
+  margin-top: 0;
+  margin-bottom: 8px;
+  height: 92px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+.find-card-body--three .find-card-name--compact {
+  font-size: 11px;
+  margin-bottom: 0;
+}
+.find-card-body--three .find-card-loc {
+  display: none;
+}
+
+.observation-author-chip {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  border: 2px solid rgba(13,17,9,0.9);
+  background: var(--green-deep);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.28);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+.observation-author-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.observation-author-chip--initial {
+  color: var(--green-accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+.observation-author-chip--compact {
+  width: 24px;
+  height: 24px;
+  top: 6px;
+  right: 6px;
+}
+.observation-author-chip--tile {
+  width: 22px;
+  height: 22px;
+  top: 5px;
+  right: 5px;
+  border-width: 1.5px;
+}
+.observation-author-chip--home {
+  width: 18px;
+  height: 18px;
+  top: -4px;
+  right: -4px;
+  border-width: 1.5px;
 }
 
 .badge {
@@ -865,11 +993,23 @@ html, body {
   height: 220px; width: auto; min-width: 160px; border-radius: 10px;
   object-fit: cover; flex-shrink: 0;
 }
-.detail-header-meta {
+.detail-intro {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.detail-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.18;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  max-width: 100%;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .detail-date-time {
   font-family: 'DM Mono', monospace; font-size: 12px; color: var(--text-dim);
@@ -878,49 +1018,6 @@ html, body {
 .detail-coords-bar {
   font-family: 'DM Mono', monospace; font-size: 11px;
   color: var(--text-dim); margin-bottom: 8px;
-}
-.detail-exif-debug {
-  font-family: 'DM Mono', monospace; font-size: 10px;
-  color: var(--text-dim); background: var(--card);
-  border: 1px solid var(--border); border-radius: 8px;
-  padding: 10px 12px; margin-bottom: 12px;
-  white-space: pre-wrap; word-break: break-all;
-}
-.detail-observation-badge,
-.find-owner-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: rgba(255,255,255,0.03);
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  line-height: 1;
-}
-.detail-observation-badge {
-  align-self: flex-end;
-}
-.find-owner-badge {
-  margin-top: 6px;
-}
-.find-owner-badge.mine,
-.detail-observation-badge.mine {
-  color: var(--green-accent);
-  border-color: rgba(126,200,122,0.35);
-}
-.find-owner-badge.shared,
-.detail-observation-badge.shared {
-  color: #9dc7ff;
-  border-color: rgba(157,199,255,0.3);
-}
-.find-owner-badge.public,
-.detail-observation-badge.public {
-  color: var(--amber);
-  border-color: rgba(212,146,74,0.32);
 }
 .detail-form { display: flex; flex-direction: column; gap: 4px; }
 .detail-field {
@@ -1218,6 +1315,10 @@ html, body {
 }
 .ai-id-btn:active { background: var(--green-mid); }
 .ai-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green-accent); animation: pulse 1.5s infinite; }
+.import-current-location-btn {
+  width: 100%;
+  justify-content: center;
+}
 
 .btn-add-photo {
   display: flex; align-items: center; gap: 6px;
@@ -1232,7 +1333,7 @@ html, body {
 .btn-add-photo:active { background: var(--green-mid); }
 html.light .btn-add-photo { color: #ffffff; }
 
-.specimen-grid {
+.observation-grid {
   display: flex;
   gap: 12px;
   margin: 0 -18px 20px;   /* bleed to screen edges */
@@ -1242,8 +1343,14 @@ html.light .btn-add-photo { color: #ffffff; }
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
 }
-.specimen-grid::-webkit-scrollbar { display: none; }
-.specimen-card {
+.observation-grid::-webkit-scrollbar { display: none; }
+.observation-grid.review-session-grid {
+  display: block;
+  margin: 0 0 20px;
+  padding: 0;
+  overflow: visible;
+}
+.observation-card {
   flex: 0 0 calc(100% - 36px);  /* one card fills visible width */
   scroll-snap-align: start;
   border-radius: 12px; overflow: hidden;
@@ -1252,24 +1359,62 @@ html.light .btn-add-photo { color: #ffffff; }
   cursor: pointer;
   transition: border-color 0.15s;
 }
-.specimen-card:active { border-color: var(--green-bright); }
-.specimen-photo {
+.observation-card:active { border-color: var(--green-bright); }
+.capture-session-card {
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--card);
+  border: 1px solid var(--border);
+  padding: 12px;
+}
+.capture-session-empty {
+  min-height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+.capture-session-gallery {
+  padding-bottom: 10px;
+}
+.capture-session-thumb-placeholder {
+  height: 220px;
+  width: 160px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--card-raised);
+  font-size: 36px;
+}
+.capture-session-summary {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+.capture-session-species {
+  margin-top: 2px;
+}
+.observation-photo {
   width: 100%; aspect-ratio: 4/3;
   background: var(--card-raised);
   display: flex; align-items: center; justify-content: center;
   font-size: 36px;
   position: relative;
 }
-.specimen-precision {
+.observation-precision {
   position: absolute; top: 6px; left: 6px;
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--green-accent);
   box-shadow: 0 0 6px var(--green-accent);
 }
-.specimen-precision.med { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
-.specimen-info { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
-.specimen-name { font-size: 13px; font-weight: 500; color: var(--text-primary); font-family: 'Instrument Serif', serif; font-style: italic; }
-.specimen-meta { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text-dim); }
+.observation-precision.med { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+.observation-info { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
+.observation-name { font-size: 13px; font-weight: 500; color: var(--text-primary); font-family: 'Instrument Serif', serif; font-style: italic; }
+.observation-meta { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text-dim); }
 
 /* Taxon autocomplete field */
 .taxon-field-wrap { position: relative; }
@@ -1350,11 +1495,11 @@ html.light .btn-add-photo { color: #ffffff; }
   min-width: 30px;
 }
 .ai-name { color: var(--text-primary); font-style: italic; }
-.specimen-add {
+.observation-add {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 6px;
 }
-.specimen-add-icon { color: var(--text-dim); }
+.observation-add-icon { color: var(--text-dim); }
 
 .field-meta-section {
   background: var(--card);

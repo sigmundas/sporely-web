@@ -2,7 +2,7 @@ import { supabase } from '../supabase.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, formatDisplayName, runArtsorakel } from '../artsorakel.js'
+import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { loadFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
@@ -26,6 +26,7 @@ export function initFindDetail() {
 
   input.addEventListener('input', () => {
     selectedTaxon = null
+    document.getElementById('detail-title').textContent = input.value.trim() || 'Unknown species'
     clearTimeout(debounce)
     debounce = setTimeout(() => _searchTaxon(input.value.trim(), dropdown), 280)
   })
@@ -74,6 +75,8 @@ export async function openFindDetail(obsId, exifDebug) {
   _applyOwnershipMode(currentObsIsOwner)
 
   const displayName = formatDisplayName(obs.genus || '', obs.species || '', obs.common_name)
+  const titleName = displayName.trim() || 'Unknown species'
+  document.getElementById('detail-title').textContent = titleName
   document.getElementById('detail-taxon-input').value = displayName.trim()
   document.getElementById('detail-location').value    = obs.location  || ''
   document.getElementById('detail-habitat').value     = obs.habitat   || ''
@@ -101,31 +104,6 @@ export async function openFindDetail(obsId, exifDebug) {
   const coordsEl = document.getElementById('detail-coords')
   if (coordsEl) coordsEl.textContent = coords || ''
   if (coordsEl) coordsEl.style.display = coords ? 'block' : 'none'
-
-  // Show EXIF debug panel when GPS is missing (from single-photo import)
-  const dbgEl = document.getElementById('detail-exif-debug')
-  if (dbgEl) {
-    if (exifDebug?.length) {
-      const rows = exifDebug.map((d, i) => {
-        const lines = [
-          `Photo ${i + 1}: ${d.fileName || '?'} ${d.fileType || '?'} ${d.fileSize ? Math.round(d.fileSize/1024) + 'KB' : ''}`,
-          `Buffer read: ${d.bufSize ? Math.round(d.bufSize/1024) + 'KB' : 'FAILED'} ${d.bufError ? '⚠ ' + d.bufError : ''}`,
-          `parseGps(): ${d.gpsResult || (d.gpsError ? '⚠ ' + d.gpsError : 'null')}`,
-          `parse({gps:true}): ${d.gpsFallback || 'null'}`,
-          d.gpsFallbackError ? `parse({gps:true}) error: ${d.gpsFallbackError}` : '',
-          `raw GPS tags (file): ${d.rawGpsFile || 'null'}`,
-          d.rawGpsFileError ? `raw GPS tags (file) error: ${d.rawGpsFileError}` : '',
-          `raw GPS tags (buffer): ${d.rawGpsBuffer || 'null'}`,
-          d.rawGpsBufferError ? `raw GPS tags (buffer) error: ${d.rawGpsBufferError}` : '',
-        ].filter(Boolean).join('\n')
-        return lines
-      }).join('\n\n')
-      dbgEl.textContent = rows
-      dbgEl.style.display = 'block'
-    } else {
-      dbgEl.style.display = 'none'
-    }
-  }
 
   // Set visibility radio
   const vis = obs.visibility || 'friends'
@@ -211,17 +189,25 @@ async function _useCurrentLocation() {
 async function _runAI() {
   const btn       = document.getElementById('detail-ai-btn')
   const resultsEl = document.getElementById('detail-ai-results')
-  const firstImg  = document.querySelector('#detail-gallery img')
-  if (!firstImg?.src) { showToast('No photo to identify'); return }
+  const galleryImgs = Array.from(document.querySelectorAll('#detail-gallery img'))
+  if (!galleryImgs.length) { showToast('No photo to identify'); return }
 
   btn.disabled = true
   btn.innerHTML = '<div class="ai-dot"></div> Identifying…'
   resultsEl.style.display = 'none'
 
   try {
-    const resp = await fetch(firstImg.src)
-    const blob = await resp.blob()
-    const predictions = await runArtsorakel(blob, 'no')
+    const blobResults = await Promise.allSettled(
+      galleryImgs.map(async img => {
+        const resp = await fetch(img.src)
+        if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
+        return resp.blob()
+      })
+    )
+    const blobs = blobResults
+      .filter(result => result.status === 'fulfilled' && result.value instanceof Blob)
+      .map(result => result.value)
+    const predictions = await runArtsorakelForBlobs(blobs, 'no')
 
     if (!predictions?.length) {
       showToast('No match found')
@@ -248,6 +234,7 @@ async function _runAI() {
           displayName:     p.displayName,
         }
         document.getElementById('detail-taxon-input').value = p.displayName
+        document.getElementById('detail-title').textContent = p.displayName || 'Unknown species'
         resultsEl.style.display = 'none'
       })
     })
@@ -274,7 +261,12 @@ function _resetForm() {
   document.getElementById('detail-habitat').value     = ''
   document.getElementById('detail-notes').value       = ''
   document.getElementById('detail-uncertain').checked = false
+  document.getElementById('detail-title').textContent = 'Unknown species'
   document.getElementById('detail-date').textContent  = '—'
+  const timeEl = document.getElementById('detail-time')
+  const timeVal = document.getElementById('detail-time-val')
+  if (timeEl) timeEl.style.display = 'none'
+  if (timeVal) timeVal.textContent = ''
   document.getElementById('detail-gallery').innerHTML = ''
   const aiResults = document.getElementById('detail-ai-results')
   if (aiResults) { aiResults.style.display = 'none'; aiResults.innerHTML = '' }
@@ -304,10 +296,7 @@ function _applyOwnershipMode(isOwner) {
   const currentLocationBtn = document.getElementById('detail-current-location-btn')
 
   if (readonlyNote) {
-    const ownerMeta = _ownershipMeta(currentObs)
-    readonlyNote.textContent = ownerMeta.label
-    readonlyNote.className = `detail-observation-badge ${ownerMeta.className}`
-    readonlyNote.style.display = 'inline-flex'
+    readonlyNote.style.display = 'none'
   }
   if (saveBtn) saveBtn.style.display = isOwner ? '' : 'none'
   if (deleteBtn) deleteBtn.style.display = isOwner ? '' : 'none'
@@ -322,17 +311,6 @@ function _applyOwnershipMode(isOwner) {
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.disabled = !isOwner
   })
-}
-
-function _ownershipMeta(obs) {
-  if (!obs) return { label: 'Observation', className: '' }
-  if (obs.user_id === state.user?.id) {
-    return { label: 'Your observation', className: 'mine' }
-  }
-  if (obs.visibility === 'public') {
-    return { label: 'Public observation', className: 'public' }
-  }
-  return { label: 'Shared observation', className: 'shared' }
 }
 
 async function _searchTaxon(q, dropdown) {

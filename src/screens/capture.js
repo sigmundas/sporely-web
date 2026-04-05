@@ -2,6 +2,10 @@ import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 
+function _isNativeApp() {
+  return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
+}
+
 export function initCapture() {
   document.getElementById('flash-btn').addEventListener('click', toggleFlash)
   document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
@@ -38,7 +42,8 @@ async function tryGetUserMedia() {
   }
 }
 
-export async function startCamera() {
+export async function startCamera(options = {}) {
+  const preserveBatch = !!options.preserveBatch
   try {
     const stream = await tryGetUserMedia()
     state.cameraStream = stream
@@ -49,11 +54,19 @@ export async function startCamera() {
       try { await video.play() } catch (_) {}
       _syncPreviewFit(video)
     }
-    state.sessionStart = new Date()
-    state.batchCount = 0
-    state.capturedPhotos = []
-    document.getElementById('batch-count').textContent = '0'
-    document.getElementById('batch-area').style.display = 'none'
+    if (!preserveBatch) {
+      state.sessionStart = new Date()
+      state.capturedPhotos = []
+      state.captureDraft = {
+        habitat: '',
+        notes: '',
+        uncertain: false,
+        visibility: 'friends',
+      }
+    }
+    state.batchCount = state.capturedPhotos.length
+    document.getElementById('batch-count').textContent = String(state.batchCount)
+    document.getElementById('batch-area').style.display = state.batchCount ? 'flex' : 'none'
     simulateLightReading()
   } catch (err) {
     const denied = document.getElementById('camera-denied')
@@ -62,7 +75,9 @@ export async function startCamera() {
     if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
       const ua = navigator.userAgent
       let instructions
-      if (/iPhone|iPad/.test(ua)) {
+      if (_isNativeApp()) {
+        instructions = 'Allow Camera for Sporely in Android app permissions, then tap "Try again".'
+      } else if (/iPhone|iPad/.test(ua)) {
         instructions = 'On iPhone: open the Settings app → scroll down to Safari (or your browser) → Camera → Allow.'
       } else if (/Firefox/.test(ua)) {
         instructions = 'In Firefox: tap the lock icon in the address bar → Site permissions → Camera → Allow.'

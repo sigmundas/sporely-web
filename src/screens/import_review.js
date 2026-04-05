@@ -2,7 +2,10 @@ import { state } from '../state.js';
 import { supabase } from '../supabase.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
-import { searchTaxa, formatDisplayName, runArtsorakel } from '../artsorakel.js';
+import { registerPlugin } from '@capacitor/core';
+import { Filesystem } from '@capacitor/filesystem';
+import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js';
+import { uploadObservationImageVariants } from '../images.js';
 import { loadFinds } from './finds.js';
 import { openFindDetail } from './find_detail.js';
 import exifr from 'exifr/dist/full.esm.mjs';
@@ -11,9 +14,14 @@ import { saveImportSessions, clearImportSessions } from '../import-store.js';
 let sessions = [];
 const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
 const RAW_GPS_PICK = ['GPSLatitude', 'GPSLatitudeRef', 'GPSLongitude', 'GPSLongitudeRef', 'latitude', 'longitude'];
+const NativePhotoPicker = registerPlugin('NativePhotoPicker');
 
 function sessionById(sid) {
   return sessions.find(s => s.id === sid);
+}
+
+function _isNativeApp() {
+  return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.());
 }
 
 export function initImportReview() {
@@ -37,7 +45,24 @@ export function restoreImportSessions(savedSessions) {
   renderSessions();
 }
 
-export function openPhotoImportPicker() {
+export async function openPhotoImportPicker() {
+  if (_isNativeApp()) {
+    try {
+      const result = await NativePhotoPicker.pickImages();
+      const photos = Array.isArray(result?.photos) ? result.photos : [];
+      if (!photos.length) return;
+      const files = [];
+      for (let i = 0; i < photos.length; i++) {
+        files.push(await _nativePickedPhotoToFile(photos[i], i));
+      }
+      await handleSelectedFiles(files, { nativePhotos: photos });
+      return;
+    } catch (err) {
+      if (_isPickerCancel(err)) return;
+      console.warn('Native photo picker failed, falling back to browser input:', err);
+    }
+  }
+
   document.getElementById('import-photo-input').click();
 }
 
@@ -79,14 +104,20 @@ export async function handleFileSelect(event) {
   await handleSelectedFiles(files);
 }
 
-async function handleSelectedFiles(files) {
+async function handleSelectedFiles(files, options = {}) {
   if (!files.length) return;
+  const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
 
   _setProgress(0, files.length, 'Reading timestamps…');
 
   // Read EXIF capture time + GPS for each file.
   // Android/iOS often set file.lastModified to sync date, not shutter time.
-  const withTimes = await Promise.all(files.map(async f => {
+  const withTimes = await Promise.all(files.map(async (f, idx) => {
+    const nativePhoto = nativePhotos[idx];
+    if (nativePhoto) {
+      const { time, lat, lon, dbg } = _captureNativePhotoExif(nativePhoto, f);
+      return { file: f, captureTime: time, lat, lon, dbg };
+    }
     const { time, lat, lon, dbg } = await _captureExif(f);
     return { file: f, captureTime: time, lat, lon, dbg };
   }));
@@ -200,6 +231,67 @@ function _isHeicLike(file) {
   return /\.(heic|heif)$/i.test(file?.name || '') || /heic|heif/i.test(file?.type || '');
 }
 
+function _isPickerCancel(err) {
+  const message = String(err?.message || err || '').toLowerCase();
+  return err?.name === 'AbortError' || err?.code === 'CANCELLED' || message.includes('cancel');
+}
+
+function _coerceExifDate(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const normalized = value.includes(':') && value.includes(' ')
+      ? value.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')
+      : value;
+    const date = new Date(normalized);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  return null;
+}
+
+async function _nativePickedPhotoToFile(photo, index) {
+  const mimeType = _normalizeNativeMimeType(photo?.mimeType, photo?.format);
+  const contents = await Filesystem.readFile({ path: photo.path });
+  const blob = _filesystemReadResultToBlob(contents?.data, mimeType);
+  const fileName = _guessNativeFileName(photo, index, mimeType);
+  return new File([blob], fileName, {
+    type: mimeType,
+    lastModified: Date.now(),
+  });
+}
+
+function _normalizeNativeMimeType(mimeType, format) {
+  const normalizedMime = String(mimeType || '').trim().toLowerCase();
+  if (normalizedMime) return normalizedMime;
+  const normalizedFormat = String(format || '').trim().toLowerCase();
+  if (normalizedFormat === 'jpg') return 'image/jpeg';
+  if (normalizedFormat) return `image/${normalizedFormat}`;
+  return 'image/jpeg';
+}
+
+function _guessNativeFileName(photo, index, mimeType) {
+  const fromName = String(photo?.name || '').trim();
+  if (fromName) return fromName;
+  const ext = mimeType === 'image/heic' ? '.heic'
+    : mimeType === 'image/heif' ? '.heif'
+    : mimeType === 'image/png' ? '.png'
+    : '.jpg';
+  return `native-import-${index + 1}${ext}`;
+}
+
+function _filesystemReadResultToBlob(data, mimeType) {
+  if (data instanceof Blob) return data;
+  if (typeof data !== 'string') throw new Error('Unexpected Filesystem.readFile result');
+  const base64 = data.includes(',') ? data.split(',').pop() : data;
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mimeType });
+}
+
 function _coerceExifNumber(value) {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value === 'string') {
@@ -249,6 +341,24 @@ function _extractLatLonFromRawGps(rawGps) {
   lon = _coerceExifNumber(lon);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return { lat: null, lon: null };
   return { lat, lon };
+}
+
+function _captureNativePhotoExif(photo, file) {
+  const exif = photo?.exif || {};
+  const dt = _coerceExifDate(exif?.DateTimeOriginal || exif?.CreateDate || exif?.ModifyDate || photo?.capturedAt);
+  const rawNativeGps = _extractLatLonFromRawGps(exif);
+  const lat = rawNativeGps.lat;
+  const lon = rawNativeGps.lon;
+  const time = dt?.getTime() || file.lastModified || Date.now();
+  const dbg = {
+    fileName: file.name,
+    fileSize: file.size,
+    fileType: file.type,
+    nativePath: photo?.path || null,
+    nativeMimeType: photo?.mimeType || null,
+    nativeExif: exif ? JSON.stringify(exif) : 'null',
+  };
+  return { time, lat, lon, dbg };
 }
 
 async function _captureExif(file) {
@@ -432,6 +542,11 @@ async function _processFile(file) {
 // Save a single session immediately and return the new observation ID.
 async function _saveSingleAndOpen(session) {
   try {
+    if (!session.locationName && session.gpsLat !== null && session.gpsLon !== null) {
+      session.locationName = await _reverseGeocode(session.gpsLat, session.gpsLon)
+        || `${session.gpsLat.toFixed(4)}° N, ${session.gpsLon.toFixed(4)}° E`;
+    }
+
     const obsPayload = {
       user_id: state.user.id,
       date: _localDate(session.ts),
@@ -458,10 +573,12 @@ async function _saveSingleAndOpen(session) {
     const obsId = obsData.id;
     for (let i = 0; i < session.files.length; i++) {
       const path = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`;
-      const { error: upErr } = await supabase.storage
-        .from('observation-images')
-        .upload(path, session.files[i], { contentType: 'image/jpeg' });
-      if (upErr) { console.error('upload error', upErr); continue; }
+      try {
+        await uploadObservationImageVariants(session.files[i], path);
+      } catch (upErr) {
+        console.error('upload error', upErr);
+        continue;
+      }
       await supabase.from('observation_images').insert({
         observation_id: obsId,
         user_id: state.user.id,
@@ -635,7 +752,7 @@ function buildCardHTML(session) {
         data-sid="${sid}" placeholder="—" readonly
         value="${locVal}">
       ${missingGpsHint}
-      <button class="location-apply-btn import-current-location-btn" data-sid="${sid}" style="margin-top:8px">Current location</button>
+      <button class="ai-id-btn import-current-location-btn" data-sid="${sid}" style="margin-top:8px">Set from GPS</button>
     </div>
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">Sharing</div>
@@ -709,7 +826,7 @@ function _wireCard(sid) {
       aiBtn.disabled = true
       aiBtn.textContent = 'Identifying…'
       try {
-        const predictions = await runArtsorakel(session.files[0], 'nb')
+        const predictions = await runArtsorakelForBlobs(session.files, 'nb')
         if (!predictions?.length) {
           aiResults.style.display = 'none'
           aiBtn.disabled = false
@@ -782,11 +899,12 @@ async function saveAll() {
       const obsId = obsData.id;
       for (let i = 0; i < session.files.length; i++) {
         const path = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`;
-        // Files are already JPEG blobs (converted in _processFile)
-        const { error: uploadError } = await supabase.storage
-          .from('observation-images')
-          .upload(path, session.files[i], { contentType: 'image/jpeg' });
-        if (uploadError) { console.error('Image upload error:', uploadError); continue; }
+        try {
+          await uploadObservationImageVariants(session.files[i], path);
+        } catch (uploadError) {
+          console.error('Image upload error:', uploadError);
+          continue;
+        }
         await supabase.from('observation_images').insert({
           observation_id: obsId, user_id: state.user.id,
           storage_path: path, image_type: 'field', sort_order: i,

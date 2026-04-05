@@ -24,13 +24,11 @@ export function initLocationField() {
   const btn   = document.getElementById('location-apply-btn')
   if (!input || !btn) return
 
-  btn.textContent = 'Current location'
-
   btn.addEventListener('click', () => {
     if (!resolvedName) return
     const current = input.value.trim()
     if (current && current !== resolvedName.trim()) {
-      const confirmed = window.confirm('Current location will overwrite the existing location. Continue?')
+      const confirmed = window.confirm('The place-name lookup will overwrite the existing location. Continue?')
       if (!confirmed) return
     }
     input.value = resolvedName
@@ -61,6 +59,11 @@ export function startLocationLookup(lat, lon) {
       const input = document.getElementById('location-name-input')
       if (!input) return
 
+      if (!input.value.trim()) {
+        input.value = resolvedName
+        lastApplied = resolvedName
+      }
+
       _updateApplyBtn()
     } catch { /* silent — location name is optional */ }
   }, 500)
@@ -70,6 +73,8 @@ function _updateApplyBtn() {
   const input = document.getElementById('location-name-input')
   const btn   = document.getElementById('location-apply-btn')
   if (!input || !btn) return
-  btn.style.display = resolvedName ? 'inline-block' : 'none'
-  btn.disabled = !resolvedName || input.value.trim() === resolvedName.trim()
+  const matchesResolved = !!resolvedName && input.value.trim() === resolvedName.trim()
+  btn.textContent = resolvedName || 'Use lookup result'
+  btn.style.display = resolvedName && !matchesResolved ? 'inline-block' : 'none'
+  btn.disabled = !resolvedName
 }

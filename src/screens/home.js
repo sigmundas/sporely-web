@@ -6,21 +6,36 @@ import { showAuthOverlay } from './auth.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
 import { openFindDetail } from './find_detail.js'
-import { openPhotoImportPicker, openFileImportPicker } from './import_review.js'
+import { openPhotoImportPicker } from './import_review.js'
+
+function _imageHtml(source, className, placeholderHtml) {
+  if (!source?.primaryUrl) return placeholderHtml
+  const fallbackAttr = source.fallbackUrl && source.fallbackUrl !== source.primaryUrl
+    ? ` data-fallback-src="${source.fallbackUrl}"`
+    : ''
+  return `<img class="${className}" src="${source.primaryUrl}"${fallbackAttr} loading="lazy" decoding="async" alt="">`
+}
+
+function _wireImageFallback(root) {
+  root.querySelectorAll('img[data-fallback-src]').forEach(img => {
+    img.addEventListener('error', () => {
+      const fallback = img.dataset.fallbackSrc
+      if (!fallback || img.dataset.fallbackApplied === 'true') return
+      img.dataset.fallbackApplied = 'true'
+      img.src = fallback
+    }, { once: true })
+  })
+}
 
 export async function initHome() {
   document.getElementById('qa-new-obs').addEventListener('click', () => navigate('capture'))
   document.getElementById('ac-view-obs').addEventListener('click', () => navigate('finds'))
-  document.getElementById('ac-import').addEventListener('click', _openImportSourceSheet)
+  document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
   document.getElementById('import-source-close').addEventListener('click', _closeImportSourceSheet)
   document.getElementById('import-source-photos').addEventListener('click', () => {
     _closeImportSourceSheet()
     openPhotoImportPicker()
-  })
-  document.getElementById('import-source-files').addEventListener('click', () => {
-    _closeImportSourceSheet()
-    openFileImportPicker()
   })
 
   await refreshHome()
@@ -65,7 +80,8 @@ async function loadRecentFinds() {
     return
   }
 
-  const imageUrls = await fetchFirstImages(combined.map(o => o.id))
+  const profileMap = await _loadProfileMap(combined)
+  const imageUrls = await fetchFirstImages(combined.map(o => o.id), { variant: 'medium' })
 
   list.innerHTML = combined.map(obs => {
     const latin       = obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus
@@ -77,20 +93,19 @@ async function loadRecentFinds() {
         ? `${obs.gps_latitude.toFixed(2)}°N, ${obs.gps_longitude.toFixed(2)}°E`
         : '—'
     )
-    const imgUrl = imageUrls[obs.id]
-    const thumb  = imgUrl
-      ? `<img class="find-thumb" src="${imgUrl}" loading="lazy" alt="">`
-      : `<div class="find-thumb-placeholder">🍄</div>`
-
-    const owner = _ownershipMeta(obs)
+    const thumb = _imageHtml(
+      imageUrls[obs.id],
+      'find-thumb',
+      '<div class="find-thumb-placeholder">🍄</div>',
+    )
     const dot = `<div class="find-owner-dot ${obs._owner}"></div>`
+    const authorChip = _homeAuthorChip(obs, profileMap)
 
     return `<div class="find-row" data-id="${obs.id}" style="cursor:pointer">
-      ${thumb}
+      <div class="find-thumb-wrap">${thumb}${authorChip}</div>
       <div class="find-meta">
         <div class="find-common${isIdentified ? '' : ' unidentified'}" style="display:flex;align-items:center;gap:5px">${dot}${displayName}</div>
         ${subtitle ? `<div class="find-latin">${subtitle}</div>` : ''}
-        <div class="find-owner-badge ${owner.className}">${owner.label}</div>
         <div class="find-location">
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
           ${loc}
@@ -102,6 +117,7 @@ async function loadRecentFinds() {
   list.querySelectorAll('.find-row[data-id]').forEach(row => {
     row.addEventListener('click', () => openFindDetail(row.dataset.id))
   })
+  _wireImageFallback(list)
 }
 
 async function loadRecentComments() {
@@ -155,19 +171,22 @@ async function loadRecentComments() {
       .in('id', obsIds)
     ;(obsData || []).forEach(o => { obsMap[o.id] = o })
   }
-  const imageUrls = obsIds.length ? await fetchFirstImages(obsIds) : {}
+  const imageUrls = obsIds.length ? await fetchFirstImages(obsIds, { variant: 'small' }) : {}
 
   list.innerHTML = combined.map(comment => {
     const { name, initial } = getCommentAuthor(authorMap[comment.user_id])
     const date = new Date(comment.created_at).toLocaleDateString('no-NO', { day: 'numeric', month: 'short' })
     const obs = obsMap[comment.observation_id]
-    const imgUrl = imageUrls[comment.observation_id]
     const species = obs
       ? (obs.common_name || (obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus) || '')
       : ''
-    const thumb = imgUrl
-      ? `<img class="comment-obs-thumb" src="${imgUrl}" loading="lazy" alt="">`
-      : (obs ? `<div class="comment-obs-thumb comment-obs-placeholder">🍄</div>` : '')
+    const thumb = obs
+      ? _imageHtml(
+        imageUrls[comment.observation_id],
+        'comment-obs-thumb',
+        '<div class="comment-obs-thumb comment-obs-placeholder">🍄</div>',
+      )
+      : ''
 
     return `<div class="home-comment-row" ${obs ? `data-obs-id="${obs.id}" style="cursor:pointer"` : ''}>
       ${thumb ? `<div class="comment-obs-thumb-wrap">${thumb}</div>` : `<div class="comment-avatar">${_esc(initial)}</div>`}
@@ -185,6 +204,7 @@ async function loadRecentComments() {
   list.querySelectorAll('.home-comment-row[data-obs-id]').forEach(row => {
     row.addEventListener('click', () => openFindDetail(row.dataset.obsId))
   })
+  _wireImageFallback(list)
 }
 
 // ── Quick stats ───────────────────────────────────────────────────────────────
@@ -228,14 +248,37 @@ function _esc(str) {
   return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-function _ownershipMeta(obs) {
-  if (obs._owner === 'mine' || obs.user_id === state.user?.id) {
-    return { label: 'Your observation', className: 'mine' }
+async function _loadProfileMap(observations) {
+  const userIds = [...new Set((observations || [])
+    .map(obs => obs.user_id)
+    .filter(uid => uid && uid !== state.user?.id))]
+
+  if (!userIds.length) return {}
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, username, display_name, avatar_url')
+    .in('id', userIds)
+
+  if (error) {
+    console.warn('Could not load recent-find profiles:', error.message)
+    return {}
   }
-  if (obs.visibility === 'public') {
-    return { label: 'Public observation', className: 'public' }
+
+  return Object.fromEntries((data || []).map(profile => [profile.id, profile]))
+}
+
+function _homeAuthorChip(obs, profileMap) {
+  if (obs._owner === 'mine' || obs.user_id === state.user?.id) return ''
+  const profile = profileMap[obs.user_id]
+  const label = profile?.username ? `@${profile.username}` : (profile?.display_name || 'Unknown')
+  if (profile?.avatar_url) {
+    return `<div class="observation-author-chip observation-author-chip--home" title="${_esc(label)}">
+      <img src="${_esc(profile.avatar_url)}" alt="${_esc(label)}" loading="lazy" decoding="async">
+    </div>`
   }
-  return { label: 'Shared observation', className: 'shared' }
+  const initial = String(profile?.username || profile?.display_name || '?').replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
+  return `<div class="observation-author-chip observation-author-chip--initial observation-author-chip--home" title="${_esc(label)}">${_esc(initial)}</div>`
 }
 
 function _openImportSourceSheet() {
