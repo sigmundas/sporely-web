@@ -8,10 +8,10 @@ import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsora
 import { uploadObservationImageVariants } from '../images.js';
 import { loadFinds } from './finds.js';
 import { openFindDetail } from './find_detail.js';
-import exifr from 'exifr/dist/full.esm.mjs';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 
 let sessions = [];
+let exifrModulePromise = null;
 const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
 const RAW_GPS_PICK = ['GPSLatitude', 'GPSLatitudeRef', 'GPSLongitude', 'GPSLongitudeRef', 'latitude', 'longitude'];
 const NativePhotoPicker = registerPlugin('NativePhotoPicker');
@@ -178,9 +178,8 @@ async function handleSelectedFiles(files, options = {}) {
   if (sessions.length === 1) {
     const obsId = await _saveSingleAndOpen(sessions[0]);
     if (obsId) {
-      const dbg = sessions[0].exifDebug;
       sessions = [];
-      openFindDetail(obsId, dbg);
+      openFindDetail(obsId);
     }
     return;
   }
@@ -250,6 +249,13 @@ function _coerceExifDate(value) {
     return Number.isNaN(date.getTime()) ? null : date;
   }
   return null;
+}
+
+async function _getExifr() {
+  if (!exifrModulePromise) {
+    exifrModulePromise = import('exifr/dist/full.esm.mjs').then(module => module.default);
+  }
+  return exifrModulePromise;
 }
 
 async function _nativePickedPhotoToFile(photo, index) {
@@ -362,6 +368,7 @@ function _captureNativePhotoExif(photo, file) {
 }
 
 async function _captureExif(file) {
+  const exifr = await _getExifr();
   let time = file.lastModified;
   let lat  = null;
   let lon  = null;
@@ -406,7 +413,6 @@ async function _captureExif(file) {
   // Try parseGps() first; fall back to parse({gps:true}) for formats where gps() alone may fail
   try {
     const gpsResult = await exifr.gps(file, fullRead);
-    console.log('[EXIF] parseGps(file) result:', gpsResult);
     dbg.gpsResult = gpsResult ? JSON.stringify(gpsResult) : 'null';
     if (gpsResult?.latitude  != null) lat = gpsResult.latitude;
     if (gpsResult?.longitude != null) lon = gpsResult.longitude;
@@ -418,7 +424,6 @@ async function _captureExif(file) {
   if (lat === null) {
     try {
       const gpsResult = await exifr.gps(buf);
-      console.log('[EXIF] parseGps(buffer) fallback result:', gpsResult);
       dbg.gpsBufferResult = gpsResult ? JSON.stringify(gpsResult) : 'null';
       if (gpsResult?.latitude  != null) lat = gpsResult.latitude;
       if (gpsResult?.longitude != null) lon = gpsResult.longitude;
@@ -432,7 +437,6 @@ async function _captureExif(file) {
   if (lat === null) {
     try {
       const fallback = await exifr.parse(file, { gps: true, tiff: true, xmp: true, ...fullRead });
-      console.log('[EXIF] parse(file, {gps:true}) fallback:', fallback);
       dbg.gpsFallback = fallback ? JSON.stringify(fallback) : 'null';
       if (fallback?.latitude  != null) lat = fallback.latitude;
       if (fallback?.longitude != null) lon = fallback.longitude;
@@ -445,7 +449,6 @@ async function _captureExif(file) {
   if (lat === null) {
     try {
       const fallback = await exifr.parse(buf, { gps: true, tiff: true, xmp: true });
-      console.log('[EXIF] parse(buffer, {gps:true}) fallback:', fallback);
       dbg.gpsBufferFallback = fallback ? JSON.stringify(fallback) : 'null';
       if (fallback?.latitude  != null) lat = fallback.latitude;
       if (fallback?.longitude != null) lon = fallback.longitude;
@@ -496,7 +499,6 @@ async function _captureExif(file) {
     }
   }
 
-  console.log(`[EXIF] ${file.name}: lat=${lat}, lon=${lon}, buf=${dbg.bufSize}/${file.size}`);
   return { time, lat, lon, dbg };
 }
 

@@ -26,7 +26,7 @@ export function initFindDetail() {
 
   input.addEventListener('input', () => {
     selectedTaxon = null
-    document.getElementById('detail-title').textContent = input.value.trim() || 'Unknown species'
+    _setDetailHeader({ fallbackName: input.value.trim() || 'Unknown species' })
     clearTimeout(debounce)
     debounce = setTimeout(() => _searchTaxon(input.value.trim(), dropdown), 280)
   })
@@ -44,7 +44,7 @@ export function initFindDetail() {
   _initMentions(commentInput)
 }
 
-export async function openFindDetail(obsId, exifDebug) {
+export async function openFindDetail(obsId) {
   currentObs    = null
   selectedTaxon = null
   currentObsIsOwner = false
@@ -75,8 +75,12 @@ export async function openFindDetail(obsId, exifDebug) {
   _applyOwnershipMode(currentObsIsOwner)
 
   const displayName = formatDisplayName(obs.genus || '', obs.species || '', obs.common_name)
-  const titleName = displayName.trim() || 'Unknown species'
-  document.getElementById('detail-title').textContent = titleName
+  _setDetailHeader({
+    commonName: obs.common_name || '',
+    genus: obs.genus || '',
+    species: obs.species || '',
+    fallbackName: displayName.trim() || 'Unknown species',
+  })
   document.getElementById('detail-taxon-input').value = displayName.trim()
   document.getElementById('detail-location').value    = obs.location  || ''
   document.getElementById('detail-habitat').value     = obs.habitat   || ''
@@ -234,7 +238,12 @@ async function _runAI() {
           displayName:     p.displayName,
         }
         document.getElementById('detail-taxon-input').value = p.displayName
-        document.getElementById('detail-title').textContent = p.displayName || 'Unknown species'
+        _setDetailHeader({
+          commonName: selectedTaxon.vernacularName || '',
+          genus: selectedTaxon.genus || '',
+          species: selectedTaxon.specificEpithet || '',
+          fallbackName: p.displayName || 'Unknown species',
+        })
         resultsEl.style.display = 'none'
       })
     })
@@ -261,7 +270,7 @@ function _resetForm() {
   document.getElementById('detail-habitat').value     = ''
   document.getElementById('detail-notes').value       = ''
   document.getElementById('detail-uncertain').checked = false
-  document.getElementById('detail-title').textContent = 'Unknown species'
+  _setDetailHeader({ fallbackName: 'Unknown species' })
   document.getElementById('detail-date').textContent  = '—'
   const timeEl = document.getElementById('detail-time')
   const timeVal = document.getElementById('detail-time-val')
@@ -331,9 +340,33 @@ async function _searchTaxon(q, dropdown) {
     li.addEventListener('mousedown', () => {
       selectedTaxon = JSON.parse(li.dataset.taxon)
       document.getElementById('detail-taxon-input').value = selectedTaxon.displayName
+      _setDetailHeader({
+        commonName: selectedTaxon.vernacularName || '',
+        genus: selectedTaxon.genus || '',
+        species: selectedTaxon.specificEpithet || '',
+        fallbackName: selectedTaxon.displayName || 'Unknown species',
+      })
       dropdown.style.display = 'none'
     })
   })
+}
+
+function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackName = 'Unknown species' }) {
+  const commonEl = document.getElementById('detail-title-common')
+  const latinEl = document.getElementById('detail-title-latin')
+  if (!commonEl || !latinEl) return
+
+  const latinName = [genus, species].filter(Boolean).join(' ').trim()
+  const primaryName = String(commonName || '').trim() || String(fallbackName || '').trim() || 'Unknown species'
+
+  commonEl.textContent = primaryName
+  if (latinName && latinName.toLowerCase() !== primaryName.toLowerCase()) {
+    latinEl.textContent = latinName
+    latinEl.style.display = 'block'
+  } else {
+    latinEl.textContent = ''
+    latinEl.style.display = 'none'
+  }
 }
 
 async function _save() {

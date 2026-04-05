@@ -12,8 +12,8 @@ export function initReview() {
   document.getElementById('review-close')
     .addEventListener('click', cancelReview)
   document.getElementById('add-photo-btn').addEventListener('click', () => navigate('capture'))
-  document.getElementById('save-draft-btn').addEventListener('click', cancelReview)
-  document.getElementById('finish-sync-btn').addEventListener('click', finishAndSync)
+  document.getElementById('review-cancel-btn').addEventListener('click', cancelReview)
+  document.getElementById('review-save-btn').addEventListener('click', saveObservationBatch)
   document.getElementById('review-habitat').addEventListener('input', event => {
     state.captureDraft.habitat = event.target.value
   })
@@ -347,7 +347,7 @@ async function _insertObservation(obsPayload) {
   return obsData.id
 }
 
-async function finishAndSync() {
+async function saveObservationBatch() {
   if (!state.user) { showToast('Not signed in'); return }
   if (!state.capturedPhotos.length) { showToast('No photos to sync'); return }
 

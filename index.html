@@ -365,8 +365,8 @@
 
       <div class="review-actions">
         <div class="review-action-btns">
-          <button class="btn-secondary" id="save-draft-btn">Cancel</button>
-          <button class="btn-primary" id="finish-sync-btn">Save</button>
+          <button class="btn-secondary" id="review-cancel-btn">Cancel</button>
+          <button class="btn-primary" id="review-save-btn">Save</button>
         </div>
         <div class="sync-footer-text">Creates one observation in Sporely Cloud</div>
       </div>
@@ -383,9 +383,13 @@
 
       <div class="review-body">
         <div class="detail-intro">
-          <div class="detail-title" id="detail-title">Unknown species</div>
+          <div class="detail-title">
+            <div class="detail-title-common" id="detail-title-common">Unknown species</div>
+            <div class="detail-title-latin" id="detail-title-latin" style="display:none"></div>
+          </div>
           <div class="detail-date-time">
-            <span id="detail-date">—</span><span id="detail-time" style="display:none"> · <span id="detail-time-val"></span></span>
+            <span id="detail-date">—</span>
+            <span id="detail-time" style="display:none">· <span id="detail-time-val"></span></span>
           </div>
           <div class="detail-observation-badge" id="detail-readonly-note" style="display:none"></div>
         </div>
@@ -651,7 +655,7 @@
         </div>
         <p class="settings-gap-hint">Photos taken within this window are grouped into one observation.</p>
 
-        <div class="settings-version">v0.1.13</div>
+        <div class="settings-version">v0.2.0</div>
       </div>
     </div>
 

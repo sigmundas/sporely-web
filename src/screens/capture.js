@@ -123,7 +123,7 @@ function capturePhoto() {
     canvas.height = video.videoHeight
     canvas.getContext('2d').drawImage(video, 0, 0)
 
-    // Wrap toBlob in a Promise so finishAndSync can await all blobs before uploading
+    // Wrap toBlob in a Promise so review save can await all blobs before uploading
     const blobPromise = new Promise(resolve =>
       canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.92)
     )

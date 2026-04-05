@@ -9,6 +9,10 @@ Field capture (GPS + photos) and cloud sync via Supabase. Not a replacement
 for the desktop — the desktop owns taxonomy, microscopy, and publishing to
 Artsobservasjoner / Artportalen.
 
+The same codebase also ships as a Capacitor Android app. The Android wrapper is
+primarily there for more reliable file import, especially native HEIC/EXIF/GPS
+handling from the device photo library.
+
 ---
 
 ## Stack
@@ -16,6 +20,7 @@ Artsobservasjoner / Artportalen.
 | Layer | Choice |
 |---|---|
 | Build | Vite 6, vanilla JS (ES modules) — no framework |
+| Native wrapper | Capacitor Android + one custom plugin (`NativePhotoPicker`) |
 | Styling | Plain CSS custom properties, no preprocessor |
 | Auth & DB | Supabase JS v2 (`@supabase/supabase-js`) |
 | Storage | Supabase Storage buckets `observation-images` + `avatars` |
@@ -47,8 +52,11 @@ sporely-web/
         ├── home.js         Dashboard, recent finds from Supabase, sign-out
         ├── finds.js        Full observation list from Supabase
         ├── capture.js      Camera (getUserMedia), shutter, batch capture
-        ├── review.js       Review captured batch, upload to Supabase
+        ├── review.js       Review one captured observation batch, save to Supabase
+        ├── import_review.js Import/group photos, native EXIF/GPS handling, save flow
         └── profile.js      Profile editing, avatar crop/upload, friends, delete-account action
+    ├── images.js          Upload originals + thumbnail variants, signed-URL cache
+    └── import-store.js    IndexedDB persistence for pending import sessions
 ```
 
 ---
@@ -154,21 +162,42 @@ avatar URL is unavailable or stale.
 
 ---
 
-## Capture → sync flow
+## Capture → save flow
 
 ```
 capture.js: capturePhoto()
   ├─ demo mode (no camera)  → push { blob: null, emoji, gps, ts }
   └─ real camera            → canvas.toBlob wrapped in Promise → push { blobPromise, gps, ts }
 
-review.js: finishAndSync()
+review.js: saveObservationBatch()
   1. await Promise.all(capturedPhotos.map(p => p.blobPromise ?? p.blob))
-  2. For each photo:
-     a. INSERT into observations → get back obs.id
-     b. If blob is a real Blob:
-        upload to storage/observation-images/{user_id}/{obs_id}/{i}_{ts}.jpg
-        INSERT into observation_images with storage_path
-  3. Clear state, navigate home
+  2. INSERT a single observations row for the whole capture batch
+  3. For each photo:
+     a. upload original to storage/observation-images/{user_id}/{obs_id}/{i}_{ts}.jpg
+     b. generate + upload `small` and `medium` thumbnail variants
+     c. INSERT observation_images row with shared observation_id + sort_order
+  4. Clear capture state, refresh lists, navigate away from review
+```
+
+## Import flow
+
+```
+import_review.js: openPhotoImportPicker()
+  ├─ Capacitor Android → NativePhotoPicker plugin returns original URI + native EXIF/GPS
+  └─ Browser / fallback → file input or showOpenFilePicker()
+
+handleSelectedFiles()
+  1. Read capture time + GPS from native metadata or exifr
+  2. Sort files by capture time
+  3. Group files taken within the configured time gap into one observation
+  4. Convert review copies to JPEG sequentially to avoid mobile memory spikes
+  5. Save pending import sessions to IndexedDB so review survives app suspension
+
+Single group:
+  save immediately → open observation detail editor
+
+Multiple groups:
+  show grouped import cards → user edits species/location/sharing → save all
 ```
 
 ---
@@ -207,8 +236,10 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 | Confirmation email resend | ✅ Real |
 | GPS capture | ✅ Real |
 | Camera capture (mobile) | ✅ Real |
+| Native Android gallery import with HEIC GPS | ✅ Real — custom Capacitor plugin + Filesystem read |
 | Observation insert to Supabase | ✅ Real |
 | Image upload to Supabase Storage | ✅ Real |
+| Grid/card thumbnails | ✅ Real — `small` + `medium` variants generated at upload time |
 | Profile avatar upload/crop | ✅ Real |
 | Self-service account deletion | ✅ Real — via Supabase Edge Function `delete-account` |
 | Finds list from Supabase | ✅ Real |
@@ -219,9 +250,10 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 | Camera permission denied overlay | ✅ Real — platform-specific instructions |
 | Friends finds + thumbnails | ✅ Real — `observations_friend_view` + authenticated Storage SELECT |
 | Community finds | ✅ Real — `observations_community_view` (visibility = public) |
-| Map view | 🟡 Stubbed — toast only |
+| Map view | ✅ Real — Leaflet + OpenStreetMap |
 | Friends feed | 🟡 Stubbed — toast only |
-| Draft save (IndexedDB) | 🟡 Stubbed — toast only |
+| Import review recovery after app suspension | ✅ Real — IndexedDB `pending_import` store |
+| Capture draft save/resume | ❌ Removed — capture review is now direct cancel/save |
 | Push notifications | ❌ Not started |
 | Offline queue | ❌ Not started |
 
@@ -245,17 +277,18 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 1. **Run unique constraints SQL** in `MycoLog/database/supabase_unique_constraints.sql`
    to add `UNIQUE (desktop_id, user_id)` — needed for desktop sync upsert performance.
 
-2. **Offline queue** — wrap `finishAndSync` failures in IndexedDB so photos aren't
+2. **Offline queue** — wrap capture/import save failures in IndexedDB so photos aren't
    lost when the user is in the field without signal.
 
-3. **Draft save** — persist `state.capturedPhotos` to IndexedDB so a page reload
-   doesn't wipe an in-progress session.
+3. **Capture session recovery** — decide whether camera batches should get the same
+   resumable persistence that import sessions already have.
 
-4. **Map screen** — show observations as pins using Leaflet + OpenStreetMap.
+4. **Bundle trimming** — lazy-load heavier import/map dependencies so the initial JS chunk stays small on mobile.
 
 5. **Friends feed** — query `observations_friend_view`, paginate, render like Finds list.
 
-6. **Finds screen image thumbnails** — load first image from Storage for each observation.
+6. **Server-side thumbnails** — consider replacing client-generated thumbnail uploads
+   with Supabase Storage transformations if/when plan and caching tradeoffs make sense.
 
 7. **Desktop sync auto-trigger** — call `mark_observation_dirty()` in `update_observation()`
    so edits are automatically re-pushed on the next sync.
