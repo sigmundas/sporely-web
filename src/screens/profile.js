@@ -2,8 +2,14 @@ import { supabase } from '../supabase.js'
 import { state } from '../state.js'
 import { showToast } from '../toast.js'
 import { showAuthOverlay } from './auth.js'
+import { Capacitor } from '@capacitor/core'
+import { FilePicker } from '@capawesome/capacitor-file-picker'
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
+
+function _isNativeApp() {
+  return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.());
+}
 
 export function initProfile() {
   document.getElementById('profile-avatar-img').addEventListener('error', _showInitialsAvatar)
@@ -18,7 +24,38 @@ export function initProfile() {
     if (e.key === 'Enter') _searchFriend()
   })
   document.getElementById('profile-save-btn').addEventListener('click', _saveProfile)
-  const _openPicker = () => document.getElementById('profile-avatar-input').click()
+  const _openPicker = async () => {
+    if (_isNativeApp()) {
+      try {
+        await FilePicker.requestPermissions();
+        const result = await FilePicker.pickImages({ multiple: false, readData: false });
+        const photo = result?.files?.[0];
+        if (!photo) return;
+
+        let path = photo.path;
+        let mimeType = photo.mimeType || 'image/jpeg';
+        if (mimeType === 'image/heic' || mimeType === 'image/heif' || photo.format === 'heic' || photo.format === 'heif') {
+          try {
+            const converted = await FilePicker.convertHeicToJpeg({ path });
+            path = converted.path;
+            mimeType = 'image/jpeg';
+          } catch (e) {
+            console.warn('Native HEIC conversion failed:', e);
+          }
+        }
+
+        const url = Capacitor.convertFileSrc(path);
+        const res = await fetch(url);
+        const blob = await res.blob();
+        const file = new File([blob], photo.name || 'avatar.jpg', { type: mimeType });
+        _showCrop(file);
+        return;
+      } catch (err) {
+        console.warn('Native picker failed, falling back to input:', err);
+      }
+    }
+    document.getElementById('profile-avatar-input').click();
+  }
   document.getElementById('profile-avatar-btn').addEventListener('click', _openPicker)
   document.getElementById('profile-avatar-circle').addEventListener('click', _openPicker)
   document.getElementById('profile-avatar-input').addEventListener('change', e => {

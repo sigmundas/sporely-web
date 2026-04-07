@@ -28,20 +28,19 @@ function _isLocalTestingHost(hostname = window.location.hostname) {
   )
 }
 
-const BYPASS_TURNSTILE = import.meta.env.DEV && _isLocalTestingHost()
+function _isNativeApp() {
+  return !!window.Capacitor?.isNativePlatform?.()
+    || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
+}
+
+const BYPASS_TURNSTILE = _isNativeApp() || (import.meta.env.DEV && _isLocalTestingHost())
 const PERSIST_AUTH_DRAFTS = import.meta.env.DEV
 const AUTH_DRAFT_KEY = 'sporely-auth-draft'
 
 async function _initTurnstile() {
-  const container = document.getElementById('turnstile-container')
-
-  if (BYPASS_TURNSTILE) {
-    _captchaToken = null
-    if (container) container.style.display = 'none'
-    return
-  }
-
-  if (container) container.style.display = 'flex'
+  if (BYPASS_TURNSTILE) return
+  // Don't render a second widget if one already exists
+  if (_turnstileWidgetId !== null) return
 
   for (let i = 0; i < 100; i++) {
     if (window.turnstile) break
@@ -162,6 +161,9 @@ function switchToLogin(prefillEmail = '') {
   showError('')
   document.getElementById('signup-form').style.display = 'none'
   document.getElementById('login-form').style.display  = 'block'
+  // Hide Turnstile on the login view — captcha is signup-only
+  const tc = document.getElementById('turnstile-container')
+  if (tc) tc.style.display = 'none'
   if (prefillEmail) document.getElementById('login-email').value = prefillEmail
   _writeAuthDraft({ mode: 'login', loginEmail: prefillEmail || document.getElementById('login-email').value })
 }
@@ -170,6 +172,10 @@ function switchToSignup(prefillEmail = '') {
   showError('')
   document.getElementById('login-form').style.display  = 'none'
   document.getElementById('signup-form').style.display = 'block'
+  // Show and init Turnstile when entering signup view
+  const tc = document.getElementById('turnstile-container')
+  if (tc) tc.style.display = 'flex'
+  _initTurnstile()
   if (prefillEmail) document.getElementById('signup-email').value = prefillEmail
   _writeAuthDraft({ mode: 'signup', signupEmail: prefillEmail || document.getElementById('signup-email').value })
 }
@@ -256,7 +262,7 @@ export function initAuth(onAuthenticated) {
 
   _restoreAuthDraft()
   _persistAuthInputs()
-  _initTurnstile()
+  // Turnstile is initialised lazily when the user switches to the signup view
 
   document.getElementById('show-signup').addEventListener('click', e => {
     e.preventDefault()
@@ -276,13 +282,8 @@ export function initAuth(onAuthenticated) {
     const password = document.getElementById('login-password').value
 
     setLoading(loginBtn, true)
-    const signInPayload = { email, password }
-    if (!BYPASS_TURNSTILE) {
-      signInPayload.options = { captchaToken: _captchaToken }
-    }
-    const { error } = await supabase.auth.signInWithPassword(signInPayload)
+    const { error } = await supabase.auth.signInWithPassword({ email, password })
     setLoading(loginBtn, false)
-    _resetTurnstile()
 
     if (!error) {
       _clearAuthDraft()

@@ -2,8 +2,9 @@ import { state } from '../state.js';
 import { supabase } from '../supabase.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
-import { registerPlugin } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
+import { FilePicker } from '@capawesome/capacitor-file-picker';
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js';
 import { uploadObservationImageVariants } from '../images.js';
 import { loadFinds } from './finds.js';
@@ -14,7 +15,6 @@ let sessions = [];
 let exifrModulePromise = null;
 const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
 const RAW_GPS_PICK = ['GPSLatitude', 'GPSLatitudeRef', 'GPSLongitude', 'GPSLongitudeRef', 'latitude', 'longitude'];
-const NativePhotoPicker = registerPlugin('NativePhotoPicker');
 
 function sessionById(sid) {
   return sessions.find(s => s.id === sid);
@@ -48,11 +48,18 @@ export function restoreImportSessions(savedSessions) {
 export async function openPhotoImportPicker() {
   if (_isNativeApp()) {
     try {
-      const result = await NativePhotoPicker.pickImages();
-      const photos = Array.isArray(result?.photos) ? result.photos : [];
+      // Request permissions first to ensure ACCESS_MEDIA_LOCATION is handled
+      await FilePicker.requestPermissions();
+
+      const result = await FilePicker.pickImages({ multiple: true, readData: false });
+      const photos = Array.isArray(result?.files) ? result.files : [];
       if (!photos.length) return;
+
+      _setProgress(0, photos.length, 'Reading files…');
+
       const files = [];
       for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, `Importing ${i + 1} of ${photos.length}…`);
         files.push(await _nativePickedPhotoToFile(photos[i], i));
       }
       await handleSelectedFiles(files, { nativePhotos: photos });
@@ -60,6 +67,7 @@ export async function openPhotoImportPicker() {
     } catch (err) {
       if (_isPickerCancel(err)) return;
       console.warn('Native photo picker failed, falling back to browser input:', err);
+      _hideProgress();
     }
   }
 
@@ -115,7 +123,7 @@ async function handleSelectedFiles(files, options = {}) {
   const withTimes = await Promise.all(files.map(async (f, idx) => {
     const nativePhoto = nativePhotos[idx];
     if (nativePhoto) {
-      const { time, lat, lon, dbg } = _captureNativePhotoExif(nativePhoto, f);
+      const { time, lat, lon, dbg } = await _captureNativePhotoExif(nativePhoto, f);
       return { file: f, captureTime: time, lat, lon, dbg };
     }
     const { time, lat, lon, dbg } = await _captureExif(f);
@@ -259,9 +267,25 @@ async function _getExifr() {
 }
 
 async function _nativePickedPhotoToFile(photo, index) {
-  const mimeType = _normalizeNativeMimeType(photo?.mimeType, photo?.format);
-  const contents = await Filesystem.readFile({ path: photo.path });
-  const blob = _filesystemReadResultToBlob(contents?.data, mimeType);
+  let mimeType = _normalizeNativeMimeType(photo?.mimeType, photo?.format);
+  let path = photo.path;
+
+  // Use the plugin's native convertHeicToJpeg (High Speed) if the format is HEIC
+  if (mimeType === 'image/heic' || mimeType === 'image/heif' || photo?.format === 'heic' || photo?.format === 'heif') {
+    try {
+      const converted = await FilePicker.convertHeicToJpeg({ path });
+      path = converted.path;
+      mimeType = 'image/jpeg';
+    } catch (e) {
+      console.warn('Native HEIC conversion failed:', e);
+    }
+  }
+
+  // Fast native file read using Capacitor protocol (avoids blocking base64 encode)
+  const url = Capacitor.convertFileSrc(path);
+  const res = await fetch(url);
+  const blob = await res.blob();
+
   const fileName = _guessNativeFileName(photo, index, mimeType);
   return new File([blob], fileName, {
     type: mimeType,
@@ -349,21 +373,38 @@ function _extractLatLonFromRawGps(rawGps) {
   return { lat, lon };
 }
 
-function _captureNativePhotoExif(photo, file) {
-  const exif = photo?.exif || {};
-  const dt = _coerceExifDate(exif?.DateTimeOriginal || exif?.CreateDate || exif?.ModifyDate || photo?.capturedAt);
-  const rawNativeGps = _extractLatLonFromRawGps(exif);
-  const lat = rawNativeGps.lat;
-  const lon = rawNativeGps.lon;
-  const time = dt?.getTime() || file.lastModified || Date.now();
+async function _captureNativePhotoExif(photo, file) {
+  let time = file.lastModified || Date.now();
+  let lat = null;
+  let lon = null;
   const dbg = {
     fileName: file.name,
     fileSize: file.size,
     fileType: file.type,
     nativePath: photo?.path || null,
     nativeMimeType: photo?.mimeType || null,
-    nativeExif: exif ? JSON.stringify(exif) : 'null',
   };
+
+  try {
+    // Read the original file natively (preserves EXIF if it was converted from HEIC)
+    const url = window.Capacitor.convertFileSrc(photo.path);
+    const res = await fetch(url);
+    const originalBlob = await res.blob();
+    
+    const dummyFile = new File([originalBlob], file.name, {
+      type: photo.mimeType || 'image/jpeg',
+      lastModified: time
+    });
+
+    const jsExif = await _captureExif(dummyFile);
+    lat = jsExif.lat;
+    lon = jsExif.lon;
+    time = jsExif.time;
+    dbg.jsFallback = true;
+  } catch (err) {
+    console.warn('Native EXIF extraction failed:', err);
+  }
+
   return { time, lat, lon, dbg };
 }
 
@@ -374,6 +415,11 @@ async function _captureExif(file) {
   let lon  = null;
   let dbg  = { fileName: file.name, fileSize: file.size, fileType: file.type, bufSize: 0, gpsResult: null, gpsError: null, exifError: null };
   const fullRead = _isHeicLike(file) ? { chunked: false } : {};
+
+  const setGps = (res) => {
+    if (res && typeof res.latitude === 'number' && !Number.isNaN(res.latitude)) lat = res.latitude;
+    if (res && typeof res.longitude === 'number' && !Number.isNaN(res.longitude)) lon = res.longitude;
+  };
 
   // Read the full file into an ArrayBuffer before passing to exifr.
   // exifr uses chunked reads in the browser and can miss GPS data in HEIC files
@@ -414,8 +460,7 @@ async function _captureExif(file) {
   try {
     const gpsResult = await exifr.gps(file, fullRead);
     dbg.gpsResult = gpsResult ? JSON.stringify(gpsResult) : 'null';
-    if (gpsResult?.latitude  != null) lat = gpsResult.latitude;
-    if (gpsResult?.longitude != null) lon = gpsResult.longitude;
+    setGps(gpsResult);
   } catch (e) {
     dbg.gpsError = String(e);
     console.warn('[EXIF] parseGps(file) failed:', e);
@@ -425,8 +470,7 @@ async function _captureExif(file) {
     try {
       const gpsResult = await exifr.gps(buf);
       dbg.gpsBufferResult = gpsResult ? JSON.stringify(gpsResult) : 'null';
-      if (gpsResult?.latitude  != null) lat = gpsResult.latitude;
-      if (gpsResult?.longitude != null) lon = gpsResult.longitude;
+      setGps(gpsResult);
     } catch (e) {
       dbg.gpsBufferError = String(e);
       console.warn('[EXIF] parseGps(buffer) failed:', e);
@@ -438,8 +482,7 @@ async function _captureExif(file) {
     try {
       const fallback = await exifr.parse(file, { gps: true, tiff: true, xmp: true, ...fullRead });
       dbg.gpsFallback = fallback ? JSON.stringify(fallback) : 'null';
-      if (fallback?.latitude  != null) lat = fallback.latitude;
-      if (fallback?.longitude != null) lon = fallback.longitude;
+      setGps(fallback);
     } catch (e) {
       dbg.gpsFallbackError = String(e);
       console.warn('[EXIF] parse(file, {gps:true}) fallback failed:', e);
@@ -450,8 +493,7 @@ async function _captureExif(file) {
     try {
       const fallback = await exifr.parse(buf, { gps: true, tiff: true, xmp: true });
       dbg.gpsBufferFallback = fallback ? JSON.stringify(fallback) : 'null';
-      if (fallback?.latitude  != null) lat = fallback.latitude;
-      if (fallback?.longitude != null) lon = fallback.longitude;
+      setGps(fallback);
     } catch (e) {
       dbg.gpsBufferFallbackError = String(e);
       console.warn('[EXIF] parse(buffer, {gps:true}) fallback failed:', e);
@@ -472,8 +514,7 @@ async function _captureExif(file) {
       });
       dbg.rawGpsFile = rawGps ? JSON.stringify(rawGps) : 'null';
       const extracted = _extractLatLonFromRawGps(rawGps);
-      if (extracted.lat != null) lat = extracted.lat;
-      if (extracted.lon != null) lon = extracted.lon;
+      setGps({ latitude: extracted.lat, longitude: extracted.lon });
     } catch (e) {
       dbg.rawGpsFileError = String(e);
       console.warn('[EXIF] raw GPS file parse failed:', e);
@@ -491,8 +532,7 @@ async function _captureExif(file) {
       });
       dbg.rawGpsBuffer = rawGps ? JSON.stringify(rawGps) : 'null';
       const extracted = _extractLatLonFromRawGps(rawGps);
-      if (extracted.lat != null) lat = extracted.lat;
-      if (extracted.lon != null) lon = extracted.lon;
+      setGps({ latitude: extracted.lat, longitude: extracted.lon });
     } catch (e) {
       dbg.rawGpsBufferError = String(e);
       console.warn('[EXIF] raw GPS buffer parse failed:', e);
@@ -528,16 +568,7 @@ async function _processFile(file) {
     return { blob, url };
   } catch (_) {}
 
-  // 2. heic2any path (slower ~1-2s, handles HEIC/HEIF on Android Chrome etc.)
-  try {
-    const heic2any = (await import('heic2any')).default;
-    let result = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.88 });
-    if (Array.isArray(result)) result = result[0];
-    const url = URL.createObjectURL(result);
-    return { blob: result, url };
-  } catch (_) {}
-
-  // 3. Final fallback — original file (will show blank if browser can't decode it)
+  // 2. Final fallback — original file (will show blank if browser can't decode it)
   return { blob: file, url: URL.createObjectURL(file) };
 }
 
@@ -765,6 +796,8 @@ function buildCardHTML(session) {
       </div>
     </div>
   </div>
+  <input type="hidden" class="import-lat-input" data-sid="${sid}" value="${session.gpsLat ?? ''}">
+  <input type="hidden" class="import-lon-input" data-sid="${sid}" value="${session.gpsLon ?? ''}">
 </div>`;
 }
 
