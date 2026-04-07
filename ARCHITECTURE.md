@@ -20,7 +20,7 @@ handling from the device photo library.
 | Layer | Choice |
 |---|---|
 | Build | Vite 6, vanilla JS (ES modules) — no framework |
-| Native wrapper | Capacitor Android + one custom plugin (`NativePhotoPicker`) |
+| Native wrapper | Capacitor Android + `@capawesome/capacitor-file-picker` |
 | Styling | Plain CSS custom properties, no preprocessor |
 | Auth & DB | Supabase JS v2 (`@supabase/supabase-js`) |
 | Storage | Supabase Storage buckets `observation-images` + `avatars` |

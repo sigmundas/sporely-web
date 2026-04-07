@@ -114,12 +114,10 @@ Deserialise before pushing from desktop.
 
 ## Native import / EXIF
 
-- Android library import uses the custom `NativePhotoPicker` Capacitor plugin in
-  `android/app/src/main/java/app/sporely/no/NativePhotoPickerPlugin.java`.
-- The plugin returns the original content URI plus native EXIF/GPS extracted with
-  `ExifInterface`; `import_review.js` then reads the original bytes with
-  `@capacitor/filesystem`.
-- Browser import still falls back to `exifr` and dynamic `heic2any` conversion.
+- Android library import uses `@capawesome/capacitor-file-picker`.
+- The plugin handles native image selection, fast HEIC-to-JPEG conversion (if supported),
+  and extracts EXIF/GPS metadata natively without blocking the WebView.
+- Browser and Android Chrome fallback to `exifr` and dynamic `heic2any` conversion.
 - Do not reintroduce `@capacitor/camera` for library import unless there is a strong
   reason; it was removed because it obscured original metadata in this app.
 

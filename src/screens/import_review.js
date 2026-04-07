@@ -273,9 +273,11 @@ async function _nativePickedPhotoToFile(photo, index) {
   // Use the plugin's native convertHeicToJpeg (High Speed) if the format is HEIC
   if (mimeType === 'image/heic' || mimeType === 'image/heif' || photo?.format === 'heic' || photo?.format === 'heif') {
     try {
-      const converted = await FilePicker.convertHeicToJpeg({ path });
-      path = converted.path;
-      mimeType = 'image/jpeg';
+      if (window.Capacitor?.Plugins?.FilePicker?.convertHeicToJpeg) {
+        const converted = await FilePicker.convertHeicToJpeg({ path });
+        path = converted.path;
+        mimeType = 'image/jpeg';
+      }
     } catch (e) {
       console.warn('Native HEIC conversion failed:', e);
     }
@@ -386,23 +388,35 @@ async function _captureNativePhotoExif(photo, file) {
   };
 
   try {
-    // Read the original file natively (preserves EXIF if it was converted from HEIC)
-    const url = window.Capacitor.convertFileSrc(photo.path);
-    const res = await fetch(url);
-    const originalBlob = await res.blob();
-    
-    const dummyFile = new File([originalBlob], file.name, {
-      type: photo.mimeType || 'image/jpeg',
-      lastModified: time
-    });
+    // FAST PATH: Extract EXIF natively without loading the file into JS memory
+    const exif = window.Capacitor?.Plugins?.FilePicker?.getExif ? await FilePicker.getExif({ path: photo.path }) : null;
+    if (exif) {
+      dbg.nativeExif = JSON.stringify(exif);
+      const rawNativeGps = _extractLatLonFromRawGps(exif);
+      if (rawNativeGps.lat !== null) lat = rawNativeGps.lat;
+      if (rawNativeGps.lon !== null) lon = rawNativeGps.lon;
 
-    const jsExif = await _captureExif(dummyFile);
-    lat = jsExif.lat;
-    lon = jsExif.lon;
-    time = jsExif.time;
+      const dt = _coerceExifDate(exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate || photo.capturedAt);
+      if (dt) time = dt.getTime();
+
+      // If native extraction found the coordinates, return immediately! (Lightning fast)
+      if (lat !== null && lon !== null) {
+        return { time, lat, lon, dbg };
+      }
+    }
+  } catch (err) {
+    console.warn('Native EXIF extraction failed, trying JS fallback:', err);
+  }
+
+  // SLOW PATH: Only run the JS fallback if native EXIF failed or lacked GPS
+  try {
+    const jsExif = await _captureExif(file);
+    if (jsExif.lat !== null) lat = jsExif.lat;
+    if (jsExif.lon !== null) lon = jsExif.lon;
+    if (jsExif.time) time = jsExif.time;
     dbg.jsFallback = true;
   } catch (err) {
-    console.warn('Native EXIF extraction failed:', err);
+    console.warn('JS EXIF extraction fallback failed:', err);
   }
 
   return { time, lat, lon, dbg };
@@ -424,9 +438,10 @@ async function _captureExif(file) {
   // Read the full file into an ArrayBuffer before passing to exifr.
   // exifr uses chunked reads in the browser and can miss GPS data in HEIC files
   // if the GPS box falls outside the initial chunk window.
+  // Optimization: Read only the first 2MB instead of the entire 10MB+ file
   let buf;
   try {
-    buf = await file.arrayBuffer();
+    buf = await file.slice(0, 2 * 1024 * 1024).arrayBuffer();
     dbg.bufSize = buf.byteLength;
   } catch (e) {
     dbg.bufError = String(e);
@@ -568,7 +583,20 @@ async function _processFile(file) {
     return { blob, url };
   } catch (_) {}
 
-  // 2. Final fallback — original file (will show blank if browser can't decode it)
+  // 2. heic2any path (handles HEIC/HEIF on Android Chrome since native conversion is iOS only)
+  if (_isHeicLike(file)) {
+    try {
+      const heic2any = (await import('heic2any')).default;
+      let result = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.88 });
+      if (Array.isArray(result)) result = result[0];
+      const url = URL.createObjectURL(result);
+      return { blob: result, url };
+    } catch (err) {
+      console.warn('heic2any failed:', err);
+    }
+  }
+
+  // 3. Final fallback — original file (will show blank if browser can't decode it)
   return { blob: file, url: URL.createObjectURL(file) };
 }
 

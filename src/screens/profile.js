@@ -36,9 +36,11 @@ export function initProfile() {
         let mimeType = photo.mimeType || 'image/jpeg';
         if (mimeType === 'image/heic' || mimeType === 'image/heif' || photo.format === 'heic' || photo.format === 'heif') {
           try {
-            const converted = await FilePicker.convertHeicToJpeg({ path });
-            path = converted.path;
-            mimeType = 'image/jpeg';
+            if (window.Capacitor?.Plugins?.FilePicker?.convertHeicToJpeg) {
+              const converted = await FilePicker.convertHeicToJpeg({ path });
+              path = converted.path;
+              mimeType = 'image/jpeg';
+            }
           } catch (e) {
             console.warn('Native HEIC conversion failed:', e);
           }
