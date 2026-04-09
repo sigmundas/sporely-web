@@ -7,6 +7,7 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
 import { FilePicker } from '@capawesome/capacitor-file-picker';
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js';
+import { uploadObservationImageVariants } from '../images.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { loadFinds } from './finds.js';
 import { openFindDetail } from './find_detail.js';
@@ -185,11 +186,10 @@ async function handleSelectedFiles(files, options = {}) {
 
   // Single group → skip review screen, save immediately and open edit dialog
   if (sessions.length === 1) {
-    const success = await _saveSingleAndOpen(sessions[0]);
-    if (success) {
+    const obsId = await _saveSingleAndOpen(sessions[0]);
+    if (obsId) {
       sessions = [];
-      showToast(t('import.queuedSingle'));
-      navigate('finds');
+      await openFindDetail(obsId, { returnScreen: 'finds' });
     }
     return;
   }
@@ -608,16 +608,54 @@ async function _saveSingleAndOpen(session) {
       visibility: session.visibility || 'friends',
     };
 
-    await enqueueObservation(obsPayload, session.files);
+    let { data: obsData, error: obsError } = await supabase
+      .from('observations')
+      .insert(obsPayload)
+      .select('id')
+      .single();
+
+    if (obsError?.message?.includes('captured_at')) {
+      const { captured_at: _, ...payloadWithoutCapturedAt } = obsPayload;
+      ({ data: obsData, error: obsError } = await supabase
+        .from('observations')
+        .insert(payloadWithoutCapturedAt)
+        .select('id')
+        .single());
+    }
+
+    if (obsError || !obsData?.id) {
+      throw obsError || new Error('Observation insert failed');
+    }
+
+    const obsId = obsData.id;
+    for (let i = 0; i < session.files.length; i++) {
+      const file = session.files[i];
+      if (!(file instanceof Blob)) continue;
+
+      const storagePath = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`;
+      await uploadObservationImageVariants(file, storagePath);
+
+      const { error: imgError } = await supabase
+        .from('observation_images')
+        .insert({
+          observation_id: obsId,
+          user_id: state.user.id,
+          storage_path: storagePath,
+          image_type: 'field',
+          sort_order: i,
+        });
+
+      if (imgError) throw imgError;
+    }
 
     session.blobUrls.forEach(url => URL.revokeObjectURL(url));
 
-    return true;
+    return obsId;
   } catch (err) {
     console.error('Single import failed:', err);
     showToast(t('import.failed'));
     session.blobUrls.forEach(url => URL.revokeObjectURL(url));
-    return false;
+    return null;
   }
 }
 

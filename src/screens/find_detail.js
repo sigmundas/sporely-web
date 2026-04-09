@@ -5,13 +5,14 @@ import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
-import { loadFinds } from './finds.js'
+import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 
 let currentObs    = null
 let selectedTaxon = null
 let currentObsIsOwner = false
 let currentLocationOverride = null
+let returnScreenOverride = null
 
 export function initFindDetail() {
   const backBtn = document.getElementById('detail-back')
@@ -45,18 +46,19 @@ export function initFindDetail() {
   _initMentions(commentInput)
 }
 
-export async function openFindDetail(obsId) {
+export async function openFindDetail(obsId, options = {}) {
   currentObs    = null
   selectedTaxon = null
   currentObsIsOwner = false
   currentLocationOverride = null
+  returnScreenOverride = options.returnScreen || null
 
   // Update back button label — state.currentScreen is still the previous screen at this point
   const prevLabel = {
     home: t('detail.backHome'),
     finds: t('detail.backFinds'),
     map: t('detail.backMap'),
-  }[state.currentScreen] || t('detail.backGeneric')
+  }[returnScreenOverride || state.currentScreen] || t('detail.backGeneric')
   const backLabel = document.getElementById('detail-back-label')
   if (backLabel) backLabel.textContent = prevLabel
 
@@ -87,7 +89,11 @@ export async function openFindDetail(obsId) {
     fallbackName: displayName.trim() || t('detail.unknownSpecies'),
   })
   document.getElementById('detail-taxon-input').value = displayName.trim()
-  document.getElementById('detail-location').value    = obs.location  || ''
+  const coords = obs.gps_latitude && obs.gps_longitude
+    ? `${obs.gps_latitude.toFixed(4)}° N, ${obs.gps_longitude.toFixed(4)}° E`
+    : null
+
+  document.getElementById('detail-location').value    = obs.location || coords || ''
   document.getElementById('detail-habitat').value     = obs.habitat   || ''
   document.getElementById('detail-notes').value       = obs.notes     || ''
   document.getElementById('detail-uncertain').checked = !!obs.uncertain
@@ -107,9 +113,6 @@ export async function openFindDetail(obsId) {
     timeEl.style.display = 'none'
   }
 
-  const coords = obs.gps_latitude && obs.gps_longitude
-    ? `${obs.gps_latitude.toFixed(4)}° N, ${obs.gps_longitude.toFixed(4)}° E`
-    : null
   const coordsEl = document.getElementById('detail-coords')
   if (coordsEl) coordsEl.textContent = coords || ''
   if (coordsEl) coordsEl.style.display = coords ? 'block' : 'none'
@@ -262,6 +265,16 @@ async function _runAI() {
 
 function _goBack(event) {
   if (event) event.preventDefault()
+  if (returnScreenOverride) {
+    const target = returnScreenOverride
+    returnScreenOverride = null
+    if (target === 'finds') {
+      openFinds('mine', { resetSearch: true })
+      return
+    }
+    navigate(target)
+    return
+  }
   const prev = goBack()
   if (prev === 'finds') loadFinds()
 }

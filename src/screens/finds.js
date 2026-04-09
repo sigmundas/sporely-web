@@ -63,12 +63,35 @@ export function initFinds() {
   // Scope tabs
   document.querySelectorAll('.scope-tab').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.scope-tab').forEach(b => b.classList.remove('active'))
-      btn.classList.add('active')
-      currentScope = btn.dataset.scope
+      _setScope(btn.dataset.scope)
       loadFinds()
     })
   })
+}
+
+function _syncScopeTabs() {
+  document.querySelectorAll('.scope-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.scope === currentScope)
+  })
+}
+
+function _setScope(scope, options = {}) {
+  currentScope = scope || 'mine'
+  _syncScopeTabs()
+
+  if (options.resetSearch) {
+    state.searchQuery = ''
+    const searchInput = document.getElementById('finds-search-input')
+    const searchBar = document.getElementById('finds-search-bar')
+    if (searchInput) searchInput.value = ''
+    if (searchBar) searchBar.classList.remove('open')
+  }
+}
+
+export async function openFinds(scope = currentScope, options = {}) {
+  _setScope(scope, options)
+  navigate('finds')
+  await loadFinds()
 }
 
 function _setFindsView(view) {
