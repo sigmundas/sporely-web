@@ -163,7 +163,7 @@ For `avatars`:
 1. **Run unique constraints SQL**
    - File: `MycoLog/database/supabase_unique_constraints.sql`
    - Purpose: add/ensure `UNIQUE (desktop_id, user_id)` (or equivalent)
-   - Reason: needed for desktop sync upsert performance and correctness
+   - Status: ✅ Applied
 2. **Verify Storage bucket existence**
    - `observation-images` ✅ exists
    - `avatars` ✅ exists (public bucket, created 2026-04)

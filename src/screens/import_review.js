@@ -6,7 +6,7 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
 import { FilePicker } from '@capawesome/capacitor-file-picker';
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js';
-import { uploadObservationImageVariants } from '../images.js';
+import { enqueueObservation } from '../sync-queue.js';
 import { loadFinds } from './finds.js';
 import { openFindDetail } from './find_detail.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
@@ -184,10 +184,11 @@ async function handleSelectedFiles(files, options = {}) {
 
   // Single group → skip review screen, save immediately and open edit dialog
   if (sessions.length === 1) {
-    const obsId = await _saveSingleAndOpen(sessions[0]);
-    if (obsId) {
+    const success = await _saveSingleAndOpen(sessions[0]);
+    if (success) {
       sessions = [];
-      openFindDetail(obsId);
+      showToast('Added to sync queue');
+      navigate('finds');
     }
     return;
   }
@@ -572,9 +573,9 @@ async function _reverseGeocode(lat, lon) {
 
 // Convert file to a displayable JPEG blob.
 // Strategy: try fast canvas decode first (works for JPEG/PNG/WebP and HEIC on iOS Safari).
-// If that fails (Android Chrome / desktop browsers can't decode HEIC), fall back to
-// heic2any — a pure-JS HEIC/HEIF decoder that works everywhere.
-// heic2any is loaded dynamically so it only downloads when actually needed.
+// If that fails (e.g. Android Chrome / desktop browsers can't decode HEIC),
+// we fall back to the original file. The native plugin now handles HEIC-to-JPEG conversion
+// during import on Android/iOS.
 async function _processFile(file) {
   // 1. Canvas path (fast — works for JPEG/PNG/WebP; also HEIC on iOS/macOS Safari)
   try {
@@ -583,20 +584,7 @@ async function _processFile(file) {
     return { blob, url };
   } catch (_) {}
 
-  // 2. heic2any path (handles HEIC/HEIF on Android Chrome since native conversion is iOS only)
-  if (_isHeicLike(file)) {
-    try {
-      const heic2any = (await import('heic2any')).default;
-      let result = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.88 });
-      if (Array.isArray(result)) result = result[0];
-      const url = URL.createObjectURL(result);
-      return { blob: result, url };
-    } catch (err) {
-      console.warn('heic2any failed:', err);
-    }
-  }
-
-  // 3. Final fallback — original file (will show blank if browser can't decode it)
+  // 2. Final fallback — original file (will show blank if browser can't decode it)
   return { blob: file, url: URL.createObjectURL(file) };
 }
 
@@ -619,44 +607,16 @@ async function _saveSingleAndOpen(session) {
       visibility: session.visibility || 'friends',
     };
 
-    let { data: obsData, error } = await supabase
-      .from('observations').insert(obsPayload).select('id').single();
-
-    // Fallback: if captured_at column doesn't exist yet, retry without it
-    if (error?.message?.includes('captured_at')) {
-      const { captured_at: _, ...payloadWithout } = obsPayload;
-      ({ data: obsData, error } = await supabase
-        .from('observations').insert(payloadWithout).select('id').single());
-    }
-
-    if (error) throw error;
-
-    const obsId = obsData.id;
-    for (let i = 0; i < session.files.length; i++) {
-      const path = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`;
-      try {
-        await uploadObservationImageVariants(session.files[i], path);
-      } catch (upErr) {
-        console.error('upload error', upErr);
-        continue;
-      }
-      await supabase.from('observation_images').insert({
-        observation_id: obsId,
-        user_id: state.user.id,
-        storage_path: path,
-        image_type: 'field',
-        sort_order: i,
-      });
-    }
+    await enqueueObservation(obsPayload, session.files);
 
     session.blobUrls.forEach(url => URL.revokeObjectURL(url));
 
-    return obsId;
+    return true;
   } catch (err) {
     console.error('Single import failed:', err);
     showToast('Import failed');
     session.blobUrls.forEach(url => URL.revokeObjectURL(url));
-    return null;
+    return false;
   }
 }
 
@@ -955,35 +915,18 @@ async function saveAll() {
         visibility: session.visibility || 'friends',
       };
 
-      const { data: obsData, error: obsError } = await supabase
-        .from('observations').insert(obsPayload).select('id').single();
-      if (obsError) throw obsError;
-
-      const obsId = obsData.id;
-      for (let i = 0; i < session.files.length; i++) {
-        const path = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`;
-        try {
-          await uploadObservationImageVariants(session.files[i], path);
-        } catch (uploadError) {
-          console.error('Image upload error:', uploadError);
-          continue;
-        }
-        await supabase.from('observation_images').insert({
-          observation_id: obsId, user_id: state.user.id,
-          storage_path: path, image_type: 'field', sort_order: i,
-        });
-      }
+      await enqueueObservation(obsPayload, session.files);
       savedCount++;
     } catch (err) {
       console.error('Failed to save session', session.id, err);
-      showToast('Failed to save one group. Others may have saved.');
+      showToast('Failed to queue one group. Others may have queued.');
     }
   }
 
   allBlobUrls.forEach(url => URL.revokeObjectURL(url));
   sessions = [];
   clearImportSessions();
-  if (savedCount > 0) showToast(`Saved ${savedCount} observation${savedCount !== 1 ? 's' : ''}`);
+  if (savedCount > 0) showToast(`Queued ${savedCount} observation${savedCount !== 1 ? 's' : ''} for upload`);
   saveBtn.disabled = false;
   navigate('finds');
   loadFinds();

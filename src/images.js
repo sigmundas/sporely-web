@@ -3,7 +3,7 @@ import { supabase } from './supabase.js'
 const SIGNED_URL_TTL_SECONDS = 3600
 const SIGNED_URL_CACHE = new Map()
 const THUMB_VARIANTS = {
-  small: { maxEdge: 240, quality: 0.74 },
+  small: { maxEdge: 240, quality: 0.82 },
   medium: { maxEdge: 720, quality: 0.82 },
 }
 

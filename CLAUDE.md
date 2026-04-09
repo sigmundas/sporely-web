@@ -109,6 +109,8 @@ Deserialise before pushing from desktop.
 - Requires HTTPS — Vite is configured with `@vitejs/plugin-basic-ssl` for LAN testing.
 - Permission-denied overlay (`#camera-denied`) shows platform-specific instructions.
 - Blobs are wrapped in `blobPromise` (canvas.toBlob) and resolved in `review.js`.
+  The camera logic uses dynamic off-screen canvases scaled to max 1920px to prevent
+  mobile OOM crashes and race conditions.
 - A capture batch is one observation. Multiple photos taken in the same session should
   share species, notes, location, and one observation row.
 
@@ -117,7 +119,7 @@ Deserialise before pushing from desktop.
 - Android library import uses `@capawesome/capacitor-file-picker`.
 - The plugin handles native image selection, fast HEIC-to-JPEG conversion (if supported),
   and extracts EXIF/GPS metadata natively without blocking the WebView.
-- Browser and Android Chrome fallback to `exifr` and dynamic `heic2any` conversion.
+- Browser and Android Chrome fallback to `exifr` for EXIF reading.
 - Do not reintroduce `@capacitor/camera` for library import unless there is a strong
   reason; it was removed because it obscured original metadata in this app.
 
@@ -132,8 +134,9 @@ Deserialise before pushing from desktop.
   first image.
 - `uploadObservationImageVariants()` uploads the original plus `small` and `medium`
   thumbnail variants for list/grid use.
-- Capture review now uses `saveObservationBatch()`: inserts one observation row for
-  the batch, uploads all images, and writes `observation_images.sort_order`.
+- Capture review now uses `saveObservationBatch()`: enqueues the observation and raw
+  image blobs into IndexedDB (`sync-queue.js`) for background uploading instead of
+  blocking the UI.
 
 ## Desktop sync notes (for context, not implemented in web)
 
@@ -147,3 +150,10 @@ Deserialise before pushing from desktop.
   without re-rendering or re-uploading it.
 - If the same linked observation changed on both desktop and web, the desktop now reports
   a conflict and skips the automatic overwrite.
+
+
+## Standardized Image Pipeline
+- **Output Format**: JPEG
+- **Dimensions**: Small = 240px, Medium = 720px
+- **Compression**: 82% quality
+*Both apps (MycoLog and Sporely Web) must strictly adhere to these standards to remain in sync. The web app's thumbnail generation (in `src/images.js`) has been successfully aligned with the desktop thumbnail standards.*

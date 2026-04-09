@@ -139,15 +139,7 @@ async function _showCrop(file) {
 
   if (!canDecode) {
     URL.revokeObjectURL(url)
-    try {
-      const heic2any = (await import('heic2any')).default
-      let result = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.92 })
-      if (Array.isArray(result)) result = result[0]
-      url = URL.createObjectURL(result)
-    } catch (err) {
-      console.warn('Avatar HEIC conversion failed:', err)
-      url = URL.createObjectURL(file)  // last resort
-    }
+    url = URL.createObjectURL(file)  // last resort
   }
 
   img.onload = () => {

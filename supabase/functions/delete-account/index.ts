@@ -55,6 +55,10 @@ Deno.serve(async req => {
       await admin.from('observations').delete().in('id', observationIds)
     }
 
+    // Also delete desktop-app synced tables to prevent FK constraint errors
+    await admin.from('spore_measurements').delete().eq('user_id', uid)
+    await admin.from('calibrations').delete().eq('user_id', uid)
+
     await admin.from('profiles').delete().eq('id', uid)
 
     const { error: deleteUserError } = await admin.auth.admin.deleteUser(uid)

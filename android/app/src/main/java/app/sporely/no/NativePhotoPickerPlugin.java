@@ -134,7 +134,7 @@ public class NativePhotoPickerPlugin extends Plugin {
                     returnMime = "image/jpeg";
                     returnFormat = "jpeg";
                 } catch (Exception ex) {
-                    // Conversion failed — fall through to original URI; heic2any will handle it
+                    // Conversion failed — fall through to original URI; browser will attempt to handle it
                 }
             }
 

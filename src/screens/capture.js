@@ -112,21 +112,46 @@ export function stopCamera() {
 
 function capturePhoto() {
   const video  = document.getElementById('camera-video')
-  const canvas = document.getElementById('camera-canvas')
 
   if (!video.srcObject) {
     // Demo mode — no real camera
     const emoji = ['🍄', '🟡', '🤎', '🍂', '🌿'][state.batchCount % 5]
     state.capturedPhotos.push({ blob: null, blobPromise: null, gps: state.gps, ts: new Date(), emoji })
   } else {
-    canvas.width  = video.videoWidth
-    canvas.height = video.videoHeight
-    canvas.getContext('2d').drawImage(video, 0, 0)
+    let w = video.videoWidth
+    let h = video.videoHeight
+
+    if (!w || !h) {
+      showToast('Camera not fully ready')
+      return
+    }
+
+    // Scale down to prevent mobile browser OOM crashes from huge blobs
+    const maxEdge = 1920
+    if (w > maxEdge || h > maxEdge) {
+      const scale = maxEdge / Math.max(w, h)
+      w = Math.round(w * scale)
+      h = Math.round(h * scale)
+    }
+
+    // Create a fresh canvas for each capture to avoid toBlob() race conditions
+    // which can cause promises to hang if the shutter is tapped rapidly.
+    const canvas = document.createElement('canvas')
+    canvas.width  = w
+    canvas.height = h
+    canvas.getContext('2d').drawImage(video, 0, 0, w, h)
 
     // Wrap toBlob in a Promise so review save can await all blobs before uploading
-    const blobPromise = new Promise(resolve =>
-      canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.92)
-    )
+    const blobPromise = new Promise((resolve, reject) => {
+      canvas.toBlob(blob => {
+        if (blob) resolve(blob)
+        else reject(new Error('Image capture failed'))
+      }, 'image/jpeg', 0.92)
+    })
+    
+    // Add a dummy catch to prevent UnhandledPromiseRejection if it's not awaited immediately
+    blobPromise.catch(() => {})
+    
     state.capturedPhotos.push({ blob: null, blobPromise, gps: state.gps, ts: new Date(), emoji: '📸' })
   }
 

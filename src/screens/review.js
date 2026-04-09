@@ -7,6 +7,7 @@ import { uploadObservationImageVariants } from '../images.js'
 import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
 import { loadFinds } from './finds.js'
+import { enqueueObservation } from '../sync-queue.js'
 
 export function initReview() {
   document.getElementById('review-close')
@@ -327,33 +328,13 @@ function _localDate(ts) {
   return `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}`
 }
 
-async function _insertObservation(obsPayload) {
-  let { data: obsData, error } = await supabase
-    .from('observations')
-    .insert(obsPayload)
-    .select('id')
-    .single()
-
-  if (error?.message?.includes('captured_at')) {
-    const { captured_at: _, ...payloadWithoutCapturedAt } = obsPayload
-    ;({ data: obsData, error } = await supabase
-      .from('observations')
-      .insert(payloadWithoutCapturedAt)
-      .select('id')
-      .single())
-  }
-
-  if (error) throw new Error(`Observation insert failed: ${error.message}`)
-  return obsData.id
-}
-
 async function saveObservationBatch() {
   if (!state.user) { showToast('Not signed in'); return }
   if (!state.capturedPhotos.length) { showToast('No photos to sync'); return }
 
-  const btn = document.getElementById('finish-sync-btn')
-  btn.disabled = true
-  showToast('Syncing to Sporely Cloud…')
+  const btn = document.getElementById('review-save-btn')
+  if (btn) btn.disabled = true
+  showToast('Adding to sync queue…')
 
   try {
     const photos = await Promise.all(
@@ -384,27 +365,10 @@ async function saveObservationBatch() {
       visibility,
     }
 
-    const obsId = await _insertObservation(obsPayload)
+    const imageBlobs = photos.map(p => p.blob).filter(b => b instanceof Blob)
+    await enqueueObservation(obsPayload, imageBlobs)
 
-    for (const [i, photo] of photos.entries()) {
-      if (!(photo.blob instanceof Blob)) continue
-
-      const storagePath = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`
-      await uploadObservationImageVariants(photo.blob, storagePath)
-
-      const { error: imgError } = await supabase
-        .from('observation_images')
-        .insert({
-          observation_id: obsId,
-          user_id:        state.user.id,
-          storage_path:   storagePath,
-          image_type:     'field',
-          sort_order:     i,
-        })
-      if (imgError) console.warn('Image metadata insert failed:', imgError.message)
-    }
-
-    showToast(`Synced 1 observation with ${photos.length} photo${photos.length !== 1 ? 's' : ''} ✓`)
+    showToast(`Queued observation with ${imageBlobs.length} photo${imageBlobs.length !== 1 ? 's' : ''} ✓`)
     state.capturedPhotos = []
     state.batchCount = 0
     state.captureDraft = {
@@ -416,11 +380,10 @@ async function saveObservationBatch() {
     resetLocationState()
     await refreshHome()
     navigate('finds')
-    loadFinds()
   } catch (err) {
     showToast(`Sync failed: ${err.message}`)
     console.error('Sync error:', err)
   } finally {
-    btn.disabled = false
+    if (btn) btn.disabled = false
   }
 }

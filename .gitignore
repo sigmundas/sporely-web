@@ -1,4 +1,6 @@
 .DS_Store
+.geminiignore
+GEMINI.md
 node_modules/
 dist/
 

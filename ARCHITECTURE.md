@@ -171,12 +171,14 @@ capture.js: capturePhoto()
 
 review.js: saveObservationBatch()
   1. await Promise.all(capturedPhotos.map(p => p.blobPromise ?? p.blob))
-  2. INSERT a single observations row for the whole capture batch
-  3. For each photo:
-     a. upload original to storage/observation-images/{user_id}/{obs_id}/{i}_{ts}.jpg
-     b. generate + upload `small` and `medium` thumbnail variants
-     c. INSERT observation_images row with shared observation_id + sort_order
-  4. Clear capture state, refresh lists, navigate away from review
+  2. Enqueue parent observation and image Blobs to IndexedDB (`sync-queue.js`)
+  3. Clear capture state, refresh lists, navigate away from review
+
+sync-queue.js: triggerSync() (background)
+  1. Read pending observations from IndexedDB
+  2. INSERT observations row for the batch
+  3. For each photo: upload original to storage, generate variants, INSERT observation_images row
+  4. Remove from IndexedDB offline queue
 ```
 
 ## Import flow
@@ -289,6 +291,3 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 
 6. **Server-side thumbnails** — consider replacing client-generated thumbnail uploads
    with Supabase Storage transformations if/when plan and caching tradeoffs make sense.
-
-7. **Desktop sync auto-trigger** — call `mark_observation_dirty()` in `update_observation()`
-   so edits are automatically re-pushed on the next sync.
