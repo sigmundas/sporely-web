@@ -1,4 +1,5 @@
 import { supabase } from '../supabase.js'
+import { formatDate, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
@@ -111,7 +112,7 @@ async function _fetchMine() {
     .order('date', { ascending: false })
     .limit(100)
 
-  if (error) { showToast('Could not load finds'); _cache['mine'] = []; return }
+  if (error) { showToast(t('finds.couldNotLoad')); _cache['mine'] = []; return }
   _cache['mine'] = data || []
 }
 
@@ -218,7 +219,7 @@ function _authorHandle(obs) {
   const profile = _authorProfile(obs)
   if (profile?.username) return `@${profile.username}`
   if (profile?.display_name) return profile.display_name
-  return 'Unknown'
+  return t('common.unknown')
 }
 
 function _authorInitial(obs) {
@@ -244,23 +245,23 @@ function _authorChip(obs, options = {}) {
 // ── Render: tiles ─────────────────────────────────────────────────────────────
 
 function _renderTiles(list, subtitle, data) {
+  const q = (state.searchQuery || '').trim()
   if (!data.length) {
-    const q = state.searchQuery
     subtitle.textContent = q
-      ? `No results for "${q}".`
-      : currentScope === 'friends' ? 'No friends\' finds yet.' : 'No observations yet.'
+      ? t('finds.noResults', { query: q })
+      : currentScope === 'friends' ? t('finds.noFriends') : t('finds.noObservations')
     list.innerHTML = ''
     return
   }
 
-  subtitle.textContent = `${data.length} observation${data.length !== 1 ? 's' : ''}.`
+  subtitle.textContent = tp('finds.observationCount', data.length)
 
   fetchFirstImages(data.map(o => o.id), { variant: 'small' }).then(imageUrls => {
     let html = '<div class="find-tiles-grid">'
     data.forEach(obs => {
       const name = obs.common_name
         || (obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus)
-        || '?'
+        || t('finds.unidentified')
       const photo = _imageHtml(imageUrls[obs.id], '', 'find-tile-empty')
       html += `<div class="find-tile" data-id="${obs.id}">
         <div class="find-tile-photo">${photo}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
@@ -282,16 +283,16 @@ function _renderTiles(list, subtitle, data) {
 function _renderCards(list, subtitle, data, options) {
   const variant = options?.variant || 'cards'
   const isFriends = !!options?.isFriends
+  const q = (state.searchQuery || '').trim()
   if (!data.length) {
-    const q = state.searchQuery
     subtitle.textContent = q
-      ? `No results for "${q}".`
-      : isFriends ? 'No friends\' finds yet.' : 'No observations yet — go capture some!'
+      ? t('finds.noResults', { query: q })
+      : isFriends ? t('finds.noFriends') : t('finds.noObservationsCapture')
     list.innerHTML = ''
     return
   }
 
-  subtitle.textContent = `${data.length} observation${data.length !== 1 ? 's' : ''}.`
+  subtitle.textContent = tp('finds.observationCount', data.length)
 
   const imageVariant = variant === 'cards' ? 'medium' : variant === 'two' ? 'medium' : 'small'
   fetchFirstImages(data.map(o => o.id), { variant: imageVariant }).then(imageUrls => {
@@ -307,7 +308,7 @@ function _renderCards(list, subtitle, data, options) {
     let html = '<div class="finds-grid-outer">'
     groups.forEach(({ date, items }) => {
       const dateLabel = date !== '—'
-        ? new Date(date + 'T12:00:00').toLocaleDateString('no-NO', { day: 'numeric', month: 'long', year: 'numeric' })
+        ? formatDate(new Date(date + 'T12:00:00'), { day: 'numeric', month: 'long', year: 'numeric' })
         : '—'
       html += `<div class="finds-date-sep">
         <div class="finds-date-line"></div>
@@ -319,16 +320,16 @@ function _renderCards(list, subtitle, data, options) {
       items.forEach(obs => {
         const latin     = obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus
         const isUnknown = !obs.genus && !obs.common_name
-        const displayName = obs.common_name || latin || 'Unidentified'
+        const displayName = obs.common_name || latin || t('finds.unidentified')
         const nameHtml  = isUnknown
-          ? `<span class="find-card-name unidentified">Unidentified</span>`
+          ? `<span class="find-card-name unidentified">${t('finds.unidentified')}</span>`
           : obs.common_name && latin
             ? `<span class="find-card-name">${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
             : obs.common_name
               ? `<span class="find-card-name">${obs.common_name}</span>`
               : `<span class="find-card-name"><em class="find-card-scientific">${latin}</em></span>`
         const compactNameHtml = isUnknown
-          ? `<span class="find-card-name find-card-name--compact unidentified">Unidentified</span>`
+          ? `<span class="find-card-name find-card-name--compact unidentified">${t('finds.unidentified')}</span>`
           : `<span class="find-card-name find-card-name--compact">${displayName}</span>`
 
         const loc = obs.location || (

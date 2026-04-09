@@ -1,6 +1,7 @@
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { supabase } from '../supabase.js'
+import { formatDate, t } from '../i18n.js'
 import { state } from '../state.js'
 import { openFindDetail } from './find_detail.js'
 
@@ -144,9 +145,9 @@ function _addMarkers(observations, owner) {
   observations.forEach(obs => {
     const name = obs.common_name
       || (obs.genus ? `${obs.genus}${obs.species ? ' ' + obs.species : ''}` : null)
-      || 'Unknown'
+      || t('detail.unknownSpecies')
     const date = obs.date
-      ? new Date(obs.date).toLocaleDateString('no-NO', { day: 'numeric', month: 'short', year: 'numeric' })
+      ? formatDate(obs.date, { day: 'numeric', month: 'short', year: 'numeric' })
       : ''
 
     const pinClass = [
@@ -169,7 +170,7 @@ function _addMarkers(observations, owner) {
           <div class="map-popup-name">${_esc(name)}</div>
           <div class="map-popup-date">${_esc(date)}</div>
           ${obs.location ? `<div class="map-popup-loc">${_esc(obs.location)}</div>` : ''}
-          <button class="map-popup-btn" data-id="${obs.id}">View details →</button>
+          <button class="map-popup-btn" data-id="${obs.id}">${t('map.viewDetails')}</button>
         </div>
       `)
 

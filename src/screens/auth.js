@@ -1,6 +1,7 @@
 import { supabase } from '../supabase.js'
+import { t } from '../i18n.js'
 
-const TURNSTILE_SITE_KEY = '0x4AAAAAAC0h9RON_lYu5ib_'
+const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAC0h9RON_lYu5ib_'
 let _captchaToken      = null
 let _turnstileWidgetId = null
 
@@ -146,7 +147,7 @@ function _captchaErrorMessage(message) {
   const lower = text.toLowerCase()
 
   if (BYPASS_TURNSTILE && (lower.includes('captcha') || lower.includes('turnstile') || lower.includes('challenge'))) {
-    return 'Local dev is hiding Turnstile, but Supabase still requires CAPTCHA on the server. For phone testing, use your deployed URL or temporarily disable CAPTCHA in Supabase Auth.'
+    return t('auth.localCaptchaHint')
   }
 
   return text
@@ -154,7 +155,7 @@ function _captchaErrorMessage(message) {
 
 function setLoading(btn, loading) {
   btn.disabled    = loading
-  btn.textContent = loading ? 'Please wait…' : btn.dataset.label
+  btn.textContent = loading ? t('common.pleaseWait') : btn.dataset.label
 }
 
 function switchToLogin(prefillEmail = '') {
@@ -185,9 +186,9 @@ function switchToSignup(prefillEmail = '') {
 function showResendPrompt(email) {
   _pendingEmail = email
   showError(
-    `Check your inbox to confirm your account. ` +
+    `${t('auth.checkInbox')} ` +
     `<a href="#" id="resend-link" style="color:var(--green-accent);font-weight:600;text-decoration:none">` +
-    `Resend email</a>`,
+    `${t('auth.resendEmail')}</a>`,
     /*allowHtml*/ true,
     /*info*/ true
   )
@@ -202,12 +203,12 @@ async function doResend(email) {
   if (error) {
     // "already confirmed" means they can just sign in
     if (error.message.toLowerCase().includes('already confirmed')) {
-      showError('Your email is already confirmed — try signing in.')
+      showError(t('auth.emailAlreadyConfirmed'))
     } else {
-      showError(`Could not resend: ${error.message}`)
+      showError(t('auth.couldNotResend', { message: error.message }))
     }
   } else {
-    showError('Confirmation email sent — check your inbox.')
+    showError(t('auth.confirmationSent'))
   }
 }
 
@@ -215,12 +216,12 @@ async function doResend(email) {
 
 function friendlyHashError(code, description) {
   if (code === 'otp_expired') {
-    return 'Your confirmation link has expired. Enter your email below and request a new one.'
+    return t('auth.confirmationExpired')
   }
   if (code === 'access_denied') {
-    return description || 'Access denied. Please try again.'
+    return description || t('auth.accessDenied')
   }
-  return description || 'Something went wrong. Please try again.'
+  return description || t('auth.genericError')
 }
 
 export function handleUrlHashError() {
@@ -257,8 +258,8 @@ export function initAuth(onAuthenticated) {
   const loginBtn   = document.getElementById('login-btn')
   const signupBtn  = document.getElementById('signup-btn')
 
-  loginBtn.dataset.label  = 'Sign in'
-  signupBtn.dataset.label = 'Create account'
+  loginBtn.dataset.label  = t('auth.signIn')
+  signupBtn.dataset.label = t('auth.createAccount')
 
   _restoreAuthDraft()
   _persistAuthInputs()
@@ -322,7 +323,7 @@ export function initAuth(onAuthenticated) {
         error.message.toLowerCase().includes('already been registered')
       ) {
         switchToLogin(email)
-        showError('An account with that email already exists. Sign in, or use "Forgot password" to reset it.')
+        showError(t('auth.existingAccount'))
       } else {
         showError(_captchaErrorMessage(error.message))
       }

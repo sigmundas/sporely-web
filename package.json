@@ -3,7 +3,14 @@
   "private": true,
   "version": "0.2.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
+    "check:node": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (major < 22) { console.error('\\nNode 22+ is required for sporely-web. Current: ' + process.version + '\\nUse nvm install 22 && nvm use 22\\n'); process.exit(1); }\"",
+    "predev": "npm run check:node",
+    "prebuild": "npm run check:node",
+    "prepreview": "npm run check:node",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

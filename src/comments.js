@@ -1,4 +1,5 @@
 import { supabase } from './supabase.js'
+import { t } from './i18n.js'
 
 export async function fetchCommentAuthorMap(comments, currentUser = null) {
   const userIds = [...new Set((comments || []).map(comment => comment.user_id).filter(Boolean))]
@@ -19,7 +20,7 @@ export async function fetchCommentAuthorMap(comments, currentUser = null) {
     authorMap[currentUser.id] = {
       id: currentUser.id,
       username: null,
-      display_name: currentUser.user_metadata?.full_name || currentUser.email || 'You',
+      display_name: currentUser.user_metadata?.full_name || currentUser.email || t('common.you'),
     }
   }
 
@@ -27,7 +28,7 @@ export async function fetchCommentAuthorMap(comments, currentUser = null) {
 }
 
 export function getCommentAuthor(profile) {
-  const name = profile?.username ? `@${profile.username}` : (profile?.display_name || 'Unknown')
+  const name = profile?.username ? `@${profile.username}` : (profile?.display_name || t('common.unknown'))
   const initial = name.replace('@', '')[0]?.toUpperCase() || '?'
   return { name, initial }
 }

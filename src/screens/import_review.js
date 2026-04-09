@@ -1,5 +1,6 @@
 import { state } from '../state.js';
 import { supabase } from '../supabase.js';
+import { formatDate, formatTime, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
@@ -55,11 +56,11 @@ export async function openPhotoImportPicker() {
       const photos = Array.isArray(result?.files) ? result.files : [];
       if (!photos.length) return;
 
-      _setProgress(0, photos.length, 'Reading files…');
+      _setProgress(0, photos.length, t('import.readingFiles'));
 
       const files = [];
       for (let i = 0; i < photos.length; i++) {
-        _setProgress(i, photos.length, `Importing ${i + 1} of ${photos.length}…`);
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
         files.push(await _nativePickedPhotoToFile(photos[i], i));
       }
       await handleSelectedFiles(files, { nativePhotos: photos });
@@ -116,7 +117,7 @@ async function handleSelectedFiles(files, options = {}) {
   if (!files.length) return;
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
 
-  _setProgress(0, files.length, 'Reading timestamps…');
+  _setProgress(0, files.length, t('import.readingTimestamps'));
 
   // Read EXIF capture time + GPS for each file.
   // Android/iOS often set file.lastModified to sync date, not shutter time.
@@ -153,7 +154,7 @@ async function handleSelectedFiles(files, options = {}) {
     const grp = grouped[idx];
     const processed = [];
     for (const { file } of grp) {
-      _setProgress(doneCount, files.length, `Converting ${doneCount + 1} of ${files.length}…`);
+      _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
       processed.push(await _processFile(file));
       doneCount++;
     }
@@ -222,7 +223,7 @@ function _setProgress(done, total, label) {
   overlay.style.display = 'flex';
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
   document.getElementById('import-progress-fill').style.width = pct + '%';
-  document.getElementById('import-progress-label').textContent = label || 'Processing…';
+  document.getElementById('import-progress-label').textContent = label || t('import.processing');
 }
 
 function _hideProgress() {
@@ -654,7 +655,7 @@ async function _saveSingleAndOpen(session) {
     return obsId;
   } catch (err) {
     console.error('Single import failed:', err);
-    showToast('Import failed');
+    showToast(t('import.failed'));
     session.blobUrls.forEach(url => URL.revokeObjectURL(url));
     return null;
   }
@@ -665,7 +666,7 @@ export function renderSessions() {
   const countEl = document.getElementById('import-session-count');
 
   const n = sessions.length;
-  countEl.textContent = `${n} group${n !== 1 ? 's' : ''}`;
+  countEl.textContent = tp('counts.group', n);
 
   list.innerHTML = sessions.map(session => buildCardHTML(session)).join('');
 
@@ -721,11 +722,11 @@ export function renderSessions() {
       const session = sessionById(sid);
       if (!session) return;
       if (!state.gps) {
-        showToast('Current GPS unavailable');
+        showToast(t('import.currentGpsUnavailable'));
         return;
       }
       if (session.locationName) {
-        const confirmed = window.confirm('Current location will overwrite the EXIF location. Continue?');
+        const confirmed = window.confirm(t('import.overwriteExifConfirm'));
         if (!confirmed) return;
       }
       const name = await _reverseGeocode(state.gps.lat, state.gps.lon);
@@ -747,12 +748,12 @@ export function renderSessions() {
 
 function buildCardHTML(session) {
   const sid = session.id;
-  const dateStr = session.ts.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  const timeStr = session.ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const dateStr = formatDate(session.ts, { month: 'short', day: 'numeric' });
+  const timeStr = formatTime(session.ts, { hour: '2-digit', minute: '2-digit' });
   const photoCount = session.files.length;
   const speciesText = session.taxon
     ? escHtml(session.taxon.displayName)
-    : '<span style="opacity:0.45">Unknown species</span>';
+    : `<span style="opacity:0.45">${t('detail.unknownSpecies')}</span>`;
 
   const stackImgs = session.blobUrls.slice(0, 3);
   const polaroids = stackImgs.map((url, i) =>
@@ -773,7 +774,7 @@ function buildCardHTML(session) {
     /\.(heic|heif)$/i.test(d?.fileName || '') || /heic|heif/i.test(d?.fileType || '')
   );
   const missingGpsHint = heicWithoutGps
-    ? `<div class="import-location-hint">No photo GPS found in this HEIC. On some iPhone web uploads, location metadata is not exposed to the browser.</div>`
+    ? `<div class="import-location-hint">${t('import.noHeicGps')}</div>`
     : '';
 
   return `<div class="import-card" data-sid="${sid}">
@@ -782,11 +783,11 @@ function buildCardHTML(session) {
       ${polaroids}
     </div>
     <div class="import-card-info">
-      <div class="import-card-datetime"><span>${dateStr}</span><span>${timeStr} · ${photoCount} photo${photoCount !== 1 ? 's' : ''}</span></div>
+      <div class="import-card-datetime"><span>${dateStr}</span><span>${timeStr} · ${tp('counts.photo', photoCount)}</span></div>
       <div class="import-card-loc">${session.locationName ? escHtml(session.locationName) : '—'}</div>
       <div class="import-card-species">${speciesText}</div>
     </div>
-    <button class="import-card-delete" data-sid="${sid}" aria-label="Delete group">
+    <button class="import-card-delete" data-sid="${sid}" aria-label="${t('common.delete')}">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
     </button>
   </div>
@@ -795,32 +796,32 @@ function buildCardHTML(session) {
       ${stripItems}
     </div>
     <div class="detail-field" style="margin-top:12px">
-      <div class="detail-field-label">Species</div>
+      <div class="detail-field-label">${t('detail.species')}</div>
       <div class="taxon-field-wrap">
-        <input class="taxon-input import-taxon-input" type="text" placeholder="Unknown species"
+        <input class="taxon-input import-taxon-input" type="text" placeholder="${t('detail.unknownSpecies')}"
           data-sid="${sid}" autocomplete="off" spellcheck="false"
           value="${taxonVal}">
         <ul class="taxon-dropdown import-taxon-dropdown" data-sid="${sid}" style="display:none"></ul>
       </div>
       <button class="ai-id-btn-import" data-sid="${sid}">
-        <div class="ai-dot"></div> Artsorakel AI
+        <div class="ai-dot"></div> ${t('detail.identifyAI')}
       </button>
       <div class="ai-results-import" data-sid="${sid}" style="display:none"></div>
     </div>
     <div class="detail-field" style="margin-top:4px">
-      <div class="detail-field-label">Location</div>
+      <div class="detail-field-label">${t('detail.location')}</div>
       <input class="detail-text-input import-loc-input" type="text"
         data-sid="${sid}" placeholder="—" readonly
         value="${locVal}">
       ${missingGpsHint}
-      <button class="ai-id-btn import-current-location-btn" data-sid="${sid}" style="margin-top:8px">Set from GPS</button>
+      <button class="ai-id-btn import-current-location-btn" data-sid="${sid}" style="margin-top:8px">${t('import.setFromGps')}</button>
     </div>
     <div class="detail-field" style="margin-top:4px">
-      <div class="detail-field-label">Sharing</div>
+      <div class="detail-field-label">${t('detail.sharing')}</div>
       <div class="vis-radio-group">
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="private" ${visChecked('private')}> <span>Private</span></label>
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="friends" ${visChecked('friends')}> <span>Friends</span></label>
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="public" ${visChecked('public')}> <span>Public</span></label>
+        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="private" ${visChecked('private')}> <span>${translateVisibility('private')}</span></label>
+        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="friends" ${visChecked('friends')}> <span>${translateVisibility('friends')}</span></label>
+        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="public" ${visChecked('public')}> <span>${translateVisibility('public')}</span></label>
       </div>
     </div>
   </div>
@@ -845,7 +846,7 @@ function _wireCard(sid) {
     if (!q) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
     debounceTimer = setTimeout(async () => {
       try {
-        const results = await searchTaxa(q, 'nb');
+        const results = await searchTaxa(q, getTaxonomyLanguage());
         if (!results?.length) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
         dropdown.innerHTML = results.map((r, i) => {
           const display = formatDisplayName(r.genus, r.specificEpithet, r.vernacularName);
@@ -887,13 +888,13 @@ function _wireCard(sid) {
       const session = sessionById(sid)
       if (!session?.files?.length) return
       aiBtn.disabled = true
-      aiBtn.textContent = 'Identifying…'
+      aiBtn.textContent = t('import.identifying')
       try {
-        const predictions = await runArtsorakelForBlobs(session.files, 'nb')
+        const predictions = await runArtsorakelForBlobs(session.files, getTaxonomyLanguage())
         if (!predictions?.length) {
           aiResults.style.display = 'none'
           aiBtn.disabled = false
-          aiBtn.innerHTML = '<div class="ai-dot"></div> Artsorakel AI'
+          aiBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
           return
         }
         aiResults.innerHTML = predictions.map((p, i) =>
@@ -924,7 +925,7 @@ function _wireCard(sid) {
         console.error('Artsorakel AI error:', err)
       }
       aiBtn.disabled = false
-      aiBtn.innerHTML = '<div class="ai-dot"></div> Artsorakel AI'
+      aiBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
     })
   }
 }
@@ -976,14 +977,14 @@ async function saveAll() {
       savedCount++;
     } catch (err) {
       console.error('Failed to save session', session.id, err);
-      showToast('Failed to save one group. Others may have saved.');
+      showToast(t('import.failedOneGroup'));
     }
   }
 
   allBlobUrls.forEach(url => URL.revokeObjectURL(url));
   sessions = [];
   clearImportSessions();
-  if (savedCount > 0) showToast(`Saved ${savedCount} observation${savedCount !== 1 ? 's' : ''}`);
+  if (savedCount > 0) showToast(t('import.saved', { count: tp('counts.observation', savedCount) }));
   saveBtn.disabled = false;
   navigate('finds');
   loadFinds();

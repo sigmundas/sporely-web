@@ -1,4 +1,5 @@
 import { supabase } from '../supabase.js'
+import { t } from '../i18n.js'
 import { state } from '../state.js'
 import { showToast } from '../toast.js'
 import { showAuthOverlay } from './auth.js'
@@ -108,10 +109,10 @@ async function _saveProfile() {
   const { error } = await supabase.from('profiles').update({ username, display_name }).eq('id', state.user.id)
   btn.disabled = false
   if (error) {
-    showToast(error.code === '23505' ? 'Username already taken' : `Error: ${error.message}`)
+    showToast(error.code === '23505' ? t('profile.usernameTaken') : t('common.errorPrefix', { message: error.message }))
     return
   }
-  showToast('Profile saved ✓')
+  showToast(t('profile.saved'))
 }
 
 // ── Avatar crop ────────────────────────────────────────────────────────────────
@@ -274,17 +275,17 @@ async function _uploadAvatar(blob) {
   const { error: upErr } = await supabase.storage
     .from('avatars')
     .upload(path, blob, { contentType: 'image/jpeg', upsert: true })
-  if (upErr) { showToast(`Upload failed: ${upErr.message}`); return }
+  if (upErr) { showToast(t('profile.uploadFailed', { message: upErr.message })); return }
   const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(path)
   const { error: dbErr } = await supabase.from('profiles').update({ avatar_url: publicUrl }).eq('id', uid)
-  if (dbErr) { showToast(`Profile update failed: ${dbErr.message}`); return }
+  if (dbErr) { showToast(t('common.errorPrefix', { message: dbErr.message })); return }
   await _setProfileAvatarSource({
     uid,
     preferredUrl: publicUrl,
     cacheBust: true,
     keepCurrentOnFailure: true,
   })
-  showToast('Photo updated ✓')
+  showToast(t('profile.photoUpdated'))
 }
 
 function _initials(str) {
@@ -388,7 +389,7 @@ async function _loadFriends() {
   const list = document.getElementById('friends-list')
 
   if (!friendships?.length) {
-    list.innerHTML = `<div style="color:var(--text-dim);font-size:13px">No friends yet.</div>`
+    list.innerHTML = `<div style="color:var(--text-dim);font-size:13px">${t('profile.noFriends')}</div>`
     return
   }
 
@@ -402,7 +403,7 @@ async function _loadFriends() {
     return `<div class="friend-row">
       <div class="friend-avatar">${initial}</div>
       <div class="friend-email">${_esc(label)}</div>
-      <button class="friend-remove-btn" data-id="${p.id}">Remove</button>
+      <button class="friend-remove-btn" data-id="${p.id}">${t('profile.remove')}</button>
     </div>`
   }).join('')
 
@@ -439,8 +440,8 @@ async function _loadPending() {
     return `<div class="friend-row">
       <div class="friend-avatar">${label.replace('@', '')[0]?.toUpperCase() || '?'}</div>
       <div class="friend-email">${_esc(label)}</div>
-      <button class="btn-primary friend-accept-btn" data-id="${req.id}" style="padding:5px 10px;font-size:12px;flex-shrink:0">Accept</button>
-      <button class="friend-decline-btn" data-id="${req.id}" style="font-size:12px;padding:5px 10px;background:transparent;border:1px solid var(--border);border-radius:6px;color:var(--text-dim);cursor:pointer;flex-shrink:0">Decline</button>
+      <button class="btn-primary friend-accept-btn" data-id="${req.id}" style="padding:5px 10px;font-size:12px;flex-shrink:0">${t('profile.accept')}</button>
+      <button class="friend-decline-btn" data-id="${req.id}" style="font-size:12px;padding:5px 10px;background:transparent;border:1px solid var(--border);border-radius:6px;color:var(--text-dim);cursor:pointer;flex-shrink:0">${t('profile.decline')}</button>
     </div>`
   }).join('')
 
@@ -457,10 +458,10 @@ async function _checkSync() {
   if (!el) return
   try {
     const { error } = await supabase.from('observations').select('id').limit(1)
-    el.textContent   = error ? 'Offline' : 'Connected'
+    el.textContent   = error ? t('profile.offline') : t('profile.connected')
     el.style.color   = error ? 'var(--amber)' : ''
   } catch {
-    el.textContent = 'Offline'
+    el.textContent = t('profile.offline')
     el.style.color = 'var(--amber)'
   }
 }
@@ -473,7 +474,7 @@ async function _searchFriend() {
   const q = input.value.trim()
   if (!q) return
 
-  results.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">Searching…</div>`
+  results.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('profile.searching')}</div>`
 
   const { data, error } = await supabase
     .from('profiles')
@@ -483,7 +484,7 @@ async function _searchFriend() {
     .limit(5)
 
   if (error || !data?.length) {
-    results.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">No users found.</div>`
+    results.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('profile.noUsersFound')}</div>`
     return
   }
 
@@ -498,7 +499,7 @@ async function _searchFriend() {
         <div class="friend-name">${_esc(name)}</div>
         ${handle ? `<div class="friend-handle">${_esc(handle)}</div>` : ''}
       </div>
-      <button class="btn-primary send-request-btn" data-id="${p.id}" style="padding:5px 10px;font-size:12px;flex-shrink:0">Add</button>
+      <button class="btn-primary send-request-btn" data-id="${p.id}" style="padding:5px 10px;font-size:12px;flex-shrink:0">${t('profile.add')}</button>
     </div>`
   }).join('')
 
@@ -514,19 +515,19 @@ async function _sendRequest(friendId, btn) {
     .insert({ requester_id: state.user.id, addressee_id: friendId, status: 'pending' })
 
   if (error) {
-    showToast(error.code === '23505' ? 'Request already sent' : `Error: ${error.message}`)
+    showToast(error.code === '23505' ? t('profile.requestAlreadySent') : t('common.errorPrefix', { message: error.message }))
     btn.disabled = false
   } else {
-    showToast('Friend request sent ✓')
-    btn.textContent = 'Sent'
+    showToast(t('profile.requestSent'))
+    btn.textContent = t('profile.sent')
   }
 }
 
 async function _acceptRequest(friendshipId) {
   const { error } = await supabase
     .from('friendships').update({ status: 'accepted' }).eq('id', friendshipId)
-  if (error) { showToast('Error: ' + error.message); return }
-  showToast('Friend accepted ✓')
+  if (error) { showToast(t('common.errorPrefix', { message: error.message })); return }
+  showToast(t('profile.friendAccepted'))
   loadProfile()
 }
 
@@ -539,21 +540,19 @@ async function _removeFriend(friendUserId) {
   const uid = state.user.id
   await supabase.from('friendships').delete()
     .or(`and(requester_id.eq.${uid},addressee_id.eq.${friendUserId}),and(requester_id.eq.${friendUserId},addressee_id.eq.${uid})`)
-  showToast('Friend removed')
+  showToast(t('profile.friendRemoved'))
   loadProfile()
 }
 
 async function _deleteAccount() {
   const email = state.user?.email || 'this account'
-  const confirmed = window.confirm(
-    `Delete ${email} permanently?\n\nThis removes your profile, observations, comments, friendships, and uploaded images. This cannot be undone.`
-  )
+  const confirmed = window.confirm(t('profile.deleteConfirm', { email }))
   if (!confirmed) return
 
   const btn = document.getElementById('delete-account-btn')
   btn.disabled = true
   const originalLabel = btn.textContent
-  btn.textContent = 'Deleting…'
+  btn.textContent = t('profile.deleting')
 
   const { error } = await supabase.functions.invoke('delete-account', {
     body: {},
@@ -563,9 +562,9 @@ async function _deleteAccount() {
     btn.disabled = false
     btn.textContent = originalLabel
     if (String(error.message || '').toLowerCase().includes('failed to send')) {
-      showToast('Delete account function is not deployed yet')
+      showToast(t('profile.deleteFunctionMissing'))
     } else {
-      showToast(`Could not delete account: ${error.message}`)
+      showToast(t('profile.deleteFailed', { message: error.message }))
     }
     return
   }
@@ -575,7 +574,7 @@ async function _deleteAccount() {
   showAuthOverlay()
   btn.disabled = false
   btn.textContent = originalLabel
-  showToast('Account deleted')
+  showToast(t('profile.accountDeleted'))
 }
 
 function _esc(str) {

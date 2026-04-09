@@ -1,4 +1,5 @@
 import { state } from '../state.js'
+import { formatLightReading, t } from '../i18n.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 
@@ -76,23 +77,23 @@ export async function startCamera(options = {}) {
       const ua = navigator.userAgent
       let instructions
       if (_isNativeApp()) {
-        instructions = 'Allow Camera for Sporely in Android app permissions, then tap "Try again".'
+        instructions = t('capture.cameraPermissionAndroid')
       } else if (/iPhone|iPad/.test(ua)) {
-        instructions = 'On iPhone: open the Settings app → scroll down to Safari (or your browser) → Camera → Allow.'
+        instructions = t('capture.cameraPermissionIphone')
       } else if (/Firefox/.test(ua)) {
-        instructions = 'In Firefox: tap the lock icon in the address bar → Site permissions → Camera → Allow.'
+        instructions = t('capture.cameraPermissionFirefox')
       } else if (/SamsungBrowser/.test(ua)) {
-        instructions = 'In Samsung Internet: tap the lock icon in the address bar → Permissions → Camera → Allow.'
+        instructions = t('capture.cameraPermissionSamsung')
       } else {
-        instructions = 'Tap the lock or camera icon in your browser\'s address bar, allow camera access, then tap "Try again".'
+        instructions = t('capture.cameraPermissionBrowser')
       }
       body.textContent = instructions
       denied.style.display = 'flex'
     } else if (err.name === 'NotFoundError') {
-      body.textContent = 'No camera was found on this device.'
+      body.textContent = t('capture.noCameraFound')
       denied.style.display = 'flex'
     } else {
-      body.textContent = `Camera could not be started (${err.name}). Close other apps using the camera and try again.`
+      body.textContent = t('capture.cameraStartFailed', { name: err.name })
       denied.style.display = 'flex'
     }
   }
@@ -140,7 +141,7 @@ function capturePhoto() {
   vf.style.opacity    = '0.3'
   setTimeout(() => { vf.style.transition = 'opacity 0.15s'; vf.style.opacity = '1' }, 60)
 
-  showToast(`Photo ${state.batchCount} captured`)
+  showToast(t('capture.photoCaptured', { count: state.batchCount }))
 }
 
 function finishCapture() {
@@ -154,7 +155,7 @@ function toggleFlash() {
   const btn = document.getElementById('flash-btn')
   btn.style.background  = state.flashOn ? 'rgba(255,220,100,0.3)' : 'rgba(255,255,255,0.12)'
   btn.style.borderColor = state.flashOn ? 'rgba(255,220,100,0.5)' : 'rgba(255,255,255,0.15)'
-  showToast(`Flash ${state.flashOn ? 'on' : 'off'}`)
+  showToast(t(state.flashOn ? 'capture.flashOn' : 'capture.flashOff'))
 }
 
 function simulateLightReading() {
@@ -162,7 +163,7 @@ function simulateLightReading() {
   const lux = Math.round(200 + Math.random() * 600)
   const f   = (1.8 + Math.random() * 4).toFixed(1)
   const el  = document.getElementById('light-display')
-  if (el) el.textContent = `LIGHT: ${lux} LUX / F-STOP: ${f}`
+  if (el) el.textContent = formatLightReading(lux, f)
   setTimeout(simulateLightReading, 3000)
 }
 

@@ -32,27 +32,27 @@
       <!-- Login form -->
       <form id="login-form" class="auth-form">
         <h2 class="auth-title">Sign in</h2>
-        <label class="auth-label">Email
+        <label class="auth-label"><span id="login-email-label">Email</span>
           <input type="email" id="login-email" class="auth-input" placeholder="you@example.com" required autocomplete="email">
         </label>
-        <label class="auth-label">Password
+        <label class="auth-label"><span id="login-password-label">Password</span>
           <input type="password" id="login-password" class="auth-input" placeholder="••••••••" required autocomplete="current-password">
         </label>
         <button type="submit" class="auth-btn" id="login-btn">Sign in</button>
-        <p class="auth-switch">No account? <a href="#" id="show-signup">Create one</a></p>
+        <p class="auth-switch"><span id="login-switch-prefix">No account?</span> <a href="#" id="show-signup">Create one</a></p>
       </form>
 
       <!-- Signup form -->
       <form id="signup-form" class="auth-form" style="display:none">
         <h2 class="auth-title">Create account</h2>
-        <label class="auth-label">Email
+        <label class="auth-label"><span id="signup-email-label">Email</span>
           <input type="email" id="signup-email" class="auth-input" placeholder="you@example.com" required autocomplete="email">
         </label>
-        <label class="auth-label">Password
+        <label class="auth-label"><span id="signup-password-label">Password</span>
           <input type="password" id="signup-password" class="auth-input" placeholder="At least 6 characters" required autocomplete="new-password">
         </label>
         <button type="submit" class="auth-btn" id="signup-btn">Create account</button>
-        <p class="auth-switch">Already have one? <a href="#" id="show-login">Sign in</a></p>
+        <p class="auth-switch"><span id="signup-switch-prefix">Already have one?</span> <a href="#" id="show-login">Sign in</a></p>
       </form>
 
       <!-- Turnstile CAPTCHA -->
@@ -75,16 +75,44 @@
                            window.matchMedia('(display-mode: standalone)').matches
       if ((!isIOS && !isAndroid) || isStandalone) return
 
+      const locale = (navigator.language || 'en').toLowerCase()
+      const lang = locale.startsWith('nb') || locale.startsWith('nn') || locale.startsWith('no')
+        ? 'no'
+        : locale.startsWith('sv')
+          ? 'sv'
+          : locale.startsWith('de')
+            ? 'de'
+            : 'en'
+
       const hint = document.getElementById('auth-install-hint')
       const icon = document.getElementById('auth-install-icon')
       const text = document.getElementById('auth-install-text')
 
+      const copy = {
+        en: {
+          ios: '<strong>Install on iPhone:</strong> Tap the share button <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> in Safari, then <strong>"Add to Home Screen"</strong>',
+          android: '<strong>Install on Android:</strong> Tap the menu <strong>⋮</strong> in Chrome, then <strong>"Add to Home screen"</strong>'
+        },
+        no: {
+          ios: '<strong>Installer på iPhone:</strong> Trykk på delingsknappen <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> i Safari, og velg deretter <strong>"Legg til på hjemmeskjermen"</strong>',
+          android: '<strong>Installer på Android:</strong> Trykk på menyen <strong>⋮</strong> i Chrome, og velg deretter <strong>"Legg til på startskjermen"</strong>'
+        },
+        sv: {
+          ios: '<strong>Installera på iPhone:</strong> Tryck på delningsknappen <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> i Safari och välj sedan <strong>"Lägg till på hemskärmen"</strong>',
+          android: '<strong>Installera på Android:</strong> Tryck på menyn <strong>⋮</strong> i Chrome och välj sedan <strong>"Lägg till på startskärmen"</strong>'
+        },
+        de: {
+          ios: '<strong>Auf dem iPhone installieren:</strong> Tippe in Safari auf die Teilen-Schaltfläche <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> und wähle dann <strong>"Zum Home-Bildschirm"</strong>',
+          android: '<strong>Auf Android installieren:</strong> Tippe in Chrome auf das Menü <strong>⋮</strong> und wähle dann <strong>"Zum Startbildschirm hinzufügen"</strong>'
+        }
+      }[lang]
+
       if (isIOS) {
         icon.textContent = '📲'
-        text.innerHTML = '<strong>Install on iPhone:</strong> Tap the share button <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> in Safari, then <strong>"Add to Home Screen"</strong>'
+        text.innerHTML = copy.ios
       } else {
         icon.textContent = '📲'
-        text.innerHTML = '<strong>Install on Android:</strong> Tap the menu <strong>⋮</strong> in Chrome, then <strong>"Add to Home screen"</strong>'
+        text.innerHTML = copy.android
       }
       hint.style.display = 'flex'
     })()
@@ -138,7 +166,7 @@
         </div>
 
         <div class="section-header">
-          <div class="section-title">Recent Finds</div>
+          <div class="section-title" id="home-recent-finds-title">Recent Finds</div>
           <div class="section-link" id="recent-history-link">History →</div>
         </div>
 
@@ -147,7 +175,7 @@
         </div>
 
         <div class="section-header home-section-gap">
-          <div class="section-title">Recent Comments</div>
+          <div class="section-title" id="home-recent-comments-title">Recent Comments</div>
         </div>
 
         <div id="recent-comments-list">
@@ -157,17 +185,17 @@
         <div class="home-stats-row">
           <div class="home-stat">
             <div class="home-stat-val" id="hstat-obs">—</div>
-            <div class="home-stat-lbl">Finds</div>
+            <div class="home-stat-lbl" id="home-stat-finds-label">Finds</div>
           </div>
           <div class="home-stat-div"></div>
           <div class="home-stat">
             <div class="home-stat-val" id="hstat-sp">—</div>
-            <div class="home-stat-lbl">Species</div>
+            <div class="home-stat-lbl" id="home-stat-species-label">Species</div>
           </div>
           <div class="home-stat-div"></div>
           <div class="home-stat">
             <div class="home-stat-val" id="hstat-friends">—</div>
-            <div class="home-stat-lbl">Friends active</div>
+            <div class="home-stat-lbl" id="home-stat-friends-label">Friends active</div>
           </div>
         </div>
 
@@ -305,7 +333,7 @@
           <div class="review-count" id="review-count">New observation</div>
           <button class="btn-add-photo" id="add-photo-btn">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
-            Add photo
+            <span id="add-photo-label">Add photo</span>
           </button>
         </div>
         <span id="review-coords-text" style="display:none"></span>
@@ -377,7 +405,7 @@
       <div class="review-header">
         <button class="detail-back-btn" id="detail-back" type="button" aria-label="Back">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
-          Finds
+          <span id="detail-back-label">Finds</span>
         </button>
       </div>
 
@@ -471,7 +499,7 @@
       <div class="review-header">
         <button class="detail-back-btn" id="import-back" type="button">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
-          Home
+          <span id="import-back-label">Home</span>
         </button>
         <div class="review-time" id="import-session-count">0 groups</div>
       </div>
@@ -509,11 +537,11 @@
     </div>
 
     <!-- ═══════════════════════════ PROFILE ═══════════════════════════ -->
-    <div class="screen" id="screen-profile">
+      <div class="screen" id="screen-profile">
       <div class="app-header">
         <div class="header-brand">
           <div class="brand-icon">🍄</div>
-          Profile
+          <span id="profile-header-label">Profile</span>
         </div>
       </div>
       <div class="profile-body">
@@ -540,15 +568,15 @@
         <div class="profile-stats-row">
           <div class="profile-stat">
             <div class="profile-stat-val" id="stat-obs-count">—</div>
-            <div class="profile-stat-lbl">Finds</div>
+            <div class="profile-stat-lbl" id="profile-stat-finds-label">Finds</div>
           </div>
           <div class="profile-stat">
             <div class="profile-stat-val" id="stat-species-count">—</div>
-            <div class="profile-stat-lbl">Species</div>
+            <div class="profile-stat-lbl" id="profile-stat-species-label">Species</div>
           </div>
           <div class="profile-stat">
             <div class="profile-stat-val" id="stat-friends-count">—</div>
-            <div class="profile-stat-lbl">Friends</div>
+            <div class="profile-stat-lbl" id="profile-stat-friends-label">Friends</div>
           </div>
         </div>
 
@@ -640,22 +668,33 @@
         <div class="settings-handle"></div>
         <div class="settings-title">Settings</div>
 
-        <div class="settings-section-label">Appearance</div>
+        <div class="settings-section-label" id="settings-appearance-label">Appearance</div>
         <div class="theme-segment">
           <button class="theme-seg-btn" data-theme="auto">Auto</button>
           <button class="theme-seg-btn" data-theme="light">Light</button>
           <button class="theme-seg-btn" data-theme="dark">Dark</button>
         </div>
 
-        <div class="settings-section-label" style="margin-top:22px">Photo Import</div>
+        <div class="settings-section-label" id="settings-language-label" style="margin-top:22px">Language</div>
         <div class="settings-gap-row">
-          <div class="settings-gap-label">New observation after</div>
+          <label for="settings-language-select" class="settings-gap-label" id="settings-language-select-label">App language</label>
+          <select id="settings-language-select" class="settings-gap-input" style="width:auto">
+            <option value="en">English</option>
+            <option value="nb_NO">Norsk</option>
+            <option value="sv_SE">Svenska</option>
+            <option value="de_DE">Deutsch</option>
+          </select>
+        </div>
+
+        <div class="settings-section-label" id="settings-photo-import-label" style="margin-top:22px">Photo Import</div>
+        <div class="settings-gap-row">
+          <div class="settings-gap-label" id="settings-gap-label">New observation after</div>
           <input type="number" id="settings-gap-input" class="settings-gap-input" min="1" max="120" value="1">
           <span class="settings-gap-unit">min</span>
         </div>
         <p class="settings-gap-hint">Photos taken within this window are grouped into one observation.</p>
 
-        <div class="settings-version">v0.2.1</div>
+        <div class="settings-version" id="settings-version">v0.2.0</div>
       </div>
     </div>
 
