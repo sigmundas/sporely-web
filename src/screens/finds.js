@@ -4,6 +4,7 @@ import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { fetchFirstImages } from '../images.js'
+import { QUEUE_EVENT, getQueuedObservations } from '../sync-queue.js'
 import { openFindDetail } from './find_detail.js'
 
 let currentScope = 'mine'
@@ -67,6 +68,12 @@ export function initFinds() {
       loadFinds()
     })
   })
+
+  window.addEventListener(QUEUE_EVENT, () => {
+    if (state.currentScreen === 'finds' && currentScope === 'mine') {
+      loadFinds()
+    }
+  })
 }
 
 function _syncScopeTabs() {
@@ -113,6 +120,7 @@ export async function loadFinds() {
   const list = document.getElementById('finds-list')
   if (!state.user) return
 
+  _syncScopeTabs()
   list.innerHTML = ''
 
   if (currentScope === 'mine') {
@@ -130,19 +138,23 @@ export async function loadFinds() {
 async function _fetchMine() {
   const { data, error } = await supabase
     .from('observations')
-    .select('id, user_id, date, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
+    .select('id, user_id, date, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
     .eq('user_id', state.user.id)
     .order('date', { ascending: false })
     .limit(100)
 
   if (error) { showToast(t('finds.couldNotLoad')); _cache['mine'] = []; return }
-  _cache['mine'] = data || []
+
+  const queued = await getQueuedObservations(state.user.id)
+  const items = [...queued, ...(data || [])]
+  items.sort((a, b) => _sortTs(b) - _sortTs(a))
+  _cache['mine'] = items
 }
 
 async function _fetchFriends() {
   const { data, error } = await supabase
     .from('observations_friend_view')
-    .select('id, user_id, date, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
+    .select('id, user_id, date, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
     .neq('user_id', state.user.id)
     .order('date', { ascending: false })
     .limit(100)
@@ -154,7 +166,7 @@ async function _fetchFriends() {
 async function _fetchCommunity() {
   const { data, error } = await supabase
     .from('observations_community_view')
-    .select('id, user_id, date, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
+    .select('id, user_id, date, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
     .order('date', { ascending: false })
     .limit(100)
 
@@ -191,6 +203,12 @@ async function _loadProfilesForScope(data) {
 function _matches(obs, q) {
   return [obs.common_name, obs.genus, obs.species, obs.location, obs.notes]
     .some(f => f && f.toLowerCase().includes(q))
+}
+
+function _sortTs(obs) {
+  const primary = obs?.captured_at || obs?.date || obs?._queuedAt || 0
+  const ts = new Date(primary).getTime()
+  return Number.isFinite(ts) ? ts : 0
 }
 
 function _applyFilter() {
@@ -279,7 +297,7 @@ function _renderTiles(list, subtitle, data) {
 
   subtitle.textContent = tp('finds.observationCount', data.length)
 
-  fetchFirstImages(data.map(o => o.id), { variant: 'small' }).then(imageUrls => {
+  fetchFirstImages(data.filter(obs => !obs._pendingSync).map(o => o.id), { variant: 'small' }).then(imageUrls => {
     let html = '<div class="find-tiles-grid">'
     data.forEach(obs => {
       const name = obs.common_name
@@ -295,7 +313,14 @@ function _renderTiles(list, subtitle, data) {
     list.innerHTML = html
 
     list.querySelectorAll('.find-tile[data-id]').forEach(tile => {
-      tile.addEventListener('click', () => openFindDetail(tile.dataset.id))
+      tile.addEventListener('click', () => {
+        const obs = data.find(item => String(item.id) === String(tile.dataset.id))
+        if (obs?._pendingSync) {
+          showToast(t('finds.pendingUpload'))
+          return
+        }
+        openFindDetail(tile.dataset.id)
+      })
     })
     _wireImageFallback(list)
   })
@@ -318,7 +343,7 @@ function _renderCards(list, subtitle, data, options) {
   subtitle.textContent = tp('finds.observationCount', data.length)
 
   const imageVariant = variant === 'cards' ? 'medium' : variant === 'two' ? 'medium' : 'small'
-  fetchFirstImages(data.map(o => o.id), { variant: imageVariant }).then(imageUrls => {
+  fetchFirstImages(data.filter(obs => !obs._pendingSync).map(o => o.id), { variant: imageVariant }).then(imageUrls => {
     // Group by date
     const groups = []
     const seen   = {}
@@ -365,25 +390,33 @@ function _renderCards(list, subtitle, data, options) {
           ? ''
           : `<div class="find-card-author">${_esc(authorHandle)}</div>`
 
-        const visIcon = obs.visibility === 'private'
-          ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`
-          : obs.visibility === 'friends'
-            ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
-            : ''
+        const statusIcon = obs._pendingSync
+          ? `<svg class="find-card-vis-icon find-card-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
+          : obs.visibility === 'private'
+            ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`
+            : obs.visibility === 'friends'
+              ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
+              : ''
+        const locText = obs._pendingSync ? t('finds.pendingUpload') : loc
 
         const photoInner = _imageHtml(imageUrls[obs.id], '', 'find-card-photo-placeholder')
+        const metaLead = obs._pendingSync
+          ? `<span class="find-card-loc-text">${t('finds.pendingUpload')}</span>`
+          : loc
+            ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+            <span class="find-card-loc-text">${loc}</span>`
+            : '<span></span>'
 
         if (variant === 'two') {
           html += `<div class="find-card-wrap find-card-wrap--two">
-            <div class="find-card find-card--two" data-id="${obs.id}">
+            <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
               <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
                 ${authorMeta}
-                ${loc || visIcon ? `<div class="find-card-loc">
-                  ${loc ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                  <span class="find-card-loc-text">${loc}</span>` : '<span></span>'}
-                  ${visIcon}
+                ${locText || statusIcon ? `<div class="find-card-loc">
+                  ${metaLead}
+                  ${statusIcon}
                 </div>` : ''}
               </div>
             </div>
@@ -393,7 +426,7 @@ function _renderCards(list, subtitle, data, options) {
 
         if (variant === 'three') {
           html += `<div class="find-card-wrap find-card-wrap--three">
-            <div class="find-card find-card--three" data-id="${obs.id}">
+            <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
               <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
               <div class="find-card-body find-card-body--three">
                 ${compactNameHtml}
@@ -404,15 +437,14 @@ function _renderCards(list, subtitle, data, options) {
         }
 
         html += `<div class="find-card-wrap">
-          <div class="find-card" data-id="${obs.id}">
+          <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
             <div class="find-card-photo-wrap">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
             <div class="find-card-body">
               ${nameHtml}
               ${authorMeta}
-              ${loc || visIcon ? `<div class="find-card-loc">
-                ${loc ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                <span class="find-card-loc-text">${loc}</span>` : '<span></span>'}
-                ${visIcon}
+              ${locText || statusIcon ? `<div class="find-card-loc">
+                ${metaLead}
+                ${statusIcon}
               </div>` : ''}
             </div>
           </div>
@@ -425,7 +457,14 @@ function _renderCards(list, subtitle, data, options) {
     list.innerHTML = html
 
     list.querySelectorAll('.find-card[data-id]').forEach(card => {
-      card.addEventListener('click', () => openFindDetail(card.dataset.id))
+      card.addEventListener('click', () => {
+        const obs = data.find(item => String(item.id) === String(card.dataset.id))
+        if (obs?._pendingSync) {
+          showToast(t('finds.pendingUpload'))
+          return
+        }
+        openFindDetail(card.dataset.id)
+      })
     })
     _wireImageFallback(list)
   })

@@ -3,6 +3,7 @@ import { uploadObservationImageVariants } from './images.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
+const QUEUE_EVENT = 'sporely-sync-queue-changed'
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -13,6 +14,18 @@ function openDB() {
     req.onsuccess = () => resolve(req.result)
     req.onerror = () => reject(req.error)
   })
+}
+
+function readAll(store) {
+  return new Promise((resolve, reject) => {
+    const req = store.getAll()
+    req.onsuccess = () => resolve(req.result || [])
+    req.onerror = () => reject(req.error)
+  })
+}
+
+function notifyQueueChanged() {
+  window.dispatchEvent(new CustomEvent(QUEUE_EVENT))
 }
 
 export async function enqueueObservation(obsPayload, imageBlobs) {
@@ -30,12 +43,45 @@ export async function enqueueObservation(obsPayload, imageBlobs) {
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => {
+      notifyQueueChanged()
       triggerSync()
       resolve()
     }
     tx.onerror = () => reject(tx.error)
   })
 }
+
+export async function getQueuedObservations(userId) {
+  if (!userId) return []
+
+  const db = await openDB()
+  const tx = db.transaction(STORE_NAME, 'readonly')
+  const store = tx.objectStore(STORE_NAME)
+  const items = await readAll(store)
+
+  return items
+    .filter(item => item?.userId === userId && item?.obsPayload)
+    .map(item => ({
+      id: `queued-${item.id}`,
+      user_id: item.userId,
+      date: item.obsPayload.date || null,
+      captured_at: item.obsPayload.captured_at || null,
+      genus: item.obsPayload.genus || null,
+      species: item.obsPayload.species || null,
+      common_name: item.obsPayload.common_name || null,
+      location: item.obsPayload.location || null,
+      notes: item.obsPayload.notes || null,
+      uncertain: !!item.obsPayload.uncertain,
+      visibility: item.obsPayload.visibility || 'friends',
+      gps_latitude: item.obsPayload.gps_latitude ?? null,
+      gps_longitude: item.obsPayload.gps_longitude ?? null,
+      source_type: item.obsPayload.source_type || 'personal',
+      _pendingSync: true,
+      _queuedAt: item.ts || Date.now(),
+    }))
+}
+
+export { QUEUE_EVENT }
 
 let isSyncing = false
 
@@ -90,6 +136,7 @@ export async function triggerSync() {
           delTx.oncomplete = res
           delTx.onerror = rej
         })
+        notifyQueueChanged()
       } catch (err) {
         console.error('Background sync failed for queue item', item.id, err)
         break // Network or RLS failure — halt processing to avoid looping errors

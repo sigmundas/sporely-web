@@ -5,6 +5,7 @@ import { showToast } from '../toast.js'
 import { searchTaxa, runArtsorakelForBlobs, formatDisplayName } from '../artsorakel.js'
 import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
+import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
 
 export function initReview() {
@@ -379,7 +380,7 @@ async function saveObservationBatch() {
     }
     resetLocationState()
     await refreshHome()
-    navigate('finds')
+    await openFinds('mine', { resetSearch: true })
   } catch (err) {
     showToast(t('review.syncFailed', { message: err.message }))
     console.error('Sync error:', err)

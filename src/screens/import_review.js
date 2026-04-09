@@ -9,7 +9,7 @@ import { FilePicker } from '@capawesome/capacitor-file-picker';
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js';
 import { uploadObservationImageVariants } from '../images.js';
 import { enqueueObservation } from '../sync-queue.js';
-import { loadFinds } from './finds.js';
+import { openFinds } from './finds.js';
 import { openFindDetail } from './find_detail.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 
@@ -933,7 +933,11 @@ async function saveAll() {
   saveBtn.disabled = true;
 
   const activeSessions = sessions.filter(s => s.files.length > 0);
-  if (!activeSessions.length) { saveBtn.disabled = false; navigate('finds'); return; }
+  if (!activeSessions.length) {
+    saveBtn.disabled = false;
+    await openFinds('mine', { resetSearch: true });
+    return;
+  }
 
   const allBlobUrls = sessions.flatMap(s => s.blobUrls);
   let savedCount = 0;
@@ -967,8 +971,7 @@ async function saveAll() {
   clearImportSessions();
   if (savedCount > 0) showToast(t('import.saved', { count: tp('counts.observation', savedCount) }));
   saveBtn.disabled = false;
-  navigate('finds');
-  loadFinds();
+  await openFinds('mine', { resetSearch: true });
 }
 
 // Convert any image file to a JPEG Blob via Canvas.
