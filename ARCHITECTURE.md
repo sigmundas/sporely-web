@@ -4,7 +4,7 @@
 
 > For Supabase schema, RLS rules, and Storage conventions see [SUPABASE_DB.md](SUPABASE_DB.md).
 
-A mobile-first PWA companion to the MycoLog desktop app (PySide6 / SQLite).
+A mobile-first PWA companion to the Sporely desktop app (PySide6 / SQLite).
 Field capture (GPS + photos) and cloud sync via Supabase. Not a replacement
 for the desktop — the desktop owns taxonomy, microscopy, and publishing to
 Artsobservasjoner / Artportalen.
@@ -103,7 +103,7 @@ Raw `fetch` is no longer used anywhere — everything goes through the SDK.
 
 ## Database schema (Supabase side)
 
-Full SQL is in `MycoLog/database/` (the desktop app repo).
+Full SQL is in `sporely/database/` (the desktop app repo).
 Key tables used by the web app:
 
 ### `observations`
@@ -204,9 +204,9 @@ Multiple groups:
 
 ---
 
-## Desktop ↔ Cloud sync (desktop-side, MycoLog)
+## Desktop ↔ Cloud sync (desktop-side, Sporely)
 
-Implemented in `MycoLog/utils/cloud_sync.py` using the Supabase REST API directly (`requests`).
+Implemented in `sporely/utils/cloud_sync.py` using the Supabase REST API directly (`requests`).
 
 **Push (desktop → cloud):**
 - Queries SQLite for `cloud_id IS NULL OR sync_status = 'dirty'`
@@ -276,7 +276,7 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 
 ## Next steps
 
-1. **Run unique constraints SQL** in `MycoLog/database/supabase_unique_constraints.sql`
+1. **Run unique constraints SQL** in `sporely/database/supabase_unique_constraints.sql`
    to add `UNIQUE (desktop_id, user_id)` — needed for desktop sync upsert performance.
 
 2. **Offline queue** — wrap capture/import save failures in IndexedDB so photos aren't

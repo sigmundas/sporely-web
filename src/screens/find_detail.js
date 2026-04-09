@@ -1,4 +1,5 @@
 import { supabase } from '../supabase.js'
+import { formatDate, formatTime, getTaxonomyLanguage, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
@@ -26,7 +27,7 @@ export function initFindDetail() {
 
   input.addEventListener('input', () => {
     selectedTaxon = null
-    _setDetailHeader({ fallbackName: input.value.trim() || 'Unknown species' })
+    _setDetailHeader({ fallbackName: input.value.trim() || t('detail.unknownSpecies') })
     clearTimeout(debounce)
     debounce = setTimeout(() => _searchTaxon(input.value.trim(), dropdown), 280)
   })
@@ -51,9 +52,13 @@ export async function openFindDetail(obsId) {
   currentLocationOverride = null
 
   // Update back button label — state.currentScreen is still the previous screen at this point
-  const prevLabel = { home: 'Home', finds: 'Finds', map: 'Map' }[state.currentScreen] || 'Back'
-  const backBtn = document.getElementById('detail-back')
-  backBtn.childNodes[backBtn.childNodes.length - 1].textContent = ' ' + prevLabel
+  const prevLabel = {
+    home: t('detail.backHome'),
+    finds: t('detail.backFinds'),
+    map: t('detail.backMap'),
+  }[state.currentScreen] || t('detail.backGeneric')
+  const backLabel = document.getElementById('detail-back-label')
+  if (backLabel) backLabel.textContent = prevLabel
 
   _resetForm()
   navigate('find-detail')
@@ -65,7 +70,7 @@ export async function openFindDetail(obsId) {
     .single()
 
   if (error || !obs) {
-    showToast('Could not load observation')
+    showToast(t('detail.couldNotLoadObservation'))
     navigate('finds')
     return
   }
@@ -79,7 +84,7 @@ export async function openFindDetail(obsId) {
     commonName: obs.common_name || '',
     genus: obs.genus || '',
     species: obs.species || '',
-    fallbackName: displayName.trim() || 'Unknown species',
+    fallbackName: displayName.trim() || t('detail.unknownSpecies'),
   })
   document.getElementById('detail-taxon-input').value = displayName.trim()
   document.getElementById('detail-location').value    = obs.location  || ''
@@ -88,7 +93,7 @@ export async function openFindDetail(obsId) {
   document.getElementById('detail-uncertain').checked = !!obs.uncertain
 
   document.getElementById('detail-date').textContent = obs.date
-    ? new Date(obs.date).toLocaleDateString('no-NO', { day: 'numeric', month: 'short', year: 'numeric' })
+    ? formatDate(obs.date, { day: 'numeric', month: 'short', year: 'numeric' })
     : '—'
 
   // Show capture time from EXIF if available
@@ -96,7 +101,7 @@ export async function openFindDetail(obsId) {
   const timeVal = document.getElementById('detail-time-val')
   if (obs.captured_at) {
     const t = new Date(obs.captured_at)
-    timeVal.textContent = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    timeVal.textContent = formatTime(t, { hour: '2-digit', minute: '2-digit' })
     timeEl.style.display = 'inline'
   } else {
     timeEl.style.display = 'none'
@@ -167,15 +172,15 @@ async function _reverseGeocode(lat, lon) {
 
 async function _useCurrentLocation() {
   if (!currentObsIsOwner) {
-    showToast('Only the owner can overwrite the location')
+    showToast(t('detail.onlyOwnerOverwriteLocation'))
     return
   }
   if (!state.gps) {
-    showToast('Current GPS unavailable')
+    showToast(t('detail.currentGpsUnavailable'))
     return
   }
 
-  const confirmed = window.confirm('Current location will overwrite the existing location. Continue?')
+  const confirmed = window.confirm(t('detail.overwriteLocationConfirm'))
   if (!confirmed) return
 
   const lat = state.gps.lat
@@ -187,17 +192,17 @@ async function _useCurrentLocation() {
   document.getElementById('detail-coords').textContent = `${lat.toFixed(4)}° N, ${lon.toFixed(4)}° E`
   document.getElementById('detail-coords').style.display = 'block'
   currentLocationOverride = { lat, lon, location: name || value }
-  showToast('Location set from current GPS')
+  showToast(t('detail.locationSet'))
 }
 
 async function _runAI() {
   const btn       = document.getElementById('detail-ai-btn')
   const resultsEl = document.getElementById('detail-ai-results')
   const galleryImgs = Array.from(document.querySelectorAll('#detail-gallery img'))
-  if (!galleryImgs.length) { showToast('No photo to identify'); return }
+  if (!galleryImgs.length) { showToast(t('detail.noPhotoToIdentify')); return }
 
   btn.disabled = true
-  btn.innerHTML = '<div class="ai-dot"></div> Identifying…'
+  btn.innerHTML = `<div class="ai-dot"></div> ${t('review.identifying')}`
   resultsEl.style.display = 'none'
 
   try {
@@ -211,10 +216,10 @@ async function _runAI() {
     const blobs = blobResults
       .filter(result => result.status === 'fulfilled' && result.value instanceof Blob)
       .map(result => result.value)
-    const predictions = await runArtsorakelForBlobs(blobs, 'no')
+    const predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage())
 
     if (!predictions?.length) {
-      showToast('No match found')
+      showToast(t('review.noMatch'))
       return
     }
 
@@ -242,16 +247,16 @@ async function _runAI() {
           commonName: selectedTaxon.vernacularName || '',
           genus: selectedTaxon.genus || '',
           species: selectedTaxon.specificEpithet || '',
-          fallbackName: p.displayName || 'Unknown species',
+          fallbackName: p.displayName || t('detail.unknownSpecies'),
         })
         resultsEl.style.display = 'none'
       })
     })
   } catch (err) {
-    showToast(`Artsorakel: ${err.message}`)
+    showToast(t('common.artsorakelError', { message: err.message }))
   } finally {
     btn.disabled = false
-    btn.innerHTML = '<div class="ai-dot"></div> Identify with Artsorakel AI'
+    btn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
   }
 }
 
@@ -270,7 +275,7 @@ function _resetForm() {
   document.getElementById('detail-habitat').value     = ''
   document.getElementById('detail-notes').value       = ''
   document.getElementById('detail-uncertain').checked = false
-  _setDetailHeader({ fallbackName: 'Unknown species' })
+  _setDetailHeader({ fallbackName: t('detail.unknownSpecies') })
   document.getElementById('detail-date').textContent  = '—'
   const timeEl = document.getElementById('detail-time')
   const timeVal = document.getElementById('detail-time-val')
@@ -325,7 +330,7 @@ function _applyOwnershipMode(isOwner) {
 async function _searchTaxon(q, dropdown) {
   if (q.length < 2) { dropdown.style.display = 'none'; return }
 
-  const results = await searchTaxa(q, 'no')
+  const results = await searchTaxa(q, getTaxonomyLanguage())
   if (!results.length) { dropdown.style.display = 'none'; return }
 
   dropdown.innerHTML = results.map(r =>
@@ -344,20 +349,20 @@ async function _searchTaxon(q, dropdown) {
         commonName: selectedTaxon.vernacularName || '',
         genus: selectedTaxon.genus || '',
         species: selectedTaxon.specificEpithet || '',
-        fallbackName: selectedTaxon.displayName || 'Unknown species',
+        fallbackName: selectedTaxon.displayName || t('detail.unknownSpecies'),
       })
       dropdown.style.display = 'none'
     })
   })
 }
 
-function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackName = 'Unknown species' }) {
+function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackName = t('detail.unknownSpecies') }) {
   const commonEl = document.getElementById('detail-title-common')
   const latinEl = document.getElementById('detail-title-latin')
   if (!commonEl || !latinEl) return
 
   const latinName = [genus, species].filter(Boolean).join(' ').trim()
-  const primaryName = String(commonName || '').trim() || String(fallbackName || '').trim() || 'Unknown species'
+  const primaryName = String(commonName || '').trim() || String(fallbackName || '').trim() || t('detail.unknownSpecies')
 
   commonEl.textContent = primaryName
   if (latinName && latinName.toLowerCase() !== primaryName.toLowerCase()) {
@@ -372,7 +377,7 @@ function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackN
 async function _save() {
   if (!currentObs) return
   if (!currentObsIsOwner) {
-    showToast('Only the owner can edit this observation')
+    showToast(t('detail.onlyOwnerEdit'))
     return
   }
 
@@ -407,21 +412,21 @@ async function _save() {
   btn.disabled = false
 
   if (error) {
-    showToast(`Save failed: ${error.message}`)
+    showToast(t('detail.saveFailed', { message: error.message }))
     return
   }
 
-  showToast('Saved ✓')
+  showToast(t('detail.saved'))
   _goBack()
 }
 
 async function _delete() {
   if (!currentObs) return
   if (!currentObsIsOwner) {
-    showToast('Only the owner can delete this observation')
+    showToast(t('detail.onlyOwnerDelete'))
     return
   }
-  if (!confirm('Delete this observation? This cannot be undone.')) return
+  if (!confirm(t('detail.deleteConfirm'))) return
 
   const btn = document.getElementById('detail-delete-btn')
   btn.disabled = true
@@ -446,16 +451,16 @@ async function _delete() {
 
   btn.disabled = false
 
-  if (error) { showToast(`Delete failed: ${error.message}`); return }
+  if (error) { showToast(t('detail.deleteFailed', { message: error.message })); return }
 
-  showToast('Observation deleted')
+  showToast(t('detail.deleted'))
   _goBack()
 }
 
 async function _loadComments(obsId) {
   const list = document.getElementById('comments-list')
   if (!list) return
-  list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:8px 0">Loading…</div>'
+  list.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('common.loading')}</div>`
 
   const { data, error } = await supabase
     .from('comments')
@@ -465,12 +470,12 @@ async function _loadComments(obsId) {
 
   if (error) {
     console.warn('Comment load failed:', error.message)
-    list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:8px 0">Could not load comments.</div>'
+    list.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('comments.couldNotLoad')}</div>`
     return
   }
 
   if (!data?.length) {
-    list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:8px 0">No comments yet.</div>'
+    list.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('comments.none')}</div>`
     return
   }
 
@@ -478,7 +483,7 @@ async function _loadComments(obsId) {
 
   list.innerHTML = data.map(c => {
     const { name, initial } = getCommentAuthor(authorMap[c.user_id])
-    const date = new Date(c.created_at).toLocaleDateString('no-NO', { day: 'numeric', month: 'short' })
+    const date = formatDate(c.created_at, { day: 'numeric', month: 'short' })
     return `<div class="comment-row">
       <div class="comment-avatar">${_esc(initial)}</div>
       <div class="comment-body-wrap">
@@ -583,9 +588,9 @@ async function _sendComment() {
     }))
   }
   btn.disabled = false
-  if (error) { showToast(`Could not post comment: ${error.message}`); return }
+  if (error) { showToast(t('comments.postFailed', { message: error.message })); return }
   input.value = ''
-  showToast('Comment posted ✓')
+  showToast(t('comments.posted'))
   _loadComments(currentObs.id)
 }
 

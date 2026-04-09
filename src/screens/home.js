@@ -1,4 +1,5 @@
 import { supabase } from '../supabase.js'
+import { formatDate, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
@@ -76,7 +77,7 @@ async function loadRecentFinds() {
     .slice(0, 5)
 
   if (!combined.length) {
-    list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">No observations yet.</p>`
+    list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">${t('home.noObservations')}</p>`
     return
   }
 
@@ -85,7 +86,7 @@ async function loadRecentFinds() {
 
   list.innerHTML = combined.map(obs => {
     const latin       = obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus
-    const displayName = obs.common_name || latin || 'Unidentified'
+    const displayName = obs.common_name || latin || t('home.unidentified')
     const subtitle    = obs.common_name && latin ? latin : null
     const isIdentified = !!(obs.genus || obs.common_name)
     const loc    = obs.location || (
@@ -133,7 +134,7 @@ async function loadRecentComments() {
 
   if (error) {
     console.warn('Recent comments load failed:', error.message)
-    list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">Could not load comments.</p>`
+    list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">${t('comments.couldNotLoad')}</p>`
     return
   }
 
@@ -156,7 +157,7 @@ async function loadRecentComments() {
   const combined = merged.slice(0, 5)
 
   if (!combined.length) {
-    list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">No comments yet.</p>`
+    list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">${t('comments.none')}</p>`
     return
   }
 
@@ -175,7 +176,7 @@ async function loadRecentComments() {
 
   list.innerHTML = combined.map(comment => {
     const { name, initial } = getCommentAuthor(authorMap[comment.user_id])
-    const date = new Date(comment.created_at).toLocaleDateString('no-NO', { day: 'numeric', month: 'short' })
+    const date = formatDate(comment.created_at, { day: 'numeric', month: 'short' })
     const obs = obsMap[comment.observation_id]
     const species = obs
       ? (obs.common_name || (obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus) || '')
@@ -271,7 +272,7 @@ async function _loadProfileMap(observations) {
 function _homeAuthorChip(obs, profileMap) {
   if (obs._owner === 'mine' || obs.user_id === state.user?.id) return ''
   const profile = profileMap[obs.user_id]
-  const label = profile?.username ? `@${profile.username}` : (profile?.display_name || 'Unknown')
+  const label = profile?.username ? `@${profile.username}` : (profile?.display_name || t('common.unknown'))
   if (profile?.avatar_url) {
     return `<div class="observation-author-chip observation-author-chip--home" title="${_esc(label)}">
       <img src="${_esc(profile.avatar_url)}" alt="${_esc(label)}" loading="lazy" decoding="async">

@@ -4,6 +4,8 @@
 
 - **URL:** `https://zkpjklzfwzefhjluvhfw.supabase.co`
 - **Publishable (anon) key:** `sb_publishable_nZrERVFN3WR4Aqn2yggc7Q_siAG1TCV`
+- Prefer `.env.local` / `.env.example` for client config overrides. The current
+  production values are also kept as code fallbacks in `src/supabase.js`.
 - The client is created once in `src/supabase.js` and imported everywhere. Never recreate it.
 - Never use raw `fetch` for Supabase — always use the SDK client.
 
@@ -140,7 +142,7 @@ Deserialise before pushing from desktop.
 
 ## Desktop sync notes (for context, not implemented in web)
 
-- Desktop push/pull is handled by `MycoLog/utils/cloud_sync.py`.
+- Desktop push/pull is handled by `sporely/utils/cloud_sync.py`.
 - `desktop_id` on cloud rows is the bridge: desktop sets it, web must never overwrite it.
 - `sync_status` on local SQLite rows: `'local'` | `'synced'` | `'dirty'`.
   Call `mark_observation_dirty(id)` after any local edit.

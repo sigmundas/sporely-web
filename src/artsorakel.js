@@ -6,6 +6,7 @@
  */
 
 import { supabase } from './supabase.js'
+import { t } from './i18n.js'
 
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
 
@@ -122,7 +123,7 @@ export async function runArtsorakel(blob, lang = 'no') {
         scientificName: sci || null,
         vernacularName: vern || null,
         displayName:    vern && sci && vern.toLowerCase() !== sci.toLowerCase()
-                          ? `${vern} (${sci})` : vern || sci || 'Unknown',
+                          ? `${vern} (${sci})` : vern || sci || t('common.unknown'),
         adbUrl:         pickUrl(pred, taxon),
       }
     })

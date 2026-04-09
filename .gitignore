@@ -3,6 +3,11 @@
 GEMINI.md
 node_modules/
 dist/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # Local Capacitor output
 android/.idea/
@@ -19,3 +24,5 @@ android/app/src/main/assets/capacitor.plugins.json
 # Gradle
 *.apk
 *.aab
+
+!.env.example

@@ -2,6 +2,7 @@ import './style.css'
 import './theme.js'   // applies saved theme immediately, no flash
 
 import { supabase } from './supabase.js'
+import { getLocale, initI18n, onLocaleChange, setLocale } from './i18n.js'
 import { state } from './state.js'
 import { startGeo } from './geo.js'
 import { navigate } from './router.js'
@@ -10,13 +11,15 @@ import { initAuth, showAuthOverlay, hideAuthOverlay, handleUrlHashError } from '
 import { initHome, refreshHome } from './screens/home.js'
 import { initFinds, loadFinds } from './screens/finds.js'
 import { initCapture } from './screens/capture.js'
-import { initReview } from './screens/review.js'
+import { buildReviewGrid, initReview } from './screens/review.js'
 import { initFindDetail } from './screens/find_detail.js'
 import { initPhotoViewer } from './photo-viewer.js'
-import { initImportReview, restoreImportSessions } from './screens/import_review.js'
+import { initImportReview, renderSessions, restoreImportSessions } from './screens/import_review.js'
 import { loadImportSessions } from './import-store.js'
-import { initMap } from './screens/map.js'
+import { initMap, loadMap } from './screens/map.js'
 import { initProfile, loadProfile } from './screens/profile.js'
+
+initI18n()
 
 // ── Settings panel ────────────────────────────────────────────────────────────
 function initSettings() {
@@ -57,6 +60,11 @@ function initSettings() {
     gapInput.value = v
     localStorage.setItem('sporely-photo-gap', String(v))
   })
+
+  const localeSelect = document.getElementById('settings-language-select')
+  localeSelect.addEventListener('change', () => {
+    setLocale(localeSelect.value)
+  })
 }
 
 function _syncSettingsUI() {
@@ -66,6 +74,8 @@ function _syncSettingsUI() {
   })
   const gapInput = document.getElementById('settings-gap-input')
   if (gapInput) gapInput.value = localStorage.getItem('sporely-photo-gap') || '1'
+  const localeSelect = document.getElementById('settings-language-select')
+  if (localeSelect) localeSelect.value = getLocale()
 }
 
 // ── Nav ───────────────────────────────────────────────────────────────────────
@@ -107,6 +117,19 @@ async function bootApp(user) {
   const pending = await loadImportSessions()
   if (pending.length) restoreImportSessions(pending)
 }
+
+onLocaleChange(() => {
+  _syncSettingsUI()
+
+  if (!state.user) return
+
+  if (state.currentScreen === 'home') refreshHome()
+  if (state.currentScreen === 'finds') loadFinds()
+  if (state.currentScreen === 'review') buildReviewGrid()
+  if (state.currentScreen === 'import-review') renderSessions()
+  if (state.currentScreen === 'map') loadMap()
+  if (state.currentScreen === 'profile') loadProfile()
+})
 
 async function init() {
   handleUrlHashError()

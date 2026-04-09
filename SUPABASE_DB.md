@@ -161,7 +161,7 @@ For `avatars`:
 ## Operational checklist (recommended)
 
 1. **Run unique constraints SQL**
-   - File: `MycoLog/database/supabase_unique_constraints.sql`
+   - File: `sporely/database/supabase_unique_constraints.sql`
    - Purpose: add/ensure `UNIQUE (desktop_id, user_id)` (or equivalent)
    - Status: ✅ Applied
 2. **Verify Storage bucket existence**
@@ -188,9 +188,9 @@ For `avatars`:
 ## Where the "real SQL" lives (for maintainers)
 Do not copy policy SQL into this doc.
 Instead, policy/DDL changes live in:
-- `MycoLog/database/` (schema migrations / DDL artifacts)
-- any standalone SQL files referenced in `MycoLog/database/` for constraints/RPCs
+- `sporely/database/` (schema migrations / DDL artifacts)
+- any standalone SQL files referenced in `sporely/database/` for constraints/RPCs
 
 If you need exact definitions:
-- update the appropriate SQL files under `MycoLog/database/`
+- update the appropriate SQL files under `sporely/database/`
 - then (optionally) update this doc's descriptions/invariants accordingly
