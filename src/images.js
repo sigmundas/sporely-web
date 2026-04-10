@@ -2,24 +2,109 @@ import { supabase } from './supabase.js'
 
 const SIGNED_URL_TTL_SECONDS = 3600
 const SIGNED_URL_CACHE = new Map()
+const MEDIA_BASE_URL = String(import.meta.env.VITE_MEDIA_BASE_URL || 'https://media.sporely.no').replace(/\/+$/, '')
+const MEDIA_UPLOAD_BASE_URL = String(import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || '').replace(/\/+$/, '')
 const THUMB_VARIANTS = {
   small: { maxEdge: 240, quality: 0.82 },
   medium: { maxEdge: 720, quality: 0.82 },
 }
 
+const SUPABASE_STORAGE_PATH_PATTERNS = [
+  /\/storage\/v1\/object\/authenticated\/observation-images\/(.+)$/i,
+  /\/storage\/v1\/object\/public\/observation-images\/(.+)$/i,
+  /\/storage\/v1\/object\/observation-images\/(.+)$/i,
+]
+
+export function normalizeMediaKey(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      const url = new URL(text)
+      const normalizedBase = MEDIA_BASE_URL.toLowerCase()
+      const normalizedText = text.toLowerCase()
+      if (normalizedText.startsWith(`${normalizedBase}/`)) {
+        return text.slice(MEDIA_BASE_URL.length + 1).replace(/^\/+/, '')
+      }
+      const rawPath = url.pathname.replace(/^\/+/, '')
+      for (const pattern of SUPABASE_STORAGE_PATH_PATTERNS) {
+        const match = url.pathname.match(pattern)
+        if (match?.[1]) return match[1].replace(/^\/+/, '')
+      }
+      if (rawPath.startsWith('observation-images/')) return rawPath.slice('observation-images/'.length)
+      if (rawPath.startsWith('sporely-media/')) return rawPath.slice('sporely-media/'.length)
+      return rawPath
+    } catch (_) {
+      return text
+    }
+  }
+
+  if (text.startsWith('observation-images/')) return text.slice('observation-images/'.length)
+  if (text.startsWith('sporely-media/')) return text.slice('sporely-media/'.length)
+  return text.replace(/^\/+/, '')
+}
+
 function _splitPath(storagePath) {
-  const parts = String(storagePath || '').split('/')
+  const parts = normalizeMediaKey(storagePath).split('/')
   const fileName = parts.pop() || ''
   return { dir: parts.join('/'), fileName }
 }
 
 export function getVariantPath(storagePath, variant = 'original') {
-  if (!storagePath || variant === 'original') return storagePath
+  const key = normalizeMediaKey(storagePath)
+  if (!key || variant === 'original') return key
   const { dir, fileName } = _splitPath(storagePath)
   return dir ? `${dir}/thumb_${variant}_${fileName}` : `thumb_${variant}_${fileName}`
 }
 
+export function getPublicMediaUrl(storagePath, variant = 'original') {
+  const key = getVariantPath(storagePath, variant)
+  if (!key) return ''
+  return `${MEDIA_BASE_URL}/${key}`
+}
+
+function _encodeObjectKey(storagePath) {
+  return normalizeMediaKey(storagePath)
+    .split('/')
+    .filter(Boolean)
+    .map(segment => encodeURIComponent(segment))
+    .join('/')
+}
+
+async function _uploadViaWorker(path, blob) {
+  const normalizedPath = normalizeMediaKey(path)
+  if (!normalizedPath) throw new Error('Missing storage path')
+
+  const { data: { session } } = await supabase.auth.getSession()
+  const accessToken = session?.access_token
+  if (!accessToken) throw new Error('Missing authenticated session for media upload')
+
+  const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': blob?.type || 'image/jpeg',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    },
+    body: blob,
+  })
+
+  if (!response.ok) {
+    let detail = response.statusText || 'Upload failed'
+    try {
+      const payload = await response.json()
+      if (payload?.message) detail = payload.message
+    } catch (_) {}
+    throw new Error(`Worker upload failed: ${detail}`)
+  }
+}
+
 async function _uploadToStorage(path, blob) {
+  if (MEDIA_UPLOAD_BASE_URL) {
+    await _uploadViaWorker(path, blob)
+    return
+  }
   const { error } = await supabase.storage
     .from('observation-images')
     .upload(path, blob, { contentType: 'image/jpeg', upsert: true })
@@ -88,8 +173,48 @@ export async function uploadObservationImageVariants(blob, storagePath) {
   await Promise.all(uploads)
 }
 
+function _isMissingColumnError(error, columnName) {
+  const text = String(error?.message || error?.details || error?.hint || '').toLowerCase()
+  const column = String(columnName || '').toLowerCase()
+  return !!column
+    && text.includes(column)
+    && (text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find'))
+}
+
+export async function syncObservationMediaKeys(observationId, storagePath, options = {}) {
+  if (!observationId) return
+  const sortOrder = options.sortOrder
+  if (sortOrder !== undefined && sortOrder !== null && Number(sortOrder) !== 0) return
+
+  const imageKey = normalizeMediaKey(storagePath)
+  if (!imageKey) return
+  const thumbKey = getVariantPath(imageKey, 'small')
+
+  const { error: combinedError } = await supabase
+    .from('observations')
+    .update({ image_key: imageKey, thumb_key: thumbKey })
+    .eq('id', observationId)
+  if (!combinedError) return
+
+  const combinedIsColumnError = _isMissingColumnError(combinedError, 'image_key')
+    || _isMissingColumnError(combinedError, 'thumb_key')
+  if (!combinedIsColumnError) throw combinedError
+
+  const fieldPayloads = [
+    ['image_key', imageKey],
+    ['thumb_key', thumbKey],
+  ]
+  for (const [field, value] of fieldPayloads) {
+    const { error } = await supabase
+      .from('observations')
+      .update({ [field]: value })
+      .eq('id', observationId)
+    if (error && !_isMissingColumnError(error, field)) throw error
+  }
+}
+
 async function _getSignedUrlMap(paths, expiresIn = SIGNED_URL_TTL_SECONDS) {
-  const uniquePaths = [...new Set((paths || []).filter(Boolean))]
+  const uniquePaths = [...new Set((paths || []).map(normalizeMediaKey).filter(Boolean))]
   if (!uniquePaths.length) return {}
 
   const now = Date.now()
@@ -123,6 +248,29 @@ async function _getSignedUrlMap(paths, expiresIn = SIGNED_URL_TTL_SECONDS) {
   return urls
 }
 
+export async function resolveMediaSources(paths, options = {}) {
+  const variant = options.variant || 'original'
+  const normalizedPaths = (paths || []).map(normalizeMediaKey)
+  const requestedPaths = variant === 'original'
+    ? normalizedPaths
+    : normalizedPaths.flatMap(path => [getVariantPath(path, variant), path])
+  const signed = await _getSignedUrlMap(requestedPaths)
+
+  return normalizedPaths.map(originalPath => {
+    if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
+    const variantPath = getVariantPath(originalPath, variant)
+    const fallbackUrl = variant === 'original'
+      ? (signed[originalPath] || null)
+      : (signed[variantPath] || signed[originalPath] || null)
+    const primaryUrl = getPublicMediaUrl(originalPath, variant) || fallbackUrl
+    return {
+      key: originalPath,
+      primaryUrl,
+      fallbackUrl,
+    }
+  })
+}
+
 /**
  * Given an array of observation IDs, returns a map of
  * { obsId -> { primaryUrl, fallbackUrl } } for the first image.
@@ -147,21 +295,22 @@ export async function fetchFirstImages(obsIds, options = {}) {
   }
 
   const originalPaths = Object.values(firstPaths)
-  const requestedPaths = variant === 'original'
-    ? originalPaths
-    : originalPaths.flatMap(path => [getVariantPath(path, variant), path])
-  const signed = await _getSignedUrlMap(requestedPaths)
+  const sourcesByPath = new Map()
+  const sources = await resolveMediaSources(originalPaths, { variant })
+  sources.forEach(source => {
+    if (source?.key) sourcesByPath.set(source.key, source)
+  })
 
-  const sources = {}
+  const imageSources = {}
   Object.entries(firstPaths).forEach(([obsId, originalPath]) => {
-    const fallbackUrl = signed[originalPath] || null
-    const primaryUrl = variant === 'original'
-      ? fallbackUrl
-      : (signed[getVariantPath(originalPath, variant)] || fallbackUrl)
+    const normalizedPath = normalizeMediaKey(originalPath)
+    const source = sourcesByPath.get(normalizedPath)
+    const primaryUrl = source?.primaryUrl || null
+    const fallbackUrl = source?.fallbackUrl || null
     if (primaryUrl || fallbackUrl) {
-      sources[obsId] = { primaryUrl, fallbackUrl }
+      imageSources[obsId] = { primaryUrl, fallbackUrl }
     }
   })
 
-  return sources
+  return imageSources
 }

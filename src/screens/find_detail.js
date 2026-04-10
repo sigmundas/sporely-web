@@ -5,6 +5,7 @@ import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
+import { resolveMediaSources } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 
@@ -132,18 +133,22 @@ export async function openFindDetail(obsId, options = {}) {
   gallery.innerHTML = ''
 
   if (imgData?.length) {
-    const paths = imgData.map(i => i.storage_path)
-    const { data: signed } = await supabase.storage
-      .from('observation-images')
-      .createSignedUrls(paths, 3600)
+    const sources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
 
-    ;(signed || []).forEach(s => {
-      if (!s.signedUrl) return
+    sources.forEach(source => {
+      if (!source?.primaryUrl && !source?.fallbackUrl) return
       const img = document.createElement('img')
       img.className = 'detail-gallery-img'
-      img.src       = s.signedUrl
+      img.src       = source.primaryUrl || source.fallbackUrl
       img.loading   = 'lazy'
       img.alt       = ''
+      if (source.fallbackUrl && source.fallbackUrl !== source.primaryUrl) {
+        img.addEventListener('error', () => {
+          if (img.dataset.fallbackApplied === 'true') return
+          img.dataset.fallbackApplied = 'true'
+          img.src = source.fallbackUrl
+        }, { once: true })
+      }
       gallery.appendChild(img)
     })
 

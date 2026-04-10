@@ -1,5 +1,5 @@
 import { supabase } from './supabase.js'
-import { uploadObservationImageVariants } from './images.js'
+import { syncObservationMediaKeys, uploadObservationImageVariants } from './images.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -127,6 +127,7 @@ export async function triggerSync() {
           
           await uploadObservationImageVariants(blob, path)
           await supabase.from('observation_images').insert({ observation_id: obsId, user_id: item.userId, storage_path: path, image_type: 'field', sort_order: i })
+          await syncObservationMediaKeys(obsId, path, { sortOrder: i })
         }
 
         // 3. Purge from offline queue

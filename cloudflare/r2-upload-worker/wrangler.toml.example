@@ -1,0 +1,22 @@
+name = "sporely-r2-upload"
+main = "src/index.js"
+compatibility_date = "2026-04-10"
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "sporely-media"
+
+[vars]
+SUPABASE_URL = "https://zkpjklzfwzefhjluvhfw.supabase.co"
+SUPABASE_JWT_AUDIENCE = "authenticated"
+MEDIA_PUBLIC_BASE_URL = "https://media.sporely.no"
+ALLOWED_ORIGINS = "https://app.sporely.no,http://localhost:5173,https://localhost,capacitor://localhost"
+MAX_UPLOAD_BYTES = "15728640"
+
+# Optional overrides:
+# SUPABASE_JWT_ISSUER = "https://zkpjklzfwzefhjluvhfw.supabase.co/auth/v1"
+# SUPABASE_JWKS_URL = "https://zkpjklzfwzefhjluvhfw.supabase.co/auth/v1/.well-known/jwks.json"
+# JWT_CLOCK_SKEW_SECONDS = "60"
+
+# Only needed if your Supabase project still signs access tokens with HS* keys.
+# Set this with `wrangler secret put SUPABASE_JWT_SECRET`, not in plaintext.

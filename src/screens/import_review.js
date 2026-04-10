@@ -7,7 +7,7 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
 import { FilePicker } from '@capawesome/capacitor-file-picker';
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js';
-import { uploadObservationImageVariants } from '../images.js';
+import { syncObservationMediaKeys, uploadObservationImageVariants } from '../images.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { openFinds } from './finds.js';
 import { openFindDetail } from './find_detail.js';
@@ -646,6 +646,7 @@ async function _saveSingleAndOpen(session) {
         });
 
       if (imgError) throw imgError;
+      await syncObservationMediaKeys(obsId, storagePath, { sortOrder: i });
     }
 
     session.blobUrls.forEach(url => URL.revokeObjectURL(url));
