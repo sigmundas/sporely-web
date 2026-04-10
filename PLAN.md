@@ -9,6 +9,7 @@ Migrating media storage to Cloudflare R2 and consolidating cloud infrastructure.
 - [x] **Worker for Uploads Implemented** — Authenticated Worker code now exists in-repo for JWT-validated R2 uploads.
 - [x] **Web Upload Path Prepared** — The web app can use the Worker for uploads when `VITE_MEDIA_UPLOAD_BASE_URL` is configured.
 - [x] **Database Schema Update Authored** — `sporely-py/database/supabase_r2_media_migration.sql` adds `image_key` and `thumb_key` plus backfills from existing image rows.
+- [x] **Domain Roles Clarified** — `media.sporely.no` is the public read domain for gallery/media delivery, while the Worker endpoint handles authenticated writes. A temporary `workers.dev` URL is acceptable until `upload.sporely.no` is routed.
 - [ ] **Deploy Worker for Uploads** — Bind the R2 bucket, configure Supabase env vars, and attach a route such as `upload.sporely.no`.
 - [ ] **Run Live Schema Migration** — Apply the R2 migration SQL in Supabase.
 - [ ] **Run Unique Constraints SQL** — Execute `MycoLog/database/supabase_unique_constraints.sql` for `UNIQUE (desktop_id, user_id)`.
