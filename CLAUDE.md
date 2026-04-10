@@ -1,5 +1,7 @@
 # Sporely Web — Claude Code instructions
 
+> **Note:** Before starting work, always read `PLAN.md` in the project root to understand the current project context and priority tasks.
+
 ## Supabase project
 
 - **URL:** `https://zkpjklzfwzefhjluvhfw.supabase.co`

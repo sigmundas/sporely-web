@@ -98,8 +98,10 @@ See also:
 
 ### Image path / folder convention
 Upload paths follow:
-- Observations: `${uid}/{obs_id}/{index}_{timestamp}.jpg`
+- Observations: `${uid}/{obs_id}/{img_cloud_id}_${url_encoded_filename}`
 - Avatars: `${uid}/avatar.jpg`
+
+*Note: The filename segment of the storage path must be URL-encoded (e.g. `urllib.parse.quote`) prior to upload to prevent spaces or special characters from breaking the HTTP path parameters, which can falsely trigger 403 RLS unauthorized errors.*
 
 Storage folder-prefix policies rely on the first folder segment matching `auth.uid()::text` via `storage.foldername(name)[1]`.
 

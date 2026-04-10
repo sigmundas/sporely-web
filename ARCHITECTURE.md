@@ -222,8 +222,12 @@ Implemented in `sporely/utils/cloud_sync.py` using the Supabase REST API directl
 - Writes `desktop_id` back to Supabase for future dedup
 - Watermarked by `cloud_last_pull_at` in `app_settings.json`
 - Pulls cloud-managed images into the local desktop observation and refreshes the local media baseline
+- Uses a bulk-fetch `in.()` query for image metadata to prevent N+1 query performance bottlenecks during sync.
 
-**Conflict rule:** if the same linked observation changed on both desktop and web since the last synced snapshot, the desktop now skips the automatic overwrite and reports a conflict instead.
+**Conflict rule:** 
+- Desktop sync stores a last-seen cloud snapshot for linked observations.
+- If the same linked observation changed on both desktop and web since the last synced snapshot, the desktop skips automatic overwrite and reports a conflict.
+- Conflict checking strictly compares only images designated for sync (e.g., skipping generated microscope plots or local plates) to prevent falsely flagging them as deleted by the cloud.
 `private_comment` never leaves the desktop.
 
 Triggered via Settings → Sporely Cloud Sync… in the desktop app.
@@ -273,21 +277,3 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 | `search_taxa` RPC | ✅ Deployed |
 | `delete-account` Edge Function | ⚠️ In repo — must be deployed in Supabase before the UI button works |
 | Unique constraints on observations | ⚠️ Not yet run — see `supabase_unique_constraints.sql` |
-
-## Next steps
-
-1. **Run unique constraints SQL** in `sporely/database/supabase_unique_constraints.sql`
-   to add `UNIQUE (desktop_id, user_id)` — needed for desktop sync upsert performance.
-
-2. **Offline queue** — wrap capture/import save failures in IndexedDB so photos aren't
-   lost when the user is in the field without signal.
-
-3. **Capture session recovery** — decide whether camera batches should get the same
-   resumable persistence that import sessions already have.
-
-4. **Bundle trimming** — lazy-load heavier import/map dependencies so the initial JS chunk stays small on mobile.
-
-5. **Friends feed** — query `observations_friend_view`, paginate, render like Finds list.
-
-6. **Server-side thumbnails** — consider replacing client-generated thumbnail uploads
-   with Supabase Storage transformations if/when plan and caching tradeoffs make sense.
