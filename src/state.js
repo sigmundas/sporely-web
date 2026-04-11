@@ -15,4 +15,5 @@ export const state = {
   user: null,
   searchQuery: '',
   findsView: 'cards',
+  findsGroupBySpecies: false,
 }

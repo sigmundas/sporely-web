@@ -2,6 +2,10 @@ name = "sporely-r2-upload"
 main = "src/index.js"
 compatibility_date = "2026-04-10"
 
+[[routes]]
+pattern = "upload.sporely.no"
+custom_domain = true
+
 [[r2_buckets]]
 binding = "MEDIA_BUCKET"
 bucket_name = "sporely-media"
@@ -10,7 +14,7 @@ bucket_name = "sporely-media"
 SUPABASE_URL = "https://zkpjklzfwzefhjluvhfw.supabase.co"
 SUPABASE_JWT_AUDIENCE = "authenticated"
 MEDIA_PUBLIC_BASE_URL = "https://media.sporely.no"
-ALLOWED_ORIGINS = "https://app.sporely.no,http://localhost:5173,https://localhost,capacitor://localhost"
+ALLOWED_ORIGINS = "https://app.sporely.no,https://localhost:5173,http://localhost:5173,https://localhost,capacitor://localhost"
 MAX_UPLOAD_BYTES = "15728640"
 
 # Optional overrides:

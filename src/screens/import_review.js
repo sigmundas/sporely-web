@@ -892,8 +892,7 @@ function _wireCard(sid) {
         const predictions = await runArtsorakelForBlobs(session.files, getTaxonomyLanguage())
         if (!predictions?.length) {
           aiResults.style.display = 'none'
-          aiBtn.disabled = false
-          aiBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
+          showToast(t('review.noMatch'))
           return
         }
         aiResults.innerHTML = predictions.map((p, i) =>
@@ -922,9 +921,15 @@ function _wireCard(sid) {
         })
       } catch (err) {
         console.error('Artsorakel AI error:', err)
+        if (String(err?.message || '').includes('CORS') || String(err?.message || '').includes('Failed to fetch') || String(err?.message || '').includes('NetworkError')) {
+          showToast(t('review.aiUnavailable'))
+        } else {
+          showToast(t('common.artsorakelError', { message: err.message }))
+        }
+      } finally {
+        aiBtn.disabled = false
+        aiBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
       }
-      aiBtn.disabled = false
-      aiBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
     })
   }
 }

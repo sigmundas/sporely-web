@@ -9,6 +9,9 @@ import { supabase } from './supabase.js'
 import { t } from './i18n.js'
 
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
+const ARTSDATA_PROXY_BASE_URL = String(
+  import.meta.env.VITE_ARTSORAKEL_BASE_URL || import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || ''
+).replace(/\/+$/, '')
 
 // ── Language helpers ──────────────────────────────────────────────────────────
 
@@ -97,11 +100,17 @@ export async function runArtsorakel(blob, lang = 'no') {
   async function tryPost(fieldName) {
     const form = new FormData()
     form.append(fieldName, blob, 'photo.jpg')
-    return fetch(ARTSDATA_AI_URL, {
+    const request = {
       method: 'POST',
-      headers: { 'User-Agent': 'Sporely/1.0' },
       body: form,
-    })
+    }
+    if (ARTSDATA_PROXY_BASE_URL) {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session?.access_token) {
+        request.headers = { Authorization: `Bearer ${session.access_token}` }
+      }
+    }
+    return fetch(ARTSDATA_PROXY_BASE_URL ? `${ARTSDATA_PROXY_BASE_URL}/artsorakel` : ARTSDATA_AI_URL, request)
   }
 
   let res = await tryPost('image')
@@ -109,8 +118,9 @@ export async function runArtsorakel(blob, lang = 'no') {
   if (!res.ok) throw new Error(`Artsdata AI ${res.status}`)
 
   const data = await res.json()
+  const predictions = _extractPredictions(data)
 
-  return (data.predictions || [])
+  return predictions
     .filter(p => p?.taxon?.vernacularName !== '*** Utdatert versjon ***')
     .slice(0, 5)
     .map(pred => {
@@ -127,6 +137,20 @@ export async function runArtsorakel(blob, lang = 'no') {
         adbUrl:         pickUrl(pred, taxon),
       }
     })
+}
+
+function _extractPredictions(data) {
+  if (Array.isArray(data)) return data
+  if (!data || typeof data !== 'object') return []
+
+  for (const key of ['predictions', 'results', 'matches', 'items', 'data']) {
+    if (Array.isArray(data[key])) return data[key]
+  }
+
+  if (Array.isArray(data?.data?.predictions)) return data.data.predictions
+  if (Array.isArray(data?.result?.predictions)) return data.result.predictions
+  if (data?.taxon || data?.scientificName || data?.probability) return [data]
+  return []
 }
 
 export async function runArtsorakelForBlobs(blobs, lang = 'no') {

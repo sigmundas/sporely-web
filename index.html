@@ -166,7 +166,7 @@
         </div>
 
         <div class="section-header">
-          <div class="section-title" id="home-recent-finds-title">Recent Finds</div>
+          <div class="section-title" id="home-recent-finds-title">Recently Uploaded</div>
           <div class="section-link" id="recent-history-link">History →</div>
         </div>
 
@@ -183,20 +183,20 @@
         </div>
 
         <div class="home-stats-row">
-          <div class="home-stat">
+          <button class="home-stat home-stat--btn" id="hstat-obs-btn">
             <div class="home-stat-val" id="hstat-obs">—</div>
-            <div class="home-stat-lbl" id="home-stat-finds-label">Finds</div>
-          </div>
+            <div class="home-stat-lbl">Finds</div>
+          </button>
           <div class="home-stat-div"></div>
-          <div class="home-stat">
+          <button class="home-stat home-stat--btn" id="hstat-sp-btn">
             <div class="home-stat-val" id="hstat-sp">—</div>
-            <div class="home-stat-lbl" id="home-stat-species-label">Species</div>
-          </div>
+            <div class="home-stat-lbl">Species</div>
+          </button>
           <div class="home-stat-div"></div>
-          <div class="home-stat">
+          <button class="home-stat home-stat--btn" id="hstat-friends-btn">
             <div class="home-stat-val" id="hstat-friends">—</div>
-            <div class="home-stat-lbl" id="home-stat-friends-label">Friends active</div>
-          </div>
+            <div class="home-stat-lbl">Friends</div>
+          </button>
         </div>
 
         <input type="file" id="import-photo-input" accept="image/*" multiple style="display:none">
@@ -254,13 +254,15 @@
       <div class="finds-topbar">
         <div class="finds-subtitle-bar" id="finds-subtitle">Documented observations.</div>
         <div class="finds-view-btns">
-          <button class="finds-view-btn active" id="finds-view-cards" title="Single column view" aria-label="Single column view">
+          <button class="finds-view-btn finds-view-btn-text" id="finds-group-species" title="Group by species" aria-label="Group by species">Species</button>
+          <button class="finds-view-btn active" id="finds-view-cards" title="Detailed view" aria-label="Detailed view">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="4" rx="1.5"/><rect x="3" y="20" width="18" height="1" rx="0.5" opacity="0.4"/></svg>
+          </button>
+          <button class="finds-view-btn" id="finds-view-two" title="Two columns" aria-label="Two columns">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="8" height="10" rx="1.5"/><rect x="13" y="3" width="8" height="10" rx="1.5"/><rect x="3" y="16" width="8" height="5" rx="1.5"/><rect x="13" y="16" width="8" height="5" rx="1.5"/></svg>
           </button>
-          <button class="finds-view-btn finds-view-btn-text" id="finds-view-two" title="Two columns" aria-label="Two columns">2</button>
-          <button class="finds-view-btn finds-view-btn-text" id="finds-view-three" title="Three columns" aria-label="Three columns">3</button>
-          <button class="finds-view-btn" id="finds-view-tiles" title="Tiny grid view" aria-label="Tiny grid view">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="4" height="4" rx="0.5"/><rect x="10" y="3" width="4" height="4" rx="0.5"/><rect x="17" y="3" width="4" height="4" rx="0.5"/><rect x="3" y="10" width="4" height="4" rx="0.5"/><rect x="10" y="10" width="4" height="4" rx="0.5"/><rect x="17" y="10" width="4" height="4" rx="0.5"/><rect x="3" y="17" width="4" height="4" rx="0.5"/><rect x="10" y="17" width="4" height="4" rx="0.5"/><rect x="17" y="17" width="4" height="4" rx="0.5"/></svg>
+          <button class="finds-view-btn" id="finds-view-three" title="Three columns" aria-label="Three columns">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="6" height="8" rx="1.5"/><rect x="9" y="3" width="6" height="8" rx="1.5"/><rect x="16" y="3" width="6" height="8" rx="1.5"/><rect x="2" y="14" width="6" height="7" rx="1.5"/><rect x="9" y="14" width="6" height="7" rx="1.5"/><rect x="16" y="14" width="6" height="7" rx="1.5"/></svg>
           </button>
         </div>
       </div>
@@ -522,7 +524,10 @@
       <div class="map-overlay-top">
         <div class="map-search-row">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-          <input type="search" id="map-search-input" placeholder="Filter map…" autocomplete="off">
+          <div class="map-search-input-wrap">
+            <input type="search" id="map-search-input" placeholder="Search…" autocomplete="off" spellcheck="false">
+            <ul class="taxon-dropdown" id="map-search-dropdown" style="display:none"></ul>
+          </div>
           <button class="map-search-clear" id="map-search-clear" style="display:none" aria-label="Clear">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg>
           </button>

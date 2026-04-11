@@ -1,7 +1,7 @@
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { supabase } from '../supabase.js'
-import { formatDate, t } from '../i18n.js'
+import { formatDate, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { openFindDetail } from './find_detail.js'
 
@@ -33,20 +33,48 @@ export function initMap() {
     })
   })
 
-  // Search input
+  // Search input with species autocomplete
   const searchInput = document.getElementById('map-search-input')
   const clearBtn    = document.getElementById('map-search-clear')
+  const dropdown    = document.getElementById('map-search-dropdown')
+  let _searchDebounce = null
 
   searchInput.addEventListener('input', () => {
     state.searchQuery = searchInput.value
     clearBtn.style.display = state.searchQuery ? 'flex' : 'none'
     _applyMapFilter()
+
+    clearTimeout(_searchDebounce)
+    const q = searchInput.value.trim()
+    if (q.length < 2) { dropdown.style.display = 'none'; return }
+    _searchDebounce = setTimeout(async () => {
+      const results = _getMapAutocompleteSuggestions(q)
+      if (!results.length || searchInput.value.trim() !== q) { dropdown.style.display = 'none'; return }
+      dropdown.innerHTML = results.map(r =>
+        `<li data-name="${_esc(r.queryValue)}">${_esc(r.displayName)}${r.meta ? `<span class="taxon-family">${_esc(r.meta)}</span>` : ''}</li>`
+      ).join('')
+      dropdown.style.display = 'block'
+      dropdown.querySelectorAll('li').forEach(li => {
+        li.addEventListener('mousedown', () => {
+          searchInput.value = li.dataset.name
+          state.searchQuery = li.dataset.name
+          clearBtn.style.display = 'flex'
+          dropdown.style.display = 'none'
+          _applyMapFilter()
+        })
+      })
+    }, 280)
+  })
+
+  searchInput.addEventListener('blur', () => {
+    setTimeout(() => { dropdown.style.display = 'none' }, 150)
   })
 
   clearBtn.addEventListener('click', () => {
     searchInput.value = ''
     state.searchQuery = ''
     clearBtn.style.display = 'none'
+    dropdown.style.display = 'none'
     _applyMapFilter()
   })
 }
@@ -108,6 +136,58 @@ export async function loadMap() {
 }
 
 // ── Filter + render markers ───────────────────────────────────────────────────
+
+function _mapSearchPool() {
+  if (currentScope === 'mine') return _mapData.mine
+  if (currentScope === 'friends') return _mapData.friends
+  return [..._mapData.mine, ..._mapData.friends]
+}
+
+function _displayNameForObservation(obs) {
+  const scientificName = obs.genus
+    ? `${obs.genus}${obs.species ? ` ${obs.species}` : ''}`.trim()
+    : ''
+  const commonName = String(obs.common_name || '').trim()
+  if (commonName && scientificName && commonName.toLowerCase() !== scientificName.toLowerCase()) {
+    return `${commonName} (${scientificName})`
+  }
+  return commonName || scientificName || ''
+}
+
+function _getMapAutocompleteSuggestions(query) {
+  const q = String(query || '').trim().toLowerCase()
+  if (q.length < 2) return []
+
+  const ranked = new Map()
+  for (const obs of _mapSearchPool()) {
+    const scientificName = obs.genus
+      ? `${obs.genus}${obs.species ? ` ${obs.species}` : ''}`.trim()
+      : ''
+    const commonName = String(obs.common_name || '').trim()
+    const haystacks = [scientificName, commonName].filter(Boolean)
+    if (!haystacks.length || !haystacks.some(text => text.toLowerCase().includes(q))) continue
+
+    const key = scientificName.toLowerCase() || commonName.toLowerCase()
+    const existing = ranked.get(key) || {
+      queryValue: scientificName || commonName,
+      displayName: _displayNameForObservation(obs) || scientificName || commonName,
+      count: 0,
+    }
+    existing.count += 1
+    ranked.set(key, existing)
+  }
+
+  return Array.from(ranked.values())
+    .sort((a, b) =>
+      b.count - a.count
+      || a.displayName.localeCompare(b.displayName, undefined, { sensitivity: 'base' })
+    )
+    .slice(0, 12)
+    .map(item => ({
+      ...item,
+      meta: tp('finds.observationCount', item.count).replace(/\.$/, ''),
+    }))
+}
 
 function _matchesMap(obs, q) {
   return [obs.common_name, obs.genus, obs.species, obs.location]

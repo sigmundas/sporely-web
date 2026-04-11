@@ -1,5 +1,5 @@
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
-const DEFAULT_ALLOWED_METHODS = 'PUT, OPTIONS'
+const DEFAULT_ALLOWED_METHODS = 'PUT, POST, OPTIONS'
 const DEFAULT_ALLOWED_HEADERS = 'Authorization, Content-Type, Cache-Control'
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
 
@@ -32,6 +32,10 @@ async function handleRequest(request, env, ctx) {
 
   if (url.pathname === '/healthz') {
     return jsonResponse({ ok: true, service: 'sporely-r2-upload-worker' }, 200, request, env)
+  }
+
+  if (request.method === 'POST' && url.pathname === '/artsorakel') {
+    return handleArtsorakel(request, env, ctx)
   }
 
   if (request.method === 'PUT' && url.pathname.startsWith('/upload/')) {
@@ -115,6 +119,38 @@ async function handleUpload(request, env, ctx, url) {
   )
 }
 
+async function handleArtsorakel(request, env, ctx) {
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const authHeader = request.headers.get('Authorization')
+  const token = parseBearerToken(authHeader)
+  await verifySupabaseJwt(token, env, ctx)
+
+  if (!request.body) {
+    throw httpError(400, 'missing_body', 'Request body is required')
+  }
+
+  const contentType = String(request.headers.get('Content-Type') || '').trim()
+  const upstream = await fetch('https://ai.artsdatabanken.no', {
+    method: 'POST',
+    headers: contentType ? { 'Content-Type': contentType } : undefined,
+    body: request.body,
+  })
+
+  const responseHeaders = corsHeaders(request, env, origin)
+  const upstreamContentType = upstream.headers.get('Content-Type')
+  if (upstreamContentType) {
+    responseHeaders.set('Content-Type', upstreamContentType)
+  }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: responseHeaders,
+  })
+}
+
 function parseBearerToken(authHeader) {
   const text = String(authHeader || '').trim()
   const match = /^Bearer\s+(.+)$/i.exec(text)
@@ -169,7 +205,7 @@ async function verifyJwtSignature(header, signature, signedData, env, ctx) {
   const jwk = await resolveJwkForHeader(header, env, ctx)
   const cryptoKey = await importJwkForVerify(jwk, alg)
   const verifyAlgorithm = subtleVerifyAlgorithmForAlg(alg)
-  const signatureBytes = alg.startsWith('ES') ? joseSignatureToDer(signature) : signature
+  const signatureBytes = signature
   const ok = await crypto.subtle.verify(verifyAlgorithm, cryptoKey, signatureBytes, signedData)
   if (!ok) {
     throw httpError(401, 'invalid_token', 'JWT signature verification failed')
@@ -370,6 +406,8 @@ function publicMediaUrl(env, key) {
   return base ? `${base}/${key}` : null
 }
 
+const LOCAL_NETWORK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(:\d+)?$/
+
 function resolveAllowedOrigin(request, env) {
   const configured = String(env.ALLOWED_ORIGINS || '')
     .split(',')
@@ -383,7 +421,13 @@ function resolveAllowedOrigin(request, env) {
   if (!configured.length) {
     return origin
   }
-  return configured.includes(origin) ? origin : null
+  if (configured.includes(origin)) {
+    return origin
+  }
+  if (LOCAL_NETWORK_ORIGIN.test(origin)) {
+    return origin
+  }
+  return null
 }
 
 function corsHeaders(request, env, resolvedOrigin = null) {
@@ -396,15 +440,13 @@ function corsHeaders(request, env, resolvedOrigin = null) {
   headers.set('Access-Control-Allow-Methods', DEFAULT_ALLOWED_METHODS)
   headers.set('Access-Control-Allow-Headers', DEFAULT_ALLOWED_HEADERS)
   headers.set('Access-Control-Max-Age', '86400')
-  headers.set('Content-Type', 'application/json')
   return headers
 }
 
 function jsonResponse(payload, status, request, env, resolvedOrigin = null) {
-  return new Response(JSON.stringify(payload, null, 2), {
-    status,
-    headers: corsHeaders(request, env, resolvedOrigin),
-  })
+  const headers = corsHeaders(request, env, resolvedOrigin)
+  headers.set('Content-Type', 'application/json')
+  return new Response(JSON.stringify(payload, null, 2), { status, headers })
 }
 
 function httpError(status, code, message) {

@@ -34,19 +34,26 @@ html, body {
   font-family: 'Outfit', sans-serif;
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
 }
 
 /* ── APP SHELL ── */
 #app {
-  width: 100%;
+  width: min(100%, 430px);
+  max-width: 430px;
   height: 100vh;
   height: 100dvh;
   max-width: 430px;
-  margin: 0 auto;
-  position: relative;
+  margin: 0;
+  position: fixed;
+  top: 0;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
   overflow: hidden;
   background: var(--bg);
   box-shadow: 0 0 60px rgba(0,0,0,0.8);
+  overscroll-behavior: none;
 }
 
 /* ── AUTH OVERLAY ── */
@@ -228,12 +235,12 @@ html, body {
 
 /* ── BOTTOM NAV ── */
 #bottom-nav {
-  position: fixed;
-  left: 50%;
-  right: auto;
+  position: absolute;
+  left: 0;
+  right: 0;
   bottom: 0;
-  transform: translateX(-50%);
-  width: min(100%, 430px);
+  transform: none;
+  width: 100%;
   height: calc(var(--nav-h) + var(--safe-bottom));
   padding-bottom: var(--safe-bottom);
   background: var(--surface);
@@ -656,6 +663,8 @@ html, body {
   border-radius: 12px; padding: 14px 0; margin-bottom: 22px;
 }
 .home-stat { flex: 1; text-align: center; }
+.home-stat--btn { background: none; border: none; cursor: pointer; padding: 6px 0; border-radius: 8px; transition: background 0.15s; }
+.home-stat--btn:hover, .home-stat--btn:focus-visible { background: var(--hover, rgba(255,255,255,0.06)); }
 .home-stat-val { font-size: 22px; font-weight: 700; color: var(--white); line-height: 1; margin-bottom: 4px; }
 .home-stat-lbl { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
 .home-stat-div { width: 1px; background: var(--border); align-self: stretch; }
@@ -728,14 +737,22 @@ html, body {
   width: 100%; max-width: 340px;
   pointer-events: auto;
 }
-.map-search-row input[type="search"] {
-  flex: 1; background: none; border: none; outline: none;
+.map-search-input-wrap {
+  flex: 1; position: relative;
+}
+.map-search-input-wrap input[type="search"] {
+  width: 100%; background: none; border: none; outline: none;
   color: var(--text-primary);
   font-family: 'Outfit', sans-serif; font-size: 14px;
   -webkit-appearance: none;
 }
-.map-search-row input[type="search"]::placeholder { color: var(--text-dim); }
-.map-search-row input[type="search"]::-webkit-search-cancel-button { display: none; }
+.map-search-input-wrap input[type="search"]::placeholder { color: var(--text-dim); }
+.map-search-input-wrap input[type="search"]::-webkit-search-cancel-button { display: none; }
+#map-search-dropdown {
+  position: absolute;
+  top: calc(100% + 6px); left: -36px; right: -50px;
+  z-index: 1000;
+}
 .map-search-clear {
   background: none; border: none; cursor: pointer;
   color: var(--text-dim); padding: 0;
@@ -777,6 +794,9 @@ html, body {
 .finds-date-label {
   font-size: 10px; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase;
   color: var(--text-dim); white-space: nowrap;
+}
+.finds-species-meta {
+  font-size: 11px; color: var(--text-dim); padding: 0 18px 8px; margin-top: -8px;
 }
 
 /* Card grid */
@@ -833,6 +853,43 @@ html, body {
   width: 100%; height: 100%;
   display: flex; align-items: center; justify-content: center;
   font-size: 52px;
+}
+
+/* Polaroid-style dual photo layout */
+.find-card-polaroid {
+  display: flex;
+  gap: 3px;
+  height: 100%;
+  background: var(--card);
+}
+.find-card-polaroid-frame {
+  flex: 1;
+  overflow: hidden;
+  padding: 4px;
+  background: rgba(255,255,255,0.12);
+  border-radius: 4px;
+}
+.find-card-polaroid-frame + .find-card-polaroid-frame { border-left: none; }
+.find-card-polaroid-img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+  border-radius: 2px;
+}
+.find-card-polaroid-empty {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 28px; opacity: 0.4;
+}
+
+/* Name row with photo count badge */
+.find-card-name-row {
+  display: flex; align-items: baseline; gap: 6px; margin-bottom: 5px;
+}
+.find-card-name-row .find-card-name { margin-bottom: 0; }
+.find-card-photo-count {
+  font-size: 12px; font-weight: 500; color: var(--text-dim);
+  white-space: nowrap; flex-shrink: 0;
 }
 
 /* Card content — hanging indent */
@@ -2009,9 +2066,12 @@ html.light .quick-action-card::before {
   background: radial-gradient(circle at 80% 50%, rgba(255,255,255,0.06), transparent 60%);
 }
 
-/* Scope tab active — green-accent (#2D4B32) text on green-deep (#2D4B32) bg is invisible */
+/* Active buttons — green-accent (#2D4B32) text on green-deep (#2D4B32) bg is invisible in light mode */
 html.light .scope-tab.active { color: #ffffff; }
+html.light .map-scope-btn.active { color: #ffffff; }
 html.light .vis-option input[type="radio"]:checked + span { color: #ffffff; }
+/* Friend avatar initial — green-accent on green-deep */
+html.light .friend-avatar { color: #ffffff; }
 
 /* Primary button — green-accent on green-deep bg is invisible */
 html.light .btn-primary { color: #ffffff; }

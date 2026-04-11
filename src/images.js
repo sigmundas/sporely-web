@@ -184,21 +184,24 @@ function _isMissingColumnError(error, columnName) {
 export async function syncObservationMediaKeys(observationId, storagePath, options = {}) {
   if (!observationId) return
   const sortOrder = options.sortOrder
-  if (sortOrder !== undefined && sortOrder !== null && Number(sortOrder) !== 0) return
+  if (sortOrder !== undefined && sortOrder !== null && Number(sortOrder) !== 0) return false
 
   const imageKey = normalizeMediaKey(storagePath)
-  if (!imageKey) return
+  if (!imageKey) return false
   const thumbKey = getVariantPath(imageKey, 'small')
 
   const { error: combinedError } = await supabase
     .from('observations')
     .update({ image_key: imageKey, thumb_key: thumbKey })
     .eq('id', observationId)
-  if (!combinedError) return
+  if (!combinedError) return true
 
   const combinedIsColumnError = _isMissingColumnError(combinedError, 'image_key')
     || _isMissingColumnError(combinedError, 'thumb_key')
-  if (!combinedIsColumnError) throw combinedError
+  if (!combinedIsColumnError) {
+    console.warn('Observation media key sync failed:', combinedError)
+    return false
+  }
 
   const fieldPayloads = [
     ['image_key', imageKey],
@@ -209,8 +212,12 @@ export async function syncObservationMediaKeys(observationId, storagePath, optio
       .from('observations')
       .update({ [field]: value })
       .eq('id', observationId)
-    if (error && !_isMissingColumnError(error, field)) throw error
+    if (error && !_isMissingColumnError(error, field)) {
+      console.warn(`Observation ${field} sync failed:`, error)
+      return false
+    }
   }
+  return true
 }
 
 async function _getSignedUrlMap(paths, expiresIn = SIGNED_URL_TTL_SECONDS) {
@@ -313,4 +320,58 @@ export async function fetchFirstImages(obsIds, options = {}) {
   })
 
   return imageSources
+}
+
+/**
+ * Like fetchFirstImages but returns up to two image sources per observation plus
+ * the total image count. Used by the single-column cards view.
+ * Returns { [obsId]: { first, second, count } } where second may be null.
+ */
+export async function fetchCardImages(obsIds, options = {}) {
+  if (!obsIds.length) return {}
+  const variant = options.variant || 'medium'
+
+  const { data, error } = await supabase
+    .from('observation_images')
+    .select('observation_id, storage_path')
+    .in('observation_id', obsIds)
+    .order('sort_order', { ascending: true })
+
+  if (error || !data?.length) return {}
+
+  // Collect first two paths + count per observation
+  const firstTwo = {}
+  const counts = {}
+  for (const img of data) {
+    const id = img.observation_id
+    counts[id] = (counts[id] || 0) + 1
+    if (!firstTwo[id]) {
+      firstTwo[id] = [img.storage_path]
+    } else if (firstTwo[id].length === 1) {
+      firstTwo[id].push(img.storage_path)
+    }
+  }
+
+  const allPaths = Object.values(firstTwo).flat()
+  const sourcesByPath = new Map()
+  const sources = await resolveMediaSources(allPaths, { variant })
+  sources.forEach(source => {
+    if (source?.key) sourcesByPath.set(source.key, source)
+  })
+
+  const result = {}
+  for (const [obsId, paths] of Object.entries(firstTwo)) {
+    const toSource = path => {
+      const normalized = normalizeMediaKey(path)
+      const s = sourcesByPath.get(normalized)
+      return (s?.primaryUrl || s?.fallbackUrl) ? s : null
+    }
+    result[obsId] = {
+      first: toSource(paths[0]),
+      second: paths[1] ? toSource(paths[1]) : null,
+      count: counts[obsId] || 1,
+    }
+  }
+
+  return result
 }

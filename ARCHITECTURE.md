@@ -5,7 +5,7 @@
 > For Supabase schema, RLS rules, and Storage conventions see [SUPABASE_DB.md](SUPABASE_DB.md).
 
 A mobile-first PWA companion to the Sporely desktop app (PySide6 / SQLite).
-Field capture (GPS + photos) and cloud sync via Supabase. Not a replacement
+Field capture (GPS + photos) and cloud sync via Supabase + Cloudflare. Not a replacement
 for the desktop — the desktop owns taxonomy, microscopy, and publishing to
 Artsobservasjoner / Artportalen.
 
@@ -23,7 +23,12 @@ handling from the device photo library.
 | Native wrapper | Capacitor Android + `@capawesome/capacitor-file-picker` |
 | Styling | Plain CSS custom properties, no preprocessor |
 | Auth & DB | Supabase JS v2 (`@supabase/supabase-js`) |
-| Storage | Supabase Storage buckets `observation-images` + `avatars` |
+| Media storage | Cloudflare R2 bucket `sporely-media` |
+| Media upload | Cloudflare Worker at `upload.sporely.no` (JWT-authenticated PUT) |
+| Media serving | Public CDN at `https://media.sporely.no` |
+
+Supabase Storage (`observation-images` bucket) is no longer used for new uploads.
+All media now goes through the Cloudflare R2 pipeline.
 
 ---
 
@@ -33,6 +38,10 @@ handling from the device photo library.
 sporely-web/
 ├── index.html              Full app shell + auth overlay HTML (no JS inline)
 ├── package.json
+├── cloudflare/
+│   └── r2-upload-worker/   Cloudflare Worker for authenticated R2 uploads
+│       ├── src/index.js    Worker source — JWT verify, R2 put, CORS
+│       └── wrangler.toml   Worker config — routes, vars, R2 binding
 ├── supabase/
 │   ├── config.toml         Supabase local/deploy config for Edge Functions
 │   └── functions/
@@ -46,6 +55,9 @@ sporely-web/
     ├── router.js           navigate(screen) — swaps .active class, starts/stops camera
     ├── toast.js            showToast(msg) — timed overlay message
     ├── geo.js              GPS watchPosition, writes into state.gps
+    ├── images.js           Upload originals + thumbnail variants, media URL helpers
+    ├── sync-queue.js       IndexedDB offline queue for captured observations
+    ├── import-store.js     IndexedDB persistence for pending import sessions
     ├── style.css           All CSS (custom properties, no utility classes)
     └── screens/
         ├── auth.js         Login, signup, resend confirmation, hash error handling
@@ -55,8 +67,6 @@ sporely-web/
         ├── review.js       Review one captured observation batch, save to Supabase
         ├── import_review.js Import/group photos, native EXIF/GPS handling, save flow
         └── profile.js      Profile editing, avatar crop/upload, friends, delete-account action
-    ├── images.js          Upload originals + thumbnail variants, signed-URL cache
-    └── import-store.js    IndexedDB persistence for pending import sessions
 ```
 
 ---
@@ -95,9 +105,84 @@ Resend uses `supabase.auth.resend({ type: 'signup', email })`.
 
 **Project URL:** `https://zkpjklzfwzefhjluvhfw.supabase.co`
 **Key type:** Publishable (anon) key — safe to expose in client code; RLS enforces access.
+**JWT algorithm:** ES256 (ECC P-256) — Supabase switched from HS256 to ES256.
 
-All requests go through the `supabase` client instance in `src/supabase.js`.
-Raw `fetch` is no longer used anywhere — everything goes through the SDK.
+All database requests go through the `supabase` client instance in `src/supabase.js`.
+Raw `fetch` is no longer used for Supabase — everything goes through the SDK.
+
+---
+
+## Media pipeline (Cloudflare R2)
+
+All media is stored in Cloudflare R2, not Supabase Storage.
+
+### Upload worker (`upload.sporely.no`)
+
+- **Route:** `PUT /upload/{user_id}/{obs_id}/{filename}`
+- **Auth:** Supabase JWT sent as `Authorization: Bearer {token}`
+- **JWT verification:** Worker fetches the JWKS from Supabase (`/auth/v1/.well-known/jwks.json`) and verifies the ES256 signature using Web Crypto. The JWKS is cached in-memory for 10 minutes.
+- **Key rule:** Upload path must start with the JWT `sub` (user ID) — enforced by the worker.
+- **Source:** `cloudflare/r2-upload-worker/src/index.js`
+- **Config:** `cloudflare/r2-upload-worker/wrangler.toml`
+
+### CORS
+
+Allowed origins are configured in `wrangler.toml` (`ALLOWED_ORIGINS`). The worker also
+accepts any private network origin automatically (`10.x.x.x`, `192.168.x.x`, `172.16-31.x.x`)
+so LAN dev testing from a phone works without hardcoding IPs.
+
+### Media serving (`media.sporely.no`)
+
+R2 bucket `sporely-media` is exposed publicly via Cloudflare. All media URLs are
+**relative keys** stored in the database — never full URLs. The key is prefixed with
+`{user_id}/{obs_id}/` for path-based ownership.
+
+### Thumbnail variants
+
+`src/images.js` generates two variants at upload time:
+- `thumb_small_{filename}` — 240px, JPEG 82%
+- `thumb_medium_{filename}` — 720px, JPEG 82%
+
+Both stored under the same directory as the original, e.g.:
+```
+{user_id}/{obs_id}/0_1234567890.jpg          ← original
+{user_id}/{obs_id}/thumb_small_0_1234567890.jpg
+{user_id}/{obs_id}/thumb_medium_0_1234567890.jpg
+```
+
+### Environment variables
+
+Frontend (`.env.local` / `.env.example`):
+```
+VITE_MEDIA_BASE_URL=https://media.sporely.no
+VITE_MEDIA_UPLOAD_BASE_URL=https://upload.sporely.no
+```
+
+Worker (`wrangler.toml` `[vars]`):
+```
+SUPABASE_URL=https://zkpjklzfwzefhjluvhfw.supabase.co
+SUPABASE_JWT_AUDIENCE=authenticated
+MEDIA_PUBLIC_BASE_URL=https://media.sporely.no
+ALLOWED_ORIGINS=https://app.sporely.no,https://localhost:5173,http://localhost:5173,...
+MAX_UPLOAD_BYTES=15728640
+```
+
+### Deploying the worker
+
+```sh
+cd cloudflare/r2-upload-worker
+npx wrangler deploy
+```
+
+Custom domain `upload.sporely.no` is registered automatically via the `[[routes]]` block
+in `wrangler.toml` — no manual DNS entry needed as long as `sporely.no` is proxied through Cloudflare.
+
+### Known gotcha: Web Crypto ECDSA signature format
+
+Web Crypto's `subtle.verify` for ECDSA expects **raw IEEE P1363 format** (r||s concatenated).
+JOSE JWTs already use this format. Do **not** convert the signature to DER before passing
+to `subtle.verify` — that will cause every valid token to fail with "JWT signature
+verification failed".
 
 ---
 
@@ -113,13 +198,14 @@ Extra cloud-only columns:
 - `desktop_id int` — local SQLite `id`, used for dedup on sync
 - `location_public bool` — hide GPS from friends if false
 - `visibility text` — cloud sharing scope (`private` / `friends` / `public`)
-
-Columns written on mobile capture (currently):
-`user_id, date, gps_latitude, gps_longitude, source_type`
+- `image_key text` — relative R2 key of the cover image
+- `thumb_key text` — relative R2 key of the cover thumbnail (small variant)
 
 ### `observation_images`
-- `storage_path text` — path inside the `observation-images` Storage bucket
+- `storage_path text` — relative R2 media key (e.g. `{user_id}/{obs_id}/0_ts.jpg`)
 - `image_type` — `'field'` | `'microscope'`
+- `image_key text` — same as `storage_path` (normalized)
+- `thumb_key text` — relative key of the small thumbnail variant
 - Full microscope metadata columns present but only populated by desktop sync
 
 ### `profiles`
@@ -152,13 +238,9 @@ All tables have RLS enabled. Default policy: **owner only**.
 GPS coordinates are nulled out in `observations_friend_view` when `location_public = false`,
 unless an `observation_shares` row explicitly grants location access.
 
-Storage bucket `observation-images` uses folder-prefix policies:
-- Upload/delete: `auth.uid()::text = (storage.foldername(name))[1]`
-- Read: same, plus friend-access join
-
-Storage bucket `avatars` stores `${user_id}/avatar.jpg` for profile photos.
-The bucket is public, but the client can fall back to a signed URL when the direct
-avatar URL is unavailable or stale.
+Note: Supabase Storage bucket `observation-images` still exists but is no longer used
+for new uploads. Media access control is now handled by the R2 upload worker (JWT path
+enforcement) and Cloudflare's public CDN for serving.
 
 ---
 
@@ -171,13 +253,13 @@ capture.js: capturePhoto()
 
 review.js: saveObservationBatch()
   1. await Promise.all(capturedPhotos.map(p => p.blobPromise ?? p.blob))
-  2. Enqueue parent observation and image Blobs to IndexedDB (`sync-queue.js`)
+  2. Enqueue parent observation and image Blobs to IndexedDB (sync-queue.js)
   3. Clear capture state, refresh lists, navigate away from review
 
 sync-queue.js: triggerSync() (background)
   1. Read pending observations from IndexedDB
-  2. INSERT observations row for the batch
-  3. For each photo: upload original to storage, generate variants, INSERT observation_images row
+  2. INSERT observations row via Supabase
+  3. For each photo: PUT to upload.sporely.no (R2 worker), generate variants, INSERT observation_images row
   4. Remove from IndexedDB offline queue
 ```
 
@@ -207,6 +289,9 @@ Multiple groups:
 ## Desktop ↔ Cloud sync (desktop-side, Sporely)
 
 Implemented in `sporely/utils/cloud_sync.py` using the Supabase REST API directly (`requests`).
+Media uploads use `sporely/utils/r2_storage.py` — a minimal S3-compatible client using
+SigV4 signing directly against the R2 S3 endpoint (bypasses the upload worker, uses
+service-level R2 API credentials from `python.env`).
 
 **Push (desktop → cloud):**
 - Queries SQLite for `cloud_id IS NULL OR sync_status = 'dirty'`
@@ -224,7 +309,7 @@ Implemented in `sporely/utils/cloud_sync.py` using the Supabase REST API directl
 - Pulls cloud-managed images into the local desktop observation and refreshes the local media baseline
 - Uses a bulk-fetch `in.()` query for image metadata to prevent N+1 query performance bottlenecks during sync.
 
-**Conflict rule:** 
+**Conflict rule:**
 - Desktop sync stores a last-seen cloud snapshot for linked observations.
 - If the same linked observation changed on both desktop and web since the last synced snapshot, the desktop skips automatic overwrite and reports a conflict.
 - Conflict checking strictly compares only images designated for sync (e.g., skipping generated microscope plots or local plates) to prevent falsely flagging them as deleted by the cloud.
@@ -244,24 +329,24 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 | Camera capture (mobile) | ✅ Real |
 | Native Android gallery import with HEIC GPS | ✅ Real — custom Capacitor plugin + Filesystem read |
 | Observation insert to Supabase | ✅ Real |
-| Image upload to Supabase Storage | ✅ Real |
+| Image upload to Cloudflare R2 | ✅ Real — via `upload.sporely.no` worker |
 | Grid/card thumbnails | ✅ Real — `small` + `medium` variants generated at upload time |
 | Profile avatar upload/crop | ✅ Real |
 | Self-service account deletion | ✅ Real — via Supabase Edge Function `delete-account` |
 | Finds list from Supabase | ✅ Real |
 | Recent finds on home screen | ✅ Real |
 | Desktop ↔ cloud sync | ✅ Real (desktop side) |
-| Artsorakel (Artsdata AI species ID) | ✅ Real — direct browser→AI call, CORS open |
-| Taxa autocomplete search | ✅ Real — 110k taxa in Supabase, RPC search_taxa |
+| Artsorakel (Artsdata AI species ID) | ✅ Real — proxied through the Cloudflare Worker when `VITE_MEDIA_UPLOAD_BASE_URL`/`VITE_ARTSORAKEL_BASE_URL` is configured, with direct-call fallback otherwise |
+| Taxa autocomplete search | ✅ Real — Supabase RPC for taxon inputs; map autocomplete uses currently loaded observations for faster local filtering |
 | Camera permission denied overlay | ✅ Real — platform-specific instructions |
-| Friends finds + thumbnails | ✅ Real — `observations_friend_view` + authenticated Storage SELECT |
+| Friends finds + thumbnails | ✅ Real — `observations_friend_view` + R2 public CDN |
 | Community finds | ✅ Real — `observations_community_view` (visibility = public) |
 | Map view | ✅ Real — Leaflet + OpenStreetMap |
-| Friends feed | 🟡 Stubbed — toast only |
+| Offline queue | ✅ Real — IndexedDB queue, syncs on reconnect |
 | Import review recovery after app suspension | ✅ Real — IndexedDB `pending_import` store |
+| Friends feed | 🟡 Stubbed — toast only |
 | Capture draft save/resume | ❌ Removed — capture review is now direct cancel/save |
 | Push notifications | ❌ Not started |
-| Offline queue | ❌ Not started |
 
 ---
 
@@ -270,9 +355,12 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 | Item | Status |
 |---|---|
 | Supabase project | ✅ Live (`zkpjklzfwzefhjluvhfw`) |
+| Supabase JWT algorithm | ✅ ES256 (ECC P-256) — asymmetric, JWKS-based |
 | Email via Resend SMTP | ✅ Configured (`noreply@sporely.no`, domain verified) |
-| `observation-images` Storage bucket | ✅ Created — SELECT: any authenticated user; INSERT/DELETE: owner only |
-| `avatars` Storage bucket | ✅ Created, public read + owner-scoped writes |
+| Cloudflare R2 bucket `sporely-media` | ✅ Live |
+| Cloudflare Worker `upload.sporely.no` | ✅ Live — custom domain via `[[routes]]` in wrangler.toml |
+| Cloudflare CDN `media.sporely.no` | ✅ Live — public R2 bucket serving |
+| `avatars` Storage bucket (Supabase) | ✅ Created, public read + owner-scoped writes |
 | `taxa` + `taxa_vernacular` tables | ✅ Populated (110k taxa, 70k vernacular names) |
 | `search_taxa` RPC | ✅ Deployed |
 | `delete-account` Edge Function | ⚠️ In repo — must be deployed in Supabase before the UI button works |

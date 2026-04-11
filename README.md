@@ -84,4 +84,6 @@ UI locale support is built into the web app settings for:
 - German
 
 Taxon search and Artsorakel requests follow the active UI locale where the
-underlying data source supports that language.
+underlying data source supports that language. On the map screen, autocomplete
+is limited to taxa already present in the currently loaded observations so
+filtering stays fast and observation-focused.

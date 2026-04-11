@@ -8,6 +8,7 @@ import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
 import { openFindDetail } from './find_detail.js'
 import { openPhotoImportPicker } from './import_review.js'
+import { openFinds } from './finds.js'
 
 function _imageHtml(source, className, placeholderHtml) {
   if (!source?.primaryUrl) return placeholderHtml
@@ -39,6 +40,10 @@ export async function initHome() {
     openPhotoImportPicker()
   })
 
+  document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))
+  document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { groupBySpecies: true }))
+  document.getElementById('hstat-friends-btn').addEventListener('click', () => openFinds('friends'))
+
   await refreshHome()
 }
 
@@ -52,29 +57,29 @@ async function loadRecentFinds() {
   const list = document.getElementById('recent-finds-list')
   if (!state.user) { list.innerHTML = ''; return }
 
-  // Fetch mine and friends' latest in parallel
+  // Fetch mine and friends' latest by upload/created time in parallel
   const [myRes, friendRes] = await Promise.all([
     supabase
       .from('observations')
-      .select('id, user_id, date, genus, species, common_name, gps_latitude, gps_longitude, location, visibility')
+      .select('id, user_id, date, created_at, genus, species, common_name, gps_latitude, gps_longitude, location, visibility')
       .eq('user_id', state.user.id)
-      .order('date', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(3),
     supabase
       .from('observations_friend_view')
-      .select('id, user_id, date, genus, species, common_name, gps_latitude, gps_longitude, location, visibility')
+      .select('id, user_id, date, created_at, genus, species, common_name, gps_latitude, gps_longitude, location, visibility')
       .neq('user_id', state.user.id)
-      .order('date', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(3),
   ])
 
   const mine    = (myRes.data    || []).map(o => ({ ...o, _owner: 'mine' }))
   const friends = (friendRes.data || []).map(o => ({ ...o, _owner: 'friend' }))
 
-  // Merge and sort by date, take top 5
+  // Merge and sort by upload time, take top 4
   const combined = [...mine, ...friends]
-    .sort((a, b) => new Date(b.date) - new Date(a.date))
-    .slice(0, 5)
+    .sort((a, b) => new Date(b.created_at || b.date) - new Date(a.created_at || a.date))
+    .slice(0, 4)
 
   if (!combined.length) {
     list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">${t('home.noObservations')}</p>`
@@ -214,15 +219,10 @@ async function loadStats() {
   const uid = state.user?.id
   if (!uid) return
 
-  const weekAgo = new Date()
-  weekAgo.setDate(weekAgo.getDate() - 7)
-
-  const [{ count: obsCount }, { data: sp }, friendRes] = await Promise.all([
+  const [{ count: obsCount }, { data: sp }, { count: friendCount }] = await Promise.all([
     supabase.from('observations').select('*', { count: 'exact', head: true }).eq('user_id', uid),
     supabase.from('observations').select('genus, species').eq('user_id', uid).not('genus', 'is', null),
-    supabase.from('observations_friend_view')
-      .select('user_id')
-      .gte('date', weekAgo.toISOString().slice(0, 10)),
+    supabase.from('friendships').select('*', { count: 'exact', head: true }).eq('status', 'accepted'),
   ])
 
   document.getElementById('hstat-obs').textContent =
@@ -230,7 +230,7 @@ async function loadStats() {
   document.getElementById('hstat-sp').textContent =
     new Set((sp || []).map(o => `${o.genus}|${o.species}`)).size || 0
   document.getElementById('hstat-friends').textContent =
-    new Set((friendRes.data || []).map(o => o.user_id)).size || 0
+    friendCount ?? '—'
 }
 
 // ── Sync check ────────────────────────────────────────────────────────────────
