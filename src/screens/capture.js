@@ -2,6 +2,7 @@ import { state } from '../state.js'
 import { formatLightReading, t } from '../i18n.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
+import { getDefaultAiCropRect } from '../image_crop.js'
 
 function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
@@ -117,7 +118,16 @@ function capturePhoto() {
   if (!video.srcObject) {
     // Demo mode — no real camera
     const emoji = ['🍄', '🟡', '🤎', '🍂', '🌿'][state.batchCount % 5]
-    state.capturedPhotos.push({ blob: null, blobPromise: null, gps: state.gps, ts: new Date(), emoji })
+    state.capturedPhotos.push({
+      blob: null,
+      blobPromise: null,
+      gps: state.gps,
+      ts: new Date(),
+      emoji,
+      aiCropRect: null,
+      aiCropSourceW: null,
+      aiCropSourceH: null,
+    })
   } else {
     let w = video.videoWidth
     let h = video.videoHeight
@@ -153,7 +163,16 @@ function capturePhoto() {
     // Add a dummy catch to prevent UnhandledPromiseRejection if it's not awaited immediately
     blobPromise.catch(() => {})
     
-    state.capturedPhotos.push({ blob: null, blobPromise, gps: state.gps, ts: new Date(), emoji: '📸' })
+    state.capturedPhotos.push({
+      blob: null,
+      blobPromise,
+      gps: state.gps,
+      ts: new Date(),
+      emoji: '📸',
+      aiCropRect: getDefaultAiCropRect(w, h),
+      aiCropSourceW: w,
+      aiCropSourceH: h,
+    })
   }
 
   state.batchCount++

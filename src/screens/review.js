@@ -7,6 +7,8 @@ import { initLocationField, startLocationLookup, getLocationName, resetLocationS
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
+import { openAiCropEditor } from '../ai-crop-editor.js'
+import { hasAiCropRect } from '../image_crop.js'
 
 export function initReview() {
   document.getElementById('review-close')
@@ -99,9 +101,12 @@ export function buildReviewGrid() {
       ? `${tp('counts.photo', 1)} · ${firstTime}`
       : `${tp('counts.photo', count)} · ${firstTime} - ${lastTime}`
 
+    const croppedCount = photos.filter(photo => hasAiCropRect(photo.aiCropRect)).length
+
     html = `<div class="capture-session-card">
       <div class="detail-gallery capture-session-gallery" id="review-gallery"></div>
       <div class="capture-session-summary">${summary}</div>
+      <div class="capture-session-crop-status">${croppedCount ? `${croppedCount}/${count} AI crop` : 'Tap a photo to add AI crop'}</div>
       <div class="detail-field capture-session-species">
         <div class="detail-field-label">${t('detail.species')}</div>
         <div class="taxon-field-wrap">
@@ -136,18 +141,33 @@ function loadThumbnails(photos) {
 
   gallery.innerHTML = ''
   ;(async () => {
-    for (const p of photos) {
+    for (let index = 0; index < photos.length; index++) {
+      const p = photos[index]
       let blob = p.blob instanceof Blob ? p.blob : null
       if (!blob && p.blobPromise) blob = await p.blobPromise
 
       if (blob instanceof Blob) {
         const url = URL.createObjectURL(blob)
+        const item = document.createElement('button')
+        item.type = 'button'
+        item.className = 'ai-crop-gallery-item'
+        item.addEventListener('click', () => _openReviewCropEditor(index))
+
         const img = document.createElement('img')
         img.className = 'detail-gallery-img'
         img.src = url
         img.loading = 'lazy'
         img.alt = ''
-        gallery.appendChild(img)
+        item.appendChild(img)
+
+        if (hasAiCropRect(p.aiCropRect)) {
+          const badge = document.createElement('div')
+          badge.className = 'ai-crop-thumb-badge'
+          badge.textContent = 'AI crop'
+          item.appendChild(badge)
+        }
+
+        gallery.appendChild(item)
         continue
       }
 
@@ -253,8 +273,11 @@ async function handleArtsorakelBtn(i) {
   })
 
   try {
-    const blobs = (await Promise.all(state.capturedPhotos.map(resolveBlob)))
-      .filter(blob => blob instanceof Blob)
+    const blobs = (await Promise.all(state.capturedPhotos.map(async photo => ({
+      blob: await resolveBlob(photo),
+      cropRect: photo.aiCropRect || null,
+    }))))
+      .filter(item => item.blob instanceof Blob)
     const predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage())
 
     if (!predictions || predictions.length === 0) {
@@ -299,6 +322,42 @@ async function handleArtsorakelBtn(i) {
       actionBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
     })
   }
+}
+
+async function _openReviewCropEditor(startIndex = 0) {
+  const reviewImages = []
+  const indexMap = []
+
+  for (let photoIndex = 0; photoIndex < state.capturedPhotos.length; photoIndex++) {
+    const photo = state.capturedPhotos[photoIndex]
+    const blob = await resolveBlob(photo)
+    if (!(blob instanceof Blob)) continue
+    reviewImages.push({
+      url: URL.createObjectURL(blob),
+      aiCropRect: photo.aiCropRect || null,
+    })
+    indexMap.push(photoIndex)
+  }
+
+  const startEditorIndex = Math.max(0, indexMap.indexOf(startIndex))
+  if (!reviewImages.length) return
+
+  openAiCropEditor({
+    title: t('crop.editorTitle'),
+    startIndex: startEditorIndex,
+    images: reviewImages,
+    onChange: (index, nextMeta) => {
+      const photoIndex = indexMap[index]
+      state.capturedPhotos[photoIndex] = {
+        ...state.capturedPhotos[photoIndex],
+        ...nextMeta,
+      }
+    },
+    onClose: committed => {
+      reviewImages.forEach(image => URL.revokeObjectURL(image.url))
+      if (committed) buildReviewGrid()
+    },
+  })
 }
 
 async function runAllArtsorakel() {
@@ -366,8 +425,15 @@ async function saveObservationBatch() {
       visibility,
     }
 
-    const imageBlobs = photos.map(p => p.blob).filter(b => b instanceof Blob)
-    await enqueueObservation(obsPayload, imageBlobs)
+    const imageEntries = photos
+      .filter(photo => photo.blob instanceof Blob)
+      .map(photo => ({
+        blob: photo.blob,
+        aiCropRect: photo.aiCropRect || null,
+        aiCropSourceW: photo.aiCropSourceW ?? null,
+        aiCropSourceH: photo.aiCropSourceH ?? null,
+      }))
+    await enqueueObservation(obsPayload, imageEntries)
 
     showToast(t('review.synced', { count: tp('counts.photo', photos.length) }))
     state.capturedPhotos = []

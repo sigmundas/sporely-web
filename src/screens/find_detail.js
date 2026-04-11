@@ -5,9 +5,11 @@ import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
-import { resolveMediaSources } from '../images.js'
+import { deleteObservationMedia, resolveMediaSources, updateObservationImageCrop } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
+import { openAiCropEditor } from '../ai-crop-editor.js'
+import { normalizeAiCropRect } from '../image_crop.js'
 
 let currentObs    = null
 let selectedTaxon = null
@@ -123,11 +125,23 @@ export async function openFindDetail(obsId, options = {}) {
   const visRadio = document.querySelector(`input[name="detail-vis"][value="${vis}"]`)
   if (visRadio) visRadio.checked = true
 
-  const { data: imgData } = await supabase
+  // Try to load with crop columns; fall back if the migration hasn't been applied yet
+  let imgData = null
+  const { data: imgWithCrop, error: imgErr } = await supabase
     .from('observation_images')
-    .select('storage_path, sort_order')
+    .select('id, storage_path, sort_order, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2')
     .eq('observation_id', obsId)
     .order('sort_order', { ascending: true })
+  if (imgErr) {
+    const { data: imgBase } = await supabase
+      .from('observation_images')
+      .select('id, storage_path, sort_order')
+      .eq('observation_id', obsId)
+      .order('sort_order', { ascending: true })
+    imgData = (imgBase || []).map(r => ({ ...r, ai_crop_x1: null, ai_crop_y1: null, ai_crop_x2: null, ai_crop_y2: null }))
+  } else {
+    imgData = imgWithCrop || []
+  }
 
   const gallery = document.getElementById('detail-gallery')
   gallery.innerHTML = ''
@@ -152,12 +166,34 @@ export async function openFindDetail(obsId, options = {}) {
       gallery.appendChild(img)
     })
 
-    // Wire gallery images to photo viewer
     const galleryImgs = Array.from(gallery.querySelectorAll('img'))
     galleryImgs.forEach((el, idx) => {
       el.style.cursor = 'pointer'
       el.addEventListener('click', () => {
-        openPhotoViewer(galleryImgs.map(i => i.src), idx)
+        if (currentObsIsOwner) {
+          openAiCropEditor({
+            title: t('crop.editorTitle'),
+            startIndex: idx,
+            images: imgData.map((row, i) => ({
+              url: sources[i]?.primaryUrl || sources[i]?.fallbackUrl || '',
+              aiCropRect: normalizeAiCropRect({
+                x1: row.ai_crop_x1, y1: row.ai_crop_y1,
+                x2: row.ai_crop_x2, y2: row.ai_crop_y2,
+              }),
+            })),
+            onChange: (index, meta) => {
+              const row = imgData[index]
+              if (!row) return
+              row.ai_crop_x1 = meta.aiCropRect?.x1 ?? null
+              row.ai_crop_y1 = meta.aiCropRect?.y1 ?? null
+              row.ai_crop_x2 = meta.aiCropRect?.x2 ?? null
+              row.ai_crop_y2 = meta.aiCropRect?.y2 ?? null
+              updateObservationImageCrop(row.id, meta)
+            },
+          })
+        } else {
+          openPhotoViewer(galleryImgs.map(i => i.src), idx)
+        }
       })
     })
   }
@@ -449,30 +485,32 @@ async function _delete() {
   const btn = document.getElementById('detail-delete-btn')
   btn.disabled = true
 
-  // Delete storage images first
-  const { data: imgData } = await supabase
-    .from('observation_images')
-    .select('storage_path')
-    .eq('observation_id', currentObs.id)
+  try {
+    // Delete storage images first
+    const { data: imgData } = await supabase
+      .from('observation_images')
+      .select('storage_path')
+      .eq('observation_id', currentObs.id)
 
-  if (imgData?.length) {
-    await supabase.storage
-      .from('observation-images')
-      .remove(imgData.map(i => i.storage_path))
+    if (imgData?.length) {
+      await deleteObservationMedia(imgData.map(i => i.storage_path))
+    }
+
+    const { error } = await supabase
+      .from('observations')
+      .delete()
+      .eq('id', currentObs.id)
+      .eq('user_id', state.user.id)
+
+    if (error) { showToast(t('detail.deleteFailed', { message: error.message })); return }
+
+    showToast(t('detail.deleted'))
+    _goBack()
+  } catch (error) {
+    showToast(t('detail.deleteFailed', { message: error.message }))
+  } finally {
+    btn.disabled = false
   }
-
-  const { error } = await supabase
-    .from('observations')
-    .delete()
-    .eq('id', currentObs.id)
-    .eq('user_id', state.user.id)
-
-  btn.disabled = false
-
-  if (error) { showToast(t('detail.deleteFailed', { message: error.message })); return }
-
-  showToast(t('detail.deleted'))
-  _goBack()
 }
 
 async function _loadComments(obsId) {

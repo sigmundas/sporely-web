@@ -1,5 +1,5 @@
 import { supabase } from './supabase.js'
-import { syncObservationMediaKeys, uploadObservationImageVariants } from './images.js'
+import { insertObservationImage, syncObservationMediaKeys, uploadObservationImageVariants } from './images.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -28,15 +28,35 @@ function notifyQueueChanged() {
   window.dispatchEvent(new CustomEvent(QUEUE_EVENT))
 }
 
-export async function enqueueObservation(obsPayload, imageBlobs) {
+function _normalizeQueuedImages(imageEntries) {
+  return (imageEntries || []).map(entry => {
+    if (entry instanceof Blob) {
+      return {
+        blob: entry,
+        aiCropRect: null,
+        aiCropSourceW: null,
+        aiCropSourceH: null,
+      }
+    }
+    return {
+      blob: entry?.blob instanceof Blob ? entry.blob : null,
+      aiCropRect: entry?.aiCropRect || null,
+      aiCropSourceW: entry?.aiCropSourceW ?? null,
+      aiCropSourceH: entry?.aiCropSourceH ?? null,
+    }
+  }).filter(entry => entry.blob instanceof Blob)
+}
+
+export async function enqueueObservation(obsPayload, imageEntries) {
   const db = await openDB()
   const tx = db.transaction(STORE_NAME, 'readwrite')
   const store = tx.objectStore(STORE_NAME)
-  
-  // IndexedDB inherently supports saving raw File and Blob objects!
+
+  const queuedImages = _normalizeQueuedImages(imageEntries)
+
   store.add({ 
     obsPayload, 
-    imageBlobs, 
+    imageEntries: queuedImages,
     userId: obsPayload.user_id,
     ts: Date.now() 
   })
@@ -121,12 +141,23 @@ export async function triggerSync() {
 
         // 2. Upload images
         const obsId = obsData.id
-        for (let i = 0; i < item.imageBlobs.length; i++) {
-          const blob = item.imageBlobs[i]
+        const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
+        for (let i = 0; i < queuedImages.length; i++) {
+          const image = queuedImages[i]
+          const blob = image.blob
           const path = `${item.userId}/${obsId}/${i}_${item.ts}.jpg`
           
           await uploadObservationImageVariants(blob, path)
-          await supabase.from('observation_images').insert({ observation_id: obsId, user_id: item.userId, storage_path: path, image_type: 'field', sort_order: i })
+          await insertObservationImage({
+            observation_id: obsId,
+            user_id: item.userId,
+            storage_path: path,
+            image_type: 'field',
+            sort_order: i,
+            aiCropRect: image.aiCropRect,
+            aiCropSourceW: image.aiCropSourceW,
+            aiCropSourceH: image.aiCropSourceH,
+          })
           await syncObservationMediaKeys(obsId, path, { sortOrder: i })
         }
 

@@ -279,6 +279,10 @@
       <div class="capture-viewfinder">
         <video id="camera-video" autoplay playsinline muted></video>
         <canvas id="camera-canvas" style="display:none"></canvas>
+        <div class="capture-ai-guide" aria-hidden="true">
+          <div class="capture-ai-guide-frame"></div>
+          <div class="capture-ai-guide-label">AI crop</div>
+        </div>
 
         <div id="camera-denied" style="display:none">
           <div class="camera-denied-icon">📷</div>
@@ -634,6 +638,31 @@
           <button class="btn-secondary" id="avatar-crop-cancel">Cancel</button>
           <button class="btn-primary" id="avatar-crop-confirm">Use Photo</button>
         </div>
+      </div>
+    </div>
+
+    <div id="ai-crop-editor" class="ai-crop-editor" style="display:none">
+      <div class="ai-crop-editor-topbar">
+        <div class="ai-crop-title-wrap">
+          <div class="ai-crop-title" id="ai-crop-title">AI crop</div>
+          <div class="ai-crop-counter" id="ai-crop-counter"></div>
+        </div>
+        <button class="ai-crop-close" id="ai-crop-cancel" aria-label="Close">×</button>
+      </div>
+      <div class="ai-crop-viewport" id="ai-crop-viewport">
+        <img id="ai-crop-image" draggable="false" alt="" style="position:absolute;touch-action:none;user-select:none">
+        <div class="ai-crop-frame"></div>
+      </div>
+      <div class="ai-crop-hint">Pinch to zoom · Drag to reposition</div>
+      <div class="ai-crop-actions">
+        <button class="photo-nav-btn ai-crop-nav-btn" id="ai-crop-prev" aria-label="Previous">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button class="btn-secondary" id="ai-crop-reset">Reset crop</button>
+        <button class="btn-primary" id="ai-crop-save">Save crop</button>
+        <button class="photo-nav-btn ai-crop-nav-btn" id="ai-crop-next" aria-label="Next">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
       </div>
     </div>
 

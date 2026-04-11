@@ -53,9 +53,12 @@ sporely-web/
     ├── supabase.js         createClient (URL + publishable key)
     ├── state.js            Single shared mutable object (no reactivity layer)
     ├── router.js           navigate(screen) — swaps .active class, starts/stops camera
+    ├── map-loader.js       Lazy loads the map screen so Leaflet stays off the startup path
     ├── toast.js            showToast(msg) — timed overlay message
     ├── geo.js              GPS watchPosition, writes into state.gps
     ├── images.js           Upload originals + thumbnail variants, media URL helpers
+    ├── image_crop.js       Shared AI crop math + cropped blob export helpers
+    ├── ai-crop-editor.js   Full-screen AI crop editor used by review/import flows
     ├── sync-queue.js       IndexedDB offline queue for captured observations
     ├── import-store.js     IndexedDB persistence for pending import sessions
     ├── style.css           All CSS (custom properties, no utility classes)
@@ -119,6 +122,7 @@ All media is stored in Cloudflare R2, not Supabase Storage.
 ### Upload worker (`upload.sporely.no`)
 
 - **Route:** `PUT /upload/{user_id}/{obs_id}/{filename}`
+- **Delete route:** `DELETE /upload/{user_id}/{obs_id}/{filename}`
 - **Auth:** Supabase JWT sent as `Authorization: Bearer {token}`
 - **JWT verification:** Worker fetches the JWKS from Supabase (`/auth/v1/.well-known/jwks.json`) and verifies the ES256 signature using Web Crypto. The JWKS is cached in-memory for 10 minutes.
 - **Key rule:** Upload path must start with the JWT `sub` (user ID) — enforced by the worker.
@@ -177,6 +181,58 @@ npx wrangler deploy
 Custom domain `upload.sporely.no` is registered automatically via the `[[routes]]` block
 in `wrangler.toml` — no manual DNS entry needed as long as `sporely.no` is proxied through Cloudflare.
 
+**⚠️ Deploy after every worker change.** The worker is NOT automatically deployed when you
+commit. If you add a new route or fix a bug in `src/index.js` and forget to run
+`wrangler deploy`, the old version keeps running in production and the new code has no
+effect. Symptom: routes that exist in source return 404 in production.
+
+### Artsorakel proxy (`POST /artsorakel`)
+
+The worker proxies AI species identification requests to `https://ai.artsdatabanken.no`.
+
+- **Body forwarding:** Use `await request.arrayBuffer()` — do **not** pass `request.body`
+  (the ReadableStream) directly to the upstream `fetch`. Streaming a multipart body through
+  two fetch hops can produce a malformed request that the upstream silently accepts but
+  returns only the "please update" stub prediction. Buffering the body first guarantees the
+  full multipart payload is forwarded intact.
+- **Response:** Buffer the upstream response with `await upstream.arrayBuffer()` before
+  returning it. This avoids partial-body issues on slow upstream connections.
+
+### R2 CORS (`media.sporely.no`)
+
+The R2 bucket `sporely-media` has a CORS policy that allows `GET`/`HEAD`/`PUT`/`POST`
+from all origins (`*`). This is required because:
+- `find_detail.js` fetches images from the CDN via `fetch(img.src)` to pass blobs to the
+  Artsorakel AI. Without `Access-Control-Allow-Origin: *`, the browser blocks these fetches
+  and artsorakel silently gets zero blobs → "no suggestions".
+- Dev server and LAN testing use different origins than `app.sporely.no`.
+
+To inspect or update the CORS policy:
+```sh
+# View current rules
+npx wrangler r2 bucket cors list sporely-media
+
+# Update (format must match the Cloudflare R2 CORS API schema)
+npx wrangler r2 bucket cors set sporely-media --file cors.json --force
+```
+
+The correct JSON schema for the `--file` argument:
+```json
+{
+  "rules": [
+    {
+      "allowed": {
+        "origins": ["*"],
+        "methods": ["GET", "HEAD", "PUT", "POST"],
+        "headers": ["*"]
+      },
+      "exposeHeaders": [],
+      "maxAgeSeconds": 86400
+    }
+  ]
+}
+```
+
 ### Known gotcha: Web Crypto ECDSA signature format
 
 Web Crypto's `subtle.verify` for ECDSA expects **raw IEEE P1363 format** (r||s concatenated).
@@ -206,6 +262,10 @@ Extra cloud-only columns:
 - `image_type` — `'field'` | `'microscope'`
 - `image_key text` — same as `storage_path` (normalized)
 - `thumb_key text` — relative key of the small thumbnail variant
+- `ai_crop_x1`, `ai_crop_y1`, `ai_crop_x2`, `ai_crop_y2` — normalized AI crop rectangle (`0..1`)
+- `ai_crop_source_w`, `ai_crop_source_h` — source dimensions when the AI crop was set
+
+AI crop metadata is stored per image and only affects Artsorakel requests. Gallery rendering still uses the full stored image.
 - Full microscope metadata columns present but only populated by desktop sync
 
 ### `profiles`
@@ -249,11 +309,11 @@ enforcement) and Cloudflare's public CDN for serving.
 ```
 capture.js: capturePhoto()
   ├─ demo mode (no camera)  → push { blob: null, emoji, gps, ts }
-  └─ real camera            → canvas.toBlob wrapped in Promise → push { blobPromise, gps, ts }
+  └─ real camera            → canvas.toBlob wrapped in Promise → push { blobPromise, gps, ts, aiCropRect, aiCropSourceW/H }
 
 review.js: saveObservationBatch()
   1. await Promise.all(capturedPhotos.map(p => p.blobPromise ?? p.blob))
-  2. Enqueue parent observation and image Blobs to IndexedDB (sync-queue.js)
+  2. Enqueue parent observation and per-image crop metadata to IndexedDB (sync-queue.js)
   3. Clear capture state, refresh lists, navigate away from review
 
 sync-queue.js: triggerSync() (background)
@@ -275,13 +335,13 @@ handleSelectedFiles()
   2. Sort files by capture time
   3. Group files taken within the configured time gap into one observation
   4. Convert review copies to JPEG sequentially to avoid mobile memory spikes
-  5. Save pending import sessions to IndexedDB so review survives app suspension
+  5. Pre-seed per-image AI crop metadata and save pending import sessions to IndexedDB so review survives app suspension
 
 Single group:
   save immediately → open observation detail editor
 
 Multiple groups:
-  show grouped import cards → user edits species/location/sharing → save all
+  show grouped import cards → user edits species/location/sharing/AI crop → save all
 ```
 
 ---
@@ -298,6 +358,7 @@ service-level R2 API credentials from `python.env`).
 - Upserts to Supabase (check-then-patch-or-post pattern)
 - Writes `cloud_id` + `sync_status = 'synced'` back to SQLite
 - Syncs the selected desktop images plus optional generated media (measure plot, thumbnail gallery, plate)
+- Pushes `observation_images.ai_crop_*` alongside the rest of each synced image row so web and desktop share the same AI crop geometry
 - Uses a lightweight local media signature so unchanged images/media can be skipped on later syncs
 - Upload size is controlled by the desktop **Sync image size** setting (`Reduced (2 MP)` or `Full size`)
 
@@ -307,6 +368,7 @@ service-level R2 API credentials from `python.env`).
 - Writes `desktop_id` back to Supabase for future dedup
 - Watermarked by `cloud_last_pull_at` in `app_settings.json`
 - Pulls cloud-managed images into the local desktop observation and refreshes the local media baseline
+- Hydrates local `images.ai_crop_*` fields from `public.observation_images` when cloud images already have AI crop metadata
 - Uses a bulk-fetch `in.()` query for image metadata to prevent N+1 query performance bottlenecks during sync.
 
 **Conflict rule:**
@@ -359,7 +421,7 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 | Email via Resend SMTP | ✅ Configured (`noreply@sporely.no`, domain verified) |
 | Cloudflare R2 bucket `sporely-media` | ✅ Live |
 | Cloudflare Worker `upload.sporely.no` | ✅ Live — custom domain via `[[routes]]` in wrangler.toml |
-| Cloudflare CDN `media.sporely.no` | ✅ Live — public R2 bucket serving |
+| Cloudflare CDN `media.sporely.no` | ✅ Live — public R2 bucket serving, CORS `*` configured |
 | `avatars` Storage bucket (Supabase) | ✅ Created, public read + owner-scoped writes |
 | `taxa` + `taxa_vernacular` tables | ✅ Populated (110k taxa, 70k vernacular names) |
 | `search_taxa` RPC | ✅ Deployed |

@@ -37,6 +37,8 @@ See also:
   - Columns:
     - `storage_path` (path inside the Storage bucket)
     - `image_type` (`'field' | 'microscope'`)
+    - `ai_crop_x1`, `ai_crop_y1`, `ai_crop_x2`, `ai_crop_y2` (normalized `0..1` AI crop rectangle)
+    - `ai_crop_source_w`, `ai_crop_source_h` (source dimensions used when the crop was authored)
     - microscope metadata columns exist but are populated primarily by desktop sync
 - `comments`
   - Community comments on observations
@@ -90,6 +92,7 @@ See also:
 ### Buckets
 - `observation-images`
   - Stores image binaries for observations
+  - Cloud metadata for those images lives on `public.observation_images`, including the optional `ai_crop_*` fields
   - The web app uploads field capture images; desktop sync uploads microscope images when applicable
 - `avatars`
   - Stores profile avatar images
@@ -156,6 +159,7 @@ For `avatars`:
 
 ### What the mobile app uploads
 - Field photos: inserted as `observations` + `observation_images`, uploaded to Storage under the user UUID folder convention
+- AI crop metadata is stored on each `observation_images` row, not as a separate cropped asset
 - Microscope photos: typically skipped by default in mobile capture; populated primarily by desktop sync
 
 ---

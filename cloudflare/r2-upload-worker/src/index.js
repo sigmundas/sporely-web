@@ -1,5 +1,5 @@
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
-const DEFAULT_ALLOWED_METHODS = 'PUT, POST, OPTIONS'
+const DEFAULT_ALLOWED_METHODS = 'PUT, POST, DELETE, OPTIONS'
 const DEFAULT_ALLOWED_HEADERS = 'Authorization, Content-Type, Cache-Control'
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
 
@@ -40,6 +40,10 @@ async function handleRequest(request, env, ctx) {
 
   if (request.method === 'PUT' && url.pathname.startsWith('/upload/')) {
     return handleUpload(request, env, ctx, url)
+  }
+
+  if (request.method === 'DELETE' && url.pathname.startsWith('/upload/')) {
+    return handleDelete(request, env, ctx, url)
   }
 
   throw httpError(404, 'not_found', 'Route not found')
@@ -119,6 +123,43 @@ async function handleUpload(request, env, ctx, url) {
   )
 }
 
+async function handleDelete(request, env, ctx, url) {
+  if (!env.MEDIA_BUCKET) {
+    throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
+  }
+
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const authHeader = request.headers.get('Authorization')
+  const token = parseBearerToken(authHeader)
+  const claims = await verifySupabaseJwt(token, env, ctx)
+
+  const key = normalizeObjectKey(url.pathname.slice('/upload/'.length))
+  if (!key) {
+    throw httpError(400, 'invalid_key', 'Missing upload key')
+  }
+  if (!claims?.sub || !key.startsWith(`${claims.sub}/`)) {
+    throw httpError(403, 'key_not_allowed', 'Delete key must start with the authenticated user id')
+  }
+
+  await env.MEDIA_BUCKET.delete(key)
+
+  return jsonResponse(
+    {
+      ok: true,
+      key,
+      deleted: true,
+    },
+    200,
+    request,
+    env,
+    origin,
+  )
+}
+
 async function handleArtsorakel(request, env, ctx) {
   const origin = resolveAllowedOrigin(request, env)
   if (request.headers.get('Origin') && !origin) {
@@ -134,18 +175,20 @@ async function handleArtsorakel(request, env, ctx) {
   }
 
   const contentType = String(request.headers.get('Content-Type') || '').trim()
+  const bodyBuffer = await request.arrayBuffer()
   const upstream = await fetch('https://ai.artsdatabanken.no', {
     method: 'POST',
-    headers: contentType ? { 'Content-Type': contentType } : undefined,
-    body: request.body,
+    headers: contentType ? { 'Content-Type': contentType } : {},
+    body: bodyBuffer,
   })
 
+  const upstreamBody = await upstream.arrayBuffer()
   const responseHeaders = corsHeaders(request, env, origin)
   const upstreamContentType = upstream.headers.get('Content-Type')
   if (upstreamContentType) {
     responseHeaders.set('Content-Type', upstreamContentType)
   }
-  return new Response(upstream.body, {
+  return new Response(upstreamBody, {
     status: upstream.status,
     headers: responseHeaders,
   })

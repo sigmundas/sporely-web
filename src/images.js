@@ -1,4 +1,5 @@
 import { supabase } from './supabase.js'
+import { normalizeAiCropRect } from './image_crop.js'
 
 const SIGNED_URL_TTL_SECONDS = 3600
 const SIGNED_URL_CACHE = new Map()
@@ -100,6 +101,31 @@ async function _uploadViaWorker(path, blob) {
   }
 }
 
+async function _deleteViaWorker(path) {
+  const normalizedPath = normalizeMediaKey(path)
+  if (!normalizedPath) return
+
+  const { data: { session } } = await supabase.auth.getSession()
+  const accessToken = session?.access_token
+  if (!accessToken) throw new Error('Missing authenticated session for media delete')
+
+  const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  })
+
+  if (!response.ok && response.status !== 404) {
+    let detail = response.statusText || 'Delete failed'
+    try {
+      const payload = await response.json()
+      if (payload?.message) detail = payload.message
+    } catch (_) {}
+    throw new Error(`Worker delete failed: ${detail}`)
+  }
+}
+
 async function _uploadToStorage(path, blob) {
   if (MEDIA_UPLOAD_BASE_URL) {
     await _uploadViaWorker(path, blob)
@@ -179,6 +205,90 @@ function _isMissingColumnError(error, columnName) {
   return !!column
     && text.includes(column)
     && (text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find'))
+}
+
+export async function deleteObservationMedia(paths) {
+  const normalized = [...new Set((paths || []).map(normalizeMediaKey).filter(Boolean))]
+  if (!normalized.length) return
+
+  if (MEDIA_UPLOAD_BASE_URL) {
+    await Promise.all(normalized.map(path => _deleteViaWorker(path)))
+    return
+  }
+
+  const { error } = await supabase.storage
+    .from('observation-images')
+    .remove(normalized)
+
+  if (error) throw new Error(`Storage delete failed: ${error.message}`)
+}
+
+export async function insertObservationImage(observationImage) {
+  const cropRect = normalizeAiCropRect(observationImage?.aiCropRect)
+  const cropSourceW = observationImage?.aiCropSourceW ?? null
+  const cropSourceH = observationImage?.aiCropSourceH ?? null
+  const basePayload = {
+    observation_id: observationImage?.observation_id,
+    user_id: observationImage?.user_id,
+    storage_path: normalizeMediaKey(observationImage?.storage_path),
+    image_type: observationImage?.image_type || 'field',
+    sort_order: observationImage?.sort_order ?? 0,
+  }
+
+  const payloadWithCrop = {
+    ...basePayload,
+    ai_crop_x1: cropRect?.x1 ?? null,
+    ai_crop_y1: cropRect?.y1 ?? null,
+    ai_crop_x2: cropRect?.x2 ?? null,
+    ai_crop_y2: cropRect?.y2 ?? null,
+    ai_crop_source_w: cropSourceW,
+    ai_crop_source_h: cropSourceH,
+  }
+
+  const { error } = await supabase
+    .from('observation_images')
+    .insert(payloadWithCrop)
+
+  if (!error) return true
+
+  const cropFieldNames = [
+    'ai_crop_x1',
+    'ai_crop_y1',
+    'ai_crop_x2',
+    'ai_crop_y2',
+    'ai_crop_source_w',
+    'ai_crop_source_h',
+  ]
+
+  if (!cropFieldNames.some(field => _isMissingColumnError(error, field))) {
+    throw error
+  }
+
+  const { error: fallbackError } = await supabase
+    .from('observation_images')
+    .insert(basePayload)
+
+  if (fallbackError) throw fallbackError
+  return false
+}
+
+export async function updateObservationImageCrop(imageId, cropData) {
+  if (!imageId) return
+  const cropRect = normalizeAiCropRect(cropData?.aiCropRect)
+  const { error } = await supabase
+    .from('observation_images')
+    .update({
+      ai_crop_x1: cropRect?.x1 ?? null,
+      ai_crop_y1: cropRect?.y1 ?? null,
+      ai_crop_x2: cropRect?.x2 ?? null,
+      ai_crop_y2: cropRect?.y2 ?? null,
+      ai_crop_source_w: cropData?.aiCropSourceW ?? null,
+      ai_crop_source_h: cropData?.aiCropSourceH ?? null,
+    })
+    .eq('id', imageId)
+  if (error && !_isMissingColumnError(error, 'ai_crop_x1')) {
+    console.warn('updateObservationImageCrop failed:', error)
+  }
 }
 
 export async function syncObservationMediaKeys(observationId, storagePath, options = {}) {

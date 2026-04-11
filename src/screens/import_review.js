@@ -7,16 +7,35 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
 import { FilePicker } from '@capawesome/capacitor-file-picker';
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js';
-import { syncObservationMediaKeys, uploadObservationImageVariants } from '../images.js';
+import { insertObservationImage, syncObservationMediaKeys, uploadObservationImageVariants } from '../images.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { openFinds } from './finds.js';
 import { openFindDetail } from './find_detail.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
+import { openAiCropEditor } from '../ai-crop-editor.js';
+import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
 
 let sessions = [];
 let exifrModulePromise = null;
 const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
 const RAW_GPS_PICK = ['GPSLatitude', 'GPSLatitudeRef', 'GPSLongitude', 'GPSLongitudeRef', 'latitude', 'longitude'];
+
+function _persistSessions() {
+  saveImportSessions(sessions);
+}
+
+function _ensureSessionImageMeta(session) {
+  if (!session) return [];
+  if (!Array.isArray(session.imageMeta)) session.imageMeta = [];
+  while (session.imageMeta.length < session.files.length) {
+    session.imageMeta.push({
+      aiCropRect: null,
+      aiCropSourceW: null,
+      aiCropSourceH: null,
+    });
+  }
+  return session.imageMeta;
+}
 
 function sessionById(sid) {
   return sessions.find(s => s.id === sid);
@@ -172,6 +191,7 @@ async function handleSelectedFiles(files, options = {}) {
       id: 's' + idx,
       files: processed.map(p => p.blob),
       blobUrls: processed.map(p => p.url),
+      imageMeta: processed.map(p => p.meta),
       ts,
       gpsLat,
       gpsLon,
@@ -195,7 +215,7 @@ async function handleSelectedFiles(files, options = {}) {
   }
 
   // Persist to IndexedDB so state survives app suspension
-  saveImportSessions(sessions);  // fire-and-forget
+  _persistSessions()
 
   navigate('import-review');
   renderSessions();
@@ -213,7 +233,7 @@ async function handleSelectedFiles(files, options = {}) {
       if (input) input.value = name;
       if (locEl) locEl.textContent = name;
     }
-    saveImportSessions(sessions);
+      _persistSessions();
   });
 }
 
@@ -582,11 +602,17 @@ async function _processFile(file) {
   try {
     const blob = await _toJpeg(file);
     const url = URL.createObjectURL(blob);
-    return { blob, url };
+    const meta = await createImageCropMeta(blob, { preseed: true });
+    return { blob, url, meta };
   } catch (_) {}
 
   // 2. Final fallback — original file (will show blank if browser can't decode it)
-  return { blob: file, url: URL.createObjectURL(file) };
+  const meta = await createImageCropMeta(file, { preseed: true }).catch(() => ({
+    aiCropRect: null,
+    aiCropSourceW: null,
+    aiCropSourceH: null,
+  }));
+  return { blob: file, url: URL.createObjectURL(file), meta };
 }
 
 // Save a single session immediately and return the new observation ID.
@@ -628,6 +654,7 @@ async function _saveSingleAndOpen(session) {
     }
 
     const obsId = obsData.id;
+    _ensureSessionImageMeta(session);
     for (let i = 0; i < session.files.length; i++) {
       const file = session.files[i];
       if (!(file instanceof Blob)) continue;
@@ -635,17 +662,16 @@ async function _saveSingleAndOpen(session) {
       const storagePath = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`;
       await uploadObservationImageVariants(file, storagePath);
 
-      const { error: imgError } = await supabase
-        .from('observation_images')
-        .insert({
-          observation_id: obsId,
-          user_id: state.user.id,
-          storage_path: storagePath,
-          image_type: 'field',
-          sort_order: i,
-        });
-
-      if (imgError) throw imgError;
+      await insertObservationImage({
+        observation_id: obsId,
+        user_id: state.user.id,
+        storage_path: storagePath,
+        image_type: 'field',
+        sort_order: i,
+        aiCropRect: session.imageMeta[i]?.aiCropRect || null,
+        aiCropSourceW: session.imageMeta[i]?.aiCropSourceW ?? null,
+        aiCropSourceH: session.imageMeta[i]?.aiCropSourceH ?? null,
+      });
       await syncObservationMediaKeys(obsId, storagePath, { sortOrder: i });
     }
 
@@ -693,6 +719,8 @@ export function renderSessions() {
       if (session) {
         session.blobUrls.forEach(url => URL.revokeObjectURL(url));
         sessions = sessions.filter(s => s.id !== sid);
+        if (!sessions.length) clearImportSessions();
+        else _persistSessions();
         renderSessions();
       }
     });
@@ -708,9 +736,12 @@ export function renderSessions() {
       URL.revokeObjectURL(session.blobUrls[idx]);
       session.files.splice(idx, 1);
       session.blobUrls.splice(idx, 1);
+      _ensureSessionImageMeta(session).splice(idx, 1);
       if (session.files.length === 0) {
         sessions = sessions.filter(s => s.id !== sid);
       }
+      if (!sessions.length) clearImportSessions();
+      else _persistSessions();
       renderSessions();
     });
   });
@@ -732,7 +763,7 @@ export function renderSessions() {
       session.gpsLat = state.gps.lat;
       session.gpsLon = state.gps.lon;
       session.locationName = name || `${state.gps.lat.toFixed(4)}° N, ${state.gps.lon.toFixed(4)}° E`;
-      saveImportSessions(sessions);
+      _persistSessions();
       renderSessions();
     });
   });
@@ -741,6 +772,7 @@ export function renderSessions() {
     input.addEventListener('change', () => {
       const s = sessionById(input.dataset.sid);
       if (s) s.visibility = input.value;
+      _persistSessions();
     });
   });
 }
@@ -750,6 +782,8 @@ function buildCardHTML(session) {
   const dateStr = formatDate(session.ts, { month: 'short', day: 'numeric' });
   const timeStr = formatTime(session.ts, { hour: '2-digit', minute: '2-digit' });
   const photoCount = session.files.length;
+  const imageMeta = _ensureSessionImageMeta(session);
+  const croppedCount = imageMeta.filter(meta => hasAiCropRect(meta?.aiCropRect)).length;
   const speciesText = session.taxon
     ? escHtml(session.taxon.displayName)
     : `<span style="opacity:0.45">${t('detail.unknownSpecies')}</span>`;
@@ -762,6 +796,7 @@ function buildCardHTML(session) {
   const stripItems = session.blobUrls.map((url, i) =>
     `<div class="import-strip-item" data-sid="${sid}" data-idx="${i}">
       <img src="${escHtml(url)}" class="import-strip-thumb" loading="lazy">
+      ${hasAiCropRect(imageMeta[i]?.aiCropRect) ? '<div class="ai-crop-thumb-badge">AI crop</div>' : ''}
       <button class="import-strip-delete" data-sid="${sid}" data-idx="${i}">×</button>
     </div>`
   ).join('');
@@ -785,6 +820,7 @@ function buildCardHTML(session) {
       <div class="import-card-datetime"><span>${dateStr}</span><span>${timeStr} · ${tp('counts.photo', photoCount)}</span></div>
       <div class="import-card-loc">${session.locationName ? escHtml(session.locationName) : '—'}</div>
       <div class="import-card-species">${speciesText}</div>
+      <div class="import-card-crop-status">${croppedCount ? t('crop.statusSome', { cropped: croppedCount, total: photoCount }) : t('crop.noCropHint')}</div>
     </div>
     <button class="import-card-delete" data-sid="${sid}" aria-label="${t('common.delete')}">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
@@ -836,6 +872,7 @@ function _wireCard(sid) {
   const dropdown = card.querySelector(`.import-taxon-dropdown[data-sid="${sid}"]`);
   if (!input || !dropdown || input._wired) return;
   input._wired = true;
+  _ensureSessionImageMeta(sessionById(sid));
 
   let debounceTimer = null;
 
@@ -865,6 +902,7 @@ function _wireCard(sid) {
                 vernacularName: r.vernacularName || null,
                 displayName: display,
               };
+              _persistSessions();
             }
             input.value = display;
             dropdown.style.display = 'none';
@@ -881,6 +919,17 @@ function _wireCard(sid) {
 
   const aiBtn = card.querySelector(`.ai-id-btn-import[data-sid="${sid}"]`)
   const aiResults = card.querySelector(`.ai-results-import[data-sid="${sid}"]`)
+  card.querySelectorAll(`.import-strip-item[data-sid="${sid}"]`).forEach(item => {
+    if (item._wired) return
+    item._wired = true
+    item.addEventListener('click', event => {
+      if (event.target.closest('.import-strip-delete')) return
+      const session = sessionById(sid)
+      if (!session) return
+      const startIndex = parseInt(item.dataset.idx, 10) || 0
+      _openSessionCropEditor(session, startIndex)
+    })
+  })
   if (aiBtn && aiResults && !aiBtn._wired) {
     aiBtn._wired = true
     aiBtn.addEventListener('click', async () => {
@@ -889,7 +938,13 @@ function _wireCard(sid) {
       aiBtn.disabled = true
       aiBtn.textContent = t('import.identifying')
       try {
-        const predictions = await runArtsorakelForBlobs(session.files, getTaxonomyLanguage())
+        const predictions = await runArtsorakelForBlobs(
+          session.files.map((blob, index) => ({
+            blob,
+            cropRect: session.imageMeta?.[index]?.aiCropRect || null,
+          })),
+          getTaxonomyLanguage(),
+        )
         if (!predictions?.length) {
           aiResults.style.display = 'none'
           showToast(t('review.noMatch'))
@@ -915,6 +970,7 @@ function _wireCard(sid) {
               vernacularName: p.vernacularName || null,
               displayName: p.displayName,
             }
+            _persistSessions()
             input.value = p.displayName
             aiResults.style.display = 'none'
           })
@@ -932,6 +988,30 @@ function _wireCard(sid) {
       }
     })
   }
+}
+
+function _openSessionCropEditor(session, startIndex = 0) {
+  const imageMeta = _ensureSessionImageMeta(session)
+  openAiCropEditor({
+    title: t('crop.editorTitle'),
+    startIndex,
+    images: session.blobUrls.map((url, index) => ({
+      url,
+      aiCropRect: imageMeta[index]?.aiCropRect || null,
+    })),
+    onChange: (index, nextMeta) => {
+      imageMeta[index] = {
+        ...imageMeta[index],
+        ...nextMeta,
+      }
+    },
+    onClose: committed => {
+      if (committed) {
+        _persistSessions()
+        renderSessions()
+      }
+    },
+  })
 }
 
 async function saveAll() {
@@ -964,7 +1044,13 @@ async function saveAll() {
         visibility: session.visibility || 'friends',
       };
 
-      await enqueueObservation(obsPayload, session.files);
+      _ensureSessionImageMeta(session);
+      await enqueueObservation(obsPayload, session.files.map((blob, index) => ({
+        blob,
+        aiCropRect: session.imageMeta[index]?.aiCropRect || null,
+        aiCropSourceW: session.imageMeta[index]?.aiCropSourceW ?? null,
+        aiCropSourceH: session.imageMeta[index]?.aiCropSourceH ?? null,
+      })));
       savedCount++;
     } catch (err) {
       console.error('Failed to save session', session.id, err);

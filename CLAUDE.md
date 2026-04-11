@@ -33,7 +33,13 @@ Deserialise before pushing from desktop.
 - Tables: `public.taxa` + `public.taxa_vernacular` — imported from `vernacular_multilanguage_unified.sqlite3`
 - Search via Supabase RPC: `supabase.rpc('search_taxa', { q, lang, lim })`
 - All logic lives in `src/artsorakel.js`: `searchTaxa()`, `runArtsorakel()`, `formatDisplayName()`
-- Artsdata AI (`https://ai.artsdatabanken.no`) is called directly from the browser — CORS is open
+- Artsorakel AI is **proxied through `upload.sporely.no/artsorakel`** (JWT-authenticated). Direct
+  fallback to `https://ai.artsdatabanken.no` only if neither `VITE_ARTSORAKEL_BASE_URL` nor
+  `VITE_MEDIA_UPLOAD_BASE_URL` is set.
+- `find_detail.js` fetches gallery images cross-origin via `fetch(img.src)` before sending to AI.
+  This requires `media.sporely.no` to send `Access-Control-Allow-Origin: *` — it is configured.
+  If artsorakel silently returns "no suggestions" from the detail screen, check R2 CORS first:
+  `npx wrangler r2 bucket cors list sporely-media`
 - Languages supported in vernacular DB: no, sv, da, de, en, es, fi, fr, it, pl, pt
 - External IDs on `taxa`: `norwegian_taxon_id`, `swedish_taxon_id`, `inaturalist_taxon_id`, `artportalen_taxon_id`
 - To re-import taxa: `export SUPABASE_SERVICE_ROLE_KEY=... && python database/import_taxa_to_supabase.py`
@@ -90,6 +96,19 @@ Deserialise before pushing from desktop.
 - Transactional email via Resend (smtp.resend.com, port 587, username `resend`)
 - Sender: `noreply@sporely.no` (domain verified in Resend)
 - API key stored as SMTP password in Supabase Authentication → SMTP settings
+
+## Cloudflare Worker
+
+- Source: `cloudflare/r2-upload-worker/src/index.js`
+- **Must be manually deployed after every change** — committing does not deploy automatically.
+  ```sh
+  cd cloudflare/r2-upload-worker && npx wrangler deploy
+  ```
+- Routes: `PUT /upload/{key}` (R2 upload), `POST /artsorakel` (AI proxy), `GET /healthz`
+- Symptoms of a stale deployment: new routes return 404, fixes have no effect in production.
+- When forwarding a multipart body to an upstream, always buffer with `request.arrayBuffer()`
+  before passing to the upstream `fetch`. Streaming `request.body` directly can produce
+  malformed multipart payloads that silently succeed but return no useful data.
 
 ## Storage
 

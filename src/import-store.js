@@ -37,6 +37,11 @@ export async function saveImportSessions(sessions) {
       locationName: s.locationName || '',
       taxon: s.taxon || null,
       visibility: s.visibility || 'friends',
+      imageMeta: (s.imageMeta || []).map(meta => ({
+        aiCropRect: meta?.aiCropRect || null,
+        aiCropSourceW: meta?.aiCropSourceW ?? null,
+        aiCropSourceH: meta?.aiCropSourceH ?? null,
+      })),
       blobs: await Promise.all(s.files.map(f => f.arrayBuffer())),
     })))
 
@@ -77,6 +82,11 @@ export async function loadImportSessions() {
           visibility: r.visibility,
           files,
           blobUrls,
+          imageMeta: (r.imageMeta || []).map(meta => ({
+            aiCropRect: meta?.aiCropRect || null,
+            aiCropSourceW: meta?.aiCropSourceW ?? null,
+            aiCropSourceH: meta?.aiCropSourceH ?? null,
+          })),
         }
       })
   } catch (err) {

@@ -1,7 +1,7 @@
 import { state } from './state.js'
 import { startCamera, stopCamera } from './screens/capture.js'
 import { buildReviewGrid } from './screens/review.js'
-import { loadMap } from './screens/map.js'
+import { loadMapScreen } from './map-loader.js'
 
 // Navigation history stack
 const navStack = []
@@ -24,7 +24,7 @@ function _show(screen) {
   else stopCamera()
 
   if (screen === 'review') buildReviewGrid()
-  if (screen === 'map')    loadMap()
+  if (screen === 'map')    void loadMapScreen()
 }
 
 export function navigate(screen) {

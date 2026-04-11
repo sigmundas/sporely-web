@@ -7,6 +7,7 @@
 
 import { supabase } from './supabase.js'
 import { t } from './i18n.js'
+import { createCroppedImageBlob, normalizeAiCropRect } from './image_crop.js'
 
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
 const ARTSDATA_PROXY_BASE_URL = String(
@@ -154,15 +155,29 @@ function _extractPredictions(data) {
 }
 
 export async function runArtsorakelForBlobs(blobs, lang = 'no') {
-  const realBlobs = (blobs || []).filter(blob => blob instanceof Blob)
-  if (!realBlobs.length) return null
+  const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
+    if (item instanceof Blob) return item
+    if (!(item?.blob instanceof Blob)) return null
 
-  if (realBlobs.length === 1) {
-    return runArtsorakel(realBlobs[0], lang)
+    const cropRect = normalizeAiCropRect(item.cropRect)
+    if (!cropRect) return item.blob
+
+    try {
+      return await createCroppedImageBlob(item.blob, cropRect)
+    } catch (error) {
+      console.warn('AI crop export failed, falling back to full image:', error)
+      return item.blob
+    }
+  }))).filter(blob => blob instanceof Blob)
+
+  if (!preparedBlobs.length) return null
+
+  if (preparedBlobs.length === 1) {
+    return runArtsorakel(preparedBlobs[0], lang)
   }
 
-  const responses = await Promise.all(realBlobs.map(blob => runArtsorakel(blob, lang)))
-  const totalBlobs = realBlobs.length
+  const responses = await Promise.all(preparedBlobs.map(blob => runArtsorakel(blob, lang)))
+  const totalBlobs = preparedBlobs.length
   const combined = new Map()
 
   responses

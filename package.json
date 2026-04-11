@@ -1,7 +1,7 @@
 {
   "name": "sporely-web",
   "private": true,
-  "version": "0.2.5",
+  "version": "0.2.6",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -11,6 +11,8 @@
     "predev": "npm run check:node",
     "prebuild": "npm run check:node",
     "prepreview": "npm run check:node",
+    "sync:version": "node scripts/sync-version.mjs",
+    "sync:version:bump-code": "node scripts/sync-version.mjs --bump-code",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

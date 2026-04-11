@@ -16,8 +16,9 @@ import { initFindDetail } from './screens/find_detail.js'
 import { initPhotoViewer } from './photo-viewer.js'
 import { initImportReview, renderSessions, restoreImportSessions } from './screens/import_review.js'
 import { loadImportSessions } from './import-store.js'
-import { initMap, loadMap } from './screens/map.js'
 import { initProfile, loadProfile } from './screens/profile.js'
+import { initAiCropEditor } from './ai-crop-editor.js'
+import { loadMapScreen } from './map-loader.js'
 
 initI18n()
 
@@ -107,8 +108,8 @@ async function bootApp(user) {
   initReview()
   initFindDetail()
   initPhotoViewer()
+  initAiCropEditor()
   initImportReview()
-  initMap()
   initProfile()
   startGeo()
   navigate('home')
@@ -127,7 +128,7 @@ onLocaleChange(() => {
   if (state.currentScreen === 'finds') loadFinds()
   if (state.currentScreen === 'review') buildReviewGrid()
   if (state.currentScreen === 'import-review') renderSessions()
-  if (state.currentScreen === 'map') loadMap()
+  if (state.currentScreen === 'map') void loadMapScreen()
   if (state.currentScreen === 'profile') loadProfile()
 })
 
