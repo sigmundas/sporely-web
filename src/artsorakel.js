@@ -88,6 +88,38 @@ function pickUrl(pred, taxon) {
   return 'https://artsdatabanken.no'
 }
 
+const AI_MAX_PIXELS = 1_000_000
+
+async function _resizeForAi(blob) {
+  if (!(blob instanceof Blob)) return blob
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const pixels = img.naturalWidth * img.naturalHeight
+        if (pixels <= AI_MAX_PIXELS) { resolve(blob); return }
+        const scale = Math.sqrt(AI_MAX_PIXELS / pixels)
+        const w = Math.max(1, Math.round(img.naturalWidth * scale))
+        const h = Math.max(1, Math.round(img.naturalHeight * scale))
+        const canvas = document.createElement('canvas')
+        canvas.width = w
+        canvas.height = h
+        const ctx = canvas.getContext('2d')
+        if (!ctx) { resolve(blob); return }
+        ctx.drawImage(img, 0, 0, w, h)
+        canvas.toBlob(resized => resolve(resized instanceof Blob ? resized : blob), 'image/jpeg', 0.88)
+      } catch (_) {
+        resolve(blob)
+      } finally {
+        URL.revokeObjectURL(url)
+      }
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(blob) }
+    img.src = url
+  })
+}
+
 /**
  * POST a Blob to Artsdata AI and return up to 5 normalized predictions.
  * Returns null if blob is not a real Blob (demo mode).
@@ -96,11 +128,12 @@ function pickUrl(pred, taxon) {
 export async function runArtsorakel(blob, lang = 'no') {
   if (!(blob instanceof Blob)) return null
 
+  const aiBlob = await _resizeForAi(blob)
   const langNorm = normalizeLang(lang)
 
   async function tryPost(fieldName) {
     const form = new FormData()
-    form.append(fieldName, blob, 'photo.jpg')
+    form.append(fieldName, aiBlob, 'photo.jpg')
     const request = {
       method: 'POST',
       body: form,
@@ -156,17 +189,21 @@ function _extractPredictions(data) {
 
 export async function runArtsorakelForBlobs(blobs, lang = 'no') {
   const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
-    if (item instanceof Blob) return item
-    if (!(item?.blob instanceof Blob)) return null
+    const rawBlob = item instanceof Blob ? item : item?.blob
+    if (!(rawBlob instanceof Blob)) return null
 
-    const cropRect = normalizeAiCropRect(item.cropRect)
-    if (!cropRect) return item.blob
+    // Resize to ≤1MP before cropping so createCroppedImageBlob doesn't OOM
+    // on high-resolution imported photos (camera blobs are already ≤1MP via this path too).
+    const resizedBlob = await _resizeForAi(rawBlob)
+
+    const cropRect = item instanceof Blob ? null : normalizeAiCropRect(item.cropRect)
+    if (!cropRect) return resizedBlob
 
     try {
-      return await createCroppedImageBlob(item.blob, cropRect)
+      return await createCroppedImageBlob(resizedBlob, cropRect)
     } catch (error) {
-      console.warn('AI crop export failed, falling back to full image:', error)
-      return item.blob
+      console.warn('AI crop export failed, falling back to resized image:', error)
+      return resizedBlob
     }
   }))).filter(blob => blob instanceof Blob)
 

@@ -1,5 +1,4 @@
 import { state } from '../state.js';
-import { supabase } from '../supabase.js';
 import { formatDate, formatTime, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
@@ -7,21 +6,103 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
 import { FilePicker } from '@capawesome/capacitor-file-picker';
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js';
-import { insertObservationImage, syncObservationMediaKeys, uploadObservationImageVariants } from '../images.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { openFinds } from './finds.js';
-import { openFindDetail } from './find_detail.js';
+import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
 
 let sessions = [];
+let expandedSessionIds = new Set();
+let sourceItems = [];
 let exifrModulePromise = null;
 const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
 const RAW_GPS_PICK = ['GPSLatitude', 'GPSLatitudeRef', 'GPSLongitude', 'GPSLongitudeRef', 'latitude', 'longitude'];
+const IMPORT_AI_MAX_EDGE = 1920;
 
 function _persistSessions() {
   saveImportSessions(sessions);
+}
+
+function _getPhotoGapMinutes() {
+  return Math.max(1, Math.min(120, parseInt(localStorage.getItem('sporely-photo-gap')) || 1));
+}
+
+function _disposeSessionBlobUrls(items = sessions) {
+  (items || []).forEach(session => {
+    (session?.blobUrls || []).forEach(url => URL.revokeObjectURL(url));
+  });
+}
+
+function _groupSourceItems(items, gapMs) {
+  if (!items.length) return [];
+  const grouped = [[items[0]]];
+  for (let i = 1; i < items.length; i++) {
+    const prev = grouped[grouped.length - 1];
+    const gap = items[i].captureTime - prev[prev.length - 1].captureTime;
+    if (gap <= gapMs) prev.push(items[i]);
+    else grouped.push([items[i]]);
+  }
+  return grouped;
+}
+
+function _groupKey(items) {
+  return (items || []).map(item => item.id).join('|');
+}
+
+function _buildSessionsFromSourceItems() {
+  const previousByKey = new Map(
+    sessions.map(session => [_groupKey((session.sourceItemIds || []).map(id => ({ id }))), session])
+  );
+  const gapMs = _getPhotoGapMinutes() * 60_000;
+  const grouped = _groupSourceItems(sourceItems, gapMs);
+
+  _disposeSessionBlobUrls(sessions);
+
+  sessions = grouped.map((group, idx) => {
+    const key = _groupKey(group);
+    const previous = previousByKey.get(key);
+    const exifGps = group.find(item => item.lat !== null && item.lon !== null);
+    return {
+      id: previous?.id || `s${idx}`,
+      sourceItemIds: group.map(item => item.id),
+      files: group.map(item => item.blob),
+      aiFiles: group.map(item => item.aiBlob || item.blob),
+      blobUrls: group.map(item => URL.createObjectURL(item.blob)),
+      imageMeta: group.map(item => item.meta),
+      photoTimes: group.map(item => item.captureTime),
+      photoGps: group.map(item => ({ lat: item.lat, lon: item.lon })),
+      photoDebug: group.map(item => item.dbg || null),
+      ts: new Date(group[0].captureTime),
+      gpsLat: exifGps?.lat ?? null,
+      gpsLon: exifGps?.lon ?? null,
+      locationName: previous?.locationName || '',
+      taxon: previous?.taxon || null,
+      visibility: previous?.visibility || 'friends',
+      exifDebug: group.map(item => item.dbg).filter(Boolean),
+    };
+  });
+}
+
+function _flattenSourceItemsFromSessions(savedSessions) {
+  let fallbackCounter = 0;
+  return (savedSessions || []).flatMap(session =>
+    (session.files || []).map((blob, index) => ({
+      id: session.sourceItemIds?.[index] || `restored-${fallbackCounter++}`,
+      blob,
+      aiBlob: session.aiFiles?.[index] instanceof Blob ? session.aiFiles[index] : blob,
+      meta: session.imageMeta?.[index] || {
+        aiCropRect: null,
+        aiCropSourceW: null,
+        aiCropSourceH: null,
+      },
+      captureTime: session.photoTimes?.[index] || session.ts?.getTime?.() || Date.now(),
+      lat: session.photoGps?.[index]?.lat ?? null,
+      lon: session.photoGps?.[index]?.lon ?? null,
+      dbg: session.photoDebug?.[index] || null,
+    }))
+  );
 }
 
 function _ensureSessionImageMeta(session) {
@@ -51,17 +132,53 @@ export function initImportReview() {
   document.getElementById('import-save-btn').addEventListener('click', saveAll);
   document.getElementById('import-photo-input').addEventListener('change', handleFileSelect);
   document.getElementById('import-browse-input').addEventListener('change', handleFileSelect);
+  const gapInput = document.getElementById('import-gap-input');
+  if (gapInput) {
+    gapInput.addEventListener('change', () => {
+      const value = Math.max(1, Math.min(120, parseInt(gapInput.value) || 1));
+      gapInput.value = value;
+      localStorage.setItem('sporely-photo-gap', String(value));
+      const settingsGapInput = document.getElementById('settings-gap-input');
+      if (settingsGapInput) settingsGapInput.value = value;
+      if (!sourceItems.length) return;
+      expandedSessionIds = new Set();
+      _buildSessionsFromSourceItems();
+      if (sessions.length === 1) {
+        const session = sessions[0];
+        session.blobUrls.forEach(url => URL.revokeObjectURL(url));
+        sessions = [];
+        expandedSessionIds = new Set();
+        sourceItems = [];
+        clearImportSessions();
+        openImportedReview(session);
+        return;
+      }
+      if (!sessions.length) {
+        clearImportSessions();
+        navigate('home');
+        return;
+      }
+      _persistSessions();
+      renderSessions();
+      _prefillSessionLocations();
+    });
+  }
 }
 
 function _cancelImport() {
+  _disposeSessionBlobUrls();
   clearImportSessions();
   sessions = [];
+  expandedSessionIds = new Set();
+  sourceItems = [];
   navigate('home');
 }
 
 // Restore a previously-saved import session (app was killed mid-review)
 export function restoreImportSessions(savedSessions) {
   sessions = savedSessions;
+  sourceItems = _flattenSourceItemsFromSessions(savedSessions);
+  expandedSessionIds = new Set(savedSessions.map(session => session.id));
   navigate('import-review');
   renderSessions();
 }
@@ -154,63 +271,41 @@ async function handleSelectedFiles(files, options = {}) {
   // Sort by actual capture time
   withTimes.sort((a, b) => a.captureTime - b.captureTime);
 
-  // Group by user-configured time gap (default 1 min)
-  const gapMs = (parseInt(localStorage.getItem('sporely-photo-gap')) || 1) * 60_000;
-  const grouped = [[withTimes[0]]];
-  for (let i = 1; i < withTimes.length; i++) {
-    const prev = grouped[grouped.length - 1];
-    const gap = withTimes[i].captureTime - prev[prev.length - 1].captureTime;
-    if (gap <= gapMs) {
-      prev.push(withTimes[i]);
-    } else {
-      grouped.push([withTimes[i]]);
-    }
-  }
-
   // Convert to JPEG sequentially — avoids exhausting mobile memory with parallel decodes.
+  _disposeSessionBlobUrls();
   sessions = [];
+  expandedSessionIds = new Set();
+  sourceItems = [];
   let doneCount = 0;
-  for (let idx = 0; idx < grouped.length; idx++) {
-    const grp = grouped[idx];
-    const processed = [];
-    for (const { file } of grp) {
-      _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
-      processed.push(await _processFile(file));
-      doneCount++;
-    }
-    // Use GPS from the first photo in the group that has EXIF GPS.
-    // Do NOT fall back to state.gps — gallery photos have their own location.
-    const exifGps = grp.find(f => f.lat !== null);
-    const gpsLat = exifGps?.lat ?? null;
-    const gpsLon = exifGps?.lon ?? null;
-    // Collect debug info from all photos in group for diagnostics
-    const exifDebug = grp.map(f => f.dbg).filter(Boolean);
-
-    const ts = new Date(grp[0].captureTime);
-    sessions.push({
-      id: 's' + idx,
-      files: processed.map(p => p.blob),
-      blobUrls: processed.map(p => p.url),
-      imageMeta: processed.map(p => p.meta),
-      ts,
-      gpsLat,
-      gpsLon,
-      locationName: '',
-      taxon: null,
-      visibility: 'friends',
-      exifDebug,
+  for (let idx = 0; idx < withTimes.length; idx++) {
+    const item = withTimes[idx];
+    _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
+    const processed = await _processFile(item.file);
+    sourceItems.push({
+      id: `i${idx}`,
+      blob: processed.blob,
+      aiBlob: processed.aiBlob || processed.blob,
+      meta: processed.meta,
+      captureTime: item.captureTime,
+      lat: item.lat ?? null,
+      lon: item.lon ?? null,
+      dbg: item.dbg || null,
     });
+    doneCount++;
   }
+
+  _buildSessionsFromSourceItems();
 
   _hideProgress();
 
-  // Single group → skip review screen, save immediately and open edit dialog
+  // Single group → open the same Review screen as camera capture.
   if (sessions.length === 1) {
-    const obsId = await _saveSingleAndOpen(sessions[0]);
-    if (obsId) {
-      sessions = [];
-      await openFindDetail(obsId, { returnScreen: 'finds' });
-    }
+    const session = sessions[0];
+    session.blobUrls.forEach(url => URL.revokeObjectURL(url));
+    sessions = [];
+    expandedSessionIds = new Set();
+    sourceItems = [];
+    openImportedReview(session);
     return;
   }
 
@@ -219,22 +314,7 @@ async function handleSelectedFiles(files, options = {}) {
 
   navigate('import-review');
   renderSessions();
-
-  // Reverse geocode each session's GPS position (EXIF or live) to pre-fill location name.
-  // Run in parallel — each resolves independently and re-renders when done.
-  sessions.forEach(async session => {
-    if (session.gpsLat === null) return;
-    const name = await _reverseGeocode(session.gpsLat, session.gpsLon);
-    if (name && !session.locationName) {
-      session.locationName = name;
-      // Update just this card's location input without full re-render
-      const input = document.querySelector(`.import-loc-input[data-sid="${session.id}"]`);
-      const locEl = document.querySelector(`.import-card[data-sid="${session.id}"] .import-card-loc`);
-      if (input) input.value = name;
-      if (locEl) locEl.textContent = name;
-    }
-      _persistSessions();
-  });
+  _prefillSessionLocations();
 }
 
 // ── Progress overlay ─────────────────────────────────────────────────────────
@@ -250,6 +330,21 @@ function _setProgress(done, total, label) {
 function _hideProgress() {
   const overlay = document.getElementById('import-progress');
   if (overlay) overlay.style.display = 'none';
+}
+
+function _prefillSessionLocations() {
+  sessions.forEach(async session => {
+    if (session.gpsLat === null || session.locationName) return;
+    const name = await _reverseGeocode(session.gpsLat, session.gpsLon);
+    if (name && !session.locationName) {
+      session.locationName = name;
+      const input = document.querySelector(`.import-loc-input[data-sid="${session.id}"]`);
+      const locEl = document.querySelector(`.import-card[data-sid="${session.id}"] .import-card-loc`);
+      if (input) input.value = name;
+      if (locEl) locEl.textContent = name;
+      _persistSessions();
+    }
+  });
 }
 
 // ── EXIF / capture time + GPS ─────────────────────────────────────────────────
@@ -600,10 +695,10 @@ async function _reverseGeocode(lat, lon) {
 async function _processFile(file) {
   // 1. Canvas path (fast — works for JPEG/PNG/WebP; also HEIC on iOS/macOS Safari)
   try {
-    const blob = await _toJpeg(file);
+    const { blob, aiBlob } = await _toJpeg(file);
     const url = URL.createObjectURL(blob);
     const meta = await createImageCropMeta(blob, { preseed: true });
-    return { blob, url, meta };
+    return { blob, aiBlob, url, meta };
   } catch (_) {}
 
   // 2. Final fallback — original file (will show blank if browser can't decode it)
@@ -612,86 +707,23 @@ async function _processFile(file) {
     aiCropSourceW: null,
     aiCropSourceH: null,
   }));
-  return { blob: file, url: URL.createObjectURL(file), meta };
-}
-
-// Save a single session immediately and return the new observation ID.
-async function _saveSingleAndOpen(session) {
-  try {
-    if (!session.locationName && session.gpsLat !== null && session.gpsLon !== null) {
-      session.locationName = await _reverseGeocode(session.gpsLat, session.gpsLon)
-        || `${session.gpsLat.toFixed(4)}° N, ${session.gpsLon.toFixed(4)}° E`;
-    }
-
-    const obsPayload = {
-      user_id: state.user.id,
-      date: _localDate(session.ts),
-      captured_at: session.ts.toISOString(),
-      gps_latitude: session.gpsLat ?? null,
-      gps_longitude: session.gpsLon ?? null,
-      location: session.locationName || null,
-      source_type: 'personal',
-      visibility: session.visibility || 'friends',
-    };
-
-    let { data: obsData, error: obsError } = await supabase
-      .from('observations')
-      .insert(obsPayload)
-      .select('id')
-      .single();
-
-    if (obsError?.message?.includes('captured_at')) {
-      const { captured_at: _, ...payloadWithoutCapturedAt } = obsPayload;
-      ({ data: obsData, error: obsError } = await supabase
-        .from('observations')
-        .insert(payloadWithoutCapturedAt)
-        .select('id')
-        .single());
-    }
-
-    if (obsError || !obsData?.id) {
-      throw obsError || new Error('Observation insert failed');
-    }
-
-    const obsId = obsData.id;
-    _ensureSessionImageMeta(session);
-    for (let i = 0; i < session.files.length; i++) {
-      const file = session.files[i];
-      if (!(file instanceof Blob)) continue;
-
-      const storagePath = `${state.user.id}/${obsId}/${i}_${Date.now()}.jpg`;
-      await uploadObservationImageVariants(file, storagePath);
-
-      await insertObservationImage({
-        observation_id: obsId,
-        user_id: state.user.id,
-        storage_path: storagePath,
-        image_type: 'field',
-        sort_order: i,
-        aiCropRect: session.imageMeta[i]?.aiCropRect || null,
-        aiCropSourceW: session.imageMeta[i]?.aiCropSourceW ?? null,
-        aiCropSourceH: session.imageMeta[i]?.aiCropSourceH ?? null,
-      });
-      await syncObservationMediaKeys(obsId, storagePath, { sortOrder: i });
-    }
-
-    session.blobUrls.forEach(url => URL.revokeObjectURL(url));
-
-    return obsId;
-  } catch (err) {
-    console.error('Single import failed:', err);
-    showToast(t('import.failed'));
-    session.blobUrls.forEach(url => URL.revokeObjectURL(url));
-    return null;
-  }
+  return { blob: file, aiBlob: file, url: URL.createObjectURL(file), meta };
 }
 
 export function renderSessions() {
   const list = document.getElementById('import-session-list');
   const countEl = document.getElementById('import-session-count');
+  const groupingControls = document.getElementById('import-grouping-controls');
+  const gapInput = document.getElementById('import-gap-input');
+  const gapLabel = document.getElementById('import-gap-label');
+  const gapUnit = document.getElementById('import-gap-unit');
 
   const n = sessions.length;
   countEl.textContent = tp('counts.group', n);
+  if (gapLabel) gapLabel.textContent = t('settings.newObservationAfter');
+  if (gapUnit) gapUnit.textContent = document.querySelector('#settings-sheet .settings-gap-unit')?.textContent || 'min';
+  if (gapInput) gapInput.value = _getPhotoGapMinutes();
+  if (groupingControls) groupingControls.style.display = n > 1 ? 'block' : 'none';
 
   list.innerHTML = sessions.map(session => buildCardHTML(session)).join('');
 
@@ -704,8 +736,10 @@ export function renderSessions() {
       const isOpen = expanded.style.display !== 'none';
       if (isOpen) {
         expanded.style.display = 'none';
+        expandedSessionIds.delete(sid);
       } else {
         expanded.style.display = 'block';
+        expandedSessionIds.add(sid);
         _wireCard(sid);
       }
     });
@@ -717,11 +751,14 @@ export function renderSessions() {
       const sid = btn.dataset.sid;
       const session = sessionById(sid);
       if (session) {
-        session.blobUrls.forEach(url => URL.revokeObjectURL(url));
-        sessions = sessions.filter(s => s.id !== sid);
+        const removeIds = new Set(session.sourceItemIds || []);
+        sourceItems = sourceItems.filter(item => !removeIds.has(item.id));
+        expandedSessionIds.delete(sid);
+        _buildSessionsFromSourceItems();
         if (!sessions.length) clearImportSessions();
         else _persistSessions();
         renderSessions();
+        _prefillSessionLocations();
       }
     });
   });
@@ -733,38 +770,16 @@ export function renderSessions() {
       const idx = parseInt(btn.dataset.idx, 10);
       const session = sessionById(sid);
       if (!session) return;
-      URL.revokeObjectURL(session.blobUrls[idx]);
-      session.files.splice(idx, 1);
-      session.blobUrls.splice(idx, 1);
-      _ensureSessionImageMeta(session).splice(idx, 1);
-      if (session.files.length === 0) {
-        sessions = sessions.filter(s => s.id !== sid);
+      const removeId = session.sourceItemIds?.[idx];
+      if (removeId) {
+        sourceItems = sourceItems.filter(item => item.id !== removeId);
       }
+      if (session.files.length <= 1) expandedSessionIds.delete(sid);
+      _buildSessionsFromSourceItems();
       if (!sessions.length) clearImportSessions();
       else _persistSessions();
       renderSessions();
-    });
-  });
-
-  list.querySelectorAll('.import-current-location-btn[data-sid]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const sid = btn.dataset.sid;
-      const session = sessionById(sid);
-      if (!session) return;
-      if (!state.gps) {
-        showToast(t('import.currentGpsUnavailable'));
-        return;
-      }
-      if (session.locationName) {
-        const confirmed = window.confirm(t('import.overwriteExifConfirm'));
-        if (!confirmed) return;
-      }
-      const name = await _reverseGeocode(state.gps.lat, state.gps.lon);
-      session.gpsLat = state.gps.lat;
-      session.gpsLon = state.gps.lon;
-      session.locationName = name || `${state.gps.lat.toFixed(4)}° N, ${state.gps.lon.toFixed(4)}° E`;
-      _persistSessions();
-      renderSessions();
+      _prefillSessionLocations();
     });
   });
 
@@ -774,6 +789,13 @@ export function renderSessions() {
       if (s) s.visibility = input.value;
       _persistSessions();
     });
+  });
+
+  list.querySelectorAll('.import-card-expanded[data-sid]').forEach(expanded => {
+    const sid = expanded.dataset.sid;
+    const isOpen = expandedSessionIds.has(sid);
+    expanded.style.display = isOpen ? 'block' : 'none';
+    if (isOpen) _wireCard(sid);
   });
 }
 
@@ -849,7 +871,6 @@ function buildCardHTML(session) {
         data-sid="${sid}" placeholder="—" readonly
         value="${locVal}">
       ${missingGpsHint}
-      <button class="ai-id-btn import-current-location-btn" data-sid="${sid}" style="margin-top:8px">${t('import.setFromGps')}</button>
     </div>
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">${t('detail.sharing')}</div>
@@ -940,7 +961,7 @@ function _wireCard(sid) {
       try {
         const predictions = await runArtsorakelForBlobs(
           session.files.map((blob, index) => ({
-            blob,
+            blob: session.aiFiles?.[index] instanceof Blob ? session.aiFiles[index] : blob,
             cropRect: session.imageMeta?.[index]?.aiCropRect || null,
           })),
           getTaxonomyLanguage(),
@@ -1060,35 +1081,73 @@ async function saveAll() {
 
   allBlobUrls.forEach(url => URL.revokeObjectURL(url));
   sessions = [];
+  expandedSessionIds = new Set();
+  sourceItems = [];
   clearImportSessions();
   if (savedCount > 0) showToast(t('import.saved', { count: tp('counts.observation', savedCount) }));
   saveBtn.disabled = false;
   await openFinds('mine', { resetSearch: true });
 }
 
-// Convert any image file to a JPEG Blob via Canvas.
+function _getScaledSize(width, height, maxEdge) {
+  if (!width || !height || !maxEdge) return { width, height };
+  const scale = Math.min(1, maxEdge / Math.max(width, height));
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+function _canvasToJpegBlob(img, width, height, quality = 0.88) {
+  return new Promise((resolve, reject) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      reject(new Error('Canvas context unavailable'));
+      return;
+    }
+
+    ctx.drawImage(img, 0, 0, width, height);
+    canvas.toBlob(
+      blob => (blob ? resolve(blob) : reject(new Error('toBlob failed'))),
+      'image/jpeg',
+      quality,
+    );
+  });
+}
+
+// Convert any image file to JPEG blobs via Canvas.
+// Returns both the full-resolution upload blob and an AI-safe preview blob.
 // Works for JPEG, PNG, WebP, and HEIC on platforms that can decode it (iOS/macOS Safari).
 function _toJpeg(file) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
-    img.onload = () => {
-      const w = img.naturalWidth;
-      const h = img.naturalHeight;
-      if (!w || !h) {
+    img.onload = async () => {
+      try {
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        if (!w || !h) {
+          reject(new Error('zero dimensions — format not supported by this browser'));
+          return;
+        }
+
+        const aiSize = _getScaledSize(w, h, IMPORT_AI_MAX_EDGE);
+        const aiBlob = await _canvasToJpegBlob(img, aiSize.width, aiSize.height, 0.88);
+        if (aiSize.width === w && aiSize.height === h) {
+          resolve({ blob: aiBlob, aiBlob });
+          return;
+        }
+
+        const blob = await _canvasToJpegBlob(img, w, h, 0.88);
+        resolve({ blob, aiBlob });
+      } catch (error) {
+        reject(error);
+      } finally {
         URL.revokeObjectURL(url);
-        reject(new Error('zero dimensions — format not supported by this browser'));
-        return;
       }
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0);
-      URL.revokeObjectURL(url);
-      canvas.toBlob(
-        blob => (blob ? resolve(blob) : reject(new Error('toBlob failed'))),
-        'image/jpeg', 0.88
-      );
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('load failed')); };
     img.src = url;

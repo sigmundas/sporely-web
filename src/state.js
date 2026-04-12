@@ -1,6 +1,7 @@
 export const state = {
   currentScreen: 'home',
   capturedPhotos: [],
+  reviewContext: null,
   captureDraft: {
     habitat: '',
     notes: '',

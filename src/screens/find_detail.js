@@ -16,6 +16,7 @@ let selectedTaxon = null
 let currentObsIsOwner = false
 let currentLocationOverride = null
 let returnScreenOverride = null
+let hideCancelOverride = false
 
 export function initFindDetail() {
   const backBtn = document.getElementById('detail-back')
@@ -55,6 +56,7 @@ export async function openFindDetail(obsId, options = {}) {
   currentObsIsOwner = false
   currentLocationOverride = null
   returnScreenOverride = options.returnScreen || null
+  hideCancelOverride = !!options.hideCancel
 
   // Update back button label — state.currentScreen is still the previous screen at this point
   const prevLabel = {
@@ -66,6 +68,8 @@ export async function openFindDetail(obsId, options = {}) {
   if (backLabel) backLabel.textContent = prevLabel
 
   _resetForm()
+  const cancelBtn = document.getElementById('detail-cancel-btn')
+  if (cancelBtn) cancelBtn.style.display = hideCancelOverride ? 'none' : ''
   navigate('find-detail')
 
   const { data: obs, error } = await supabase
@@ -148,14 +152,17 @@ export async function openFindDetail(obsId, options = {}) {
 
   if (imgData?.length) {
     const sources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
+    const aiSources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'medium' })
 
-    sources.forEach(source => {
+    sources.forEach((source, index) => {
       if (!source?.primaryUrl && !source?.fallbackUrl) return
       const img = document.createElement('img')
+      const aiSource = aiSources[index] || null
       img.className = 'detail-gallery-img'
       img.src       = source.primaryUrl || source.fallbackUrl
       img.loading   = 'lazy'
       img.alt       = ''
+      img.dataset.aiSrc = aiSource?.primaryUrl || aiSource?.fallbackUrl || img.src
       if (source.fallbackUrl && source.fallbackUrl !== source.primaryUrl) {
         img.addEventListener('error', () => {
           if (img.dataset.fallbackApplied === 'true') return
@@ -252,7 +259,7 @@ async function _runAI() {
   try {
     const blobResults = await Promise.allSettled(
       galleryImgs.map(async img => {
-        const resp = await fetch(img.src)
+        const resp = await fetch(img.dataset.aiSrc || img.src)
         if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
         return resp.blob()
       })
@@ -338,6 +345,8 @@ function _resetForm() {
   document.getElementById('detail-gallery').innerHTML = ''
   const aiResults = document.getElementById('detail-ai-results')
   if (aiResults) { aiResults.style.display = 'none'; aiResults.innerHTML = '' }
+  const cancelBtn = document.getElementById('detail-cancel-btn')
+  if (cancelBtn) cancelBtn.style.display = ''
 
   // Reset visibility to default
   const r = document.querySelector('input[name="detail-vis"][value="friends"]')

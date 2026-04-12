@@ -18,17 +18,19 @@ export function startGeo() {
       const gpsDisplay = document.getElementById('gps-display')
       if (gpsDisplay) gpsDisplay.textContent = `${lat}° N, ${lon}° E`
 
-      const reviewCoords = document.getElementById('review-coords-text')
-      if (reviewCoords)
-        reviewCoords.textContent = `${parseFloat(lat).toFixed(4)}° N, ${parseFloat(lon).toFixed(4)}° E`
+      if (state.reviewContext?.source !== 'import') {
+        const reviewCoords = document.getElementById('review-coords-text')
+        if (reviewCoords)
+          reviewCoords.textContent = `${parseFloat(lat).toFixed(4)}° N, ${parseFloat(lon).toFixed(4)}° E`
 
-      const metaAccuracy = document.getElementById('meta-accuracy')
-      if (metaAccuracy)
-        metaAccuracy.textContent = `± ${Math.round(pos.coords.accuracy)} m`
+        const metaAccuracy = document.getElementById('meta-accuracy')
+        if (metaAccuracy)
+          metaAccuracy.textContent = `± ${Math.round(pos.coords.accuracy)} m`
 
-      if (pos.coords.altitude) {
-        const metaAlt = document.getElementById('meta-altitude')
-        if (metaAlt) metaAlt.textContent = `${Math.round(pos.coords.altitude)} m ASL`
+        if (pos.coords.altitude) {
+          const metaAlt = document.getElementById('meta-altitude')
+          if (metaAlt) metaAlt.textContent = `${Math.round(pos.coords.altitude)} m ASL`
+        }
       }
     },
     () => {

@@ -3,6 +3,18 @@
 ## Current Focus
 Migrating media storage to Cloudflare R2 and consolidating cloud infrastructure.
 
+## New Priority: Documentation and Landing Page (VitePress)
+*Goal: Convert the existing `sporely-landing` static site into a VitePress project that directly serves the Markdown documentation from `sporely-py/docs` alongside the app feature highlights.*
+
+### Status: Planning
+
+**Tasks:**
+- [ ] Initialize VitePress in `sporely-landing`
+- [ ] Recreate current `index.html` highlights on the VitePress homepage
+- [ ] Configure VitePress to source Markdown files from `../sporely-py/docs/`
+- [ ] Update build and deployment scripts for `sporely.no` to use VitePress
+
+
 ## New Priority: AI Crop Workflow Shared Between Web, Supabase, and Desktop
 *Goal: add a browser-native "AI crop" flow for Artsorakel that works for both camera captures and imported photos, while staying compatible with the existing `sporely-py` crop model.*
 
@@ -36,8 +48,13 @@ Migrating media storage to Cloudflare R2 and consolidating cloud infrastructure.
 - [x] **Move Web Deletes to R2** — Worker DELETE route deployed; `deleteObservationMedia` uses Worker for R2 deletion.
 - [x] **Offline queue** — Capture/import saves already enqueue observations and blobs in IndexedDB and retry background sync later.
 - [ ] **Supabase Heartbeat** — Configure GitHub Action to ping DB every 4 days to prevent 1-week auto-pause.
-- [ ] **Bundle trimming** — Lazy-load heavier import/map dependencies for small mobile JS chunks.
+- [x] **Bundle trimming** — Map screen is lazy-loaded so `leaflet` is no longer on the initial startup path.
 - [ ] **Friends feed** — Query `observations_friend_view`, paginate, and render list.
+
+## Shared Sync Notes
+- [x] **Desktop conflict noise reduced** — desktop sync now ignores order-only image changes and low-signal local media-signature churn when deciding whether web/cloud edits need review.
+- [x] **Startup cloud scan reduced** — desktop sync now prefilters cloud observations using cached local links and a short timestamp grace window so same-sync server timestamp lag does not make every observation look newly changed on restart.
+- [ ] **Optional server-side change summary** — a future Supabase RPC/view could return one per-observation “meaningful cloud change” summary and remove most remaining client-side deep comparison work.
 
 ## Phase 2: Web-Native Analysis & Community Data
 *Goal: Replicate core analysis insights in a responsive browser environment.*

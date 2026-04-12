@@ -10,6 +10,15 @@ import { enqueueObservation } from '../sync-queue.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { hasAiCropRect } from '../image_crop.js'
 
+function _defaultCaptureDraft() {
+  return {
+    habitat: '',
+    notes: '',
+    uncertain: false,
+    visibility: 'friends',
+  }
+}
+
 export function initReview() {
   document.getElementById('review-close')
     .addEventListener('click', cancelReview)
@@ -33,11 +42,53 @@ export function initReview() {
   initLocationField()
 }
 
+export function openImportedReview(session) {
+  resetLocationState()
+  const reviewGps = Number.isFinite(session?.gpsLat) && Number.isFinite(session?.gpsLon)
+    ? {
+        lat: session.gpsLat,
+        lon: session.gpsLon,
+        accuracy: null,
+        altitude: null,
+      }
+    : null
+
+  const taxon = session?.taxon ? { ...session.taxon } : null
+  state.capturedPhotos = (session?.files || []).map((blob, index) => ({
+    blob,
+    aiBlob: session?.aiFiles?.[index] instanceof Blob ? session.aiFiles[index] : blob,
+    blobPromise: null,
+    gps: reviewGps,
+    ts: session?.ts || new Date(),
+    emoji: '🖼️',
+    aiCropRect: session?.imageMeta?.[index]?.aiCropRect || null,
+    aiCropSourceW: session?.imageMeta?.[index]?.aiCropSourceW ?? null,
+    aiCropSourceH: session?.imageMeta?.[index]?.aiCropSourceH ?? null,
+    taxon: taxon ? { ...taxon } : null,
+  }))
+  state.batchCount = state.capturedPhotos.length
+  state.sessionStart = session?.ts || new Date()
+  state.captureDraft = {
+    ..._defaultCaptureDraft(),
+    visibility: session?.visibility || 'friends',
+  }
+  state.reviewContext = {
+    source: 'import',
+    gps: reviewGps,
+    locationName: session?.locationName || '',
+  }
+  navigate('review')
+}
+
 // ── Grid build ────────────────────────────────────────────────────────────────
 
 export function buildReviewGrid() {
   const photos = state.capturedPhotos
   const count  = photos.length
+  const reviewContext = state.reviewContext || null
+  const reviewGps = reviewContext?.source === 'import'
+    ? (reviewContext.gps || null)
+    : (state.gps || null)
   const reviewCount = document.getElementById('review-count')
   const sharedTaxon = photos.find(photo => photo.taxon)?.taxon || null
   const speciesLabel = sharedTaxon?.displayName
@@ -50,25 +101,35 @@ export function buildReviewGrid() {
 
   // title stays "New observation" — count shown via card carousel
 
-  if (state.sessionStart) {
+  if (photos.length) {
+    const firstTs = photos[0]?.ts || state.sessionStart || new Date()
+    const lastTs = photos[photos.length - 1]?.ts || firstTs
     document.getElementById('review-time').textContent =
       t('review.capturedRange', {
-        start: formatTime(state.sessionStart, { hour: '2-digit', minute: '2-digit' }),
-        end: formatTime(new Date(), { hour: '2-digit', minute: '2-digit' }),
+        start: formatTime(firstTs, { hour: '2-digit', minute: '2-digit' }),
+        end: formatTime(lastTs, { hour: '2-digit', minute: '2-digit' }),
       })
   }
 
-  if (state.gps) {
+  if (reviewGps) {
     document.getElementById('review-coords-text').textContent =
-      `${state.gps.lat.toFixed(4)}° N, ${state.gps.lon.toFixed(4)}° E`
-    document.getElementById('meta-accuracy').textContent =
-      `± ${Math.round(state.gps.accuracy)} m`
-    if (state.gps.altitude)
+      `${reviewGps.lat.toFixed(4)}° N, ${reviewGps.lon.toFixed(4)}° E`
+    document.getElementById('meta-accuracy').textContent = Number.isFinite(reviewGps.accuracy)
+      ? `± ${Math.round(reviewGps.accuracy)} m`
+      : '—'
+    if (Number.isFinite(reviewGps.altitude))
       document.getElementById('meta-altitude').textContent =
-        `${Math.round(state.gps.altitude)} m ASL`
+        `${Math.round(reviewGps.altitude)} m ASL`
+    else
+      document.getElementById('meta-altitude').textContent = '— ASL'
     document.getElementById('review-location').textContent =
-      `${state.gps.lat.toFixed(3)}° N, ${state.gps.lon.toFixed(3)}° E`
-    startLocationLookup(state.gps.lat, state.gps.lon)
+      `${reviewGps.lat.toFixed(3)}° N, ${reviewGps.lon.toFixed(3)}° E`
+    startLocationLookup(reviewGps.lat, reviewGps.lon)
+  } else {
+    document.getElementById('review-coords-text').textContent = ''
+    document.getElementById('meta-accuracy').textContent = '—'
+    document.getElementById('meta-altitude').textContent = '— ASL'
+    document.getElementById('review-location').textContent = ''
   }
 
   document.getElementById('review-habitat').value = state.captureDraft.habitat || ''
@@ -77,6 +138,12 @@ export function buildReviewGrid() {
   const visibility = state.captureDraft.visibility || 'friends'
   const visibilityRadio = document.querySelector(`input[name="review-vis"][value="${visibility}"]`)
   if (visibilityRadio) visibilityRadio.checked = true
+  const locationInput = document.getElementById('location-name-input')
+  if (locationInput) {
+    locationInput.value = reviewContext?.locationName || locationInput.value || ''
+  }
+  const addPhotoBtn = document.getElementById('add-photo-btn')
+  if (addPhotoBtn) addPhotoBtn.style.display = reviewContext?.source === 'import' ? 'none' : ''
 
   const grid = document.getElementById('observation-grid')
   grid.classList.add('review-session-grid')
@@ -274,7 +341,7 @@ async function handleArtsorakelBtn(i) {
 
   try {
     const blobs = (await Promise.all(state.capturedPhotos.map(async photo => ({
-      blob: await resolveBlob(photo),
+      blob: photo.aiBlob instanceof Blob ? photo.aiBlob : await resolveBlob(photo),
       cropRect: photo.aiCropRect || null,
     }))))
       .filter(item => item.blob instanceof Blob)
@@ -373,13 +440,9 @@ async function runAllArtsorakel() {
 
 function cancelReview() {
   state.capturedPhotos = []
+  state.reviewContext = null
   state.batchCount = 0
-  state.captureDraft = {
-    habitat: '',
-    notes: '',
-    uncertain: false,
-    visibility: 'friends',
-  }
+  state.captureDraft = _defaultCaptureDraft()
   resetLocationState()
   navigate('home')
 }
@@ -437,13 +500,9 @@ async function saveObservationBatch() {
 
     showToast(t('review.synced', { count: tp('counts.photo', photos.length) }))
     state.capturedPhotos = []
+    state.reviewContext = null
     state.batchCount = 0
-    state.captureDraft = {
-      habitat: '',
-      notes: '',
-      uncertain: false,
-      visibility: 'friends',
-    }
+    state.captureDraft = _defaultCaptureDraft()
     resetLocationState()
     await refreshHome()
     await openFinds('mine', { resetSearch: true })

@@ -360,6 +360,7 @@ service-level R2 API credentials from `python.env`).
 - Syncs the selected desktop images plus optional generated media (measure plot, thumbnail gallery, plate)
 - Pushes `observation_images.ai_crop_*` alongside the rest of each synced image row so web and desktop share the same AI crop geometry
 - Uses a lightweight local media signature so unchanged images/media can be skipped on later syncs
+- Media-signature comparison now ignores low-signal local-only churn such as file mtime drift, gallery layout state, order-only image changes, and older signature payloads that predate the shared AI crop fields
 - Upload size is controlled by the desktop **Sync image size** setting (`Reduced (2 MP)` or `Full size`)
 
 **Pull (cloud → desktop):**
@@ -370,11 +371,15 @@ service-level R2 API credentials from `python.env`).
 - Pulls cloud-managed images into the local desktop observation and refreshes the local media baseline
 - Hydrates local `images.ai_crop_*` fields from `public.observation_images` when cloud images already have AI crop metadata
 - Uses a bulk-fetch `in.()` query for image metadata to prevent N+1 query performance bottlenecks during sync.
+- Before deep comparison, desktop sync now prefilters cloud observations using one local lookup pass plus the cloud row `updated_at` versus local `synced_at`.
+- A small grace window is applied to `updated_at > synced_at` checks so server-write timestamp skew from the same sync cycle does not cause every observation to be re-checked on next app launch.
 
 **Conflict rule:**
 - Desktop sync stores a last-seen cloud snapshot for linked observations.
 - If the same linked observation changed on both desktop and web since the last synced snapshot, the desktop skips automatic overwrite and reports a conflict.
 - Conflict checking strictly compares only images designated for sync (e.g., skipping generated microscope plots or local plates) to prevent falsely flagging them as deleted by the cloud.
+- Order-only image changes are treated as low-signal and no longer produce standalone cloud-conflict review items.
+- `Keep desktop` still refreshes the cloud snapshot and sync markers, but it skips image re-upload work when no meaningful desktop media changes remain.
 `private_comment` never leaves the desktop.
 
 Triggered via Settings → Sporely Cloud Sync… in the desktop app.

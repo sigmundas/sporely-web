@@ -42,7 +42,15 @@ export async function saveImportSessions(sessions) {
         aiCropSourceW: meta?.aiCropSourceW ?? null,
         aiCropSourceH: meta?.aiCropSourceH ?? null,
       })),
+      sourceItemIds: [...(s.sourceItemIds || [])],
+      photoTimes: [...(s.photoTimes || [])],
+      photoGps: (s.photoGps || []).map(gps => ({
+        lat: gps?.lat ?? null,
+        lon: gps?.lon ?? null,
+      })),
+      photoDebug: [...(s.photoDebug || [])],
       blobs: await Promise.all(s.files.map(f => f.arrayBuffer())),
+      aiBlobs: await Promise.all((s.aiFiles || s.files).map(f => f.arrayBuffer())),
     })))
 
     const db = await _open()
@@ -81,7 +89,15 @@ export async function loadImportSessions() {
           taxon: r.taxon,
           visibility: r.visibility,
           files,
+          aiFiles: (r.aiBlobs || r.blobs).map(ab => new Blob([ab], { type: 'image/jpeg' })),
           blobUrls,
+          sourceItemIds: [...(r.sourceItemIds || [])],
+          photoTimes: [...(r.photoTimes || [])],
+          photoGps: (r.photoGps || []).map(gps => ({
+            lat: gps?.lat ?? null,
+            lon: gps?.lon ?? null,
+          })),
+          photoDebug: [...(r.photoDebug || [])],
           imageMeta: (r.imageMeta || []).map(meta => ({
             aiCropRect: meta?.aiCropRect || null,
             aiCropSourceW: meta?.aiCropSourceW ?? null,

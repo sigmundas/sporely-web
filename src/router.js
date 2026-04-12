@@ -12,7 +12,7 @@ function _show(screen) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'))
 
   const nav = document.getElementById('bottom-nav')
-  nav.style.display = ['capture', 'find-detail', 'import-review'].includes(screen) ? 'none' : 'flex'
+  nav.style.display = ['capture', 'review', 'find-detail', 'import-review'].includes(screen) ? 'none' : 'flex'
 
   document.getElementById(`screen-${screen}`).classList.add('active')
   const navEl = document.getElementById(`nav-${screen}`)

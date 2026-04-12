@@ -2250,6 +2250,29 @@ html.light .ai-id-btn { color: #ffffff; }
   overflow: hidden;
   bottom: 0;
 }
+#screen-review {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  bottom: 0;
+}
+#screen-review .review-body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 16px;
+}
+#screen-review .review-actions {
+  position: static;
+  flex-shrink: 0;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  box-sizing: border-box;
+  padding: 12px 18px calc(16px + var(--safe-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
 #screen-find-detail .review-body {
   flex: 1;
   overflow-y: auto;
@@ -2267,16 +2290,23 @@ html.light .ai-id-btn { color: #ffffff; }
   display: flex;
   flex-direction: column;
   overflow: hidden;  /* scrolling happens inside .review-body only */
+  bottom: 0;
 }
 #screen-import-review .review-body {
   flex: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
+.import-grouping-controls {
+  padding: 2px 0 14px;
+}
 #screen-import-review .review-actions {
   position: static;       /* override the global position:fixed */
   flex-shrink: 0;
-  /* re-declare the non-positioning styles */
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  box-sizing: border-box;
   padding: 12px 18px calc(16px + var(--safe-bottom));
   background: var(--surface);
   border-top: 1px solid var(--border);
