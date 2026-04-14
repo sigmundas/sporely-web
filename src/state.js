@@ -14,6 +14,7 @@ export const state = {
   flashOn: false,
   cameraStream: null,
   user: null,
+  cloudPlan: null,
   searchQuery: '',
   findsView: 'cards',
   findsGroupBySpecies: false,

@@ -1,29 +1,42 @@
 :root {
+  /* Surfaces */
   --bg:           #0d1109;
   --surface:      #141a10;
   --card:         #192015;
   --card-raised:  #1e2819;
+  /* Borders */
   --border:       #2a3824;
   --border-dim:   #1e2a1a;
+  /* Green palette */
   --green-deep:   #1e3d22;
   --green-mid:    #2e5c35;
   --green-bright: #5a9e62;
   --green-accent: #7ec87a;
-  --green-glow:   rgba(94,180,90,0.15);
+  /* Text */
   --text-primary: #ddebd8;
   --text-secondary:#8aab84;
   --text-dim:     #4a6646;
   --text-data:    #a0cc9a;
+  /* Semantic accents */
   --amber:        #d4924a;
   --amber-dim:    rgba(212,146,74,0.2);
   --red:          #c05848;
   --red-dim:      rgba(192,88,72,0.2);
   --white:        #eef4ec;
+  /* Button tokens (dark mode) */
+  --btn-bg:       #aecdc3;
+  --btn-text:     #131313;
+  --btn-active:   #8db8ad;
+  --btn-border:   rgba(174,205,195,0.4);
+  --btn-glow:     rgba(174,205,195,0.3);
+  --btn-tap:      rgba(174,205,195,0.35);
+  /* Layout */
   --nav-h:        64px;
   --safe-bottom:  env(safe-area-inset-bottom, 0px);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--green-bright); }
 
 html, body {
   width: 100%;
@@ -111,15 +124,15 @@ html, body {
 
 .auth-btn {
   padding: 14px; border-radius: 10px;
-  background: var(--green-bright);
+  background: var(--btn-bg);
   border: none; cursor: pointer;
   font-family: 'Outfit', sans-serif;
   font-size: 15px; font-weight: 700;
-  color: #0d1109; letter-spacing: 0.02em;
+  color: var(--btn-text); letter-spacing: 0.02em;
   margin-top: 4px;
   transition: background 0.15s, opacity 0.15s;
 }
-.auth-btn:active { background: var(--green-accent); }
+.auth-btn:active { background: var(--btn-active); }
 .auth-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .auth-switch {
@@ -265,19 +278,19 @@ html, body {
 /* hide old capture-btn if still referenced */
 .nav-capture-btn {
   width: 48px; height: 48px; border-radius: 50%;
-  background: var(--green-bright);
+  background: var(--btn-bg);
   border: none; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
   margin-top: -16px;
-  box-shadow: 0 0 0 4px var(--surface), 0 0 20px var(--green-glow);
+  box-shadow: 0 0 0 4px var(--surface), 0 0 20px var(--btn-glow);
   transition: transform 0.15s, box-shadow 0.15s;
   flex-shrink: 0;
 }
 .nav-capture-btn:active {
   transform: scale(0.93);
-  box-shadow: 0 0 0 4px var(--surface), 0 0 8px var(--green-glow);
+  box-shadow: 0 0 0 4px var(--surface), 0 0 8px var(--btn-glow);
 }
-.nav-capture-btn svg { width: 22px; height: 22px; color: #0d1109; }
+.nav-capture-btn svg { width: 22px; height: 22px; color: var(--btn-text); }
 
 /* ── HOME SCREEN ── */
 .home-content { padding: 20px 18px 24px; }
@@ -520,13 +533,22 @@ html, body {
 .import-card-expanded { padding: 0 14px 14px; border-top: 1px solid var(--border-dim); }
 .import-photo-strip { display: flex; gap: 8px; overflow-x: auto; padding: 12px 0 8px; scrollbar-width: none; }
 .import-photo-strip::-webkit-scrollbar { display: none; }
-.import-strip-item { position: relative; flex-shrink: 0; }
-.import-strip-thumb { width: 80px; height: 80px; object-fit: cover; border-radius: 8px; display: block; }
+.import-strip-item {
+  position: relative; flex-shrink: 0;
+  padding: 3px; border-radius: 11px; background: transparent;
+  cursor: pointer; outline: none; -webkit-tap-highlight-color: transparent;
+  transition: background 0.12s;
+}
+.import-strip-item:active { background: var(--btn-tap); }
+.import-strip-thumb {
+  width: 80px; height: 80px; object-fit: cover; border-radius: 8px; display: block;
+  position: relative; z-index: 1; pointer-events: none;
+}
 .import-strip-delete {
-  position: absolute; top: 3px; right: 3px;
+  position: absolute; top: 6px; right: 6px;
   width: 20px; height: 20px; border-radius: 50%;
   background: rgba(0,0,0,0.6); border: none; color: #fff;
-  font-size: 12px; line-height: 1; cursor: pointer;
+  font-size: 12px; line-height: 1; cursor: pointer; z-index: 2;
   display: flex; align-items: center; justify-content: center;
 }
 .ai-crop-thumb-badge {
@@ -845,8 +867,10 @@ html, body {
 .find-card {
   background: var(--card-raised);
   border-radius: 16px;
-  padding: 14px;
+  padding: 16px 14px;
   cursor: pointer;
+  outline: none;
+  user-select: none; -webkit-user-select: none;
   transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
 .find-card:active { transform: scale(0.97); }
@@ -866,7 +890,7 @@ html, body {
   box-shadow: 0 4px 16px rgba(0,0,0,0.25);
   position: relative;
 }
-.find-card-photo-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.find-card-photo-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
 .find-card-photo-placeholder {
   width: 100%; height: 100%;
   display: flex; align-items: center; justify-content: center;
@@ -942,14 +966,17 @@ html, body {
   font-size: 15px;
 }
 .find-card-loc {
-  display: flex; align-items: center; gap: 4px;
+  display: flex; align-items: flex-start; gap: 4px;
   font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--text-dim); margin-bottom: 4px;
   justify-content: space-between;
 }
-.find-card-loc-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.find-card-loc-text {
+  flex: 1; min-width: 0; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
 .find-card-vis-icon {
-  width: 13px; height: 13px; flex-shrink: 0;
+  width: 13px; height: 13px; flex-shrink: 0; margin-top: 1px;
   stroke: var(--text-dim); opacity: 0.7;
 }
 .find-card-status-icon {
@@ -1054,11 +1081,11 @@ html, body {
   bottom: calc(var(--nav-h) + var(--safe-bottom) + 16px);
   right: calc((100% - min(100%, 430px)) / 2 + 18px);
   width: 52px; height: 52px; border-radius: 50%;
-  background: var(--green-bright);
+  background: var(--btn-bg);
   border: none; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 4px 20px rgba(94,180,90,0.35);
-  color: #0d1109; font-size: 24px;
+  box-shadow: 0 4px 20px var(--btn-glow);
+  color: var(--btn-text); font-size: 24px;
   transition: transform 0.15s, box-shadow 0.15s;
   z-index: 50;
 }
@@ -1081,18 +1108,73 @@ html, body {
 }
 .detail-gallery::-webkit-scrollbar { display: none; }
 .detail-gallery:empty { display: none; }
+.detail-gallery-item-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: block;
+}
 .detail-gallery-img {
   height: 220px; width: auto; min-width: 160px; border-radius: 10px;
   object-fit: cover; flex-shrink: 0;
+  display: block;
+}
+.detail-overlay-btn {
+  position: absolute;
+  background: rgba(13, 17, 9, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+  border-radius: 8px;
+  cursor: pointer;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 13px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  transition: background 0.15s, border-color 0.15s;
+}
+.detail-overlay-btn:active {
+  background: rgba(0, 0, 0, 0.9);
+}
+.detail-overlay-crop {
+  bottom: 8px;
+  left: 8px;
+  padding: 6px 12px;
+  font-weight: 500;
+}
+.detail-overlay-delete {
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 8px;
+}
+.detail-overlay-delete svg {
+  width: 14px;
+  height: 14px;
 }
 .ai-crop-gallery-item {
   position: relative;
   display: block;
   border: none;
-  background: none;
-  padding: 0;
+  background: transparent;
+  padding: 3px;
+  border-radius: 13px;
   flex-shrink: 0;
   cursor: pointer;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.12s;
+}
+.ai-crop-gallery-item:active { background: var(--btn-tap); }
+.ai-crop-gallery-item .detail-gallery-img {
+  position: relative;
+  z-index: 1;
+  display: block;
+  pointer-events: none;
 }
 .detail-intro {
   display: flex;
@@ -1225,14 +1307,14 @@ html, body {
 .map-popup-btn {
   display: block; width: 100%;
   padding: 7px 12px; margin-top: 8px;
-  background: var(--green-deep);
-  border: 1px solid var(--green-mid);
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
   border-radius: 7px;
-  color: var(--green-accent);
+  color: var(--btn-text);
   font-size: 12px; font-weight: 600; font-family: 'Outfit', sans-serif;
   cursor: pointer; text-align: center;
 }
-.map-popup-btn:active { background: var(--green-mid); }
+.map-popup-btn:active { background: var(--btn-active); }
 
 /* Leaflet attribution dark styling */
 .leaflet-control-attribution {
@@ -1453,15 +1535,15 @@ html, body {
 .ai-id-btn {
   display: flex; align-items: center; gap: 6px;
   padding: 8px 14px; border-radius: 8px;
-  background: var(--green-deep);
-  border: 1px solid var(--green-mid);
-  cursor: pointer; color: var(--green-accent);
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
+  cursor: pointer; color: var(--btn-text);
   font-family: 'Outfit', sans-serif;
   font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
   transition: background 0.15s;
 }
-.ai-id-btn:active { background: var(--green-mid); }
-.ai-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green-accent); animation: pulse 1.5s infinite; }
+.ai-id-btn:active { background: var(--btn-active); }
+.ai-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--btn-text); animation: pulse 1.5s infinite; }
 .import-current-location-btn {
   width: 100%;
   justify-content: center;
@@ -1470,15 +1552,15 @@ html, body {
 .btn-add-photo {
   display: flex; align-items: center; gap: 6px;
   padding: 8px 14px; border-radius: 8px;
-  background: var(--green-deep);
-  border: 1px solid var(--green-mid);
-  cursor: pointer; color: var(--green-accent);
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
+  cursor: pointer; color: var(--btn-text);
   font-family: 'Outfit', sans-serif;
   font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
   transition: background 0.15s;
 }
-.btn-add-photo:active { background: var(--green-mid); }
-html.light .btn-add-photo { color: #ffffff; }
+.btn-add-photo:active { background: var(--btn-active); }
+html.light .btn-add-photo { background: var(--green-deep); border-color: var(--green-mid); color: #ffffff; }
 
 .observation-grid {
   display: flex;
@@ -1671,6 +1753,14 @@ html.light .btn-add-photo { color: #ffffff; }
 .field-meta-key { font-size: 11px; color: var(--text-secondary); letter-spacing: 0.04em; }
 .field-meta-val { font-family: 'DM Mono', monospace; font-size: 12px; color: var(--text-data); font-weight: 500; }
 .field-meta-val.green { color: var(--green-accent); }
+.field-meta-val.amber { color: #d9b15f; }
+.profile-cloud-plan-note {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border-dim);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
 .location-field-val { display: flex; align-items: center; gap: 6px; justify-content: flex-end; flex: 1; }
 .location-name-input {
   background: transparent; border: none; border-bottom: 1px solid var(--border);
@@ -1719,14 +1809,14 @@ html.light .btn-add-photo { color: #ffffff; }
 .btn-secondary:active { background: var(--card-raised); }
 .btn-primary {
   padding: 13px; border-radius: 10px;
-  background: var(--green-deep);
-  border: 1px solid var(--green-mid);
-  cursor: pointer; color: var(--green-accent);
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
+  cursor: pointer; color: var(--btn-text);
   font-family: 'Outfit', sans-serif; font-size: 14px; font-weight: 600;
   display: flex; align-items: center; justify-content: center; gap: 8px;
   transition: background 0.15s;
 }
-.btn-primary:active { background: var(--green-mid); }
+.btn-primary:active { background: var(--btn-active); }
 .btn-danger {
   padding: 13px; border-radius: 10px;
   background: transparent;
@@ -2132,12 +2222,12 @@ html.light .vis-option input[type="radio"]:checked + span { color: #ffffff; }
 /* Friend avatar initial — green-accent on green-deep */
 html.light .friend-avatar { color: #ffffff; }
 
-/* Primary button — green-accent on green-deep bg is invisible */
-html.light .btn-primary { color: #ffffff; }
+/* Primary button — restore dark green bg in light mode */
+html.light .btn-primary { background: var(--green-deep); border-color: var(--green-mid); color: #ffffff; }
 html.light .btn-primary:active { background: var(--green-mid); }
 
-/* Auth button — hardcoded #0d1109 text on new darker green bg */
-html.light .auth-btn { color: #ffffff; }
+/* Auth button — restore dark green bg in light mode */
+html.light .auth-btn { background: var(--green-bright); color: #ffffff; }
 html.light .auth-btn:active { background: var(--green-mid); }
 
 /* Auth info variant */
@@ -2153,12 +2243,15 @@ html.light .badge-verified {
   border-color: rgba(45,75,50,0.25);
 }
 
-/* FAB — hardcoded #0d1109 icon color on new darker green bg */
-html.light .finds-fab { color: #ffffff; }
-html.light .finds-fab { box-shadow: 0 4px 20px rgba(45,75,50,0.30); }
+/* FAB — restore dark green bg in light mode */
+html.light .finds-fab { background: var(--green-bright); color: #ffffff; box-shadow: 0 4px 20px rgba(45,75,50,0.30); }
 
-/* Map popup button — green-accent on green-deep bg is invisible */
-html.light .map-popup-btn { color: #ffffff; }
+/* Nav capture btn — restore dark green bg in light mode */
+html.light .nav-capture-btn { background: var(--green-bright); box-shadow: 0 0 0 4px var(--surface), 0 0 20px var(--green-glow); }
+html.light .nav-capture-btn svg { color: #ffffff; }
+
+/* Map popup button — restore dark green bg in light mode */
+html.light .map-popup-btn { background: var(--green-deep); border-color: var(--green-mid); color: #ffffff; }
 html.light .map-popup-btn:active { background: var(--green-mid); }
 
 /* Map pin border — --bg is now light, use white ring instead */
@@ -2211,7 +2304,8 @@ html.light .finds-search-inner { background: #f0f4f0; }
 /* Review screen light mode */
 html.light .review-count,
 html.light .review-location { color: var(--text-primary); }
-html.light .ai-id-btn { color: #ffffff; }
+html.light .ai-id-btn { background: var(--green-deep); border-color: var(--green-mid); color: #ffffff; }
+html.light .ai-dot { background: rgba(255,255,255,0.75); }
 
 /* ── IMPORT PROGRESS OVERLAY ── */
 #import-progress {

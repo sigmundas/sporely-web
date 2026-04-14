@@ -26,6 +26,7 @@ handling from the device photo library.
 | Media storage | Cloudflare R2 bucket `sporely-media` |
 | Media upload | Cloudflare Worker at `upload.sporely.no` (JWT-authenticated PUT) |
 | Media serving | Public CDN at `https://media.sporely.no` |
+| Future billing foundation | Supabase profile flags + per-image upload metadata |
 
 Supabase Storage (`observation-images` bucket) is no longer used for new uploads.
 All media now goes through the Cloudflare R2 pipeline.
@@ -56,6 +57,7 @@ sporely-web/
     ├── map-loader.js       Lazy loads the map screen so Leaflet stays off the startup path
     ├── toast.js            showToast(msg) — timed overlay message
     ├── geo.js              GPS watchPosition, writes into state.gps
+    ├── cloud-plan.js       Cloud plan lookup + effective upload policy helpers
     ├── images.js           Upload originals + thumbnail variants, media URL helpers
     ├── image_crop.js       Shared AI crop math + cropped blob export helpers
     ├── ai-crop-editor.js   Full-screen AI crop editor used by review/import flows
@@ -126,6 +128,7 @@ All media is stored in Cloudflare R2, not Supabase Storage.
 - **Auth:** Supabase JWT sent as `Authorization: Bearer {token}`
 - **JWT verification:** Worker fetches the JWKS from Supabase (`/auth/v1/.well-known/jwks.json`) and verifies the ES256 signature using Web Crypto. The JWKS is cached in-memory for 10 minutes.
 - **Key rule:** Upload path must start with the JWT `sub` (user ID) — enforced by the worker.
+- **Current client policy:** The web app uploads reduced (~2MP) images on the free tier. Future Pro entitlements (gated by `profiles.is_pro` via RevenueCat) can switch to full-resolution backups without changing the sync pipeline.
 - **Source:** `cloudflare/r2-upload-worker/src/index.js`
 - **Config:** `cloudflare/r2-upload-worker/wrangler.toml`
 
@@ -146,6 +149,36 @@ R2 bucket `sporely-media` is exposed publicly via Cloudflare. All media URLs are
 `src/images.js` generates two variants at upload time:
 - `thumb_small_{filename}` — 240px, JPEG 82%
 - `thumb_medium_{filename}` — 720px, JPEG 82%
+
+### ⚠️ Known issue: EXIF stripped during free-tier 2 MP conversion
+
+Free-tier uploads resize images to approximately 2 MP via the Canvas API before uploading to R2.
+**Canvas `toBlob()` strips all EXIF** — GPS coordinates, `DateTimeOriginal`, camera model, etc. are
+lost in the stored R2 file.
+
+**Desktop workaround (implemented):** When the desktop pulls a cloud field image, it checks
+whether the image has no EXIF datetime/GPS; if the observation has GPS or date stored in the local
+database, it injects that metadata back into the downloaded JPEG using PIL. This restores the
+"Set from current image" button functionality in the Prepare Images dialog for cloud-synced images.
+See `_inject_obs_exif_into_field_image()` and `_backfill_missing_exif_on_cloud_images()` in
+`sporely/utils/cloud_sync.py`.
+
+**Permanent fix needed in the web app:** In `src/images.js` or `src/screens/import_review.js`,
+extract GPS + capture time from native EXIF *before* the Canvas resize step (e.g. using `exifr`),
+then either:
+- Re-inject the EXIF bytes into the JPEG blob before upload (using `piexifjs` or equivalent), or
+- Write GPS and `captured_at` into the `observation_images` row explicitly so desktop sync can
+  restore it.
+
+See also `sporely-web PLAN.md` → Phase 4 → Metadata Preservation.
+
+For the original upload path, the web app now records how the stored cloud image was prepared:
+- `upload_mode` — `reduced` or `full`
+- `source_width`, `source_height`
+- `stored_width`, `stored_height`
+- `stored_bytes`
+
+Desktop cloud sync prepares and pushes the same metadata so both clients describe cloud media the same way.
 
 Both stored under the same directory as the original, e.g.:
 ```
@@ -264,6 +297,10 @@ Extra cloud-only columns:
 - `thumb_key text` — relative key of the small thumbnail variant
 - `ai_crop_x1`, `ai_crop_y1`, `ai_crop_x2`, `ai_crop_y2` — normalized AI crop rectangle (`0..1`)
 - `ai_crop_source_w`, `ai_crop_source_h` — source dimensions when the AI crop was set
+- `upload_mode` — `reduced` or `full`
+- `source_width`, `source_height` — original dimensions seen by the uploading client
+- `stored_width`, `stored_height` — dimensions actually stored in cloud
+- `stored_bytes` — size of the stored original blob in bytes
 
 AI crop metadata is stored per image and only affects Artsorakel requests. Gallery rendering still uses the full stored image.
 - Full microscope metadata columns present but only populated by desktop sync
@@ -271,10 +308,16 @@ AI crop metadata is stored per image and only affects Artsorakel requests. Galle
 ### `profiles`
 Auto-created by a Postgres trigger on `auth.users` insert.
 Profile UI reads `username`, `display_name`, and `avatar_url`.
+The subscription/storage foundation also now lives here:
+- `is_pro` — RevenueCat-synced boolean entitlement; controls full-resolution cloud backup access
+- `storage_quota_bytes`, `storage_used_bytes` — placeholders for future usage/paywall UI
+- `billing_status`, `billing_provider` — reserved for later billing sync
+
 Avatar initials are derived on the client, and avatar rendering prefers the stored URL
 with a signed-URL fallback if the direct image fetch fails.
 The profile screen also exposes a self-service account deletion action, which calls the
 `delete-account` Supabase Edge Function.
+It now also shows a Cloud plan/status block so storage usage and paywall messaging have a stable UI home later.
 
 ### `friendships`
 Bidirectional, status-gated (`pending` / `accepted` / `blocked`).
@@ -319,8 +362,9 @@ review.js: saveObservationBatch()
 sync-queue.js: triggerSync() (background)
   1. Read pending observations from IndexedDB
   2. INSERT observations row via Supabase
-  3. For each photo: PUT to upload.sporely.no (R2 worker), generate variants, INSERT observation_images row
-  4. Remove from IndexedDB offline queue
+  3. Load effective cloud upload policy from the signed-in user's profile
+  4. For each photo: prepare reduced/full upload blob, PUT to upload.sporely.no (R2 worker), generate variants, INSERT observation_images row with upload metadata
+  5. Remove from IndexedDB offline queue
 ```
 
 ## Import flow
@@ -362,6 +406,7 @@ service-level R2 API credentials from `python.env`).
 - Uses a lightweight local media signature so unchanged images/media can be skipped on later syncs
 - Media-signature comparison now ignores low-signal local-only churn such as file mtime drift, gallery layout state, order-only image changes, and older signature payloads that predate the shared AI crop fields
 - Upload size is controlled by the desktop **Sync image size** setting (`Reduced (2 MP)` or `Full size`)
+- Desktop now pushes the same upload metadata as web (`upload_mode`, source/stored dimensions, stored bytes), so future subscription logic can reason about already-uploaded media on both platforms
 
 **Pull (cloud → desktop):**
 - Fetches `observations WHERE desktop_id IS NULL` (created on mobile)
@@ -373,6 +418,8 @@ service-level R2 API credentials from `python.env`).
 - Uses a bulk-fetch `in.()` query for image metadata to prevent N+1 query performance bottlenecks during sync.
 - Before deep comparison, desktop sync now prefilters cloud observations using one local lookup pass plus the cloud row `updated_at` versus local `synced_at`.
 - A small grace window is applied to `updated_at > synced_at` checks so server-write timestamp skew from the same sync cycle does not cause every observation to be re-checked on next app launch.
+- **EXIF restoration:** When downloading field images that have no EXIF (stripped by the web app's 2 MP Canvas conversion), the desktop re-injects observation GPS and date into the JPEG EXIF so "Set from current image" works in the Prepare Images dialog.
+- **Local file preservation:** If the local copy of a field image is larger than the downloaded cloud version, the local full-res original is kept and only DB metadata is updated. This prevents the 2 MP cloud copy from overwriting full-resolution desktop-imported originals.
 
 **Conflict rule:**
 - Desktop sync stores a last-seen cloud snapshot for linked observations.
@@ -414,6 +461,8 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 | Friends feed | 🟡 Stubbed — toast only |
 | Capture draft save/resume | ❌ Removed — capture review is now direct cancel/save |
 | Push notifications | ❌ Not started |
+| Pro Subscription (RevenueCat) | 🟡 Groundwork in place — schema + upload metadata are live, but no billing/IAP flow yet |
+| Hardware Sync (Macro-to-GPS) | ❌ Not started |
 
 ---
 
@@ -427,6 +476,7 @@ Triggered via Settings → Sporely Cloud Sync… in the desktop app.
 | Cloudflare R2 bucket `sporely-media` | ✅ Live |
 | Cloudflare Worker `upload.sporely.no` | ✅ Live — custom domain via `[[routes]]` in wrangler.toml |
 | Cloudflare CDN `media.sporely.no` | ✅ Live — public R2 bucket serving, CORS `*` configured |
+| Subscription bootstrap SQL | ✅ Applied — profile plan flags + upload metadata columns are live |
 | `avatars` Storage bucket (Supabase) | ✅ Created, public read + owner-scoped writes |
 | `taxa` + `taxa_vernacular` tables | ✅ Populated (110k taxa, 70k vernacular names) |
 | `search_taxa` RPC | ✅ Deployed |

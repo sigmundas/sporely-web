@@ -1,5 +1,6 @@
 import { supabase } from './supabase.js'
 import { insertObservationImage, syncObservationMediaKeys, uploadObservationImageVariants } from './images.js'
+import { fetchCloudPlanProfile } from './cloud-plan.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -104,6 +105,7 @@ export async function getQueuedObservations(userId) {
 export { QUEUE_EVENT }
 
 let isSyncing = false
+const _cloudPlanCache = new Map()
 
 export async function triggerSync() {
   if (isSyncing || !navigator.onLine) return
@@ -142,12 +144,20 @@ export async function triggerSync() {
         // 2. Upload images
         const obsId = obsData.id
         const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
+        let uploadPolicy = _cloudPlanCache.get(item.userId)
+        if (!uploadPolicy) {
+          uploadPolicy = await fetchCloudPlanProfile(item.userId)
+          _cloudPlanCache.set(item.userId, uploadPolicy)
+        }
         for (let i = 0; i < queuedImages.length; i++) {
           const image = queuedImages[i]
           const blob = image.blob
           const path = `${item.userId}/${obsId}/${i}_${item.ts}.jpg`
           
-          await uploadObservationImageVariants(blob, path)
+          const uploadMeta = await uploadObservationImageVariants(blob, path, {
+            uploadPolicy,
+            uploadOrigin: 'web',
+          })
           await insertObservationImage({
             observation_id: obsId,
             user_id: item.userId,
@@ -157,6 +167,7 @@ export async function triggerSync() {
             aiCropRect: image.aiCropRect,
             aiCropSourceW: image.aiCropSourceW,
             aiCropSourceH: image.aiCropSourceH,
+            ...uploadMeta,
           })
           await syncObservationMediaKeys(obsId, path, { sortOrder: i })
         }

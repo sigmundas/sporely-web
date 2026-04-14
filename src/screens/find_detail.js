@@ -133,7 +133,7 @@ export async function openFindDetail(obsId, options = {}) {
   let imgData = null
   const { data: imgWithCrop, error: imgErr } = await supabase
     .from('observation_images')
-    .select('id, storage_path, sort_order, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2')
+    .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2')
     .eq('observation_id', obsId)
     .order('sort_order', { ascending: true })
   if (imgErr) {
@@ -142,7 +142,7 @@ export async function openFindDetail(obsId, options = {}) {
       .select('id, storage_path, sort_order')
       .eq('observation_id', obsId)
       .order('sort_order', { ascending: true })
-    imgData = (imgBase || []).map(r => ({ ...r, ai_crop_x1: null, ai_crop_y1: null, ai_crop_x2: null, ai_crop_y2: null }))
+    imgData = (imgBase || []).map(r => ({ ...r, image_type: 'field', ai_crop_x1: null, ai_crop_y1: null, ai_crop_x2: null, ai_crop_y2: null }))
   } else {
     imgData = imgWithCrop || []
   }
@@ -156,6 +156,13 @@ export async function openFindDetail(obsId, options = {}) {
 
     sources.forEach((source, index) => {
       if (!source?.primaryUrl && !source?.fallbackUrl) return
+      
+      const row = imgData[index]
+      const isMicroscope = (row?.image_type || 'field') === 'microscope'
+
+      const container = document.createElement('div')
+      container.className = 'detail-gallery-item-wrap'
+      
       const img = document.createElement('img')
       const aiSource = aiSources[index] || null
       img.className = 'detail-gallery-img'
@@ -170,38 +177,68 @@ export async function openFindDetail(obsId, options = {}) {
           img.src = source.fallbackUrl
         }, { once: true })
       }
-      gallery.appendChild(img)
-    })
-
-    const galleryImgs = Array.from(gallery.querySelectorAll('img'))
-    galleryImgs.forEach((el, idx) => {
-      el.style.cursor = 'pointer'
-      el.addEventListener('click', () => {
-        if (currentObsIsOwner) {
-          openAiCropEditor({
-            title: t('crop.editorTitle'),
-            startIndex: idx,
-            images: imgData.map((row, i) => ({
-              url: sources[i]?.primaryUrl || sources[i]?.fallbackUrl || '',
-              aiCropRect: normalizeAiCropRect({
-                x1: row.ai_crop_x1, y1: row.ai_crop_y1,
-                x2: row.ai_crop_x2, y2: row.ai_crop_y2,
-              }),
-            })),
-            onChange: (index, meta) => {
-              const row = imgData[index]
-              if (!row) return
-              row.ai_crop_x1 = meta.aiCropRect?.x1 ?? null
-              row.ai_crop_y1 = meta.aiCropRect?.y1 ?? null
-              row.ai_crop_x2 = meta.aiCropRect?.x2 ?? null
-              row.ai_crop_y2 = meta.aiCropRect?.y2 ?? null
-              updateObservationImageCrop(row.id, meta)
-            },
-          })
-        } else {
-          openPhotoViewer(galleryImgs.map(i => i.src), idx)
-        }
+      
+      img.style.cursor = 'pointer'
+      img.addEventListener('click', () => {
+        const galleryImgs = Array.from(gallery.querySelectorAll('.detail-gallery-img'))
+        openPhotoViewer(galleryImgs.map(i => i.src), index)
       })
+
+      container.appendChild(img)
+
+      if (currentObsIsOwner) {
+        if (!isMicroscope) {
+          const cropBtn = document.createElement('button')
+          cropBtn.className = 'detail-overlay-btn detail-overlay-crop'
+          cropBtn.textContent = 'AI crop'
+          cropBtn.addEventListener('click', (e) => {
+            e.stopPropagation()
+            openAiCropEditor({
+              title: t('crop.editorTitle'),
+              startIndex: index,
+              images: imgData.map((r, i) => ({
+                url: sources[i]?.primaryUrl || sources[i]?.fallbackUrl || '',
+                aiCropRect: normalizeAiCropRect({
+                  x1: r.ai_crop_x1, y1: r.ai_crop_y1,
+                  x2: r.ai_crop_x2, y2: r.ai_crop_y2,
+                }),
+              })),
+              onChange: (idx, meta) => {
+                const r = imgData[idx]
+                if (!r) return
+                r.ai_crop_x1 = meta.aiCropRect?.x1 ?? null
+                r.ai_crop_y1 = meta.aiCropRect?.y1 ?? null
+                r.ai_crop_x2 = meta.aiCropRect?.x2 ?? null
+                r.ai_crop_y2 = meta.aiCropRect?.y2 ?? null
+                updateObservationImageCrop(r.id, meta)
+              },
+            })
+          })
+          container.appendChild(cropBtn)
+        }
+
+        const delBtn = document.createElement('button')
+        delBtn.className = 'detail-overlay-btn detail-overlay-delete'
+        delBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/></svg>'
+        delBtn.addEventListener('click', async (e) => {
+          e.stopPropagation()
+          if (!confirm(t('detail.confirmDeleteImage') || 'Delete this image?')) return
+          
+          delBtn.disabled = true
+          try {
+            await deleteObservationMedia([row.storage_path])
+            await supabase.from('observation_images').delete().eq('id', row.id)
+            openFindDetail(currentObs.id)
+          } catch (err) {
+            console.error('Failed to delete image:', err)
+            showToast(err.message)
+            delBtn.disabled = false
+          }
+        })
+        container.appendChild(delBtn)
+      }
+
+      gallery.appendChild(container)
     })
   }
 

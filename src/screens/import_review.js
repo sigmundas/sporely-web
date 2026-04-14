@@ -69,7 +69,7 @@ function _buildSessionsFromSourceItems() {
       sourceItemIds: group.map(item => item.id),
       files: group.map(item => item.blob),
       aiFiles: group.map(item => item.aiBlob || item.blob),
-      blobUrls: group.map(item => URL.createObjectURL(item.blob)),
+      blobUrls: group.map(item => URL.createObjectURL(item.aiBlob || item.blob)),
       imageMeta: group.map(item => item.meta),
       photoTimes: group.map(item => item.captureTime),
       photoGps: group.map(item => ({ lat: item.lat, lon: item.lon })),
@@ -696,9 +696,8 @@ async function _processFile(file) {
   // 1. Canvas path (fast — works for JPEG/PNG/WebP; also HEIC on iOS/macOS Safari)
   try {
     const { blob, aiBlob } = await _toJpeg(file);
-    const url = URL.createObjectURL(blob);
     const meta = await createImageCropMeta(blob, { preseed: true });
-    return { blob, aiBlob, url, meta };
+    return { blob, aiBlob, meta };
   } catch (_) {}
 
   // 2. Final fallback — original file (will show blank if browser can't decode it)
@@ -707,7 +706,7 @@ async function _processFile(file) {
     aiCropSourceW: null,
     aiCropSourceH: null,
   }));
-  return { blob: file, aiBlob: file, url: URL.createObjectURL(file), meta };
+  return { blob: file, aiBlob: file, meta };
 }
 
 export function renderSessions() {

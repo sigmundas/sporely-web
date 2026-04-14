@@ -1,9 +1,9 @@
 # Sporely-web Development Plan
 
-## Current Focus
-Migrating media storage to Cloudflare R2 and consolidating cloud infrastructure.
+## Bugs
+- I can't delete observations from app.sporely.no. Deleting from the installed apk app works. Error: "Delete failed: failed to fetch"
 
-## New Priority: Documentation and Landing Page (VitePress)
+## Documentation and Landing Page (VitePress)
 *Goal: Convert the existing `sporely-landing` static site into a VitePress project that directly serves the Markdown documentation from `sporely-py/docs` alongside the app feature highlights.*
 
 ### Status: Planning
@@ -81,6 +81,60 @@ Migrating media storage to Cloudflare R2 and consolidating cloud infrastructure.
 ## Long-Term Goals (Phase 3)
 - [ ] **In-Browser Measurement** — Replicate manual spore clicking and calibration using HTML5 Canvas.
 - [ ] **Cross-Platform Math Consistency** — Investigate **Pyodide** (WebAssembly) to run Python/Numpy logic in-browser.
+- [ ] **Import Flow Memory Architecture** — Refactor `import_review.js` and `import-store.js` to a streaming architecture. Currently, large imports (40+ photos) can exhaust mobile browser memory and crash the app because all full-resolution JPEGs are decoded and held in RAM simultaneously before being written to IndexedDB. The fix requires:
+    - Streaming each processed blob directly to IndexedDB in `_processFile` and releasing it from RAM.
+    - Keeping only lightweight metadata and downscaled `aiBlob` URLs in the active memory array (`sourceItems`).
+    - Avoiding the massive memory spike caused by `Promise.all(files.map(f => f.arrayBuffer()))` in `import-store.js`.
+    - *Note on Platforms (PWA vs APK):* This bottleneck is most severe for iPhone users running the app as a PWA (Safari), where per-tab memory limits are very strict (crashing often around 150-300MB). Android users on the native Capacitor APK have a higher WebView memory ceiling (often 500MB+ on modern devices like the S25) and benefit from native HEIC-to-JPEG conversion, but they will still eventually crash on huge imports until this streaming fix is implemented.
+
+## Phase 4: Image Sync & Monetization
+*Goal: Implement tiered storage, client-side compression, and a Pro subscription model.*
+
+### 1. Image Processing & Compression (Client-Side)
+- [ ] **Define Global Constants:**
+    - Set `MAX_DIMENSION = 1200`
+    - Set `JPEG_QUALITY = 0.6` 
+    - Target file size: < 500KB per image.
+- [ ] **Develop Browser Compression Utility:**
+    - Create a JavaScript/TypeScript module using the **Canvas API**.
+    - Implement a `processImage()` function to downscale and compress before upload.
+- [ ] **Platform-Specific Logic:**
+    - **Web/Free:** Force downscale to 1200px max width/height.
+    - **Capacitor/Android:**
+        - Check `is_pro` status via RevenueCat.
+        - Allow "Original" upload if Pro.
+        - Default to forced downscale for free users.
+- [ ] **Metadata Preservation:**
+    - Extract GPS and timestamp EXIF data *before* compression.
+    - Re-inject or store metadata in the database to ensure "Digital Lab Notebook" integrity.
+
+### 2. Storage Architecture & Guardrails
+- [ ] **Tiered Cloudflare R2 Buckets:**
+    - `sporely-public-2mp`: Optimized for community browsing and free tier.
+    - `sporely-archive-pro`: Secure storage for full-resolution research data.
+- [ ] **Server-Side Validation (Cloudflare Workers):**
+    - Implement a "Gatekeeper" Worker to verify `Content-Length` headers.
+    - Configure the worker to reject any upload to the public bucket exceeding 500KB.
+
+### 3. Monetization & In-App Purchases (IAP)
+- [ ] **RevenueCat Integration:**
+    - Initialize RevenueCat SDK in the Capacitor wrapper (Android/iOS).
+    - Configure the "Pro" Entitlement: `full_res_storage`.
+- [ ] **Subscription UI:**
+    - Create a "Cloud Sync" settings page showing current storage usage.
+    - Implement a Paywall UI comparing:
+        - **Free:** 1200px images, community access.
+        - **Pro:** Full-size original backups, high-res research export.
+- [ ] **Backend Entitlement Sync:**
+    - Set up a webhook listener to update the user's `is_pro` flag in the database when a purchase is confirmed.
+
+
+
+### 5. Transparency & Open Source
+- [ ] **UI Disclaimers:**
+    - Add clear messaging: "Web uploads are limited to 1200px to keep hosting free. Use the mobile app for full-res backups."
+- [ ] **Documentation:**
+    - Update `README.md` to explain the division between the open-source client code and the paid cloud storage hosting.
 
 ## Ongoing Database & Operations Tasks
 - Ensure `delete-account` Edge Function is deployed and functional.

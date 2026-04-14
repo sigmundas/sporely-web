@@ -616,10 +616,30 @@
         </div>
 
         <div class="profile-section">
-          <div class="field-meta-section">
-            <div class="field-meta-header">Connection</div>
+          <div class="profile-section-title" id="profile-cloud-plan-title">Cloud plan</div>
+          <div class="field-meta-section" style="margin-bottom:0">
+            <div class="field-meta-header" id="profile-cloud-plan-header">Cloud storage</div>
             <div class="field-meta-row">
-              <div class="field-meta-key">Supabase</div>
+              <div class="field-meta-key" id="profile-cloud-plan-key">Tier</div>
+              <div class="field-meta-val amber" id="profile-cloud-plan-badge">Free</div>
+            </div>
+            <div class="field-meta-row">
+              <div class="field-meta-key" id="profile-cloud-upload-key">Uploads</div>
+              <div class="field-meta-val" id="profile-cloud-upload-mode">Reduced (2 MP)</div>
+            </div>
+            <div class="field-meta-row">
+              <div class="field-meta-key" id="profile-cloud-usage-key">Storage</div>
+              <div class="field-meta-val" id="profile-cloud-usage">—</div>
+            </div>
+            <div class="profile-cloud-plan-note" id="profile-cloud-plan-note"></div>
+          </div>
+        </div>
+
+        <div class="profile-section">
+          <div class="field-meta-section">
+            <div class="field-meta-header" id="profile-connection-header">Connection</div>
+            <div class="field-meta-row">
+              <div class="field-meta-key" id="profile-connection-key">Supabase</div>
               <div class="field-meta-val green" id="profile-sync-status">Checking…</div>
             </div>
           </div>
@@ -734,6 +754,16 @@
           <span class="settings-gap-unit">min</span>
         </div>
         <p class="settings-gap-hint">Photos taken within this window are grouped into one observation.</p>
+
+        <div id="settings-debug-section" style="display:none">
+          <div class="settings-section-label" id="settings-debug-label" style="margin-top:22px; color:var(--amber)">Testing</div>
+          <p class="settings-gap-hint" id="settings-debug-hint" style="margin-top:0;margin-bottom:10px">Local-only override for testing free vs paid cloud behavior.</p>
+          <div class="theme-segment settings-debug-segment" style="margin-bottom:12px">
+            <button class="theme-seg-btn settings-cloud-plan-btn" id="settings-cloud-plan-server" data-cloud-plan-override="server">Server</button>
+            <button class="theme-seg-btn settings-cloud-plan-btn" id="settings-cloud-plan-free" data-cloud-plan-override="free">Free</button>
+            <button class="theme-seg-btn settings-cloud-plan-btn" id="settings-cloud-plan-pro" data-cloud-plan-override="pro">Pro</button>
+          </div>
+        </div>
 
         <div class="settings-version" id="settings-version">v0.2.0</div>
       </div>

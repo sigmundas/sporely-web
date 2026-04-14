@@ -1,5 +1,6 @@
 import { supabase } from './supabase.js'
 import { normalizeAiCropRect } from './image_crop.js'
+import { getEffectiveCloudUploadPolicy } from './cloud-plan.js'
 
 const SIGNED_URL_TTL_SECONDS = 3600
 const SIGNED_URL_CACHE = new Map()
@@ -9,6 +10,14 @@ const THUMB_VARIANTS = {
   small: { maxEdge: 240, quality: 0.82 },
   medium: { maxEdge: 720, quality: 0.82 },
 }
+const UPLOAD_METADATA_FIELDS = [
+  'upload_mode',
+  'source_width',
+  'source_height',
+  'stored_width',
+  'stored_height',
+  'stored_bytes',
+]
 
 const SUPABASE_STORAGE_PATH_PATTERNS = [
   /\/storage\/v1\/object\/authenticated\/observation-images\/(.+)$/i,
@@ -73,7 +82,7 @@ function _encodeObjectKey(storagePath) {
     .join('/')
 }
 
-async function _uploadViaWorker(path, blob) {
+async function _uploadViaWorker(path, blob, options = {}) {
   const normalizedPath = normalizeMediaKey(path)
   if (!normalizedPath) throw new Error('Missing storage path')
 
@@ -81,13 +90,18 @@ async function _uploadViaWorker(path, blob) {
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for media upload')
 
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': blob?.type || 'image/jpeg',
+    'Cache-Control': 'public, max-age=31536000, immutable',
+  }
+  if (options?.uploadMode) headers['X-Sporely-Upload-Mode'] = String(options.uploadMode)
+  if (options?.cloudPlan) headers['X-Sporely-Cloud-Plan'] = String(options.cloudPlan)
+  if (options?.uploadOrigin) headers['X-Sporely-Upload-Origin'] = String(options.uploadOrigin)
+
   const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
     method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': blob?.type || 'image/jpeg',
-      'Cache-Control': 'public, max-age=31536000, immutable',
-    },
+    headers,
     body: blob,
   })
 
@@ -126,9 +140,9 @@ async function _deleteViaWorker(path) {
   }
 }
 
-async function _uploadToStorage(path, blob) {
+async function _uploadToStorage(path, blob, options = {}) {
   if (MEDIA_UPLOAD_BASE_URL) {
-    await _uploadViaWorker(path, blob)
+    await _uploadViaWorker(path, blob, options)
     return
   }
   const { error } = await supabase.storage
@@ -183,20 +197,87 @@ async function _createThumbnailBlob(blob, maxEdge, quality) {
   })
 }
 
-export async function uploadObservationImageVariants(blob, storagePath) {
-  await _uploadToStorage(storagePath, blob)
+function _fitWithinMaxPixels(width, height, maxPixels) {
+  const pixels = Math.max(1, Number(width) || 0) * Math.max(1, Number(height) || 0)
+  if (!maxPixels || pixels <= maxPixels) {
+    return {
+      targetWidth: width,
+      targetHeight: height,
+      resized: false,
+    }
+  }
+  const scale = Math.sqrt(maxPixels / pixels)
+  return {
+    targetWidth: Math.max(1, Math.round(width * scale)),
+    targetHeight: Math.max(1, Math.round(height * scale)),
+    resized: true,
+  }
+}
+
+async function _prepareUploadBlob(blob, uploadPolicy) {
+  if (!(blob instanceof Blob)) throw new Error('Missing image blob')
+
+  const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+  const img = await _loadImage(blob)
+  const sourceWidth = img.naturalWidth || img.width
+  const sourceHeight = img.naturalHeight || img.height
+  if (!sourceWidth || !sourceHeight) throw new Error('Image has zero dimensions')
+
+  const fitted = _fitWithinMaxPixels(sourceWidth, sourceHeight, policy.maxPixels)
+  let uploadBlob = blob
+
+  if (fitted.resized || blob.type !== 'image/jpeg') {
+    const canvas = document.createElement('canvas')
+    canvas.width = fitted.targetWidth
+    canvas.height = fitted.targetHeight
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Canvas context unavailable')
+    ctx.drawImage(img, 0, 0, fitted.targetWidth, fitted.targetHeight)
+    uploadBlob = await new Promise((resolve, reject) => {
+      canvas.toBlob(
+        nextBlob => nextBlob ? resolve(nextBlob) : reject(new Error('Upload encode failed')),
+        'image/jpeg',
+        fitted.resized ? 0.9 : 0.92,
+      )
+    })
+  }
+
+  return {
+    uploadBlob,
+    uploadMeta: {
+      upload_mode: policy.uploadMode || 'reduced',
+      source_width: sourceWidth,
+      source_height: sourceHeight,
+      stored_width: fitted.targetWidth,
+      stored_height: fitted.targetHeight,
+      stored_bytes: uploadBlob.size || 0,
+    },
+  }
+}
+
+export async function uploadObservationImageVariants(blob, storagePath, options = {}) {
+  const uploadPolicy = options?.uploadPolicy || getEffectiveCloudUploadPolicy()
+  const { uploadBlob, uploadMeta } = await _prepareUploadBlob(blob, uploadPolicy)
+  const uploadOptions = {
+    uploadMode: uploadMeta.upload_mode,
+    cloudPlan: uploadPolicy.cloudPlan,
+    uploadOrigin: options?.uploadOrigin || 'web',
+  }
+
+  await _uploadToStorage(storagePath, uploadBlob, uploadOptions)
 
   const uploads = Object.entries(THUMB_VARIANTS).map(async ([variant, config]) => {
     try {
-      const thumbBlob = await _createThumbnailBlob(blob, config.maxEdge, config.quality)
+      const thumbBlob = await _createThumbnailBlob(uploadBlob, config.maxEdge, config.quality)
       if (!(thumbBlob instanceof Blob)) return
-      await _uploadToStorage(getVariantPath(storagePath, variant), thumbBlob)
+      await _uploadToStorage(getVariantPath(storagePath, variant), thumbBlob, uploadOptions)
     } catch (err) {
       console.warn(`Thumbnail upload failed for ${variant}:`, err)
     }
   })
 
   await Promise.all(uploads)
+  return uploadMeta
 }
 
 function _isMissingColumnError(error, columnName) {
@@ -244,10 +325,19 @@ export async function insertObservationImage(observationImage) {
     ai_crop_source_w: cropSourceW,
     ai_crop_source_h: cropSourceH,
   }
+  const payloadWithUploadMeta = {
+    ...payloadWithCrop,
+    upload_mode: observationImage?.upload_mode || null,
+    source_width: observationImage?.source_width ?? null,
+    source_height: observationImage?.source_height ?? null,
+    stored_width: observationImage?.stored_width ?? null,
+    stored_height: observationImage?.stored_height ?? null,
+    stored_bytes: observationImage?.stored_bytes ?? null,
+  }
 
   const { error } = await supabase
     .from('observation_images')
-    .insert(payloadWithCrop)
+    .insert(payloadWithUploadMeta)
 
   if (!error) return true
 
@@ -259,6 +349,22 @@ export async function insertObservationImage(observationImage) {
     'ai_crop_source_w',
     'ai_crop_source_h',
   ]
+
+  const uploadFieldMissing = UPLOAD_METADATA_FIELDS.some(field => _isMissingColumnError(error, field))
+  if (uploadFieldMissing) {
+    const { error: retryError } = await supabase
+      .from('observation_images')
+      .insert(payloadWithCrop)
+    if (!retryError) return false
+    if (!cropFieldNames.some(field => _isMissingColumnError(retryError, field))) {
+      throw retryError
+    }
+    const { error: fallbackError } = await supabase
+      .from('observation_images')
+      .insert(basePayload)
+    if (fallbackError) throw fallbackError
+    return false
+  }
 
   if (!cropFieldNames.some(field => _isMissingColumnError(error, field))) {
     throw error

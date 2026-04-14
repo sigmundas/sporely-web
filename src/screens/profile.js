@@ -3,6 +3,7 @@ import { t } from '../i18n.js'
 import { state } from '../state.js'
 import { showToast } from '../toast.js'
 import { showAuthOverlay } from './auth.js'
+import { fetchCloudPlanProfile, formatStorageBytes } from '../cloud-plan.js'
 import { Capacitor } from '@capacitor/core'
 import { FilePicker } from '@capawesome/capacitor-file-picker'
 
@@ -86,7 +87,11 @@ async function _loadProfileData() {
     .select('username, display_name, avatar_url')
     .eq('id', uid)
     .single()
-  if (!data) return
+  state.cloudPlan = await fetchCloudPlanProfile(uid)
+  if (!data) {
+    _renderCloudPlan(state.cloudPlan)
+    return
+  }
 
 
   document.getElementById('profile-username').value  = data.username     || ''
@@ -96,9 +101,13 @@ async function _loadProfileData() {
   document.getElementById('profile-avatar-initials').textContent = initials
   if (data.avatar_url) {
     const shown = await _setProfileAvatarSource({ uid, preferredUrl: data.avatar_url })
-    if (shown) return
+    if (shown) {
+      _renderCloudPlan(state.cloudPlan)
+      return
+    }
   }
   _showInitialsAvatar()
+  _renderCloudPlan(state.cloudPlan)
 }
 
 async function _saveProfile() {
@@ -345,6 +354,59 @@ function _withCacheBust(url, enabled) {
   if (!url) return ''
   if (!enabled) return url
   return `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`
+}
+
+function _renderCloudPlan(cloudPlan) {
+  const normalized = cloudPlan || state.cloudPlan || {
+    cloudPlan: 'free',
+    fullResStorageEnabled: false,
+    storageQuotaBytes: null,
+    storageUsedBytes: 0,
+    uploadMode: 'reduced',
+  }
+  const isPro = normalized.cloudPlan === 'pro'
+  const uploadMode = normalized.uploadMode === 'full' ? 'full' : 'reduced'
+
+  const tierEl = document.getElementById('profile-cloud-plan-badge')
+  const uploadEl = document.getElementById('profile-cloud-upload-mode')
+  const usageEl = document.getElementById('profile-cloud-usage')
+  const noteEl = document.getElementById('profile-cloud-plan-note')
+
+  if (tierEl) {
+    tierEl.textContent = t(isPro ? 'profile.planPro' : 'profile.planFree')
+    tierEl.classList.toggle('green', isPro)
+    tierEl.classList.toggle('amber', !isPro)
+  }
+  if (uploadEl) {
+    uploadEl.textContent = t(uploadMode === 'full' ? 'profile.uploadFull' : 'profile.uploadReduced')
+  }
+  if (usageEl) {
+    if (normalized.storageQuotaBytes) {
+      usageEl.textContent = t('profile.storageUsedOfQuota', {
+        used: formatStorageBytes(normalized.storageUsedBytes),
+        total: formatStorageBytes(normalized.storageQuotaBytes),
+      })
+    } else if (normalized.storageUsedBytes > 0) {
+      usageEl.textContent = t('profile.storageUsedOnly', {
+        used: formatStorageBytes(normalized.storageUsedBytes),
+      })
+    } else {
+      usageEl.textContent = t('profile.storageUnknown')
+    }
+  }
+  if (noteEl) {
+    if (normalized.planSource === 'debug_override') {
+      noteEl.textContent = t('profile.cloudPlanDebugOverride', {
+        mode: t(normalized.debugOverride === 'pro' ? 'profile.planPro' : 'profile.planFree'),
+      })
+    } else {
+      noteEl.textContent = t(
+        isPro && uploadMode === 'full'
+          ? 'profile.cloudPlanProNote'
+          : 'profile.cloudPlanFreeNote'
+      )
+    }
+  }
 }
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
