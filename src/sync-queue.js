@@ -102,6 +102,20 @@ export async function getQueuedObservations(userId) {
     }))
 }
 
+export async function deleteQueuedObservation(queueId) {
+  const numId = parseInt(String(queueId).replace('queued-', ''), 10)
+  if (!numId) return
+
+  const db = await openDB()
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    tx.objectStore(STORE_NAME).delete(numId)
+    tx.oncomplete = resolve
+    tx.onerror = () => reject(tx.error)
+  })
+  notifyQueueChanged()
+}
+
 export { QUEUE_EVENT }
 
 let isSyncing = false

@@ -4,12 +4,13 @@ import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { fetchFirstImages, fetchCardImages } from '../images.js'
-import { QUEUE_EVENT, getQueuedObservations } from '../sync-queue.js'
+import { QUEUE_EVENT, getQueuedObservations, deleteQueuedObservation } from '../sync-queue.js'
 import { openFindDetail } from './find_detail.js'
 
 let currentScope = 'mine'
 const _cache = {}   // scope → array of observations
 let _profileMap = {}
+let _pendingScrollRestore = null
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
@@ -167,23 +168,31 @@ async function _fetchMine() {
 async function _fetchFriends() {
   const { data, error } = await supabase
     .from('observations_friend_view')
-    .select('id, user_id, date, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
+    .select('id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude')
     .neq('user_id', state.user.id)
     .order('date', { ascending: false })
     .limit(100)
 
-  if (error) { _cache['friends'] = []; return }
+  if (error) { 
+    console.error('Failed to fetch friends feed:', error)
+    _cache['friends'] = []; 
+    return 
+  }
   _cache['friends'] = data || []
 }
 
 async function _fetchCommunity() {
   const { data, error } = await supabase
     .from('observations_community_view')
-    .select('id, user_id, date, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
+    .select('id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude')
     .order('date', { ascending: false })
     .limit(100)
 
-  if (error) { _cache['community'] = []; return }
+  if (error) { 
+    console.error('Failed to fetch community feed:', error)
+    _cache['community'] = []; 
+    return 
+  }
   _cache['community'] = data || []
 }
 
@@ -219,7 +228,7 @@ function _matches(obs, q) {
 }
 
 function _sortTs(obs) {
-  const primary = obs?.captured_at || obs?.date || obs?._queuedAt || 0
+  const primary = obs?.captured_at || obs?.created_at || obs?.date || obs?._queuedAt || 0
   const ts = new Date(primary).getTime()
   return Number.isFinite(ts) ? ts : 0
 }
@@ -262,6 +271,35 @@ function _wireImageFallback(root) {
       img.src = fallback
     }, { once: true })
   })
+}
+
+function _deleteQueueBtn(obs) {
+  if (!obs._pendingSync) return ''
+  return `<button class="find-card-delete-btn" data-delete-id="${_esc(obs.id)}">` +
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+    `<polyline points="3 6 5 6 21 6"/>` +
+    `<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>` +
+    `<path d="M10 11v6"/><path d="M14 11v6"/>` +
+    `<path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>` +
+    `</svg></button>`
+}
+
+function _wireDeleteButtons(root) {
+  root.querySelectorAll('.find-card-delete-btn[data-delete-id]').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation()
+      _pendingScrollRestore = document.getElementById('screen-finds')?.scrollTop ?? null
+      await deleteQueuedObservation(btn.dataset.deleteId)
+      loadFinds()
+    })
+  })
+}
+
+function _restoreScroll() {
+  if (_pendingScrollRestore === null) return
+  const scroller = document.getElementById('screen-finds')
+  if (scroller) scroller.scrollTop = _pendingScrollRestore
+  _pendingScrollRestore = null
 }
 
 function _esc(str) {
@@ -381,7 +419,7 @@ function _renderBySpecies(list, subtitle, data) {
             <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
             <div class="find-card-body find-card-body--two">
               <span class="find-card-name find-card-name--compact">${dateLabel}</span>
-              <div class="find-card-loc">${metaLead}${statusIcon}</div>
+              <div class="find-card-loc">${metaLead}${statusIcon}${_deleteQueueBtn(obs)}</div>
             </div>
           </div>
         </div>`
@@ -392,14 +430,17 @@ function _renderBySpecies(list, subtitle, data) {
 
     html += '</div>'
     list.innerHTML = html
+    _restoreScroll()
 
     list.querySelectorAll('.find-card[data-id]').forEach(card => {
       card.addEventListener('click', () => {
         const obs = data.find(item => String(item.id) === String(card.dataset.id))
         if (obs?._pendingSync) { showToast(t('finds.pendingUpload')); return }
+        _pendingScrollRestore = document.getElementById('screen-finds')?.scrollTop ?? null
         openFindDetail(card.dataset.id)
       })
     })
+    _wireDeleteButtons(list)
     _wireImageFallback(list)
   })
 }
@@ -542,7 +583,7 @@ function _renderCards(list, subtitle, data, options) {
                 ${authorMeta}
                 ${locText || statusIcon ? `<div class="find-card-loc">
                   ${metaLead}
-                  ${statusIcon}
+                  ${statusIcon}${_deleteQueueBtn(obs)}
                 </div>` : ''}
               </div>
             </div>
@@ -557,6 +598,7 @@ function _renderCards(list, subtitle, data, options) {
               <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
               <div class="find-card-body find-card-body--three">
                 ${compactNameHtml}
+                ${obs._pendingSync ? `<div class="find-card-loc">${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
               </div>
             </div>
           </div>`
@@ -586,7 +628,7 @@ function _renderCards(list, subtitle, data, options) {
               ${authorMeta}
               ${locText || statusIcon ? `<div class="find-card-loc">
                 ${metaLead}
-                ${statusIcon}
+                ${statusIcon}${_deleteQueueBtn(obs)}
               </div>` : ''}
             </div>
           </div>
@@ -597,6 +639,7 @@ function _renderCards(list, subtitle, data, options) {
     })
     html += '</div>'
     list.innerHTML = html
+    _restoreScroll()
 
     list.querySelectorAll('.find-card[data-id]').forEach(card => {
       card.addEventListener('click', () => {
@@ -605,9 +648,11 @@ function _renderCards(list, subtitle, data, options) {
           showToast(t('finds.pendingUpload'))
           return
         }
+        _pendingScrollRestore = document.getElementById('screen-finds')?.scrollTop ?? null
         openFindDetail(card.dataset.id)
       })
     })
+    _wireDeleteButtons(list)
     _wireImageFallback(list)
   })
 }

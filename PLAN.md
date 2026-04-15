@@ -49,7 +49,7 @@
 - [x] **Offline queue** — Capture/import saves already enqueue observations and blobs in IndexedDB and retry background sync later.
 - [ ] **Supabase Heartbeat** — Configure GitHub Action to ping DB every 4 days to prevent 1-week auto-pause.
 - [x] **Bundle trimming** — Map screen is lazy-loaded so `leaflet` is no longer on the initial startup path.
-- [ ] **Friends feed** — Query `observations_friend_view`, paginate, and render list.
+- [x] **Friends feed** — Query `observations_friend_view`, paginate, and render list.
 
 ## Shared Sync Notes
 - [x] **Desktop conflict noise reduced** — desktop sync now ignores order-only image changes and low-signal local media-signature churn when deciding whether web/cloud edits need review.
@@ -120,6 +120,7 @@
 - [ ] **RevenueCat Integration:**
     - Initialize RevenueCat SDK in the Capacitor wrapper (Android/iOS).
     - Configure the "Pro" Entitlement: `full_res_storage`.
+    - *Note on Debug Settings:* The app includes a hidden debug toggle with "Server", "Free", and "Pro" options. "Server" is not a tier—it means "use the real plan fetched from the Supabase database." The "Free" and "Pro" options are local overrides for testing upload policies without changing the actual database row.
 - [ ] **Subscription UI:**
     - Create a "Cloud Sync" settings page showing current storage usage.
     - Implement a Paywall UI comparing:
@@ -139,3 +140,31 @@
 ## Ongoing Database & Operations Tasks
 - Ensure `delete-account` Edge Function is deployed and functional.
 - Validate RLS policies continuously as new features are added.
+
+## User Testing & QA Checklist
+*A list of manual checks to verify recently implemented features.*
+
+### 1. AI Crop Workflow & Gallery Overlays
+- **Importing:** Import a photo. Verify that a default AI crop is pre-seeded and that clicking the crop button allows you to pan/zoom.
+- **Artsorakel:** Run Artsorakel on a cropped image and ensure it correctly analyzes the cropped region.
+- **Detail Gallery Overlays:** Open one of your own observations in the Find Detail screen.
+  - Verify that a square "AI crop" button appears in the bottom-left of field images (but not microscope images).
+  - Verify that a "Trashcan" button appears in the top-right.
+  - Click the "AI crop" button to ensure the full-screen crop editor opens.
+  - Click the image itself (not the buttons) to ensure the fullscreen swipeable photo viewer opens.
+  - Click the "Trashcan" button, verify the translated confirmation dialog appears ("Delete this image?"), and confirm it deletes the image from the gallery and cloud.
+- **Cross-Platform:** Edit a crop on the web, then sync the Sporely desktop app to verify the crop metadata transfers correctly.
+
+### 2. Friends Feed
+- Navigate to the **Finds** screen and select the **Friends** tab.
+- Verify that a list of your friends' observations appears.
+- Verify that the feed is correctly sorted chronologically (newest first).
+
+### 3. Memory & Import Limits (Device Testing)
+- **Android APK (e.g., S25):** Import ~40 photos at once. Verify that the import succeeds without crashing and that the review thumbnails do not render as "broken image" icons (thanks to the recent `aiBlob` memory fix).
+- **iOS PWA (Safari):** Be aware that importing more than 15-20 high-res photos at once may crash the tab due to strict WebKit memory limits. This is expected behavior until the Phase 3 streaming architecture is implemented.
+
+### 4. Cloud Plan Debug UI
+- Go to Settings and tap the app version number 5 times to reveal the debug menu.
+- Verify the options are "Server", "Free", and "Pro".
+- Ensure "Server" correctly fetches the real plan from the database rather than forcing a local override.

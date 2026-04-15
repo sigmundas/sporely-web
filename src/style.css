@@ -983,6 +983,13 @@ html, body {
   stroke: var(--green-accent);
   opacity: 0.95;
 }
+.find-card-delete-btn {
+  background: none; border: none; padding: 0; cursor: pointer;
+  flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--red); opacity: 0.65; line-height: 0; margin-left: 2px;
+}
+.find-card-delete-btn:hover, .find-card-delete-btn:active { opacity: 1; }
+.find-card-delete-btn svg { width: 16px; height: 16px; stroke: currentColor; }
 .find-card--two {
   border-radius: 14px;
   padding: 10px;
@@ -2305,6 +2312,8 @@ html.light .finds-search-inner { background: #f0f4f0; }
 html.light .review-count,
 html.light .review-location { color: var(--text-primary); }
 html.light .ai-id-btn { background: var(--green-deep); border-color: var(--green-mid); color: #ffffff; }
+html.light .comment-send-btn { background: var(--green-deep); border-color: var(--green-mid); color: #ffffff; }
+html.light .comment-send-btn:active { background: var(--green-mid); }
 html.light .ai-dot { background: rgba(255,255,255,0.75); }
 
 /* ── IMPORT PROGRESS OVERLAY ── */

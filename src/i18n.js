@@ -414,7 +414,7 @@ const messages = {
     'finds.noObservations': 'Ingen observasjoner ennå.',
     'finds.noObservationsCapture': 'Ingen observasjoner ennå — gå og ta noen!',
     'finds.noResults': 'Ingen treff for "{query}".',
-    'finds.pendingUpload': 'Køet for opplasting',
+    'finds.pendingUpload': 'Lagt i kø for opplasting',
     'finds.unidentified': 'Ubestemt',
     'finds.observationCount.one': '{count} observasjon.',
     'finds.observationCount.other': '{count} observasjoner.',
