@@ -5,7 +5,7 @@ import { showToast } from '../toast.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
 import { FilePicker } from '@capawesome/capacitor-file-picker';
-import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js';
+import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, isArtsorakelNetworkError } from '../artsorakel.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
@@ -200,7 +200,7 @@ export async function openPhotoImportPicker() {
         _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
         files.push(await _nativePickedPhotoToFile(photos[i], i));
       }
-      await handleSelectedFiles(files, { nativePhotos: photos });
+      await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos });
       return;
     } catch (err) {
       if (_isPickerCancel(err)) return;
@@ -209,7 +209,7 @@ export async function openPhotoImportPicker() {
     }
   }
 
-  document.getElementById('import-photo-input').click();
+  _openBrowserFileInput('import-photo-input');
 }
 
 export async function openFileImportPicker() {
@@ -230,7 +230,7 @@ export async function openFileImportPicker() {
         }],
       });
       const files = await Promise.all(handles.map(handle => handle.getFile()));
-      await handleSelectedFiles(files);
+      await _handleSelectedFilesWithFeedback(files);
       return;
     } catch (err) {
       if (err?.name !== 'AbortError') {
@@ -241,13 +241,13 @@ export async function openFileImportPicker() {
     }
   }
 
-  document.getElementById('import-browse-input').click();
+  _openBrowserFileInput('import-browse-input');
 }
 
 export async function handleFileSelect(event) {
   const files = Array.from(event.target.files || []);
   if (event.target) event.target.value = '';
-  await handleSelectedFiles(files);
+  await _handleSelectedFilesWithFeedback(files);
 }
 
 async function handleSelectedFiles(files, options = {}) {
@@ -358,6 +358,33 @@ function _isHeicLike(file) {
 function _isPickerCancel(err) {
   const message = String(err?.message || err || '').toLowerCase();
   return err?.name === 'AbortError' || err?.code === 'CANCELLED' || message.includes('cancel');
+}
+
+function _openBrowserFileInput(inputId) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  input.value = '';
+  if (typeof input.showPicker === 'function') {
+    try {
+      input.showPicker();
+      return;
+    } catch (err) {
+      if (err?.name !== 'NotAllowedError' && err?.name !== 'InvalidStateError') {
+        console.warn('showPicker() failed, falling back to click():', err);
+      }
+    }
+  }
+  input.click();
+}
+
+async function _handleSelectedFilesWithFeedback(files, options = {}) {
+  try {
+    await handleSelectedFiles(files, options);
+  } catch (err) {
+    console.error('Photo import failed:', err);
+    _hideProgress();
+    showToast(t('import.failed'));
+  }
 }
 
 function _coerceExifDate(value) {
@@ -997,10 +1024,11 @@ function _wireCard(sid) {
         })
       } catch (err) {
         console.error('Artsorakel AI error:', err)
-        if (String(err?.message || '').includes('CORS') || String(err?.message || '').includes('Failed to fetch') || String(err?.message || '').includes('NetworkError')) {
+        const message = String(err?.message || 'Unknown error')
+        if (isArtsorakelNetworkError(err) || message.includes('CORS')) {
           showToast(t('review.aiUnavailable'))
         } else {
-          showToast(t('common.artsorakelError', { message: err.message }))
+          showToast(t('common.artsorakelError', { message }))
         }
       } finally {
         aiBtn.disabled = false

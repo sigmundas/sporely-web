@@ -199,8 +199,8 @@
           </button>
         </div>
 
-        <input type="file" id="import-photo-input" accept="image/*" multiple style="display:none">
-        <input type="file" id="import-browse-input" accept=".jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif" multiple style="display:none">
+        <input type="file" id="import-photo-input" class="hidden-file-input" accept="image/*" multiple>
+        <input type="file" id="import-browse-input" class="hidden-file-input" accept=".jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif" multiple>
       </div>
     </div>
 
@@ -571,7 +571,7 @@
             <button class="profile-avatar-btn" id="profile-avatar-btn" aria-label="Change photo">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
             </button>
-            <input type="file" id="profile-avatar-input" accept="image/*" style="display:none">
+            <input type="file" id="profile-avatar-input" class="hidden-file-input" accept="image/*">
           </div>
           <div class="profile-identity-fields">
             <input id="profile-username" class="profile-field-input" type="text" placeholder="@username" autocomplete="off" spellcheck="false">

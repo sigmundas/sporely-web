@@ -12,6 +12,31 @@ const _cache = {}   // scope → array of observations
 let _profileMap = {}
 let _pendingScrollRestore = null
 
+function _formatFingerprintCoord(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return ''
+  return num.toFixed(5)
+}
+
+function _observationFingerprint(obs) {
+  if (!obs) return ''
+  return [
+    obs.user_id || '',
+    obs.source_type || '',
+    obs.date || '',
+    obs.captured_at || '',
+    obs.genus || '',
+    obs.species || '',
+    obs.common_name || '',
+    obs.location || '',
+    obs.notes || '',
+    obs.uncertain ? '1' : '0',
+    obs.visibility || '',
+    _formatFingerprintCoord(obs.gps_latitude),
+    _formatFingerprintCoord(obs.gps_longitude),
+  ].join('|')
+}
+
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
 export function initFinds() {
@@ -160,7 +185,16 @@ async function _fetchMine() {
   if (error) { showToast(t('finds.couldNotLoad')); _cache['mine'] = []; return }
 
   const queued = await getQueuedObservations(state.user.id)
-  const items = [...queued, ...(data || [])]
+  const queuedFingerprints = new Set(
+    queued
+      .map(_observationFingerprint)
+      .filter(Boolean)
+  )
+  const synced = (data || []).filter(obs => {
+    const fingerprint = _observationFingerprint(obs)
+    return !fingerprint || !queuedFingerprints.has(fingerprint)
+  })
+  const items = [...queued, ...synced]
   items.sort((a, b) => _sortTs(b) - _sortTs(a))
   _cache['mine'] = items
 }

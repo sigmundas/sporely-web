@@ -7,8 +7,12 @@ import { showAuthOverlay } from './auth.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
 import { openFindDetail } from './find_detail.js'
-import { openPhotoImportPicker } from './import_review.js'
+import { openPhotoImportPicker, openFileImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
+
+function _isAndroid() {
+  return /android/i.test(navigator.userAgent || '')
+}
 
 function _imageHtml(source, className, placeholderHtml) {
   if (!source?.primaryUrl) return placeholderHtml
@@ -32,12 +36,22 @@ function _wireImageFallback(root) {
 export async function initHome() {
   document.getElementById('qa-new-obs').addEventListener('click', () => navigate('capture'))
   document.getElementById('ac-view-obs').addEventListener('click', () => navigate('finds'))
-  document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
+  document.getElementById('ac-import').addEventListener('click', () => {
+    if (_isAndroid()) {
+      openPhotoImportPicker()
+      return
+    }
+    _openImportSourceSheet()
+  })
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
   document.getElementById('import-source-close').addEventListener('click', _closeImportSourceSheet)
   document.getElementById('import-source-photos').addEventListener('click', () => {
     _closeImportSourceSheet()
     openPhotoImportPicker()
+  })
+  document.getElementById('import-source-files').addEventListener('click', () => {
+    _closeImportSourceSheet()
+    openFileImportPicker()
   })
 
   document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))

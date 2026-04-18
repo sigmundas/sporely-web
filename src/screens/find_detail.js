@@ -3,7 +3,7 @@ import { formatDate, formatTime, getTaxonomyLanguage, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, formatDisplayName, runArtsorakelForBlobs } from '../artsorakel.js'
+import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, isArtsorakelNetworkError } from '../artsorakel.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { deleteObservationMedia, resolveMediaSources, updateObservationImageCrop } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
@@ -341,7 +341,12 @@ async function _runAI() {
       })
     })
   } catch (err) {
-    showToast(t('common.artsorakelError', { message: err.message }))
+    const message = String(err?.message || 'Unknown error')
+    if (isArtsorakelNetworkError(err) || message.includes('CORS')) {
+      showToast(t('review.aiUnavailable'))
+    } else {
+      showToast(t('common.artsorakelError', { message }))
+    }
   } finally {
     btn.disabled = false
     btn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`

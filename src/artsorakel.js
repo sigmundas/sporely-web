@@ -14,6 +14,21 @@ const ARTSDATA_PROXY_BASE_URL = String(
   import.meta.env.VITE_ARTSORAKEL_BASE_URL || import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || ''
 ).replace(/\/+$/, '')
 
+function _buildNetworkErrorMessage(error) {
+  return String(error?.message || error || '').trim().toLowerCase()
+}
+
+export function isArtsorakelNetworkError(error) {
+  const message = _buildNetworkErrorMessage(error)
+  return (
+    message.includes('failed to fetch')
+    || message.includes('networkerror')
+    || message.includes('load failed')
+    || message.includes('fetch failed')
+    || message.includes('network request failed')
+  )
+}
+
 // ── Language helpers ──────────────────────────────────────────────────────────
 
 export function normalizeLang(code = 'no') {
@@ -130,26 +145,54 @@ export async function runArtsorakel(blob, lang = 'no') {
 
   const aiBlob = await _resizeForAi(blob)
   const langNorm = normalizeLang(lang)
+  let proxyHeaders = null
 
-  async function tryPost(fieldName) {
+  async function tryPost(url, fieldName, headers = null) {
     const form = new FormData()
     form.append(fieldName, aiBlob, 'photo.jpg')
     const request = {
       method: 'POST',
       body: form,
     }
-    if (ARTSDATA_PROXY_BASE_URL) {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (session?.access_token) {
-        request.headers = { Authorization: `Bearer ${session.access_token}` }
-      }
+    if (headers) {
+      request.headers = headers
     }
-    return fetch(ARTSDATA_PROXY_BASE_URL ? `${ARTSDATA_PROXY_BASE_URL}/artsorakel` : ARTSDATA_AI_URL, request)
+    return fetch(url, request)
   }
 
-  let res = await tryPost('image')
-  if (!res.ok) res = await tryPost('file')
-  if (!res.ok) throw new Error(`Artsdata AI ${res.status}`)
+  async function runAgainstEndpoint(url, headers = null) {
+    let res = await tryPost(url, 'image', headers)
+    if (!res.ok) res = await tryPost(url, 'file', headers)
+    if (!res.ok) throw new Error(`Artsdata AI ${res.status}`)
+    return res
+  }
+
+  if (ARTSDATA_PROXY_BASE_URL) {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (session?.access_token) {
+      proxyHeaders = { Authorization: `Bearer ${session.access_token}` }
+    }
+  }
+
+  let res = null
+  let lastError = null
+
+  if (ARTSDATA_PROXY_BASE_URL) {
+    try {
+      res = await runAgainstEndpoint(`${ARTSDATA_PROXY_BASE_URL}/artsorakel`, proxyHeaders)
+    } catch (error) {
+      lastError = error
+      console.warn('Artsorakel proxy failed, falling back to direct endpoint:', error)
+    }
+  }
+
+  if (!res) {
+    try {
+      res = await runAgainstEndpoint(ARTSDATA_AI_URL)
+    } catch (error) {
+      throw lastError || error
+    }
+  }
 
   const data = await res.json()
   const predictions = _extractPredictions(data)

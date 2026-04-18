@@ -2,7 +2,7 @@ import { formatTime, getTaxonomyLanguage, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, runArtsorakelForBlobs, formatDisplayName } from '../artsorakel.js'
+import { searchTaxa, runArtsorakelForBlobs, formatDisplayName, isArtsorakelNetworkError } from '../artsorakel.js'
 import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
@@ -377,10 +377,11 @@ async function handleArtsorakelBtn(i) {
       })
     })
   } catch (err) {
-    if (err.message.includes('CORS') || err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+    const message = String(err?.message || 'Unknown error')
+    if (isArtsorakelNetworkError(err) || message.includes('CORS')) {
       showToast(t('review.aiUnavailable'))
     } else {
-      showToast(t('common.artsorakelError', { message: err.message }))
+      showToast(t('common.artsorakelError', { message }))
     }
     console.warn('Artsorakel error:', err)
   } finally {
