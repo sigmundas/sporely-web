@@ -716,20 +716,20 @@ async function _reverseGeocode(lat, lon) {
   return null;
 }
 
-// Convert file to a displayable JPEG blob.
-// Strategy: try fast canvas decode first (works for JPEG/PNG/WebP and HEIC on iOS Safari).
-// If that fails (e.g. Android Chrome / desktop browsers can't decode HEIC),
-// we fall back to the original file. The native plugin now handles HEIC-to-JPEG conversion
-// during import on Android/iOS.
+// Prepare an imported file for preview + AI without eagerly re-encoding the full upload blob.
+// Strategy: if the browser can decode the image, keep the original file for upload/preview and
+// only generate a reduced AI JPEG. This avoids expensive full-resolution canvas encodes on
+// Android imports. If decode fails (e.g. some HEIC flows outside Safari/native conversion),
+// we fall back to the original file as-is.
 async function _processFile(file) {
-  // 1. Canvas path (fast — works for JPEG/PNG/WebP; also HEIC on iOS/macOS Safari)
+  // 1. Browser-decodable path.
   try {
-    const { blob, aiBlob } = await _toJpeg(file);
-    const meta = await createImageCropMeta(blob, { preseed: true });
+    const { blob, aiBlob, metaSource } = await _prepareImportBlobs(file);
+    const meta = await createImageCropMeta(metaSource || blob, { preseed: true });
     return { blob, aiBlob, meta };
   } catch (_) {}
 
-  // 2. Final fallback — original file (will show blank if browser can't decode it)
+  // 2. Final fallback — original file (may still show blank if browser can't decode it).
   const meta = await createImageCropMeta(file, { preseed: true }).catch(() => ({
     aiCropRect: null,
     aiCropSourceW: null,
@@ -1147,10 +1147,9 @@ function _canvasToJpegBlob(img, width, height, quality = 0.88) {
   });
 }
 
-// Convert any image file to JPEG blobs via Canvas.
-// Returns both the full-resolution upload blob and an AI-safe preview blob.
-// Works for JPEG, PNG, WebP, and HEIC on platforms that can decode it (iOS/macOS Safari).
-function _toJpeg(file) {
+// Returns the original file for preview/upload plus a reduced JPEG for AI inference.
+// Works for any image format the browser can decode via <img>.
+function _prepareImportBlobs(file) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
@@ -1164,14 +1163,17 @@ function _toJpeg(file) {
         }
 
         const aiSize = _getScaledSize(w, h, IMPORT_AI_MAX_EDGE);
-        const aiBlob = await _canvasToJpegBlob(img, aiSize.width, aiSize.height, 0.88);
-        if (aiSize.width === w && aiSize.height === h) {
-          resolve({ blob: aiBlob, aiBlob });
-          return;
-        }
+        const aiBlob = aiSize.width === w
+          && aiSize.height === h
+          && file.type === 'image/jpeg'
+          ? file
+          : await _canvasToJpegBlob(img, aiSize.width, aiSize.height, 0.88);
 
-        const blob = await _canvasToJpegBlob(img, w, h, 0.88);
-        resolve({ blob, aiBlob });
+        resolve({
+          blob: file,
+          aiBlob,
+          metaSource: file,
+        });
       } catch (error) {
         reject(error);
       } finally {

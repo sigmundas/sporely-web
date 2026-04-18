@@ -5,6 +5,9 @@ import { fetchCloudPlanProfile } from './cloud-plan.js'
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
 const QUEUE_EVENT = 'sporely-sync-queue-changed'
+const RETRY_DELAY_MS = 30_000
+const _queuedPreviewUrls = new Map()
+let _retryTimer = null
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -25,8 +28,92 @@ function readAll(store) {
   })
 }
 
+function readOne(store, key) {
+  return new Promise((resolve, reject) => {
+    const req = store.get(key)
+    req.onsuccess = () => resolve(req.result || null)
+    req.onerror = () => reject(req.error)
+  })
+}
+
 function notifyQueueChanged() {
   window.dispatchEvent(new CustomEvent(QUEUE_EVENT))
+}
+
+function _revokeQueuedPreviewUrl(id) {
+  const existing = _queuedPreviewUrls.get(id)
+  if (!existing) return
+  URL.revokeObjectURL(existing)
+  _queuedPreviewUrls.delete(id)
+}
+
+function _previewUrlForQueueItem(item) {
+  const id = item?.id
+  if (!id) return null
+
+  const existing = _queuedPreviewUrls.get(id)
+  if (existing) return existing
+
+  const firstBlob = _normalizeQueuedImages(item?.imageEntries || item?.imageBlobs)[0]?.blob
+  if (!(firstBlob instanceof Blob)) return null
+
+  const nextUrl = URL.createObjectURL(firstBlob)
+  _queuedPreviewUrls.set(id, nextUrl)
+  return nextUrl
+}
+
+function _pruneQueuedPreviewUrls(activeIds) {
+  const keep = new Set(activeIds || [])
+  for (const id of _queuedPreviewUrls.keys()) {
+    if (!keep.has(id)) _revokeQueuedPreviewUrl(id)
+  }
+}
+
+async function _readQueueItems() {
+  const db = await openDB()
+  const tx = db.transaction(STORE_NAME, 'readonly')
+  const store = tx.objectStore(STORE_NAME)
+  return readAll(store)
+}
+
+async function _updateQueueItem(itemId, updater) {
+  const db = await openDB()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    const store = tx.objectStore(STORE_NAME)
+
+    readOne(store, itemId)
+      .then(current => {
+        if (!current) {
+          resolve(null)
+          return
+        }
+        const next = updater(current)
+        store.put(next)
+        tx.oncomplete = () => resolve(next)
+        tx.onerror = () => reject(tx.error)
+      })
+      .catch(reject)
+  })
+}
+
+async function _deleteQueueItem(itemId) {
+  const db = await openDB()
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    tx.objectStore(STORE_NAME).delete(itemId)
+    tx.oncomplete = resolve
+    tx.onerror = () => reject(tx.error)
+  })
+  _revokeQueuedPreviewUrl(itemId)
+}
+
+function _scheduleSyncRetry() {
+  if (_retryTimer || !navigator.onLine) return
+  _retryTimer = window.setTimeout(() => {
+    _retryTimer = null
+    triggerSync()
+  }, RETRY_DELAY_MS)
 }
 
 function _normalizeQueuedImages(imageEntries) {
@@ -75,18 +162,17 @@ export async function enqueueObservation(obsPayload, imageEntries) {
 export async function getQueuedObservations(userId) {
   if (!userId) return []
 
-  const db = await openDB()
-  const tx = db.transaction(STORE_NAME, 'readonly')
-  const store = tx.objectStore(STORE_NAME)
-  const items = await readAll(store)
+  const items = await _readQueueItems()
+  const filteredItems = items.filter(item => item?.userId === userId && item?.obsPayload)
+  _pruneQueuedPreviewUrls(filteredItems.map(item => item.id))
 
-  return items
-    .filter(item => item?.userId === userId && item?.obsPayload)
+  return filteredItems
     .map(item => ({
       id: `queued-${item.id}`,
       user_id: item.userId,
       date: item.obsPayload.date || null,
       captured_at: item.obsPayload.captured_at || null,
+      created_at: item.obsPayload.created_at || null,
       genus: item.obsPayload.genus || null,
       species: item.obsPayload.species || null,
       common_name: item.obsPayload.common_name || null,
@@ -99,6 +185,9 @@ export async function getQueuedObservations(userId) {
       source_type: item.obsPayload.source_type || 'personal',
       _pendingSync: true,
       _queuedAt: item.ts || Date.now(),
+      _pendingPreviewUrl: _previewUrlForQueueItem(item),
+      _pendingPhotoCount: _normalizeQueuedImages(item.imageEntries || item.imageBlobs).length,
+      _remoteObservationId: item.remoteObservationId || null,
     }))
 }
 
@@ -106,13 +195,7 @@ export async function deleteQueuedObservation(queueId) {
   const numId = parseInt(String(queueId).replace('queued-', ''), 10)
   if (!numId) return
 
-  const db = await openDB()
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite')
-    tx.objectStore(STORE_NAME).delete(numId)
-    tx.oncomplete = resolve
-    tx.onerror = () => reject(tx.error)
-  })
+  await _deleteQueueItem(numId)
   notifyQueueChanged()
 }
 
@@ -131,15 +214,7 @@ export async function triggerSync() {
   isSyncing = true
 
   try {
-    const db = await openDB()
-    const tx = db.transaction(STORE_NAME, 'readonly')
-    const store = tx.objectStore(STORE_NAME)
-    const req = store.getAll()
-    
-    const items = await new Promise((resolve, reject) => {
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
-    })
+    const items = await _readQueueItems()
 
     if (!items || !items.length) return
 
@@ -147,23 +222,38 @@ export async function triggerSync() {
       if (!navigator.onLine) break
       
       try {
-        // 1. Upload parent observation
-        let { data: obsData, error } = await supabase.from('observations').insert(item.obsPayload).select('id').single()
-        if (error?.message?.includes('captured_at')) {
-          const { captured_at: _, ...payloadWithout } = item.obsPayload
-          ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithout).select('id').single())
+        let obsId = item.remoteObservationId || null
+
+        // 1. Upload parent observation once, then persist the remote ID for retries.
+        if (!obsId) {
+          let { data: obsData, error } = await supabase.from('observations').insert(item.obsPayload).select('id').single()
+          if (error?.message?.includes('captured_at')) {
+            const { captured_at: _, ...payloadWithout } = item.obsPayload
+            ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithout).select('id').single())
+          }
+          if (error) throw error
+
+          obsId = obsData.id
+          const updatedItem = await _updateQueueItem(item.id, current => ({
+            ...current,
+            remoteObservationId: obsId,
+          }))
+          if (!updatedItem) continue
         }
-        if (error) throw error
 
         // 2. Upload images
-        const obsId = obsData.id
         const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
+        const completedImageIndexes = new Set(
+          Array.isArray(item.completedImageIndexes) ? item.completedImageIndexes : []
+        )
         let uploadPolicy = _cloudPlanCache.get(item.userId)
         if (!uploadPolicy) {
           uploadPolicy = await fetchCloudPlanProfile(item.userId)
           _cloudPlanCache.set(item.userId, uploadPolicy)
         }
         for (let i = 0; i < queuedImages.length; i++) {
+          if (completedImageIndexes.has(i)) continue
+
           const image = queuedImages[i]
           const blob = image.blob
           const path = `${item.userId}/${obsId}/${i}_${item.ts}.jpg`
@@ -184,18 +274,21 @@ export async function triggerSync() {
             ...uploadMeta,
           })
           await syncObservationMediaKeys(obsId, path, { sortOrder: i })
+
+          completedImageIndexes.add(i)
+          await _updateQueueItem(item.id, current => ({
+            ...current,
+            remoteObservationId: obsId,
+            completedImageIndexes: [...completedImageIndexes].sort((a, b) => a - b),
+          }))
         }
 
         // 3. Purge from offline queue
-        await new Promise((res, rej) => {
-          const delTx = db.transaction(STORE_NAME, 'readwrite')
-          delTx.objectStore(STORE_NAME).delete(item.id)
-          delTx.oncomplete = res
-          delTx.onerror = rej
-        })
+        await _deleteQueueItem(item.id)
         notifyQueueChanged()
       } catch (err) {
         console.error('Background sync failed for queue item', item.id, err)
+        _scheduleSyncRetry()
         break // Network or RLS failure — halt processing to avoid looping errors
       }
     }
@@ -206,4 +299,9 @@ export async function triggerSync() {
 
 // Boot logic: Listen for connection restoral, and also check when the file is first evaluated.
 window.addEventListener('online', triggerSync)
+window.addEventListener('focus', triggerSync)
+window.addEventListener('pageshow', triggerSync)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') triggerSync()
+})
 setTimeout(triggerSync, 1000)

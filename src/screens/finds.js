@@ -313,6 +313,14 @@ function _imageHtml(source, className, placeholderClass) {
   return `<img class="${className}" src="${source.primaryUrl}"${fallbackAttr} loading="lazy" decoding="async" alt="">`
 }
 
+function _pendingImageSource(obs) {
+  if (!obs?._pendingPreviewUrl) return null
+  return {
+    primaryUrl: obs._pendingPreviewUrl,
+    fallbackUrl: null,
+  }
+}
+
 function _wireImageFallback(root) {
   root.querySelectorAll('img[data-fallback-src]').forEach(img => {
     img.addEventListener('error', () => {
@@ -448,7 +456,11 @@ function _renderBySpecies(list, subtitle, data) {
       <div class="finds-grid finds-grid--two">`
 
       for (const obs of group.items) {
-        const photoInner = _imageHtml(imageUrls[obs.id], '', 'find-card-photo-placeholder')
+        const photoInner = _imageHtml(
+          obs._pendingSync ? _pendingImageSource(obs) : imageUrls[obs.id],
+          '',
+          'find-card-photo-placeholder'
+        )
         const loc = obs.location || (obs.gps_latitude && obs.gps_longitude
           ? `${obs.gps_latitude.toFixed(3)}° N, ${obs.gps_longitude.toFixed(3)}° E`
           : null)
@@ -516,7 +528,11 @@ function _renderTiles(list, subtitle, data) {
       const name = obs.common_name
         || (obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus)
         || t('finds.unidentified')
-      const photo = _imageHtml(imageUrls[obs.id], '', 'find-tile-empty')
+      const photo = _imageHtml(
+        obs._pendingSync ? _pendingImageSource(obs) : imageUrls[obs.id],
+        '',
+        'find-tile-empty'
+      )
       html += `<div class="find-tile" data-id="${obs.id}">
         <div class="find-tile-photo">${photo}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
         <div class="find-tile-name">${name}</div>
@@ -625,7 +641,11 @@ function _renderCards(list, subtitle, data, options) {
             : '<span></span>'
 
         if (variant === 'two') {
-          const photoInner = _imageHtml(imageData[obs.id], '', 'find-card-photo-placeholder')
+          const photoInner = _imageHtml(
+            obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
+            '',
+            'find-card-photo-placeholder'
+          )
           html += `<div class="find-card-wrap find-card-wrap--two">
             <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
               <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
@@ -643,7 +663,11 @@ function _renderCards(list, subtitle, data, options) {
         }
 
         if (variant === 'three') {
-          const photoInner = _imageHtml(imageData[obs.id], '', 'find-card-photo-placeholder')
+          const photoInner = _imageHtml(
+            obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
+            '',
+            'find-card-photo-placeholder'
+          )
           html += `<div class="find-card-wrap find-card-wrap--three">
             <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
               <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
@@ -658,12 +682,12 @@ function _renderCards(list, subtitle, data, options) {
 
         // Single-column cards view — polaroid layout with up to 2 photos
         const cardImg = imageData[obs.id]
-        const photoCount = cardImg?.count || 0
+        const photoCount = obs._pendingSync ? (obs._pendingPhotoCount || 0) : (cardImg?.count || 0)
         const countBadge = photoCount > 1
           ? `<span class="find-card-photo-count">(${photoCount})</span>`
           : ''
         const photoWrapInner = obs._pendingSync
-          ? `<div class="find-card-photo-placeholder"></div>`
+          ? _imageHtml(_pendingImageSource(obs), '', 'find-card-photo-placeholder')
           : cardImg?.second
             ? `<div class="find-card-polaroid">
                 <div class="find-card-polaroid-frame">${_imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>

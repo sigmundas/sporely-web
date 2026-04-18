@@ -1,6 +1,13 @@
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_ALLOWED_METHODS = 'PUT, POST, DELETE, OPTIONS'
-const DEFAULT_ALLOWED_HEADERS = 'Authorization, Content-Type, Cache-Control'
+const DEFAULT_ALLOWED_HEADERS = [
+  'Authorization',
+  'Content-Type',
+  'Cache-Control',
+  'X-Sporely-Upload-Mode',
+  'X-Sporely-Cloud-Plan',
+  'X-Sporely-Upload-Origin',
+].join(', ')
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
 
 let cachedJwks = null

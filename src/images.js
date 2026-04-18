@@ -95,9 +95,6 @@ async function _uploadViaWorker(path, blob, options = {}) {
     'Content-Type': blob?.type || 'image/jpeg',
     'Cache-Control': 'public, max-age=31536000, immutable',
   }
-  if (options?.uploadMode) headers['X-Sporely-Upload-Mode'] = String(options.uploadMode)
-  if (options?.cloudPlan) headers['X-Sporely-Cloud-Plan'] = String(options.cloudPlan)
-  if (options?.uploadOrigin) headers['X-Sporely-Upload-Origin'] = String(options.uploadOrigin)
 
   const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
     method: 'PUT',

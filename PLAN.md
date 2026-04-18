@@ -3,6 +3,146 @@
 ## Bugs
 - I can't delete observations from app.sporely.no. Deleting from the installed apk app works. Error: "Delete failed: failed to fetch"
 
+## Upload Debug Log
+*Goal: keep a running, dated log of cross-platform photo import, upload, queue, thumbnail, and Artsorakel behavior so regressions are easier to track.*
+
+### 2026-04-18 — Current Working Notes
+
+**Important deployment note**
+- `app.sporely.no` updates when the repo is pushed (Pages deploy).
+- The Cloudflare Worker at `upload.sporely.no` does **not** auto-deploy with repo pushes; worker changes still require manual deployment.
+- This matters because several current symptoms look like: observation row inserted successfully, but media upload / image row / queue cleanup fails afterward.
+
+**What was reported before this round**
+- Initial live issue: installed web app on iPhone showed `Artsorakel: Load failed` immediately after tapping Identify on a newly taken photo.
+- Initial live issue: installed web app / Android showed `Artsorakel unavailable right now` immediately for both imported photos and freshly taken photos.
+- Initial live issue: iPhone import via web app sometimes did nothing after trying to import photos.
+- Earlier Android local-network test: Artsorakel worked for imported photos, but saving produced two cards for the same observation and neither showed the expected image thumbnail.
+- Earlier `app.sporely.no` test: iPhone photo capture could run Artsorakel, but saving still showed one queued observation plus one non-queued duplicate with no real image.
+- Earlier `app.sporely.no` test: iPhone `Import photo from file` produced no visible result.
+
+**Changes attempted in this round**
+- Added client-side Artsorakel fallback from the authenticated worker proxy to the direct Artsdata endpoint, plus broader Safari/WebKit network-error detection in `src/artsorakel.js`, `src/screens/review.js`, `src/screens/find_detail.js`, and `src/screens/import_review.js`.
+- Reworked browser file-input triggering to avoid fragile hidden-input programmatic picker behavior, especially for iPhone web apps.
+- Restored Android home-screen import to go directly to the photo picker instead of showing the extra source-choice sheet.
+- Added more aggressive Finds dedupe logic so queued observations and newly inserted cloud rows would not both render when they appear to be the same observation.
+- Reintroduced worker-origin changes so browser/PWA requests from `app.sporely.no`, `sporely.no`, subdomains, and `Origin: null` are accepted by the upload worker.
+
+**Results of those changes**
+- iPhone web app import-from-file is now much better than before: photo import works, GPS from EXIF is present, and Artsorakel works.
+- The queue / thumbnail / upload-completion problems remain unresolved across platforms.
+- Android behavior is still inconsistent between APK and web app, suggesting at least one issue remains in the actual upload/sync path, not only in the picker UI.
+
+### 2026-04-18 — Current Behavior Matrix
+
+**Android APK**
+- Camera capture:
+  - Saving creates a `Queued for upload` card.
+  - The observation appears stuck in the queue.
+  - Going Home and back to Finds does not clear the queued state.
+  - Thumbnail area is blank.
+- Import from file:
+  - `Converting 1 of 1...` takes a very long time.
+  - This used to be much faster before the latest changes.
+  - The same queue problem remains afterward.
+  - Thumbnail area is blank.
+  - Artsorakel works in both Android APK cases above.
+
+**Android web app (`app.sporely.no`)**
+- Same account as Android APK:
+  - One queued upload is visible twice.
+  - No photo is shown.
+  - Species and location appear to have reached the database, but image upload/thumbnail did not complete cleanly.
+- Photo capture:
+  - Artsorakel says `unavailable right now`.
+  - Save produces one queued card without a thumbnail and one normal card with a mushroom emoji.
+
+**iPhone web app (`app.sporely.no`)**
+- Photo capture:
+  - Artsorakel works.
+  - Saving takes a long time.
+  - One queued-for-upload card appears.
+  - No extra duplicate card is currently seen.
+  - No photo thumbnail appears.
+- Photo import from file:
+  - Import works.
+  - GPS from EXIF works.
+  - Artsorakel works.
+  - Observation never leaves the queue.
+  - No thumbnail image appears in the card.
+
+### 2026-04-18 — Current Hypotheses
+
+**Likely failure point**
+- The cloud observation row is probably being inserted before media upload and/or image-row creation finishes.
+- That would explain the common pattern:
+  - species / location reach the DB,
+  - the queue item remains,
+  - thumbnails never appear,
+  - and a duplicate row can appear if Finds renders both the queued item and the partially-synced cloud row.
+
+**Most likely code paths to inspect next**
+- `src/sync-queue.js`
+  - Observation insert succeeds.
+  - One of these later steps may fail silently or repeatedly:
+    - `uploadObservationImageVariants(...)`
+    - `insertObservationImage(...)`
+    - `syncObservationMediaKeys(...)`
+    - queue deletion after successful sync
+- `src/screens/finds.js`
+  - UI dedupe may still not catch all queue-vs-cloud timing cases.
+- Cloudflare Worker upload path
+  - Live `app.sporely.no` behavior may still differ from local/browser tests if the worker was not redeployed after source changes.
+
+### 2026-04-18 — Next Debugging Tasks
+
+- Add explicit step-by-step logging around queue processing:
+  - observation insert start/success/fail
+  - image upload start/success/fail
+  - `observation_images` insert start/success/fail
+  - `observations.image_key/thumb_key` sync start/success/fail
+  - queue deletion start/success/fail
+- Verify whether queued observations are actually retrying in the background or are permanently blocked after the first failure.
+- Confirm whether `app.sporely.no` has the latest worker deployed, not just the latest Pages frontend.
+- Investigate why Android APK `Converting 1 of 1...` regressed and became slow again.
+- Keep appending dated observations to this section after each real-device test round.
+
+### 2026-04-18 — New Strategy Pass Applied
+
+**New likely root cause found**
+- The upload worker only advertised `Authorization, Content-Type, Cache-Control` in `Access-Control-Allow-Headers`.
+- The web client was sending extra `X-Sporely-Upload-Mode`, `X-Sporely-Cloud-Plan`, and `X-Sporely-Upload-Origin` headers on image uploads.
+- Those custom headers were **not** actually used by the worker upload handler.
+- On mobile PWAs, that mismatch is a strong candidate for why observation rows could be created while image upload stayed stuck in the queue: the browser can block the upload at preflight time before the PUT fully succeeds.
+
+**What was changed**
+- `src/images.js`
+  - Removed the unused `X-Sporely-*` upload headers from worker PUT requests.
+  - This means the frontend should now exercise a less fragile upload path immediately after a normal repo push.
+- `cloudflare/r2-upload-worker/src/index.js`
+  - Also widened worker CORS `Access-Control-Allow-Headers` to include those `X-Sporely-*` headers anyway, so the worker is more tolerant if they are ever reintroduced later.
+- `src/screens/import_review.js`
+  - Changed imported-photo preprocessing to keep the original file for preview/upload when the browser can already decode it.
+  - Only the reduced AI blob is generated eagerly now.
+  - This should reduce the long `Converting 1 of 1...` delay on Android imports, because the app no longer re-encodes a full-resolution JPEG up front for every imported photo.
+
+**Expected results from this strategy**
+- Queue items should have a better chance of actually leaving the queue after image upload instead of getting stuck after only the observation row is inserted.
+- Pending cards should be less likely to remain photo-less for uploads that were previously blocked before media storage completed.
+- Android import should feel faster, especially for regular JPEG gallery files.
+
+**Deployment/testing implication**
+- A normal repo push is enough to test the client-side upload-header removal and import-speed optimization on `app.sporely.no`.
+- The worker CORS hardening still requires a manual worker deploy to become live.
+- So if the next test round improves but is not fully fixed, compare:
+  - frontend-only deploy result
+  - frontend + manual worker deploy result
+
+**Current code-level stabilization already in place before this strategy**
+- Queue sync is now retry-safe: a retried queue item reuses the previously inserted remote observation ID instead of creating duplicate cloud rows.
+- Completed image indexes are persisted per queued item, so partial upload progress can resume instead of starting over from image 0 each time.
+- Finds now prefers a local queued preview URL for pending observations, so queued cards should show a real local thumbnail instead of only a mushroom placeholder when the queued blob is available.
+
 ## Documentation and Landing Page (VitePress)
 *Goal: Convert the existing `sporely-landing` static site into a VitePress project that directly serves the Markdown documentation from `sporely-py/docs` alongside the app feature highlights.*
 
