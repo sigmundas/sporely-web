@@ -9,7 +9,7 @@
 ### 2026-04-18 — Current Working Notes
 
 **Important deployment note**
-- `app.sporely.no` updates when the repo is pushed (Pages deploy).
+- `app.sporely.no` auto-updates from GitHub pushes and usually shows the new Pages build within about 1 minute.
 - The Cloudflare Worker at `upload.sporely.no` does **not** auto-deploy with repo pushes; worker changes still require manual deployment.
 - This matters because several current symptoms look like: observation row inserted successfully, but media upload / image row / queue cleanup fails afterward.
 

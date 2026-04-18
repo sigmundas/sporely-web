@@ -149,6 +149,9 @@ const messages = {
     'finds.noObservationsCapture': 'No observations yet — go capture some!',
     'finds.noResults': 'No results for "{query}".',
     'finds.pendingUpload': 'Queued for upload',
+    'finds.pullToRefresh': 'Pull to refresh',
+    'finds.releaseToRefresh': 'Release to refresh',
+    'finds.refreshing': 'Refreshing…',
     'finds.unidentified': 'Unidentified',
     'finds.observationCount.one': '{count} observation.',
     'finds.observationCount.other': '{count} observations.',
@@ -415,6 +418,9 @@ const messages = {
     'finds.noObservationsCapture': 'Ingen observasjoner ennå — gå og ta noen!',
     'finds.noResults': 'Ingen treff for "{query}".',
     'finds.pendingUpload': 'Lagt i kø for opplasting',
+    'finds.pullToRefresh': 'Dra ned for å oppdatere',
+    'finds.releaseToRefresh': 'Slipp for å oppdatere',
+    'finds.refreshing': 'Oppdaterer…',
     'finds.unidentified': 'Ubestemt',
     'finds.observationCount.one': '{count} observasjon.',
     'finds.observationCount.other': '{count} observasjoner.',
@@ -680,6 +686,9 @@ const messages = {
     'finds.noObservationsCapture': 'Inga observationer ännu — gå ut och ta några!',
     'finds.noResults': 'Inga träffar för "{query}".',
     'finds.pendingUpload': 'Köad för uppladdning',
+    'finds.pullToRefresh': 'Dra ned för att uppdatera',
+    'finds.releaseToRefresh': 'Släpp för att uppdatera',
+    'finds.refreshing': 'Uppdaterar…',
     'finds.unidentified': 'Obestämd',
     'finds.observationCount.one': '{count} observation.',
     'finds.observationCount.other': '{count} observationer.',
@@ -945,6 +954,9 @@ const messages = {
     'finds.noObservationsCapture': 'Noch keine Beobachtungen — geh raus und erfasse welche!',
     'finds.noResults': 'Keine Treffer für "{query}".',
     'finds.pendingUpload': 'Zum Upload vorgemerkt',
+    'finds.pullToRefresh': 'Zum Aktualisieren nach unten ziehen',
+    'finds.releaseToRefresh': 'Zum Aktualisieren loslassen',
+    'finds.refreshing': 'Aktualisiere…',
     'finds.unidentified': 'Unbestimmt',
     'finds.observationCount.one': '{count} Beobachtung.',
     'finds.observationCount.other': '{count} Beobachtungen.',
@@ -1304,6 +1316,7 @@ export function applyStaticTranslations() {
 
   setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.friends'), t('scope.community')])
   setText('#finds-subtitle', 'finds.documentedObservations')
+  setText('#finds-refresh-label', 'finds.pullToRefresh')
   setText('#screen-profile .profile-section-title', 'profile.addFriend')
 
   setText('#profile-header-label', 'profile.title')

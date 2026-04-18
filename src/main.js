@@ -42,7 +42,15 @@ function initSettings() {
   function _openSettings() {
     _syncSettingsUI()
     overlay.style.display = 'block'
-    requestAnimationFrame(() => requestAnimationFrame(() => overlay.classList.add('open')))
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      overlay.classList.add('open')
+      window.setTimeout(() => {
+        const active = document.activeElement
+        if (active && /^(INPUT|SELECT|TEXTAREA)$/i.test(active.tagName) && typeof active.blur === 'function') {
+          active.blur()
+        }
+      }, 80)
+    }))
   }
 
   function _closeSettings() {

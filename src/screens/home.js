@@ -10,10 +10,6 @@ import { openFindDetail } from './find_detail.js'
 import { openPhotoImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
 
-function _isAndroid() {
-  return /android/i.test(navigator.userAgent || '')
-}
-
 function _imageHtml(source, className, placeholderHtml) {
   if (!source?.primaryUrl) return placeholderHtml
   const fallbackAttr = source.fallbackUrl && source.fallbackUrl !== source.primaryUrl
@@ -36,21 +32,8 @@ function _wireImageFallback(root) {
 export async function initHome() {
   document.getElementById('qa-new-obs').addEventListener('click', () => navigate('capture'))
   document.getElementById('ac-view-obs').addEventListener('click', () => navigate('finds'))
-  document.getElementById('ac-import').addEventListener('click', () => {
-    if (_isAndroid()) {
-      openPhotoImportPicker()
-      return
-    }
-    _openImportSourceSheet()
-  })
+  document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
-  document.getElementById('import-source-close').addEventListener('click', _closeImportSourceSheet)
-  document.getElementById('import-source-photos').addEventListener('click', () => {
-    setTimeout(_closeImportSourceSheet, 0)
-  })
-  document.getElementById('import-source-files').addEventListener('click', () => {
-    setTimeout(_closeImportSourceSheet, 0)
-  })
 
   document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))
   document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { groupBySpecies: true }))
@@ -292,14 +275,4 @@ function _homeAuthorChip(obs, profileMap) {
   }
   const initial = String(profile?.username || profile?.display_name || '?').replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
   return `<div class="observation-author-chip observation-author-chip--initial observation-author-chip--home" title="${_esc(label)}">${_esc(initial)}</div>`
-}
-
-function _openImportSourceSheet() {
-  const sheet = document.getElementById('import-source-sheet')
-  if (sheet) sheet.style.display = 'flex'
-}
-
-function _closeImportSourceSheet() {
-  const sheet = document.getElementById('import-source-sheet')
-  if (sheet) sheet.style.display = 'none'
 }

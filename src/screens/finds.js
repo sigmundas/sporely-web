@@ -4,13 +4,19 @@ import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { fetchFirstImages, fetchCardImages } from '../images.js'
-import { QUEUE_EVENT, getQueuedObservations, deleteQueuedObservation } from '../sync-queue.js'
+import { QUEUE_EVENT, getQueuedObservations, deleteQueuedObservation, triggerSync } from '../sync-queue.js'
 import { openFindDetail } from './find_detail.js'
 
 let currentScope = 'mine'
 const _cache = {}   // scope → array of observations
 let _profileMap = {}
 let _pendingScrollRestore = null
+const PULL_REFRESH_THRESHOLD = 72
+const PULL_REFRESH_MAX = 112
+let _pullTracking = false
+let _pullStartY = 0
+let _pullDistance = 0
+let _isRefreshing = false
 
 function _formatFingerprintCoord(value) {
   const num = Number(value)
@@ -62,9 +68,95 @@ function _observationsLikelySame(queuedObs, syncedObs) {
   return Math.abs(queuedTime - syncedTime) <= 15 * 60 * 1000
 }
 
+function _setRefreshIndicator(distance = 0, stateName = 'idle') {
+  const wrap = document.getElementById('finds-refresh')
+  const label = document.getElementById('finds-refresh-label')
+  if (!wrap || !label) return
+
+  wrap.style.height = distance > 0 ? `${Math.round(distance)}px` : '0px'
+  wrap.dataset.state = stateName
+  label.textContent = t(
+    stateName === 'refreshing'
+      ? 'finds.refreshing'
+      : stateName === 'ready'
+        ? 'finds.releaseToRefresh'
+        : 'finds.pullToRefresh'
+  )
+}
+
+async function _refreshFindsFeed() {
+  if (_isRefreshing) return
+  _isRefreshing = true
+  _setRefreshIndicator(56, 'refreshing')
+  try {
+    await triggerSync()
+    await loadFinds()
+  } finally {
+    _isRefreshing = false
+    _pullDistance = 0
+    _setRefreshIndicator(0, 'idle')
+  }
+}
+
+function _bindPullToRefresh() {
+  const screen = document.getElementById('screen-finds')
+  if (!screen || screen.dataset.pullRefreshBound === 'true') return
+  screen.dataset.pullRefreshBound = 'true'
+
+  screen.addEventListener('touchstart', event => {
+    if (_isRefreshing) return
+    if (event.touches.length !== 1) return
+    if (screen.scrollTop > 0) return
+    if (event.target.closest('input, textarea, select, button')) return
+
+    _pullTracking = true
+    _pullStartY = event.touches[0].clientY
+    _pullDistance = 0
+  }, { passive: true })
+
+  screen.addEventListener('touchmove', event => {
+    if (!_pullTracking || _isRefreshing) return
+    if (screen.scrollTop > 0) {
+      _pullTracking = false
+      _pullDistance = 0
+      _setRefreshIndicator(0, 'idle')
+      return
+    }
+
+    const deltaY = event.touches[0].clientY - _pullStartY
+    if (deltaY <= 0) {
+      _pullDistance = 0
+      _setRefreshIndicator(0, 'idle')
+      return
+    }
+
+    event.preventDefault()
+    _pullDistance = Math.min(PULL_REFRESH_MAX, deltaY * 0.5)
+    _setRefreshIndicator(
+      _pullDistance,
+      _pullDistance >= PULL_REFRESH_THRESHOLD ? 'ready' : 'idle'
+    )
+  }, { passive: false })
+
+  function _finishPull() {
+    if (!_pullTracking) return
+    _pullTracking = false
+    if (_pullDistance >= PULL_REFRESH_THRESHOLD) {
+      void _refreshFindsFeed()
+      return
+    }
+    _pullDistance = 0
+    _setRefreshIndicator(0, 'idle')
+  }
+
+  screen.addEventListener('touchend', _finishPull)
+  screen.addEventListener('touchcancel', _finishPull)
+}
+
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
 export function initFinds() {
+  _bindPullToRefresh()
   document.getElementById('finds-fab')
     .addEventListener('click', () => navigate('capture'))
 
