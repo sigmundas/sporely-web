@@ -450,6 +450,7 @@ function publicMediaUrl(env, key) {
 }
 
 const LOCAL_NETWORK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(:\d+)?$/
+const SPORELY_WEB_ORIGIN = /^https:\/\/([a-z0-9-]+\.)*sporely\.no$/i
 
 function resolveAllowedOrigin(request, env) {
   const configured = String(env.ALLOWED_ORIGINS || '')
@@ -468,6 +469,13 @@ function resolveAllowedOrigin(request, env) {
     return origin
   }
   if (LOCAL_NETWORK_ORIGIN.test(origin)) {
+    return origin
+  }
+  if (SPORELY_WEB_ORIGIN.test(origin)) {
+    return origin
+  }
+  // Installed iOS and Android web apps may emit `Origin: null` for file/blob requests.
+  if (origin === 'null') {
     return origin
   }
   return null

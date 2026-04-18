@@ -18,23 +18,48 @@ function _formatFingerprintCoord(value) {
   return num.toFixed(5)
 }
 
-function _observationFingerprint(obs) {
+function _normalizeObservationText(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+function _observationMatchKey(obs) {
   if (!obs) return ''
   return [
     obs.user_id || '',
     obs.source_type || '',
     obs.date || '',
-    obs.captured_at || '',
     obs.genus || '',
     obs.species || '',
     obs.common_name || '',
-    obs.location || '',
-    obs.notes || '',
-    obs.uncertain ? '1' : '0',
     obs.visibility || '',
     _formatFingerprintCoord(obs.gps_latitude),
     _formatFingerprintCoord(obs.gps_longitude),
   ].join('|')
+}
+
+function _observationTimeMs(obs) {
+  const raw = obs?.captured_at || obs?.created_at || obs?._queuedAt || obs?.date || 0
+  const ms = new Date(raw).getTime()
+  return Number.isFinite(ms) ? ms : 0
+}
+
+function _observationsLikelySame(queuedObs, syncedObs) {
+  if (!queuedObs || !syncedObs) return false
+  if (_observationMatchKey(queuedObs) !== _observationMatchKey(syncedObs)) return false
+
+  const queuedLocation = _normalizeObservationText(queuedObs.location)
+  const syncedLocation = _normalizeObservationText(syncedObs.location)
+  if (queuedLocation && syncedLocation && queuedLocation !== syncedLocation) return false
+
+  const queuedNotes = _normalizeObservationText(queuedObs.notes)
+  const syncedNotes = _normalizeObservationText(syncedObs.notes)
+  if (queuedNotes && syncedNotes && queuedNotes !== syncedNotes) return false
+
+  const queuedTime = _observationTimeMs(queuedObs)
+  const syncedTime = _observationTimeMs(syncedObs)
+  if (!queuedTime || !syncedTime) return true
+
+  return Math.abs(queuedTime - syncedTime) <= 15 * 60 * 1000
 }
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
@@ -177,7 +202,7 @@ export async function loadFinds() {
 async function _fetchMine() {
   const { data, error } = await supabase
     .from('observations')
-    .select('id, user_id, date, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
+    .select('id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
     .eq('user_id', state.user.id)
     .order('date', { ascending: false })
     .limit(100)
@@ -185,15 +210,7 @@ async function _fetchMine() {
   if (error) { showToast(t('finds.couldNotLoad')); _cache['mine'] = []; return }
 
   const queued = await getQueuedObservations(state.user.id)
-  const queuedFingerprints = new Set(
-    queued
-      .map(_observationFingerprint)
-      .filter(Boolean)
-  )
-  const synced = (data || []).filter(obs => {
-    const fingerprint = _observationFingerprint(obs)
-    return !fingerprint || !queuedFingerprints.has(fingerprint)
-  })
+  const synced = (data || []).filter(obs => !queued.some(queuedObs => _observationsLikelySame(queuedObs, obs)))
   const items = [...queued, ...synced]
   items.sort((a, b) => _sortTs(b) - _sortTs(a))
   _cache['mine'] = items

@@ -7,7 +7,7 @@ import { showAuthOverlay } from './auth.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
 import { openFindDetail } from './find_detail.js'
-import { openPhotoImportPicker, openFileImportPicker } from './import_review.js'
+import { openPhotoImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
 
 function _isAndroid() {
@@ -46,12 +46,10 @@ export async function initHome() {
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
   document.getElementById('import-source-close').addEventListener('click', _closeImportSourceSheet)
   document.getElementById('import-source-photos').addEventListener('click', () => {
-    _closeImportSourceSheet()
-    openPhotoImportPicker()
+    setTimeout(_closeImportSourceSheet, 0)
   })
   document.getElementById('import-source-files').addEventListener('click', () => {
-    _closeImportSourceSheet()
-    openFileImportPicker()
+    setTimeout(_closeImportSourceSheet, 0)
   })
 
   document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))

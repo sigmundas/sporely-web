@@ -210,14 +210,16 @@
         <div class="sheet-handle"></div>
         <div class="sheet-title" id="import-source-title">Import photos</div>
         <div class="sheet-subtitle">Choose the fastest path, or browse files when you want the best shot at keeping original metadata.</div>
-        <button class="sheet-option" id="import-source-photos">
+        <label class="sheet-option" id="import-source-photos">
+          <input type="file" id="import-sheet-photo-input" class="sheet-option-input" accept="image/*" multiple>
           <span class="sheet-option-title">Photos &amp; videos</span>
           <span class="sheet-option-copy">Quick picker from your gallery.</span>
-        </button>
-        <button class="sheet-option" id="import-source-files">
+        </label>
+        <label class="sheet-option" id="import-source-files">
+          <input type="file" id="import-sheet-browse-input" class="sheet-option-input" accept=".jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif" multiple>
           <span class="sheet-option-title">Browse files</span>
           <span class="sheet-option-copy">Best for original HEIC metadata on some Android phones.</span>
-        </button>
+        </label>
       </div>
     </div>
 

@@ -132,6 +132,8 @@ export function initImportReview() {
   document.getElementById('import-save-btn').addEventListener('click', saveAll);
   document.getElementById('import-photo-input').addEventListener('change', handleFileSelect);
   document.getElementById('import-browse-input').addEventListener('change', handleFileSelect);
+  document.getElementById('import-sheet-photo-input').addEventListener('change', handleFileSelect);
+  document.getElementById('import-sheet-browse-input').addEventListener('change', handleFileSelect);
   const gapInput = document.getElementById('import-gap-input');
   if (gapInput) {
     gapInput.addEventListener('change', () => {

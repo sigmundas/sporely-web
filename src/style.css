@@ -476,6 +476,7 @@ html, body {
   color: var(--text-secondary);
 }
 .sheet-option {
+  position: relative;
   width: 100%;
   display: grid;
   gap: 4px;
@@ -486,6 +487,14 @@ html, body {
   background: color-mix(in srgb, var(--card-raised) 82%, transparent);
   text-align: left;
   color: inherit;
+  cursor: pointer;
+}
+.sheet-option-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
   cursor: pointer;
 }
 .sheet-option-title {

@@ -10,7 +10,7 @@ bucket_name = "sporely-media"
 SUPABASE_URL = "https://zkpjklzfwzefhjluvhfw.supabase.co"
 SUPABASE_JWT_AUDIENCE = "authenticated"
 MEDIA_PUBLIC_BASE_URL = "https://media.sporely.no"
-ALLOWED_ORIGINS = "https://app.sporely.no,http://localhost:5173,https://localhost,capacitor://localhost"
+ALLOWED_ORIGINS = "https://app.sporely.no,https://sporely.no,https://www.sporely.no,http://localhost:5173,https://localhost,capacitor://localhost"
 MAX_UPLOAD_BYTES = "15728640"
 
 # Optional overrides:
