@@ -51,6 +51,8 @@ function _observationTimeMs(obs) {
 
 function _observationsLikelySame(queuedObs, syncedObs) {
   if (!queuedObs || !syncedObs) return false
+  if (queuedObs._remoteObservationId && String(queuedObs._remoteObservationId) === String(syncedObs.id)) return true
+  
   if (_observationMatchKey(queuedObs) !== _observationMatchKey(syncedObs)) return false
 
   const queuedLocation = _normalizeObservationText(queuedObs.location)
@@ -413,6 +415,27 @@ function _pendingImageSource(obs) {
   }
 }
 
+function _pendingStatusText(obs) {
+  if (!obs?._pendingSync) return ''
+  const total = Math.max(0, Number(obs._syncImageCount || obs._pendingPhotoCount || 0))
+  const current = Math.max(1, Number(obs._syncImageIndex || 1))
+
+  switch (obs._syncStage) {
+    case 'saving-observation':
+    case 'reconciling':
+    case 'finalizing':
+      return t('finds.pendingFinalizing')
+    case 'uploading-image':
+      return total > 0
+        ? t('finds.pendingUploading', { current: Math.min(current, total), total })
+        : t('finds.pendingUpload')
+    case 'retrying':
+      return t('finds.pendingRetrying')
+    default:
+      return t('finds.pendingUpload')
+  }
+}
+
 function _wireImageFallback(root) {
   root.querySelectorAll('img[data-fallback-src]').forEach(img => {
     img.addEventListener('error', () => {
@@ -563,7 +586,7 @@ function _renderBySpecies(list, subtitle, data) {
           ? `<svg class="find-card-vis-icon find-card-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
           : ''
         const metaLead = obs._pendingSync
-          ? `<span class="find-card-loc-text">${t('finds.pendingUpload')}</span>`
+          ? `<span class="find-card-loc-text">${_esc(_pendingStatusText(obs))}</span>`
           : loc
             ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
               <span class="find-card-loc-text">${_esc(loc)}</span>`
@@ -590,7 +613,7 @@ function _renderBySpecies(list, subtitle, data) {
     list.querySelectorAll('.find-card[data-id]').forEach(card => {
       card.addEventListener('click', () => {
         const obs = data.find(item => String(item.id) === String(card.dataset.id))
-        if (obs?._pendingSync) { showToast(t('finds.pendingUpload')); return }
+        if (obs?._pendingSync) { showToast(_pendingStatusText(obs)); return }
         _pendingScrollRestore = document.getElementById('screen-finds')?.scrollTop ?? null
         openFindDetail(card.dataset.id)
       })
@@ -637,7 +660,7 @@ function _renderTiles(list, subtitle, data) {
       tile.addEventListener('click', () => {
         const obs = data.find(item => String(item.id) === String(tile.dataset.id))
         if (obs?._pendingSync) {
-          showToast(t('finds.pendingUpload'))
+          showToast(_pendingStatusText(obs))
           return
         }
         openFindDetail(tile.dataset.id)
@@ -723,10 +746,10 @@ function _renderCards(list, subtitle, data, options) {
             : obs.visibility === 'friends'
               ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
               : ''
-        const locText = obs._pendingSync ? t('finds.pendingUpload') : loc
+        const locText = obs._pendingSync ? _pendingStatusText(obs) : loc
 
         const metaLead = obs._pendingSync
-          ? `<span class="find-card-loc-text">${t('finds.pendingUpload')}</span>`
+          ? `<span class="find-card-loc-text">${_esc(_pendingStatusText(obs))}</span>`
           : loc
             ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
             <span class="find-card-loc-text">${loc}</span>`
@@ -812,7 +835,7 @@ function _renderCards(list, subtitle, data, options) {
       card.addEventListener('click', () => {
         const obs = data.find(item => String(item.id) === String(card.dataset.id))
         if (obs?._pendingSync) {
-          showToast(t('finds.pendingUpload'))
+          showToast(_pendingStatusText(obs))
           return
         }
         _pendingScrollRestore = document.getElementById('screen-finds')?.scrollTop ?? null

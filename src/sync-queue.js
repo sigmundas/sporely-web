@@ -1,10 +1,11 @@
 import { supabase } from './supabase.js'
-import { insertObservationImage, syncObservationMediaKeys, uploadObservationImageVariants } from './images.js'
+import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants } from './images.js'
 import { fetchCloudPlanProfile } from './cloud-plan.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
 const QUEUE_EVENT = 'sporely-sync-queue-changed'
+const SYNC_SUCCESS_EVENT = 'sporely-sync-upload-complete'
 const RETRY_DELAY_MS = 30_000
 const _queuedPreviewUrls = new Map()
 let _retryTimer = null
@@ -38,6 +39,10 @@ function readOne(store, key) {
 
 function notifyQueueChanged() {
   window.dispatchEvent(new CustomEvent(QUEUE_EVENT))
+}
+
+function notifySyncSuccess(detail) {
+  window.dispatchEvent(new CustomEvent(SYNC_SUCCESS_EVENT, { detail }))
 }
 
 function _revokeQueuedPreviewUrl(id) {
@@ -108,6 +113,21 @@ async function _deleteQueueItem(itemId) {
   _revokeQueuedPreviewUrl(itemId)
 }
 
+async function _setQueueSyncStatus(itemId, stage, extras = {}) {
+  try {
+    await _updateQueueItem(itemId, current => current ? {
+      ...current,
+      syncStage: stage,
+      syncErrorMessage: extras.syncErrorMessage ?? null,
+      syncImageIndex: extras.syncImageIndex ?? current.syncImageIndex ?? null,
+      syncImageCount: extras.syncImageCount ?? current.syncImageCount ?? null,
+      lastAttemptAt: Date.now(),
+    } : current)
+  } catch (error) {
+    console.warn('Failed to update queue sync status', itemId, error)
+  }
+}
+
 function _scheduleSyncRetry() {
   if (_retryTimer || !navigator.onLine) return
   _retryTimer = window.setTimeout(() => {
@@ -124,6 +144,9 @@ function _normalizeQueuedImages(imageEntries) {
         aiCropRect: null,
         aiCropSourceW: null,
         aiCropSourceH: null,
+        uploadBlob: null,
+        uploadMeta: null,
+        variants: null,
       }
     }
     return {
@@ -131,8 +154,11 @@ function _normalizeQueuedImages(imageEntries) {
       aiCropRect: entry?.aiCropRect || null,
       aiCropSourceW: entry?.aiCropSourceW ?? null,
       aiCropSourceH: entry?.aiCropSourceH ?? null,
+      uploadBlob: entry?.uploadBlob instanceof Blob ? entry.uploadBlob : null,
+      uploadMeta: entry?.uploadMeta || null,
+      variants: entry?.variants || null,
     }
-  }).filter(entry => entry.blob instanceof Blob)
+  }).filter(entry => entry.blob instanceof Blob || entry.uploadBlob instanceof Blob)
 }
 
 export async function enqueueObservation(obsPayload, imageEntries) {
@@ -142,9 +168,30 @@ export async function enqueueObservation(obsPayload, imageEntries) {
 
   const queuedImages = _normalizeQueuedImages(imageEntries)
 
+  let uploadPolicy = _cloudPlanCache.get(obsPayload.user_id)
+  if (!uploadPolicy) {
+    uploadPolicy = await fetchCloudPlanProfile(obsPayload.user_id)
+    _cloudPlanCache.set(obsPayload.user_id, uploadPolicy)
+  }
+
+  const preparedImages = []
+  for (const image of queuedImages) {
+    if (image.blob instanceof Blob && !image.uploadBlob) {
+      const prepared = await prepareImageVariants(image.blob, uploadPolicy)
+      preparedImages.push({
+        ...image,
+        uploadBlob: prepared.uploadBlob,
+        uploadMeta: prepared.uploadMeta,
+        variants: prepared.variants,
+      })
+    } else {
+      preparedImages.push(image)
+    }
+  }
+
   store.add({ 
     obsPayload, 
-    imageEntries: queuedImages,
+    imageEntries: preparedImages,
     userId: obsPayload.user_id,
     ts: Date.now() 
   })
@@ -188,6 +235,10 @@ export async function getQueuedObservations(userId) {
       _pendingPreviewUrl: _previewUrlForQueueItem(item),
       _pendingPhotoCount: _normalizeQueuedImages(item.imageEntries || item.imageBlobs).length,
       _remoteObservationId: item.remoteObservationId || null,
+      _syncStage: item.syncStage || null,
+      _syncErrorMessage: item.syncErrorMessage || null,
+      _syncImageIndex: item.syncImageIndex ?? null,
+      _syncImageCount: item.syncImageCount ?? null,
     }))
 }
 
@@ -199,10 +250,78 @@ export async function deleteQueuedObservation(queueId) {
   notifyQueueChanged()
 }
 
-export { QUEUE_EVENT }
+export { QUEUE_EVENT, SYNC_SUCCESS_EVENT }
 
 let isSyncing = false
 const _cloudPlanCache = new Map()
+
+async function _fetchRemoteObservationState(observationId) {
+  if (!observationId) {
+    return {
+      observationExists: false,
+      imageRows: [],
+      completedIndexes: [],
+      confirmed: false,
+    }
+  }
+
+  const [{ data: observationRows, error: observationError }, { data: imageRows, error: imageError }] = await Promise.all([
+    supabase
+      .from('observations')
+      .select('id, image_key, thumb_key')
+      .eq('id', observationId)
+      .limit(1),
+    supabase
+      .from('observation_images')
+      .select('id, sort_order, storage_path')
+      .eq('observation_id', observationId)
+      .order('sort_order', { ascending: true }),
+  ])
+
+  if (observationError) throw observationError
+  if (imageError) throw imageError
+
+  const observation = Array.isArray(observationRows) ? observationRows[0] || null : null
+  const rows = Array.isArray(imageRows) ? imageRows : []
+  const completedIndexes = rows
+    .map(row => Number(row?.sort_order))
+    .filter(index => Number.isInteger(index) && index >= 0)
+
+  const firstRow = rows.find(row => Number(row?.sort_order) === 0 && row?.storage_path)
+  if (observation && firstRow && (!observation.image_key || !observation.thumb_key)) {
+    await syncObservationMediaKeys(observationId, firstRow.storage_path, { sortOrder: 0 })
+  }
+
+  return {
+    observationExists: !!observation,
+    imageRows: rows,
+    completedIndexes,
+    confirmed: false,
+  }
+}
+
+async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'local') {
+  const expectedImageCount = queuedImages.length
+  await _setQueueSyncStatus(item.id, 'finalizing', {
+    syncImageCount: expectedImageCount,
+  })
+
+  const remoteState = await _fetchRemoteObservationState(obsId)
+  const confirmed = remoteState.observationExists
+    && remoteState.completedIndexes.length >= expectedImageCount
+
+  if (!confirmed) {
+    throw new Error(`Sync confirmation incomplete for observation ${obsId}`)
+  }
+
+  await _deleteQueueItem(item.id)
+  notifyQueueChanged()
+  notifySyncSuccess({
+    observationId: obsId,
+    imageCount: expectedImageCount,
+    reason,
+  })
+}
 
 export async function triggerSync() {
   if (isSyncing || !navigator.onLine) return
@@ -222,10 +341,14 @@ export async function triggerSync() {
       if (!navigator.onLine) break
       
       try {
+        const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
         let obsId = item.remoteObservationId || null
 
         // 1. Upload parent observation once, then persist the remote ID for retries.
         if (!obsId) {
+          await _setQueueSyncStatus(item.id, 'saving-observation', {
+            syncImageCount: queuedImages.length,
+          })
           let { data: obsData, error } = await supabase.from('observations').insert(item.obsPayload).select('id').single()
           if (error?.message?.includes('captured_at')) {
             const { captured_at: _, ...payloadWithout } = item.obsPayload
@@ -241,11 +364,26 @@ export async function triggerSync() {
           if (!updatedItem) continue
         }
 
-        // 2. Upload images
-        const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
+        // 2. Reconcile against remote state so a stale local queue can heal itself.
         const completedImageIndexes = new Set(
           Array.isArray(item.completedImageIndexes) ? item.completedImageIndexes : []
         )
+        await _setQueueSyncStatus(item.id, 'reconciling', {
+          syncImageCount: queuedImages.length,
+        })
+        const remoteState = await _fetchRemoteObservationState(obsId)
+        remoteState.completedIndexes.forEach(index => completedImageIndexes.add(index))
+        if (completedImageIndexes.size >= queuedImages.length) {
+          await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'remote-reconcile')
+          continue
+        }
+        if (remoteState.completedIndexes.length) {
+          await _updateQueueItem(item.id, current => current ? {
+            ...current,
+            completedImageIndexes: [...completedImageIndexes].sort((a, b) => a - b),
+          } : current)
+        }
+
         let uploadPolicy = _cloudPlanCache.get(item.userId)
         if (!uploadPolicy) {
           uploadPolicy = await fetchCloudPlanProfile(item.userId)
@@ -255,10 +393,24 @@ export async function triggerSync() {
           if (completedImageIndexes.has(i)) continue
 
           const image = queuedImages[i]
-          const blob = image.blob
+          await _setQueueSyncStatus(item.id, 'uploading-image', {
+            syncImageIndex: i + 1,
+            syncImageCount: queuedImages.length,
+          })
+          let preparedImage = image
+          if (!image.uploadBlob && image.blob instanceof Blob) {
+            const prepared = await prepareImageVariants(image.blob, uploadPolicy)
+            preparedImage = {
+              ...image,
+              uploadBlob: prepared.uploadBlob,
+              uploadMeta: prepared.uploadMeta,
+              variants: prepared.variants,
+            }
+          }
+
           const path = `${item.userId}/${obsId}/${i}_${item.ts}.jpg`
           
-          const uploadMeta = await uploadObservationImageVariants(blob, path, {
+          const uploadMeta = await uploadPreparedObservationImageVariants(preparedImage, path, {
             uploadPolicy,
             uploadOrigin: 'web',
           })
@@ -280,14 +432,18 @@ export async function triggerSync() {
             ...current,
             remoteObservationId: obsId,
             completedImageIndexes: [...completedImageIndexes].sort((a, b) => a - b),
+            syncImageIndex: i + 1,
+            syncImageCount: queuedImages.length,
           }))
         }
 
-        // 3. Purge from offline queue
-        await _deleteQueueItem(item.id)
-        notifyQueueChanged()
+        // 3. Confirm remote DB/image state, then purge from the offline queue.
+        await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'local-sync')
       } catch (err) {
         console.error('Background sync failed for queue item', item.id, err)
+        await _setQueueSyncStatus(item.id, 'retrying', {
+          syncErrorMessage: String(err?.message || err || 'Upload failed'),
+        })
         _scheduleSyncRetry()
         break // Network or RLS failure — halt processing to avoid looping errors
       }

@@ -107,6 +107,239 @@
 - Investigate why Android APK `Converting 1 of 1...` regressed and became slow again.
 - Keep appending dated observations to this section after each real-device test round.
 
+### 2026-04-18 — Agent Code Analysis & Proposed Fixes
+
+**1. Reliable UI Deduplication (`src/screens/finds.js`) - ✅ FIXED**
+**Problem:** The UI dedupe logic (`_observationsLikelySame`) attempts to fuzzy-match queued vs. synced observations by comparing timestamps, locations, and notes. It currently ignores `_remoteObservationId`. If Supabase alters any field slightly (e.g., truncating timestamps or floating point changes on GPS), the fuzzy match fails, causing the UI to display a duplicate (one queued, one cloud).
+**Solution Applied:** Added a direct check to the top of `_observationsLikelySame` that bypasses fuzzy matching if `queuedObs._remoteObservationId` matches `syncedObs.id`.
+
+**2. Heavy Image Processing Crashing the Background Sync (`src/images.js`) - ✅ FIXED**
+**Problem:** `triggerSync()` loops over queued images and calls `uploadObservationImageVariants()`. This function invokes `_prepareUploadBlob()`, which loads the original high-res image from IndexedDB into an HTMLCanvas, resizes it, and encodes it to a new JPEG blob. Doing heavy Canvas rendering in a background sync loop—especially on mobile WebViews or iOS Safari PWAs—is very likely to cause an Out-Of-Memory (OOM) silent crash or be killed by the OS. When it crashes, the item stays in the queue and `triggerSync()` will repeatedly crash on it.
+**Solution Applied:** Refactored `uploadObservationImageVariants` in `src/images.js` into `prepareImageVariants` and `uploadPreparedObservationImageVariants`. Updated `src/sync-queue.js` to run `prepareImageVariants` inside `enqueueObservation`, keeping heavy canvas workloads in the foreground where they belong. The background worker now only handles network requests, preventing OOM loops.
+
+**3. iOS Safari IndexedDB Blob Fetch Bug (`src/images.js`) - ✅ FIXED**
+**Problem:** `_uploadViaWorker` directly passes the `Blob` from IndexedDB to the `fetch` body. iOS WebKit has known issues where streaming Blobs directly from IndexedDB to `fetch` can silently hang or send 0 bytes.
+**Solution Applied:** Converted the `Blob` to an `ArrayBuffer` via `await blob.arrayBuffer()` before passing it into the `fetch` body inside `_uploadViaWorker`.
+
+**4. Slow "Converting 1 of 1..." on Android Import**
+**Problem:** As per previous logs, imported-photo preprocessing was changed to keep the original file for upload and only generate the AI blob eagerly. However, because the main `uploadBlob` is now generated later (in the sync loop), the app is potentially decoding the full 12MP+ JPEG multiple times. If "Converting" is slow, the eager AI blob generation might still be blocking the main thread synchronously. 
+
+### 2026-04-18 — Versioned Change Log With Actual Code
+
+#### v0.2.14 — Changes already present when this pass started
+
+**A. Dedup queued row vs cloud row by real remote observation id**
+- File: `src/screens/finds.js`
+- Actual code:
+```js
+function _observationsLikelySame(queuedObs, syncedObs) {
+  if (!queuedObs || !syncedObs) return false
+  if (queuedObs._remoteObservationId && String(queuedObs._remoteObservationId) === String(syncedObs.id)) return true
+  ...
+}
+```
+- Why this matters:
+  - Once the queued item has a real `remoteObservationId`, the UI can stop relying only on fuzzy timestamp/location matching.
+  - This avoids the loop where one local queued card and one cloud row both show up for the same observation.
+
+**B. Move heavy image preparation out of background sync and into enqueue time**
+- File: `src/sync-queue.js`
+- Actual code:
+```js
+const prepared = await prepareImageVariants(image.blob, uploadPolicy)
+preparedImages.push({
+  ...image,
+  uploadBlob: prepared.uploadBlob,
+  uploadMeta: prepared.uploadMeta,
+  variants: prepared.variants,
+})
+...
+store.add({
+  obsPayload,
+  imageEntries: preparedImages,
+  userId: obsPayload.user_id,
+  ts: Date.now()
+})
+```
+- Why this matters:
+  - The heavy Canvas resize/encode work happens while the user is actively saving, not later in a fragile background sync loop.
+  - The queued payload now already contains `uploadBlob`, `uploadMeta`, and thumbnail variants, so retries are lighter.
+
+**C. Avoid iOS/WebKit blob-streaming fetch hangs by sending an ArrayBuffer**
+- File: `src/images.js`
+- Actual code:
+```js
+const arrayBuffer = await blob.arrayBuffer()
+
+const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
+  method: 'PUT',
+  headers,
+  body: arrayBuffer,
+})
+```
+- Why this matters:
+  - Directly streaming an IndexedDB-backed `Blob` into `fetch()` is a known weak point on iOS/WebKit.
+  - Converting to `ArrayBuffer` makes the upload request body more deterministic across Safari/PWA/WebView.
+
+**D. Remove custom upload headers from worker PUT requests**
+- File: `src/images.js`
+- Actual code:
+```js
+const headers = {
+  Authorization: `Bearer ${accessToken}`,
+  'Content-Type': blob?.type || 'image/jpeg',
+  'Cache-Control': 'public, max-age=31536000, immutable',
+}
+```
+- Previous headers removed:
+```js
+X-Sporely-Upload-Mode
+X-Sporely-Cloud-Plan
+X-Sporely-Upload-Origin
+```
+- Why this matters:
+  - Those headers were not used by the worker upload handler, but they could still force stricter CORS preflight behavior on mobile PWAs.
+
+#### v0.2.15 — Remote Reconcile + Upload Complete Feedback
+
+**What was added**
+
+**1. Remote reconciliation before deciding a queue item is still pending**
+- File: `src/sync-queue.js`
+- Actual code:
+```js
+const remoteState = await _fetchRemoteObservationState(obsId)
+remoteState.completedIndexes.forEach(index => completedImageIndexes.add(index))
+if (completedImageIndexes.size >= queuedImages.length) {
+  await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'remote-reconcile')
+  continue
+}
+```
+- Why this matters:
+  - If the local queue state is stale but Supabase already has the observation and its image rows, the app now heals itself instead of leaving the card stuck forever.
+  - This directly targets the “cloud row exists, queue card still visible” symptom.
+
+**2. Explicit remote confirmation before deleting the local queue item**
+- File: `src/sync-queue.js`
+- Actual code:
+```js
+async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'local') {
+  const expectedImageCount = queuedImages.length
+  const remoteState = await _fetchRemoteObservationState(obsId)
+  const confirmed = remoteState.observationExists
+    && remoteState.completedIndexes.length >= expectedImageCount
+
+  if (!confirmed) {
+    throw new Error(`Sync confirmation incomplete for observation ${obsId}`)
+  }
+
+  await _deleteQueueItem(item.id)
+  notifyQueueChanged()
+  notifySyncSuccess({
+    observationId: obsId,
+    imageCount: expectedImageCount,
+    reason,
+  })
+}
+```
+- Why this matters:
+  - The queue now disappears only after the observation row exists and enough `observation_images` rows exist remotely.
+  - This is the first pass that gives a hard “complete” boundary instead of assuming success from local progress alone.
+
+**3. Stage tracking inside the queue item itself**
+- File: `src/sync-queue.js`
+- Actual code:
+```js
+await _setQueueSyncStatus(item.id, 'saving-observation', {
+  syncImageCount: queuedImages.length,
+})
+...
+await _setQueueSyncStatus(item.id, 'uploading-image', {
+  syncImageIndex: i + 1,
+  syncImageCount: queuedImages.length,
+})
+...
+await _setQueueSyncStatus(item.id, 'retrying', {
+  syncErrorMessage: String(err?.message || err || 'Upload failed'),
+})
+```
+- Why this matters:
+  - The queue item now carries concrete state like `saving-observation`, `uploading-image`, `finalizing`, and `retrying`.
+  - This is exposed back to the Finds screen instead of every pending item just saying `Queued for upload`.
+
+**4. User-visible status text in Finds**
+- File: `src/screens/finds.js`
+- Actual code:
+```js
+function _pendingStatusText(obs) {
+  switch (obs._syncStage) {
+    case 'saving-observation':
+    case 'reconciling':
+    case 'finalizing':
+      return t('finds.pendingFinalizing')
+    case 'uploading-image':
+      return total > 0
+        ? t('finds.pendingUploading', { current: Math.min(current, total), total })
+        : t('finds.pendingUpload')
+    case 'retrying':
+      return t('finds.pendingRetrying')
+    default:
+      return t('finds.pendingUpload')
+  }
+}
+```
+- Why this matters:
+  - Instead of a static pending label, the card can now tell you whether it is uploading image `1/3`, finalizing, or retrying.
+
+**5. Global “upload complete” feedback**
+- File: `src/main.js`
+- Actual code:
+```js
+window.addEventListener(SYNC_SUCCESS_EVENT, event => {
+  const imageCount = Number(event?.detail?.imageCount || 0)
+  showToast(t('review.uploadedComplete', { count: imageCount }))
+
+  if (state.currentScreen === 'finds') void loadFinds()
+  if (state.currentScreen === 'home') void refreshHome()
+})
+```
+- Why this matters:
+  - The app now gives an explicit success toast only after the queue item has been remotely confirmed and removed.
+  - It also refreshes Finds/Home immediately so the UI has a chance to pick up the finished state.
+
+**Tests to run on `v0.2.15`**
+
+1. Android web app, take photo:
+   - Tap save.
+   - Confirm the queued card shows a real stage label like `Uploading photo 1 of 1…` or `Finalizing upload…`, not just `Queued for upload`.
+   - Wait without leaving Finds.
+   - Confirm the queued card disappears on its own.
+   - Confirm you get the success toast after it disappears.
+   - Confirm the resulting cloud observation shows a thumbnail, not a mushroom emoji.
+
+2. Android web app, import from library:
+   - Save one imported photo.
+   - Confirm the card shows stage text and eventually disappears.
+   - Confirm the cloud observation includes the image.
+
+3. iPhone web app, take photo:
+   - Save one observation.
+   - Stay on Finds.
+   - Confirm the queued card eventually disappears and the success toast appears.
+   - Confirm the cloud observation has the image.
+
+4. Cross-device verification:
+   - Upload from Android.
+   - Open the same account on iPhone.
+   - Confirm only one observation exists and it has a real image.
+
+5. Failure-state verification:
+   - If a queue card still gets stuck, note the exact text shown on the card:
+     - `Uploading photo X of Y…`
+     - `Finalizing upload…`
+     - `Retrying upload…`
+   - That text now tells us which stage is failing, which should prevent the next debugging pass from looping blindly.
+
 ### 2026-04-18 — New Strategy Pass Applied
 
 **New likely root cause found**

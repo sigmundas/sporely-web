@@ -21,6 +21,7 @@ import { initProfile, loadProfile } from './screens/profile.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
 import { getStoredCloudPlanOverride, setStoredCloudPlanOverride } from './cloud-plan.js'
+import { SYNC_SUCCESS_EVENT } from './sync-queue.js'
 
 initI18n()
 
@@ -30,6 +31,21 @@ function _debugCloudPlanControlsVisible() {
   return import.meta.env.DEV
     || String(import.meta.env.VITE_ENABLE_DEBUG_CLOUD_PLAN || '').trim() === '1'
     || localStorage.getItem(DEBUG_CLOUD_PLAN_REVEAL_KEY) === '1'
+}
+
+let _syncFeedbackBound = false
+
+function initSyncFeedback() {
+  if (_syncFeedbackBound) return
+  _syncFeedbackBound = true
+
+  window.addEventListener(SYNC_SUCCESS_EVENT, event => {
+    const imageCount = Number(event?.detail?.imageCount || 0)
+    showToast(t('review.uploadedComplete', { count: imageCount }))
+
+    if (state.currentScreen === 'finds') void loadFinds()
+    if (state.currentScreen === 'home') void refreshHome()
+  })
 }
 
 // ── Settings panel ────────────────────────────────────────────────────────────
@@ -163,6 +179,7 @@ async function bootApp(user) {
   state.user = user
 
   hideAuthOverlay()
+  initSyncFeedback()
   initSettings()
   initNav()
   initHome()

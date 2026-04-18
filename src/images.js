@@ -96,10 +96,12 @@ async function _uploadViaWorker(path, blob, options = {}) {
     'Cache-Control': 'public, max-age=31536000, immutable',
   }
 
+  const arrayBuffer = await blob.arrayBuffer()
+
   const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
     method: 'PUT',
     headers,
-    body: blob,
+    body: arrayBuffer,
   })
 
   if (!response.ok) {
@@ -252,29 +254,55 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
   }
 }
 
-export async function uploadObservationImageVariants(blob, storagePath, options = {}) {
-  const uploadPolicy = options?.uploadPolicy || getEffectiveCloudUploadPolicy()
-  const { uploadBlob, uploadMeta } = await _prepareUploadBlob(blob, uploadPolicy)
-  const uploadOptions = {
-    uploadMode: uploadMeta.upload_mode,
-    cloudPlan: uploadPolicy.cloudPlan,
-    uploadOrigin: options?.uploadOrigin || 'web',
-  }
+export async function prepareImageVariants(blob, uploadPolicy) {
+  const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+  const { uploadBlob, uploadMeta } = await _prepareUploadBlob(blob, policy)
 
-  await _uploadToStorage(storagePath, uploadBlob, uploadOptions)
-
+  const variants = {}
   const uploads = Object.entries(THUMB_VARIANTS).map(async ([variant, config]) => {
     try {
       const thumbBlob = await _createThumbnailBlob(uploadBlob, config.maxEdge, config.quality)
-      if (!(thumbBlob instanceof Blob)) return
-      await _uploadToStorage(getVariantPath(storagePath, variant), thumbBlob, uploadOptions)
+      if (thumbBlob instanceof Blob) {
+        variants[variant] = thumbBlob
+      }
     } catch (err) {
-      console.warn(`Thumbnail upload failed for ${variant}:`, err)
+      console.warn(`Thumbnail preparation failed for ${variant}:`, err)
     }
   })
 
   await Promise.all(uploads)
-  return uploadMeta
+  
+  return { uploadBlob, uploadMeta, variants }
+}
+
+export async function uploadPreparedObservationImageVariants(preparedImage, storagePath, options = {}) {
+  const uploadPolicy = options?.uploadPolicy || getEffectiveCloudUploadPolicy()
+  const uploadOptions = {
+    uploadMode: preparedImage.uploadMeta.upload_mode,
+    cloudPlan: uploadPolicy.cloudPlan,
+    uploadOrigin: options?.uploadOrigin || 'web',
+  }
+
+  await _uploadToStorage(storagePath, preparedImage.uploadBlob, uploadOptions)
+
+  const uploads = Object.entries(preparedImage.variants || {}).map(async ([variant, thumbBlob]) => {
+    if (thumbBlob instanceof Blob) {
+      try {
+        await _uploadToStorage(getVariantPath(storagePath, variant), thumbBlob, uploadOptions)
+      } catch (err) {
+        console.warn(`Thumbnail upload failed for ${variant}:`, err)
+      }
+    }
+  })
+
+  await Promise.all(uploads)
+  return preparedImage.uploadMeta
+}
+
+export async function uploadObservationImageVariants(blob, storagePath, options = {}) {
+  const uploadPolicy = options?.uploadPolicy || getEffectiveCloudUploadPolicy()
+  const preparedImage = await prepareImageVariants(blob, uploadPolicy)
+  return uploadPreparedObservationImageVariants(preparedImage, storagePath, options)
 }
 
 function _isMissingColumnError(error, columnName) {
