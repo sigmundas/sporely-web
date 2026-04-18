@@ -162,10 +162,6 @@ function _normalizeQueuedImages(imageEntries) {
 }
 
 export async function enqueueObservation(obsPayload, imageEntries) {
-  const db = await openDB()
-  const tx = db.transaction(STORE_NAME, 'readwrite')
-  const store = tx.objectStore(STORE_NAME)
-
   const queuedImages = _normalizeQueuedImages(imageEntries)
 
   let uploadPolicy = _cloudPlanCache.get(obsPayload.user_id)
@@ -189,20 +185,27 @@ export async function enqueueObservation(obsPayload, imageEntries) {
     }
   }
 
-  store.add({ 
-    obsPayload, 
+  const db = await openDB()
+  const queueItem = {
+    obsPayload,
     imageEntries: preparedImages,
     userId: obsPayload.user_id,
-    ts: Date.now() 
-  })
+    ts: Date.now(),
+  }
 
   return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    const store = tx.objectStore(STORE_NAME)
+    const req = store.add(queueItem)
+
+    req.onerror = () => reject(req.error || tx.error)
     tx.oncomplete = () => {
       notifyQueueChanged()
       triggerSync()
       resolve()
     }
     tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error || new Error('Queue write aborted'))
   })
 }
 

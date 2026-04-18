@@ -340,6 +340,124 @@ window.addEventListener(SYNC_SUCCESS_EVENT, event => {
      - `Retrying upload…`
    - That text now tells us which stage is failing, which should prevent the next debugging pass from looping blindly.
 
+#### v0.2.16 — Post-device-test hotfix: IndexedDB transaction lifetime
+
+**User-reported results on `app.sporely.no` before this hotfix**
+- Android web app, import from file:
+  - Save failed immediately.
+  - The review screen stayed open instead of navigating away.
+  - The toast text ran off-screen, but the visible fragment included:
+  - `"ervation: Failed to execute 'add' on 'IDBObjectStore': The trans"`
+- Android web app, take photo:
+  - Same error and same behavior.
+- iPhone web app:
+  - Same error and same behavior.
+
+**Root cause found**
+- File: `src/sync-queue.js`
+- The queue code opened an IndexedDB write transaction too early:
+```js
+const db = await openDB()
+const tx = db.transaction(STORE_NAME, 'readwrite')
+const store = tx.objectStore(STORE_NAME)
+
+let uploadPolicy = _cloudPlanCache.get(obsPayload.user_id)
+if (!uploadPolicy) {
+  uploadPolicy = await fetchCloudPlanProfile(obsPayload.user_id)
+}
+
+for (const image of queuedImages) {
+  const prepared = await prepareImageVariants(image.blob, uploadPolicy)
+  ...
+}
+
+store.add({ ... })
+```
+- Why this broke:
+  - IndexedDB transactions are short-lived.
+  - On Android Chrome and iOS Safari/WebKit, a readwrite transaction can auto-close while the code is awaiting async work.
+  - By the time `store.add(...)` ran, the transaction was already inactive, which matches the mobile error you saw.
+
+**Fix applied**
+- File: `src/sync-queue.js`
+- Actual code now:
+```js
+const queuedImages = _normalizeQueuedImages(imageEntries)
+...
+for (const image of queuedImages) {
+  const prepared = await prepareImageVariants(image.blob, uploadPolicy)
+  ...
+}
+
+const db = await openDB()
+const queueItem = {
+  obsPayload,
+  imageEntries: preparedImages,
+  userId: obsPayload.user_id,
+  ts: Date.now(),
+}
+
+return new Promise((resolve, reject) => {
+  const tx = db.transaction(STORE_NAME, 'readwrite')
+  const store = tx.objectStore(STORE_NAME)
+  const req = store.add(queueItem)
+
+  req.onerror = () => reject(req.error || tx.error)
+  tx.oncomplete = () => {
+    notifyQueueChanged()
+    triggerSync()
+    resolve()
+  }
+  tx.onerror = () => reject(tx.error)
+  tx.onabort = () => reject(tx.error || new Error('Queue write aborted'))
+})
+```
+- Why this should help:
+  - All slow async work now happens before the IndexedDB write transaction is opened.
+  - The transaction is used only for the actual `store.add(...)`, which is what mobile IndexedDB wants.
+
+**Secondary UI fix**
+- File: `src/style.css`
+- Actual code now:
+```css
+#toast {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: min(calc(100vw - 24px), 420px);
+  box-sizing: border-box;
+  text-align: center;
+}
+```
+- Why this matters:
+  - If another mobile-only error happens, the full message should now wrap instead of disappearing off the right edge.
+
+**Tests to run after this hotfix**
+
+1. Android web app, import one photo:
+   - Tap save.
+   - Confirm the review screen leaves successfully and opens Finds.
+   - Confirm you see either `Uploading photo 1 of 1…` or `Finalizing upload…`, not the IndexedDB error.
+
+2. Android web app, take one photo:
+   - Tap save.
+   - Confirm the same thing: no `IDBObjectStore.add` error, and the observation enters the queue normally.
+
+3. iPhone web app, import one photo:
+   - Tap save.
+   - Confirm there is no `IDBObjectStore.add` error and the observation enters the queue.
+
+4. iPhone web app, take one photo:
+   - Tap save.
+   - Confirm there is no `IDBObjectStore.add` error and the observation enters the queue.
+
+5. If the save now succeeds but the observation still gets stuck later:
+   - Report the exact pending text shown in Finds.
+   - Examples:
+     - `Uploading photo 1 of 1…`
+     - `Finalizing upload…`
+     - `Retrying upload…`
+   - That will tell the next pass whether the remaining problem is queue write, upload, DB row insert, or final reconciliation.
+
 ### 2026-04-18 — New Strategy Pass Applied
 
 **New likely root cause found**

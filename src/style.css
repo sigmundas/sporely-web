@@ -1896,7 +1896,11 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   padding: 10px 18px;
   font-size: 13px; font-weight: 500;
   color: var(--text-primary);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: min(calc(100vw - 24px), 420px);
+  box-sizing: border-box;
+  text-align: center;
   z-index: 999;
   opacity: 0;
   transition: opacity 0.2s, transform 0.2s;

@@ -18,7 +18,7 @@ The basic idea is simple:
 - use `sporely-web` when you are out in the field, or when your photos are already on your phone
 - use `sporely-py` when you are back at your desk and want the full observation workflow
 
-You can use the desktop app without logging in to the Sporely cloud, if you just want to do offline microscopy work. If you also want to geotag and upload your observations to Artsdatabasen.no or Artportalen.se, it really helps if you use the web app, instead of downloading your photos to your desktop and importing them manually. 
+You can use the desktop app without logging in to the Sporely cloud, if you just want to do offline microscopy work. If you also want to geotag and upload your observations to Artsdatabasen.no, Artportalen.se, iNaturalist, or Mushroom Observer, it really helps if you use the web app, instead of downloading your photos to your desktop and importing them manually. 
 
 ## What The Web App Does
 

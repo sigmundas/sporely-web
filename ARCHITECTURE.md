@@ -7,7 +7,7 @@
 A mobile-first PWA companion to the Sporely desktop app (PySide6 / SQLite).
 Field capture (GPS + photos) and cloud sync via Supabase + Cloudflare. Not a replacement
 for the desktop — the desktop owns taxonomy, microscopy, and publishing to
-Artsobservasjoner / Artportalen.
+Artsobservasjoner, Artportalen, iNaturalist, and Mushroom Observer.
 
 The same codebase also ships as a Capacitor Android app. The Android wrapper is
 primarily there for more reliable file import, especially native HEIC/EXIF/GPS
