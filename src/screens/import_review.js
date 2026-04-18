@@ -5,7 +5,7 @@ import { showToast } from '../toast.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
 import { FilePicker } from '@capawesome/capacitor-file-picker';
-import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, isArtsorakelNetworkError } from '../artsorakel.js';
+import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, createManualTaxon, isArtsorakelNetworkError } from '../artsorakel.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
@@ -928,6 +928,11 @@ function _wireCard(sid) {
   input.addEventListener('input', () => {
     clearTimeout(debounceTimer);
     const q = input.value.trim();
+    const session = sessionById(sid);
+    if (session) {
+      session.taxon = createManualTaxon(q);
+      _persistSessions();
+    }
     if (!q) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
     debounceTimer = setTimeout(async () => {
       try {

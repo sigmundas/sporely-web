@@ -4,6 +4,7 @@ import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { fetchFirstImages, fetchCardImages } from '../images.js'
+import { formatScientificName } from '../artsorakel.js'
 import { QUEUE_EVENT, getQueuedObservations, deleteQueuedObservation, triggerSync } from '../sync-queue.js'
 import { openFindDetail } from './find_detail.js'
 
@@ -13,7 +14,9 @@ let _profileMap = {}
 let _pendingScrollRestore = null
 const PULL_REFRESH_THRESHOLD = 72
 const PULL_REFRESH_MAX = 112
+const PULL_REFRESH_TOUCH_SLOP = 10
 let _pullTracking = false
+let _pullStartX = 0
 let _pullStartY = 0
 let _pullDistance = 0
 let _isRefreshing = false
@@ -109,9 +112,11 @@ function _bindPullToRefresh() {
     if (_isRefreshing) return
     if (event.touches.length !== 1) return
     if (screen.scrollTop > 0) return
-    if (event.target.closest('input, textarea, select, button')) return
+    if (event.target.closest('input, textarea, select, button, a, label')) return
+    if (event.target.closest('.finds-header, .scope-tabs, .finds-topbar, .finds-refresh')) return
 
     _pullTracking = true
+    _pullStartX = event.touches[0].clientX
     _pullStartY = event.touches[0].clientY
     _pullDistance = 0
   }, { passive: true })
@@ -125,12 +130,20 @@ function _bindPullToRefresh() {
       return
     }
 
+    const deltaX = event.touches[0].clientX - _pullStartX
     const deltaY = event.touches[0].clientY - _pullStartY
+    if (Math.abs(deltaX) > Math.abs(deltaY)) {
+      _pullTracking = false
+      _pullDistance = 0
+      _setRefreshIndicator(0, 'idle')
+      return
+    }
     if (deltaY <= 0) {
       _pullDistance = 0
       _setRefreshIndicator(0, 'idle')
       return
     }
+    if (deltaY < PULL_REFRESH_TOUCH_SLOP) return
 
     event.preventDefault()
     _pullDistance = Math.min(PULL_REFRESH_MAX, deltaY * 0.5)
@@ -386,7 +399,7 @@ function _applyFilter() {
   const data = q ? raw.filter(obs => _matches(obs, q)) : raw
 
   if (state.findsGroupBySpecies) {
-    _renderBySpecies(list, subtitle, data)
+    _renderBySpecies(list, subtitle, data, { variant: state.findsView })
     return
   }
 
@@ -517,17 +530,18 @@ function _speciesKey(obs) {
   const genus = obs.genus || ''
   const species = obs.species || ''
   const common = obs.common_name || ''
-  if (!genus && !common) return '\x00unidentified'
+  if (!genus && !species && !common) return '\x00unidentified'
   return `${genus}|${species}|${common}`.toLowerCase()
 }
 
 function _speciesLabel(obs) {
-  const latin = obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus
+  const latin = formatScientificName(obs.genus || '', obs.species || '')
   if (obs.common_name && latin) return `${obs.common_name} — ${latin}`
   return obs.common_name || latin || t('finds.unidentified')
 }
 
-function _renderBySpecies(list, subtitle, data) {
+function _renderBySpecies(list, subtitle, data, options = {}) {
+  const variant = options.variant || 'cards'
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
     subtitle.textContent = q
@@ -557,7 +571,12 @@ function _renderBySpecies(list, subtitle, data) {
   subtitle.textContent = `${tp('finds.observationCount', data.length)} · ${tp('finds.speciesCount', speciesCount)}`
 
   const allObs = groups.flatMap(([, g]) => g.items).filter(o => !o._pendingSync)
-  fetchFirstImages(allObs.map(o => o.id), { variant: 'small' }).then(imageUrls => {
+  const imageVariant = variant === 'cards' ? 'medium' : 'small'
+  const imagePromise = variant === 'cards'
+    ? fetchCardImages(allObs.map(o => o.id), { variant: imageVariant })
+    : fetchFirstImages(allObs.map(o => o.id), { variant: imageVariant })
+
+  imagePromise.then(imageData => {
     let html = '<div class="finds-grid-outer">'
 
     for (const [, group] of groups) {
@@ -568,14 +587,22 @@ function _renderBySpecies(list, subtitle, data) {
         <div class="finds-date-line"></div>
       </div>
       <div class="finds-species-meta">${tp('finds.observationCount', count)}</div>
-      <div class="finds-grid finds-grid--two">`
+      <div class="finds-grid finds-grid--${variant}">`
 
       for (const obs of group.items) {
-        const photoInner = _imageHtml(
-          obs._pendingSync ? _pendingImageSource(obs) : imageUrls[obs.id],
-          '',
-          'find-card-photo-placeholder'
-        )
+        const latin = formatScientificName(obs.genus || '', obs.species || '')
+        const isUnknown = !latin && !obs.common_name
+        const displayName = obs.common_name || latin || t('finds.unidentified')
+        const nameHtml = isUnknown
+          ? `<span class="find-card-name unidentified">${t('finds.unidentified')}</span>`
+          : obs.common_name && latin
+            ? `<span class="find-card-name">${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
+            : obs.common_name
+              ? `<span class="find-card-name">${obs.common_name}</span>`
+              : `<span class="find-card-name"><em class="find-card-scientific">${latin}</em></span>`
+        const compactNameHtml = isUnknown
+          ? `<span class="find-card-name find-card-name--compact unidentified">${t('finds.unidentified')}</span>`
+          : `<span class="find-card-name find-card-name--compact">${displayName}</span>`
         const loc = obs.location || (obs.gps_latitude && obs.gps_longitude
           ? `${obs.gps_latitude.toFixed(3)}° N, ${obs.gps_longitude.toFixed(3)}° E`
           : null)
@@ -592,11 +619,61 @@ function _renderBySpecies(list, subtitle, data) {
               <span class="find-card-loc-text">${_esc(loc)}</span>`
             : `<span class="find-card-loc-text">${dateLabel}</span>`
 
-        html += `<div class="find-card-wrap find-card-wrap--two">
-          <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-            <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
-            <div class="find-card-body find-card-body--two">
-              <span class="find-card-name find-card-name--compact">${dateLabel}</span>
+        if (variant === 'two') {
+          const photoInner = _imageHtml(
+            obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
+            '',
+            'find-card-photo-placeholder'
+          )
+          html += `<div class="find-card-wrap find-card-wrap--two">
+            <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
+              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+              <div class="find-card-body find-card-body--two">
+                ${compactNameHtml}
+                <div class="find-card-loc">${metaLead}${statusIcon}${_deleteQueueBtn(obs)}</div>
+              </div>
+            </div>
+          </div>`
+          continue
+        }
+
+        if (variant === 'three') {
+          const photoInner = _imageHtml(
+            obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
+            '',
+            'find-card-photo-placeholder'
+          )
+          html += `<div class="find-card-wrap find-card-wrap--three">
+            <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
+              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
+              <div class="find-card-body find-card-body--three">
+                ${compactNameHtml}
+                ${obs._pendingSync ? `<div class="find-card-loc">${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
+              </div>
+            </div>
+          </div>`
+          continue
+        }
+
+        const cardImg = imageData[obs.id]
+        const photoCount = obs._pendingSync ? (obs._pendingPhotoCount || 0) : (cardImg?.count || 0)
+        const countBadge = photoCount > 1
+          ? `<span class="find-card-photo-count">(${photoCount})</span>`
+          : ''
+        const photoWrapInner = obs._pendingSync
+          ? _imageHtml(_pendingImageSource(obs), '', 'find-card-photo-placeholder')
+          : cardImg?.second
+            ? `<div class="find-card-polaroid">
+                <div class="find-card-polaroid-frame">${_imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                <div class="find-card-polaroid-frame">${_imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+              </div>`
+            : _imageHtml(cardImg?.first || cardImg, '', 'find-card-photo-placeholder')
+
+        html += `<div class="find-card-wrap">
+          <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
+            <div class="find-card-photo-wrap">${photoWrapInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+            <div class="find-card-body">
+              <div class="find-card-name-row">${nameHtml}${countBadge}</div>
               <div class="find-card-loc">${metaLead}${statusIcon}${_deleteQueueBtn(obs)}</div>
             </div>
           </div>
@@ -641,7 +718,7 @@ function _renderTiles(list, subtitle, data) {
     let html = '<div class="find-tiles-grid">'
     data.forEach(obs => {
       const name = obs.common_name
-        || (obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus)
+        || formatScientificName(obs.genus || '', obs.species || '')
         || t('finds.unidentified')
       const photo = _imageHtml(
         obs._pendingSync ? _pendingImageSource(obs) : imageUrls[obs.id],
@@ -715,8 +792,8 @@ function _renderCards(list, subtitle, data, options) {
       <div class="finds-grid finds-grid--${variant}">`
 
       items.forEach(obs => {
-        const latin     = obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus
-        const isUnknown = !obs.genus && !obs.common_name
+        const latin     = formatScientificName(obs.genus || '', obs.species || '')
+        const isUnknown = !latin && !obs.common_name
         const displayName = obs.common_name || latin || t('finds.unidentified')
         const nameHtml  = isUnknown
           ? `<span class="find-card-name unidentified">${t('finds.unidentified')}</span>`

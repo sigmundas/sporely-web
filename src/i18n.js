@@ -36,9 +36,7 @@ const messages = {
     'common.errorPrefix': 'Error: {message}',
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Close',
-    'home.quickAction': 'Quick Action',
-    'home.newObservation': 'New Observation',
-    'home.viewObservations': 'View Observations',
+    'home.sporelyCam': 'Sporely Cam',
     'home.importPhotos': 'Import Photos',
     'home.recentFinds': 'Recent Finds',
     'home.history': 'History →',
@@ -309,9 +307,7 @@ const messages = {
     'common.errorPrefix': 'Feil: {message}',
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Lukk',
-    'home.quickAction': 'Hurtigvalg',
-    'home.newObservation': 'Ny observasjon',
-    'home.viewObservations': 'Vis observasjoner',
+    'home.sporelyCam': 'Sporely Cam',
     'home.importPhotos': 'Importer bilder',
     'home.recentFinds': 'Siste funn',
     'home.history': 'Historikk →',
@@ -582,9 +578,7 @@ const messages = {
     'common.errorPrefix': 'Fel: {message}',
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Stäng',
-    'home.quickAction': 'Snabbval',
-    'home.newObservation': 'Ny observation',
-    'home.viewObservations': 'Visa observationer',
+    'home.sporelyCam': 'Sporely Cam',
     'home.importPhotos': 'Importera bilder',
     'home.recentFinds': 'Senaste fynd',
     'home.history': 'Historik →',
@@ -854,9 +848,7 @@ const messages = {
     'common.errorPrefix': 'Fehler: {message}',
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Schließen',
-    'home.quickAction': 'Schnellaktion',
-    'home.newObservation': 'Neue Beobachtung',
-    'home.viewObservations': 'Beobachtungen anzeigen',
+    'home.sporelyCam': 'Sporely Cam',
     'home.importPhotos': 'Fotos importieren',
     'home.recentFinds': 'Letzte Funde',
     'home.history': 'Verlauf →',
@@ -1261,9 +1253,7 @@ export function applyStaticTranslations() {
   setText('#home-stat-finds-label', 'stats.finds')
   setText('#home-stat-species-label', 'stats.species')
   setText('#home-stat-friends-label', 'stats.friendsActive')
-  setText('#qa-new-obs .qa-label', 'home.quickAction')
-  setText('#qa-new-obs .qa-title', 'home.newObservation')
-  setText('#ac-view-obs .action-card-label', 'home.viewObservations')
+  setText('#ac-sporely-cam .action-card-label', 'home.sporelyCam')
   setText('#ac-import .action-card-label', 'home.importPhotos')
 
   setText('#import-source-title', 'importSheet.title')
@@ -1390,7 +1380,9 @@ export function applyStaticTranslations() {
   setAria('#settings-btn', 'settings.title')
   setAria('#finds-search-btn', 'finds.searchAria')
   setAria('#finds-search-clear', 'finds.clearSearch')
+  setAria('#home-fab', 'finds.newObservationAria')
   setAria('#finds-fab', 'finds.newObservationAria')
+  setAria('#map-fab', 'finds.newObservationAria')
   setAria('#map-search-clear', 'map.clear')
   setAria('#profile-avatar-btn', 'profile.changePhoto')
   setAria('#detail-back', 'detail.backGeneric')

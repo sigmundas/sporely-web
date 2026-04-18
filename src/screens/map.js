@@ -3,6 +3,8 @@ import 'leaflet/dist/leaflet.css'
 import { supabase } from '../supabase.js'
 import { formatDate, t, tp } from '../i18n.js'
 import { state } from '../state.js'
+import { formatDisplayName, formatScientificName } from '../artsorakel.js'
+import { navigate } from '../router.js'
 import { openFindDetail } from './find_detail.js'
 
 let map          = null
@@ -14,6 +16,11 @@ const _mapData   = { mine: [], friends: [] }   // cached for re-filtering
 
 export function initMap() {
   map = L.map('map-container', { zoomControl: true, attributionControl: true })
+  document.getElementById('map-fab').addEventListener('click', () => {
+    const dropdown = document.getElementById('map-search-dropdown')
+    if (dropdown) dropdown.style.display = 'none'
+    navigate('capture')
+  })
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>',
@@ -144,14 +151,7 @@ function _mapSearchPool() {
 }
 
 function _displayNameForObservation(obs) {
-  const scientificName = obs.genus
-    ? `${obs.genus}${obs.species ? ` ${obs.species}` : ''}`.trim()
-    : ''
-  const commonName = String(obs.common_name || '').trim()
-  if (commonName && scientificName && commonName.toLowerCase() !== scientificName.toLowerCase()) {
-    return `${commonName} (${scientificName})`
-  }
-  return commonName || scientificName || ''
+  return formatDisplayName(obs.genus || '', obs.species || '', obs.common_name || '')
 }
 
 function _getMapAutocompleteSuggestions(query) {
@@ -160,9 +160,7 @@ function _getMapAutocompleteSuggestions(query) {
 
   const ranked = new Map()
   for (const obs of _mapSearchPool()) {
-    const scientificName = obs.genus
-      ? `${obs.genus}${obs.species ? ` ${obs.species}` : ''}`.trim()
-      : ''
+    const scientificName = formatScientificName(obs.genus || '', obs.species || '')
     const commonName = String(obs.common_name || '').trim()
     const haystacks = [scientificName, commonName].filter(Boolean)
     if (!haystacks.length || !haystacks.some(text => text.toLowerCase().includes(q))) continue
@@ -223,8 +221,7 @@ function _applyMapFilter() {
 
 function _addMarkers(observations, owner) {
   observations.forEach(obs => {
-    const name = obs.common_name
-      || (obs.genus ? `${obs.genus}${obs.species ? ' ' + obs.species : ''}` : null)
+    const name = formatDisplayName(obs.genus || '', obs.species || '', obs.common_name || '')
       || t('detail.unknownSpecies')
     const date = obs.date
       ? formatDate(obs.date, { day: 'numeric', month: 'short', year: 'numeric' })

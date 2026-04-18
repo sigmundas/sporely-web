@@ -2,7 +2,7 @@ import { formatTime, getTaxonomyLanguage, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, runArtsorakelForBlobs, formatDisplayName, isArtsorakelNetworkError } from '../artsorakel.js'
+import { searchTaxa, runArtsorakelForBlobs, formatDisplayName, createManualTaxon, isArtsorakelNetworkError } from '../artsorakel.js'
 import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
@@ -256,6 +256,13 @@ function wireCardEvents() {
   document.querySelectorAll('.taxon-input').forEach(input => {
     let debounce
     input.addEventListener('input', () => {
+      const value = input.value.trim()
+      const currentTaxon = state.capturedPhotos.find(photo => photo.taxon)?.taxon || null
+      if (!value) {
+        setSharedTaxon(null, { syncInputs: false, hideMenus: false })
+      } else if ((currentTaxon?.displayName || '').trim() !== value) {
+        setSharedTaxon(createManualTaxon(value), { syncInputs: false, hideMenus: false })
+      }
       clearTimeout(debounce)
       debounce = setTimeout(() => handleTaxonInput(input), 280)
     })
@@ -302,19 +309,37 @@ function hideDropdown(i) {
   if (ul) ul.style.display = 'none'
 }
 
-function applyTaxon(i, taxon) {
+function _syncReviewSpeciesLabel(taxon = null) {
+  const reviewCount = document.getElementById('review-count')
+  if (!reviewCount) return
+  const currentTaxon = taxon || state.capturedPhotos.find(photo => photo.taxon)?.taxon || null
+  reviewCount.textContent = currentTaxon?.displayName
+    || (currentTaxon ? formatDisplayName(currentTaxon.genus, currentTaxon.specificEpithet, currentTaxon.vernacularName) : '')
+    || t('detail.unknownSpecies')
+}
+
+function setSharedTaxon(taxon, options = {}) {
   state.capturedPhotos.forEach(photo => {
     photo.taxon = taxon ? { ...taxon } : null
   })
-  document.querySelectorAll('.taxon-input').forEach(input => {
-    input.value = taxon?.displayName || ''
-  })
-  document.querySelectorAll('.taxon-dropdown').forEach(dropdown => {
-    dropdown.style.display = 'none'
-  })
-  document.querySelectorAll('.artsorakel-results').forEach(result => {
-    result.style.display = 'none'
-  })
+  if (options.syncInputs) {
+    document.querySelectorAll('.taxon-input').forEach(input => {
+      input.value = taxon?.displayName || ''
+    })
+  }
+  if (options.hideMenus !== false) {
+    document.querySelectorAll('.taxon-dropdown').forEach(dropdown => {
+      dropdown.style.display = 'none'
+    })
+    document.querySelectorAll('.artsorakel-results').forEach(result => {
+      result.style.display = 'none'
+    })
+  }
+  _syncReviewSpeciesLabel(taxon)
+}
+
+function applyTaxon(i, taxon) {
+  setSharedTaxon(taxon, { syncInputs: true, hideMenus: true })
 }
 
 // ── Artsorakel AI ─────────────────────────────────────────────────────────────

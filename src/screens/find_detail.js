@@ -502,10 +502,21 @@ async function _save() {
     patch.gps_longitude = currentLocationOverride.lon
   }
 
+  const taxonInputValue = document.getElementById('detail-taxon-input').value.trim()
+  const currentDisplayName = formatDisplayName(
+    currentObs.genus || '',
+    currentObs.species || '',
+    currentObs.common_name || '',
+  ).trim()
+
   if (selectedTaxon) {
     patch.genus       = selectedTaxon.genus            || null
     patch.species     = selectedTaxon.specificEpithet  || null
     patch.common_name = selectedTaxon.vernacularName   || null
+  } else if (taxonInputValue !== currentDisplayName) {
+    patch.genus       = null
+    patch.species     = taxonInputValue || null
+    patch.common_name = null
   }
 
   const { error } = await supabase

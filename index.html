@@ -140,22 +140,12 @@
       </div>
 
       <div class="home-content">
-        <div class="quick-action-card" id="qa-new-obs">
-          <div>
-            <div class="qa-label">Quick Action</div>
-            <div class="qa-title">New Observation</div>
-          </div>
-          <div class="qa-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M20.94 13a9 9 0 1 1-1.2-4.06"/><path d="M22 6h-4v4"/></svg>
-          </div>
-        </div>
-
         <div class="action-grid">
-          <div class="action-card" id="ac-view-obs">
+          <div class="action-card" id="ac-sporely-cam">
             <div class="action-card-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h4l2-2h4l2 2h4a1 1 0 0 1 1 1v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13" r="4"/></svg>
             </div>
-            <div class="action-card-label">View Observations</div>
+            <div class="action-card-label">Sporely Cam</div>
           </div>
           <div class="action-card" id="ac-import">
             <div class="action-card-icon">
@@ -202,6 +192,7 @@
         <input type="file" id="import-photo-input" class="hidden-file-input" accept="image/*" multiple>
         <input type="file" id="import-browse-input" class="hidden-file-input" accept=".jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif" multiple>
       </div>
+      <button class="screen-fab" id="home-fab" aria-label="New observation">+</button>
     </div>
 
     <div class="sheet-overlay" id="import-source-sheet" style="display:none">
@@ -556,6 +547,7 @@
         </div>
       </div>
       <div id="map-container"></div>
+      <button class="screen-fab" id="map-fab" aria-label="New observation">+</button>
     </div>
 
     <!-- ═══════════════════════════ PROFILE ═══════════════════════════ -->
@@ -771,7 +763,7 @@
           </div>
         </div>
 
-        <div class="settings-version" id="settings-version">v0.2.0</div>
+        <div class="settings-version" id="settings-version">v0.3.1</div>
       </div>
     </div>
 

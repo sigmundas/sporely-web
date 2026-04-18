@@ -41,11 +41,31 @@ export function normalizeLang(code = 'no') {
   return raw.slice(0, 2) || 'no'
 }
 
+export function formatScientificName(genus, specificEpithet) {
+  return [genus, specificEpithet]
+    .map(part => String(part || '').trim())
+    .filter(Boolean)
+    .join(' ')
+}
+
 export function formatDisplayName(genus, specificEpithet, vernacularName) {
-  const sci  = `${genus} ${specificEpithet}`.trim()
+  const sci  = formatScientificName(genus, specificEpithet)
   const vern = vernacularName?.trim()
   if (vern && vern.toLowerCase() !== sci.toLowerCase()) return `${vern} (${sci})`
   return sci
+}
+
+export function createManualTaxon(value) {
+  const displayName = String(value || '').trim()
+  if (!displayName) return null
+  return {
+    genus: null,
+    specificEpithet: displayName,
+    vernacularName: null,
+    scientificName: displayName,
+    displayName,
+    manualEntry: true,
+  }
 }
 
 // ── Taxon search (Supabase RPC) ───────────────────────────────────────────────

@@ -6,6 +6,7 @@ import { showToast } from '../toast.js'
 import { showAuthOverlay } from './auth.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
+import { formatScientificName } from '../artsorakel.js'
 import { openFindDetail } from './find_detail.js'
 import { openPhotoImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
@@ -30,8 +31,8 @@ function _wireImageFallback(root) {
 }
 
 export async function initHome() {
-  document.getElementById('qa-new-obs').addEventListener('click', () => navigate('capture'))
-  document.getElementById('ac-view-obs').addEventListener('click', () => navigate('finds'))
+  document.getElementById('home-fab').addEventListener('click', () => navigate('capture'))
+  document.getElementById('ac-sporely-cam').addEventListener('click', () => navigate('capture'))
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
 
@@ -85,10 +86,10 @@ async function loadRecentFinds() {
   const imageUrls = await fetchFirstImages(combined.map(o => o.id), { variant: 'medium' })
 
   list.innerHTML = combined.map(obs => {
-    const latin       = obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus
+    const latin       = formatScientificName(obs.genus || '', obs.species || '')
     const displayName = obs.common_name || latin || t('home.unidentified')
     const subtitle    = obs.common_name && latin ? latin : null
-    const isIdentified = !!(obs.genus || obs.common_name)
+    const isIdentified = !!(latin || obs.common_name)
     const loc    = obs.location || (
       obs.gps_latitude && obs.gps_longitude
         ? `${obs.gps_latitude.toFixed(2)}°N, ${obs.gps_longitude.toFixed(2)}°E`
@@ -179,7 +180,7 @@ async function loadRecentComments() {
     const date = formatDate(comment.created_at, { day: 'numeric', month: 'short' })
     const obs = obsMap[comment.observation_id]
     const species = obs
-      ? (obs.common_name || (obs.genus && obs.species ? `${obs.genus} ${obs.species}` : obs.genus) || '')
+      ? (obs.common_name || formatScientificName(obs.genus || '', obs.species || '') || '')
       : ''
     const thumb = obs
       ? _imageHtml(
