@@ -33,6 +33,7 @@
   /* Layout */
   --nav-h:        64px;
   --safe-bottom:  env(safe-area-inset-bottom, 0px);
+  --safe-top:     env(safe-area-inset-top, 0px);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -2465,9 +2466,13 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
   background: var(--surface);
   border-radius: 20px 20px 0 0;
   padding: 10px 20px calc(28px + var(--safe-bottom));
+  max-height: calc(100dvh - var(--safe-top) - 18px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   transform: translateY(100%);
   transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
   border-top: 1px solid var(--border);
+  outline: none;
 }
 #settings-overlay.open #settings-sheet { transform: translateY(0); }
 
@@ -2521,6 +2526,37 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
 .settings-gap-hint {
   margin-top: 8px; font-size: 11px; color: var(--text-dim); line-height: 1.5;
 }
+.settings-stepper {
+  display: grid;
+  grid-template-columns: 34px 48px 34px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+.settings-stepper .settings-gap-input {
+  width: 48px;
+  border: none;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+.settings-gap-display {
+  pointer-events: none;
+  user-select: none;
+}
+.settings-stepper-btn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: 600 16px/1 'Outfit', sans-serif;
+  cursor: pointer;
+}
+.settings-stepper-btn:active { background: var(--green-deep); }
 .settings-version {
   margin-top: 24px; font-size: 11px; color: var(--text-dim);
   text-align: center; font-family: 'DM Mono', monospace;

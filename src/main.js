@@ -51,30 +51,37 @@ function initSyncFeedback() {
 // ── Settings panel ────────────────────────────────────────────────────────────
 function initSettings() {
   const overlay = document.getElementById('settings-overlay')
+  const sheet = document.getElementById('settings-sheet')
   const versionEl = document.getElementById('settings-version')
   let versionTapCount = 0
   let versionTapTimer = null
 
-  function _openSettings() {
+  function _blurActiveControl() {
+    const active = document.activeElement
+    if (active && /^(INPUT|SELECT|TEXTAREA)$/i.test(active.tagName) && typeof active.blur === 'function') {
+      active.blur()
+    }
+  }
+
+  function _openSettings(event) {
+    event?.preventDefault()
+    _blurActiveControl()
     _syncSettingsUI()
     overlay.style.display = 'block'
+    overlay.setAttribute('aria-hidden', 'false')
     requestAnimationFrame(() => requestAnimationFrame(() => {
       overlay.classList.add('open')
-      window.setTimeout(() => {
-        const active = document.activeElement
-        if (active && /^(INPUT|SELECT|TEXTAREA)$/i.test(active.tagName) && typeof active.blur === 'function') {
-          active.blur()
-        }
-      }, 80)
+      sheet?.focus?.({ preventScroll: true })
     }))
   }
 
   function _closeSettings() {
     overlay.classList.remove('open')
+    overlay.setAttribute('aria-hidden', 'true')
     overlay.addEventListener('transitionend', () => { overlay.style.display = 'none' }, { once: true })
   }
 
-  document.getElementById('settings-btn').addEventListener('click', _openSettings)
+  document.getElementById('settings-btn').addEventListener('click', event => _openSettings(event))
 
   // Close on backdrop tap
   overlay.addEventListener('click', e => {
@@ -82,7 +89,7 @@ function initSettings() {
   })
 
   // Theme segment buttons
-  document.querySelectorAll('.theme-seg-btn').forEach(btn => {
+  document.querySelectorAll('.theme-seg-btn[data-theme]').forEach(btn => {
     btn.addEventListener('click', () => {
       const theme = btn.dataset.theme
       localStorage.setItem('sporely-theme', theme)
@@ -93,11 +100,14 @@ function initSettings() {
 
   // Photo gap input
   const gapInput = document.getElementById('settings-gap-input')
-  gapInput.addEventListener('change', () => {
-    const v = Math.max(1, Math.min(120, parseInt(gapInput.value) || 1))
+  function _setPhotoGap(value) {
+    const v = Math.max(1, Math.min(120, parseInt(value) || 1))
     gapInput.value = v
     localStorage.setItem('sporely-photo-gap', String(v))
-  })
+  }
+  gapInput.addEventListener('focus', () => gapInput.blur())
+  document.getElementById('settings-gap-decrement')?.addEventListener('click', () => _setPhotoGap(Number(gapInput.value || 1) - 1))
+  document.getElementById('settings-gap-increment')?.addEventListener('click', () => _setPhotoGap(Number(gapInput.value || 1) + 1))
 
   const localeSelect = document.getElementById('settings-language-select')
   localeSelect.addEventListener('change', () => {
@@ -139,7 +149,7 @@ function initSettings() {
 
 function _syncSettingsUI() {
   const current = localStorage.getItem('sporely-theme') || 'dark'
-  document.querySelectorAll('.theme-seg-btn').forEach(b => {
+  document.querySelectorAll('.theme-seg-btn[data-theme]').forEach(b => {
     b.classList.toggle('active', b.dataset.theme === current)
   })
   const gapInput = document.getElementById('settings-gap-input')

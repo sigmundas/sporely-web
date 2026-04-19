@@ -722,10 +722,10 @@
     </div>
 
     <!-- ══════════════════════════ SETTINGS PANEL ════════════════════════════ -->
-    <div id="settings-overlay">
-      <div id="settings-sheet">
+    <div id="settings-overlay" aria-hidden="true">
+      <div id="settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
         <div class="settings-handle"></div>
-        <div class="settings-title">Settings</div>
+        <div class="settings-title" id="settings-title">Settings</div>
 
         <div class="settings-section-label" id="settings-appearance-label">Appearance</div>
         <div class="theme-segment">
@@ -748,7 +748,11 @@
         <div class="settings-section-label" id="settings-photo-import-label" style="margin-top:22px">Photo Import</div>
         <div class="settings-gap-row">
           <div class="settings-gap-label" id="settings-gap-label">New observation after</div>
-          <input type="number" id="settings-gap-input" class="settings-gap-input" min="1" max="120" value="1">
+          <div class="settings-stepper" aria-labelledby="settings-gap-label">
+            <button type="button" class="settings-stepper-btn" id="settings-gap-decrement" aria-label="Decrease photo gap">-</button>
+            <input type="text" id="settings-gap-input" class="settings-gap-input settings-gap-display" inputmode="none" readonly aria-live="polite" value="1">
+            <button type="button" class="settings-stepper-btn" id="settings-gap-increment" aria-label="Increase photo gap">+</button>
+          </div>
           <span class="settings-gap-unit">min</span>
         </div>
         <p class="settings-gap-hint">Photos taken within this window are grouped into one observation.</p>
