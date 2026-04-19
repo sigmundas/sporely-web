@@ -26,4 +26,13 @@ android/app/src/main/assets/capacitor.plugins.json
 *.apk
 *.aab
 
+# Signing keys and local credentials
+*.pem
+*.key
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.properties
+
 !.env.example

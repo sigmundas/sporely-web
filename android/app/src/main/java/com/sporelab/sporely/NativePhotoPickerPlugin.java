@@ -1,4 +1,4 @@
-package app.sporely.no;
+package com.sporelab.sporely;
 
 import android.app.Activity;
 import android.content.ContentResolver;

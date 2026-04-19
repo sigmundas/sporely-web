@@ -1,4 +1,4 @@
-package app.sporely.no;
+package com.sporelab.sporely;
 
 import android.os.Bundle;
 import com.getcapacitor.BridgeActivity;

@@ -15,7 +15,7 @@ const _mapData   = { mine: [], friends: [] }   // cached for re-filtering
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
 export function initMap() {
-  map = L.map('map-container', { zoomControl: true, attributionControl: true })
+  map = L.map('map-container', { zoomControl: false, attributionControl: true })
   document.getElementById('map-fab').addEventListener('click', () => {
     const dropdown = document.getElementById('map-search-dropdown')
     if (dropdown) dropdown.style.display = 'none'
