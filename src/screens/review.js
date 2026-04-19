@@ -9,13 +9,14 @@ import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { hasAiCropRect } from '../image_crop.js'
+import { getDefaultVisibility } from '../settings.js'
 
 function _defaultCaptureDraft() {
   return {
     habitat: '',
     notes: '',
     uncertain: false,
-    visibility: 'friends',
+    visibility: getDefaultVisibility(),
   }
 }
 
@@ -70,7 +71,7 @@ export function openImportedReview(session) {
   state.sessionStart = session?.ts || new Date()
   state.captureDraft = {
     ..._defaultCaptureDraft(),
-    visibility: session?.visibility || 'friends',
+    visibility: session?.visibility || getDefaultVisibility(),
   }
   state.reviewContext = {
     source: 'import',
@@ -135,7 +136,7 @@ export function buildReviewGrid() {
   document.getElementById('review-habitat').value = state.captureDraft.habitat || ''
   document.getElementById('review-notes').value = state.captureDraft.notes || ''
   document.getElementById('review-uncertain').checked = !!state.captureDraft.uncertain
-  const visibility = state.captureDraft.visibility || 'friends'
+  const visibility = state.captureDraft.visibility || getDefaultVisibility()
   const visibilityRadio = document.querySelector(`input[name="review-vis"][value="${visibility}"]`)
   if (visibilityRadio) visibilityRadio.checked = true
   const locationInput = document.getElementById('location-name-input')
@@ -493,7 +494,7 @@ async function saveObservationBatch() {
       }))
     )
 
-    const visibility = state.captureDraft.visibility || 'friends'
+    const visibility = state.captureDraft.visibility || getDefaultVisibility()
     const leadGps = photos.find(photo => photo.gps)?.gps || null
     const leadPhoto = photos[0] || {}
     const taxon = photos.find(photo => photo.taxon)?.taxon || {}

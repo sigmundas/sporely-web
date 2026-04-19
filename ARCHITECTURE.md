@@ -24,9 +24,9 @@ handling from the device photo library.
 | Styling | Plain CSS custom properties, no preprocessor |
 | Auth & DB | Supabase JS v2 (`@supabase/supabase-js`) |
 | Media storage | Cloudflare R2 bucket `sporely-media` |
-| Media upload | Cloudflare Worker at `upload.sporely.no` (JWT-authenticated PUT) |
+| Media upload | Cloudflare Worker at `upload.sporely.no` (JWT-authenticated PUT/DELETE) |
 | Media serving | Public CDN at `https://media.sporely.no` |
-| Future billing foundation | Supabase profile flags + per-image upload metadata |
+| Account/storage foundation | Supabase profile plan flags + worker-enforced storage tally/quota |
 
 Supabase Storage (`observation-images` bucket) is no longer used for new uploads.
 All media now goes through the Cloudflare R2 pipeline.
@@ -45,6 +45,7 @@ sporely-web/
 │       └── wrangler.toml   Worker config — routes, vars, R2 binding
 ├── supabase/
 │   ├── config.toml         Supabase local/deploy config for Edge Functions
+│   ├── profile-storage-usage.sql Supabase profile storage/quota tally helper
 │   └── functions/
 │       └── delete-account/
 │           └── index.ts    Self-service account deletion (service-role Edge Function)
@@ -58,6 +59,7 @@ sporely-web/
     ├── toast.js            showToast(msg) — timed overlay message
     ├── geo.js              GPS watchPosition, writes into state.gps
     ├── cloud-plan.js       Cloud plan lookup + effective upload policy helpers
+    ├── settings.js         Local Settings preferences: visibility, sync data policy, sync history
     ├── images.js           Upload originals + thumbnail variants, media URL helpers
     ├── image_crop.js       Shared AI crop math + cropped blob export helpers
     ├── ai-crop-editor.js   Full-screen AI crop editor used by review/import flows
@@ -128,7 +130,9 @@ All media is stored in Cloudflare R2, not Supabase Storage.
 - **Auth:** Supabase JWT sent as `Authorization: Bearer {token}`
 - **JWT verification:** Worker fetches the JWKS from Supabase (`/auth/v1/.well-known/jwks.json`) and verifies the ES256 signature using Web Crypto. The JWKS is cached in-memory for 10 minutes.
 - **Key rule:** Upload path must start with the JWT `sub` (user ID) — enforced by the worker.
-- **Current client policy:** The web app uploads reduced (~2MP) images on the free tier. Future Pro entitlements (gated by `profiles.is_pro` via RevenueCat) can switch to full-resolution backups without changing the sync pipeline.
+- **Current client policy:** Free accounts upload reduced 2 MP images. Pro/full-res accounts can choose `Reduced (2MP)` or `Max (12MP)` in Settings. Max keeps near-12 MP originals when friendly to quality and only resizes images from 14 MP and up down to 12 MP.
+- **Storage tally/quota:** After successful R2 writes/deletes, the worker updates `profiles.total_storage_bytes`, compatibility `profiles.storage_used_bytes`, and original-image `profiles.image_count` through the Supabase RPC in `supabase/profile-storage-usage.sql`. Free-tier storage can be limited per profile via `storage_quota_bytes` or globally via worker `FREE_STORAGE_QUOTA_BYTES`.
+- **Worker secret:** The worker needs Cloudflare secret `SUPABASE_SERVICE_ROLE_KEY` so backend-only profile tally updates can bypass RLS. This secret must never be committed or exposed to the frontend.
 - **Source:** `cloudflare/r2-upload-worker/src/index.js`
 - **Config:** `cloudflare/r2-upload-worker/wrangler.toml`
 
@@ -202,6 +206,12 @@ SUPABASE_JWT_AUDIENCE=authenticated
 MEDIA_PUBLIC_BASE_URL=https://media.sporely.no
 ALLOWED_ORIGINS=https://app.sporely.no,https://localhost:5173,http://localhost:5173,...
 MAX_UPLOAD_BYTES=15728640
+FREE_STORAGE_QUOTA_BYTES=0
+```
+
+Worker secrets:
+```sh
+SUPABASE_SERVICE_ROLE_KEY=<Supabase secret key, stored with wrangler secret put>
 ```
 
 ### Deploying the worker
@@ -209,6 +219,13 @@ MAX_UPLOAD_BYTES=15728640
 ```sh
 cd cloudflare/r2-upload-worker
 npx wrangler deploy
+```
+
+Before deploying storage/quota tracking, run `supabase/profile-storage-usage.sql` in the
+Supabase SQL Editor and set the Cloudflare Worker secret with:
+
+```sh
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 ```
 
 Custom domain `upload.sporely.no` is registered automatically via the `[[routes]]` block
@@ -309,15 +326,18 @@ AI crop metadata is stored per image and only affects Artsorakel requests. Galle
 Auto-created by a Postgres trigger on `auth.users` insert.
 Profile UI reads `username`, `display_name`, and `avatar_url`.
 The subscription/storage foundation also now lives here:
-- `is_pro` — RevenueCat-synced boolean entitlement; controls full-resolution cloud backup access
-- `storage_quota_bytes`, `storage_used_bytes` — placeholders for future usage/paywall UI
+- `cloud_plan` — `free` or `pro`; controls account status and full-res entitlement.
+- `full_res_storage_enabled` — compatibility flag for manually granting full-res access.
+- `storage_quota_bytes` — optional per-user storage cap; free plans can be limited here.
+- `total_storage_bytes` / `storage_used_bytes` — worker-maintained byte tally. `storage_used_bytes` remains for compatibility.
+- `image_count` — worker-maintained count of original uploaded images; thumbnail variants are not counted as images.
 - `billing_status`, `billing_provider` — reserved for later billing sync
 
 Avatar initials are derived on the client, and avatar rendering prefers the stored URL
 with a signed-URL fallback if the direct image fetch fails.
 The profile screen also exposes a self-service account deletion action, which calls the
 `delete-account` Supabase Edge Function.
-It now also shows a Cloud plan/status block so storage usage and paywall messaging have a stable UI home later.
+It now also shows an Account status block with image resolution, sync history, storage usage, and image count.
 
 ### `friendships`
 Bidirectional, status-gated (`pending` / `accepted` / `blocked`).

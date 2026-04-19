@@ -1,9 +1,10 @@
 import { supabase } from '../supabase.js'
-import { t } from '../i18n.js'
+import { formatDate, formatTime, t } from '../i18n.js'
 import { state } from '../state.js'
 import { showToast } from '../toast.js'
 import { showAuthOverlay } from './auth.js'
 import { fetchCloudPlanProfile, formatStorageBytes } from '../cloud-plan.js'
+import { getLastSyncAt } from '../settings.js'
 import { Capacitor } from '@capacitor/core'
 import { FilePicker } from '@capawesome/capacitor-file-picker'
 
@@ -73,7 +74,7 @@ export function initProfile() {
 // ── Load (called on navigate to profile) ─────────────────────────────────────
 
 export async function loadProfile() {
-  await Promise.all([_loadProfileData(), _loadStats(), _loadFriends(), _loadPending(), _checkSync()])
+  await Promise.all([_loadProfileData(), _loadFriends(), _loadPending()])
 }
 
 
@@ -364,68 +365,51 @@ function _renderCloudPlan(cloudPlan) {
     storageUsedBytes: 0,
     uploadMode: 'reduced',
   }
-  const isPro = normalized.cloudPlan === 'pro'
-  const uploadMode = normalized.uploadMode === 'full' ? 'full' : 'reduced'
+  const isMaxResolution = normalized.uploadMode === 'full'
 
-  const tierEl = document.getElementById('profile-cloud-plan-badge')
   const uploadEl = document.getElementById('profile-cloud-upload-mode')
   const usageEl = document.getElementById('profile-cloud-usage')
-  const noteEl = document.getElementById('profile-cloud-plan-note')
+  const storageEl = document.getElementById('profile-storage-usage')
+  const imageCountEl = document.getElementById('profile-image-count')
 
-  if (tierEl) {
-    tierEl.textContent = t(isPro ? 'profile.planPro' : 'profile.planFree')
-    tierEl.classList.toggle('green', isPro)
-    tierEl.classList.toggle('amber', !isPro)
-  }
   if (uploadEl) {
-    uploadEl.textContent = t(uploadMode === 'full' ? 'profile.uploadFull' : 'profile.uploadReduced')
+    uploadEl.textContent = t(isMaxResolution ? 'profile.imageResolutionPro' : 'profile.imageResolutionFree')
   }
   if (usageEl) {
+    usageEl.textContent = _formatSyncHistory(getLastSyncAt())
+  }
+  if (storageEl) {
     if (normalized.storageQuotaBytes) {
-      usageEl.textContent = t('profile.storageUsedOfQuota', {
+      storageEl.textContent = t('profile.storageUsedOfQuota', {
         used: formatStorageBytes(normalized.storageUsedBytes),
         total: formatStorageBytes(normalized.storageQuotaBytes),
       })
-    } else if (normalized.storageUsedBytes > 0) {
-      usageEl.textContent = t('profile.storageUsedOnly', {
+    } else {
+      storageEl.textContent = t('profile.storageUsedOnly', {
         used: formatStorageBytes(normalized.storageUsedBytes),
       })
-    } else {
-      usageEl.textContent = t('profile.storageUnknown')
     }
   }
-  if (noteEl) {
-    if (normalized.planSource === 'debug_override') {
-      noteEl.textContent = t('profile.cloudPlanDebugOverride', {
-        mode: t(normalized.debugOverride === 'pro' ? 'profile.planPro' : 'profile.planFree'),
-      })
-    } else {
-      noteEl.textContent = t(
-        isPro && uploadMode === 'full'
-          ? 'profile.cloudPlanProNote'
-          : 'profile.cloudPlanFreeNote'
-      )
-    }
+  if (imageCountEl) {
+    imageCountEl.textContent = t(
+      normalized.imageCount === 1 ? 'profile.imageCountValue.one' : 'profile.imageCountValue.other',
+      { count: normalized.imageCount || 0 },
+    )
   }
 }
 
-// ── Stats ─────────────────────────────────────────────────────────────────────
-
-async function _loadStats() {
-  const uid = state.user?.id
-  if (!uid) return
-
-  const [{ count: obsCount }, { data: sp }, { data: fr }] = await Promise.all([
-    supabase.from('observations').select('*', { count: 'exact', head: true }).eq('user_id', uid),
-    supabase.from('observations').select('genus, species').eq('user_id', uid).not('genus', 'is', null),
-    supabase.from('friendships').select('id').eq('status', 'accepted')
-      .or(`requester_id.eq.${uid},addressee_id.eq.${uid}`),
-  ])
-
-  document.getElementById('stat-obs-count').textContent     = obsCount ?? '—'
-  document.getElementById('stat-species-count').textContent =
-    new Set((sp || []).map(o => `${o.genus}|${o.species}`)).size || 0
-  document.getElementById('stat-friends-count').textContent = fr?.length ?? 0
+function _formatSyncHistory(date) {
+  if (!date) return t('profile.syncNever')
+  const now = new Date()
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate()
+  const time = formatTime(date, { hour: '2-digit', minute: '2-digit', hour12: false })
+  if (sameDay) return t('profile.syncTodayAt', { time })
+  return t('profile.syncAt', {
+    date: formatDate(date, { day: 'numeric', month: 'short' }),
+    time,
+  })
 }
 
 // ── Friends list ──────────────────────────────────────────────────────────────
@@ -505,21 +489,6 @@ async function _loadPending() {
     b.addEventListener('click', () => _declineRequest(b.dataset.id)))
 }
 
-// ── Sync status ───────────────────────────────────────────────────────────────
-
-async function _checkSync() {
-  const el = document.getElementById('profile-sync-status')
-  if (!el) return
-  try {
-    const { error } = await supabase.from('observations').select('id').limit(1)
-    el.textContent   = error ? t('profile.offline') : t('profile.connected')
-    el.style.color   = error ? 'var(--amber)' : ''
-  } catch {
-    el.textContent = t('profile.offline')
-    el.style.color = 'var(--amber)'
-  }
-}
-
 // ── Friend search ─────────────────────────────────────────────────────────────
 
 async function _searchFriend() {
@@ -542,10 +511,32 @@ async function _searchFriend() {
     return
   }
 
+  const searchIds = data.map(p => p.id)
+  const { data: existingFriendships, error: friendshipError } = await supabase
+    .from('friendships')
+    .select('requester_id, addressee_id, status')
+    .or(`requester_id.eq.${state.user.id},addressee_id.eq.${state.user.id}`)
+  if (friendshipError) {
+    console.warn('Friend relationship lookup failed:', friendshipError.message)
+  }
+
+  const relationshipByUserId = new Map()
+  ;(existingFriendships || []).forEach(friendship => {
+    const otherId = friendship.requester_id === state.user.id ? friendship.addressee_id : friendship.requester_id
+    if (searchIds.includes(otherId)) relationshipByUserId.set(otherId, friendship.status)
+  })
+
   results.innerHTML = data.map(p => {
     const name    = p.display_name || p.username || '?'
     const handle  = p.username ? `@${p.username}` : (p.email || '')
     const initial = name[0]?.toUpperCase() || '?'
+    const relationshipStatus = relationshipByUserId.get(p.id)
+    const disabledAttr = relationshipStatus ? ' disabled' : ''
+    const buttonLabel = relationshipStatus === 'accepted'
+      ? t('profile.friends')
+      : relationshipStatus === 'pending'
+        ? t('profile.sent')
+        : t('profile.add')
     return `
     <div class="friend-row">
       <div class="friend-avatar">${initial}</div>
@@ -553,7 +544,7 @@ async function _searchFriend() {
         <div class="friend-name">${_esc(name)}</div>
         ${handle ? `<div class="friend-handle">${_esc(handle)}</div>` : ''}
       </div>
-      <button class="btn-primary send-request-btn" data-id="${p.id}" style="padding:5px 10px;font-size:12px;flex-shrink:0">${t('profile.add')}</button>
+      <button class="btn-primary send-request-btn" data-id="${p.id}" style="padding:5px 10px;font-size:12px;flex-shrink:0"${disabledAttr} aria-disabled="${relationshipStatus ? 'true' : 'false'}">${buttonLabel}</button>
     </div>`
   }).join('')
 

@@ -1,4 +1,5 @@
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
 const DEFAULT_ALLOWED_METHODS = 'PUT, POST, DELETE, OPTIONS'
 const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
@@ -103,8 +104,20 @@ async function handleUpload(request, env, ctx, url) {
     throw httpError(415, 'unsupported_media_type', 'Only image uploads are supported')
   }
 
+  const bodyBuffer = await request.arrayBuffer()
+  const bodyBytes = bodyBuffer.byteLength
+  if (bodyBytes > maxUploadBytes) {
+    throw httpError(413, 'payload_too_large', `Upload exceeds ${maxUploadBytes} bytes`)
+  }
+
+  const existingObject = await env.MEDIA_BUCKET.head(key)
+  const existingBytes = mediaObjectSize(existingObject)
+  const storageDelta = Math.max(0, bodyBytes - existingBytes)
+  const profile = await fetchStorageProfile(env, claims.sub)
+  assertStorageQuotaAllowsUpload(profile, storageDelta, env)
+
   const cacheControl = String(request.headers.get('Cache-Control') || 'public, max-age=31536000, immutable').trim()
-  const object = await env.MEDIA_BUCKET.put(key, request.body, {
+  const object = await env.MEDIA_BUCKET.put(key, bodyBuffer, {
     httpMetadata: {
       contentType,
       cacheControl,
@@ -115,12 +128,24 @@ async function handleUpload(request, env, ctx, url) {
       uploaded_by: String(claims.email || ''),
     },
   })
+  const imageDelta = isOriginalImageKey(key) && !existingObject ? 1 : 0
+  let trackedProfile = null
+  try {
+    trackedProfile = await applyStorageDelta(env, claims.sub, bodyBytes - existingBytes, imageDelta)
+  } catch (error) {
+    await env.MEDIA_BUCKET.delete(key).catch(deleteError => {
+      console.error('Failed to roll back R2 upload after tally error', deleteError)
+    })
+    throw error
+  }
 
   return jsonResponse(
     {
       ok: true,
       key,
       etag: object?.etag || null,
+      size: bodyBytes,
+      storage: trackedProfile,
       url: publicMediaUrl(env, key),
     },
     201,
@@ -152,19 +177,110 @@ async function handleDelete(request, env, ctx, url) {
     throw httpError(403, 'key_not_allowed', 'Delete key must start with the authenticated user id')
   }
 
+  const existingObject = await env.MEDIA_BUCKET.head(key)
   await env.MEDIA_BUCKET.delete(key)
+  const existingBytes = mediaObjectSize(existingObject)
+  const imageDelta = isOriginalImageKey(key) && existingObject ? -1 : 0
+  const trackedProfile = await applyStorageDelta(env, claims.sub, -existingBytes, imageDelta)
 
   return jsonResponse(
     {
       ok: true,
       key,
       deleted: true,
+      storage: trackedProfile,
     },
     200,
     request,
     env,
     origin,
   )
+}
+
+async function fetchStorageProfile(env, userId) {
+  if (!hasSupabaseServiceRole(env)) return null
+
+  const query = [
+    `id=eq.${encodeURIComponent(userId)}`,
+    'select=cloud_plan,storage_quota_bytes,total_storage_bytes,storage_used_bytes,image_count',
+    'limit=1',
+  ].join('&')
+  const response = await supabaseRestFetch(env, `/rest/v1/profiles?${query}`, { method: 'GET' })
+  if (!response.ok) {
+    throw httpError(500, 'profile_fetch_failed', 'Could not fetch storage profile')
+  }
+  const rows = await response.json()
+  return Array.isArray(rows) ? rows[0] || null : null
+}
+
+function assertStorageQuotaAllowsUpload(profile, storageDelta, env) {
+  if (!profile || storageDelta <= 0) return
+
+  const cloudPlan = String(profile.cloud_plan || '').trim().toLowerCase()
+  if (cloudPlan === 'pro') return
+
+  const quota = parseNonNegativeInt(profile.storage_quota_bytes, parseNonNegativeInt(env.FREE_STORAGE_QUOTA_BYTES, DEFAULT_FREE_STORAGE_QUOTA_BYTES))
+  if (!quota) return
+
+  const used = parseNonNegativeInt(profile.total_storage_bytes ?? profile.storage_used_bytes, 0)
+  if (used + storageDelta > quota) {
+    throw httpError(413, 'storage_quota_exceeded', 'This account has reached its storage limit')
+  }
+}
+
+async function applyStorageDelta(env, userId, storageDelta, imageDelta) {
+  if (!hasSupabaseServiceRole(env) || (!storageDelta && !imageDelta)) return null
+
+  const response = await supabaseRestFetch(env, '/rest/v1/rpc/apply_profile_storage_delta', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_user_id: userId,
+      p_storage_delta: Math.trunc(storageDelta),
+      p_image_delta: Math.trunc(imageDelta),
+    }),
+  })
+  if (!response.ok) {
+    throw httpError(500, 'profile_tally_failed', 'Could not update profile storage tally')
+  }
+  const rows = await response.json()
+  const profile = Array.isArray(rows) ? rows[0] || null : rows
+  return profile ? {
+    total_storage_bytes: Number(profile.total_storage_bytes || 0),
+    storage_used_bytes: Number(profile.storage_used_bytes || 0),
+    image_count: Number(profile.image_count || 0),
+  } : null
+}
+
+function hasSupabaseServiceRole(env) {
+  return !!String(env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+}
+
+function supabaseRestFetch(env, path, options = {}) {
+  const supabaseUrl = String(env.SUPABASE_URL || '').trim().replace(/\/+$/, '')
+  const serviceRoleKey = String(env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+  if (!supabaseUrl || !serviceRoleKey) {
+    throw httpError(500, 'missing_supabase_admin', 'SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for storage tracking')
+  }
+
+  const headers = new Headers(options.headers || {})
+  headers.set('apikey', serviceRoleKey)
+  headers.set('Authorization', `Bearer ${serviceRoleKey}`)
+  headers.set('Content-Type', 'application/json')
+  headers.set('Accept', 'application/json')
+  return fetch(`${supabaseUrl}${path}`, {
+    ...options,
+    headers,
+  })
+}
+
+function mediaObjectSize(object) {
+  const size = Number(object?.size)
+  return Number.isFinite(size) && size > 0 ? Math.trunc(size) : 0
+}
+
+function isOriginalImageKey(key) {
+  const filename = String(key || '').split('/').pop() || ''
+  return !!filename && !filename.startsWith('thumb_')
 }
 
 async function handleArtsorakel(request, env, ctx) {
@@ -523,6 +639,12 @@ function parseIntegerHeader(value) {
 function parsePositiveInt(value, fallback) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback
+  return Math.trunc(parsed)
+}
+
+function parseNonNegativeInt(value, fallback = 0) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback
   return Math.trunc(parsed)
 }
 

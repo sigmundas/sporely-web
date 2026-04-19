@@ -3,6 +3,7 @@ import { formatLightReading, t } from '../i18n.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
+import { getDefaultVisibility } from '../settings.js'
 
 function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
@@ -63,7 +64,7 @@ export async function startCamera(options = {}) {
         habitat: '',
         notes: '',
         uncertain: false,
-        visibility: 'friends',
+        visibility: getDefaultVisibility(),
       }
     }
     state.batchCount = state.capturedPhotos.length

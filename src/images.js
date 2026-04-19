@@ -74,6 +74,10 @@ export function getPublicMediaUrl(storagePath, variant = 'original') {
   return `${MEDIA_BASE_URL}/${key}`
 }
 
+export function clearMediaUrlCache() {
+  SIGNED_URL_CACHE.clear()
+}
+
 function _encodeObjectKey(storagePath) {
   return normalizeMediaKey(storagePath)
     .split('/')
@@ -196,9 +200,10 @@ async function _createThumbnailBlob(blob, maxEdge, quality) {
   })
 }
 
-function _fitWithinMaxPixels(width, height, maxPixels) {
+function _fitWithinMaxPixels(width, height, maxPixels, options = {}) {
   const pixels = Math.max(1, Number(width) || 0) * Math.max(1, Number(height) || 0)
-  if (!maxPixels || pixels <= maxPixels) {
+  const resizeThresholdPixels = Math.max(Number(maxPixels) || 0, Number(options.resizeThresholdPixels) || 0)
+  if (!maxPixels || pixels <= maxPixels || (resizeThresholdPixels && pixels < resizeThresholdPixels)) {
     return {
       targetWidth: width,
       targetHeight: height,
@@ -222,7 +227,9 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
   const sourceHeight = img.naturalHeight || img.height
   if (!sourceWidth || !sourceHeight) throw new Error('Image has zero dimensions')
 
-  const fitted = _fitWithinMaxPixels(sourceWidth, sourceHeight, policy.maxPixels)
+  const fitted = _fitWithinMaxPixels(sourceWidth, sourceHeight, policy.maxPixels, {
+    resizeThresholdPixels: policy.resizeThresholdPixels,
+  })
   let uploadBlob = blob
 
   if (fitted.resized || blob.type !== 'image/jpeg') {
@@ -314,7 +321,13 @@ function _isMissingColumnError(error, columnName) {
 }
 
 export async function deleteObservationMedia(paths) {
-  const normalized = [...new Set((paths || []).map(normalizeMediaKey).filter(Boolean))]
+  const normalized = [...new Set((paths || [])
+    .map(normalizeMediaKey)
+    .filter(Boolean)
+    .flatMap(path => [
+      path,
+      ...Object.keys(THUMB_VARIANTS).map(variant => getVariantPath(path, variant)),
+    ]))]
   if (!normalized.length) return
 
   if (MEDIA_UPLOAD_BASE_URL) {

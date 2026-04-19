@@ -537,8 +537,9 @@ return new Promise((resolve, reject) => {
 - [x] **Run Live Schema Migration** — R2 migration SQL has been applied in Supabase.
 - [x] **Run Unique Constraints SQL** — Unique-constraint SQL is already marked applied in the current cloud setup docs.
 - [x] **Move Web Deletes to R2** — Worker DELETE route deployed; `deleteObservationMedia` uses Worker for R2 deletion.
+- [x] **Profile storage tally + quota guardrails** — Worker updates `profiles.total_storage_bytes`, compatibility `storage_used_bytes`, and `image_count` after R2 upload/delete. Free-tier quota can be set per profile with `storage_quota_bytes` or globally with `FREE_STORAGE_QUOTA_BYTES`.
 - [x] **Offline queue** — Capture/import saves already enqueue observations and blobs in IndexedDB and retry background sync later.
-- [ ] **Supabase Heartbeat** — Configure GitHub Action to ping DB every 4 days to prevent 1-week auto-pause.
+- [x] **Supabase Heartbeat** — GitHub Action pings Supabase every 4 days through `scripts/supabase-heartbeat.mjs` to prevent 1-week auto-pause.
 - [x] **Bundle trimming** — Map screen is lazy-loaded so `leaflet` is no longer on the initial startup path.
 - [x] **Friends feed** — Query `observations_friend_view`, paginate, and render list.
 
@@ -582,50 +583,37 @@ return new Promise((resolve, reject) => {
 *Goal: Implement tiered storage, client-side compression, and a Pro subscription model.*
 
 ### 1. Image Processing & Compression (Client-Side)
-- [ ] **Define Global Constants:**
-    - Set `MAX_DIMENSION = 1200`
-    - Set `JPEG_QUALITY = 0.6` 
-    - Target file size: < 500KB per image.
-- [ ] **Develop Browser Compression Utility:**
-    - Create a JavaScript/TypeScript module using the **Canvas API**.
-    - Implement a `processImage()` function to downscale and compress before upload.
-- [ ] **Platform-Specific Logic:**
-    - **Web/Free:** Force downscale to 1200px max width/height.
-    - **Capacitor/Android:**
-        - Check `is_pro` status via RevenueCat.
-        - Allow "Original" upload if Pro.
-        - Default to forced downscale for free users.
+- [x] **Free-tier reduced uploads:** Free accounts upload at 2 MP.
+- [x] **Pro image-resolution setting:** Pro/full-res accounts can choose `Reduced (2MP)` or `Max (12MP)` in Settings.
+- [x] **Friendly 12 MP cap:** Max mode keeps near-12 MP images as-is and only resizes from 14 MP and above down to 12 MP.
 - [ ] **Metadata Preservation:**
     - Extract GPS and timestamp EXIF data *before* compression.
     - Re-inject or store metadata in the database to ensure "Digital Lab Notebook" integrity.
 
 ### 2. Storage Architecture & Guardrails
-- [ ] **Tiered Cloudflare R2 Buckets:**
-    - `sporely-public-2mp`: Optimized for community browsing and free tier.
-    - `sporely-archive-pro`: Secure storage for full-resolution research data.
-- [ ] **Server-Side Validation (Cloudflare Workers):**
-    - Implement a "Gatekeeper" Worker to verify `Content-Length` headers.
-    - Configure the worker to reject any upload to the public bucket exceeding 500KB.
+- [x] **Single R2 bucket with authenticated Worker:** `sporely-media` stores originals and generated thumbnails; `upload.sporely.no` enforces user-owned key prefixes.
+- [x] **Server-side storage tally:** The Worker increments/decrements `profiles.total_storage_bytes`, compatibility `storage_used_bytes`, and `image_count` using `supabase/profile-storage-usage.sql`.
+- [x] **Free-tier quota guardrail:** The Worker rejects free-tier uploads that exceed `profiles.storage_quota_bytes` or global `FREE_STORAGE_QUOTA_BYTES`.
+- [ ] **Backfill historical usage:** Add an admin script to scan existing R2 objects and reconcile `total_storage_bytes` / `image_count` for users with pre-tally uploads.
 
 ### 3. Monetization & In-App Purchases (IAP)
 - [ ] **RevenueCat Integration:**
     - Initialize RevenueCat SDK in the Capacitor wrapper (Android/iOS).
-    - Configure the "Pro" Entitlement: `full_res_storage`.
-    - *Note on Debug Settings:* The app includes a hidden debug toggle with "Server", "Free", and "Pro" options. "Server" is not a tier—it means "use the real plan fetched from the Supabase database." The "Free" and "Pro" options are local overrides for testing upload policies without changing the actual database row.
+    - Configure the "Pro" entitlement and sync it into `profiles.cloud_plan = 'pro'` or `full_res_storage_enabled = true`.
 - [ ] **Subscription UI:**
-    - Create a "Cloud Sync" settings page showing current storage usage.
+    - Account status now shows image resolution, sync history, storage usage, and image count.
     - Implement a Paywall UI comparing:
-        - **Free:** 1200px images, community access.
-        - **Pro:** Full-size original backups, high-res research export.
+        - **Free:** 2 MP images, community access, quota-limited cloud storage.
+        - **Pro:** selectable 2 MP or 12 MP backups, higher storage quota, high-res research export.
 - [ ] **Backend Entitlement Sync:**
-    - Set up a webhook listener to update the user's `is_pro` flag in the database when a purchase is confirmed.
+    - Set up a webhook listener to update the user's `cloud_plan` / `full_res_storage_enabled` fields when a purchase is confirmed.
 
 
 
 ### 5. Transparency & Open Source
 - [ ] **UI Disclaimers:**
-    - Add clear messaging: "Web uploads are limited to 1200px to keep hosting free. Use the mobile app for full-res backups."
-- [ ] **Documentation:**
+    - Add clear messaging around free 2 MP uploads, Pro 12 MP uploads, and account storage quota.
+- [x] **Documentation:**
     - Update `README.md` to explain the division between the open-source client code and the paid cloud storage hosting.
 
 ## Ongoing Database & Operations Tasks
@@ -655,7 +643,8 @@ return new Promise((resolve, reject) => {
 - **Android APK (e.g., S25):** Import ~40 photos at once. Verify that the import succeeds without crashing and that the review thumbnails do not render as "broken image" icons (thanks to the recent `aiBlob` memory fix).
 - **iOS PWA (Safari):** Be aware that importing more than 15-20 high-res photos at once may crash the tab due to strict WebKit memory limits. This is expected behavior until the Phase 3 streaming architecture is implemented.
 
-### 4. Cloud Plan Debug UI
-- Go to Settings and tap the app version number 5 times to reveal the debug menu.
-- Verify the options are "Server", "Free", and "Pro".
-- Ensure "Server" correctly fetches the real plan from the database rather than forcing a local override.
+### 4. Account Status, Storage, and Pro Upload QA
+- Verify free accounts show `2MP`, storage usage, image count, and sync history in Profile → Account status.
+- Verify Pro/full-res accounts show the Settings image-resolution selector with `Reduced (2MP)` and `Max (12MP)`.
+- Upload and delete a test observation, then confirm `profiles.total_storage_bytes`, `storage_used_bytes`, and `image_count` move in the expected direction.
+- Set a small `storage_quota_bytes` on a free test profile and confirm uploads over the quota are rejected by the worker.

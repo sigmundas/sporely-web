@@ -1,0 +1,27 @@
+name: Supabase heartbeat
+
+on:
+  schedule:
+    - cron: '17 3 */4 * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    name: Ping Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: https://zkpjklzfwzefhjluvhfw.supabase.co
+      SUPABASE_PUBLISHABLE_KEY: sb_publishable_nZrERVFN3WR4Aqn2yggc7Q_siAG1TCV
+      SUPABASE_HEARTBEAT_TABLE: profiles
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Ping Supabase REST API
+        run: node scripts/supabase-heartbeat.mjs

@@ -579,23 +579,31 @@
           </div>
         </div>
 
-        <div class="profile-stats-row">
-          <div class="profile-stat">
-            <div class="profile-stat-val" id="stat-obs-count">—</div>
-            <div class="profile-stat-lbl" id="profile-stat-finds-label">Finds</div>
-          </div>
-          <div class="profile-stat">
-            <div class="profile-stat-val" id="stat-species-count">—</div>
-            <div class="profile-stat-lbl" id="profile-stat-species-label">Species</div>
-          </div>
-          <div class="profile-stat">
-            <div class="profile-stat-val" id="stat-friends-count">—</div>
-            <div class="profile-stat-lbl" id="profile-stat-friends-label">Friends</div>
+        <div class="profile-section">
+          <div class="profile-section-title" id="profile-cloud-plan-title">Account status</div>
+          <div class="field-meta-section" style="margin-bottom:0">
+            <div class="field-meta-header" id="profile-cloud-plan-header">Account</div>
+            <div class="field-meta-row">
+              <div class="field-meta-key" id="profile-cloud-upload-key">Image resolution</div>
+              <div class="field-meta-val" id="profile-cloud-upload-mode">2MP</div>
+            </div>
+            <div class="field-meta-row">
+              <div class="field-meta-key" id="profile-cloud-usage-key">Sync history</div>
+              <div class="field-meta-val" id="profile-cloud-usage">No syncs yet</div>
+            </div>
+            <div class="field-meta-row">
+              <div class="field-meta-key" id="profile-storage-key">Storage</div>
+              <div class="field-meta-val" id="profile-storage-usage">—</div>
+            </div>
+            <div class="field-meta-row">
+              <div class="field-meta-key" id="profile-image-count-key">Images</div>
+              <div class="field-meta-val" id="profile-image-count">—</div>
+            </div>
           </div>
         </div>
 
         <div class="profile-section">
-          <div class="profile-section-title">Add Friend</div>
+          <div class="profile-section-title" id="profile-add-friend-title">Add Friend</div>
           <div class="friend-search-row">
             <input id="friend-search-input" class="friend-search-input" type="text" placeholder="Email, name or @username…" autocomplete="off">
             <button id="friend-search-btn" class="btn-primary" style="padding:8px 14px;flex-shrink:0">Search</button>
@@ -603,44 +611,14 @@
           <div id="friend-search-results"></div>
         </div>
 
-        <div class="profile-section" id="pending-section" style="display:none">
-          <div class="profile-section-title">Pending Requests</div>
-          <div id="pending-list"></div>
-        </div>
-
         <div class="profile-section">
-          <div class="profile-section-title">Friends</div>
+          <div class="profile-section-title" id="profile-friends-title">Friends</div>
           <div id="friends-list"><div style="color:var(--text-dim);font-size:13px">No friends yet.</div></div>
         </div>
 
-        <div class="profile-section">
-          <div class="profile-section-title" id="profile-cloud-plan-title">Cloud plan</div>
-          <div class="field-meta-section" style="margin-bottom:0">
-            <div class="field-meta-header" id="profile-cloud-plan-header">Cloud storage</div>
-            <div class="field-meta-row">
-              <div class="field-meta-key" id="profile-cloud-plan-key">Tier</div>
-              <div class="field-meta-val amber" id="profile-cloud-plan-badge">Free</div>
-            </div>
-            <div class="field-meta-row">
-              <div class="field-meta-key" id="profile-cloud-upload-key">Uploads</div>
-              <div class="field-meta-val" id="profile-cloud-upload-mode">Reduced (2 MP)</div>
-            </div>
-            <div class="field-meta-row">
-              <div class="field-meta-key" id="profile-cloud-usage-key">Storage</div>
-              <div class="field-meta-val" id="profile-cloud-usage">—</div>
-            </div>
-            <div class="profile-cloud-plan-note" id="profile-cloud-plan-note"></div>
-          </div>
-        </div>
-
-        <div class="profile-section">
-          <div class="field-meta-section">
-            <div class="field-meta-header" id="profile-connection-header">Connection</div>
-            <div class="field-meta-row">
-              <div class="field-meta-key" id="profile-connection-key">Supabase</div>
-              <div class="field-meta-val green" id="profile-sync-status">Checking…</div>
-            </div>
-          </div>
+        <div class="profile-section" id="pending-section" style="display:none">
+          <div class="profile-section-title" id="profile-pending-title">Pending Requests</div>
+          <div id="pending-list"></div>
         </div>
 
         <div class="profile-danger-zone">
@@ -755,17 +733,37 @@
           </div>
           <span class="settings-gap-unit">min</span>
         </div>
-        <p class="settings-gap-hint">Photos taken within this window are grouped into one observation.</p>
+        <p class="settings-gap-hint">Photo import from your device will group images based on time between photos.</p>
 
-        <div id="settings-debug-section" style="display:none">
-          <div class="settings-section-label" id="settings-debug-label" style="margin-top:22px; color:var(--amber)">Testing</div>
-          <p class="settings-gap-hint" id="settings-debug-hint" style="margin-top:0;margin-bottom:10px">Local-only override for testing free vs paid cloud behavior.</p>
-          <div class="theme-segment settings-debug-segment" style="margin-bottom:12px">
-            <button class="theme-seg-btn settings-cloud-plan-btn" id="settings-cloud-plan-server" data-cloud-plan-override="server">Server</button>
-            <button class="theme-seg-btn settings-cloud-plan-btn" id="settings-cloud-plan-free" data-cloud-plan-override="free">Free</button>
-            <button class="theme-seg-btn settings-cloud-plan-btn" id="settings-cloud-plan-pro" data-cloud-plan-override="pro">Pro</button>
+        <div id="settings-image-resolution-section" style="display:none">
+          <div class="settings-section-label" id="settings-image-resolution-label" style="margin-top:22px">Image resolution</div>
+          <div class="theme-segment settings-resolution-segment">
+            <button class="theme-seg-btn settings-resolution-btn" id="settings-resolution-reduced" data-image-resolution-mode="reduced">Reduced (2MP)</button>
+            <button class="theme-seg-btn settings-resolution-btn" id="settings-resolution-max" data-image-resolution-mode="max">Max (12MP)</button>
           </div>
         </div>
+
+        <div class="settings-section-label" id="settings-sync-label" style="margin-top:22px">Sync</div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-title" id="settings-mobile-sync-label">Sync over mobile data</div>
+          </div>
+          <label class="settings-switch">
+            <input type="checkbox" id="settings-mobile-sync-toggle" checked>
+            <span></span>
+          </label>
+        </div>
+
+        <div class="settings-section-label" id="settings-default-visibility-label" style="margin-top:22px">Default visibility</div>
+        <div class="theme-segment settings-default-visibility-segment">
+          <button class="theme-seg-btn settings-default-visibility-btn" id="settings-default-visibility-private" data-default-visibility="private">Private</button>
+          <button class="theme-seg-btn settings-default-visibility-btn" id="settings-default-visibility-friends" data-default-visibility="friends">Friends</button>
+          <button class="theme-seg-btn settings-default-visibility-btn" id="settings-default-visibility-public" data-default-visibility="public">Public</button>
+        </div>
+
+        <div class="settings-section-label" id="settings-data-label" style="margin-top:22px">Data</div>
+        <button type="button" class="settings-clear-cache-btn" id="settings-clear-cache-btn">Clear local cache</button>
+        <p class="settings-gap-hint" id="settings-clear-cache-hint">Clears temporary import photos and browser media cache. Queued observations stay safe.</p>
 
         <div class="settings-version" id="settings-version">v0.3.1</div>
       </div>

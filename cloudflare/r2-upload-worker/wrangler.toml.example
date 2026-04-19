@@ -12,6 +12,8 @@ SUPABASE_JWT_AUDIENCE = "authenticated"
 MEDIA_PUBLIC_BASE_URL = "https://media.sporely.no"
 ALLOWED_ORIGINS = "https://app.sporely.no,https://sporely.no,https://www.sporely.no,http://localhost:5173,https://localhost,capacitor://localhost"
 MAX_UPLOAD_BYTES = "15728640"
+# Optional free-tier account quota. Set 0 to rely only on per-profile storage_quota_bytes.
+FREE_STORAGE_QUOTA_BYTES = "0"
 
 # Optional overrides:
 # SUPABASE_JWT_ISSUER = "https://zkpjklzfwzefhjluvhfw.supabase.co/auth/v1"
@@ -20,3 +22,6 @@ MAX_UPLOAD_BYTES = "15728640"
 
 # Only needed if your Supabase project still signs access tokens with HS* keys.
 # Set this with `wrangler secret put SUPABASE_JWT_SECRET`, not in plaintext.
+
+# Needed for storage quota/tally updates.
+# Set this with `wrangler secret put SUPABASE_SERVICE_ROLE_KEY`, not in plaintext.

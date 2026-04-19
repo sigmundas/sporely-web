@@ -1,19 +1,14 @@
 import { supabase } from './supabase.js'
 
 export const FREE_CLOUD_MAX_PIXELS = 2_000_000
-const DEBUG_OVERRIDE_KEY = 'sporely_debug_cloud_plan'
+export const PRO_CLOUD_MAX_PIXELS = 12_000_000
+export const PRO_CLOUD_RESIZE_THRESHOLD_PIXELS = 14_000_000
+export const CLOUD_UPLOAD_POLICY_CHANGED_EVENT = 'sporely-cloud-upload-policy-changed'
+const IMAGE_RESOLUTION_MODE_KEY = 'sporely-image-resolution-mode'
 
 function _parseNullableInt(value) {
   const parsed = Number.parseInt(value, 10)
   return Number.isFinite(parsed) ? parsed : null
-}
-
-function _canUseLocalStorage() {
-  try {
-    return typeof localStorage !== 'undefined'
-  } catch (_) {
-    return false
-  }
 }
 
 function _isMissingColumnError(error, columnName) {
@@ -27,51 +22,49 @@ function _isMissingColumnError(error, columnName) {
 export function normalizeCloudPlanProfile(profile) {
   const rawPlan = String(profile?.cloud_plan || '').trim().toLowerCase()
   const cloudPlan = rawPlan === 'pro' ? 'pro' : 'free'
-  const fullResStorageEnabled = !!profile?.full_res_storage_enabled
+  const fullResStorageEnabled = cloudPlan === 'pro' || !!profile?.full_res_storage_enabled
   return {
     cloudPlan,
     fullResStorageEnabled,
     storageQuotaBytes: _parseNullableInt(profile?.storage_quota_bytes),
-    storageUsedBytes: Math.max(0, _parseNullableInt(profile?.storage_used_bytes) ?? 0),
+    storageUsedBytes: Math.max(0, _parseNullableInt(profile?.total_storage_bytes ?? profile?.storage_used_bytes) ?? 0),
+    imageCount: Math.max(0, _parseNullableInt(profile?.image_count) ?? 0),
   }
 }
 
-export function normalizeCloudPlanOverride(value) {
-  const raw = String(value || '').trim().toLowerCase()
-  return raw === 'free' || raw === 'pro' ? raw : 'server'
+export function normalizeImageResolutionMode(value) {
+  return String(value || '').trim().toLowerCase() === 'reduced' ? 'reduced' : 'max'
 }
 
-export function getStoredCloudPlanOverride() {
-  if (!_canUseLocalStorage()) return 'server'
-  return normalizeCloudPlanOverride(localStorage.getItem(DEBUG_OVERRIDE_KEY))
-}
-
-export function setStoredCloudPlanOverride(value) {
-  if (!_canUseLocalStorage()) return
-  const normalized = normalizeCloudPlanOverride(value)
-  if (normalized === 'server') {
-    localStorage.removeItem(DEBUG_OVERRIDE_KEY)
-    return
+export function getStoredImageResolutionMode() {
+  try {
+    return normalizeImageResolutionMode(localStorage.getItem(IMAGE_RESOLUTION_MODE_KEY))
+  } catch (_) {
+    return 'max'
   }
-  localStorage.setItem(DEBUG_OVERRIDE_KEY, normalized)
+}
+
+export function setStoredImageResolutionMode(value) {
+  try {
+    localStorage.setItem(IMAGE_RESOLUTION_MODE_KEY, normalizeImageResolutionMode(value))
+  } catch (_) {}
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new Event(CLOUD_UPLOAD_POLICY_CHANGED_EVENT))
+  }
 }
 
 export function getEffectiveCloudUploadPolicy(profile) {
-  const override = getStoredCloudPlanOverride()
   const normalized = normalizeCloudPlanProfile(profile)
-  const effective = override === 'free'
-    ? { ...normalized, cloudPlan: 'free', fullResStorageEnabled: false }
-    : override === 'pro'
-      ? { ...normalized, cloudPlan: 'pro', fullResStorageEnabled: true }
-      : normalized
-  const planSource = override === 'server' ? 'server' : 'debug_override'
-  const uploadMode = effective.fullResStorageEnabled ? 'full' : 'reduced'
+  const imageResolutionMode = getStoredImageResolutionMode()
+  const canUseMaxResolution = normalized.cloudPlan === 'pro' || normalized.fullResStorageEnabled
+  const uploadMode = canUseMaxResolution && imageResolutionMode === 'max' ? 'full' : 'reduced'
+  const maxPixels = uploadMode === 'full' ? PRO_CLOUD_MAX_PIXELS : FREE_CLOUD_MAX_PIXELS
   return {
-    ...effective,
+    ...normalized,
+    imageResolutionMode: uploadMode === 'full' ? 'max' : 'reduced',
     uploadMode,
-    maxPixels: uploadMode === 'full' ? 0 : FREE_CLOUD_MAX_PIXELS,
-    planSource,
-    debugOverride: override,
+    maxPixels,
+    resizeThresholdPixels: uploadMode === 'full' ? PRO_CLOUD_RESIZE_THRESHOLD_PIXELS : maxPixels,
   }
 }
 
@@ -81,7 +74,7 @@ export async function fetchCloudPlanProfile(userId) {
 
   const { data, error } = await supabase
     .from('profiles')
-    .select('cloud_plan, full_res_storage_enabled, storage_quota_bytes, storage_used_bytes')
+    .select('cloud_plan, full_res_storage_enabled, storage_quota_bytes, total_storage_bytes, storage_used_bytes, image_count')
     .eq('id', uid)
     .single()
 
@@ -90,7 +83,9 @@ export async function fetchCloudPlanProfile(userId) {
       'cloud_plan',
       'full_res_storage_enabled',
       'storage_quota_bytes',
+      'total_storage_bytes',
       'storage_used_bytes',
+      'image_count',
     ]
     if (missingColumns.some(column => _isMissingColumnError(error, column))) {
       return getEffectiveCloudUploadPolicy()

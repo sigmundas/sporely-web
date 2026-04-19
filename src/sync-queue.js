@@ -1,6 +1,7 @@
 import { supabase } from './supabase.js'
 import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants } from './images.js'
-import { fetchCloudPlanProfile } from './cloud-plan.js'
+import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
+import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -327,7 +328,7 @@ async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'loc
 }
 
 export async function triggerSync() {
-  if (isSyncing || !navigator.onLine) return
+  if (isSyncing || !navigator.onLine || !canSyncOnCurrentConnection()) return
   
   // Ensure the user hasn't logged out while items were pending
   const { data: { session } } = await supabase.auth.getSession()
@@ -401,7 +402,8 @@ export async function triggerSync() {
             syncImageCount: queuedImages.length,
           })
           let preparedImage = image
-          if (!image.uploadBlob && image.blob instanceof Blob) {
+          const preparedUploadMode = image.uploadMeta?.upload_mode || null
+          if (image.blob instanceof Blob && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
             const prepared = await prepareImageVariants(image.blob, uploadPolicy)
             preparedImage = {
               ...image,
@@ -457,9 +459,13 @@ export async function triggerSync() {
 }
 
 // Boot logic: Listen for connection restoral, and also check when the file is first evaluated.
+window.addEventListener(CLOUD_UPLOAD_POLICY_CHANGED_EVENT, () => {
+  _cloudPlanCache.clear()
+})
 window.addEventListener('online', triggerSync)
 window.addEventListener('focus', triggerSync)
 window.addEventListener('pageshow', triggerSync)
+onConnectionTypeChange(triggerSync)
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') triggerSync()
 })

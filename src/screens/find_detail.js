@@ -10,6 +10,7 @@ import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { normalizeAiCropRect } from '../image_crop.js'
+import { getDefaultVisibility, setLastSyncAt } from '../settings.js'
 
 let currentObs    = null
 let selectedTaxon = null
@@ -391,7 +392,7 @@ function _resetForm() {
   if (cancelBtn) cancelBtn.style.display = ''
 
   // Reset visibility to default
-  const r = document.querySelector('input[name="detail-vis"][value="friends"]')
+  const r = document.querySelector(`input[name="detail-vis"][value="${getDefaultVisibility()}"]`)
   if (r) r.checked = true
 
   // Clear comments
@@ -532,6 +533,7 @@ async function _save() {
     return
   }
 
+  setLastSyncAt()
   showToast(t('detail.saved'))
   _goBack()
 }
@@ -566,6 +568,7 @@ async function _delete() {
 
     if (error) { showToast(t('detail.deleteFailed', { message: error.message })); return }
 
+    setLastSyncAt()
     showToast(t('detail.deleted'))
     _goBack()
   } catch (error) {

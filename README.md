@@ -102,6 +102,14 @@ Server-side / Supabase function secrets are not read from Vite env files. Set th
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
+## Supabase Heartbeat
+
+`.github/workflows/supabase-heartbeat.yml` pings the Supabase REST API every 4 days to keep the free project from auto-pausing after a quiet week. It uses the same public project URL and publishable key as the client app. If those rotate, update both `src/supabase.js` and the workflow env values.
+
+## Cloud Storage Hosting
+
+This repository contains the open-source Sporely web client and Android Capacitor shell. The hosted sync service is separate infrastructure: Supabase handles auth/database records, and Cloudflare R2 stores uploaded media through the `upload.sporely.no` Worker. Free accounts use reduced 2 MP uploads with quota guardrails; Pro/full-res accounts can choose reduced uploads or higher-resolution 12 MP uploads when enabled on their profile.
+
 ## Stack
 
 - Vite 6

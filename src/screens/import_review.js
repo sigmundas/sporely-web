@@ -12,6 +12,7 @@ import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
+import { getDefaultVisibility } from '../settings.js';
 
 let sessions = [];
 let expandedSessionIds = new Set();
@@ -79,7 +80,7 @@ function _buildSessionsFromSourceItems() {
       gpsLon: exifGps?.lon ?? null,
       locationName: previous?.locationName || '',
       taxon: previous?.taxon || null,
-      visibility: previous?.visibility || 'friends',
+      visibility: previous?.visibility || getDefaultVisibility(),
       exifDebug: group.map(item => item.dbg).filter(Boolean),
     };
   });
@@ -1096,7 +1097,7 @@ async function saveAll() {
         genus: session.taxon?.genus || null,
         species: session.taxon?.specificEpithet || null,
         common_name: session.taxon?.vernacularName || null,
-        visibility: session.visibility || 'friends',
+        visibility: session.visibility || getDefaultVisibility(),
       };
 
       _ensureSessionImageMeta(session);

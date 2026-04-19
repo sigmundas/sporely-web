@@ -743,13 +743,6 @@ html, body {
 
 /* ── PROFILE SCREEN ── */
 .profile-body { padding: 16px 18px 32px; }
-.profile-stats-row {
-  display: flex; background: var(--card); border: 1px solid var(--border);
-  border-radius: 14px; padding: 16px 0; margin-bottom: 20px;
-}
-.profile-stat { flex: 1; text-align: center; }
-.profile-stat-val { font-size: 26px; font-weight: 700; color: var(--white); line-height: 1; margin-bottom: 4px; }
-.profile-stat-lbl { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
 .profile-section { margin-bottom: 20px; }
 .profile-section-title {
   font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
@@ -1859,6 +1852,18 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   transition: background 0.15s;
 }
 .btn-primary:active { background: var(--btn-active); }
+.btn-primary:disabled,
+.btn-primary[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--card-raised);
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+.btn-primary:disabled:active,
+.btn-primary[aria-disabled="true"]:active {
+  background: var(--card-raised);
+}
 .btn-danger {
   padding: 13px; border-radius: 10px;
   background: transparent;
@@ -2231,7 +2236,6 @@ html.light #app { box-shadow: 0 0 40px rgba(0,0,0,0.12); }
 
 /* Stat numbers use --white in dark mode; remap to text-primary in light */
 html.light .home-stat-val,
-html.light .profile-stat-val,
 html.light .finds-title,
 html.light .auth-brand,
 html.light .auth-title,
@@ -2453,7 +2457,7 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
 #settings-overlay {
   position: absolute; inset: 0;
   background: rgba(0,0,0,0.45);
-  z-index: 150;
+  z-index: 1300;
   display: none;
   opacity: 0;
   pointer-events: none;
@@ -2525,6 +2529,69 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
 .settings-gap-unit { font-size: 13px; color: var(--text-dim); }
 .settings-gap-hint {
   margin-top: 8px; font-size: 11px; color: var(--text-dim); line-height: 1.5;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.settings-row-title {
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.settings-switch {
+  position: relative;
+  width: 48px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+.settings-switch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.settings-switch span {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  transition: background 0.15s, border-color 0.15s;
+}
+.settings-switch span::after {
+  content: '';
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  left: 2px;
+  top: 2px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.15s, background 0.15s;
+}
+.settings-switch input:checked + span {
+  background: var(--green-deep);
+  border-color: var(--green-bright);
+}
+.settings-switch input:checked + span::after {
+  transform: translateX(20px);
+  background: #ffffff;
+}
+.settings-clear-cache-btn {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--card);
+  color: var(--text-primary);
+  font-family: 'Outfit', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.settings-clear-cache-btn:active {
+  background: var(--card-raised);
 }
 .settings-stepper {
   display: grid;

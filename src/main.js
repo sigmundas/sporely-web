@@ -16,22 +16,22 @@ import { buildReviewGrid, initReview } from './screens/review.js'
 import { initFindDetail } from './screens/find_detail.js'
 import { initPhotoViewer } from './photo-viewer.js'
 import { initImportReview, renderSessions, restoreImportSessions } from './screens/import_review.js'
-import { loadImportSessions } from './import-store.js'
+import { clearImportSessions, loadImportSessions } from './import-store.js'
 import { initProfile, loadProfile } from './screens/profile.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
-import { getStoredCloudPlanOverride, setStoredCloudPlanOverride } from './cloud-plan.js'
-import { SYNC_SUCCESS_EVENT } from './sync-queue.js'
+import { fetchCloudPlanProfile, getStoredImageResolutionMode, setStoredImageResolutionMode } from './cloud-plan.js'
+import { clearMediaUrlCache } from './images.js'
+import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
+import {
+  getDefaultVisibility,
+  getSyncOverMobileDataEnabled,
+  setDefaultVisibility,
+  setLastSyncAt,
+  setSyncOverMobileDataEnabled,
+} from './settings.js'
 
 initI18n()
-
-const DEBUG_CLOUD_PLAN_REVEAL_KEY = 'sporely_debug_cloud_plan_reveal'
-
-function _debugCloudPlanControlsVisible() {
-  return import.meta.env.DEV
-    || String(import.meta.env.VITE_ENABLE_DEBUG_CLOUD_PLAN || '').trim() === '1'
-    || localStorage.getItem(DEBUG_CLOUD_PLAN_REVEAL_KEY) === '1'
-}
 
 let _syncFeedbackBound = false
 
@@ -41,10 +41,12 @@ function initSyncFeedback() {
 
   window.addEventListener(SYNC_SUCCESS_EVENT, event => {
     const imageCount = Number(event?.detail?.imageCount || 0)
+    setLastSyncAt()
     showToast(t('review.uploadedComplete', { count: imageCount }))
 
     if (state.currentScreen === 'finds') void loadFinds()
     if (state.currentScreen === 'home') void refreshHome()
+    if (state.currentScreen === 'profile') void loadProfile()
   })
 }
 
@@ -52,15 +54,19 @@ function initSyncFeedback() {
 function initSettings() {
   const overlay = document.getElementById('settings-overlay')
   const sheet = document.getElementById('settings-sheet')
-  const versionEl = document.getElementById('settings-version')
-  let versionTapCount = 0
-  let versionTapTimer = null
 
   function _blurActiveControl() {
     const active = document.activeElement
     if (active && /^(INPUT|SELECT|TEXTAREA)$/i.test(active.tagName) && typeof active.blur === 'function') {
       active.blur()
     }
+  }
+
+  async function _refreshSettingsCloudPlan() {
+    const uid = state.user?.id
+    if (!uid) return
+    state.cloudPlan = await fetchCloudPlanProfile(uid)
+    _syncSettingsUI()
   }
 
   function _openSettings(event) {
@@ -73,6 +79,7 @@ function initSettings() {
       overlay.classList.add('open')
       sheet?.focus?.({ preventScroll: true })
     }))
+    void _refreshSettingsCloudPlan()
   }
 
   function _closeSettings() {
@@ -114,37 +121,44 @@ function initSettings() {
     setLocale(localeSelect.value)
   })
 
-  document.querySelectorAll('.settings-cloud-plan-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      setStoredCloudPlanOverride(btn.dataset.cloudPlanOverride)
-      _syncSettingsUI()
+  document.querySelectorAll('.settings-resolution-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      setStoredImageResolutionMode(btn.dataset.imageResolutionMode)
+      await _refreshSettingsCloudPlan()
       if (state.currentScreen === 'profile') loadProfile()
     })
   })
 
-  if (versionEl) {
-    versionEl.addEventListener('click', () => {
-      if (import.meta.env.DEV || String(import.meta.env.VITE_ENABLE_DEBUG_CLOUD_PLAN || '').trim() === '1') {
-        return
-      }
-      versionTapCount += 1
-      if (versionTapTimer) clearTimeout(versionTapTimer)
-      versionTapTimer = setTimeout(() => {
-        versionTapCount = 0
-      }, 1500)
-      if (versionTapCount < 5) return
+  document.getElementById('settings-mobile-sync-toggle')?.addEventListener('change', event => {
+    setSyncOverMobileDataEnabled(event.target.checked)
+    if (event.target.checked) triggerSync()
+  })
 
-      versionTapCount = 0
-      const nextVisible = localStorage.getItem(DEBUG_CLOUD_PLAN_REVEAL_KEY) === '1' ? '0' : '1'
-      if (nextVisible === '0') {
-        setStoredCloudPlanOverride('server')
-      }
-      localStorage.setItem(DEBUG_CLOUD_PLAN_REVEAL_KEY, nextVisible)
+  document.querySelectorAll('.settings-default-visibility-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      setDefaultVisibility(btn.dataset.defaultVisibility)
       _syncSettingsUI()
-      if (state.currentScreen === 'profile') loadProfile()
-      showToast(t(nextVisible === '1' ? 'settings.testingEnabled' : 'settings.testingHidden'))
     })
-  }
+  })
+
+  document.getElementById('settings-clear-cache-btn')?.addEventListener('click', async event => {
+    const btn = event.currentTarget
+    if (!window.confirm(t('settings.clearLocalCacheConfirm'))) return
+    btn.disabled = true
+    try {
+      await clearImportSessions()
+      clearMediaUrlCache()
+      if (window.caches?.keys) {
+        const keys = await caches.keys()
+        await Promise.all(keys.map(key => caches.delete(key)))
+      }
+      showToast(t('settings.localCacheCleared'))
+    } catch (error) {
+      showToast(t('settings.localCacheFailed', { message: error?.message || error }))
+    } finally {
+      btn.disabled = false
+    }
+  })
 }
 
 function _syncSettingsUI() {
@@ -157,15 +171,22 @@ function _syncSettingsUI() {
   const localeSelect = document.getElementById('settings-language-select')
   if (localeSelect) localeSelect.value = getLocale()
 
-  const debugSection = document.getElementById('settings-debug-section')
-  if (debugSection) debugSection.style.display = _debugCloudPlanControlsVisible() ? '' : 'none'
+  const resolutionSection = document.getElementById('settings-image-resolution-section')
+  const isPro = state.cloudPlan?.cloudPlan === 'pro' || !!state.cloudPlan?.fullResStorageEnabled
+  if (resolutionSection) resolutionSection.style.display = isPro ? '' : 'none'
 
-  const override = getStoredCloudPlanOverride()
-  document.querySelectorAll('.settings-cloud-plan-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.cloudPlanOverride === override)
+  const selectedResolution = state.cloudPlan?.imageResolutionMode || getStoredImageResolutionMode()
+  document.querySelectorAll('.settings-resolution-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.imageResolutionMode === selectedResolution)
   })
-  const versionEl = document.getElementById('settings-version')
-  if (versionEl) versionEl.style.opacity = _debugCloudPlanControlsVisible() ? '0.8' : '0.5'
+
+  const mobileSyncToggle = document.getElementById('settings-mobile-sync-toggle')
+  if (mobileSyncToggle) mobileSyncToggle.checked = getSyncOverMobileDataEnabled()
+
+  const defaultVisibility = getDefaultVisibility()
+  document.querySelectorAll('.settings-default-visibility-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.defaultVisibility === defaultVisibility)
+  })
 }
 
 // ── Nav ───────────────────────────────────────────────────────────────────────
