@@ -10,18 +10,21 @@ jobs:
     name: Ping Supabase
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     env:
       SUPABASE_URL: https://zkpjklzfwzefhjluvhfw.supabase.co
       SUPABASE_PUBLISHABLE_KEY: sb_publishable_nZrERVFN3WR4Aqn2yggc7Q_siAG1TCV
       SUPABASE_HEARTBEAT_TABLE: profiles
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
+          package-manager-cache: false
 
       - name: Ping Supabase REST API
         run: node scripts/supabase-heartbeat.mjs
