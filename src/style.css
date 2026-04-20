@@ -190,12 +190,19 @@ html, body {
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
+  z-index: 0;
   transform: translateX(20px);
-  transition: opacity 0.22s ease, transform 0.22s ease;
+  transition: opacity 0.22s ease, transform 0.22s ease, visibility 0s linear 0.22s;
 }
 .screen.active {
-  opacity: 1; pointer-events: auto; transform: none;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 1;
+  transform: none;
+  transition-delay: 0s;
 }
 #screen-capture {
   bottom: 0;

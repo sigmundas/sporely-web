@@ -795,6 +795,22 @@
   <div id="toast"></div>
 </div>
 
+<script>
+  document.addEventListener('click', (event) => {
+    const findsScreen = document.getElementById('screen-finds')
+    if (event.target.closest('#finds-search-btn') && !findsScreen?.classList.contains('active')) {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      return
+    }
+
+    if (event.target.closest('#settings-btn')) {
+      const active = document.activeElement
+      if (active instanceof HTMLElement) active.blur()
+    }
+  }, true)
+</script>
+
 <script type="module" src="/src/main.js"></script>
 </body>
 </html>
