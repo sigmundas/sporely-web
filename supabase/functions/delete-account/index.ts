@@ -41,6 +41,7 @@ Deno.serve(async req => {
     await admin.from('comments').delete().eq('user_id', uid)
     await admin.from('observation_shares').delete().eq('shared_with_id', uid)
     await admin.from('friendships').delete().or(`requester_id.eq.${uid},addressee_id.eq.${uid}`)
+    await admin.from('user_blocks').delete().or(`blocker_id.eq.${uid},blocked_id.eq.${uid}`)
 
     const { data: observations } = await admin
       .from('observations')

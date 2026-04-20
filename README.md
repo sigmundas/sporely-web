@@ -65,7 +65,7 @@ The app ships with working production defaults for the current Supabase project 
 
 ## Android
 
-The Android wrapper lives in [`android/`](android/).
+The Android wrapper lives in `android/` and is configured with the package name `com.sporelab.sporely` for Google Play Store distribution.
 
 Typical build flow:
 

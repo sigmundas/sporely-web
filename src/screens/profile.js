@@ -69,6 +69,22 @@ export function initProfile() {
     e.target.value = ''
   })
   _initCropEvents()
+
+  // Inject EULA / Terms of Service link in Danger Zone
+  const dangerZone = document.querySelector('.profile-danger-zone')
+  if (dangerZone && !document.getElementById('profile-tos-link')) {
+    const tosLink = document.createElement('a')
+    tosLink.id = 'profile-tos-link'
+    tosLink.href = 'https://sporely.no/terms'
+    tosLink.target = '_blank'
+    tosLink.textContent = t('profile.termsOfService') || 'Terms of Service'
+    tosLink.style.display = 'block'
+    tosLink.style.textAlign = 'center'
+    tosLink.style.color = 'var(--text-secondary)'
+    tosLink.style.fontSize = '13px'
+    tosLink.style.textDecoration = 'none'
+    dangerZone.insertBefore(tosLink, document.getElementById('delete-account-btn'))
+  }
 }
 
 // ── Load (called on navigate to profile) ─────────────────────────────────────

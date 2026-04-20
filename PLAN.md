@@ -623,12 +623,45 @@ return new Promise((resolve, reject) => {
     - Set up a webhook listener to update the user's `cloud_plan` / `full_res_storage_enabled` fields when a purchase is confirmed.
 
 
+### 4. App Distribution (Google Play Store)
+*Goal: Release the native Android Capacitor wrapper to the Google Play Store.*
+- [x] Configure standard package name (`com.sporelab.sporely`) in Capacitor and Android project.
+- [ ] Create Android Keystore and configure release signing.
+- [ ] Build App Bundle (`.aab`) and upload to Google Play Console.
+- [ ] Prepare store listing, screenshots, and privacy policy.
+
 
 ### 5. Transparency & Open Source
 - [ ] **UI Disclaimers:**
     - Add clear messaging around free 2 MP uploads, Pro 12 MP uploads, and account storage quota.
 - [x] **Documentation:**
     - Update `README.md` to explain the division between the open-source client code and the paid cloud storage hosting.
+
+## Phase 5: UGC Moderation & Play Store Compliance
+*Goal: Implement required User Generated Content (UGC) moderation features to satisfy Google Play Store policies before APK release.*
+
+### 1. Terms of Service & EULA
+- [x] **Legal Document** — Write a EULA/Terms of Service explicitly defining objectionable content (no hate speech, illegal content, etc.).
+- [x] **Publish** — Host the EULA on `sporely.no` (via VitePress/landing page).
+- [x] **In-App Link** — Add an "Accept Terms" checkbox on the signup screen and a link to the EULA in App Settings / Profile.
+
+### 2. User Blocking
+- [x] **Schema Update** — Create a `user_blocks` table (`blocker_id`, `blocked_id`, `created_at`).
+- [x] **View Filtering** — Update `observations_community_view` and `observations_friend_view` to omit records where the author is blocked by the current user (or vice versa). Apply same filtering to comment RPCs/queries.
+- [x] **UI Implementation** — Add a "Block User" action to the `Profile` and `Find Detail` screens (e.g., via an overflow menu on observations and comments).
+- [x] **Local Hiding** — Instantly remove the blocked user's content from the local UI (`state.finds` / comments) upon successful block.
+
+### 3. Content Reporting
+- [x] **Schema Update** — Create a `reports` table (`id`, `reporter_id`, `reported_user_id`, `observation_id`, `comment_id`, `reason`, `status`, `created_at`).
+- [x] **UI Implementation** — Add a "Report" action to every public observation (Find Detail screen) and comment.
+- [x] **Report Dialog** — Implement a UI dialog to choose a report reason (e.g., "Spam", "Inappropriate", "Offensive").
+- [x] **Optimistic Hiding** — Once reported, immediately hide the reported content locally so the reporter no longer has to see it.
+
+### 4. Admin Moderation
+- [x] **Schema Update** — Add `is_banned` and `is_admin` boolean flags to `profiles`.
+- [x] **Backend Enforcement** — Ensure database triggers and the Cloudflare R2 Worker block upload/write actions for users where `profiles.is_banned = true`.
+- [x] **Content Hiding** — Update `observations_community_view` and `observations_friend_view` to hide past posts from banned users.
+- [ ] **Moderation Dashboard** — V1: Utilize Supabase Studio as the backend dashboard to routinely review the `reports` table, delete offending `observations`/`comments`, and ban bad actors. V2: Build an in-app `/admin` view gated by `is_admin = true`.
 
 ## Ongoing Database & Operations Tasks
 - Ensure `delete-account` Edge Function is deployed and functional.
@@ -662,3 +695,19 @@ return new Promise((resolve, reject) => {
 - Verify Pro/full-res accounts show the Settings image-resolution selector with `Reduced (2MP)` and `Max (12MP)`.
 - Upload and delete a test observation, then confirm `profiles.total_storage_bytes`, `storage_used_bytes`, and `image_count` move in the expected direction.
 - Set a small `storage_quota_bytes` on a free test profile and confirm uploads over the quota are rejected by the worker.
+
+### 5. UGC Moderation & Play Store Compliance
+- **Terms of Service:** On the Auth screen, confirm the "Accept Terms" checkbox blocks sign-up if unchecked. Confirm the ToS link works there and in the Profile screen's Danger Zone.
+- **User Blocking:** 
+  - Find a public observation by another user and click "Block user".
+  - Verify a success toast appears and that you are returned to the previous screen.
+  - Verify that the blocked user's observations and comments no longer appear in your Home, Finds, or Comment lists.
+- **Content Reporting:**
+  - Find an observation by another user, click "Report post", enter a reason, and verify the success toast.
+  - Find a comment by another user, click "Report", enter a reason, and verify the success toast.
+  - Log into Supabase Studio and verify that both reports appear in the `reports` table.
+- **Ban Enforcement (Write & Upload):**
+  - In Supabase Studio, manually set `is_banned = true` on a test user's profile.
+  - Log in as the test user. Try to save a new observation with an image. Verify the Cloudflare worker rejects the upload and/or the database trigger rejects the save. Try to leave a comment and verify the database trigger rejects it.
+- **Ban Enforcement (Read/Hide):**
+  - Log in as a normal user. Verify that all past observations from the banned test user are completely hidden from the Community and Friends feeds.

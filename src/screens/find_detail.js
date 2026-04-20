@@ -11,6 +11,7 @@ import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { normalizeAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility, setLastSyncAt } from '../settings.js'
+import { refreshHome } from './home.js'
 
 let currentObs    = null
 let selectedTaxon = null
@@ -447,6 +448,44 @@ function _applyOwnershipMode(isOwner) {
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.disabled = !isOwner
   })
+
+  let modContainer = document.getElementById('detail-mod-container')
+  if (!isOwner) {
+    if (!modContainer) {
+      modContainer = document.createElement('div')
+      modContainer.id = 'detail-mod-container'
+      modContainer.style.marginTop = '24px'
+      modContainer.style.paddingTop = '16px'
+      modContainer.style.borderTop = '1px solid var(--border-dim)'
+      modContainer.style.display = 'flex'
+      modContainer.style.gap = '10px'
+      
+      const blockBtn = document.createElement('button')
+      blockBtn.id = 'detail-block-btn'
+      blockBtn.className = 'btn-secondary btn-sm'
+      blockBtn.style.flex = '1'
+      blockBtn.style.color = 'var(--red)'
+      blockBtn.textContent = t('detail.blockUser') || 'Block user'
+      blockBtn.addEventListener('click', _blockObservationAuthor)
+      
+      const reportBtn = document.createElement('button')
+      reportBtn.id = 'detail-report-btn'
+      reportBtn.className = 'btn-secondary btn-sm'
+      reportBtn.style.flex = '1'
+      reportBtn.style.color = 'var(--amber)'
+      reportBtn.textContent = t('detail.reportPost') || 'Report post'
+      reportBtn.addEventListener('click', _reportObservation)
+      
+      modContainer.appendChild(reportBtn)
+      modContainer.appendChild(blockBtn)
+      
+      const body = document.querySelector('#screen-find-detail .review-body')
+      if (body) body.appendChild(modContainer)
+    }
+    modContainer.style.display = 'flex'
+  } else {
+    if (modContainer) modContainer.style.display = 'none'
+  }
 }
 
 async function _searchTaxon(q, dropdown) {
@@ -597,16 +636,65 @@ async function _delete() {
   }
 }
 
+async function _blockObservationAuthor() {
+  if (!currentObs || !state.user) return
+  if (!confirm(t('detail.blockUserConfirm') || 'Block this user? You will no longer see their posts and comments.')) return
+  
+  const btn = document.getElementById('detail-block-btn')
+  if (btn) btn.disabled = true
+  
+  const { error } = await supabase.from('user_blocks').insert({
+    blocker_id: state.user.id,
+    blocked_id: currentObs.user_id
+  })
+  
+  if (error && error.code !== '23505') {
+    showToast((t('detail.blockFailed') || 'Failed to block user: ') + error.message)
+    if (btn) btn.disabled = false
+    return
+  }
+  
+  showToast(t('detail.userBlocked') || 'User blocked.')
+  await loadFinds()
+  await refreshHome()
+  _goBack()
+}
+
+async function _reportObservation() {
+  if (!currentObs || !state.user) return
+  const reason = prompt(t('detail.reportReason') || 'Why are you reporting this post? (e.g. spam, inappropriate)')
+  if (!reason) return
+  
+  const btn = document.getElementById('detail-report-btn')
+  if (btn) btn.disabled = true
+  
+  const { error } = await supabase.from('reports').insert({
+    reporter_id: state.user.id,
+    reported_user_id: currentObs.user_id,
+    observation_id: currentObs.id,
+    reason: reason.trim(),
+    status: 'pending'
+  })
+  
+  if (error) {
+    showToast((t('detail.reportFailed') || 'Failed to report: ') + error.message)
+    if (btn) btn.disabled = false
+    return
+  }
+  
+  showToast(t('detail.postReported') || 'Post reported to admins.')
+  _goBack()
+}
+
 async function _loadComments(obsId) {
   const list = document.getElementById('comments-list')
   if (!list) return
   list.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('common.loading')}</div>`
 
-  const { data, error } = await supabase
-    .from('comments')
-    .select('id, body, created_at, user_id')
-    .eq('observation_id', obsId)
-    .order('created_at', { ascending: true })
+  const [{ data, error }, { data: blocks }] = await Promise.all([
+    supabase.from('comments').select('id, body, created_at, user_id').eq('observation_id', obsId).order('created_at', { ascending: true }),
+    supabase.from('user_blocks').select('blocked_id').eq('blocker_id', state.user?.id)
+  ])
 
   if (error) {
     console.warn('Comment load failed:', error.message)
@@ -614,24 +702,80 @@ async function _loadComments(obsId) {
     return
   }
 
-  if (!data?.length) {
+  const blockedIds = new Set((blocks || []).map(b => b.blocked_id))
+  const visibleComments = (data || []).filter(c => !blockedIds.has(c.user_id))
+
+  if (!visibleComments?.length) {
     list.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('comments.none')}</div>`
     return
   }
 
-  const authorMap = await fetchCommentAuthorMap(data, state.user)
+  const authorMap = await fetchCommentAuthorMap(visibleComments, state.user)
 
-  list.innerHTML = data.map(c => {
+  list.innerHTML = visibleComments.map(c => {
     const { name, initial } = getCommentAuthor(authorMap[c.user_id])
     const date = formatDate(c.created_at, { day: 'numeric', month: 'short' })
+    const isMe = c.user_id === state.user?.id
+    const modHtml = !isMe ? `
+      <div style="margin-left:auto; display:flex; gap:8px;">
+        <button class="comment-report-btn" data-uid="${c.user_id}" data-cid="${c.id}" style="background:none; border:none; color:var(--amber); font-size:11px; cursor:pointer;">Report</button>
+        <button class="comment-block-btn" data-uid="${c.user_id}" style="background:none; border:none; color:var(--red); font-size:11px; cursor:pointer;">Block</button>
+      </div>
+    ` : ''
+
     return `<div class="comment-row">
       <div class="comment-avatar">${_esc(initial)}</div>
       <div class="comment-body-wrap">
-        <div class="comment-meta"><span class="comment-author">${_esc(name)}</span><span class="comment-date">${date}</span></div>
+        <div class="comment-meta">
+          <span class="comment-author">${_esc(name)}</span>
+          <span class="comment-date">${date}</span>
+          ${modHtml}
+        </div>
         <div class="comment-text">${_esc(c.body)}</div>
       </div>
     </div>`
   }).join('')
+
+  list.querySelectorAll('.comment-report-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const reason = prompt(t('comments.reportReason') || 'Why are you reporting this comment?')
+      if (!reason) return
+      const uid = btn.dataset.uid
+      const cid = btn.dataset.cid
+      const { error } = await supabase.from('reports').insert({
+        reporter_id: state.user.id,
+        reported_user_id: uid,
+        comment_id: cid,
+        observation_id: obsId,
+        reason: reason.trim(),
+        status: 'pending'
+      })
+      if (error) {
+        showToast((t('comments.reportFailed') || 'Failed to report: ') + error.message)
+        return
+      }
+      showToast(t('comments.commentReported') || 'Comment reported.')
+    })
+  })
+
+  list.querySelectorAll('.comment-block-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm(t('comments.blockConfirm') || 'Block this user?')) return
+      const uid = btn.dataset.uid
+      const { error } = await supabase.from('user_blocks').insert({
+        blocker_id: state.user.id,
+        blocked_id: uid
+      })
+      if (error && error.code !== '23505') {
+        showToast((t('comments.blockFailed') || 'Failed to block: ') + error.message)
+        return
+      }
+      showToast(t('comments.userBlocked') || 'User blocked.')
+      _loadComments(obsId)
+      loadFinds()
+      refreshHome()
+    })
+  })
 }
 
 function _initMentions(input) {

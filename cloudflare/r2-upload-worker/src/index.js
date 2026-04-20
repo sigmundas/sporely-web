@@ -114,6 +114,9 @@ async function handleUpload(request, env, ctx, url) {
   const existingBytes = mediaObjectSize(existingObject)
   const storageDelta = Math.max(0, bodyBytes - existingBytes)
   const profile = await fetchStorageProfile(env, claims.sub)
+  if (profile?.is_banned === true) {
+    throw httpError(403, 'user_banned', 'User is banned from uploading media')
+  }
   assertStorageQuotaAllowsUpload(profile, storageDelta, env)
 
   const cacheControl = String(request.headers.get('Cache-Control') || 'public, max-age=31536000, immutable').trim()
@@ -202,7 +205,7 @@ async function fetchStorageProfile(env, userId) {
 
   const query = [
     `id=eq.${encodeURIComponent(userId)}`,
-    'select=cloud_plan,storage_quota_bytes,total_storage_bytes,storage_used_bytes,image_count',
+    'select=cloud_plan,storage_quota_bytes,total_storage_bytes,storage_used_bytes,image_count,is_banned',
     'limit=1',
   ].join('&')
   const response = await supabaseRestFetch(env, `/rest/v1/profiles?${query}`, { method: 'GET' })

@@ -132,6 +132,23 @@ html, body {
 .auth-input:focus { border-color: var(--green-bright); }
 .auth-input::placeholder { color: var(--text-dim); }
 
+.auth-terms {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: -4px;
+}
+.auth-terms input[type="checkbox"] {
+  margin-top: 2px;
+}
+.auth-terms a {
+  color: var(--green-accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+
 .auth-btn {
   padding: 14px; border-radius: 10px;
   background: var(--btn-bg);

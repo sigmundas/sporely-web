@@ -148,6 +148,12 @@ async function loadRecentComments() {
     .limit(3)
     .then(r => r.error?.message?.includes('mentioned_user_ids') ? { data: [] } : r)
 
+  const { data: blocks } = await supabase
+    .from('user_blocks')
+    .select('blocked_id')
+    .eq('blocker_id', state.user.id)
+  const blockedIds = new Set((blocks || []).map(b => b.blocked_id))
+
   // Merge and deduplicate by id, sort by created_at desc, limit 5
   const seen = new Set((data || []).map(c => c.id))
   const merged = [...(data || [])]
@@ -155,7 +161,7 @@ async function loadRecentComments() {
     if (!seen.has(c.id)) { seen.add(c.id); merged.push(c) }
   }
   merged.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-  const combined = merged.slice(0, 5)
+  const combined = merged.filter(c => !blockedIds.has(c.user_id)).slice(0, 5)
 
   if (!combined.length) {
     list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">${t('comments.none')}</p>`

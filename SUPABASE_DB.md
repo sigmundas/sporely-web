@@ -45,10 +45,18 @@ See also:
   - Columns: `observation_id` (bigint FK), `user_id` (uuid FK), `body` (text), `created_at`
   - Visibility enforced by RLS: same access rules as the parent observation
 
+### Moderation / UGC Compliance
+- `user_blocks`
+  - Enforces one-way user blocking for feed filtering
+  - Columns: `blocker_id` (uuid), `blocked_id` (uuid), `created_at`
+- `reports`
+  - Tracks user-reported objectionable content for admin review
+  - Columns: `id`, `reporter_id` (uuid), `reported_user_id` (uuid), `observation_id` (nullable FK), `comment_id` (nullable FK), `reason` (text), `status` (enum: 'pending'/'reviewed'/'resolved'), `created_at`
+
 ### Profiles / social graph
 - `profiles`
   - Auto-created by a Postgres trigger on `auth.users` insert
-  - Columns: `username` (unique), `display_name`, `avatar_url`, `bio`
+  - Columns: `username` (unique), `display_name`, `avatar_url`, `bio`, `is_admin` (bool), `is_banned` (bool)
   - Avatar initials derived from `username` or `email` on the client
 - `friendships`
   - Bidirectional friendship rows with status gating: `pending` / `accepted` / `blocked`
@@ -82,8 +90,12 @@ See also:
   - GPS handling:
     - GPS coordinates are nulled out in the view when `location_public = false`
     - location access can be explicitly granted via `observation_shares`
+  - Block filtering: Omits observations where the user is blocked by or has blocked the viewer.
+  - Ban filtering: Omits observations where the author `is_banned = true`.
 - `observations_community_view`
   - Exposes observations where `visibility = 'public'` to all authenticated users
+  - Block filtering: Omits observations authored by users present in the viewer's `user_blocks` list.
+  - Ban filtering: Omits observations where the author `is_banned = true`.
 
 ---
 
@@ -127,6 +139,7 @@ All tables have RLS enabled and default "owner-only" access unless overridden by
 ### RLS: who can write what (high level)
 - Client writes are constrained to rows owned by the authenticated user (`user_id`)
 - Images: allowed only when the Storage object path prefix matches the authenticated user UUID
+- Banned Users: A Postgres trigger prevents `INSERT` and `UPDATE` on `observations`, `observation_images`, and `comments` if `profiles.is_banned = true`.
 - Client code must never rely on setting `user_id` from the client as a trust boundary; RLS is the enforcement
 - Account deletion is not performed directly from the client; it goes through the `delete-account`
   Edge Function because deleting `auth.users` requires elevated privileges
@@ -188,6 +201,11 @@ For `avatars`:
    - `location_public = false` friends see null GPS unless sharing explicitly grants access
    - `visibility = 'private'` observations do not appear in friend or community views
    - `visibility = 'public'` observations appear in `observations_community_view`
+
+8. **Verify UGC Moderation**
+   - `user_blocks` and `reports` tables exist and have RLS policies.
+   - `observations_community_view` and `observations_friend_view` successfully filter out blocked content.
+   - `profiles` correctly tracks `is_admin` and `is_banned`.
 
 ---
 

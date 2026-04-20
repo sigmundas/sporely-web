@@ -261,6 +261,19 @@ export function initAuth(onAuthenticated) {
   loginBtn.dataset.label  = t('auth.signIn')
   signupBtn.dataset.label = t('auth.createAccount')
 
+  // Inject Terms of Service checkbox dynamically
+  if (signupForm && signupBtn && !document.getElementById('signup-terms')) {
+    const termsLabel = document.createElement('label')
+    termsLabel.className = 'auth-terms'
+    termsLabel.innerHTML = `
+      <input type="checkbox" id="signup-terms" required>
+      <span>
+        I agree to the <a href="https://sporely.no/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> and confirm I will not upload objectionable or illegal content.
+      </span>
+    `
+    signupForm.insertBefore(termsLabel, signupBtn)
+  }
+
   _restoreAuthDraft()
   _persistAuthInputs()
   // Turnstile is initialised lazily when the user switches to the signup view
