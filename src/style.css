@@ -686,6 +686,10 @@ html, body {
   font-size: 12px;
   font-weight: 600;
 }
+.finds-view-btn-mark {
+  font-size: 15px;
+  font-weight: 700;
+}
 .finds-view-btn.active {
   background: var(--card-raised); color: var(--green-accent);
 }
@@ -960,6 +964,11 @@ html, body {
   font-family: 'Outfit', sans-serif;
   font-size: 17px; font-weight: 700; color: var(--white);
   margin-bottom: 5px; line-height: 1.3; display: block;
+}
+.find-card-uncertain {
+  color: var(--green-accent);
+  font-family: 'DM Mono', monospace;
+  font-style: normal;
 }
 .find-card-name--compact {
   font-size: 14px;
@@ -1505,16 +1514,11 @@ html, body {
   display: flex; align-items: center; justify-content: space-between;
   pointer-events: auto;
 }
-.capture-side-btn {
-  width: 44px; height: 44px; border-radius: 50%;
-  background: rgba(255,255,255,0.12);
-  border: 1px solid rgba(255,255,255,0.15);
-  backdrop-filter: blur(8px);
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer; color: white;
-  transition: background 0.15s;
+.capture-control-spacer {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
 }
-.capture-side-btn:active { background: rgba(255,255,255,0.2); }
 .shutter-btn {
   width: 70px; height: 70px; border-radius: 50%;
   background: rgba(255,255,255,0.9);
@@ -2470,7 +2474,7 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
   background: var(--surface);
   border-radius: 20px 20px 0 0;
   padding: 10px 20px calc(28px + var(--safe-bottom));
-  max-height: calc(100dvh - var(--safe-top) - 18px);
+  max-height: min(82dvh, calc(100dvh - var(--safe-top) - 56px));
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   transform: translateY(100%);
@@ -2482,11 +2486,34 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
 
 .settings-handle {
   width: 36px; height: 4px; border-radius: 2px;
-  background: var(--border); margin: 0 auto 20px;
+  background: var(--border); margin: 0 auto 14px;
+}
+.settings-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
 }
 .settings-title {
   font-size: 16px; font-weight: 700; color: var(--text-primary);
-  margin-bottom: 18px;
+}
+.settings-close-btn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: var(--card);
+  color: var(--text-secondary);
+  font: 500 22px/1 'Outfit', sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.settings-close-btn:active {
+  background: var(--card-raised);
+  color: var(--text-primary);
 }
 .settings-section-label {
   font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
@@ -2611,6 +2638,9 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
   background: transparent;
 }
 .settings-gap-display {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   pointer-events: none;
   user-select: none;
 }

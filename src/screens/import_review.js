@@ -14,12 +14,23 @@ import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
 import { getDefaultVisibility } from '../settings.js';
 
+const NativePhotoPicker = registerPlugin('NativePhotoPicker');
 let sessions = [];
 let expandedSessionIds = new Set();
 let sourceItems = [];
 let exifrModulePromise = null;
 const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
-const RAW_GPS_PICK = ['GPSLatitude', 'GPSLatitudeRef', 'GPSLongitude', 'GPSLongitudeRef', 'latitude', 'longitude'];
+const RAW_GPS_PICK = [
+  'GPSLatitude',
+  'GPSLatitudeRef',
+  'GPSLongitude',
+  'GPSLongitudeRef',
+  'GPSAltitude',
+  'GPSAltitudeRef',
+  'latitude',
+  'longitude',
+  'altitude',
+];
 const IMPORT_AI_MAX_EDGE = 1920;
 
 function _persistSessions() {
@@ -64,7 +75,7 @@ function _buildSessionsFromSourceItems() {
   sessions = grouped.map((group, idx) => {
     const key = _groupKey(group);
     const previous = previousByKey.get(key);
-    const exifGps = group.find(item => item.lat !== null && item.lon !== null);
+    const exifGps = group.find(item => _isUsableCoordinate(item.lat, item.lon));
     return {
       id: previous?.id || `s${idx}`,
       sourceItemIds: group.map(item => item.id),
@@ -72,12 +83,14 @@ function _buildSessionsFromSourceItems() {
       aiFiles: group.map(item => item.aiBlob || item.blob),
       blobUrls: group.map(item => URL.createObjectURL(item.aiBlob || item.blob)),
       imageMeta: group.map(item => item.meta),
+      metadataPromises: group.map(item => item.metadataPromise || null),
       photoTimes: group.map(item => item.captureTime),
-      photoGps: group.map(item => ({ lat: item.lat, lon: item.lon })),
+      photoGps: group.map(item => ({ lat: item.lat, lon: item.lon, altitude: item.altitude ?? null })),
       photoDebug: group.map(item => item.dbg || null),
       ts: new Date(group[0].captureTime),
       gpsLat: exifGps?.lat ?? null,
       gpsLon: exifGps?.lon ?? null,
+      gpsAltitude: exifGps?.altitude ?? null,
       locationName: previous?.locationName || '',
       taxon: previous?.taxon || null,
       visibility: previous?.visibility || getDefaultVisibility(),
@@ -98,9 +111,11 @@ function _flattenSourceItemsFromSessions(savedSessions) {
         aiCropSourceW: null,
         aiCropSourceH: null,
       },
+      metadataPromise: session.metadataPromises?.[index] || null,
       captureTime: session.photoTimes?.[index] || session.ts?.getTime?.() || Date.now(),
       lat: session.photoGps?.[index]?.lat ?? null,
       lon: session.photoGps?.[index]?.lon ?? null,
+      altitude: session.photoGps?.[index]?.altitude ?? null,
       dbg: session.photoDebug?.[index] || null,
     }))
   );
@@ -117,6 +132,71 @@ function _ensureSessionImageMeta(session) {
     });
   }
   return session.imageMeta;
+}
+
+function _applyMetadataToSession(session, index, metadata) {
+  if (!session || !metadata) return false;
+  const lat = Number(metadata.lat);
+  const lon = Number(metadata.lon);
+  const hasGps = _isUsableCoordinate(lat, lon);
+  const altitude = Number(metadata.altitude);
+  const time = Number(metadata.time);
+  let changed = false;
+
+  if (Number.isFinite(time) && session.photoTimes?.[index] !== time) {
+    session.photoTimes[index] = time;
+    if (index === 0) session.ts = new Date(time);
+    changed = true;
+  }
+
+  if (hasGps) {
+    if (!Array.isArray(session.photoGps)) session.photoGps = [];
+    session.photoGps[index] = {
+      ...(session.photoGps[index] || {}),
+      lat,
+      lon,
+      altitude: Number.isFinite(altitude) ? altitude : (session.photoGps[index]?.altitude ?? null),
+    };
+    if (session.gpsLat === null || session.gpsLon === null) {
+      session.gpsLat = lat;
+      session.gpsLon = lon;
+      session.gpsAltitude = Number.isFinite(altitude) ? altitude : null;
+      changed = true;
+    }
+    if (session.gpsAltitude == null && Number.isFinite(altitude)) {
+      session.gpsAltitude = altitude;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function _attachSessionMetadataHydration() {
+  sessions.forEach(session => {
+    if (session.metadataPromise || !Array.isArray(session.metadataPromises)) return;
+    const pending = session.metadataPromises
+      .map((promise, index) => promise ? { promise, index } : null)
+      .filter(Boolean);
+    if (!pending.length) return;
+
+    session.metadataPromise = Promise.allSettled(pending.map(item => item.promise)).then(results => {
+      let changed = false;
+      results.forEach((result, resultIndex) => {
+        if (result.status !== 'fulfilled') return;
+        const index = pending[resultIndex].index;
+        changed = _applyMetadataToSession(session, index, result.value) || changed;
+      });
+      if (changed) {
+        _persistSessions();
+        if (state.currentScreen === 'import-review') {
+          renderSessions();
+          _prefillSessionLocations();
+        }
+      }
+      return session;
+    });
+  });
 }
 
 function sessionById(sid) {
@@ -189,21 +269,10 @@ export function restoreImportSessions(savedSessions) {
 export async function openPhotoImportPicker() {
   if (_isNativeApp()) {
     try {
-      // Request permissions first to ensure ACCESS_MEDIA_LOCATION is handled
-      await FilePicker.requestPermissions();
-
-      const result = await FilePicker.pickImages({ multiple: true, readData: false });
-      const photos = Array.isArray(result?.files) ? result.files : [];
-      if (!photos.length) return;
-
-      _setProgress(0, photos.length, t('import.readingFiles'));
-
-      const files = [];
-      for (let i = 0; i < photos.length; i++) {
-        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
-        files.push(await _nativePickedPhotoToFile(photos[i], i));
-      }
-      await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos });
+      const result = Capacitor.getPlatform?.() === 'android'
+        ? await _pickImagesWithNativePhotoPicker()
+        : await _pickImagesWithFilePicker();
+      await _handleNativePhotoResult(result);
       return;
     } catch (err) {
       if (_isPickerCancel(err)) return;
@@ -215,7 +284,49 @@ export async function openPhotoImportPicker() {
   _openBrowserFileInput('import-photo-input');
 }
 
+async function _handleNativePhotoResult(result) {
+  const photos = Array.isArray(result?.photos) ? result.photos
+    : Array.isArray(result?.files) ? result.files
+      : [];
+  if (!photos.length) return;
+
+  _setProgress(0, photos.length, t('import.readingFiles'));
+
+  const files = [];
+  for (let i = 0; i < photos.length; i++) {
+    _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
+    files.push(await _nativePickedPhotoToFile(photos[i], i));
+  }
+  await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos });
+}
+
+async function _pickImagesWithFilePicker() {
+  // Request permissions first to ensure ACCESS_MEDIA_LOCATION is handled where available.
+  await FilePicker.requestPermissions();
+  return FilePicker.pickImages({ multiple: true, readData: false });
+}
+
+async function _pickImagesWithNativePhotoPicker() {
+  try {
+    await FilePicker.requestPermissions({ permissions: ['accessMediaLocation'] });
+  } catch (error) {
+    console.warn('Could not request media-location permission before import:', error);
+  }
+  return NativePhotoPicker.pickImages();
+}
+
 export async function openFileImportPicker() {
+  if (_isNativeApp() && Capacitor.getPlatform?.() === 'android') {
+    try {
+      await _handleNativePhotoResult(await _pickImagesWithNativePhotoPicker());
+      return;
+    } catch (err) {
+      if (_isPickerCancel(err)) return;
+      console.warn('Native photo picker failed, falling back to browser input:', err);
+      _hideProgress();
+    }
+  }
+
   if (window.showOpenFilePicker) {
     try {
       const handles = await window.showOpenFilePicker({
@@ -264,11 +375,20 @@ async function handleSelectedFiles(files, options = {}) {
   const withTimes = await Promise.all(files.map(async (f, idx) => {
     const nativePhoto = nativePhotos[idx];
     if (nativePhoto) {
-      const { time, lat, lon, dbg } = await _captureNativePhotoExif(nativePhoto, f);
-      return { file: f, captureTime: time, lat, lon, dbg };
+      const { time, lat, lon, altitude, dbg } = await _captureNativePhotoExif(nativePhoto, f);
+      return {
+        file: f,
+        nativePhoto,
+        metadataPromise: _createNativeMetadataHydrationPromise(nativePhoto, f),
+        captureTime: time,
+        lat,
+        lon,
+        altitude,
+        dbg,
+      };
     }
-    const { time, lat, lon, dbg } = await _captureExif(f);
-    return { file: f, captureTime: time, lat, lon, dbg };
+    const { time, lat, lon, altitude, dbg } = await _captureExif(f);
+    return { file: f, captureTime: time, lat, lon, altitude, dbg };
   }));
 
   // Sort by actual capture time
@@ -283,21 +403,24 @@ async function handleSelectedFiles(files, options = {}) {
   for (let idx = 0; idx < withTimes.length; idx++) {
     const item = withTimes[idx];
     _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
-    const processed = await _processFile(item.file);
+    const processed = await _processFile(item.file, { nativePhoto: item.nativePhoto });
     sourceItems.push({
       id: `i${idx}`,
       blob: processed.blob,
       aiBlob: processed.aiBlob || processed.blob,
       meta: processed.meta,
+      metadataPromise: item.metadataPromise || null,
       captureTime: item.captureTime,
       lat: item.lat ?? null,
       lon: item.lon ?? null,
+      altitude: item.altitude ?? null,
       dbg: item.dbg || null,
     });
     doneCount++;
   }
 
   _buildSessionsFromSourceItems();
+  _attachSessionMetadataHydration();
 
   _hideProgress();
 
@@ -337,7 +460,7 @@ function _hideProgress() {
 
 function _prefillSessionLocations() {
   sessions.forEach(async session => {
-    if (session.gpsLat === null || session.locationName) return;
+    if (!_isUsableCoordinate(Number(session.gpsLat), Number(session.gpsLon)) || session.locationName) return;
     const name = await _reverseGeocode(session.gpsLat, session.gpsLon);
     if (name && !session.locationName) {
       session.locationName = name;
@@ -431,8 +554,9 @@ async function _nativePickedPhotoToFile(photo, index) {
   }
 
   // Fast native file read using Capacitor protocol (avoids blocking base64 encode)
-  const url = Capacitor.convertFileSrc(path);
+  const url = Capacitor.convertFileSrc(_normalizeNativePathForFetch(path));
   const res = await fetch(url);
+  if (!res.ok) throw new Error(`Could not read native photo (${res.status})`);
   const blob = await res.blob();
 
   const fileName = _guessNativeFileName(photo, index, mimeType);
@@ -440,6 +564,58 @@ async function _nativePickedPhotoToFile(photo, index) {
     type: mimeType,
     lastModified: Date.now(),
   });
+}
+
+function _shouldHydrateNativeMetadata(photo, file) {
+  if (Capacitor.getPlatform?.() !== 'android') return false;
+  if (!photo?.originalPath) return false;
+  if (photo.originalPath === photo.path && !_isHeicLike(file)) return false;
+  const rawGps = _extractLatLonFromRawGps(photo.exif);
+  return rawGps.lat === null || rawGps.lon === null;
+}
+
+function _createNativeMetadataHydrationPromise(photo, file) {
+  if (!_shouldHydrateNativeMetadata(photo, file)) return null;
+  return _captureNativeOriginalExif(photo).catch(error => ({
+    time: file.lastModified || Date.now(),
+    lat: null,
+    lon: null,
+    altitude: null,
+    dbg: {
+      fileName: file.name,
+      fileSize: file.size,
+      fileType: file.type,
+      nativePath: photo?.path || null,
+      originalPath: photo?.originalPath || null,
+      backgroundExifError: String(error),
+    },
+  }));
+}
+
+async function _captureNativeOriginalExif(photo) {
+  const path = photo?.originalPath || photo?.path;
+  if (!path) throw new Error('Missing native original path');
+  const mimeType = _normalizeNativeMimeType(photo?.originalMimeType || photo?.mimeType, photo?.originalFormat || photo?.format);
+  const url = Capacitor.convertFileSrc(_normalizeNativePathForFetch(path));
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Could not read native original photo (${res.status})`);
+  const blob = await res.blob();
+  const fileName = _guessNativeFileName({
+    name: photo?.name || '',
+    mimeType,
+    format: photo?.originalFormat || photo?.format,
+  }, 0, mimeType);
+  const originalFile = new File([blob], fileName, {
+    type: mimeType,
+    lastModified: Date.now(),
+  });
+  return _captureExif(originalFile);
+}
+
+function _normalizeNativePathForFetch(path) {
+  const value = String(path || '');
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return value;
+  return value.startsWith('/') ? `file://${value}` : value;
 }
 
 function _normalizeNativeMimeType(mimeType, format) {
@@ -488,6 +664,12 @@ function _coerceExifNumber(value) {
   return null;
 }
 
+function _isUsableCoordinate(lat, lon) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return false;
+  return !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001);
+}
+
 function _toDecimalDegrees(value) {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (Array.isArray(value)) {
@@ -518,14 +700,32 @@ function _extractLatLonFromRawGps(rawGps) {
 
   lat = _coerceExifNumber(lat);
   lon = _coerceExifNumber(lon);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return { lat: null, lon: null };
+  if (!_isUsableCoordinate(lat, lon)) return { lat: null, lon: null };
   return { lat, lon };
+}
+
+function _extractAltitudeFromRawGps(rawGps) {
+  if (!rawGps || typeof rawGps !== 'object') return null;
+  const candidates = [
+    rawGps.altitude,
+    rawGps.GPSAltitude,
+    rawGps.GpsAltitude,
+  ];
+  let altitude = null;
+  for (const candidate of candidates) {
+    altitude = _coerceExifNumber(candidate);
+    if (altitude !== null) break;
+  }
+  if (!Number.isFinite(altitude)) return null;
+  const ref = _coerceExifNumber(rawGps.GPSAltitudeRef ?? rawGps.GpsAltitudeRef);
+  return ref === 1 ? -Math.abs(altitude) : altitude;
 }
 
 async function _captureNativePhotoExif(photo, file) {
   let time = file.lastModified || Date.now();
   let lat = null;
   let lon = null;
+  let altitude = null;
   const dbg = {
     fileName: file.name,
     fileSize: file.size,
@@ -533,6 +733,22 @@ async function _captureNativePhotoExif(photo, file) {
     nativePath: photo?.path || null,
     nativeMimeType: photo?.mimeType || null,
   };
+
+  if (photo?.exif && typeof photo.exif === 'object') {
+    dbg.nativeExif = JSON.stringify(photo.exif);
+    const rawNativeGps = _extractLatLonFromRawGps(photo.exif);
+    if (rawNativeGps.lat !== null) lat = rawNativeGps.lat;
+    if (rawNativeGps.lon !== null) lon = rawNativeGps.lon;
+    altitude = _extractAltitudeFromRawGps(photo.exif);
+
+    const dt = _coerceExifDate(photo.exif.DateTimeOriginal || photo.exif.CreateDate || photo.exif.ModifyDate || photo.capturedAt);
+    if (dt) time = dt.getTime();
+
+    // Custom Android NativePhotoPicker already did the expensive metadata read
+    // before optional HEIC conversion. Trust that result and avoid a slow JS
+    // exifr fallback over the converted cache JPEG, especially for single HEIC imports.
+    return { time, lat, lon, altitude, dbg };
+  }
 
   try {
     // FAST PATH: Extract EXIF natively without loading the file into JS memory
@@ -542,13 +758,14 @@ async function _captureNativePhotoExif(photo, file) {
       const rawNativeGps = _extractLatLonFromRawGps(exif);
       if (rawNativeGps.lat !== null) lat = rawNativeGps.lat;
       if (rawNativeGps.lon !== null) lon = rawNativeGps.lon;
+      altitude = _extractAltitudeFromRawGps(exif);
 
       const dt = _coerceExifDate(exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate || photo.capturedAt);
       if (dt) time = dt.getTime();
 
       // If native extraction found the coordinates, return immediately! (Lightning fast)
       if (lat !== null && lon !== null) {
-        return { time, lat, lon, dbg };
+        return { time, lat, lon, altitude, dbg };
       }
     }
   } catch (err) {
@@ -560,13 +777,14 @@ async function _captureNativePhotoExif(photo, file) {
     const jsExif = await _captureExif(file);
     if (jsExif.lat !== null) lat = jsExif.lat;
     if (jsExif.lon !== null) lon = jsExif.lon;
+    if (jsExif.altitude !== null) altitude = jsExif.altitude;
     if (jsExif.time) time = jsExif.time;
     dbg.jsFallback = true;
   } catch (err) {
     console.warn('JS EXIF extraction fallback failed:', err);
   }
 
-  return { time, lat, lon, dbg };
+  return { time, lat, lon, altitude, dbg };
 }
 
 async function _captureExif(file) {
@@ -574,12 +792,19 @@ async function _captureExif(file) {
   let time = file.lastModified;
   let lat  = null;
   let lon  = null;
+  let altitude = null;
   let dbg  = { fileName: file.name, fileSize: file.size, fileType: file.type, bufSize: 0, gpsResult: null, gpsError: null, exifError: null };
   const fullRead = _isHeicLike(file) ? { chunked: false } : {};
 
   const setGps = (res) => {
-    if (res && typeof res.latitude === 'number' && !Number.isNaN(res.latitude)) lat = res.latitude;
-    if (res && typeof res.longitude === 'number' && !Number.isNaN(res.longitude)) lon = res.longitude;
+    const nextLat = _coerceExifNumber(res?.latitude);
+    const nextLon = _coerceExifNumber(res?.longitude);
+    if (_isUsableCoordinate(nextLat, nextLon)) {
+      lat = nextLat;
+      lon = nextLon;
+    }
+    const nextAltitude = _extractAltitudeFromRawGps(res);
+    if (nextAltitude !== null) altitude = nextAltitude;
   };
 
   // Read the full file into an ArrayBuffer before passing to exifr.
@@ -593,7 +818,7 @@ async function _captureExif(file) {
   } catch (e) {
     dbg.bufError = String(e);
     console.warn('[EXIF] arrayBuffer() failed:', e);
-    return { time, lat, lon, dbg };
+    return { time, lat, lon, altitude, dbg };
   }
 
   // Try the original File first. exifr officially supports HEIC/HEIF blobs/files,
@@ -676,7 +901,7 @@ async function _captureExif(file) {
       });
       dbg.rawGpsFile = rawGps ? JSON.stringify(rawGps) : 'null';
       const extracted = _extractLatLonFromRawGps(rawGps);
-      setGps({ latitude: extracted.lat, longitude: extracted.lon });
+      setGps({ ...rawGps, latitude: extracted.lat, longitude: extracted.lon });
     } catch (e) {
       dbg.rawGpsFileError = String(e);
       console.warn('[EXIF] raw GPS file parse failed:', e);
@@ -694,14 +919,14 @@ async function _captureExif(file) {
       });
       dbg.rawGpsBuffer = rawGps ? JSON.stringify(rawGps) : 'null';
       const extracted = _extractLatLonFromRawGps(rawGps);
-      setGps({ latitude: extracted.lat, longitude: extracted.lon });
+      setGps({ ...rawGps, latitude: extracted.lat, longitude: extracted.lon });
     } catch (e) {
       dbg.rawGpsBufferError = String(e);
       console.warn('[EXIF] raw GPS buffer parse failed:', e);
     }
   }
 
-  return { time, lat, lon, dbg };
+  return { time, lat, lon, altitude, dbg };
 }
 
 async function _reverseGeocode(lat, lon) {
@@ -722,7 +947,25 @@ async function _reverseGeocode(lat, lon) {
 // only generate a reduced AI JPEG. This avoids expensive full-resolution canvas encodes on
 // Android imports. If decode fails (e.g. some HEIC flows outside Safari/native conversion),
 // we fall back to the original file as-is.
-async function _processFile(file) {
+function _isAndroidNativeJpegImport(file, nativePhoto) {
+  return Capacitor.getPlatform?.() === 'android'
+    && !!nativePhoto
+    && file?.type === 'image/jpeg';
+}
+
+async function _processFile(file, options = {}) {
+  if (_isAndroidNativeJpegImport(file, options.nativePhoto)) {
+    return {
+      blob: file,
+      aiBlob: file,
+      meta: {
+        aiCropRect: null,
+        aiCropSourceW: null,
+        aiCropSourceH: null,
+      },
+    };
+  }
+
   // 1. Browser-decodable path.
   try {
     const { blob, aiBlob, metaSource } = await _prepareImportBlobs(file);
@@ -1086,6 +1329,9 @@ async function saveAll() {
 
   for (const session of activeSessions) {
     try {
+      if ((session.gpsLat === null || session.gpsLon === null) && session.metadataPromise) {
+        await session.metadataPromise;
+      }
       const obsPayload = {
         user_id: state.user.id,
         date: _localDate(session.ts),

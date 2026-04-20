@@ -54,6 +54,12 @@ function initSyncFeedback() {
 function initSettings() {
   const overlay = document.getElementById('settings-overlay')
   const sheet = document.getElementById('settings-sheet')
+  const settingsBtn = document.getElementById('settings-btn')
+  let dragStartY = 0
+  let dragStartX = 0
+  let dragCurrentY = 0
+  let dragStarted = false
+  let dragTracking = false
 
   function _blurActiveControl() {
     const active = document.activeElement
@@ -77,18 +83,94 @@ function initSettings() {
     overlay.setAttribute('aria-hidden', 'false')
     requestAnimationFrame(() => requestAnimationFrame(() => {
       overlay.classList.add('open')
-      sheet?.focus?.({ preventScroll: true })
+      _blurActiveControl()
     }))
     void _refreshSettingsCloudPlan()
   }
 
   function _closeSettings() {
+    sheet.style.transition = ''
+    sheet.style.transform = ''
     overlay.classList.remove('open')
     overlay.setAttribute('aria-hidden', 'true')
     overlay.addEventListener('transitionend', () => { overlay.style.display = 'none' }, { once: true })
   }
 
-  document.getElementById('settings-btn').addEventListener('click', event => _openSettings(event))
+  function _resetSettingsDrag() {
+    dragStartY = 0
+    dragStartX = 0
+    dragCurrentY = 0
+    dragStarted = false
+    dragTracking = false
+    sheet.style.transition = ''
+    sheet.style.transform = ''
+  }
+
+  function _beginSettingsDrag(point, target) {
+    if (target?.closest?.('button, input, select, textarea, a, label')) return
+    dragStartY = point.clientY
+    dragStartX = point.clientX
+    dragCurrentY = dragStartY
+    dragStarted = false
+    dragTracking = true
+  }
+
+  function _moveSettingsDrag(point, event) {
+    if (!dragTracking) return
+    dragCurrentY = point.clientY
+    const deltaY = dragCurrentY - dragStartY
+    const deltaX = point.clientX - dragStartX
+
+    if (!dragStarted) {
+      if (deltaY <= 8 || Math.abs(deltaY) <= Math.abs(deltaX)) return
+      if (sheet.scrollTop > 0) {
+        _resetSettingsDrag()
+        return
+      }
+      dragStarted = true
+      sheet.style.transition = 'none'
+    }
+
+    event?.preventDefault?.()
+    sheet.style.transform = `translateY(${Math.max(0, deltaY)}px)`
+  }
+
+  function _finishSettingsDrag() {
+    if (!dragTracking) return
+    const deltaY = dragCurrentY - dragStartY
+    const shouldClose = dragStarted && deltaY > 86
+    _resetSettingsDrag()
+    if (shouldClose) _closeSettings()
+  }
+
+  settingsBtn.addEventListener('click', event => _openSettings(event))
+  document.getElementById('settings-close-btn')?.addEventListener('click', _closeSettings)
+  sheet.addEventListener('touchstart', event => {
+    if (event.touches.length !== 1) return
+    _beginSettingsDrag(event.touches[0], event.target)
+  }, { passive: true })
+  sheet.addEventListener('touchmove', event => {
+    if (event.touches.length !== 1) return
+    _moveSettingsDrag(event.touches[0], event)
+  }, { passive: false })
+  sheet.addEventListener('touchend', _finishSettingsDrag)
+  sheet.addEventListener('touchcancel', _resetSettingsDrag)
+  sheet.addEventListener('pointerdown', event => {
+    if (event.pointerType === 'touch') return
+    _beginSettingsDrag(event, event.target)
+  })
+  sheet.addEventListener('pointermove', event => {
+    if (event.pointerType === 'touch') return
+    _moveSettingsDrag(event, event)
+  })
+  sheet.addEventListener('pointerup', event => {
+    if (event.pointerType === 'touch') return
+    _finishSettingsDrag()
+  })
+  sheet.addEventListener('pointercancel', event => {
+    if (event.pointerType === 'touch') return
+    _resetSettingsDrag()
+  })
 
   // Close on backdrop tap
   overlay.addEventListener('click', e => {
@@ -110,9 +192,9 @@ function initSettings() {
   function _setPhotoGap(value) {
     const v = Math.max(1, Math.min(120, parseInt(value) || 1))
     gapInput.value = v
+    gapInput.textContent = String(v)
     localStorage.setItem('sporely-photo-gap', String(v))
   }
-  gapInput.addEventListener('focus', () => gapInput.blur())
   document.getElementById('settings-gap-decrement')?.addEventListener('click', () => _setPhotoGap(Number(gapInput.value || 1) - 1))
   document.getElementById('settings-gap-increment')?.addEventListener('click', () => _setPhotoGap(Number(gapInput.value || 1) + 1))
 
@@ -167,7 +249,10 @@ function _syncSettingsUI() {
     b.classList.toggle('active', b.dataset.theme === current)
   })
   const gapInput = document.getElementById('settings-gap-input')
-  if (gapInput) gapInput.value = localStorage.getItem('sporely-photo-gap') || '1'
+  if (gapInput) {
+    gapInput.value = localStorage.getItem('sporely-photo-gap') || '1'
+    gapInput.textContent = gapInput.value
+  }
   const localeSelect = document.getElementById('settings-language-select')
   if (localeSelect) localeSelect.value = getLocale()
 

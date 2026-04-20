@@ -64,18 +64,16 @@ const messages = {
     'capture.cameraPermissionFirefox': 'In Firefox: tap the lock icon in the address bar, then allow Camera access.',
     'capture.cameraPermissionSamsung': 'In Samsung Internet: tap the lock icon in the address bar, then allow Camera access.',
     'capture.cameraPermissionBrowser': 'Tap the lock or camera icon in your browser address bar, allow camera access, then tap "Try again".',
-    'capture.toggleFlash': 'Toggle flash',
     'capture.capturePhoto': 'Capture photo',
     'capture.noCameraFound': 'No camera was found on this device.',
     'capture.cameraStartFailed': 'Camera could not be started ({name}). Close other apps using the camera and try again.',
     'capture.photoCaptured': 'Photo {count} captured',
-    'capture.flashOn': 'Flash on',
-    'capture.flashOff': 'Flash off',
     'capture.lightReading': 'LIGHT: {lux} LUX / F-STOP: {fStop}',
     'review.review': 'Review',
     'review.addPhoto': 'Add photo',
     'review.fieldMetadata': 'Field Metadata',
     'review.location': 'Location',
+    'review.latLon': 'Lat/Lon',
     'review.currentLocation': 'Current location',
     'review.gpsAccuracy': 'GPS Accuracy',
     'review.altitude': 'Altitude',
@@ -83,7 +81,7 @@ const messages = {
     'review.habitat': 'Habitat',
     'review.notes': 'Notes',
     'review.fieldNotes': 'Field notes…',
-    'review.idNeeded': 'ID Needed',
+    'review.idNeeded': 'Uncertain ID',
     'review.createsOne': 'Creates one observation in Sporely Cloud',
     'review.createsMany': 'Creates observations in Sporely Cloud',
     'review.noCaptures': 'No captures yet',
@@ -110,7 +108,7 @@ const messages = {
     'detail.currentLocation': 'Current location',
     'detail.habitat': 'Habitat',
     'detail.notes': 'Notes',
-    'detail.idNeeded': 'ID Needed',
+    'detail.idNeeded': 'Uncertain ID',
     'detail.sharing': 'Sharing',
     'detail.onlyOwnerOverwriteLocation': 'Only the owner can overwrite the location',
     'detail.currentGpsUnavailable': 'Current GPS unavailable',
@@ -140,6 +138,7 @@ const messages = {
     'finds.singleColumn': 'Single column view',
     'finds.twoColumns': 'Two columns',
     'finds.threeColumns': 'Three columns',
+    'finds.uncertainIds': 'Uncertain IDs',
     'finds.tinyGrid': 'Tiny grid view',
     'finds.newObservationAria': 'New observation',
     'finds.couldNotLoad': 'Could not load finds',
@@ -336,18 +335,16 @@ const messages = {
     'capture.cameraPermissionFirefox': 'I Firefox: trykk på hengelåsikonet i adressefeltet og tillat kameratilgang.',
     'capture.cameraPermissionSamsung': 'I Samsung Internet: trykk på hengelåsikonet i adressefeltet og tillat kameratilgang.',
     'capture.cameraPermissionBrowser': 'Trykk på hengelås- eller kameraikonet i adressefeltet, tillat kameratilgang, og trykk deretter "Prøv igjen".',
-    'capture.toggleFlash': 'Slå blits av/på',
     'capture.capturePhoto': 'Ta bilde',
     'capture.noCameraFound': 'Fant ikke noe kamera på denne enheten.',
     'capture.cameraStartFailed': 'Kunne ikke starte kameraet ({name}). Lukk andre apper som bruker kameraet og prøv igjen.',
     'capture.photoCaptured': 'Bilde {count} tatt',
-    'capture.flashOn': 'Blits på',
-    'capture.flashOff': 'Blits av',
     'capture.lightReading': 'LYS: {lux} LUX / F-STOPP: {fStop}',
     'review.review': 'Gjennomgang',
     'review.addPhoto': 'Legg til bilde',
     'review.fieldMetadata': 'Feltmetadata',
     'review.location': 'Sted',
+    'review.latLon': 'Bredde/lengde',
     'review.currentLocation': 'Nåværende sted',
     'review.gpsAccuracy': 'GPS-nøyaktighet',
     'review.altitude': 'Høyde',
@@ -355,7 +352,7 @@ const messages = {
     'review.habitat': 'Habitat',
     'review.notes': 'Notater',
     'review.fieldNotes': 'Feltnotater…',
-    'review.idNeeded': 'Trenger ID',
+    'review.idNeeded': 'Usikker ID',
     'review.createsOne': 'Oppretter én observasjon i Sporely Cloud',
     'review.createsMany': 'Oppretter observasjoner i Sporely Cloud',
     'review.noCaptures': 'Ingen opptak ennå',
@@ -382,7 +379,7 @@ const messages = {
     'detail.currentLocation': 'Nåværende sted',
     'detail.habitat': 'Habitat',
     'detail.notes': 'Notater',
-    'detail.idNeeded': 'Trenger ID',
+    'detail.idNeeded': 'Usikker ID',
     'detail.sharing': 'Deling',
     'detail.onlyOwnerOverwriteLocation': 'Bare eieren kan overskrive stedet',
     'detail.currentGpsUnavailable': 'Nåværende GPS er utilgjengelig',
@@ -412,6 +409,7 @@ const messages = {
     'finds.singleColumn': 'Enkeltkolonnevisning',
     'finds.twoColumns': 'To kolonner',
     'finds.threeColumns': 'Tre kolonner',
+    'finds.uncertainIds': 'Usikre ID-er',
     'finds.tinyGrid': 'Lite rutenett',
     'finds.newObservationAria': 'Ny observasjon',
     'finds.couldNotLoad': 'Kunne ikke laste funn',
@@ -608,18 +606,16 @@ const messages = {
     'capture.cameraPermissionFirefox': 'I Firefox: tryck på låsikonen i adressfältet och tillåt kameraåtkomst.',
     'capture.cameraPermissionSamsung': 'I Samsung Internet: tryck på låsikonen i adressfältet och tillåt kameraåtkomst.',
     'capture.cameraPermissionBrowser': 'Tryck på lås- eller kameraikonen i adressfältet, tillåt kameraåtkomst och tryck sedan på "Försök igen".',
-    'capture.toggleFlash': 'Växla blixt',
     'capture.capturePhoto': 'Ta bild',
     'capture.noCameraFound': 'Ingen kamera hittades på den här enheten.',
     'capture.cameraStartFailed': 'Kameran kunde inte startas ({name}). Stäng andra appar som använder kameran och försök igen.',
     'capture.photoCaptured': 'Bild {count} tagen',
-    'capture.flashOn': 'Blixt på',
-    'capture.flashOff': 'Blixt av',
     'capture.lightReading': 'LJUS: {lux} LUX / F-STOPP: {fStop}',
     'review.review': 'Granskning',
     'review.addPhoto': 'Lägg till bild',
     'review.fieldMetadata': 'Fältmetadata',
     'review.location': 'Plats',
+    'review.latLon': 'Lat/lon',
     'review.currentLocation': 'Nuvarande plats',
     'review.gpsAccuracy': 'GPS-noggrannhet',
     'review.altitude': 'Höjd',
@@ -627,7 +623,7 @@ const messages = {
     'review.habitat': 'Habitat',
     'review.notes': 'Anteckningar',
     'review.fieldNotes': 'Fältanteckningar…',
-    'review.idNeeded': 'Behöver ID',
+    'review.idNeeded': 'Osäker ID',
     'review.createsOne': 'Skapar en observation i Sporely Cloud',
     'review.createsMany': 'Skapar observationer i Sporely Cloud',
     'review.noCaptures': 'Inga bilder ännu',
@@ -654,7 +650,7 @@ const messages = {
     'detail.currentLocation': 'Nuvarande plats',
     'detail.habitat': 'Habitat',
     'detail.notes': 'Anteckningar',
-    'detail.idNeeded': 'Behöver ID',
+    'detail.idNeeded': 'Osäker ID',
     'detail.sharing': 'Delning',
     'detail.onlyOwnerOverwriteLocation': 'Bara ägaren kan skriva över platsen',
     'detail.currentGpsUnavailable': 'Nuvarande GPS är inte tillgänglig',
@@ -684,6 +680,7 @@ const messages = {
     'finds.singleColumn': 'En kolumn',
     'finds.twoColumns': 'Två kolumner',
     'finds.threeColumns': 'Tre kolumner',
+    'finds.uncertainIds': 'Osäkra ID:n',
     'finds.tinyGrid': 'Litet rutnät',
     'finds.newObservationAria': 'Ny observation',
     'finds.couldNotLoad': 'Kunde inte ladda fynd',
@@ -880,18 +877,16 @@ const messages = {
     'capture.cameraPermissionFirefox': 'In Firefox: Tippe auf das Schloss im Adressfeld und erlaube den Kamerazugriff.',
     'capture.cameraPermissionSamsung': 'In Samsung Internet: Tippe auf das Schloss im Adressfeld und erlaube den Kamerazugriff.',
     'capture.cameraPermissionBrowser': 'Tippe auf das Schloss- oder Kamerasymbol im Adressfeld, erlaube den Kamerazugriff und tippe dann auf "Erneut versuchen".',
-    'capture.toggleFlash': 'Blitz umschalten',
     'capture.capturePhoto': 'Foto aufnehmen',
     'capture.noCameraFound': 'Auf diesem Gerät wurde keine Kamera gefunden.',
     'capture.cameraStartFailed': 'Die Kamera konnte nicht gestartet werden ({name}). Schließe andere Apps mit Kamerazugriff und versuche es erneut.',
     'capture.photoCaptured': 'Foto {count} aufgenommen',
-    'capture.flashOn': 'Blitz an',
-    'capture.flashOff': 'Blitz aus',
     'capture.lightReading': 'LICHT: {lux} LUX / BLENDE: {fStop}',
     'review.review': 'Prüfen',
     'review.addPhoto': 'Foto hinzufügen',
     'review.fieldMetadata': 'Feldmetadaten',
     'review.location': 'Ort',
+    'review.latLon': 'Breite/Länge',
     'review.currentLocation': 'Aktueller Ort',
     'review.gpsAccuracy': 'GPS-Genauigkeit',
     'review.altitude': 'Höhe',
@@ -899,7 +894,7 @@ const messages = {
     'review.habitat': 'Habitat',
     'review.notes': 'Notizen',
     'review.fieldNotes': 'Feldnotizen…',
-    'review.idNeeded': 'Bestimmung nötig',
+    'review.idNeeded': 'Unsichere ID',
     'review.createsOne': 'Erstellt eine Beobachtung in Sporely Cloud',
     'review.createsMany': 'Erstellt Beobachtungen in Sporely Cloud',
     'review.noCaptures': 'Noch keine Aufnahmen',
@@ -926,7 +921,7 @@ const messages = {
     'detail.currentLocation': 'Aktueller Ort',
     'detail.habitat': 'Habitat',
     'detail.notes': 'Notizen',
-    'detail.idNeeded': 'Bestimmung nötig',
+    'detail.idNeeded': 'Unsichere ID',
     'detail.sharing': 'Freigabe',
     'detail.onlyOwnerOverwriteLocation': 'Nur der Eigentümer kann den Ort überschreiben',
     'detail.currentGpsUnavailable': 'Aktuelles GPS nicht verfügbar',
@@ -956,6 +951,7 @@ const messages = {
     'finds.singleColumn': 'Einspaltige Ansicht',
     'finds.twoColumns': 'Zwei Spalten',
     'finds.threeColumns': 'Drei Spalten',
+    'finds.uncertainIds': 'Unsichere IDs',
     'finds.tinyGrid': 'Kleines Raster',
     'finds.newObservationAria': 'Neue Beobachtung',
     'finds.couldNotLoad': 'Funde konnten nicht geladen werden',
@@ -1280,6 +1276,7 @@ export function applyStaticTranslations() {
   setText('#screen-review .field-meta-header', 'review.fieldMetadata')
   setAllText('#screen-review .field-meta-key', [
     t('review.location'),
+    t('review.latLon'),
     t('review.gpsAccuracy'),
     t('review.altitude'),
     t('review.sharing'),
@@ -1381,8 +1378,10 @@ export function applyStaticTranslations() {
   setText('#settings-clear-cache-btn', 'settings.clearLocalCache')
   setText('#settings-clear-cache-hint', 'settings.clearLocalCacheHint')
   setAria('#settings-btn', 'settings.title')
+  setAria('#settings-close-btn', 'common.close')
   setAria('#finds-search-btn', 'finds.searchAria')
   setAria('#finds-search-clear', 'finds.clearSearch')
+  setAria('#finds-filter-uncertain', 'finds.uncertainIds')
   setAria('#home-fab', 'finds.newObservationAria')
   setAria('#finds-fab', 'finds.newObservationAria')
   setAria('#map-fab', 'finds.newObservationAria')
@@ -1392,12 +1391,12 @@ export function applyStaticTranslations() {
   setAria('#photo-viewer-close', 'photo.close')
   setAria('#photo-viewer-prev', 'photo.previous')
   setAria('#photo-viewer-next', 'photo.next')
-  setAria('#flash-btn', 'capture.toggleFlash')
   setAria('#shutter-btn', 'capture.capturePhoto')
 
   setTitle('#finds-view-cards', 'finds.singleColumn')
   setTitle('#finds-view-two', 'finds.twoColumns')
   setTitle('#finds-view-three', 'finds.threeColumns')
+  setTitle('#finds-filter-uncertain', 'finds.uncertainIds')
   setTitle('#finds-view-tiles', 'finds.tinyGrid')
 
   const versionEl = document.getElementById('settings-version')

@@ -10,7 +10,6 @@ function _isNativeApp() {
 }
 
 export function initCapture() {
-  document.getElementById('flash-btn').addEventListener('click', toggleFlash)
   document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
   document.getElementById('done-btn').addEventListener('click', finishCapture)
   document.getElementById('camera-retry-btn').addEventListener('click', () => {
@@ -193,14 +192,6 @@ function finishCapture() {
   stopCamera()
   document.getElementById('bottom-nav').style.display = 'flex'
   navigate('review')
-}
-
-function toggleFlash() {
-  state.flashOn = !state.flashOn
-  const btn = document.getElementById('flash-btn')
-  btn.style.background  = state.flashOn ? 'rgba(255,220,100,0.3)' : 'rgba(255,255,255,0.12)'
-  btn.style.borderColor = state.flashOn ? 'rgba(255,220,100,0.5)' : 'rgba(255,255,255,0.15)'
-  showToast(t(state.flashOn ? 'capture.flashOn' : 'capture.flashOff'))
 }
 
 function simulateLightReading() {

@@ -20,7 +20,7 @@ handling from the device photo library.
 | Layer | Choice |
 |---|---|
 | Build | Vite 6, vanilla JS (ES modules) — no framework |
-| Native wrapper | Capacitor Android + `@capawesome/capacitor-file-picker` |
+| Native wrapper | Capacitor Android + `@capawesome/capacitor-file-picker` + custom `NativePhotoPicker` plugin |
 | Styling | Plain CSS custom properties, no preprocessor |
 | Auth & DB | Supabase JS v2 (`@supabase/supabase-js`) |
 | Media storage | Cloudflare R2 bucket `sporely-media` |
@@ -391,14 +391,15 @@ sync-queue.js: triggerSync() (background)
 
 ```
 import_review.js: openPhotoImportPicker()
-  ├─ Capacitor Android → NativePhotoPicker plugin returns original URI + native EXIF/GPS
+  ├─ Capacitor Android → NativePhotoPicker plugin returns native EXIF/GPS and JPEG cache files for HEIC/HEIF
+  ├─ Capacitor iOS → Capawesome FilePicker path
   └─ Browser / fallback → file input or showOpenFilePicker()
 
 handleSelectedFiles()
   1. Read capture time + GPS from native metadata or exifr
   2. Sort files by capture time
   3. Group files taken within the configured time gap into one observation
-  4. Convert review copies to JPEG sequentially to avoid mobile memory spikes
+  4. Keep browser-decodable originals for preview/upload and create only reduced JPEG AI copies up front
   5. Pre-seed per-image AI crop metadata and save pending import sessions to IndexedDB so review survives app suspension
 
 Single group:
@@ -407,6 +408,64 @@ Single group:
 Multiple groups:
   show grouped import cards → user edits species/location/sharing/AI crop → save all
 ```
+
+Android APK note: HEIC/HEIF import must go through the custom `NativePhotoPicker`
+bridge, not directly through Capawesome `FilePicker.pickImages()`. The custom
+plugin decodes HEIC/HEIF with Android bitmap APIs, writes a temporary JPEG in app
+cache, and returns native EXIF/GPS metadata separately. The native bridge uses
+`ACTION_OPEN_DOCUMENT`, not Android 13+ `MediaStore.ACTION_PICK_IMAGES`, because
+Photo Picker URIs can expose redacted GPS metadata such as `0,0`. Before opening the
+custom picker, JS still asks Capawesome FilePicker for `accessMediaLocation`,
+because Android can redact photo GPS unless that runtime permission is granted
+and the native plugin opens `MediaStore.setRequireOriginal(uri)`. Sending an
+HEIC blob directly into the WebView can produce a blank review image because
+Android WebView cannot reliably decode HEIC object URLs. When native EXIF is
+returned, the JS import flow trusts it and skips the slower `exifr` fallback;
+otherwise single HEIC imports can spend several seconds re-reading metadata
+after native conversion. Android native JPEG imports also skip eager JS image
+decoding during the "Converting" phase; preview uses the native/cache JPEG blob
+directly, and AI crop metadata can remain unset until the user explicitly opens
+crop/AI tools.
+
+Confirmed on Samsung S25 / Android APK: `ACTION_OPEN_DOCUMENT` preserves GPS for
+the test HEIC (`20260419_092927.heic`: about `63.45209, 10.43705`, altitude
+`90 m`). The UX tradeoff is that Android shows the document picker, often opening
+on "Recent" photos; users may need to open the side menu and choose "Images" to
+browse the full photo library. If this becomes too confusing, the product should
+offer two Android import choices: a friendly/fast gallery picker that may lose
+EXIF GPS, and a metadata-safe picker for geotagged imports.
+
+Import location metadata is intentionally stored separately from the image blob:
+`gpsLat`, `gpsLon`, `gpsAltitude`, and per-photo `photoGps` values travel with
+the pending import session and review context. This is important because Canvas
+conversion/resizing strips EXIF, and because Android HEIC conversion writes a new
+temporary JPEG. The review screen should show both the reverse-geocoded Location
+name and a separate Lat/Lon row with the actual coordinates so stale place-name
+lookups are easy to spot. Treat `0,0` as missing GPS, never as a real location.
+If a JPEG truly has no GPS EXIF tags (example: `20260418_154138.jpg`, which has
+Samsung/time metadata but no parsable GPSLatitude/GPSLongitude), the app should
+show no coordinates instead of falling back to stale or current-device GPS.
+
+Identification confidence follows the desktop app: the cloud/local observation
+field is `uncertain`, not a separate `needs_id` field. The web UI labels this as
+"Uncertain ID", prefixes displayed names with `?` when set, and offers a Finds
+filter for uncertain observations.
+
+Known Android HEIC tradeoff: the fastest single-HEIC path can show the edit
+screen quickly even when metadata is not already available from the native picker
+result. The import flow splits visual import from metadata hydration:
+
+1. Convert/decode enough to show the image and open the edit screen immediately.
+2. Continue EXIF/GPS extraction in the background.
+3. When GPS arrives, update the active review/session location fields and persist
+   the pending import session.
+4. If the user saves before hydration finishes, the save path waits for pending
+   metadata before enqueueing the observation so EXIF GPS is not dropped.
+
+Multi-file HEIC import has previously appeared fast while still preserving GPS,
+so do not assume speed and GPS are mutually exclusive. Before changing this path,
+add timing logs around native decode, native EXIF, JS `exifr`, and review render
+so regressions are easy to locate.
 
 ---
 

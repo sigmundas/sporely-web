@@ -221,6 +221,11 @@ export function initFinds() {
     _syncSpeciesToggle()
     _applyFilter()
   })
+  document.getElementById('finds-filter-uncertain').addEventListener('click', () => {
+    state.findsUncertainOnly = !state.findsUncertainOnly
+    _syncUncertainToggle()
+    _applyFilter()
+  })
 
   // Scope tabs
   document.querySelectorAll('.scope-tab').forEach(btn => {
@@ -248,6 +253,13 @@ function _syncSpeciesToggle() {
     ?.classList.toggle('active', !!state.findsGroupBySpecies)
 }
 
+function _syncUncertainToggle() {
+  const btn = document.getElementById('finds-filter-uncertain')
+  if (!btn) return
+  btn.classList.toggle('active', !!state.findsUncertainOnly)
+  btn.setAttribute('aria-pressed', state.findsUncertainOnly ? 'true' : 'false')
+}
+
 function _setScope(scope, options = {}) {
   currentScope = scope || 'mine'
   _syncScopeTabs()
@@ -263,6 +275,11 @@ function _setScope(scope, options = {}) {
   if (options.groupBySpecies !== undefined) {
     state.findsGroupBySpecies = !!options.groupBySpecies
     _syncSpeciesToggle()
+  }
+
+  if (options.uncertainOnly !== undefined) {
+    state.findsUncertainOnly = !!options.uncertainOnly
+    _syncUncertainToggle()
   }
 }
 
@@ -292,6 +309,7 @@ export async function loadFinds() {
 
   _syncScopeTabs()
   _syncSpeciesToggle()
+  _syncUncertainToggle()
   list.innerHTML = ''
 
   if (currentScope === 'mine') {
@@ -381,7 +399,7 @@ async function _loadProfilesForScope(data) {
 // ── Filter + dispatch ─────────────────────────────────────────────────────────
 
 function _matches(obs, q) {
-  return [obs.common_name, obs.genus, obs.species, obs.location, obs.notes]
+  return [obs.common_name, obs.genus, obs.species, obs.location, obs.notes, obs.uncertain ? 'uncertain id' : '']
     .some(f => f && f.toLowerCase().includes(q))
 }
 
@@ -396,7 +414,8 @@ function _applyFilter() {
   const subtitle = document.getElementById('finds-subtitle')
   const raw  = _cache[currentScope] || []
   const q    = (state.searchQuery || '').toLowerCase().trim()
-  const data = q ? raw.filter(obs => _matches(obs, q)) : raw
+  const filtered = state.findsUncertainOnly ? raw.filter(obs => !!obs.uncertain) : raw
+  const data = q ? filtered.filter(obs => _matches(obs, q)) : filtered
 
   if (state.findsGroupBySpecies) {
     _renderBySpecies(list, subtitle, data, { variant: state.findsView })
@@ -536,8 +555,12 @@ function _speciesKey(obs) {
 
 function _speciesLabel(obs) {
   const latin = formatScientificName(obs.genus || '', obs.species || '')
-  if (obs.common_name && latin) return `${obs.common_name} — ${latin}`
-  return obs.common_name || latin || t('finds.unidentified')
+  const label = obs.common_name && latin ? `${obs.common_name} — ${latin}` : (obs.common_name || latin || t('finds.unidentified'))
+  return obs.uncertain ? `? ${label}` : label
+}
+
+function _uncertainPrefix(obs) {
+  return obs?.uncertain ? '<span class="find-card-uncertain" aria-label="Uncertain ID">?</span> ' : ''
 }
 
 function _renderBySpecies(list, subtitle, data, options = {}) {
@@ -593,16 +616,17 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
         const latin = formatScientificName(obs.genus || '', obs.species || '')
         const isUnknown = !latin && !obs.common_name
         const displayName = obs.common_name || latin || t('finds.unidentified')
+        const uncertainPrefix = _uncertainPrefix(obs)
         const nameHtml = isUnknown
-          ? `<span class="find-card-name unidentified">${t('finds.unidentified')}</span>`
+          ? `<span class="find-card-name unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
           : obs.common_name && latin
-            ? `<span class="find-card-name">${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
+            ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
             : obs.common_name
-              ? `<span class="find-card-name">${obs.common_name}</span>`
-              : `<span class="find-card-name"><em class="find-card-scientific">${latin}</em></span>`
+              ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name}</span>`
+              : `<span class="find-card-name">${uncertainPrefix}<em class="find-card-scientific">${latin}</em></span>`
         const compactNameHtml = isUnknown
-          ? `<span class="find-card-name find-card-name--compact unidentified">${t('finds.unidentified')}</span>`
-          : `<span class="find-card-name find-card-name--compact">${displayName}</span>`
+          ? `<span class="find-card-name find-card-name--compact unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
+          : `<span class="find-card-name find-card-name--compact">${uncertainPrefix}${displayName}</span>`
         const loc = obs.location || (obs.gps_latitude && obs.gps_longitude
           ? `${obs.gps_latitude.toFixed(3)}° N, ${obs.gps_longitude.toFixed(3)}° E`
           : null)
@@ -727,7 +751,7 @@ function _renderTiles(list, subtitle, data) {
       )
       html += `<div class="find-tile" data-id="${obs.id}">
         <div class="find-tile-photo">${photo}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
-        <div class="find-tile-name">${name}</div>
+        <div class="find-tile-name">${obs.uncertain ? '? ' : ''}${name}</div>
       </div>`
     })
     html += '</div>'
@@ -795,16 +819,17 @@ function _renderCards(list, subtitle, data, options) {
         const latin     = formatScientificName(obs.genus || '', obs.species || '')
         const isUnknown = !latin && !obs.common_name
         const displayName = obs.common_name || latin || t('finds.unidentified')
+        const uncertainPrefix = _uncertainPrefix(obs)
         const nameHtml  = isUnknown
-          ? `<span class="find-card-name unidentified">${t('finds.unidentified')}</span>`
+          ? `<span class="find-card-name unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
           : obs.common_name && latin
-            ? `<span class="find-card-name">${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
+            ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
             : obs.common_name
-              ? `<span class="find-card-name">${obs.common_name}</span>`
-              : `<span class="find-card-name"><em class="find-card-scientific">${latin}</em></span>`
+              ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name}</span>`
+              : `<span class="find-card-name">${uncertainPrefix}<em class="find-card-scientific">${latin}</em></span>`
         const compactNameHtml = isUnknown
-          ? `<span class="find-card-name find-card-name--compact unidentified">${t('finds.unidentified')}</span>`
-          : `<span class="find-card-name find-card-name--compact">${displayName}</span>`
+          ? `<span class="find-card-name find-card-name--compact unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
+          : `<span class="find-card-name find-card-name--compact">${uncertainPrefix}${displayName}</span>`
 
         const loc = obs.location || (
           obs.gps_latitude && obs.gps_longitude

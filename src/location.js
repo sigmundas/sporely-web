@@ -4,8 +4,10 @@
 let resolvedName = ''
 let lastApplied  = ''
 let debounceTimer = null
+let lookupSeq = 0
 
 export function resetLocationState() {
+  lookupSeq += 1
   resolvedName = ''
   lastApplied  = ''
   clearTimeout(debounceTimer)
@@ -42,7 +44,9 @@ export function initLocationField() {
 // Call in buildReviewGrid() after GPS coords are known.
 export function startLocationLookup(lat, lon) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
+  if (Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001) return
 
+  const seq = ++lookupSeq
   clearTimeout(debounceTimer)
   debounceTimer = setTimeout(async () => {
     try {
@@ -53,6 +57,7 @@ export function startLocationLookup(lat, lon) {
       const data = await resp.json()
       const name = typeof data?.navn === 'string' ? data.navn.trim() : ''
       if (!name) return
+      if (seq !== lookupSeq) return
 
       resolvedName = name
 

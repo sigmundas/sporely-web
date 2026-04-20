@@ -11,11 +11,11 @@ export const state = {
   batchCount: 0,
   sessionStart: null,
   gps: null,
-  flashOn: false,
   cameraStream: null,
   user: null,
   cloudPlan: null,
   searchQuery: '',
   findsView: 'cards',
   findsGroupBySpecies: false,
+  findsUncertainOnly: false,
 }

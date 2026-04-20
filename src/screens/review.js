@@ -20,6 +20,32 @@ function _defaultCaptureDraft() {
   }
 }
 
+function _firstFiniteNumber(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === '') continue
+    const number = Number(value)
+    if (Number.isFinite(number)) return number
+  }
+  return null
+}
+
+function _formatCoordinate(value, positive, negative, digits = 5) {
+  if (!Number.isFinite(value)) return ''
+  const hemi = value < 0 ? negative : positive
+  return `${Math.abs(value).toFixed(digits)}° ${hemi}`
+}
+
+function _formatLatLon(gps, digits = 5) {
+  if (!gps || !_isUsableCoordinate(gps.lat, gps.lon)) return '—'
+  return `${_formatCoordinate(gps.lat, 'N', 'S', digits)}, ${_formatCoordinate(gps.lon, 'E', 'W', digits)}`
+}
+
+function _isUsableCoordinate(lat, lon) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return false
+  return !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001)
+}
+
 export function initReview() {
   document.getElementById('review-close')
     .addEventListener('click', cancelReview)
@@ -34,6 +60,7 @@ export function initReview() {
   })
   document.getElementById('review-uncertain').addEventListener('change', event => {
     state.captureDraft.uncertain = event.target.checked
+    buildReviewGrid()
   })
   document.querySelectorAll('input[name="review-vis"]').forEach(radio => {
     radio.addEventListener('change', event => {
@@ -45,12 +72,18 @@ export function initReview() {
 
 export function openImportedReview(session) {
   resetLocationState()
-  const reviewGps = Number.isFinite(session?.gpsLat) && Number.isFinite(session?.gpsLon)
+  const gpsAltitude = _firstFiniteNumber(
+    session?.gpsAltitude,
+    ...(session?.photoGps || []).map(gps => gps?.altitude),
+  )
+  const sessionLat = Number(session?.gpsLat)
+  const sessionLon = Number(session?.gpsLon)
+  const reviewGps = _isUsableCoordinate(sessionLat, sessionLon)
     ? {
-        lat: session.gpsLat,
-        lon: session.gpsLon,
+        lat: sessionLat,
+        lon: sessionLon,
         accuracy: null,
-        altitude: null,
+        altitude: gpsAltitude,
       }
     : null
 
@@ -77,8 +110,75 @@ export function openImportedReview(session) {
     source: 'import',
     gps: reviewGps,
     locationName: session?.locationName || '',
+    metadataPromise: session?.metadataPromise || null,
   }
+  _hydrateImportedReviewMetadata(session)
   navigate('review')
+}
+
+function _metadataGps(metadataSession) {
+  const lat = Number(metadataSession?.gpsLat)
+  const lon = Number(metadataSession?.gpsLon)
+  if (_isUsableCoordinate(lat, lon)) {
+    return {
+      lat,
+      lon,
+      accuracy: null,
+      altitude: _firstFiniteNumber(
+        metadataSession?.gpsAltitude,
+        ...(metadataSession?.photoGps || []).map(gps => gps?.altitude),
+      ),
+    }
+  }
+  const photoGps = (metadataSession?.photoGps || []).find(gps =>
+    _isUsableCoordinate(Number(gps?.lat), Number(gps?.lon))
+  )
+  if (!photoGps) return null
+  return {
+    lat: Number(photoGps.lat),
+    lon: Number(photoGps.lon),
+    accuracy: null,
+    altitude: _firstFiniteNumber(photoGps.altitude),
+  }
+}
+
+function _applyImportedReviewGps(reviewGps) {
+  if (!reviewGps) return false
+  state.capturedPhotos.forEach(photo => {
+    photo.gps = reviewGps
+  })
+  if (state.reviewContext?.source === 'import') {
+    state.reviewContext.gps = reviewGps
+  }
+  buildReviewGrid()
+  return true
+}
+
+function _hydrateImportedReviewMetadata(session) {
+  const promise = session?.metadataPromise
+  if (!promise) return
+  promise.then(metadataSession => {
+    if (state.reviewContext?.source !== 'import') return
+    if (state.reviewContext.gps) return
+    const reviewGps = _metadataGps(metadataSession)
+    if (reviewGps) _applyImportedReviewGps(reviewGps)
+  }).catch(error => {
+    console.warn('Import metadata hydration failed:', error)
+  })
+}
+
+async function _awaitImportedReviewMetadata() {
+  const promise = state.reviewContext?.metadataPromise
+  if (!promise) return
+  if (state.reviewContext.gps) return
+  try {
+    const metadataSession = await promise
+    if (state.reviewContext?.source !== 'import' || state.reviewContext.gps) return
+    const reviewGps = _metadataGps(metadataSession)
+    if (reviewGps) _applyImportedReviewGps(reviewGps)
+  } catch (error) {
+    console.warn('Import metadata hydration failed before save:', error)
+  }
 }
 
 // ── Grid build ────────────────────────────────────────────────────────────────
@@ -97,7 +197,9 @@ export function buildReviewGrid() {
     || t('detail.unknownSpecies')
 
   if (reviewCount) {
-    reviewCount.textContent = speciesLabel
+    reviewCount.textContent = state.captureDraft.uncertain
+      ? `? ${String(speciesLabel).replace(/^\?\s*/, '')}`
+      : String(speciesLabel).replace(/^\?\s*/, '')
   }
 
   // title stays "New observation" — count shown via card carousel
@@ -114,7 +216,9 @@ export function buildReviewGrid() {
 
   if (reviewGps) {
     document.getElementById('review-coords-text').textContent =
-      `${reviewGps.lat.toFixed(4)}° N, ${reviewGps.lon.toFixed(4)}° E`
+      _formatLatLon(reviewGps, 4)
+    const metaCoordinates = document.getElementById('meta-coordinates')
+    if (metaCoordinates) metaCoordinates.textContent = _formatLatLon(reviewGps, 5)
     document.getElementById('meta-accuracy').textContent = Number.isFinite(reviewGps.accuracy)
       ? `± ${Math.round(reviewGps.accuracy)} m`
       : '—'
@@ -124,10 +228,12 @@ export function buildReviewGrid() {
     else
       document.getElementById('meta-altitude').textContent = '— ASL'
     document.getElementById('review-location').textContent =
-      `${reviewGps.lat.toFixed(3)}° N, ${reviewGps.lon.toFixed(3)}° E`
+      _formatLatLon(reviewGps, 3)
     startLocationLookup(reviewGps.lat, reviewGps.lon)
   } else {
     document.getElementById('review-coords-text').textContent = ''
+    const metaCoordinates = document.getElementById('meta-coordinates')
+    if (metaCoordinates) metaCoordinates.textContent = '—'
     document.getElementById('meta-accuracy').textContent = '—'
     document.getElementById('meta-altitude').textContent = '— ASL'
     document.getElementById('review-location').textContent = ''
@@ -141,7 +247,9 @@ export function buildReviewGrid() {
   if (visibilityRadio) visibilityRadio.checked = true
   const locationInput = document.getElementById('location-name-input')
   if (locationInput) {
-    locationInput.value = reviewContext?.locationName || locationInput.value || ''
+    locationInput.value = reviewContext?.source === 'import'
+      ? (reviewContext.locationName || '')
+      : (reviewContext?.locationName || locationInput.value || '')
   }
   const addPhotoBtn = document.getElementById('add-photo-btn')
   if (addPhotoBtn) addPhotoBtn.style.display = reviewContext?.source === 'import' ? 'none' : ''
@@ -487,6 +595,7 @@ async function saveObservationBatch() {
   showToast(t('review.syncing'))
 
   try {
+    await _awaitImportedReviewMetadata()
     const photos = await Promise.all(
       state.capturedPhotos.map(async p => ({
         ...p,

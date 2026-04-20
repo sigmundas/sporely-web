@@ -33,7 +33,10 @@ export function initFindDetail() {
 
   input.addEventListener('input', () => {
     selectedTaxon = null
-    _setDetailHeader({ fallbackName: input.value.trim() || t('detail.unknownSpecies') })
+    _setDetailHeader({
+      fallbackName: input.value.trim() || t('detail.unknownSpecies'),
+      uncertain: document.getElementById('detail-uncertain')?.checked,
+    })
     clearTimeout(debounce)
     debounce = setTimeout(() => _searchTaxon(input.value.trim(), dropdown), 280)
   })
@@ -42,6 +45,17 @@ export function initFindDetail() {
   })
 
   document.getElementById('detail-ai-btn').addEventListener('click', _runAI)
+  document.getElementById('detail-uncertain').addEventListener('change', () => {
+    if (!currentObs) return
+    const value = document.getElementById('detail-taxon-input').value.trim()
+    _setDetailHeader({
+      commonName: selectedTaxon?.vernacularName || currentObs.common_name || '',
+      genus: selectedTaxon?.genus || currentObs.genus || '',
+      species: selectedTaxon?.specificEpithet || currentObs.species || '',
+      fallbackName: value || t('detail.unknownSpecies'),
+      uncertain: document.getElementById('detail-uncertain')?.checked,
+    })
+  })
 
   const commentInput = document.getElementById('comment-input')
   document.getElementById('comment-send-btn').addEventListener('click', _sendComment)
@@ -95,6 +109,7 @@ export async function openFindDetail(obsId, options = {}) {
     genus: obs.genus || '',
     species: obs.species || '',
     fallbackName: displayName.trim() || t('detail.unknownSpecies'),
+    uncertain: !!obs.uncertain,
   })
   document.getElementById('detail-taxon-input').value = displayName.trim()
   const coords = obs.gps_latitude && obs.gps_longitude
@@ -337,6 +352,7 @@ async function _runAI() {
           genus: selectedTaxon.genus || '',
           species: selectedTaxon.specificEpithet || '',
           fallbackName: p.displayName || t('detail.unknownSpecies'),
+          uncertain: document.getElementById('detail-uncertain')?.checked,
         })
         resultsEl.style.display = 'none'
       })
@@ -456,23 +472,26 @@ async function _searchTaxon(q, dropdown) {
         genus: selectedTaxon.genus || '',
         species: selectedTaxon.specificEpithet || '',
         fallbackName: selectedTaxon.displayName || t('detail.unknownSpecies'),
+        uncertain: document.getElementById('detail-uncertain')?.checked,
       })
       dropdown.style.display = 'none'
     })
   })
 }
 
-function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackName = t('detail.unknownSpecies') }) {
+function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackName = t('detail.unknownSpecies'), uncertain = false }) {
   const commonEl = document.getElementById('detail-title-common')
   const latinEl = document.getElementById('detail-title-latin')
   if (!commonEl || !latinEl) return
 
   const latinName = [genus, species].filter(Boolean).join(' ').trim()
   const primaryName = String(commonName || '').trim() || String(fallbackName || '').trim() || t('detail.unknownSpecies')
+  const markedPrimary = uncertain ? `? ${primaryName.replace(/^\?\s*/, '')}` : primaryName.replace(/^\?\s*/, '')
+  const markedLatin = uncertain ? `? ${latinName.replace(/^\?\s*/, '')}` : latinName.replace(/^\?\s*/, '')
 
-  commonEl.textContent = primaryName
+  commonEl.textContent = markedPrimary
   if (latinName && latinName.toLowerCase() !== primaryName.toLowerCase()) {
-    latinEl.textContent = latinName
+    latinEl.textContent = markedLatin
     latinEl.style.display = 'block'
   } else {
     latinEl.textContent = ''

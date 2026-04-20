@@ -37,17 +37,15 @@ public class NativePhotoPickerPlugin extends Plugin {
     @PluginMethod
     public void pickImages(PluginCall call) {
         Intent intent;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+ — native system photo picker (shows full gallery, no Files app)
-            intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
-            intent.setType("image/*");
-            intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, 100);
-        } else {
-            // Android < 13 — open gallery app with multi-select
-            intent = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
-            intent.setType("image/*");
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        }
+        // Use the document/content picker instead of Android's newer Photo Picker.
+        // Photo Picker URIs can expose redacted EXIF GPS on Android 13+, while
+        // ACTION_OPEN_DOCUMENT gives us a normal readable URI for metadata import.
+        intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("image/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         startActivityForResult(call, intent, "handlePickedImages");
     }
 
@@ -63,6 +61,7 @@ public class NativePhotoPickerPlugin extends Plugin {
         List<Uri> uris = collectUris(data);
         JSArray photos = new JSArray();
         for (Uri uri : uris) {
+            persistReadPermission(data, uri);
             JSObject photo = buildPhotoObject(uri);
             if (photo != null) photos.put(photo);
         }
@@ -70,6 +69,17 @@ public class NativePhotoPickerPlugin extends Plugin {
         JSObject ret = new JSObject();
         ret.put("photos", photos);
         call.resolve(ret);
+    }
+
+    private void persistReadPermission(Intent data, Uri uri) {
+        if (data == null || uri == null) return;
+        int flags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+        if (flags == 0) return;
+        try {
+            getContext().getContentResolver().takePersistableUriPermission(uri, flags);
+        } catch (SecurityException ignored) {
+            // Some providers grant temporary read access only; immediate cache import still works.
+        }
     }
 
     private List<Uri> collectUris(Intent data) {
@@ -94,16 +104,19 @@ public class NativePhotoPickerPlugin extends Plugin {
             String displayName = queryDisplayName(uri);
             String format = inferFormat(displayName, mimeType);
 
-            // Read EXIF metadata (GPS, timestamps, orientation)
+            // Read EXIF metadata (GPS, timestamps, orientation). On Android 10+,
+            // GPS can be redacted unless the original media URI is explicitly requested.
             JSObject exifJson = new JSObject();
             int exifOrientation = ExifInterface.ORIENTATION_NORMAL;
-            try (InputStream stream = resolver.openInputStream(uri)) {
+            try (InputStream stream = openExifInputStream(uri, resolver)) {
                 if (stream != null) {
                     ExifInterface exif = new ExifInterface(stream);
                     float[] latLong = new float[2];
                     if (exif.getLatLong(latLong)) {
-                        exifJson.put("latitude", latLong[0]);
-                        exifJson.put("longitude", latLong[1]);
+                        if (isUsableCoordinate(latLong[0], latLong[1])) {
+                            exifJson.put("latitude", latLong[0]);
+                            exifJson.put("longitude", latLong[1]);
+                        }
                     }
                     String dateTimeOriginal = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL);
                     String dateTime = exif.getAttribute(ExifInterface.TAG_DATETIME);
@@ -140,14 +153,35 @@ public class NativePhotoPickerPlugin extends Plugin {
 
             JSObject photo = new JSObject();
             photo.put("path", returnPath);
+            photo.put("originalPath", uri.toString());
             photo.put("name", displayName);
             photo.put("mimeType", returnMime);
+            photo.put("originalMimeType", mimeType);
             photo.put("format", returnFormat);
+            photo.put("originalFormat", format);
+            photo.put("converted", isHeic && "image/jpeg".equals(returnMime));
             photo.put("exif", exifJson);
             return photo;
         } catch (Exception ex) {
             return null;
         }
+    }
+
+    private static boolean isUsableCoordinate(double latitude, double longitude) {
+        if (Double.isNaN(latitude) || Double.isNaN(longitude)) return false;
+        if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return false;
+        return !(Math.abs(latitude) < 0.000001 && Math.abs(longitude) < 0.000001);
+    }
+
+    private InputStream openExifInputStream(Uri uri, ContentResolver resolver) throws IOException {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                return resolver.openInputStream(MediaStore.setRequireOriginal(uri));
+            } catch (SecurityException | UnsupportedOperationException ignored) {
+                // Fall back to the normal URI; it may be location-redacted.
+            }
+        }
+        return resolver.openInputStream(uri);
     }
 
     /**

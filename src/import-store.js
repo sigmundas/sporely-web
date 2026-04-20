@@ -48,6 +48,7 @@ export async function saveImportSessions(sessions) {
       photoGps: (s.photoGps || []).map(gps => ({
         lat: gps?.lat ?? null,
         lon: gps?.lon ?? null,
+        altitude: gps?.altitude ?? null,
       })),
       photoDebug: [...(s.photoDebug || [])],
       blobs: await Promise.all(s.files.map(f => f.arrayBuffer())),
@@ -97,6 +98,7 @@ export async function loadImportSessions() {
           photoGps: (r.photoGps || []).map(gps => ({
             lat: gps?.lat ?? null,
             lon: gps?.lon ?? null,
+            altitude: gps?.altitude ?? null,
           })),
           photoDebug: [...(r.photoDebug || [])],
           imageMeta: (r.imageMeta || []).map(meta => ({
