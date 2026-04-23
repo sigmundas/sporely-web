@@ -289,8 +289,11 @@
           <button class="camera-denied-retry" id="camera-retry-btn">Try again</button>
         </div>
 
-        <div class="capture-header">
+        <div class="capture-header" style="justify-content: space-between;">
           <div class="capture-brand">Sporely</div>
+          <button class="icon-btn" id="capture-close-btn" aria-label="Close camera" style="color:white; background:rgba(0,0,0,0.5); border-radius:50%; width:36px; height:36px; display:flex; align-items:center; justify-content:center; margin-right:16px;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
         </div>
 
         <div class="capture-top-overlays" style="margin-top:52px">
@@ -311,7 +314,9 @@
         </div>
 
         <div class="capture-controls">
-          <div class="capture-control-spacer" aria-hidden="true"></div>
+          <button class="icon-btn" id="capture-import-btn" aria-label="Import photos" style="color:white; background:rgba(0,0,0,0.5); border-radius:50%; width:48px; height:48px; display:flex; align-items:center; justify-content:center; margin-left:16px;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="24" height="24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          </button>
           <button class="shutter-btn" id="shutter-btn" aria-label="Capture photo">
             <div class="shutter-inner"></div>
           </button>
@@ -807,6 +812,13 @@
     if (event.target.closest('#settings-btn')) {
       const active = document.activeElement
       if (active instanceof HTMLElement) active.blur()
+    }
+
+    if (event.target.closest('#capture-close-btn')) {
+      window.history.back()
+    }
+    if (event.target.closest('#capture-import-btn')) {
+      document.getElementById('ac-import')?.click()
     }
   }, true)
 </script>

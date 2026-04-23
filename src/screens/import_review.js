@@ -295,7 +295,12 @@ export async function openPhotoImportPicker() {
     }
   }
 
-  _openBrowserFileInput('import-photo-input');
+  // Android Chrome strips EXIF from "image/*" input. Use the browse input for Android web.
+  if (/android/i.test(navigator.userAgent)) {
+    _openBrowserFileInput('import-browse-input');
+  } else {
+    _openBrowserFileInput('import-photo-input');
+  }
 }
 
 async function _handleNativePhotoResult(result) {
