@@ -24,6 +24,16 @@ const messages = {
     'auth.genericError': 'Something went wrong. Please try again.',
     'auth.localCaptchaHint': 'Local dev is hiding Turnstile, but Supabase still requires CAPTCHA on the server. For phone testing, use your deployed URL or temporarily disable CAPTCHA in Supabase Auth.',
     'auth.existingAccount': 'An account with that email already exists. Sign in, or use "Forgot password" to reset it.',
+    'auth.forgotPassword': 'Forgot password?',
+    'auth.forgotPasswordDesc': 'Enter your email to receive a reset link.',
+    'auth.resetPassword': 'Reset password',
+    'auth.resetPasswordDesc': 'Enter your new password below.',
+    'auth.sendResetLink': 'Send reset link',
+    'auth.newPassword': 'New password',
+    'auth.updatePassword': 'Update password',
+    'auth.resetEmailSent': 'Password reset link sent. Check your inbox.',
+    'auth.passwordUpdated': 'Password updated successfully.',
+    'auth.backToLogin': 'Back to sign in',
     'common.sync': 'Sync',
     'common.pleaseWait': 'Please wait…',
     'common.cancel': 'Cancel',
@@ -310,6 +320,16 @@ const messages = {
     'auth.genericError': 'Noe gikk galt. Prøv igjen.',
     'auth.localCaptchaHint': 'Lokal utvikling skjuler Turnstile, men Supabase krever fortsatt CAPTCHA på serveren. For testing på telefon kan du bruke den deployede URL-en eller midlertidig slå av CAPTCHA i Supabase Auth.',
     'auth.existingAccount': 'Det finnes allerede en konto med den e-posten. Logg inn, eller bruk "Glemt passord" for å tilbakestille den.',
+    'auth.forgotPassword': 'Glemt passord?',
+    'auth.forgotPasswordDesc': 'Skriv inn e-posten din for å få en tilbakestillingslenke.',
+    'auth.resetPassword': 'Tilbakestill passord',
+    'auth.resetPasswordDesc': 'Skriv inn ditt nye passord under.',
+    'auth.sendResetLink': 'Send lenke',
+    'auth.newPassword': 'Nytt passord',
+    'auth.updatePassword': 'Oppdater passord',
+    'auth.resetEmailSent': 'Lenke for tilbakestilling sendt. Sjekk innboksen.',
+    'auth.passwordUpdated': 'Passordet er oppdatert.',
+    'auth.backToLogin': 'Tilbake til innlogging',
     'common.sync': 'Synk',
     'common.pleaseWait': 'Vent litt…',
     'common.cancel': 'Avbryt',
@@ -596,6 +616,16 @@ const messages = {
     'auth.genericError': 'Något gick fel. Försök igen.',
     'auth.localCaptchaHint': 'Lokal utveckling döljer Turnstile, men Supabase kräver fortfarande CAPTCHA på servern. För test på telefon kan du använda den deployade URL:en eller tillfälligt stänga av CAPTCHA i Supabase Auth.',
     'auth.existingAccount': 'Det finns redan ett konto med den e-posten. Logga in eller använd "Glömt lösenord" för att återställa det.',
+    'auth.forgotPassword': 'Glömt lösenord?',
+    'auth.forgotPasswordDesc': 'Ange din e-post för att få en återställningslänk.',
+    'auth.resetPassword': 'Återställ lösenord',
+    'auth.resetPasswordDesc': 'Ange ditt nya lösenord nedan.',
+    'auth.sendResetLink': 'Skicka länk',
+    'auth.newPassword': 'Nytt lösenord',
+    'auth.updatePassword': 'Uppdatera lösenord',
+    'auth.resetEmailSent': 'Länk för återställning skickad. Kontrollera inkorgen.',
+    'auth.passwordUpdated': 'Lösenordet har uppdaterats.',
+    'auth.backToLogin': 'Tillbaka till inloggning',
     'common.sync': 'Synk',
     'common.pleaseWait': 'Vänta…',
     'common.cancel': 'Avbryt',
@@ -882,6 +912,16 @@ const messages = {
     'auth.genericError': 'Etwas ist schiefgelaufen. Bitte versuche es erneut.',
     'auth.localCaptchaHint': 'Lokale Entwicklung blendet Turnstile aus, aber Supabase verlangt weiterhin CAPTCHA auf dem Server. Für Tests auf dem Handy verwende die deployte URL oder deaktiviere CAPTCHA vorübergehend in Supabase Auth.',
     'auth.existingAccount': 'Für diese E-Mail gibt es bereits ein Konto. Melde dich an oder nutze "Passwort vergessen", um es zurückzusetzen.',
+    'auth.forgotPassword': 'Passwort vergessen?',
+    'auth.forgotPasswordDesc': 'Gib deine E-Mail ein, um einen Link zum Zurücksetzen zu erhalten.',
+    'auth.resetPassword': 'Passwort zurücksetzen',
+    'auth.resetPasswordDesc': 'Gib unten dein neues Passwort ein.',
+    'auth.sendResetLink': 'Link senden',
+    'auth.newPassword': 'Neues Passwort',
+    'auth.updatePassword': 'Passwort aktualisieren',
+    'auth.resetEmailSent': 'Link zum Zurücksetzen gesendet. Prüfe deinen Posteingang.',
+    'auth.passwordUpdated': 'Passwort erfolgreich aktualisiert.',
+    'auth.backToLogin': 'Zurück zur Anmeldung',
     'common.sync': 'Sync',
     'common.pleaseWait': 'Bitte warten…',
     'common.cancel': 'Abbrechen',
@@ -1297,6 +1337,22 @@ export function applyStaticTranslations() {
   setText('#signup-switch-prefix', 'auth.alreadyHaveOne')
   setText('#show-login', 'auth.signIn')
   setText('.auth-tagline', 'auth.tagline')
+  
+  setText('#show-forgot-password', 'auth.forgotPassword')
+  setText('#forgot-password-title', 'auth.resetPassword')
+  setText('#forgot-password-desc', 'auth.forgotPasswordDesc')
+  setText('#forgot-email-label', 'auth.email')
+  const forgotBtn = document.getElementById('forgot-btn')
+  if (forgotBtn) forgotBtn.dataset.label = t('auth.sendResetLink')
+  setText('#forgot-btn', 'auth.sendResetLink')
+  setText('#show-login-from-forgot', 'auth.backToLogin')
+  
+  setText('#reset-password-title', 'auth.resetPassword')
+  setText('#reset-password-desc', 'auth.resetPasswordDesc')
+  setText('#reset-password-label', 'auth.newPassword')
+  const resetBtn = document.getElementById('reset-password-btn')
+  if (resetBtn) resetBtn.dataset.label = t('auth.updatePassword')
+  setText('#reset-password-btn', 'auth.updatePassword')
 
   setPlaceholder('#signup-password', 'auth.passwordMin')
   setPlaceholder('#finds-search-input', 'finds.search')

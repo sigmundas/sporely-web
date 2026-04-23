@@ -437,6 +437,8 @@ decoding during the "Converting" phase; preview uses the native/cache JPEG blob
 directly, and AI crop metadata can remain unset until the user explicitly opens
 crop/AI tools.
 
+**Android PWA (Web) note:** Android Chrome strips EXIF metadata (including GPS) for privacy when a web app uses a standard `<input type="file" accept="image/*">` quick picker. To preserve GPS on imported JPEGs, the web app routes Android browser users to a specific file picker (`import-browse-input` with explicit file extensions) that bypasses the privacy scrub and preserves the original bytes and metadata.
+
 Confirmed on Samsung S25 / Android APK: `ACTION_OPEN_DOCUMENT` preserves GPS for
 the test HEIC (`20260419_092927.heic`: about `63.45209, 10.43705`, altitude
 `90 m`). The UX tradeoff is that Android shows the document picker, often opening

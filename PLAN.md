@@ -1,7 +1,7 @@
 # Sporely-web Development Plan
 
 ## UI fixes
-- Add a button on the left side of the capture button for the camera. Or perhaps a circle with an image inside - like the native camera app. Tapping that should bring up the file import dialog (same as the file import from home scren.) Add a circle with a cross in int, upper right corner. Tapping will close the camera without making any observation - so back to the screen user came from.
+- [x] Add a button on the left side of the capture button for the camera. Or perhaps a circle with an image inside - like the native camera app. Tapping that should bring up the file import dialog (same as the file import from home scren.) Add a circle with a cross in int, upper right corner. Tapping will close the camera without making any observation - so back to the screen user came from.
 
 ## Code Review & Refactoring
 *Review this code with a strict refactor/audit mindset. Do not praise. Look for concrete problems only.*
@@ -621,6 +621,20 @@ return new Promise((resolve, reject) => {
 - Queue sync is now retry-safe: a retried queue item reuses the previously inserted remote observation ID instead of creating duplicate cloud rows.
 - Completed image indexes are persisted per queued item, so partial upload progress can resume instead of starting over from image 0 each time.
 - Finds now prefers a local queued preview URL for pending observations, so queued cards should show a real local thumbnail instead of only a mushroom placeholder when the queued blob is available.
+
+### 2026-04-23 — Schema and CORS Blockers Fixed
+
+**What was reported**
+- Android web app stuck on "Finalizing upload..." and retrying.
+- iPhone web app stuck on "Queued for upload".
+- Upload works perfectly from the Android APK.
+- Missing EXIF GPS on Samsung Android web app when importing JPEGs.
+
+**Root causes and fixes**
+- **Schema Mismatch:** The newly introduced `ai_crop_*`, `upload_mode`, and dimension tracking columns were missing from the production Supabase `observation_images` table, causing silent inserts to fail and trap queue items in endless retry loops.
+- **Web CORS / Env Mismatch:** The web frontend `app.sporely.no` was missing `VITE_MEDIA_UPLOAD_BASE_URL` pointing to the proper Cloudflare Worker custom domain, causing silent preflight/fetch failures that never showed up in `wrangler tail`.
+- **Android Web GPS Stripping:** Android Chrome strips EXIF metadata (including GPS) for privacy when a web app invokes the camera roll via standard `<input type="file" accept="image/*">`. Fixed by routing Android web user agents to use the specific `import-browse-input` (`accept=".jpg,.jpeg,..."`), which forces the file browser and preserves original metadata.
+- **UI Fix:** Added "Close" and "Import" buttons to the camera capture overlay.
 
 ## Documentation and Landing Page (VitePress)
 *Goal: Convert the existing `sporely-landing` static site into a VitePress project that directly serves the Markdown documentation from `sporely-py/docs` alongside the app feature highlights.*

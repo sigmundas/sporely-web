@@ -39,7 +39,29 @@
           <input type="password" id="login-password" class="auth-input" placeholder="••••••••" required autocomplete="current-password">
         </label>
         <button type="submit" class="auth-btn" id="login-btn">Sign in</button>
+        <p class="auth-switch" style="margin-bottom:8px"><a href="#" id="show-forgot-password">Forgot password?</a></p>
         <p class="auth-switch"><span id="login-switch-prefix">No account?</span> <a href="#" id="show-signup">Create one</a></p>
+      </form>
+
+      <!-- Forgot password form -->
+      <form id="forgot-password-form" class="auth-form" style="display:none">
+        <h2 class="auth-title" id="forgot-password-title">Reset password</h2>
+        <p class="auth-tagline" id="forgot-password-desc">Enter your email to receive a reset link.</p>
+        <label class="auth-label"><span id="forgot-email-label">Email</span>
+          <input type="email" id="forgot-email" class="auth-input" placeholder="you@example.com" required autocomplete="email">
+        </label>
+        <button type="submit" class="auth-btn" id="forgot-btn">Send reset link</button>
+        <p class="auth-switch"><a href="#" id="show-login-from-forgot">Back to sign in</a></p>
+      </form>
+
+      <!-- Reset password form -->
+      <form id="reset-password-form" class="auth-form" style="display:none">
+        <h2 class="auth-title" id="reset-password-title">Set new password</h2>
+        <p class="auth-tagline" id="reset-password-desc">Enter your new password below.</p>
+        <label class="auth-label"><span id="reset-password-label">New password</span>
+          <input type="password" id="new-password" class="auth-input" placeholder="At least 6 characters" required autocomplete="new-password">
+        </label>
+        <button type="submit" class="auth-btn" id="reset-password-btn">Update password</button>
       </form>
 
       <!-- Signup form -->

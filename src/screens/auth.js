@@ -158,20 +158,27 @@ function setLoading(btn, loading) {
   btn.textContent = loading ? t('common.pleaseWait') : btn.dataset.label
 }
 
-function switchToLogin(prefillEmail = '') {
+export function switchToLogin(prefillEmail = '', resetMessage = false) {
   showError('')
   document.getElementById('signup-form').style.display = 'none'
+  document.getElementById('forgot-password-form').style.display = 'none'
+  document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('login-form').style.display  = 'block'
   // Hide Turnstile on the login view — captcha is signup-only
   const tc = document.getElementById('turnstile-container')
   if (tc) tc.style.display = 'none'
   if (prefillEmail) document.getElementById('login-email').value = prefillEmail
   _writeAuthDraft({ mode: 'login', loginEmail: prefillEmail || document.getElementById('login-email').value })
+  if (resetMessage) {
+    showError(t('auth.passwordUpdated'), false, true)
+  }
 }
 
 function switchToSignup(prefillEmail = '') {
   showError('')
   document.getElementById('login-form').style.display  = 'none'
+  document.getElementById('forgot-password-form').style.display = 'none'
+  document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('signup-form').style.display = 'block'
   // Show and init Turnstile when entering signup view
   const tc = document.getElementById('turnstile-container')
@@ -179,6 +186,27 @@ function switchToSignup(prefillEmail = '') {
   _initTurnstile()
   if (prefillEmail) document.getElementById('signup-email').value = prefillEmail
   _writeAuthDraft({ mode: 'signup', signupEmail: prefillEmail || document.getElementById('signup-email').value })
+}
+
+export function switchToForgotPassword(prefillEmail = '') {
+  showError('')
+  document.getElementById('login-form').style.display = 'none'
+  document.getElementById('signup-form').style.display = 'none'
+  document.getElementById('reset-password-form').style.display = 'none'
+  document.getElementById('forgot-password-form').style.display = 'block'
+  const tc = document.getElementById('turnstile-container')
+  if (tc) tc.style.display = 'none'
+  if (prefillEmail) document.getElementById('forgot-email').value = prefillEmail
+}
+
+export function switchToResetPassword() {
+  showError('')
+  document.getElementById('login-form').style.display = 'none'
+  document.getElementById('signup-form').style.display = 'none'
+  document.getElementById('forgot-password-form').style.display = 'none'
+  document.getElementById('reset-password-form').style.display = 'block'
+  const tc = document.getElementById('turnstile-container')
+  if (tc) tc.style.display = 'none'
 }
 
 // ── Resend confirmation ────────────────────────────────────────────────────────
@@ -255,11 +283,17 @@ export function handleUrlHashError() {
 export function initAuth(onAuthenticated) {
   const loginForm  = document.getElementById('login-form')
   const signupForm = document.getElementById('signup-form')
+  const forgotForm = document.getElementById('forgot-password-form')
+  const resetForm  = document.getElementById('reset-password-form')
   const loginBtn   = document.getElementById('login-btn')
   const signupBtn  = document.getElementById('signup-btn')
+  const forgotBtn  = document.getElementById('forgot-btn')
+  const resetBtn   = document.getElementById('reset-password-btn')
 
   loginBtn.dataset.label  = t('auth.signIn')
   signupBtn.dataset.label = t('auth.createAccount')
+  forgotBtn.dataset.label = t('auth.sendResetLink')
+  resetBtn.dataset.label  = t('auth.updatePassword')
 
   // Inject Terms of Service checkbox dynamically
   if (signupForm && signupBtn && !document.getElementById('signup-terms')) {
@@ -284,6 +318,16 @@ export function initAuth(onAuthenticated) {
   })
 
   document.getElementById('show-login').addEventListener('click', e => {
+    e.preventDefault()
+    switchToLogin()
+  })
+
+  document.getElementById('show-forgot-password')?.addEventListener('click', e => {
+    e.preventDefault()
+    switchToForgotPassword(document.getElementById('login-email').value)
+  })
+
+  document.getElementById('show-login-from-forgot')?.addEventListener('click', e => {
     e.preventDefault()
     switchToLogin()
   })
@@ -357,6 +401,43 @@ export function initAuth(onAuthenticated) {
     // data.user being present means fresh signup.
     switchToLogin(email)
     showResendPrompt(email)
+  })
+
+  // ── Forgot Password ────────────────────────────────────────────────────────
+  forgotForm?.addEventListener('submit', async e => {
+    e.preventDefault()
+    showError('')
+    const email = document.getElementById('forgot-email').value.trim()
+    
+    setLoading(forgotBtn, true)
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/`
+    })
+    setLoading(forgotBtn, false)
+    
+    if (error) {
+      showError(error.message)
+    } else {
+      showError(t('auth.resetEmailSent'), false, true)
+    }
+  })
+
+  // ── Reset Password ─────────────────────────────────────────────────────────
+  resetForm?.addEventListener('submit', async e => {
+    e.preventDefault()
+    showError('')
+    const newPassword = document.getElementById('new-password').value
+    
+    setLoading(resetBtn, true)
+    const { error } = await supabase.auth.updateUser({ password: newPassword })
+    setLoading(resetBtn, false)
+    
+    if (error) {
+      showError(error.message)
+    } else {
+      history.replaceState(null, '', window.location.pathname + window.location.search)
+      switchToLogin('', true)
+    }
   })
 }
 

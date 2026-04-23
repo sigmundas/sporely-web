@@ -39,6 +39,8 @@ See also:
     - `image_type` (`'field' | 'microscope'`)
     - `ai_crop_x1`, `ai_crop_y1`, `ai_crop_x2`, `ai_crop_y2` (normalized `0..1` AI crop rectangle)
     - `ai_crop_source_w`, `ai_crop_source_h` (source dimensions used when the crop was authored)
+    - `upload_mode` (`'reduced' | 'full' | 'original'`)
+    - `source_width`, `source_height`, `stored_width`, `stored_height`, `stored_bytes`
     - microscope metadata columns exist but are populated primarily by desktop sync
 - `comments`
   - Community comments on observations
