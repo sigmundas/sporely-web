@@ -51,6 +51,10 @@ export async function saveImportSessions(sessions) {
         altitude: gps?.altitude ?? null,
       })),
       photoDebug: [...(s.photoDebug || [])],
+      gpsLat: s.gpsLat ?? null,
+      gpsLon: s.gpsLon ?? null,
+      gpsAltitude: s.gpsAltitude ?? null,
+      gpsAccuracy: s.gpsAccuracy ?? null,
       blobs: await Promise.all(s.files.map(f => f.arrayBuffer())),
       aiBlobs: await Promise.all((s.aiFiles || s.files).map(f => f.arrayBuffer())),
     })))
@@ -101,6 +105,10 @@ export async function loadImportSessions() {
             altitude: gps?.altitude ?? null,
           })),
           photoDebug: [...(r.photoDebug || [])],
+          gpsLat: r.gpsLat ?? null,
+          gpsLon: r.gpsLon ?? null,
+          gpsAltitude: r.gpsAltitude ?? null,
+          gpsAccuracy: r.gpsAccuracy ?? null,
           imageMeta: (r.imageMeta || []).map(meta => ({
             aiCropRect: meta?.aiCropRect || null,
             aiCropSourceW: meta?.aiCropSourceW ?? null,

@@ -33,6 +33,15 @@ All media now goes through the Cloudflare R2 pipeline.
 
 ---
 
+## Testing & Auditing
+
+| Layer | Choice |
+|---|---|
+| Static Analysis | ESLint (planned) for automating the 10-point code review checklist |
+| Unit Testing | Vitest (planned) for testing core logic like sync queues, AI crop math, and deduplication |
+| Database | Supabase local testing utilities / pgTAP (planned) for automated RLS policy auditing |
+---
+
 ## File structure
 
 ```
@@ -131,6 +140,7 @@ All media is stored in Cloudflare R2, not Supabase Storage.
 - **JWT verification:** Worker fetches the JWKS from Supabase (`/auth/v1/.well-known/jwks.json`) and verifies the ES256 signature using Web Crypto. The JWKS is cached in-memory for 10 minutes.
 - **Key rule:** Upload path must start with the JWT `sub` (user ID) — enforced by the worker.
 - **Current client policy:** Free accounts upload reduced 2 MP images. Pro/full-res accounts can choose `Reduced (2MP)` or `Max (12MP)` in Settings. Max keeps near-12 MP originals when friendly to quality and only resizes images from 14 MP and up down to 12 MP.
+- **HEIC Fallback (Web):** If the browser cannot natively decode an image into a Canvas (e.g., HEIC files in Chrome/Firefox without native conversion), the resize step gracefully fails and the app uploads the original, unmodified file with `upload_mode: 'original'`.
 - **Storage tally/quota:** After successful R2 writes/deletes, the worker updates `profiles.total_storage_bytes`, compatibility `profiles.storage_used_bytes`, and original-image `profiles.image_count` through the Supabase RPC in `supabase/profile-storage-usage.sql`. Free-tier storage can be limited per profile via `storage_quota_bytes` or globally via worker `FREE_STORAGE_QUOTA_BYTES`.
 - **Worker secret:** The worker needs Cloudflare secret `SUPABASE_SERVICE_ROLE_KEY` so backend-only profile tally updates can bypass RLS. This secret must never be committed or exposed to the frontend.
 - **Source:** `cloudflare/r2-upload-worker/src/index.js`
@@ -509,55 +519,3 @@ service-level R2 API credentials from `python.env`).
 `private_comment` never leaves the desktop.
 
 Triggered via Settings → Sporely Cloud Sync… in the desktop app.
-
----
-
-## What's real vs stubbed
-
-| Feature | Status |
-|---|---|
-| Email/password auth | ✅ Real |
-| Confirmation email resend | ✅ Real |
-| GPS capture | ✅ Real |
-| Camera capture (mobile) | ✅ Real |
-| Native Android gallery import with HEIC GPS | ✅ Real — custom Capacitor plugin + Filesystem read |
-| Observation insert to Supabase | ✅ Real |
-| Image upload to Cloudflare R2 | ✅ Real — via `upload.sporely.no` worker |
-| Grid/card thumbnails | ✅ Real — `small` + `medium` variants generated at upload time |
-| Profile avatar upload/crop | ✅ Real |
-| Self-service account deletion | ✅ Real — via Supabase Edge Function `delete-account` |
-| Finds list from Supabase | ✅ Real |
-| Recent finds on home screen | ✅ Real |
-| Desktop ↔ cloud sync | ✅ Real (desktop side) |
-| Artsorakel (Artsdata AI species ID) | ✅ Real — proxied through the Cloudflare Worker when `VITE_MEDIA_UPLOAD_BASE_URL`/`VITE_ARTSORAKEL_BASE_URL` is configured, with direct-call fallback otherwise |
-| Taxa autocomplete search | ✅ Real — Supabase RPC for taxon inputs; map autocomplete uses currently loaded observations for faster local filtering |
-| Camera permission denied overlay | ✅ Real — platform-specific instructions |
-| Friends finds + thumbnails | ✅ Real — `observations_friend_view` + R2 public CDN |
-| Community finds | ✅ Real — `observations_community_view` (visibility = public) |
-| Map view | ✅ Real — Leaflet + OpenStreetMap |
-| Offline queue | ✅ Real — IndexedDB queue, syncs on reconnect |
-| Import review recovery after app suspension | ✅ Real — IndexedDB `pending_import` store |
-| Friends feed | 🟡 Stubbed — toast only |
-| Capture draft save/resume | ❌ Removed — capture review is now direct cancel/save |
-| Push notifications | ❌ Not started |
-| Pro Subscription (RevenueCat) | 🟡 Groundwork in place — schema + upload metadata are live, but no billing/IAP flow yet |
-| Hardware Sync (Macro-to-GPS) | ❌ Not started |
-
----
-
-## Infrastructure status
-
-| Item | Status |
-|---|---|
-| Supabase project | ✅ Live (`zkpjklzfwzefhjluvhfw`) |
-| Supabase JWT algorithm | ✅ ES256 (ECC P-256) — asymmetric, JWKS-based |
-| Email via Resend SMTP | ✅ Configured (`noreply@sporely.no`, domain verified) |
-| Cloudflare R2 bucket `sporely-media` | ✅ Live |
-| Cloudflare Worker `upload.sporely.no` | ✅ Live — custom domain via `[[routes]]` in wrangler.toml |
-| Cloudflare CDN `media.sporely.no` | ✅ Live — public R2 bucket serving, CORS `*` configured |
-| Subscription bootstrap SQL | ✅ Applied — profile plan flags + upload metadata columns are live |
-| `avatars` Storage bucket (Supabase) | ✅ Created, public read + owner-scoped writes |
-| `taxa` + `taxa_vernacular` tables | ✅ Populated (110k taxa, 70k vernacular names) |
-| `search_taxa` RPC | ✅ Deployed |
-| `delete-account` Edge Function | ⚠️ In repo — must be deployed in Supabase before the UI button works |
-| Unique constraints on observations | ⚠️ Not yet run — see `supabase_unique_constraints.sql` |

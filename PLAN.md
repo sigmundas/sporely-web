@@ -1,5 +1,102 @@
 # Sporely-web Development Plan
 
+## UI fixes
+- Add a button on the left side of the capture button for the camera. Or perhaps a circle with an image inside - like the native camera app. Tapping that should bring up the file import dialog (same as the file import from home scren.) Add a circle with a cross in int, upper right corner. Tapping will close the camera without making any observation - so back to the screen user came from.
+
+## Code Review & Refactoring
+*Review this code with a strict refactor/audit mindset. Do not praise. Look for concrete problems only.*
+
+For each issue you find, return:
+- severity: low / medium / high
+- category
+- file(s)
+- exact problem
+- why it is a problem
+- minimal fix
+- whether fix is safe or risky
+
+Check specifically for these categories:
+
+1. Duplicate logic
+- Repeated Vanilla JS DOM element creation, formatting, or parsing
+- Repeated Supabase JS `.select()` or `.insert()` query boilerplate
+- Repeated IndexedDB transaction and object store boilerplate
+- Repeated EXIF parsing or Canvas resizing logic that should be centralized
+- Duplicated deduplication logic (e.g., fuzzy matching) across different list views
+
+2. Conflicting source of truth
+- DOM state (e.g., `data-*` attributes, input values) drifting from `src/state.js`
+- Local variables in `screens/*.js` shadowing global `state` properties
+- IndexedDB offline queue state out of sync with actual Supabase cloud row state
+- Cached Supabase auth session data drifting from the actual `onAuthStateChange` reality
+- Inconsistent markers for uploaded vs. pending photos
+
+3. Database consistency
+- Supabase JS insert payloads missing fallback values or null handling
+- Mismatches between IndexedDB object store payloads and actual Supabase DB schemas
+- Relying on client-side JS to enforce rules that should be handled by Supabase RLS or the Cloudflare Worker
+- Type inconsistencies across environments (e.g., string vs. integer for `desktop_id` or remote IDs)
+
+4. State flow problems
+- Modifying `state.js` directly without triggering DOM updates or `notify*()` signals
+- Async races: UI rendering before Supabase fetch or IndexedDB read completes
+- IndexedDB `readwrite` transactions auto-closing due to intermediate `await` calls (especially on iOS Safari)
+- Screen navigation (`router.js`) failing to tear down previous screen's event listeners, intervals, or camera streams
+- Background sync worker racing or clashing with active foreground UI states
+
+5. UI consistency problems
+- Same concept displayed with different labels (e.g., "Queued" vs "Pending")
+- Hardcoded English strings used instead of the `t()` translation helper
+- Vanilla JS DOM manipulation omitting standard CSS classes from `style.css`
+- Inconsistent error toast messages for network failures vs database failures
+- Missing empty states for lists (Finds, Comments, Friends)
+
+6. Dead code / stale code
+- Unused functions, constants, or leftover `console.log` statements
+- Unused CSS custom properties in `style.css`
+- Dead code paths from before the Cloudflare R2 storage migration (legacy Supabase storage logic)
+- Leftover code from removed features (e.g., draft save/resume logic)
+
+7. Overgrown files / bad boundaries
+- `screens/*.js` files directly mixing heavy DOM construction, raw IndexedDB transactions, and Supabase queries
+- Heavy image processing (Canvas rendering, EXIF extraction) blocking the main UI thread
+- State files containing DOM presentation formatting
+- `import_review.js` or `sync-queue.js` growing too large without module splitting
+
+8. Naming problems
+- Confusing or overlapping IDs (e.g., mixing up local offline `id`, `desktop_id`, and Supabase `id`)
+- Misleading sync stages (`syncStage` vs `syncStatus` vs `status`)
+- Function names that sound synchronous but return Promises
+- Generic element IDs in Vanilla JS leading to `document.getElementById` collisions
+
+9. Error handling / edge cases
+- Unhandled iOS Safari memory / Blob streaming limits leading to silent crashes
+- Assuming the network is online without a proper IndexedDB offline-queue fallback
+- Assuming native Capacitor APIs (e.g., `NativePhotoPicker`) are always available when running as a PWA
+- Silent failures in `Promise.all` during multi-photo batch imports or uploads
+- Missing guard clauses when DOM elements are temporarily unmounted
+
+10. Refactor opportunities worth doing now
+- Move repeated Vanilla JS DOM creation into shared layout helpers
+- Centralize IndexedDB read/write for specific entities (`import-store.js`, `sync-queue.js`)
+- Isolate heavy image processing / AI crop math into pure, testable modules (`Vitest` ready)
+- Align cloud AI crop data shapes directly with the canonical `sporely-py` desktop definitions
+
+Important:
+- Prefer specific findings over style opinions
+- Ignore superficial formatting unless it hides a real problem
+- Do not suggest huge rewrites unless necessary
+- Flag places where behavior may drift across desktop/web/mobile versions
+- Distinguish “must fix” from “cleanup”
+
+### Existing Refactor & Audit Tasks
+- [ ] **Optional server-side change summary** — a future Supabase RPC/view could return one per-observation “meaningful cloud change” summary and remove most remaining client-side deep comparison work.
+- [ ] **Import Flow Memory Architecture** — Refactor `import_review.js` and `import-store.js` to a streaming architecture. Currently, large imports (40+ photos) can exhaust mobile browser memory and crash the app because all full-resolution JPEGs are decoded and held in RAM simultaneously before being written to IndexedDB. The fix requires:
+    - Streaming each processed blob directly to IndexedDB in `_processFile` and releasing it from RAM.
+    - Keeping only lightweight metadata and downscaled `aiBlob` URLs in the active memory array (`sourceItems`).
+    - Avoiding the massive memory spike caused by `Promise.all(files.map(f => f.arrayBuffer()))` in `import-store.js`.
+    - *Note on Platforms (PWA vs APK):* This bottleneck is most severe for iPhone users running the app as a PWA (Safari), where per-tab memory limits are very strict (crashing often around 150-300MB). Android users on the native Capacitor APK have a higher WebView memory ceiling (often 500MB+ on modern devices like the S25) and benefit from native HEIC-to-JPEG conversion, but they will still eventually crash on huge imports until this streaming fix is implemented.
+
 ## Bugs
 - I can't delete observations from app.sporely.no. Deleting from the installed apk app works. Error: "Delete failed: failed to fetch"
 - Android HEIC import location regression was traced to metadata/display handling, not only conversion:
@@ -354,6 +451,23 @@ window.addEventListener(SYNC_SUCCESS_EVENT, event => {
      - `Retrying upload…`
    - That text now tells us which stage is failing, which should prevent the next debugging pass from looping blindly.
 
+### 2026-04-22 — HEIC, GPS, and Blob Validation Fixes
+
+**What was reported**
+- Image import from HEIC: no image, no GPS.
+- Image import from JPG file: image imports, no GPS.
+- From camera (demo mode): no image, no GPS.
+
+**Root causes and fixes**
+- **Fragile `instanceof Blob` checks:** Cross-context objects (like native files from Capacitor or IndexedDB records) often fail strict `instanceof Blob` checks on mobile WebViews and Safari. This caused valid images to be stripped silently from queues.
+  - *Fix:* Replaced all strict checks with a robust `_isBlob` duck-type helper (checking for `size` and `type` properties) across `sync-queue.js`, `review.js`, `import_review.js`, `images.js`, and `artsorakel.js`.
+- **HEIC Web Uploads Crashing:** Browsers cannot natively decode HEIC into an `<img>` tag to draw to a Canvas. The `_prepareUploadBlob` function was throwing an error, completely aborting the sync.
+  - *Fix:* Wrapped the image decode in a `try/catch`. If decode fails, it gracefully falls back to uploading the raw original HEIC file with `upload_mode: 'original'`.
+- **IndexedDB GPS Persistence:** Multi-photo import sessions persisted to IndexedDB but forgot to save `gpsLat`, `gpsLon`, `gpsAltitude`, and `gpsAccuracy`. Resuming an import session wiped the GPS.
+  - *Fix:* Added the missing GPS fields to `import-store.js` serialization.
+- **Demo Mode Camera:** The local web-only demo camera was pushing a `null` blob, which the new robust checks rightfully rejected, resulting in 0-image uploads.
+  - *Fix:* Generated a real canvas blob with a mushroom emoji for demo mode captures.
+
 #### v0.2.16 — Post-device-test hotfix: IndexedDB transaction lifetime
 
 **User-reported results on `app.sporely.no` before this hotfix**
@@ -525,42 +639,15 @@ return new Promise((resolve, reject) => {
 
 ### Status: AI Crop Workflow — largely complete
 
-**Completed:**
-- [x] Shared crop data model (`ai_crop_x1/y1/x2/y2`, `ai_crop_source_w/h`) on `observation_images` — matches `sporely-py` schema
-- [x] Supabase migration applied (`sporely-py/database/supabase_observation_images_ai_crop.sql`)
-- [x] `src/image_crop.js` — reusable crop math, normalization, default rect, blob export
-- [x] `src/ai-crop-editor.js` — full-screen pan/pinch-zoom crop editor (pan, pinch, reset, prev/next)
-- [x] Import review editor — per-image AI crop in `import_review.js`, pre-seeded default on import
-- [x] Camera review editor — crop editing wired in `review.js`
-- [x] Artsorakel integration — `runArtsorakelForBlobs()` accepts `{blob, cropRect}`, crops client-side before AI request
-- [x] Observation detail crop editor — clicking a gallery image on your own observation opens the crop editor; `updateObservationImageCrop` persists changes immediately; non-owners get photo viewer
-- [x] `insertObservationImage` saves crop columns; `updateObservationImageCrop` updates them post-save
-- [x] Sync queue handles crop metadata for background uploads
-
 **Remaining:**
 - [ ] **Cross-platform QA** — verify the same image’s crop survives web edit → desktop pull and desktop edit → cloud/web round-trip
 
-## Active Tasks (TODO) - Infrastructure, Sync & R2 Migration
-- [x] **Setup R2 Bucket** — `sporely-media` is configured in Cloudflare.
-- [x] **Public Media Reads** — Web galleries now prefer `https://media.sporely.no` and fall back to signed legacy Supabase URLs when needed.
-- [x] **Worker for Uploads Implemented** — Authenticated Worker code now exists in-repo for JWT-validated R2 uploads.
-- [x] **Web Upload Path Prepared** — The web app can use the Worker for uploads when `VITE_MEDIA_UPLOAD_BASE_URL` is configured.
-- [x] **Database Schema Update Authored** — `sporely-py/database/supabase_r2_media_migration.sql` adds `image_key` and `thumb_key` plus backfills from existing image rows.
-- [x] **Domain Roles Clarified** — `media.sporely.no` is the public read domain for gallery/media delivery, while the Worker endpoint handles authenticated writes. A temporary `workers.dev` URL is acceptable until `upload.sporely.no` is routed.
-- [x] **Deploy Worker for Uploads** — Worker is deployed with the R2 bucket bound and a live `upload.sporely.no` route.
-- [x] **Run Live Schema Migration** — R2 migration SQL has been applied in Supabase.
-- [x] **Run Unique Constraints SQL** — Unique-constraint SQL is already marked applied in the current cloud setup docs.
-- [x] **Move Web Deletes to R2** — Worker DELETE route deployed; `deleteObservationMedia` uses Worker for R2 deletion.
-- [x] **Profile storage tally + quota guardrails** — Worker updates `profiles.total_storage_bytes`, compatibility `storage_used_bytes`, and `image_count` after R2 upload/delete. Free-tier quota can be set per profile with `storage_quota_bytes` or globally with `FREE_STORAGE_QUOTA_BYTES`.
-- [x] **Offline queue** — Capture/import saves already enqueue observations and blobs in IndexedDB and retry background sync later.
-- [x] **Supabase Heartbeat** — GitHub Action pings Supabase every 4 days through `scripts/supabase-heartbeat.mjs` to prevent 1-week auto-pause.
-- [x] **Bundle trimming** — Map screen is lazy-loaded so `leaflet` is no longer on the initial startup path.
-- [x] **Friends feed** — Query `observations_friend_view`, paginate, and render list.
-
-## Shared Sync Notes
-- [x] **Desktop conflict noise reduced** — desktop sync now ignores order-only image changes and low-signal local media-signature churn when deciding whether web/cloud edits need review.
-- [x] **Startup cloud scan reduced** — desktop sync now prefilters cloud observations using cached local links and a short timestamp grace window so same-sync server timestamp lag does not make every observation look newly changed on restart.
-- [ ] **Optional server-side change summary** — a future Supabase RPC/view could return one per-observation “meaningful cloud change” summary and remove most remaining client-side deep comparison work.
+## Active Tasks (TODO) - Automated Testing & Auditing
+*Goal: Move from purely manual QA debug logs to an automated safety net for complex sync and state flows.*
+- [ ] **Static Analysis** — Introduce ESLint and configure it to catch dead code, missing variables, and unused imports to automate the "10-point Code Review" checklist.
+- [ ] **Unit Testing Framework** — Introduce `Vitest` to test pure-logic modules (`image_crop.js`, local media signature generation, and `_observationsLikelySame` deduplication logic).
+- [ ] **Sync Queue Tests** — Write automated integration tests for `sync-queue.js` mocking IndexedDB and Cloudflare R2 worker uploads to simulate network drops and retry loops.
+- [ ] **RLS Auditing** — Create automated SQL tests (e.g., using `pgTAP` or Supabase local utilities) to verify that blocked users, banned users, and private measurements are correctly filtered by RLS policies.
 
 ## Phase 2: Web-Native Analysis & Community Data
 *Goal: Replicate core analysis insights in a responsive browser environment.*
@@ -587,27 +674,16 @@ return new Promise((resolve, reject) => {
 ## Long-Term Goals (Phase 3)
 - [ ] **In-Browser Measurement** — Replicate manual spore clicking and calibration using HTML5 Canvas.
 - [ ] **Cross-Platform Math Consistency** — Investigate **Pyodide** (WebAssembly) to run Python/Numpy logic in-browser.
-- [ ] **Import Flow Memory Architecture** — Refactor `import_review.js` and `import-store.js` to a streaming architecture. Currently, large imports (40+ photos) can exhaust mobile browser memory and crash the app because all full-resolution JPEGs are decoded and held in RAM simultaneously before being written to IndexedDB. The fix requires:
-    - Streaming each processed blob directly to IndexedDB in `_processFile` and releasing it from RAM.
-    - Keeping only lightweight metadata and downscaled `aiBlob` URLs in the active memory array (`sourceItems`).
-    - Avoiding the massive memory spike caused by `Promise.all(files.map(f => f.arrayBuffer()))` in `import-store.js`.
-    - *Note on Platforms (PWA vs APK):* This bottleneck is most severe for iPhone users running the app as a PWA (Safari), where per-tab memory limits are very strict (crashing often around 150-300MB). Android users on the native Capacitor APK have a higher WebView memory ceiling (often 500MB+ on modern devices like the S25) and benefit from native HEIC-to-JPEG conversion, but they will still eventually crash on huge imports until this streaming fix is implemented.
 
 ## Phase 4: Image Sync & Monetization
 *Goal: Implement tiered storage, client-side compression, and a Pro subscription model.*
 
 ### 1. Image Processing & Compression (Client-Side)
-- [x] **Free-tier reduced uploads:** Free accounts upload at 2 MP.
-- [x] **Pro image-resolution setting:** Pro/full-res accounts can choose `Reduced (2MP)` or `Max (12MP)` in Settings.
-- [x] **Friendly 12 MP cap:** Max mode keeps near-12 MP images as-is and only resizes from 14 MP and above down to 12 MP.
 - [ ] **Metadata Preservation:**
     - Extract GPS and timestamp EXIF data *before* compression.
     - Re-inject or store metadata in the database to ensure "Digital Lab Notebook" integrity.
 
 ### 2. Storage Architecture & Guardrails
-- [x] **Single R2 bucket with authenticated Worker:** `sporely-media` stores originals and generated thumbnails; `upload.sporely.no` enforces user-owned key prefixes.
-- [x] **Server-side storage tally:** The Worker increments/decrements `profiles.total_storage_bytes`, compatibility `storage_used_bytes`, and `image_count` using `supabase/profile-storage-usage.sql`.
-- [x] **Free-tier quota guardrail:** The Worker rejects free-tier uploads that exceed `profiles.storage_quota_bytes` or global `FREE_STORAGE_QUOTA_BYTES`.
 - [ ] **Backfill historical usage:** Add an admin script to scan existing R2 objects and reconcile `total_storage_bytes` / `image_count` for users with pre-tally uploads.
 
 ### 3. Monetization & In-App Purchases (IAP)
@@ -625,43 +701,67 @@ return new Promise((resolve, reject) => {
 
 ### 4. App Distribution (Google Play Store)
 *Goal: Release the native Android Capacitor wrapper to the Google Play Store.*
-- [x] Configure standard package name (`com.sporelab.sporely`) in Capacitor and Android project.
 - [ ] Create Android Keystore and configure release signing.
 - [ ] Build App Bundle (`.aab`) and upload to Google Play Console.
 - [ ] Prepare store listing, screenshots, and privacy policy.
 
-
 ### 5. Transparency & Open Source
 - [ ] **UI Disclaimers:**
     - Add clear messaging around free 2 MP uploads, Pro 12 MP uploads, and account storage quota.
-- [x] **Documentation:**
-    - Update `README.md` to explain the division between the open-source client code and the paid cloud storage hosting.
 
 ## Phase 5: UGC Moderation & Play Store Compliance
 *Goal: Implement required User Generated Content (UGC) moderation features to satisfy Google Play Store policies before APK release.*
 
-### 1. Terms of Service & EULA
-- [x] **Legal Document** — Write a EULA/Terms of Service explicitly defining objectionable content (no hate speech, illegal content, etc.).
-- [x] **Publish** — Host the EULA on `sporely.no` (via VitePress/landing page).
-- [x] **In-App Link** — Add an "Accept Terms" checkbox on the signup screen and a link to the EULA in App Settings / Profile.
-
-### 2. User Blocking
-- [x] **Schema Update** — Create a `user_blocks` table (`blocker_id`, `blocked_id`, `created_at`).
-- [x] **View Filtering** — Update `observations_community_view` and `observations_friend_view` to omit records where the author is blocked by the current user (or vice versa). Apply same filtering to comment RPCs/queries.
-- [x] **UI Implementation** — Add a "Block User" action to the `Profile` and `Find Detail` screens (e.g., via an overflow menu on observations and comments).
-- [x] **Local Hiding** — Instantly remove the blocked user's content from the local UI (`state.finds` / comments) upon successful block.
-
-### 3. Content Reporting
-- [x] **Schema Update** — Create a `reports` table (`id`, `reporter_id`, `reported_user_id`, `observation_id`, `comment_id`, `reason`, `status`, `created_at`).
-- [x] **UI Implementation** — Add a "Report" action to every public observation (Find Detail screen) and comment.
-- [x] **Report Dialog** — Implement a UI dialog to choose a report reason (e.g., "Spam", "Inappropriate", "Offensive").
-- [x] **Optimistic Hiding** — Once reported, immediately hide the reported content locally so the reporter no longer has to see it.
-
-### 4. Admin Moderation
-- [x] **Schema Update** — Add `is_banned` and `is_admin` boolean flags to `profiles`.
-- [x] **Backend Enforcement** — Ensure database triggers and the Cloudflare R2 Worker block upload/write actions for users where `profiles.is_banned = true`.
-- [x] **Content Hiding** — Update `observations_community_view` and `observations_friend_view` to hide past posts from banned users.
+### Outstanding Tasks
 - [ ] **Moderation Dashboard** — V1: Utilize Supabase Studio as the backend dashboard to routinely review the `reports` table, delete offending `observations`/`comments`, and ban bad actors. V2: Build an in-app `/admin` view gated by `is_admin = true`.
+
+## Feature Status (What's real vs stubbed)
+
+| Feature | Status |
+|---|---|
+| Email/password auth | ✅ Real |
+| Confirmation email resend | ✅ Real |
+| GPS capture | ✅ Real |
+| Camera capture (mobile) | ✅ Real |
+| Native Android gallery import with HEIC GPS | ✅ Real — custom Capacitor plugin + Filesystem read |
+| Observation insert to Supabase | ✅ Real |
+| Image upload to Cloudflare R2 | ✅ Real — via `upload.sporely.no` worker |
+| Grid/card thumbnails | ✅ Real — `small` + `medium` variants generated at upload time |
+| Profile avatar upload/crop | ✅ Real |
+| Self-service account deletion | ✅ Real — via Supabase Edge Function `delete-account` |
+| Finds list from Supabase | ✅ Real |
+| Recent finds on home screen | ✅ Real |
+| Desktop ↔ cloud sync | ✅ Real (desktop side) |
+| Artsorakel (Artsdata AI species ID) | ✅ Real — proxied through the Cloudflare Worker when `VITE_MEDIA_UPLOAD_BASE_URL`/`VITE_ARTSORAKEL_BASE_URL` is configured, with direct-call fallback otherwise |
+| Taxa autocomplete search | ✅ Real — Supabase RPC for taxon inputs; map autocomplete uses currently loaded observations for faster local filtering |
+| Camera permission denied overlay | ✅ Real — platform-specific instructions |
+| Friends finds + thumbnails | ✅ Real — `observations_friend_view` + R2 public CDN |
+| Community finds | ✅ Real — `observations_community_view` (visibility = public) |
+| Map view | ✅ Real — Leaflet + OpenStreetMap |
+| Offline queue | ✅ Real — IndexedDB queue, syncs on reconnect |
+| Import review recovery after app suspension | ✅ Real — IndexedDB `pending_import` store |
+| Friends feed | 🟡 Stubbed — toast only |
+| Capture draft save/resume | ❌ Removed — capture review is now direct cancel/save |
+| Push notifications | ❌ Not started |
+Not doing this: | Pro Subscription (RevenueCat) | 🟡 Groundwork in place — schema + upload metadata are live, but no billing/IAP flow yet |
+| Hardware Sync (Macro-to-GPS) | ❌ Not started |
+
+## Infrastructure Status
+
+| Item | Status |
+|---|---|
+| Supabase project | ✅ Live (`zkpjklzfwzefhjluvhfw`) |
+| Supabase JWT algorithm | ✅ ES256 (ECC P-256) — asymmetric, JWKS-based |
+| Email via Resend SMTP | ✅ Configured (`noreply@sporely.no`, domain verified) |
+| Cloudflare R2 bucket `sporely-media` | ✅ Live |
+| Cloudflare Worker `upload.sporely.no` | ✅ Live — custom domain via `[[routes]]` in wrangler.toml |
+| Cloudflare CDN `media.sporely.no` | ✅ Live — public R2 bucket serving, CORS `*` configured |
+| Subscription bootstrap SQL | ✅ Applied — profile plan flags + upload metadata columns are live |
+| `avatars` Storage bucket (Supabase) | ✅ Created, public read + owner-scoped writes |
+| `taxa` + `taxa_vernacular` tables | ✅ Populated (110k taxa, 70k vernacular names) |
+| `search_taxa` RPC | ✅ Deployed |
+| `delete-account` Edge Function | ⚠️ In repo — must be deployed in Supabase before the UI button works |
+| Unique constraints on observations | ⚠️ Not yet run — see `supabase_unique_constraints.sql` |
 
 ## Ongoing Database & Operations Tasks
 - Ensure `delete-account` Edge Function is deployed and functional.

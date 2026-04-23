@@ -7,6 +7,7 @@ import { fetchFirstImages, fetchCardImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
 import { QUEUE_EVENT, getQueuedObservations, deleteQueuedObservation, triggerSync } from '../sync-queue.js'
 import { openFindDetail } from './find_detail.js'
+import { imageHtml, wireImageFallback } from '../image-helpers.js'
 
 let currentScope = 'mine'
 const _cache = {}   // scope → array of observations
@@ -431,14 +432,6 @@ function _applyFilter() {
   }
 }
 
-function _imageHtml(source, className, placeholderClass) {
-  if (!source?.primaryUrl) return `<div class="${placeholderClass}">🍄</div>`
-  const fallbackAttr = source.fallbackUrl && source.fallbackUrl !== source.primaryUrl
-    ? ` data-fallback-src="${source.fallbackUrl}"`
-    : ''
-  return `<img class="${className}" src="${source.primaryUrl}"${fallbackAttr} loading="lazy" decoding="async" alt="">`
-}
-
 function _pendingImageSource(obs) {
   if (!obs?._pendingPreviewUrl) return null
   return {
@@ -466,17 +459,6 @@ function _pendingStatusText(obs) {
     default:
       return t('finds.pendingUpload')
   }
-}
-
-function _wireImageFallback(root) {
-  root.querySelectorAll('img[data-fallback-src]').forEach(img => {
-    img.addEventListener('error', () => {
-      const fallback = img.dataset.fallbackSrc
-      if (!fallback || img.dataset.fallbackApplied === 'true') return
-      img.dataset.fallbackApplied = 'true'
-      img.src = fallback
-    }, { once: true })
-  })
 }
 
 function _deleteQueueBtn(obs) {
@@ -644,7 +626,7 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
             : `<span class="find-card-loc-text">${dateLabel}</span>`
 
         if (variant === 'two') {
-          const photoInner = _imageHtml(
+          const photoInner = imageHtml(
             obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
             '',
             'find-card-photo-placeholder'
@@ -662,7 +644,7 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
         }
 
         if (variant === 'three') {
-          const photoInner = _imageHtml(
+          const photoInner = imageHtml(
             obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
             '',
             'find-card-photo-placeholder'
@@ -685,13 +667,13 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
           ? `<span class="find-card-photo-count">(${photoCount})</span>`
           : ''
         const photoWrapInner = obs._pendingSync
-          ? _imageHtml(_pendingImageSource(obs), '', 'find-card-photo-placeholder')
+          ? imageHtml(_pendingImageSource(obs), '', 'find-card-photo-placeholder')
           : cardImg?.second
             ? `<div class="find-card-polaroid">
-                <div class="find-card-polaroid-frame">${_imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
-                <div class="find-card-polaroid-frame">${_imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                <div class="find-card-polaroid-frame">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                <div class="find-card-polaroid-frame">${imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
               </div>`
-            : _imageHtml(cardImg?.first || cardImg, '', 'find-card-photo-placeholder')
+            : imageHtml(cardImg?.first || cardImg, '', 'find-card-photo-placeholder')
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
@@ -720,7 +702,7 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
       })
     })
     _wireDeleteButtons(list)
-    _wireImageFallback(list)
+    wireImageFallback(list)
   })
 }
 
@@ -744,7 +726,7 @@ function _renderTiles(list, subtitle, data) {
       const name = obs.common_name
         || formatScientificName(obs.genus || '', obs.species || '')
         || t('finds.unidentified')
-      const photo = _imageHtml(
+      const photo = imageHtml(
         obs._pendingSync ? _pendingImageSource(obs) : imageUrls[obs.id],
         '',
         'find-tile-empty'
@@ -767,7 +749,7 @@ function _renderTiles(list, subtitle, data) {
         openFindDetail(tile.dataset.id)
       })
     })
-    _wireImageFallback(list)
+    wireImageFallback(list)
   })
 }
 
@@ -858,7 +840,7 @@ function _renderCards(list, subtitle, data, options) {
             : '<span></span>'
 
         if (variant === 'two') {
-          const photoInner = _imageHtml(
+          const photoInner = imageHtml(
             obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
             '',
             'find-card-photo-placeholder'
@@ -880,7 +862,7 @@ function _renderCards(list, subtitle, data, options) {
         }
 
         if (variant === 'three') {
-          const photoInner = _imageHtml(
+          const photoInner = imageHtml(
             obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
             '',
             'find-card-photo-placeholder'
@@ -904,13 +886,13 @@ function _renderCards(list, subtitle, data, options) {
           ? `<span class="find-card-photo-count">(${photoCount})</span>`
           : ''
         const photoWrapInner = obs._pendingSync
-          ? _imageHtml(_pendingImageSource(obs), '', 'find-card-photo-placeholder')
+          ? imageHtml(_pendingImageSource(obs), '', 'find-card-photo-placeholder')
           : cardImg?.second
             ? `<div class="find-card-polaroid">
-                <div class="find-card-polaroid-frame">${_imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
-                <div class="find-card-polaroid-frame">${_imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                <div class="find-card-polaroid-frame">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                <div class="find-card-polaroid-frame">${imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
               </div>`
-            : _imageHtml(cardImg?.first || cardImg, '', 'find-card-photo-placeholder')
+            : imageHtml(cardImg?.first || cardImg, '', 'find-card-photo-placeholder')
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
@@ -945,6 +927,6 @@ function _renderCards(list, subtitle, data, options) {
       })
     })
     _wireDeleteButtons(list)
-    _wireImageFallback(list)
+    wireImageFallback(list)
   })
 }

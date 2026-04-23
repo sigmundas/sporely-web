@@ -25,6 +25,10 @@ const SUPABASE_STORAGE_PATH_PATTERNS = [
   /\/storage\/v1\/object\/observation-images\/(.+)$/i,
 ]
 
+function _isBlob(b) {
+  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
+}
+
 export function normalizeMediaKey(value) {
   const text = String(value || '').trim()
   if (!text) return ''
@@ -171,7 +175,7 @@ function _loadImage(blob) {
 }
 
 async function _createThumbnailBlob(blob, maxEdge, quality) {
-  if (!(blob instanceof Blob)) return null
+  if (!_isBlob(blob)) return null
 
   const img = await _loadImage(blob)
   const width = img.naturalWidth || img.width
@@ -219,13 +223,42 @@ function _fitWithinMaxPixels(width, height, maxPixels, options = {}) {
 }
 
 async function _prepareUploadBlob(blob, uploadPolicy) {
-  if (!(blob instanceof Blob)) throw new Error('Missing image blob')
+  if (!_isBlob(blob)) throw new Error('Missing image blob')
 
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
-  const img = await _loadImage(blob)
+  let img
+  try {
+    img = await _loadImage(blob)
+  } catch (err) {
+    // Browser cannot decode the image (e.g. HEIC fallback). Just upload original.
+    return {
+      uploadBlob: blob,
+      uploadMeta: {
+        upload_mode: 'original',
+        source_width: null,
+        source_height: null,
+        stored_width: null,
+        stored_height: null,
+        stored_bytes: blob.size || 0,
+      },
+    }
+  }
+
   const sourceWidth = img.naturalWidth || img.width
   const sourceHeight = img.naturalHeight || img.height
-  if (!sourceWidth || !sourceHeight) throw new Error('Image has zero dimensions')
+  if (!sourceWidth || !sourceHeight) {
+    return {
+      uploadBlob: blob,
+      uploadMeta: {
+        upload_mode: 'original',
+        source_width: null,
+        source_height: null,
+        stored_width: null,
+        stored_height: null,
+        stored_bytes: blob.size || 0,
+      },
+    }
+  }
 
   const fitted = _fitWithinMaxPixels(sourceWidth, sourceHeight, policy.maxPixels, {
     resizeThresholdPixels: policy.resizeThresholdPixels,
@@ -269,7 +302,7 @@ export async function prepareImageVariants(blob, uploadPolicy) {
   const uploads = Object.entries(THUMB_VARIANTS).map(async ([variant, config]) => {
     try {
       const thumbBlob = await _createThumbnailBlob(uploadBlob, config.maxEdge, config.quality)
-      if (thumbBlob instanceof Blob) {
+      if (_isBlob(thumbBlob)) {
         variants[variant] = thumbBlob
       }
     } catch (err) {
@@ -293,7 +326,7 @@ export async function uploadPreparedObservationImageVariants(preparedImage, stor
   await _uploadToStorage(storagePath, preparedImage.uploadBlob, uploadOptions)
 
   const uploads = Object.entries(preparedImage.variants || {}).map(async ([variant, thumbBlob]) => {
-    if (thumbBlob instanceof Blob) {
+    if (_isBlob(thumbBlob)) {
       try {
         await _uploadToStorage(getVariantPath(storagePath, variant), thumbBlob, uploadOptions)
       } catch (err) {

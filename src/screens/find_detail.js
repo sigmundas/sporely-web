@@ -10,13 +10,14 @@ import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { normalizeAiCropRect } from '../image_crop.js'
+import { esc as _esc } from '../esc.js'
 import { getDefaultVisibility, setLastSyncAt } from '../settings.js'
 import { refreshHome } from './home.js'
+import { buildGpsMetaHtml } from './review.js'
 
 let currentObs    = null
 let selectedTaxon = null
 let currentObsIsOwner = false
-let currentLocationOverride = null
 let returnScreenOverride = null
 let hideCancelOverride = false
 
@@ -26,7 +27,6 @@ export function initFindDetail() {
   document.getElementById('detail-cancel-btn').addEventListener('click', _goBack)
   document.getElementById('detail-save-btn').addEventListener('click', _save)
   document.getElementById('detail-delete-btn').addEventListener('click', _delete)
-  document.getElementById('detail-current-location-btn').addEventListener('click', _useCurrentLocation)
 
   const input    = document.getElementById('detail-taxon-input')
   const dropdown = document.getElementById('detail-taxon-dropdown')
@@ -70,7 +70,6 @@ export async function openFindDetail(obsId, options = {}) {
   currentObs    = null
   selectedTaxon = null
   currentObsIsOwner = false
-  currentLocationOverride = null
   returnScreenOverride = options.returnScreen || null
   hideCancelOverride = !!options.hideCancel
 
@@ -90,7 +89,7 @@ export async function openFindDetail(obsId, options = {}) {
 
   const { data: obs, error } = await supabase
     .from('observations')
-    .select('id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility')
+    .select('id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility')
     .eq('id', obsId)
     .single()
 
@@ -113,11 +112,9 @@ export async function openFindDetail(obsId, options = {}) {
     uncertain: !!obs.uncertain,
   })
   document.getElementById('detail-taxon-input').value = displayName.trim()
-  const coords = obs.gps_latitude && obs.gps_longitude
-    ? `${obs.gps_latitude.toFixed(4)}° N, ${obs.gps_longitude.toFixed(4)}° E`
-    : null
 
-  document.getElementById('detail-location').value    = obs.location || coords || ''
+  document.getElementById('detail-location').value = obs.location || ''
+
   document.getElementById('detail-habitat').value     = obs.habitat   || ''
   document.getElementById('detail-notes').value       = obs.notes     || ''
   document.getElementById('detail-uncertain').checked = !!obs.uncertain
@@ -137,9 +134,16 @@ export async function openFindDetail(obsId, options = {}) {
     timeEl.style.display = 'none'
   }
 
-  const coordsEl = document.getElementById('detail-coords')
-  if (coordsEl) coordsEl.textContent = coords || ''
-  if (coordsEl) coordsEl.style.display = coords ? 'block' : 'none'
+  const coordsEl = document.getElementById('detail-coords');
+  if (coordsEl) {
+    coordsEl.innerHTML = buildGpsMetaHtml({
+      lat: obs.gps_latitude,
+      lon: obs.gps_longitude,
+      altitude: obs.gps_altitude,
+      accuracy: obs.gps_accuracy,
+    })
+    coordsEl.style.display = obs.gps_latitude ? 'block' : 'none'
+  }
 
   // Set visibility radio
   const vis = obs.visibility || 'friends'
@@ -263,43 +267,6 @@ export async function openFindDetail(obsId, options = {}) {
   _loadComments(obsId)
 }
 
-async function _reverseGeocode(lat, lon) {
-  try {
-    const res = await fetch(
-      `https://stedsnavn.artsdatabanken.no/v1/punkt?lat=${lat}&lng=${lon}&zoom=55`
-    )
-    if (!res.ok) return null
-    const data = await res.json()
-    return data?.navn || null
-  } catch (_) {}
-  return null
-}
-
-async function _useCurrentLocation() {
-  if (!currentObsIsOwner) {
-    showToast(t('detail.onlyOwnerOverwriteLocation'))
-    return
-  }
-  if (!state.gps) {
-    showToast(t('detail.currentGpsUnavailable'))
-    return
-  }
-
-  const confirmed = window.confirm(t('detail.overwriteLocationConfirm'))
-  if (!confirmed) return
-
-  const lat = state.gps.lat
-  const lon = state.gps.lon
-  const name = await _reverseGeocode(lat, lon)
-  const value = name || `${lat.toFixed(4)}° N, ${lon.toFixed(4)}° E`
-
-  document.getElementById('detail-location').value = value
-  document.getElementById('detail-coords').textContent = `${lat.toFixed(4)}° N, ${lon.toFixed(4)}° E`
-  document.getElementById('detail-coords').style.display = 'block'
-  currentLocationOverride = { lat, lon, location: name || value }
-  showToast(t('detail.locationSet'))
-}
-
 async function _runAI() {
   const btn       = document.getElementById('detail-ai-btn')
   const resultsEl = document.getElementById('detail-ai-results')
@@ -389,11 +356,12 @@ function _goBack(event) {
 
 function _resetForm() {
   currentObsIsOwner = false
-  currentLocationOverride = null
   document.getElementById('detail-taxon-input').value = ''
   document.getElementById('detail-taxon-dropdown').style.display = 'none'
   document.getElementById('detail-location').value    = ''
   document.getElementById('detail-habitat').value     = ''
+  const coordsEl = document.getElementById('detail-coords')
+  if (coordsEl) { coordsEl.innerHTML = ''; coordsEl.style.display = 'none' }
   document.getElementById('detail-notes').value       = ''
   document.getElementById('detail-uncertain').checked = false
   _setDetailHeader({ fallbackName: t('detail.unknownSpecies') })
@@ -430,7 +398,6 @@ function _applyOwnershipMode(isOwner) {
   const habitatInput = document.getElementById('detail-habitat')
   const notesInput = document.getElementById('detail-notes')
   const uncertainInput = document.getElementById('detail-uncertain')
-  const currentLocationBtn = document.getElementById('detail-current-location-btn')
 
   if (readonlyNote) {
     readonlyNote.style.display = 'none'
@@ -443,7 +410,9 @@ function _applyOwnershipMode(isOwner) {
   if (habitatInput) habitatInput.readOnly = !isOwner
   if (notesInput) notesInput.readOnly = !isOwner
   if (uncertainInput) uncertainInput.disabled = !isOwner
-  if (currentLocationBtn) currentLocationBtn.style.display = isOwner ? 'inline-block' : 'none'
+
+  const currentLocationBtn = document.getElementById('detail-current-location-btn')
+  if (currentLocationBtn) currentLocationBtn.style.display = 'none'
 
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.disabled = !isOwner
@@ -553,12 +522,6 @@ async function _save() {
     notes:      document.getElementById('detail-notes').value.trim()     || null,
     uncertain:  document.getElementById('detail-uncertain').checked,
     visibility: document.querySelector('input[name="detail-vis"]:checked')?.value || 'friends',
-  }
-
-  if (currentLocationOverride) {
-    patch.location = currentLocationOverride.location || null
-    patch.gps_latitude = currentLocationOverride.lat
-    patch.gps_longitude = currentLocationOverride.lon
   }
 
   const taxonInputValue = document.getElementById('detail-taxon-input').value.trim()
@@ -876,8 +839,5 @@ async function _sendComment() {
   input.value = ''
   showToast(t('comments.posted'))
   _loadComments(currentObs.id)
-}
 
-function _esc(str) {
-  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }

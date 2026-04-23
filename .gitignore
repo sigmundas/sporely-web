@@ -36,3 +36,5 @@ android/app/src/main/assets/capacitor.plugins.json
 *.properties
 
 !.env.example
+
+opencode.json

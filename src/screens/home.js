@@ -9,26 +9,9 @@ import { fetchFirstImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
 import { openFindDetail } from './find_detail.js'
 import { openPhotoImportPicker } from './import_review.js'
+import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openFinds } from './finds.js'
-
-function _imageHtml(source, className, placeholderHtml) {
-  if (!source?.primaryUrl) return placeholderHtml
-  const fallbackAttr = source.fallbackUrl && source.fallbackUrl !== source.primaryUrl
-    ? ` data-fallback-src="${source.fallbackUrl}"`
-    : ''
-  return `<img class="${className}" src="${source.primaryUrl}"${fallbackAttr} loading="lazy" decoding="async" alt="">`
-}
-
-function _wireImageFallback(root) {
-  root.querySelectorAll('img[data-fallback-src]').forEach(img => {
-    img.addEventListener('error', () => {
-      const fallback = img.dataset.fallbackSrc
-      if (!fallback || img.dataset.fallbackApplied === 'true') return
-      img.dataset.fallbackApplied = 'true'
-      img.src = fallback
-    }, { once: true })
-  })
-}
+import { esc as _esc } from '../esc.js'
 
 export async function initHome() {
   document.getElementById('home-fab').addEventListener('click', () => navigate('capture'))
@@ -95,11 +78,10 @@ async function loadRecentFinds() {
         ? `${obs.gps_latitude.toFixed(2)}°N, ${obs.gps_longitude.toFixed(2)}°E`
         : '—'
     )
-    const thumb = _imageHtml(
-      imageUrls[obs.id],
-      'find-thumb',
-      '<div class="find-thumb-placeholder">🍄</div>',
-    )
+     const thumb = imageHtml(
+       imageUrls[obs.id],
+        'find-thumb',
+      )
     const dot = `<div class="find-owner-dot ${obs._owner}"></div>`
     const authorChip = _homeAuthorChip(obs, profileMap)
 
@@ -119,7 +101,7 @@ async function loadRecentFinds() {
   list.querySelectorAll('.find-row[data-id]').forEach(row => {
     row.addEventListener('click', () => openFindDetail(row.dataset.id))
   })
-  _wireImageFallback(list)
+  wireImageFallback(list)
 }
 
 async function loadRecentComments() {
@@ -189,11 +171,10 @@ async function loadRecentComments() {
       ? (obs.common_name || formatScientificName(obs.genus || '', obs.species || '') || '')
       : ''
     const thumb = obs
-      ? _imageHtml(
-        imageUrls[comment.observation_id],
-        'comment-obs-thumb',
-        '<div class="comment-obs-thumb comment-obs-placeholder">🍄</div>',
-      )
+        ? imageHtml(
+          imageUrls[comment.observation_id],
+          'comment-obs-thumb',
+        )
       : ''
 
     return `<div class="home-comment-row" ${obs ? `data-obs-id="${obs.id}" style="cursor:pointer"` : ''}>
@@ -212,7 +193,7 @@ async function loadRecentComments() {
   list.querySelectorAll('.home-comment-row[data-obs-id]').forEach(row => {
     row.addEventListener('click', () => openFindDetail(row.dataset.obsId))
   })
-  _wireImageFallback(list)
+  wireImageFallback(list)
 }
 
 // ── Quick stats ───────────────────────────────────────────────────────────────
@@ -245,10 +226,6 @@ async function checkSyncStatus() {
   } catch {
     if (tag) tag.style.display = 'none'
   }
-}
-
-function _esc(str) {
-  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
 async function _loadProfileMap(observations) {

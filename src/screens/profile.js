@@ -7,6 +7,7 @@ import { fetchCloudPlanProfile, formatStorageBytes } from '../cloud-plan.js'
 import { getLastSyncAt } from '../settings.js'
 import { Capacitor } from '@capacitor/core'
 import { FilePicker } from '@capawesome/capacitor-file-picker'
+import { esc as _esc } from '../esc.js'
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
@@ -636,8 +637,4 @@ async function _deleteAccount() {
   btn.disabled = false
   btn.textContent = originalLabel
   showToast(t('profile.accountDeleted'))
-}
-
-function _esc(str) {
-  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }

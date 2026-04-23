@@ -6,6 +6,7 @@ import { state } from '../state.js'
 import { formatDisplayName, formatScientificName } from '../artsorakel.js'
 import { navigate } from '../router.js'
 import { openFindDetail } from './find_detail.js'
+import { esc as _esc } from '../esc.js'
 
 let map          = null
 let markerLayer  = null
@@ -258,8 +259,4 @@ function _addMarkers(observations, owner) {
     })
     marker.addTo(markerLayer)
   })
-}
-
-function _esc(str) {
-  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }

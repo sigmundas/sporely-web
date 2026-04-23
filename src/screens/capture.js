@@ -118,15 +118,31 @@ function capturePhoto() {
   if (!video.srcObject) {
     // Demo mode — no real camera
     const emoji = ['🍄', '🟡', '🤎', '🍂', '🌿'][state.batchCount % 5]
+    const canvas = document.createElement('canvas')
+    canvas.width = 800
+    canvas.height = 600
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = '#222'
+    ctx.fillRect(0, 0, 800, 600)
+    ctx.font = '240px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(emoji, 400, 300)
+
+    const blobPromise = new Promise((resolve) => {
+      canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.9)
+    })
+    blobPromise.catch(() => {})
+
     state.capturedPhotos.push({
       blob: null,
-      blobPromise: null,
+      blobPromise,
       gps: state.gps,
       ts: new Date(),
       emoji,
       aiCropRect: null,
-      aiCropSourceW: null,
-      aiCropSourceH: null,
+      aiCropSourceW: 800,
+      aiCropSourceH: 600,
     })
   } else {
     let w = video.videoWidth

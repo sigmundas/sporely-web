@@ -11,6 +11,10 @@ import { openAiCropEditor } from '../ai-crop-editor.js'
 import { hasAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
 
+function _isBlob(b) {
+  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
+}
+
 function _defaultCaptureDraft() {
   return {
     habitat: '',
@@ -29,21 +33,44 @@ function _firstFiniteNumber(...values) {
   return null
 }
 
-function _formatCoordinate(value, positive, negative, digits = 5) {
+export function formatCoordinate(value, positive, negative, digits = 5) {
   if (!Number.isFinite(value)) return ''
   const hemi = value < 0 ? negative : positive
   return `${Math.abs(value).toFixed(digits)}° ${hemi}`
 }
 
-function _formatLatLon(gps, digits = 5) {
-  if (!gps || !_isUsableCoordinate(gps.lat, gps.lon)) return '—'
-  return `${_formatCoordinate(gps.lat, 'N', 'S', digits)}, ${_formatCoordinate(gps.lon, 'E', 'W', digits)}`
+export function formatLatLon(gps, digits = 5) {
+  if (!gps || !isUsableCoordinate(gps.lat, gps.lon)) return '—'
+  return `${formatCoordinate(gps.lat, 'N', 'S', digits)}, ${formatCoordinate(gps.lon, 'E', 'W', digits)}`
 }
 
-function _isUsableCoordinate(lat, lon) {
+export function isUsableCoordinate(lat, lon) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false
   if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return false
   return !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001)
+}
+
+export function buildGpsMetaHtml(gps) {
+  if (!gps || !isUsableCoordinate(gps.lat, gps.lon)) return ''
+  
+  const coords = formatLatLon(gps, 5)
+  const accuracy = Number.isFinite(gps.accuracy) ? `± ${Math.round(gps.accuracy)} m` : '—'
+  const altitude = Number.isFinite(gps.altitude) ? `${Math.round(gps.altitude)} m ASL` : '— ASL'
+  
+  return `
+    <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:13px;">
+      <span style="color:var(--text-dim)">${t('review.latLon')}</span>
+      <span style="font-variant-numeric: tabular-nums">${coords}</span>
+    </div>
+    <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:13px;">
+      <span style="color:var(--text-dim)">${t('review.gpsAccuracy')}</span>
+      <span style="font-variant-numeric: tabular-nums">${accuracy}</span>
+    </div>
+    <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:13px;">
+      <span style="color:var(--text-dim)">${t('review.altitude')}</span>
+      <span style="font-variant-numeric: tabular-nums">${altitude}</span>
+    </div>
+  `
 }
 
 export function initReview() {
@@ -76,13 +103,17 @@ export function openImportedReview(session) {
     session?.gpsAltitude,
     ...(session?.photoGps || []).map(gps => gps?.altitude),
   )
+  const gpsAccuracy = _firstFiniteNumber(
+    session?.gpsAccuracy,
+    ...(session?.photoGps || []).map(gps => gps?.accuracy),
+  )
   const sessionLat = Number(session?.gpsLat)
   const sessionLon = Number(session?.gpsLon)
-  const reviewGps = _isUsableCoordinate(sessionLat, sessionLon)
+  const reviewGps = isUsableCoordinate(sessionLat, sessionLon)
     ? {
         lat: sessionLat,
         lon: sessionLon,
-        accuracy: null,
+        accuracy: gpsAccuracy,
         altitude: gpsAltitude,
       }
     : null
@@ -90,7 +121,7 @@ export function openImportedReview(session) {
   const taxon = session?.taxon ? { ...session.taxon } : null
   state.capturedPhotos = (session?.files || []).map((blob, index) => ({
     blob,
-    aiBlob: session?.aiFiles?.[index] instanceof Blob ? session.aiFiles[index] : blob,
+    aiBlob: _isBlob(session?.aiFiles?.[index]) ? session.aiFiles[index] : blob,
     blobPromise: null,
     gps: reviewGps,
     ts: session?.ts || new Date(),
@@ -119,11 +150,14 @@ export function openImportedReview(session) {
 function _metadataGps(metadataSession) {
   const lat = Number(metadataSession?.gpsLat)
   const lon = Number(metadataSession?.gpsLon)
-  if (_isUsableCoordinate(lat, lon)) {
+  if (isUsableCoordinate(lat, lon)) {
     return {
       lat,
       lon,
-      accuracy: null,
+        accuracy: _firstFiniteNumber(
+          metadataSession?.gpsAccuracy,
+          ...(metadataSession?.photoGps || []).map(gps => gps?.accuracy),
+        ),
       altitude: _firstFiniteNumber(
         metadataSession?.gpsAltitude,
         ...(metadataSession?.photoGps || []).map(gps => gps?.altitude),
@@ -131,13 +165,13 @@ function _metadataGps(metadataSession) {
     }
   }
   const photoGps = (metadataSession?.photoGps || []).find(gps =>
-    _isUsableCoordinate(Number(gps?.lat), Number(gps?.lon))
+    isUsableCoordinate(Number(gps?.lat), Number(gps?.lon))
   )
   if (!photoGps) return null
   return {
     lat: Number(photoGps.lat),
     lon: Number(photoGps.lon),
-    accuracy: null,
+      accuracy: _firstFiniteNumber(photoGps.accuracy),
     altitude: _firstFiniteNumber(photoGps.altitude),
   }
 }
@@ -154,14 +188,41 @@ function _applyImportedReviewGps(reviewGps) {
   return true
 }
 
+function _mergeHydratedGps(reviewGps) {
+  if (!reviewGps) return false
+  if (!state.reviewContext.gps) {
+    return _applyImportedReviewGps(reviewGps)
+  }
+  let changed = false
+  if (state.reviewContext.gps.altitude == null && reviewGps.altitude != null) {
+    state.reviewContext.gps.altitude = reviewGps.altitude
+    changed = true
+  }
+  if (state.reviewContext.gps.accuracy == null && reviewGps.accuracy != null) {
+    state.reviewContext.gps.accuracy = reviewGps.accuracy
+    changed = true
+  }
+  if (changed) {
+    state.capturedPhotos.forEach(photo => {
+      if (photo.gps) {
+        if (photo.gps.altitude == null && reviewGps.altitude != null) photo.gps.altitude = reviewGps.altitude;
+        if (photo.gps.accuracy == null && reviewGps.accuracy != null) photo.gps.accuracy = reviewGps.accuracy;
+      } else {
+        photo.gps = { ...reviewGps };
+      }
+    })
+    buildReviewGrid()
+  }
+  return changed
+}
+
 function _hydrateImportedReviewMetadata(session) {
   const promise = session?.metadataPromise
   if (!promise) return
   promise.then(metadataSession => {
     if (state.reviewContext?.source !== 'import') return
-    if (state.reviewContext.gps) return
     const reviewGps = _metadataGps(metadataSession)
-    if (reviewGps) _applyImportedReviewGps(reviewGps)
+    _mergeHydratedGps(reviewGps)
   }).catch(error => {
     console.warn('Import metadata hydration failed:', error)
   })
@@ -170,12 +231,11 @@ function _hydrateImportedReviewMetadata(session) {
 async function _awaitImportedReviewMetadata() {
   const promise = state.reviewContext?.metadataPromise
   if (!promise) return
-  if (state.reviewContext.gps) return
   try {
     const metadataSession = await promise
-    if (state.reviewContext?.source !== 'import' || state.reviewContext.gps) return
+    if (state.reviewContext?.source !== 'import') return
     const reviewGps = _metadataGps(metadataSession)
-    if (reviewGps) _applyImportedReviewGps(reviewGps)
+    _mergeHydratedGps(reviewGps)
   } catch (error) {
     console.warn('Import metadata hydration failed before save:', error)
   }
@@ -187,9 +247,12 @@ export function buildReviewGrid() {
   const photos = state.capturedPhotos
   const count  = photos.length
   const reviewContext = state.reviewContext || null
+  const leadPhotoWithGps = photos.find(p => p.gps && isUsableCoordinate(p.gps.lat, p.gps.lon))
+  const captureGps = leadPhotoWithGps?.gps || photos[0]?.gps || null
+
   const reviewGps = reviewContext?.source === 'import'
     ? (reviewContext.gps || null)
-    : (state.gps || null)
+    : captureGps
   const reviewCount = document.getElementById('review-count')
   const sharedTaxon = photos.find(photo => photo.taxon)?.taxon || null
   const speciesLabel = sharedTaxon?.displayName
@@ -216,9 +279,9 @@ export function buildReviewGrid() {
 
   if (reviewGps) {
     document.getElementById('review-coords-text').textContent =
-      _formatLatLon(reviewGps, 4)
+      formatLatLon(reviewGps, 4)
     const metaCoordinates = document.getElementById('meta-coordinates')
-    if (metaCoordinates) metaCoordinates.textContent = _formatLatLon(reviewGps, 5)
+    if (metaCoordinates) metaCoordinates.textContent = formatLatLon(reviewGps, 5)
     document.getElementById('meta-accuracy').textContent = Number.isFinite(reviewGps.accuracy)
       ? `± ${Math.round(reviewGps.accuracy)} m`
       : '—'
@@ -228,7 +291,7 @@ export function buildReviewGrid() {
     else
       document.getElementById('meta-altitude').textContent = '— ASL'
     document.getElementById('review-location').textContent =
-      _formatLatLon(reviewGps, 3)
+      formatLatLon(reviewGps, 3)
     startLocationLookup(reviewGps.lat, reviewGps.lon)
   } else {
     document.getElementById('review-coords-text').textContent = ''
@@ -319,10 +382,10 @@ function loadThumbnails(photos) {
   ;(async () => {
     for (let index = 0; index < photos.length; index++) {
       const p = photos[index]
-      let blob = p.blob instanceof Blob ? p.blob : null
+      let blob = _isBlob(p.blob) ? p.blob : null
       if (!blob && p.blobPromise) blob = await p.blobPromise
 
-      if (blob instanceof Blob) {
+      if (_isBlob(blob)) {
         const url = URL.createObjectURL(blob)
         const item = document.createElement('button')
         item.type = 'button'
@@ -475,10 +538,10 @@ async function handleArtsorakelBtn(i) {
 
   try {
     const blobs = (await Promise.all(state.capturedPhotos.map(async photo => ({
-      blob: photo.aiBlob instanceof Blob ? photo.aiBlob : await resolveBlob(photo),
+      blob: _isBlob(photo.aiBlob) ? photo.aiBlob : await resolveBlob(photo),
       cropRect: photo.aiCropRect || null,
     }))))
-      .filter(item => item.blob instanceof Blob)
+      .filter(item => _isBlob(item.blob))
     const predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage())
 
     if (!predictions || predictions.length === 0) {
@@ -533,7 +596,7 @@ async function _openReviewCropEditor(startIndex = 0) {
   for (let photoIndex = 0; photoIndex < state.capturedPhotos.length; photoIndex++) {
     const photo = state.capturedPhotos[photoIndex]
     const blob = await resolveBlob(photo)
-    if (!(blob instanceof Blob)) continue
+    if (!_isBlob(blob)) continue
     reviewImages.push({
       url: URL.createObjectURL(blob),
       aiCropRect: photo.aiCropRect || null,
@@ -560,15 +623,6 @@ async function _openReviewCropEditor(startIndex = 0) {
       if (committed) buildReviewGrid()
     },
   })
-}
-
-async function runAllArtsorakel() {
-  const count = state.capturedPhotos.length
-  if (!count) { showToast(t('review.noPhotosToIdentify')); return }
-  showToast(t('review.runningAi', { count: tp('counts.photo', count) }))
-  for (let i = 0; i < count; i++) {
-    await handleArtsorakelBtn(i)
-  }
 }
 
 // ── Draft / sync ──────────────────────────────────────────────────────────────
@@ -613,6 +667,8 @@ async function saveObservationBatch() {
       captured_at:   (leadPhoto.ts || new Date()).toISOString(),
       gps_latitude:  leadGps?.lat ?? null,
       gps_longitude: leadGps?.lon ?? null,
+      gps_altitude:  leadGps?.altitude ?? null,
+      gps_accuracy:  leadGps?.accuracy ?? null,
       location:      getLocationName() || null,
       habitat:       state.captureDraft.habitat.trim() || null,
       notes:         state.captureDraft.notes.trim() || null,
@@ -625,7 +681,7 @@ async function saveObservationBatch() {
     }
 
     const imageEntries = photos
-      .filter(photo => photo.blob instanceof Blob)
+      .filter(photo => _isBlob(photo.blob))
       .map(photo => ({
         blob: photo.blob,
         aiCropRect: photo.aiCropRect || null,

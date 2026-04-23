@@ -11,6 +11,10 @@ const RETRY_DELAY_MS = 30_000
 const _queuedPreviewUrls = new Map()
 let _retryTimer = null
 
+function _isBlob(b) {
+  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
+}
+
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, 1)
@@ -60,10 +64,12 @@ function _previewUrlForQueueItem(item) {
   const existing = _queuedPreviewUrls.get(id)
   if (existing) return existing
 
-  const firstBlob = _normalizeQueuedImages(item?.imageEntries || item?.imageBlobs)[0]?.blob
-  if (!(firstBlob instanceof Blob)) return null
+  const entry = _normalizeQueuedImages(item?.imageEntries || item?.imageBlobs)[0]
+  if (!entry) return null
+  const blobToUrl = entry.variants?.small || entry.variants?.medium || entry.uploadBlob || entry.blob
+  if (!_isBlob(blobToUrl)) return null
 
-  const nextUrl = URL.createObjectURL(firstBlob)
+  const nextUrl = URL.createObjectURL(blobToUrl)
   _queuedPreviewUrls.set(id, nextUrl)
   return nextUrl
 }
@@ -139,7 +145,7 @@ function _scheduleSyncRetry() {
 
 function _normalizeQueuedImages(imageEntries) {
   return (imageEntries || []).map(entry => {
-    if (entry instanceof Blob) {
+    if (_isBlob(entry)) {
       return {
         blob: entry,
         aiCropRect: null,
@@ -150,16 +156,17 @@ function _normalizeQueuedImages(imageEntries) {
         variants: null,
       }
     }
+    const realBlob = _isBlob(entry?.blob) ? entry.blob : (_isBlob(entry?.file) ? entry.file : null)
     return {
-      blob: entry?.blob instanceof Blob ? entry.blob : null,
+      blob: realBlob,
       aiCropRect: entry?.aiCropRect || null,
       aiCropSourceW: entry?.aiCropSourceW ?? null,
       aiCropSourceH: entry?.aiCropSourceH ?? null,
-      uploadBlob: entry?.uploadBlob instanceof Blob ? entry.uploadBlob : null,
+      uploadBlob: _isBlob(entry?.uploadBlob) ? entry.uploadBlob : null,
       uploadMeta: entry?.uploadMeta || null,
       variants: entry?.variants || null,
     }
-  }).filter(entry => entry.blob instanceof Blob || entry.uploadBlob instanceof Blob)
+  }).filter(entry => _isBlob(entry.blob) || _isBlob(entry.uploadBlob))
 }
 
 export async function enqueueObservation(obsPayload, imageEntries) {
@@ -173,7 +180,7 @@ export async function enqueueObservation(obsPayload, imageEntries) {
 
   const preparedImages = []
   for (const image of queuedImages) {
-    if (image.blob instanceof Blob && !image.uploadBlob) {
+    if (_isBlob(image.blob) && !image.uploadBlob) {
       const prepared = await prepareImageVariants(image.blob, uploadPolicy)
       preparedImages.push({
         ...image,
@@ -231,8 +238,9 @@ export async function getQueuedObservations(userId) {
       notes: item.obsPayload.notes || null,
       uncertain: !!item.obsPayload.uncertain,
       visibility: item.obsPayload.visibility || 'friends',
-      gps_latitude: item.obsPayload.gps_latitude ?? null,
-      gps_longitude: item.obsPayload.gps_longitude ?? null,
+      gps_latitude: item.obsPayload.gps_latitude ?? item.obsPayload.gpsLat ?? null,
+      gps_longitude: item.obsPayload.gps_longitude ?? item.obsPayload.gpsLon ?? null,
+      gps_altitude: item.obsPayload.gps_altitude ?? item.obsPayload.gpsAltitude ?? null,
       source_type: item.obsPayload.source_type || 'personal',
       _pendingSync: true,
       _queuedAt: item.ts || Date.now(),
@@ -353,9 +361,27 @@ export async function triggerSync() {
           await _setQueueSyncStatus(item.id, 'saving-observation', {
             syncImageCount: queuedImages.length,
           })
-          let { data: obsData, error } = await supabase.from('observations').insert(item.obsPayload).select('id').single()
+
+          const payload = { ...item.obsPayload }
+          if (payload.gpsLat !== undefined) {
+            payload.gps_latitude = payload.gpsLat
+            delete payload.gpsLat
+          }
+          if (payload.gpsLon !== undefined) {
+            payload.gps_longitude = payload.gpsLon
+            delete payload.gpsLon
+          }
+          if (payload.gpsAltitude !== undefined) {
+            payload.gps_altitude = payload.gpsAltitude
+            delete payload.gpsAltitude
+          }
+          if (payload.photoGps !== undefined) {
+            delete payload.photoGps
+          }
+
+          let { data: obsData, error } = await supabase.from('observations').insert(payload).select('id').single()
           if (error?.message?.includes('captured_at')) {
-            const { captured_at: _, ...payloadWithout } = item.obsPayload
+            const { captured_at: _, ...payloadWithout } = payload
             ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithout).select('id').single())
           }
           if (error) throw error

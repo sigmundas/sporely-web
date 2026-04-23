@@ -14,6 +14,10 @@ const ARTSDATA_PROXY_BASE_URL = String(
   import.meta.env.VITE_ARTSORAKEL_BASE_URL || import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || ''
 ).replace(/\/+$/, '')
 
+function _isBlob(b) {
+  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
+}
+
 function _buildNetworkErrorMessage(error) {
   return String(error?.message || error || '').trim().toLowerCase()
 }
@@ -126,7 +130,7 @@ function pickUrl(pred, taxon) {
 const AI_MAX_PIXELS = 1_000_000
 
 async function _resizeForAi(blob) {
-  if (!(blob instanceof Blob)) return blob
+  if (!_isBlob(blob)) return blob
   return new Promise((resolve) => {
     const url = URL.createObjectURL(blob)
     const img = new Image()
@@ -143,7 +147,7 @@ async function _resizeForAi(blob) {
         const ctx = canvas.getContext('2d')
         if (!ctx) { resolve(blob); return }
         ctx.drawImage(img, 0, 0, w, h)
-        canvas.toBlob(resized => resolve(resized instanceof Blob ? resized : blob), 'image/jpeg', 0.88)
+        canvas.toBlob(resized => resolve(_isBlob(resized) ? resized : blob), 'image/jpeg', 0.88)
       } catch (_) {
         resolve(blob)
       } finally {
@@ -161,7 +165,7 @@ async function _resizeForAi(blob) {
  * Throws on network/API error.
  */
 export async function runArtsorakel(blob, lang = 'no') {
-  if (!(blob instanceof Blob)) return null
+  if (!_isBlob(blob)) return null
 
   const aiBlob = await _resizeForAi(blob)
   const langNorm = normalizeLang(lang)
@@ -252,14 +256,14 @@ function _extractPredictions(data) {
 
 export async function runArtsorakelForBlobs(blobs, lang = 'no') {
   const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
-    const rawBlob = item instanceof Blob ? item : item?.blob
-    if (!(rawBlob instanceof Blob)) return null
+    const rawBlob = _isBlob(item) ? item : item?.blob
+    if (!_isBlob(rawBlob)) return null
 
     // Resize to ≤1MP before cropping so createCroppedImageBlob doesn't OOM
     // on high-resolution imported photos (camera blobs are already ≤1MP via this path too).
     const resizedBlob = await _resizeForAi(rawBlob)
 
-    const cropRect = item instanceof Blob ? null : normalizeAiCropRect(item.cropRect)
+    const cropRect = _isBlob(item) ? null : normalizeAiCropRect(item.cropRect)
     if (!cropRect) return resizedBlob
 
     try {
@@ -268,7 +272,7 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no') {
       console.warn('AI crop export failed, falling back to resized image:', error)
       return resizedBlob
     }
-  }))).filter(blob => blob instanceof Blob)
+  }))).filter(blob => _isBlob(blob))
 
   if (!preparedBlobs.length) return null
 

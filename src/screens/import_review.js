@@ -27,11 +27,16 @@ const RAW_GPS_PICK = [
   'GPSLongitudeRef',
   'GPSAltitude',
   'GPSAltitudeRef',
+  'GPSHPositioningError',
   'latitude',
   'longitude',
   'altitude',
 ];
 const IMPORT_AI_MAX_EDGE = 1920;
+
+function _isBlob(b) {
+  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
+}
 
 function _persistSessions() {
   saveImportSessions(sessions);
@@ -80,17 +85,18 @@ function _buildSessionsFromSourceItems() {
       id: previous?.id || `s${idx}`,
       sourceItemIds: group.map(item => item.id),
       files: group.map(item => item.blob),
-      aiFiles: group.map(item => item.aiBlob || item.blob),
+      aiFiles: group.map(item => _isBlob(item.aiBlob) ? item.aiBlob : item.blob),
       blobUrls: group.map(item => URL.createObjectURL(item.aiBlob || item.blob)),
       imageMeta: group.map(item => item.meta),
       metadataPromises: group.map(item => item.metadataPromise || null),
       photoTimes: group.map(item => item.captureTime),
-      photoGps: group.map(item => ({ lat: item.lat, lon: item.lon, altitude: item.altitude ?? null })),
+      photoGps: group.map(item => ({ lat: item.lat, lon: item.lon, altitude: item.altitude ?? null, accuracy: item.accuracy ?? null })),
       photoDebug: group.map(item => item.dbg || null),
       ts: new Date(group[0].captureTime),
       gpsLat: exifGps?.lat ?? null,
       gpsLon: exifGps?.lon ?? null,
       gpsAltitude: exifGps?.altitude ?? null,
+      gpsAccuracy: exifGps?.accuracy ?? null,
       locationName: previous?.locationName || '',
       taxon: previous?.taxon || null,
       visibility: previous?.visibility || getDefaultVisibility(),
@@ -105,7 +111,7 @@ function _flattenSourceItemsFromSessions(savedSessions) {
     (session.files || []).map((blob, index) => ({
       id: session.sourceItemIds?.[index] || `restored-${fallbackCounter++}`,
       blob,
-      aiBlob: session.aiFiles?.[index] instanceof Blob ? session.aiFiles[index] : blob,
+      aiBlob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
       meta: session.imageMeta?.[index] || {
         aiCropRect: null,
         aiCropSourceW: null,
@@ -116,6 +122,7 @@ function _flattenSourceItemsFromSessions(savedSessions) {
       lat: session.photoGps?.[index]?.lat ?? null,
       lon: session.photoGps?.[index]?.lon ?? null,
       altitude: session.photoGps?.[index]?.altitude ?? null,
+      accuracy: session.photoGps?.[index]?.accuracy ?? null,
       dbg: session.photoDebug?.[index] || null,
     }))
   );
@@ -140,6 +147,7 @@ function _applyMetadataToSession(session, index, metadata) {
   const lon = Number(metadata.lon);
   const hasGps = _isUsableCoordinate(lat, lon);
   const altitude = Number(metadata.altitude);
+  const accuracy = Number(metadata.accuracy);
   const time = Number(metadata.time);
   let changed = false;
 
@@ -156,15 +164,21 @@ function _applyMetadataToSession(session, index, metadata) {
       lat,
       lon,
       altitude: Number.isFinite(altitude) ? altitude : (session.photoGps[index]?.altitude ?? null),
+      accuracy: Number.isFinite(accuracy) ? accuracy : (session.photoGps[index]?.accuracy ?? null),
     };
     if (session.gpsLat === null || session.gpsLon === null) {
       session.gpsLat = lat;
       session.gpsLon = lon;
       session.gpsAltitude = Number.isFinite(altitude) ? altitude : null;
+      session.gpsAccuracy = Number.isFinite(accuracy) ? accuracy : null;
       changed = true;
     }
     if (session.gpsAltitude == null && Number.isFinite(altitude)) {
       session.gpsAltitude = altitude;
+      changed = true;
+    }
+    if (session.gpsAccuracy == null && Number.isFinite(accuracy)) {
+      session.gpsAccuracy = accuracy;
       changed = true;
     }
   }
@@ -375,7 +389,7 @@ async function handleSelectedFiles(files, options = {}) {
   const withTimes = await Promise.all(files.map(async (f, idx) => {
     const nativePhoto = nativePhotos[idx];
     if (nativePhoto) {
-      const { time, lat, lon, altitude, dbg } = await _captureNativePhotoExif(nativePhoto, f);
+      const { time, lat, lon, altitude, accuracy, dbg } = await _captureNativePhotoExif(nativePhoto, f);
       return {
         file: f,
         nativePhoto,
@@ -384,11 +398,12 @@ async function handleSelectedFiles(files, options = {}) {
         lat,
         lon,
         altitude,
+        accuracy,
         dbg,
       };
     }
-    const { time, lat, lon, altitude, dbg } = await _captureExif(f);
-    return { file: f, captureTime: time, lat, lon, altitude, dbg };
+    const { time, lat, lon, altitude, accuracy, dbg } = await _captureExif(f);
+    return { file: f, captureTime: time, lat, lon, altitude, accuracy, dbg };
   }));
 
   // Sort by actual capture time
@@ -414,6 +429,7 @@ async function handleSelectedFiles(files, options = {}) {
       lat: item.lat ?? null,
       lon: item.lon ?? null,
       altitude: item.altitude ?? null,
+      accuracy: item.accuracy ?? null,
       dbg: item.dbg || null,
     });
     doneCount++;
@@ -581,6 +597,7 @@ function _createNativeMetadataHydrationPromise(photo, file) {
     lat: null,
     lon: null,
     altitude: null,
+    accuracy: null,
     dbg: {
       fileName: file.name,
       fileSize: file.size,
@@ -721,11 +738,27 @@ function _extractAltitudeFromRawGps(rawGps) {
   return ref === 1 ? -Math.abs(altitude) : altitude;
 }
 
+function _extractAccuracyFromRawGps(rawGps) {
+  if (!rawGps || typeof rawGps !== 'object') return null;
+  const candidates = [
+    rawGps.GPSHPositioningError,
+    rawGps.accuracy
+  ];
+  let accuracy = null;
+  for (const candidate of candidates) {
+    accuracy = _coerceExifNumber(candidate);
+    if (accuracy !== null && accuracy > 0) break;
+  }
+  if (!Number.isFinite(accuracy)) return null;
+  return accuracy;
+}
+
 async function _captureNativePhotoExif(photo, file) {
   let time = file.lastModified || Date.now();
   let lat = null;
   let lon = null;
   let altitude = null;
+  let accuracy = null;
   const dbg = {
     fileName: file.name,
     fileSize: file.size,
@@ -740,6 +773,7 @@ async function _captureNativePhotoExif(photo, file) {
     if (rawNativeGps.lat !== null) lat = rawNativeGps.lat;
     if (rawNativeGps.lon !== null) lon = rawNativeGps.lon;
     altitude = _extractAltitudeFromRawGps(photo.exif);
+    accuracy = _extractAccuracyFromRawGps(photo.exif);
 
     const dt = _coerceExifDate(photo.exif.DateTimeOriginal || photo.exif.CreateDate || photo.exif.ModifyDate || photo.capturedAt);
     if (dt) time = dt.getTime();
@@ -747,7 +781,7 @@ async function _captureNativePhotoExif(photo, file) {
     // Custom Android NativePhotoPicker already did the expensive metadata read
     // before optional HEIC conversion. Trust that result and avoid a slow JS
     // exifr fallback over the converted cache JPEG, especially for single HEIC imports.
-    return { time, lat, lon, altitude, dbg };
+    return { time, lat, lon, altitude, accuracy, dbg };
   }
 
   try {
@@ -759,13 +793,14 @@ async function _captureNativePhotoExif(photo, file) {
       if (rawNativeGps.lat !== null) lat = rawNativeGps.lat;
       if (rawNativeGps.lon !== null) lon = rawNativeGps.lon;
       altitude = _extractAltitudeFromRawGps(exif);
+      accuracy = _extractAccuracyFromRawGps(exif);
 
       const dt = _coerceExifDate(exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate || photo.capturedAt);
       if (dt) time = dt.getTime();
 
       // If native extraction found the coordinates, return immediately! (Lightning fast)
       if (lat !== null && lon !== null) {
-        return { time, lat, lon, altitude, dbg };
+        return { time, lat, lon, altitude, accuracy, dbg };
       }
     }
   } catch (err) {
@@ -778,13 +813,14 @@ async function _captureNativePhotoExif(photo, file) {
     if (jsExif.lat !== null) lat = jsExif.lat;
     if (jsExif.lon !== null) lon = jsExif.lon;
     if (jsExif.altitude !== null) altitude = jsExif.altitude;
+    if (jsExif.accuracy !== null) accuracy = jsExif.accuracy;
     if (jsExif.time) time = jsExif.time;
     dbg.jsFallback = true;
   } catch (err) {
     console.warn('JS EXIF extraction fallback failed:', err);
   }
 
-  return { time, lat, lon, altitude, dbg };
+  return { time, lat, lon, altitude, accuracy, dbg };
 }
 
 async function _captureExif(file) {
@@ -793,6 +829,7 @@ async function _captureExif(file) {
   let lat  = null;
   let lon  = null;
   let altitude = null;
+  let accuracy = null;
   let dbg  = { fileName: file.name, fileSize: file.size, fileType: file.type, bufSize: 0, gpsResult: null, gpsError: null, exifError: null };
   const fullRead = _isHeicLike(file) ? { chunked: false } : {};
 
@@ -805,6 +842,8 @@ async function _captureExif(file) {
     }
     const nextAltitude = _extractAltitudeFromRawGps(res);
     if (nextAltitude !== null) altitude = nextAltitude;
+    const nextAccuracy = _extractAccuracyFromRawGps(res);
+    if (nextAccuracy !== null) accuracy = nextAccuracy;
   };
 
   // Read the full file into an ArrayBuffer before passing to exifr.
@@ -926,7 +965,7 @@ async function _captureExif(file) {
     }
   }
 
-  return { time, lat, lon, altitude, dbg };
+  return { time, lat, lon, altitude, accuracy, dbg };
 }
 
 async function _reverseGeocode(lat, lon) {
@@ -1238,7 +1277,7 @@ function _wireCard(sid) {
       try {
         const predictions = await runArtsorakelForBlobs(
           session.files.map((blob, index) => ({
-            blob: session.aiFiles?.[index] instanceof Blob ? session.aiFiles[index] : blob,
+            blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
             cropRect: session.imageMeta?.[index]?.aiCropRect || null,
           })),
           getTaxonomyLanguage(),
@@ -1338,6 +1377,8 @@ async function saveAll() {
         captured_at: session.ts.toISOString(),
         gps_latitude: session.gpsLat ?? null,
         gps_longitude: session.gpsLon ?? null,
+        gps_altitude: session.gpsAltitude ?? null,
+        gps_accuracy: session.gpsAccuracy ?? null,
         location: session.locationName || null,
         source_type: 'personal',
         genus: session.taxon?.genus || null,
