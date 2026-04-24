@@ -13,6 +13,7 @@ import {
   getInitialAuthState,
   hasPasswordRecoveryHint,
   initAuth,
+  showAuthError,
   showAuthOverlay,
   hideAuthOverlay,
   handleUrlHashError,
@@ -302,43 +303,51 @@ function initNav() {
 }
 
 async function bootApp(user) {
-  // Validate profile with retries to account for Postgres trigger delay
-  let profileFound = false
-  for (let i = 0; i < 3; i++) {
-    const { data } = await supabase.from('profiles').select('id').eq('id', user.id).single()
-    if (data) {
-      profileFound = true
-      break
+  try {
+    // Validate profile with retries to account for Postgres trigger delay
+    let profileFound = false
+    for (let i = 0; i < 3; i++) {
+      const { data } = await supabase.from('profiles').select('id').eq('id', user.id).single()
+      if (data) {
+        profileFound = true
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, 500))
     }
-    await new Promise(resolve => setTimeout(resolve, 500))
+    if (!profileFound) {
+      console.warn("Profile not found for user, proceeding anyway.", user.id)
+    }
+
+    state.user = user
+
+    hideAuthOverlay()
+    if (_appBootstrapped) return
+    _appBootstrapped = true
+    initSyncFeedback()
+    initSettings()
+    initNav()
+    initHome()
+    initFinds()
+    initCapture()
+    initReview()
+    initFindDetail()
+    initPhotoViewer()
+    initAiCropEditor()
+    initImportReview()
+    initProfile()
+    startGeo()
+    navigate('home')
+
+    // Restore any import session that was interrupted by app suspension/kill
+    const pending = await loadImportSessions()
+    if (pending.length) restoreImportSessions(pending)
+  } catch (error) {
+    console.error('App boot failed:', error)
+    _appBootstrapped = false
+    state.user = null
+    showAuthOverlay()
+    showAuthError(t('common.errorPrefix', { message: error?.message || String(error) }))
   }
-  if (!profileFound) {
-    console.warn("Profile not found for user, proceeding anyway.", user.id)
-  }
-
-  state.user = user
-
-  hideAuthOverlay()
-  if (_appBootstrapped) return
-  _appBootstrapped = true
-  initSyncFeedback()
-  initSettings()
-  initNav()
-  initHome()
-  initFinds()
-  initCapture()
-  initReview()
-  initFindDetail()
-  initPhotoViewer()
-  initAiCropEditor()
-  initImportReview()
-  initProfile()
-  startGeo()
-  navigate('home')
-
-  // Restore any import session that was interrupted by app suspension/kill
-  const pending = await loadImportSessions()
-  if (pending.length) restoreImportSessions(pending)
 }
 
 onLocaleChange(() => {

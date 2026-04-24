@@ -82,6 +82,10 @@ function showError(msg, allowHtml = false, info = false) {
   el.style.display = msg ? 'block' : 'none'
 }
 
+export function showAuthError(msg, allowHtml = false, info = false) {
+  showError(msg, allowHtml, info)
+}
+
 function _setPasswordRecoveryHint(email = '') {
   try {
     localStorage.setItem(PASSWORD_RECOVERY_HINT_KEY, JSON.stringify({
