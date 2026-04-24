@@ -360,9 +360,22 @@ async function init() {
   const hasRecoveryHint = hasPasswordRecoveryHint()
   const recoveryViaHintOnly = !authState.isRecovery && hasRecoveryHint
   let recoveryModeActive = (authState.isRecovery || hasRecoveryHint) && !hasHashError
+  let authUiInitialized = false
+
+  const ensureAuthUiInitialized = (skipDraftRestore = false) => {
+    if (authUiInitialized) return
+    initAuth(async () => {
+      recoveryModeActive = false
+      clearPasswordRecoveryHint()
+      const { data: { session: newSession } } = await supabase.auth.getSession()
+      if (newSession?.user) await bootApp(newSession.user)
+    }, skipDraftRestore)
+    authUiInitialized = true
+  }
 
   supabase.auth.onAuthStateChange(async (event, session) => {
     if (event === 'PASSWORD_RECOVERY') {
+      ensureAuthUiInitialized(true)
       recoveryModeActive = true
       showAuthOverlay()
       switchToResetPassword()
@@ -376,6 +389,7 @@ async function init() {
     }
     if (event === 'SIGNED_OUT') {
       state.user = null
+      ensureAuthUiInitialized(true)
       showAuthOverlay()
     }
   })
@@ -391,12 +405,7 @@ async function init() {
     if (document.getElementById('auth-overlay').style.display !== 'flex') {
       showAuthOverlay()
     }
-    initAuth(async () => {
-      recoveryModeActive = false
-      clearPasswordRecoveryHint()
-      const { data: { session: newSession } } = await supabase.auth.getSession()
-      if (newSession?.user) await bootApp(newSession.user)
-    }, hasHashError || recoveryModeActive)
+    ensureAuthUiInitialized(hasHashError || recoveryModeActive)
     if (recoveryModeActive) {
       switchToResetPassword()
       if (recoveryViaHintOnly) {
