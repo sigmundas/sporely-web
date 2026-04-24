@@ -364,11 +364,11 @@ async function init() {
 
   const ensureAuthUiInitialized = (skipDraftRestore = false) => {
     if (authUiInitialized) return
-    initAuth(async () => {
+    initAuth(async session => {
       recoveryModeActive = false
       clearPasswordRecoveryHint()
-      const { data: { session: newSession } } = await supabase.auth.getSession()
-      if (newSession?.user) await bootApp(newSession.user)
+      const bootSession = session || (await supabase.auth.getSession()).data.session
+      if (bootSession?.user) await bootApp(bootSession.user)
     }, skipDraftRestore)
     authUiInitialized = true
   }

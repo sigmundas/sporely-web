@@ -415,12 +415,12 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     const password = document.getElementById('login-password').value
 
     setLoading(loginBtn, true)
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
     setLoading(loginBtn, false)
 
     if (!error) {
       _clearAuthDraft()
-      onAuthenticated()
+      onAuthenticated(data?.session || null)
       return
     }
 
@@ -467,7 +467,7 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     const { data: { session } } = await supabase.auth.getSession()
     if (session) {
       _clearAuthDraft()
-      onAuthenticated()
+      onAuthenticated(session)
       return
     }
 
