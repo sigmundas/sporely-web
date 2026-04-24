@@ -132,6 +132,13 @@ html, body {
 .auth-input:focus { border-color: var(--green-bright); }
 .auth-input::placeholder { color: var(--text-dim); }
 
+.auth-help {
+  margin-top: -8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
 .auth-terms {
   display: flex;
   align-items: flex-start;

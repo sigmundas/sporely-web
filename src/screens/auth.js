@@ -228,6 +228,28 @@ function setLoading(btn, loading) {
   btn.textContent = loading ? t('common.pleaseWait') : btn.dataset.label
 }
 
+function _validatePasswordRequirements(password) {
+  const value = String(password || '')
+  if (value.length < 8) {
+    return t('auth.passwordMin')
+  }
+  if (!/[A-Z]/.test(value) || !/[a-z]/.test(value) || !/\d/.test(value) || !/[^A-Za-z0-9]/.test(value)) {
+    return t('auth.passwordRequirements')
+  }
+  return ''
+}
+
+async function _waitForSession(maxAttempts = 5, delayMs = 150) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (session?.user) return session
+    if (i < maxAttempts - 1) {
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+    }
+  }
+  return null
+}
+
 export function switchToLogin(prefillEmail = '', resetMessage = false) {
   showError('')
   document.getElementById('signup-form').style.display = 'none'
@@ -414,21 +436,32 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     const email    = document.getElementById('login-email').value.trim()
     const password = document.getElementById('login-password').value
 
-    setLoading(loginBtn, true)
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-    setLoading(loginBtn, false)
+    try {
+      setLoading(loginBtn, true)
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
 
-    if (!error) {
-      _clearAuthDraft()
-      onAuthenticated(data?.session || null)
-      return
-    }
+      if (!error) {
+        const session = data?.session || await _waitForSession()
+        if (session?.user) {
+          _clearAuthDraft()
+          onAuthenticated(session)
+          return
+        }
+        showError(t('common.errorPrefix', { message: 'Sign-in succeeded but no session was available yet. Please try again.' }))
+        return
+      }
 
-    // "Email not confirmed" — offer resend
-    if (error.message.toLowerCase().includes('not confirmed')) {
-      showResendPrompt(email)
-    } else {
-      showError(_captchaErrorMessage(error.message))
+      // "Email not confirmed" — offer resend
+      if (error.message.toLowerCase().includes('not confirmed')) {
+        showResendPrompt(email)
+      } else {
+        showError(_captchaErrorMessage(error.message))
+      }
+    } catch (error) {
+      console.error('Sign-in failed unexpectedly:', error)
+      showError(_captchaErrorMessage(error?.message || String(error)))
+    } finally {
+      setLoading(loginBtn, false)
     }
   })
 
@@ -439,43 +472,55 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     const email    = document.getElementById('signup-email').value.trim()
     const password = document.getElementById('signup-password').value
 
-    setLoading(signupBtn, true)
-    const signUpPayload = { email, password }
-    if (!BYPASS_TURNSTILE) {
-      signUpPayload.options = { captchaToken: _captchaToken }
+    const passwordValidationMessage = _validatePasswordRequirements(password)
+    if (passwordValidationMessage) {
+      showError(passwordValidationMessage)
+      return
     }
-    const { data, error } = await supabase.auth.signUp(signUpPayload)
-    setLoading(signupBtn, false)
-    _resetTurnstile()
 
-    if (error) {
-      // "User already registered" — send them to login instead
-      if (
-        error.message.toLowerCase().includes('already registered') ||
-        error.message.toLowerCase().includes('already been registered')
-      ) {
-        switchToLogin(email)
-        showError(t('auth.existingAccount'))
-      } else {
-        showError(_captchaErrorMessage(error.message))
+    try {
+      setLoading(signupBtn, true)
+      const signUpPayload = { email, password }
+      if (!BYPASS_TURNSTILE) {
+        signUpPayload.options = { captchaToken: _captchaToken }
       }
-      return
-    }
+      const { data, error } = await supabase.auth.signUp(signUpPayload)
+      _resetTurnstile()
 
-    // Supabase returns success even for already-registered addresses (security).
-    // Check whether we actually got a session.
-    const { data: { session } } = await supabase.auth.getSession()
-    if (session) {
-      _clearAuthDraft()
-      onAuthenticated(session)
-      return
-    }
+      if (error) {
+        // "User already registered" — send them to login instead
+        if (
+          error.message.toLowerCase().includes('already registered') ||
+          error.message.toLowerCase().includes('already been registered')
+        ) {
+          switchToLogin(email)
+          showError(t('auth.existingAccount'))
+        } else {
+          showError(_captchaErrorMessage(error.message))
+        }
+        return
+      }
 
-    // No session → email confirmation required
-    // data.user being null means address was already registered (and unconfirmed).
-    // data.user being present means fresh signup.
-    switchToLogin(email)
-    showResendPrompt(email)
+      // Supabase returns success even for already-registered addresses (security).
+      // Check whether we actually got a session.
+      const session = await _waitForSession()
+      if (session?.user) {
+        _clearAuthDraft()
+        onAuthenticated(session)
+        return
+      }
+
+      // No session → email confirmation required
+      // data.user being null means address was already registered (and unconfirmed).
+      // data.user being present means fresh signup.
+      switchToLogin(email)
+      showResendPrompt(email)
+    } catch (error) {
+      console.error('Sign-up failed unexpectedly:', error)
+      showError(_captchaErrorMessage(error?.message || String(error)))
+    } finally {
+      setLoading(signupBtn, false)
+    }
   })
 
   // ── Forgot Password ────────────────────────────────────────────────────────
@@ -484,24 +529,30 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     showError('')
     const email = document.getElementById('forgot-email').value.trim()
     
-    setLoading(forgotBtn, true)
+    try {
+      setLoading(forgotBtn, true)
 
-    let redirectOrigin = window.location.origin
-    // If requested from the Android app, origin is localhost. Force redirect to the real web app.
-    if ((redirectOrigin.includes('localhost') || redirectOrigin.includes('127.0.0.1')) && !redirectOrigin.includes(':5173')) {
-      redirectOrigin = 'https://app.sporely.no'
-    }
+      let redirectOrigin = window.location.origin
+      // If requested from the Android app, origin is localhost. Force redirect to the real web app.
+      if ((redirectOrigin.includes('localhost') || redirectOrigin.includes('127.0.0.1')) && !redirectOrigin.includes(':5173')) {
+        redirectOrigin = 'https://app.sporely.no'
+      }
 
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${redirectOrigin}/?flow=recovery&screen=reset-password`
-    })
-    setLoading(forgotBtn, false)
-    
-    if (error) {
-      showError(error.message)
-    } else {
-      _setPasswordRecoveryHint(email)
-      showError(t('auth.resetEmailSent'), false, true)
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: `${redirectOrigin}/?flow=recovery&screen=reset-password`
+      })
+      
+      if (error) {
+        showError(error.message)
+      } else {
+        _setPasswordRecoveryHint(email)
+        showError(t('auth.resetEmailSent'), false, true)
+      }
+    } catch (error) {
+      console.error('Reset-password email failed unexpectedly:', error)
+      showError(error?.message || String(error))
+    } finally {
+      setLoading(forgotBtn, false)
     }
   })
 
@@ -516,21 +567,28 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
       showError(t('auth.passwordsDontMatch'))
       return
     }
-    if (newPassword.length < 6) { // Supabase default minimum password length
-      showError(t('auth.passwordMin'))
+    const passwordValidationMessage = _validatePasswordRequirements(newPassword)
+    if (passwordValidationMessage) {
+      showError(passwordValidationMessage)
       return
     }
-    setLoading(resetBtn, true)
-    const { error } = await supabase.auth.updateUser({ password: newPassword })
-    setLoading(resetBtn, false)
-    
-    if (error) {
-      showError(error.message)
-    } else {
-      clearPasswordRecoveryHint()
-      await supabase.auth.signOut()
-      history.replaceState(null, '', '/')
-      switchToLogin('', true)
+    try {
+      setLoading(resetBtn, true)
+      const { error } = await supabase.auth.updateUser({ password: newPassword })
+      
+      if (error) {
+        showError(error.message)
+      } else {
+        clearPasswordRecoveryHint()
+        await supabase.auth.signOut()
+        history.replaceState(null, '', '/')
+        switchToLogin('', true)
+      }
+    } catch (error) {
+      console.error('Password update failed unexpectedly:', error)
+      showError(error?.message || String(error))
+    } finally {
+      setLoading(resetBtn, false)
     }
   })
 }

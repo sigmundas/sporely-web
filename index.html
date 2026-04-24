@@ -63,11 +63,12 @@
         <h2 class="auth-title" id="reset-password-title">Set new password</h2>
         <p class="auth-tagline" id="reset-password-desc">Enter your new password below.</p>
         <label class="auth-label"><span id="reset-password-label">New password</span>
-          <input type="password" id="new-password" class="auth-input" placeholder="At least 6 characters" required autocomplete="new-password">
+          <input type="password" id="new-password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
         </label>
         <label class="auth-label"><span id="confirm-password-label">Confirm new password</span>
-          <input type="password" id="confirm-new-password" class="auth-input" placeholder="At least 6 characters" required autocomplete="new-password">
+          <input type="password" id="confirm-new-password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
         </label>
+        <p class="auth-help" id="reset-password-help">Use at least 8 characters, including uppercase, lowercase, number, and symbol.</p>
         <button type="submit" class="auth-btn" id="reset-password-btn">Update password</button>
       </form>
 
@@ -78,8 +79,9 @@
           <input type="email" id="signup-email" class="auth-input" placeholder="you@example.com" required autocomplete="email">
         </label>
         <label class="auth-label"><span id="signup-password-label">Password</span>
-          <input type="password" id="signup-password" class="auth-input" placeholder="At least 6 characters" required autocomplete="new-password">
+          <input type="password" id="signup-password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
         </label>
+        <p class="auth-help" id="signup-password-help">Use at least 8 characters, including uppercase, lowercase, number, and symbol.</p>
         <button type="submit" class="auth-btn" id="signup-btn">Create account</button>
         <p class="auth-switch"><span id="signup-switch-prefix">Already have one?</span> <a href="#" id="show-login">Sign in</a></p>
       </form>

@@ -10,7 +10,8 @@ const messages = {
     'auth.createAccount': 'Create account',
     'auth.email': 'Email',
     'auth.password': 'Password',
-    'auth.passwordMin': 'At least 6 characters',
+    'auth.passwordMin': 'At least 8 characters',
+    'auth.passwordRequirements': 'Use at least 8 characters, including uppercase, lowercase, number, and symbol.',
     'auth.noAccount': 'No account?',
     'auth.createOne': 'Create one',
     'auth.alreadyHaveOne': 'Already have one?',
@@ -308,7 +309,8 @@ const messages = {
     'auth.createAccount': 'Opprett konto',
     'auth.email': 'E-post',
     'auth.password': 'Passord',
-    'auth.passwordMin': 'Minst 6 tegn',
+    'auth.passwordMin': 'Minst 8 tegn',
+    'auth.passwordRequirements': 'Bruk minst 8 tegn, inkludert stor bokstav, liten bokstav, tall og symbol.',
     'auth.noAccount': 'Ingen konto?',
     'auth.createOne': 'Opprett en',
     'auth.alreadyHaveOne': 'Har du allerede en?',
@@ -606,7 +608,8 @@ const messages = {
     'auth.createAccount': 'Skapa konto',
     'auth.email': 'E-post',
     'auth.password': 'Lösenord',
-    'auth.passwordMin': 'Minst 6 tecken',
+    'auth.passwordMin': 'Minst 8 tecken',
+    'auth.passwordRequirements': 'Använd minst 8 tecken, inklusive versal, gemen, siffra och symbol.',
     'auth.noAccount': 'Inget konto?',
     'auth.createOne': 'Skapa ett',
     'auth.alreadyHaveOne': 'Har du redan ett?',
@@ -904,7 +907,8 @@ const messages = {
     'auth.createAccount': 'Konto erstellen',
     'auth.email': 'E-Mail',
     'auth.password': 'Passwort',
-    'auth.passwordMin': 'Mindestens 6 Zeichen',
+    'auth.passwordMin': 'Mindestens 8 Zeichen',
+    'auth.passwordRequirements': 'Verwende mindestens 8 Zeichen, einschließlich Großbuchstabe, Kleinbuchstabe, Zahl und Sonderzeichen.',
     'auth.noAccount': 'Kein Konto?',
     'auth.createOne': 'Eins erstellen',
     'auth.alreadyHaveOne': 'Hast du schon eins?',
@@ -1359,11 +1363,15 @@ export function applyStaticTranslations() {
   setText('#reset-password-desc', 'auth.resetPasswordDesc')
   setText('#reset-password-label', 'auth.newPassword')
   setText('#confirm-password-label', 'auth.confirmNewPassword')
+  setText('#reset-password-help', 'auth.passwordRequirements')
   const resetBtn = document.getElementById('reset-password-btn')
   if (resetBtn) resetBtn.dataset.label = t('auth.updatePassword')
   setText('#reset-password-btn', 'auth.updatePassword')
 
   setPlaceholder('#signup-password', 'auth.passwordMin')
+  setText('#signup-password-help', 'auth.passwordRequirements')
+  setPlaceholder('#new-password', 'auth.passwordMin')
+  setPlaceholder('#confirm-new-password', 'auth.passwordMin')
   setPlaceholder('#finds-search-input', 'finds.search')
   setPlaceholder('#review-notes', 'review.fieldNotes')
   setPlaceholder('#detail-taxon-input', 'detail.unknownSpecies')
