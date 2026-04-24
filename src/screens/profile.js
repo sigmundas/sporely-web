@@ -7,7 +7,6 @@ import { fetchCloudPlanProfile, formatStorageBytes } from '../cloud-plan.js'
 import { getLastSyncAt } from '../settings.js'
 import { Capacitor } from '@capacitor/core'
 import { FilePicker } from '@capawesome/capacitor-file-picker'
-import { esc as _esc } from '../esc.js'
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
@@ -71,21 +70,9 @@ export function initProfile() {
   })
   _initCropEvents()
 
-  // Inject EULA / Terms of Service link in Danger Zone
-  const dangerZone = document.querySelector('.profile-danger-zone')
-  if (dangerZone && !document.getElementById('profile-tos-link')) {
-    const tosLink = document.createElement('a')
-    tosLink.id = 'profile-tos-link'
-    tosLink.href = 'https://sporely.no/terms'
-    tosLink.target = '_blank'
-    tosLink.textContent = t('profile.termsOfService') || 'Terms of Service'
-    tosLink.style.display = 'block'
-    tosLink.style.textAlign = 'center'
-    tosLink.style.color = 'var(--text-secondary)'
-    tosLink.style.fontSize = '13px'
-    tosLink.style.textDecoration = 'none'
-    dangerZone.insertBefore(tosLink, document.getElementById('delete-account-btn'))
-  }
+  document.getElementById('profile-tos-btn')?.addEventListener('click', () => {
+    window.open('https://sporely.no/terms', '_blank')
+  })
 }
 
 // ── Load (called on navigate to profile) ─────────────────────────────────────
@@ -637,4 +624,8 @@ async function _deleteAccount() {
   btn.disabled = false
   btn.textContent = originalLabel
   showToast(t('profile.accountDeleted'))
+}
+
+function _esc(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }

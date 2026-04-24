@@ -8,7 +8,16 @@ import { startGeo } from './geo.js'
 import { navigate } from './router.js'
 import { applyTheme } from './theme.js'
 import { showToast } from './toast.js'
-import { initAuth, showAuthOverlay, hideAuthOverlay, handleUrlHashError, switchToResetPassword } from './screens/auth.js'
+import {
+  clearPasswordRecoveryHint,
+  getInitialAuthState,
+  hasPasswordRecoveryHint,
+  initAuth,
+  showAuthOverlay,
+  hideAuthOverlay,
+  handleUrlHashError,
+  switchToResetPassword,
+} from './screens/auth.js'
 import { initHome, refreshHome } from './screens/home.js'
 import { initFinds, loadFinds } from './screens/finds.js'
 import { initCapture } from './screens/capture.js'
@@ -343,36 +352,20 @@ onLocaleChange(() => {
 })
 
 async function init() {
-  handleUrlHashError()
-
-  const hashParams = new URLSearchParams(window.location.hash.slice(1))
-  const isRecovery = hashParams.get('type') === 'recovery' || (hashParams.has('access_token') && window.location.hash.includes('type=recovery'))
-
-  const { data: { session } } = await supabase.auth.getSession()
-
-  if (session?.user && !isRecovery) {
-    await bootApp(session.user)
-  } else {
-    if (document.getElementById('auth-overlay').style.display !== 'flex') {
-      showAuthOverlay()
-    }
-    if (isRecovery) {
-      switchToResetPassword()
-    }
-    initAuth(async () => {
-      const { data: { session: newSession } } = await supabase.auth.getSession()
-      if (newSession?.user) await bootApp(newSession.user)
-    })
-  }
+  const authState = getInitialAuthState()
+  const hasHashError = handleUrlHashError()
+  const hasRecoveryHint = hasPasswordRecoveryHint()
+  let recoveryModeActive = (authState.isRecovery || hasRecoveryHint) && !hasHashError
 
   supabase.auth.onAuthStateChange(async (event, session) => {
     if (event === 'PASSWORD_RECOVERY') {
+      recoveryModeActive = true
       showAuthOverlay()
       switchToResetPassword()
       return
     }
     if (event === 'SIGNED_IN' && session?.user && !state.user) {
-      if (document.getElementById('reset-password-form')?.style.display === 'block') {
+      if (recoveryModeActive || document.getElementById('reset-password-form')?.style.display === 'block') {
         return // Do not boot app while resetting password
       }
       await bootApp(session.user)
@@ -382,6 +375,28 @@ async function init() {
       showAuthOverlay()
     }
   })
+
+  // Give Supabase a tick to finish any URL-based recovery bootstrap before we branch.
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const { data: { session } } = await supabase.auth.getSession()
+
+  if (session?.user && !recoveryModeActive && document.getElementById('reset-password-form')?.style.display !== 'block') {
+    clearPasswordRecoveryHint()
+    await bootApp(session.user)
+  } else {
+    if (document.getElementById('auth-overlay').style.display !== 'flex') {
+      showAuthOverlay()
+    }
+    initAuth(async () => {
+      recoveryModeActive = false
+      clearPasswordRecoveryHint()
+      const { data: { session: newSession } } = await supabase.auth.getSession()
+      if (newSession?.user) await bootApp(newSession.user)
+    }, hasHashError || recoveryModeActive)
+    if (recoveryModeActive) {
+      switchToResetPassword()
+    }
+  }
 }
 
 init()

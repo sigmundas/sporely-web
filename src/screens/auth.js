@@ -37,6 +37,8 @@ function _isNativeApp() {
 const BYPASS_TURNSTILE = _isNativeApp() || (import.meta.env.DEV && _isLocalTestingHost())
 const PERSIST_AUTH_DRAFTS = import.meta.env.DEV
 const AUTH_DRAFT_KEY = 'sporely-auth-draft'
+const PASSWORD_RECOVERY_HINT_KEY = 'sporely-password-recovery-hint'
+const PASSWORD_RECOVERY_HINT_TTL_MS = 1000 * 60 * 60
 
 async function _initTurnstile() {
   if (BYPASS_TURNSTILE) return
@@ -78,6 +80,74 @@ function showError(msg, allowHtml = false, info = false) {
     el.textContent = msg
   }
   el.style.display = msg ? 'block' : 'none'
+}
+
+function _setPasswordRecoveryHint(email = '') {
+  try {
+    localStorage.setItem(PASSWORD_RECOVERY_HINT_KEY, JSON.stringify({
+      email,
+      createdAt: Date.now(),
+    }))
+  } catch {}
+}
+
+export function hasPasswordRecoveryHint() {
+  try {
+    const raw = localStorage.getItem(PASSWORD_RECOVERY_HINT_KEY)
+    if (!raw) return false
+
+    const parsed = JSON.parse(raw)
+    const createdAt = Number(parsed?.createdAt || 0)
+    if (!createdAt || (Date.now() - createdAt) > PASSWORD_RECOVERY_HINT_TTL_MS) {
+      localStorage.removeItem(PASSWORD_RECOVERY_HINT_KEY)
+      return false
+    }
+
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function clearPasswordRecoveryHint() {
+  try {
+    localStorage.removeItem(PASSWORD_RECOVERY_HINT_KEY)
+  } catch {}
+}
+
+function _getInitialAuthParams() {
+  const params = new URLSearchParams(window.location.search)
+  const hash = (window.__INITIAL_HASH__ || window.location.hash).replace(/^#/, '')
+
+  if (!hash) return params
+
+  const hashParams = new URLSearchParams(hash)
+  hashParams.forEach((value, key) => {
+    if (!params.has(key)) params.set(key, value)
+  })
+
+  return params
+}
+
+export function getInitialAuthState() {
+  const params = _getInitialAuthParams()
+  const pathname = window.location.pathname || ''
+  const isError = params.has('error') || params.has('error_code')
+  const isRecovery = !isError && (
+    pathname.includes('reset-password') ||
+    params.get('flow') === 'recovery' ||
+    params.get('screen') === 'reset-password' ||
+    params.get('type') === 'recovery' ||
+    (params.has('access_token') && params.get('type') === 'recovery') ||
+    (params.has('code') && (
+      pathname.includes('reset-password') ||
+      params.get('type') === 'recovery' ||
+      params.get('flow') === 'recovery' ||
+      params.get('screen') === 'reset-password'
+    ))
+  )
+
+  return { params, pathname, isError, isRecovery }
 }
 
 function _readAuthDraft() {
@@ -207,6 +277,8 @@ export function switchToResetPassword() {
   document.getElementById('reset-password-form').style.display = 'block'
   const tc = document.getElementById('turnstile-container')
   if (tc) tc.style.display = 'none'
+  document.getElementById('new-password').value = ''
+  document.getElementById('confirm-new-password').value = ''
 }
 
 // ── Resend confirmation ────────────────────────────────────────────────────────
@@ -253,34 +325,35 @@ function friendlyHashError(code, description) {
 }
 
 export function handleUrlHashError() {
-  const hash = window.location.hash.slice(1) // strip leading #
-  if (!hash) return
+  const { params } = getInitialAuthState()
+  const values = Object.fromEntries(params)
+  if (!values.error) return false
 
-  const params = Object.fromEntries(new URLSearchParams(hash))
-  if (!params.error) return
+  // Clean auth params from the URL so they don't persist on reload
+  history.replaceState(null, '', window.location.pathname)
 
-  // Clean the hash from the URL so it doesn't persist on reload
-  history.replaceState(null, '', window.location.pathname + window.location.search)
-
-  const msg    = friendlyHashError(params.error_code, params.error_description)
-  const email  = params.email || ''
+  const msg    = friendlyHashError(values.error_code, values.error_description)
+  const email  = values.email || ''
 
   // Show the auth overlay with the error and a resend link if appropriate
   document.getElementById('auth-overlay').style.display = 'flex'
   document.getElementById('app-shell').style.display    = 'none'
 
-  if (params.error_code === 'otp_expired') {
+  if (values.error_code === 'otp_expired') {
     // Switch to signup view so user can re-enter email
     switchToSignup(email)
     showError(msg)
   } else {
+    switchToLogin(email)
     showError(msg)
   }
+  
+  return true
 }
 
 // ── Main auth init ────────────────────────────────────────────────────────────
 
-export function initAuth(onAuthenticated) {
+export function initAuth(onAuthenticated, skipDraftRestore = false) {
   const loginForm  = document.getElementById('login-form')
   const signupForm = document.getElementById('signup-form')
   const forgotForm = document.getElementById('forgot-password-form')
@@ -308,7 +381,9 @@ export function initAuth(onAuthenticated) {
     signupForm.insertBefore(termsLabel, signupBtn)
   }
 
-  _restoreAuthDraft()
+  if (!skipDraftRestore) {
+    _restoreAuthDraft()
+  }
   _persistAuthInputs()
   // Turnstile is initialised lazily when the user switches to the signup view
 
@@ -410,14 +485,22 @@ export function initAuth(onAuthenticated) {
     const email = document.getElementById('forgot-email').value.trim()
     
     setLoading(forgotBtn, true)
+
+    let redirectOrigin = window.location.origin
+    // If requested from the Android app, origin is localhost. Force redirect to the real web app.
+    if ((redirectOrigin.includes('localhost') || redirectOrigin.includes('127.0.0.1')) && !redirectOrigin.includes(':5173')) {
+      redirectOrigin = 'https://app.sporely.no'
+    }
+
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/`
+      redirectTo: `${redirectOrigin}/?flow=recovery&screen=reset-password`
     })
     setLoading(forgotBtn, false)
     
     if (error) {
       showError(error.message)
     } else {
+      _setPasswordRecoveryHint(email)
       showError(t('auth.resetEmailSent'), false, true)
     }
   })
@@ -426,8 +509,17 @@ export function initAuth(onAuthenticated) {
   resetForm?.addEventListener('submit', async e => {
     e.preventDefault()
     showError('')
-    const newPassword = document.getElementById('new-password').value
-    
+    const newPassword = document.getElementById('new-password').value.trim()
+    const confirmNewPassword = document.getElementById('confirm-new-password').value.trim()
+
+    if (newPassword !== confirmNewPassword) {
+      showError(t('auth.passwordsDontMatch'))
+      return
+    }
+    if (newPassword.length < 6) { // Supabase default minimum password length
+      showError(t('auth.passwordMin'))
+      return
+    }
     setLoading(resetBtn, true)
     const { error } = await supabase.auth.updateUser({ password: newPassword })
     setLoading(resetBtn, false)
@@ -435,7 +527,9 @@ export function initAuth(onAuthenticated) {
     if (error) {
       showError(error.message)
     } else {
-      history.replaceState(null, '', window.location.pathname + window.location.search)
+      clearPasswordRecoveryHint()
+      await supabase.auth.signOut()
+      history.replaceState(null, '', '/')
       switchToLogin('', true)
     }
   })

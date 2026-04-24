@@ -15,6 +15,10 @@
 <link rel="stylesheet" href="/src/style.css">
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
+<script>
+  // Capture hash before Supabase client strips it
+  window.__INITIAL_HASH__ = window.location.hash;
+</script>
 <body>
 <div id="app">
 
@@ -60,6 +64,9 @@
         <p class="auth-tagline" id="reset-password-desc">Enter your new password below.</p>
         <label class="auth-label"><span id="reset-password-label">New password</span>
           <input type="password" id="new-password" class="auth-input" placeholder="At least 6 characters" required autocomplete="new-password">
+        </label>
+        <label class="auth-label"><span id="confirm-password-label">Confirm new password</span>
+          <input type="password" id="confirm-new-password" class="auth-input" placeholder="At least 6 characters" required autocomplete="new-password">
         </label>
         <button type="submit" class="auth-btn" id="reset-password-btn">Update password</button>
       </form>
@@ -653,7 +660,10 @@
 
         <div class="profile-danger-zone">
           <button class="sign-out-btn" id="sign-out-btn">Sign out</button>
-          <button class="sign-out-btn sign-out-btn-danger" id="delete-account-btn">Delete account</button>
+          <div style="margin-top: 48px; display: flex; flex-direction: column; gap: 16px;">
+            <button class="sign-out-btn" id="profile-tos-btn">Terms of Service</button>
+            <button class="sign-out-btn sign-out-btn-danger" id="delete-account-btn">Delete account</button>
+          </div>
         </div>
       </div>
     </div>

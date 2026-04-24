@@ -33,6 +33,8 @@ const messages = {
     'auth.updatePassword': 'Update password',
     'auth.resetEmailSent': 'Password reset link sent. Check your inbox.',
     'auth.passwordUpdated': 'Password updated successfully.',
+    'auth.confirmNewPassword': 'Confirm new password',
+    'auth.passwordsDontMatch': 'Passwords do not match.',
     'auth.backToLogin': 'Back to sign in',
     'common.sync': 'Sync',
     'common.pleaseWait': 'Please wait…',
@@ -329,6 +331,8 @@ const messages = {
     'auth.updatePassword': 'Oppdater passord',
     'auth.resetEmailSent': 'Lenke for tilbakestilling sendt. Sjekk innboksen.',
     'auth.passwordUpdated': 'Passordet er oppdatert.',
+    'auth.confirmNewPassword': 'Bekreft nytt passord',
+    'auth.passwordsDontMatch': 'Passordene stemmer ikke overens.',
     'auth.backToLogin': 'Tilbake til innlogging',
     'common.sync': 'Synk',
     'common.pleaseWait': 'Vent litt…',
@@ -625,6 +629,8 @@ const messages = {
     'auth.updatePassword': 'Uppdatera lösenord',
     'auth.resetEmailSent': 'Länk för återställning skickad. Kontrollera inkorgen.',
     'auth.passwordUpdated': 'Lösenordet har uppdaterats.',
+    'auth.confirmNewPassword': 'Bekräfta nytt lösenord',
+    'auth.passwordsDontMatch': 'Lösenorden matchar inte.',
     'auth.backToLogin': 'Tillbaka till inloggning',
     'common.sync': 'Synk',
     'common.pleaseWait': 'Vänta…',
@@ -921,6 +927,8 @@ const messages = {
     'auth.updatePassword': 'Passwort aktualisieren',
     'auth.resetEmailSent': 'Link zum Zurücksetzen gesendet. Prüfe deinen Posteingang.',
     'auth.passwordUpdated': 'Passwort erfolgreich aktualisiert.',
+    'auth.confirmNewPassword': 'Neues Passwort bestätigen',
+    'auth.passwordsDontMatch': 'Passwörter stimmen nicht überein.',
     'auth.backToLogin': 'Zurück zur Anmeldung',
     'common.sync': 'Sync',
     'common.pleaseWait': 'Bitte warten…',
@@ -1350,6 +1358,7 @@ export function applyStaticTranslations() {
   setText('#reset-password-title', 'auth.resetPassword')
   setText('#reset-password-desc', 'auth.resetPasswordDesc')
   setText('#reset-password-label', 'auth.newPassword')
+  setText('#confirm-password-label', 'auth.confirmNewPassword')
   const resetBtn = document.getElementById('reset-password-btn')
   if (resetBtn) resetBtn.dataset.label = t('auth.updatePassword')
   setText('#reset-password-btn', 'auth.updatePassword')
@@ -1456,6 +1465,7 @@ export function applyStaticTranslations() {
   setText('#profile-cloud-plan-title', 'profile.cloudPlan')
   setText('#sign-out-btn', 'profile.signOut')
   setText('#delete-account-btn', 'profile.deleteAccount')
+  setText('#profile-tos-btn', 'profile.termsOfService')
   const friendsEmpty = document.querySelector('#friends-list > div')
   if (friendsEmpty) friendsEmpty.textContent = t('profile.noFriends')
 
