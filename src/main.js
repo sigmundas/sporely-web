@@ -43,6 +43,7 @@ import {
 initI18n()
 
 let _syncFeedbackBound = false
+let _appBootstrapped = false
 
 function initSyncFeedback() {
   if (_syncFeedbackBound) return
@@ -318,6 +319,8 @@ async function bootApp(user) {
   state.user = user
 
   hideAuthOverlay()
+  if (_appBootstrapped) return
+  _appBootstrapped = true
   initSyncFeedback()
   initSettings()
   initNav()
@@ -355,6 +358,7 @@ async function init() {
   const authState = getInitialAuthState()
   const hasHashError = handleUrlHashError()
   const hasRecoveryHint = hasPasswordRecoveryHint()
+  const recoveryViaHintOnly = !authState.isRecovery && hasRecoveryHint
   let recoveryModeActive = (authState.isRecovery || hasRecoveryHint) && !hasHashError
 
   supabase.auth.onAuthStateChange(async (event, session) => {
@@ -395,6 +399,11 @@ async function init() {
     }, hasHashError || recoveryModeActive)
     if (recoveryModeActive) {
       switchToResetPassword()
+      if (recoveryViaHintOnly) {
+        // Treat the fallback hint as one-time rescue state so later clean visits
+        // to "/" don't keep reopening the reset form in the same browser.
+        clearPasswordRecoveryHint()
+      }
     }
   }
 }

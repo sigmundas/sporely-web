@@ -19,6 +19,7 @@ let sessions = [];
 let expandedSessionIds = new Set();
 let sourceItems = [];
 let exifrModulePromise = null;
+let importSheetInitialized = false;
 const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
 const RAW_GPS_PICK = [
   'GPSLatitude',
@@ -221,7 +222,31 @@ function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.());
 }
 
+function _shouldUseImportSourceSheet() {
+  if (_isNativeApp()) return false;
+  return /android|iphone|ipad|ipod/i.test(navigator.userAgent || '');
+}
+
+function _openImportSourceSheet() {
+  const sheet = document.getElementById('import-source-sheet');
+  if (!sheet) return;
+  sheet.style.display = 'block';
+}
+
+function _closeImportSourceSheet() {
+  const sheet = document.getElementById('import-source-sheet');
+  if (!sheet) return;
+  sheet.style.display = 'none';
+}
+
 export function initImportReview() {
+  if (!importSheetInitialized) {
+    importSheetInitialized = true;
+    document.getElementById('import-source-close')?.addEventListener('click', _closeImportSourceSheet);
+    document.getElementById('import-source-sheet')?.addEventListener('click', event => {
+      if (event.target?.id === 'import-source-sheet') _closeImportSourceSheet();
+    });
+  }
   document.getElementById('import-back').addEventListener('click', _cancelImport);
   document.getElementById('import-cancel-btn').addEventListener('click', _cancelImport);
   document.getElementById('import-save-btn').addEventListener('click', saveAll);
@@ -293,6 +318,11 @@ export async function openPhotoImportPicker() {
       console.warn('Native photo picker failed, falling back to browser input:', err);
       _hideProgress();
     }
+  }
+
+  if (_shouldUseImportSourceSheet()) {
+    _openImportSourceSheet();
+    return;
   }
 
   // Android Chrome strips EXIF from "image/*" input. Use the browse input for Android web.
@@ -379,6 +409,7 @@ export async function openFileImportPicker() {
 
 export async function handleFileSelect(event) {
   const files = Array.from(event.target.files || []);
+  _closeImportSourceSheet();
   if (event.target) event.target.value = '';
   await _handleSelectedFilesWithFeedback(files);
 }
