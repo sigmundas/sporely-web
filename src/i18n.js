@@ -190,6 +190,7 @@ const messages = {
     'scope.all': 'All',
     'profile.title': 'Profile',
     'profile.fullNameOptional': 'Full name (optional)',
+    'profile.bio': 'Bio',
     'profile.saveProfile': 'Save profile',
     'profile.addFriend': 'Add Friend',
     'profile.friendSearch': 'Email, name or @username…',
@@ -237,12 +238,27 @@ const messages = {
     'profile.storageUsedOnly': '{used} used',
     'profile.storageUsedOfQuota': '{used} / {total}',
     'profile.termsOfService': 'Terms of Service',
+    'people.title': 'People',
+    'people.search': 'Search people…',
+    'people.recentlyPublic': 'Recently active in public',
+    'people.searching': 'Searching people…',
+    'people.noMatches': 'No people found.',
+    'people.noneYet': 'No public contributors yet.',
+    'people.noResults': 'No results for "{query}"',
+    'people.resultsCount': '{count} people',
+    'people.couldNotLoad': 'Could not load people.',
+    'people.noBio': 'No bio yet.',
+    'avatar.chooseSource': 'Update photo',
+    'avatar.choosePhoto': 'Choose photo',
+    'avatar.takeSelfie': 'Take selfie',
     'avatar.cropPhoto': 'Crop Photo',
     'avatar.hint': 'Pinch to zoom · Drag to reposition',
     'avatar.usePhoto': 'Use Photo',
+    'avatar.loadFailed': 'Could not open that image. Try a different photo.',
     'nav.home': 'Home',
     'nav.finds': 'Finds',
     'nav.map': 'Map',
+    'nav.people': 'People',
     'nav.profile': 'Profile',
     'settings.title': 'Settings',
     'settings.appearance': 'Appearance',
@@ -494,6 +510,7 @@ const messages = {
     'scope.all': 'Alle',
     'profile.title': 'Profil',
     'profile.fullNameOptional': 'Fullt navn (valgfritt)',
+    'profile.bio': 'Bio',
     'profile.saveProfile': 'Lagre profil',
     'profile.addFriend': 'Legg til venn',
     'profile.friendSearch': 'E-post, navn eller @brukernavn…',
@@ -541,12 +558,23 @@ const messages = {
     'profile.storageUsedOnly': '{used} brukt',
     'profile.storageUsedOfQuota': '{used} / {total}',
     'profile.termsOfService': 'Vilkår for bruk',
+    'people.title': 'Personer',
+    'people.search': 'Søk etter personer…',
+    'people.recentlyPublic': 'Nylig aktive offentlig',
+    'people.searching': 'Søker etter personer…',
+    'people.noMatches': 'Fant ingen personer.',
+    'people.noneYet': 'Ingen offentlige bidragsytere ennå.',
+    'people.noResults': 'Ingen treff for "{query}"',
+    'people.resultsCount': '{count} personer',
+    'people.couldNotLoad': 'Kunne ikke laste personer.',
+    'people.noBio': 'Ingen bio ennå.',
     'avatar.cropPhoto': 'Beskjær bilde',
     'avatar.hint': 'Klyp for å zoome · Dra for å flytte',
     'avatar.usePhoto': 'Bruk bilde',
     'nav.home': 'Hjem',
     'nav.finds': 'Funn',
     'nav.map': 'Kart',
+    'nav.people': 'Personer',
     'nav.profile': 'Profil',
     'settings.title': 'Innstillinger',
     'settings.appearance': 'Utseende',
@@ -798,6 +826,7 @@ const messages = {
     'scope.all': 'Alla',
     'profile.title': 'Profil',
     'profile.fullNameOptional': 'Fullständigt namn (valfritt)',
+    'profile.bio': 'Bio',
     'profile.saveProfile': 'Spara profil',
     'profile.addFriend': 'Lägg till vän',
     'profile.friendSearch': 'E-post, namn eller @användarnamn…',
@@ -845,12 +874,23 @@ const messages = {
     'profile.storageUsedOnly': '{used} använt',
     'profile.storageUsedOfQuota': '{used} / {total}',
     'profile.termsOfService': 'Användarvillkor',
+    'people.title': 'Personer',
+    'people.search': 'Sök personer…',
+    'people.recentlyPublic': 'Nyligen aktiva offentligt',
+    'people.searching': 'Söker personer…',
+    'people.noMatches': 'Hittade inga personer.',
+    'people.noneYet': 'Inga offentliga bidragsgivare ännu.',
+    'people.noResults': 'Inga träffar för "{query}"',
+    'people.resultsCount': '{count} personer',
+    'people.couldNotLoad': 'Kunde inte ladda personer.',
+    'people.noBio': 'Ingen bio ännu.',
     'avatar.cropPhoto': 'Beskär bild',
     'avatar.hint': 'Nyp för att zooma · Dra för att flytta',
     'avatar.usePhoto': 'Använd bild',
     'nav.home': 'Hem',
     'nav.finds': 'Fynd',
     'nav.map': 'Karta',
+    'nav.people': 'Personer',
     'nav.profile': 'Profil',
     'settings.title': 'Inställningar',
     'settings.appearance': 'Utseende',
@@ -1102,6 +1142,7 @@ const messages = {
     'scope.all': 'Alle',
     'profile.title': 'Profil',
     'profile.fullNameOptional': 'Vollständiger Name (optional)',
+    'profile.bio': 'Bio',
     'profile.saveProfile': 'Profil speichern',
     'profile.addFriend': 'Freund hinzufügen',
     'profile.friendSearch': 'E-Mail, Name oder @benutzername…',
@@ -1149,12 +1190,23 @@ const messages = {
     'profile.storageUsedOnly': '{used} genutzt',
     'profile.storageUsedOfQuota': '{used} / {total}',
     'profile.termsOfService': 'Nutzungsbedingungen',
+    'people.title': 'Personen',
+    'people.search': 'Personen suchen…',
+    'people.recentlyPublic': 'Kürzlich öffentlich aktiv',
+    'people.searching': 'Personen werden gesucht…',
+    'people.noMatches': 'Keine Personen gefunden.',
+    'people.noneYet': 'Noch keine öffentlichen Mitwirkenden.',
+    'people.noResults': 'Keine Treffer für "{query}"',
+    'people.resultsCount': '{count} Personen',
+    'people.couldNotLoad': 'Personen konnten nicht geladen werden.',
+    'people.noBio': 'Noch keine Bio.',
     'avatar.cropPhoto': 'Foto zuschneiden',
     'avatar.hint': 'Zum Zoomen zusammenziehen · Zum Verschieben ziehen',
     'avatar.usePhoto': 'Foto verwenden',
     'nav.home': 'Start',
     'nav.finds': 'Funde',
     'nav.map': 'Karte',
+    'nav.people': 'Personen',
     'nav.profile': 'Profil',
     'settings.title': 'Einstellungen',
     'settings.appearance': 'Darstellung',
@@ -1399,7 +1451,9 @@ export function applyStaticTranslations() {
   setPlaceholder('#comment-input', 'comments.add')
   setPlaceholder('#map-search-input', 'map.filter')
   setPlaceholder('#profile-fullname', 'profile.fullNameOptional')
+  setPlaceholder('#profile-bio', 'profile.bio')
   setPlaceholder('#friend-search-input', 'profile.friendSearch')
+  setPlaceholder('#people-search-input', 'people.search')
 
   setText('#header-sync-tag span', 'common.sync')
   setText('#home-recent-finds-title', 'home.recentFinds')
@@ -1481,6 +1535,8 @@ export function applyStaticTranslations() {
   setText('#finds-refresh-label', 'finds.pullToRefresh')
 
   setText('#profile-header-label', 'profile.title')
+  setText('#people-header-label', 'people.title')
+  setText('#people-subtitle', 'people.recentlyPublic')
   setText('#profile-save-btn', 'profile.saveProfile')
   setText('#profile-add-friend-title', 'profile.addFriend')
   setText('#profile-pending-title', 'profile.pendingRequests')
@@ -1501,10 +1557,15 @@ export function applyStaticTranslations() {
   setText('.avatar-crop-hint', 'avatar.hint')
   setText('#avatar-crop-cancel', 'common.cancel')
   setText('#avatar-crop-confirm', 'avatar.usePhoto')
+  setText('.avatar-source-title', 'avatar.chooseSource')
+  setText('#avatar-source-library', 'avatar.choosePhoto')
+  setText('#avatar-source-selfie', 'avatar.takeSelfie')
+  setText('#avatar-source-cancel', 'common.cancel')
 
   setText('#nav-home .nav-label', 'nav.home')
   setText('#nav-finds .nav-label', 'nav.finds')
   setText('#nav-map .nav-label', 'nav.map')
+  setText('#nav-people .nav-label', 'nav.people')
   setText('#nav-profile .nav-label', 'nav.profile')
   setAllText('#screen-map .map-scope-btn', [t('scope.mine'), t('scope.friends'), t('scope.all')])
 
@@ -1539,12 +1600,17 @@ export function applyStaticTranslations() {
   setAria('#settings-close-btn', 'common.close')
   setAria('#finds-search-btn', 'finds.searchAria')
   setAria('#finds-search-clear', 'finds.clearSearch')
+  setAria('#people-search-clear', 'finds.clearSearch')
   setAria('#finds-filter-uncertain', 'finds.uncertainIds')
   setAria('#home-fab', 'finds.newObservationAria')
   setAria('#finds-fab', 'finds.newObservationAria')
   setAria('#map-fab', 'finds.newObservationAria')
   setAria('#map-search-clear', 'map.clear')
   setAria('#profile-avatar-btn', 'profile.changePhoto')
+  setAria('#home-profile-btn', 'nav.profile')
+  setAria('#finds-profile-btn', 'nav.profile')
+  setAria('#map-profile-btn', 'nav.profile')
+  setAria('#people-profile-btn', 'nav.profile')
   setAria('#detail-back', 'detail.backGeneric')
   setAria('#photo-viewer-close', 'photo.close')
   setAria('#photo-viewer-prev', 'photo.previous')

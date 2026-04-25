@@ -27,45 +27,28 @@ export function initProfile() {
     if (e.key === 'Enter') _searchFriend()
   })
   document.getElementById('profile-save-btn').addEventListener('click', _saveProfile)
-  const _openPicker = async () => {
-    if (_isNativeApp()) {
-      try {
-        await FilePicker.requestPermissions();
-        const result = await FilePicker.pickImages({ multiple: false, readData: false });
-        const photo = result?.files?.[0];
-        if (!photo) return;
-
-        let path = photo.path;
-        let mimeType = photo.mimeType || 'image/jpeg';
-        if (mimeType === 'image/heic' || mimeType === 'image/heif' || photo.format === 'heic' || photo.format === 'heif') {
-          try {
-            if (window.Capacitor?.Plugins?.FilePicker?.convertHeicToJpeg) {
-              const converted = await FilePicker.convertHeicToJpeg({ path });
-              path = converted.path;
-              mimeType = 'image/jpeg';
-            }
-          } catch (e) {
-            console.warn('Native HEIC conversion failed:', e);
-          }
-        }
-
-        const url = Capacitor.convertFileSrc(path);
-        const res = await fetch(url);
-        const blob = await res.blob();
-        const file = new File([blob], photo.name || 'avatar.jpg', { type: mimeType });
-        _showCrop(file);
-        return;
-      } catch (err) {
-        console.warn('Native picker failed, falling back to input:', err);
-      }
-    }
-    document.getElementById('profile-avatar-input').click();
-  }
-  document.getElementById('profile-avatar-btn').addEventListener('click', _openPicker)
-  document.getElementById('profile-avatar-circle').addEventListener('click', _openPicker)
+  document.getElementById('profile-avatar-btn').addEventListener('click', _openAvatarSourcePicker)
+  document.getElementById('profile-avatar-circle').addEventListener('click', _openAvatarSourcePicker)
+  document.getElementById('avatar-source-overlay').addEventListener('click', e => {
+    if (e.target?.id === 'avatar-source-overlay') _closeAvatarSourcePicker()
+  })
+  document.getElementById('avatar-source-library').addEventListener('click', () => {
+    _closeAvatarSourcePicker()
+    void _openAvatarLibraryPicker()
+  })
+  document.getElementById('avatar-source-selfie').addEventListener('click', () => {
+    _closeAvatarSourcePicker()
+    _openAvatarCameraPicker()
+  })
+  document.getElementById('avatar-source-cancel').addEventListener('click', _closeAvatarSourcePicker)
   document.getElementById('profile-avatar-input').addEventListener('change', e => {
     const file = e.target.files?.[0]
-    if (file) _showCrop(file)
+    if (file) void _showCrop(file)
+    e.target.value = ''
+  })
+  document.getElementById('profile-avatar-camera-input').addEventListener('change', e => {
+    const file = e.target.files?.[0]
+    if (file) void _showCrop(file)
     e.target.value = ''
   })
   _initCropEvents()
@@ -81,6 +64,47 @@ export async function loadProfile() {
   await Promise.all([_loadProfileData(), _loadFriends(), _loadPending()])
 }
 
+export async function refreshHeaderProfileButtons(profile = null) {
+  const uid = state.user?.id
+  if (!uid) return
+
+  let summary = profile
+  if (!summary) {
+    const { data } = await supabase
+      .from('profiles')
+      .select('username, display_name, avatar_url')
+      .eq('id', uid)
+      .single()
+    summary = data || {}
+  }
+
+  const initials = _initials(summary?.username || state.user?.email || '')
+  const avatarUrl = summary?.avatar_url || ''
+  const targets = [
+    ['home-profile-img', 'home-profile-initials'],
+    ['finds-profile-img', 'finds-profile-initials'],
+    ['map-profile-img', 'map-profile-initials'],
+    ['people-profile-img', 'people-profile-initials'],
+  ]
+
+  for (const [imgId, initialsId] of targets) {
+    const img = document.getElementById(imgId)
+    const label = document.getElementById(initialsId)
+    if (!img || !label) continue
+
+    label.textContent = initials
+    if (avatarUrl && await _canLoadImage(avatarUrl)) {
+      img.src = avatarUrl
+      img.style.display = 'block'
+      label.style.display = 'none'
+    } else {
+      img.style.display = 'none'
+      img.removeAttribute('src')
+      label.style.display = ''
+    }
+  }
+}
+
 
 // ── Profile data (username, full_name, avatar) ────────────────────────────────
 
@@ -89,7 +113,7 @@ async function _loadProfileData() {
   if (!uid) return
   const { data } = await supabase
     .from('profiles')
-    .select('username, display_name, avatar_url')
+    .select('username, display_name, bio, avatar_url')
     .eq('id', uid)
     .single()
   state.cloudPlan = await fetchCloudPlanProfile(uid)
@@ -101,9 +125,11 @@ async function _loadProfileData() {
 
   document.getElementById('profile-username').value  = data.username     || ''
   document.getElementById('profile-fullname').value  = data.display_name || ''
+  document.getElementById('profile-bio').value = data.bio || ''
   document.getElementById('profile-email-display').textContent = state.user?.email || ''
   const initials = _initials(data.username || state.user?.email || '')
   document.getElementById('profile-avatar-initials').textContent = initials
+  await refreshHeaderProfileButtons(data)
   if (data.avatar_url) {
     const shown = await _setProfileAvatarSource({ uid, preferredUrl: data.avatar_url })
     if (shown) {
@@ -120,12 +146,14 @@ async function _saveProfile() {
   btn.disabled = true
   const username     = document.getElementById('profile-username').value.trim().replace(/^@/, '') || null
   const display_name = document.getElementById('profile-fullname').value.trim() || null
-  const { error } = await supabase.from('profiles').update({ username, display_name }).eq('id', state.user.id)
+  const bio = document.getElementById('profile-bio').value.trim() || null
+  const { error } = await supabase.from('profiles').update({ username, display_name, bio }).eq('id', state.user.id)
   btn.disabled = false
   if (error) {
     showToast(error.code === '23505' ? t('profile.usernameTaken') : t('common.errorPrefix', { message: error.message }))
     return
   }
+  await refreshHeaderProfileButtons({ username, display_name, avatar_url: document.getElementById('profile-avatar-img')?.getAttribute('src') || '' })
   showToast(t('profile.saved'))
 }
 
@@ -136,40 +164,90 @@ let _cropScale = 1, _cropX = 0, _cropY = 0
 let _cropBaseScale = 1, _cropViewSize = 0
 let _pointers = new Map(), _lastPinchDist = 0, _lastPinchScale = 1
 let _dragStartX = 0, _dragStartY = 0, _dragStartCropX = 0, _dragStartCropY = 0
+let _cropShowing = false
+
+function _openAvatarSourcePicker() {
+  document.getElementById('avatar-source-overlay').style.display = 'flex'
+}
+
+function _closeAvatarSourcePicker() {
+  document.getElementById('avatar-source-overlay').style.display = 'none'
+}
+
+async function _openAvatarLibraryPicker() {
+  if (_isNativeApp()) {
+    try {
+      await FilePicker.requestPermissions()
+      const result = await FilePicker.pickImages({ multiple: false, readData: false })
+      const photo = result?.files?.[0]
+      if (!photo) return
+
+      let path = photo.path
+      let mimeType = photo.mimeType || 'image/jpeg'
+      if (mimeType === 'image/heic' || mimeType === 'image/heif' || photo.format === 'heic' || photo.format === 'heif') {
+        try {
+          if (window.Capacitor?.Plugins?.FilePicker?.convertHeicToJpeg) {
+            const converted = await FilePicker.convertHeicToJpeg({ path })
+            path = converted.path
+            mimeType = 'image/jpeg'
+          }
+        } catch (error) {
+          console.warn('Native HEIC conversion failed:', error)
+        }
+      }
+
+      const response = await fetch(Capacitor.convertFileSrc(path))
+      const blob = await response.blob()
+      await _showCrop(new File([blob], photo.name || 'avatar.jpg', { type: mimeType }))
+      return
+    } catch (error) {
+      console.warn('Native avatar picker failed, falling back to browser input:', error)
+    }
+  }
+
+  document.getElementById('profile-avatar-input').click()
+}
+
+function _openAvatarCameraPicker() {
+  document.getElementById('profile-avatar-camera-input').click()
+}
 
 async function _showCrop(file) {
   const img = document.getElementById('avatar-crop-img')
-  // Show overlay first so the viewport has layout dimensions
+  const confirmBtn = document.getElementById('avatar-crop-confirm')
+  _resetCropPreview()
+  _cropShowing = true
   document.getElementById('avatar-crop-overlay').style.display = 'flex'
+  confirmBtn.disabled = true
   img.style.width = img.style.height = img.style.left = img.style.top = ''
 
-  // Test whether the browser can decode this file natively (HEIC fails on Android Chrome)
-  let url = URL.createObjectURL(file)
-  const canDecode = await new Promise(resolve => {
-    const test = new Image()
-    test.onload = () => resolve(test.naturalWidth > 0)
-    test.onerror = () => resolve(false)
-    test.src = url
-  })
-
-  if (!canDecode) {
-    URL.revokeObjectURL(url)
-    url = URL.createObjectURL(file)  // last resort
-  }
-
-  img.onload = () => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const vp = document.getElementById('avatar-crop-viewport')
-        _cropViewSize = vp.offsetWidth || Math.min(window.innerWidth * 0.92, 380)
-        const { naturalWidth: nw, naturalHeight: nh } = img
-        _cropBaseScale = _cropViewSize / Math.min(nw, nh)
-        _cropScale = 1; _cropX = 0; _cropY = 0
-        _applyCrop()
-      })
+  try {
+    const dataUrl = await _readFileAsDataUrl(file)
+    await new Promise((resolve, reject) => {
+      img.onload = () => resolve()
+      img.onerror = () => reject(new Error('avatar-preview-load-failed'))
+      img.src = dataUrl
     })
+  } catch (error) {
+    console.warn('Avatar crop load failed:', error)
+    _closeCropOverlay()
+    showToast(t('avatar.loadFailed'))
+    return
   }
-  img.src = url
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const vp = document.getElementById('avatar-crop-viewport')
+      _cropViewSize = vp.offsetWidth || Math.min(window.innerWidth * 0.92, 380)
+      const { naturalWidth: nw, naturalHeight: nh } = img
+      _cropBaseScale = _cropViewSize / Math.min(nw, nh)
+      _cropScale = 1
+      _cropX = 0
+      _cropY = 0
+      _applyCrop()
+      confirmBtn.disabled = false
+    })
+  })
 }
 
 function _applyCrop() {
@@ -231,17 +309,23 @@ function _initCropEvents() {
     _applyCrop()
   }, { passive: false })
 
-  document.getElementById('avatar-crop-cancel').addEventListener('click', () => {
-    document.getElementById('avatar-crop-overlay').style.display = 'none'
-    URL.revokeObjectURL(document.getElementById('avatar-crop-img').src)
+  document.getElementById('avatar-crop-overlay').addEventListener('click', e => {
+    if (e.target?.id === 'avatar-crop-overlay') _closeCropOverlay()
   })
 
-  document.getElementById('avatar-crop-confirm').addEventListener('click', _confirmCrop)
+  document.getElementById('avatar-crop-cancel').addEventListener('click', _closeCropOverlay)
+  document.getElementById('avatar-crop-confirm').addEventListener('click', () => { void _confirmCrop() })
 }
 
-function _confirmCrop() {
+async function _confirmCrop() {
   const domImg = document.getElementById('avatar-crop-img')
-  const blobUrl = domImg.src
+  const confirmBtn = document.getElementById('avatar-crop-confirm')
+  if (!_cropShowing || !domImg.naturalWidth || !domImg.naturalHeight) {
+    showToast(t('avatar.loadFailed'))
+    return
+  }
+
+  confirmBtn.disabled = true
   const { naturalWidth: nw, naturalHeight: nh } = domImg
   const eff = _cropBaseScale * _cropScale
   const vs  = _cropViewSize
@@ -253,26 +337,26 @@ function _confirmCrop() {
   const sw = vs / eff
   const sh = vs / eff
 
-  // Load fresh so canvas drawImage isn't blocked by cross-origin tainting
-  const fresh = new Image()
-  fresh.onload = () => {
-    const canvas = document.createElement('canvas')
-    canvas.width = canvas.height = CROP_OUTPUT
-    canvas.getContext('2d').drawImage(fresh, sx, sy, sw, sh, 0, 0, CROP_OUTPUT, CROP_OUTPUT)
-    URL.revokeObjectURL(blobUrl)
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = CROP_OUTPUT
+  canvas.getContext('2d').drawImage(domImg, sx, sy, sw, sh, 0, 0, CROP_OUTPUT, CROP_OUTPUT)
 
-    // Show result immediately — no CDN round-trip
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
-    const profileImg = document.getElementById('profile-avatar-img')
-    profileImg.src = dataUrl
-    profileImg.style.display = 'block'
-    document.getElementById('profile-avatar-initials').style.display = 'none'
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
+  const profileImg = document.getElementById('profile-avatar-img')
+  profileImg.src = dataUrl
+  profileImg.style.display = 'block'
+  document.getElementById('profile-avatar-initials').style.display = 'none'
 
-    canvas.toBlob(blob => { if (blob) _uploadAvatar(blob) }, 'image/jpeg', 0.92)
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+  _closeCropOverlay()
+  if (!blob) {
+    confirmBtn.disabled = false
+    showToast(t('avatar.loadFailed'))
+    return
   }
-  fresh.src = blobUrl
 
-  document.getElementById('avatar-crop-overlay').style.display = 'none'
+  await _uploadAvatar(blob)
+  confirmBtn.disabled = false
 }
 
 async function _uploadAvatar(blob) {
@@ -291,6 +375,7 @@ async function _uploadAvatar(blob) {
     cacheBust: true,
     keepCurrentOnFailure: true,
   })
+  await refreshHeaderProfileButtons({ username: document.getElementById('profile-username')?.value.trim(), avatar_url: publicUrl })
   showToast(t('profile.photoUpdated'))
 }
 
@@ -303,6 +388,39 @@ function _showInitialsAvatar() {
   img.style.display = 'none'
   img.removeAttribute('src')
   document.getElementById('profile-avatar-initials').style.display = ''
+}
+
+function _closeCropOverlay() {
+  _cropShowing = false
+  document.getElementById('avatar-crop-overlay').style.display = 'none'
+  document.getElementById('avatar-crop-confirm').disabled = false
+  _resetCropPreview()
+}
+
+function _resetCropPreview() {
+  const img = document.getElementById('avatar-crop-img')
+  img.onload = null
+  img.onerror = null
+  img.removeAttribute('src')
+  img.style.width = ''
+  img.style.height = ''
+  img.style.left = ''
+  img.style.top = ''
+  _cropScale = 1
+  _cropX = 0
+  _cropY = 0
+  _cropBaseScale = 1
+  _cropViewSize = 0
+  _pointers.clear()
+}
+
+function _readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = () => reject(reader.error || new Error('avatar-file-read-failed'))
+    reader.readAsDataURL(file)
+  })
 }
 
 async function _setProfileAvatarSource({ uid, preferredUrl = '', cacheBust = false, keepCurrentOnFailure = false }) {

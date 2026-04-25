@@ -28,7 +28,8 @@ import { initFindDetail } from './screens/find_detail.js'
 import { initPhotoViewer } from './photo-viewer.js'
 import { initImportReview, renderSessions, restoreImportSessions } from './screens/import_review.js'
 import { clearImportSessions, loadImportSessions } from './import-store.js'
-import { initProfile, loadProfile } from './screens/profile.js'
+import { initProfile, loadProfile, refreshHeaderProfileButtons } from './screens/profile.js'
+import { initPeople, loadPeople } from './screens/people.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
 import { fetchCloudPlanProfile, getStoredImageResolutionMode, setStoredImageResolutionMode } from './cloud-plan.js'
@@ -308,9 +309,15 @@ function initNav() {
     loadFinds()
   })
   document.getElementById('nav-map').addEventListener('click', () => navigate('map'))
-  document.getElementById('nav-profile').addEventListener('click', () => {
-    navigate('profile')
-    loadProfile()
+  document.getElementById('nav-people').addEventListener('click', () => {
+    navigate('people')
+    loadPeople()
+  })
+  ;['home-profile-btn', 'finds-profile-btn', 'map-profile-btn', 'people-profile-btn'].forEach(id => {
+    document.getElementById(id)?.addEventListener('click', () => {
+      navigate('profile')
+      loadProfile()
+    })
   })
 }
 
@@ -342,7 +349,9 @@ async function bootApp(user) {
   runBootStep('photo-viewer', () => initPhotoViewer())
   runBootStep('ai-crop-editor', () => initAiCropEditor())
   runBootStep('import-review', () => initImportReview())
+  runBootStep('people', () => initPeople())
   runBootStep('profile', () => initProfile())
+  runBootStep('header-profile-buttons', () => refreshHeaderProfileButtons())
   runBootStep('geolocation', () => startGeo())
 
   navigate('home')
@@ -372,6 +381,7 @@ onLocaleChange(() => {
   if (state.currentScreen === 'review') buildReviewGrid()
   if (state.currentScreen === 'import-review') renderSessions()
   if (state.currentScreen === 'map') void loadMapScreen()
+  if (state.currentScreen === 'people') loadPeople()
   if (state.currentScreen === 'profile') loadProfile()
 })
 

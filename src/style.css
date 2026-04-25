@@ -267,6 +267,44 @@ html, body {
   font-size: 14px;
 }
 .header-actions { display: flex; align-items: center; gap: 10px; position: relative; z-index: 20; }
+.header-avatar-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--green-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+}
+.header-avatar-btn:active { transform: scale(0.97); }
+.header-avatar-initials {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+.header-avatar-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.map-profile-btn {
+  position: absolute;
+  top: calc(12px + var(--safe-top));
+  right: 14px;
+  z-index: 1001;
+  background: rgba(13,17,9,0.88);
+  backdrop-filter: blur(8px);
+}
 .icon-btn {
   width: 34px; height: 34px;
   border-radius: 50%; border: none;
@@ -768,6 +806,129 @@ html, body {
 .home-stat-val { font-size: 22px; font-weight: 700; color: var(--white); line-height: 1; margin-bottom: 4px; }
 .home-stat-lbl { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
 .home-stat-div { width: 1px; background: var(--border); align-self: stretch; }
+
+/* ── PEOPLE SCREEN ── */
+.people-body {
+  padding: 12px 14px 24px;
+}
+.people-search-wrap {
+  padding: 0;
+  max-height: none;
+}
+.people-search-wrap.open {
+  padding: 0;
+}
+.people-subtitle {
+  margin: 12px 4px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: 'DM Mono', monospace;
+}
+.people-empty {
+  padding: 16px 6px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.people-card {
+  background: var(--card-raised);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 14px;
+  margin-bottom: 12px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.12);
+}
+.people-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.people-card-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: var(--card);
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}
+.people-card-avatar-img,
+.people-card-avatar-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.people-card-avatar-img {
+  object-fit: cover;
+  display: block;
+}
+.people-card-avatar-fallback {
+  background: linear-gradient(135deg, var(--green-deep), color-mix(in srgb, var(--green-mid) 70%, #22331f 30%));
+  color: var(--green-accent);
+  font-size: 19px;
+  font-weight: 700;
+}
+.people-card-title-wrap {
+  min-width: 0;
+  flex: 1;
+}
+.people-card-name {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+.people-card-handle {
+  margin-top: 3px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--green-accent);
+  font-family: 'DM Mono', monospace;
+}
+.people-card-bio {
+  margin-top: 12px;
+  min-height: 38px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.people-card-bio-empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+.people-card-counts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-dim);
+}
+.people-card-count {
+  text-align: center;
+  padding: 0 6px;
+}
+.people-card-count + .people-card-count {
+  border-left: 1px solid var(--border-dim);
+}
+.people-card-count-val {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--white);
+  line-height: 1;
+  margin-bottom: 4px;
+}
+.people-card-count-lbl {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
 
 /* Mixed feed ownership dot */
 .find-owner-dot {
@@ -2031,7 +2192,7 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   padding: 0;
   z-index: 2;
   touch-action: manipulation;
-  pointer-events: none;
+  pointer-events: auto;
 }
 .profile-identity-fields {
   flex: 1;
@@ -2056,6 +2217,10 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
 }
 .profile-field-input::placeholder {
   color: var(--text-dim);
+}
+.profile-bio-input {
+  min-height: 76px;
+  resize: vertical;
 }
 .profile-email-display {
   font-size: 12px;
@@ -2199,6 +2364,7 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
 }
 
 /* ── Avatar crop overlay ──────────────────────────────────────────────────── */
+.avatar-source-overlay,
 .avatar-crop-overlay {
   position: fixed;
   inset: 0;
@@ -2207,6 +2373,47 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.avatar-source-overlay {
+  z-index: 999;
+  align-items: flex-end;
+}
+.avatar-source-sheet {
+  width: min(92vw, 380px);
+  margin: 0 0 calc(16px + var(--safe-bottom, 0px));
+  background: var(--surface);
+  border-radius: 20px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.28);
+}
+.avatar-source-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-align: center;
+  padding: 4px 6px 8px;
+}
+.avatar-source-option,
+.avatar-source-cancel {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--text-primary);
+  font-family: 'Outfit', sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 14px 16px;
+  cursor: pointer;
+}
+.avatar-source-option:active,
+.avatar-source-cancel:active {
+  transform: translateY(1px);
+}
+.avatar-source-cancel {
+  color: var(--text-dim);
 }
 .avatar-crop-modal {
   width: min(92vw, 380px);
@@ -2400,6 +2607,18 @@ html.light .detail-toggle-thumb { background: #ffffff; }
 /* Finds card light mode */
 html.light .find-card-name { color: var(--green-deep); }
 html.light .find-card { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+html.light .people-card {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+html.light .people-card-count-val {
+  color: var(--green-deep);
+}
+html.light .header-avatar-btn {
+  background: #f0f4f0;
+}
+html.light .map-profile-btn {
+  background: rgba(255,255,255,0.92);
+}
 
 /* Map search light mode */
 html.light .map-search-row,

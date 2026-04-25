@@ -59,6 +59,7 @@ See also:
 - `profiles`
   - Auto-created by a Postgres trigger on `auth.users` insert
   - Columns: `username` (unique), `display_name`, `avatar_url`, `bio`, `is_admin` (bool), `is_banned` (bool)
+  - `bio` is used by the web Profile editor and the People screen cards
   - Avatar initials derived from `username` or `email` on the client
 - `friendships`
   - Bidirectional friendship rows with status gating: `pending` / `accepted` / `blocked`
@@ -74,6 +75,22 @@ See also:
   - Populated with ~110k taxa + ~70k vernacular names
 - `search_taxa` (RPC)
   - Deployed and used by the web app for autocomplete/search
+
+### Community spore-data RPCs
+- Public contributor / measurement aggregates should be exposed through `SECURITY DEFINER` RPCs, not by granting blanket public `SELECT` on `spore_measurements`
+- Existing SQL draft:
+  - `sporely-py/database/supabase_spore_community_schema.sql`
+- People-directory RPC:
+  - `sporely-py/database/supabase_people_directory.sql`
+- Relevant functions in that SQL draft include:
+  - `search_community_spore_datasets`
+  - `get_community_spore_dataset`
+  - `community_spore_taxon_summary`
+- `search_people_directory(p_query text DEFAULT NULL, p_limit int DEFAULT 24)`
+  - Used by the web People screen
+  - Returns profile fields plus public `finds / species / spores` contributor counts
+  - Default behavior: recently active public contributors
+  - Search behavior: matches `username` / `display_name`, still returning public stats only
 
 ### Edge Functions
 - `delete-account`
@@ -132,9 +149,10 @@ All tables have RLS enabled and default "owner-only" access unless overridden by
 - `observations` — accepted friends can read; `visibility` controls observation visibility and comment access
 - `observation_images` — follow the same ownership/sharing model as their parent observation
 - `comments` — readable by the observation owner, plus anyone who can see the observation based on `visibility` and friendship status
-- `profiles` — friends can read (accepted friendships)
+- `profiles` — authenticated users must be able to read the public profile fields used by the web app (`username`, `display_name`, `avatar_url`, `bio`) for friend search, mentions, comments, and the People screen
 - `reference_values` — all authenticated users
 - `observation_shares` — scoped to the `shared_with_id` user
+- `spore_measurements` — owner/friend access by default; public/community access should come from dedicated RPCs rather than direct table reads
 
 **Note:** `private_comment` is never read by the web app and should remain desktop-only.
 
@@ -194,7 +212,8 @@ For `avatars`:
 4. **Verify RLS enabled**
    - Ensure tables/views referenced by the web app still have RLS enabled
 5. **Verify RPC availability**
-   - Ensure `search_taxa` remains deployed and callable by the web app
+  - Ensure `search_taxa` remains deployed and callable by the web app
+  - Ensure `search_people_directory` is deployed if the web app exposes the People screen
 6. **Verify Edge Function availability**
    - Ensure `delete-account` is deployed if the web app exposes the Profile → Delete account action
 7. **Regression tests for sharing / visibility**
