@@ -1861,6 +1861,33 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   z-index: 50;
 }
 .review-action-btns { display: grid; grid-template-columns: 1fr 1.6fr; gap: 10px; }
+.import-ai-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.import-ai-progress-track {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+.import-ai-progress-fill {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green-accent);
+  transition: width 0.12s linear;
+}
+.import-ai-progress-text {
+  min-width: 34px;
+  text-align: right;
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+}
 .detail-btns-row {
   display: flex;
   gap: 8px;
@@ -2486,6 +2513,12 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
   padding: 12px 18px calc(16px + var(--safe-bottom));
   background: var(--surface);
   border-top: 1px solid var(--border);
+}
+#screen-import-review .review-action-btns {
+  grid-template-columns: minmax(0, 0.88fr) minmax(0, 1.55fr) minmax(0, 0.9fr);
+}
+#screen-import-review .review-action-btns > button {
+  min-width: 0;
 }
 
 /* ── SETTINGS PANEL (bottom sheet) ── */

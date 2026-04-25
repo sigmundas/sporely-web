@@ -17,10 +17,11 @@ import {
   showAuthOverlay,
   hideAuthOverlay,
   handleUrlHashError,
+  switchToLogin,
   switchToResetPassword,
 } from './screens/auth.js'
 import { initHome, refreshHome } from './screens/home.js'
-import { initFinds, loadFinds } from './screens/finds.js'
+import { initFinds, loadFinds, requestFindsRefresh } from './screens/finds.js'
 import { initCapture } from './screens/capture.js'
 import { buildReviewGrid, initReview } from './screens/review.js'
 import { initFindDetail } from './screens/find_detail.js'
@@ -34,10 +35,14 @@ import { fetchCloudPlanProfile, getStoredImageResolutionMode, setStoredImageReso
 import { clearMediaUrlCache } from './images.js'
 import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
 import {
+  getArtsorakelMaxEdge,
   getDefaultVisibility,
+  getPhotoGapMinutes,
   getSyncOverMobileDataEnabled,
+  setArtsorakelMaxEdge,
   setDefaultVisibility,
   setLastSyncAt,
+  setPhotoGapMinutes,
   setSyncOverMobileDataEnabled,
 } from './settings.js'
 
@@ -55,7 +60,7 @@ function initSyncFeedback() {
     setLastSyncAt()
     showToast(t('review.uploadedComplete', { count: imageCount }))
 
-    if (state.currentScreen === 'finds') void loadFinds()
+    if (state.currentScreen === 'finds') requestFindsRefresh()
     if (state.currentScreen === 'home') void refreshHome()
     if (state.currentScreen === 'profile') void loadProfile()
   })
@@ -201,13 +206,18 @@ function initSettings() {
   // Photo gap input
   const gapInput = document.getElementById('settings-gap-input')
   function _setPhotoGap(value) {
-    const v = Math.max(1, Math.min(120, parseInt(value) || 1))
+    const v = setPhotoGapMinutes(value)
     gapInput.value = v
     gapInput.textContent = String(v)
-    localStorage.setItem('sporely-photo-gap', String(v))
   }
   document.getElementById('settings-gap-decrement')?.addEventListener('click', () => _setPhotoGap(Number(gapInput.value || 1) - 1))
   document.getElementById('settings-gap-increment')?.addEventListener('click', () => _setPhotoGap(Number(gapInput.value || 1) + 1))
+
+  const artsorakelMaxEdgeInput = document.getElementById('settings-artsorakel-max-edge')
+  artsorakelMaxEdgeInput?.addEventListener('change', () => {
+    setArtsorakelMaxEdge(artsorakelMaxEdgeInput.value)
+    artsorakelMaxEdgeInput.value = String(getArtsorakelMaxEdge())
+  })
 
   const localeSelect = document.getElementById('settings-language-select')
   localeSelect.addEventListener('change', () => {
@@ -261,9 +271,11 @@ function _syncSettingsUI() {
   })
   const gapInput = document.getElementById('settings-gap-input')
   if (gapInput) {
-    gapInput.value = localStorage.getItem('sporely-photo-gap') || '1'
+    gapInput.value = String(getPhotoGapMinutes())
     gapInput.textContent = gapInput.value
   }
+  const artsorakelMaxEdgeInput = document.getElementById('settings-artsorakel-max-edge')
+  if (artsorakelMaxEdgeInput) artsorakelMaxEdgeInput.value = String(getArtsorakelMaxEdge())
   const localeSelect = document.getElementById('settings-language-select')
   if (localeSelect) localeSelect.value = getLocale()
 
@@ -303,51 +315,51 @@ function initNav() {
 }
 
 async function bootApp(user) {
-  try {
-    // Validate profile with retries to account for Postgres trigger delay
-    let profileFound = false
+  state.user = user
+  hideAuthOverlay()
+  showAuthError('')
+
+  if (_appBootstrapped) return
+  _appBootstrapped = true
+
+  function runBootStep(label, fn) {
+    Promise.resolve()
+      .then(fn)
+      .catch(error => {
+        console.error(`Boot step failed: ${label}`, error)
+        return null
+      })
+  }
+
+  runBootStep('sync-feedback', () => initSyncFeedback())
+  runBootStep('settings', () => initSettings())
+  runBootStep('navigation', () => initNav())
+  runBootStep('home', () => initHome())
+  runBootStep('finds', () => initFinds())
+  runBootStep('capture', () => initCapture())
+  runBootStep('review', () => initReview())
+  runBootStep('find-detail', () => initFindDetail())
+  runBootStep('photo-viewer', () => initPhotoViewer())
+  runBootStep('ai-crop-editor', () => initAiCropEditor())
+  runBootStep('import-review', () => initImportReview())
+  runBootStep('profile', () => initProfile())
+  runBootStep('geolocation', () => startGeo())
+
+  navigate('home')
+
+  runBootStep('profile-check', async () => {
     for (let i = 0; i < 3; i++) {
       const { data } = await supabase.from('profiles').select('id').eq('id', user.id).single()
-      if (data) {
-        profileFound = true
-        break
-      }
+      if (data) return
       await new Promise(resolve => setTimeout(resolve, 500))
     }
-    if (!profileFound) {
-      console.warn("Profile not found for user, proceeding anyway.", user.id)
-    }
+    console.warn('Profile not found for user, proceeding anyway.', user.id)
+  })
 
-    state.user = user
-
-    hideAuthOverlay()
-    if (_appBootstrapped) return
-    _appBootstrapped = true
-    initSyncFeedback()
-    initSettings()
-    initNav()
-    initHome()
-    initFinds()
-    initCapture()
-    initReview()
-    initFindDetail()
-    initPhotoViewer()
-    initAiCropEditor()
-    initImportReview()
-    initProfile()
-    startGeo()
-    navigate('home')
-
-    // Restore any import session that was interrupted by app suspension/kill
+  runBootStep('pending-import-restore', async () => {
     const pending = await loadImportSessions()
     if (pending.length) restoreImportSessions(pending)
-  } catch (error) {
-    console.error('App boot failed:', error)
-    _appBootstrapped = false
-    state.user = null
-    showAuthOverlay()
-    showAuthError(t('common.errorPrefix', { message: error?.message || String(error) }))
-  }
+  })
 }
 
 onLocaleChange(() => {
@@ -397,9 +409,12 @@ async function init() {
       await bootApp(session.user)
     }
     if (event === 'SIGNED_OUT') {
+      const persistedSession = (await supabase.auth.getSession()).data.session
+      if (persistedSession?.user) return
       state.user = null
       ensureAuthUiInitialized(true)
       showAuthOverlay()
+      switchToLogin()
     }
   })
 

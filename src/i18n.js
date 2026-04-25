@@ -59,14 +59,9 @@ const messages = {
     'home.unidentified': 'Unidentified',
     'stats.finds': 'Finds',
     'stats.species': 'Species',
+    'stats.spores': 'Spores',
     'stats.friendsActive': 'Friends active',
     'stats.friends': 'Friends',
-    'importSheet.title': 'Import photos',
-    'importSheet.subtitle': 'Choose the fastest path, or browse files when you want the best shot at keeping original metadata.',
-    'importSheet.photosAndVideos': 'Photos & videos',
-    'importSheet.quickPicker': 'Quick picker from your gallery.',
-    'importSheet.browseFiles': 'Browse files',
-    'importSheet.heicHint': 'Best for original HEIC metadata on some Android phones.',
     'capture.acquiring': 'Acquiring…',
     'capture.batchActive': 'Batch Active',
     'capture.done': 'DONE',
@@ -81,6 +76,7 @@ const messages = {
     'capture.noCameraFound': 'No camera was found on this device.',
     'capture.cameraStartFailed': 'Camera could not be started ({name}). Close other apps using the camera and try again.',
     'capture.photoCaptured': 'Photo {count} captured',
+    'capture.importPhotos': 'Import photos',
     'capture.lightReading': 'LIGHT: {lux} LUX / F-STOP: {fStop}',
     'review.review': 'Review',
     'review.addPhoto': 'Add photo',
@@ -230,7 +226,7 @@ const messages = {
     'profile.storage': 'Sync history',
     'profile.storageUsage': 'Storage',
     'profile.imageCount': 'Images',
-    'profile.imageResolutionFree': '2MP',
+    'profile.imageResolutionDefault': 'Default (2MP)',
     'profile.imageResolutionPro': '12MP',
     'profile.imageCountValue.one': '{count} image',
     'profile.imageCountValue.other': '{count} images',
@@ -259,8 +255,12 @@ const messages = {
     'settings.newObservationAfter': 'New observation after',
     'settings.min': 'min',
     'settings.photoGapHint': 'Photo import from your device will group images based on time between photos.',
+    'settings.artsorakel': 'Artsorakel',
+    'settings.artsorakelMaxEdge': 'Max width/height',
+    'settings.artsorakelMaxEdgeHint': 'Images sent to Artsorakel will be resized so neither width nor height exceeds this value.',
+    'settings.px': 'px',
     'settings.imageResolution': 'Image resolution',
-    'settings.imageResolutionReduced': 'Reduced (2MP)',
+    'settings.imageResolutionReduced': 'Default (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
     'settings.sync': 'Sync',
     'settings.syncOverMobileData': 'Sync over mobile data',
@@ -282,10 +282,15 @@ const messages = {
     'import.overwriteExifConfirm': 'Current location will overwrite the EXIF location. Continue?',
     'import.noHeicGps': 'No photo GPS found in this HEIC. On some iPhone web uploads, location metadata is not exposed to the browser.',
     'import.setFromGps': 'Set from GPS',
+    'import.aiIdAll': 'AI ID All',
     'import.identifying': 'Identifying…',
     'import.failedOneGroup': 'Failed to queue one group. Others may have queued.',
     'import.saved': 'Queued {count} for upload',
     'import.queuedSingle': 'Added to sync queue',
+    'import.exifWarningTitle': 'Missing Location Data?',
+    'import.exifWarningDesc': 'Android web browsers automatically remove GPS location from photos when using the quick "Photos & videos" picker. Install the Sporely app from Play Store to import location data with your images.',
+    'import.dontShowAgain': 'Don\'t show this again',
+    'import.continueAnyway': 'Continue anyway',
     'counts.photo.one': '{count} photo',
     'counts.photo.other': '{count} photos',
     'counts.observation.one': '{count} observation',
@@ -358,14 +363,9 @@ const messages = {
     'home.unidentified': 'Ubestemt',
     'stats.finds': 'Funn',
     'stats.species': 'Arter',
+    'stats.spores': 'Sporer',
     'stats.friendsActive': 'Aktive venner',
     'stats.friends': 'Venner',
-    'importSheet.title': 'Importer bilder',
-    'importSheet.subtitle': 'Velg den raskeste veien, eller bla gjennom filer når du vil ha størst sjanse for å beholde original metadata.',
-    'importSheet.photosAndVideos': 'Bilder og videoer',
-    'importSheet.quickPicker': 'Rask velger fra bildegalleriet.',
-    'importSheet.browseFiles': 'Bla gjennom filer',
-    'importSheet.heicHint': 'Best for original HEIC-metadata på noen Android-telefoner.',
     'capture.acquiring': 'Henter posisjon…',
     'capture.batchActive': 'Serie aktiv',
     'capture.done': 'FERDIG',
@@ -380,6 +380,7 @@ const messages = {
     'capture.noCameraFound': 'Fant ikke noe kamera på denne enheten.',
     'capture.cameraStartFailed': 'Kunne ikke starte kameraet ({name}). Lukk andre apper som bruker kameraet og prøv igjen.',
     'capture.photoCaptured': 'Bilde {count} tatt',
+    'capture.importPhotos': 'Importer bilder',
     'capture.lightReading': 'LYS: {lux} LUX / F-STOPP: {fStop}',
     'review.review': 'Gjennomgang',
     'review.addPhoto': 'Legg til bilde',
@@ -529,7 +530,7 @@ const messages = {
     'profile.storage': 'Synkhistorikk',
     'profile.storageUsage': 'Lagring',
     'profile.imageCount': 'Bilder',
-    'profile.imageResolutionFree': '2MP',
+    'profile.imageResolutionDefault': 'Standard (2MP)',
     'profile.imageResolutionPro': '12MP',
     'profile.imageCountValue.one': '{count} bilde',
     'profile.imageCountValue.other': '{count} bilder',
@@ -558,8 +559,12 @@ const messages = {
     'settings.newObservationAfter': 'Ny observasjon etter',
     'settings.min': 'min',
     'settings.photoGapHint': 'Bildeimport fra enheten grupperer bilder basert på tiden mellom bildene.',
+    'settings.artsorakel': 'Artsorakel',
+    'settings.artsorakelMaxEdge': 'Maks bredde/høyde',
+    'settings.artsorakelMaxEdgeHint': 'Bilder sendt til Artsorakel skaleres slik at verken bredde eller høyde overstiger denne verdien.',
+    'settings.px': 'px',
     'settings.imageResolution': 'Bildeoppløsning',
-    'settings.imageResolutionReduced': 'Redusert (2MP)',
+    'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Maks (12MP)',
     'settings.sync': 'Synk',
     'settings.syncOverMobileData': 'Synk over mobildata',
@@ -581,10 +586,15 @@ const messages = {
     'import.overwriteExifConfirm': 'Nåværende sted vil overskrive EXIF-stedet. Fortsette?',
     'import.noHeicGps': 'Fant ingen GPS-data i dette HEIC-bildet. På noen iPhone-opplastinger på web eksponeres ikke stedsmetadata til nettleseren.',
     'import.setFromGps': 'Sett fra GPS',
+    'import.aiIdAll': 'AI-ID alle',
     'import.identifying': 'Identifiserer…',
     'import.failedOneGroup': 'Kunne ikke sette én gruppe i kø. Andre kan ha blitt satt i kø.',
     'import.saved': 'Satte {count} i kø for opplasting',
     'import.queuedSingle': 'Lagt til i synkøen',
+    'import.exifWarningTitle': 'Mangler stedsdata?',
+    'import.exifWarningDesc': 'Nettlesere på Android fjerner automatisk GPS-posisjon fra bilder når du bruker den raske bildevelgeren for å beskytte personvernet ditt. Installer Sporely-appen fra Play Store for å importere stedsdata med bildene dine.',
+    'import.dontShowAgain': 'Ikke vis dette igjen',
+    'import.continueAnyway': 'Fortsett likevel',
     'counts.photo.one': '{count} bilde',
     'counts.photo.other': '{count} bilder',
     'counts.observation.one': '{count} observasjon',
@@ -657,14 +667,9 @@ const messages = {
     'home.unidentified': 'Obestämd',
     'stats.finds': 'Fynd',
     'stats.species': 'Arter',
+    'stats.spores': 'Sporer',
     'stats.friendsActive': 'Aktiva vänner',
     'stats.friends': 'Vänner',
-    'importSheet.title': 'Importera bilder',
-    'importSheet.subtitle': 'Välj den snabbaste vägen, eller bläddra bland filer när du vill ha bäst chans att behålla originalmetadata.',
-    'importSheet.photosAndVideos': 'Bilder och videor',
-    'importSheet.quickPicker': 'Snabbväljare från ditt galleri.',
-    'importSheet.browseFiles': 'Bläddra bland filer',
-    'importSheet.heicHint': 'Bäst för original HEIC-metadata på vissa Android-telefoner.',
     'capture.acquiring': 'Hämtar position…',
     'capture.batchActive': 'Serie aktiv',
     'capture.done': 'KLAR',
@@ -679,6 +684,7 @@ const messages = {
     'capture.noCameraFound': 'Ingen kamera hittades på den här enheten.',
     'capture.cameraStartFailed': 'Kameran kunde inte startas ({name}). Stäng andra appar som använder kameran och försök igen.',
     'capture.photoCaptured': 'Bild {count} tagen',
+    'capture.importPhotos': 'Importera bilder',
     'capture.lightReading': 'LJUS: {lux} LUX / F-STOPP: {fStop}',
     'review.review': 'Granskning',
     'review.addPhoto': 'Lägg till bild',
@@ -828,7 +834,7 @@ const messages = {
     'profile.storage': 'Synkhistorik',
     'profile.storageUsage': 'Lagring',
     'profile.imageCount': 'Bilder',
-    'profile.imageResolutionFree': '2MP',
+    'profile.imageResolutionDefault': 'Standard (2MP)',
     'profile.imageResolutionPro': '12MP',
     'profile.imageCountValue.one': '{count} bild',
     'profile.imageCountValue.other': '{count} bilder',
@@ -857,8 +863,12 @@ const messages = {
     'settings.newObservationAfter': 'Ny observation efter',
     'settings.min': 'min',
     'settings.photoGapHint': 'Bildimport från enheten grupperar bilder baserat på tiden mellan bilderna.',
+    'settings.artsorakel': 'Artsorakel',
+    'settings.artsorakelMaxEdge': 'Max bredd/höjd',
+    'settings.artsorakelMaxEdgeHint': 'Bilder som skickas till Artsorakel skalas så att varken bredd eller höjd överstiger detta värde.',
+    'settings.px': 'px',
     'settings.imageResolution': 'Bildupplösning',
-    'settings.imageResolutionReduced': 'Reducerad (2MP)',
+    'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
     'settings.sync': 'Synk',
     'settings.syncOverMobileData': 'Synka via mobildata',
@@ -880,10 +890,15 @@ const messages = {
     'import.overwriteExifConfirm': 'Nuvarande plats kommer att skriva över EXIF-platsen. Fortsätta?',
     'import.noHeicGps': 'Ingen GPS hittades i denna HEIC-bild. I vissa iPhone-uppladdningar på webben exponeras inte platsmetadata till webbläsaren.',
     'import.setFromGps': 'Sätt från GPS',
+    'import.aiIdAll': 'AI-ID alla',
     'import.identifying': 'Identifierar…',
     'import.failedOneGroup': 'Det gick inte att köa en grupp. Andra kan ha köats.',
     'import.saved': 'Köade {count} för uppladdning',
     'import.queuedSingle': 'Tillagd i synkkön',
+    'import.exifWarningTitle': 'Saknas platsdata?',
+    'import.exifWarningDesc': 'Webbläsare på Android tar automatiskt bort GPS-plats från bilder när du använder den snabba bildväljaren. Installera Sporely-appen från Play Store för att importera platsdata med dina bilder.',
+    'import.dontShowAgain': 'Visa inte detta igen',
+    'import.continueAnyway': 'Fortsätt ändå',
     'counts.photo.one': '{count} bild',
     'counts.photo.other': '{count} bilder',
     'counts.observation.one': '{count} observation',
@@ -956,14 +971,9 @@ const messages = {
     'home.unidentified': 'Unbestimmt',
     'stats.finds': 'Funde',
     'stats.species': 'Arten',
+    'stats.spores': 'Sporen',
     'stats.friendsActive': 'Aktive Freunde',
     'stats.friends': 'Freunde',
-    'importSheet.title': 'Fotos importieren',
-    'importSheet.subtitle': 'Wähle den schnellsten Weg oder durchsuche Dateien, wenn du die beste Chance auf originale Metadaten willst.',
-    'importSheet.photosAndVideos': 'Fotos und Videos',
-    'importSheet.quickPicker': 'Schnellauswahl aus deiner Galerie.',
-    'importSheet.browseFiles': 'Dateien durchsuchen',
-    'importSheet.heicHint': 'Am besten für originale HEIC-Metadaten auf manchen Android-Handys.',
     'capture.acquiring': 'Standort wird ermittelt…',
     'capture.batchActive': 'Serie aktiv',
     'capture.done': 'FERTIG',
@@ -978,6 +988,7 @@ const messages = {
     'capture.noCameraFound': 'Auf diesem Gerät wurde keine Kamera gefunden.',
     'capture.cameraStartFailed': 'Die Kamera konnte nicht gestartet werden ({name}). Schließe andere Apps mit Kamerazugriff und versuche es erneut.',
     'capture.photoCaptured': 'Foto {count} aufgenommen',
+    'capture.importPhotos': 'Fotos importieren',
     'capture.lightReading': 'LICHT: {lux} LUX / BLENDE: {fStop}',
     'review.review': 'Prüfen',
     'review.addPhoto': 'Foto hinzufügen',
@@ -1127,7 +1138,7 @@ const messages = {
     'profile.storage': 'Sync-Verlauf',
     'profile.storageUsage': 'Speicher',
     'profile.imageCount': 'Bilder',
-    'profile.imageResolutionFree': '2MP',
+    'profile.imageResolutionDefault': 'Standard (2MP)',
     'profile.imageResolutionPro': '12MP',
     'profile.imageCountValue.one': '{count} Bild',
     'profile.imageCountValue.other': '{count} Bilder',
@@ -1156,8 +1167,12 @@ const messages = {
     'settings.newObservationAfter': 'Neue Beobachtung nach',
     'settings.min': 'min',
     'settings.photoGapHint': 'Der Fotoimport von deinem Gerät gruppiert Bilder anhand der Zeit zwischen den Fotos.',
+    'settings.artsorakel': 'Artsorakel',
+    'settings.artsorakelMaxEdge': 'Max. Breite/Höhe',
+    'settings.artsorakelMaxEdgeHint': 'An Artsorakel gesendete Bilder werden so skaliert, dass weder Breite noch Höhe diesen Wert überschreitet.',
+    'settings.px': 'px',
     'settings.imageResolution': 'Bildauflösung',
-    'settings.imageResolutionReduced': 'Reduziert (2MP)',
+    'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max. (12MP)',
     'settings.sync': 'Sync',
     'settings.syncOverMobileData': 'Über mobile Daten synchronisieren',
@@ -1179,10 +1194,15 @@ const messages = {
     'import.overwriteExifConfirm': 'Der aktuelle Ort überschreibt den EXIF-Ort. Fortfahren?',
     'import.noHeicGps': 'Für dieses HEIC-Foto wurden keine GPS-Daten gefunden. Bei manchen iPhone-Webuploads werden Standortmetadaten nicht an den Browser weitergegeben.',
     'import.setFromGps': 'Aus GPS setzen',
+    'import.aiIdAll': 'AI-ID für alle',
     'import.identifying': 'Identifiziere…',
     'import.failedOneGroup': 'Eine Gruppe konnte nicht in die Warteschlange gestellt werden. Andere wurden möglicherweise bereits eingereiht.',
     'import.saved': '{count} zum Upload vorgemerkt',
     'import.queuedSingle': 'Zur Sync-Warteschlange hinzugefügt',
+    'import.exifWarningTitle': 'Fehlen Standortdaten?',
+    'import.exifWarningDesc': 'Android-Webbrowser entfernen automatisch die GPS-Position aus Fotos, wenn die Schnellauswahl verwendet wird. Installiere die Sporely-App aus dem Play Store, um Standortdaten mit deinen Bildern zu importieren.',
+    'import.dontShowAgain': 'Nicht mehr anzeigen',
+    'import.continueAnyway': 'Trotzdem fortfahren',
     'counts.photo.one': '{count} Foto',
     'counts.photo.other': '{count} Fotos',
     'counts.observation.one': '{count} Beobachtung',
@@ -1387,16 +1407,9 @@ export function applyStaticTranslations() {
   setText('#home-recent-comments-title', 'home.recentComments')
   setText('#home-stat-finds-label', 'stats.finds')
   setText('#home-stat-species-label', 'stats.species')
-  setText('#home-stat-friends-label', 'stats.friendsActive')
+  setText('#home-stat-spores-label', 'stats.spores')
   setText('#ac-sporely-cam .action-card-label', 'home.sporelyCam')
   setText('#ac-import .action-card-label', 'home.importPhotos')
-
-  setText('#import-source-title', 'importSheet.title')
-  setText('#import-source-sheet .sheet-subtitle', 'importSheet.subtitle')
-  setText('#import-source-photos .sheet-option-title', 'importSheet.photosAndVideos')
-  setText('#import-source-photos .sheet-option-copy', 'importSheet.quickPicker')
-  setText('#import-source-files .sheet-option-title', 'importSheet.browseFiles')
-  setText('#import-source-files .sheet-option-copy', 'importSheet.heicHint')
 
   setText('#gps-display', 'capture.acquiring')
   setText('.batch-active-label', 'capture.batchActive')
@@ -1453,8 +1466,15 @@ export function applyStaticTranslations() {
 
   setText('#import-back-label', 'detail.backHome')
   setText('#import-cancel-btn', 'common.cancel')
+  setText('#import-ai-all-btn', 'import.aiIdAll')
   setText('#import-save-btn', 'import.saveAll')
   setText('#screen-import-review .sync-footer-text', 'review.createsMany')
+
+  setText('#exif-warning-title', 'import.exifWarningTitle')
+  setText('#exif-warning-desc', 'import.exifWarningDesc')
+  setText('#exif-warning-dont-show-label', 'import.dontShowAgain')
+  setText('#exif-warning-cancel', 'common.cancel')
+  setText('#exif-warning-continue', 'import.continueAnyway')
 
   setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.friends'), t('scope.community')])
   setText('#finds-subtitle', 'finds.documentedObservations')
@@ -1497,8 +1517,12 @@ export function applyStaticTranslations() {
   setText('#settings-language-select-label', 'settings.appLanguage')
   setText('#settings-photo-import-label', 'settings.photoImport')
   setText('#settings-gap-label', 'settings.newObservationAfter')
-  setText('.settings-gap-unit', 'settings.min')
-  setText('.settings-gap-hint', 'settings.photoGapHint')
+  setText('#settings-gap-unit', 'settings.min')
+  setText('#settings-gap-hint', 'settings.photoGapHint')
+  setText('#settings-artsorakel-label', 'settings.artsorakel')
+  setText('#settings-artsorakel-max-edge-label', 'settings.artsorakelMaxEdge')
+  setText('#settings-artsorakel-max-edge-unit', 'settings.px')
+  setText('#settings-artsorakel-max-edge-hint', 'settings.artsorakelMaxEdgeHint')
   setText('#settings-image-resolution-label', 'settings.imageResolution')
   setText('#settings-resolution-reduced', 'settings.imageResolutionReduced')
   setText('#settings-resolution-max', 'settings.imageResolutionMax')
@@ -1526,6 +1550,7 @@ export function applyStaticTranslations() {
   setAria('#photo-viewer-prev', 'photo.previous')
   setAria('#photo-viewer-next', 'photo.next')
   setAria('#shutter-btn', 'capture.capturePhoto')
+  setAria('#capture-import-btn', 'capture.importPhotos')
 
   setTitle('#finds-view-cards', 'finds.singleColumn')
   setTitle('#finds-view-two', 'finds.twoColumns')

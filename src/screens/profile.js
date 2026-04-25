@@ -377,7 +377,7 @@ function _renderCloudPlan(cloudPlan) {
   const imageCountEl = document.getElementById('profile-image-count')
 
   if (uploadEl) {
-    uploadEl.textContent = t(isMaxResolution ? 'profile.imageResolutionPro' : 'profile.imageResolutionFree')
+    uploadEl.textContent = t(isMaxResolution ? 'profile.imageResolutionPro' : 'profile.imageResolutionDefault')
   }
   if (usageEl) {
     usageEl.textContent = _formatSyncHistory(getLastSyncAt())

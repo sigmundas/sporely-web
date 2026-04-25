@@ -12,14 +12,18 @@ import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
-import { getDefaultVisibility } from '../settings.js';
+import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes } from '../settings.js';
 
 const NativePhotoPicker = registerPlugin('NativePhotoPicker');
 let sessions = [];
 let expandedSessionIds = new Set();
 let sourceItems = [];
 let exifrModulePromise = null;
-let importSheetInitialized = false;
+const importAiBatchState = {
+  running: false,
+  completedUnits: 0,
+  totalUnits: 0,
+};
 const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
 const RAW_GPS_PICK = [
   'GPSLatitude',
@@ -43,8 +47,173 @@ function _persistSessions() {
   saveImportSessions(sessions);
 }
 
-function _getPhotoGapMinutes() {
-  return Math.max(1, Math.min(120, parseInt(localStorage.getItem('sporely-photo-gap')) || 1));
+function _resetImportAiBatchState() {
+  importAiBatchState.running = false;
+  importAiBatchState.completedUnits = 0;
+  importAiBatchState.totalUnits = 0;
+}
+
+function _getBatchAiTargets() {
+  return sessions.filter(session => Array.isArray(session?.files) && session.files.length > 0);
+}
+
+function _getBatchAiTotalUnits(targets = _getBatchAiTargets()) {
+  return targets.reduce((sum, session) => sum + ((session.files?.length || 0) * 2), 0);
+}
+
+function _incrementBatchAiProgress(step = 1) {
+  importAiBatchState.completedUnits = Math.min(
+    importAiBatchState.totalUnits,
+    importAiBatchState.completedUnits + step,
+  );
+  _updateImportFooterUi();
+}
+
+function _applySessionAiPrediction(session, prediction) {
+  if (!session || !prediction) return false;
+  const parts = String(prediction.scientificName || '').trim().split(/\s+/);
+  session.taxon = {
+    genus: parts[0] || null,
+    specificEpithet: parts[1] || null,
+    vernacularName: prediction.vernacularName || null,
+    scientificName: prediction.scientificName || null,
+    displayName: prediction.displayName,
+  };
+  return true;
+}
+
+function _renderSessionAiResults(predictions) {
+  if (!Array.isArray(predictions) || !predictions.length) return '';
+  return predictions.map((prediction, index) =>
+    `<div class="ai-result-item" data-idx="${index}">
+      <span class="ai-result-name">${escHtml(prediction.displayName)}</span>
+      <span class="ai-result-pct">${Math.round(prediction.probability * 100)}%</span>
+    </div>`
+  ).join('');
+}
+
+function _wireAiResults(sid, input, aiResults, predictions) {
+  if (!input || !aiResults || !Array.isArray(predictions) || !predictions.length) return;
+  aiResults._predictions = predictions;
+  aiResults.querySelectorAll('.ai-result-item').forEach((el, index) => {
+    if (el._wired) return;
+    el._wired = true;
+    el.addEventListener('click', () => {
+      const prediction = predictions[index];
+      const session = sessionById(sid);
+      if (!_applySessionAiPrediction(session, prediction)) return;
+      _persistSessions();
+      input.value = prediction.displayName;
+      aiResults.style.display = 'none';
+      renderSessions();
+    });
+  });
+}
+
+function _updateImportFooterUi() {
+  const backBtn = document.getElementById('import-back');
+  const cancelBtn = document.getElementById('import-cancel-btn');
+  const aiBtn = document.getElementById('import-ai-all-btn');
+  const saveBtn = document.getElementById('import-save-btn');
+  const progress = document.getElementById('import-ai-progress');
+  const progressFill = document.getElementById('import-ai-progress-fill');
+  const progressText = document.getElementById('import-ai-progress-text');
+  const hasTargets = _getBatchAiTargets().length > 0;
+  const running = importAiBatchState.running;
+  const total = importAiBatchState.totalUnits;
+  const done = importAiBatchState.completedUnits;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  if (backBtn) backBtn.disabled = running;
+  if (cancelBtn) cancelBtn.disabled = running;
+  if (saveBtn) saveBtn.disabled = running;
+  if (aiBtn) {
+    aiBtn.textContent = running ? t('import.identifying') : t('import.aiIdAll');
+    aiBtn.disabled = running || !hasTargets;
+  }
+  if (progress) progress.style.display = running && total > 0 ? 'flex' : 'none';
+  if (progressFill) progressFill.style.width = `${pct}%`;
+  if (progressText) progressText.textContent = total > 0 ? `${done}/${total}` : '';
+
+  document
+    .querySelectorAll('#import-session-list .import-card-delete, #import-session-list .import-strip-delete, #import-session-list .ai-id-btn-import, #import-session-list .import-vis-radio, #import-session-list .import-taxon-input')
+    .forEach(el => {
+      el.disabled = running;
+    });
+}
+
+async function _runAiIdAll() {
+  if (importAiBatchState.running) return;
+  const targets = _getBatchAiTargets();
+  const totalUnits = _getBatchAiTotalUnits(targets);
+  if (!targets.length || totalUnits <= 0) return;
+
+  importAiBatchState.running = true;
+  importAiBatchState.completedUnits = 0;
+  importAiBatchState.totalUnits = totalUnits;
+  _updateImportFooterUi();
+
+  let successCount = 0;
+  let noMatchCount = 0;
+  let failureCount = 0;
+
+  try {
+    for (const session of targets) {
+      try {
+        const predictions = await runArtsorakelForBlobs(
+          session.files.map((blob, index) => ({
+            blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
+            cropRect: session.imageMeta?.[index]?.aiCropRect || null,
+          })),
+          getTaxonomyLanguage(),
+          {
+            onImageSent: () => _incrementBatchAiProgress(),
+            onIdReceived: () => _incrementBatchAiProgress(),
+          },
+        );
+
+        if (Array.isArray(predictions) && predictions.length) {
+          session.aiPredictions = predictions;
+          _applySessionAiPrediction(session, predictions[0]);
+          successCount++;
+        } else {
+          session.aiPredictions = [];
+          noMatchCount++;
+        }
+        _persistSessions();
+        renderSessions();
+      } catch (err) {
+        failureCount++;
+        console.error('Batch Artsorakel AI error:', err);
+      }
+    }
+  } finally {
+    _resetImportAiBatchState();
+    _updateImportFooterUi();
+  }
+
+  if (failureCount && successCount === 0 && noMatchCount === 0) {
+    showToast(t('review.aiUnavailable'));
+  } else if (!successCount && noMatchCount > 0) {
+    showToast(t('review.noMatch'));
+  } else if (failureCount > 0) {
+    showToast(t('review.aiUnavailable'));
+  }
+}
+
+function _syncPhotoGapDisplays(value = getPhotoGapMinutes()) {
+  const normalized = String(value);
+  const importGapInput = document.getElementById('import-gap-input');
+  if (importGapInput) {
+    importGapInput.value = normalized;
+    importGapInput.textContent = normalized;
+  }
+  const settingsGapInput = document.getElementById('settings-gap-input');
+  if (settingsGapInput) {
+    settingsGapInput.value = normalized;
+    settingsGapInput.textContent = normalized;
+  }
+  return Number(normalized);
 }
 
 function _disposeSessionBlobUrls(items = sessions) {
@@ -73,7 +242,7 @@ function _buildSessionsFromSourceItems() {
   const previousByKey = new Map(
     sessions.map(session => [_groupKey((session.sourceItemIds || []).map(id => ({ id }))), session])
   );
-  const gapMs = _getPhotoGapMinutes() * 60_000;
+  const gapMs = getPhotoGapMinutes() * 60_000;
   const grouped = _groupSourceItems(sourceItems, gapMs);
 
   _disposeSessionBlobUrls(sessions);
@@ -222,77 +391,58 @@ function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.());
 }
 
-function _shouldUseImportSourceSheet() {
-  if (_isNativeApp()) return false;
-  return /android|iphone|ipad|ipod/i.test(navigator.userAgent || '');
-}
-
-function _openImportSourceSheet() {
-  const sheet = document.getElementById('import-source-sheet');
-  if (!sheet) return;
-  sheet.style.display = 'block';
-}
-
-function _closeImportSourceSheet() {
-  const sheet = document.getElementById('import-source-sheet');
-  if (!sheet) return;
-  sheet.style.display = 'none';
-}
-
 export function initImportReview() {
-  if (!importSheetInitialized) {
-    importSheetInitialized = true;
-    document.getElementById('import-source-close')?.addEventListener('click', _closeImportSourceSheet);
-    document.getElementById('import-source-sheet')?.addEventListener('click', event => {
-      if (event.target?.id === 'import-source-sheet') _closeImportSourceSheet();
-    });
-  }
   document.getElementById('import-back').addEventListener('click', _cancelImport);
   document.getElementById('import-cancel-btn').addEventListener('click', _cancelImport);
+  document.getElementById('import-ai-all-btn').addEventListener('click', _runAiIdAll);
   document.getElementById('import-save-btn').addEventListener('click', saveAll);
   document.getElementById('import-photo-input').addEventListener('change', handleFileSelect);
   document.getElementById('import-browse-input').addEventListener('change', handleFileSelect);
-  document.getElementById('import-sheet-photo-input').addEventListener('change', handleFileSelect);
-  document.getElementById('import-sheet-browse-input').addEventListener('change', handleFileSelect);
-  const gapInput = document.getElementById('import-gap-input');
-  if (gapInput) {
-    gapInput.addEventListener('change', () => {
-      const value = Math.max(1, Math.min(120, parseInt(gapInput.value) || 1));
-      gapInput.value = value;
-      localStorage.setItem('sporely-photo-gap', String(value));
-      const settingsGapInput = document.getElementById('settings-gap-input');
-      if (settingsGapInput) settingsGapInput.value = value;
-      if (!sourceItems.length) return;
-      expandedSessionIds = new Set();
-      _buildSessionsFromSourceItems();
-      if (sessions.length === 1) {
-        const session = sessions[0];
-        session.blobUrls.forEach(url => URL.revokeObjectURL(url));
-        sessions = [];
-        expandedSessionIds = new Set();
-        sourceItems = [];
-        clearImportSessions();
-        openImportedReview(session);
-        return;
-      }
-      if (!sessions.length) {
-        clearImportSessions();
-        navigate('home');
-        return;
-      }
-      _persistSessions();
-      renderSessions();
-      _prefillSessionLocations();
-    });
+  _updateImportFooterUi();
+  document.getElementById('import-gap-decrement')?.addEventListener('click', () => {
+    _applyImportPhotoGapChange(getPhotoGapMinutes() - 1);
+  });
+  document.getElementById('import-gap-increment')?.addEventListener('click', () => {
+    _applyImportPhotoGapChange(getPhotoGapMinutes() + 1);
+  });
+  _syncPhotoGapDisplays();
+}
+
+function _applyImportPhotoGapChange(value) {
+  const normalized = setPhotoGapMinutes(value);
+  _syncPhotoGapDisplays(normalized);
+  if (!sourceItems.length) return;
+
+  expandedSessionIds = new Set();
+  _buildSessionsFromSourceItems();
+  if (sessions.length === 1) {
+    const session = sessions[0];
+    session.blobUrls.forEach(url => URL.revokeObjectURL(url));
+    sessions = [];
+    expandedSessionIds = new Set();
+    sourceItems = [];
+    clearImportSessions();
+    openImportedReview(session);
+    return;
   }
+  if (!sessions.length) {
+    clearImportSessions();
+    navigate('home');
+    return;
+  }
+  _persistSessions();
+  renderSessions();
+  _prefillSessionLocations();
 }
 
 function _cancelImport() {
+  if (importAiBatchState.running) return;
   _disposeSessionBlobUrls();
   clearImportSessions();
   sessions = [];
   expandedSessionIds = new Set();
   sourceItems = [];
+  _resetImportAiBatchState();
   navigate('home');
 }
 
@@ -301,16 +451,15 @@ export function restoreImportSessions(savedSessions) {
   sessions = savedSessions;
   sourceItems = _flattenSourceItemsFromSessions(savedSessions);
   expandedSessionIds = new Set(savedSessions.map(session => session.id));
+  _resetImportAiBatchState();
   navigate('import-review');
   renderSessions();
 }
 
 export async function openPhotoImportPicker() {
-  if (_isNativeApp()) {
+  if (_isNativeApp() && Capacitor.getPlatform?.() === 'android') {
     try {
-      const result = Capacitor.getPlatform?.() === 'android'
-        ? await _pickImagesWithNativePhotoPicker()
-        : await _pickImagesWithFilePicker();
+      const result = await _pickImagesWithNativePhotoPicker();
       await _handleNativePhotoResult(result);
       return;
     } catch (err) {
@@ -320,13 +469,17 @@ export async function openPhotoImportPicker() {
     }
   }
 
-  if (_shouldUseImportSourceSheet()) {
-    _openImportSourceSheet();
-    return;
-  }
-
   // Android Chrome strips EXIF from "image/*" input. Use the browse input for Android web.
   if (/android/i.test(navigator.userAgent)) {
+    if (localStorage.getItem('sporely-hide-exif-warning') !== '1') {
+      const overlay = document.getElementById('exif-warning-overlay');
+      const dontShow = document.getElementById('exif-warning-dont-show');
+      if (overlay && dontShow) {
+        dontShow.checked = false;
+        overlay.style.display = 'flex';
+        return;
+      }
+    }
     _openBrowserFileInput('import-browse-input');
   } else {
     _openBrowserFileInput('import-photo-input');
@@ -409,7 +562,6 @@ export async function openFileImportPicker() {
 
 export async function handleFileSelect(event) {
   const files = Array.from(event.target.files || []);
-  _closeImportSourceSheet();
   if (event.target) event.target.value = '';
   await _handleSelectedFilesWithFeedback(files);
 }
@@ -1069,7 +1221,7 @@ export function renderSessions() {
   countEl.textContent = tp('counts.group', n);
   if (gapLabel) gapLabel.textContent = t('settings.newObservationAfter');
   if (gapUnit) gapUnit.textContent = document.querySelector('#settings-sheet .settings-gap-unit')?.textContent || 'min';
-  if (gapInput) gapInput.value = _getPhotoGapMinutes();
+  if (gapInput) _syncPhotoGapDisplays();
   if (groupingControls) groupingControls.style.display = n > 1 ? 'block' : 'none';
 
   list.innerHTML = sessions.map(session => buildCardHTML(session)).join('');
@@ -1144,6 +1296,8 @@ export function renderSessions() {
     expanded.style.display = isOpen ? 'block' : 'none';
     if (isOpen) _wireCard(sid);
   });
+
+  _updateImportFooterUi();
 }
 
 function buildCardHTML(session) {
@@ -1172,6 +1326,7 @@ function buildCardHTML(session) {
 
   const taxonVal = session.taxon ? escHtml(session.taxon.displayName) : '';
   const locVal = escHtml(session.locationName);
+  const aiPredictions = Array.isArray(session.aiPredictions) ? session.aiPredictions : [];
   const visChecked = v => session.visibility === v ? 'checked' : '';
   const heicWithoutGps = session.gpsLat === null && (session.exifDebug || []).some(d =>
     /\.(heic|heif)$/i.test(d?.fileName || '') || /heic|heif/i.test(d?.fileType || '')
@@ -1207,10 +1362,10 @@ function buildCardHTML(session) {
           value="${taxonVal}">
         <ul class="taxon-dropdown import-taxon-dropdown" data-sid="${sid}" style="display:none"></ul>
       </div>
-      <button class="ai-id-btn-import" data-sid="${sid}">
+      <button class="ai-id-btn-import" data-sid="${sid}" ${importAiBatchState.running ? 'disabled' : ''}>
         <div class="ai-dot"></div> ${t('detail.identifyAI')}
       </button>
-      <div class="ai-results-import" data-sid="${sid}" style="display:none"></div>
+      <div class="ai-results-import" data-sid="${sid}" style="${aiPredictions.length ? '' : 'display:none'}">${_renderSessionAiResults(aiPredictions)}</div>
     </div>
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">${t('detail.location')}</div>
@@ -1292,6 +1447,8 @@ function _wireCard(sid) {
 
   const aiBtn = card.querySelector(`.ai-id-btn-import[data-sid="${sid}"]`)
   const aiResults = card.querySelector(`.ai-results-import[data-sid="${sid}"]`)
+  const session = sessionById(sid)
+  _wireAiResults(sid, input, aiResults, session?.aiPredictions || [])
   card.querySelectorAll(`.import-strip-item[data-sid="${sid}"]`).forEach(item => {
     if (item._wired) return
     item._wired = true
@@ -1306,6 +1463,7 @@ function _wireCard(sid) {
   if (aiBtn && aiResults && !aiBtn._wired) {
     aiBtn._wired = true
     aiBtn.addEventListener('click', async () => {
+      if (importAiBatchState.running) return
       const session = sessionById(sid)
       if (!session?.files?.length) return
       aiBtn.disabled = true
@@ -1319,35 +1477,17 @@ function _wireCard(sid) {
           getTaxonomyLanguage(),
         )
         if (!predictions?.length) {
+          session.aiPredictions = []
           aiResults.style.display = 'none'
+          _persistSessions()
           showToast(t('review.noMatch'))
           return
         }
-        aiResults.innerHTML = predictions.map((p, i) =>
-          `<div class="ai-result-item" data-idx="${i}">
-            <span class="ai-result-name">${escHtml(p.displayName)}</span>
-            <span class="ai-result-pct">${Math.round(p.probability * 100)}%</span>
-          </div>`
-        ).join('')
+        session.aiPredictions = predictions
+        aiResults.innerHTML = _renderSessionAiResults(predictions)
         aiResults.style.display = 'block'
-        aiResults._predictions = predictions
-        aiResults.querySelectorAll('.ai-result-item').forEach((el, i) => {
-          el.addEventListener('click', () => {
-            const p = predictions[i]
-            const session = sessionById(sid)
-            if (!session) return
-            const parts = (p.scientificName || '').trim().split(' ')
-            session.taxon = {
-              genus: parts[0] || null,
-              specificEpithet: parts[1] || null,
-              vernacularName: p.vernacularName || null,
-              displayName: p.displayName,
-            }
-            _persistSessions()
-            input.value = p.displayName
-            aiResults.style.display = 'none'
-          })
-        })
+        _persistSessions()
+        _wireAiResults(sid, input, aiResults, predictions)
       } catch (err) {
         console.error('Artsorakel AI error:', err)
         const message = String(err?.message || 'Unknown error')
@@ -1389,6 +1529,7 @@ function _openSessionCropEditor(session, startIndex = 0) {
 }
 
 async function saveAll() {
+  if (importAiBatchState.running) return;
   const saveBtn = document.getElementById('import-save-btn');
   saveBtn.disabled = true;
 

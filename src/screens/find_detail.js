@@ -191,6 +191,7 @@ export async function openFindDetail(obsId, options = {}) {
       img.loading   = 'lazy'
       img.alt       = ''
       img.dataset.aiSrc = aiSource?.primaryUrl || aiSource?.fallbackUrl || img.src
+      img.dataset.aiFallback = source.fallbackUrl || source.primaryUrl || img.src
       if (source.fallbackUrl && source.fallbackUrl !== source.primaryUrl) {
         img.addEventListener('error', () => {
           if (img.dataset.fallbackApplied === 'true') return
@@ -278,12 +279,28 @@ async function _runAI() {
   resultsEl.style.display = 'none'
 
   try {
+    async function fetchAiBlobForImage(img) {
+      const urls = [
+        img.dataset.aiSrc || '',
+        img.dataset.aiFallback || '',
+        img.src || '',
+      ].filter(Boolean)
+
+      let lastError = null
+      for (const url of urls) {
+        try {
+          const resp = await fetch(url)
+          if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
+          return await resp.blob()
+        } catch (error) {
+          lastError = error
+        }
+      }
+      throw lastError || new Error('Image fetch failed')
+    }
+
     const blobResults = await Promise.allSettled(
-      galleryImgs.map(async img => {
-        const resp = await fetch(img.dataset.aiSrc || img.src)
-        if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
-        return resp.blob()
-      })
+      galleryImgs.map(fetchAiBlobForImage)
     )
     const blobs = blobResults
       .filter(result => result.status === 'fulfilled' && result.value instanceof Blob)

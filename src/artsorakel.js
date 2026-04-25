@@ -8,6 +8,7 @@
 import { supabase } from './supabase.js'
 import { t } from './i18n.js'
 import { createCroppedImageBlob, normalizeAiCropRect } from './image_crop.js'
+import { getArtsorakelMaxEdge } from './settings.js'
 
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
 const ARTSDATA_PROXY_BASE_URL = String(
@@ -127,8 +128,6 @@ function pickUrl(pred, taxon) {
   return 'https://artsdatabanken.no'
 }
 
-const AI_MAX_PIXELS = 1_000_000
-
 async function _resizeForAi(blob) {
   if (!_isBlob(blob)) return blob
   return new Promise((resolve) => {
@@ -136,9 +135,10 @@ async function _resizeForAi(blob) {
     const img = new Image()
     img.onload = () => {
       try {
-        const pixels = img.naturalWidth * img.naturalHeight
-        if (pixels <= AI_MAX_PIXELS) { resolve(blob); return }
-        const scale = Math.sqrt(AI_MAX_PIXELS / pixels)
+        const maxEdge = Math.max(1, getArtsorakelMaxEdge())
+        const sourceMaxEdge = Math.max(img.naturalWidth || 0, img.naturalHeight || 0)
+        if (!sourceMaxEdge || sourceMaxEdge <= maxEdge) { resolve(blob); return }
+        const scale = maxEdge / sourceMaxEdge
         const w = Math.max(1, Math.round(img.naturalWidth * scale))
         const h = Math.max(1, Math.round(img.naturalHeight * scale))
         const canvas = document.createElement('canvas')
@@ -164,11 +164,14 @@ async function _resizeForAi(blob) {
  * Returns null if blob is not a real Blob (demo mode).
  * Throws on network/API error.
  */
-export async function runArtsorakel(blob, lang = 'no') {
+export async function runArtsorakel(blob, lang = 'no', options = {}) {
   if (!_isBlob(blob)) return null
 
   const aiBlob = await _resizeForAi(blob)
   const langNorm = normalizeLang(lang)
+  const onImageSent = typeof options?.onImageSent === 'function' ? options.onImageSent : null
+  const onIdReceived = typeof options?.onIdReceived === 'function' ? options.onIdReceived : null
+  const signal = options?.signal
   let proxyHeaders = null
 
   async function tryPost(url, fieldName, headers = null) {
@@ -177,6 +180,7 @@ export async function runArtsorakel(blob, lang = 'no') {
     const request = {
       method: 'POST',
       body: form,
+      signal,
     }
     if (headers) {
       request.headers = headers
@@ -200,6 +204,7 @@ export async function runArtsorakel(blob, lang = 'no') {
 
   let res = null
   let lastError = null
+  onImageSent?.()
 
   if (ARTSDATA_PROXY_BASE_URL) {
     try {
@@ -220,6 +225,7 @@ export async function runArtsorakel(blob, lang = 'no') {
 
   const data = await res.json()
   const predictions = _extractPredictions(data)
+  onIdReceived?.(predictions)
 
   return predictions
     .filter(p => p?.taxon?.vernacularName !== '*** Utdatert versjon ***')
@@ -254,7 +260,7 @@ function _extractPredictions(data) {
   return []
 }
 
-export async function runArtsorakelForBlobs(blobs, lang = 'no') {
+export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
   const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
     const rawBlob = _isBlob(item) ? item : item?.blob
     if (!_isBlob(rawBlob)) return null
@@ -277,10 +283,10 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no') {
   if (!preparedBlobs.length) return null
 
   if (preparedBlobs.length === 1) {
-    return runArtsorakel(preparedBlobs[0], lang)
+    return runArtsorakel(preparedBlobs[0], lang, options)
   }
 
-  const responses = await Promise.all(preparedBlobs.map(blob => runArtsorakel(blob, lang)))
+  const responses = await Promise.all(preparedBlobs.map(blob => runArtsorakel(blob, lang, options)))
   const totalBlobs = preparedBlobs.length
   const combined = new Map()
 

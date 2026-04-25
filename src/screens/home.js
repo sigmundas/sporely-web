@@ -9,9 +9,26 @@ import { fetchFirstImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
 import { openFindDetail } from './find_detail.js'
 import { openPhotoImportPicker } from './import_review.js'
-import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openFinds } from './finds.js'
-import { esc as _esc } from '../esc.js'
+
+function _imageHtml(source, className, placeholderHtml) {
+  if (!source?.primaryUrl) return placeholderHtml
+  const fallbackAttr = source.fallbackUrl && source.fallbackUrl !== source.primaryUrl
+    ? ` data-fallback-src="${source.fallbackUrl}"`
+    : ''
+  return `<img class="${className}" src="${source.primaryUrl}"${fallbackAttr} loading="lazy" decoding="async" alt="">`
+}
+
+function _wireImageFallback(root) {
+  root.querySelectorAll('img[data-fallback-src]').forEach(img => {
+    img.addEventListener('error', () => {
+      const fallback = img.dataset.fallbackSrc
+      if (!fallback || img.dataset.fallbackApplied === 'true') return
+      img.dataset.fallbackApplied = 'true'
+      img.src = fallback
+    }, { once: true })
+  })
+}
 
 export async function initHome() {
   document.getElementById('home-fab').addEventListener('click', () => navigate('capture'))
@@ -21,7 +38,20 @@ export async function initHome() {
 
   document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))
   document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { groupBySpecies: true }))
-  document.getElementById('hstat-friends-btn').addEventListener('click', () => openFinds('friends'))
+
+  // EXIF warning modal events for Android web
+  const warningOverlay = document.getElementById('exif-warning-overlay')
+  const dontShowCheckbox = document.getElementById('exif-warning-dont-show')
+  const browseInput = document.getElementById('import-browse-input')
+
+  document.getElementById('exif-warning-cancel')?.addEventListener('click', () => {
+    warningOverlay.style.display = 'none'
+  })
+  document.getElementById('exif-warning-continue')?.addEventListener('click', () => {
+    if (dontShowCheckbox?.checked) localStorage.setItem('sporely-hide-exif-warning', '1')
+    warningOverlay.style.display = 'none'
+    browseInput?.click()
+  })
 
   await refreshHome()
 }
@@ -78,10 +108,11 @@ async function loadRecentFinds() {
         ? `${obs.gps_latitude.toFixed(2)}°N, ${obs.gps_longitude.toFixed(2)}°E`
         : '—'
     )
-     const thumb = imageHtml(
-       imageUrls[obs.id],
-        'find-thumb',
-      )
+    const thumb = _imageHtml(
+      imageUrls[obs.id],
+      'find-thumb',
+      '<div class="find-thumb-placeholder">🍄</div>',
+    )
     const dot = `<div class="find-owner-dot ${obs._owner}"></div>`
     const authorChip = _homeAuthorChip(obs, profileMap)
 
@@ -101,7 +132,7 @@ async function loadRecentFinds() {
   list.querySelectorAll('.find-row[data-id]').forEach(row => {
     row.addEventListener('click', () => openFindDetail(row.dataset.id))
   })
-  wireImageFallback(list)
+  _wireImageFallback(list)
 }
 
 async function loadRecentComments() {
@@ -171,10 +202,11 @@ async function loadRecentComments() {
       ? (obs.common_name || formatScientificName(obs.genus || '', obs.species || '') || '')
       : ''
     const thumb = obs
-        ? imageHtml(
-          imageUrls[comment.observation_id],
-          'comment-obs-thumb',
-        )
+      ? _imageHtml(
+        imageUrls[comment.observation_id],
+        'comment-obs-thumb',
+        '<div class="comment-obs-thumb comment-obs-placeholder">🍄</div>',
+      )
       : ''
 
     return `<div class="home-comment-row" ${obs ? `data-obs-id="${obs.id}" style="cursor:pointer"` : ''}>
@@ -193,7 +225,7 @@ async function loadRecentComments() {
   list.querySelectorAll('.home-comment-row[data-obs-id]').forEach(row => {
     row.addEventListener('click', () => openFindDetail(row.dataset.obsId))
   })
-  wireImageFallback(list)
+  _wireImageFallback(list)
 }
 
 // ── Quick stats ───────────────────────────────────────────────────────────────
@@ -202,18 +234,22 @@ async function loadStats() {
   const uid = state.user?.id
   if (!uid) return
 
-  const [{ count: obsCount }, { data: sp }, { count: friendCount }] = await Promise.all([
+  const [{ count: obsCount }, { data: sp }, sporeRes] = await Promise.all([
     supabase.from('observations').select('*', { count: 'exact', head: true }).eq('user_id', uid),
     supabase.from('observations').select('genus, species').eq('user_id', uid).not('genus', 'is', null),
-    supabase.from('friendships').select('*', { count: 'exact', head: true }).eq('status', 'accepted'),
+    supabase.from('spore_measurements').select('*', { count: 'exact', head: true }).eq('user_id', uid),
   ])
+
+  if (sporeRes.error) {
+    console.warn('Spore measurement stats load failed:', sporeRes.error.message)
+  }
 
   document.getElementById('hstat-obs').textContent =
     obsCount ?? '—'
   document.getElementById('hstat-sp').textContent =
     new Set((sp || []).map(o => `${o.genus}|${o.species}`)).size || 0
-  document.getElementById('hstat-friends').textContent =
-    friendCount ?? '—'
+  document.getElementById('hstat-spores').textContent =
+    sporeRes.count ?? '—'
 }
 
 // ── Sync check ────────────────────────────────────────────────────────────────
@@ -226,6 +262,10 @@ async function checkSyncStatus() {
   } catch {
     if (tag) tag.style.display = 'none'
   }
+}
+
+function _esc(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
 async function _loadProfileMap(observations) {

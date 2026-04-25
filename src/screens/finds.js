@@ -21,6 +21,8 @@ let _pullStartX = 0
 let _pullStartY = 0
 let _pullDistance = 0
 let _isRefreshing = false
+let _queuedRefreshTimer = null
+let _loadFindsSeq = 0
 
 function _formatFingerprintCoord(value) {
   const num = Number(value)
@@ -238,7 +240,7 @@ export function initFinds() {
 
   window.addEventListener(QUEUE_EVENT, () => {
     if (state.currentScreen === 'finds' && currentScope === 'mine') {
-      loadFinds()
+      requestFindsRefresh()
     }
   })
 }
@@ -290,6 +292,16 @@ export async function openFinds(scope = currentScope, options = {}) {
   await loadFinds()
 }
 
+export function requestFindsRefresh(delayMs = 120) {
+  if (_queuedRefreshTimer) {
+    window.clearTimeout(_queuedRefreshTimer)
+  }
+  _queuedRefreshTimer = window.setTimeout(() => {
+    _queuedRefreshTimer = null
+    void loadFinds()
+  }, Math.max(0, Number(delayMs) || 0))
+}
+
 function _setFindsView(view) {
   state.findsView = view
   _syncViewBtns()
@@ -307,11 +319,11 @@ function _syncViewBtns() {
 export async function loadFinds() {
   const list = document.getElementById('finds-list')
   if (!state.user) return
+  const loadSeq = ++_loadFindsSeq
 
   _syncScopeTabs()
   _syncSpeciesToggle()
   _syncUncertainToggle()
-  list.innerHTML = ''
 
   if (currentScope === 'mine') {
     await _fetchMine()
@@ -322,6 +334,7 @@ export async function loadFinds() {
   }
 
   await _loadProfilesForScope(_cache[currentScope] || [])
+  if (loadSeq !== _loadFindsSeq) return
   _applyFilter()
 }
 

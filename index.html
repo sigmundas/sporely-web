@@ -206,18 +206,18 @@
         <div class="home-stats-row">
           <button class="home-stat home-stat--btn" id="hstat-obs-btn">
             <div class="home-stat-val" id="hstat-obs">—</div>
-            <div class="home-stat-lbl">Finds</div>
+            <div class="home-stat-lbl" id="home-stat-finds-label">Finds</div>
           </button>
           <div class="home-stat-div"></div>
           <button class="home-stat home-stat--btn" id="hstat-sp-btn">
             <div class="home-stat-val" id="hstat-sp">—</div>
-            <div class="home-stat-lbl">Species</div>
+            <div class="home-stat-lbl" id="home-stat-species-label">Species</div>
           </button>
           <div class="home-stat-div"></div>
-          <button class="home-stat home-stat--btn" id="hstat-friends-btn">
-            <div class="home-stat-val" id="hstat-friends">—</div>
-            <div class="home-stat-lbl">Friends</div>
-          </button>
+          <div class="home-stat">
+            <div class="home-stat-val" id="hstat-spores">—</div>
+            <div class="home-stat-lbl" id="home-stat-spores-label">Spores</div>
+          </div>
         </div>
 
         <input type="file" id="import-photo-input" class="hidden-file-input" accept="image/*" multiple>
@@ -226,22 +226,21 @@
       <button class="screen-fab" id="home-fab" aria-label="New observation">+</button>
     </div>
 
-    <div class="sheet-overlay" id="import-source-sheet" style="display:none">
-      <button class="sheet-backdrop" id="import-source-close" aria-label="Close import options"></button>
-      <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="import-source-title">
-        <div class="sheet-handle"></div>
-        <div class="sheet-title" id="import-source-title">Import photos</div>
-        <div class="sheet-subtitle">Choose the fastest path, or browse files when you want the best shot at keeping original metadata.</div>
-        <label class="sheet-option" id="import-source-photos">
-          <input type="file" id="import-sheet-photo-input" class="sheet-option-input" accept="image/*" multiple>
-          <span class="sheet-option-title">Photos &amp; videos</span>
-          <span class="sheet-option-copy">Quick picker from your gallery.</span>
+    <!-- ══════════════════════ EXIF WARNING ══════════════════════════ -->
+    <div id="exif-warning-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); z-index:2000; align-items:center; justify-content:center; padding:20px; backdrop-filter:blur(4px);">
+      <div style="background:var(--bg-main, #111); border:1px solid var(--border, #333); border-radius:20px; width:100%; max-width:400px; padding:24px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div id="exif-warning-title" style="font-size:20px; font-weight:600; margin-bottom:12px;">Missing Location Data?</div>
+        <div id="exif-warning-desc" style="font-size:15px; color:var(--text-dim, #aaa); line-height:1.5; margin-bottom:24px;">Android web browsers automatically remove GPS location from photos when using the quick "Photos & videos" picker. Install the Sporely app from Play Store to import location data with your images.</div>
+        
+        <label style="display:flex; align-items:center; gap:12px; margin-bottom:24px; cursor:pointer;">
+          <input type="checkbox" id="exif-warning-dont-show" style="width:20px; height:20px; accent-color:var(--brand, #4CAF50); cursor:pointer;">
+          <span id="exif-warning-dont-show-label" style="font-size:15px; user-select:none;">Don't show this again</span>
         </label>
-        <label class="sheet-option" id="import-source-files">
-          <input type="file" id="import-sheet-browse-input" class="sheet-option-input" accept=".jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif" multiple>
-          <span class="sheet-option-title">Browse files</span>
-          <span class="sheet-option-copy">Best for original HEIC metadata on some Android phones.</span>
-        </label>
+        
+        <div style="display:flex; gap:12px; justify-content:flex-end;">
+          <button class="btn-secondary" id="exif-warning-cancel" style="flex:1;">Cancel</button>
+          <button class="btn-primary" id="exif-warning-continue" style="flex:1;">Continue anyway</button>
+        </div>
       </div>
     </div>
 
@@ -546,20 +545,31 @@
         <div class="review-time" id="import-session-count">0 groups</div>
       </div>
 
-      <div class="review-body">
-        <div class="import-grouping-controls" id="import-grouping-controls" style="display:none">
-          <div class="settings-gap-row">
-            <div class="settings-gap-label" id="import-gap-label">New observation after</div>
-            <input type="number" id="import-gap-input" class="settings-gap-input" min="1" max="120" value="1">
-            <span class="settings-gap-unit" id="import-gap-unit">min</span>
+        <div class="review-body">
+          <div class="import-grouping-controls" id="import-grouping-controls" style="display:none">
+            <div class="settings-gap-row">
+              <div class="settings-gap-label" id="import-gap-label">New observation after</div>
+              <div class="settings-stepper" aria-labelledby="import-gap-label">
+                <button type="button" class="settings-stepper-btn" id="import-gap-decrement" aria-label="Decrease photo gap">-</button>
+                <output id="import-gap-input" class="settings-gap-input settings-gap-display" aria-live="polite">1</output>
+                <button type="button" class="settings-stepper-btn" id="import-gap-increment" aria-label="Increase photo gap">+</button>
+              </div>
+              <span class="settings-gap-unit" id="import-gap-unit">min</span>
+            </div>
           </div>
-        </div>
         <div id="import-session-list"></div>
       </div>
 
       <div class="review-actions">
+        <div class="import-ai-progress" id="import-ai-progress" style="display:none">
+          <div class="import-ai-progress-track" aria-hidden="true">
+            <div class="import-ai-progress-fill" id="import-ai-progress-fill"></div>
+          </div>
+          <div class="import-ai-progress-text" id="import-ai-progress-text"></div>
+        </div>
         <div class="review-action-btns">
           <button class="btn-secondary" id="import-cancel-btn">Cancel</button>
+          <button class="btn-secondary" id="import-ai-all-btn">AI ID All</button>
           <button class="btn-primary" id="import-save-btn">Save All</button>
         </div>
         <div class="sync-footer-text">Creates observations in Sporely Cloud</div>
@@ -776,14 +786,22 @@
             <output id="settings-gap-input" class="settings-gap-input settings-gap-display" aria-live="polite">1</output>
             <button type="button" class="settings-stepper-btn" id="settings-gap-increment" aria-label="Increase photo gap">+</button>
           </div>
-          <span class="settings-gap-unit">min</span>
+          <span class="settings-gap-unit" id="settings-gap-unit">min</span>
         </div>
-        <p class="settings-gap-hint">Photo import from your device will group images based on time between photos.</p>
+        <p class="settings-gap-hint" id="settings-gap-hint">Photo import from your device will group images based on time between photos.</p>
+
+        <div class="settings-section-label" id="settings-artsorakel-label" style="margin-top:22px">Artsorakel</div>
+        <div class="settings-gap-row">
+          <label for="settings-artsorakel-max-edge" class="settings-gap-label" id="settings-artsorakel-max-edge-label">Max width/height</label>
+          <input type="number" id="settings-artsorakel-max-edge" class="settings-gap-input" min="100" max="4000" step="50" inputmode="numeric" style="width:88px">
+          <span class="settings-gap-unit" id="settings-artsorakel-max-edge-unit">px</span>
+        </div>
+        <p class="settings-gap-hint" id="settings-artsorakel-max-edge-hint">Images sent to Artsorakel will be resized so neither width nor height exceeds this value.</p>
 
         <div id="settings-image-resolution-section" style="display:none">
           <div class="settings-section-label" id="settings-image-resolution-label" style="margin-top:22px">Image resolution</div>
           <div class="theme-segment settings-resolution-segment">
-            <button class="theme-seg-btn settings-resolution-btn" id="settings-resolution-reduced" data-image-resolution-mode="reduced">Reduced (2MP)</button>
+            <button class="theme-seg-btn settings-resolution-btn" id="settings-resolution-reduced" data-image-resolution-mode="reduced">Default (2MP)</button>
             <button class="theme-seg-btn settings-resolution-btn" id="settings-resolution-max" data-image-resolution-mode="max">Max (12MP)</button>
           </div>
         </div>
@@ -850,9 +868,6 @@
 
     if (event.target.closest('#capture-close-btn')) {
       window.history.back()
-    }
-    if (event.target.closest('#capture-import-btn')) {
-      document.getElementById('ac-import')?.click()
     }
   }, true)
 </script>

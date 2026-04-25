@@ -4,6 +4,7 @@ import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
+import { openPhotoImportPicker } from './import_review.js'
 
 function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
@@ -12,6 +13,9 @@ function _isNativeApp() {
 export function initCapture() {
   document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
   document.getElementById('done-btn').addEventListener('click', finishCapture)
+  document.getElementById('capture-import-btn')?.addEventListener('click', () => {
+    void openPhotoImportPicker()
+  })
   document.getElementById('camera-retry-btn').addEventListener('click', () => {
     document.getElementById('camera-denied').style.display = 'none'
     startCamera()
