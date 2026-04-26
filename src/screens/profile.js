@@ -2,7 +2,8 @@ import { supabase } from '../supabase.js'
 import { formatDate, formatTime, t } from '../i18n.js'
 import { state } from '../state.js'
 import { showToast } from '../toast.js'
-import { showAuthOverlay } from './auth.js'
+import { showAuthOverlay, switchToLogin } from './auth.js'
+import { navigate } from '../router.js'
 import { fetchCloudPlanProfile, formatStorageBytes } from '../cloud-plan.js'
 import { getLastSyncAt } from '../settings.js'
 import { Capacitor } from '@capacitor/core'
@@ -17,9 +18,17 @@ function _isNativeApp() {
 export function initProfile() {
   document.getElementById('profile-avatar-img').addEventListener('error', _showInitialsAvatar)
   document.getElementById('sign-out-btn').addEventListener('click', async () => {
-    await supabase.auth.signOut()
+    const btn = document.getElementById('sign-out-btn')
+    const originalLabel = btn.textContent
+    btn.disabled = true
+    btn.textContent = t('common.pleaseWait')
+    try { await supabase.auth.signOut() } catch (e) { console.warn('Sign out error:', e) }
     state.user = null
     showAuthOverlay()
+    switchToLogin()
+    navigate('home')
+    btn.disabled = false
+    btn.textContent = originalLabel
   })
   document.getElementById('delete-account-btn').addEventListener('click', _deleteAccount)
   document.getElementById('friend-search-btn').addEventListener('click', _searchFriend)
@@ -736,9 +745,11 @@ async function _deleteAccount() {
     return
   }
 
-  await supabase.auth.signOut()
+  try { await supabase.auth.signOut() } catch (e) { console.warn('Sign out error:', e) }
   state.user = null
   showAuthOverlay()
+  switchToLogin()
+  navigate('home')
   btn.disabled = false
   btn.textContent = originalLabel
   showToast(t('profile.accountDeleted'))

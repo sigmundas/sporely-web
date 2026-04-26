@@ -6,6 +6,12 @@ import { getDefaultAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
 import { openPhotoImportPicker } from './import_review.js'
 
+const CAPTURE_TARGET_WIDTH = 4000
+const CAPTURE_TARGET_HEIGHT = 3000
+const CAPTURE_MAX_EDGE = 4000
+const CAPTURE_JPEG_QUALITY = 0.95
+const DEFAULT_EXPOSURE_BIAS_EV = -0.3
+
 function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
 }
@@ -23,15 +29,17 @@ export function initCapture() {
 }
 
 async function tryGetUserMedia() {
-  // Prefer the rear camera and explicitly ask for 1x zoom when supported.
+  // Prefer the rear camera and explicitly ask for a 12 MP-ish 4:3 stream.
   // We avoid biasing too hard toward a portrait stream because that can make
   // the live preview feel more cropped than the captured frame.
+  const rearDeviceId = await _selectRearCameraDeviceId()
+  const highResRearVideo = _cameraConstraints(rearDeviceId)
+  const highResAnyRearVideo = _cameraConstraints(null)
+
   try {
     return await navigator.mediaDevices.getUserMedia({
       video: {
-        facingMode: 'environment',
-        width:  { ideal: 1920 },
-        height: { ideal: 1440 },
+        ...highResRearVideo,
         advanced: [{ zoom: 1 }],
       },
       audio: false,
@@ -39,13 +47,34 @@ async function tryGetUserMedia() {
   } catch {
     try {
       return await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1440 } },
+        video: {
+          ...highResAnyRearVideo,
+          advanced: [{ zoom: 1 }],
+        },
         audio: false,
       })
     } catch {
-      return await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          video: highResAnyRearVideo,
+          audio: false,
+        })
+      } catch {
+        return await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      }
     }
   }
+}
+
+function _cameraConstraints(deviceId) {
+  const constraints = {
+    facingMode: { ideal: 'environment' },
+    width: { ideal: CAPTURE_TARGET_WIDTH },
+    height: { ideal: CAPTURE_TARGET_HEIGHT },
+    aspectRatio: { ideal: 4 / 3 },
+  }
+  if (deviceId) constraints.deviceId = { exact: deviceId }
+  return constraints
 }
 
 export async function startCamera(options = {}) {
@@ -59,6 +88,7 @@ export async function startCamera(options = {}) {
     video.onloadedmetadata = async () => {
       try { await video.play() } catch (_) {}
       _syncPreviewFit(video)
+      _tuneCameraTrack(stream)
     }
     if (!preserveBatch) {
       state.sessionStart = new Date()
@@ -116,7 +146,7 @@ export function stopCamera() {
   }
 }
 
-function capturePhoto() {
+async function capturePhoto() {
   const video  = document.getElementById('camera-video')
 
   if (!video.srcObject) {
@@ -149,50 +179,41 @@ function capturePhoto() {
       aiCropSourceH: 600,
     })
   } else {
-    let w = video.videoWidth
-    let h = video.videoHeight
-
-    if (!w || !h) {
+    if (!video.videoWidth || !video.videoHeight) {
       showToast('Camera not fully ready')
       return
     }
 
-    // Scale down to prevent mobile browser OOM crashes from huge blobs
-    const maxEdge = 1920
-    if (w > maxEdge || h > maxEdge) {
-      const scale = maxEdge / Math.max(w, h)
-      w = Math.round(w * scale)
-      h = Math.round(h * scale)
-    }
-
-    // Create a fresh canvas for each capture to avoid toBlob() race conditions
-    // which can cause promises to hang if the shutter is tapped rapidly.
-    const canvas = document.createElement('canvas')
-    canvas.width  = w
-    canvas.height = h
-    canvas.getContext('2d').drawImage(video, 0, 0, w, h)
-
-    // Wrap toBlob in a Promise so review save can await all blobs before uploading
-    const blobPromise = new Promise((resolve, reject) => {
-      canvas.toBlob(blob => {
-        if (blob) resolve(blob)
-        else reject(new Error('Image capture failed'))
-      }, 'image/jpeg', 0.92)
-    })
-    
-    // Add a dummy catch to prevent UnhandledPromiseRejection if it's not awaited immediately
-    blobPromise.catch(() => {})
-    
-    state.capturedPhotos.push({
+    const fallbackDimensions = _fitDimensionsWithinMaxEdge(
+      video.videoWidth,
+      video.videoHeight,
+      CAPTURE_MAX_EDGE,
+    )
+    const blobPromise = _captureBestAvailableBlob(video)
+    const photo = {
       blob: null,
       blobPromise,
       gps: state.gps,
       ts: new Date(),
       emoji: '📸',
-      aiCropRect: getDefaultAiCropRect(w, h),
-      aiCropSourceW: w,
-      aiCropSourceH: h,
-    })
+      aiCropRect: getDefaultAiCropRect(fallbackDimensions.width, fallbackDimensions.height),
+      aiCropSourceW: fallbackDimensions.width,
+      aiCropSourceH: fallbackDimensions.height,
+    }
+    blobPromise
+      .then(blob => _readImageDimensions(blob))
+      .then(nextDimensions => {
+        const dimensions = nextDimensions || fallbackDimensions
+        photo.aiCropRect = getDefaultAiCropRect(dimensions.width, dimensions.height)
+        photo.aiCropSourceW = dimensions.width
+        photo.aiCropSourceH = dimensions.height
+      })
+      .catch(() => {})
+    
+    // Add a dummy catch to prevent UnhandledPromiseRejection if it's not awaited immediately
+    blobPromise.catch(() => {})
+
+    state.capturedPhotos.push(photo)
   }
 
   state.batchCount++
@@ -206,6 +227,153 @@ function capturePhoto() {
   setTimeout(() => { vf.style.transition = 'opacity 0.15s'; vf.style.opacity = '1' }, 60)
 
   showToast(t('capture.photoCaptured', { count: state.batchCount }))
+}
+
+async function _selectRearCameraDeviceId() {
+  if (!navigator.mediaDevices?.enumerateDevices) return null
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    const rearCameras = devices
+      .filter(device => device.kind === 'videoinput')
+      .map(device => ({
+        device,
+        label: String(device.label || '').toLowerCase(),
+      }))
+      .filter(entry => /back|rear|environment|0\b/.test(entry.label))
+
+    const normalLens = rearCameras.find(entry => (
+      !/ultra|0\.5|macro|depth|tele|front/.test(entry.label)
+      && /back|rear|environment|main|camera 0|0\b/.test(entry.label)
+    ))
+    return (normalLens || rearCameras.find(entry => !/front/.test(entry.label)))?.device.deviceId || null
+  } catch (_) {
+    return null
+  }
+}
+
+function _tuneCameraTrack(stream) {
+  const track = stream?.getVideoTracks?.()[0]
+  if (!track?.getCapabilities || !track?.applyConstraints) return
+  const capabilities = track.getCapabilities()
+  const advanced = []
+
+  if (capabilities.zoom && typeof capabilities.zoom.min === 'number' && typeof capabilities.zoom.max === 'number') {
+    advanced.push({ zoom: Math.max(capabilities.zoom.min, Math.min(capabilities.zoom.max, 1)) })
+  }
+
+  if (
+    capabilities.exposureCompensation
+    && typeof capabilities.exposureCompensation.min === 'number'
+    && typeof capabilities.exposureCompensation.max === 'number'
+  ) {
+    advanced.push({
+      exposureCompensation: Math.max(
+        capabilities.exposureCompensation.min,
+        Math.min(capabilities.exposureCompensation.max, DEFAULT_EXPOSURE_BIAS_EV),
+      ),
+    })
+  }
+
+  if (advanced.length) {
+    track.applyConstraints({ advanced }).catch(() => {})
+  }
+}
+
+async function _captureBestAvailableBlob(video) {
+  const track = video.srcObject?.getVideoTracks?.()[0]
+  if (track && typeof window.ImageCapture === 'function') {
+    try {
+      const imageCapture = new window.ImageCapture(track)
+      const photoSettings = await _getPhotoSettings(imageCapture)
+      const blob = await imageCapture.takePhoto(photoSettings)
+      if (blob instanceof Blob && blob.size > 0) return blob
+    } catch (_) {}
+  }
+  return _captureCanvasBlob(video)
+}
+
+async function _getPhotoSettings(imageCapture) {
+  if (!imageCapture?.getPhotoCapabilities) {
+    return {
+      imageWidth: CAPTURE_TARGET_WIDTH,
+      imageHeight: CAPTURE_TARGET_HEIGHT,
+    }
+  }
+
+  try {
+    const capabilities = await imageCapture.getPhotoCapabilities()
+    return {
+      imageWidth: _fitCapabilityValue(capabilities.imageWidth, CAPTURE_TARGET_WIDTH),
+      imageHeight: _fitCapabilityValue(capabilities.imageHeight, CAPTURE_TARGET_HEIGHT),
+    }
+  } catch (_) {
+    return {
+      imageWidth: CAPTURE_TARGET_WIDTH,
+      imageHeight: CAPTURE_TARGET_HEIGHT,
+    }
+  }
+}
+
+function _fitCapabilityValue(capability, target) {
+  if (!capability || typeof capability.min !== 'number' || typeof capability.max !== 'number') return target
+  return Math.max(capability.min, Math.min(capability.max, target))
+}
+
+function _captureCanvasBlob(video) {
+  const { width: w, height: h } = _fitDimensionsWithinMaxEdge(
+    video.videoWidth,
+    video.videoHeight,
+    CAPTURE_MAX_EDGE,
+  )
+
+  // Create a fresh canvas for each capture to avoid toBlob() race conditions
+  // which can cause promises to hang if the shutter is tapped rapidly.
+  const canvas = document.createElement('canvas')
+  canvas.width  = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return Promise.reject(new Error('Canvas context unavailable'))
+  ctx.drawImage(video, 0, 0, w, h)
+
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (blob) resolve(blob)
+      else reject(new Error('Image capture failed'))
+    }, 'image/jpeg', CAPTURE_JPEG_QUALITY)
+  })
+}
+
+function _fitDimensionsWithinMaxEdge(width, height, maxEdge) {
+  let w = Math.max(1, Number(width) || 1)
+  let h = Math.max(1, Number(height) || 1)
+
+  if (w > maxEdge || h > maxEdge) {
+    const scale = maxEdge / Math.max(w, h)
+    w = Math.round(w * scale)
+    h = Math.round(h * scale)
+  }
+
+  return { width: w, height: h }
+}
+
+function _readImageDimensions(blob) {
+  if (!(blob instanceof Blob)) return Promise.resolve(null)
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      resolve({
+        width: img.naturalWidth || img.width,
+        height: img.naturalHeight || img.height,
+      })
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      resolve(null)
+    }
+    img.src = url
+  })
 }
 
 function finishCapture() {

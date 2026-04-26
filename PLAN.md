@@ -1,12 +1,14 @@
 # Sporely-web Development Plan
 
 ## UI fixes
+- Missing location data popup: Remove "when using the quick "Photos & videos" picker". Add the sentence: "(Or just use Sporely cam to capture location)"
 - Group import review screen: Instead of Queue all, just use Add (Legg til
 - Remove the New observation after.. /Photo import section in Settings (It is now in the group import page - make sure this setting is stored until next time)
 - On the Finds tab: Species is not translated
 - Finds tab, when 1 card per row is shown: Add an icon that indicates if there are spore measures for the observation. This could be like a small almond shaped brown icon, same row and just before the "sharing" icon (friends/public/private). 
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
 - Add a legend drop-down to the map page. Selection: Genus (more will come). this will show a legend with colors, corresponding the the dots on the map.
+- The card with number of finds, number of species, and number of spores: Tapping finds: open screen with finds, filtered for that user (card could appear on home tab or people tab): Species filter off. Tapping species: same as for tapping finds, but with species filter on. Tapping spores: filter only finds for that user with spore measurements.
 
 ## Code Review & Refactoring
 *Review this code with a strict refactor/audit mindset. Do not praise. Look for concrete problems only.*

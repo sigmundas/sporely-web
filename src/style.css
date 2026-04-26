@@ -235,7 +235,7 @@ html, body {
 /* ── HEADER ── */
 .app-header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 18px 12px;
+  padding: 20px 18px 18px;
   position: sticky; top: 0; z-index: 10;
   background: var(--bg);
   border-bottom: 1px solid var(--border-dim);
@@ -248,7 +248,7 @@ html, body {
 }
 .header-brand {
   display: flex; align-items: center; gap: 8px;
-  font-weight: 600; font-size: 15px; letter-spacing: 0.02em;
+  font-weight: 600; font-size: 20px; letter-spacing: 0.02em;
   color: var(--text-primary);
 }
 .header-sync-tag {
@@ -259,17 +259,17 @@ html, body {
   text-transform: uppercase; color: var(--green-accent);
 }
 .brand-icon {
-  width: 26px; height: 26px;
+  width: 36px; height: 36px;
   background: var(--green-deep);
   border: 1px solid var(--green-mid);
   border-radius: 6px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 14px;
+  font-size: 20px;
 }
 .header-actions { display: flex; align-items: center; gap: 10px; position: relative; z-index: 20; }
 .header-avatar-btn {
-  width: 34px;
-  height: 34px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   border: 1px solid var(--border);
   background: var(--card);
@@ -285,9 +285,15 @@ html, body {
 }
 .header-avatar-btn:active { transform: scale(0.97); }
 .header-avatar-initials {
-  font-size: 13px;
+  font-size: 18px;
   font-weight: 700;
   line-height: 1;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
 }
 .header-avatar-img {
   position: absolute;
@@ -296,17 +302,18 @@ html, body {
   height: 100%;
   object-fit: cover;
   display: block;
+  z-index: 2;
 }
 .map-profile-btn {
   position: absolute;
   top: calc(12px + var(--safe-top));
-  right: 14px;
+  right: 18px;
   z-index: 1001;
   background: rgba(13,17,9,0.88);
   backdrop-filter: blur(8px);
 }
 .icon-btn {
-  width: 34px; height: 34px;
+  width: 48px; height: 48px;
   border-radius: 50%; border: none;
   background: transparent; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
@@ -314,7 +321,7 @@ html, body {
   transition: background 0.15s, color 0.15s;
 }
 .icon-btn:active { background: var(--card); color: var(--green-accent); }
-.icon-btn svg { pointer-events: none; }
+.icon-btn svg { width: 28px; height: 28px; pointer-events: none; }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
   background: var(--green-deep);

@@ -102,29 +102,39 @@ function _normalizePersonRow(row) {
 }
 
 function _buildPeopleCard(person) {
-  const primaryName = person.display_name || (person.username ? `@${person.username}` : t('common.unknown'))
-  const handle = person.username ? `@${person.username}` : ''
-  const bio = String(person.bio || '').trim()
-  const initials = _initials(primaryName.replace(/^@/, ''))
-  const avatar = person.avatar_url
-    ? `<img class="people-card-avatar-img" src="${_esc(person.avatar_url)}" alt="" data-fallback-initials="${_esc(initials)}">`
-    : `<div class="people-card-avatar-fallback">${_esc(initials)}</div>`
+   const avatarUrl = person.avatar_url || null
+   const displayName = person.display_name && person.display_name.trim() ? person.display_name : null
+   const username = person.username && person.username.trim() ? person.username : null
+   const primaryName = displayName || (username ? `@${username}` : t('common.unknown'))
+   const hasAvatar = !!avatarUrl
+   const initials = _esc(_initials(primaryName.replace(/^@/, '')))
+   const bio = String(person.bio || '').trim()
+   const avatarHtml = hasAvatar
+      ? `<img class="people-card-avatar-img" src="${_esc(avatarUrl)}" alt="" data-fallback-initials="${initials}">`
+      : `<div class="people-card-avatar-fallback">${initials}</div>`
 
-  return `<article class="people-card">
-    <div class="people-card-head">
-      <div class="people-card-avatar">${avatar}</div>
-      <div class="people-card-title-wrap">
-        <div class="people-card-name">${_esc(primaryName)}</div>
-        ${handle ? `<div class="people-card-handle">${_esc(handle)}</div>` : ''}
+   return `<article class="people-card">
+      <div class="people-card-head">
+        <div class="people-card-avatar">${avatarHtml}</div>
+        <div class="people-card-title-wrap">
+          <div class="people-card-name">${_esc(primaryName)}</div>
+          ${username ? `<div class="people-card-handle">@${_esc(username)}</div>` : ''}
+        </div>
       </div>
-    </div>
-    <div class="people-card-bio${bio ? '' : ' people-card-bio-empty'}">${_esc(bio || t('people.noBio'))}</div>
-    <div class="people-card-counts">
-      ${_buildCount('stats.finds', person.finds)}
-      ${_buildCount('stats.species', person.species)}
-      ${_buildCount('stats.spores', person.spores)}
-    </div>
-  </article>`
+      <div class="people-card-bio${bio ? '' : ' people-card-bio-empty'}">${_esc(bio || t('people.noBio'))}</div>
+      <div class="people-card-counts">
+        ${_buildCount('stats.finds', Number(person.finds) || 0)}
+        ${_buildCount('stats.species', Number(person.species) || 0)}
+        ${_buildCount('stats.spores', Number(person.spores) || 0)}
+      </div>
+    </article>`
+}
+
+function _initials(value) {
+  if (!value) return '?'
+  const cleaned = String(value).replace(/^@/, '')
+  if (!cleaned) return '?'
+  return cleaned.slice(0, 3).toUpperCase()
 }
 
 function _buildCount(labelKey, value) {
@@ -148,15 +158,6 @@ function _createAvatarFallback(initials) {
   fallback.className = 'people-card-avatar-fallback'
   fallback.textContent = initials
   return fallback
-}
-
-function _initials(value) {
-  return String(value || '')
-    .split(/[\s@._-]+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map(part => part[0]?.toUpperCase() || '')
-    .join('') || '?'
 }
 
 function _esc(value) {

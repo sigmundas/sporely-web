@@ -425,6 +425,7 @@ async function init() {
       ensureAuthUiInitialized(true)
       showAuthOverlay()
       switchToLogin()
+      navigate('home')
     }
   })
 
