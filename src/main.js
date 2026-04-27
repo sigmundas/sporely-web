@@ -419,8 +419,6 @@ async function init() {
       await bootApp(session.user)
     }
     if (event === 'SIGNED_OUT') {
-      const persistedSession = (await supabase.auth.getSession()).data.session
-      if (persistedSession?.user) return
       state.user = null
       ensureAuthUiInitialized(true)
       showAuthOverlay()

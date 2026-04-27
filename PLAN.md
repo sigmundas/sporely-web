@@ -1,9 +1,25 @@
 # Sporely-web Development Plan
 
+## Native Android Camera Capture Flow
+- [x] Step 1: Install `@capgo/camera-preview` and verify Android Manifest permissions (`CAMERA`, `ACCESS_COARSE_LOCATION`, `ACCESS_FINE_LOCATION`).
+- [x] Step 2: Add platform routing logic to detect Android and apply transparent CSS to the WebView.
+- [x] Step 3: Initialize Android native camera (`toBack: true`) and bind to the primary 1x wide-angle lens.
+- [x] Step 4: Implement native capture using `withExifLocation: true` and `storeToFile: true`, followed by proper cleanup (`stop()`).
+
+### Camera Flicker Troubleshooting (Android 15 Edge-to-Edge)
+**Failed Attempts:**
+- JS `setTimeout` DOM reflow (only repaints HTML, fails to fix native `SurfaceView` compositing).
+- Programmatic background/foreground toggle (requires physical home button press by user).
+- *XML Opt-Out:* Added `<item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>` to `styles.xml` (ignored by Android 15 / Capacitor 6+).
+- *EdgeToEdge Plugin:* Calling `EdgeToEdge.enable()` stabilized the layout but didn't cure the flicker below the crop frame.
+- *Removed CSS box-shadow:* Didn't fix the surface tearing.
+- **Solution (Applied):** Switched to `toBack: false` (Silver Bullet). Renders camera ON TOP of the WebView. Completely killed the transparency flicker. Preview box explicitly sized to 4:3 aspect ratio and anchored below the top nav to avoid plugin-internal letterboxing.
+
 ## UI fixes
 - Missing location data popup: Remove "when using the quick "Photos & videos" picker". Add the sentence: "(Or just use Sporely cam to capture location)"
 - Group import review screen: Instead of Queue all, just use Add (Legg til
 - Remove the New observation after.. /Photo import section in Settings (It is now in the group import page - make sure this setting is stored until next time)
+- [x] Remove the F-stop and location info boxes from Capture screen. Add lens/zoom selection buttons reading from device hardware API and move the batch badge above the Done button.
 - On the Finds tab: Species is not translated
 - Finds tab, when 1 card per row is shown: Add an icon that indicates if there are spore measures for the observation. This could be like a small almond shaped brown icon, same row and just before the "sharing" icon (friends/public/private). 
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.

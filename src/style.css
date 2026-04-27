@@ -54,6 +54,7 @@ html, body {
   min-height: 100dvh;
   overflow: hidden;
   background: var(--bg);
+  background-color: transparent!important;
   font-family: 'Outfit', sans-serif;
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
@@ -75,8 +76,14 @@ html, body {
   transform: translateX(-50%);
   overflow: hidden;
   background: var(--bg);
+  background-color: transparent!important;
   box-shadow: 0 0 60px rgba(0,0,0,0.8);
   overscroll-behavior: none;
+}
+@media (max-width: 431px) {
+  #app {
+    box-shadow: none !important;
+  }
 }
 
 /* ── AUTH OVERLAY ── */
@@ -1588,6 +1595,39 @@ html, body {
   object-fit: contain;
   background: #000;
 }
+/* Native Android Camera background transparency */
+html.is-native-camera-active,
+html.is-native-camera-active body,
+html.is-native-camera-active #app,
+html.is-native-camera-active #screen-capture,
+html.is-native-camera-active .capture-viewfinder {
+  background: transparent !important;
+}
+html.is-native-camera-active #camera-video {
+  display: none !important;
+}
+/* Hard-hide inactive screens and disable animations to prevent Android compositor wobble/bleed */
+html.is-native-camera-active .screen:not(#screen-capture),
+html.is-native-camera-active .app-header,
+html.is-native-camera-active #bottom-nav {
+  display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+html.is-native-camera-active #screen-capture {
+  transform: none !important;
+  transition: none !important;
+}
+/* Kill gradient tearing on Android */
+html.is-native-camera-active .capture-controls {
+  background: rgba(0,0,0,0.6) !important;
+}
+/* Force hardware layers on overlays so DOM text updates don't cause Android WebView tearing/flickering */
+html.is-native-camera-active .capture-ai-guide,
+html.is-native-camera-active .capture-controls {
+  will-change: transform;
+  transform: translateZ(0);
+}
 .capture-ai-guide {
   position: absolute;
   inset: 0;
@@ -1649,18 +1689,8 @@ html, body {
   color: rgba(255,255,255,0.6);
   backdrop-filter: blur(8px);
 }
-.capture-header {
-  position: absolute; top: 0; left: 0; right: 0;
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 18px;
-  background: linear-gradient(180deg, rgba(0,0,0,0.5) 0%, transparent 100%);
-  pointer-events: auto;
-}
-.capture-brand { color: var(--white); font-weight: 600; font-size: 15px; }
 .batch-badge-area {
-  position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%);
   display: flex; flex-direction: column; align-items: center; gap: 6px;
-  pointer-events: none;
 }
 .batch-stack {
   width: 64px; height: 64px; position: relative;
@@ -1704,6 +1734,33 @@ html, body {
   border: none; border-radius: 24px;
   font-size: 15px; font-weight: 600;
   cursor: pointer;
+}
+
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  z-index: 10;
+}
+.zoom-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 19px;
+  background: rgba(0,0,0,0.6);
+  color: white;
+  border: 1px solid rgba(255,255,255,0.4);
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.zoom-btn.active {
+  background: var(--green-accent);
+  color: #0d1109;
+  border-color: var(--green-accent);
 }
 
 .capture-controls {
