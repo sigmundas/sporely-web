@@ -9,11 +9,23 @@
 ### Camera Flicker Troubleshooting (Android 15 Edge-to-Edge)
 **Failed Attempts:**
 - JS `setTimeout` DOM reflow (only repaints HTML, fails to fix native `SurfaceView` compositing).
+- *Lifecycle Clue:* Flicker persists at the bottom of the screen upon initial start, but disappears completely if the device screen is turned off and back on while the camera is active. This indicates the native Android `SurfaceView` or Window compositor is out of sync with the navigation bar insets until a full `onPause`/`onResume` lifecycle event forces a correct layout recalculation.
 - Programmatic background/foreground toggle (requires physical home button press by user).
 - *XML Opt-Out:* Added `<item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>` to `styles.xml` (ignored by Android 15 / Capacitor 6+).
 - *EdgeToEdge Plugin:* Calling `EdgeToEdge.enable()` stabilized the layout but didn't cure the flicker below the crop frame.
 - *Removed CSS box-shadow:* Didn't fix the surface tearing.
-- **Solution (Applied):** Switched to `toBack: false` (Silver Bullet). Renders camera ON TOP of the WebView. Completely killed the transparency flicker. Preview box explicitly sized to 4:3 aspect ratio and anchored below the top nav to avoid plugin-internal letterboxing.
+- *toBack: false (Render ON TOP):* Abandoned. While it killed the transparency flicker, manually syncing CSS coordinates with native hardware coordinates across different Android pixel densities caused the camera to shift down and spawn black borders.
+
+### Moving Back to Full-Screen Camera (Android 15 Bug Fixes)
+We are going back to a full-screen background camera (`toBack: true`) with our UI floating on top.
+- Step 1: Fullscreen Camera Initialization (`toBack: true`, `window.screen` width/height, `aspectMode: 'cover'`)
+- Step 2: Absolute App Transparency (`--ion-background-color`, `html`, `body`, `ion-app`, `ion-content` transparent)
+- Step 3: Removed all camera crop guides and overlays temporarily to completely isolate the camera view and focus on resolving the flicker.
+- Step 4: Fix Samsung Lens Selection (programmatic selection using `CameraPreview.getAvailableDevices()` to bypass software restrictions).
+- Step 5: Initialization Race Condition (Added a 500ms delay before `CameraPreview.start()` so Android 15 edge-to-edge layout settles).
+- Step 6: Native Android Window UI Flags (Replaced deprecated flags with modern `WindowCompat.setDecorFitsSystemWindows(getWindow(), false)` to prevent Capacitor layout loops).
+- Step 7: Disabled Capacitor's margin engine (`adjustMarginsForEdgeToEdge: 'disable'`) and shifted UI positioning natively to CSS using `env(safe-area-inset-bottom, 20px)`. **Result: Failed.** Layout is still unstable/flickering at the bottom until the screen is cycled off and on.
+
 
 ## UI fixes
 - Missing location data popup: Remove "when using the quick "Photos & videos" picker". Add the sentence: "(Or just use Sporely cam to capture location)"

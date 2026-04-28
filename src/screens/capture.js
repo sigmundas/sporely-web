@@ -56,19 +56,17 @@ export async function startCamera(options = {}) {
   const preserveBatch = !!options.preserveBatch
   try {
     if (isAndroidNative) {
+      // Strip away #screen-capture's black background and hide other screens
+      document.documentElement.classList.add('is-native-camera-active')
+
       const video = document.getElementById('camera-video')
       if (video) video.style.display = 'none'
       
       // Ensure software keyboard is closed so screen dimensions are accurate
       if (document.activeElement) document.activeElement.blur()
       
-      // Step 1: Wait for DOM to settle
-      await new Promise(resolve => setTimeout(resolve, 150))
-      
-      // Align the top of the camera feed exactly with the top of the screen (4:3 ratio)
-      const yPos = 0
-      const camWidth = Math.round(window.innerWidth)
-      const camHeight = Math.round(camWidth * (4 / 3))
+      // Step 1: Wait 500ms for Android 15 edge-to-edge layout to settle before initialization
+      await new Promise(resolve => setTimeout(resolve, 500))
       
       let zoomValues = [0.5, 1, 2, 3]
       if (CameraPreview.getZoomButtonValues) {
@@ -95,32 +93,22 @@ export async function startCamera(options = {}) {
               await CameraPreview.setZoom({ zoom: numericZoom })
               
               if (CameraPreview.getAvailableDevices && CameraPreview.setDeviceId) {
-                // 1. Fetch all physical cameras
-                const res = await CameraPreview.getAvailableDevices()
-                const devices = res.devices || res.values || (Array.isArray(res) ? res : [])
+                const { devices } = await CameraPreview.getAvailableDevices();
+                // Filter for rear cameras
+                const rearLenses = devices.filter(d => d.position === 'rear');
 
-                // 2. Filter to only get the rear-facing physical lenses
-                const rearLenses = devices.filter(d => 
-                  String(d.position || '').toLowerCase() === 'rear' || 
-                  String(d.position || '').toLowerCase() === 'back' ||
-                  String(d.lensFacing || '').toLowerCase() === 'back' ||
-                  String(d.lensFacing || '') === '1'
-                )
-
-                // Samsung typically lists the main camera first, ultra-wide second, and telephoto third. 
-                // We map our buttons directly to these physical array indexes.
-                let targetId = null
+                let targetId = null;
+                // Assuming Samsung order:  Main 1x, [1] Ultrawide 0.5x, [2] Telephoto 3x
                 if (buttonValue === '0.5x' && rearLenses.length > 1) {
-                  targetId = rearLenses[1].deviceId // Usually the ultra-wide
+                  targetId = rearLenses[1].deviceId; 
                 } else if (buttonValue === '3x' && rearLenses.length > 2) {
-                  targetId = rearLenses[2].deviceId // Usually the telephoto
+                  targetId = rearLenses[2].deviceId; 
                 } else if (rearLenses.length > 0) {
-                  targetId = rearLenses[0].deviceId // Default to 1x main
+                  targetId = rearLenses[0].deviceId; // Main
                 }
 
-                // 3. Force the hardware to switch lenses
                 if (targetId) {
-                  await CameraPreview.setDeviceId({ deviceId: targetId })
+                  await CameraPreview.setDeviceId({ deviceId: targetId });
                 }
               }
             } catch (e) {
@@ -136,13 +124,11 @@ export async function startCamera(options = {}) {
 
       await CameraPreview.start({
         position: 'rear',
-        toBack: false, // SILVER BULLET: Renders ON TOP of the webview, killing the flicker
-        enableZoom: true,
-        x: 0,
-        y: yPos,
-        width: camWidth,
-        height: camHeight,
-        aspectMode: 'fit',
+        toBack: true,
+        width: window.screen.width,
+        height: window.screen.height,
+        aspectMode: 'cover', // Ensures no black borders
+        enableZoom: true
       })
       try {
         await CameraPreview.setZoom({ zoom: 1.0 })
@@ -204,6 +190,9 @@ export async function startCamera(options = {}) {
 }
 
 export function stopCamera() {
+  // Restore normal app opacity when leaving the camera view
+  document.documentElement.classList.remove('is-native-camera-active')
+
   if (isAndroidNative) {
     CameraPreview.stop().catch(() => {})
     
