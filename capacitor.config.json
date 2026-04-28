@@ -1,8 +1,5 @@
 {
   "appId": "com.sporelab.sporely",
   "appName": "Sporely",
-  "webDir": "dist",
-  "android": {
-    "adjustMarginsForEdgeToEdge": "disable"
-  }
+  "webDir": "dist"
 }

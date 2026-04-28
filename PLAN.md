@@ -25,7 +25,18 @@ We are going back to a full-screen background camera (`toBack: true`) with our U
 - Step 5: Initialization Race Condition (Added a 500ms delay before `CameraPreview.start()` so Android 15 edge-to-edge layout settles).
 - Step 6: Native Android Window UI Flags (Replaced deprecated flags with modern `WindowCompat.setDecorFitsSystemWindows(getWindow(), false)` to prevent Capacitor layout loops).
 - Step 7: Disabled Capacitor's margin engine (`adjustMarginsForEdgeToEdge: 'disable'`) and shifted UI positioning natively to CSS using `env(safe-area-inset-bottom, 20px)`. **Result: Failed.** Layout is still unstable/flickering at the bottom until the screen is cycled off and on.
+- Step 8: Reverted the native edge-to-edge layout workarounds in `MainActivity.java`, `capacitor.config.json`, and `styles.xml` to return to standard Capacitor layout management.
 
+### Standard WebRTC Camera Recovery (Samsung Torch Heuristic)
+Now that we are back on the standard `navigator.mediaDevices.getUserMedia()` flow (Capgo native camera moved to `camera-fallback` branch), we need to fix the Samsung S25 issue where it defaults to the ultra-wide lens. Since OEM string labels like 'camera 0' are useless, we built a 'torch heuristic' initialization function.
+
+- [x] Calls `navigator.mediaDevices.enumerateDevices()` and filters for all videoinput devices that are rear-facing.
+- [x] Loops through these specific device IDs one by one, opening a temporary, low-resolution video stream for each.
+- [x] Inspects the active video track using `track.getCapabilities().torch`.
+- [x] Saves the deviceId if torch capability is true.
+- [x] Stops all temporary video tracks to free up hardware memory.
+- [x] Starts main application camera feed using that specific deviceId in the `getUserMedia` constraints.
+- [x] Removed Capgo native CameraPreview code from main branch.
 
 ## UI fixes
 - Missing location data popup: Remove "when using the quick "Photos & videos" picker". Add the sentence: "(Or just use Sporely cam to capture location)"

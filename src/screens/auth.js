@@ -35,6 +35,7 @@ function _isNativeApp() {
 }
 
 const BYPASS_TURNSTILE = _isNativeApp() || (import.meta.env.DEV && _isLocalTestingHost())
+const PASSWORD_RESET_WEB_ORIGIN = 'https://app.sporely.no'
 const PERSIST_AUTH_DRAFTS = import.meta.env.DEV
 const AUTH_DRAFT_KEY = 'sporely-auth-draft'
 const PASSWORD_RECOVERY_HINT_KEY = 'sporely-password-recovery-hint'
@@ -63,6 +64,19 @@ function _resetTurnstile() {
   _captchaToken = null
   if (window.turnstile && _turnstileWidgetId !== null) {
     window.turnstile.reset(_turnstileWidgetId)
+  }
+}
+
+async function _withTimeout(promise, timeoutMs, label) {
+  let timeoutId
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(label)), timeoutMs)
+  })
+
+  try {
+    return await Promise.race([promise, timeout])
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 
@@ -241,6 +255,22 @@ function _validatePasswordRequirements(password) {
     return t('auth.passwordRequirements')
   }
   return ''
+}
+
+function _getPasswordResetRedirectUrl() {
+  const origin = window.location.origin
+  const hostname = window.location.hostname
+
+  if (_isNativeApp()) {
+    return `${PASSWORD_RESET_WEB_ORIGIN}/?flow=recovery&screen=reset-password`
+  }
+
+  const isExactViteLocalhost =
+    (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') &&
+    window.location.port === '5173'
+
+  const resetOrigin = isExactViteLocalhost ? origin : PASSWORD_RESET_WEB_ORIGIN
+  return `${resetOrigin}/?flow=recovery&screen=reset-password`
 }
 
 async function _waitForSession(maxAttempts = 5, delayMs = 150) {
@@ -536,18 +566,12 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     try {
       setLoading(forgotBtn, true)
 
-      let redirectOrigin = window.location.origin
-      // If requested from the Android app, origin is localhost. Force redirect to the real web app.
-      if ((redirectOrigin.includes('localhost') || redirectOrigin.includes('127.0.0.1')) && !redirectOrigin.includes(':5173')) {
-        redirectOrigin = 'https://app.sporely.no'
-      }
-
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${redirectOrigin}/?flow=recovery&screen=reset-password`
+        redirectTo: _getPasswordResetRedirectUrl()
       })
       
       if (error) {
-        showError(error.message)
+        showError(_captchaErrorMessage(error.message))
       } else {
         _setPasswordRecoveryHint(email)
         showError(t('auth.resetEmailSent'), false, true)
@@ -578,15 +602,25 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     }
     try {
       setLoading(resetBtn, true)
-      const { error } = await supabase.auth.updateUser({ password: newPassword })
+      const { error } = await _withTimeout(
+        supabase.auth.updateUser({ password: newPassword }),
+        15000,
+        'Password update is taking longer than expected. Please try again.'
+      )
       
       if (error) {
         showError(error.message)
       } else {
         clearPasswordRecoveryHint()
-        await supabase.auth.signOut()
-        history.replaceState(null, '', '/')
         switchToLogin('', true)
+        await _withTimeout(
+          supabase.auth.signOut(),
+          5000,
+          'Sign-out is taking longer than expected.'
+        ).catch(error => {
+          console.warn('Sign-out after password reset did not finish cleanly:', error)
+        })
+        history.replaceState(null, '', '/')
       }
     } catch (error) {
       console.error('Password update failed unexpectedly:', error)

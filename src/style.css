@@ -1601,38 +1601,6 @@ html, body {
   object-fit: contain;
   background: #000;
 }
-/* Native Android Camera background transparency */
-html.is-native-camera-active,
-html.is-native-camera-active body,
-html.is-native-camera-active #app,
-html.is-native-camera-active #screen-capture,
-html.is-native-camera-active .capture-viewfinder {
-  background: transparent !important;
-}
-html.is-native-camera-active #camera-video {
-  display: none !important;
-}
-/* Hard-hide inactive screens and disable animations to prevent Android compositor wobble/bleed */
-html.is-native-camera-active .screen:not(#screen-capture),
-html.is-native-camera-active .app-header,
-html.is-native-camera-active #bottom-nav {
-  display: none !important;
-  opacity: 0 !important;
-  pointer-events: none !important;
-}
-html.is-native-camera-active #screen-capture {
-  transform: none !important;
-  transition: none !important;
-}
-/* Kill gradient tearing on Android */
-html.is-native-camera-active .capture-controls {
-  background: rgba(0,0,0,0.6) !important;
-}
-/* Force hardware layers on overlays so DOM text updates don't cause Android WebView tearing/flickering */
-html.is-native-camera-active .capture-controls {
-  will-change: transform;
-  transform: translateZ(0);
-}
 .capture-overlay {
   position: absolute; inset: 0;
   display: flex; flex-direction: column;
