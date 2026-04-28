@@ -112,9 +112,27 @@ html, body {
   margin-bottom: 6px;
 }
 
+.auth-language-select {
+  float: right;
+  max-width: 132px;
+  margin-top: -36px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-family: 'Outfit', sans-serif;
+  font-size: 13px;
+  padding: 7px 28px 7px 10px;
+}
+
 .auth-tagline {
   font-size: 13px; color: var(--text-secondary);
   margin-bottom: 36px;
+}
+
+.auth-form .auth-tagline {
+  margin: 0 0 6px;
+  line-height: 1.5;
 }
 
 .auth-title {
@@ -146,7 +164,7 @@ html, body {
 .auth-input::placeholder { color: var(--text-dim); }
 
 .auth-help {
-  margin-top: -8px;
+  margin: 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-secondary);
@@ -183,6 +201,7 @@ html, body {
 .auth-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .auth-switch {
+  margin: 0;
   text-align: center; font-size: 13px; color: var(--text-secondary);
 }
 .auth-switch a {

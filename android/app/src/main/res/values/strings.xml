@@ -4,4 +4,11 @@
     <string name="title_activity_main">Sporely</string>
     <string name="package_name">com.sporelab.sporely</string>
     <string name="custom_url_scheme">com.sporelab.sporely</string>
+    <string name="asset_statements" translatable="false">
+        [{
+            \"include\": \"https://app.sporely.no/.well-known/assetlinks.json\"
+        }, {
+            \"include\": \"https://sporely.no/.well-known/assetlinks.json\"
+        }]
+    </string>
 </resources>

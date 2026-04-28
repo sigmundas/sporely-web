@@ -388,9 +388,10 @@ onLocaleChange(() => {
 async function init() {
   const authState = getInitialAuthState()
   const hasHashError = handleUrlHashError()
-  const hasRecoveryHint = hasPasswordRecoveryHint()
-  const recoveryViaHintOnly = !authState.isRecovery && hasRecoveryHint
-  let recoveryModeActive = (authState.isRecovery || hasRecoveryHint) && !hasHashError
+  if (!authState.isRecovery && hasPasswordRecoveryHint()) {
+    clearPasswordRecoveryHint()
+  }
+  let recoveryModeActive = authState.isRecovery && !hasHashError
   let authUiInitialized = false
 
   const ensureAuthUiInitialized = (skipDraftRestore = false) => {
@@ -441,11 +442,6 @@ async function init() {
     ensureAuthUiInitialized(hasHashError || recoveryModeActive)
     if (recoveryModeActive) {
       switchToResetPassword()
-      if (recoveryViaHintOnly) {
-        // Treat the fallback hint as one-time rescue state so later clean visits
-        // to "/" don't keep reopening the reset form in the same browser.
-        clearPasswordRecoveryHint()
-      }
     }
   }
 }

@@ -1,0 +1,12 @@
+[{
+  "relation": [
+    "delegate_permission/common.get_login_creds"
+  ],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.sporelab.sporely",
+    "sha256_cert_fingerprints": [
+      "FC:32:C9:7F:1B:4B:BA:58:3F:35:BF:AC:67:CF:C0:CF:AF:FA:FD:FD:71:62:9C:20:AF:D7:9F:3E:F1:77:6A:76"
+    ]
+  }
+}]

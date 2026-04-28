@@ -29,6 +29,12 @@
         <div class="brand-icon">🍄</div>
         <span>Sporely</span>
       </div>
+      <select id="auth-language-select" class="auth-language-select" aria-label="Language">
+        <option value="en">English</option>
+        <option value="nb_NO">Norsk</option>
+        <option value="sv_SE">Svenska</option>
+        <option value="de_DE">Deutsch</option>
+      </select>
       <p class="auth-tagline">Field observations, everywhere.</p>
 
       <div id="auth-error" class="auth-error" style="display:none"></div>
@@ -37,10 +43,10 @@
       <form id="login-form" class="auth-form">
         <h2 class="auth-title">Sign in</h2>
         <label class="auth-label"><span id="login-email-label">Email</span>
-          <input type="email" id="login-email" class="auth-input" placeholder="you@example.com" required autocomplete="email">
+          <input type="email" id="login-email" name="email" class="auth-input" placeholder="you@example.com" required autocomplete="username">
         </label>
         <label class="auth-label"><span id="login-password-label">Password</span>
-          <input type="password" id="login-password" class="auth-input" placeholder="••••••••" required autocomplete="current-password">
+          <input type="password" id="login-password" name="password" class="auth-input" placeholder="••••••••" required autocomplete="current-password">
         </label>
         <button type="submit" class="auth-btn" id="login-btn">Sign in</button>
         <p class="auth-switch" style="margin-bottom:8px"><a href="#" id="show-forgot-password">Forgot password?</a></p>
@@ -52,7 +58,7 @@
         <h2 class="auth-title" id="forgot-password-title">Reset password</h2>
         <p class="auth-tagline" id="forgot-password-desc">Enter your email to receive a reset link.</p>
         <label class="auth-label"><span id="forgot-email-label">Email</span>
-          <input type="email" id="forgot-email" class="auth-input" placeholder="you@example.com" required autocomplete="email">
+          <input type="email" id="forgot-email" name="email" class="auth-input" placeholder="you@example.com" required autocomplete="username">
         </label>
         <button type="submit" class="auth-btn" id="forgot-btn">Send reset link</button>
         <p class="auth-switch"><a href="#" id="show-login-from-forgot">Back to sign in</a></p>
@@ -63,23 +69,24 @@
         <h2 class="auth-title" id="reset-password-title">Set new password</h2>
         <p class="auth-tagline" id="reset-password-desc">Enter your new password below.</p>
         <label class="auth-label"><span id="reset-password-label">New password</span>
-          <input type="password" id="new-password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
+          <input type="password" id="new-password" name="new-password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
         </label>
         <label class="auth-label"><span id="confirm-password-label">Confirm new password</span>
-          <input type="password" id="confirm-new-password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
+          <input type="password" id="confirm-new-password" name="confirm-new-password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
         </label>
         <p class="auth-help" id="reset-password-help">Use at least 8 characters, including uppercase, lowercase, number, and symbol.</p>
         <button type="submit" class="auth-btn" id="reset-password-btn">Update password</button>
+        <p class="auth-switch"><a href="#" id="show-login-from-reset">Back to sign in</a></p>
       </form>
 
       <!-- Signup form -->
       <form id="signup-form" class="auth-form" style="display:none">
         <h2 class="auth-title">Create account</h2>
         <label class="auth-label"><span id="signup-email-label">Email</span>
-          <input type="email" id="signup-email" class="auth-input" placeholder="you@example.com" required autocomplete="email">
+          <input type="email" id="signup-email" name="email" class="auth-input" placeholder="you@example.com" required autocomplete="username">
         </label>
         <label class="auth-label"><span id="signup-password-label">Password</span>
-          <input type="password" id="signup-password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
+          <input type="password" id="signup-password" name="password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
         </label>
         <p class="auth-help" id="signup-password-help">Use at least 8 characters, including uppercase, lowercase, number, and symbol.</p>
         <button type="submit" class="auth-btn" id="signup-btn">Create account</button>
@@ -102,9 +109,16 @@
       const ua = navigator.userAgent
       const isIOS     = /iphone|ipad|ipod/i.test(ua)
       const isAndroid = /android/i.test(ua)
+      const isAndroidWebView = isAndroid && /;\s*wv\)/i.test(ua)
+      const isNative = !!window.Capacitor?.isNativePlatform?.() ||
+                       ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
       const isStandalone = window.navigator.standalone === true ||
                            window.matchMedia('(display-mode: standalone)').matches
-      if ((!isIOS && !isAndroid) || isStandalone) return
+      if ((!isIOS && !isAndroid) || isStandalone || isNative || isAndroidWebView) return
+
+      const isAndroidChrome = isAndroid &&
+                              /\bChrome\//i.test(ua) &&
+                              !/\b(?:EdgA|OPR|Firefox|FxiOS|SamsungBrowser)\b/i.test(ua)
 
       const locale = (navigator.language || 'en').toLowerCase()
       const lang = locale.startsWith('nb') || locale.startsWith('nn') || locale.startsWith('no')
@@ -122,19 +136,23 @@
       const copy = {
         en: {
           ios: '<strong>Install on iPhone:</strong> Tap the share button <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> in Safari, then <strong>"Add to Home Screen"</strong>',
-          android: '<strong>Install on Android:</strong> Tap the menu <strong>⋮</strong> in Chrome, then <strong>"Add to Home screen"</strong>'
+          android: '<strong>Install on Android:</strong> Tap the menu <strong>⋮</strong> in Chrome, then <strong>"Add to Home screen"</strong>',
+          androidOther: '<strong>Install on Android:</strong> Open this page in Chrome, then tap the menu <strong>⋮</strong> and choose <strong>"Add to Home screen"</strong>'
         },
         no: {
           ios: '<strong>Installer på iPhone:</strong> Trykk på delingsknappen <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> i Safari, og velg deretter <strong>"Legg til på hjemmeskjermen"</strong>',
-          android: '<strong>Installer på Android:</strong> Trykk på menyen <strong>⋮</strong> i Chrome, og velg deretter <strong>"Legg til på startskjermen"</strong>'
+          android: '<strong>Installer på Android:</strong> Trykk på menyen <strong>⋮</strong> i Chrome, og velg deretter <strong>"Legg til på startskjermen"</strong>',
+          androidOther: '<strong>Installer på Android:</strong> Åpne denne siden i Chrome, trykk på menyen <strong>⋮</strong>, og velg <strong>"Legg til på startskjermen"</strong>'
         },
         sv: {
           ios: '<strong>Installera på iPhone:</strong> Tryck på delningsknappen <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> i Safari och välj sedan <strong>"Lägg till på hemskärmen"</strong>',
-          android: '<strong>Installera på Android:</strong> Tryck på menyn <strong>⋮</strong> i Chrome och välj sedan <strong>"Lägg till på startskärmen"</strong>'
+          android: '<strong>Installera på Android:</strong> Tryck på menyn <strong>⋮</strong> i Chrome och välj sedan <strong>"Lägg till på startskärmen"</strong>',
+          androidOther: '<strong>Installera på Android:</strong> Öppna sidan i Chrome, tryck på menyn <strong>⋮</strong> och välj <strong>"Lägg till på startskärmen"</strong>'
         },
         de: {
           ios: '<strong>Auf dem iPhone installieren:</strong> Tippe in Safari auf die Teilen-Schaltfläche <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> und wähle dann <strong>"Zum Home-Bildschirm"</strong>',
-          android: '<strong>Auf Android installieren:</strong> Tippe in Chrome auf das Menü <strong>⋮</strong> und wähle dann <strong>"Zum Startbildschirm hinzufügen"</strong>'
+          android: '<strong>Auf Android installieren:</strong> Tippe in Chrome auf das Menü <strong>⋮</strong> und wähle dann <strong>"Zum Startbildschirm hinzufügen"</strong>',
+          androidOther: '<strong>Auf Android installieren:</strong> Öffne diese Seite in Chrome, tippe auf das Menü <strong>⋮</strong> und wähle <strong>"Zum Startbildschirm hinzufügen"</strong>'
         }
       }[lang]
 
@@ -143,7 +161,7 @@
         text.innerHTML = copy.ios
       } else {
         icon.textContent = '📲'
-        text.innerHTML = copy.android
+        text.innerHTML = isAndroidChrome ? copy.android : copy.androidOther
       }
       hint.style.display = 'flex'
     })()

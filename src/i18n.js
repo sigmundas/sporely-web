@@ -1362,6 +1362,8 @@ export function onLocaleChange(listener) {
 export function applyStaticTranslations() {
   document.documentElement.lang = getIntlLocale()
   document.title = t('app.name')
+  const authLocaleSelect = document.getElementById('auth-language-select')
+  if (authLocaleSelect) authLocaleSelect.value = currentLocale
 
   setText('#login-form .auth-title', 'auth.signIn')
   setText('#login-email-label', 'auth.email')
@@ -1390,7 +1392,8 @@ export function applyStaticTranslations() {
   if (forgotBtn) forgotBtn.dataset.label = t('auth.sendResetLink')
   setText('#forgot-btn', 'auth.sendResetLink')
   setText('#show-login-from-forgot', 'auth.backToLogin')
-  
+  setText('#show-login-from-reset', 'auth.backToLogin')
+
   setText('#reset-password-title', 'auth.resetPassword')
   setText('#reset-password-desc', 'auth.resetPasswordDesc')
   setText('#reset-password-label', 'auth.newPassword')
@@ -1579,6 +1582,8 @@ export function applyStaticTranslations() {
 export function initI18n() {
   currentLocale = detectLocale()
   applyStaticTranslations()
+  const authLocaleSelect = document.getElementById('auth-language-select')
+  if (authLocaleSelect) authLocaleSelect.value = currentLocale
   const localeSelect = document.getElementById('settings-language-select')
   if (localeSelect) localeSelect.value = currentLocale
 }

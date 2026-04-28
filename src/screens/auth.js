@@ -1,5 +1,5 @@
 import { supabase } from '../supabase.js'
-import { t } from '../i18n.js'
+import { getLocale, setLocale, t } from '../i18n.js'
 
 const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAC0h9RON_lYu5ib_'
 let _captchaToken      = null
@@ -418,11 +418,18 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
   const signupBtn  = document.getElementById('signup-btn')
   const forgotBtn  = document.getElementById('forgot-btn')
   const resetBtn   = document.getElementById('reset-password-btn')
+  const languageSelect = document.getElementById('auth-language-select')
 
   loginBtn.dataset.label  = t('auth.signIn')
   signupBtn.dataset.label = t('auth.createAccount')
   forgotBtn.dataset.label = t('auth.sendResetLink')
   resetBtn.dataset.label  = t('auth.updatePassword')
+  if (languageSelect) {
+    languageSelect.value = getLocale()
+    languageSelect.addEventListener('change', () => {
+      setLocale(languageSelect.value)
+    })
+  }
 
   // Inject Terms of Service checkbox dynamically
   if (signupForm && signupBtn && !document.getElementById('signup-terms')) {
@@ -461,6 +468,16 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
   document.getElementById('show-login-from-forgot')?.addEventListener('click', e => {
     e.preventDefault()
     switchToLogin()
+  })
+
+  document.getElementById('show-login-from-reset')?.addEventListener('click', async e => {
+    e.preventDefault()
+    clearPasswordRecoveryHint()
+    history.replaceState(null, '', '/')
+    switchToLogin()
+    await supabase.auth.signOut().catch(error => {
+      console.warn('Sign-out while leaving password reset did not finish cleanly:', error)
+    })
   })
 
   // ── Login ──────────────────────────────────────────────────────────────────
