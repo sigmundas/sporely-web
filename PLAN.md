@@ -31,12 +31,55 @@ We are going back to a full-screen background camera (`toBack: true`) with our U
 Now that we are back on the standard `navigator.mediaDevices.getUserMedia()` flow (Capgo native camera moved to `camera-fallback` branch), we need to fix the Samsung S25 issue where it defaults to the ultra-wide lens. Since OEM string labels like 'camera 0' are useless, we built a 'torch heuristic' initialization function.
 
 - [x] Calls `navigator.mediaDevices.enumerateDevices()` and filters for all videoinput devices that are rear-facing.
-- [x] Loops through these specific device IDs one by one, opening a temporary, low-resolution video stream for each.
+- [x] Loops through these specific device IDs one by one, opening a temporary video stream for each.
 - [x] Inspects the active video track using `track.getCapabilities().torch`.
-- [x] Saves the deviceId if torch capability is true.
+- [x] Also probes `ImageCapture.getPhotoCapabilities().fillLightMode` for flash support when `torch` is not exposed.
+- [x] Saves the deviceId if torch/flash capability is true.
 - [x] Stops all temporary video tracks to free up hardware memory.
 - [x] Starts main application camera feed using that specific deviceId in the `getUserMedia` constraints.
 - [x] Removed Capgo native CameraPreview code from main branch.
+
+#### 2026-04-29 Samsung S25 Findings
+**What did not work**
+- The WebRTC torch heuristic was implemented, but device testing still showed the ultra-wide camera. This likely means Samsung/Chrome WebView is exposing a logical rear camera where the selected `deviceId` does not map cleanly to the physical 1x sensor, or it does not expose torch/flash capability on the separate physical camera entries in a useful way.
+- Relying on `deviceId: { exact }` alone is not enough on the S25. Even if we identify a rear/torch-capable logical camera, WebRTC may still choose the ultra-wide physical lens internally.
+- The previous camera capture path was not still-photo capture. It grabbed the current WebRTC video frame with `canvas.drawImage(video, ...)`. On the S25 this produced a cropped video frame around `2400x3200`, then app code downscaled the long edge to `1920`, resulting in `1440x1920` output. That explains the observed 2.8 MP captures.
+- Requesting `width: { ideal: 1920 }, height: { ideal: 1440 }` encourages a video-mode resolution, not full still capture. It cannot produce a true 12 MP photo by itself.
+- Adding `advanced: [{ zoom: 1 }]` directly in initial `getUserMedia()` constraints is fragile because unsupported zoom constraints can cause startup rejection or be ignored.
+
+**What may work**
+- Use WebRTC only for preview and use `ImageCapture.takePhoto()` for the shutter. `takePhoto()` is the browser still-photo API and can return a larger JPEG than the live video frame when the WebView exposes still-photo capabilities.
+- Ask `ImageCapture.getPhotoCapabilities()` for max `imageWidth` / `imageHeight`, then call `takePhoto({ imageWidth, imageHeight, fillLightMode: 'off' })`. This has been implemented as the first capture path, with video-frame canvas capture kept only as fallback.
+- Remove the app-side 1920 long-edge resize from camera capture. Upload resizing should be handled later by the existing cloud upload policy, not at shutter time.
+- Keep zoom application after stream startup via `track.applyConstraints()` and only if `track.getCapabilities().zoom` exposes a valid range. If WebRTC exposes a logical rear camera only, testing zoom values greater than 1 may force the logical camera from ultra-wide toward the 1x field of view, even when device IDs do not.
+- If WebRTC still returns the ultra-wide lens and/or `ImageCapture.takePhoto()` still returns video-mode crops, the likely working solution is native Android CameraX/Camera2 for capture: enumerate physical cameras, choose the back camera with flash/torch and normal focal length, bind a Preview use case plus ImageCapture use case, and return the captured JPEG(s) to the WebView. This would also support multi-shot capture before returning to the app, but must avoid the previous native preview flicker path.
+
+#### 2026-04-29 ImageCapture Results and Dual Camera Plan
+**Latest hardware result**
+- Current WebRTC implementation now captures high-resolution stills around 12 MP using `ImageCapture.takePhoto()`.
+- The selected lens is still the ultra-wide lens on the Samsung S25.
+- Preview and captured JPEG now show the same field of view, so the old mismatch between preview/video crop and output is gone.
+- When imported into `sporely-py`, the captured image appears rotated -90 degrees. This suggests the JPEG has EXIF orientation that desktop import is not honoring, or native/WebView still capture is writing pixels/orientation differently than expected.
+- GPS EXIF is missing from the captured JPEG. This may be acceptable because Sporely already stores capture GPS in the cloud/local observation DB, but we should either transfer coordinates from cloud DB to local DB during desktop sync/import or explicitly write GPS EXIF before upload/export.
+
+**Product direction**
+- Keep the current WebRTC `ImageCapture.takePhoto()` implementation as **Sporely Cam**. It is useful because it gives high-resolution 12 MP captures and works without the native flicker path, even though S25 lens selection is wrong.
+- Add a third capture/import button in the web app: **Native Cam**. This button is Android-only and launches a native CameraX/Camera2 capture flow.
+- Native Cam should use Android CameraX/Camera2 to select the back physical camera with flash/torch and normal/wide focal length, avoiding Samsung WebView's logical-camera ultra-wide selection.
+- Native Cam should return one or more JPEGs plus metadata to the existing Sporely review/import pipeline, so multi-shot capture can be supported before returning to the web UI.
+- Native Cam must normalize orientation before returning files, or write a correct EXIF orientation tag that both web and `sporely-py` honor.
+- Native Cam should either write GPS EXIF using current app/device coordinates or return GPS metadata alongside the photo so the observation DB remains the source of truth.
+
+**Implementation tasks**
+- [x] Rename/label the existing WebRTC camera entry point as **Sporely Cam** in the UI where users choose capture/import.
+- [x] Add **Native Cam** as a third Android-only button in the web app.
+- [x] Add a `NativeCamera` Capacitor plugin and register it in `MainActivity`.
+- [x] Add Android CameraX dependencies.
+- [x] Build first native CameraX capture activity with Preview + ImageCapture, multi-shot queue, Done/Cancel controls, and a 1x/back-camera selector based on Camera2 characteristics.
+- [x] Return captured cache-file paths and metadata to JS.
+- [x] Reuse the existing import/review path to convert returned native files into `File`/Blob entries.
+- [x] Initial Android device test: Native Cam launches, captures, returns photos to the app, and works as the new native capture path.
+- [ ] Verify on Samsung S25: selected lens is 1x, capture is 12 MP, preview matches output, orientation is correct in `sporely-py`, and GPS strategy is documented.
 
 ## UI fixes
 - Missing location data popup: Remove "when using the quick "Photos & videos" picker". Add the sentence: "(Or just use Sporely cam to capture location)"

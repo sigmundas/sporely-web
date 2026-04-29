@@ -17,11 +17,6 @@ const _mapData   = { mine: [], friends: [] }   // cached for re-filtering
 
 export function initMap() {
   map = L.map('map-container', { zoomControl: false, attributionControl: true })
-  document.getElementById('map-fab').addEventListener('click', () => {
-    const dropdown = document.getElementById('map-search-dropdown')
-    if (dropdown) dropdown.style.display = 'none'
-    navigate('capture')
-  })
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>',

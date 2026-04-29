@@ -8,8 +8,9 @@ import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
 import { openFindDetail } from './find_detail.js'
-import { openPhotoImportPicker } from './import_review.js'
+import { openNativeCamera, openPhotoImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
+import { refreshHeaderProfileButtons } from './profile.js'
 
 function _imageHtml(source, className, placeholderHtml) {
   if (!source?.primaryUrl) return placeholderHtml
@@ -33,8 +34,10 @@ function _wireImageFallback(root) {
 export async function initHome() {
   document.getElementById('home-fab').addEventListener('click', () => navigate('capture'))
   document.getElementById('ac-sporely-cam').addEventListener('click', () => navigate('capture'))
+  document.getElementById('ac-native-cam')?.addEventListener('click', () => openNativeCamera())
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
+  _syncNativeCameraAction()
 
   document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))
   document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { groupBySpecies: true }))
@@ -56,8 +59,17 @@ export async function initHome() {
   await refreshHome()
 }
 
+function _syncNativeCameraAction() {
+  const nativeCam = document.getElementById('ac-native-cam')
+  if (!nativeCam) return
+  const isAndroidNative = !!window.Capacitor?.isNativePlatform?.()
+    && window.Capacitor?.getPlatform?.() === 'android'
+  nativeCam.style.display = isAndroidNative ? 'flex' : 'none'
+  nativeCam.closest('.action-grid')?.classList.toggle('action-grid-native', isAndroidNative)
+}
+
 export async function refreshHome() {
-  await Promise.all([loadRecentFinds(), loadRecentComments(), loadStats(), checkSyncStatus()])
+  await Promise.all([loadRecentFinds(), loadRecentComments(), loadStats(), checkSyncStatus(), refreshHeaderProfileButtons()])
 }
 
 // ── Mixed feed ────────────────────────────────────────────────────────────────

@@ -60,7 +60,7 @@ html, body {
   min-height: 100dvh;
   overflow: hidden;
   background: var(--bg);
-  background-color: transparent!important;
+  /* background-color: transparent!important; */ /* Removed: Caused white background in dark mode */
   font-family: 'Outfit', sans-serif;
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
@@ -141,7 +141,7 @@ html, body {
 }
 
 .auth-form {
-  display: flex; flex-direction: column; gap: 16px;
+  display: flex; flex-direction: column; gap: 18px;
 }
 
 .auth-label {
@@ -199,6 +199,16 @@ html, body {
 }
 .auth-btn:active { background: var(--btn-active); }
 .auth-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+#reset-password-btn {
+  align-self: center;
+  min-width: min(100%, 260px);
+  margin-top: 10px;
+}
+
+#reset-password-form .auth-switch {
+  margin-top: 12px;
+}
 
 .auth-switch {
   margin: 0;
@@ -267,7 +277,7 @@ html, body {
 /* ── HEADER ── */
 .app-header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 20px 18px 18px;
+  padding: 14px 18px 12px;
   position: sticky; top: 0; z-index: 10;
   background: var(--bg);
   border-bottom: 1px solid var(--border-dim);
@@ -280,7 +290,7 @@ html, body {
 }
 .header-brand {
   display: flex; align-items: center; gap: 8px;
-  font-weight: 600; font-size: 20px; letter-spacing: 0.02em;
+  font-weight: 600; font-size: 18px; letter-spacing: 0.02em;
   color: var(--text-primary);
 }
 .header-sync-tag {
@@ -291,25 +301,25 @@ html, body {
   text-transform: uppercase; color: var(--green-accent);
 }
 .brand-icon {
-  width: 36px; height: 36px;
+  width: 30px; height: 30px;
   background: var(--green-deep);
   border: 1px solid var(--green-mid);
   border-radius: 6px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 20px;
+  font-size: 18px;
 }
 .header-actions { display: flex; align-items: center; gap: 10px; position: relative; z-index: 20; }
 .header-avatar-btn {
-  width: 48px;
-  height: 48px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--green-mid);
   background: var(--card);
   color: var(--green-accent);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
+  padding: 2px;
   overflow: hidden;
   cursor: pointer;
   position: relative;
@@ -317,7 +327,7 @@ html, body {
 }
 .header-avatar-btn:active { transform: scale(0.97); }
 .header-avatar-initials {
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 700;
   line-height: 1;
   position: absolute;
@@ -336,16 +346,8 @@ html, body {
   display: block;
   z-index: 2;
 }
-.map-profile-btn {
-  position: absolute;
-  top: calc(12px + var(--safe-top));
-  right: 18px;
-  z-index: 1001;
-  background: rgba(13,17,9,0.88);
-  backdrop-filter: blur(8px);
-}
 .icon-btn {
-  width: 48px; height: 48px;
+  width: 40px; height: 40px;
   border-radius: 50%; border: none;
   background: transparent; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
@@ -353,7 +355,7 @@ html, body {
   transition: background 0.15s, color 0.15s;
 }
 .icon-btn:active { background: var(--card); color: var(--green-accent); }
-.icon-btn svg { width: 28px; height: 28px; pointer-events: none; }
+.icon-btn svg { width: 22px; height: 22px; pointer-events: none; }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
   background: var(--green-deep);
@@ -414,6 +416,7 @@ html, body {
 .home-content { padding: 20px 18px calc(var(--nav-h) + var(--safe-bottom) + 100px); }
 
 .action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 28px; }
+.action-grid.action-grid-native { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .action-card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -435,6 +438,10 @@ html, body {
 #ac-sporely-cam:active { background: var(--btn-active); }
 #ac-sporely-cam .action-card-icon,
 #ac-sporely-cam .action-card-label { color: var(--btn-text); }
+@media (max-width: 360px) {
+  .action-grid { grid-template-columns: 1fr 1fr; }
+  .action-grid.action-grid-native { grid-template-columns: 1fr 1fr; }
+}
 
 .section-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -2636,9 +2643,6 @@ html.light .people-card {
 }
 html.light .people-card-count-val {
   color: var(--green-deep);
-}
-html.light .header-avatar-btn {
-  background: #f0f4f0;
 }
 html.light .map-profile-btn {
   background: rgba(255,255,255,0.92);

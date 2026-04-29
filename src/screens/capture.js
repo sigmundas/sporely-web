@@ -1,7 +1,6 @@
-import { Capacitor } from '@capacitor/core'
 import { state } from '../state.js'
 import { t } from '../i18n.js'
-import { navigate, goBack } from '../router.js'
+import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
@@ -10,6 +9,12 @@ import { openPhotoImportPicker } from './import_review.js'
 function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
 }
+
+let cachedPrimaryMainCameraId = null
+let primaryMainCameraPromise = null
+
+const CAMERA_VIDEO_WIDTH_IDEAL = 4000
+const CAMERA_VIDEO_HEIGHT_IDEAL = 3000
 
 export function initCapture() {
   document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
@@ -23,100 +28,292 @@ export function initCapture() {
   })
 }
 
-async function _findMainCameraWithTorch() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return null;
+function _stopMediaStream(stream) {
+  if (!stream || typeof stream.getTracks !== 'function') return
+  stream.getTracks().forEach(track => track.stop())
+}
+
+function _isPermissionDeniedError(err) {
+  return err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError'
+}
+
+function _isClearlyFrontCamera(device) {
+  const label = (device?.label || '').toLowerCase()
+  return /\b(front|user|selfie)\b/.test(label)
+}
+
+async function _primeCameraPermission() {
+  let stream = null
   try {
-    // 1. Ask for basic camera permissions first so enumerateDevices() returns full labels
-    const initialStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-    initialStream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } },
+      audio: false,
+    })
+  } catch (err) {
+    if (_isPermissionDeniedError(err)) throw err
+    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+  } finally {
+    _stopMediaStream(stream)
+  }
+}
 
-    // 2. Enumerate devices and filter for rear cameras
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const videoDevices = devices.filter(d => d.kind === 'videoinput');
+async function _probeDeviceForTorch(device) {
+  let stream = null
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: device.deviceId } },
+      audio: false,
+    })
+    const track = stream.getVideoTracks()[0]
+    const capabilities = typeof track?.getCapabilities === 'function' ? track.getCapabilities() : {}
+    if (capabilities?.torch === true) return true
 
-    // Filter out explicitly front-facing cameras
-    const rearDevices = videoDevices.filter(d => {
-      const label = (d.label || '').toLowerCase();
-      return label.includes('back') || label.includes('rear') || label.includes('environment') || (!label.includes('front') && !label.includes('user'));
-    });
+    if (typeof window.ImageCapture === 'function' && track) {
+      const imageCapture = new window.ImageCapture(track)
+      if (typeof imageCapture.getPhotoCapabilities === 'function') {
+        const photoCapabilities = await imageCapture.getPhotoCapabilities()
+        if (photoCapabilities?.fillLightMode?.includes?.('flash')) return true
+      }
+    }
 
-    // 3. Loop through and check for torch capability
-    for (const device of rearDevices) {
-      try {
-        // Open a low-res temporary stream
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: device.deviceId }, width: { ideal: 640 }, height: { ideal: 480 } },
-          audio: false
-        });
+    return false
+  } finally {
+    _stopMediaStream(stream)
+  }
+}
 
-        const track = stream.getVideoTracks()[0];
-        const caps = track.getCapabilities ? track.getCapabilities() : {};
+async function _getPrimaryMainCameraId() {
+  if (!navigator.mediaDevices?.getUserMedia || !navigator.mediaDevices?.enumerateDevices) return null
+  if (cachedPrimaryMainCameraId) return cachedPrimaryMainCameraId
+  if (primaryMainCameraPromise) return primaryMainCameraPromise
 
-        // 4. Free up memory immediately
-        stream.getTracks().forEach(t => t.stop());
+  primaryMainCameraPromise = (async () => {
+    try {
+      await _primeCameraPermission()
 
-        // 5. If torch is supported, this is the primary main camera
-        if (caps.torch) {
-          return device.deviceId;
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const videoDevices = devices.filter(device => device.kind === 'videoinput')
+      const candidateDevices = videoDevices.filter(device => !_isClearlyFrontCamera(device))
+      const probeDevices = candidateDevices.length ? candidateDevices : videoDevices
+
+      for (const device of probeDevices) {
+        try {
+          if (await _probeDeviceForTorch(device)) {
+            cachedPrimaryMainCameraId = device.deviceId
+            console.log('Main 1x camera identified via torch capability:', device.label || device.deviceId)
+            return cachedPrimaryMainCameraId
+          }
+        } catch (err) {
+          console.warn('Torch heuristic: failed to inspect camera:', device.label || device.deviceId, err)
         }
-      } catch (e) {
-        // Ignore errors for individual cameras (e.g., infrared lenses that can't be opened)
-        console.warn('Torch heuristic: failed to inspect camera:', device.label, e);
+      }
+
+      console.log('Torch heuristic: no torch-capable camera found; falling back to environment camera.')
+      return null
+    } catch (err) {
+      console.warn('Torch heuristic failed:', err)
+      if (_isPermissionDeniedError(err)) throw err
+      return null
+    } finally {
+      primaryMainCameraPromise = null
+    }
+  })()
+
+  return primaryMainCameraPromise
+}
+
+async function _applyPrimaryLensPreferences(stream) {
+  const track = stream?.getVideoTracks?.()[0]
+  if (!track) return
+
+  try {
+    const capabilities = typeof track.getCapabilities === 'function' ? track.getCapabilities() : {}
+    if (capabilities.zoom && typeof track.applyConstraints === 'function') {
+      const zoomMin = Number(capabilities.zoom.min)
+      const zoomMax = Number(capabilities.zoom.max)
+      if (Number.isFinite(zoomMin) && Number.isFinite(zoomMax)) {
+        const preferredZoom = zoomMin <= 1 && zoomMax >= 1 ? 1 : zoomMin
+        await track.applyConstraints({ advanced: [{ zoom: preferredZoom }] })
       }
     }
   } catch (err) {
-    console.warn('Torch heuristic failed:', err);
+    console.warn('Camera zoom preference could not be applied:', err)
   }
-  return null;
+
+  if (typeof track.getSettings === 'function') {
+    console.log('Camera stream settings:', track.getSettings())
+  }
 }
 
 async function tryGetUserMedia() {
   // Step 1: Run the torch heuristic to find the primary main lens
-  const mainDeviceId = await _findMainCameraWithTorch();
+  const mainDeviceId = await _getPrimaryMainCameraId()
 
   // Step 2: Try to start the camera using the exact device ID if found
   if (mainDeviceId) {
     try {
-      return await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           deviceId: { exact: mainDeviceId },
-          width:  { ideal: 1920 },
-          height: { ideal: 1440 },
-          advanced: [{ zoom: 1 }]
+          width:  { ideal: CAMERA_VIDEO_WIDTH_IDEAL },
+          height: { ideal: CAMERA_VIDEO_HEIGHT_IDEAL },
         },
         audio: false
-      });
+      })
+      await _applyPrimaryLensPreferences(stream)
+      return stream
     } catch (err) {
-      console.warn('Failed to start camera with heuristic deviceId, falling back...', err);
+      cachedPrimaryMainCameraId = null
+      console.warn('Failed to start camera with heuristic deviceId, falling back...', err)
     }
   }
 
   // Step 3: Fallback logic
   try {
-    return await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       video: {
-        facingMode: 'environment',
-        width:  { ideal: 1920 },
-        height: { ideal: 1440 },
-        advanced: [{ zoom: 1 }],
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: CAMERA_VIDEO_WIDTH_IDEAL },
+        height: { ideal: CAMERA_VIDEO_HEIGHT_IDEAL },
       },
       audio: false,
     })
+    await _applyPrimaryLensPreferences(stream)
+    return stream
   } catch {
     try {
-      return await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1440 } },
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: CAMERA_VIDEO_WIDTH_IDEAL },
+          height: { ideal: CAMERA_VIDEO_HEIGHT_IDEAL },
+        },
         audio: false,
       })
+      await _applyPrimaryLensPreferences(stream)
+      return stream
     } catch {
-      return await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
+      await _applyPrimaryLensPreferences(stream)
+      return stream
     }
   }
+}
+
+function _isBlob(value) {
+  return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
+}
+
+function _finiteMaxRangeValue(range) {
+  const max = Number(range?.max)
+  return Number.isFinite(max) && max > 0 ? Math.round(max) : null
+}
+
+async function _getImageBlobDimensions(blob) {
+  if (!_isBlob(blob)) return { width: null, height: null }
+
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(blob)
+      const dimensions = { width: bitmap.width || null, height: bitmap.height || null }
+      bitmap.close?.()
+      if (dimensions.width && dimensions.height) return dimensions
+    } catch (err) {
+      console.warn('Could not read captured image dimensions with createImageBitmap:', err)
+    }
+  }
+
+  return await new Promise(resolve => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      const dimensions = {
+        width: img.naturalWidth || img.width || null,
+        height: img.naturalHeight || img.height || null,
+      }
+      URL.revokeObjectURL(url)
+      resolve(dimensions)
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      resolve({ width: null, height: null })
+    }
+    img.src = url
+  })
+}
+
+async function _takeStillPhoto(video) {
+  const stream = video?.srcObject
+  const track = stream?.getVideoTracks?.()[0]
+  if (!track || typeof window.ImageCapture !== 'function') return null
+
+  const imageCapture = new window.ImageCapture(track)
+  if (typeof imageCapture.takePhoto !== 'function') return null
+
+  const photoSettings = {}
+  try {
+    if (typeof imageCapture.getPhotoCapabilities === 'function') {
+      const capabilities = await imageCapture.getPhotoCapabilities()
+      const imageWidth = _finiteMaxRangeValue(capabilities?.imageWidth)
+      const imageHeight = _finiteMaxRangeValue(capabilities?.imageHeight)
+      if (imageWidth) photoSettings.imageWidth = imageWidth
+      if (imageHeight) photoSettings.imageHeight = imageHeight
+      if (capabilities?.fillLightMode?.includes?.('off')) photoSettings.fillLightMode = 'off'
+    }
+  } catch (err) {
+    console.warn('Photo capabilities unavailable; taking still with defaults:', err)
+  }
+
+  const blob = await imageCapture.takePhoto(photoSettings)
+  if (!_isBlob(blob)) throw new Error('Still photo capture returned no image')
+  console.log('Captured still photo via ImageCapture:', {
+    bytes: blob.size,
+    type: blob.type,
+    settings: typeof track.getSettings === 'function' ? track.getSettings() : null,
+    photoSettings,
+  })
+  return blob
+}
+
+async function _captureVideoFrame(video) {
+  const w = video.videoWidth
+  const h = video.videoHeight
+
+  if (!w || !h) {
+    showToast('Camera not fully ready')
+    return null
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width  = w
+  canvas.height = h
+  canvas.getContext('2d').drawImage(video, 0, 0, w, h)
+
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob(nextBlob => {
+      if (nextBlob) resolve(nextBlob)
+      else reject(new Error('Image capture failed'))
+    }, 'image/jpeg', 0.92)
+  })
+
+  console.log('Captured fallback video frame:', { width: w, height: h, bytes: blob.size })
+  return blob
+}
+
+async function _captureCameraBlob(video) {
+  try {
+    const stillBlob = await _takeStillPhoto(video)
+    if (_isBlob(stillBlob)) return stillBlob
+  } catch (err) {
+    console.warn('ImageCapture still photo failed; falling back to video frame:', err)
+  }
+  return await _captureVideoFrame(video)
 }
 
 export async function startCamera(options = {}) {
   const preserveBatch = !!options.preserveBatch
   try {
+    stopCamera()
     const stream = await tryGetUserMedia()
     state.cameraStream = stream
     const video = document.getElementById('camera-video')
@@ -180,6 +377,7 @@ export function stopCamera() {
   const video = document.getElementById('camera-video')
   if (video) {
     video.onloadedmetadata = null
+    video.srcObject = null
     video.classList.remove('camera-video-full-frame')
   }
 }
@@ -217,50 +415,39 @@ function capturePhoto() {
       aiCropSourceH: 600,
     })
   } else {
-    let w = video.videoWidth
-    let h = video.videoHeight
-
-    if (!w || !h) {
+    const previewW = video.videoWidth
+    const previewH = video.videoHeight
+    if (!previewW || !previewH) {
       showToast('Camera not fully ready')
       return
     }
 
-    // Scale down to prevent mobile browser OOM crashes from huge blobs
-    const maxEdge = 1920
-    if (w > maxEdge || h > maxEdge) {
-      const scale = maxEdge / Math.max(w, h)
-      w = Math.round(w * scale)
-      h = Math.round(h * scale)
+    const photo = {
+      blob: null,
+      blobPromise: null,
+      gps: state.gps,
+      ts: new Date(),
+      emoji: '📸',
+      aiCropRect: getDefaultAiCropRect(previewW, previewH),
+      aiCropSourceW: previewW,
+      aiCropSourceH: previewH,
     }
 
-    // Create a fresh canvas for each capture to avoid toBlob() race conditions
-    // which can cause promises to hang if the shutter is tapped rapidly.
-    const canvas = document.createElement('canvas')
-    canvas.width  = w
-    canvas.height = h
-    canvas.getContext('2d').drawImage(video, 0, 0, w, h)
-
-    // Wrap toBlob in a Promise so review save can await all blobs before uploading
-    const blobPromise = new Promise((resolve, reject) => {
-      canvas.toBlob(blob => {
-        if (blob) resolve(blob)
-        else reject(new Error('Image capture failed'))
-      }, 'image/jpeg', 0.92)
+    const blobPromise = _captureCameraBlob(video).then(async blob => {
+      const dimensions = await _getImageBlobDimensions(blob)
+      if (dimensions.width && dimensions.height) {
+        photo.aiCropRect = getDefaultAiCropRect(dimensions.width, dimensions.height)
+        photo.aiCropSourceW = dimensions.width
+        photo.aiCropSourceH = dimensions.height
+      }
+      return blob
     })
     
     // Add a dummy catch to prevent UnhandledPromiseRejection if it's not awaited immediately
     blobPromise.catch(() => {})
-    
-    state.capturedPhotos.push({
-      blob: null,
-      blobPromise,
-      gps: state.gps,
-      ts: new Date(),
-      emoji: '📸',
-      aiCropRect: getDefaultAiCropRect(w, h),
-      aiCropSourceW: w,
-      aiCropSourceH: h,
-    })
+
+    photo.blobPromise = blobPromise
+    state.capturedPhotos.push(photo)
   }
 
   state.batchCount++

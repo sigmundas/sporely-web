@@ -50,6 +50,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Close',
     'home.sporelyCam': 'Sporely Cam',
+    'home.nativeCam': 'Native Cam',
     'home.importPhotos': 'Import Photos',
     'home.recentFinds': 'Recent Finds',
     'home.history': 'History →',
@@ -357,6 +358,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Lukk',
     'home.sporelyCam': 'Sporely Cam',
+    'home.nativeCam': 'Native Cam',
     'home.importPhotos': 'Importer bilder',
     'home.recentFinds': 'Siste funn',
     'home.history': 'Historikk →',
@@ -664,6 +666,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Stäng',
     'home.sporelyCam': 'Sporely Cam',
+    'home.nativeCam': 'Native Cam',
     'home.importPhotos': 'Importera bilder',
     'home.recentFinds': 'Senaste fynd',
     'home.history': 'Historik →',
@@ -971,6 +974,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Schließen',
     'home.sporelyCam': 'Sporely Cam',
+    'home.nativeCam': 'Native Cam',
     'home.importPhotos': 'Fotos importieren',
     'home.recentFinds': 'Letzte Funde',
     'home.history': 'Verlauf →',
@@ -1424,6 +1428,7 @@ export function applyStaticTranslations() {
   setText('#home-stat-species-label', 'stats.species')
   setText('#home-stat-spores-label', 'stats.spores')
   setText('#ac-sporely-cam .action-card-label', 'home.sporelyCam')
+  setText('#ac-native-cam .action-card-label', 'home.nativeCam')
   setText('#ac-import .action-card-label', 'home.importPhotos')
 
   setText('#gps-display', 'capture.acquiring')

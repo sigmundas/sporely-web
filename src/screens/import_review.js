@@ -15,6 +15,7 @@ import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
 import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes } from '../settings.js';
 
 const NativePhotoPicker = registerPlugin('NativePhotoPicker');
+const NativeCamera = registerPlugin('NativeCamera');
 let sessions = [];
 let expandedSessionIds = new Set();
 let sourceItems = [];
@@ -483,6 +484,30 @@ export async function openPhotoImportPicker() {
     _openBrowserFileInput('import-browse-input');
   } else {
     _openBrowserFileInput('import-photo-input');
+  }
+}
+
+export async function openNativeCamera() {
+  if (!_isNativeApp() || Capacitor.getPlatform?.() !== 'android') {
+    showToast('Native Cam is available in the Android app.')
+    return
+  }
+
+  try {
+    const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
+      ? {
+          latitude: state.gps.lat,
+          longitude: state.gps.lon,
+          altitude: Number.isFinite(state.gps.altitude) ? state.gps.altitude : null,
+          accuracy: Number.isFinite(state.gps.accuracy) ? state.gps.accuracy : null,
+        }
+      : null
+    await _handleNativePhotoResult(await NativeCamera.capturePhotos(gps ? { gps } : {}))
+  } catch (err) {
+    if (_isPickerCancel(err)) return
+    console.warn('Native camera failed:', err)
+    showToast(`Native Cam: ${err?.message || err}`)
+    _hideProgress()
   }
 }
 

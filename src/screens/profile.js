@@ -88,7 +88,21 @@ export async function refreshHeaderProfileButtons(profile = null) {
   }
 
   const initials = _initials(summary?.username || state.user?.email || '')
-  const avatarUrl = summary?.avatar_url || ''
+  let avatarUrl = summary?.avatar_url || ''
+  let isValid = false
+
+  if (avatarUrl) {
+    avatarUrl = _withCacheBust(avatarUrl, true)
+    isValid = await _canLoadImage(avatarUrl)
+  }
+  if (!isValid) {
+    const signed = await _getSignedAvatarUrl(uid, true)
+    if (signed && await _canLoadImage(signed)) {
+      avatarUrl = signed
+      isValid = true
+    }
+  }
+
   const targets = [
     ['home-profile-img', 'home-profile-initials'],
     ['finds-profile-img', 'finds-profile-initials'],
@@ -102,7 +116,7 @@ export async function refreshHeaderProfileButtons(profile = null) {
     if (!img || !label) continue
 
     label.textContent = initials
-    if (avatarUrl && await _canLoadImage(avatarUrl)) {
+    if (isValid && avatarUrl) {
       img.src = avatarUrl
       img.style.display = 'block'
       label.style.display = 'none'
