@@ -634,6 +634,8 @@ return new Promise((resolve, reject) => {
 ## Documentation and Landing Page (VitePress)
 *Goal: Convert the existing `sporely-landing` static site into a VitePress project that directly serves the Markdown documentation from `sporely-py/docs` alongside the app feature highlights.*
 
+
+
 ### Status: Planning
 
 **Tasks:**

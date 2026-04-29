@@ -488,6 +488,11 @@ Media uploads use `sporely/utils/r2_storage.py` — a minimal S3-compatible clie
 SigV4 signing directly against the R2 S3 endpoint (bypasses the upload worker, uses
 service-level R2 API credentials from `python.env`).
 
+**Account binding safety:**
+- Desktop stores `linked_cloud_user_id` in its local `app_settings.json` after first successful sync and verifies the active Supabase user before each later push/pull.
+- If a local SQLite database is opened while signed into a different Supabase account, desktop sync aborts instead of duplicating observations/media into that account.
+- Desktop Settings → Sporely Cloud → **Reset Cloud Link...** clears local cloud IDs and the account binding only after warning that old Supabase/R2 data must be deleted separately through the web Profile delete-account flow.
+
 **Push (desktop → cloud):**
 - Queries SQLite for `cloud_id IS NULL OR sync_status = 'dirty'`
 - Upserts to Supabase (check-then-patch-or-post pattern)
