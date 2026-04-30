@@ -3,9 +3,9 @@ import { formatDate, formatTime, getTaxonomyLanguage, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, isArtsorakelNetworkError } from '../artsorakel.js'
+import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, runArtsorakelForMediaKeys, isArtsorakelNetworkError } from '../artsorakel.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
-import { deleteObservationMedia, resolveMediaSources, updateObservationImageCrop } from '../images.js'
+import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
@@ -190,6 +190,7 @@ export async function openFindDetail(obsId, options = {}) {
       img.src       = source.primaryUrl || source.fallbackUrl
       img.loading   = 'lazy'
       img.alt       = ''
+      img.dataset.storagePath = row.storage_path || ''
       img.dataset.aiSrc = aiSource?.primaryUrl || aiSource?.fallbackUrl || img.src
       img.dataset.aiFallback = source.fallbackUrl || source.primaryUrl || img.src
       if (source.fallbackUrl && source.fallbackUrl !== source.primaryUrl) {
@@ -280,23 +281,27 @@ async function _runAI() {
 
   try {
     async function fetchAiBlobForImage(img) {
-      const urls = [
-        img.dataset.aiSrc || '',
-        img.dataset.aiFallback || '',
-        img.src || '',
-      ].filter(Boolean)
+      try {
+        return await downloadObservationImageBlob(img.dataset.storagePath, { variant: 'medium' })
+      } catch (storageError) {
+        const urls = [
+          img.dataset.aiFallback || '',
+          img.dataset.aiSrc || '',
+          img.src || '',
+        ].filter(Boolean)
 
-      let lastError = null
-      for (const url of urls) {
-        try {
-          const resp = await fetch(url)
-          if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
-          return await resp.blob()
-        } catch (error) {
-          lastError = error
+        let lastError = storageError
+        for (const url of urls) {
+          try {
+            const resp = await fetch(url)
+            if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
+            return await resp.blob()
+          } catch (error) {
+            lastError = error
+          }
         }
+        throw lastError || new Error('Image fetch failed')
       }
-      throw lastError || new Error('Image fetch failed')
     }
 
     const blobResults = await Promise.allSettled(
@@ -305,7 +310,19 @@ async function _runAI() {
     const blobs = blobResults
       .filter(result => result.status === 'fulfilled' && result.value instanceof Blob)
       .map(result => result.value)
-    const predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage())
+    const mediaKeys = galleryImgs
+      .map(img => img.dataset.storagePath || '')
+      .filter(Boolean)
+
+    let predictions = null
+    if (blobs.length) {
+      predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage(), { tolerateFailures: true })
+    } else if (mediaKeys.length) {
+      console.warn('Artsorakel image download failed for existing observation:', blobResults)
+      predictions = await runArtsorakelForMediaKeys(mediaKeys, getTaxonomyLanguage(), { variant: 'medium' })
+    } else {
+      throw new Error('Could not load observation images for Artsorakel')
+    }
 
     if (!predictions?.length) {
       showToast(t('review.noMatch'))
@@ -349,6 +366,7 @@ async function _runAI() {
     } else {
       showToast(t('common.artsorakelError', { message }))
     }
+    console.warn('Artsorakel detail error:', err)
   } finally {
     btn.disabled = false
     btn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`

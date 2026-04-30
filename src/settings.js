@@ -3,6 +3,7 @@ const SYNC_OVER_MOBILE_DATA_KEY = 'sporely-sync-over-mobile-data'
 const LAST_SYNC_AT_KEY = 'sporely-last-sync-at'
 const ARTSORAKEL_MAX_EDGE_KEY = 'sporely-artsorakel-max-edge'
 const PHOTO_GAP_MINUTES_KEY = 'sporely-photo-gap'
+const CAMERA_MODE_KEY = 'sporely-camera-mode'
 const DEFAULT_ARTSORAKEL_MAX_EDGE = 500
 
 export function normalizeArtsorakelMaxEdge(value) {
@@ -45,6 +46,28 @@ export function setPhotoGapMinutes(value) {
   const normalized = normalizePhotoGapMinutes(value)
   try {
     localStorage.setItem(PHOTO_GAP_MINUTES_KEY, String(normalized))
+  } catch (_) {}
+  return normalized
+}
+
+export function normalizeCameraMode(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'sporely' ? 'sporely' : 'native'
+}
+
+export function getCameraMode() {
+  try {
+    return normalizeCameraMode(localStorage.getItem(CAMERA_MODE_KEY))
+  } catch (_) {
+    return 'native'
+  }
+}
+
+export function setCameraMode(value) {
+  const normalized = normalizeCameraMode(value)
+  try {
+    localStorage.setItem(CAMERA_MODE_KEY, normalized)
+    window.dispatchEvent(new CustomEvent('sporely-camera-mode-change', { detail: { mode: normalized } }))
   } catch (_) {}
   return normalized
 }

@@ -1,6 +1,6 @@
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
-const DEFAULT_ALLOWED_METHODS = 'PUT, POST, DELETE, OPTIONS'
+const DEFAULT_ALLOWED_METHODS = 'GET, PUT, POST, DELETE, OPTIONS'
 const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
   'Content-Type',
@@ -46,8 +46,16 @@ async function handleRequest(request, env, ctx) {
     return handleArtsorakel(request, env, ctx)
   }
 
+  if (request.method === 'POST' && url.pathname === '/artsorakel/media') {
+    return handleArtsorakelMedia(request, env, ctx)
+  }
+
   if (request.method === 'PUT' && url.pathname.startsWith('/upload/')) {
     return handleUpload(request, env, ctx, url)
+  }
+
+  if (request.method === 'GET' && url.pathname.startsWith('/upload/')) {
+    return handleDownload(request, env, ctx, url)
   }
 
   if (request.method === 'DELETE' && url.pathname.startsWith('/upload/')) {
@@ -156,6 +164,44 @@ async function handleUpload(request, env, ctx, url) {
     env,
     origin,
   )
+}
+
+async function handleDownload(request, env, ctx, url) {
+  if (!env.MEDIA_BUCKET) {
+    throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
+  }
+
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const authHeader = request.headers.get('Authorization')
+  const token = parseBearerToken(authHeader)
+  const claims = await verifySupabaseJwt(token, env, ctx)
+
+  const key = normalizeObjectKey(url.pathname.slice('/upload/'.length))
+  if (!key) {
+    throw httpError(400, 'invalid_key', 'Missing download key')
+  }
+  if (!await canReadMediaKey(env, claims, key)) {
+    throw httpError(403, 'key_not_allowed', 'Download key is not available to the authenticated user')
+  }
+
+  const object = await env.MEDIA_BUCKET.get(key)
+  if (!object) {
+    throw httpError(404, 'media_not_found', 'Media object was not found')
+  }
+
+  const headers = corsHeaders(request, env, origin)
+  object.writeHttpMetadata(headers)
+  if (object.httpEtag) headers.set('ETag', object.httpEtag)
+  headers.set('Cache-Control', 'private, max-age=300')
+
+  return new Response(object.body, {
+    status: 200,
+    headers,
+  })
 }
 
 async function handleDelete(request, env, ctx, url) {
@@ -286,6 +332,38 @@ function isOriginalImageKey(key) {
   return !!filename && !filename.startsWith('thumb_')
 }
 
+async function canReadMediaKey(env, claims, key) {
+  if (!claims?.sub || !key) return false
+  if (key.startsWith(`${claims.sub}/`)) return true
+  if (!hasSupabaseServiceRole(env)) return false
+
+  const imageQuery = [
+    `storage_path=eq.${encodeURIComponent(key)}`,
+    'select=observation_id',
+    'limit=1',
+  ].join('&')
+  const imageResponse = await supabaseRestFetch(env, `/rest/v1/observation_images?${imageQuery}`, { method: 'GET' })
+  if (!imageResponse.ok) {
+    throw httpError(500, 'media_owner_lookup_failed', 'Could not verify media ownership')
+  }
+  const imageRows = await imageResponse.json()
+  const observationId = Array.isArray(imageRows) ? imageRows[0]?.observation_id : null
+  if (!observationId) return false
+
+  const observationQuery = [
+    `id=eq.${encodeURIComponent(observationId)}`,
+    `user_id=eq.${encodeURIComponent(claims.sub)}`,
+    'select=id',
+    'limit=1',
+  ].join('&')
+  const observationResponse = await supabaseRestFetch(env, `/rest/v1/observations?${observationQuery}`, { method: 'GET' })
+  if (!observationResponse.ok) {
+    throw httpError(500, 'media_owner_lookup_failed', 'Could not verify media ownership')
+  }
+  const observationRows = await observationResponse.json()
+  return Array.isArray(observationRows) && observationRows.length > 0
+}
+
 async function handleArtsorakel(request, env, ctx) {
   const origin = resolveAllowedOrigin(request, env)
   if (request.headers.get('Origin') && !origin) {
@@ -317,6 +395,135 @@ async function handleArtsorakel(request, env, ctx) {
   return new Response(upstreamBody, {
     status: upstream.status,
     headers: responseHeaders,
+  })
+}
+
+async function handleArtsorakelMedia(request, env, ctx) {
+  if (!env.MEDIA_BUCKET) {
+    throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
+  }
+
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const authHeader = request.headers.get('Authorization')
+  const token = parseBearerToken(authHeader)
+  const claims = await verifySupabaseJwt(token, env, ctx)
+
+  let body
+  try {
+    body = await request.json()
+  } catch (_) {
+    throw httpError(400, 'invalid_json', 'Request body must be JSON')
+  }
+
+  const rawKeys = Array.isArray(body?.keys) ? body.keys : [body?.key]
+  const keys = [...new Set(rawKeys
+    .map(value => String(value || '').trim())
+    .filter(Boolean))]
+    .slice(0, parsePositiveInt(env.ARTSORAKEL_MAX_MEDIA_ITEMS, 6))
+  if (!keys.length) {
+    throw httpError(400, 'missing_media_keys', 'At least one media key is required')
+  }
+
+  const variant = String(body?.variant || 'medium').trim() || 'medium'
+  const responses = []
+  const errors = []
+
+  for (const rawKey of keys) {
+    let key
+    try {
+      key = normalizeObjectKey(rawKey)
+    } catch (error) {
+      errors.push({ key: rawKey, error: error?.code || 'invalid_key' })
+      continue
+    }
+
+    if (!await canReadMediaKey(env, claims, key)) {
+      errors.push({ key, error: 'key_not_allowed' })
+      continue
+    }
+
+    const object = await getMediaObjectForAi(env, key, variant)
+    if (!object) {
+      errors.push({ key, error: 'media_not_found' })
+      continue
+    }
+
+    try {
+      const data = await runArtsorakelForMediaObject(object)
+      responses.push({ key, data })
+    } catch (error) {
+      console.error('Artsorakel media request failed', error)
+      errors.push({ key, error: error?.code || 'artsorakel_failed' })
+    }
+  }
+
+  if (!responses.length) {
+    const allForbidden = errors.length > 0 && errors.every(item => item.error === 'key_not_allowed')
+    throw httpError(
+      allForbidden ? 403 : 502,
+      allForbidden ? 'key_not_allowed' : 'media_ai_failed',
+      allForbidden
+        ? 'Observation images are not available to the authenticated user'
+        : 'Could not load observation images for Artsorakel',
+    )
+  }
+
+  return jsonResponse(
+    {
+      ok: true,
+      total: keys.length,
+      responses,
+      errors,
+    },
+    200,
+    request,
+    env,
+    origin,
+  )
+}
+
+async function getMediaObjectForAi(env, key, variant) {
+  const candidates = mediaCandidateKeys(key, variant)
+  for (const candidate of candidates) {
+    const object = await env.MEDIA_BUCKET.get(candidate)
+    if (object) return object
+  }
+  return null
+}
+
+function mediaCandidateKeys(key, variant) {
+  if (!variant || variant === 'original') return [key]
+  const parts = key.split('/')
+  const fileName = parts.pop() || ''
+  const dir = parts.join('/')
+  const variantKey = dir ? `${dir}/thumb_${variant}_${fileName}` : `thumb_${variant}_${fileName}`
+  return [...new Set([variantKey, key].filter(Boolean))]
+}
+
+async function runArtsorakelForMediaObject(object) {
+  const contentType = String(object?.httpMetadata?.contentType || '').trim() || 'image/jpeg'
+  const bodyBuffer = await object.arrayBuffer()
+
+  let upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'image')
+  if (!upstream.ok) {
+    upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'file')
+  }
+  if (!upstream.ok) {
+    throw httpError(502, 'artsorakel_failed', `Artsdata AI ${upstream.status}`)
+  }
+  return upstream.json()
+}
+
+function postArtsorakelBuffer(bodyBuffer, contentType, fieldName) {
+  const form = new FormData()
+  form.append(fieldName, new Blob([bodyBuffer], { type: contentType }), 'photo.jpg')
+  return fetch('https://ai.artsdatabanken.no', {
+    method: 'POST',
+    body: form,
   })
 }
 

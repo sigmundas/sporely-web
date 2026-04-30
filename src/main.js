@@ -26,7 +26,7 @@ import { initCapture } from './screens/capture.js'
 import { buildReviewGrid, initReview } from './screens/review.js'
 import { initFindDetail } from './screens/find_detail.js'
 import { initPhotoViewer } from './photo-viewer.js'
-import { initImportReview, renderSessions, restoreImportSessions } from './screens/import_review.js'
+import { initImportReview, openNativeCamera, renderSessions, restoreImportSessions } from './screens/import_review.js'
 import { clearImportSessions, loadImportSessions } from './import-store.js'
 import { initProfile, loadProfile, refreshHeaderProfileButtons } from './screens/profile.js'
 import { initPeople, loadPeople } from './screens/people.js'
@@ -37,17 +37,21 @@ import { clearMediaUrlCache } from './images.js'
 import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
 import {
   getArtsorakelMaxEdge,
+  getCameraMode,
   getDefaultVisibility,
   getPhotoGapMinutes,
   getSyncOverMobileDataEnabled,
   setArtsorakelMaxEdge,
+  setCameraMode,
   setDefaultVisibility,
   setLastSyncAt,
   setPhotoGapMinutes,
   setSyncOverMobileDataEnabled,
 } from './settings.js'
+import { openPreferredCamera, setNativeCameraOpener } from './camera-actions.js'
 
 initI18n()
+setNativeCameraOpener(openNativeCamera)
 
 let _syncFeedbackBound = false
 let _appBootstrapped = false
@@ -204,6 +208,13 @@ function initSettings() {
     })
   })
 
+  document.querySelectorAll('.settings-camera-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      setCameraMode(btn.dataset.cameraMode)
+      _syncSettingsUI()
+    })
+  })
+
   // Photo gap input
   const gapInput = document.getElementById('settings-gap-input')
   function _setPhotoGap(value) {
@@ -289,6 +300,11 @@ function _syncSettingsUI() {
     btn.classList.toggle('active', btn.dataset.imageResolutionMode === selectedResolution)
   })
 
+  const cameraMode = getCameraMode()
+  document.querySelectorAll('.settings-camera-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.cameraMode === cameraMode)
+  })
+
   const mobileSyncToggle = document.getElementById('settings-mobile-sync-toggle')
   if (mobileSyncToggle) mobileSyncToggle.checked = getSyncOverMobileDataEnabled()
 
@@ -309,6 +325,7 @@ function initNav() {
     loadFinds()
   })
   document.getElementById('nav-map').addEventListener('click', () => navigate('map'))
+  document.getElementById('map-fab')?.addEventListener('click', openPreferredCamera)
   document.getElementById('nav-people').addEventListener('click', () => {
     navigate('people')
     loadPeople()

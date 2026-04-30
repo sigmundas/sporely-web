@@ -4,7 +4,6 @@ import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
-import { openPhotoImportPicker } from './import_review.js'
 
 function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
@@ -19,9 +18,7 @@ const CAMERA_VIDEO_HEIGHT_IDEAL = 3000
 export function initCapture() {
   document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
   document.getElementById('done-btn').addEventListener('click', finishCapture)
-  document.getElementById('capture-import-btn')?.addEventListener('click', () => {
-    void openPhotoImportPicker()
-  })
+  document.getElementById('capture-cancel-btn')?.addEventListener('click', cancelCapture)
   document.getElementById('camera-retry-btn').addEventListener('click', () => {
     document.getElementById('camera-denied').style.display = 'none'
     startCamera()
@@ -469,6 +466,24 @@ function finishCapture() {
   stopCamera()
   document.getElementById('bottom-nav').style.display = 'flex'
   navigate('review')
+}
+
+function cancelCapture() {
+  stopCamera()
+  state.capturedPhotos = []
+  state.reviewContext = null
+  state.batchCount = 0
+  state.sessionStart = null
+  state.captureDraft = {
+    habitat: '',
+    notes: '',
+    uncertain: false,
+    visibility: getDefaultVisibility(),
+  }
+  document.getElementById('batch-count').textContent = '0'
+  document.getElementById('batch-area').style.display = 'none'
+  document.getElementById('bottom-nav').style.display = 'flex'
+  navigate('home')
 }
 
 function _syncPreviewFit(video) {

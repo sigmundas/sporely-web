@@ -227,7 +227,25 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
   const predictions = _extractPredictions(data)
   onIdReceived?.(predictions)
 
-  return predictions
+  return _normalizePredictions(predictions, langNorm)
+}
+
+function _extractPredictions(data) {
+  if (Array.isArray(data)) return data
+  if (!data || typeof data !== 'object') return []
+
+  for (const key of ['predictions', 'results', 'matches', 'items', 'data']) {
+    if (Array.isArray(data[key])) return data[key]
+  }
+
+  if (Array.isArray(data?.data?.predictions)) return data.data.predictions
+  if (Array.isArray(data?.result?.predictions)) return data.result.predictions
+  if (data?.taxon || data?.scientificName || data?.probability) return [data]
+  return []
+}
+
+function _normalizePredictions(data, langNorm) {
+  return _extractPredictions(data)
     .filter(p => p?.taxon?.vernacularName !== '*** Utdatert versjon ***')
     .slice(0, 5)
     .map(pred => {
@@ -246,48 +264,7 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
     })
 }
 
-function _extractPredictions(data) {
-  if (Array.isArray(data)) return data
-  if (!data || typeof data !== 'object') return []
-
-  for (const key of ['predictions', 'results', 'matches', 'items', 'data']) {
-    if (Array.isArray(data[key])) return data[key]
-  }
-
-  if (Array.isArray(data?.data?.predictions)) return data.data.predictions
-  if (Array.isArray(data?.result?.predictions)) return data.result.predictions
-  if (data?.taxon || data?.scientificName || data?.probability) return [data]
-  return []
-}
-
-export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
-  const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
-    const rawBlob = _isBlob(item) ? item : item?.blob
-    if (!_isBlob(rawBlob)) return null
-
-    // Resize to ≤1MP before cropping so createCroppedImageBlob doesn't OOM
-    // on high-resolution imported photos (camera blobs are already ≤1MP via this path too).
-    const resizedBlob = await _resizeForAi(rawBlob)
-
-    const cropRect = _isBlob(item) ? null : normalizeAiCropRect(item.cropRect)
-    if (!cropRect) return resizedBlob
-
-    try {
-      return await createCroppedImageBlob(resizedBlob, cropRect)
-    } catch (error) {
-      console.warn('AI crop export failed, falling back to resized image:', error)
-      return resizedBlob
-    }
-  }))).filter(blob => _isBlob(blob))
-
-  if (!preparedBlobs.length) return null
-
-  if (preparedBlobs.length === 1) {
-    return runArtsorakel(preparedBlobs[0], lang, options)
-  }
-
-  const responses = await Promise.all(preparedBlobs.map(blob => runArtsorakel(blob, lang, options)))
-  const totalBlobs = preparedBlobs.length
+function _combinePredictionResponses(responses, totalBlobs) {
   const combined = new Map()
 
   responses
@@ -324,4 +301,89 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
     )
     .slice(0, 5)
     .map(({ probabilitySum, hitCount, ...prediction }) => prediction)
+}
+
+export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
+  const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
+    const rawBlob = _isBlob(item) ? item : item?.blob
+    if (!_isBlob(rawBlob)) return null
+
+    // Resize to ≤1MP before cropping so createCroppedImageBlob doesn't OOM
+    // on high-resolution imported photos (camera blobs are already ≤1MP via this path too).
+    const resizedBlob = await _resizeForAi(rawBlob)
+
+    const cropRect = _isBlob(item) ? null : normalizeAiCropRect(item.cropRect)
+    if (!cropRect) return resizedBlob
+
+    try {
+      return await createCroppedImageBlob(resizedBlob, cropRect)
+    } catch (error) {
+      console.warn('AI crop export failed, falling back to resized image:', error)
+      return resizedBlob
+    }
+  }))).filter(blob => _isBlob(blob))
+
+  if (!preparedBlobs.length) return null
+
+  if (preparedBlobs.length === 1) {
+    return runArtsorakel(preparedBlobs[0], lang, options)
+  }
+
+  const tolerateFailures = options?.tolerateFailures === true
+  const responses = tolerateFailures
+    ? await Promise.allSettled(preparedBlobs.map(blob => runArtsorakel(blob, lang, options)))
+        .then(results => {
+          const fulfilled = results
+            .filter(result => result.status === 'fulfilled')
+            .map(result => result.value)
+          if (fulfilled.length) return fulfilled
+          const firstError = results.find(result => result.status === 'rejected')?.reason
+          throw firstError || new Error('Artsorakel failed for all images')
+        })
+    : await Promise.all(preparedBlobs.map(blob => runArtsorakel(blob, lang, options)))
+  return _combinePredictionResponses(responses, preparedBlobs.length)
+}
+
+export async function runArtsorakelForMediaKeys(mediaKeys, lang = 'no', options = {}) {
+  const keys = [...new Set((mediaKeys || [])
+    .map(key => String(key || '').trim())
+    .filter(Boolean))]
+  if (!keys.length) return null
+  if (!ARTSDATA_PROXY_BASE_URL) {
+    throw new Error('Artsorakel media proxy unavailable')
+  }
+
+  const { data: { session } } = await supabase.auth.getSession()
+  const accessToken = session?.access_token
+  if (!accessToken) throw new Error('Missing authenticated session for Artsorakel media')
+
+  const response = await fetch(`${ARTSDATA_PROXY_BASE_URL}/artsorakel/media`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      keys,
+      variant: options?.variant || 'medium',
+      lang: normalizeLang(lang),
+    }),
+    signal: options?.signal,
+  })
+
+  if (!response.ok) {
+    let detail = response.statusText || 'Artsorakel media failed'
+    try {
+      const payload = await response.json()
+      if (payload?.message) detail = payload.message
+    } catch (_) {}
+    throw new Error(`Artsorakel media failed: ${detail}`)
+  }
+
+  const payload = await response.json()
+  const langNorm = normalizeLang(lang)
+  const responses = (payload?.responses || [])
+    .map(item => _normalizePredictions(item?.data || item, langNorm))
+  if (!responses.length) return []
+  return _combinePredictionResponses(responses, Number(payload?.total || responses.length) || responses.length)
 }

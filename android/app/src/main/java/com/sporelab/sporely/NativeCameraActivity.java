@@ -24,6 +24,7 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.camera.camera2.interop.Camera2CameraInfo;
@@ -55,6 +56,7 @@ import java.util.Set;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+@SuppressWarnings("deprecation")
 public class NativeCameraActivity extends AppCompatActivity {
     public static final String EXTRA_GPS_JSON = "com.sporelab.sporely.NativeCamera.GPS";
     public static final String EXTRA_PHOTOS_JSON = "com.sporelab.sporely.NativeCamera.PHOTOS";
@@ -63,12 +65,17 @@ public class NativeCameraActivity extends AppCompatActivity {
     private static final double FULL_FRAME_DIAGONAL_MM = 43.2666153;
     private static final int SPORELY_GREEN = Color.rgb(88, 155, 82);
     private static final int SPORELY_GREEN_DARK = Color.rgb(38, 72, 43);
+    private static final int CONTROLS_BOTTOM_PADDING_DP = 112;
+    private static final int BATCH_STACK_BOTTOM_MARGIN_DP = 210;
+    private static final int ACTION_BUTTON_HEIGHT_DP = 44;
 
     private PreviewView previewView;
+    private FrameLayout batchStack;
     private TextView countBadge;
     private ProcessCameraProvider cameraProvider;
     private ImageCapture imageCapture;
     private Location captureLocation;
+    private boolean canceled = false;
     private final ArrayList<File> capturedFiles = new ArrayList<>();
 
     @Override
@@ -76,6 +83,12 @@ public class NativeCameraActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         captureLocation = parseLocation(getIntent().getStringExtra(EXTRA_GPS_JSON));
         buildLayout();
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                finishCanceled();
+            }
+        });
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera();
@@ -93,8 +106,7 @@ public class NativeCameraActivity extends AppCompatActivity {
             startCamera();
             return;
         }
-        setResult(Activity.RESULT_CANCELED);
-        finish();
+        finishCanceled();
     }
 
     private void buildLayout() {
@@ -111,24 +123,16 @@ public class NativeCameraActivity extends AppCompatActivity {
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
         controls.setGravity(Gravity.CENTER);
-        controls.setPadding(dp(22), dp(10), dp(22), dp(30));
+        controls.setPadding(dp(22), dp(10), dp(22), dp(CONTROLS_BOTTOM_PADDING_DP));
 
         TextView cancel = makeActionButton("Cancel", false);
         TextView shutter = makeShutterButton();
         TextView done = makeActionButton("Done", true);
-        countBadge = new TextView(this);
-        countBadge.setTextColor(Color.WHITE);
-        countBadge.setGravity(Gravity.CENTER);
-        countBadge.setText("0");
-        countBadge.setTextSize(14);
-        countBadge.setTypeface(Typeface.DEFAULT_BOLD);
-        countBadge.setMinWidth(dp(34));
-        countBadge.setMinHeight(dp(28));
-        countBadge.setBackground(makeRoundedBackground(Color.argb(150, 0, 0, 0), 14, 1, Color.argb(65, 255, 255, 255)));
+        batchStack = makeBatchStack();
+        batchStack.setVisibility(FrameLayout.GONE);
 
         cancel.setOnClickListener(v -> {
-            setResult(Activity.RESULT_CANCELED);
-            finish();
+            finishCanceled();
         });
         shutter.setOnClickListener(v -> capturePhoto());
         done.setOnClickListener(v -> finishWithPhotos());
@@ -136,12 +140,6 @@ public class NativeCameraActivity extends AppCompatActivity {
         LinearLayout shutterStack = new LinearLayout(this);
         shutterStack.setOrientation(LinearLayout.VERTICAL);
         shutterStack.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams countParams = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            dp(28)
-        );
-        countParams.setMargins(0, 0, 0, dp(8));
-        shutterStack.addView(countBadge, countParams);
         shutterStack.addView(shutter, new LinearLayout.LayoutParams(dp(82), dp(82)));
 
         controls.addView(cancel, actionButtonParams());
@@ -154,7 +152,43 @@ public class NativeCameraActivity extends AppCompatActivity {
             Gravity.BOTTOM
         );
         root.addView(controls, controlParams);
+        FrameLayout.LayoutParams batchParams = new FrameLayout.LayoutParams(dp(54), dp(54), Gravity.BOTTOM | Gravity.END);
+        batchParams.setMargins(0, 0, dp(28), dp(BATCH_STACK_BOTTOM_MARGIN_DP));
+        root.addView(batchStack, batchParams);
         setContentView(root);
+    }
+
+    private FrameLayout makeBatchStack() {
+        FrameLayout stack = new FrameLayout(this);
+        stack.addView(makeMushroomTile(-4f), makeTileParams(6, 0));
+        stack.addView(makeMushroomTile(-1f), makeTileParams(3, 4));
+
+        countBadge = new TextView(this);
+        countBadge.setTextColor(Color.rgb(13, 17, 9));
+        countBadge.setGravity(Gravity.CENTER);
+        countBadge.setText("0");
+        countBadge.setTextSize(11);
+        countBadge.setTypeface(Typeface.DEFAULT_BOLD);
+        countBadge.setBackground(makeRoundedBackground(SPORELY_GREEN, 10, 0, Color.TRANSPARENT));
+        FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.END | Gravity.BOTTOM);
+        stack.addView(countBadge, badgeParams);
+        return stack;
+    }
+
+    private FrameLayout.LayoutParams makeTileParams(float left, float top) {
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(36), dp(36));
+        params.setMargins(dp(left), dp(top), 0, 0);
+        return params;
+    }
+
+    private TextView makeMushroomTile(float rotation) {
+        TextView tile = new TextView(this);
+        tile.setText("\uD83C\uDF44");
+        tile.setTextSize(16);
+        tile.setGravity(Gravity.CENTER);
+        tile.setRotation(rotation);
+        tile.setBackground(makeRoundedBackground(Color.rgb(32, 40, 28), 8, 2, Color.argb(40, 255, 255, 255)));
+        return tile;
     }
 
     private TextView makeActionButton(String label, boolean primary) {
@@ -163,14 +197,14 @@ public class NativeCameraActivity extends AppCompatActivity {
         button.setGravity(Gravity.CENTER);
         button.setTextSize(15);
         button.setTypeface(Typeface.DEFAULT_BOLD);
-        button.setMinHeight(dp(46));
+        button.setMinHeight(dp(ACTION_BUTTON_HEIGHT_DP));
         button.setPadding(dp(16), 0, dp(16), 0);
         if (primary) {
             button.setTextColor(Color.WHITE);
-            button.setBackground(makeRoundedBackground(SPORELY_GREEN_DARK, 23, 1, SPORELY_GREEN));
+            button.setBackground(makeRoundedBackground(SPORELY_GREEN_DARK, ACTION_BUTTON_HEIGHT_DP / 2f, 1, SPORELY_GREEN));
         } else {
             button.setTextColor(Color.argb(235, 255, 255, 255));
-            button.setBackground(makeRoundedBackground(Color.argb(110, 0, 0, 0), 23, 1, Color.argb(80, 255, 255, 255)));
+            button.setBackground(makeRoundedBackground(Color.argb(110, 0, 0, 0), ACTION_BUTTON_HEIGHT_DP / 2f, 1, Color.argb(80, 255, 255, 255)));
         }
         return button;
     }
@@ -183,8 +217,8 @@ public class NativeCameraActivity extends AppCompatActivity {
     }
 
     private LinearLayout.LayoutParams actionButtonParams() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(46), 1f);
-        params.setMargins(dp(4), dp(34), dp(4), 0);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(ACTION_BUTTON_HEIGHT_DP), 1f);
+        params.setMargins(dp(4), dp(82 - ACTION_BUTTON_HEIGHT_DP), dp(4), 0);
         return params;
     }
 
@@ -209,8 +243,7 @@ public class NativeCameraActivity extends AppCompatActivity {
                 bindCamera();
             } catch (Exception ex) {
                 Toast.makeText(this, "Native camera failed: " + ex.getMessage(), Toast.LENGTH_LONG).show();
-                setResult(Activity.RESULT_CANCELED);
-                finish();
+                finishCanceled();
             }
         }, ContextCompat.getMainExecutor(this));
     }
@@ -240,6 +273,7 @@ public class NativeCameraActivity extends AppCompatActivity {
         cameraProvider.bindToLifecycle(this, selected.selector, preview, imageCapture);
     }
 
+    @SuppressWarnings("deprecation")
     private int getDisplayRotation() {
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             return getDisplay() != null ? getDisplay().getRotation() : Surface.ROTATION_0;
@@ -335,6 +369,10 @@ public class NativeCameraActivity extends AppCompatActivity {
         imageCapture.takePicture(options, ContextCompat.getMainExecutor(this), new ImageCapture.OnImageSavedCallback() {
             @Override
             public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
+                if (canceled) {
+                    if (file.exists() && !file.delete()) file.deleteOnExit();
+                    return;
+                }
                 try {
                     normalizeOrientation(file, capturedAtMillis);
                     writeCaptureExif(file, capturedAtMillis);
@@ -343,6 +381,7 @@ public class NativeCameraActivity extends AppCompatActivity {
                 }
                 capturedFiles.add(file);
                 countBadge.setText(String.valueOf(capturedFiles.size()));
+                batchStack.setVisibility(FrameLayout.VISIBLE);
             }
 
             @Override
@@ -352,14 +391,32 @@ public class NativeCameraActivity extends AppCompatActivity {
         });
     }
 
+    private void finishCanceled() {
+        canceled = true;
+        setResult(Activity.RESULT_CANCELED);
+        deleteCapturedFiles();
+        finish();
+    }
+
+    private void deleteCapturedFiles() {
+        for (File file : capturedFiles) {
+            if (file != null && file.exists() && !file.delete()) {
+                file.deleteOnExit();
+            }
+        }
+        capturedFiles.clear();
+        if (countBadge != null) countBadge.setText("0");
+        if (batchStack != null) batchStack.setVisibility(FrameLayout.GONE);
+    }
+
     private void finishWithPhotos() {
         if (capturedFiles.isEmpty()) {
-            setResult(Activity.RESULT_CANCELED);
-            finish();
+            finishCanceled();
             return;
         }
 
         try {
+            canceled = false;
             JSONArray photos = new JSONArray();
             for (File file : capturedFiles) {
                 photos.put(buildPhotoJson(file));

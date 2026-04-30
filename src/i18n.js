@@ -255,6 +255,7 @@ const messages = {
     'settings.dark': 'Dark',
     'settings.language': 'Language',
     'settings.appLanguage': 'App language',
+    'settings.camera': 'Camera',
     'settings.photoImport': 'Photo Import',
     'settings.newObservationAfter': 'New observation after',
     'settings.min': 'min',
@@ -563,6 +564,7 @@ const messages = {
     'settings.dark': 'Mørk',
     'settings.language': 'Språk',
     'settings.appLanguage': 'Appspråk',
+    'settings.camera': 'Kamera',
     'settings.photoImport': 'Bildeimport',
     'settings.newObservationAfter': 'Ny observasjon etter',
     'settings.min': 'min',
@@ -871,6 +873,7 @@ const messages = {
     'settings.dark': 'Mörk',
     'settings.language': 'Språk',
     'settings.appLanguage': 'Appspråk',
+    'settings.camera': 'Kamera',
     'settings.photoImport': 'Bildimport',
     'settings.newObservationAfter': 'Ny observation efter',
     'settings.min': 'min',
@@ -1179,6 +1182,7 @@ const messages = {
     'settings.dark': 'Dunkel',
     'settings.language': 'Sprache',
     'settings.appLanguage': 'App-Sprache',
+    'settings.camera': 'Kamera',
     'settings.photoImport': 'Fotoimport',
     'settings.newObservationAfter': 'Neue Beobachtung nach',
     'settings.min': 'min',
@@ -1427,12 +1431,12 @@ export function applyStaticTranslations() {
   setText('#home-stat-finds-label', 'stats.finds')
   setText('#home-stat-species-label', 'stats.species')
   setText('#home-stat-spores-label', 'stats.spores')
-  setText('#ac-sporely-cam .action-card-label', 'home.sporelyCam')
-  setText('#ac-native-cam .action-card-label', 'home.nativeCam')
+  setText('#ac-camera .action-card-label', 'home.nativeCam')
   setText('#ac-import .action-card-label', 'home.importPhotos')
 
   setText('#gps-display', 'capture.acquiring')
   setText('.batch-active-label', 'capture.batchActive')
+  setText('#capture-cancel-btn', 'common.cancel')
   setText('#done-btn', 'capture.done')
   setText('.camera-denied-title', 'capture.cameraAccessNeeded')
   setText('#camera-retry-btn', 'capture.tryAgain')
@@ -1536,6 +1540,9 @@ export function applyStaticTranslations() {
   setText('.theme-seg-btn[data-theme="dark"]', 'settings.dark')
   setText('#settings-language-label', 'settings.language')
   setText('#settings-language-select-label', 'settings.appLanguage')
+  setText('#settings-camera-label', 'settings.camera')
+  setText('#settings-camera-native', 'home.nativeCam')
+  setText('#settings-camera-sporely', 'home.sporelyCam')
   setText('#settings-photo-import-label', 'settings.photoImport')
   setText('#settings-gap-label', 'settings.newObservationAfter')
   setText('#settings-gap-unit', 'settings.min')
@@ -1572,7 +1579,7 @@ export function applyStaticTranslations() {
   setAria('#photo-viewer-prev', 'photo.previous')
   setAria('#photo-viewer-next', 'photo.next')
   setAria('#shutter-btn', 'capture.capturePhoto')
-  setAria('#capture-import-btn', 'capture.importPhotos')
+  setAria('#capture-cancel-btn', 'common.cancel')
 
   setTitle('#finds-view-cards', 'finds.singleColumn')
   setTitle('#finds-view-two', 'finds.twoColumns')

@@ -147,6 +147,35 @@ async function _deleteViaWorker(path) {
   }
 }
 
+async function _downloadViaWorker(path) {
+  const normalizedPath = normalizeMediaKey(path)
+  if (!normalizedPath) throw new Error('Missing storage path')
+
+  const { data: { session } } = await supabase.auth.getSession()
+  const accessToken = session?.access_token
+  if (!accessToken) throw new Error('Missing authenticated session for media download')
+
+  const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  })
+
+  if (!response.ok) {
+    let detail = response.statusText || 'Download failed'
+    try {
+      const payload = await response.json()
+      if (payload?.message) detail = payload.message
+    } catch (_) {}
+    throw new Error(`Worker download failed: ${detail}`)
+  }
+
+  const blob = await response.blob()
+  if (!_isBlob(blob)) throw new Error('Worker download returned invalid data')
+  return blob
+}
+
 async function _uploadToStorage(path, blob, options = {}) {
   if (MEDIA_UPLOAD_BASE_URL) {
     await _uploadViaWorker(path, blob, options)
@@ -373,6 +402,36 @@ export async function deleteObservationMedia(paths) {
     .remove(normalized)
 
   if (error) throw new Error(`Storage delete failed: ${error.message}`)
+}
+
+export async function downloadObservationImageBlob(storagePath, options = {}) {
+  const originalPath = normalizeMediaKey(storagePath)
+  if (!originalPath) throw new Error('Missing image storage path')
+
+  const variant = options.variant || 'medium'
+  const candidatePaths = variant === 'original'
+    ? [originalPath]
+    : [getVariantPath(originalPath, variant), originalPath]
+
+  let lastError = null
+  for (const path of [...new Set(candidatePaths.filter(Boolean))]) {
+    if (MEDIA_UPLOAD_BASE_URL) {
+      try {
+        const data = await _downloadViaWorker(path)
+        if (_isBlob(data)) return data
+      } catch (err) {
+        lastError = err
+      }
+    }
+
+    const { data, error } = await supabase.storage
+      .from('observation-images')
+      .download(path)
+    if (!error && _isBlob(data)) return data
+    lastError = error
+  }
+
+  throw new Error(`Image download failed: ${lastError?.message || originalPath}`)
 }
 
 export async function insertObservationImage(observationImage) {

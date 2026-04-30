@@ -8,6 +8,7 @@ import { formatScientificName } from '../artsorakel.js'
 import { QUEUE_EVENT, getQueuedObservations, deleteQueuedObservation, triggerSync } from '../sync-queue.js'
 import { openFindDetail } from './find_detail.js'
 import { imageHtml, wireImageFallback } from '../image-helpers.js'
+import { openPreferredCamera } from '../camera-actions.js'
 
 let currentScope = 'mine'
 const _cache = {}   // scope → array of observations
@@ -176,7 +177,7 @@ function _bindPullToRefresh() {
 export function initFinds() {
   _bindPullToRefresh()
   document.getElementById('finds-fab')
-    .addEventListener('click', () => navigate('capture'))
+    .addEventListener('click', openPreferredCamera)
 
   // Search bar
   const searchBtn   = document.getElementById('finds-search-btn')

@@ -194,13 +194,7 @@
 
       <div class="home-content">
         <div class="action-grid">
-          <div class="action-card" id="ac-sporely-cam">
-            <div class="action-card-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h4l2-2h4l2 2h4a1 1 0 0 1 1 1v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13" r="4"/></svg>
-            </div>
-            <div class="action-card-label">Sporely Cam</div>
-          </div>
-          <div class="action-card native-only" id="ac-native-cam" style="display:none">
+          <div class="action-card" id="ac-camera" data-camera-mode="native">
             <div class="action-card-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 6h3l1.6-2h4.8L16 6h3a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/><path d="M18 9h.01"/></svg>
             </div>
@@ -348,7 +342,7 @@
         </div>
 
         <div class="capture-controls" id="capture-controls">
-          <div class="capture-controls-row" style="position:absolute; bottom:100%; left:0; right:0; padding:0 24px 16px; display:flex; justify-content:space-between; align-items:flex-end; pointer-events:none;">
+          <div class="capture-controls-row" style="position:absolute; bottom:calc(100% - 32px); left:0; right:0; padding:0 24px 16px; display:flex; justify-content:space-between; align-items:flex-end; pointer-events:none;">
             <div id="zoom-controls" class="zoom-controls" style="pointer-events:auto;"></div>
             <div class="batch-badge-area" id="batch-area" style="display:none; pointer-events:auto;">
               <div class="batch-stack" style="width: 44px; height: 44px;">
@@ -358,9 +352,7 @@
               </div>
             </div>
           </div>
-          <button class="icon-btn" id="capture-import-btn" aria-label="Import photos" style="color:white; background:rgba(0,0,0,0.5); border-radius:50%; width:48px; height:48px; display:flex; align-items:center; justify-content:center; margin-left:16px;">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="24" height="24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-          </button>
+          <button class="capture-cancel-btn" id="capture-cancel-btn">Cancel</button>
           <button class="shutter-btn" id="shutter-btn" aria-label="Capture photo">
             <div class="shutter-inner"></div>
           </button>
@@ -833,6 +825,12 @@
             <option value="sv_SE">Svenska</option>
             <option value="de_DE">Deutsch</option>
           </select>
+        </div>
+
+        <div class="settings-section-label" id="settings-camera-label" style="margin-top:22px">Camera</div>
+        <div class="theme-segment settings-camera-segment">
+          <button class="theme-seg-btn settings-camera-btn" id="settings-camera-native" data-camera-mode="native">Native Cam</button>
+          <button class="theme-seg-btn settings-camera-btn" id="settings-camera-sporely" data-camera-mode="sporely">Sporely Cam</button>
         </div>
 
         <div class="settings-section-label" id="settings-photo-import-label" style="margin-top:22px">Photo Import</div>

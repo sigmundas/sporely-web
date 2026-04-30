@@ -4,7 +4,8 @@ Cloudflare Worker for authenticated media uploads to the `sporely-media` R2 buck
 
 ## What It Does
 
-- Accepts `PUT /upload/{key}` and `DELETE /upload/{key}` requests.
+- Accepts authenticated `GET`, `PUT`, and `DELETE` requests at `/upload/{key}`.
+- Accepts authenticated `POST /artsorakel/media` requests that identify saved R2 images without browser-side image downloads.
 - Validates the caller's Supabase JWT before writing to R2.
 - Enforces that the object key starts with the authenticated user's `sub`, for example:
   - `user_uuid/observation_uuid/field_001.jpg`
@@ -49,6 +50,19 @@ curl -X PUT "https://upload.sporely.no/upload/<user_id>/<obs_id>/image.jpg" \
   -H "Content-Type: image/jpeg" \
   -H "Cache-Control: public, max-age=31536000, immutable" \
   --data-binary @image.jpg
+```
+
+```bash
+curl "https://upload.sporely.no/upload/<user_id>/<obs_id>/image.jpg" \
+  -H "Authorization: Bearer <supabase_access_token>" \
+  --output image.jpg
+```
+
+```bash
+curl -X POST "https://upload.sporely.no/artsorakel/media" \
+  -H "Authorization: Bearer <supabase_access_token>" \
+  -H "Content-Type: application/json" \
+  --data '{"keys":["<user_id>/<obs_id>/image.jpg"],"variant":"medium"}'
 ```
 
 ## Notes

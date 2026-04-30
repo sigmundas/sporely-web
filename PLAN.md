@@ -92,8 +92,51 @@ Now that we are back on the standard `navigator.mediaDevices.getUserMedia()` flo
 - Add a legend drop-down to the map page. Selection: Genus (more will come). this will show a legend with colors, corresponding the the dots on the map.
 - The card with number of finds, number of species, and number of spores: Tapping finds: open screen with finds, filtered for that user (card could appear on home tab or people tab): Species filter off. Tapping species: same as for tapping finds, but with species filter on. Tapping spores: filter only finds for that user with spore measurements.
 
+## Shared Priority: Accurate Place Names From Coordinates (`sporely-web` and `sporely-py`)
+*Goal: resolve photo/observation GPS coordinates to accurate place names across web/mobile and desktop. Accuracy matters more than lookup speed because desktop photo processing is infrequent (typically every 2-5 minutes), and web/mobile can resolve once per observation instead of once per photo.*
+
+### Step 1: Primary Global Lookup with Nominatim
+- [ ] **Use OpenStreetMap Nominatim as the global reverse-geocoder first.** When a photo or observation needs location tagging, extract latitude/longitude and query:
+  `https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json`
+- [ ] **Always send a custom User-Agent header.** Use an app-specific header such as `SporelyApp/1.0 (contact@sporely.no)` or a configurable support/contact email. Do not call Nominatim with a default browser/fetch user agent.
+- [ ] **Parse and persist useful global lookup fields.** Store the full `display_name`, and extract `address.country_code` as a 2-letter country code.
+
+### Step 2: Conditional Evaluation
+- [ ] **If `country_code != "no"`:** stop after Nominatim and tag the photo/observation from the Nominatim `display_name` or more specific address fields.
+- [ ] **If `country_code == "no"`:** treat the point as Norway and continue to the high-precision local lookup.
+
+### Step 3: High-Precision Norway Lookup with Artsdatabanken
+- [ ] **For Norwegian coordinates, query Artsdatabanken using the same GPS point:**
+  `https://stedsnavn.artsdatabanken.no/v1/punkt?lat={lat}&lng={lon}&zoom=45`
+- [ ] **Parse the response.** Extract `navn` as the local place name and `dist` as a float distance/quality value.
+- [ ] **Validate before using the Norwegian result.** If `dist <= 0.006`, tag with Artsdatabanken `navn`. If `dist > 0.006`, treat it as an anomalous snap/offshore-boundary result and fall back to the Nominatim `display_name`.
+
+### Step 4: Denmark Lookup with DAWA
+- [ ] **For Danish coordinates (`country_code == "dk"`), query DAWA before using Nominatim as the selected label:**
+  `https://api.dataforsyningen.dk/adgangsadresser/reverse?x={lon}&y={lat}`
+- [ ] **Format DAWA results from local to regional.** Use fields such as `vejstykke.navn`, `postnummer.navn`, `kommune.navn`, and `region.navn`, ending with `Danmark`.
+
+### Step 5: Multiple Location Suggestions
+- [ ] **Show location suggestions in a dropdown on both `sporely-web` and `sporely-py`.** The first suggestion should still auto-fill the Location field, but clicking/focusing the field should show all available suggestions.
+- [ ] **Norway suggestion order:** first validated Artsdatabanken `navn`, then Nominatim suggestions.
+- [ ] **Denmark suggestion order:** first DAWA, then Nominatim suggestions.
+- [ ] **Nominatim suggestions:** include the full `display_name`, plus a local hierarchy based on `address` fields as prototyped in `sporely-py/database/reverse_location_lookup.py`: `addr.get("amenity") or addr.get("road")`, then `addr.get("neighbourhood") or addr.get("suburb")`, then city/town/village, municipality/county, state, country.
+- [ ] **Deduplicate suggestions while preserving source-priority order.**
+
+### Step 6: Throttle and Rate-Limit Management
+- [ ] **Desktop batch imports (`sporely-py`):** enforce a hard `sleep(1)` between every Nominatim request in any loop that processes imported photos. This keeps the desktop app within Nominatim's maximum of 1 request per second.
+- [ ] **Web/mobile (`sporely-web`):** avoid per-photo reverse geocoding when one observation has multiple photos from the same place. Resolve once per observation/session when possible, then reuse the place name for photos attached to that observation.
+
 ## Code Review & Refactoring
 *Review this code with a strict refactor/audit mindset. Do not praise. Look for concrete problems only.*
+
+### 2026-04-30 Camera Settings Review Findings
+- [ ] Settings can show `Native Cam` selected while browser/PWA users are actually routed to `Sporely Cam`; make the settings UI show the effective camera mode or hide/disable native selection outside the Android app.
+- [x] Native Camera cancel should delete discarded cache-file captures from `getCacheDir()/native-camera` before leaving the activity.
+- [ ] Capture reset/default draft logic is duplicated across `capture.js` and `review.js`; centralize `defaultCaptureDraft()` and `resetCaptureSession()` near `state.js`.
+- [ ] Remove dead `capture.importPhotos` i18n keys after removing the capture-screen gallery button.
+- [ ] Consolidate duplicated platform detection helpers (`_isNativeApp`, Android-native checks) into a shared platform helper.
+- [ ] Remove or gate production camera debug logs in `capture.js`.
 
 For each issue you find, return:
 - severity: low / medium / high

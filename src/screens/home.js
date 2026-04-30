@@ -2,13 +2,12 @@ import { supabase } from '../supabase.js'
 import { formatDate, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
-import { showToast } from '../toast.js'
-import { showAuthOverlay } from './auth.js'
+import { getEffectiveCameraLabel, getEffectiveCameraMode, openPreferredCamera } from '../camera-actions.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
 import { openFindDetail } from './find_detail.js'
-import { openNativeCamera, openPhotoImportPicker } from './import_review.js'
+import { openPhotoImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
 import { refreshHeaderProfileButtons } from './profile.js'
 
@@ -32,12 +31,12 @@ function _wireImageFallback(root) {
 }
 
 export async function initHome() {
-  document.getElementById('home-fab').addEventListener('click', () => navigate('capture'))
-  document.getElementById('ac-sporely-cam').addEventListener('click', () => navigate('capture'))
-  document.getElementById('ac-native-cam')?.addEventListener('click', () => openNativeCamera())
+  document.getElementById('home-fab').addEventListener('click', openPreferredCamera)
+  document.getElementById('ac-camera')?.addEventListener('click', openPreferredCamera)
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
-  _syncNativeCameraAction()
+  _syncCameraAction()
+  window.addEventListener('sporely-camera-mode-change', _syncCameraAction)
 
   document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))
   document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { groupBySpecies: true }))
@@ -59,16 +58,16 @@ export async function initHome() {
   await refreshHome()
 }
 
-function _syncNativeCameraAction() {
-  const nativeCam = document.getElementById('ac-native-cam')
-  if (!nativeCam) return
-  const isAndroidNative = !!window.Capacitor?.isNativePlatform?.()
-    && window.Capacitor?.getPlatform?.() === 'android'
-  nativeCam.style.display = isAndroidNative ? 'flex' : 'none'
-  nativeCam.closest('.action-grid')?.classList.toggle('action-grid-native', isAndroidNative)
+function _syncCameraAction() {
+  const camera = document.getElementById('ac-camera')
+  if (!camera) return
+  camera.dataset.cameraMode = getEffectiveCameraMode()
+  const label = camera.querySelector('.action-card-label')
+  if (label) label.textContent = getEffectiveCameraLabel()
 }
 
 export async function refreshHome() {
+  _syncCameraAction()
   await Promise.all([loadRecentFinds(), loadRecentComments(), loadStats(), checkSyncStatus(), refreshHeaderProfileButtons()])
 }
 
