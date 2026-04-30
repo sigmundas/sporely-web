@@ -10,9 +10,13 @@ const DEFAULT_ALLOWED_HEADERS = [
   'X-Sporely-Upload-Origin',
 ].join(', ')
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
+const ARTS_MAX_DIST = 0.006
+const NOMINATIM_INTERVAL_MS = 1000
 
 let cachedJwks = null
 let cachedJwksAt = 0
+let lastNominatimRequestStartedAt = 0
+let nominatimQueue = Promise.resolve()
 
 export default {
   async fetch(request, env, ctx) {
@@ -42,6 +46,10 @@ async function handleRequest(request, env, ctx) {
     return jsonResponse({ ok: true, service: 'sporely-r2-upload-worker' }, 200, request, env)
   }
 
+  if (request.method === 'GET' && url.pathname === '/reverse-location') {
+    return handleReverseLocation(request, env, url)
+  }
+
   if (request.method === 'POST' && url.pathname === '/artsorakel') {
     return handleArtsorakel(request, env, ctx)
   }
@@ -65,6 +73,79 @@ async function handleRequest(request, env, ctx) {
   throw httpError(404, 'not_found', 'Route not found')
 }
 
+async function handleReverseLocation(request, env, url) {
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const lat = Number(url.searchParams.get('lat'))
+  const lon = Number(url.searchParams.get('lon'))
+  if (!isUsableCoordinate(lat, lon)) {
+    throw httpError(400, 'invalid_coordinates', 'Valid lat and lon query parameters are required')
+  }
+
+  const prefer = String(url.searchParams.get('prefer') || '').trim().toLowerCase()
+  if (prefer !== 'international') {
+    const artsName = await fetchArtsdatabankenSuggestion(lat, lon)
+    if (artsName) {
+      return jsonResponse(
+        {
+          suggestions: [artsName],
+          latitude: lat,
+          longitude: lon,
+          country_code: 'no',
+          country_name: 'Norge',
+          nominatim_display_name: null,
+          source: 'artsdatabanken',
+        },
+        200,
+        request,
+        env,
+        origin,
+      )
+    }
+  }
+
+  const nominatim = await fetchNominatim(lat, lon, env)
+  const address = nominatim?.address || {}
+  const countryCode = stringOrNull(address.country_code)?.toLowerCase() || null
+  const countryName = stringOrNull(address.country)
+  const displayName = stringOrNull(nominatim?.display_name)
+  const nominatimSuggestions = nominatimSuggestionList(nominatim)
+  const suggestions = []
+  let source = 'nominatim'
+
+  if (countryCode === 'no') {
+    source = 'nominatim'
+  } else if (countryCode === 'dk') {
+    const dawaName = await fetchDawaSuggestion(lat, lon)
+    if (dawaName) {
+      suggestions.push(dawaName)
+      source = 'dawa'
+    }
+  }
+
+  suggestions.push(...nominatimSuggestions)
+  const maxSuggestions = countryCode === 'no' ? 3 : 2
+
+  return jsonResponse(
+    {
+      suggestions: dedupeText(suggestions).slice(0, maxSuggestions),
+      latitude: lat,
+      longitude: lon,
+      country_code: countryCode,
+      country_name: countryName,
+      nominatim_display_name: displayName,
+      source,
+    },
+    200,
+    request,
+    env,
+    origin,
+  )
+}
+
 function handleOptions(request, env) {
   const origin = resolveAllowedOrigin(request, env)
   if (request.headers.get('Origin') && !origin) {
@@ -74,6 +155,86 @@ function handleOptions(request, env) {
     status: 204,
     headers: corsHeaders(request, env, origin),
   })
+}
+
+async function fetchNominatim(lat, lon, env) {
+  await queueNominatimTurn()
+
+  const url = new URL('https://nominatim.openstreetmap.org/reverse')
+  url.searchParams.set('lat', String(lat))
+  url.searchParams.set('lon', String(lon))
+  url.searchParams.set('format', 'json')
+  url.searchParams.set('addressdetails', '1')
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': String(env.NOMINATIM_USER_AGENT || 'SporelyApp/1.0 (contact@sporely.no)'),
+    },
+    cf: { cacheTtl: 3600, cacheEverything: true },
+  })
+  if (!response.ok) return {}
+  return safeJsonObject(response)
+}
+
+function queueNominatimTurn() {
+  const run = nominatimQueue
+    .catch(() => {})
+    .then(async () => {
+      const elapsed = Date.now() - lastNominatimRequestStartedAt
+      if (elapsed < NOMINATIM_INTERVAL_MS) {
+        await delay(NOMINATIM_INTERVAL_MS - elapsed)
+      }
+      lastNominatimRequestStartedAt = Date.now()
+    })
+  nominatimQueue = run.catch(() => {})
+  return run
+}
+
+async function fetchArtsdatabankenSuggestion(lat, lon) {
+  const url = new URL('https://stedsnavn.artsdatabanken.no/v1/punkt')
+  url.searchParams.set('lat', String(lat))
+  url.searchParams.set('lng', String(lon))
+  url.searchParams.set('zoom', '45')
+
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    cf: { cacheTtl: 3600, cacheEverything: true },
+  })
+  if (!response.ok) return ''
+  const data = await safeJsonObject(response)
+  const dist = Number(data?.dist)
+  if (!Number.isFinite(dist) || dist > ARTS_MAX_DIST) return ''
+  return stringOrNull(data?.navn) || ''
+}
+
+async function fetchDawaSuggestion(lat, lon) {
+  const url = new URL('https://api.dataforsyningen.dk/adgangsadresser/reverse')
+  url.searchParams.set('x', String(lon))
+  url.searchParams.set('y', String(lat))
+
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    cf: { cacheTtl: 3600, cacheEverything: true },
+  })
+  if (!response.ok) return ''
+  const data = await safeJsonObject(response)
+  return dedupeText([
+    data?.vejstykke?.navn,
+    data?.postnummer?.navn,
+    data?.kommune?.navn,
+    data?.region?.navn,
+    'Danmark',
+  ]).join(', ')
+}
+
+function nominatimSuggestionList(data) {
+  const address = data?.address || {}
+  const localParts = dedupeText([
+    address.amenity || address.road,
+    address.neighbourhood || address.suburb,
+  ])
+  return localParts.length ? localParts : dedupeText([data?.display_name])
 }
 
 async function handleUpload(request, env, ctx, url) {
@@ -838,6 +999,48 @@ function httpError(status, code, message) {
   error.status = status
   error.code = code
   return error
+}
+
+async function safeJsonObject(response) {
+  try {
+    const data = await response.json()
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {}
+  } catch (_) {
+    return {}
+  }
+}
+
+function isUsableCoordinate(lat, lon) {
+  return Number.isFinite(lat) &&
+    Number.isFinite(lon) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lon >= -180 &&
+    lon <= 180 &&
+    !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001)
+}
+
+function dedupeText(values) {
+  const seen = new Set()
+  const result = []
+  for (const value of values || []) {
+    const text = stringOrNull(value)
+    if (!text) continue
+    const key = text.toLocaleLowerCase().replace(/\s+/g, ' ')
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(text)
+  }
+  return result
+}
+
+function stringOrNull(value) {
+  const text = String(value || '').trim()
+  return text || null
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function parseIntegerHeader(value) {

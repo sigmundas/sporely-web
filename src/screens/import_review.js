@@ -13,6 +13,7 @@ import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
 import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes } from '../settings.js';
+import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 
 const NativePhotoPicker = registerPlugin('NativePhotoPicker');
 const NativeCamera = registerPlugin('NativeCamera');
@@ -269,6 +270,10 @@ function _buildSessionsFromSourceItems() {
       gpsAltitude: exifGps?.altitude ?? null,
       gpsAccuracy: exifGps?.accuracy ?? null,
       locationName: previous?.locationName || '',
+      locationSuggestions: Array.isArray(previous?.locationSuggestions) ? [...previous.locationSuggestions] : [],
+      locationLookup: previous?.locationLookup || null,
+      locationLookupKey: previous?.locationLookupKey || '',
+      locationAutoApplied: previous?.locationAutoApplied || '',
       taxon: previous?.taxon || null,
       visibility: previous?.visibility || getDefaultVisibility(),
       exifDebug: group.map(item => item.dbg).filter(Boolean),
@@ -689,17 +694,49 @@ function _hideProgress() {
 
 function _prefillSessionLocations() {
   sessions.forEach(async session => {
-    if (!_isUsableCoordinate(Number(session.gpsLat), Number(session.gpsLon)) || session.locationName) return;
-    const name = await _reverseGeocode(session.gpsLat, session.gpsLon);
-    if (name && !session.locationName) {
-      session.locationName = name;
-      const input = document.querySelector(`.import-loc-input[data-sid="${session.id}"]`);
-      const locEl = document.querySelector(`.import-card[data-sid="${session.id}"] .import-card-loc`);
-      if (input) input.value = name;
-      if (locEl) locEl.textContent = name;
-      _persistSessions();
-    }
+    const lat = Number(session.gpsLat);
+    const lon = Number(session.gpsLon);
+    const lookupKey = lookupCoordinateKey(lat, lon);
+    if (!lookupKey) return;
+    if (session.locationLookupKey === lookupKey && Array.isArray(session.locationSuggestions)) return;
+
+    session.locationLookupKey = lookupKey;
+    const previousAuto = session.locationAutoApplied || '';
+    try {
+      const result = await lookupReverseLocation(lat, lon, {
+        onUpdate: updated => _applySessionLocationLookup(session.id, lookupKey, updated),
+      });
+      if (session.locationLookupKey !== lookupKey) return;
+      _applySessionLocationLookup(session.id, lookupKey, result, previousAuto);
+    } catch (_) {}
   });
+}
+
+function _applySessionLocationLookup(sessionId, lookupKey, result, previousAuto = null) {
+  const session = sessionById(sessionId);
+  if (!session || session.locationLookupKey !== lookupKey) return;
+
+  const nextSuggestions = result?.suggestions || [];
+  session.locationSuggestions = nextSuggestions;
+  session.locationLookup = result || null;
+  const first = nextSuggestions[0] || '';
+  const autoValue = previousAuto ?? session.locationAutoApplied ?? '';
+  if (first && (!session.locationName || session.locationName === autoValue)) {
+    session.locationName = first;
+    session.locationAutoApplied = first;
+  }
+
+  _syncLocationInput(session);
+  _persistSessions();
+}
+
+function _syncLocationInput(session) {
+  if (!session?.id) return;
+  const input = document.querySelector(`.import-loc-input[data-sid="${session.id}"]`);
+  const locEl = document.querySelector(`.import-card[data-sid="${session.id}"] .import-card-loc`);
+  if (input) input.value = session.locationName || '';
+  if (locEl) locEl.textContent = session.locationName || '—';
+  _renderImportLocationDropdown(session.id, false);
 }
 
 // ── EXIF / capture time + GPS ─────────────────────────────────────────────────
@@ -1181,19 +1218,6 @@ async function _captureExif(file) {
   return { time, lat, lon, altitude, accuracy, dbg };
 }
 
-async function _reverseGeocode(lat, lon) {
-  try {
-    const res = await fetch(
-      `https://stedsnavn.artsdatabanken.no/v1/punkt?lat=${lat}&lng=${lon}&zoom=55`
-    );
-    if (res.ok) {
-      const data = await res.json();
-      return data?.navn ?? null;
-    }
-  } catch (_) {}
-  return null;
-}
-
 // Prepare an imported file for preview + AI without eagerly re-encoding the full upload blob.
 // Strategy: if the browser can decode the image, keep the original file for upload/preview and
 // only generate a reduced AI JPEG. This avoids expensive full-resolution canvas encodes on
@@ -1394,9 +1418,12 @@ function buildCardHTML(session) {
     </div>
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">${t('detail.location')}</div>
-      <input class="detail-text-input import-loc-input" type="text"
-        data-sid="${sid}" placeholder="—" readonly
-        value="${locVal}">
+      <div class="location-suggest-wrap import-location-wrap">
+        <input class="detail-text-input import-loc-input" type="text"
+          data-sid="${sid}" placeholder="—" autocomplete="off" spellcheck="false"
+          value="${locVal}">
+        <ul class="location-suggestion-dropdown import-location-dropdown" data-sid="${sid}" style="display:none"></ul>
+      </div>
       ${missingGpsHint}
     </div>
     <div class="detail-field" style="margin-top:4px">
@@ -1413,9 +1440,67 @@ function buildCardHTML(session) {
 </div>`;
 }
 
+function _wireImportLocationInput(sid, card) {
+  const input = card.querySelector(`.import-loc-input[data-sid="${sid}"]`);
+  if (!input || input._wired) return;
+  input._wired = true;
+
+  input.addEventListener('focus', () => _renderImportLocationDropdown(sid, true));
+  input.addEventListener('click', () => _renderImportLocationDropdown(sid, true));
+  input.addEventListener('input', () => {
+    const session = sessionById(sid);
+    if (!session) return;
+    session.locationName = input.value.trim();
+    const locEl = card.querySelector('.import-card-loc');
+    if (locEl) locEl.textContent = session.locationName || '—';
+    _persistSessions();
+    _renderImportLocationDropdown(sid, document.activeElement === input);
+  });
+  input.addEventListener('blur', () => {
+    setTimeout(() => _renderImportLocationDropdown(sid, false), 160);
+  });
+}
+
+function _renderImportLocationDropdown(sid, show) {
+  const session = sessionById(sid);
+  const dropdown = document.querySelector(`.import-location-dropdown[data-sid="${sid}"]`);
+  const input = document.querySelector(`.import-loc-input[data-sid="${sid}"]`);
+  if (!dropdown || !input) return;
+
+  const options = Array.isArray(session?.locationSuggestions) ? session.locationSuggestions : [];
+  if (!show || !options.length) {
+    dropdown.style.display = 'none';
+    dropdown.innerHTML = '';
+    return;
+  }
+
+  dropdown.innerHTML = options
+    .map((name, index) => `<li data-index="${index}">${escHtml(name)}</li>`)
+    .join('');
+  dropdown.style.display = 'block';
+  dropdown.querySelectorAll('li').forEach((item, index) => {
+    item.addEventListener('mousedown', event => {
+      event.preventDefault();
+      const name = options[index] || '';
+      const nextSession = sessionById(sid);
+      if (nextSession) {
+        nextSession.locationName = name;
+        nextSession.locationAutoApplied = name;
+      }
+      input.value = name;
+      const locEl = document.querySelector(`.import-card[data-sid="${sid}"] .import-card-loc`);
+      if (locEl) locEl.textContent = name || '—';
+      dropdown.style.display = 'none';
+      _persistSessions();
+    });
+  });
+}
+
 function _wireCard(sid) {
   const card = document.querySelector(`.import-card[data-sid="${sid}"]`);
   if (!card) return;
+  _wireImportLocationInput(sid, card);
+
   const input = card.querySelector(`.import-taxon-input[data-sid="${sid}"]`);
   const dropdown = card.querySelector(`.import-taxon-dropdown[data-sid="${sid}"]`);
   if (!input || !dropdown || input._wired) return;

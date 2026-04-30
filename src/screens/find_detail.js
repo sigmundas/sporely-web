@@ -14,12 +14,16 @@ import { esc as _esc } from '../esc.js'
 import { getDefaultVisibility, setLastSyncAt } from '../settings.js'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
+import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js'
 
 let currentObs    = null
 let selectedTaxon = null
 let currentObsIsOwner = false
 let returnScreenOverride = null
 let hideCancelOverride = false
+let detailLocationSuggestions = []
+let detailLocationLookupKey = ''
+let detailLocationAutoApplied = ''
 
 export function initFindDetail() {
   const backBtn = document.getElementById('detail-back')
@@ -44,6 +48,18 @@ export function initFindDetail() {
   input.addEventListener('blur', () => {
     setTimeout(() => { dropdown.style.display = 'none' }, 200)
   })
+
+  const locationInput = document.getElementById('detail-location')
+  if (locationInput) {
+    locationInput.addEventListener('focus', () => _renderDetailLocationDropdown(true))
+    locationInput.addEventListener('click', () => _renderDetailLocationDropdown(true))
+    locationInput.addEventListener('input', () => {
+      _renderDetailLocationDropdown(document.activeElement === locationInput)
+    })
+    locationInput.addEventListener('blur', () => {
+      setTimeout(() => _renderDetailLocationDropdown(false), 160)
+    })
+  }
 
   document.getElementById('detail-ai-btn').addEventListener('click', _runAI)
   document.getElementById('detail-uncertain').addEventListener('change', () => {
@@ -114,6 +130,7 @@ export async function openFindDetail(obsId, options = {}) {
   document.getElementById('detail-taxon-input').value = displayName.trim()
 
   document.getElementById('detail-location').value = obs.location || ''
+  _startDetailLocationLookup(obs)
 
   document.getElementById('detail-habitat').value     = obs.habitat   || ''
   document.getElementById('detail-notes').value       = obs.notes     || ''
@@ -394,6 +411,10 @@ function _resetForm() {
   document.getElementById('detail-taxon-input').value = ''
   document.getElementById('detail-taxon-dropdown').style.display = 'none'
   document.getElementById('detail-location').value    = ''
+  detailLocationSuggestions = []
+  detailLocationLookupKey = ''
+  detailLocationAutoApplied = ''
+  _renderDetailLocationDropdown(false)
   document.getElementById('detail-habitat').value     = ''
   const coordsEl = document.getElementById('detail-coords')
   if (coordsEl) { coordsEl.innerHTML = ''; coordsEl.style.display = 'none' }
@@ -423,6 +444,60 @@ function _resetForm() {
   _applyOwnershipMode(true)
 }
 
+function _startDetailLocationLookup(obs) {
+  const lat = Number(obs?.gps_latitude)
+  const lon = Number(obs?.gps_longitude)
+  const lookupKey = lookupCoordinateKey(lat, lon)
+  detailLocationSuggestions = []
+  detailLocationLookupKey = lookupKey
+  detailLocationAutoApplied = ''
+  _renderDetailLocationDropdown(false)
+  if (!lookupKey) return
+
+  lookupReverseLocation(lat, lon, {
+    onUpdate: updated => _applyDetailLocationLookup(lookupKey, updated),
+  })
+    .then(result => _applyDetailLocationLookup(lookupKey, result))
+    .catch(() => {})
+}
+
+function _applyDetailLocationLookup(lookupKey, result) {
+  if (lookupKey !== detailLocationLookupKey) return
+  detailLocationSuggestions = result?.suggestions || []
+  const first = detailLocationSuggestions[0] || ''
+  const input = document.getElementById('detail-location')
+  if (input && first && (!input.value.trim() || input.value.trim() === detailLocationAutoApplied)) {
+    input.value = first
+    detailLocationAutoApplied = first
+  }
+  _renderDetailLocationDropdown(document.activeElement === input)
+}
+
+function _renderDetailLocationDropdown(show) {
+  const dropdown = document.getElementById('detail-location-dropdown')
+  const input = document.getElementById('detail-location')
+  if (!dropdown || !input) return
+  if (!show || !currentObsIsOwner || !detailLocationSuggestions.length) {
+    dropdown.style.display = 'none'
+    dropdown.innerHTML = ''
+    return
+  }
+
+  dropdown.innerHTML = detailLocationSuggestions
+    .map((name, index) => `<li data-index="${index}">${_esc(name)}</li>`)
+    .join('')
+  dropdown.style.display = 'block'
+  dropdown.querySelectorAll('li').forEach((item, index) => {
+    item.addEventListener('mousedown', event => {
+      event.preventDefault()
+      const name = detailLocationSuggestions[index] || ''
+      input.value = name
+      detailLocationAutoApplied = name
+      dropdown.style.display = 'none'
+    })
+  })
+}
+
 function _applyOwnershipMode(isOwner) {
   const readonlyNote = document.getElementById('detail-readonly-note')
   const saveBtn = document.getElementById('detail-save-btn')
@@ -441,7 +516,7 @@ function _applyOwnershipMode(isOwner) {
   if (deleteBtn) deleteBtn.style.display = isOwner ? '' : 'none'
   if (aiBtn) aiBtn.disabled = !isOwner
   if (taxonInput) taxonInput.disabled = !isOwner
-  if (locationInput) locationInput.readOnly = true
+  if (locationInput) locationInput.readOnly = !isOwner
   if (habitatInput) habitatInput.readOnly = !isOwner
   if (notesInput) notesInput.readOnly = !isOwner
   if (uncertainInput) uncertainInput.disabled = !isOwner
@@ -553,6 +628,7 @@ async function _save() {
   btn.disabled = true
 
   const patch = {
+    location:   document.getElementById('detail-location').value.trim()  || null,
     habitat:    document.getElementById('detail-habitat').value.trim()   || null,
     notes:      document.getElementById('detail-notes').value.trim()     || null,
     uncertain:  document.getElementById('detail-uncertain').checked,

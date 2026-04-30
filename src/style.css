@@ -2029,13 +2029,46 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   font-size: 12px;
   line-height: 1.45;
 }
-.location-field-val { display: flex; align-items: center; gap: 6px; justify-content: flex-end; flex: 1; }
+.location-field-val { display: flex; align-items: center; gap: 6px; justify-content: flex-end; flex: 1; position: relative; }
 .location-name-input {
   background: transparent; border: none; border-bottom: 1px solid var(--border);
   color: var(--text-data); font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500;
   text-align: right; width: 150px; outline: none; padding: 0 2px;
 }
 .location-name-input::placeholder { color: var(--text-dim); }
+.location-suggest-wrap { position: relative; }
+.location-suggestion-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 120;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: #1e2d20;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.28);
+  overflow: hidden;
+}
+.location-suggestion-dropdown li {
+  padding: 8px 10px;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-family: 'Outfit', sans-serif;
+  font-size: 12px;
+  line-height: 1.25;
+}
+.location-suggestion-dropdown li:hover { background: rgba(255,255,255,0.08); }
+.import-location-wrap .location-suggestion-dropdown {
+  top: 100%;
+  margin-top: 2px;
+}
+.detail-location-wrap .location-suggestion-dropdown {
+  top: 100%;
+  margin-top: 2px;
+}
 .location-apply-btn {
   font-size: 10px; padding: 2px 7px; border-radius: 4px;
   border: 1px solid var(--green-accent); color: var(--green-accent);

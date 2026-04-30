@@ -311,7 +311,7 @@ export function buildReviewGrid() {
   const locationInput = document.getElementById('location-name-input')
   if (locationInput) {
     locationInput.value = reviewContext?.source === 'import'
-      ? (reviewContext.locationName || '')
+      ? (locationInput.value || reviewContext.locationName || '')
       : (reviewContext?.locationName || locationInput.value || '')
   }
   const addPhotoBtn = document.getElementById('add-photo-btn')

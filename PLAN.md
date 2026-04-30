@@ -1,138 +1,50 @@
 # Sporely-web Development Plan
 
-## Native Android Camera Capture Flow
-- [x] Step 1: Install `@capgo/camera-preview` and verify Android Manifest permissions (`CAMERA`, `ACCESS_COARSE_LOCATION`, `ACCESS_FINE_LOCATION`).
-- [x] Step 2: Add platform routing logic to detect Android and apply transparent CSS to the WebView.
-- [x] Step 3: Initialize Android native camera (`toBack: true`) and bind to the primary 1x wide-angle lens.
-- [x] Step 4: Implement native capture using `withExifLocation: true` and `storeToFile: true`, followed by proper cleanup (`stop()`).
-
-### Camera Flicker Troubleshooting (Android 15 Edge-to-Edge)
-**Failed Attempts:**
-- JS `setTimeout` DOM reflow (only repaints HTML, fails to fix native `SurfaceView` compositing).
-- *Lifecycle Clue:* Flicker persists at the bottom of the screen upon initial start, but disappears completely if the device screen is turned off and back on while the camera is active. This indicates the native Android `SurfaceView` or Window compositor is out of sync with the navigation bar insets until a full `onPause`/`onResume` lifecycle event forces a correct layout recalculation.
-- Programmatic background/foreground toggle (requires physical home button press by user).
-- *XML Opt-Out:* Added `<item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>` to `styles.xml` (ignored by Android 15 / Capacitor 6+).
-- *EdgeToEdge Plugin:* Calling `EdgeToEdge.enable()` stabilized the layout but didn't cure the flicker below the crop frame.
-- *Removed CSS box-shadow:* Didn't fix the surface tearing.
-- *toBack: false (Render ON TOP):* Abandoned. While it killed the transparency flicker, manually syncing CSS coordinates with native hardware coordinates across different Android pixel densities caused the camera to shift down and spawn black borders.
-
-### Moving Back to Full-Screen Camera (Android 15 Bug Fixes)
-We are going back to a full-screen background camera (`toBack: true`) with our UI floating on top.
-- Step 1: Fullscreen Camera Initialization (`toBack: true`, `window.screen` width/height, `aspectMode: 'cover'`)
-- Step 2: Absolute App Transparency (`--ion-background-color`, `html`, `body`, `ion-app`, `ion-content` transparent)
-- Step 3: Removed all camera crop guides and overlays temporarily to completely isolate the camera view and focus on resolving the flicker.
-- Step 4: Fix Samsung Lens Selection (programmatic selection using `CameraPreview.getAvailableDevices()` to bypass software restrictions).
-- Step 5: Initialization Race Condition (Added a 500ms delay before `CameraPreview.start()` so Android 15 edge-to-edge layout settles).
-- Step 6: Native Android Window UI Flags (Replaced deprecated flags with modern `WindowCompat.setDecorFitsSystemWindows(getWindow(), false)` to prevent Capacitor layout loops).
-- Step 7: Disabled Capacitor's margin engine (`adjustMarginsForEdgeToEdge: 'disable'`) and shifted UI positioning natively to CSS using `env(safe-area-inset-bottom, 20px)`. **Result: Failed.** Layout is still unstable/flickering at the bottom until the screen is cycled off and on.
-- Step 8: Reverted the native edge-to-edge layout workarounds in `MainActivity.java`, `capacitor.config.json`, and `styles.xml` to return to standard Capacitor layout management.
-
-### Standard WebRTC Camera Recovery (Samsung Torch Heuristic)
-Now that we are back on the standard `navigator.mediaDevices.getUserMedia()` flow (Capgo native camera moved to `camera-fallback` branch), we need to fix the Samsung S25 issue where it defaults to the ultra-wide lens. Since OEM string labels like 'camera 0' are useless, we built a 'torch heuristic' initialization function.
-
-- [x] Calls `navigator.mediaDevices.enumerateDevices()` and filters for all videoinput devices that are rear-facing.
-- [x] Loops through these specific device IDs one by one, opening a temporary video stream for each.
-- [x] Inspects the active video track using `track.getCapabilities().torch`.
-- [x] Also probes `ImageCapture.getPhotoCapabilities().fillLightMode` for flash support when `torch` is not exposed.
-- [x] Saves the deviceId if torch/flash capability is true.
-- [x] Stops all temporary video tracks to free up hardware memory.
-- [x] Starts main application camera feed using that specific deviceId in the `getUserMedia` constraints.
-- [x] Removed Capgo native CameraPreview code from main branch.
-
-#### 2026-04-29 Samsung S25 Findings
-**What did not work**
-- The WebRTC torch heuristic was implemented, but device testing still showed the ultra-wide camera. This likely means Samsung/Chrome WebView is exposing a logical rear camera where the selected `deviceId` does not map cleanly to the physical 1x sensor, or it does not expose torch/flash capability on the separate physical camera entries in a useful way.
-- Relying on `deviceId: { exact }` alone is not enough on the S25. Even if we identify a rear/torch-capable logical camera, WebRTC may still choose the ultra-wide physical lens internally.
-- The previous camera capture path was not still-photo capture. It grabbed the current WebRTC video frame with `canvas.drawImage(video, ...)`. On the S25 this produced a cropped video frame around `2400x3200`, then app code downscaled the long edge to `1920`, resulting in `1440x1920` output. That explains the observed 2.8 MP captures.
-- Requesting `width: { ideal: 1920 }, height: { ideal: 1440 }` encourages a video-mode resolution, not full still capture. It cannot produce a true 12 MP photo by itself.
-- Adding `advanced: [{ zoom: 1 }]` directly in initial `getUserMedia()` constraints is fragile because unsupported zoom constraints can cause startup rejection or be ignored.
-
-**What may work**
-- Use WebRTC only for preview and use `ImageCapture.takePhoto()` for the shutter. `takePhoto()` is the browser still-photo API and can return a larger JPEG than the live video frame when the WebView exposes still-photo capabilities.
-- Ask `ImageCapture.getPhotoCapabilities()` for max `imageWidth` / `imageHeight`, then call `takePhoto({ imageWidth, imageHeight, fillLightMode: 'off' })`. This has been implemented as the first capture path, with video-frame canvas capture kept only as fallback.
-- Remove the app-side 1920 long-edge resize from camera capture. Upload resizing should be handled later by the existing cloud upload policy, not at shutter time.
-- Keep zoom application after stream startup via `track.applyConstraints()` and only if `track.getCapabilities().zoom` exposes a valid range. If WebRTC exposes a logical rear camera only, testing zoom values greater than 1 may force the logical camera from ultra-wide toward the 1x field of view, even when device IDs do not.
-- If WebRTC still returns the ultra-wide lens and/or `ImageCapture.takePhoto()` still returns video-mode crops, the likely working solution is native Android CameraX/Camera2 for capture: enumerate physical cameras, choose the back camera with flash/torch and normal focal length, bind a Preview use case plus ImageCapture use case, and return the captured JPEG(s) to the WebView. This would also support multi-shot capture before returning to the app, but must avoid the previous native preview flicker path.
-
-#### 2026-04-29 ImageCapture Results and Dual Camera Plan
-**Latest hardware result**
-- Current WebRTC implementation now captures high-resolution stills around 12 MP using `ImageCapture.takePhoto()`.
-- The selected lens is still the ultra-wide lens on the Samsung S25.
-- Preview and captured JPEG now show the same field of view, so the old mismatch between preview/video crop and output is gone.
-- When imported into `sporely-py`, the captured image appears rotated -90 degrees. This suggests the JPEG has EXIF orientation that desktop import is not honoring, or native/WebView still capture is writing pixels/orientation differently than expected.
-- GPS EXIF is missing from the captured JPEG. This may be acceptable because Sporely already stores capture GPS in the cloud/local observation DB, but we should either transfer coordinates from cloud DB to local DB during desktop sync/import or explicitly write GPS EXIF before upload/export.
-
-**Product direction**
-- Keep the current WebRTC `ImageCapture.takePhoto()` implementation as **Sporely Cam**. It is useful because it gives high-resolution 12 MP captures and works without the native flicker path, even though S25 lens selection is wrong.
-- Add a third capture/import button in the web app: **Native Cam**. This button is Android-only and launches a native CameraX/Camera2 capture flow.
-- Native Cam should use Android CameraX/Camera2 to select the back physical camera with flash/torch and normal/wide focal length, avoiding Samsung WebView's logical-camera ultra-wide selection.
-- Native Cam should return one or more JPEGs plus metadata to the existing Sporely review/import pipeline, so multi-shot capture can be supported before returning to the web UI.
-- Native Cam must normalize orientation before returning files, or write a correct EXIF orientation tag that both web and `sporely-py` honor.
-- Native Cam should either write GPS EXIF using current app/device coordinates or return GPS metadata alongside the photo so the observation DB remains the source of truth.
-
-**Implementation tasks**
-- [x] Rename/label the existing WebRTC camera entry point as **Sporely Cam** in the UI where users choose capture/import.
-- [x] Add **Native Cam** as a third Android-only button in the web app.
-- [x] Add a `NativeCamera` Capacitor plugin and register it in `MainActivity`.
-- [x] Add Android CameraX dependencies.
-- [x] Build first native CameraX capture activity with Preview + ImageCapture, multi-shot queue, Done/Cancel controls, and a 1x/back-camera selector based on Camera2 characteristics.
-- [x] Return captured cache-file paths and metadata to JS.
-- [x] Reuse the existing import/review path to convert returned native files into `File`/Blob entries.
-- [x] Initial Android device test: Native Cam launches, captures, returns photos to the app, and works as the new native capture path.
-- [ ] Verify on Samsung S25: selected lens is 1x, capture is 12 MP, preview matches output, orientation is correct in `sporely-py`, and GPS strategy is documented.
+## Native Android Camera Follow-Up
+- [ ] Verify on Samsung S25: Native Cam selects the 1x lens, capture is 12 MP, preview matches output, orientation is correct in `sporely-py`, and GPS strategy is documented.
 
 ## UI fixes
 - Missing location data popup: Remove "when using the quick "Photos & videos" picker". Add the sentence: "(Or just use Sporely cam to capture location)"
 - Group import review screen: Instead of Queue all, just use Add (Legg til
 - Remove the New observation after.. /Photo import section in Settings (It is now in the group import page - make sure this setting is stored until next time)
-- [x] Remove the F-stop and location info boxes from Capture screen. Add lens/zoom selection buttons reading from device hardware API and move the batch badge above the Done button.
 - On the Finds tab: Species is not translated
 - Finds tab, when 1 card per row is shown: Add an icon that indicates if there are spore measures for the observation. This could be like a small almond shaped brown icon, same row and just before the "sharing" icon (friends/public/private). 
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
 - Add a legend drop-down to the map page. Selection: Genus (more will come). this will show a legend with colors, corresponding the the dots on the map.
 - The card with number of finds, number of species, and number of spores: Tapping finds: open screen with finds, filtered for that user (card could appear on home tab or people tab): Species filter off. Tapping species: same as for tapping finds, but with species filter on. Tapping spores: filter only finds for that user with spore measurements.
 
-## Shared Priority: Accurate Place Names From Coordinates (`sporely-web` and `sporely-py`)
-*Goal: resolve photo/observation GPS coordinates to accurate place names across web/mobile and desktop. Accuracy matters more than lookup speed because desktop photo processing is infrequent (typically every 2-5 minutes), and web/mobile can resolve once per observation instead of once per photo.*
+## Accurate Place Names From Coordinates (`sporely-web`)
+*Goal: match the desktop lookup behavior without repeating the trial-and-error. Resolve once per observation/import session, prefer accuracy over speed, and keep UI suggestions short and local.*
 
-### Step 1: Primary Global Lookup with Nominatim
-- [ ] **Use OpenStreetMap Nominatim as the global reverse-geocoder first.** When a photo or observation needs location tagging, extract latitude/longitude and query:
-  `https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json`
-- [ ] **Always send a custom User-Agent header.** Use an app-specific header such as `SporelyApp/1.0 (contact@sporely.no)` or a configurable support/contact email. Do not call Nominatim with a default browser/fetch user agent.
-- [ ] **Parse and persist useful global lookup fields.** Store the full `display_name`, and extract `address.country_code` as a 2-letter country code.
+### Implementation Shape
+- [ ] **Add a Sporely-owned reverse-location endpoint.** Do not call Nominatim directly from browser code as the primary path: browser `fetch` cannot set the real `User-Agent` header Nominatim expects. Use a Cloudflare Worker or Supabase Edge Function such as `/reverse-location?lat={lat}&lon={lon}` that performs Nominatim/Artsdatabanken/DAWA calls server-side, adds an app-specific `User-Agent`, handles CORS, and can throttle/cache requests.
+- [ ] **Create a small web client helper.** Add a pure helper such as `src/location-lookup.js` that calls the endpoint and returns the same normalized shape used by desktop: `{ suggestions, latitude, longitude, country_code, country_name, nominatim_display_name, source }`.
+- [ ] **Use a latest-request guard.** Track a request id plus rounded coordinates in the UI. If the user changes photos/coordinates before the lookup returns, ignore the stale result so an old place name cannot fill a new observation.
 
-### Step 2: Conditional Evaluation
-- [ ] **If `country_code != "no"`:** stop after Nominatim and tag the photo/observation from the Nominatim `display_name` or more specific address fields.
-- [ ] **If `country_code == "no"`:** treat the point as Norway and continue to the high-precision local lookup.
+### Server-Side Lookup Flow
+- [ ] **Nominatim first for country detection.** Query `https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json`, parse `display_name`, `address.country_code`, and `address.country`, and keep the full `display_name` as fallback/reference.
+- [ ] **Build short Nominatim suggestions as separate entries.** Do not show the full local-to-regional chain as the normal Location text. Suggest `address.amenity || address.road` as one dropdown item, then `address.neighbourhood || address.suburb` as another item.
+- [ ] **Norway branch:** if `country_code === "no"`, query `https://stedsnavn.artsdatabanken.no/v1/punkt?lat={lat}&lng={lon}&zoom=45`. Use `navn` first only when `dist <= 0.006`; otherwise discard it and fall back to Nominatim suggestions.
+- [ ] **Denmark branch:** if `country_code === "dk"`, query `https://api.dataforsyningen.dk/adgangsadresser/reverse?x={lon}&y={lat}`. Put the best DAWA local label first, then the Nominatim local suggestions.
+- [ ] **Other countries:** use Nominatim local suggestions first; use `display_name` only if no local address parts are available.
+- [ ] **Deduplicate suggestions while preserving source priority.** Norway order is Artsdatabanken then Nominatim. Denmark order is DAWA then Nominatim.
 
-### Step 3: High-Precision Norway Lookup with Artsdatabanken
-- [ ] **For Norwegian coordinates, query Artsdatabanken using the same GPS point:**
-  `https://stedsnavn.artsdatabanken.no/v1/punkt?lat={lat}&lng={lon}&zoom=45`
-- [ ] **Parse the response.** Extract `navn` as the local place name and `dist` as a float distance/quality value.
-- [ ] **Validate before using the Norwegian result.** If `dist <= 0.006`, tag with Artsdatabanken `navn`. If `dist > 0.006`, treat it as an anomalous snap/offshore-boundary result and fall back to the Nominatim `display_name`.
+### Web UI Behavior
+- [ ] **Resolve once per observation/session.** For a multi-photo observation, reuse the resolved place name for attached photos unless coordinates differ meaningfully.
+- [ ] **Auto-fill the first suggestion.** The Location field should receive the first suggestion when it is empty or still contains the previous auto-filled value.
+- [ ] **Show all suggestions on field focus/click.** The dropdown should contain separate entries, not a comma-joined string.
+- [ ] **Persist useful country metadata.** Store or carry `country_code`, `country_name`, and `nominatim_display_name` alongside the observation/import draft when available.
+- [ ] **Drive regional UI from country.** Norway uses Artsobservasjoner-oriented fields, Sweden uses Artportalen-oriented fields, Denmark is pending Danmarks Svampeatlas, and other countries use iNaturalist/Sporely Cloud defaults. Hide regional biotope/substrate controls outside Norway and Sweden, while keeping them visible until country is known.
 
-### Step 4: Denmark Lookup with DAWA
-- [ ] **For Danish coordinates (`country_code == "dk"`), query DAWA before using Nominatim as the selected label:**
-  `https://api.dataforsyningen.dk/adgangsadresser/reverse?x={lon}&y={lat}`
-- [ ] **Format DAWA results from local to regional.** Use fields such as `vejstykke.navn`, `postnummer.navn`, `kommune.navn`, and `region.navn`, ending with `Danmark`.
-
-### Step 5: Multiple Location Suggestions
-- [ ] **Show location suggestions in a dropdown on both `sporely-web` and `sporely-py`.** The first suggestion should still auto-fill the Location field, but clicking/focusing the field should show all available suggestions.
-- [ ] **Norway suggestion order:** first validated Artsdatabanken `navn`, then Nominatim suggestions.
-- [ ] **Denmark suggestion order:** first DAWA, then Nominatim suggestions.
-- [ ] **Nominatim suggestions:** include the full `display_name`, plus a local hierarchy based on `address` fields as prototyped in `sporely-py/database/reverse_location_lookup.py`: `addr.get("amenity") or addr.get("road")`, then `addr.get("neighbourhood") or addr.get("suburb")`, then city/town/village, municipality/county, state, country.
-- [ ] **Deduplicate suggestions while preserving source-priority order.**
-
-### Step 6: Throttle and Rate-Limit Management
-- [ ] **Desktop batch imports (`sporely-py`):** enforce a hard `sleep(1)` between every Nominatim request in any loop that processes imported photos. This keeps the desktop app within Nominatim's maximum of 1 request per second.
-- [ ] **Web/mobile (`sporely-web`):** avoid per-photo reverse geocoding when one observation has multiple photos from the same place. Resolve once per observation/session when possible, then reuse the place name for photos attached to that observation.
+### Tests
+- [ ] **Unit-test normalization fixtures.** Add fixtures for Norway, Denmark, Sweden, and a non-Nordic country. Assert suggestion order, deduplication, country parsing, and fallback behavior.
+- [ ] **Test stale lookup handling.** Simulate two coordinate lookups resolving out of order and verify only the latest result updates the draft.
 
 ## Code Review & Refactoring
 *Review this code with a strict refactor/audit mindset. Do not praise. Look for concrete problems only.*
 
 ### 2026-04-30 Camera Settings Review Findings
 - [ ] Settings can show `Native Cam` selected while browser/PWA users are actually routed to `Sporely Cam`; make the settings UI show the effective camera mode or hide/disable native selection outside the Android app.
-- [x] Native Camera cancel should delete discarded cache-file captures from `getCacheDir()/native-camera` before leaving the activity.
 - [ ] Capture reset/default draft logic is duplicated across `capture.js` and `review.js`; centralize `defaultCaptureDraft()` and `resetCaptureSession()` near `state.js`.
 - [ ] Remove dead `capture.importPhotos` i18n keys after removing the capture-screen gallery button.
 - [ ] Consolidate duplicated platform detection helpers (`_isNativeApp`, Android-native checks) into a shared platform helper.
@@ -719,9 +631,7 @@ return new Promise((resolve, reject) => {
 - [ ] **Literature Overlays** — Overlay reference bounding boxes on user plots for immediate ID comparison.
 
 ### E. Performance & QC Optimization (R2 & Free Tier Focus)
-- [x] **Local Image Processing** — The web app already creates thumbnail variants locally before upload.
 - [ ] **Outlier Verification UI** — Link Plotly click events to the R2-hosted thumbnails for instant QC.
-- [x] **Zero-Egress Gallery** — Gallery reads now prefer Cloudflare R2 via `media.sporely.no`.
 
 ## Long-Term Goals (Phase 3)
 - [ ] **In-Browser Measurement** — Replicate manual spore clicking and calibration using HTML5 Canvas.

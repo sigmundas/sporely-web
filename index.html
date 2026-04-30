@@ -391,7 +391,7 @@
           <div class="field-meta-row">
             <div class="field-meta-key">Location</div>
             <div class="field-meta-val location-field-val">
-              <input id="location-name-input" type="text" placeholder="—" class="location-name-input" autocomplete="off" spellcheck="false" readonly>
+              <input id="location-name-input" type="text" placeholder="—" class="location-name-input" autocomplete="off" spellcheck="false">
               <button id="location-apply-btn" class="location-apply-btn" style="display:none">Current location</button>
             </div>
           </div>
@@ -489,7 +489,10 @@
 
           <div class="detail-field">
             <div class="detail-field-label">Location</div>
-            <input id="detail-location" class="detail-text-input" type="text" placeholder="—">
+            <div class="location-suggest-wrap detail-location-wrap">
+              <input id="detail-location" class="detail-text-input" type="text" placeholder="—" autocomplete="off" spellcheck="false">
+              <ul id="detail-location-dropdown" class="location-suggestion-dropdown" style="display:none"></ul>
+            </div>
             <button id="detail-current-location-btn" class="location-apply-btn detail-location-btn" style="display:none">Current location</button>
           </div>
 
