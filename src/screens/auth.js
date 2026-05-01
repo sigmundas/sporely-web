@@ -431,19 +431,6 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     })
   }
 
-  // Inject Terms of Service checkbox dynamically
-  if (signupForm && signupBtn && !document.getElementById('signup-terms')) {
-    const termsLabel = document.createElement('label')
-    termsLabel.className = 'auth-terms'
-    termsLabel.innerHTML = `
-      <input type="checkbox" id="signup-terms" required>
-      <span>
-        I agree to the <a href="https://sporely.no/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> and confirm I will not upload objectionable or illegal content.
-      </span>
-    `
-    signupForm.insertBefore(termsLabel, signupBtn)
-  }
-
   if (!skipDraftRestore) {
     _restoreAuthDraft()
   }

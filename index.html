@@ -89,12 +89,18 @@
           <input type="password" id="signup-password" name="password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
         </label>
         <p class="auth-help" id="signup-password-help">Use at least 8 characters, including uppercase, lowercase, number, and symbol.</p>
-        <button type="submit" class="auth-btn" id="signup-btn">Create account</button>
+      <label class="auth-label" style="display:flex; align-items:center; gap:8px; margin-top:16px; margin-bottom:24px; cursor:pointer; flex-direction:row;">
+        <input type="checkbox" id="signup-tos" required style="width:16px;height:16px;accent-color:var(--brand, #4CAF50)">
+        <span style="font-size:13px; font-weight:normal; color:var(--text-dim, #aaa)">I agree to <a href="https://sporely.no/terms" target="_blank" style="color:var(--brand, #4CAF50); text-decoration:none;">terms of service and privacy policy</a></span>
+      </label>
+    <!-- Turnstile CAPTCHA -->
+    <div id="turnstile-container" style="margin-bottom:16px;display:none;justify-content:center"></div>
+
+      <div style="display:flex; justify-content:center;">
+      <button type="submit" class="auth-btn" id="signup-btn" style="padding-left:32px; padding-right:32px; min-width:200px;">Create account</button>
+      </div>
         <p class="auth-switch"><span id="signup-switch-prefix">Already have one?</span> <a href="#" id="show-login">Sign in</a></p>
       </form>
-
-      <!-- Turnstile CAPTCHA -->
-      <div id="turnstile-container" style="margin-top:12px;display:none;justify-content:center"></div>
 
       <!-- Install hint (mobile only, injected by JS) -->
       <div class="auth-install-hint" id="auth-install-hint" style="display:none">
@@ -136,23 +142,19 @@
       const copy = {
         en: {
           ios: '<strong>Install on iPhone:</strong> Tap the share button <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> in Safari, then <strong>"Add to Home Screen"</strong>',
-          android: '<strong>Install on Android:</strong> Tap the menu <strong>⋮</strong> in Chrome, then <strong>"Add to Home screen"</strong>',
-          androidOther: '<strong>Install on Android:</strong> Open this page in Chrome, then tap the menu <strong>⋮</strong> and choose <strong>"Add to Home screen"</strong>'
+          android: '<strong>Get the app:</strong> Download Sporely from the Google Play Store for the best experience.'
         },
         no: {
           ios: '<strong>Installer på iPhone:</strong> Trykk på delingsknappen <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> i Safari, og velg deretter <strong>"Legg til på hjemmeskjermen"</strong>',
-          android: '<strong>Installer på Android:</strong> Trykk på menyen <strong>⋮</strong> i Chrome, og velg deretter <strong>"Legg til på startskjermen"</strong>',
-          androidOther: '<strong>Installer på Android:</strong> Åpne denne siden i Chrome, trykk på menyen <strong>⋮</strong>, og velg <strong>"Legg til på startskjermen"</strong>'
+          android: '<strong>Skaff deg appen:</strong> Last ned Sporely fra Google Play Store for den beste opplevelsen.'
         },
         sv: {
           ios: '<strong>Installera på iPhone:</strong> Tryck på delningsknappen <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> i Safari och välj sedan <strong>"Lägg till på hemskärmen"</strong>',
-          android: '<strong>Installera på Android:</strong> Tryck på menyn <strong>⋮</strong> i Chrome och välj sedan <strong>"Lägg till på startskärmen"</strong>',
-          androidOther: '<strong>Installera på Android:</strong> Öppna sidan i Chrome, tryck på menyn <strong>⋮</strong> och välj <strong>"Lägg till på startskärmen"</strong>'
+          android: '<strong>Hämta appen:</strong> Ladda ner Sporely från Google Play Store för bästa upplevelse.'
         },
         de: {
           ios: '<strong>Auf dem iPhone installieren:</strong> Tippe in Safari auf die Teilen-Schaltfläche <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> und wähle dann <strong>"Zum Home-Bildschirm"</strong>',
-          android: '<strong>Auf Android installieren:</strong> Tippe in Chrome auf das Menü <strong>⋮</strong> und wähle dann <strong>"Zum Startbildschirm hinzufügen"</strong>',
-          androidOther: '<strong>Auf Android installieren:</strong> Öffne diese Seite in Chrome, tippe auf das Menü <strong>⋮</strong> und wähle <strong>"Zum Startbildschirm hinzufügen"</strong>'
+          android: '<strong>Hol dir die App:</strong> Lade Sporely aus dem Google Play Store herunter, um das beste Erlebnis zu haben.'
         }
       }[lang]
 
@@ -160,8 +162,8 @@
         icon.textContent = '📲'
         text.innerHTML = copy.ios
       } else {
-        icon.textContent = '📲'
-        text.innerHTML = isAndroidChrome ? copy.android : copy.androidOther
+        icon.textContent = '🍄'
+        text.innerHTML = copy.android
       }
       hint.style.display = 'flex'
     })()
@@ -252,7 +254,7 @@
     <div id="exif-warning-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); z-index:2000; align-items:center; justify-content:center; padding:20px; backdrop-filter:blur(4px);">
       <div style="background:var(--bg-main, #111); border:1px solid var(--border, #333); border-radius:20px; width:100%; max-width:400px; padding:24px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
         <div id="exif-warning-title" style="font-size:20px; font-weight:600; margin-bottom:12px;">Missing Location Data?</div>
-        <div id="exif-warning-desc" style="font-size:15px; color:var(--text-dim, #aaa); line-height:1.5; margin-bottom:24px;">Android web browsers automatically remove GPS location from photos when using the quick "Photos & videos" picker. Install the Sporely app from Play Store to import location data with your images.</div>
+      <div id="exif-warning-desc" style="font-size:15px; color:var(--text-dim, #aaa); line-height:1.5; margin-bottom:24px;">Android web browsers automatically remove GPS location from photos. Install the Sporely app from Play Store to import location data with your images. (Or just use Sporely cam to capture location)</div>
 
         <label style="display:flex; align-items:center; gap:12px; margin-bottom:24px; cursor:pointer;">
           <input type="checkbox" id="exif-warning-dont-show" style="width:20px; height:20px; accent-color:var(--brand, #4CAF50); cursor:pointer;">
@@ -599,7 +601,7 @@
         <div class="review-action-btns">
           <button class="btn-secondary" id="import-cancel-btn">Cancel</button>
           <button class="btn-secondary" id="import-ai-all-btn">AI ID All</button>
-          <button class="btn-primary" id="import-save-btn">Save All</button>
+      <button class="btn-primary" id="import-save-btn">Add</button>
         </div>
         <div class="sync-footer-text">Creates observations in Sporely Cloud</div>
       </div>
@@ -847,18 +849,6 @@
             <option value="de_DE">Deutsch</option>
           </select>
         </div>
-
-        <div class="settings-section-label" id="settings-photo-import-label" style="margin-top:22px">Photo Import</div>
-        <div class="settings-gap-row">
-          <div class="settings-gap-label" id="settings-gap-label">New observation after</div>
-          <div class="settings-stepper" aria-labelledby="settings-gap-label">
-            <button type="button" class="settings-stepper-btn" id="settings-gap-decrement" aria-label="Decrease photo gap">-</button>
-            <output id="settings-gap-input" class="settings-gap-input settings-gap-display" aria-live="polite">1</output>
-            <button type="button" class="settings-stepper-btn" id="settings-gap-increment" aria-label="Increase photo gap">+</button>
-          </div>
-          <span class="settings-gap-unit" id="settings-gap-unit">min</span>
-        </div>
-        <p class="settings-gap-hint" id="settings-gap-hint">Photo import from your device will group images based on time between photos.</p>
 
         <div class="settings-section-label" id="settings-artsorakel-label" style="margin-top:22px">Artsorakel</div>
         <div class="settings-gap-row">

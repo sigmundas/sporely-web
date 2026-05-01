@@ -14,6 +14,7 @@ import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
 import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes } from '../settings.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
+import { isAndroidApp } from '../platform.js';
 
 const NativePhotoPicker = registerPlugin('NativePhotoPicker');
 const NativeCamera = registerPlugin('NativeCamera');
@@ -393,10 +394,6 @@ function sessionById(sid) {
   return sessions.find(s => s.id === sid);
 }
 
-function _isNativeApp() {
-  return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.());
-}
-
 export function initImportReview() {
   document.getElementById('import-back').addEventListener('click', _cancelImport);
   document.getElementById('import-cancel-btn').addEventListener('click', _cancelImport);
@@ -463,7 +460,7 @@ export function restoreImportSessions(savedSessions) {
 }
 
 export async function openPhotoImportPicker() {
-  if (_isNativeApp() && Capacitor.getPlatform?.() === 'android') {
+  if (isAndroidApp()) {
     try {
       const result = await _pickImagesWithNativePhotoPicker();
       await _handleNativePhotoResult(result);
@@ -493,7 +490,7 @@ export async function openPhotoImportPicker() {
 }
 
 export async function openNativeCamera() {
-  if (!_isNativeApp() || Capacitor.getPlatform?.() !== 'android') {
+  if (!isAndroidApp()) {
     showToast('Sporely Cam is available in the Android app.')
     return
   }
@@ -548,7 +545,7 @@ async function _pickImagesWithNativePhotoPicker() {
 }
 
 export async function openFileImportPicker() {
-  if (_isNativeApp() && Capacitor.getPlatform?.() === 'android') {
+  if (isAndroidApp()) {
     try {
       await _handleNativePhotoResult(await _pickImagesWithNativePhotoPicker());
       return;
@@ -833,7 +830,7 @@ async function _nativePickedPhotoToFile(photo, index) {
 }
 
 function _shouldHydrateNativeMetadata(photo, file) {
-  if (Capacitor.getPlatform?.() !== 'android') return false;
+  if (!isAndroidApp()) return false;
   if (!photo?.originalPath) return false;
   if (photo.originalPath === photo.path && !_isHeicLike(file)) return false;
   const rawGps = _extractLatLonFromRawGps(photo.exif);
@@ -1224,7 +1221,7 @@ async function _captureExif(file) {
 // Android imports. If decode fails (e.g. some HEIC flows outside Safari/native conversion),
 // we fall back to the original file as-is.
 function _isAndroidNativeJpegImport(file, nativePhoto) {
-  return Capacitor.getPlatform?.() === 'android'
+  return isAndroidApp()
     && !!nativePhoto
     && file?.type === 'image/jpeg';
 }

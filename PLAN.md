@@ -3,10 +3,23 @@
 ## Native Android Camera Follow-Up
 - [ ] Verify on Samsung S25: Native Cam selects the 1x lens, capture is 12 MP, preview matches output, orientation is correct in `sporely-py`, and GPS strategy is documented.
 
+## Camera Behavior Summary (Sporely Cam vs Web Cam)
+
+**Sporely Cam (Native Android / CameraX)**
+- **Availability:** Active only when running the installed Android app (via Capacitor).
+- **Hardware & Quality:** Direct access to native CameraX APIs. Utilizes the best available lens (e.g., 1x lens) and captures at true, high-resolution original quality (e.g., 12 MP).
+- **Metadata:** Natively preserves full EXIF orientation and accurate GPS location data seamlessly during capture.
+
+**Web Cam (HTML5 `getUserMedia` / PWA)**
+- **Availability:** Used when accessing `app.sporely.no` from a mobile browser (Safari/Chrome) or installed as a PWA.
+- **Hardware & Quality:** Captures frames from a `<video>` stream painted to an HTML `<canvas>`. Output resolution is artificially constrained by browser WebRTC stream limits, typically resulting in lower image quality than native captures.
+- **Metadata:** Mobile browsers aggressively strip EXIF data (like GPS coordinates) from browser-based captures to protect privacy.
+- **UI Handling:** The app displays an `android-web-camera-warning-overlay` and `exif-warning-overlay` to advise Android web users of this limitation, recommending they install the native Sporely app for proper location handling and image quality.
+
 ## UI fixes
-- Missing location data popup: Remove "when using the quick "Photos & videos" picker". Add the sentence: "(Or just use Sporely cam to capture location)"
-- Group import review screen: Instead of Queue all, just use Add (Legg til
-- Remove the New observation after.. /Photo import section in Settings (It is now in the group import page - make sure this setting is stored until next time)
+- [x] Missing location data popup: Remove "when using the quick 'Photos & videos' picker". Add the sentence: "(Or just use Sporely cam to capture location)"
+- [x] Group import review screen: Instead of Queue all, just use Add
+- [x] Remove the New observation after.. /Photo import section in Settings
 - On the Finds tab: Species is not translated
 - Finds tab, when 1 card per row is shown: Add an icon that indicates if there are spore measures for the observation. This could be like a small almond shaped brown icon, same row and just before the "sharing" icon (friends/public/private). 
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
@@ -47,7 +60,7 @@
 - [ ] Settings can show `Native Cam` selected while browser/PWA users are actually routed to `Sporely Cam`; make the settings UI show the effective camera mode or hide/disable native selection outside the Android app.
 - [ ] Capture reset/default draft logic is duplicated across `capture.js` and `review.js`; centralize `defaultCaptureDraft()` and `resetCaptureSession()` near `state.js`.
 - [ ] Remove dead `capture.importPhotos` i18n keys after removing the capture-screen gallery button.
-- [ ] Consolidate duplicated platform detection helpers (`_isNativeApp`, Android-native checks) into a shared platform helper.
+- [x] Consolidate duplicated platform detection helpers (`_isNativeApp`, Android-native checks) into a shared platform helper.
 - [ ] Remove or gate production camera debug logs in `capture.js`.
 
 For each issue you find, return:
@@ -640,10 +653,15 @@ return new Promise((resolve, reject) => {
 ## Phase 4: Image Sync & Monetization
 *Goal: Implement tiered storage, client-side compression, and a Pro subscription model.*
 
-### 1. Storage Architecture & Guardrails
+### 1. Image Processing & Compression (Client-Side)
+- [ ] **Metadata Preservation:**
+    - Extract GPS and timestamp EXIF data *before* compression.
+    - Re-inject or store metadata in the database to ensure "Digital Lab Notebook" integrity.
+
+### 2. Storage Architecture & Guardrails
 - [ ] **Backfill historical usage:** Add an admin script to scan existing R2 objects and reconcile `total_storage_bytes` / `image_count` for users with pre-tally uploads.
 
-### 2. Monetization & In-App Purchases (IAP)
+### 3. Monetization & In-App Purchases (IAP)
 - [ ] **RevenueCat Integration:**
     - Initialize RevenueCat SDK in the Capacitor wrapper (Android/iOS).
     - Configure the "Pro" entitlement and sync it into `profiles.cloud_plan = 'pro'` or `full_res_storage_enabled = true`.
