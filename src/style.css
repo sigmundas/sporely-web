@@ -2660,6 +2660,18 @@ html.light .taxon-dropdown {
 }
 html.light .taxon-dropdown li:hover { background: var(--card-raised); }
 
+html.light .location-suggestion-dropdown {
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.10);
+}
+html.light .location-suggestion-dropdown li {
+  color: var(--text-primary);
+}
+html.light .location-suggestion-dropdown li:hover {
+  background: var(--card-raised);
+}
+
 /* AI result rows */
 html.light .ai-result { background: rgba(0,0,0,0.04); }
 html.light .ai-result:hover { background: rgba(0,0,0,0.08); }
