@@ -41,7 +41,7 @@ public class NativeCameraPlugin extends Plugin {
             ret.put("photos", photos);
             call.resolve(ret);
         } catch (Exception ex) {
-            call.reject("Native camera result failed", ex);
+            call.reject("Sporely camera result failed", ex);
         }
     }
 }

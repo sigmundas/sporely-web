@@ -640,15 +640,10 @@ return new Promise((resolve, reject) => {
 ## Phase 4: Image Sync & Monetization
 *Goal: Implement tiered storage, client-side compression, and a Pro subscription model.*
 
-### 1. Image Processing & Compression (Client-Side)
-- [ ] **Metadata Preservation:**
-    - Extract GPS and timestamp EXIF data *before* compression.
-    - Re-inject or store metadata in the database to ensure "Digital Lab Notebook" integrity.
-
-### 2. Storage Architecture & Guardrails
+### 1. Storage Architecture & Guardrails
 - [ ] **Backfill historical usage:** Add an admin script to scan existing R2 objects and reconcile `total_storage_bytes` / `image_count` for users with pre-tally uploads.
 
-### 3. Monetization & In-App Purchases (IAP)
+### 2. Monetization & In-App Purchases (IAP)
 - [ ] **RevenueCat Integration:**
     - Initialize RevenueCat SDK in the Capacitor wrapper (Android/iOS).
     - Configure the "Pro" entitlement and sync it into `profiles.cloud_plan = 'pro'` or `full_res_storage_enabled = true`.

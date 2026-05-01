@@ -194,11 +194,11 @@
 
       <div class="home-content">
         <div class="action-grid">
-          <div class="action-card" id="ac-camera" data-camera-mode="native">
+          <div class="action-card" id="ac-camera">
             <div class="action-card-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 6h3l1.6-2h4.8L16 6h3a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/><path d="M18 9h.01"/></svg>
             </div>
-            <div class="action-card-label">Native Cam</div>
+            <div class="action-card-label">Sporely Cam</div>
           </div>
           <div class="action-card" id="ac-import">
             <div class="action-card-icon">
@@ -253,15 +253,33 @@
       <div style="background:var(--bg-main, #111); border:1px solid var(--border, #333); border-radius:20px; width:100%; max-width:400px; padding:24px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
         <div id="exif-warning-title" style="font-size:20px; font-weight:600; margin-bottom:12px;">Missing Location Data?</div>
         <div id="exif-warning-desc" style="font-size:15px; color:var(--text-dim, #aaa); line-height:1.5; margin-bottom:24px;">Android web browsers automatically remove GPS location from photos when using the quick "Photos & videos" picker. Install the Sporely app from Play Store to import location data with your images.</div>
-        
+
         <label style="display:flex; align-items:center; gap:12px; margin-bottom:24px; cursor:pointer;">
           <input type="checkbox" id="exif-warning-dont-show" style="width:20px; height:20px; accent-color:var(--brand, #4CAF50); cursor:pointer;">
           <span id="exif-warning-dont-show-label" style="font-size:15px; user-select:none;">Don't show this again</span>
         </label>
-        
+
         <div style="display:flex; gap:12px; justify-content:flex-end;">
           <button class="btn-secondary" id="exif-warning-cancel" style="flex:1;">Cancel</button>
           <button class="btn-primary" id="exif-warning-continue" style="flex:1;">Continue anyway</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════ ANDROID WEB CAMERA WARNING ══════════════════════════ -->
+    <div id="android-web-camera-warning-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); z-index:2000; align-items:center; justify-content:center; padding:20px; backdrop-filter:blur(4px);">
+      <div style="background:var(--bg-main, #111); border:1px solid var(--border, #333); border-radius:20px; width:100%; max-width:400px; padding:24px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div id="android-web-camera-warning-title" style="font-size:20px; font-weight:600; margin-bottom:12px;">Better image quality in the app</div>
+        <div id="android-web-camera-warning-desc" style="font-size:15px; color:var(--text-dim, #aaa); line-height:1.5; margin-bottom:24px;">For the best image quality and location handling on Android, download the Sporely app from Play Store. You can continue with the web camera if you prefer.</div>
+
+        <label style="display:flex; align-items:center; gap:12px; margin-bottom:24px; cursor:pointer;">
+          <input type="checkbox" id="android-web-camera-warning-dont-show" style="width:20px; height:20px; accent-color:var(--brand, #4CAF50); cursor:pointer;">
+          <span id="android-web-camera-warning-dont-show-label" style="font-size:15px; user-select:none;">Don't show this again</span>
+        </label>
+
+        <div style="display:flex; gap:12px; justify-content:flex-end;">
+          <button class="btn-secondary" id="android-web-camera-warning-cancel" style="flex:1;">Cancel</button>
+          <button class="btn-primary" id="android-web-camera-warning-continue" style="flex:1;">Continue anyway</button>
         </div>
       </div>
     </div>
@@ -828,12 +846,6 @@
             <option value="sv_SE">Svenska</option>
             <option value="de_DE">Deutsch</option>
           </select>
-        </div>
-
-        <div class="settings-section-label" id="settings-camera-label" style="margin-top:22px">Camera</div>
-        <div class="theme-segment settings-camera-segment">
-          <button class="theme-seg-btn settings-camera-btn" id="settings-camera-native" data-camera-mode="native">Native Cam</button>
-          <button class="theme-seg-btn settings-camera-btn" id="settings-camera-sporely" data-camera-mode="sporely">Sporely Cam</button>
         </div>
 
         <div class="settings-section-label" id="settings-photo-import-label" style="margin-top:22px">Photo Import</div>

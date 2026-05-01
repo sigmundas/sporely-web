@@ -494,7 +494,7 @@ export async function openPhotoImportPicker() {
 
 export async function openNativeCamera() {
   if (!_isNativeApp() || Capacitor.getPlatform?.() !== 'android') {
-    showToast('Native Cam is available in the Android app.')
+    showToast('Sporely Cam is available in the Android app.')
     return
   }
 
@@ -510,8 +510,8 @@ export async function openNativeCamera() {
     await _handleNativePhotoResult(await NativeCamera.capturePhotos(gps ? { gps } : {}))
   } catch (err) {
     if (_isPickerCancel(err)) return
-    console.warn('Native camera failed:', err)
-    showToast(`Native Cam: ${err?.message || err}`)
+    console.warn('Sporely camera failed:', err)
+    showToast(`Sporely Cam: ${err?.message || err}`)
     _hideProgress()
   }
 }

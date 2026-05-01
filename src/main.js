@@ -37,18 +37,16 @@ import { clearMediaUrlCache } from './images.js'
 import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
 import {
   getArtsorakelMaxEdge,
-  getCameraMode,
   getDefaultVisibility,
   getPhotoGapMinutes,
   getSyncOverMobileDataEnabled,
   setArtsorakelMaxEdge,
-  setCameraMode,
   setDefaultVisibility,
   setLastSyncAt,
   setPhotoGapMinutes,
   setSyncOverMobileDataEnabled,
 } from './settings.js'
-import { openPreferredCamera, setNativeCameraOpener } from './camera-actions.js'
+import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener } from './camera-actions.js'
 
 initI18n()
 setNativeCameraOpener(openNativeCamera)
@@ -208,13 +206,6 @@ function initSettings() {
     })
   })
 
-  document.querySelectorAll('.settings-camera-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      setCameraMode(btn.dataset.cameraMode)
-      _syncSettingsUI()
-    })
-  })
-
   // Photo gap input
   const gapInput = document.getElementById('settings-gap-input')
   function _setPhotoGap(value) {
@@ -300,11 +291,6 @@ function _syncSettingsUI() {
     btn.classList.toggle('active', btn.dataset.imageResolutionMode === selectedResolution)
   })
 
-  const cameraMode = getCameraMode()
-  document.querySelectorAll('.settings-camera-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.cameraMode === cameraMode)
-  })
-
   const mobileSyncToggle = document.getElementById('settings-mobile-sync-toggle')
   if (mobileSyncToggle) mobileSyncToggle.checked = getSyncOverMobileDataEnabled()
 
@@ -357,6 +343,7 @@ async function bootApp(user) {
 
   runBootStep('sync-feedback', () => initSyncFeedback())
   runBootStep('settings', () => initSettings())
+  runBootStep('camera-fallback-warning', () => initCameraFallbackWarning())
   runBootStep('navigation', () => initNav())
   runBootStep('home', () => initHome())
   runBootStep('finds', () => initFinds())

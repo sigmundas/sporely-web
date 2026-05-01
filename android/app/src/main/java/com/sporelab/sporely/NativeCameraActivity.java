@@ -19,9 +19,9 @@ import android.os.Bundle;
 import android.util.SizeF;
 import android.view.Gravity;
 import android.view.Surface;
+import android.view.WindowInsets;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.activity.OnBackPressedCallback;
@@ -65,18 +65,27 @@ public class NativeCameraActivity extends AppCompatActivity {
     private static final double FULL_FRAME_DIAGONAL_MM = 43.2666153;
     private static final int SPORELY_GREEN = Color.rgb(88, 155, 82);
     private static final int SPORELY_GREEN_DARK = Color.rgb(38, 72, 43);
-    private static final int CONTROLS_BOTTOM_PADDING_DP = 112;
-    private static final int BATCH_STACK_BOTTOM_MARGIN_DP = 210;
-    private static final int ACTION_BUTTON_HEIGHT_DP = 44;
+    private static final int CONTROLS_BOTTOM_MARGIN_DP = 96;
+    private static final int ACTION_BUTTON_HEIGHT_DP = 52;
+    private static final int ACTION_BUTTON_WIDTH_DP = 104;
+    private static final int ACTION_BUTTON_SIDE_MARGIN_DP = 28;
+    private static final int CONTROL_ROW_HEIGHT_DP = 118;
+    private static final int CONTROL_ROW_BOTTOM_PADDING_DP = 18;
+    private static final int SHUTTER_BUTTON_SIZE_DP = 82;
 
     private PreviewView previewView;
     private FrameLayout batchStack;
     private TextView countBadge;
+    private TextView doneButton;
     private ProcessCameraProvider cameraProvider;
     private ImageCapture imageCapture;
     private Location captureLocation;
     private boolean canceled = false;
+    private boolean finishWhenPendingComplete = false;
+    private int pendingCaptures = 0;
     private final ArrayList<File> capturedFiles = new ArrayList<>();
+    private FrameLayout.LayoutParams controlParams;
+    private FrameLayout.LayoutParams batchParams;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -112,6 +121,8 @@ public class NativeCameraActivity extends AppCompatActivity {
     private void buildLayout() {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
+        root.setClipChildren(false);
+        root.setClipToPadding(false);
 
         previewView = new PreviewView(this);
         previewView.setScaleType(PreviewView.ScaleType.FILL_CENTER);
@@ -120,14 +131,14 @@ public class NativeCameraActivity extends AppCompatActivity {
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
 
-        LinearLayout controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.HORIZONTAL);
-        controls.setGravity(Gravity.CENTER);
-        controls.setPadding(dp(22), dp(10), dp(22), dp(CONTROLS_BOTTOM_PADDING_DP));
+        FrameLayout controls = new FrameLayout(this);
+        controls.setClipChildren(false);
+        controls.setClipToPadding(false);
 
         TextView cancel = makeActionButton("Cancel", false);
         TextView shutter = makeShutterButton();
         TextView done = makeActionButton("Done", true);
+        doneButton = done;
         batchStack = makeBatchStack();
         batchStack.setVisibility(FrameLayout.GONE);
 
@@ -137,25 +148,41 @@ public class NativeCameraActivity extends AppCompatActivity {
         shutter.setOnClickListener(v -> capturePhoto());
         done.setOnClickListener(v -> finishWithPhotos());
 
-        LinearLayout shutterStack = new LinearLayout(this);
-        shutterStack.setOrientation(LinearLayout.VERTICAL);
-        shutterStack.setGravity(Gravity.CENTER);
-        shutterStack.addView(shutter, new LinearLayout.LayoutParams(dp(82), dp(82)));
+        controls.addView(cancel, actionButtonParams(Gravity.BOTTOM | Gravity.START));
+        controls.addView(shutter, shutterButtonParams());
+        controls.addView(done, actionButtonParams(Gravity.BOTTOM | Gravity.END));
 
-        controls.addView(cancel, actionButtonParams());
-        controls.addView(shutterStack, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.1f));
-        controls.addView(done, actionButtonParams());
-
-        FrameLayout.LayoutParams controlParams = new FrameLayout.LayoutParams(
+        controlParams = new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
+            dp(CONTROL_ROW_HEIGHT_DP),
             Gravity.BOTTOM
         );
+        controlParams.setMargins(0, 0, 0, dp(CONTROLS_BOTTOM_MARGIN_DP));
         root.addView(controls, controlParams);
-        FrameLayout.LayoutParams batchParams = new FrameLayout.LayoutParams(dp(54), dp(54), Gravity.BOTTOM | Gravity.END);
-        batchParams.setMargins(0, 0, dp(28), dp(BATCH_STACK_BOTTOM_MARGIN_DP));
+        batchParams = new FrameLayout.LayoutParams(dp(54), dp(54), Gravity.BOTTOM | Gravity.END);
+        batchParams.setMargins(0, 0, dp(28), dp(CONTROLS_BOTTOM_MARGIN_DP + CONTROL_ROW_HEIGHT_DP));
         root.addView(batchStack, batchParams);
+        updateCaptureActionState();
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            applySystemBarInsets(insets);
+            return insets;
+        });
         setContentView(root);
+        root.requestApplyInsets();
+    }
+
+    private void applySystemBarInsets(WindowInsets insets) {
+        if (insets == null) return;
+        int bottomInset = Math.max(0, insets.getSystemWindowInsetBottom());
+        int controlsBottom = Math.max(dp(CONTROLS_BOTTOM_MARGIN_DP), bottomInset + dp(56));
+        if (controlParams != null && controlParams.bottomMargin != controlsBottom) {
+            controlParams.setMargins(0, 0, 0, controlsBottom);
+        }
+        int batchBottom = controlsBottom + dp(CONTROL_ROW_HEIGHT_DP);
+        if (batchParams != null && batchParams.bottomMargin != batchBottom) {
+            batchParams.setMargins(0, 0, dp(28), batchBottom);
+        }
+        if (previewView != null) previewView.requestLayout();
     }
 
     private FrameLayout makeBatchStack() {
@@ -199,6 +226,8 @@ public class NativeCameraActivity extends AppCompatActivity {
         button.setTypeface(Typeface.DEFAULT_BOLD);
         button.setMinHeight(dp(ACTION_BUTTON_HEIGHT_DP));
         button.setPadding(dp(16), 0, dp(16), 0);
+        button.setIncludeFontPadding(false);
+        button.setSingleLine(true);
         if (primary) {
             button.setTextColor(Color.WHITE);
             button.setBackground(makeRoundedBackground(SPORELY_GREEN_DARK, ACTION_BUTTON_HEIGHT_DP / 2f, 1, SPORELY_GREEN));
@@ -216,9 +245,28 @@ public class NativeCameraActivity extends AppCompatActivity {
         return shutter;
     }
 
-    private LinearLayout.LayoutParams actionButtonParams() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(ACTION_BUTTON_HEIGHT_DP), 1f);
-        params.setMargins(dp(4), dp(82 - ACTION_BUTTON_HEIGHT_DP), dp(4), 0);
+    private FrameLayout.LayoutParams actionButtonParams(int gravity) {
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+            dp(ACTION_BUTTON_WIDTH_DP),
+            dp(ACTION_BUTTON_HEIGHT_DP),
+            gravity
+        );
+        params.setMargins(
+            dp(ACTION_BUTTON_SIDE_MARGIN_DP),
+            0,
+            dp(ACTION_BUTTON_SIDE_MARGIN_DP),
+            dp(CONTROL_ROW_BOTTOM_PADDING_DP)
+        );
+        return params;
+    }
+
+    private FrameLayout.LayoutParams shutterButtonParams() {
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+            dp(SHUTTER_BUTTON_SIZE_DP),
+            dp(SHUTTER_BUTTON_SIZE_DP),
+            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
+        );
+        params.setMargins(0, 0, 0, dp(CONTROL_ROW_BOTTOM_PADDING_DP));
         return params;
     }
 
@@ -242,7 +290,7 @@ public class NativeCameraActivity extends AppCompatActivity {
                 cameraProvider = providerFuture.get();
                 bindCamera();
             } catch (Exception ex) {
-                Toast.makeText(this, "Native camera failed: " + ex.getMessage(), Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "Sporely camera failed: " + ex.getMessage(), Toast.LENGTH_LONG).show();
                 finishCanceled();
             }
         }, ContextCompat.getMainExecutor(this));
@@ -350,9 +398,14 @@ public class NativeCameraActivity extends AppCompatActivity {
 
     private void capturePhoto() {
         if (imageCapture == null) return;
+        pendingCaptures += 1;
+        finishWhenPendingComplete = false;
+        updateCaptureActionState();
 
         File dir = new File(getCacheDir(), "native-camera");
         if (!dir.exists() && !dir.mkdirs()) {
+            pendingCaptures = Math.max(0, pendingCaptures - 1);
+            updateCaptureActionState();
             Toast.makeText(this, "Could not create camera cache", Toast.LENGTH_LONG).show();
             return;
         }
@@ -371,6 +424,8 @@ public class NativeCameraActivity extends AppCompatActivity {
             public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
                 if (canceled) {
                     if (file.exists() && !file.delete()) file.deleteOnExit();
+                    pendingCaptures = Math.max(0, pendingCaptures - 1);
+                    updateCaptureActionState();
                     return;
                 }
                 try {
@@ -382,17 +437,33 @@ public class NativeCameraActivity extends AppCompatActivity {
                 capturedFiles.add(file);
                 countBadge.setText(String.valueOf(capturedFiles.size()));
                 batchStack.setVisibility(FrameLayout.VISIBLE);
+                pendingCaptures = Math.max(0, pendingCaptures - 1);
+                updateCaptureActionState();
+                if (finishWhenPendingComplete && pendingCaptures == 0) {
+                    finishWhenPendingComplete = false;
+                    finishWithPhotos();
+                }
             }
 
             @Override
             public void onError(@NonNull ImageCaptureException exception) {
+                pendingCaptures = Math.max(0, pendingCaptures - 1);
+                updateCaptureActionState();
                 Toast.makeText(NativeCameraActivity.this, "Capture failed: " + exception.getMessage(), Toast.LENGTH_LONG).show();
             }
         });
     }
 
+    private void updateCaptureActionState() {
+        if (doneButton == null) return;
+        boolean capturePending = pendingCaptures > 0;
+        doneButton.setEnabled(true);
+        doneButton.setAlpha(capturePending ? 0.78f : 1.0f);
+    }
+
     private void finishCanceled() {
         canceled = true;
+        finishWhenPendingComplete = false;
         setResult(Activity.RESULT_CANCELED);
         deleteCapturedFiles();
         finish();
@@ -410,6 +481,12 @@ public class NativeCameraActivity extends AppCompatActivity {
     }
 
     private void finishWithPhotos() {
+        if (pendingCaptures > 0) {
+            finishWhenPendingComplete = true;
+            Toast.makeText(this, "Saving photo...", Toast.LENGTH_SHORT).show();
+            updateCaptureActionState();
+            return;
+        }
         if (capturedFiles.isEmpty()) {
             finishCanceled();
             return;

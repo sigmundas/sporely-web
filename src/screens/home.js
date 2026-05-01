@@ -2,7 +2,7 @@ import { supabase } from '../supabase.js'
 import { formatDate, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
-import { getEffectiveCameraLabel, getEffectiveCameraMode, openPreferredCamera } from '../camera-actions.js'
+import { getEffectiveCameraLabel, openPreferredCamera } from '../camera-actions.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
@@ -36,7 +36,6 @@ export async function initHome() {
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
   _syncCameraAction()
-  window.addEventListener('sporely-camera-mode-change', _syncCameraAction)
 
   document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))
   document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { groupBySpecies: true }))
@@ -61,7 +60,6 @@ export async function initHome() {
 function _syncCameraAction() {
   const camera = document.getElementById('ac-camera')
   if (!camera) return
-  camera.dataset.cameraMode = getEffectiveCameraMode()
   const label = camera.querySelector('.action-card-label')
   if (label) label.textContent = getEffectiveCameraLabel()
 }

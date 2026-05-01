@@ -4,6 +4,7 @@ import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
+import { getEffectiveCloudUploadPolicy } from '../cloud-plan.js'
 
 function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
@@ -14,6 +15,8 @@ let primaryMainCameraPromise = null
 
 const CAMERA_VIDEO_WIDTH_IDEAL = 4000
 const CAMERA_VIDEO_HEIGHT_IDEAL = 3000
+let pendingCaptureCount = 0
+let finishCaptureWhenPendingComplete = false
 
 export function initCapture() {
   document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
@@ -297,14 +300,87 @@ async function _captureVideoFrame(video) {
   return blob
 }
 
+async function _loadImage(blob) {
+  return await new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      resolve(img)
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('Image decode failed'))
+    }
+    img.src = url
+  })
+}
+
+async function _resizeCaptureBlobForPolicy(blob) {
+  if (!_isBlob(blob)) return blob
+  const policy = getEffectiveCloudUploadPolicy(state.cloudPlan)
+  const maxPixels = Number(policy?.maxPixels) || 0
+  if (!maxPixels || policy.uploadMode === 'full') return blob
+
+  let img
+  try {
+    img = await _loadImage(blob)
+  } catch (err) {
+    console.warn('Could not decode captured image for resolution policy:', err)
+    return blob
+  }
+
+  const sourceWidth = img.naturalWidth || img.width
+  const sourceHeight = img.naturalHeight || img.height
+  const sourcePixels = sourceWidth * sourceHeight
+  if (!sourceWidth || !sourceHeight || sourcePixels <= maxPixels) return blob
+
+  const scale = Math.sqrt(maxPixels / sourcePixels)
+  const targetWidth = Math.max(1, Math.round(sourceWidth * scale))
+  const targetHeight = Math.max(1, Math.round(sourceHeight * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = targetWidth
+  canvas.height = targetHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return blob
+  ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
+
+  const resized = await new Promise((resolve, reject) => {
+    canvas.toBlob(nextBlob => {
+      if (nextBlob) resolve(nextBlob)
+      else reject(new Error('Capture resize failed'))
+    }, 'image/jpeg', 0.9)
+  })
+  return resized
+}
+
+function _syncCaptureControls() {
+  const doneBtn = document.getElementById('done-btn')
+  if (doneBtn) {
+    doneBtn.disabled = false
+    doneBtn.setAttribute('aria-busy', pendingCaptureCount > 0 ? 'true' : 'false')
+  }
+}
+
+function _setPendingCaptureDelta(delta) {
+  pendingCaptureCount = Math.max(0, pendingCaptureCount + delta)
+  _syncCaptureControls()
+  if (pendingCaptureCount === 0 && finishCaptureWhenPendingComplete) {
+    finishCaptureWhenPendingComplete = false
+    finishCapture()
+  }
+}
+
 async function _captureCameraBlob(video) {
+  let blob = null
   try {
     const stillBlob = await _takeStillPhoto(video)
-    if (_isBlob(stillBlob)) return stillBlob
+    if (_isBlob(stillBlob)) blob = stillBlob
   } catch (err) {
     console.warn('ImageCapture still photo failed; falling back to video frame:', err)
   }
-  return await _captureVideoFrame(video)
+  if (!_isBlob(blob)) blob = await _captureVideoFrame(video)
+  return await _resizeCaptureBlobForPolicy(blob)
 }
 
 export async function startCamera(options = {}) {
@@ -334,6 +410,9 @@ export async function startCamera(options = {}) {
     state.batchCount = state.capturedPhotos.length
     document.getElementById('batch-count').textContent = String(state.batchCount)
     document.getElementById('batch-area').style.display = state.batchCount ? 'flex' : 'none'
+    pendingCaptureCount = 0
+    finishCaptureWhenPendingComplete = false
+    _syncCaptureControls()
   } catch (err) {
     const denied = document.getElementById('camera-denied')
     const body   = document.getElementById('camera-denied-body')
@@ -396,9 +475,10 @@ function capturePhoto() {
     ctx.textBaseline = 'middle'
     ctx.fillText(emoji, 400, 300)
 
+    _setPendingCaptureDelta(1)
     const blobPromise = new Promise((resolve) => {
       canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.9)
-    })
+    }).finally(() => _setPendingCaptureDelta(-1))
     blobPromise.catch(() => {})
 
     state.capturedPhotos.push({
@@ -430,6 +510,7 @@ function capturePhoto() {
       aiCropSourceH: previewH,
     }
 
+    _setPendingCaptureDelta(1)
     const blobPromise = _captureCameraBlob(video).then(async blob => {
       const dimensions = await _getImageBlobDimensions(blob)
       if (dimensions.width && dimensions.height) {
@@ -438,8 +519,8 @@ function capturePhoto() {
         photo.aiCropSourceH = dimensions.height
       }
       return blob
-    })
-    
+    }).finally(() => _setPendingCaptureDelta(-1))
+
     // Add a dummy catch to prevent UnhandledPromiseRejection if it's not awaited immediately
     blobPromise.catch(() => {})
 
@@ -463,6 +544,11 @@ function capturePhoto() {
 }
 
 function finishCapture() {
+  if (pendingCaptureCount > 0) {
+    finishCaptureWhenPendingComplete = true
+    showToast('Saving photo...')
+    return
+  }
   stopCamera()
   document.getElementById('bottom-nav').style.display = 'flex'
   navigate('review')
@@ -473,6 +559,8 @@ function cancelCapture() {
   state.capturedPhotos = []
   state.reviewContext = null
   state.batchCount = 0
+  pendingCaptureCount = 0
+  finishCaptureWhenPendingComplete = false
   state.sessionStart = null
   state.captureDraft = {
     habitat: '',
@@ -482,6 +570,7 @@ function cancelCapture() {
   }
   document.getElementById('batch-count').textContent = '0'
   document.getElementById('batch-area').style.display = 'none'
+  _syncCaptureControls()
   document.getElementById('bottom-nav').style.display = 'flex'
   navigate('home')
 }

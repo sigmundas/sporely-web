@@ -50,7 +50,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Close',
     'home.sporelyCam': 'Sporely Cam',
-    'home.nativeCam': 'Native Cam',
+    'home.webCam': 'Web Cam',
     'home.importPhotos': 'Import Photos',
     'home.recentFinds': 'Recent Finds',
     'home.history': 'History →',
@@ -255,7 +255,6 @@ const messages = {
     'settings.dark': 'Dark',
     'settings.language': 'Language',
     'settings.appLanguage': 'App language',
-    'settings.camera': 'Camera',
     'settings.photoImport': 'Photo Import',
     'settings.newObservationAfter': 'New observation after',
     'settings.min': 'min',
@@ -293,7 +292,9 @@ const messages = {
     'import.saved': 'Queued {count} for upload',
     'import.queuedSingle': 'Added to sync queue',
     'import.exifWarningTitle': 'Missing Location Data?',
-    'import.exifWarningDesc': 'Android web browsers automatically remove GPS location from photos. Install the Sporely app from Play Store to import location data with your images. (Or just use Sporely cam to capture location)',
+    'import.exifWarningDesc': 'Android web browsers automatically remove GPS location from photos. Install the Sporely app from Play Store to import location data with your images.',
+    'camera.androidWebWarningTitle': 'Better image quality in the app',
+    'camera.androidWebWarningDesc': 'For the best image quality and location handling on Android, download the Sporely app from Play Store. You can continue with the web camera if you prefer.',
     'import.dontShowAgain': 'Don\'t show this again',
     'import.continueAnyway': 'Continue anyway',
     'counts.photo.one': '{count} photo',
@@ -359,7 +360,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Lukk',
     'home.sporelyCam': 'Sporely Cam',
-    'home.nativeCam': 'Native Cam',
+    'home.webCam': 'Web Cam',
     'home.importPhotos': 'Importer bilder',
     'home.recentFinds': 'Siste funn',
     'home.history': 'Historikk →',
@@ -564,7 +565,6 @@ const messages = {
     'settings.dark': 'Mørk',
     'settings.language': 'Språk',
     'settings.appLanguage': 'Appspråk',
-    'settings.camera': 'Kamera',
     'settings.photoImport': 'Bildeimport',
     'settings.newObservationAfter': 'Ny observasjon etter',
     'settings.min': 'min',
@@ -602,7 +602,9 @@ const messages = {
     'import.saved': 'Satte {count} i kø for opplasting',
     'import.queuedSingle': 'Lagt til i synkøen',
     'import.exifWarningTitle': 'Mangler stedsdata?',
-    'import.exifWarningDesc': 'Nettlesere på Android fjerner automatisk GPS-posisjon fra bilder for å beskytte personvernet ditt. Installer Sporely-appen fra Play Store for å importere stedsdata med bildene dine. (Eller bare bruk Sporely cam for å fange posisjon)',
+    'import.exifWarningDesc': 'Nettlesere på Android fjerner automatisk GPS-posisjon fra bilder for å beskytte personvernet ditt. Installer Sporely-appen fra Play Store for å importere stedsdata med bildene dine.',
+    'camera.androidWebWarningTitle': 'Bedre bildekvalitet i appen',
+    'camera.androidWebWarningDesc': 'For best bildekvalitet og stedshåndtering på Android, last ned Sporely-appen fra Play Store. Du kan fortsette med webkameraet hvis du vil.',
     'import.dontShowAgain': 'Ikke vis dette igjen',
     'import.continueAnyway': 'Fortsett likevel',
     'counts.photo.one': '{count} bilde',
@@ -668,7 +670,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Stäng',
     'home.sporelyCam': 'Sporely Cam',
-    'home.nativeCam': 'Native Cam',
+    'home.webCam': 'Web Cam',
     'home.importPhotos': 'Importera bilder',
     'home.recentFinds': 'Senaste fynd',
     'home.history': 'Historik →',
@@ -873,7 +875,6 @@ const messages = {
     'settings.dark': 'Mörk',
     'settings.language': 'Språk',
     'settings.appLanguage': 'Appspråk',
-    'settings.camera': 'Kamera',
     'settings.photoImport': 'Bildimport',
     'settings.newObservationAfter': 'Ny observation efter',
     'settings.min': 'min',
@@ -911,7 +912,9 @@ const messages = {
     'import.saved': 'Köade {count} för uppladdning',
     'import.queuedSingle': 'Tillagd i synkkön',
     'import.exifWarningTitle': 'Saknas platsdata?',
-    'import.exifWarningDesc': 'Webbläsare på Android tar automatiskt bort GPS-plats från bilder. Installera Sporely-appen från Play Store för att importera platsdata med dina bilder. (Eller använd bara Sporely cam för att fånga platsen)',
+    'import.exifWarningDesc': 'Webbläsare på Android tar automatiskt bort GPS-plats från bilder. Installera Sporely-appen från Play Store för att importera platsdata med dina bilder.',
+    'camera.androidWebWarningTitle': 'Bättre bildkvalitet i appen',
+    'camera.androidWebWarningDesc': 'För bästa bildkvalitet och platshantering på Android, ladda ner Sporely-appen från Play Store. Du kan fortsätta med webbkameran om du vill.',
     'import.dontShowAgain': 'Visa inte detta igen',
     'import.continueAnyway': 'Fortsätt ändå',
     'counts.photo.one': '{count} bild',
@@ -977,7 +980,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Schließen',
     'home.sporelyCam': 'Sporely Cam',
-    'home.nativeCam': 'Native Cam',
+    'home.webCam': 'Web Cam',
     'home.importPhotos': 'Fotos importieren',
     'home.recentFinds': 'Letzte Funde',
     'home.history': 'Verlauf →',
@@ -1182,7 +1185,6 @@ const messages = {
     'settings.dark': 'Dunkel',
     'settings.language': 'Sprache',
     'settings.appLanguage': 'App-Sprache',
-    'settings.camera': 'Kamera',
     'settings.photoImport': 'Fotoimport',
     'settings.newObservationAfter': 'Neue Beobachtung nach',
     'settings.min': 'min',
@@ -1220,7 +1222,9 @@ const messages = {
     'import.saved': '{count} zum Upload vorgemerkt',
     'import.queuedSingle': 'Zur Sync-Warteschlange hinzugefügt',
     'import.exifWarningTitle': 'Fehlen Standortdaten?',
-    'import.exifWarningDesc': 'Android-Webbrowser entfernen automatisch die GPS-Position aus Fotos. Installiere die Sporely-App aus dem Play Store, um Standortdaten mit deinen Bildern zu importieren. (Oder nutze einfach die Sporely Cam zur Standorterfassung)',
+    'import.exifWarningDesc': 'Android-Webbrowser entfernen automatisch die GPS-Position aus Fotos. Installiere die Sporely-App aus dem Play Store, um Standortdaten mit deinen Bildern zu importieren.',
+    'camera.androidWebWarningTitle': 'Bessere Bildqualität in der App',
+    'camera.androidWebWarningDesc': 'Für die beste Bildqualität und Standortverarbeitung auf Android lade die Sporely-App aus dem Play Store herunter. Du kannst auch mit der Webkamera fortfahren.',
     'import.dontShowAgain': 'Nicht mehr anzeigen',
     'import.continueAnyway': 'Trotzdem fortfahren',
     'counts.photo.one': '{count} Foto',
@@ -1431,7 +1435,7 @@ export function applyStaticTranslations() {
   setText('#home-stat-finds-label', 'stats.finds')
   setText('#home-stat-species-label', 'stats.species')
   setText('#home-stat-spores-label', 'stats.spores')
-  setText('#ac-camera .action-card-label', 'home.nativeCam')
+  setText('#ac-camera .action-card-label', 'home.sporelyCam')
   setText('#ac-import .action-card-label', 'home.importPhotos')
 
   setText('#gps-display', 'capture.acquiring')
@@ -1499,6 +1503,11 @@ export function applyStaticTranslations() {
   setText('#exif-warning-dont-show-label', 'import.dontShowAgain')
   setText('#exif-warning-cancel', 'common.cancel')
   setText('#exif-warning-continue', 'import.continueAnyway')
+  setText('#android-web-camera-warning-title', 'camera.androidWebWarningTitle')
+  setText('#android-web-camera-warning-desc', 'camera.androidWebWarningDesc')
+  setText('#android-web-camera-warning-dont-show-label', 'import.dontShowAgain')
+  setText('#android-web-camera-warning-cancel', 'common.cancel')
+  setText('#android-web-camera-warning-continue', 'import.continueAnyway')
 
   setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.friends'), t('scope.community')])
   setText('#finds-subtitle', 'finds.documentedObservations')
@@ -1540,9 +1549,6 @@ export function applyStaticTranslations() {
   setText('.theme-seg-btn[data-theme="dark"]', 'settings.dark')
   setText('#settings-language-label', 'settings.language')
   setText('#settings-language-select-label', 'settings.appLanguage')
-  setText('#settings-camera-label', 'settings.camera')
-  setText('#settings-camera-native', 'home.nativeCam')
-  setText('#settings-camera-sporely', 'home.sporelyCam')
   setText('#settings-photo-import-label', 'settings.photoImport')
   setText('#settings-gap-label', 'settings.newObservationAfter')
   setText('#settings-gap-unit', 'settings.min')

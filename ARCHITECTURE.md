@@ -177,14 +177,10 @@ database, it injects that metadata back into the downloaded JPEG using PIL. This
 See `_inject_obs_exif_into_field_image()` and `_backfill_missing_exif_on_cloud_images()` in
 `sporely/utils/cloud_sync.py`.
 
-**Permanent fix needed in the web app:** In `src/images.js` or `src/screens/import_review.js`,
-extract GPS + capture time from native EXIF *before* the Canvas resize step (e.g. using `exifr`),
-then either:
-- Re-inject the EXIF bytes into the JPEG blob before upload (using `piexifjs` or equivalent), or
-- Write GPS and `captured_at` into the `observation_images` row explicitly so desktop sync can
-  restore it.
-
-See also `sporely-web PLAN.md` → Phase 4 → Metadata Preservation.
+**Web App Extraction (Implemented):** The web app now correctly extracts EXIF/GPS *before*
+the Canvas resize step during import/capture, persisting it into the observation draft and
+database rows. While the stored R2 JPEG *bytes* still lack EXIF, the metadata is safely synced,
+allowing the desktop app to re-inject it upon download.
 
 For the original upload path, the web app now records how the stored cloud image was prepared:
 - `upload_mode` — `reduced` or `full`
@@ -302,6 +298,13 @@ verification failed".
 
 ---
 
+### ⚠️ Upload Request Gotchas
+
+- **iOS Safari Fetch Hangs:** Never stream an IndexedDB-backed `Blob` directly into a `fetch()` body on iOS/WebKit. The web app must always convert it to an `ArrayBuffer` first (`await blob.arrayBuffer()`) before passing it to `fetch`, otherwise the upload may silently hang or send 0 bytes.
+- **CORS Preflight on PUT:** Avoid adding custom non-standard headers (like `X-Sporely-Upload-Mode`) to the R2 upload `PUT` request. Custom headers force strict CORS preflight (`OPTIONS`) behavior on mobile PWAs, which can unexpectedly block uploads depending on network/cache conditions.
+
+---
+
 ## Database schema (Supabase side)
 
 Full SQL is in `sporely/database/` (the desktop app repo).
@@ -331,6 +334,11 @@ Extra cloud-only columns:
 
 AI crop metadata is stored per image and only affects Artsorakel requests. Gallery rendering still uses the full stored image.
 - Full microscope metadata columns present but only populated by desktop sync
+
+### Moderation / UGC Compliance
+- `user_blocks` — Enforces one-way user blocking for feed filtering (`blocker_id`, `blocked_id`).
+- `reports` — Tracks user-reported objectionable content (`observation_id`, `comment_id`, `reason`).
+- These tables, alongside `profiles.is_banned`, are required for Google Play Store User Generated Content (UGC) compliance. RLS and Views (e.g. `observations_community_view`) automatically filter out blocked or banned content.
 
 ### `profiles`
 Auto-created by a Postgres trigger on `auth.users` insert.
@@ -376,6 +384,19 @@ for new uploads. Media access control is now handled by the R2 upload worker (JW
 enforcement) and Cloudflare's public CDN for serving.
 
 ---
+
+## Camera Behaviors (Native vs Web)
+
+**Sporely Cam (Native Android / CameraX)**
+- Activated when running inside the Capacitor Android app.
+- Hooks directly into native CameraX APIs for full 12 MP captures, auto-selecting the 1x lens.
+- Natively preserves full EXIF orientation and accurate GPS metadata securely without Canvas stripping.
+
+**Web Cam (HTML5 `getUserMedia` / PWA)**
+- Activated in mobile browsers (Safari/Chrome) or PWAs.
+- Captures by painting a `<video>` stream to an HTML `<canvas>`, inherently limiting resolution to the browser's WebRTC stream (often ~2 MP).
+- Mobile browsers aggressively strip EXIF/GPS from web captures for privacy. The app compensates by reading device geolocation via JS `navigator.geolocation` during capture.
+- Android web users see warnings advising them to install the native app for better quality and metadata handling.
 
 ## Capture → save flow
 
