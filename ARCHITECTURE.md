@@ -390,6 +390,7 @@ enforcement) and Cloudflare's public CDN for serving.
 **Sporely Cam (Native Android / CameraX)**
 - Activated when running inside the Capacitor Android app.
 - Hooks directly into native CameraX APIs for full 12 MP captures, auto-selecting the 1x lens.
+- Supports a dual-pipeline High Dynamic Range (HDR) capability. For Android 14+ devices (e.g. Samsung S25), it uses native Ultra HDR (`JPEG_R` output) capabilities. For older devices, it queries the CameraX `ExtensionsManager` for OEM vendor HDR extensions. When HDR is active, physical lens locks are cleared to allow the device's ISP to compute the HDR gain map across its logical lens array.
 - Natively preserves full EXIF orientation and accurate GPS metadata securely without Canvas stripping.
 
 **Web Cam (HTML5 `getUserMedia` / PWA)**

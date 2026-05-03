@@ -17,6 +17,10 @@ public class NativeCameraPlugin extends Plugin {
     @PluginMethod
     public void capturePhotos(PluginCall call) {
         Intent intent = new Intent(getActivity(), NativeCameraActivity.class);
+        
+        Boolean useHdr = call.getBoolean("useHdr", false);
+        intent.putExtra("useHdr", useHdr != null ? useHdr : false);
+
         JSObject gps = call.getObject("gps");
         if (gps != null) {
             intent.putExtra(NativeCameraActivity.EXTRA_GPS_JSON, gps.toString());

@@ -10,25 +10,7 @@ import { openFindDetail } from './find_detail.js'
 import { openPhotoImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
 import { refreshHeaderProfileButtons } from './profile.js'
-
-function _imageHtml(source, className, placeholderHtml) {
-  if (!source?.primaryUrl) return placeholderHtml
-  const fallbackAttr = source.fallbackUrl && source.fallbackUrl !== source.primaryUrl
-    ? ` data-fallback-src="${source.fallbackUrl}"`
-    : ''
-  return `<img class="${className}" src="${source.primaryUrl}"${fallbackAttr} loading="lazy" decoding="async" alt="">`
-}
-
-function _wireImageFallback(root) {
-  root.querySelectorAll('img[data-fallback-src]').forEach(img => {
-    img.addEventListener('error', () => {
-      const fallback = img.dataset.fallbackSrc
-      if (!fallback || img.dataset.fallbackApplied === 'true') return
-      img.dataset.fallbackApplied = 'true'
-      img.src = fallback
-    }, { once: true })
-  })
-}
+import { imageHtml as _imageHtml, wireImageFallback as _wireImageFallback } from '../image-helpers.js'
 
 export async function initHome() {
   document.getElementById('home-fab').addEventListener('click', openPreferredCamera)

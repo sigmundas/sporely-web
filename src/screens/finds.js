@@ -268,12 +268,20 @@ function _syncScopeTabs() {
 
       const avatarEl = document.getElementById('finds-user-avatar')
       if (avatarEl) {
-        if (state.findsTargetAvatarUrl) {
-          avatarEl.innerHTML = `<img src="${_esc(state.findsTargetAvatarUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;">`
-        } else {
-          const initial = String(state.findsTargetUsername || '?').replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
-          avatarEl.innerHTML = _esc(initial)
+        const label = state.findsTargetUsername || state.findsTargetUserId || '?'
+        const initial = String(label).replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
+        
+        let avatarHtml = `<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;">${_esc(initial)}</div>`
+        const guessedUrl = state.findsTargetUserId ? supabase.storage.from('avatars').getPublicUrl(`${state.findsTargetUserId}/avatar.jpg`).data.publicUrl : ''
+        const primaryUrl = state.findsTargetAvatarUrl || guessedUrl
+        
+        if (primaryUrl) {
+          avatarHtml += `<img src="${_esc(primaryUrl)}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;" onerror="if (!this.dataset.triedGuessed && '${_esc(guessedUrl)}' && this.src !== '${_esc(guessedUrl)}') { this.dataset.triedGuessed = 'true'; this.src = '${_esc(guessedUrl)}'; } else { this.style.display='none'; }">`
         }
+        
+        avatarEl.innerHTML = avatarHtml
+        avatarEl.style.position = 'relative'
+        avatarEl.style.overflow = 'hidden'
       }
     }
   } else {

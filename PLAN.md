@@ -4,11 +4,26 @@
 - [ ] Verify on Samsung S25: Native Cam selects the 1x lens, capture is 12 MP, preview matches output, orientation is correct in `sporely-py`, and GPS strategy is documented.
 - [ ] **Fix duplicate captures:** Resolve the race condition in the Android custom camera plugin where pressing "Done" right after capturing causes the `onImageSaved` callback and the `onDoneClick` handler to both add the same photo to the results array.
 
+## Capacitor CameraX HDR Integration
+*Goal: Update the custom NativeCamera Capacitor plugin to support CameraX vendor extensions (HDR) via user preference.*
+
+### 1. Frontend Updates (JavaScript)
+- [x] **Preferences Integration:** Use `@capacitor/preferences` to retrieve a `useHdr` boolean preference before camera initialization.
+- [x] **Plugin API:** Pass the `useHdr` boolean within the `options` object sent to the native Capacitor plugin's `start` / `capturePhotos` method.
+
+### 2. Native Android Updates (Kotlin)
+- [x] **Dependencies:** Update `android/app/build.gradle` to include `implementation "androidx.camera:camera-extensions:1.4.0"` and coroutines support.
+- [x] **Plugin Method:** Extract the `useHdr` flag from the JS call using `call.getBoolean("useHdr", false)` and pass it to the Android Activity.
+- [x] **ExtensionsManager:** Retrieve the `ExtensionsManager` instance asynchronously using Guava's `ListenableFuture`.
+- [x] **Camera Selector:** Create a standard base `CameraSelector` targeting the requested lens (e.g., `LENS_FACING_BACK`).
+- [x] **Hardware Verification & Fallback:** Support legacy OEM HDR via `ExtensionsManager`. If not available, fallback to Android 14+ Ultra HDR (`OUTPUT_FORMAT_JPEG_ULTRA_HDR`) via `ImageCaptureCapabilities`. Safely drop physical camera locks to allow ISP processing.
+- [x] **Lifecycle Binding:** Bind the `Preview` and `ImageCapture` use cases to the Android Activity lifecycle.
+
 ## Camera Behavior Summary (Sporely Cam vs Web Cam)
 
 **Sporely Cam (Native Android / CameraX)**
 - **Availability:** Active only when running the installed Android app (via Capacitor).
-- **Hardware & Quality:** Direct access to native CameraX APIs. Utilizes the best available lens (e.g., 1x lens) and captures at true, high-resolution original quality (e.g., 12 MP).
+- **Hardware & Quality:** Direct access to native CameraX APIs. Utilizes the best available lens (e.g., 1x lens) and captures at true, high-resolution original quality (e.g., 12 MP). Supports legacy OEM HDR extensions and modern Android 14+ Ultra HDR (JPEG_R format).
 - **Metadata:** Natively preserves full EXIF orientation and accurate GPS location data seamlessly during capture.
 
 **Web Cam (HTML5 `getUserMedia` / PWA)**

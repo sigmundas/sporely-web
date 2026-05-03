@@ -271,6 +271,18 @@ export async function openFindDetail(obsId, options = {}) {
           try {
             await deleteObservationMedia([row.storage_path])
             await supabase.from('observation_images').delete().eq('id', row.id)
+            
+            const { data: remaining } = await supabase
+              .from('observation_images')
+              .select('storage_path')
+              .eq('observation_id', currentObs.id)
+              .order('sort_order', { ascending: true })
+              .limit(1)
+            if (remaining && remaining.length > 0) {
+              await syncObservationMediaKeys(currentObs.id, remaining[0].storage_path, { sortOrder: 0 })
+            } else {
+              await supabase.from('observations').update({ image_key: null, thumb_key: null }).eq('id', currentObs.id)
+            }
             openFindDetail(currentObs.id)
           } catch (err) {
             console.error('Failed to delete image:', err)

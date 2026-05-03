@@ -33,9 +33,12 @@ import androidx.camera.camera2.interop.Camera2Interop;
 import androidx.camera.core.CameraInfo;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageCapture;
+import androidx.camera.core.ImageCaptureCapabilities;
 import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
+import androidx.camera.extensions.ExtensionMode;
+import androidx.camera.extensions.ExtensionsManager;
 import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -90,6 +93,7 @@ public class NativeCameraActivity extends AppCompatActivity {
     private FrameLayout.LayoutParams batchParams;
     private long lastCaptureTime = 0;
     private View flashView;
+    private boolean isFinishing = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -297,7 +301,18 @@ public class NativeCameraActivity extends AppCompatActivity {
         providerFuture.addListener(() -> {
             try {
                 cameraProvider = providerFuture.get();
-                bindCamera();
+
+                ListenableFuture<ExtensionsManager> extensionsManagerFuture = ExtensionsManager.getInstanceAsync(this, cameraProvider);
+                extensionsManagerFuture.addListener(() -> {
+                    try {
+                        ExtensionsManager extensionsManager = extensionsManagerFuture.get();
+                        bindCamera(extensionsManager);
+                    } catch (Exception ex) {
+                        // Defensive fallback if extensions manager initialization fails
+                        bindCamera(null);
+                    }
+                }, ContextCompat.getMainExecutor(this));
+
             } catch (Exception ex) {
                 Toast.makeText(this, "Sporely camera failed: " + ex.getMessage(), Toast.LENGTH_LONG).show();
                 finishCanceled();
@@ -306,28 +321,57 @@ public class NativeCameraActivity extends AppCompatActivity {
     }
 
     @SuppressWarnings("UnsafeOptInUsageError")
-    private void bindCamera() {
+    private void bindCamera(ExtensionsManager extensionsManager) {
         if (cameraProvider == null) return;
         cameraProvider.unbindAll();
 
         SelectedCamera selected = selectBackMainCamera(cameraProvider);
+        CameraSelector finalSelector = selected.selector;
+        String finalPhysicalCameraId = selected.physicalCameraId;
+        int outputFormat = ImageCapture.OUTPUT_FORMAT_JPEG;
+        
+        boolean useHdr = getIntent().getBooleanExtra("useHdr", false);
+        if (useHdr) {
+            boolean extensionHdr = false;
+            if (extensionsManager != null) {
+                // OEM Extensions require standard logical camera selectors
+                CameraSelector baseSelector = CameraSelector.DEFAULT_BACK_CAMERA;
+                if (extensionsManager.isExtensionAvailable(baseSelector, ExtensionMode.HDR)) {
+                    finalSelector = extensionsManager.getExtensionEnabledCameraSelector(baseSelector, ExtensionMode.HDR);
+                    finalPhysicalCameraId = null; // Clear physical lens constraint for OEM pipeline
+                    extensionHdr = true;
+                }
+            }
+            
+            if (!extensionHdr) {
+                ImageCaptureCapabilities capabilities = ImageCapture.getImageCaptureCapabilities(selected.cameraInfo);
+                if (capabilities.getSupportedOutputFormats().contains(ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR)) {
+                    outputFormat = ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR;
+                    finalPhysicalCameraId = null; // Ultra HDR requires the logical camera ISP pipeline
+                    finalSelector = CameraSelector.DEFAULT_BACK_CAMERA;
+                } else {
+                    Toast.makeText(this, "HDR not supported on this device's camera hardware.", Toast.LENGTH_SHORT).show();
+                }
+            }
+        }
 
         Preview.Builder previewBuilder = new Preview.Builder()
             .setTargetRotation(getDisplayRotation());
         ImageCapture.Builder captureBuilder = new ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setOutputFormat(outputFormat)
             .setJpegQuality(95)
             .setTargetRotation(getDisplayRotation());
 
-        if (selected.physicalCameraId != null) {
-            new Camera2Interop.Extender<>(previewBuilder).setPhysicalCameraId(selected.physicalCameraId);
-            new Camera2Interop.Extender<>(captureBuilder).setPhysicalCameraId(selected.physicalCameraId);
+        if (finalPhysicalCameraId != null) {
+            new Camera2Interop.Extender<>(previewBuilder).setPhysicalCameraId(finalPhysicalCameraId);
+            new Camera2Interop.Extender<>(captureBuilder).setPhysicalCameraId(finalPhysicalCameraId);
         }
 
         Preview preview = previewBuilder.build();
         imageCapture = captureBuilder.build();
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
-        cameraProvider.bindToLifecycle(this, selected.selector, preview, imageCapture);
+        cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
     }
 
     @SuppressWarnings("deprecation")
@@ -358,7 +402,7 @@ public class NativeCameraActivity extends AppCompatActivity {
         CameraSelector selector = new CameraSelector.Builder()
             .addCameraFilter(cameraInfos -> Collections.singletonList(selectedInfo))
             .build();
-        return new SelectedCamera(selector, physicalCameraId);
+        return new SelectedCamera(selector, physicalCameraId, selectedInfo);
     }
 
     private String choosePhysicalMainCameraId(CameraInfo cameraInfo) {
@@ -481,6 +525,8 @@ public class NativeCameraActivity extends AppCompatActivity {
     }
 
     private void finishCanceled() {
+        if (isFinishing) return;
+        isFinishing = true;
         canceled = true;
         finishWhenPendingComplete = false;
         setResult(Activity.RESULT_CANCELED);
@@ -500,6 +546,7 @@ public class NativeCameraActivity extends AppCompatActivity {
     }
 
     private void finishWithPhotos() {
+        if (isFinishing) return;
         if (pendingCaptures > 0) {
             finishWhenPendingComplete = true;
             Toast.makeText(this, "Saving photo...", Toast.LENGTH_SHORT).show();
@@ -510,6 +557,9 @@ public class NativeCameraActivity extends AppCompatActivity {
             finishCanceled();
             return;
         }
+
+        isFinishing = true;
+        if (doneButton != null) doneButton.setEnabled(false);
 
         try {
             canceled = false;
@@ -710,10 +760,12 @@ public class NativeCameraActivity extends AppCompatActivity {
     private static class SelectedCamera {
         final CameraSelector selector;
         final String physicalCameraId;
+        final CameraInfo cameraInfo;
 
-        SelectedCamera(CameraSelector selector, String physicalCameraId) {
+        SelectedCamera(CameraSelector selector, String physicalCameraId, CameraInfo cameraInfo) {
             this.selector = selector;
             this.physicalCameraId = physicalCameraId;
+            this.cameraInfo = cameraInfo;
         }
     }
 

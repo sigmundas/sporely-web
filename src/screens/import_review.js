@@ -1,3 +1,4 @@
+import { Preferences } from '@capacitor/preferences';
 import { state } from '../state.js';
 import { formatDate, formatTime, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
@@ -477,6 +478,9 @@ export async function openNativeCamera() {
   }
 
   try {
+    const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' });
+    const useHdr = useHdrStr === 'true';
+
     const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
       ? {
           latitude: state.gps.lat,
@@ -485,7 +489,10 @@ export async function openNativeCamera() {
           accuracy: Number.isFinite(state.gps.accuracy) ? state.gps.accuracy : null,
         }
       : null
-    await _handleNativePhotoResult(await NativeCamera.capturePhotos(gps ? { gps } : {}))
+
+    const options = { useHdr };
+    if (gps) options.gps = gps;
+    await _handleNativePhotoResult(await NativeCamera.capturePhotos(options))
   } catch (err) {
     if (isPickerCancel(err)) return
     console.warn('Sporely camera failed:', err)
@@ -1731,10 +1738,16 @@ function _prepareImportBlobs(file) {
 async function _openCameraForSession(sid) {
   if (isAndroidNativeApp()) {
     try {
+      const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' });
+      const useHdr = useHdrStr === 'true';
+
       const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
         ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
         : null;
-      const result = await NativeCamera.capturePhotos(gps ? { gps } : {});
+
+      const options = { useHdr };
+      if (gps) options.gps = gps;
+      const result = await NativeCamera.capturePhotos(options);
       const photos = Array.isArray(result?.photos) ? result.photos : [];
       if (!photos.length) return;
       

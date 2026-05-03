@@ -1,5 +1,6 @@
 import './style.css'
 import './theme.js'   // applies saved theme immediately, no flash
+import { Preferences } from '@capacitor/preferences'
 
 import { supabase } from './supabase.js'
 import { getLocale, initI18n, onLocaleChange, setLocale, t } from './i18n.js'
@@ -246,6 +247,16 @@ function initSettings() {
       _syncSettingsUI()
     })
   })
+
+  const hdrToggle = document.getElementById('settings-hdr-toggle')
+  if (hdrToggle) {
+    Preferences.get({ key: 'useHdr' }).then(({ value }) => {
+      hdrToggle.checked = value === 'true'
+    })
+    hdrToggle.addEventListener('change', event => {
+      Preferences.set({ key: 'useHdr', value: event.target.checked ? 'true' : 'false' })
+    })
+  }
 
   document.getElementById('settings-clear-cache-btn')?.addEventListener('click', async event => {
     const btn = event.currentTarget

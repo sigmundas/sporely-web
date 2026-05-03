@@ -120,18 +120,17 @@ function _normalizePersonRow(row) {
 }
 
 function _buildPeopleCard(person) {
-   const avatarUrl = person.avatar_url || null
+   const dbAvatarUrl = person.avatar_url || null
+   const guessedAvatarUrl = supabase.storage.from('avatars').getPublicUrl(`${person.user_id}/avatar.jpg`).data.publicUrl
+   const avatarUrl = dbAvatarUrl || guessedAvatarUrl
    const displayName = person.display_name && person.display_name.trim() ? person.display_name : null
    const username = person.username && person.username.trim() ? person.username : null
    const primaryName = displayName || (username ? `@${username}` : t('common.unknown'))
-   const hasAvatar = !!avatarUrl
-   const initials = _esc(_initials(primaryName.replace(/^@/, '')))
+   const initials = _esc(_initials(displayName || username))
    const bio = String(person.bio || '').trim()
-   const avatarHtml = hasAvatar
-      ? `<img class="people-card-avatar-img" src="${_esc(avatarUrl)}" alt="" data-fallback-initials="${initials}">`
-      : `<div class="people-card-avatar-fallback">${initials}</div>`
+   const avatarHtml = `<img class="people-card-avatar-img" src="${_esc(avatarUrl)}" alt="" data-fallback-initials="${initials}" data-guessed-url="${_esc(guessedAvatarUrl)}">`
 
-   return `<article class="people-card" data-user-id="${_esc(person.user_id)}" data-username="${_esc(primaryName)}" data-avatar-url="${_esc(avatarUrl || '')}">
+   return `<article class="people-card" data-user-id="${_esc(person.user_id)}" data-username="${_esc(username || '')}" data-avatar-url="${_esc(avatarUrl)}">
       <div class="people-card-head">
         <div class="people-card-avatar">${avatarHtml}</div>
         <div class="people-card-title-wrap">
@@ -139,7 +138,7 @@ function _buildPeopleCard(person) {
           ${username ? `<div class="people-card-handle">@${_esc(username)}</div>` : ''}
         </div>
       </div>
-      <div class="people-card-bio${bio ? '' : ' people-card-bio-empty'}">${_esc(bio || t('people.noBio'))}</div>
+      ${bio ? `<div class="people-card-bio">${_esc(bio)}</div>` : ''}
       <div class="people-card-counts">
         ${_buildCount('stats.finds', Number(person.finds) || 0, 'finds')}
         ${_buildCount('stats.species', Number(person.species) || 0, 'species')}
@@ -150,9 +149,7 @@ function _buildPeopleCard(person) {
 
 function _initials(value) {
   if (!value) return '?'
-  const cleaned = String(value).replace(/^@/, '')
-  if (!cleaned) return '?'
-  return cleaned.slice(0, 3).toUpperCase()
+  return String(value).replace(/^@/, '').split(/[\s@.]/).filter(Boolean).slice(0, 2).map(p => p[0].toUpperCase()).join('') || '?'
 }
 
 function _buildCount(labelKey, value, actionId) {
@@ -164,10 +161,16 @@ function _buildCount(labelKey, value, actionId) {
 
 function _wireAvatarFallback(root) {
   root.querySelectorAll('.people-card-avatar-img[data-fallback-initials]').forEach(img => {
-    img.addEventListener('error', () => {
+    const handleError = () => {
+      if (!img.dataset.triedGuessed && img.dataset.guessedUrl && img.src !== img.dataset.guessedUrl) {
+        img.dataset.triedGuessed = 'true'
+        img.src = img.dataset.guessedUrl
+        return
+      }
       const initials = img.dataset.fallbackInitials || '?'
       img.replaceWith(_createAvatarFallback(initials))
-    }, { once: true })
+    }
+    img.addEventListener('error', handleError)
   })
 }
 
