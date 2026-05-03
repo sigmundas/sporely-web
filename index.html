@@ -238,10 +238,10 @@
             <div class="home-stat-lbl" id="home-stat-species-label">Species</div>
           </button>
           <div class="home-stat-div"></div>
-          <div class="home-stat">
+          <button class="home-stat home-stat--btn" id="hstat-spores-btn">
             <div class="home-stat-val" id="hstat-spores">—</div>
             <div class="home-stat-lbl" id="home-stat-spores-label">Spores</div>
-          </div>
+          </button>
         </div>
 
         <input type="file" id="import-photo-input" class="hidden-file-input" accept="image/*" multiple>
@@ -318,10 +318,23 @@
         </div>
       </div>
 
-      <div class="scope-tabs">
-        <button class="scope-tab active" data-scope="mine">Mine</button>
-        <button class="scope-tab" data-scope="friends">Friends</button>
-        <button class="scope-tab" data-scope="community">Community</button>
+      <div style="display:flex; align-items:center; justify-content:space-between; border-bottom: 1px solid var(--border-dim); padding-right:18px;">
+        <div class="scope-tabs" id="finds-scope-tabs" style="border-bottom:none; flex:1; padding-right:0;">
+          <button class="scope-tab active" data-scope="mine">Mine</button>
+          <button class="scope-tab" data-scope="friends">Friends</button>
+          <button class="scope-tab" data-scope="community">Community</button>
+        </div>
+        <div id="finds-user-bar" style="display:none; align-items:center; gap:8px; padding: 12px 0 0 18px; flex:1;">
+          <button class="detail-back-btn" id="finds-user-back" type="button" style="padding:0; margin-right:4px;" aria-label="Back">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+          <div class="friend-avatar" id="finds-user-avatar" style="width:26px;height:26px;font-size:11px;border:1px solid var(--green-mid);">?</div>
+          <div style="font-size:14px; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:140px;" id="finds-user-name"></div>
+        </div>
+        <button id="finds-filter-spores" style="padding: 5px 10px; border-radius: 20px; border: 1px solid transparent; font-size: 13px; font-weight: 600; font-family: 'Outfit', sans-serif; cursor: pointer; background: transparent; color: var(--text-dim); transition: color 0.15s, background 0.15s; display:flex; align-items:center; gap:4px; margin-top:12px; margin-bottom:12px;">
+          <svg style="width:12px;height:12px;stroke:currentColor" viewBox="0 0 24 24" fill="none" stroke-width="2.5"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>
+          <span id="finds-filter-spores-label">Spores</span>
+        </button>
       </div>
 
       <div class="finds-topbar">

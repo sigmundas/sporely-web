@@ -5,16 +5,19 @@ import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, runArtsorakelForMediaKeys, isArtsorakelNetworkError } from '../artsorakel.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
-import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop } from '../images.js'
+import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
-import { normalizeAiCropRect } from '../image_crop.js'
+import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
 import { getDefaultVisibility, setLastSyncAt } from '../settings.js'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js'
+import { fetchCloudPlanProfile } from '../cloud-plan.js'
+import { isAndroidNativeApp } from '../camera-actions.js'
+import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 
 let currentObs    = null
 let selectedTaxon = null
@@ -280,6 +283,29 @@ export async function openFindDetail(obsId, options = {}) {
 
       gallery.appendChild(container)
     })
+  }
+
+  if (currentObsIsOwner) {
+    const addCardContainer = document.createElement('div')
+    addCardContainer.className = 'detail-gallery-item-wrap'
+    addCardContainer.innerHTML = `
+      <div class="gallery-add-placeholder">
+        <div class="gallery-add-title">${t('import.addImage') || 'Add Image'}</div>
+        <div class="gallery-add-btn-wrap">
+          <button class="gallery-add-btn gallery-add-btn-cam" type="button" aria-label="Add from camera">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h3l1.6-2h4.8L16 6h3a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
+            <span>${t('import.camera') || 'Camera'}</span>
+          </button>
+          <button class="gallery-add-btn gallery-add-btn-file" type="button" aria-label="Add from file">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span>${t('import.upload') || 'Upload'}</span>
+          </button>
+        </div>
+      </div>
+    `
+    gallery.appendChild(addCardContainer)
+    addCardContainer.querySelector('.gallery-add-btn-cam').addEventListener('click', () => _openCameraForDetail())
+    addCardContainer.querySelector('.gallery-add-btn-file').addEventListener('click', () => _openPickerForDetail())
   }
 
   // Load comments async (don't await)
@@ -951,4 +977,149 @@ async function _sendComment() {
   showToast(t('comments.posted'))
   _loadComments(currentObs.id)
 
+}
+
+async function _openCameraForDetail() {
+  if (isAndroidNativeApp()) {
+    try {
+      const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
+        ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
+        : null
+      const result = await NativeCamera.capturePhotos(gps ? { gps } : {})
+      const photos = Array.isArray(result?.photos) ? result.photos : []
+      if (!photos.length) return
+
+      _setProgress(0, photos.length, t('import.readingFiles'))
+      const files = []
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+        files.push(await nativePickedPhotoToFile(photos[i], i))
+      }
+      await _addPhotosToObservation(files)
+    } catch (err) {
+      if (isPickerCancel(err)) return
+      showToast(`Sporely Cam: ${err?.message || err}`)
+      _hideProgress()
+    }
+  } else {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'image/*'
+    input.capture = 'environment'
+    input.onchange = async (e) => {
+      const files = Array.from(e.target.files || [])
+      if (!files.length) return
+      await _addPhotosToObservation(files)
+    }
+    input.click()
+  }
+}
+
+async function _openPickerForDetail() {
+  if (isAndroidNativeApp()) {
+    try {
+      const result = await pickImagesWithNativePhotoPicker()
+      const photos = Array.isArray(result?.photos) ? result.photos : []
+      if (!photos.length) return
+      _setProgress(0, photos.length, t('import.readingFiles'))
+      const files = []
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+        files.push(await nativePickedPhotoToFile(photos[i], i))
+      }
+      await _addPhotosToObservation(files)
+      return
+    } catch (err) {
+      if (isPickerCancel(err)) return
+      _hideProgress()
+    }
+  }
+
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.multiple = true
+  input.accept = 'image/*'
+  if (/android/i.test(navigator.userAgent)) {
+    input.accept = '.jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif'
+  }
+  input.onchange = async (e) => {
+    const files = Array.from(e.target.files || [])
+    if (!files.length) return
+    await _addPhotosToObservation(files)
+  }
+  input.click()
+}
+
+async function _addPhotosToObservation(files) {
+  if (!currentObs || !files.length) return
+
+  const obsId = currentObs.id
+  const userId = currentObs.user_id
+
+  _setProgress(0, files.length, `Adding ${files.length} photo(s)...`)
+  const saveBtn = document.getElementById('detail-save-btn')
+  if (saveBtn) saveBtn.disabled = true
+
+  try {
+    const { data: existingImages } = await supabase
+      .from('observation_images')
+      .select('sort_order')
+      .eq('observation_id', obsId)
+      .order('sort_order', { ascending: false })
+      .limit(1)
+
+    let nextSortOrder = 0
+    if (existingImages?.length) {
+      nextSortOrder = (existingImages[0].sort_order || 0) + 1
+    }
+
+    const uploadPolicy = await fetchCloudPlanProfile(userId)
+
+    for (let i = 0; i < files.length; i++) {
+      _setProgress(i, files.length, `Uploading ${i + 1} of ${files.length}...`)
+      const file = files[i]
+      const sortOrder = nextSortOrder + i
+      const storagePath = `${userId}/${obsId}/${sortOrder}_${Date.now()}.jpg`
+
+      const preparedImage = await prepareImageVariants(file, uploadPolicy)
+      await uploadPreparedObservationImageVariants(preparedImage, storagePath, { uploadPolicy })
+      const cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })
+      await insertObservationImage({
+        observation_id: obsId,
+        user_id: userId,
+        storage_path: storagePath,
+        image_type: 'field',
+        sort_order: sortOrder,
+        ...preparedImage.uploadMeta,
+        ...cropMeta,
+      })
+
+      if (sortOrder === 0) {
+        await syncObservationMediaKeys(obsId, storagePath, { sortOrder: 0 })
+      }
+    }
+
+    showToast(`${files.length} photo(s) added.`)
+    await openFindDetail(obsId)
+  } catch (err) {
+    console.error('Failed to add photos to observation:', err)
+    showToast(`Error adding photos: ${err.message}`)
+  } finally {
+    _hideProgress()
+    if (saveBtn) saveBtn.disabled = false
+  }
+}
+
+function _setProgress(done, total, label) {
+  const overlay = document.getElementById('import-progress')
+  if (!overlay) return
+  overlay.style.display = 'flex'
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  document.getElementById('import-progress-fill').style.width = pct + '%'
+  document.getElementById('import-progress-label').textContent = label || t('import.processing')
+}
+
+function _hideProgress() {
+  const overlay = document.getElementById('import-progress')
+  if (overlay) overlay.style.display = 'none'
 }

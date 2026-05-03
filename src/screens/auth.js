@@ -1,5 +1,6 @@
 import { supabase } from '../supabase.js'
 import { getLocale, setLocale, t } from '../i18n.js'
+import { isNativeApp } from '../platform.js'
 
 const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAC0h9RON_lYu5ib_'
 let _captchaToken      = null
@@ -29,12 +30,7 @@ function _isLocalTestingHost(hostname = window.location.hostname) {
   )
 }
 
-function _isNativeApp() {
-  return !!window.Capacitor?.isNativePlatform?.()
-    || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
-}
-
-const BYPASS_TURNSTILE = _isNativeApp() || (import.meta.env.DEV && _isLocalTestingHost())
+const BYPASS_TURNSTILE = isNativeApp() || (import.meta.env.DEV && _isLocalTestingHost())
 const PASSWORD_RESET_WEB_ORIGIN = 'https://app.sporely.no'
 const PERSIST_AUTH_DRAFTS = import.meta.env.DEV
 const AUTH_DRAFT_KEY = 'sporely-auth-draft'
@@ -261,7 +257,7 @@ function _getPasswordResetRedirectUrl() {
   const origin = window.location.origin
   const hostname = window.location.hostname
 
-  if (_isNativeApp()) {
+  if (isNativeApp()) {
     return `${PASSWORD_RESET_WEB_ORIGIN}/?flow=recovery&screen=reset-password`
   }
 

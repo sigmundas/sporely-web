@@ -1,6 +1,7 @@
 import { supabase } from '../supabase.js'
 import { t } from '../i18n.js'
 import { state } from '../state.js'
+import { openFinds } from './finds.js'
 
 let _searchTimer = null
 let _loadSeq = 0
@@ -62,6 +63,23 @@ export async function loadPeople(options = {}) {
 
     list.innerHTML = rows.map(person => _buildPeopleCard(person)).join('')
     _wireAvatarFallback(list)
+
+    list.querySelectorAll('.people-card-count[data-action]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        const action = btn.dataset.action
+        const card = btn.closest('.people-card')
+        if (!card) return
+        openFinds('user', {
+          userId: card.dataset.userId,
+          username: card.dataset.username,
+          avatarUrl: card.dataset.avatarUrl,
+          resetSearch: true,
+          resetFilters: true,
+          groupBySpecies: action === 'species',
+          sporesOnly: action === 'spores'
+        })
+      })
+    })
   } catch (error) {
     console.warn('Could not load people:', error?.message || error)
     if (seq !== _loadSeq) return
@@ -113,7 +131,7 @@ function _buildPeopleCard(person) {
       ? `<img class="people-card-avatar-img" src="${_esc(avatarUrl)}" alt="" data-fallback-initials="${initials}">`
       : `<div class="people-card-avatar-fallback">${initials}</div>`
 
-   return `<article class="people-card">
+   return `<article class="people-card" data-user-id="${_esc(person.user_id)}" data-username="${_esc(primaryName)}" data-avatar-url="${_esc(avatarUrl || '')}">
       <div class="people-card-head">
         <div class="people-card-avatar">${avatarHtml}</div>
         <div class="people-card-title-wrap">
@@ -123,9 +141,9 @@ function _buildPeopleCard(person) {
       </div>
       <div class="people-card-bio${bio ? '' : ' people-card-bio-empty'}">${_esc(bio || t('people.noBio'))}</div>
       <div class="people-card-counts">
-        ${_buildCount('stats.finds', Number(person.finds) || 0)}
-        ${_buildCount('stats.species', Number(person.species) || 0)}
-        ${_buildCount('stats.spores', Number(person.spores) || 0)}
+        ${_buildCount('stats.finds', Number(person.finds) || 0, 'finds')}
+        ${_buildCount('stats.species', Number(person.species) || 0, 'species')}
+        ${_buildCount('stats.spores', Number(person.spores) || 0, 'spores')}
       </div>
     </article>`
 }
@@ -137,8 +155,8 @@ function _initials(value) {
   return cleaned.slice(0, 3).toUpperCase()
 }
 
-function _buildCount(labelKey, value) {
-  return `<div class="people-card-count">
+function _buildCount(labelKey, value, actionId) {
+  return `<div class="people-card-count" data-action="${actionId}" style="cursor:pointer">
     <div class="people-card-count-val">${Number(value) || 0}</div>
     <div class="people-card-count-lbl">${_esc(t(labelKey))}</div>
   </div>`

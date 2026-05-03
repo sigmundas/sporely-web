@@ -18,4 +18,8 @@ export const state = {
   findsView: 'cards',
   findsGroupBySpecies: false,
   findsUncertainOnly: false,
+  findsSporesOnly: false,
+  findsTargetUserId: null,
+  findsTargetUsername: null,
+  findsTargetAvatarUrl: null,
 }

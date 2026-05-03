@@ -78,7 +78,7 @@ sporely-web/
     └── screens/
         ├── auth.js         Login, signup, resend confirmation, hash error handling
         ├── home.js         Dashboard, recent finds from Supabase, sign-out
-        ├── finds.js        Full observation list from Supabase
+        ├── finds.js        Observation lists (Mine, Friends, Community, User) + Spores filter
         ├── capture.js      Camera (getUserMedia), shutter, batch capture
         ├── review.js       Review one captured observation batch, save to Supabase
         ├── import_review.js Import/group photos, native EXIF/GPS handling, save flow

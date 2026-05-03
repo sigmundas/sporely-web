@@ -666,6 +666,78 @@ html, body {
   pointer-events: none;
 }
 
+.gallery-add-placeholder {
+  height: 220px;
+  width: 160px;
+  border-radius: 10px;
+  border: 2px dashed var(--border);
+  background: var(--card-raised);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 14px;
+  transition: background 0.2s;
+}
+
+.gallery-add-placeholder:hover {
+  background: color-mix(in srgb, var(--card-raised) 80%, #fff 20%);
+}
+
+.gallery-add-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  text-align: center;
+}
+
+.gallery-add-btn-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.gallery-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 10px 0;
+  width: 100%;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  font-family: 'Outfit', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.gallery-add-btn-cam {
+  background: rgba(94, 180, 90, 0.15);
+  color: var(--green-accent);
+  border: 1px solid rgba(126, 200, 122, 0.3);
+}
+.gallery-add-btn-cam:active {
+  background: rgba(94, 180, 90, 0.25);
+}
+
+.gallery-add-btn-file {
+  background: var(--card);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.gallery-add-btn-file:active {
+  background: var(--card-raised);
+  border-color: var(--text-dim);
+  color: var(--text-primary);
+}
+
 .sign-out-btn {
   display: block;
   margin: 24px auto 0;
@@ -2697,6 +2769,18 @@ html.light .btn-danger:active { background: #fee2e2; }
 
 /* Toggle thumb stays white regardless */
 html.light .detail-toggle-thumb { background: #ffffff; }
+
+html.light .gallery-add-placeholder:hover {
+  background: color-mix(in srgb, var(--card-raised) 80%, #000 5%);
+}
+html.light .gallery-add-btn-cam {
+  background: rgba(45, 75, 50, 0.1);
+  color: var(--green-deep);
+  border: 1px solid rgba(45, 75, 50, 0.2);
+}
+html.light .gallery-add-btn-cam:active {
+  background: rgba(45, 75, 50, 0.2);
+}
 
 /* Finds card light mode */
 html.light .find-card-name { color: var(--green-deep); }

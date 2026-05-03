@@ -2,6 +2,7 @@
 
 ## Native Android Camera Follow-Up
 - [ ] Verify on Samsung S25: Native Cam selects the 1x lens, capture is 12 MP, preview matches output, orientation is correct in `sporely-py`, and GPS strategy is documented.
+- [ ] **Fix duplicate captures:** Resolve the race condition in the Android custom camera plugin where pressing "Done" right after capturing causes the `onImageSaved` callback and the `onDoneClick` handler to both add the same photo to the results array.
 
 ## Camera Behavior Summary (Sporely Cam vs Web Cam)
 
@@ -21,10 +22,11 @@
 - [x] Group import review screen: Instead of Queue all, just use Add
 - [x] Remove the New observation after.. /Photo import section in Settings
 - On the Finds tab: Species is not translated
-- Finds tab, when 1 card per row is shown: Add an icon that indicates if there are spore measures for the observation. This could be like a small almond shaped brown icon, same row and just before the "sharing" icon (friends/public/private). 
+- [x] Finds tab, when 1 card per row is shown: Add an icon that indicates if there are spore measures for the observation. This could be like a small almond shaped brown icon, same row and just before the "sharing" icon (friends/public/private).
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
 - Add a legend drop-down to the map page. Selection: Genus (more will come). this will show a legend with colors, corresponding the the dots on the map.
-- The card with number of finds, number of species, and number of spores: Tapping finds: open screen with finds, filtered for that user (card could appear on home tab or people tab): Species filter off. Tapping species: same as for tapping finds, but with species filter on. Tapping spores: filter only finds for that user with spore measurements.
+- [x] The card with number of finds, number of species, and number of spores: Tapping finds: open screen with finds, filtered for that user (card could appear on home tab or people tab): Species filter off. Tapping species: same as for tapping finds, but with species filter on. Tapping spores: filter only finds for that user with spore measurements.
+- [x] On the People tab: pressing finds should take me to a "User finds" page. This would be the same layout as the current Finds, but filtered for a given user. This could be done by reusing the Finds page code, just replacing the selector for Mine - Friends - Public, with a user profile. Presing finds similarly shows the same screen, but with Species = true. Pressing the spore count shows only finds with spore measurements. A toggle should be placed in the Finds: Spores. Set to true if pressing the spore count. Spore toggle could be on the same row as the Mine- Friends - Public selector (or user profile if we come here from the People screen.)
 
 ## Accurate Place Names From Coordinates (`sporely-web`)
 *Goal: match the desktop lookup behavior without repeating the trial-and-error. Resolve once per observation/import session, prefer accuracy over speed, and keep UI suggestions short and local.*
@@ -712,6 +714,8 @@ return new Promise((resolve, reject) => {
 | Camera permission denied overlay | ✅ Real — platform-specific instructions |
 | Friends finds + thumbnails | ✅ Real — `observations_friend_view` + R2 public CDN |
 | Community finds | ✅ Real — `observations_community_view` (visibility = public) |
+| User finds | ✅ Real — filtered Finds screen from a specific user profile |
+| Spores filter | ✅ Real — toggle to show only observations with spore measurements |
 | Map view | ✅ Real — Leaflet + OpenStreetMap |
 | Offline queue | ✅ Real — IndexedDB queue, syncs on reconnect |
 | Import review recovery after app suspension | ✅ Real — IndexedDB `pending_import` store |

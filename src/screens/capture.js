@@ -5,10 +5,7 @@ import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
 import { getEffectiveCloudUploadPolicy } from '../cloud-plan.js'
-
-function _isNativeApp() {
-  return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
-}
+import { isNativeApp } from '../platform.js'
 
 let cachedPrimaryMainCameraId = null
 let primaryMainCameraPromise = null
@@ -100,7 +97,7 @@ async function _getPrimaryMainCameraId() {
         try {
           if (await _probeDeviceForTorch(device)) {
             cachedPrimaryMainCameraId = device.deviceId
-            console.log('Main 1x camera identified via torch capability:', device.label || device.deviceId)
+                if (import.meta.env.DEV) console.log('Main 1x camera identified via torch capability:', device.label || device.deviceId)
             return cachedPrimaryMainCameraId
           }
         } catch (err) {
@@ -108,7 +105,7 @@ async function _getPrimaryMainCameraId() {
         }
       }
 
-      console.log('Torch heuristic: no torch-capable camera found; falling back to environment camera.')
+          if (import.meta.env.DEV) console.log('Torch heuristic: no torch-capable camera found; falling back to environment camera.')
       return null
     } catch (err) {
       console.warn('Torch heuristic failed:', err)
@@ -141,7 +138,7 @@ async function _applyPrimaryLensPreferences(stream) {
   }
 
   if (typeof track.getSettings === 'function') {
-    console.log('Camera stream settings:', track.getSettings())
+    if (import.meta.env.DEV) console.log('Camera stream settings:', track.getSettings())
   }
 }
 
@@ -266,7 +263,7 @@ async function _takeStillPhoto(video) {
 
   const blob = await imageCapture.takePhoto(photoSettings)
   if (!_isBlob(blob)) throw new Error('Still photo capture returned no image')
-  console.log('Captured still photo via ImageCapture:', {
+  if (import.meta.env.DEV) console.log('Captured still photo via ImageCapture:', {
     bytes: blob.size,
     type: blob.type,
     settings: typeof track.getSettings === 'function' ? track.getSettings() : null,
@@ -296,7 +293,7 @@ async function _captureVideoFrame(video) {
     }, 'image/jpeg', 0.92)
   })
 
-  console.log('Captured fallback video frame:', { width: w, height: h, bytes: blob.size })
+  if (import.meta.env.DEV) console.log('Captured fallback video frame:', { width: w, height: h, bytes: blob.size })
   return blob
 }
 
@@ -420,7 +417,7 @@ export async function startCamera(options = {}) {
     if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
       const ua = navigator.userAgent
       let instructions
-      if (_isNativeApp()) {
+      if (isNativeApp()) {
         instructions = t('capture.cameraPermissionAndroid')
       } else if (/iPhone|iPad/.test(ua)) {
         instructions = t('capture.cameraPermissionIphone')

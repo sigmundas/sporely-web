@@ -282,6 +282,9 @@ const messages = {
     'import.convertingFile': 'Converting {current} of {total}…',
     'import.failed': 'Import failed',
     'import.saveAll': 'Queue All',
+    'import.addImage': 'Add Image',
+    'import.camera': 'Camera',
+    'import.upload': 'Upload',
     'import.currentGpsUnavailable': 'Current GPS unavailable',
     'import.overwriteExifConfirm': 'Current location will overwrite the EXIF location. Continue?',
     'import.noHeicGps': 'No photo GPS found in this HEIC. On some iPhone web uploads, location metadata is not exposed to the browser.',
@@ -592,6 +595,9 @@ const messages = {
     'import.convertingFile': 'Konverterer {current} av {total}…',
     'import.failed': 'Import feilet',
     'import.saveAll': 'Legg alle i kø',
+    'import.addImage': 'Legg til bilde',
+    'import.camera': 'Kamera',
+    'import.upload': 'Last opp',
     'import.currentGpsUnavailable': 'Nåværende GPS er utilgjengelig',
     'import.overwriteExifConfirm': 'Nåværende sted vil overskrive EXIF-stedet. Fortsette?',
     'import.noHeicGps': 'Fant ingen GPS-data i dette HEIC-bildet. På noen iPhone-opplastinger på web eksponeres ikke stedsmetadata til nettleseren.',
@@ -902,6 +908,9 @@ const messages = {
     'import.convertingFile': 'Konverterar {current} av {total}…',
     'import.failed': 'Import misslyckades',
     'import.saveAll': 'Köa alla',
+    'import.addImage': 'Lägg till bild',
+    'import.camera': 'Kamera',
+    'import.upload': 'Ladda upp',
     'import.currentGpsUnavailable': 'Nuvarande GPS är inte tillgänglig',
     'import.overwriteExifConfirm': 'Nuvarande plats kommer att skriva över EXIF-platsen. Fortsätta?',
     'import.noHeicGps': 'Ingen GPS hittades i denna HEIC-bild. I vissa iPhone-uppladdningar på webben exponeras inte platsmetadata till webbläsaren.',
@@ -1212,6 +1221,9 @@ const messages = {
     'import.convertingFile': 'Konvertiere {current} von {total}…',
     'import.failed': 'Import fehlgeschlagen',
     'import.saveAll': 'Alle in die Warteschlange',
+    'import.addImage': 'Bild hinzufügen',
+    'import.camera': 'Kamera',
+    'import.upload': 'Hochladen',
     'import.currentGpsUnavailable': 'Aktuelles GPS nicht verfügbar',
     'import.overwriteExifConfirm': 'Der aktuelle Ort überschreibt den EXIF-Ort. Fortfahren?',
     'import.noHeicGps': 'Für dieses HEIC-Foto wurden keine GPS-Daten gefunden. Bei manchen iPhone-Webuploads werden Standortmetadaten nicht an den Browser weitergegeben.',
@@ -1512,6 +1524,7 @@ export function applyStaticTranslations() {
   setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.friends'), t('scope.community')])
   setText('#finds-subtitle', 'finds.documentedObservations')
   setText('#finds-refresh-label', 'finds.pullToRefresh')
+  setText('#finds-filter-spores-label', 'stats.spores')
 
   setText('#profile-header-label', 'profile.title')
   setText('#profile-save-btn', 'profile.saveProfile')

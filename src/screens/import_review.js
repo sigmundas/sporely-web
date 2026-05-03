@@ -2,9 +2,6 @@ import { state } from '../state.js';
 import { formatDate, formatTime, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
-import { Capacitor, registerPlugin } from '@capacitor/core';
-import { Filesystem } from '@capacitor/filesystem';
-import { FilePicker } from '@capawesome/capacitor-file-picker';
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, createManualTaxon, isArtsorakelNetworkError } from '../artsorakel.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { openFinds } from './finds.js';
@@ -14,33 +11,17 @@ import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
 import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes } from '../settings.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
-import { isAndroidApp } from '../platform.js';
+import { isAndroidNativeApp } from '../camera-actions.js';
+import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
 
-const NativePhotoPicker = registerPlugin('NativePhotoPicker');
-const NativeCamera = registerPlugin('NativeCamera');
 let sessions = [];
 let expandedSessionIds = new Set();
 let sourceItems = [];
-let exifrModulePromise = null;
 const importAiBatchState = {
   running: false,
   completedUnits: 0,
   totalUnits: 0,
 };
-const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
-const RAW_GPS_PICK = [
-  'GPSLatitude',
-  'GPSLatitudeRef',
-  'GPSLongitude',
-  'GPSLongitudeRef',
-  'GPSAltitude',
-  'GPSAltitudeRef',
-  'GPSHPositioningError',
-  'latitude',
-  'longitude',
-  'altitude',
-];
-const IMPORT_AI_MAX_EDGE = 1920;
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
@@ -460,13 +441,13 @@ export function restoreImportSessions(savedSessions) {
 }
 
 export async function openPhotoImportPicker() {
-  if (isAndroidApp()) {
+  if (isAndroidNativeApp()) {
     try {
-      const result = await _pickImagesWithNativePhotoPicker();
+      const result = await pickImagesWithNativePhotoPicker();
       await _handleNativePhotoResult(result);
       return;
     } catch (err) {
-      if (_isPickerCancel(err)) return;
+      if (isPickerCancel(err)) return;
       console.warn('Native photo picker failed, falling back to browser input:', err);
       _hideProgress();
     }
@@ -490,7 +471,7 @@ export async function openPhotoImportPicker() {
 }
 
 export async function openNativeCamera() {
-  if (!isAndroidApp()) {
+  if (!isAndroidNativeApp()) {
     showToast('Sporely Cam is available in the Android app.')
     return
   }
@@ -506,7 +487,7 @@ export async function openNativeCamera() {
       : null
     await _handleNativePhotoResult(await NativeCamera.capturePhotos(gps ? { gps } : {}))
   } catch (err) {
-    if (_isPickerCancel(err)) return
+    if (isPickerCancel(err)) return
     console.warn('Sporely camera failed:', err)
     showToast(`Sporely Cam: ${err?.message || err}`)
     _hideProgress()
@@ -524,33 +505,18 @@ async function _handleNativePhotoResult(result) {
   const files = [];
   for (let i = 0; i < photos.length; i++) {
     _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
-    files.push(await _nativePickedPhotoToFile(photos[i], i));
+    files.push(await nativePickedPhotoToFile(photos[i], i));
   }
   await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos });
 }
 
-async function _pickImagesWithFilePicker() {
-  // Request permissions first to ensure ACCESS_MEDIA_LOCATION is handled where available.
-  await FilePicker.requestPermissions();
-  return FilePicker.pickImages({ multiple: true, readData: false });
-}
-
-async function _pickImagesWithNativePhotoPicker() {
-  try {
-    await FilePicker.requestPermissions({ permissions: ['accessMediaLocation'] });
-  } catch (error) {
-    console.warn('Could not request media-location permission before import:', error);
-  }
-  return NativePhotoPicker.pickImages();
-}
-
 export async function openFileImportPicker() {
-  if (isAndroidApp()) {
+  if (isAndroidNativeApp()) {
     try {
-      await _handleNativePhotoResult(await _pickImagesWithNativePhotoPicker());
+      await _handleNativePhotoResult(await pickImagesWithNativePhotoPicker());
       return;
     } catch (err) {
-      if (_isPickerCancel(err)) return;
+      if (isPickerCancel(err)) return;
       console.warn('Native photo picker failed, falling back to browser input:', err);
       _hideProgress();
     }
@@ -604,11 +570,11 @@ async function handleSelectedFiles(files, options = {}) {
   const withTimes = await Promise.all(files.map(async (f, idx) => {
     const nativePhoto = nativePhotos[idx];
     if (nativePhoto) {
-      const { time, lat, lon, altitude, accuracy, dbg } = await _captureNativePhotoExif(nativePhoto, f);
+      const { time, lat, lon, altitude, accuracy, dbg } = await captureNativePhotoExif(nativePhoto, f);
       return {
         file: f,
         nativePhoto,
-        metadataPromise: _createNativeMetadataHydrationPromise(nativePhoto, f),
+        metadataPromise: createNativeMetadataHydrationPromise(nativePhoto, f),
         captureTime: time,
         lat,
         lon,
@@ -617,7 +583,7 @@ async function handleSelectedFiles(files, options = {}) {
         dbg,
       };
     }
-    const { time, lat, lon, altitude, accuracy, dbg } = await _captureExif(f);
+    const { time, lat, lon, altitude, accuracy, dbg } = await captureExif(f);
     return { file: f, captureTime: time, lat, lon, altitude, accuracy, dbg };
   }));
 
@@ -633,7 +599,7 @@ async function handleSelectedFiles(files, options = {}) {
   for (let idx = 0; idx < withTimes.length; idx++) {
     const item = withTimes[idx];
     _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
-    const processed = await _processFile(item.file, { nativePhoto: item.nativePhoto });
+    const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
     sourceItems.push({
       id: `i${idx}`,
       blob: processed.blob,
@@ -734,19 +700,6 @@ function _syncLocationInput(session) {
   if (input) input.value = session.locationName || '';
   if (locEl) locEl.textContent = session.locationName || '—';
   _renderImportLocationDropdown(session.id, false);
-}
-
-// ── EXIF / capture time + GPS ─────────────────────────────────────────────────
-// Read DateTimeOriginal and GPS separately.
-// exifr.gps() is specifically designed to reliably return {latitude, longitude}
-// across JPEG, HEIC/HEIF and other formats — more robust than parse() + gps:true.
-function _isHeicLike(file) {
-  return /\.(heic|heif)$/i.test(file?.name || '') || /heic|heif/i.test(file?.type || '');
-}
-
-function _isPickerCancel(err) {
-  const message = String(err?.message || err || '').toLowerCase();
-  return err?.name === 'AbortError' || err?.code === 'CANCELLED' || message.includes('cancel');
 }
 
 function _openBrowserFileInput(inputId) {
@@ -1368,7 +1321,17 @@ function buildCardHTML(session) {
       ${hasAiCropRect(imageMeta[i]?.aiCropRect) ? '<div class="ai-crop-thumb-badge">AI crop</div>' : ''}
       <button class="import-strip-delete" data-sid="${sid}" data-idx="${i}">×</button>
     </div>`
-  ).join('');
+  ).join('') + `
+    <div class="import-strip-item import-strip-add" data-sid="${sid}">
+      <button class="import-strip-add-half import-strip-add-cam" data-sid="${sid}" type="button" aria-label="Add from camera">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h3l1.6-2h4.8L16 6h3a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
+      </button>
+      <div class="import-strip-add-divider"></div>
+      <button class="import-strip-add-half import-strip-add-file" data-sid="${sid}" type="button" aria-label="Add from file">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="2" ry="2"/><rect x="7" y="7" width="14" height="14" rx="2" ry="2"/></svg>
+      </button>
+    </div>
+  `;
 
   const taxonVal = session.taxon ? escHtml(session.taxon.displayName) : '';
   const locVal = escHtml(session.locationName);
@@ -1558,6 +1521,7 @@ function _wireCard(sid) {
   _wireAiResults(sid, input, aiResults, session?.aiPredictions || [])
   card.querySelectorAll(`.import-strip-item[data-sid="${sid}"]`).forEach(item => {
     if (item._wired) return
+    if (item.classList.contains('import-strip-add')) return
     item._wired = true
     item.addEventListener('click', event => {
       if (event.target.closest('.import-strip-delete')) return
@@ -1760,6 +1724,140 @@ function _prepareImportBlobs(file) {
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('load failed')); };
     img.src = url;
   });
+}
+
+// ── Session specific additions ────────────────────────────────────────────────
+
+async function _openCameraForSession(sid) {
+  if (isAndroidNativeApp()) {
+    try {
+      const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
+        ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
+        : null;
+      const result = await NativeCamera.capturePhotos(gps ? { gps } : {});
+      const photos = Array.isArray(result?.photos) ? result.photos : [];
+      if (!photos.length) return;
+      
+      _setProgress(0, photos.length, t('import.readingFiles'));
+      const files = [];
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
+        files.push(await nativePickedPhotoToFile(photos[i], i));
+      }
+      await _addFilesToSession(sid, files, { nativePhotos: photos });
+    } catch (err) {
+      if (isPickerCancel(err)) return;
+      showToast(`Sporely Cam: ${err?.message || err}`);
+      _hideProgress();
+    }
+  } else {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.capture = 'environment';
+    input.onchange = async (e) => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      await _addFilesToSession(sid, files);
+    };
+    input.click();
+  }
+}
+
+async function _openPickerForSession(sid) {
+  if (isAndroidNativeApp()) {
+    try {
+      const result = await pickImagesWithNativePhotoPicker();
+      const photos = Array.isArray(result?.photos) ? result.photos : [];
+      if (!photos.length) return;
+      _setProgress(0, photos.length, t('import.readingFiles'));
+      const files = [];
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
+        files.push(await nativePickedPhotoToFile(photos[i], i));
+      }
+      await _addFilesToSession(sid, files, { nativePhotos: photos });
+      return;
+    } catch (err) {
+      if (isPickerCancel(err)) return;
+      _hideProgress();
+    }
+  }
+
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.accept = 'image/*';
+  if (/android/i.test(navigator.userAgent)) {
+    input.accept = '.jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif';
+  }
+  input.onchange = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    await _addFilesToSession(sid, files);
+  };
+  input.click();
+}
+
+async function _addFilesToSession(sid, files, options = {}) {
+  const session = sessionById(sid);
+  if (!session || !files.length) return;
+  const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
+  _setProgress(0, files.length, t('import.readingTimestamps'));
+  
+  const withTimes = await Promise.all(files.map(async (f, idx) => {
+    const nativePhoto = nativePhotos[idx];
+    if (nativePhoto) {
+      const { time, lat, lon, altitude, accuracy, dbg } = await captureNativePhotoExif(nativePhoto, f);
+      return { file: f, nativePhoto, metadataPromise: createNativeMetadataHydrationPromise(nativePhoto, f), captureTime: time, lat, lon, altitude, accuracy, dbg };
+    }
+    const { time, lat, lon, altitude, accuracy, dbg } = await captureExif(f);
+    return { file: f, captureTime: time, lat, lon, altitude, accuracy, dbg };
+  }));
+
+  let doneCount = 0;
+  for (let idx = 0; idx < withTimes.length; idx++) {
+    const item = withTimes[idx];
+    _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
+    const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
+    const newItem = {
+      id: `i_add_${Date.now()}_${idx}`,
+      blob: processed.blob,
+      aiBlob: processed.aiBlob || processed.blob,
+      meta: processed.meta,
+      metadataPromise: item.metadataPromise || null,
+      captureTime: session.ts.getTime(), // Force to match session so it is not ripped out by photo gap
+      lat: item.lat ?? null,
+      lon: item.lon ?? null,
+      altitude: item.altitude ?? null,
+      accuracy: item.accuracy ?? null,
+      dbg: item.dbg || null,
+    };
+    sourceItems.push(newItem);
+    session.sourceItemIds.push(newItem.id);
+    session.files.push(newItem.blob);
+    session.aiFiles.push(newItem.aiBlob);
+    session.blobUrls.push(URL.createObjectURL(newItem.aiBlob));
+    session.imageMeta.push(newItem.meta);
+    session.metadataPromises.push(newItem.metadataPromise);
+    session.photoTimes.push(newItem.captureTime);
+    session.photoGps.push({ lat: newItem.lat, lon: newItem.lon, altitude: newItem.altitude, accuracy: newItem.accuracy });
+    session.photoDebug.push(newItem.dbg);
+    
+    if (session.gpsLat === null && _isUsableCoordinate(newItem.lat, newItem.lon)) {
+      session.gpsLat = newItem.lat;
+      session.gpsLon = newItem.lon;
+      session.gpsAltitude = newItem.altitude;
+      session.gpsAccuracy = newItem.accuracy;
+    }
+    doneCount++;
+  }
+  
+  _hideProgress();
+  _attachSessionMetadataHydration();
+  _persistSessions();
+  renderSessions();
+  _prefillSessionLocations();
 }
 
 // Use local date string to avoid UTC midnight shift

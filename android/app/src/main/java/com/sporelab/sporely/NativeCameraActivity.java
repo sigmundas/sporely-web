@@ -19,6 +19,7 @@ import android.os.Bundle;
 import android.util.SizeF;
 import android.view.Gravity;
 import android.view.Surface;
+import android.view.View;
 import android.view.WindowInsets;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -53,6 +54,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -86,6 +88,8 @@ public class NativeCameraActivity extends AppCompatActivity {
     private final ArrayList<File> capturedFiles = new ArrayList<>();
     private FrameLayout.LayoutParams controlParams;
     private FrameLayout.LayoutParams batchParams;
+    private long lastCaptureTime = 0;
+    private View flashView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -130,6 +134,11 @@ public class NativeCameraActivity extends AppCompatActivity {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
+
+        flashView = new View(this);
+        flashView.setBackgroundColor(Color.argb(150, 255, 255, 255));
+        flashView.setVisibility(View.GONE);
+        root.addView(flashView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         FrameLayout controls = new FrameLayout(this);
         controls.setClipChildren(false);
@@ -398,9 +407,19 @@ public class NativeCameraActivity extends AppCompatActivity {
 
     private void capturePhoto() {
         if (imageCapture == null) return;
+
+        long now = System.currentTimeMillis();
+        if (now - lastCaptureTime < 450) return; // Prevent rapid double-bounce captures
+        lastCaptureTime = now;
+
         pendingCaptures += 1;
         finishWhenPendingComplete = false;
         updateCaptureActionState();
+
+        if (flashView != null) {
+            flashView.setVisibility(View.VISIBLE);
+            flashView.postDelayed(() -> flashView.setVisibility(View.GONE), 60);
+        }
 
         File dir = new File(getCacheDir(), "native-camera");
         if (!dir.exists() && !dir.mkdirs()) {
@@ -410,7 +429,7 @@ public class NativeCameraActivity extends AppCompatActivity {
             return;
         }
 
-        File file = new File(dir, "sporely-native-" + System.currentTimeMillis() + ".jpg");
+        File file = new File(dir, "sporely-native-" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 6) + ".jpg");
         long capturedAtMillis = System.currentTimeMillis();
         ImageCapture.Metadata metadata = new ImageCapture.Metadata();
         if (captureLocation != null) metadata.setLocation(captureLocation);

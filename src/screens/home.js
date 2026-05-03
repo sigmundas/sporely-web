@@ -37,8 +37,9 @@ export async function initHome() {
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
   _syncCameraAction()
 
-  document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))
-  document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { groupBySpecies: true }))
+  document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine', { resetSearch: true, resetFilters: true }))
+  document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { resetSearch: true, resetFilters: true, groupBySpecies: true }))
+  document.getElementById('hstat-spores-btn')?.addEventListener('click', () => openFinds('mine', { resetSearch: true, resetFilters: true, sporesOnly: true }))
 
   // EXIF warning modal events for Android web
   const warningOverlay = document.getElementById('exif-warning-overlay')
