@@ -40,14 +40,16 @@ import {
   getArtsorakelMaxEdge,
   getDefaultVisibility,
   getPhotoGapMinutes,
-  getSyncOverMobileDataEnabled,
+  getJpegQuality,
+  setJpegQuality,
   setArtsorakelMaxEdge,
   setDefaultVisibility,
   setLastSyncAt,
   setPhotoGapMinutes,
-  setSyncOverMobileDataEnabled,
+  getUseSystemCamera,
+  setUseSystemCamera,
 } from './settings.js'
-import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener } from './camera-actions.js'
+import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel } from './camera-actions.js'
 
 initI18n()
 setNativeCameraOpener(openNativeCamera)
@@ -236,9 +238,13 @@ function initSettings() {
     })
   })
 
-  document.getElementById('settings-mobile-sync-toggle')?.addEventListener('change', event => {
-    setSyncOverMobileDataEnabled(event.target.checked)
-    if (event.target.checked) triggerSync()
+  const cameraAppRow = document.getElementById('settings-camera-app-row')
+  if (cameraAppRow) cameraAppRow.style.display = (window.Capacitor?.isNativePlatform?.() && window.Capacitor?.getPlatform?.() === 'android') ? 'flex' : 'none'
+  document.querySelectorAll('.settings-camera-app-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      setUseSystemCamera(btn.dataset.cameraApp === 'native')
+      _syncSettingsUI()
+    })
   })
 
   document.querySelectorAll('.settings-default-visibility-btn').forEach(btn => {
@@ -257,6 +263,14 @@ function initSettings() {
       Preferences.set({ key: 'useHdr', value: event.target.checked ? 'true' : 'false' })
     })
   }
+  const jpegQualityInput = document.getElementById('settings-jpeg-quality')
+  function _setJpegQuality(value) {
+    const v = setJpegQuality(value)
+    jpegQualityInput.value = v
+    jpegQualityInput.textContent = String(v)
+  }
+  document.getElementById('settings-jpeg-decrement')?.addEventListener('click', () => _setJpegQuality(Number(jpegQualityInput.value || 95) - 5))
+  document.getElementById('settings-jpeg-increment')?.addEventListener('click', () => _setJpegQuality(Number(jpegQualityInput.value || 95) + 5))
 
   document.getElementById('settings-clear-cache-btn')?.addEventListener('click', async event => {
     const btn = event.currentTarget
@@ -302,13 +316,23 @@ function _syncSettingsUI() {
     btn.classList.toggle('active', btn.dataset.imageResolutionMode === selectedResolution)
   })
 
-  const mobileSyncToggle = document.getElementById('settings-mobile-sync-toggle')
-  if (mobileSyncToggle) mobileSyncToggle.checked = getSyncOverMobileDataEnabled()
-
   const defaultVisibility = getDefaultVisibility()
   document.querySelectorAll('.settings-default-visibility-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.defaultVisibility === defaultVisibility)
   })
+
+  const useSystemCamera = getUseSystemCamera()
+  document.querySelectorAll('.settings-camera-app-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.cameraApp === (useSystemCamera ? 'native' : 'sporely'))
+  })
+  const acCameraLabel = document.querySelector('#ac-camera .action-card-label')
+  if (acCameraLabel) acCameraLabel.textContent = getEffectiveCameraLabel()
+
+  const jpegQualityInput = document.getElementById('settings-jpeg-quality')
+  if (jpegQualityInput) {
+    jpegQualityInput.value = String(getJpegQuality())
+    jpegQualityInput.textContent = jpegQualityInput.value
+  }
 }
 
 // ── Nav ───────────────────────────────────────────────────────────────────────

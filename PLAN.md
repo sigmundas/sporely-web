@@ -19,6 +19,12 @@
 - [x] **Hardware Verification & Fallback:** Support legacy OEM HDR via `ExtensionsManager`. If not available, fallback to Android 14+ Ultra HDR (`OUTPUT_FORMAT_JPEG_ULTRA_HDR`) via `ImageCaptureCapabilities`. Safely drop physical camera locks to allow ISP processing.
 - [x] **Lifecycle Binding:** Bind the `Preview` and `ImageCapture` use cases to the Android Activity lifecycle.
 
+## Additional CameraX Extensions
+*Goal: Expose more CameraX vendor extensions as user-configurable settings.*
+
+- [x] **JPEG Quality:** Add a JPEG quality stepper (75-100) to the main settings panel, passing the value to the native camera to control output file size.
+- [x] **Night Mode:** Add a toggle button to the native camera UI to enable/disable `ExtensionMode.NIGHT` on supported devices.
+
 ## Camera Behavior Summary (Sporely Cam vs Web Cam)
 
 **Sporely Cam (Native Android / CameraX)**

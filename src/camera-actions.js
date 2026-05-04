@@ -1,5 +1,6 @@
 import { t } from './i18n.js'
 import { navigate } from './router.js'
+import { getUseSystemCamera } from './settings.js'
 
 const ANDROID_WEB_CAMERA_WARNING_KEY = 'sporely-hide-android-web-camera-warning'
 
@@ -31,7 +32,10 @@ function _isAndroidWebApp() {
 }
 
 export function getEffectiveCameraLabel() {
-  return t(isAndroidNativeApp() || _isIosWebApp() ? 'home.sporelyCam' : 'home.webCam')
+  if (isAndroidNativeApp()) {
+    return t(getUseSystemCamera() ? 'home.nativeCam' : 'home.sporelyCam')
+  }
+  return t(_isIosWebApp() ? 'home.sporelyCam' : 'home.webCam')
 }
 
 export async function openPreferredCamera() {

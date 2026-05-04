@@ -94,6 +94,10 @@ public class NativeCameraActivity extends AppCompatActivity {
     private long lastCaptureTime = 0;
     private View flashView;
     private boolean isFinishing = false;
+    private ExtensionsManager extensionsManager;
+    private boolean isNightModeAvailable = false;
+    private boolean isNightModeEnabled = false;
+    private TextView nightModeToggle;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -176,10 +180,23 @@ public class NativeCameraActivity extends AppCompatActivity {
         batchParams.setMargins(0, 0, dp(28), dp(CONTROLS_BOTTOM_MARGIN_DP + CONTROL_ROW_HEIGHT_DP));
         root.addView(batchStack, batchParams);
         updateCaptureActionState();
+
+        FrameLayout topOverlay = new FrameLayout(this);
+        FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP
+        );
+        topParams.setMargins(dp(14), dp(14), dp(14), 0);
+        nightModeToggle = makeExtensionToggleButton("Night");
+        nightModeToggle.setOnClickListener(v -> toggleNightMode());
+        topOverlay.addView(nightModeToggle, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.START));
+
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             applySystemBarInsets(insets);
             return insets;
         });
+        root.addView(topOverlay, topParams);
         setContentView(root);
         root.requestApplyInsets();
     }
@@ -292,6 +309,19 @@ public class NativeCameraActivity extends AppCompatActivity {
         return drawable;
     }
 
+    private TextView makeExtensionToggleButton(String label) {
+        TextView button = new TextView(this);
+        button.setText(label);
+        button.setGravity(Gravity.CENTER);
+        button.setTextSize(12);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setPadding(dp(12), dp(6), dp(12), dp(6));
+        button.setTextColor(Color.WHITE);
+        button.setBackground(makeRoundedBackground(Color.argb(140, 0, 0, 0), 8, 1, Color.argb(100, 255, 255, 255)));
+        button.setVisibility(View.GONE); // Initially hidden
+        return button;
+    }
+
     private int dp(float value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
@@ -302,10 +332,10 @@ public class NativeCameraActivity extends AppCompatActivity {
             try {
                 cameraProvider = providerFuture.get();
 
-                ListenableFuture<ExtensionsManager> extensionsManagerFuture = ExtensionsManager.getInstanceAsync(this, cameraProvider);
-                extensionsManagerFuture.addListener(() -> {
+                ListenableFuture<ExtensionsManager> future = ExtensionsManager.getInstanceAsync(this, cameraProvider);
+                future.addListener(() -> {
                     try {
-                        ExtensionsManager extensionsManager = extensionsManagerFuture.get();
+                        extensionsManager = future.get();
                         bindCamera(extensionsManager);
                     } catch (Exception ex) {
                         // Defensive fallback if extensions manager initialization fails
@@ -330,12 +360,22 @@ public class NativeCameraActivity extends AppCompatActivity {
         String finalPhysicalCameraId = selected.physicalCameraId;
         int outputFormat = ImageCapture.OUTPUT_FORMAT_JPEG;
         
+        CameraSelector baseSelector = CameraSelector.DEFAULT_BACK_CAMERA;
+
+        // Check for extension availability once
+        if (extensionsManager != null) {
+            isNightModeAvailable = extensionsManager.isExtensionAvailable(baseSelector, ExtensionMode.NIGHT);
+        }
+        updateExtensionToggleUI();
+
         boolean useHdr = getIntent().getBooleanExtra("useHdr", false);
-        if (useHdr) {
+
+        if (isNightModeEnabled && isNightModeAvailable && extensionsManager != null) {
+            finalSelector = extensionsManager.getExtensionEnabledCameraSelector(baseSelector, ExtensionMode.NIGHT);
+            finalPhysicalCameraId = null;
+        } else if (useHdr) {
             boolean extensionHdr = false;
             if (extensionsManager != null) {
-                // OEM Extensions require standard logical camera selectors
-                CameraSelector baseSelector = CameraSelector.DEFAULT_BACK_CAMERA;
                 if (extensionsManager.isExtensionAvailable(baseSelector, ExtensionMode.HDR)) {
                     finalSelector = extensionsManager.getExtensionEnabledCameraSelector(baseSelector, ExtensionMode.HDR);
                     finalPhysicalCameraId = null; // Clear physical lens constraint for OEM pipeline
@@ -357,10 +397,11 @@ public class NativeCameraActivity extends AppCompatActivity {
 
         Preview.Builder previewBuilder = new Preview.Builder()
             .setTargetRotation(getDisplayRotation());
+        int jpegQuality = getIntent().getIntExtra("jpegQuality", 95);
         ImageCapture.Builder captureBuilder = new ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setOutputFormat(outputFormat)
-            .setJpegQuality(95)
+            .setJpegQuality(jpegQuality)
             .setTargetRotation(getDisplayRotation());
 
         if (finalPhysicalCameraId != null) {
@@ -372,6 +413,24 @@ public class NativeCameraActivity extends AppCompatActivity {
         imageCapture = captureBuilder.build();
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
         cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
+    }
+
+    private void toggleNightMode() {
+        if (!isNightModeAvailable) return;
+        isNightModeEnabled = !isNightModeEnabled;
+        updateExtensionToggleUI();
+        bindCamera(extensionsManager);
+    }
+
+    private void updateExtensionToggleUI() {
+        if (nightModeToggle != null) {
+            nightModeToggle.setVisibility(isNightModeAvailable ? View.VISIBLE : View.GONE);
+            if (isNightModeEnabled) {
+                nightModeToggle.setBackground(makeRoundedBackground(SPORELY_GREEN, 8, 1, SPORELY_GREEN));
+            } else {
+                nightModeToggle.setBackground(makeRoundedBackground(Color.argb(140, 0, 0, 0), 8, 1, Color.argb(100, 255, 255, 255)));
+            }
+        }
     }
 
     @SuppressWarnings("deprecation")

@@ -50,6 +50,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Close',
     'home.sporelyCam': 'Sporely Cam',
+    'home.nativeCam': 'Native Cam',
     'home.webCam': 'Web Cam',
     'home.importPhotos': 'Import Photos',
     'home.recentFinds': 'Recent Finds',
@@ -266,8 +267,13 @@ const messages = {
     'settings.imageResolution': 'Image resolution',
     'settings.imageResolutionReduced': 'Default (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
-    'settings.sync': 'Sync',
-    'settings.syncOverMobileData': 'Sync over mobile data',
+    'settings.camera': 'Camera',
+    'settings.useHdr': 'Use HDR (Sporely Cam)',
+    'settings.jpegQuality': 'JPEG Quality (Sporely Cam)',
+    'settings.jpegQualityHint': 'Higher quality increases file size. Affects photos taken with Sporely Cam.',
+    'settings.cameraApp': 'Camera App',
+    'settings.sporely': 'Sporely',
+    'settings.native': 'Native',
     'settings.defaultVisibility': 'Default visibility',
     'settings.data': 'Data',
     'settings.clearLocalCache': 'Clear local cache',
@@ -363,6 +369,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Lukk',
     'home.sporelyCam': 'Sporely Cam',
+    'home.nativeCam': 'Systemkamera',
     'home.webCam': 'Web Cam',
     'home.importPhotos': 'Importer bilder',
     'home.recentFinds': 'Siste funn',
@@ -579,8 +586,13 @@ const messages = {
     'settings.imageResolution': 'Bildeoppløsning',
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Maks (12MP)',
-    'settings.sync': 'Synk',
-    'settings.syncOverMobileData': 'Synk over mobildata',
+    'settings.camera': 'Kamera',
+    'settings.useHdr': 'Bruk HDR (Sporely Cam)',
+    'settings.jpegQuality': 'JPEG-kvalitet (Sporely Cam)',
+    'settings.jpegQualityHint': 'Høyere kvalitet gir større filstørrelse. Gjelder bilder tatt med Sporely Cam.',
+    'settings.cameraApp': 'Kamera-app',
+    'settings.sporely': 'Sporely',
+    'settings.native': 'System',
     'settings.defaultVisibility': 'Standard synlighet',
     'settings.data': 'Data',
     'settings.clearLocalCache': 'Tøm lokal cache',
@@ -676,6 +688,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Stäng',
     'home.sporelyCam': 'Sporely Cam',
+    'home.nativeCam': 'Systemkamera',
     'home.webCam': 'Web Cam',
     'home.importPhotos': 'Importera bilder',
     'home.recentFinds': 'Senaste fynd',
@@ -892,8 +905,13 @@ const messages = {
     'settings.imageResolution': 'Bildupplösning',
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
-    'settings.sync': 'Synk',
-    'settings.syncOverMobileData': 'Synka via mobildata',
+    'settings.camera': 'Kamera',
+    'settings.useHdr': 'Använd HDR (Sporely Cam)',
+    'settings.jpegQuality': 'JPEG-kvalitet (Sporely Cam)',
+    'settings.jpegQualityHint': 'Högre kvalitet ger större filstorlek. Påverkar bilder tagna med Sporely Cam.',
+    'settings.cameraApp': 'Kamera-app',
+    'settings.sporely': 'Sporely',
+    'settings.native': 'System',
     'settings.defaultVisibility': 'Standard synlighet',
     'settings.data': 'Data',
     'settings.clearLocalCache': 'Rensa lokal cache',
@@ -989,6 +1007,7 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Schließen',
     'home.sporelyCam': 'Sporely Cam',
+    'home.nativeCam': 'Native Kamera',
     'home.webCam': 'Web Cam',
     'home.importPhotos': 'Fotos importieren',
     'home.recentFinds': 'Letzte Funde',
@@ -1205,8 +1224,13 @@ const messages = {
     'settings.imageResolution': 'Bildauflösung',
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max. (12MP)',
-    'settings.sync': 'Sync',
-    'settings.syncOverMobileData': 'Über mobile Daten synchronisieren',
+    'settings.camera': 'Kamera',
+    'settings.useHdr': 'HDR verwenden (Sporely Cam)',
+    'settings.jpegQuality': 'JPEG-Qualität (Sporely Cam)',
+    'settings.jpegQualityHint': 'Höhere Qualität vergrößert die Dateigröße. Gilt für Fotos, die mit der Sporely Cam aufgenommen wurden.',
+    'settings.cameraApp': 'Kamera-App',
+    'settings.sporely': 'Sporely',
+    'settings.native': 'System',
     'settings.defaultVisibility': 'Standard-Sichtbarkeit',
     'settings.data': 'Daten',
     'settings.clearLocalCache': 'Lokalen Cache leeren',
@@ -1573,8 +1597,13 @@ export function applyStaticTranslations() {
   setText('#settings-image-resolution-label', 'settings.imageResolution')
   setText('#settings-resolution-reduced', 'settings.imageResolutionReduced')
   setText('#settings-resolution-max', 'settings.imageResolutionMax')
-  setText('#settings-sync-label', 'settings.sync')
-  setText('#settings-mobile-sync-label', 'settings.syncOverMobileData')
+  setText('#settings-camera-label', 'settings.camera')
+  setText('#settings-camera-app-label', 'settings.cameraApp')
+  setText('.settings-camera-app-btn[data-camera-app="sporely"]', 'settings.sporely')
+  setText('.settings-camera-app-btn[data-camera-app="native"]', 'settings.native')
+  setText('#settings-hdr-label', 'settings.useHdr')
+  setText('#settings-jpeg-quality-label', 'settings.jpegQuality')
+  setText('#settings-jpeg-quality-hint', 'settings.jpegQualityHint')
   setText('#settings-default-visibility-label', 'settings.defaultVisibility')
   setText('#settings-default-visibility-private', 'visibility.private')
   setText('#settings-default-visibility-friends', 'visibility.friends')

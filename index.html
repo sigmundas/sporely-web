@@ -879,18 +879,16 @@
           </div>
         </div>
 
-        <div class="settings-section-label" id="settings-sync-label" style="margin-top:22px">Sync</div>
-        <div class="settings-row">
-          <div>
-            <div class="settings-row-title" id="settings-mobile-sync-label">Sync over mobile data</div>
-          </div>
-          <label class="settings-switch">
-            <input type="checkbox" id="settings-mobile-sync-toggle" checked>
-            <span></span>
-          </label>
-        </div>
-
         <div class="settings-section-label" id="settings-camera-label" style="margin-top:22px">Camera</div>
+        <div class="settings-row" style="margin-bottom:10px" id="settings-camera-app-row">
+          <div>
+            <div class="settings-row-title" id="settings-camera-app-label">Camera App</div>
+          </div>
+          <div class="theme-segment settings-camera-app-segment" style="width: 160px; margin: 0;">
+            <button class="theme-seg-btn settings-camera-app-btn" data-camera-app="sporely">Sporely</button>
+            <button class="theme-seg-btn settings-camera-app-btn" data-camera-app="native">Native</button>
+          </div>
+        </div>
         <div class="settings-row">
           <div>
             <div class="settings-row-title" id="settings-hdr-label">Use HDR (Sporely Cam)</div>
@@ -900,6 +898,17 @@
             <span></span>
           </label>
         </div>
+        <div class="settings-row" style="margin-top:10px">
+          <div>
+            <div class="settings-row-title" id="settings-jpeg-quality-label">JPEG Quality (Sporely Cam)</div>
+          </div>
+          <div class="settings-stepper" aria-labelledby="settings-jpeg-quality-label">
+            <button type="button" class="settings-stepper-btn" id="settings-jpeg-decrement" aria-label="Decrease JPEG quality">-</button>
+            <output id="settings-jpeg-quality" class="settings-gap-input settings-gap-display" aria-live="polite">95</output>
+            <button type="button" class="settings-stepper-btn" id="settings-jpeg-increment" aria-label="Increase JPEG quality">+</button>
+          </div>
+        </div>
+        <p class="settings-gap-hint" id="settings-jpeg-quality-hint">Higher quality increases file size. Affects photos taken with Sporely Cam.</p>
 
         <div class="settings-section-label" id="settings-default-visibility-label" style="margin-top:22px">Default visibility</div>
         <div class="theme-segment settings-default-visibility-segment">

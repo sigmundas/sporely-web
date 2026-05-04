@@ -11,7 +11,8 @@ import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
-import { getDefaultVisibility, setLastSyncAt } from '../settings.js'
+import { getDefaultVisibility, setLastSyncAt, getUseSystemCamera, getJpegQuality } from '../settings.js'
+import { Preferences } from '@capacitor/preferences'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js'
@@ -994,10 +995,31 @@ async function _sendComment() {
 async function _openCameraForDetail() {
   if (isAndroidNativeApp()) {
     try {
+      if (getUseSystemCamera()) {
+        const result = await NativeCamera.openSystemCamera()
+        const photos = Array.isArray(result?.photos) ? result.photos : []
+        if (!photos.length) return
+
+        _setProgress(0, photos.length, t('import.readingFiles'))
+        const files = []
+        for (let i = 0; i < photos.length; i++) {
+          _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+          files.push(await nativePickedPhotoToFile(photos[i], i))
+        }
+        await _addPhotosToObservation(files)
+        return
+      }
+
+      const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' })
+      const useHdr = useHdrStr === 'true'
+      const jpegQuality = getJpegQuality()
+
       const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
         ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
         : null
-      const result = await NativeCamera.capturePhotos(gps ? { gps } : {})
+      const options = { useHdr, jpegQuality }
+      if (gps) options.gps = gps
+      const result = await NativeCamera.capturePhotos(options)
       const photos = Array.isArray(result?.photos) ? result.photos : []
       if (!photos.length) return
 
