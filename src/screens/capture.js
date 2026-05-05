@@ -14,6 +14,11 @@ const CAMERA_VIDEO_WIDTH_IDEAL = 4000
 const CAMERA_VIDEO_HEIGHT_IDEAL = 3000
 let pendingCaptureCount = 0
 let finishCaptureWhenPendingComplete = false
+let captureCompleteHandler = null
+
+export function setCaptureCompleteHandler(handler) {
+  captureCompleteHandler = typeof handler === 'function' ? handler : null
+}
 
 export function initCapture() {
   document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
@@ -548,10 +553,27 @@ function finishCapture() {
   }
   stopCamera()
   document.getElementById('bottom-nav').style.display = 'flex'
+  const handler = captureCompleteHandler
+  if (handler) {
+    captureCompleteHandler = null
+    const photos = [...state.capturedPhotos]
+    state.capturedPhotos = []
+    state.batchCount = 0
+    state.reviewContext = null
+    document.getElementById('batch-count').textContent = '0'
+    document.getElementById('batch-area').style.display = 'none'
+    _syncCaptureControls()
+    Promise.resolve(handler(photos)).catch(error => {
+      console.error('Capture completion handler failed:', error)
+      showToast(error?.message || 'Could not add captured photo')
+    })
+    return
+  }
   navigate('review')
 }
 
 function cancelCapture() {
+  captureCompleteHandler = null
   stopCamera()
   state.capturedPhotos = []
   state.reviewContext = null

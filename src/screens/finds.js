@@ -824,7 +824,11 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
                 <div class="find-card-polaroid-frame">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
                 <div class="find-card-polaroid-frame">${imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
               </div>`
-            : imageHtml(cardImg?.first || cardImg, '', 'find-card-photo-placeholder')
+            : cardImg?.first
+              ? `<div class="find-card-polaroid find-card-polaroid--single">
+                  <div class="find-card-polaroid-frame find-card-polaroid-frame--single">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                </div>`
+              : imageHtml(cardImg, '', 'find-card-photo-placeholder')
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
@@ -1048,7 +1052,11 @@ function _renderCards(list, subtitle, data, options) {
                 <div class="find-card-polaroid-frame">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
                 <div class="find-card-polaroid-frame">${imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
               </div>`
-            : imageHtml(cardImg?.first || cardImg, '', 'find-card-photo-placeholder')
+            : cardImg?.first
+              ? `<div class="find-card-polaroid find-card-polaroid--single">
+                  <div class="find-card-polaroid-frame find-card-polaroid-frame--single">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                </div>`
+              : imageHtml(cardImg, '', 'find-card-photo-placeholder')
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">

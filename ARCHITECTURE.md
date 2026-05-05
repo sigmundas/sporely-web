@@ -20,7 +20,7 @@ handling from the device photo library.
 | Layer | Choice |
 |---|---|
 | Build | Vite 6, vanilla JS (ES modules) — no framework |
-| Native wrapper | Capacitor Android + `@capawesome/capacitor-file-picker` + custom `NativePhotoPicker` plugin |
+| Native wrapper | Capacitor Android + `@capawesome/capacitor-file-picker` + `@capawesome/capacitor-background-task` + custom `NativePhotoPicker` plugin |
 | Styling | Plain CSS custom properties, no preprocessor |
 | Auth & DB | Supabase JS v2 (`@supabase/supabase-js`) |
 | Media storage | Cloudflare R2 bucket `sporely-media` |
@@ -69,10 +69,11 @@ sporely-web/
     ├── geo.js              GPS watchPosition, writes into state.gps
     ├── cloud-plan.js       Cloud plan lookup + effective upload policy helpers
     ├── settings.js         Local Settings preferences: visibility, sync data policy, sync history
-    ├── images.js           Upload originals + thumbnail variants, media URL helpers
+    ├── images.js           Worker-backed image preparation, uploads + thumbnail variants, media URL helpers
+    ├── image-worker.js     Off-main-thread resize/encode worker using OffscreenCanvas
     ├── image_crop.js       Shared AI crop math + cropped blob export helpers
     ├── ai-crop-editor.js   Full-screen AI crop editor used by review/import flows
-    ├── sync-queue.js       IndexedDB offline queue for captured observations
+    ├── sync-queue.js       IndexedDB offline queue for captured observations + background-task sync drain
     ├── import-store.js     IndexedDB persistence for pending import sessions
     ├── style.css           All CSS (custom properties, no utility classes)
     └── screens/
@@ -158,11 +159,25 @@ R2 bucket `sporely-media` is exposed publicly via Cloudflare. All media URLs are
 **relative keys** stored in the database — never full URLs. The key is prefixed with
 `{user_id}/{obs_id}/` for path-based ownership.
 
+### Client image preparation
+
+`src/images.js` prepares web/mobile uploads before they are sent to R2.
+
+- Image work is attempted off the main thread in `src/image-worker.js`.
+- The worker receives an `ImageBitmap` as a transferable and uses `OffscreenCanvas`.
+- Encoding tries WebP first (`image/webp`, quality 0.8) and falls back to JPEG (`image/jpeg`, quality 0.7). AVIF is not used because mobile browser AVIF encoding support is unreliable.
+- Free/reduced mode limits images to about 2 MP with a 1600px max edge.
+- Pro/max mode keeps near-12 MP images unless the source is above the large-image guard, then downsizes to about 4000px max edge.
+- Downscaling uses progressive halving plus high-quality canvas smoothing to avoid aliasing-heavy thumbnails.
+
 ### Thumbnail variants
 
-`src/images.js` generates two variants at upload time:
-- `thumb_small_{filename}` — 240px, JPEG 82%
-- `thumb_medium_{filename}` — 720px, JPEG 82%
+`src/images.js` generates one primary thumbnail variant at upload time:
+- `thumb_{filename}` — 400px max edge, WebP 70% or JPEG 65% fallback
+
+Legacy readers still check older variant names where needed:
+- `thumb_small_{filename}`
+- `thumb_medium_{filename}`
 
 ### ⚠️ Known issue: EXIF stripped during free-tier 2 MP conversion
 
@@ -172,14 +187,14 @@ lost in the stored R2 file.
 
 **Desktop workaround (implemented):** When the desktop pulls a cloud field image, it checks
 whether the image has no EXIF datetime/GPS; if the observation has GPS or date stored in the local
-database, it injects that metadata back into the downloaded JPEG using PIL. This restores the
+database, it injects that metadata back into the downloaded image when the format supports it. This restores the
 "Set from current image" button functionality in the Prepare Images dialog for cloud-synced images.
 See `_inject_obs_exif_into_field_image()` and `_backfill_missing_exif_on_cloud_images()` in
 `sporely/utils/cloud_sync.py`.
 
 **Web App Extraction (Implemented):** The web app now correctly extracts EXIF/GPS *before*
 the Canvas resize step during import/capture, persisting it into the observation draft and
-database rows. While the stored R2 JPEG *bytes* still lack EXIF, the metadata is safely synced,
+database rows. While the stored R2 image *bytes* still lack EXIF after Canvas/WebP/JPEG encoding, the metadata is safely synced,
 allowing the desktop app to re-inject it upon download.
 
 For the original upload path, the web app now records how the stored cloud image was prepared:
@@ -193,9 +208,21 @@ Desktop cloud sync prepares and pushes the same metadata so both clients describ
 Both stored under the same directory as the original, e.g.:
 ```
 {user_id}/{obs_id}/0_1234567890.jpg          ← original
-{user_id}/{obs_id}/thumb_small_0_1234567890.jpg
-{user_id}/{obs_id}/thumb_medium_0_1234567890.jpg
+{user_id}/{obs_id}/thumb_0_1234567890.webp   ← primary thumbnail
 ```
+
+### Offline queue and background sync
+
+`src/sync-queue.js` is the durable upload boundary for new observations.
+
+- Queue rows are written to IndexedDB before image processing begins.
+- Image bytes are stored as `ArrayBuffer` values, not Blob URLs, so the queue survives browser memory pressure and process kills.
+- After image preparation succeeds, prepared upload bytes and thumbnail bytes are written back into the same queue row so sync can resume without re-encoding.
+- The queue records `remoteObservationId`, `completedImageIndexes`, `syncStage`, `syncImageIndex`, and `syncImageCount`.
+- On resume, sync reconciles against Supabase `observation_images` by `sort_order`, so already-uploaded images are skipped.
+- If the process dies after inserting the parent observation but before `remoteObservationId` is saved locally, the queue attempts to recover the cloud row by matching `user_id` and `captured_at`.
+
+When the Capacitor app is backgrounded, `document.visibilitychange` requests a short-lived background task through `@capawesome/capacitor-background-task`. The task drains any active queue preparation/upload promise and then calls `triggerSync()`. This extends the chance that current work finishes when the app is minimized or the screen turns off, but it is still subject to Android/iOS background execution limits.
 
 ### Environment variables
 

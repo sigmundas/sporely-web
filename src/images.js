@@ -61,6 +61,19 @@ function _splitPath(storagePath) {
   return { dir: parts.join('/'), fileName }
 }
 
+export function imageExtensionForMimeType(type) {
+  const normalized = String(type || '').split(';')[0].trim().toLowerCase()
+  if (normalized === 'image/webp') return 'webp'
+  if (normalized === 'image/jpeg' || normalized === 'image/jpg') return 'jpg'
+  if (normalized === 'image/heic') return 'heic'
+  if (normalized === 'image/heif') return 'heif'
+  return 'jpg'
+}
+
+export function imageExtensionForBlob(blob) {
+  return imageExtensionForMimeType(blob?.type)
+}
+
 export function getVariantPath(storagePath, variant = 'original') {
   const key = normalizeMediaKey(storagePath)
   if (!key || variant === 'original') return key
@@ -286,6 +299,45 @@ async function _canvasToEncodedBlob(canvas, candidates = ENCODE_CANDIDATES) {
   throw new Error('Image encoding failed')
 }
 
+function _configureCanvasContext(ctx) {
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+}
+
+function _drawHighQuality(source, sourceWidth, sourceHeight, targetCanvas, targetWidth, targetHeight) {
+  let currentSource = source
+  let currentWidth = sourceWidth
+  let currentHeight = sourceHeight
+  const scratchCanvases = []
+
+  while (currentWidth / targetWidth > 2 || currentHeight / targetHeight > 2) {
+    const nextWidth = Math.max(targetWidth, Math.round(currentWidth / 2))
+    const nextHeight = Math.max(targetHeight, Math.round(currentHeight / 2))
+    const scratch = document.createElement('canvas')
+    scratch.width = nextWidth
+    scratch.height = nextHeight
+    const scratchCtx = scratch.getContext('2d', { alpha: false })
+    if (!scratchCtx) break
+    _configureCanvasContext(scratchCtx)
+    scratchCtx.drawImage(currentSource, 0, 0, currentWidth, currentHeight, 0, 0, nextWidth, nextHeight)
+    if (currentSource instanceof HTMLCanvasElement) scratchCanvases.push(currentSource)
+    currentSource = scratch
+    currentWidth = nextWidth
+    currentHeight = nextHeight
+  }
+
+  const targetCtx = targetCanvas.getContext('2d', { alpha: false })
+  if (!targetCtx) throw new Error('Canvas context unavailable')
+  _configureCanvasContext(targetCtx)
+  targetCtx.drawImage(currentSource, 0, 0, currentWidth, currentHeight, 0, 0, targetWidth, targetHeight)
+
+  if (currentSource instanceof HTMLCanvasElement && currentSource !== targetCanvas) scratchCanvases.push(currentSource)
+  scratchCanvases.forEach(canvas => {
+    canvas.width = 0
+    canvas.height = 0
+  })
+}
+
 async function _prepareUploadBlobInWorker(blob, policy) {
   const worker = _getImageWorker()
   if (!worker) return null
@@ -377,9 +429,7 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
   try {
     canvas.width = targetWidth
     canvas.height = targetHeight
-    const ctx = canvas.getContext('2d', { alpha: false })
-    if (!ctx) throw new Error('Canvas context unavailable')
-    ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
+    _drawHighQuality(img, sourceWidth, sourceHeight, canvas, targetWidth, targetHeight)
 
     const fullBlob = await _canvasToEncodedBlob(canvas)
     await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
@@ -389,9 +439,7 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     const thumbHeight = Math.max(1, Math.round(targetHeight * thumbScale))
     thumbCanvas.width = thumbWidth
     thumbCanvas.height = thumbHeight
-    const thumbCtx = thumbCanvas.getContext('2d', { alpha: false })
-    if (!thumbCtx) throw new Error('Canvas thumbnail context unavailable')
-    thumbCtx.drawImage(canvas, 0, 0, thumbWidth, thumbHeight)
+    _drawHighQuality(canvas, targetWidth, targetHeight, thumbCanvas, thumbWidth, thumbHeight)
     const thumbBlob = await _canvasToEncodedBlob(thumbCanvas, [
       { type: 'image/webp', quality: 0.7 },
       { type: 'image/jpeg', quality: 0.65 },

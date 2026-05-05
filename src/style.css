@@ -1221,12 +1221,18 @@ html, body {
   height: 100%;
   background: var(--card);
 }
+.find-card-polaroid--single {
+  justify-content: center;
+}
 .find-card-polaroid-frame {
   flex: 1;
   overflow: hidden;
   padding: 4px;
   background: rgba(255,255,255,0.12);
   border-radius: 4px;
+}
+.find-card-polaroid-frame--single {
+  flex: 0 1 min(68%, 280px);
 }
 .find-card-polaroid-frame + .find-card-polaroid-frame { border-left: none; }
 .find-card-polaroid-img {

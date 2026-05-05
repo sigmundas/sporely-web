@@ -31,6 +31,43 @@ async function _encodeCanvas(canvas, candidates = ENCODE_CANDIDATES) {
   throw new Error('Image encoding failed')
 }
 
+function _configureContext(ctx) {
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+}
+
+function _drawHighQuality(source, sourceWidth, sourceHeight, targetCanvas, targetWidth, targetHeight) {
+  let currentSource = source
+  let currentWidth = sourceWidth
+  let currentHeight = sourceHeight
+  const scratchCanvases = []
+
+  while (currentWidth / targetWidth > 2 || currentHeight / targetHeight > 2) {
+    const nextWidth = Math.max(targetWidth, Math.round(currentWidth / 2))
+    const nextHeight = Math.max(targetHeight, Math.round(currentHeight / 2))
+    const scratch = new OffscreenCanvas(nextWidth, nextHeight)
+    const scratchCtx = scratch.getContext('2d', { alpha: false })
+    if (!scratchCtx) break
+    _configureContext(scratchCtx)
+    scratchCtx.drawImage(currentSource, 0, 0, currentWidth, currentHeight, 0, 0, nextWidth, nextHeight)
+    if (currentSource instanceof OffscreenCanvas) scratchCanvases.push(currentSource)
+    currentSource = scratch
+    currentWidth = nextWidth
+    currentHeight = nextHeight
+  }
+
+  const targetCtx = targetCanvas.getContext('2d', { alpha: false })
+  if (!targetCtx) throw new Error('OffscreenCanvas context unavailable')
+  _configureContext(targetCtx)
+  targetCtx.drawImage(currentSource, 0, 0, currentWidth, currentHeight, 0, 0, targetWidth, targetHeight)
+
+  if (currentSource instanceof OffscreenCanvas && currentSource !== targetCanvas) scratchCanvases.push(currentSource)
+  scratchCanvases.forEach(canvas => {
+    canvas.width = 0
+    canvas.height = 0
+  })
+}
+
 self.onmessage = async event => {
   const { id, bitmap, policy } = event.data || {}
   if (!id || !bitmap) return
@@ -44,9 +81,7 @@ self.onmessage = async event => {
     const target = _targetSize(sourceWidth, sourceHeight, policy)
 
     canvas = new OffscreenCanvas(target.width, target.height)
-    const ctx = canvas.getContext('2d', { alpha: false })
-    if (!ctx) throw new Error('OffscreenCanvas context unavailable')
-    ctx.drawImage(bitmap, 0, 0, target.width, target.height)
+    _drawHighQuality(bitmap, sourceWidth, sourceHeight, canvas, target.width, target.height)
 
     const fullBlob = await _encodeCanvas(canvas)
 
@@ -54,9 +89,7 @@ self.onmessage = async event => {
     const thumbWidth = Math.max(1, Math.round(target.width * thumbScale))
     const thumbHeight = Math.max(1, Math.round(target.height * thumbScale))
     thumbCanvas = new OffscreenCanvas(thumbWidth, thumbHeight)
-    const thumbCtx = thumbCanvas.getContext('2d', { alpha: false })
-    if (!thumbCtx) throw new Error('OffscreenCanvas thumbnail context unavailable')
-    thumbCtx.drawImage(canvas, 0, 0, thumbWidth, thumbHeight)
+    _drawHighQuality(canvas, target.width, target.height, thumbCanvas, thumbWidth, thumbHeight)
     const thumbBlob = await _encodeCanvas(thumbCanvas, [
       { type: 'image/webp', quality: 0.7 },
       { type: 'image/jpeg', quality: 0.65 },

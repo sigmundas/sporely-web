@@ -1,7 +1,9 @@
 import { supabase } from './supabase.js'
-import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants } from './images.js'
+import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, imageExtensionForMimeType } from './images.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
+import { BackgroundTask } from '@capawesome/capacitor-background-task'
+import { isNativeApp } from './platform.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -10,6 +12,10 @@ const SYNC_SUCCESS_EVENT = 'sporely-sync-upload-complete'
 const RETRY_DELAY_MS = 30_000
 const _queuedPreviewUrls = new Map()
 let _retryTimer = null
+let _currentSyncPromise = null
+let _backgroundTaskId = null
+let _backgroundTaskStarting = false
+const _activeQueueOperations = new Set()
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
@@ -25,15 +31,6 @@ function _blobFromStoredBytes(bytes, type = 'image/jpeg') {
     ? bytes
     : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
   return new Blob([data], { type: type || 'image/jpeg' })
-}
-
-function _extensionForImageType(type) {
-  const normalized = String(type || '').split(';')[0].trim().toLowerCase()
-  if (normalized === 'image/webp') return 'webp'
-  if (normalized === 'image/jpeg' || normalized === 'image/jpg') return 'jpg'
-  if (normalized === 'image/heic') return 'heic'
-  if (normalized === 'image/heif') return 'heif'
-  return 'jpg'
 }
 
 async function _blobToStoredBytes(blob) {
@@ -78,6 +75,14 @@ function notifyQueueChanged() {
 
 function notifySyncSuccess(detail) {
   window.dispatchEvent(new CustomEvent(SYNC_SUCCESS_EVENT, { detail }))
+}
+
+function _trackQueueOperation(promise) {
+  const tracked = Promise.resolve(promise).finally(() => {
+    _activeQueueOperations.delete(tracked)
+  })
+  _activeQueueOperations.add(tracked)
+  return tracked
 }
 
 function _revokeQueuedPreviewUrl(id) {
@@ -216,53 +221,55 @@ function _normalizeQueuedImages(imageEntries) {
 async function _serializeQueuedImagesForStorage(images) {
   const serialized = []
   for (const image of images || []) {
-    const upload = await _blobToStoredBytes(image.uploadBlob)
-    const thumb = await _blobToStoredBytes(image.variants?.thumb)
-    const original = upload ? null : await _blobToStoredBytes(image.blob)
-    serialized.push({
-      aiCropRect: image.aiCropRect || null,
-      aiCropSourceW: image.aiCropSourceW ?? null,
-      aiCropSourceH: image.aiCropSourceH ?? null,
-      blobBytes: original?.bytes || null,
-      blobType: original?.type || null,
-      blobSize: original?.size || null,
-      uploadBytes: upload?.bytes || null,
-      uploadType: upload?.type || null,
-      uploadSize: upload?.size || null,
-      uploadMeta: image.uploadMeta || null,
-      variantBytes: thumb ? { thumb: thumb.bytes } : null,
-      variantTypes: thumb ? { thumb: thumb.type } : null,
-      variantSizes: thumb ? { thumb: thumb.size } : null,
-    })
+    serialized.push(await _serializeQueuedImageForStorage(image))
   }
   return serialized
 }
 
-export async function enqueueObservation(obsPayload, imageEntries) {
-  const queuedImages = _normalizeQueuedImages(imageEntries)
-
-  let uploadPolicy = _cloudPlanCache.get(obsPayload.user_id)
-  if (!uploadPolicy) {
-    uploadPolicy = await fetchCloudPlanProfile(obsPayload.user_id)
-    _cloudPlanCache.set(obsPayload.user_id, uploadPolicy)
+async function _serializeQueuedImageForStorage(image) {
+  const upload = await _blobToStoredBytes(image?.uploadBlob)
+  const thumb = await _blobToStoredBytes(image?.variants?.thumb)
+  const original = upload ? null : await _blobToStoredBytes(image?.blob)
+  return {
+    aiCropRect: image?.aiCropRect || null,
+    aiCropSourceW: image?.aiCropSourceW ?? null,
+    aiCropSourceH: image?.aiCropSourceH ?? null,
+    blobBytes: original?.bytes || null,
+    blobType: original?.type || null,
+    blobSize: original?.size || null,
+    uploadBytes: upload?.bytes || null,
+    uploadType: upload?.type || null,
+    uploadSize: upload?.size || null,
+    uploadMeta: image?.uploadMeta || null,
+    variantBytes: thumb ? { thumb: thumb.bytes } : null,
+    variantTypes: thumb ? { thumb: thumb.type } : null,
+    variantSizes: thumb ? { thumb: thumb.size } : null,
   }
+}
 
-  const preparedImages = []
-  for (const image of queuedImages) {
-    if (_isBlob(image.blob) && !image.uploadBlob) {
-      const prepared = await prepareImageVariants(image.blob, uploadPolicy)
-      preparedImages.push({
-        ...image,
-        uploadBlob: prepared.uploadBlob,
-        uploadMeta: prepared.uploadMeta,
-        variants: prepared.variants,
-      })
-    } else {
-      preparedImages.push(image)
+async function _persistPreparedQueuedImage(itemId, index, preparedImage) {
+  const storedImage = await _serializeQueuedImageForStorage(preparedImage)
+  await _updateQueueItem(itemId, current => {
+    if (!current) return current
+    const entries = [...(current.imageEntries || current.imageBlobs || [])]
+    entries[index] = {
+      ...(entries[index] || {}),
+      ...storedImage,
     }
-  }
+    return {
+      ...current,
+      imageEntries: entries,
+    }
+  })
+}
 
-  const persistentImages = await _serializeQueuedImagesForStorage(preparedImages)
+export async function enqueueObservation(obsPayload, imageEntries) {
+  return _trackQueueOperation(_enqueueObservation(obsPayload, imageEntries))
+}
+
+async function _enqueueObservation(obsPayload, imageEntries) {
+  const queuedImages = _normalizeQueuedImages(imageEntries)
+  const persistentImages = await _serializeQueuedImagesForStorage(queuedImages)
   const db = await openDB()
   const queueItem = {
     obsPayload,
@@ -405,26 +412,57 @@ async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'loc
   })
 }
 
-export async function triggerSync() {
-  if (isSyncing || !navigator.onLine || !canSyncOnCurrentConnection()) return
+async function _findRemoteObservationForQueueItem(item) {
+  const payload = item?.obsPayload || {}
+  const capturedAt = String(payload.captured_at || '').trim()
+  const userId = String(item?.userId || payload.user_id || '').trim()
+  if (!capturedAt || !userId) return null
+
+  const { data, error } = await supabase
+    .from('observations')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('captured_at', capturedAt)
+    .order('id', { ascending: false })
+    .limit(1)
+
+  if (error) {
+    if (error?.message?.includes('captured_at')) return null
+    throw error
+  }
+
+  return Array.isArray(data) ? data[0]?.id || null : null
+}
+
+async function _runSyncQueue() {
+  if (!navigator.onLine || !canSyncOnCurrentConnection()) return
   
   // Ensure the user hasn't logged out while items were pending
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return
 
-  isSyncing = true
+  const items = await _readQueueItems()
 
-  try {
-    const items = await _readQueueItems()
+  if (!items || !items.length) return
 
-    if (!items || !items.length) return
-
-    for (const item of items) {
-      if (!navigator.onLine) break
+  for (const item of items) {
+    if (!navigator.onLine) break
       
       try {
         const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
         let obsId = item.remoteObservationId || null
+
+        if (!obsId) {
+          obsId = await _findRemoteObservationForQueueItem(item)
+          if (obsId) {
+            const updatedItem = await _updateQueueItem(item.id, current => current ? {
+              ...current,
+              remoteObservationId: obsId,
+              syncRecoveredRemoteIdAt: Date.now(),
+            } : current)
+            if (!updatedItem) continue
+          }
+        }
 
         // 1. Upload parent observation once, then persist the remote ID for retries.
         if (!obsId) {
@@ -507,10 +545,11 @@ export async function triggerSync() {
               uploadMeta: prepared.uploadMeta,
               variants: prepared.variants,
             }
+            await _persistPreparedQueuedImage(item.id, i, preparedImage)
           }
 
           const blobType = preparedImage.uploadBlob?.type || preparedImage.uploadType || ''
-          const ext = _extensionForImageType(blobType)
+          const ext = imageExtensionForMimeType(blobType)
           const path = `${item.userId}/${obsId}/${i}_${item.ts}.${ext}`
           
           const uploadMeta = await uploadPreparedObservationImageVariants(preparedImage, path, {
@@ -550,9 +589,59 @@ export async function triggerSync() {
         _scheduleSyncRetry()
         break // Network or RLS failure — halt processing to avoid looping errors
       }
-    }
-  } finally {
-    isSyncing = false
+  }
+}
+
+export async function triggerSync() {
+  if (isSyncing) return _currentSyncPromise
+
+  isSyncing = true
+  _currentSyncPromise = _trackQueueOperation(_runSyncQueue())
+    .finally(() => {
+      isSyncing = false
+      _currentSyncPromise = null
+    })
+  return _currentSyncPromise
+}
+
+async function _drainQueueForBackgroundTask() {
+  const active = [..._activeQueueOperations]
+  if (active.length) {
+    await Promise.allSettled(active)
+  }
+  await triggerSync()
+}
+
+export async function requestBackgroundSync() {
+  if (!isNativeApp()) {
+    await triggerSync()
+    return
+  }
+  if (_backgroundTaskId || _backgroundTaskStarting) return
+
+  _backgroundTaskStarting = true
+  try {
+    const taskId = await BackgroundTask.beforeExit(async () => {
+      try {
+        await _drainQueueForBackgroundTask()
+      } catch (error) {
+        console.warn('Background sync task failed:', error)
+      } finally {
+        try {
+          BackgroundTask.finish({ taskId })
+        } catch (finishError) {
+          console.warn('Background task finish failed:', finishError)
+        }
+        _backgroundTaskId = null
+        _backgroundTaskStarting = false
+      }
+    })
+    _backgroundTaskId = taskId
+  } catch (error) {
+    _backgroundTaskId = null
+    _backgroundTaskStarting = false
+    console.warn('Background task request failed; continuing foreground sync only:', error)
+    await triggerSync()
   }
 }
 
@@ -565,6 +654,7 @@ window.addEventListener('focus', triggerSync)
 window.addEventListener('pageshow', triggerSync)
 onConnectionTypeChange(triggerSync)
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') requestBackgroundSync()
   if (document.visibilityState === 'visible') triggerSync()
 })
 setTimeout(triggerSync, 1000)
