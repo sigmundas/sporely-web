@@ -6,10 +6,6 @@ const SIGNED_URL_TTL_SECONDS = 3600
 const SIGNED_URL_CACHE = new Map()
 const MEDIA_BASE_URL = String(import.meta.env.VITE_MEDIA_BASE_URL || 'https://media.sporely.no').replace(/\/+$/, '')
 const MEDIA_UPLOAD_BASE_URL = String(import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || '').replace(/\/+$/, '')
-const THUMB_VARIANTS = {
-  small: { maxEdge: 240, quality: 0.82 },
-  medium: { maxEdge: 720, quality: 0.82 },
-}
 const UPLOAD_METADATA_FIELDS = [
   'upload_mode',
   'source_width',
@@ -69,12 +65,17 @@ export function getVariantPath(storagePath, variant = 'original') {
   const key = normalizeMediaKey(storagePath)
   if (!key || variant === 'original') return key
   const { dir, fileName } = _splitPath(storagePath)
-  return dir ? `${dir}/thumb_${variant}_${fileName}` : `thumb_${variant}_${fileName}`
+  return dir ? `${dir}/${variant}_${fileName}` : `${variant}_${fileName}`
 }
 
 export function getPublicMediaUrl(storagePath, variant = 'original') {
-  const key = getVariantPath(storagePath, variant)
+  const key = normalizeMediaKey(storagePath)
   if (!key) return ''
+  
+  if (variant !== 'original') {
+    const variantKey = getVariantPath(storagePath, variant)
+    return `${MEDIA_BASE_URL}/${variantKey}`
+  }
   return `${MEDIA_BASE_URL}/${key}`
 }
 
@@ -203,36 +204,6 @@ function _loadImage(blob) {
   })
 }
 
-async function _createThumbnailBlob(blob, maxEdge, quality) {
-  if (!_isBlob(blob)) return null
-
-  const img = await _loadImage(blob)
-  const width = img.naturalWidth || img.width
-  const height = img.naturalHeight || img.height
-  if (!width || !height) throw new Error('Image has zero dimensions')
-
-  const scale = Math.min(1, maxEdge / Math.max(width, height))
-  const targetWidth = Math.max(1, Math.round(width * scale))
-  const targetHeight = Math.max(1, Math.round(height * scale))
-
-  if (scale === 1 && blob.type === 'image/jpeg') return blob
-
-  const canvas = document.createElement('canvas')
-  canvas.width = targetWidth
-  canvas.height = targetHeight
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas context unavailable')
-  ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
-
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      thumbBlob => thumbBlob ? resolve(thumbBlob) : reject(new Error('Thumbnail encode failed')),
-      'image/jpeg',
-      quality,
-    )
-  })
-}
-
 function _fitWithinMaxPixels(width, height, maxPixels, options = {}) {
   const pixels = Math.max(1, Number(width) || 0) * Math.max(1, Number(height) || 0)
   const resizeThresholdPixels = Math.max(Number(maxPixels) || 0, Number(options.resizeThresholdPixels) || 0)
@@ -251,10 +222,27 @@ function _fitWithinMaxPixels(width, height, maxPixels, options = {}) {
   }
 }
 
+let _bestMimeType = null
+function _getBestMimeType() {
+  if (_bestMimeType) return _bestMimeType
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = 1
+    canvas.height = 1
+    if (canvas.toDataURL('image/avif').startsWith('data:image/avif')) _bestMimeType = 'image/avif'
+    else if (canvas.toDataURL('image/webp').startsWith('data:image/webp')) _bestMimeType = 'image/webp'
+    else _bestMimeType = 'image/jpeg'
+  } catch (e) {
+    _bestMimeType = 'image/jpeg'
+  }
+  return _bestMimeType
+}
+
 async function _prepareUploadBlob(blob, uploadPolicy) {
   if (!_isBlob(blob)) throw new Error('Missing image blob')
 
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+  
   let img
   try {
     img = await _loadImage(blob)
@@ -262,8 +250,9 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     // Browser cannot decode the image (e.g. HEIC fallback). Just upload original.
     return {
       uploadBlob: blob,
+      variants: {},
       uploadMeta: {
-        upload_mode: 'original',
+        upload_mode: 'full',
         source_width: null,
         source_height: null,
         stored_width: null,
@@ -278,8 +267,9 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
   if (!sourceWidth || !sourceHeight) {
     return {
       uploadBlob: blob,
+      variants: {},
       uploadMeta: {
-        upload_mode: 'original',
+        upload_mode: 'full',
         source_width: null,
         source_height: null,
         stored_width: null,
@@ -289,58 +279,80 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     }
   }
 
-  const fitted = _fitWithinMaxPixels(sourceWidth, sourceHeight, policy.maxPixels, {
-    resizeThresholdPixels: policy.resizeThresholdPixels,
-  })
-  let uploadBlob = blob
-
-  if (fitted.resized || blob.type !== 'image/jpeg') {
-    const canvas = document.createElement('canvas')
-    canvas.width = fitted.targetWidth
-    canvas.height = fitted.targetHeight
-    const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('Canvas context unavailable')
-    ctx.drawImage(img, 0, 0, fitted.targetWidth, fitted.targetHeight)
-    uploadBlob = await new Promise((resolve, reject) => {
-      canvas.toBlob(
-        nextBlob => nextBlob ? resolve(nextBlob) : reject(new Error('Upload encode failed')),
-        'image/jpeg',
-        fitted.resized ? 0.9 : 0.92,
-      )
-    })
+  let maxEdge = 1600
+  if (policy.uploadMode === 'full') {
+    const pixels = sourceWidth * sourceHeight
+    if (pixels > 13000000) {
+      maxEdge = 4000
+    } else {
+      maxEdge = Math.max(sourceWidth, sourceHeight)
+    }
   }
 
+  const scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight))
+  const targetWidth = Math.max(1, Math.round(sourceWidth * scale))
+  const targetHeight = Math.max(1, Math.round(sourceHeight * scale))
+
+  let uploadBlob = blob
+
+  const canvas = document.createElement('canvas')
+  canvas.width = targetWidth
+  canvas.height = targetHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Canvas context unavailable')
+  ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
+
+  const mimeType = _getBestMimeType()
+  const quality = mimeType === 'image/jpeg' ? 0.88 : 0.85
+
+  const fullBlob = await new Promise((resolve) => {
+    canvas.toBlob(b => resolve(b || blob), mimeType, quality)
+  })
+  
+  await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
+
+  const thumbScale = Math.min(1, 400 / Math.max(targetWidth, targetHeight))
+  const thumbWidth = Math.max(1, Math.round(targetWidth * thumbScale))
+  const thumbHeight = Math.max(1, Math.round(targetHeight * thumbScale))
+
+  const thumbCanvas = document.createElement('canvas')
+  thumbCanvas.width = thumbWidth
+  thumbCanvas.height = thumbHeight
+  const thumbCtx = thumbCanvas.getContext('2d')
+  if (thumbCtx) {
+    thumbCtx.drawImage(canvas, 0, 0, thumbWidth, thumbHeight)
+  }
+  
+  const thumbBlob = await new Promise((resolve) => {
+    thumbCanvas.toBlob(b => resolve(b), mimeType, 0.70)
+  })
+  
+  await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
+
+  canvas.width = 0
+  canvas.height = 0
+  thumbCanvas.width = 0
+  thumbCanvas.height = 0
+  URL.revokeObjectURL(img.src)
+
   return {
-    uploadBlob,
+    uploadBlob: fullBlob,
+    variants: thumbBlob ? { thumb: thumbBlob } : {},
     uploadMeta: {
       upload_mode: policy.uploadMode || 'reduced',
       source_width: sourceWidth,
       source_height: sourceHeight,
-      stored_width: fitted.targetWidth,
-      stored_height: fitted.targetHeight,
-      stored_bytes: uploadBlob.size || 0,
+      stored_width: targetWidth,
+      stored_height: targetHeight,
+      stored_bytes: fullBlob.size || 0,
     },
   }
 }
 
 export async function prepareImageVariants(blob, uploadPolicy) {
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
-  const { uploadBlob, uploadMeta } = await _prepareUploadBlob(blob, policy)
+  const { uploadBlob, uploadMeta, variants } = await _prepareUploadBlob(blob, policy)
 
-  const variants = {}
-  const uploads = Object.entries(THUMB_VARIANTS).map(async ([variant, config]) => {
-    try {
-      const thumbBlob = await _createThumbnailBlob(uploadBlob, config.maxEdge, config.quality)
-      if (_isBlob(thumbBlob)) {
-        variants[variant] = thumbBlob
-      }
-    } catch (err) {
-      console.warn(`Thumbnail preparation failed for ${variant}:`, err)
-    }
-  })
-
-  await Promise.all(uploads)
-  
   return { uploadBlob, uploadMeta, variants }
 }
 
@@ -353,18 +365,10 @@ export async function uploadPreparedObservationImageVariants(preparedImage, stor
   }
 
   await _uploadToStorage(storagePath, preparedImage.uploadBlob, uploadOptions)
-
-  const uploads = Object.entries(preparedImage.variants || {}).map(async ([variant, thumbBlob]) => {
-    if (_isBlob(thumbBlob)) {
-      try {
-        await _uploadToStorage(getVariantPath(storagePath, variant), thumbBlob, uploadOptions)
-      } catch (err) {
-        console.warn(`Thumbnail upload failed for ${variant}:`, err)
-      }
-    }
-  })
-
-  await Promise.all(uploads)
+  if (preparedImage.variants?.thumb) {
+    const thumbPath = getVariantPath(storagePath, 'thumb')
+    await _uploadToStorage(thumbPath, preparedImage.variants.thumb, uploadOptions)
+  }
   return preparedImage.uploadMeta
 }
 
@@ -386,10 +390,7 @@ export async function deleteObservationMedia(paths) {
   const normalized = [...new Set((paths || [])
     .map(normalizeMediaKey)
     .filter(Boolean)
-    .flatMap(path => [
-      path,
-      ...Object.keys(THUMB_VARIANTS).map(variant => getVariantPath(path, variant)),
-    ]))]
+  )]
   if (!normalized.length) return
 
   if (MEDIA_UPLOAD_BASE_URL) {
@@ -612,9 +613,12 @@ export async function resolveMediaSources(paths, options = {}) {
   return normalizedPaths.map(originalPath => {
     if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
     const variantPath = getVariantPath(originalPath, variant)
-    const fallbackUrl = variant === 'original'
-      ? (signed[originalPath] || null)
-      : (signed[variantPath] || signed[originalPath] || null)
+    
+    let fallbackUrl = variant === 'original' ? signed[originalPath] || null : null;
+    if (variant !== 'original') {
+      fallbackUrl = signed[variantPath] || signed[originalPath] || getPublicMediaUrl(originalPath, 'original');
+    }
+    
     const primaryUrl = getPublicMediaUrl(originalPath, variant) || fallbackUrl
     return {
       key: originalPath,

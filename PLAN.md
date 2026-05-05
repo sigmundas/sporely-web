@@ -811,3 +811,28 @@ Not doing this: | Pro Subscription (RevenueCat) | 🟡 Groundwork in place — s
   - Log in as the test user. Try to save a new observation with an image. Verify the Cloudflare worker rejects the upload and/or the database trigger rejects the save. Try to leave a comment and verify the database trigger rejects it.
 - **Ban Enforcement (Read/Hide):**
   - Log in as a normal user. Verify that all past observations from the banned test user are completely hidden from the Community and Friends feeds.
+
+# Phase 6: 12MP/2MP Conditional AVIF Pipeline
+*Goal: Implement a client-side AVIF compression pipeline to ensure high-fidelity, cost-free storage on Cloudflare R2, moving away from server-side CF Image Resizing.*
+
+## Step 1: Conditional Resize & Conversion (Web App)
+Update image processing logic (likely in `src/images.js` or `src/import-helpers.js`) to handle the user's resolution settings while protecting device memory:
+- **Sequential Processing:** Use a `for...of` loop to process images one by one.
+- **Resolution Logic:**
+  - **If 2MP Mode:** Resize the image to a max edge of **1600px**.
+  - **If 12MP Mode:** Do **not** resize unless the source image is **>13MP** (guard against extreme resolution bloat). If >13MP, downscale to a 4000px max edge (~12MP).
+- **The "Double-Bake" Upload:** Every capture must generate two AVIF blobs:
+  1. `{id}_full.avif`: The 2MP or 12MP optimized file.
+  2. `{id}_thumb.avif`: A 400px wide thumbnail for fast feed scrolling.
+- **Memory Management:** Explicitly clear the canvas after every photo:
+  ```javascript
+  canvas.width = 0; canvas.height = 0;
+  URL.revokeObjectURL(img.src);
+  ```
+
+## Step 2: Native Camera Revert (Android)
+- **Revert HDR Bloat:** In the native Capacitor plugin (`NativeCameraActivity.java`), set `ImageCapture.Builder` back to `CAPTURE_MODE_MINIMIZE_LATENCY`.
+- **Clean Intermediate:** Set native `jpegQuality` to **100** (lossless intermediate) to ensure the subsequent web-side AVIF conversion starts with the highest possible pixel data.
+
+## Step 3: Desktop Sync Integration
+- Ensure the desktop app is configured to pull the `_full.avif` and `_thumb.avif` directly instead of relying on the Cloudflare CDN edge resize URL parameter.

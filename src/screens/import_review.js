@@ -1628,7 +1628,11 @@ async function saveAll() {
   const allBlobUrls = sessions.flatMap(s => s.blobUrls);
   let savedCount = 0;
 
-  for (const session of activeSessions) {
+  _setProgress(0, activeSessions.length, t('import.processing'));
+  await new Promise(r => setTimeout(r, 100)); // Yield to let button un-press
+
+  for (let i = 0; i < activeSessions.length; i++) {
+    const session = activeSessions[i];
     try {
       if ((session.gpsLat === null || session.gpsLon === null) && session.metadataPromise) {
         await session.metadataPromise;
@@ -1657,6 +1661,7 @@ async function saveAll() {
         aiCropSourceH: session.imageMeta[index]?.aiCropSourceH ?? null,
       })));
       savedCount++;
+      _setProgress(i + 1, activeSessions.length, t('import.processing'));
     } catch (err) {
       console.error('Failed to save session', session.id, err);
       showToast(t('import.failedOneGroup'));
@@ -1669,6 +1674,7 @@ async function saveAll() {
   sourceItems = [];
   clearImportSessions();
   if (savedCount > 0) showToast(t('import.saved', { count: tp('counts.observation', savedCount) }));
+  _hideProgress();
   saveBtn.disabled = false;
   await openFinds('mine', { resetSearch: true });
 }

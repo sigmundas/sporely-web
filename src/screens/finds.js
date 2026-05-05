@@ -602,7 +602,7 @@ function _pendingStatusText(obs) {
         ? t('finds.pendingUploading', { current: Math.min(current, total), total })
         : t('finds.pendingUpload')
     case 'retrying':
-      return t('finds.pendingRetrying')
+      return obs._syncErrorMessage ? `${t('finds.pendingRetrying')}: ${obs._syncErrorMessage}` : t('finds.pendingRetrying')
     default:
       return t('finds.pendingUpload')
   }

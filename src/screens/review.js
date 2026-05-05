@@ -668,7 +668,8 @@ async function saveObservationBatch() {
 
   const btn = document.getElementById('review-save-btn')
   if (btn) btn.disabled = true
-  showToast(t('review.syncing'))
+  
+  _setProgress(0, 1, 'Preparing observation...')
 
   try {
     await _awaitImportedReviewMetadata()
@@ -710,6 +711,9 @@ async function saveObservationBatch() {
         aiCropSourceW: photo.aiCropSourceW ?? null,
         aiCropSourceH: photo.aiCropSourceH ?? null,
       }))
+      
+    _setProgress(0, 1, 'Encoding images for storage...')
+    await new Promise(r => setTimeout(r, 100)) // Yield to let button un-press
     await enqueueObservation(obsPayload, imageEntries)
 
     showToast(t('review.synced', { count: tp('counts.photo', photos.length) }))
@@ -724,6 +728,7 @@ async function saveObservationBatch() {
     showToast(t('review.syncFailed', { message: err.message }))
     console.error('Sync error:', err)
   } finally {
+    _hideProgress()
     if (btn) btn.disabled = false
   }
 }

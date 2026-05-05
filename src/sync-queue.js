@@ -66,7 +66,7 @@ function _previewUrlForQueueItem(item) {
 
   const entry = _normalizeQueuedImages(item?.imageEntries || item?.imageBlobs)[0]
   if (!entry) return null
-  const blobToUrl = entry.variants?.small || entry.variants?.medium || entry.uploadBlob || entry.blob
+  const blobToUrl = entry.uploadBlob || entry.blob
   if (!_isBlob(blobToUrl)) return null
 
   const nextUrl = URL.createObjectURL(blobToUrl)
@@ -164,7 +164,6 @@ function _normalizeQueuedImages(imageEntries) {
       aiCropSourceH: entry?.aiCropSourceH ?? null,
       uploadBlob: _isBlob(entry?.uploadBlob) ? entry.uploadBlob : null,
       uploadMeta: entry?.uploadMeta || null,
-      variants: entry?.variants || null,
     }
   }).filter(entry => _isBlob(entry.blob) || _isBlob(entry.uploadBlob))
 }
@@ -429,7 +428,7 @@ export async function triggerSync() {
           })
           let preparedImage = image
           const preparedUploadMode = image.uploadMeta?.upload_mode || null
-          if (image.blob instanceof Blob && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
+          if (_isBlob(image.blob) && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
             const prepared = await prepareImageVariants(image.blob, uploadPolicy)
             preparedImage = {
               ...image,
@@ -439,7 +438,9 @@ export async function triggerSync() {
             }
           }
 
-          const path = `${item.userId}/${obsId}/${i}_${item.ts}.jpg`
+          const blobType = preparedImage.uploadBlob?.type || ''
+          const ext = blobType === 'image/avif' ? 'avif' : (blobType === 'image/webp' ? 'webp' : (blobType === 'image/jpeg' ? 'jpg' : 'png'))
+          const path = `${item.userId}/${obsId}/${i}_${item.ts}.${ext}`
           
           const uploadMeta = await uploadPreparedObservationImageVariants(preparedImage, path, {
             uploadPolicy,
