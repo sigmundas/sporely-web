@@ -65,7 +65,25 @@ export function getVariantPath(storagePath, variant = 'original') {
   const key = normalizeMediaKey(storagePath)
   if (!key || variant === 'original') return key
   const { dir, fileName } = _splitPath(storagePath)
-  return dir ? `${dir}/${variant}_${fileName}` : `${variant}_${fileName}`
+  const variantName = ['thumb', 'small', 'medium', 'cards'].includes(String(variant || '').toLowerCase())
+    ? `thumb_${fileName}`
+    : `${variant}_${fileName}`
+  return dir ? `${dir}/${variantName}` : variantName
+}
+
+function _legacyVariantPaths(storagePath, variant = 'original') {
+  const key = normalizeMediaKey(storagePath)
+  if (!key || variant === 'original') return []
+  const { dir, fileName } = _splitPath(key)
+  const candidates = []
+  const normalizedVariant = String(variant || '').toLowerCase()
+  if (['small', 'medium'].includes(normalizedVariant)) {
+    candidates.push(dir ? `${dir}/thumb_${normalizedVariant}_${fileName}` : `thumb_${normalizedVariant}_${fileName}`)
+  }
+  if (normalizedVariant !== 'thumb') {
+    candidates.push(dir ? `${dir}/${normalizedVariant}_${fileName}` : `${normalizedVariant}_${fileName}`)
+  }
+  return candidates.filter(Boolean)
 }
 
 export function getPublicMediaUrl(storagePath, variant = 'original') {
@@ -193,7 +211,7 @@ function _loadImage(blob) {
     const url = URL.createObjectURL(blob)
     const img = new Image()
     img.onload = () => {
-      URL.revokeObjectURL(url)
+      img._sporelyObjectUrl = url
       resolve(img)
     }
     img.onerror = () => {
@@ -204,44 +222,116 @@ function _loadImage(blob) {
   })
 }
 
-function _fitWithinMaxPixels(width, height, maxPixels, options = {}) {
-  const pixels = Math.max(1, Number(width) || 0) * Math.max(1, Number(height) || 0)
-  const resizeThresholdPixels = Math.max(Number(maxPixels) || 0, Number(options.resizeThresholdPixels) || 0)
-  if (!maxPixels || pixels <= maxPixels || (resizeThresholdPixels && pixels < resizeThresholdPixels)) {
-    return {
-      targetWidth: width,
-      targetHeight: height,
-      resized: false,
-    }
+function _releaseImage(img) {
+  const url = img?._sporelyObjectUrl
+  if (url) URL.revokeObjectURL(url)
+  if (img) img.src = ''
+}
+
+function _targetSizeForPolicy(width, height, uploadPolicy) {
+  const sourceWidth = Math.max(1, Number(width) || 0)
+  const sourceHeight = Math.max(1, Number(height) || 0)
+  const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+  let maxEdge = 1600
+  if (policy.uploadMode === 'full') {
+    const pixels = sourceWidth * sourceHeight
+    maxEdge = pixels > 13_000_000 ? 4000 : Math.max(sourceWidth, sourceHeight)
   }
-  const scale = Math.sqrt(maxPixels / pixels)
+  const scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight))
   return {
-    targetWidth: Math.max(1, Math.round(width * scale)),
-    targetHeight: Math.max(1, Math.round(height * scale)),
-    resized: true,
+    targetWidth: Math.max(1, Math.round(sourceWidth * scale)),
+    targetHeight: Math.max(1, Math.round(sourceHeight * scale)),
   }
 }
 
-let _bestMimeType = null
-function _getBestMimeType() {
-  if (_bestMimeType) return _bestMimeType
-  try {
-    const canvas = document.createElement('canvas')
-    canvas.width = 1
-    canvas.height = 1
-    if (canvas.toDataURL('image/avif').startsWith('data:image/avif')) _bestMimeType = 'image/avif'
-    else if (canvas.toDataURL('image/webp').startsWith('data:image/webp')) _bestMimeType = 'image/webp'
-    else _bestMimeType = 'image/jpeg'
-  } catch (e) {
-    _bestMimeType = 'image/jpeg'
+const ENCODE_CANDIDATES = [
+  { type: 'image/webp', quality: 0.8 },
+  { type: 'image/jpeg', quality: 0.7 },
+]
+let _imageWorker = null
+let _imageWorkerSeq = 0
+const _imageWorkerRequests = new Map()
+
+function _getImageWorker() {
+  if (_imageWorker) return _imageWorker
+  if (typeof Worker === 'undefined' || typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') {
+    return null
   }
-  return _bestMimeType
+  _imageWorker = new Worker(new URL('./image-worker.js', import.meta.url), { type: 'module' })
+  _imageWorker.onmessage = event => {
+    const { id, result, error } = event.data || {}
+    const pending = _imageWorkerRequests.get(id)
+    if (!pending) return
+    _imageWorkerRequests.delete(id)
+    if (error) pending.reject(new Error(error))
+    else pending.resolve(result)
+  }
+  _imageWorker.onerror = event => {
+    const error = new Error(event?.message || 'Image worker failed')
+    for (const pending of _imageWorkerRequests.values()) pending.reject(error)
+    _imageWorkerRequests.clear()
+    _imageWorker?.terminate?.()
+    _imageWorker = null
+  }
+  return _imageWorker
+}
+
+async function _canvasToEncodedBlob(canvas, candidates = ENCODE_CANDIDATES) {
+  for (const candidate of candidates) {
+    const blob = await new Promise(resolve => {
+      canvas.toBlob(nextBlob => resolve(nextBlob), candidate.type, candidate.quality)
+    })
+    if (blob?.type === candidate.type && blob.size > 0) return blob
+  }
+  throw new Error('Image encoding failed')
+}
+
+async function _prepareUploadBlobInWorker(blob, policy) {
+  const worker = _getImageWorker()
+  if (!worker) return null
+  const bitmap = await createImageBitmap(blob)
+  const id = `image-${++_imageWorkerSeq}`
+  const result = await new Promise((resolve, reject) => {
+    _imageWorkerRequests.set(id, { resolve, reject })
+    try {
+      worker.postMessage({ id, bitmap, policy }, [bitmap])
+    } catch (error) {
+      _imageWorkerRequests.delete(id)
+      bitmap?.close?.()
+      reject(error)
+    }
+  })
+  if (!result?.fullBytes || !result?.fullType) return null
+
+  const uploadBlob = new Blob([result.fullBytes], { type: result.fullType })
+  const thumbBlob = result.thumbBytes && result.thumbType
+    ? new Blob([result.thumbBytes], { type: result.thumbType })
+    : null
+  return {
+    uploadBlob,
+    variants: thumbBlob ? { thumb: thumbBlob } : {},
+    uploadMeta: {
+      upload_mode: policy.uploadMode || 'reduced',
+      source_width: result.sourceWidth,
+      source_height: result.sourceHeight,
+      stored_width: result.targetWidth,
+      stored_height: result.targetHeight,
+      stored_bytes: uploadBlob.size || result.fullSize || 0,
+    },
+  }
 }
 
 async function _prepareUploadBlob(blob, uploadPolicy) {
   if (!_isBlob(blob)) throw new Error('Missing image blob')
 
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+
+  try {
+    const prepared = await _prepareUploadBlobInWorker(blob, policy)
+    if (prepared) return prepared
+  } catch (err) {
+    console.warn('Image worker processing failed; falling back to main thread:', err)
+  }
   
   let img
   try {
@@ -265,6 +355,7 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
   const sourceWidth = img.naturalWidth || img.width
   const sourceHeight = img.naturalHeight || img.height
   if (!sourceWidth || !sourceHeight) {
+    _releaseImage(img)
     return {
       uploadBlob: blob,
       variants: {},
@@ -279,73 +370,52 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     }
   }
 
-  let maxEdge = 1600
-  if (policy.uploadMode === 'full') {
-    const pixels = sourceWidth * sourceHeight
-    if (pixels > 13000000) {
-      maxEdge = 4000
-    } else {
-      maxEdge = Math.max(sourceWidth, sourceHeight)
-    }
-  }
-
-  const scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight))
-  const targetWidth = Math.max(1, Math.round(sourceWidth * scale))
-  const targetHeight = Math.max(1, Math.round(sourceHeight * scale))
-
-  let uploadBlob = blob
+  const { targetWidth, targetHeight } = _targetSizeForPolicy(sourceWidth, sourceHeight, policy)
 
   const canvas = document.createElement('canvas')
-  canvas.width = targetWidth
-  canvas.height = targetHeight
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas context unavailable')
-  ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
-
-  const mimeType = _getBestMimeType()
-  const quality = mimeType === 'image/jpeg' ? 0.88 : 0.85
-
-  const fullBlob = await new Promise((resolve) => {
-    canvas.toBlob(b => resolve(b || blob), mimeType, quality)
-  })
-  
-  await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
-
-  const thumbScale = Math.min(1, 400 / Math.max(targetWidth, targetHeight))
-  const thumbWidth = Math.max(1, Math.round(targetWidth * thumbScale))
-  const thumbHeight = Math.max(1, Math.round(targetHeight * thumbScale))
-
   const thumbCanvas = document.createElement('canvas')
-  thumbCanvas.width = thumbWidth
-  thumbCanvas.height = thumbHeight
-  const thumbCtx = thumbCanvas.getContext('2d')
-  if (thumbCtx) {
+  try {
+    canvas.width = targetWidth
+    canvas.height = targetHeight
+    const ctx = canvas.getContext('2d', { alpha: false })
+    if (!ctx) throw new Error('Canvas context unavailable')
+    ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
+
+    const fullBlob = await _canvasToEncodedBlob(canvas)
+    await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
+
+    const thumbScale = Math.min(1, 400 / Math.max(targetWidth, targetHeight))
+    const thumbWidth = Math.max(1, Math.round(targetWidth * thumbScale))
+    const thumbHeight = Math.max(1, Math.round(targetHeight * thumbScale))
+    thumbCanvas.width = thumbWidth
+    thumbCanvas.height = thumbHeight
+    const thumbCtx = thumbCanvas.getContext('2d', { alpha: false })
+    if (!thumbCtx) throw new Error('Canvas thumbnail context unavailable')
     thumbCtx.drawImage(canvas, 0, 0, thumbWidth, thumbHeight)
-  }
-  
-  const thumbBlob = await new Promise((resolve) => {
-    thumbCanvas.toBlob(b => resolve(b), mimeType, 0.70)
-  })
-  
-  await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
+    const thumbBlob = await _canvasToEncodedBlob(thumbCanvas, [
+      { type: 'image/webp', quality: 0.7 },
+      { type: 'image/jpeg', quality: 0.65 },
+    ])
+    await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
 
-  canvas.width = 0
-  canvas.height = 0
-  thumbCanvas.width = 0
-  thumbCanvas.height = 0
-  URL.revokeObjectURL(img.src)
-
-  return {
-    uploadBlob: fullBlob,
-    variants: thumbBlob ? { thumb: thumbBlob } : {},
-    uploadMeta: {
-      upload_mode: policy.uploadMode || 'reduced',
-      source_width: sourceWidth,
-      source_height: sourceHeight,
-      stored_width: targetWidth,
-      stored_height: targetHeight,
-      stored_bytes: fullBlob.size || 0,
-    },
+    return {
+      uploadBlob: fullBlob,
+      variants: thumbBlob ? { thumb: thumbBlob } : {},
+      uploadMeta: {
+        upload_mode: policy.uploadMode || 'reduced',
+        source_width: sourceWidth,
+        source_height: sourceHeight,
+        stored_width: targetWidth,
+        stored_height: targetHeight,
+        stored_bytes: fullBlob.size || 0,
+      },
+    }
+  } finally {
+    canvas.width = 0
+    canvas.height = 0
+    thumbCanvas.width = 0
+    thumbCanvas.height = 0
+    _releaseImage(img)
   }
 }
 
@@ -359,7 +429,7 @@ export async function prepareImageVariants(blob, uploadPolicy) {
 export async function uploadPreparedObservationImageVariants(preparedImage, storagePath, options = {}) {
   const uploadPolicy = options?.uploadPolicy || getEffectiveCloudUploadPolicy()
   const uploadOptions = {
-    uploadMode: preparedImage.uploadMeta.upload_mode,
+    uploadMode: preparedImage.uploadMeta?.upload_mode || uploadPolicy.uploadMode,
     cloudPlan: uploadPolicy.cloudPlan,
     uploadOrigin: options?.uploadOrigin || 'web',
   }
@@ -393,14 +463,21 @@ export async function deleteObservationMedia(paths) {
   )]
   if (!normalized.length) return
 
+  const withVariants = [...new Set(normalized.flatMap(path => [
+    path,
+    getVariantPath(path, 'thumb'),
+    ..._legacyVariantPaths(path, 'small'),
+    ..._legacyVariantPaths(path, 'medium'),
+  ]))]
+
   if (MEDIA_UPLOAD_BASE_URL) {
-    await Promise.all(normalized.map(path => _deleteViaWorker(path)))
+    await Promise.all(withVariants.map(path => _deleteViaWorker(path)))
     return
   }
 
   const { error } = await supabase.storage
     .from('observation-images')
-    .remove(normalized)
+    .remove(withVariants)
 
   if (error) throw new Error(`Storage delete failed: ${error.message}`)
 }
@@ -412,7 +489,7 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
   const variant = options.variant || 'medium'
   const candidatePaths = variant === 'original'
     ? [originalPath]
-    : [getVariantPath(originalPath, variant), originalPath]
+    : [getVariantPath(originalPath, variant), ..._legacyVariantPaths(originalPath, variant), originalPath]
 
   let lastError = null
   for (const path of [...new Set(candidatePaths.filter(Boolean))]) {
@@ -535,7 +612,7 @@ export async function syncObservationMediaKeys(observationId, storagePath, optio
 
   const imageKey = normalizeMediaKey(storagePath)
   if (!imageKey) return false
-  const thumbKey = getVariantPath(imageKey, 'small')
+  const thumbKey = getVariantPath(imageKey, 'thumb')
 
   const { error: combinedError } = await supabase
     .from('observations')
@@ -607,16 +684,18 @@ export async function resolveMediaSources(paths, options = {}) {
   const normalizedPaths = (paths || []).map(normalizeMediaKey)
   const requestedPaths = variant === 'original'
     ? normalizedPaths
-    : normalizedPaths.flatMap(path => [getVariantPath(path, variant), path])
+    : normalizedPaths.flatMap(path => [getVariantPath(path, variant), ..._legacyVariantPaths(path, variant), path])
   const signed = await _getSignedUrlMap(requestedPaths)
 
   return normalizedPaths.map(originalPath => {
     if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
-    const variantPath = getVariantPath(originalPath, variant)
+    const variantPaths = [getVariantPath(originalPath, variant), ..._legacyVariantPaths(originalPath, variant)]
     
     let fallbackUrl = variant === 'original' ? signed[originalPath] || null : null;
     if (variant !== 'original') {
-      fallbackUrl = signed[variantPath] || signed[originalPath] || getPublicMediaUrl(originalPath, 'original');
+      fallbackUrl = variantPaths.map(path => signed[path]).find(Boolean)
+        || signed[originalPath]
+        || getPublicMediaUrl(originalPath, 'original');
     }
     
     const primaryUrl = getPublicMediaUrl(originalPath, variant) || fallbackUrl

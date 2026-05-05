@@ -15,6 +15,36 @@ function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
 }
 
+function _isArrayBuffer(value) {
+  return value instanceof ArrayBuffer || ArrayBuffer.isView(value)
+}
+
+function _blobFromStoredBytes(bytes, type = 'image/jpeg') {
+  if (!_isArrayBuffer(bytes)) return null
+  const data = bytes instanceof ArrayBuffer
+    ? bytes
+    : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  return new Blob([data], { type: type || 'image/jpeg' })
+}
+
+function _extensionForImageType(type) {
+  const normalized = String(type || '').split(';')[0].trim().toLowerCase()
+  if (normalized === 'image/webp') return 'webp'
+  if (normalized === 'image/jpeg' || normalized === 'image/jpg') return 'jpg'
+  if (normalized === 'image/heic') return 'heic'
+  if (normalized === 'image/heif') return 'heif'
+  return 'jpg'
+}
+
+async function _blobToStoredBytes(blob) {
+  if (!_isBlob(blob)) return null
+  return {
+    bytes: await blob.arrayBuffer(),
+    type: blob.type || 'image/jpeg',
+    size: blob.size || 0,
+  }
+}
+
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, 1)
@@ -93,19 +123,23 @@ async function _updateQueueItem(itemId, updater) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite')
     const store = tx.objectStore(STORE_NAME)
-
-    readOne(store, itemId)
-      .then(current => {
-        if (!current) {
-          resolve(null)
-          return
-        }
-        const next = updater(current)
-        store.put(next)
-        tx.oncomplete = () => resolve(next)
-        tx.onerror = () => reject(tx.error)
-      })
-      .catch(reject)
+    let nextValue = null
+    const req = store.get(itemId)
+    req.onerror = () => reject(req.error || tx.error)
+    req.onsuccess = () => {
+      try {
+        const current = req.result || null
+        if (!current) return
+        nextValue = updater(current)
+        if (nextValue) store.put(nextValue)
+      } catch (error) {
+        tx.abort()
+        reject(error)
+      }
+    }
+    tx.oncomplete = () => resolve(nextValue)
+    tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error || new Error('Queue update aborted'))
   })
 }
 
@@ -156,16 +190,52 @@ function _normalizeQueuedImages(imageEntries) {
         variants: null,
       }
     }
-    const realBlob = _isBlob(entry?.blob) ? entry.blob : (_isBlob(entry?.file) ? entry.file : null)
+    const realBlob = _isBlob(entry?.blob)
+      ? entry.blob
+      : (_isBlob(entry?.file)
+        ? entry.file
+        : _blobFromStoredBytes(entry?.blobBytes || entry?.originalBytes, entry?.blobType || entry?.originalType))
+    const uploadBlob = _isBlob(entry?.uploadBlob)
+      ? entry.uploadBlob
+      : _blobFromStoredBytes(entry?.uploadBytes, entry?.uploadType)
+    const thumbBlob = _isBlob(entry?.variants?.thumb)
+      ? entry.variants.thumb
+      : _blobFromStoredBytes(entry?.variantBytes?.thumb, entry?.variantTypes?.thumb)
     return {
       blob: realBlob,
       aiCropRect: entry?.aiCropRect || null,
       aiCropSourceW: entry?.aiCropSourceW ?? null,
       aiCropSourceH: entry?.aiCropSourceH ?? null,
-      uploadBlob: _isBlob(entry?.uploadBlob) ? entry.uploadBlob : null,
+      uploadBlob,
       uploadMeta: entry?.uploadMeta || null,
+      variants: thumbBlob ? { thumb: thumbBlob } : (entry?.variants || null),
     }
   }).filter(entry => _isBlob(entry.blob) || _isBlob(entry.uploadBlob))
+}
+
+async function _serializeQueuedImagesForStorage(images) {
+  const serialized = []
+  for (const image of images || []) {
+    const upload = await _blobToStoredBytes(image.uploadBlob)
+    const thumb = await _blobToStoredBytes(image.variants?.thumb)
+    const original = upload ? null : await _blobToStoredBytes(image.blob)
+    serialized.push({
+      aiCropRect: image.aiCropRect || null,
+      aiCropSourceW: image.aiCropSourceW ?? null,
+      aiCropSourceH: image.aiCropSourceH ?? null,
+      blobBytes: original?.bytes || null,
+      blobType: original?.type || null,
+      blobSize: original?.size || null,
+      uploadBytes: upload?.bytes || null,
+      uploadType: upload?.type || null,
+      uploadSize: upload?.size || null,
+      uploadMeta: image.uploadMeta || null,
+      variantBytes: thumb ? { thumb: thumb.bytes } : null,
+      variantTypes: thumb ? { thumb: thumb.type } : null,
+      variantSizes: thumb ? { thumb: thumb.size } : null,
+    })
+  }
+  return serialized
 }
 
 export async function enqueueObservation(obsPayload, imageEntries) {
@@ -192,10 +262,11 @@ export async function enqueueObservation(obsPayload, imageEntries) {
     }
   }
 
+  const persistentImages = await _serializeQueuedImagesForStorage(preparedImages)
   const db = await openDB()
   const queueItem = {
     obsPayload,
-    imageEntries: preparedImages,
+    imageEntries: persistentImages,
     userId: obsPayload.user_id,
     ts: Date.now(),
   }
@@ -438,8 +509,8 @@ export async function triggerSync() {
             }
           }
 
-          const blobType = preparedImage.uploadBlob?.type || ''
-          const ext = blobType === 'image/avif' ? 'avif' : (blobType === 'image/webp' ? 'webp' : (blobType === 'image/jpeg' ? 'jpg' : 'png'))
+          const blobType = preparedImage.uploadBlob?.type || preparedImage.uploadType || ''
+          const ext = _extensionForImageType(blobType)
           const path = `${item.userId}/${obsId}/${i}_${item.ts}.${ext}`
           
           const uploadMeta = await uploadPreparedObservationImageVariants(preparedImage, path, {
@@ -460,13 +531,13 @@ export async function triggerSync() {
           await syncObservationMediaKeys(obsId, path, { sortOrder: i })
 
           completedImageIndexes.add(i)
-          await _updateQueueItem(item.id, current => ({
+          await _updateQueueItem(item.id, current => current ? {
             ...current,
             remoteObservationId: obsId,
             completedImageIndexes: [...completedImageIndexes].sort((a, b) => a - b),
             syncImageIndex: i + 1,
             syncImageCount: queuedImages.length,
-          }))
+          } : current)
         }
 
         // 3. Confirm remote DB/image state, then purge from the offline queue.

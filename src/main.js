@@ -50,6 +50,7 @@ import {
   setUseSystemCamera,
 } from './settings.js'
 import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel } from './camera-actions.js'
+import { isAndroidApp } from './platform.js'
 
 initI18n()
 setNativeCameraOpener(openNativeCamera)
@@ -239,7 +240,7 @@ function initSettings() {
   })
 
   const cameraAppRow = document.getElementById('settings-camera-app-row')
-  if (cameraAppRow) cameraAppRow.style.display = (window.Capacitor?.isNativePlatform?.() && window.Capacitor?.getPlatform?.() === 'android') ? 'flex' : 'none'
+  if (cameraAppRow) cameraAppRow.style.display = isAndroidApp() ? 'flex' : 'none'
   document.querySelectorAll('.settings-camera-app-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       setUseSystemCamera(btn.dataset.cameraApp === 'native')
@@ -255,6 +256,15 @@ function initSettings() {
   })
 
   const hdrToggle = document.getElementById('settings-hdr-toggle')
+  const nativeCameraRows = [
+    document.getElementById('settings-camera-label'),
+    document.getElementById('settings-hdr-row'),
+    document.getElementById('settings-jpeg-quality-row'),
+    document.getElementById('settings-jpeg-quality-hint'),
+  ]
+  nativeCameraRows.forEach(row => {
+    if (row) row.style.display = isAndroidApp() ? '' : 'none'
+  })
   if (hdrToggle) {
     Preferences.get({ key: 'useHdr' }).then(({ value }) => {
       hdrToggle.checked = value === 'true'

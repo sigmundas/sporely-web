@@ -27,8 +27,8 @@ public class NativeCameraPlugin extends Plugin {
         Boolean useHdr = call.getBoolean("useHdr", false);
         intent.putExtra("useHdr", useHdr != null ? useHdr : false);
 
-        Integer jpegQuality = call.getInt("jpegQuality", 95);
-        intent.putExtra("jpegQuality", jpegQuality != null ? jpegQuality : 95);
+        Integer jpegQuality = call.getInt("jpegQuality", 100);
+        intent.putExtra("jpegQuality", jpegQuality != null ? jpegQuality : 100);
 
         JSObject gps = call.getObject("gps");
         if (gps != null) {

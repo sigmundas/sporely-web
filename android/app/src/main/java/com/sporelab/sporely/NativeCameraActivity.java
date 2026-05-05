@@ -397,9 +397,9 @@ public class NativeCameraActivity extends AppCompatActivity {
 
         Preview.Builder previewBuilder = new Preview.Builder()
             .setTargetRotation(getDisplayRotation());
-        int jpegQuality = getIntent().getIntExtra("jpegQuality", 95);
+        int jpegQuality = getIntent().getIntExtra("jpegQuality", 100);
         ImageCapture.Builder captureBuilder = new ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .setOutputFormat(outputFormat)
             .setJpegQuality(jpegQuality)
             .setTargetRotation(getDisplayRotation());

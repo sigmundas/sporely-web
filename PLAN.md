@@ -740,11 +740,7 @@ return new Promise((resolve, reject) => {
 | Map view | ✅ Real — Leaflet + OpenStreetMap |
 | Offline queue | ✅ Real — IndexedDB queue, syncs on reconnect |
 | Import review recovery after app suspension | ✅ Real — IndexedDB `pending_import` store |
-| Friends feed | 🟡 Stubbed — toast only |
-| Capture draft save/resume | ❌ Removed — capture review is now direct cancel/save |
-| Push notifications | ❌ Not started |
-Not doing this: | Pro Subscription (RevenueCat) | 🟡 Groundwork in place — schema + upload metadata are live, but no billing/IAP flow yet |
-| Hardware Sync (Macro-to-GPS) | ❌ Not started |
+
 
 ## Infrastructure Status
 
@@ -770,21 +766,7 @@ Not doing this: | Pro Subscription (RevenueCat) | 🟡 Groundwork in place — s
 ## User Testing & QA Checklist
 *A list of manual checks to verify recently implemented features.*
 
-### 1. AI Crop Workflow & Gallery Overlays
-- **Importing:** Import a photo. Verify that a default AI crop is pre-seeded and that clicking the crop button allows you to pan/zoom.
-- **Artsorakel:** Run Artsorakel on a cropped image and ensure it correctly analyzes the cropped region.
-- **Detail Gallery Overlays:** Open one of your own observations in the Find Detail screen.
-  - Verify that a square "AI crop" button appears in the bottom-left of field images (but not microscope images).
-  - Verify that a "Trashcan" button appears in the top-right.
-  - Click the "AI crop" button to ensure the full-screen crop editor opens.
-  - Click the image itself (not the buttons) to ensure the fullscreen swipeable photo viewer opens.
-  - Click the "Trashcan" button, verify the translated confirmation dialog appears ("Delete this image?"), and confirm it deletes the image from the gallery and cloud.
-- **Cross-Platform:** Edit a crop on the web, then sync the Sporely desktop app to verify the crop metadata transfers correctly.
 
-### 2. Friends Feed
-- Navigate to the **Finds** screen and select the **Friends** tab.
-- Verify that a list of your friends' observations appears.
-- Verify that the feed is correctly sorted chronologically (newest first).
 
 ### 3. Memory & Import Limits (Device Testing)
 - **Android APK (e.g., S25):** Import ~40 photos at once. Verify that the import succeeds without crashing and that the review thumbnails do not render as "broken image" icons (thanks to the recent `aiBlob` memory fix).
@@ -836,3 +818,51 @@ Update image processing logic (likely in `src/images.js` or `src/import-helpers.
 
 ## Step 3: Desktop Sync Integration
 - Ensure the desktop app is configured to pull the `_full.avif` and `_thumb.avif` directly instead of relying on the Cloudflare CDN edge resize URL parameter.
+
+## Fix issues: Image Pipeline Reset & Optimization**
+
+### **1. Historical Context (The Problem)**
+We attempted to move from raw JPEG uploads to a "Double-Bake" client-side optimization strategy (generating a Full-res and a 400px Thumbnail variant before upload). 
+*   **The Intent:** Use AVIF to save space and R2 egress costs.
+*   **The Failure:** Mobile browsers (especially iOS Safari) do not support **encoding** AVIF via `canvas.toBlob`. The system silently fell back to **PNG**, resulting in 30MB files that exceed Cloudflare’s 15MB upload limit.
+*   **The Memory Issue:** Large 12MP blobs are disappearing from memory on iOS, causing "Object not found" errors in the sync queue because we stored temporary Blob URLs instead of persistent data.
+
+### **2. Technical Specifications & Constraints**
+*   **Storage:** Cloudflare R2 (CORS is already configured for `PUT`/`POST`).
+*   **Client Hardware:** Samsung S25 (Android/Capacitor) and iPhone 13 (iOS/Web).
+*   **Target:** 12MP resolution with modern compression.
+
+### **3. The Multi-Threaded "ArrayBuffer" Directive**
+
+#### **A. Move to Web Workers (Avoid UI Freezes)**
+The main thread must remain responsive. Move all image resizing and encoding into a `worker.js`. Use `OffscreenCanvas` for the operations. 
+*   Pass the captured photo to the worker as an `ImageBitmap` (Transferable) to keep memory usage low.
+
+#### **B. Intelligent Encoding Fallback**
+Do not force a file extension. The browser must decide the format, and the code must label it correctly:
+1.  **Primary (Android S25):** Attempt `image/webp` at 0.8 quality as default (settings override).
+2.  **Secondary (iOS/Legacy):** If WebP fails, use `image/jpeg` at 0.7 quality (settings override). 
+3.  **Filenaming:** The extension in the R2 path must match the actual blob type (e.g., `image_full.webp` or `image_full.jpg`). **Never use .png.**
+
+#### **C. IndexedDB Resiliency (No more "Ghost" Objects)**
+iOS Safari purges Blob URLs under memory pressure. 
+1.  After encoding, convert the Blob to an **ArrayBuffer** (`await blob.arrayBuffer()`).
+2.  Store the **raw bytes** (ArrayBuffer) in IndexedDB.
+3.  The Sync Queue should pull the bytes from IndexedDB and reconstruct the Blob only at the moment of upload.
+
+#### **D. Native Feature Gating**
+*   **HDR Toggle:** The "Use HDR" setting is only valid for the **Native Android** (CameraX) app. 
+*   **UI Fix:** Hide the HDR toggle in the web app/iOS view to avoid "placebo" settings that don't talk to hardware.
+
+#### **E. Memory "Kill Switch"**
+After processing each image in the sequential queue:
+*   Set `canvas.width = 0` and `canvas.height = 0`.
+*   Call `URL.revokeObjectURL()` on all temporary sources.
+
+### **4. Files Needing Cleanup**
+*   `images.js`: Update the `toBlob` logic and fallback checks.
+*   `sync-queue.js`: Change Blob storage to ArrayBuffer storage.
+*   `main.js`: Update the Settings UI to hide the HDR toggle on non-Android platforms.
+*   `worker.js`: (New File) Create the off-thread processing logic.
+
+---

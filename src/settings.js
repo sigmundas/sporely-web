@@ -54,14 +54,14 @@ export function normalizeJpegQuality(value) {
   const parsed = Number.parseInt(value, 10)
   return Number.isFinite(parsed)
     ? Math.max(75, Math.min(100, parsed))
-    : 95
+    : 100
 }
 
 export function getJpegQuality() {
   try {
     return normalizeJpegQuality(localStorage.getItem(JPEG_QUALITY_KEY))
   } catch (_) {
-    return 95
+    return 100
   }
 }
 
