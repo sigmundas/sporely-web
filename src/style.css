@@ -3027,6 +3027,9 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
   font-size: 14px;
   color: var(--text-primary);
 }
+.settings-row-disabled .settings-row-title {
+  color: var(--text-dim);
+}
 .settings-switch {
   position: relative;
   width: 48px;
@@ -3064,6 +3067,9 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
 .settings-switch input:checked + span::after {
   transform: translateX(20px);
   background: #ffffff;
+}
+.settings-switch input:disabled + span {
+  opacity: 0.5;
 }
 .settings-clear-cache-btn {
   width: 100%;

@@ -10,7 +10,7 @@ import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
-import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getJpegQuality, getUseSystemCamera } from '../settings.js';
+import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
@@ -485,8 +485,7 @@ export async function openNativeCamera() {
     }
 
     const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' });
-    const useHdr = useHdrStr === 'true';
-    const jpegQuality = getJpegQuality();
+    const useHdr = useHdrStr !== 'false';
 
     const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
       ? {
@@ -497,7 +496,7 @@ export async function openNativeCamera() {
         }
       : null
 
-    const options = { useHdr, jpegQuality };
+    const options = { useHdr, jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
     if (gps) options.gps = gps;
     await _handleNativePhotoResult(await NativeCamera.capturePhotos(options))
   } catch (err) {
@@ -547,6 +546,7 @@ export async function openFileImportPicker() {
             'image/jpeg': ['.jpg', '.jpeg'],
             'image/png': ['.png'],
             'image/webp': ['.webp'],
+            'image/avif': ['.avif'],
             'image/heic': ['.heic'],
             'image/heif': ['.heif'],
           },
@@ -1766,14 +1766,13 @@ async function _openCameraForSession(sid) {
       }
 
       const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' });
-      const useHdr = useHdrStr === 'true';
-      const jpegQuality = getJpegQuality();
+      const useHdr = useHdrStr !== 'false';
 
       const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
         ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
         : null;
 
-      const options = { useHdr, jpegQuality };
+      const options = { useHdr, jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
       if (gps) options.gps = gps;
       const result = await NativeCamera.capturePhotos(options);
       const photos = Array.isArray(result?.photos) ? result.photos : [];
@@ -1830,7 +1829,7 @@ async function _openPickerForSession(sid) {
   input.multiple = true;
   input.accept = 'image/*';
   if (/android/i.test(navigator.userAgent)) {
-    input.accept = '.jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif';
+    input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif';
   }
   input.onchange = async (e) => {
     const files = Array.from(e.target.files || []);

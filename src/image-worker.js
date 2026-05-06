@@ -1,6 +1,6 @@
 const ENCODE_CANDIDATES = [
-  { type: 'image/webp', quality: 0.8 },
-  { type: 'image/jpeg', quality: 0.7 },
+  { type: 'image/webp', quality: 0.65 },
+  { type: 'image/jpeg', quality: 0.75 },
 ]
 
 function _targetSize(sourceWidth, sourceHeight, policy = {}) {
@@ -91,8 +91,8 @@ self.onmessage = async event => {
     thumbCanvas = new OffscreenCanvas(thumbWidth, thumbHeight)
     _drawHighQuality(canvas, target.width, target.height, thumbCanvas, thumbWidth, thumbHeight)
     const thumbBlob = await _encodeCanvas(thumbCanvas, [
-      { type: 'image/webp', quality: 0.7 },
-      { type: 'image/jpeg', quality: 0.65 },
+      { type: 'image/webp', quality: 0.65 },
+      { type: 'image/jpeg', quality: 0.75 },
     ])
 
     const fullBytes = await fullBlob.arrayBuffer()

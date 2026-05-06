@@ -1,29 +1,5 @@
 # Sporely-web Development Plan
 
-## Native Android Camera Follow-Up
-- [ ] Verify on Samsung S25: Native Cam selects the 1x lens, capture is 12 MP, preview matches output, orientation is correct in `sporely-py`, and GPS strategy is documented.
-- [ ] **Fix duplicate captures:** Resolve the race condition in the Android custom camera plugin where pressing "Done" right after capturing causes the `onImageSaved` callback and the `onDoneClick` handler to both add the same photo to the results array.
-
-## Capacitor CameraX HDR Integration
-*Goal: Update the custom NativeCamera Capacitor plugin to support CameraX vendor extensions (HDR) via user preference.*
-
-### 1. Frontend Updates (JavaScript)
-- [x] **Preferences Integration:** Use `@capacitor/preferences` to retrieve a `useHdr` boolean preference before camera initialization.
-- [x] **Plugin API:** Pass the `useHdr` boolean within the `options` object sent to the native Capacitor plugin's `start` / `capturePhotos` method.
-
-### 2. Native Android Updates (Kotlin)
-- [x] **Dependencies:** Update `android/app/build.gradle` to include `implementation "androidx.camera:camera-extensions:1.4.0"` and coroutines support.
-- [x] **Plugin Method:** Extract the `useHdr` flag from the JS call using `call.getBoolean("useHdr", false)` and pass it to the Android Activity.
-- [x] **ExtensionsManager:** Retrieve the `ExtensionsManager` instance asynchronously using Guava's `ListenableFuture`.
-- [x] **Camera Selector:** Create a standard base `CameraSelector` targeting the requested lens (e.g., `LENS_FACING_BACK`).
-- [x] **Hardware Verification & Fallback:** Support legacy OEM HDR via `ExtensionsManager`. If not available, fallback to Android 14+ Ultra HDR (`OUTPUT_FORMAT_JPEG_ULTRA_HDR`) via `ImageCaptureCapabilities`. Safely drop physical camera locks to allow ISP processing.
-- [x] **Lifecycle Binding:** Bind the `Preview` and `ImageCapture` use cases to the Android Activity lifecycle.
-
-## Additional CameraX Extensions
-*Goal: Expose more CameraX vendor extensions as user-configurable settings.*
-
-- [x] **JPEG Quality:** Add a JPEG quality stepper (75-100) to the main settings panel, passing the value to the native camera to control output file size.
-- [x] **Night Mode:** Add a toggle button to the native camera UI to enable/disable `ExtensionMode.NIGHT` on supported devices.
 
 ## Camera Behavior Summary (Sporely Cam vs Web Cam)
 
@@ -39,22 +15,12 @@
 - **UI Handling:** The app displays an `android-web-camera-warning-overlay` and `exif-warning-overlay` to advise Android web users of this limitation, recommending they install the native Sporely app for proper location handling and image quality.
 
 ## UI fixes
-- [x] Missing location data popup: Remove "when using the quick 'Photos & videos' picker". Add the sentence: "(Or just use Sporely cam to capture location)"
-- [x] Group import review screen: Instead of Queue all, just use Add
-- [x] Remove the New observation after.. /Photo import section in Settings
-- On the Finds tab: Species is not translated
-- [x] Finds tab, when 1 card per row is shown: Add an icon that indicates if there are spore measures for the observation. This could be like a small almond shaped brown icon, same row and just before the "sharing" icon (friends/public/private).
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
 - Add a legend drop-down to the map page. Selection: Genus (more will come). this will show a legend with colors, corresponding the the dots on the map.
-- [x] The card with number of finds, number of species, and number of spores: Tapping finds: open screen with finds, filtered for that user (card could appear on home tab or people tab): Species filter off. Tapping species: same as for tapping finds, but with species filter on. Tapping spores: filter only finds for that user with spore measurements.
-- [x] On the People tab: pressing finds should take me to a "User finds" page. This would be the same layout as the current Finds, but filtered for a given user. This could be done by reusing the Finds page code, just replacing the selector for Mine - Friends - Public, with a user profile. Presing finds similarly shows the same screen, but with Species = true. Pressing the spore count shows only finds with spore measurements. A toggle should be placed in the Finds: Spores. Set to true if pressing the spore count. Spore toggle could be on the same row as the Mine- Friends - Public selector (or user profile if we come here from the People screen.)
 
-## Accurate Place Names From Coordinates (`sporely-web`)
-*Goal: match the desktop lookup behavior without repeating the trial-and-error. Resolve once per observation/import session, prefer accuracy over speed, and keep UI suggestions short and local.*
 
-### Implementation Shape
-- [ ] **Add a Sporely-owned reverse-location endpoint.** Do not call Nominatim directly from browser code as the primary path: browser `fetch` cannot set the real `User-Agent` header Nominatim expects. Use a Cloudflare Worker or Supabase Edge Function such as `/reverse-location?lat={lat}&lon={lon}` that performs Nominatim/Artsdatabanken/DAWA calls server-side, adds an app-specific `User-Agent`, handles CORS, and can throttle/cache requests.
-- [ ] **Create a small web client helper.** Add a pure helper such as `src/location-lookup.js` that calls the endpoint and returns the same normalized shape used by desktop: `{ suggestions, latitude, longitude, country_code, country_name, nominatim_display_name, source }`.
+## Location
+
 - [ ] **Use a latest-request guard.** Track a request id plus rounded coordinates in the UI. If the user changes photos/coordinates before the lookup returns, ignore the stale result so an old place name cannot fill a new observation.
 
 ### Server-Side Lookup Flow
@@ -724,7 +690,7 @@ return new Promise((resolve, reject) => {
 | Native Android gallery import with HEIC GPS | ✅ Real — custom Capacitor plugin + Filesystem read |
 | Observation insert to Supabase | ✅ Real |
 | Image upload to Cloudflare R2 | ✅ Real — via `upload.sporely.no` worker |
-| Grid/card thumbnails | ✅ Real — `small` + `medium` variants generated at upload time |
+| Grid/card thumbnails | ✅ Real — primary `thumb_` variant generated at upload time, with legacy `small` + `medium` fallback support |
 | Profile avatar upload/crop | ✅ Real |
 | Self-service account deletion | ✅ Real — via Supabase Edge Function `delete-account` |
 | Finds list from Supabase | ✅ Real |
@@ -794,18 +760,27 @@ return new Promise((resolve, reject) => {
 - **Ban Enforcement (Read/Hide):**
   - Log in as a normal user. Verify that all past observations from the banned test user are completely hidden from the Community and Friends feeds.
 
-# Phase 6: 12MP/2MP Conditional AVIF Pipeline
-*Goal: Implement a client-side AVIF compression pipeline to ensure high-fidelity, cost-free storage on Cloudflare R2, moving away from server-side CF Image Resizing.*
+# Phase 6: 12MP/2MP Conditional WebP/JPEG Pipeline
+*Goal: Implement a reliable client-side compression pipeline for iOS and Android, keeping high-fidelity R2 storage without depending on Cloudflare Image Resizing.*
+
+### 2026-05-05 Status
+- ✅ JPEG/WebP upload now works on both iOS and Android.
+- ✅ Web encoding uses WebP first (`image/webp`, quality 0.65) and falls back to JPEG (`image/jpeg`, quality 0.75), with R2 filenames matching the actual blob MIME type.
+- ✅ The primary thumbnail variant is `thumb_{filename}` at 400px max edge, generated as WebP/JPEG according to browser support.
+- ✅ Image resize/encode work runs in `src/image-worker.js` using `ImageBitmap` transfer and `OffscreenCanvas` where supported.
+- ✅ Sync queue image bytes are persisted as `ArrayBuffer` values in IndexedDB, so retries can resume after app suspension or process death.
+- ✅ `@capawesome/capacitor-background-task` is wired for Capacitor background attempts when the app becomes hidden.
+- ✅ Web import/add-photo paths now accept `.avif`/`image/avif` for browser-decodable AVIF inputs, but the web app still does not encode AVIF.
 
 ## Step 1: Conditional Resize & Conversion (Web App)
-Update image processing logic (likely in `src/images.js` or `src/import-helpers.js`) to handle the user's resolution settings while protecting device memory:
-- **Sequential Processing:** Use a `for...of` loop to process images one by one.
+Update image processing logic in `src/images.js` and `src/image-worker.js` to handle the user's resolution settings while protecting device memory:
+- **Sequential Processing:** Process queued images one by one.
 - **Resolution Logic:**
   - **If 2MP Mode:** Resize the image to a max edge of **1600px**.
   - **If 12MP Mode:** Do **not** resize unless the source image is **>13MP** (guard against extreme resolution bloat). If >13MP, downscale to a 4000px max edge (~12MP).
-- **The "Double-Bake" Upload:** Every capture must generate two AVIF blobs:
-  1. `{id}_full.avif`: The 2MP or 12MP optimized file.
-  2. `{id}_thumb.avif`: A 400px wide thumbnail for fast feed scrolling.
+- **The "Double-Bake" Upload:** Every capture/import generates:
+  1. `{id}.{webp|jpg}`: The 2MP or 12MP optimized file.
+  2. `thumb_{id}.{webp|jpg}`: A 400px max-edge thumbnail for fast feed/card rendering.
 - **Memory Management:** Explicitly clear the canvas after every photo:
   ```javascript
   canvas.width = 0; canvas.height = 0;
@@ -814,10 +789,11 @@ Update image processing logic (likely in `src/images.js` or `src/import-helpers.
 
 ## Step 2: Native Camera Revert (Android)
 - **Revert HDR Bloat:** In the native Capacitor plugin (`NativeCameraActivity.java`), set `ImageCapture.Builder` back to `CAPTURE_MODE_MINIMIZE_LATENCY`.
-- **Clean Intermediate:** Set native `jpegQuality` to **100** (lossless intermediate) to ensure the subsequent web-side AVIF conversion starts with the highest possible pixel data.
+- **Native Capture Quality:** Set native `jpegQuality` to **75** so native captures use the fixed JPEG policy.
 
 ## Step 3: Desktop Sync Integration
-- Ensure the desktop app is configured to pull the `_full.avif` and `_thumb.avif` directly instead of relying on the Cloudflare CDN edge resize URL parameter.
+- Ensure the desktop app pulls direct R2 keys for `.webp`, `.jpg`, `.jpeg`, and future `.avif` files instead of relying on Cloudflare CDN edge resize parameters.
+- Keep desktop thumbnail naming aligned with web: primary `thumb_{filename}`, legacy `thumb_small_{filename}` / `thumb_medium_{filename}` only as fallback.
 
 ## Fix issues: Image Pipeline Reset & Optimization**
 
@@ -826,6 +802,7 @@ We attempted to move from raw JPEG uploads to a "Double-Bake" client-side optimi
 *   **The Intent:** Use AVIF to save space and R2 egress costs.
 *   **The Failure:** Mobile browsers (especially iOS Safari) do not support **encoding** AVIF via `canvas.toBlob`. The system silently fell back to **PNG**, resulting in 30MB files that exceed Cloudflare’s 15MB upload limit.
 *   **The Memory Issue:** Large 12MP blobs are disappearing from memory on iOS, causing "Object not found" errors in the sync queue because we stored temporary Blob URLs instead of persistent data.
+*   **Current Resolution:** WebP/JPEG encoding is now the web/mobile production path. AVIF is allowed as an input/display format when the browser can decode it, but AVIF encoding is deferred to desktop/server-side contexts where encoder support is explicit.
 
 ### **2. Technical Specifications & Constraints**
 *   **Storage:** Cloudflare R2 (CORS is already configured for `PUT`/`POST`).
@@ -840,8 +817,8 @@ The main thread must remain responsive. Move all image resizing and encoding int
 
 #### **B. Intelligent Encoding Fallback**
 Do not force a file extension. The browser must decide the format, and the code must label it correctly:
-1.  **Primary (Android S25):** Attempt `image/webp` at 0.8 quality as default (settings override).
-2.  **Secondary (iOS/Legacy):** If WebP fails, use `image/jpeg` at 0.7 quality (settings override). 
+1.  **Primary (Android + supported browsers):** Attempt `image/webp` at 0.65 quality.
+2.  **Secondary (iOS/Legacy):** If WebP fails, use `image/jpeg` at 0.75 quality.
 3.  **Filenaming:** The extension in the R2 path must match the actual blob type (e.g., `image_full.webp` or `image_full.jpg`). **Never use .png.**
 
 #### **C. IndexedDB Resiliency (No more "Ghost" Objects)**

@@ -40,8 +40,6 @@ import {
   getArtsorakelMaxEdge,
   getDefaultVisibility,
   getPhotoGapMinutes,
-  getJpegQuality,
-  setJpegQuality,
   setArtsorakelMaxEdge,
   setDefaultVisibility,
   setLastSyncAt,
@@ -243,7 +241,8 @@ function initSettings() {
   if (cameraAppRow) cameraAppRow.style.display = isAndroidApp() ? 'flex' : 'none'
   document.querySelectorAll('.settings-camera-app-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      setUseSystemCamera(btn.dataset.cameraApp === 'native')
+      const useSystemCamera = btn.dataset.cameraApp === 'native'
+      setUseSystemCamera(useSystemCamera)
       _syncSettingsUI()
     })
   })
@@ -259,28 +258,18 @@ function initSettings() {
   const nativeCameraRows = [
     document.getElementById('settings-camera-label'),
     document.getElementById('settings-hdr-row'),
-    document.getElementById('settings-jpeg-quality-row'),
-    document.getElementById('settings-jpeg-quality-hint'),
   ]
   nativeCameraRows.forEach(row => {
     if (row) row.style.display = isAndroidApp() ? '' : 'none'
   })
   if (hdrToggle) {
     Preferences.get({ key: 'useHdr' }).then(({ value }) => {
-      hdrToggle.checked = value === 'true'
+      hdrToggle.checked = getUseSystemCamera() ? false : value !== 'false'
     })
     hdrToggle.addEventListener('change', event => {
       Preferences.set({ key: 'useHdr', value: event.target.checked ? 'true' : 'false' })
     })
   }
-  const jpegQualityInput = document.getElementById('settings-jpeg-quality')
-  function _setJpegQuality(value) {
-    const v = setJpegQuality(value)
-    jpegQualityInput.value = v
-    jpegQualityInput.textContent = String(v)
-  }
-  document.getElementById('settings-jpeg-decrement')?.addEventListener('click', () => _setJpegQuality(Number(jpegQualityInput.value || 95) - 5))
-  document.getElementById('settings-jpeg-increment')?.addEventListener('click', () => _setJpegQuality(Number(jpegQualityInput.value || 95) + 5))
 
   document.getElementById('settings-clear-cache-btn')?.addEventListener('click', async event => {
     const btn = event.currentTarget
@@ -338,10 +327,18 @@ function _syncSettingsUI() {
   const acCameraLabel = document.querySelector('#ac-camera .action-card-label')
   if (acCameraLabel) acCameraLabel.textContent = getEffectiveCameraLabel()
 
-  const jpegQualityInput = document.getElementById('settings-jpeg-quality')
-  if (jpegQualityInput) {
-    jpegQualityInput.value = String(getJpegQuality())
-    jpegQualityInput.textContent = jpegQualityInput.value
+  const hdrToggle = document.getElementById('settings-hdr-toggle')
+  const hdrRow = document.getElementById('settings-hdr-row')
+  if (hdrToggle) {
+    hdrToggle.disabled = useSystemCamera
+    if (useSystemCamera) {
+      hdrToggle.checked = false
+    } else {
+      Preferences.get({ key: 'useHdr' }).then(({ value }) => {
+        if (!getUseSystemCamera()) hdrToggle.checked = value !== 'false'
+      })
+    }
+    hdrRow?.classList.toggle('settings-row-disabled', useSystemCamera)
   }
 }
 

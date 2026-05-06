@@ -165,7 +165,7 @@ R2 bucket `sporely-media` is exposed publicly via Cloudflare. All media URLs are
 
 - Image work is attempted off the main thread in `src/image-worker.js`.
 - The worker receives an `ImageBitmap` as a transferable and uses `OffscreenCanvas`.
-- Encoding tries WebP first (`image/webp`, quality 0.8) and falls back to JPEG (`image/jpeg`, quality 0.7). AVIF is not used because mobile browser AVIF encoding support is unreliable.
+- Encoding tries WebP first (`image/webp`, quality 0.65) and falls back to JPEG (`image/jpeg`, quality 0.75). AVIF is not used because mobile browser AVIF encoding support is unreliable.
 - Free/reduced mode limits images to about 2 MP with a 1600px max edge.
 - Pro/max mode keeps near-12 MP images unless the source is above the large-image guard, then downsizes to about 4000px max edge.
 - Downscaling uses progressive halving plus high-quality canvas smoothing to avoid aliasing-heavy thumbnails.
@@ -179,37 +179,7 @@ Legacy readers still check older variant names where needed:
 - `thumb_small_{filename}`
 - `thumb_medium_{filename}`
 
-### ⚠️ Known issue: EXIF stripped during free-tier 2 MP conversion
 
-Free-tier uploads resize images to approximately 2 MP via the Canvas API before uploading to R2.
-**Canvas `toBlob()` strips all EXIF** — GPS coordinates, `DateTimeOriginal`, camera model, etc. are
-lost in the stored R2 file.
-
-**Desktop workaround (implemented):** When the desktop pulls a cloud field image, it checks
-whether the image has no EXIF datetime/GPS; if the observation has GPS or date stored in the local
-database, it injects that metadata back into the downloaded image when the format supports it. This restores the
-"Set from current image" button functionality in the Prepare Images dialog for cloud-synced images.
-See `_inject_obs_exif_into_field_image()` and `_backfill_missing_exif_on_cloud_images()` in
-`sporely/utils/cloud_sync.py`.
-
-**Web App Extraction (Implemented):** The web app now correctly extracts EXIF/GPS *before*
-the Canvas resize step during import/capture, persisting it into the observation draft and
-database rows. While the stored R2 image *bytes* still lack EXIF after Canvas/WebP/JPEG encoding, the metadata is safely synced,
-allowing the desktop app to re-inject it upon download.
-
-For the original upload path, the web app now records how the stored cloud image was prepared:
-- `upload_mode` — `reduced` or `full`
-- `source_width`, `source_height`
-- `stored_width`, `stored_height`
-- `stored_bytes`
-
-Desktop cloud sync prepares and pushes the same metadata so both clients describe cloud media the same way.
-
-Both stored under the same directory as the original, e.g.:
-```
-{user_id}/{obs_id}/0_1234567890.jpg          ← original
-{user_id}/{obs_id}/thumb_0_1234567890.webp   ← primary thumbnail
-```
 
 ### Offline queue and background sync
 
@@ -224,45 +194,8 @@ Both stored under the same directory as the original, e.g.:
 
 When the Capacitor app is backgrounded, `document.visibilitychange` requests a short-lived background task through `@capawesome/capacitor-background-task`. The task drains any active queue preparation/upload promise and then calls `triggerSync()`. This extends the chance that current work finishes when the app is minimized or the screen turns off, but it is still subject to Android/iOS background execution limits.
 
-### Environment variables
-
-Frontend (`.env.local` / `.env.example`):
-```
-VITE_MEDIA_BASE_URL=https://media.sporely.no
-VITE_MEDIA_UPLOAD_BASE_URL=https://upload.sporely.no
-```
-
-Worker (`wrangler.toml` `[vars]`):
-```
-SUPABASE_URL=https://zkpjklzfwzefhjluvhfw.supabase.co
-SUPABASE_JWT_AUDIENCE=authenticated
-MEDIA_PUBLIC_BASE_URL=https://media.sporely.no
-ALLOWED_ORIGINS=https://app.sporely.no,https://localhost:5173,http://localhost:5173,...
-MAX_UPLOAD_BYTES=15728640
-FREE_STORAGE_QUOTA_BYTES=0
-```
-
-Worker secrets:
-```sh
-SUPABASE_SERVICE_ROLE_KEY=<Supabase secret key, stored with wrangler secret put>
-```
 
 ### Deploying the worker
-
-```sh
-cd cloudflare/r2-upload-worker
-npx wrangler deploy
-```
-
-Before deploying storage/quota tracking, run `supabase/profile-storage-usage.sql` in the
-Supabase SQL Editor and set the Cloudflare Worker secret with:
-
-```sh
-npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-```
-
-Custom domain `upload.sporely.no` is registered automatically via the `[[routes]]` block
-in `wrangler.toml` — no manual DNS entry needed as long as `sporely.no` is proxied through Cloudflare.
 
 **⚠️ Deploy after every worker change.** The worker is NOT automatically deployed when you
 commit. If you add a new route or fix a bug in `src/index.js` and forget to run
@@ -281,49 +214,6 @@ The worker proxies AI species identification requests to `https://ai.artsdataban
 - **Response:** Buffer the upstream response with `await upstream.arrayBuffer()` before
   returning it. This avoids partial-body issues on slow upstream connections.
 
-### R2 CORS (`media.sporely.no`)
-
-The R2 bucket `sporely-media` has a CORS policy that allows `GET`/`HEAD`/`PUT`/`POST`
-from all origins (`*`). This is required because:
-- `find_detail.js` fetches images from the CDN via `fetch(img.src)` to pass blobs to the
-  Artsorakel AI. Without `Access-Control-Allow-Origin: *`, the browser blocks these fetches
-  and artsorakel silently gets zero blobs → "no suggestions".
-- Dev server and LAN testing use different origins than `app.sporely.no`.
-
-To inspect or update the CORS policy:
-```sh
-# View current rules
-npx wrangler r2 bucket cors list sporely-media
-
-# Update (format must match the Cloudflare R2 CORS API schema)
-npx wrangler r2 bucket cors set sporely-media --file cors.json --force
-```
-
-The correct JSON schema for the `--file` argument:
-```json
-{
-  "rules": [
-    {
-      "allowed": {
-        "origins": ["*"],
-        "methods": ["GET", "HEAD", "PUT", "POST"],
-        "headers": ["*"]
-      },
-      "exposeHeaders": [],
-      "maxAgeSeconds": 86400
-    }
-  ]
-}
-```
-
-### Known gotcha: Web Crypto ECDSA signature format
-
-Web Crypto's `subtle.verify` for ECDSA expects **raw IEEE P1363 format** (r||s concatenated).
-JOSE JWTs already use this format. Do **not** convert the signature to DER before passing
-to `subtle.verify` — that will cause every valid token to fail with "JWT signature
-verification failed".
-
----
 
 ### ⚠️ Upload Request Gotchas
 

@@ -3,8 +3,8 @@ const USE_SYSTEM_CAMERA_KEY = 'sporely-use-system-camera'
 const LAST_SYNC_AT_KEY = 'sporely-last-sync-at'
 const ARTSORAKEL_MAX_EDGE_KEY = 'sporely-artsorakel-max-edge'
 const PHOTO_GAP_MINUTES_KEY = 'sporely-photo-gap'
-const JPEG_QUALITY_KEY = 'sporely-jpeg-quality'
 const DEFAULT_ARTSORAKEL_MAX_EDGE = 500
+export const NATIVE_CAMERA_JPEG_QUALITY = 75
 
 export function normalizeArtsorakelMaxEdge(value) {
   const parsed = Number.parseInt(value, 10)
@@ -46,29 +46,6 @@ export function setPhotoGapMinutes(value) {
   const normalized = normalizePhotoGapMinutes(value)
   try {
     localStorage.setItem(PHOTO_GAP_MINUTES_KEY, String(normalized))
-  } catch (_) {}
-  return normalized
-}
-
-export function normalizeJpegQuality(value) {
-  const parsed = Number.parseInt(value, 10)
-  return Number.isFinite(parsed)
-    ? Math.max(75, Math.min(100, parsed))
-    : 100
-}
-
-export function getJpegQuality() {
-  try {
-    return normalizeJpegQuality(localStorage.getItem(JPEG_QUALITY_KEY))
-  } catch (_) {
-    return 100
-  }
-}
-
-export function setJpegQuality(value) {
-  const normalized = normalizeJpegQuality(value)
-  try {
-    localStorage.setItem(JPEG_QUALITY_KEY, String(normalized))
   } catch (_) {}
   return normalized
 }

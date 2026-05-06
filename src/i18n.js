@@ -261,16 +261,13 @@ const messages = {
     'settings.min': 'min',
     'settings.photoGapHint': 'Photo import from your device will group images based on time between photos.',
     'settings.artsorakel': 'Artsorakel',
-    'settings.artsorakelMaxEdge': 'Max width/height',
+    'settings.artsorakelMaxEdge': 'Max width/height (px)',
     'settings.artsorakelMaxEdgeHint': 'Images sent to Artsorakel will be resized so neither width nor height exceeds this value.',
-    'settings.px': 'px',
     'settings.imageResolution': 'Image resolution',
     'settings.imageResolutionReduced': 'Default (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
     'settings.camera': 'Camera',
     'settings.useHdr': 'Use HDR (Sporely Cam)',
-    'settings.jpegQuality': 'JPEG Quality (Sporely Cam)',
-    'settings.jpegQualityHint': 'Higher quality increases file size. Affects photos taken with Sporely Cam.',
     'settings.cameraApp': 'Camera App',
     'settings.sporely': 'Sporely',
     'settings.native': 'Native',
@@ -580,16 +577,13 @@ const messages = {
     'settings.min': 'min',
     'settings.photoGapHint': 'Bildeimport fra enheten grupperer bilder basert på tiden mellom bildene.',
     'settings.artsorakel': 'Artsorakel',
-    'settings.artsorakelMaxEdge': 'Maks bredde/høyde',
+    'settings.artsorakelMaxEdge': 'Maks bredde/høyde (px)',
     'settings.artsorakelMaxEdgeHint': 'Bilder sendt til Artsorakel skaleres slik at verken bredde eller høyde overstiger denne verdien.',
-    'settings.px': 'px',
     'settings.imageResolution': 'Bildeoppløsning',
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Maks (12MP)',
     'settings.camera': 'Kamera',
     'settings.useHdr': 'Bruk HDR (Sporely Cam)',
-    'settings.jpegQuality': 'JPEG-kvalitet (Sporely Cam)',
-    'settings.jpegQualityHint': 'Høyere kvalitet gir større filstørrelse. Gjelder bilder tatt med Sporely Cam.',
     'settings.cameraApp': 'Kamera-app',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
@@ -899,16 +893,13 @@ const messages = {
     'settings.min': 'min',
     'settings.photoGapHint': 'Bildimport från enheten grupperar bilder baserat på tiden mellan bilderna.',
     'settings.artsorakel': 'Artsorakel',
-    'settings.artsorakelMaxEdge': 'Max bredd/höjd',
+    'settings.artsorakelMaxEdge': 'Max bredd/höjd (px)',
     'settings.artsorakelMaxEdgeHint': 'Bilder som skickas till Artsorakel skalas så att varken bredd eller höjd överstiger detta värde.',
-    'settings.px': 'px',
     'settings.imageResolution': 'Bildupplösning',
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
     'settings.camera': 'Kamera',
     'settings.useHdr': 'Använd HDR (Sporely Cam)',
-    'settings.jpegQuality': 'JPEG-kvalitet (Sporely Cam)',
-    'settings.jpegQualityHint': 'Högre kvalitet ger större filstorlek. Påverkar bilder tagna med Sporely Cam.',
     'settings.cameraApp': 'Kamera-app',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
@@ -1218,16 +1209,13 @@ const messages = {
     'settings.min': 'min',
     'settings.photoGapHint': 'Der Fotoimport von deinem Gerät gruppiert Bilder anhand der Zeit zwischen den Fotos.',
     'settings.artsorakel': 'Artsorakel',
-    'settings.artsorakelMaxEdge': 'Max. Breite/Höhe',
+    'settings.artsorakelMaxEdge': 'Max. Breite/Höhe (px)',
     'settings.artsorakelMaxEdgeHint': 'An Artsorakel gesendete Bilder werden so skaliert, dass weder Breite noch Höhe diesen Wert überschreitet.',
-    'settings.px': 'px',
     'settings.imageResolution': 'Bildauflösung',
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max. (12MP)',
     'settings.camera': 'Kamera',
     'settings.useHdr': 'HDR verwenden (Sporely Cam)',
-    'settings.jpegQuality': 'JPEG-Qualität (Sporely Cam)',
-    'settings.jpegQualityHint': 'Höhere Qualität vergrößert die Dateigröße. Gilt für Fotos, die mit der Sporely Cam aufgenommen wurden.',
     'settings.cameraApp': 'Kamera-App',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
@@ -1592,7 +1580,6 @@ export function applyStaticTranslations() {
   setText('#settings-gap-hint', 'settings.photoGapHint')
   setText('#settings-artsorakel-label', 'settings.artsorakel')
   setText('#settings-artsorakel-max-edge-label', 'settings.artsorakelMaxEdge')
-  setText('#settings-artsorakel-max-edge-unit', 'settings.px')
   setText('#settings-artsorakel-max-edge-hint', 'settings.artsorakelMaxEdgeHint')
   setText('#settings-image-resolution-label', 'settings.imageResolution')
   setText('#settings-resolution-reduced', 'settings.imageResolutionReduced')
@@ -1602,8 +1589,6 @@ export function applyStaticTranslations() {
   setText('.settings-camera-app-btn[data-camera-app="sporely"]', 'settings.sporely')
   setText('.settings-camera-app-btn[data-camera-app="native"]', 'settings.native')
   setText('#settings-hdr-label', 'settings.useHdr')
-  setText('#settings-jpeg-quality-label', 'settings.jpegQuality')
-  setText('#settings-jpeg-quality-hint', 'settings.jpegQualityHint')
   setText('#settings-default-visibility-label', 'settings.defaultVisibility')
   setText('#settings-default-visibility-private', 'visibility.private')
   setText('#settings-default-visibility-friends', 'visibility.friends')

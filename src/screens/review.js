@@ -784,7 +784,7 @@ async function _openPickerForReview() {
   input.multiple = true
   input.accept = 'image/*'
   if (/android/i.test(navigator.userAgent)) {
-    input.accept = '.jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif'
+    input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif'
   }
   input.onchange = async (e) => {
     const files = Array.from(e.target.files || [])

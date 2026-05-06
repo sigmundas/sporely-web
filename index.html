@@ -865,9 +865,8 @@
 
         <div class="settings-section-label" id="settings-artsorakel-label" style="margin-top:22px">Artsorakel</div>
         <div class="settings-gap-row">
-          <label for="settings-artsorakel-max-edge" class="settings-gap-label" id="settings-artsorakel-max-edge-label">Max width/height</label>
+          <label for="settings-artsorakel-max-edge" class="settings-gap-label" id="settings-artsorakel-max-edge-label">Max width/height (px)</label>
           <input type="number" id="settings-artsorakel-max-edge" class="settings-gap-input" min="100" max="4000" step="50" inputmode="numeric" style="width:88px">
-          <span class="settings-gap-unit" id="settings-artsorakel-max-edge-unit">px</span>
         </div>
         <p class="settings-gap-hint" id="settings-artsorakel-max-edge-hint">Images sent to Artsorakel will be resized so neither width nor height exceeds this value.</p>
 
@@ -898,17 +897,6 @@
             <span></span>
           </label>
         </div>
-        <div class="settings-row" id="settings-jpeg-quality-row" style="margin-top:10px">
-          <div>
-            <div class="settings-row-title" id="settings-jpeg-quality-label">JPEG Quality (Sporely Cam)</div>
-          </div>
-          <div class="settings-stepper" aria-labelledby="settings-jpeg-quality-label">
-            <button type="button" class="settings-stepper-btn" id="settings-jpeg-decrement" aria-label="Decrease JPEG quality">-</button>
-            <output id="settings-jpeg-quality" class="settings-gap-input settings-gap-display" aria-live="polite">100</output>
-            <button type="button" class="settings-stepper-btn" id="settings-jpeg-increment" aria-label="Increase JPEG quality">+</button>
-          </div>
-        </div>
-        <p class="settings-gap-hint" id="settings-jpeg-quality-hint">Higher quality increases file size. Affects photos taken with Sporely Cam.</p>
 
         <div class="settings-section-label" id="settings-default-visibility-label" style="margin-top:22px">Default visibility</div>
         <div class="theme-segment settings-default-visibility-segment">

@@ -18,6 +18,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.util.SizeF;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
 import android.view.WindowInsets;
@@ -30,11 +31,15 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.camera.camera2.interop.Camera2CameraInfo;
 import androidx.camera.camera2.interop.Camera2Interop;
+import androidx.camera.core.Camera;
 import androidx.camera.core.CameraInfo;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.FocusMeteringAction;
 import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureCapabilities;
 import androidx.camera.core.ImageCaptureException;
+import androidx.camera.core.MeteringPoint;
+import androidx.camera.core.MeteringPointFactory;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.extensions.ExtensionMode;
@@ -58,6 +63,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -73,16 +79,20 @@ public class NativeCameraActivity extends AppCompatActivity {
     private static final int CONTROLS_BOTTOM_MARGIN_DP = 96;
     private static final int ACTION_BUTTON_HEIGHT_DP = 52;
     private static final int ACTION_BUTTON_WIDTH_DP = 104;
-    private static final int ACTION_BUTTON_SIDE_MARGIN_DP = 28;
+    private static final int ACTION_BUTTON_SIDE_MARGIN_DP = 14;
     private static final int CONTROL_ROW_HEIGHT_DP = 118;
     private static final int CONTROL_ROW_BOTTOM_PADDING_DP = 18;
     private static final int SHUTTER_BUTTON_SIZE_DP = 82;
+    private static final int NIGHT_TOGGLE_ABOVE_CONTROLS_DP = CONTROL_ROW_HEIGHT_DP + 76;
+    private static final int FOCUS_RING_SIZE_DP = 74;
 
     private PreviewView previewView;
+    private View focusRing;
     private FrameLayout batchStack;
     private TextView countBadge;
     private TextView doneButton;
     private ProcessCameraProvider cameraProvider;
+    private Camera camera;
     private ImageCapture imageCapture;
     private Location captureLocation;
     private boolean canceled = false;
@@ -98,6 +108,10 @@ public class NativeCameraActivity extends AppCompatActivity {
     private boolean isNightModeAvailable = false;
     private boolean isNightModeEnabled = false;
     private TextView nightModeToggle;
+    private FrameLayout.LayoutParams nightModeParams;
+    private final Runnable hideFocusRingRunnable = () -> {
+        if (focusRing != null) focusRing.setVisibility(View.GONE);
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -138,10 +152,17 @@ public class NativeCameraActivity extends AppCompatActivity {
 
         previewView = new PreviewView(this);
         previewView.setScaleType(PreviewView.ScaleType.FILL_CENTER);
+        previewView.setOnTouchListener((v, event) -> handlePreviewTouch(v, event));
+        previewView.setClickable(true);
         root.addView(previewView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
+
+        focusRing = new View(this);
+        focusRing.setVisibility(View.GONE);
+        focusRing.setBackground(makeOvalBackground(Color.TRANSPARENT, 2, Color.WHITE));
+        root.addView(focusRing, new FrameLayout.LayoutParams(dp(FOCUS_RING_SIZE_DP), dp(FOCUS_RING_SIZE_DP)));
 
         flashView = new View(this);
         flashView.setBackgroundColor(Color.argb(150, 255, 255, 255));
@@ -181,22 +202,20 @@ public class NativeCameraActivity extends AppCompatActivity {
         root.addView(batchStack, batchParams);
         updateCaptureActionState();
 
-        FrameLayout topOverlay = new FrameLayout(this);
-        FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.TOP
-        );
-        topParams.setMargins(dp(14), dp(14), dp(14), 0);
         nightModeToggle = makeExtensionToggleButton("Night");
         nightModeToggle.setOnClickListener(v -> toggleNightMode());
-        topOverlay.addView(nightModeToggle, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.START));
+        nightModeParams = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM | Gravity.END
+        );
+        nightModeParams.setMargins(0, 0, dp(ACTION_BUTTON_SIDE_MARGIN_DP), dp(CONTROLS_BOTTOM_MARGIN_DP + NIGHT_TOGGLE_ABOVE_CONTROLS_DP));
+        root.addView(nightModeToggle, nightModeParams);
 
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             applySystemBarInsets(insets);
             return insets;
         });
-        root.addView(topOverlay, topParams);
         setContentView(root);
         root.requestApplyInsets();
     }
@@ -211,6 +230,10 @@ public class NativeCameraActivity extends AppCompatActivity {
         int batchBottom = controlsBottom + dp(CONTROL_ROW_HEIGHT_DP);
         if (batchParams != null && batchParams.bottomMargin != batchBottom) {
             batchParams.setMargins(0, 0, dp(28), batchBottom);
+        }
+        int nightBottom = controlsBottom + dp(NIGHT_TOGGLE_ABOVE_CONTROLS_DP);
+        if (nightModeParams != null && nightModeParams.bottomMargin != nightBottom) {
+            nightModeParams.setMargins(0, 0, dp(ACTION_BUTTON_SIDE_MARGIN_DP), nightBottom);
         }
         if (previewView != null) previewView.requestLayout();
     }
@@ -309,6 +332,14 @@ public class NativeCameraActivity extends AppCompatActivity {
         return drawable;
     }
 
+    private GradientDrawable makeOvalBackground(int fillColor, int strokeDp, int strokeColor) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setShape(GradientDrawable.OVAL);
+        drawable.setColor(fillColor);
+        if (strokeDp > 0) drawable.setStroke(dp(strokeDp), strokeColor);
+        return drawable;
+    }
+
     private TextView makeExtensionToggleButton(String label) {
         TextView button = new TextView(this);
         button.setText(label);
@@ -320,6 +351,38 @@ public class NativeCameraActivity extends AppCompatActivity {
         button.setBackground(makeRoundedBackground(Color.argb(140, 0, 0, 0), 8, 1, Color.argb(100, 255, 255, 255)));
         button.setVisibility(View.GONE); // Initially hidden
         return button;
+    }
+
+    private boolean handlePreviewTouch(View view, MotionEvent event) {
+        if (event.getAction() != MotionEvent.ACTION_UP) {
+            return true;
+        }
+        showFocusRing(event.getX(), event.getY());
+        if (camera != null && previewView != null) {
+            MeteringPointFactory factory = previewView.getMeteringPointFactory();
+            MeteringPoint point = factory.createPoint(event.getX(), event.getY());
+            FocusMeteringAction action = new FocusMeteringAction.Builder(point)
+                .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                .build();
+            camera.getCameraControl().startFocusAndMetering(action);
+        }
+        view.performClick();
+        return true;
+    }
+
+    private void showFocusRing(float x, float y) {
+        if (focusRing == null) return;
+        int size = dp(FOCUS_RING_SIZE_DP);
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) focusRing.getLayoutParams();
+        params.width = size;
+        params.height = size;
+        params.leftMargin = Math.round(x - size / 2f);
+        params.topMargin = Math.round(y - size / 2f);
+        focusRing.setLayoutParams(params);
+        focusRing.setAlpha(1f);
+        focusRing.setVisibility(View.VISIBLE);
+        focusRing.removeCallbacks(hideFocusRingRunnable);
+        focusRing.postDelayed(hideFocusRingRunnable, 500);
     }
 
     private int dp(float value) {
@@ -354,6 +417,7 @@ public class NativeCameraActivity extends AppCompatActivity {
     private void bindCamera(ExtensionsManager extensionsManager) {
         if (cameraProvider == null) return;
         cameraProvider.unbindAll();
+        camera = null;
 
         SelectedCamera selected = selectBackMainCamera(cameraProvider);
         CameraSelector finalSelector = selected.selector;
@@ -397,7 +461,7 @@ public class NativeCameraActivity extends AppCompatActivity {
 
         Preview.Builder previewBuilder = new Preview.Builder()
             .setTargetRotation(getDisplayRotation());
-        int jpegQuality = getIntent().getIntExtra("jpegQuality", 100);
+        int jpegQuality = getIntent().getIntExtra("jpegQuality", 75);
         ImageCapture.Builder captureBuilder = new ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .setOutputFormat(outputFormat)
@@ -412,7 +476,7 @@ public class NativeCameraActivity extends AppCompatActivity {
         Preview preview = previewBuilder.build();
         imageCapture = captureBuilder.build();
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
-        cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
+        camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
     }
 
     private void toggleNightMode() {

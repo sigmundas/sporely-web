@@ -11,7 +11,7 @@ import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
-import { getDefaultVisibility, setLastSyncAt, getUseSystemCamera, getJpegQuality } from '../settings.js'
+import { getDefaultVisibility, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
 import { Preferences } from '@capacitor/preferences'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
@@ -1042,13 +1042,11 @@ async function _openCameraForDetail() {
       }
 
       const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' })
-      const useHdr = useHdrStr === 'true'
-      const jpegQuality = getJpegQuality()
-
+      const useHdr = useHdrStr !== 'false'
       const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
         ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
         : null
-      const options = { useHdr, jpegQuality }
+      const options = { useHdr, jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
       if (gps) options.gps = gps
       const result = await NativeCamera.capturePhotos(options)
       const photos = Array.isArray(result?.photos) ? result.photos : []
@@ -1114,7 +1112,7 @@ async function _openPickerForDetail() {
   input.multiple = true
   input.accept = 'image/*'
   if (/android/i.test(navigator.userAgent)) {
-    input.accept = '.jpg,.jpeg,.png,.webp,.heic,.heif,image/jpeg,image/png,image/webp,image/heic,image/heif'
+    input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif'
   }
   input.onchange = async (e) => {
     const files = Array.from(e.target.files || [])

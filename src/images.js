@@ -64,6 +64,7 @@ function _splitPath(storagePath) {
 export function imageExtensionForMimeType(type) {
   const normalized = String(type || '').split(';')[0].trim().toLowerCase()
   if (normalized === 'image/webp') return 'webp'
+  if (normalized === 'image/avif') return 'avif'
   if (normalized === 'image/jpeg' || normalized === 'image/jpg') return 'jpg'
   if (normalized === 'image/heic') return 'heic'
   if (normalized === 'image/heif') return 'heif'
@@ -258,8 +259,8 @@ function _targetSizeForPolicy(width, height, uploadPolicy) {
 }
 
 const ENCODE_CANDIDATES = [
-  { type: 'image/webp', quality: 0.8 },
-  { type: 'image/jpeg', quality: 0.7 },
+  { type: 'image/webp', quality: 0.65 },
+  { type: 'image/jpeg', quality: 0.75 },
 ]
 let _imageWorker = null
 let _imageWorkerSeq = 0
@@ -441,8 +442,8 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     thumbCanvas.height = thumbHeight
     _drawHighQuality(canvas, targetWidth, targetHeight, thumbCanvas, thumbWidth, thumbHeight)
     const thumbBlob = await _canvasToEncodedBlob(thumbCanvas, [
-      { type: 'image/webp', quality: 0.7 },
-      { type: 'image/jpeg', quality: 0.65 },
+      { type: 'image/webp', quality: 0.65 },
+      { type: 'image/jpeg', quality: 0.75 },
     ])
     await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
 
