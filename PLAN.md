@@ -137,6 +137,8 @@ Important:
 
 ### Existing Refactor & Audit Tasks
 - [ ] **Optional server-side change summary** — a future Supabase RPC/view could return one per-observation “meaningful cloud change” summary and remove most remaining client-side deep comparison work.
+- [ ] **Profile/account parity QA** — Verify web Profile and desktop Profile & Cloud read/write the same Supabase `profiles` fields: `username`, `display_name`, `bio`, and `avatar_url`. Confirm desktop `profile_email` follows the Supabase auth email and is not treated as an independent account identifier while signed in.
+- [ ] **Desktop account migration UX** — Design a safer migration path for users who want a new Sporely Cloud account without duplicating synced observations or losing valuable spore data. The desktop account lock should keep blocking accidental account switches until this exists.
 - [ ] **Import Flow Memory Architecture** — Refactor `import_review.js` and `import-store.js` to a streaming architecture. Currently, large imports (40+ photos) can exhaust mobile browser memory and crash the app because all full-resolution JPEGs are decoded and held in RAM simultaneously before being written to IndexedDB. The fix requires:
     - Streaming each processed blob directly to IndexedDB in `_processFile` and releasing it from RAM.
     - Keeping only lightweight metadata and downscaled `aiBlob` URLs in the active memory array (`sourceItems`).
@@ -793,7 +795,7 @@ Update image processing logic in `src/images.js` and `src/image-worker.js` to ha
 
 ## Step 3: Desktop Sync Integration
 - Ensure the desktop app pulls direct R2 keys for `.webp`, `.jpg`, `.jpeg`, and future `.avif` files instead of relying on Cloudflare CDN edge resize parameters.
-- Keep desktop thumbnail naming aligned with web: primary `thumb_{filename}`, legacy `thumb_small_{filename}` / `thumb_medium_{filename}` only as fallback.
+- Keep desktop thumbnail naming aligned with web: the single `thumb_{filename}` variant.
 
 ## Fix issues: Image Pipeline Reset & Optimization**
 

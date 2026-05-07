@@ -85,21 +85,6 @@ export function getVariantPath(storagePath, variant = 'original') {
   return dir ? `${dir}/${variantName}` : variantName
 }
 
-function _legacyVariantPaths(storagePath, variant = 'original') {
-  const key = normalizeMediaKey(storagePath)
-  if (!key || variant === 'original') return []
-  const { dir, fileName } = _splitPath(key)
-  const candidates = []
-  const normalizedVariant = String(variant || '').toLowerCase()
-  if (['small', 'medium'].includes(normalizedVariant)) {
-    candidates.push(dir ? `${dir}/thumb_${normalizedVariant}_${fileName}` : `thumb_${normalizedVariant}_${fileName}`)
-  }
-  if (normalizedVariant !== 'thumb') {
-    candidates.push(dir ? `${dir}/${normalizedVariant}_${fileName}` : `${normalizedVariant}_${fileName}`)
-  }
-  return candidates.filter(Boolean)
-}
-
 export function getPublicMediaUrl(storagePath, variant = 'original') {
   const key = normalizeMediaKey(storagePath)
   if (!key) return ''
@@ -515,8 +500,6 @@ export async function deleteObservationMedia(paths) {
   const withVariants = [...new Set(normalized.flatMap(path => [
     path,
     getVariantPath(path, 'thumb'),
-    ..._legacyVariantPaths(path, 'small'),
-    ..._legacyVariantPaths(path, 'medium'),
   ]))]
 
   if (MEDIA_UPLOAD_BASE_URL) {
@@ -538,7 +521,7 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
   const variant = options.variant || 'medium'
   const candidatePaths = variant === 'original'
     ? [originalPath]
-    : [getVariantPath(originalPath, variant), ..._legacyVariantPaths(originalPath, variant), originalPath]
+    : [getVariantPath(originalPath, variant), originalPath]
 
   let lastError = null
   for (const path of [...new Set(candidatePaths.filter(Boolean))]) {
@@ -733,16 +716,16 @@ export async function resolveMediaSources(paths, options = {}) {
   const normalizedPaths = (paths || []).map(normalizeMediaKey)
   const requestedPaths = variant === 'original'
     ? normalizedPaths
-    : normalizedPaths.flatMap(path => [getVariantPath(path, variant), ..._legacyVariantPaths(path, variant), path])
+    : normalizedPaths.flatMap(path => [getVariantPath(path, variant), path])
   const signed = await _getSignedUrlMap(requestedPaths)
 
   return normalizedPaths.map(originalPath => {
     if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
-    const variantPaths = [getVariantPath(originalPath, variant), ..._legacyVariantPaths(originalPath, variant)]
+    const variantPath = getVariantPath(originalPath, variant)
     
     let fallbackUrl = variant === 'original' ? signed[originalPath] || null : null;
     if (variant !== 'original') {
-      fallbackUrl = variantPaths.map(path => signed[path]).find(Boolean)
+      fallbackUrl = signed[variantPath]
         || signed[originalPath]
         || getPublicMediaUrl(originalPath, 'original');
     }

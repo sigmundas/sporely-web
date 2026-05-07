@@ -172,14 +172,8 @@ R2 bucket `sporely-media` is exposed publicly via Cloudflare. All media URLs are
 
 ### Thumbnail variants
 
-`src/images.js` generates one primary thumbnail variant at upload time:
+`src/images.js` generates and reads one thumbnail variant:
 - `thumb_{filename}` — 400px max edge, WebP 70% or JPEG 65% fallback
-
-Legacy readers still check older variant names where needed:
-- `thumb_small_{filename}`
-- `thumb_medium_{filename}`
-
-
 
 ### Offline queue and background sync
 
@@ -235,13 +229,13 @@ Extra cloud-only columns:
 - `location_public bool` — hide GPS from friends if false
 - `visibility text` — cloud sharing scope (`private` / `friends` / `public`)
 - `image_key text` — relative R2 key of the cover image
-- `thumb_key text` — relative R2 key of the cover thumbnail (small variant)
+- `thumb_key text` — relative R2 key of the cover thumbnail
 
 ### `observation_images`
 - `storage_path text` — relative R2 media key (e.g. `{user_id}/{obs_id}/0_ts.jpg`)
 - `image_type` — `'field'` | `'microscope'`
 - `image_key text` — same as `storage_path` (normalized)
-- `thumb_key text` — relative key of the small thumbnail variant
+- `thumb_key text` — relative key of the primary thumbnail variant
 - `ai_crop_x1`, `ai_crop_y1`, `ai_crop_x2`, `ai_crop_y2` — normalized AI crop rectangle (`0..1`)
 - `ai_crop_source_w`, `ai_crop_source_h` — source dimensions when the AI crop was set
 - `upload_mode` — `reduced` or `full`
@@ -259,7 +253,7 @@ AI crop metadata is stored per image and only affects Artsorakel requests. Galle
 
 ### `profiles`
 Auto-created by a Postgres trigger on `auth.users` insert.
-Profile UI reads `username`, `display_name`, and `avatar_url`.
+Profile UI reads and writes `username`, `display_name`, `bio`, and `avatar_url`. The desktop **Profile & Cloud** page mirrors these same fields so the account identity is shared across web/mobile and desktop.
 The subscription/storage foundation also now lives here:
 - `cloud_plan` — `free` or `pro`; controls account status and full-res entitlement.
 - `full_res_storage_enabled` — compatibility flag for manually granting full-res access.
@@ -273,6 +267,8 @@ with a signed-URL fallback if the direct image fetch fails.
 The profile screen also exposes a self-service account deletion action, which calls the
 `delete-account` Supabase Edge Function.
 It now also shows an Account status block with image resolution, sync history, storage usage, and image count.
+
+Desktop local databases bind to a single Supabase auth user via `linked_cloud_user_id`. If a user wants to move a desktop database to another Sporely Cloud account, they must explicitly reset/migrate the desktop cloud link; simply logging in with another account is blocked before credentials are saved. Deleting the web account does not by itself migrate a desktop database, and the migration flow must avoid both duplicate cloud rows and accidental loss of useful spore data.
 
 ### `friendships`
 Bidirectional, status-gated (`pending` / `accepted` / `blocked`).
@@ -431,7 +427,7 @@ service-level R2 API credentials from `python.env`).
 - Queries SQLite for `cloud_id IS NULL OR sync_status = 'dirty'`
 - Upserts to Supabase (check-then-patch-or-post pattern)
 - Writes `cloud_id` + `sync_status = 'synced'` back to SQLite
-- Syncs the selected desktop images plus optional generated media (measure plot, thumbnail gallery, plate)
+- Syncs selected clean desktop observation images plus one clean thumbnail per image. Online-publishing overlays, watermarks, measure plots, thumbnail galleries, and plates stay out of Sporely Cloud media.
 - Pushes `observation_images.ai_crop_*` alongside the rest of each synced image row so web and desktop share the same AI crop geometry
 - Uses a lightweight local media signature so unchanged images/media can be skipped on later syncs
 - Media-signature comparison now ignores low-signal local-only churn such as file mtime drift, gallery layout state, order-only image changes, and older signature payloads that predate the shared AI crop fields

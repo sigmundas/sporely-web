@@ -12,6 +12,7 @@ import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
 import { getDefaultVisibility, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
+import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { Preferences } from '@capacitor/preferences'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
@@ -32,6 +33,25 @@ let detailLocationAutoApplied = ''
 let detailImageRows = []
 let detailImageSources = []
 let detailAiSources = []
+let detailAuthorProfile = null
+let detailFriendship = null
+let detailFollowState = { user: false, observation: false }
+
+const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
+const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
+const DETAIL_VIEW_SELECT = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
+const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
+
+function _isPhase7ColumnError(error) {
+  const message = String(error?.message || '').toLowerCase()
+  return !!error && (message.includes('is_draft') || message.includes('location_precision'))
+}
+
+async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
+  const result = await makeQuery(columns)
+  if (_isPhase7ColumnError(result.error)) return makeQuery(legacyColumns)
+  return result
+}
 
 export function initFindDetail() {
   const backBtn = document.getElementById('detail-back')
@@ -70,6 +90,10 @@ export function initFindDetail() {
   }
 
   document.getElementById('detail-ai-btn').addEventListener('click', _runAI)
+  document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
+  document.getElementById('detail-friend-btn')?.addEventListener('click', _sendFriendRequestFromDetail)
+  document.getElementById('detail-follow-user-btn')?.addEventListener('click', () => _toggleFollow('user'))
+  document.getElementById('detail-follow-observation-btn')?.addEventListener('click', () => _toggleFollow('observation'))
   document.getElementById('detail-uncertain').addEventListener('change', () => {
     if (!currentObs) return
     const value = document.getElementById('detail-taxon-input').value.trim()
@@ -111,11 +135,29 @@ export async function openFindDetail(obsId, options = {}) {
   if (cancelBtn) cancelBtn.style.display = hideCancelOverride ? 'none' : ''
   navigate('find-detail')
 
-  const { data: obs, error } = await supabase
-    .from('observations')
-    .select('id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility')
-    .eq('id', obsId)
-    .single()
+  let { data: obs, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations')
+      .select(columns)
+      .eq('id', obsId)
+      .single(),
+    DETAIL_SELECT,
+    DETAIL_SELECT_LEGACY,
+  )
+
+  if (error || !obs) {
+    const communityRes = await _withPhase7Fallback(
+      columns => supabase
+        .from('observations_community_view')
+        .select(columns)
+        .eq('id', obsId)
+        .single(),
+      DETAIL_VIEW_SELECT,
+      DETAIL_VIEW_SELECT_LEGACY,
+    )
+    obs = communityRes.data || null
+    error = communityRes.error
+  }
 
   if (error || !obs) {
     showToast(t('detail.couldNotLoadObservation'))
@@ -125,7 +167,9 @@ export async function openFindDetail(obsId, options = {}) {
 
   currentObs = obs
   currentObsIsOwner = obs.user_id === state.user?.id
+  await _loadDetailAuthorAndSocial()
   _applyOwnershipMode(currentObsIsOwner)
+  _renderDetailAuthorAndSocial()
 
   const displayName = formatDisplayName(obs.genus || '', obs.species || '', obs.common_name)
   _setDetailHeader({
@@ -171,7 +215,7 @@ export async function openFindDetail(obsId, options = {}) {
   }
 
   // Set visibility radio
-  const vis = obs.visibility || 'friends'
+  const vis = normalizeVisibility(obs.visibility, 'public')
   const visRadio = document.querySelector(`input[name="detail-vis"][value="${vis}"]`)
   if (visRadio) visRadio.checked = true
 
@@ -198,16 +242,23 @@ export async function openFindDetail(obsId, options = {}) {
   detailImageRows = []
   detailImageSources = []
   detailAiSources = []
+  detailAuthorProfile = null
+  detailFriendship = null
+  detailFollowState = { user: false, observation: false }
 
   if (imgData?.length) {
-    const sources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
-    const aiSources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'medium' })
+    const originalSources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
+    const displaySources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'medium' })
+    const aiSources = displaySources
     detailImageRows = [...imgData]
-    detailImageSources = [...sources]
+    detailImageSources = [...originalSources]
     detailAiSources = [...aiSources]
 
-    sources.forEach((source, index) => {
-      _appendDetailGalleryImage(imgData[index], source, aiSources[index] || null, { index })
+    displaySources.forEach((source, index) => {
+      _appendDetailGalleryImage(imgData[index], source, aiSources[index] || null, {
+        index,
+        originalSource: originalSources[index] || null,
+      })
     })
   }
 
@@ -238,8 +289,14 @@ export async function openFindDetail(obsId, options = {}) {
   _loadComments(obsId)
 }
 
+function _mediaSourceUrl(source) {
+  return source?.primaryUrl || source?.fallbackUrl || ''
+}
+
 function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
-  if (!row || (!source?.primaryUrl && !source?.fallbackUrl)) return null
+  const originalSource = options.originalSource || source
+  const displayUrl = _mediaSourceUrl(source) || _mediaSourceUrl(originalSource)
+  if (!row || !displayUrl) return null
   const gallery = document.getElementById('detail-gallery')
   if (!gallery) return null
 
@@ -251,12 +308,13 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
 
   const img = document.createElement('img')
   img.className = 'detail-gallery-img'
-  img.src = source.primaryUrl || source.fallbackUrl
+  img.src = displayUrl
   img.loading = 'lazy'
   img.alt = ''
   img.dataset.storagePath = row.storage_path || ''
-  img.dataset.aiSrc = aiSource?.primaryUrl || aiSource?.fallbackUrl || img.src
-  img.dataset.aiFallback = source.fallbackUrl || source.primaryUrl || img.src
+  img.dataset.fullSrc = _mediaSourceUrl(originalSource) || displayUrl
+  img.dataset.aiSrc = _mediaSourceUrl(aiSource) || displayUrl
+  img.dataset.aiFallback = _mediaSourceUrl(originalSource) || _mediaSourceUrl(source) || displayUrl
   if (source.fallbackUrl && source.fallbackUrl !== source.primaryUrl) {
     img.addEventListener('error', () => {
       if (img.dataset.fallbackApplied === 'true') return
@@ -269,7 +327,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   img.addEventListener('click', () => {
     const galleryImgs = Array.from(gallery.querySelectorAll('.detail-gallery-img'))
     const currentIndex = galleryImgs.indexOf(img)
-    openPhotoViewer(galleryImgs.map(i => i.src), Math.max(0, currentIndex))
+    openPhotoViewer(galleryImgs.map(i => i.dataset.fullSrc || i.src), Math.max(0, currentIndex))
   })
   container.appendChild(img)
 
@@ -285,7 +343,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
           title: t('crop.editorTitle'),
           startIndex: Math.max(0, startIndex),
           images: detailImageRows.map((r, i) => ({
-            url: detailImageSources[i]?.primaryUrl || detailImageSources[i]?.fallbackUrl || '',
+            url: _mediaSourceUrl(detailImageSources[i]) || _mediaSourceUrl(detailAiSources[i]) || '',
             aiCropRect: normalizeAiCropRect({
               x1: r.ai_crop_x1, y1: r.ai_crop_y1,
               x2: r.ai_crop_x2, y2: r.ai_crop_y2,
@@ -350,7 +408,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
 
   if (!options.skipStateInsert && !detailImageRows.some(r => String(r.id) === String(row.id))) {
     detailImageRows.splice(index, 0, row)
-    detailImageSources.splice(index, 0, source)
+    detailImageSources.splice(index, 0, originalSource)
     detailAiSources.splice(index, 0, aiSource)
   }
   return container
@@ -491,6 +549,10 @@ function _resetForm() {
   document.getElementById('detail-notes').value       = ''
   document.getElementById('detail-uncertain').checked = false
   _setDetailHeader({ fallbackName: t('detail.unknownSpecies') })
+  detailAuthorProfile = null
+  detailFriendship = null
+  detailFollowState = { user: false, observation: false }
+  _renderDetailAuthorAndSocial()
   document.getElementById('detail-date').textContent  = '—'
   const timeEl = document.getElementById('detail-time')
   const timeVal = document.getElementById('detail-time-val')
@@ -503,7 +565,7 @@ function _resetForm() {
   if (cancelBtn) cancelBtn.style.display = ''
 
   // Reset visibility to default
-  const r = document.querySelector(`input[name="detail-vis"][value="${getDefaultVisibility()}"]`)
+  const r = document.querySelector(`input[name="detail-vis"][value="${normalizeVisibility(getDefaultVisibility(), 'public')}"]`)
   if (r) r.checked = true
 
   // Clear comments
@@ -568,6 +630,160 @@ function _renderDetailLocationDropdown(show) {
   })
 }
 
+function _profileLabel(profile, fallback = t('common.unknown')) {
+  if (profile?.username) return `@${profile.username}`
+  if (profile?.display_name) return profile.display_name
+  return fallback
+}
+
+function _profileInitial(profile, fallback = '?') {
+  const source = profile?.username || profile?.display_name || fallback
+  return String(source).replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
+}
+
+async function _loadDetailAuthorAndSocial() {
+  detailAuthorProfile = null
+  detailFriendship = null
+  detailFollowState = { user: false, observation: false }
+  if (!currentObs?.user_id) return
+
+  const isOwner = currentObs.user_id === state.user?.id
+  const profilePromise = supabase
+    .from('profiles')
+    .select('id, username, display_name, avatar_url')
+    .eq('id', currentObs.user_id)
+    .maybeSingle()
+
+  const friendshipPromise = isOwner ? Promise.resolve({ data: [] }) : supabase
+    .from('friendships')
+    .select('id, requester_id, addressee_id, status')
+    .or(`and(requester_id.eq.${state.user.id},addressee_id.eq.${currentObs.user_id}),and(requester_id.eq.${currentObs.user_id},addressee_id.eq.${state.user.id})`)
+    .limit(1)
+
+  const followsPromise = isOwner ? Promise.resolve({ data: [] }) : supabase
+    .from('follows')
+    .select('target_type, target_id')
+    .eq('user_id', state.user.id)
+    .in('target_type', ['user', 'observation'])
+    .in('target_id', [currentObs.user_id, currentObs.id])
+
+  const [profileRes, friendshipRes, followsRes] = await Promise.all([profilePromise, friendshipPromise, followsPromise])
+  if (!profileRes.error) detailAuthorProfile = profileRes.data || null
+  if (!friendshipRes.error) detailFriendship = friendshipRes.data?.[0] || null
+  if (!followsRes.error) {
+    for (const row of followsRes.data || []) {
+      if (row.target_type === 'user' && String(row.target_id) === String(currentObs.user_id)) detailFollowState.user = true
+      if (row.target_type === 'observation' && String(row.target_id) === String(currentObs.id)) detailFollowState.observation = true
+    }
+  }
+}
+
+function _renderDetailAuthorAndSocial() {
+  const authorBtn = document.getElementById('detail-author')
+  const authorName = document.getElementById('detail-author-name')
+  const authorAvatar = document.getElementById('detail-author-avatar')
+  const socialRow = document.getElementById('detail-social-row')
+  const friendBtn = document.getElementById('detail-friend-btn')
+  const followUserBtn = document.getElementById('detail-follow-user-btn')
+  const followObsBtn = document.getElementById('detail-follow-observation-btn')
+  const isOwner = currentObs?.user_id === state.user?.id
+
+  if (authorBtn && currentObs?.user_id) {
+    const label = isOwner ? t('common.you') : _profileLabel(detailAuthorProfile)
+    authorBtn.style.display = 'inline-flex'
+    if (authorName) authorName.textContent = label
+    if (authorAvatar) {
+      const avatarUrl = detailAuthorProfile?.avatar_url || ''
+      authorAvatar.innerHTML = avatarUrl
+        ? `<img src="${_esc(avatarUrl)}" alt="" loading="lazy" decoding="async">`
+        : _esc(_profileInitial(detailAuthorProfile, label))
+    }
+  } else if (authorBtn) {
+    authorBtn.style.display = 'none'
+  }
+
+  if (socialRow) socialRow.style.display = !isOwner && currentObs?.user_id ? 'flex' : 'none'
+  if (followObsBtn) followObsBtn.style.display = !isOwner && currentObs?.id ? 'inline-flex' : 'none'
+
+  if (friendBtn) {
+    const status = detailFriendship?.status || ''
+    const accepted = status === 'accepted'
+    const pending = status === 'pending'
+    friendBtn.textContent = accepted ? '❤️' : '🤍'
+    friendBtn.classList.toggle('active', accepted)
+    friendBtn.disabled = accepted || pending
+    friendBtn.title = accepted ? t('social.friendAccepted') : pending ? t('social.friendPending') : t('social.friendRequest')
+    friendBtn.setAttribute('aria-label', friendBtn.title)
+  }
+
+  if (followUserBtn) {
+    followUserBtn.classList.toggle('active', !!detailFollowState.user)
+    followUserBtn.title = detailFollowState.user ? t('social.unfollowUser') : t('social.followUser')
+    followUserBtn.setAttribute('aria-label', followUserBtn.title)
+  }
+
+  if (followObsBtn) {
+    followObsBtn.classList.toggle('active', !!detailFollowState.observation)
+    followObsBtn.title = detailFollowState.observation ? t('social.unfollowObservation') : t('social.followObservation')
+    followObsBtn.setAttribute('aria-label', followObsBtn.title)
+  }
+}
+
+function _openAuthorFinds() {
+  if (!currentObs?.user_id || currentObs.user_id === state.user?.id) return
+  openFinds('user', {
+    userId: currentObs.user_id,
+    username: _profileLabel(detailAuthorProfile),
+    avatarUrl: detailAuthorProfile?.avatar_url || '',
+    resetSearch: true,
+    resetFilters: true,
+  })
+}
+
+async function _sendFriendRequestFromDetail() {
+  if (!currentObs?.user_id || currentObs.user_id === state.user?.id) return
+  const btn = document.getElementById('detail-friend-btn')
+  if (btn) btn.disabled = true
+  const { data, error } = await supabase
+    .from('friendships')
+    .insert({ requester_id: state.user.id, addressee_id: currentObs.user_id, status: 'pending' })
+    .select('id, requester_id, addressee_id, status')
+    .single()
+
+  if (error && error.code !== '23505') {
+    showToast(t('social.friendFailed'))
+    if (btn) btn.disabled = false
+    return
+  }
+
+  detailFriendship = data || { status: 'pending' }
+  _renderDetailAuthorAndSocial()
+}
+
+async function _toggleFollow(kind) {
+  if (!currentObs || currentObs.user_id === state.user?.id) return
+  const targetType = kind === 'user' ? 'user' : 'observation'
+  const targetId = targetType === 'user' ? currentObs.user_id : currentObs.id
+  const key = targetType === 'user' ? 'user' : 'observation'
+  const currentlyFollowing = !!detailFollowState[key]
+  const btn = document.getElementById(targetType === 'user' ? 'detail-follow-user-btn' : 'detail-follow-observation-btn')
+  if (btn) btn.disabled = true
+
+  const result = currentlyFollowing
+    ? await supabase.from('follows').delete().eq('user_id', state.user.id).eq('target_type', targetType).eq('target_id', targetId)
+    : await supabase.from('follows').insert({ user_id: state.user.id, target_type: targetType, target_id: targetId })
+
+  if (result.error && result.error.code !== '23505') {
+    showToast(t('social.followFailed'))
+    if (btn) btn.disabled = false
+    return
+  }
+
+  detailFollowState[key] = !currentlyFollowing
+  if (btn) btn.disabled = false
+  _renderDetailAuthorAndSocial()
+}
+
 function _applyOwnershipMode(isOwner) {
   const readonlyNote = document.getElementById('detail-readonly-note')
   const saveBtn = document.getElementById('detail-save-btn')
@@ -596,6 +812,10 @@ function _applyOwnershipMode(isOwner) {
 
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.disabled = !isOwner
+  })
+  const isPro = state.cloudPlan?.cloudPlan === 'pro' || !!state.cloudPlan?.fullResStorageEnabled
+  document.querySelectorAll('#detail-visibility .vis-option--slot small').forEach(label => {
+    label.style.display = isPro ? 'none' : ''
   })
 
   let modContainer = document.getElementById('detail-mod-container')
@@ -702,7 +922,7 @@ async function _save() {
     habitat:    document.getElementById('detail-habitat').value.trim()   || null,
     notes:      document.getElementById('detail-notes').value.trim()     || null,
     uncertain:  document.getElementById('detail-uncertain').checked,
-    visibility: document.querySelector('input[name="detail-vis"]:checked')?.value || 'friends',
+    visibility: toCloudVisibility(document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'),
   }
 
   const taxonInputValue = document.getElementById('detail-taxon-input').value.trim()
@@ -1187,9 +1407,9 @@ async function _addPhotosToObservation(files) {
         ai_crop_x2: cropMeta.aiCropRect?.x2 ?? null,
         ai_crop_y2: cropMeta.aiCropRect?.y2 ?? null,
       }
-      const [source] = await resolveMediaSources([storagePath], { variant: 'original' })
-      const [aiSource] = await resolveMediaSources([storagePath], { variant: 'medium' })
-      _appendDetailGalleryImage(insertedRow, source, aiSource)
+      const [originalSource] = await resolveMediaSources([storagePath], { variant: 'original' })
+      const [displaySource] = await resolveMediaSources([storagePath], { variant: 'medium' })
+      _appendDetailGalleryImage(insertedRow, displaySource, displaySource, { originalSource })
     }
 
     showToast(`${files.length} photo(s) added.`)

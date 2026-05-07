@@ -4,6 +4,7 @@ import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './clou
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
 import { BackgroundTask } from '@capawesome/capacitor-background-task'
 import { isNativeApp } from './platform.js'
+import { normalizeObservationVisibility, toCloudVisibility } from './visibility.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -314,7 +315,9 @@ export async function getQueuedObservations(userId) {
       location: item.obsPayload.location || null,
       notes: item.obsPayload.notes || null,
       uncertain: !!item.obsPayload.uncertain,
-      visibility: item.obsPayload.visibility || 'friends',
+      visibility: normalizeObservationVisibility(item.obsPayload.visibility),
+      is_draft: item.obsPayload.is_draft !== false,
+      location_precision: item.obsPayload.location_precision || 'exact',
       gps_latitude: item.obsPayload.gps_latitude ?? item.obsPayload.gpsLat ?? null,
       gps_longitude: item.obsPayload.gps_longitude ?? item.obsPayload.gpsLon ?? null,
       gps_altitude: item.obsPayload.gps_altitude ?? item.obsPayload.gpsAltitude ?? null,
@@ -470,7 +473,10 @@ async function _runSyncQueue() {
             syncImageCount: queuedImages.length,
           })
 
-          const payload = { ...item.obsPayload }
+          const payload = {
+            ...item.obsPayload,
+            visibility: toCloudVisibility(item.obsPayload.visibility, 'public'),
+          }
           if (payload.gpsLat !== undefined) {
             payload.gps_latitude = payload.gpsLat
             delete payload.gpsLat
@@ -491,6 +497,10 @@ async function _runSyncQueue() {
           if (error?.message?.includes('captured_at')) {
             const { captured_at: _, ...payloadWithout } = payload
             ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithout).select('id').single())
+          }
+          if (error?.message?.includes('is_draft') || error?.message?.includes('location_precision')) {
+            const { is_draft: _isDraft, location_precision: _locationPrecision, ...payloadWithoutPhase7 } = payload
+            ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithoutPhase7).select('id').single())
           }
           if (error) throw error
 

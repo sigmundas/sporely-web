@@ -16,6 +16,7 @@ import android.hardware.camera2.CameraManager;
 import android.location.Location;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Size;
 import android.util.SizeF;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -41,6 +42,8 @@ import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.MeteringPoint;
 import androidx.camera.core.MeteringPointFactory;
 import androidx.camera.core.Preview;
+import androidx.camera.core.resolutionselector.ResolutionSelector;
+import androidx.camera.core.resolutionselector.ResolutionStrategy;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.extensions.ExtensionMode;
 import androidx.camera.extensions.ExtensionsManager;
@@ -85,6 +88,7 @@ public class NativeCameraActivity extends AppCompatActivity {
     private static final int SHUTTER_BUTTON_SIZE_DP = 82;
     private static final int NIGHT_TOGGLE_ABOVE_CONTROLS_DP = CONTROL_ROW_HEIGHT_DP + 76;
     private static final int FOCUS_RING_SIZE_DP = 74;
+    private static final Size TARGET_CAPTURE_SIZE = new Size(4000, 3000);
 
     private PreviewView previewView;
     private View focusRing;
@@ -462,8 +466,16 @@ public class NativeCameraActivity extends AppCompatActivity {
         Preview.Builder previewBuilder = new Preview.Builder()
             .setTargetRotation(getDisplayRotation());
         int jpegQuality = getIntent().getIntExtra("jpegQuality", 75);
+        ResolutionSelector captureResolutionSelector = new ResolutionSelector.Builder()
+            .setResolutionStrategy(new ResolutionStrategy(
+                TARGET_CAPTURE_SIZE,
+                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+            ))
+            .setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
+            .build();
         ImageCapture.Builder captureBuilder = new ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setResolutionSelector(captureResolutionSelector)
             .setOutputFormat(outputFormat)
             .setJpegQuality(jpegQuality)
             .setTargetRotation(getDisplayRotation());

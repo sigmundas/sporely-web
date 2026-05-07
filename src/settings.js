@@ -1,3 +1,5 @@
+import { VISIBILITY_PUBLIC, normalizeVisibility as normalizeUiVisibility } from './visibility.js'
+
 const DEFAULT_VISIBILITY_KEY = 'sporely-default-visibility'
 const USE_SYSTEM_CAMERA_KEY = 'sporely-use-system-camera'
 const LAST_SYNC_AT_KEY = 'sporely-last-sync-at'
@@ -51,16 +53,11 @@ export function setPhotoGapMinutes(value) {
 }
 
 export function normalizeVisibility(value) {
-  const normalized = String(value || '').trim().toLowerCase()
-  return normalized === 'private' || normalized === 'public' ? normalized : 'friends'
+  return normalizeUiVisibility(value, VISIBILITY_PUBLIC)
 }
 
 export function getDefaultVisibility() {
-  try {
-    return normalizeVisibility(localStorage.getItem(DEFAULT_VISIBILITY_KEY))
-  } catch (_) {
-    return 'friends'
-  }
+  return VISIBILITY_PUBLIC
 }
 
 export function setDefaultVisibility(value) {

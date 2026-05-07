@@ -21,8 +21,9 @@ function _isMissingColumnError(error, columnName) {
 
 export function normalizeCloudPlanProfile(profile) {
   const rawPlan = String(profile?.cloud_plan ?? profile?.cloudPlan ?? '').trim().toLowerCase()
-  const cloudPlan = rawPlan === 'pro' ? 'pro' : 'free'
-  const fullResStorageEnabled = cloudPlan === 'pro' || !!(profile?.full_res_storage_enabled ?? profile?.fullResStorageEnabled)
+  const hasProAccess = rawPlan === 'pro' || !!(profile?.is_pro ?? profile?.isPro)
+  const cloudPlan = hasProAccess ? 'pro' : 'free'
+  const fullResStorageEnabled = hasProAccess || !!(profile?.full_res_storage_enabled ?? profile?.fullResStorageEnabled)
   return {
     cloudPlan,
     fullResStorageEnabled,
@@ -78,13 +79,14 @@ export async function fetchCloudPlanProfile(userId) {
 
   const { data, error } = await supabase
     .from('profiles')
-    .select('cloud_plan, full_res_storage_enabled, storage_quota_bytes, total_storage_bytes, storage_used_bytes, image_count')
+    .select('is_pro, cloud_plan, full_res_storage_enabled, storage_quota_bytes, total_storage_bytes, storage_used_bytes, image_count')
     .eq('id', uid)
     .single()
 
   if (error) {
     const missingColumns = [
       'cloud_plan',
+      'is_pro',
       'full_res_storage_enabled',
       'storage_quota_bytes',
       'total_storage_bytes',

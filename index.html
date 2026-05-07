@@ -321,6 +321,7 @@
       <div style="display:flex; align-items:center; justify-content:space-between; border-bottom: 1px solid var(--border-dim); padding-right:18px;">
         <div class="scope-tabs" id="finds-scope-tabs" style="border-bottom:none; flex:1; padding-right:0;">
           <button class="scope-tab active" data-scope="mine">Mine</button>
+          <button class="scope-tab" data-scope="feed">Feed 🧭</button>
           <button class="scope-tab" data-scope="friends">Friends</button>
           <button class="scope-tab" data-scope="community">Community</button>
         </div>
@@ -445,8 +446,8 @@
             <div class="field-meta-val">
               <div class="vis-radio-group" id="review-visibility">
                 <label class="vis-option"><input type="radio" name="review-vis" value="private"> <span>Private</span></label>
-                <label class="vis-option"><input type="radio" name="review-vis" value="friends" checked> <span>Friends</span></label>
-                <label class="vis-option"><input type="radio" name="review-vis" value="public"> <span>Public</span></label>
+                <label class="vis-option"><input type="radio" name="review-vis" value="friends"> <span>Friends</span></label>
+                <label class="vis-option"><input type="radio" name="review-vis" value="public" checked> <span>Public</span></label>
               </div>
             </div>
           </div>
@@ -497,11 +498,19 @@
             <div class="detail-title-common" id="detail-title-common">Unknown species</div>
             <div class="detail-title-latin" id="detail-title-latin" style="display:none"></div>
           </div>
+          <button class="detail-author" id="detail-author" type="button" style="display:none">
+            <span class="detail-author-name" id="detail-author-name"></span>
+            <span class="detail-author-avatar" id="detail-author-avatar">?</span>
+          </button>
           <div class="detail-date-time">
             <span id="detail-date">—</span>
             <span id="detail-time" style="display:none">· <span id="detail-time-val"></span></span>
           </div>
           <div class="detail-observation-badge" id="detail-readonly-note" style="display:none"></div>
+        </div>
+        <div class="detail-social-row" id="detail-social-row" style="display:none">
+          <button class="detail-social-btn" id="detail-friend-btn" type="button">🤍</button>
+          <button class="detail-social-btn" id="detail-follow-user-btn" type="button">🧭</button>
         </div>
         <div class="detail-gallery" id="detail-gallery"></div>
         <div class="detail-coords-bar" id="detail-coords" style="display:none"></div>
@@ -514,9 +523,12 @@
                 placeholder="Unknown species" autocomplete="off" spellcheck="false">
               <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
             </div>
-            <button class="ai-id-btn" id="detail-ai-btn" style="margin-top:8px;width:100%">
-              <div class="ai-dot"></div> Identify with Artsorakel AI
-            </button>
+            <div class="detail-ai-row">
+              <button class="ai-id-btn" id="detail-ai-btn">
+                <div class="ai-dot"></div> Identify with Artsorakel AI
+              </button>
+              <button class="detail-follow-btn" id="detail-follow-observation-btn" type="button" aria-label="Follow observation" title="Follow observation">🧭</button>
+            </div>
             <div id="detail-ai-results" style="display:none"></div>
           </div>
 
@@ -552,8 +564,8 @@
           <div class="detail-field" style="margin-top:8px">
             <div class="detail-field-label">Sharing</div>
             <div class="vis-radio-group" id="detail-visibility">
-              <label class="vis-option"><input type="radio" name="detail-vis" value="private"> <span>Private</span></label>
-              <label class="vis-option"><input type="radio" name="detail-vis" value="friends"> <span>Friends</span></label>
+              <label class="vis-option vis-option--slot"><input type="radio" name="detail-vis" value="private"> <span>Private<small>(1 slot)</small></span></label>
+              <label class="vis-option vis-option--slot"><input type="radio" name="detail-vis" value="friends"> <span>Friends<small>(1 slot)</small></span></label>
               <label class="vis-option"><input type="radio" name="detail-vis" value="public"> <span>Public</span></label>
             </div>
           </div>
@@ -898,11 +910,10 @@
           </label>
         </div>
 
-        <div class="settings-section-label" id="settings-default-visibility-label" style="margin-top:22px">Default visibility</div>
-        <div class="theme-segment settings-default-visibility-segment">
+        <div class="settings-section-label" id="settings-default-visibility-label" style="margin-top:22px;display:none">Default visibility</div>
+        <div class="theme-segment settings-default-visibility-segment" style="display:none">
           <button class="theme-seg-btn settings-default-visibility-btn" id="settings-default-visibility-private" data-default-visibility="private">Private</button>
           <button class="theme-seg-btn settings-default-visibility-btn" id="settings-default-visibility-friends" data-default-visibility="friends">Friends</button>
-          <button class="theme-seg-btn settings-default-visibility-btn" id="settings-default-visibility-public" data-default-visibility="public">Public</button>
         </div>
 
         <div class="settings-section-label" id="settings-data-label" style="margin-top:22px">Data</div>

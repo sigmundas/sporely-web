@@ -11,6 +11,7 @@ import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
 import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js';
+import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
@@ -258,7 +259,7 @@ function _buildSessionsFromSourceItems() {
       locationLookupKey: previous?.locationLookupKey || '',
       locationAutoApplied: previous?.locationAutoApplied || '',
       taxon: previous?.taxon || null,
-      visibility: previous?.visibility || getDefaultVisibility(),
+      visibility: normalizeCaptureVisibility(previous?.visibility, getDefaultVisibility()),
       exifDebug: group.map(item => item.dbg).filter(Boolean),
     };
   });
@@ -1298,7 +1299,7 @@ export function renderSessions() {
   list.querySelectorAll('.import-vis-radio[data-sid]').forEach(input => {
     input.addEventListener('change', () => {
       const s = sessionById(input.dataset.sid);
-      if (s) s.visibility = input.value;
+      if (s) s.visibility = normalizeCaptureVisibility(input.value, getDefaultVisibility());
       _persistSessions();
     });
   });
@@ -1350,7 +1351,8 @@ function buildCardHTML(session) {
   const taxonVal = session.taxon ? escHtml(session.taxon.displayName) : '';
   const locVal = escHtml(session.locationName);
   const aiPredictions = Array.isArray(session.aiPredictions) ? session.aiPredictions : [];
-  const visChecked = v => session.visibility === v ? 'checked' : '';
+  const sessionVisibility = normalizeCaptureVisibility(session.visibility, getDefaultVisibility());
+  const visChecked = v => sessionVisibility === v ? 'checked' : '';
   const heicWithoutGps = session.gpsLat === null && (session.exifDebug || []).some(d =>
     /\.(heic|heif)$/i.test(d?.fileName || '') || /heic|heif/i.test(d?.fileType || '')
   );
@@ -1405,7 +1407,6 @@ function buildCardHTML(session) {
       <div class="vis-radio-group">
         <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="private" ${visChecked('private')}> <span>${translateVisibility('private')}</span></label>
         <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="friends" ${visChecked('friends')}> <span>${translateVisibility('friends')}</span></label>
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="public" ${visChecked('public')}> <span>${translateVisibility('public')}</span></label>
       </div>
     </div>
   </div>
@@ -1650,7 +1651,9 @@ async function saveAll() {
         genus: session.taxon?.genus || null,
         species: session.taxon?.specificEpithet || null,
         common_name: session.taxon?.vernacularName || null,
-        visibility: session.visibility || getDefaultVisibility(),
+        visibility: toCloudVisibility(normalizeVisibility(session.visibility, getDefaultVisibility())),
+        is_draft: true,
+        location_precision: 'exact',
       };
 
       _ensureSessionImageMeta(session);

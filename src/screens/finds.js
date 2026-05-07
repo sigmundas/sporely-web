@@ -9,6 +9,7 @@ import { QUEUE_EVENT, getQueuedObservations, deleteQueuedObservation, triggerSyn
 import { openFindDetail } from './find_detail.js'
 import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openPreferredCamera } from '../camera-actions.js'
+import { normalizeObservationVisibility } from '../visibility.js'
 
 let currentScope = 'mine'
 const _cache = {}   // scope → array of observations
@@ -24,6 +25,22 @@ let _pullDistance = 0
 let _isRefreshing = false
 let _queuedRefreshTimer = null
 let _loadFindsSeq = 0
+
+const MINE_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, is_draft, location_precision'
+const MINE_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type'
+const FEED_SELECT = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, is_draft, location_precision'
+const FEED_SELECT_LEGACY = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude'
+
+function _isPhase7ColumnError(error) {
+  const message = String(error?.message || '').toLowerCase()
+  return !!error && (message.includes('is_draft') || message.includes('location_precision'))
+}
+
+async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
+  const result = await makeQuery(columns)
+  if (_isPhase7ColumnError(result.error)) return makeQuery(legacyColumns)
+  return result
+}
 
 function _formatFingerprintCoord(value) {
   const num = Number(value)
@@ -44,7 +61,7 @@ function _observationMatchKey(obs) {
     obs.genus || '',
     obs.species || '',
     obs.common_name || '',
-    obs.visibility || '',
+    normalizeObservationVisibility(obs.visibility),
     _formatFingerprintCoord(obs.gps_latitude),
     _formatFingerprintCoord(obs.gps_longitude),
   ].join('|')
@@ -407,6 +424,8 @@ export async function loadFinds() {
     await _fetchMine()
   } else if (currentScope === 'user') {
     await _fetchUser(state.findsTargetUserId)
+  } else if (currentScope === 'feed') {
+    await _fetchFollowFeed()
   } else if (currentScope === 'friends') {
     await _fetchFriends()
   } else {
@@ -419,12 +438,16 @@ export async function loadFinds() {
 }
 
 async function _fetchMine() {
-  const { data, error } = await supabase
-    .from('observations')
-    .select('id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
-    .eq('user_id', state.user.id)
-    .order('date', { ascending: false })
-    .limit(100)
+  const { data, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations')
+      .select(columns)
+      .eq('user_id', state.user.id)
+      .order('date', { ascending: false })
+      .limit(100),
+    MINE_SELECT,
+    MINE_SELECT_LEGACY,
+  )
 
   if (error) { showToast(t('finds.couldNotLoad')); _cache['mine'] = []; return }
 
@@ -437,12 +460,16 @@ async function _fetchMine() {
 }
 
 async function _fetchFriends() {
-  const { data, error } = await supabase
-    .from('observations_friend_view')
-    .select('id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude')
-    .neq('user_id', state.user.id)
-    .order('date', { ascending: false })
-    .limit(100)
+  const { data, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations_friend_view')
+      .select(columns)
+      .neq('user_id', state.user.id)
+      .order('date', { ascending: false })
+      .limit(100),
+    FEED_SELECT,
+    FEED_SELECT_LEGACY,
+  )
 
   if (error) { 
     console.error('Failed to fetch friends feed:', error)
@@ -454,11 +481,15 @@ async function _fetchFriends() {
 }
 
 async function _fetchCommunity() {
-  const { data, error } = await supabase
-    .from('observations_community_view')
-    .select('id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude')
-    .order('date', { ascending: false })
-    .limit(100)
+  const { data, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations_community_view')
+      .select(columns)
+      .order('date', { ascending: false })
+      .limit(100),
+    FEED_SELECT,
+    FEED_SELECT_LEGACY,
+  )
 
   if (error) { 
     console.error('Failed to fetch community feed:', error)
@@ -469,11 +500,39 @@ async function _fetchCommunity() {
   _cache['community'] = data || []
 }
 
+async function _fetchFollowFeed() {
+  const { data, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations_follow_view')
+      .select(columns)
+      .order('date', { ascending: false })
+      .limit(100),
+    FEED_SELECT,
+    FEED_SELECT_LEGACY,
+  )
+
+  if (error) {
+    console.warn('Failed to fetch followed feed:', error.message)
+    _cache['feed'] = []
+    return
+  }
+  await _attachSporeFlags(data)
+  _cache['feed'] = data || []
+}
+
 async function _fetchUser(userId) {
   if (!userId) return
   const [friendRes, publicRes] = await Promise.all([
-    supabase.from('observations').select('id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type').eq('user_id', userId).order('date', { ascending: false }).limit(100),
-    supabase.from('observations_community_view').select('id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude').eq('user_id', userId).order('date', { ascending: false }).limit(100)
+    _withPhase7Fallback(
+      columns => supabase.from('observations').select(columns).eq('user_id', userId).order('date', { ascending: false }).limit(100),
+      MINE_SELECT,
+      MINE_SELECT_LEGACY,
+    ),
+    _withPhase7Fallback(
+      columns => supabase.from('observations_community_view').select(columns).eq('user_id', userId).order('date', { ascending: false }).limit(100),
+      FEED_SELECT,
+      FEED_SELECT_LEGACY,
+    )
   ])
   
   const seen = new Set()
@@ -672,6 +731,19 @@ function _authorChip(obs, options = {}) {
   </div>`
 }
 
+function _draftBadge(obs) {
+  return obs?.is_draft === true
+    ? `<span class="find-card-draft-badge">${_esc(t('finds.draftBadge'))}</span>`
+    : ''
+}
+
+function _emptyFindsText(q, options = {}) {
+  if (q) return t('finds.noResults', { query: q })
+  if (currentScope === 'feed') return t('finds.noFollowed')
+  if (options.isFriends || currentScope === 'friends') return t('finds.noFriends')
+  return options.capture ? t('finds.noObservationsCapture') : t('finds.noObservations')
+}
+
 // ── Render: by species ────────────────────────────────────────────────────────
 
 function _speciesKey(obs) {
@@ -697,13 +769,10 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
     if (subtitle) subtitle.textContent = ''
-    const emptyText = q
-      ? t('finds.noResults', { query: q })
-      : currentScope === 'friends' ? t('finds.noFriends') : t('finds.noObservations')
+    const emptyText = _emptyFindsText(q)
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
   }
-  if (subtitle) subtitle.textContent = `${tp('finds.observationCount', data.length)} · ${tp('finds.speciesCount', speciesCount)}`
 
   // Group by species key, preserving first-seen insertion order
   const groupMap = new Map()
@@ -722,6 +791,7 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
     })
 
   const speciesCount = groups.filter(([k]) => k !== '\x00unidentified').length
+  if (subtitle) subtitle.textContent = `${tp('finds.observationCount', data.length)} · ${tp('finds.speciesCount', speciesCount)}`
 
   const allObs = groups.flatMap(([, g]) => g.items).filter(o => !o._pendingSync)
   const imageVariant = variant === 'cards' ? 'medium' : 'small'
@@ -784,7 +854,7 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
           )
           html += `<div class="find-card-wrap find-card-wrap--two">
             <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
                 <div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>
@@ -802,7 +872,7 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
           )
           html += `<div class="find-card-wrap find-card-wrap--three">
             <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
               <div class="find-card-body find-card-body--three">
                 ${compactNameHtml}
                 ${obs._pendingSync ? `<div class="find-card-loc">${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
@@ -832,7 +902,7 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-            <div class="find-card-photo-wrap">${photoWrapInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+            <div class="find-card-photo-wrap">${photoWrapInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
             <div class="find-card-body">
               <div class="find-card-name-row">${nameHtml}${countBadge}</div>
               <div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>
@@ -867,9 +937,7 @@ function _renderTiles(list, subtitle, data) {
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
     if (subtitle) subtitle.textContent = ''
-    const emptyText = q
-      ? t('finds.noResults', { query: q })
-      : currentScope === 'friends' ? t('finds.noFriends') : t('finds.noObservations')
+    const emptyText = _emptyFindsText(q)
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
   }
@@ -888,7 +956,7 @@ function _renderTiles(list, subtitle, data) {
         'find-tile-empty'
       )
       html += `<div class="find-tile" data-id="${obs.id}">
-        <div class="find-tile-photo">${photo}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
+        <div class="find-tile-photo">${photo}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
         <div class="find-tile-name">${obs.uncertain ? '? ' : ''}${name}</div>
       </div>`
     })
@@ -917,9 +985,7 @@ function _renderCards(list, subtitle, data, options) {
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
     if (subtitle) subtitle.textContent = ''
-    const emptyText = q
-      ? t('finds.noResults', { query: q })
-      : isFriends ? t('finds.noFriends') : t('finds.noObservationsCapture')
+    const emptyText = _emptyFindsText(q, { isFriends, capture: true })
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
   }
@@ -982,9 +1048,9 @@ function _renderCards(list, subtitle, data, options) {
 
         const statusIcon = obs._pendingSync
           ? `<svg class="find-card-vis-icon find-card-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
-          : obs.visibility === 'private'
+          : normalizeObservationVisibility(obs.visibility) === 'private'
             ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`
-            : obs.visibility === 'friends'
+            : normalizeObservationVisibility(obs.visibility) === 'friends'
               ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
               : ''
         const sporesIcon = obs.has_spores
@@ -1007,7 +1073,7 @@ function _renderCards(list, subtitle, data, options) {
           )
           html += `<div class="find-card-wrap find-card-wrap--two">
             <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
                 ${authorMeta}
@@ -1029,7 +1095,7 @@ function _renderCards(list, subtitle, data, options) {
           )
           html += `<div class="find-card-wrap find-card-wrap--three">
             <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
               <div class="find-card-body find-card-body--three">
                 ${compactNameHtml}
                 ${obs._pendingSync ? `<div class="find-card-loc">${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
@@ -1060,7 +1126,7 @@ function _renderCards(list, subtitle, data, options) {
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-            <div class="find-card-photo-wrap">${photoWrapInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+            <div class="find-card-photo-wrap">${photoWrapInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
             <div class="find-card-body">
               <div class="find-card-name-row">${nameHtml}${countBadge}</div>
               ${authorMeta}

@@ -412,7 +412,7 @@ async function fetchStorageProfile(env, userId) {
 
   const query = [
     `id=eq.${encodeURIComponent(userId)}`,
-    'select=cloud_plan,storage_quota_bytes,total_storage_bytes,storage_used_bytes,image_count,is_banned',
+    'select=is_pro,cloud_plan,storage_quota_bytes,total_storage_bytes,storage_used_bytes,image_count,is_banned',
     'limit=1',
   ].join('&')
   const response = await supabaseRestFetch(env, `/rest/v1/profiles?${query}`, { method: 'GET' })
@@ -427,7 +427,7 @@ function assertStorageQuotaAllowsUpload(profile, storageDelta, env) {
   if (!profile || storageDelta <= 0) return
 
   const cloudPlan = String(profile.cloud_plan || '').trim().toLowerCase()
-  if (cloudPlan === 'pro') return
+  if (cloudPlan === 'pro' || profile.is_pro === true) return
 
   const quota = parseNonNegativeInt(profile.storage_quota_bytes, parseNonNegativeInt(env.FREE_STORAGE_QUOTA_BYTES, DEFAULT_FREE_STORAGE_QUOTA_BYTES))
   if (!quota) return
@@ -661,8 +661,8 @@ function mediaCandidateKeys(key, variant) {
   const parts = key.split('/')
   const fileName = parts.pop() || ''
   const dir = parts.join('/')
-  const variantKey = dir ? `${dir}/thumb_${variant}_${fileName}` : `thumb_${variant}_${fileName}`
-  return [...new Set([variantKey, key].filter(Boolean))]
+  const primaryKey = dir ? `${dir}/thumb_${fileName}` : `thumb_${fileName}`
+  return [...new Set([primaryKey, key].filter(Boolean))]
 }
 
 async function runArtsorakelForMediaObject(object) {

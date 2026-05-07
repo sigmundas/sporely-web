@@ -183,6 +183,14 @@ async function loadRecentComments() {
       .select('id, genus, species, common_name')
       .in('id', obsIds)
     ;(obsData || []).forEach(o => { obsMap[o.id] = o })
+    const missingObsIds = obsIds.filter(id => !obsMap[id])
+    if (missingObsIds.length) {
+      const { data: publicObsData } = await supabase
+        .from('observations_community_view')
+        .select('id, genus, species, common_name')
+        .in('id', missingObsIds)
+      ;(publicObsData || []).forEach(o => { obsMap[o.id] = o })
+    }
   }
   const imageUrls = obsIds.length ? await fetchFirstImages(obsIds, { variant: 'small' }) : {}
 

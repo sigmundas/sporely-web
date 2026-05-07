@@ -9,7 +9,7 @@ Cloudflare Worker for authenticated media uploads to the `sporely-media` R2 buck
 - Validates the caller's Supabase JWT before writing to R2.
 - Enforces that the object key starts with the authenticated user's `sub`, for example:
   - `user_uuid/observation_uuid/field_001.jpg`
-  - `user_uuid/observation_uuid/thumb_small_field_001.jpg`
+  - `user_uuid/observation_uuid/thumb_field_001.jpg`
 - Returns the stored key and optional public URL.
 - Tracks successful upload/delete byte deltas in `public.profiles`.
 - Enforces free-tier storage limits when `storage_quota_bytes` or `FREE_STORAGE_QUOTA_BYTES` is set.

@@ -6,7 +6,7 @@ export const state = {
     habitat: '',
     notes: '',
     uncertain: false,
-    visibility: 'friends',
+    visibility: 'public',
   },
   batchCount: 0,
   sessionStart: null,

@@ -80,6 +80,8 @@ const messages = {
     'capture.photoCaptured': 'Photo {count} captured',
     'capture.importPhotos': 'Import photos',
     'capture.lightReading': 'LIGHT: {lux} LUX / F-STOP: {fStop}',
+    'capture.privateMode': 'Save Privately',
+    'capture.friendsMode': 'Live Share',
     'review.review': 'Review',
     'review.addPhoto': 'Add photo',
     'review.fieldMetadata': 'Location data',
@@ -169,6 +171,8 @@ const messages = {
     'finds.newObservationAria': 'New observation',
     'finds.couldNotLoad': 'Could not load finds',
     'finds.noFriends': 'No friends\' finds yet.',
+    'finds.noFollowed': 'No followed finds yet.',
+    'finds.draftBadge': 'Draft',
     'finds.noObservations': 'No observations yet.',
     'finds.noObservationsCapture': 'No observations yet — go capture some!',
     'finds.noResults': 'No results for "{query}".',
@@ -188,6 +192,7 @@ const messages = {
     'map.clear': 'Clear',
     'map.viewDetails': 'View details →',
     'scope.mine': 'Mine',
+    'scope.feed': 'Feed 🧭',
     'scope.friends': 'Friends',
     'scope.community': 'Public',
     'scope.all': 'All',
@@ -226,6 +231,16 @@ const messages = {
     'profile.sent': 'Sent',
     'profile.add': 'Add',
     'profile.cloudPlan': 'Account status',
+    'social.friendRequest': 'Send friend request',
+    'social.friendPending': 'Friend request sent',
+    'social.friendAccepted': 'Friends',
+    'social.followUser': 'Follow user',
+    'social.unfollowUser': 'Unfollow user',
+    'social.followObservation': 'Follow observation',
+    'social.unfollowObservation': 'Unfollow observation',
+    'social.followed': 'Following',
+    'social.followFailed': 'Could not update follow.',
+    'social.friendFailed': 'Could not send friend request.',
     'profile.cloudStorage': 'Account',
     'profile.uploads': 'Image resolution',
     'profile.storage': 'Sync history',
@@ -316,6 +331,7 @@ const messages = {
     'crop.noCropHint': 'Tap a photo to set AI crop',
     'crop.statusSome': '{cropped}/{total} AI crop',
     'visibility.private': 'Private',
+    'visibility.draft': 'Private',
     'visibility.friends': 'Friends',
     'visibility.public': 'Public',
   },
@@ -396,6 +412,8 @@ const messages = {
     'capture.photoCaptured': 'Bilde {count} tatt',
     'capture.importPhotos': 'Importer bilder',
     'capture.lightReading': 'LYS: {lux} LUX / F-STOPP: {fStop}',
+    'capture.privateMode': 'Lagre privat',
+    'capture.friendsMode': 'Del live',
     'review.review': 'Gjennomgang',
     'review.addPhoto': 'Legg til bilde',
     'review.fieldMetadata': 'Stedsdata',
@@ -632,6 +650,7 @@ const messages = {
     'crop.noCropHint': 'Trykk på et bilde for å angi AI-beskjæring',
     'crop.statusSome': '{cropped}/{total} AI-beskjæring',
     'visibility.private': 'Privat',
+    'visibility.draft': 'Privat',
     'visibility.friends': 'Venner',
     'visibility.public': 'Offentlig',
   },
@@ -712,6 +731,8 @@ const messages = {
     'capture.photoCaptured': 'Bild {count} tagen',
     'capture.importPhotos': 'Importera bilder',
     'capture.lightReading': 'LJUS: {lux} LUX / F-STOPP: {fStop}',
+    'capture.privateMode': 'Spara privat',
+    'capture.friendsMode': 'Dela live',
     'review.review': 'Granskning',
     'review.addPhoto': 'Lägg till bild',
     'review.fieldMetadata': 'Platsdata',
@@ -948,6 +969,7 @@ const messages = {
     'crop.noCropHint': 'Tryck på en bild för att ange AI-beskärning',
     'crop.statusSome': '{cropped}/{total} AI-beskärning',
     'visibility.private': 'Privat',
+    'visibility.draft': 'Privat',
     'visibility.friends': 'Vänner',
     'visibility.public': 'Offentlig',
   },
@@ -1028,6 +1050,8 @@ const messages = {
     'capture.photoCaptured': 'Foto {count} aufgenommen',
     'capture.importPhotos': 'Fotos importieren',
     'capture.lightReading': 'LICHT: {lux} LUX / BLENDE: {fStop}',
+    'capture.privateMode': 'Privat speichern',
+    'capture.friendsMode': 'Live teilen',
     'review.review': 'Prüfen',
     'review.addPhoto': 'Foto hinzufügen',
     'review.fieldMetadata': 'Standortdaten',
@@ -1264,6 +1288,7 @@ const messages = {
     'crop.noCropHint': 'Foto antippen, um KI-Ausschnitt festzulegen',
     'crop.statusSome': '{cropped}/{total} KI-Ausschnitt',
     'visibility.private': 'Privat',
+    'visibility.draft': 'Privat',
     'visibility.friends': 'Freunde',
     'visibility.public': 'Öffentlich',
   },
@@ -1358,7 +1383,8 @@ export function getTaxonomyLanguage() {
 }
 
 export function translateVisibility(value) {
-  return t(`visibility.${value || 'private'}`)
+  const normalized = String(value || 'private').trim().toLowerCase()
+  return t(`visibility.${normalized === 'draft' ? 'private' : normalized}`)
 }
 
 export function formatDate(value, options = {}) {
@@ -1533,7 +1559,7 @@ export function applyStaticTranslations() {
   setText('#android-web-camera-warning-cancel', 'common.cancel')
   setText('#android-web-camera-warning-continue', 'import.continueAnyway')
 
-  setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.friends'), t('scope.community')])
+  setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.feed'), t('scope.friends'), t('scope.community')])
   setText('#finds-subtitle', 'finds.documentedObservations')
   setText('#finds-refresh-label', 'finds.pullToRefresh')
   setText('#finds-filter-spores-label', 'stats.spores')

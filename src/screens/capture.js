@@ -30,6 +30,15 @@ export function initCapture() {
   })
 }
 
+function _defaultCaptureDraft() {
+  return {
+    habitat: '',
+    notes: '',
+    uncertain: false,
+    visibility: getDefaultVisibility(),
+  }
+}
+
 function _stopMediaStream(stream) {
   if (!stream || typeof stream.getTracks !== 'function') return
   stream.getTracks().forEach(track => track.stop())
@@ -402,12 +411,7 @@ export async function startCamera(options = {}) {
     if (!preserveBatch) {
       state.sessionStart = new Date()
       state.capturedPhotos = []
-      state.captureDraft = {
-        habitat: '',
-        notes: '',
-        uncertain: false,
-        visibility: getDefaultVisibility(),
-      }
+      state.captureDraft = _defaultCaptureDraft()
     }
     state.batchCount = state.capturedPhotos.length
     document.getElementById('batch-count').textContent = String(state.batchCount)
@@ -582,10 +586,7 @@ function cancelCapture() {
   finishCaptureWhenPendingComplete = false
   state.sessionStart = null
   state.captureDraft = {
-    habitat: '',
-    notes: '',
-    uncertain: false,
-    visibility: getDefaultVisibility(),
+    ..._defaultCaptureDraft(),
   }
   document.getElementById('batch-count').textContent = '0'
   document.getElementById('batch-area').style.display = 'none'
