@@ -68,7 +68,7 @@ sporely-web/
     ├── toast.js            showToast(msg) — timed overlay message
     ├── geo.js              GPS watchPosition, writes into state.gps
     ├── cloud-plan.js       Cloud plan lookup + effective upload policy helpers
-    ├── settings.js         Local Settings preferences: visibility, sync data policy, sync history
+    ├── settings.js         Local Settings preferences: camera, image resolution, sync history
     ├── images.js           Worker-backed image preparation, uploads + thumbnail variants, media URL helpers
     ├── image-worker.js     Off-main-thread resize/encode worker using OffscreenCanvas
     ├── image_crop.js       Shared AI crop math + cropped blob export helpers
@@ -226,10 +226,22 @@ Maps 1-to-1 with the desktop SQLite `observations` table.
 Extra cloud-only columns:
 - `user_id uuid` — FK to `auth.users` (set by RLS, never trusted from client)
 - `desktop_id int` — local SQLite `id`, used for dedup on sync
-- `location_public bool` — hide GPS from friends if false
-- `visibility text` — cloud sharing scope (`private` / `friends` / `public`)
+- `is_draft bool` — WIP state; public draft observations appear in the live science feed/map but are not treated as featured/verified.
+- `visibility text` — cloud sharing scope (`private` / `friends` / `public`). New web/mobile observations default to `public`.
+- `location_precision text` — `exact` or `fuzzed`; community/follow views expose exact GPS unless the user explicitly chose `fuzzed`.
+- `location_public bool` — legacy compatibility flag; new privacy behavior is driven by `visibility` and `location_precision`.
 - `image_key text` — relative R2 key of the cover image
 - `thumb_key text` — relative R2 key of the cover thumbnail
+
+Privacy slots are enforced by Supabase: a free account uses one slot when `visibility != 'public' OR location_precision = 'fuzzed'`. The current free limit is 20; pro accounts are unlimited.
+
+### `follows`
+Stores the web social trail subscriptions used by the `Feed 🧭` tab:
+- `user_id uuid`
+- `target_type text` — `user`, `observation`, `species`, or `genus`
+- `target_id text`
+
+Desktop does not expose social follow controls; this is a web/mobile feature.
 
 ### `observation_images`
 - `storage_path text` — relative R2 media key (e.g. `{user_id}/{obs_id}/0_ts.jpg`)
@@ -289,8 +301,9 @@ All tables have RLS enabled. Default policy: **owner only**.
 | `observation_shares` | The specific `shared_with_id` user |
 
 `private_comment` is never read by the web app.
-GPS coordinates are nulled out in `observations_friend_view` when `location_public = false`,
-unless an `observation_shares` row explicitly grants location access.
+Community and follow views expose exact coordinates by default for public observations.
+Coordinates are rounded only when `location_precision = 'fuzzed'`; `location_public`
+is retained as a legacy compatibility flag.
 
 Note: Supabase Storage bucket `observation-images` still exists but is no longer used
 for new uploads. Media access control is now handled by the R2 upload worker (JWT path

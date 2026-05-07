@@ -1,5 +1,14 @@
 # Sporely-web Development Plan
 
+## Phase 7 - Transparency, Social Trails, and Privacy Slots
+- [x] Remove sticky capture visibility toggle. New capture/review flows default to public draft observations.
+- [x] Save new web observations with `visibility = public`, `is_draft = true`, and `location_precision = exact`.
+- [x] Add `Feed 🧭` tab backed by `observations_follow_view`.
+- [x] Add Draft badge on gallery cards when `is_draft = true`.
+- [x] Add Find Detail author avatar/name, friend request, follow-user, and follow-observation controls.
+- [x] Add `(1 slot)` labels under Private and Friends in Find Detail for free users.
+- [ ] Apply and verify `database/supabase_phase7_transparency_social_trails.sql` in Supabase after the original Phase 7 migration.
+- [ ] Verify disposable-account RLS paths for owner, accepted friend, stranger, blocked user, banned profile, and privacy slot limit.
 
 ## Camera Behavior Summary (Sporely Cam vs Web Cam)
 
