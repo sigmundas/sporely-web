@@ -771,19 +771,20 @@ html, body {
 
 /* ── SCOPE TABS (Finds + Map) ── */
 .scope-tabs {
-  display: flex; gap: 6px;
-  padding: 12px 18px 0;
-  border-bottom: 1px solid var(--border-dim);
+  display: inline-flex; gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--card);
 }
 .scope-tab {
-  padding: 7px 16px; border-radius: 20px; border: none;
+  padding: 5px 14px; border-radius: 18px; border: none;
   font-size: 13px; font-weight: 600; font-family: 'Outfit', sans-serif;
-  cursor: pointer; background: transparent; color: var(--text-dim);
+  cursor: pointer; background: transparent; color: var(--text-secondary);
   transition: color 0.15s, background 0.15s;
 }
 .scope-tab.active {
   background: var(--green-deep); color: var(--green-accent);
-  border: 1px solid var(--green-mid);
 }
 .finds-search-bar {
   overflow: hidden;
@@ -843,21 +844,18 @@ html, body {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 14px 0;
 }
-.finds-subtitle-bar {
-  font-size: 12px; color: var(--text-dim);
-  font-family: 'DM Mono', monospace;
-}
 .finds-view-btns { display: flex; gap: 2px; }
 .finds-view-btn {
-  background: none; border: none; cursor: pointer;
-  padding: 5px 7px; border-radius: 7px;
+  background: transparent;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  padding: 5px 12px;
+  border-radius: 20px;
   color: var(--text-dim);
   display: flex; align-items: center;
-  transition: background 0.15s, color 0.15s;
-}
-.finds-view-btn-text {
-  min-width: 28px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
   justify-content: center;
+  min-width: 28px;
   font-family: 'DM Mono', monospace;
   font-size: 12px;
   font-weight: 600;
@@ -867,7 +865,8 @@ html, body {
   font-weight: 700;
 }
 .finds-view-btn.active {
-  background: var(--card-raised); color: var(--green-accent);
+  background: var(--green-deep); color: var(--green-accent);
+  border-color: var(--green-mid);
 }
 
 /* ── Tile grid view ── */

@@ -154,23 +154,6 @@ Important:
     - Avoiding the massive memory spike caused by `Promise.all(files.map(f => f.arrayBuffer()))` in `import-store.js`.
     - *Note on Platforms (PWA vs APK):* This bottleneck is most severe for iPhone users running the app as a PWA (Safari), where per-tab memory limits are very strict (crashing often around 150-300MB). Android users on the native Capacitor APK have a higher WebView memory ceiling (often 500MB+ on modern devices like the S25) and benefit from native HEIC-to-JPEG conversion, but they will still eventually crash on huge imports until this streaming fix is implemented.
 
-## Bugs
-- I can't delete observations from app.sporely.no. Deleting from the installed apk app works. Error: "Delete failed: failed to fetch"
-- Android HEIC import location regression was traced to metadata/display handling, not only conversion:
-  EXIF GPS must be extracted before Canvas/native conversion, altitude must travel with the import
-  session, and reverse-geocode results need a latest-request guard so an old place name cannot fill
-  the Location field for a new photo.
-- Follow-up: Android Photo Picker URIs can return redacted GPS as `0,0`. The APK import bridge now
-  uses `ACTION_OPEN_DOCUMENT` and rejects `0,0` coordinates instead of reverse-geocoding them.
-- Device test confirmed HEIC GPS works again in the Android APK. Tradeoff: Android now shows the
-  document picker, often starting in "Recent"; users may need the side menu → Images for the full
-  library. Consider adding a future two-choice import UI: "Gallery" for friendlier browsing and
-  "Metadata-safe import" for geotagged originals.
-- Test JPG `20260418_154138.jpg` has Samsung/time EXIF but no GPS tags according to `exifr`; no
-  app fix is expected for that file unless we intentionally fall back to current device location.
-- Web "ID Needed" was aligned with the desktop model: it is now "Uncertain ID", backed by the
-  existing `uncertain` flag, displayed with a `?` prefix, and filterable from Finds.
-
 ## Upload Debug Log
 *Goal: keep a running, dated log of cross-platform photo import, upload, queue, thumbnail, and Artsorakel behavior so regressions are easier to track.*
 

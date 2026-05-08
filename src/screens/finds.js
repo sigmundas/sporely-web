@@ -26,10 +26,10 @@ let _isRefreshing = false
 let _queuedRefreshTimer = null
 let _loadFindsSeq = 0
 
-const MINE_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, is_draft, location_precision'
-const MINE_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type'
-const FEED_SELECT = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, is_draft, location_precision'
-const FEED_SELECT_LEGACY = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude'
+const MINE_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, is_draft, location_precision, spore_statistics'
+const MINE_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, spore_statistics'
+const FEED_SELECT = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, is_draft, location_precision, spore_statistics'
+const FEED_SELECT_LEGACY = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, spore_statistics'
 
 function _isPhase7ColumnError(error) {
   const message = String(error?.message || '').toLowerCase()
@@ -550,29 +550,11 @@ async function _fetchUser(userId) {
 
 async function _attachSporeFlags(observations) {
   if (!observations || !observations.length) return
-  const obsIds = observations.filter(o => !o._pendingSync).map(o => o.id)
-  if (!obsIds.length) return
-  
-  try {
-    const { data, error } = await supabase
-      .from('spore_measurements')
-      .select('observation_id')
-      .in('observation_id', obsIds)
-
-    if (error) {
-      console.warn('Failed to fetch spore flags:', error.message)
-      return
+  observations.forEach(o => {
+    if (o.spore_statistics || o.spore_short) {
+      o.has_spores = true
     }
-    
-    const withSpores = new Set((data || []).map(d => String(d.observation_id)))
-    observations.forEach(o => {
-      if (withSpores.has(String(o.id))) {
-        o.has_spores = true
-      }
-    })
-  } catch (err) {
-    console.warn('Failed to fetch spore flags:', err)
-  }
+  })
 }
 
 async function _loadProfilesForScope(data) {
@@ -614,27 +596,26 @@ function _sortTs(obs) {
 
 function _applyFilter() {
   const list     = document.getElementById('finds-list')
-  const subtitle = document.getElementById('finds-subtitle')
   const raw  = _cache[currentScope] || []
   const q    = (state.searchQuery || '').toLowerCase().trim()
   
   let filtered = raw
   if (state.findsUncertainOnly) filtered = filtered.filter(obs => !!obs.uncertain)
-  if (state.findsSporesOnly) filtered = filtered.filter(obs => !!obs.has_spores || !!obs.spore_short)
+  if (state.findsSporesOnly) filtered = filtered.filter(obs => !!obs.has_spores || !!obs.spore_short || !!obs.spore_statistics)
   
   const data = q ? filtered.filter(obs => _matches(obs, q)) : filtered
 
   if (state.findsGroupBySpecies) {
-    _renderBySpecies(list, subtitle, data, { variant: state.findsView })
+    _renderBySpecies(list, data, { variant: state.findsView })
     return
   }
 
   if (state.findsView === 'two') {
-    _renderCards(list, subtitle, data, { variant: 'two', isFriends: currentScope === 'friends' })
+    _renderCards(list, data, { variant: 'two', isFriends: currentScope === 'friends' })
   } else if (state.findsView === 'three') {
-    _renderCards(list, subtitle, data, { variant: 'three', isFriends: currentScope === 'friends' })
+    _renderCards(list, data, { variant: 'three', isFriends: currentScope === 'friends' })
   } else {
-    _renderCards(list, subtitle, data, { variant: 'cards', isFriends: currentScope === 'friends' })
+    _renderCards(list, data, { variant: 'cards', isFriends: currentScope === 'friends' })
   }
 }
 
@@ -764,11 +745,10 @@ function _uncertainPrefix(obs) {
   return obs?.uncertain ? '<span class="find-card-uncertain" aria-label="Uncertain ID">?</span> ' : ''
 }
 
-function _renderBySpecies(list, subtitle, data, options = {}) {
+function _renderBySpecies(list, data, options = {}) {
   const variant = options.variant || 'cards'
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
-    if (subtitle) subtitle.textContent = ''
     const emptyText = _emptyFindsText(q)
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
@@ -791,7 +771,6 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
     })
 
   const speciesCount = groups.filter(([k]) => k !== '\x00unidentified').length
-  if (subtitle) subtitle.textContent = `${tp('finds.observationCount', data.length)} · ${tp('finds.speciesCount', speciesCount)}`
 
   const allObs = groups.flatMap(([, g]) => g.items).filter(o => !o._pendingSync)
   const imageVariant = variant === 'cards' ? 'medium' : 'small'
@@ -933,16 +912,14 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
 
 // ── Render: tiles ─────────────────────────────────────────────────────────────
 
-function _renderTiles(list, subtitle, data) {
+function _renderTiles(list, data) {
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
-    if (subtitle) subtitle.textContent = ''
     const emptyText = _emptyFindsText(q)
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
   }
 
-  if (subtitle) subtitle.textContent = tp('finds.observationCount', data.length)
 
   fetchFirstImages(data.filter(obs => !obs._pendingSync).map(o => o.id), { variant: 'small' }).then(imageUrls => {
     let html = '<div class="find-tiles-grid">'
@@ -979,18 +956,16 @@ function _renderTiles(list, subtitle, data) {
 
 // ── Render: cards ─────────────────────────────────────────────────────────────
 
-function _renderCards(list, subtitle, data, options) {
+function _renderCards(list, data, options) {
   const variant = options?.variant || 'cards'
   const isFriends = !!options?.isFriends
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
-    if (subtitle) subtitle.textContent = ''
     const emptyText = _emptyFindsText(q, { isFriends, capture: true })
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
   }
 
-  if (subtitle) subtitle.textContent = tp('finds.observationCount', data.length)
 
   const nonPending = data.filter(obs => !obs._pendingSync).map(o => o.id)
   const imageVariant = variant === 'cards' ? 'medium' : 'small'

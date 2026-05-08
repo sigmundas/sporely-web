@@ -192,7 +192,7 @@ const messages = {
     'map.clear': 'Clear',
     'map.viewDetails': 'View details →',
     'scope.mine': 'Mine',
-    'scope.feed': 'Feed 🧭',
+    'scope.feed': 'Feed',
     'scope.friends': 'Friends',
     'scope.community': 'Public',
     'scope.all': 'All',
@@ -524,7 +524,6 @@ const messages = {
     'scope.mine': 'Mine',
     'scope.friends': 'Venner',
     'scope.community': 'Offentlig',
-    'scope.all': 'Alle',
     'profile.title': 'Profil',
     'profile.fullNameOptional': 'Fullt navn (valgfritt)',
     'profile.saveProfile': 'Lagre profil',
@@ -843,7 +842,6 @@ const messages = {
     'scope.mine': 'Mina',
     'scope.friends': 'Vänner',
     'scope.community': 'Offentligt',
-    'scope.all': 'Alla',
     'profile.title': 'Profil',
     'profile.fullNameOptional': 'Fullständigt namn (valfritt)',
     'profile.saveProfile': 'Spara profil',
@@ -1162,7 +1160,6 @@ const messages = {
     'scope.mine': 'Meine',
     'scope.friends': 'Freunde',
     'scope.community': 'Öffentlich',
-    'scope.all': 'Alle',
     'profile.title': 'Profil',
     'profile.fullNameOptional': 'Vollständiger Name (optional)',
     'profile.saveProfile': 'Profil speichern',
@@ -1560,7 +1557,6 @@ export function applyStaticTranslations() {
   setText('#android-web-camera-warning-continue', 'import.continueAnyway')
 
   setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.feed'), t('scope.friends'), t('scope.community')])
-  setText('#finds-subtitle', 'finds.documentedObservations')
   setText('#finds-refresh-label', 'finds.pullToRefresh')
   setText('#finds-filter-spores-label', 'stats.spores')
 

@@ -38,5 +38,3 @@ android/app/src/main/assets/capacitor.plugins.json
 !.env.example
 
 opencode.json
-
-secret-plan.md

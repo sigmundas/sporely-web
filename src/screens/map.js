@@ -11,7 +11,7 @@ import { esc as _esc } from '../esc.js'
 let map          = null
 let markerLayer  = null
 let currentScope = 'mine'
-const _mapData   = { mine: [], friends: [] }   // cached for re-filtering
+const _mapData   = { mine: [], friends: [], feed: [], public: [] }   // cached for re-filtering
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
@@ -96,43 +96,54 @@ export async function loadMap() {
     if (clearBtn) clearBtn.style.display = state.searchQuery ? 'flex' : 'none'
   }
 
+  document.querySelectorAll('.map-scope-btn[data-scope="mine"]').forEach(el => el.textContent = t('scope.mine'))
+  document.querySelectorAll('.map-scope-btn[data-scope="feed"]').forEach(el => el.textContent = t('scope.feed'))
+  document.querySelectorAll('.map-scope-btn[data-scope="friends"]').forEach(el => el.textContent = t('scope.friends'))
+  document.querySelectorAll('.map-scope-btn[data-scope="public"]').forEach(el => el.textContent = t('scope.community'))
+
   if (currentScope === 'mine') {
     const { data } = await supabase
       .from('observations')
-      .select('id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
+      .select('id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
       .eq('user_id', state.user.id)
       .not('gps_latitude', 'is', null)
       .not('gps_longitude', 'is', null)
     _mapData.mine    = data || []
     _mapData.friends = []
+    _mapData.feed    = []
+    _mapData.public  = []
 
   } else if (currentScope === 'friends') {
     const { data } = await supabase
       .from('observations_friend_view')
-      .select('id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
+      .select('id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
       .neq('user_id', state.user.id)
       .not('gps_latitude', 'is', null)
       .not('gps_longitude', 'is', null)
     _mapData.mine    = []
     _mapData.friends = data || []
+    _mapData.feed    = []
+    _mapData.public  = []
 
+  } else if (currentScope === 'feed') {
+    const { data } = await supabase
+      .from('observations_follow_view')
+      .select('id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
+      .not('gps_latitude', 'is', null)
+      .not('gps_longitude', 'is', null)
+    _mapData.feed = data || []
+  } else if (currentScope === 'public') {
+    const { data } = await supabase
+      .from('observations_community_view')
+      .select('id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
+      .not('gps_latitude', 'is', null)
+      .not('gps_longitude', 'is', null)
+    _mapData.public = data || []
   } else {
-    const [myRes, friendRes] = await Promise.all([
-      supabase
-        .from('observations')
-        .select('id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
-        .eq('user_id', state.user.id)
-        .not('gps_latitude', 'is', null)
-        .not('gps_longitude', 'is', null),
-      supabase
-        .from('observations_friend_view')
-        .select('id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
-        .neq('user_id', state.user.id)
-        .not('gps_latitude', 'is', null)
-        .not('gps_longitude', 'is', null),
-    ])
-    _mapData.mine    = myRes.data    || []
-    _mapData.friends = friendRes.data || []
+    _mapData.mine    = []
+    _mapData.friends = []
+    _mapData.feed    = []
+    _mapData.public  = []
   }
 
   _applyMapFilter()
@@ -141,9 +152,7 @@ export async function loadMap() {
 // ── Filter + render markers ───────────────────────────────────────────────────
 
 function _mapSearchPool() {
-  if (currentScope === 'mine') return _mapData.mine
-  if (currentScope === 'friends') return _mapData.friends
-  return [..._mapData.mine, ..._mapData.friends]
+  return _mapData[currentScope] || []
 }
 
 function _displayNameForObservation(obs) {
@@ -192,11 +201,9 @@ function _applyMapFilter() {
   markerLayer.clearLayers()
   const q = (state.searchQuery || '').toLowerCase().trim()
 
-  const mine    = q ? _mapData.mine.filter(o => _matchesMap(o, q))    : _mapData.mine
-  const friends = q ? _mapData.friends.filter(o => _matchesMap(o, q)) : _mapData.friends
-
-  _addMarkers(mine,    'mine')
-  _addMarkers(friends, 'friends')
+  const data = _mapData[currentScope] || []
+  const filtered = q ? data.filter(o => _matchesMap(o, q)) : data
+  _addMarkers(filtered)
 
   // Fit bounds
   const allLayers = []
@@ -215,7 +222,7 @@ function _applyMapFilter() {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function _addMarkers(observations, owner) {
+function _addMarkers(observations) {
   observations.forEach(obs => {
     const name = formatDisplayName(obs.genus || '', obs.species || '', obs.common_name || '')
       || t('detail.unknownSpecies')
@@ -223,9 +230,10 @@ function _addMarkers(observations, owner) {
       ? formatDate(obs.date, { day: 'numeric', month: 'short', year: 'numeric' })
       : ''
 
+    const isOwn = obs.user_id === state.user?.id
     const pinClass = [
       'map-pin',
-      owner === 'friends' ? 'map-pin--friend' : '',
+      !isOwn ? 'map-pin--friend' : '',
       obs.uncertain ? 'map-pin--uncertain' : '',
     ].filter(Boolean).join(' ')
 

@@ -318,10 +318,10 @@
         </div>
       </div>
 
-      <div style="display:flex; align-items:center; justify-content:space-between; border-bottom: 1px solid var(--border-dim); padding-right:18px;">
-        <div class="scope-tabs" id="finds-scope-tabs" style="border-bottom:none; flex:1; padding-right:0;">
+      <div style="display:flex; align-items:center; justify-content:center; padding: 8px 18px 4px;">
+        <div class="scope-tabs" id="finds-scope-tabs">
           <button class="scope-tab active" data-scope="mine">Mine</button>
-          <button class="scope-tab" data-scope="feed">Feed 🧭</button>
+          <button class="scope-tab" data-scope="feed">Feed</button>
           <button class="scope-tab" data-scope="friends">Friends</button>
           <button class="scope-tab" data-scope="community">Community</button>
         </div>
@@ -332,14 +332,10 @@
           <div class="friend-avatar" id="finds-user-avatar" style="width:26px;height:26px;font-size:11px;border:1px solid var(--green-mid);">?</div>
           <div style="font-size:14px; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:140px;" id="finds-user-name"></div>
         </div>
-        <button id="finds-filter-spores" style="padding: 5px 10px; border-radius: 20px; border: 1px solid transparent; font-size: 13px; font-weight: 600; font-family: 'Outfit', sans-serif; cursor: pointer; background: transparent; color: var(--text-dim); transition: color 0.15s, background 0.15s; display:flex; align-items:center; gap:4px; margin-top:12px; margin-bottom:12px;">
-          <svg style="width:12px;height:12px;stroke:currentColor" viewBox="0 0 24 24" fill="none" stroke-width="2.5"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>
-          <span id="finds-filter-spores-label">Spores</span>
-        </button>
       </div>
 
       <div class="finds-topbar">
-        <div class="finds-subtitle-bar" id="finds-subtitle">Documented observations.</div>
+        <button class="finds-view-btn finds-view-btn-text" id="finds-filter-spores"><span id="finds-filter-spores-label">Spores</span></button>
         <div class="finds-view-btns">
           <button class="finds-view-btn finds-view-btn-text" id="finds-group-species" title="Group by species" aria-label="Group by species">Species</button>
           <button class="finds-view-btn finds-view-btn-text finds-view-btn-mark" id="finds-filter-uncertain" title="Uncertain ID" aria-label="Show uncertain IDs only">?</button>
@@ -647,8 +643,9 @@
         </div>
         <div class="map-scope-bar">
           <button class="map-scope-btn active" data-scope="mine">Mine</button>
+          <button class="map-scope-btn" data-scope="feed">Feed</button>
           <button class="map-scope-btn" data-scope="friends">Friends</button>
-          <button class="map-scope-btn" data-scope="all">All</button>
+          <button class="map-scope-btn" data-scope="public">Public</button>
         </div>
       </div>
       <div id="map-container"></div>
