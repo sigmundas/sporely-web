@@ -20,15 +20,20 @@ function _isMissingColumnError(error, columnName) {
 }
 
 export function normalizeCloudPlanProfile(profile) {
-  const rawPlan = String(profile?.cloud_plan || '').trim().toLowerCase()
-  const cloudPlan = rawPlan === 'pro' ? 'pro' : 'free'
-  const fullResStorageEnabled = cloudPlan === 'pro' || !!profile?.full_res_storage_enabled
+  const rawPlan = String(profile?.cloud_plan ?? profile?.cloudPlan ?? '').trim().toLowerCase()
+  const hasProAccess = rawPlan === 'pro' || !!(profile?.is_pro ?? profile?.isPro)
+  const cloudPlan = hasProAccess ? 'pro' : 'free'
+  const fullResStorageEnabled = hasProAccess || !!(profile?.full_res_storage_enabled ?? profile?.fullResStorageEnabled)
   return {
     cloudPlan,
     fullResStorageEnabled,
-    storageQuotaBytes: _parseNullableInt(profile?.storage_quota_bytes),
-    storageUsedBytes: Math.max(0, _parseNullableInt(profile?.total_storage_bytes ?? profile?.storage_used_bytes) ?? 0),
-    imageCount: Math.max(0, _parseNullableInt(profile?.image_count) ?? 0),
+    storageQuotaBytes: _parseNullableInt(profile?.storage_quota_bytes ?? profile?.storageQuotaBytes),
+    storageUsedBytes: Math.max(0, _parseNullableInt(
+      profile?.total_storage_bytes
+      ?? profile?.storage_used_bytes
+      ?? profile?.storageUsedBytes
+    ) ?? 0),
+    imageCount: Math.max(0, _parseNullableInt(profile?.image_count ?? profile?.imageCount) ?? 0),
   }
 }
 
@@ -74,13 +79,14 @@ export async function fetchCloudPlanProfile(userId) {
 
   const { data, error } = await supabase
     .from('profiles')
-    .select('cloud_plan, full_res_storage_enabled, storage_quota_bytes, total_storage_bytes, storage_used_bytes, image_count')
+    .select('is_pro, cloud_plan, full_res_storage_enabled, storage_quota_bytes, total_storage_bytes, storage_used_bytes, image_count')
     .eq('id', uid)
     .single()
 
   if (error) {
     const missingColumns = [
       'cloud_plan',
+      'is_pro',
       'full_res_storage_enabled',
       'storage_quota_bytes',
       'total_storage_bytes',

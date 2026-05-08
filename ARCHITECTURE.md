@@ -20,7 +20,7 @@ handling from the device photo library.
 | Layer | Choice |
 |---|---|
 | Build | Vite 6, vanilla JS (ES modules) — no framework |
-| Native wrapper | Capacitor Android + `@capawesome/capacitor-file-picker` + custom `NativePhotoPicker` plugin |
+| Native wrapper | Capacitor Android + `@capawesome/capacitor-file-picker` + `@capawesome/capacitor-background-task` + custom `NativePhotoPicker` plugin |
 | Styling | Plain CSS custom properties, no preprocessor |
 | Auth & DB | Supabase JS v2 (`@supabase/supabase-js`) |
 | Media storage | Cloudflare R2 bucket `sporely-media` |
@@ -68,17 +68,18 @@ sporely-web/
     ├── toast.js            showToast(msg) — timed overlay message
     ├── geo.js              GPS watchPosition, writes into state.gps
     ├── cloud-plan.js       Cloud plan lookup + effective upload policy helpers
-    ├── settings.js         Local Settings preferences: visibility, sync data policy, sync history
-    ├── images.js           Upload originals + thumbnail variants, media URL helpers
+    ├── settings.js         Local Settings preferences: camera, image resolution, sync history
+    ├── images.js           Worker-backed image preparation, uploads + thumbnail variants, media URL helpers
+    ├── image-worker.js     Off-main-thread resize/encode worker using OffscreenCanvas
     ├── image_crop.js       Shared AI crop math + cropped blob export helpers
     ├── ai-crop-editor.js   Full-screen AI crop editor used by review/import flows
-    ├── sync-queue.js       IndexedDB offline queue for captured observations
+    ├── sync-queue.js       IndexedDB offline queue for captured observations + background-task sync drain
     ├── import-store.js     IndexedDB persistence for pending import sessions
     ├── style.css           All CSS (custom properties, no utility classes)
     └── screens/
         ├── auth.js         Login, signup, resend confirmation, hash error handling
         ├── home.js         Dashboard, recent finds from Supabase, sign-out
-        ├── finds.js        Full observation list from Supabase
+        ├── finds.js        Observation lists (Mine, Friends, Community, User) + Spores filter
         ├── capture.js      Camera (getUserMedia), shutter, batch capture
         ├── review.js       Review one captured observation batch, save to Supabase
         ├── import_review.js Import/group photos, native EXIF/GPS handling, save flow
@@ -158,88 +159,37 @@ R2 bucket `sporely-media` is exposed publicly via Cloudflare. All media URLs are
 **relative keys** stored in the database — never full URLs. The key is prefixed with
 `{user_id}/{obs_id}/` for path-based ownership.
 
+### Client image preparation
+
+`src/images.js` prepares web/mobile uploads before they are sent to R2.
+
+- Image work is attempted off the main thread in `src/image-worker.js`.
+- The worker receives an `ImageBitmap` as a transferable and uses `OffscreenCanvas`.
+- Encoding tries WebP first (`image/webp`, quality 0.65) and falls back to JPEG (`image/jpeg`, quality 0.75). AVIF is not used because mobile browser AVIF encoding support is unreliable.
+- Free/reduced mode limits images to about 2 MP with a 1600px max edge.
+- Pro/max mode keeps near-12 MP images unless the source is above the large-image guard, then downsizes to about 4000px max edge.
+- Downscaling uses progressive halving plus high-quality canvas smoothing to avoid aliasing-heavy thumbnails.
+
 ### Thumbnail variants
 
-`src/images.js` generates two variants at upload time:
-- `thumb_small_{filename}` — 240px, JPEG 82%
-- `thumb_medium_{filename}` — 720px, JPEG 82%
+`src/images.js` generates and reads one thumbnail variant:
+- `thumb_{filename}` — 400px max edge, WebP 70% or JPEG 65% fallback
 
-### ⚠️ Known issue: EXIF stripped during free-tier 2 MP conversion
+### Offline queue and background sync
 
-Free-tier uploads resize images to approximately 2 MP via the Canvas API before uploading to R2.
-**Canvas `toBlob()` strips all EXIF** — GPS coordinates, `DateTimeOriginal`, camera model, etc. are
-lost in the stored R2 file.
+`src/sync-queue.js` is the durable upload boundary for new observations.
 
-**Desktop workaround (implemented):** When the desktop pulls a cloud field image, it checks
-whether the image has no EXIF datetime/GPS; if the observation has GPS or date stored in the local
-database, it injects that metadata back into the downloaded JPEG using PIL. This restores the
-"Set from current image" button functionality in the Prepare Images dialog for cloud-synced images.
-See `_inject_obs_exif_into_field_image()` and `_backfill_missing_exif_on_cloud_images()` in
-`sporely/utils/cloud_sync.py`.
+- Queue rows are written to IndexedDB before image processing begins.
+- Image bytes are stored as `ArrayBuffer` values, not Blob URLs, so the queue survives browser memory pressure and process kills.
+- After image preparation succeeds, prepared upload bytes and thumbnail bytes are written back into the same queue row so sync can resume without re-encoding.
+- The queue records `remoteObservationId`, `completedImageIndexes`, `syncStage`, `syncImageIndex`, and `syncImageCount`.
+- On resume, sync reconciles against Supabase `observation_images` by `sort_order`, so already-uploaded images are skipped.
+- If the process dies after inserting the parent observation but before `remoteObservationId` is saved locally, the queue attempts to recover the cloud row by matching `user_id` and `captured_at`.
 
-**Permanent fix needed in the web app:** In `src/images.js` or `src/screens/import_review.js`,
-extract GPS + capture time from native EXIF *before* the Canvas resize step (e.g. using `exifr`),
-then either:
-- Re-inject the EXIF bytes into the JPEG blob before upload (using `piexifjs` or equivalent), or
-- Write GPS and `captured_at` into the `observation_images` row explicitly so desktop sync can
-  restore it.
+When the Capacitor app is backgrounded, `document.visibilitychange` requests a short-lived background task through `@capawesome/capacitor-background-task`. The task drains any active queue preparation/upload promise and then calls `triggerSync()`. This extends the chance that current work finishes when the app is minimized or the screen turns off, but it is still subject to Android/iOS background execution limits.
 
-See also `sporely-web PLAN.md` → Phase 4 → Metadata Preservation.
-
-For the original upload path, the web app now records how the stored cloud image was prepared:
-- `upload_mode` — `reduced` or `full`
-- `source_width`, `source_height`
-- `stored_width`, `stored_height`
-- `stored_bytes`
-
-Desktop cloud sync prepares and pushes the same metadata so both clients describe cloud media the same way.
-
-Both stored under the same directory as the original, e.g.:
-```
-{user_id}/{obs_id}/0_1234567890.jpg          ← original
-{user_id}/{obs_id}/thumb_small_0_1234567890.jpg
-{user_id}/{obs_id}/thumb_medium_0_1234567890.jpg
-```
-
-### Environment variables
-
-Frontend (`.env.local` / `.env.example`):
-```
-VITE_MEDIA_BASE_URL=https://media.sporely.no
-VITE_MEDIA_UPLOAD_BASE_URL=https://upload.sporely.no
-```
-
-Worker (`wrangler.toml` `[vars]`):
-```
-SUPABASE_URL=https://zkpjklzfwzefhjluvhfw.supabase.co
-SUPABASE_JWT_AUDIENCE=authenticated
-MEDIA_PUBLIC_BASE_URL=https://media.sporely.no
-ALLOWED_ORIGINS=https://app.sporely.no,https://localhost:5173,http://localhost:5173,...
-MAX_UPLOAD_BYTES=15728640
-FREE_STORAGE_QUOTA_BYTES=0
-```
-
-Worker secrets:
-```sh
-SUPABASE_SERVICE_ROLE_KEY=<Supabase secret key, stored with wrangler secret put>
-```
 
 ### Deploying the worker
-
-```sh
-cd cloudflare/r2-upload-worker
-npx wrangler deploy
-```
-
-Before deploying storage/quota tracking, run `supabase/profile-storage-usage.sql` in the
-Supabase SQL Editor and set the Cloudflare Worker secret with:
-
-```sh
-npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-```
-
-Custom domain `upload.sporely.no` is registered automatically via the `[[routes]]` block
-in `wrangler.toml` — no manual DNS entry needed as long as `sporely.no` is proxied through Cloudflare.
 
 **⚠️ Deploy after every worker change.** The worker is NOT automatically deployed when you
 commit. If you add a new route or fix a bug in `src/index.js` and forget to run
@@ -258,47 +208,11 @@ The worker proxies AI species identification requests to `https://ai.artsdataban
 - **Response:** Buffer the upstream response with `await upstream.arrayBuffer()` before
   returning it. This avoids partial-body issues on slow upstream connections.
 
-### R2 CORS (`media.sporely.no`)
 
-The R2 bucket `sporely-media` has a CORS policy that allows `GET`/`HEAD`/`PUT`/`POST`
-from all origins (`*`). This is required because:
-- `find_detail.js` fetches images from the CDN via `fetch(img.src)` to pass blobs to the
-  Artsorakel AI. Without `Access-Control-Allow-Origin: *`, the browser blocks these fetches
-  and artsorakel silently gets zero blobs → "no suggestions".
-- Dev server and LAN testing use different origins than `app.sporely.no`.
+### ⚠️ Upload Request Gotchas
 
-To inspect or update the CORS policy:
-```sh
-# View current rules
-npx wrangler r2 bucket cors list sporely-media
-
-# Update (format must match the Cloudflare R2 CORS API schema)
-npx wrangler r2 bucket cors set sporely-media --file cors.json --force
-```
-
-The correct JSON schema for the `--file` argument:
-```json
-{
-  "rules": [
-    {
-      "allowed": {
-        "origins": ["*"],
-        "methods": ["GET", "HEAD", "PUT", "POST"],
-        "headers": ["*"]
-      },
-      "exposeHeaders": [],
-      "maxAgeSeconds": 86400
-    }
-  ]
-}
-```
-
-### Known gotcha: Web Crypto ECDSA signature format
-
-Web Crypto's `subtle.verify` for ECDSA expects **raw IEEE P1363 format** (r||s concatenated).
-JOSE JWTs already use this format. Do **not** convert the signature to DER before passing
-to `subtle.verify` — that will cause every valid token to fail with "JWT signature
-verification failed".
+- **iOS Safari Fetch Hangs:** Never stream an IndexedDB-backed `Blob` directly into a `fetch()` body on iOS/WebKit. The web app must always convert it to an `ArrayBuffer` first (`await blob.arrayBuffer()`) before passing it to `fetch`, otherwise the upload may silently hang or send 0 bytes.
+- **CORS Preflight on PUT:** Avoid adding custom non-standard headers (like `X-Sporely-Upload-Mode`) to the R2 upload `PUT` request. Custom headers force strict CORS preflight (`OPTIONS`) behavior on mobile PWAs, which can unexpectedly block uploads depending on network/cache conditions.
 
 ---
 
@@ -312,16 +226,28 @@ Maps 1-to-1 with the desktop SQLite `observations` table.
 Extra cloud-only columns:
 - `user_id uuid` — FK to `auth.users` (set by RLS, never trusted from client)
 - `desktop_id int` — local SQLite `id`, used for dedup on sync
-- `location_public bool` — hide GPS from friends if false
-- `visibility text` — cloud sharing scope (`private` / `friends` / `public`)
+- `is_draft bool` — WIP state; public draft observations appear in the live science feed/map but are not treated as featured/verified.
+- `visibility text` — cloud sharing scope (`private` / `friends` / `public`). New web/mobile observations default to `public`.
+- `location_precision text` — `exact` or `fuzzed`; community/follow views expose exact GPS unless the user explicitly chose `fuzzed`.
+- `location_public bool` — legacy compatibility flag; new privacy behavior is driven by `visibility` and `location_precision`.
 - `image_key text` — relative R2 key of the cover image
-- `thumb_key text` — relative R2 key of the cover thumbnail (small variant)
+- `thumb_key text` — relative R2 key of the cover thumbnail
+
+Privacy slots are enforced by Supabase: a free account uses one slot when `visibility != 'public' OR location_precision = 'fuzzed'`. The current free limit is 20; pro accounts are unlimited.
+
+### `follows`
+Stores the web social trail subscriptions used by the `Feed 🧭` tab:
+- `user_id uuid`
+- `target_type text` — `user`, `observation`, `species`, or `genus`
+- `target_id text`
+
+Desktop does not expose social follow controls; this is a web/mobile feature.
 
 ### `observation_images`
 - `storage_path text` — relative R2 media key (e.g. `{user_id}/{obs_id}/0_ts.jpg`)
 - `image_type` — `'field'` | `'microscope'`
 - `image_key text` — same as `storage_path` (normalized)
-- `thumb_key text` — relative key of the small thumbnail variant
+- `thumb_key text` — relative key of the primary thumbnail variant
 - `ai_crop_x1`, `ai_crop_y1`, `ai_crop_x2`, `ai_crop_y2` — normalized AI crop rectangle (`0..1`)
 - `ai_crop_source_w`, `ai_crop_source_h` — source dimensions when the AI crop was set
 - `upload_mode` — `reduced` or `full`
@@ -332,9 +258,14 @@ Extra cloud-only columns:
 AI crop metadata is stored per image and only affects Artsorakel requests. Gallery rendering still uses the full stored image.
 - Full microscope metadata columns present but only populated by desktop sync
 
+### Moderation / UGC Compliance
+- `user_blocks` — Enforces one-way user blocking for feed filtering (`blocker_id`, `blocked_id`).
+- `reports` — Tracks user-reported objectionable content (`observation_id`, `comment_id`, `reason`).
+- These tables, alongside `profiles.is_banned`, are required for Google Play Store User Generated Content (UGC) compliance. RLS and Views (e.g. `observations_community_view`) automatically filter out blocked or banned content.
+
 ### `profiles`
 Auto-created by a Postgres trigger on `auth.users` insert.
-Profile UI reads `username`, `display_name`, and `avatar_url`.
+Profile UI reads and writes `username`, `display_name`, `bio`, and `avatar_url`. The desktop **Profile & Cloud** page mirrors these same fields so the account identity is shared across web/mobile and desktop.
 The subscription/storage foundation also now lives here:
 - `cloud_plan` — `free` or `pro`; controls account status and full-res entitlement.
 - `full_res_storage_enabled` — compatibility flag for manually granting full-res access.
@@ -348,6 +279,8 @@ with a signed-URL fallback if the direct image fetch fails.
 The profile screen also exposes a self-service account deletion action, which calls the
 `delete-account` Supabase Edge Function.
 It now also shows an Account status block with image resolution, sync history, storage usage, and image count.
+
+Desktop local databases bind to a single Supabase auth user via `linked_cloud_user_id`. If a user wants to move a desktop database to another Sporely Cloud account, they must explicitly reset/migrate the desktop cloud link; simply logging in with another account is blocked before credentials are saved. Deleting the web account does not by itself migrate a desktop database, and the migration flow must avoid both duplicate cloud rows and accidental loss of useful spore data.
 
 ### `friendships`
 Bidirectional, status-gated (`pending` / `accepted` / `blocked`).
@@ -368,14 +301,29 @@ All tables have RLS enabled. Default policy: **owner only**.
 | `observation_shares` | The specific `shared_with_id` user |
 
 `private_comment` is never read by the web app.
-GPS coordinates are nulled out in `observations_friend_view` when `location_public = false`,
-unless an `observation_shares` row explicitly grants location access.
+Community and follow views expose exact coordinates by default for public observations.
+Coordinates are rounded only when `location_precision = 'fuzzed'`; `location_public`
+is retained as a legacy compatibility flag.
 
 Note: Supabase Storage bucket `observation-images` still exists but is no longer used
 for new uploads. Media access control is now handled by the R2 upload worker (JWT path
 enforcement) and Cloudflare's public CDN for serving.
 
 ---
+
+## Camera Behaviors (Native vs Web)
+
+**Sporely Cam (Native Android / CameraX)**
+- Activated when running inside the Capacitor Android app.
+- Hooks directly into native CameraX APIs for full 12 MP captures, auto-selecting the 1x lens.
+- Supports a dual-pipeline High Dynamic Range (HDR) capability. For Android 14+ devices (e.g. Samsung S25), it uses native Ultra HDR (`JPEG_R` output) capabilities. For older devices, it queries the CameraX `ExtensionsManager` for OEM vendor HDR extensions. When HDR is active, physical lens locks are cleared to allow the device's ISP to compute the HDR gain map across its logical lens array.
+- Natively preserves full EXIF orientation and accurate GPS metadata securely without Canvas stripping.
+
+**Web Cam (HTML5 `getUserMedia` / PWA)**
+- Activated in mobile browsers (Safari/Chrome) or PWAs.
+- Captures by painting a `<video>` stream to an HTML `<canvas>`, inherently limiting resolution to the browser's WebRTC stream (often ~2 MP).
+- Mobile browsers aggressively strip EXIF/GPS from web captures for privacy. The app compensates by reading device geolocation via JS `navigator.geolocation` during capture.
+- Android web users see warnings advising them to install the native app for better quality and metadata handling.
 
 ## Capture → save flow
 
@@ -497,7 +445,7 @@ service-level R2 API credentials from `python.env`).
 - Queries SQLite for `cloud_id IS NULL OR sync_status = 'dirty'`
 - Upserts to Supabase (check-then-patch-or-post pattern)
 - Writes `cloud_id` + `sync_status = 'synced'` back to SQLite
-- Syncs the selected desktop images plus optional generated media (measure plot, thumbnail gallery, plate)
+- Syncs selected clean desktop observation images plus one clean thumbnail per image. Online-publishing overlays, watermarks, measure plots, thumbnail galleries, and plates stay out of Sporely Cloud media.
 - Pushes `observation_images.ai_crop_*` alongside the rest of each synced image row so web and desktop share the same AI crop geometry
 - Uses a lightweight local media signature so unchanged images/media can be skipped on later syncs
 - Media-signature comparison now ignores low-signal local-only churn such as file mtime drift, gallery layout state, order-only image changes, and older signature payloads that predate the shared AI crop fields

@@ -1,0 +1,21 @@
+[
+  {
+    "AllowedOrigins": [
+      "https://app.sporely.no",
+      "https://sporely.no",
+      "http://localhost:5173",
+      "http://localhost:3000"
+    ],
+    "AllowedMethods": [
+      "GET",
+      "HEAD",
+      "PUT",
+      "POST"
+    ],
+    "AllowedHeaders": [
+      "*"
+    ],
+    "ExposeHeaders": [],
+    "MaxAgeSeconds": 86400
+  }
+]

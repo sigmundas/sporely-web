@@ -2,45 +2,26 @@ import { supabase } from '../supabase.js'
 import { formatDate, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
-import { showToast } from '../toast.js'
-import { showAuthOverlay } from './auth.js'
+import { getEffectiveCameraLabel, openPreferredCamera } from '../camera-actions.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
 import { openFindDetail } from './find_detail.js'
-import { openNativeCamera, openPhotoImportPicker } from './import_review.js'
+import { openPhotoImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
 import { refreshHeaderProfileButtons } from './profile.js'
-
-function _imageHtml(source, className, placeholderHtml) {
-  if (!source?.primaryUrl) return placeholderHtml
-  const fallbackAttr = source.fallbackUrl && source.fallbackUrl !== source.primaryUrl
-    ? ` data-fallback-src="${source.fallbackUrl}"`
-    : ''
-  return `<img class="${className}" src="${source.primaryUrl}"${fallbackAttr} loading="lazy" decoding="async" alt="">`
-}
-
-function _wireImageFallback(root) {
-  root.querySelectorAll('img[data-fallback-src]').forEach(img => {
-    img.addEventListener('error', () => {
-      const fallback = img.dataset.fallbackSrc
-      if (!fallback || img.dataset.fallbackApplied === 'true') return
-      img.dataset.fallbackApplied = 'true'
-      img.src = fallback
-    }, { once: true })
-  })
-}
+import { imageHtml as _imageHtml, wireImageFallback as _wireImageFallback } from '../image-helpers.js'
 
 export async function initHome() {
-  document.getElementById('home-fab').addEventListener('click', () => navigate('capture'))
-  document.getElementById('ac-sporely-cam').addEventListener('click', () => navigate('capture'))
-  document.getElementById('ac-native-cam')?.addEventListener('click', () => openNativeCamera())
+  document.getElementById('home-fab').addEventListener('click', openPreferredCamera)
+  document.getElementById('ac-camera')?.addEventListener('click', openPreferredCamera)
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
   document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
-  _syncNativeCameraAction()
+  _syncCameraAction()
 
-  document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine'))
-  document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { groupBySpecies: true }))
+  document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine', { resetSearch: true, resetFilters: true }))
+  document.getElementById('hstat-sp-btn').addEventListener('click', () => openFinds('mine', { resetSearch: true, resetFilters: true, groupBySpecies: true }))
+  document.getElementById('hstat-spores-btn')?.addEventListener('click', () => openFinds('mine', { resetSearch: true, resetFilters: true, sporesOnly: true }))
 
   // EXIF warning modal events for Android web
   const warningOverlay = document.getElementById('exif-warning-overlay')
@@ -59,16 +40,15 @@ export async function initHome() {
   await refreshHome()
 }
 
-function _syncNativeCameraAction() {
-  const nativeCam = document.getElementById('ac-native-cam')
-  if (!nativeCam) return
-  const isAndroidNative = !!window.Capacitor?.isNativePlatform?.()
-    && window.Capacitor?.getPlatform?.() === 'android'
-  nativeCam.style.display = isAndroidNative ? 'flex' : 'none'
-  nativeCam.closest('.action-grid')?.classList.toggle('action-grid-native', isAndroidNative)
+function _syncCameraAction() {
+  const camera = document.getElementById('ac-camera')
+  if (!camera) return
+  const label = camera.querySelector('.action-card-label')
+  if (label) label.textContent = getEffectiveCameraLabel()
 }
 
 export async function refreshHome() {
+  _syncCameraAction()
   await Promise.all([loadRecentFinds(), loadRecentComments(), loadStats(), checkSyncStatus(), refreshHeaderProfileButtons()])
 }
 
@@ -203,6 +183,14 @@ async function loadRecentComments() {
       .select('id, genus, species, common_name')
       .in('id', obsIds)
     ;(obsData || []).forEach(o => { obsMap[o.id] = o })
+    const missingObsIds = obsIds.filter(id => !obsMap[id])
+    if (missingObsIds.length) {
+      const { data: publicObsData } = await supabase
+        .from('observations_community_view')
+        .select('id, genus, species, common_name')
+        .in('id', missingObsIds)
+      ;(publicObsData || []).forEach(o => { obsMap[o.id] = o })
+    }
   }
   const imageUrls = obsIds.length ? await fetchFirstImages(obsIds, { variant: 'small' }) : {}
 

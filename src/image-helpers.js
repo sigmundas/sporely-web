@@ -2,8 +2,14 @@
 // Replaces duplicated _imageHtml + _wireImageFallback from home.js and find_s.js.
 
 /** Render an <img> from a media source, or a mushroom placeholder if missing. */
-export function imageHtml(source, className) {
-  if (!source?.primaryUrl) return `<div class="${className}"></div>`
+export function imageHtml(source, className, placeholderClassOrHtml) {
+  if (!source?.primaryUrl) {
+    if (placeholderClassOrHtml && placeholderClassOrHtml.trim().startsWith('<')) {
+      return placeholderClassOrHtml
+    }
+    const cls = placeholderClassOrHtml || className
+    return `<div class="${cls}">🍄</div>`
+  }
   const fallbackAttr = source.fallbackUrl && source.fallbackUrl !== source.primaryUrl
      ? ` data-fallback-src="${source.fallbackUrl}"`
      : ''

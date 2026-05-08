@@ -1,6 +1,6 @@
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
-const DEFAULT_ALLOWED_METHODS = 'PUT, POST, DELETE, OPTIONS'
+const DEFAULT_ALLOWED_METHODS = 'GET, PUT, POST, DELETE, OPTIONS'
 const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
   'Content-Type',
@@ -10,9 +10,13 @@ const DEFAULT_ALLOWED_HEADERS = [
   'X-Sporely-Upload-Origin',
 ].join(', ')
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
+const ARTS_MAX_DIST = 0.006
+const NOMINATIM_INTERVAL_MS = 1000
 
 let cachedJwks = null
 let cachedJwksAt = 0
+let lastNominatimRequestStartedAt = 0
+let nominatimQueue = Promise.resolve()
 
 export default {
   async fetch(request, env, ctx) {
@@ -42,12 +46,24 @@ async function handleRequest(request, env, ctx) {
     return jsonResponse({ ok: true, service: 'sporely-r2-upload-worker' }, 200, request, env)
   }
 
+  if (request.method === 'GET' && url.pathname === '/reverse-location') {
+    return handleReverseLocation(request, env, url)
+  }
+
   if (request.method === 'POST' && url.pathname === '/artsorakel') {
     return handleArtsorakel(request, env, ctx)
   }
 
+  if (request.method === 'POST' && url.pathname === '/artsorakel/media') {
+    return handleArtsorakelMedia(request, env, ctx)
+  }
+
   if (request.method === 'PUT' && url.pathname.startsWith('/upload/')) {
     return handleUpload(request, env, ctx, url)
+  }
+
+  if (request.method === 'GET' && url.pathname.startsWith('/upload/')) {
+    return handleDownload(request, env, ctx, url)
   }
 
   if (request.method === 'DELETE' && url.pathname.startsWith('/upload/')) {
@@ -55,6 +71,79 @@ async function handleRequest(request, env, ctx) {
   }
 
   throw httpError(404, 'not_found', 'Route not found')
+}
+
+async function handleReverseLocation(request, env, url) {
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const lat = Number(url.searchParams.get('lat'))
+  const lon = Number(url.searchParams.get('lon'))
+  if (!isUsableCoordinate(lat, lon)) {
+    throw httpError(400, 'invalid_coordinates', 'Valid lat and lon query parameters are required')
+  }
+
+  const prefer = String(url.searchParams.get('prefer') || '').trim().toLowerCase()
+  if (prefer !== 'international') {
+    const artsName = await fetchArtsdatabankenSuggestion(lat, lon)
+    if (artsName) {
+      return jsonResponse(
+        {
+          suggestions: [artsName],
+          latitude: lat,
+          longitude: lon,
+          country_code: 'no',
+          country_name: 'Norge',
+          nominatim_display_name: null,
+          source: 'artsdatabanken',
+        },
+        200,
+        request,
+        env,
+        origin,
+      )
+    }
+  }
+
+  const nominatim = await fetchNominatim(lat, lon, env)
+  const address = nominatim?.address || {}
+  const countryCode = stringOrNull(address.country_code)?.toLowerCase() || null
+  const countryName = stringOrNull(address.country)
+  const displayName = stringOrNull(nominatim?.display_name)
+  const nominatimSuggestions = nominatimSuggestionList(nominatim)
+  const suggestions = []
+  let source = 'nominatim'
+
+  if (countryCode === 'no') {
+    source = 'nominatim'
+  } else if (countryCode === 'dk') {
+    const dawaName = await fetchDawaSuggestion(lat, lon)
+    if (dawaName) {
+      suggestions.push(dawaName)
+      source = 'dawa'
+    }
+  }
+
+  suggestions.push(...nominatimSuggestions)
+  const maxSuggestions = countryCode === 'no' ? 3 : 2
+
+  return jsonResponse(
+    {
+      suggestions: dedupeText(suggestions).slice(0, maxSuggestions),
+      latitude: lat,
+      longitude: lon,
+      country_code: countryCode,
+      country_name: countryName,
+      nominatim_display_name: displayName,
+      source,
+    },
+    200,
+    request,
+    env,
+    origin,
+  )
 }
 
 function handleOptions(request, env) {
@@ -66,6 +155,86 @@ function handleOptions(request, env) {
     status: 204,
     headers: corsHeaders(request, env, origin),
   })
+}
+
+async function fetchNominatim(lat, lon, env) {
+  await queueNominatimTurn()
+
+  const url = new URL('https://nominatim.openstreetmap.org/reverse')
+  url.searchParams.set('lat', String(lat))
+  url.searchParams.set('lon', String(lon))
+  url.searchParams.set('format', 'json')
+  url.searchParams.set('addressdetails', '1')
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': String(env.NOMINATIM_USER_AGENT || 'SporelyApp/1.0 (contact@sporely.no)'),
+    },
+    cf: { cacheTtl: 3600, cacheEverything: true },
+  })
+  if (!response.ok) return {}
+  return safeJsonObject(response)
+}
+
+function queueNominatimTurn() {
+  const run = nominatimQueue
+    .catch(() => {})
+    .then(async () => {
+      const elapsed = Date.now() - lastNominatimRequestStartedAt
+      if (elapsed < NOMINATIM_INTERVAL_MS) {
+        await delay(NOMINATIM_INTERVAL_MS - elapsed)
+      }
+      lastNominatimRequestStartedAt = Date.now()
+    })
+  nominatimQueue = run.catch(() => {})
+  return run
+}
+
+async function fetchArtsdatabankenSuggestion(lat, lon) {
+  const url = new URL('https://stedsnavn.artsdatabanken.no/v1/punkt')
+  url.searchParams.set('lat', String(lat))
+  url.searchParams.set('lng', String(lon))
+  url.searchParams.set('zoom', '45')
+
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    cf: { cacheTtl: 3600, cacheEverything: true },
+  })
+  if (!response.ok) return ''
+  const data = await safeJsonObject(response)
+  const dist = Number(data?.dist)
+  if (!Number.isFinite(dist) || dist > ARTS_MAX_DIST) return ''
+  return stringOrNull(data?.navn) || ''
+}
+
+async function fetchDawaSuggestion(lat, lon) {
+  const url = new URL('https://api.dataforsyningen.dk/adgangsadresser/reverse')
+  url.searchParams.set('x', String(lon))
+  url.searchParams.set('y', String(lat))
+
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    cf: { cacheTtl: 3600, cacheEverything: true },
+  })
+  if (!response.ok) return ''
+  const data = await safeJsonObject(response)
+  return dedupeText([
+    data?.vejstykke?.navn,
+    data?.postnummer?.navn,
+    data?.kommune?.navn,
+    data?.region?.navn,
+    'Danmark',
+  ]).join(', ')
+}
+
+function nominatimSuggestionList(data) {
+  const address = data?.address || {}
+  const localParts = dedupeText([
+    address.amenity || address.road,
+    address.neighbourhood || address.suburb,
+  ])
+  return localParts.length ? localParts : dedupeText([data?.display_name])
 }
 
 async function handleUpload(request, env, ctx, url) {
@@ -158,6 +327,44 @@ async function handleUpload(request, env, ctx, url) {
   )
 }
 
+async function handleDownload(request, env, ctx, url) {
+  if (!env.MEDIA_BUCKET) {
+    throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
+  }
+
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const authHeader = request.headers.get('Authorization')
+  const token = parseBearerToken(authHeader)
+  const claims = await verifySupabaseJwt(token, env, ctx)
+
+  const key = normalizeObjectKey(url.pathname.slice('/upload/'.length))
+  if (!key) {
+    throw httpError(400, 'invalid_key', 'Missing download key')
+  }
+  if (!await canReadMediaKey(env, claims, key)) {
+    throw httpError(403, 'key_not_allowed', 'Download key is not available to the authenticated user')
+  }
+
+  const object = await env.MEDIA_BUCKET.get(key)
+  if (!object) {
+    throw httpError(404, 'media_not_found', 'Media object was not found')
+  }
+
+  const headers = corsHeaders(request, env, origin)
+  object.writeHttpMetadata(headers)
+  if (object.httpEtag) headers.set('ETag', object.httpEtag)
+  headers.set('Cache-Control', 'private, max-age=300')
+
+  return new Response(object.body, {
+    status: 200,
+    headers,
+  })
+}
+
 async function handleDelete(request, env, ctx, url) {
   if (!env.MEDIA_BUCKET) {
     throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
@@ -205,7 +412,7 @@ async function fetchStorageProfile(env, userId) {
 
   const query = [
     `id=eq.${encodeURIComponent(userId)}`,
-    'select=cloud_plan,storage_quota_bytes,total_storage_bytes,storage_used_bytes,image_count,is_banned',
+    'select=is_pro,cloud_plan,storage_quota_bytes,total_storage_bytes,storage_used_bytes,image_count,is_banned',
     'limit=1',
   ].join('&')
   const response = await supabaseRestFetch(env, `/rest/v1/profiles?${query}`, { method: 'GET' })
@@ -220,7 +427,7 @@ function assertStorageQuotaAllowsUpload(profile, storageDelta, env) {
   if (!profile || storageDelta <= 0) return
 
   const cloudPlan = String(profile.cloud_plan || '').trim().toLowerCase()
-  if (cloudPlan === 'pro') return
+  if (cloudPlan === 'pro' || profile.is_pro === true) return
 
   const quota = parseNonNegativeInt(profile.storage_quota_bytes, parseNonNegativeInt(env.FREE_STORAGE_QUOTA_BYTES, DEFAULT_FREE_STORAGE_QUOTA_BYTES))
   if (!quota) return
@@ -286,6 +493,38 @@ function isOriginalImageKey(key) {
   return !!filename && !filename.startsWith('thumb_')
 }
 
+async function canReadMediaKey(env, claims, key) {
+  if (!claims?.sub || !key) return false
+  if (key.startsWith(`${claims.sub}/`)) return true
+  if (!hasSupabaseServiceRole(env)) return false
+
+  const imageQuery = [
+    `storage_path=eq.${encodeURIComponent(key)}`,
+    'select=observation_id',
+    'limit=1',
+  ].join('&')
+  const imageResponse = await supabaseRestFetch(env, `/rest/v1/observation_images?${imageQuery}`, { method: 'GET' })
+  if (!imageResponse.ok) {
+    throw httpError(500, 'media_owner_lookup_failed', 'Could not verify media ownership')
+  }
+  const imageRows = await imageResponse.json()
+  const observationId = Array.isArray(imageRows) ? imageRows[0]?.observation_id : null
+  if (!observationId) return false
+
+  const observationQuery = [
+    `id=eq.${encodeURIComponent(observationId)}`,
+    `user_id=eq.${encodeURIComponent(claims.sub)}`,
+    'select=id',
+    'limit=1',
+  ].join('&')
+  const observationResponse = await supabaseRestFetch(env, `/rest/v1/observations?${observationQuery}`, { method: 'GET' })
+  if (!observationResponse.ok) {
+    throw httpError(500, 'media_owner_lookup_failed', 'Could not verify media ownership')
+  }
+  const observationRows = await observationResponse.json()
+  return Array.isArray(observationRows) && observationRows.length > 0
+}
+
 async function handleArtsorakel(request, env, ctx) {
   const origin = resolveAllowedOrigin(request, env)
   if (request.headers.get('Origin') && !origin) {
@@ -317,6 +556,135 @@ async function handleArtsorakel(request, env, ctx) {
   return new Response(upstreamBody, {
     status: upstream.status,
     headers: responseHeaders,
+  })
+}
+
+async function handleArtsorakelMedia(request, env, ctx) {
+  if (!env.MEDIA_BUCKET) {
+    throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
+  }
+
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const authHeader = request.headers.get('Authorization')
+  const token = parseBearerToken(authHeader)
+  const claims = await verifySupabaseJwt(token, env, ctx)
+
+  let body
+  try {
+    body = await request.json()
+  } catch (_) {
+    throw httpError(400, 'invalid_json', 'Request body must be JSON')
+  }
+
+  const rawKeys = Array.isArray(body?.keys) ? body.keys : [body?.key]
+  const keys = [...new Set(rawKeys
+    .map(value => String(value || '').trim())
+    .filter(Boolean))]
+    .slice(0, parsePositiveInt(env.ARTSORAKEL_MAX_MEDIA_ITEMS, 6))
+  if (!keys.length) {
+    throw httpError(400, 'missing_media_keys', 'At least one media key is required')
+  }
+
+  const variant = String(body?.variant || 'medium').trim() || 'medium'
+  const responses = []
+  const errors = []
+
+  for (const rawKey of keys) {
+    let key
+    try {
+      key = normalizeObjectKey(rawKey)
+    } catch (error) {
+      errors.push({ key: rawKey, error: error?.code || 'invalid_key' })
+      continue
+    }
+
+    if (!await canReadMediaKey(env, claims, key)) {
+      errors.push({ key, error: 'key_not_allowed' })
+      continue
+    }
+
+    const object = await getMediaObjectForAi(env, key, variant)
+    if (!object) {
+      errors.push({ key, error: 'media_not_found' })
+      continue
+    }
+
+    try {
+      const data = await runArtsorakelForMediaObject(object)
+      responses.push({ key, data })
+    } catch (error) {
+      console.error('Artsorakel media request failed', error)
+      errors.push({ key, error: error?.code || 'artsorakel_failed' })
+    }
+  }
+
+  if (!responses.length) {
+    const allForbidden = errors.length > 0 && errors.every(item => item.error === 'key_not_allowed')
+    throw httpError(
+      allForbidden ? 403 : 502,
+      allForbidden ? 'key_not_allowed' : 'media_ai_failed',
+      allForbidden
+        ? 'Observation images are not available to the authenticated user'
+        : 'Could not load observation images for Artsorakel',
+    )
+  }
+
+  return jsonResponse(
+    {
+      ok: true,
+      total: keys.length,
+      responses,
+      errors,
+    },
+    200,
+    request,
+    env,
+    origin,
+  )
+}
+
+async function getMediaObjectForAi(env, key, variant) {
+  const candidates = mediaCandidateKeys(key, variant)
+  for (const candidate of candidates) {
+    const object = await env.MEDIA_BUCKET.get(candidate)
+    if (object) return object
+  }
+  return null
+}
+
+function mediaCandidateKeys(key, variant) {
+  if (!variant || variant === 'original') return [key]
+  const parts = key.split('/')
+  const fileName = parts.pop() || ''
+  const dir = parts.join('/')
+  const primaryKey = dir ? `${dir}/thumb_${fileName}` : `thumb_${fileName}`
+  return [...new Set([primaryKey, key].filter(Boolean))]
+}
+
+async function runArtsorakelForMediaObject(object) {
+  const contentType = String(object?.httpMetadata?.contentType || '').trim() || 'image/jpeg'
+  const bodyBuffer = await object.arrayBuffer()
+
+  let upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'image')
+  if (!upstream.ok) {
+    upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'file')
+  }
+  if (!upstream.ok) {
+    throw httpError(502, 'artsorakel_failed', `Artsdata AI ${upstream.status}`)
+  }
+  return upstream.json()
+}
+
+function postArtsorakelBuffer(bodyBuffer, contentType, fieldName) {
+  const form = new FormData()
+  form.append(fieldName, new Blob([bodyBuffer], { type: contentType }), 'photo.jpg')
+  return fetch('https://ai.artsdatabanken.no', {
+    method: 'POST',
+    body: form,
   })
 }
 
@@ -631,6 +999,48 @@ function httpError(status, code, message) {
   error.status = status
   error.code = code
   return error
+}
+
+async function safeJsonObject(response) {
+  try {
+    const data = await response.json()
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {}
+  } catch (_) {
+    return {}
+  }
+}
+
+function isUsableCoordinate(lat, lon) {
+  return Number.isFinite(lat) &&
+    Number.isFinite(lon) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lon >= -180 &&
+    lon <= 180 &&
+    !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001)
+}
+
+function dedupeText(values) {
+  const seen = new Set()
+  const result = []
+  for (const value of values || []) {
+    const text = stringOrNull(value)
+    if (!text) continue
+    const key = text.toLocaleLowerCase().replace(/\s+/g, ' ')
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(text)
+  }
+  return result
+}
+
+function stringOrNull(value) {
+  const text = String(value || '').trim()
+  return text || null
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function parseIntegerHeader(value) {

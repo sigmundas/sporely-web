@@ -1,18 +1,20 @@
-// Location name lookup via Artsdatabanken place-name service.
-// Current location is only applied when the user explicitly asks for it.
+import { lookupCoordinateKey, lookupReverseLocation } from './location-lookup.js'
 
-let resolvedName = ''
-let lastApplied  = ''
+let suggestions = []
+let lastApplied = ''
+let lastLookupKey = ''
 let debounceTimer = null
 let lookupSeq = 0
 
 export function resetLocationState() {
   lookupSeq += 1
-  resolvedName = ''
-  lastApplied  = ''
+  suggestions = []
+  lastApplied = ''
+  lastLookupKey = ''
   clearTimeout(debounceTimer)
   const input = document.getElementById('location-name-input')
   if (input) input.value = ''
+  _renderDropdown(false)
   _updateApplyBtn()
 }
 
@@ -20,22 +22,22 @@ export function getLocationName() {
   return document.getElementById('location-name-input')?.value.trim() || ''
 }
 
-// Call once in initReview() — wires the manual input + "Use lookup" button.
+// Call once in initReview() — wires manual input plus lookup suggestions.
 export function initLocationField() {
   const input = document.getElementById('location-name-input')
-  const btn   = document.getElementById('location-apply-btn')
-  if (!input || !btn) return
+  if (!input || input._locationWired) return
 
-  btn.addEventListener('click', () => {
-    if (!resolvedName) return
-    const current = input.value.trim()
-    if (current && current !== resolvedName.trim()) {
-      const confirmed = window.confirm('The place-name lookup will overwrite the existing location. Continue?')
-      if (!confirmed) return
-    }
-    input.value = resolvedName
-    lastApplied = resolvedName
+  input._locationWired = true
+  input.readOnly = false
+
+  input.addEventListener('focus', () => _renderDropdown(true))
+  input.addEventListener('click', () => _renderDropdown(true))
+  input.addEventListener('input', () => {
     _updateApplyBtn()
+    _renderDropdown(document.activeElement === input)
+  })
+  input.addEventListener('blur', () => {
+    setTimeout(() => _renderDropdown(false), 160)
   })
 
   _updateApplyBtn()
@@ -43,43 +45,92 @@ export function initLocationField() {
 
 // Call in buildReviewGrid() after GPS coords are known.
 export function startLocationLookup(lat, lon) {
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
-  if (Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001) return
+  const key = lookupCoordinateKey(Number(lat), Number(lon))
+  if (!key || key === lastLookupKey) return
 
   const seq = ++lookupSeq
+  lastLookupKey = key
   clearTimeout(debounceTimer)
   debounceTimer = setTimeout(async () => {
     try {
-      const url  = `https://stedsnavn.artsdatabanken.no/v1/punkt?lat=${lat}&lng=${lon}&zoom=55`
-      const resp = await fetch(url, { headers: { Accept: 'application/json' } })
-      if (!resp.ok) return
-
-      const data = await resp.json()
-      const name = typeof data?.navn === 'string' ? data.navn.trim() : ''
-      if (!name) return
-      if (seq !== lookupSeq) return
-
-      resolvedName = name
-
-      const input = document.getElementById('location-name-input')
-      if (!input) return
-
-      if (!input.value.trim()) {
-        input.value = resolvedName
-        lastApplied = resolvedName
-      }
-
-      _updateApplyBtn()
+      const result = await lookupReverseLocation(lat, lon, {
+        onUpdate: updated => _applyLookupResult(updated, key),
+      })
+      if (seq !== lookupSeq || key !== lastLookupKey) return
+      _applyLookupResult(result, key)
     } catch { /* silent — location name is optional */ }
   }, 500)
 }
 
-function _updateApplyBtn() {
+function _applyLookupResult(result, key) {
+  if (key && key !== lastLookupKey) return
+  suggestions = result?.suggestions || []
+  const first = suggestions[0] || ''
   const input = document.getElementById('location-name-input')
-  const btn   = document.getElementById('location-apply-btn')
-  if (!input || !btn) return
-  const matchesResolved = !!resolvedName && input.value.trim() === resolvedName.trim()
-  btn.textContent = resolvedName || 'Use lookup result'
-  btn.style.display = resolvedName && !matchesResolved ? 'inline-block' : 'none'
-  btn.disabled = !resolvedName
+  if (!input) return
+
+  if (first && (!input.value.trim() || input.value.trim() === lastApplied)) {
+    input.value = first
+    lastApplied = first
+  }
+
+  _updateApplyBtn()
+  _renderDropdown(document.activeElement === input)
+}
+
+function _ensureDropdown() {
+  const input = document.getElementById('location-name-input')
+  const wrap = input?.closest('.location-field-val')
+  if (!input || !wrap) return null
+  let dropdown = wrap.querySelector('.location-suggestion-dropdown')
+  if (!dropdown) {
+    dropdown = document.createElement('ul')
+    dropdown.className = 'location-suggestion-dropdown'
+    dropdown.style.display = 'none'
+    wrap.appendChild(dropdown)
+  }
+  return dropdown
+}
+
+function _renderDropdown(show) {
+  const input = document.getElementById('location-name-input')
+  const dropdown = _ensureDropdown()
+  if (!input || !dropdown) return
+
+  if (!show || !suggestions.length) {
+    dropdown.style.display = 'none'
+    dropdown.innerHTML = ''
+    return
+  }
+
+  dropdown.innerHTML = suggestions
+    .map((name, index) => `<li data-index="${index}">${_esc(name)}</li>`)
+    .join('')
+  dropdown.style.display = 'block'
+  dropdown.querySelectorAll('li').forEach((item, index) => {
+    item.addEventListener('mousedown', event => {
+      event.preventDefault()
+      const name = suggestions[index] || ''
+      input.value = name
+      lastApplied = name
+      dropdown.style.display = 'none'
+      _updateApplyBtn()
+    })
+  })
+}
+
+function _updateApplyBtn() {
+  const btn = document.getElementById('location-apply-btn')
+  if (!btn) return
+  btn.style.display = 'none'
+  btn.disabled = true
+}
+
+function _esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }

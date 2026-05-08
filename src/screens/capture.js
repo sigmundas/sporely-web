@@ -4,28 +4,39 @@ import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
-import { openPhotoImportPicker } from './import_review.js'
-
-function _isNativeApp() {
-  return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.())
-}
+import { getEffectiveCloudUploadPolicy } from '../cloud-plan.js'
+import { isNativeApp } from '../platform.js'
 
 let cachedPrimaryMainCameraId = null
 let primaryMainCameraPromise = null
 
 const CAMERA_VIDEO_WIDTH_IDEAL = 4000
 const CAMERA_VIDEO_HEIGHT_IDEAL = 3000
+let pendingCaptureCount = 0
+let finishCaptureWhenPendingComplete = false
+let captureCompleteHandler = null
+
+export function setCaptureCompleteHandler(handler) {
+  captureCompleteHandler = typeof handler === 'function' ? handler : null
+}
 
 export function initCapture() {
   document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
   document.getElementById('done-btn').addEventListener('click', finishCapture)
-  document.getElementById('capture-import-btn')?.addEventListener('click', () => {
-    void openPhotoImportPicker()
-  })
+  document.getElementById('capture-cancel-btn')?.addEventListener('click', cancelCapture)
   document.getElementById('camera-retry-btn').addEventListener('click', () => {
     document.getElementById('camera-denied').style.display = 'none'
     startCamera()
   })
+}
+
+function _defaultCaptureDraft() {
+  return {
+    habitat: '',
+    notes: '',
+    uncertain: false,
+    visibility: getDefaultVisibility(),
+  }
 }
 
 function _stopMediaStream(stream) {
@@ -100,7 +111,7 @@ async function _getPrimaryMainCameraId() {
         try {
           if (await _probeDeviceForTorch(device)) {
             cachedPrimaryMainCameraId = device.deviceId
-            console.log('Main 1x camera identified via torch capability:', device.label || device.deviceId)
+                if (import.meta.env.DEV) console.log('Main 1x camera identified via torch capability:', device.label || device.deviceId)
             return cachedPrimaryMainCameraId
           }
         } catch (err) {
@@ -108,7 +119,7 @@ async function _getPrimaryMainCameraId() {
         }
       }
 
-      console.log('Torch heuristic: no torch-capable camera found; falling back to environment camera.')
+          if (import.meta.env.DEV) console.log('Torch heuristic: no torch-capable camera found; falling back to environment camera.')
       return null
     } catch (err) {
       console.warn('Torch heuristic failed:', err)
@@ -141,7 +152,7 @@ async function _applyPrimaryLensPreferences(stream) {
   }
 
   if (typeof track.getSettings === 'function') {
-    console.log('Camera stream settings:', track.getSettings())
+    if (import.meta.env.DEV) console.log('Camera stream settings:', track.getSettings())
   }
 }
 
@@ -266,7 +277,7 @@ async function _takeStillPhoto(video) {
 
   const blob = await imageCapture.takePhoto(photoSettings)
   if (!_isBlob(blob)) throw new Error('Still photo capture returned no image')
-  console.log('Captured still photo via ImageCapture:', {
+  if (import.meta.env.DEV) console.log('Captured still photo via ImageCapture:', {
     bytes: blob.size,
     type: blob.type,
     settings: typeof track.getSettings === 'function' ? track.getSettings() : null,
@@ -296,18 +307,91 @@ async function _captureVideoFrame(video) {
     }, 'image/jpeg', 0.92)
   })
 
-  console.log('Captured fallback video frame:', { width: w, height: h, bytes: blob.size })
+  if (import.meta.env.DEV) console.log('Captured fallback video frame:', { width: w, height: h, bytes: blob.size })
   return blob
 }
 
+async function _loadImage(blob) {
+  return await new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      resolve(img)
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('Image decode failed'))
+    }
+    img.src = url
+  })
+}
+
+async function _resizeCaptureBlobForPolicy(blob) {
+  if (!_isBlob(blob)) return blob
+  const policy = getEffectiveCloudUploadPolicy(state.cloudPlan)
+  const maxPixels = Number(policy?.maxPixels) || 0
+  if (!maxPixels || policy.uploadMode === 'full') return blob
+
+  let img
+  try {
+    img = await _loadImage(blob)
+  } catch (err) {
+    console.warn('Could not decode captured image for resolution policy:', err)
+    return blob
+  }
+
+  const sourceWidth = img.naturalWidth || img.width
+  const sourceHeight = img.naturalHeight || img.height
+  const sourcePixels = sourceWidth * sourceHeight
+  if (!sourceWidth || !sourceHeight || sourcePixels <= maxPixels) return blob
+
+  const scale = Math.sqrt(maxPixels / sourcePixels)
+  const targetWidth = Math.max(1, Math.round(sourceWidth * scale))
+  const targetHeight = Math.max(1, Math.round(sourceHeight * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = targetWidth
+  canvas.height = targetHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return blob
+  ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
+
+  const resized = await new Promise((resolve, reject) => {
+    canvas.toBlob(nextBlob => {
+      if (nextBlob) resolve(nextBlob)
+      else reject(new Error('Capture resize failed'))
+    }, 'image/jpeg', 0.9)
+  })
+  return resized
+}
+
+function _syncCaptureControls() {
+  const doneBtn = document.getElementById('done-btn')
+  if (doneBtn) {
+    doneBtn.disabled = false
+    doneBtn.setAttribute('aria-busy', pendingCaptureCount > 0 ? 'true' : 'false')
+  }
+}
+
+function _setPendingCaptureDelta(delta) {
+  pendingCaptureCount = Math.max(0, pendingCaptureCount + delta)
+  _syncCaptureControls()
+  if (pendingCaptureCount === 0 && finishCaptureWhenPendingComplete) {
+    finishCaptureWhenPendingComplete = false
+    finishCapture()
+  }
+}
+
 async function _captureCameraBlob(video) {
+  let blob = null
   try {
     const stillBlob = await _takeStillPhoto(video)
-    if (_isBlob(stillBlob)) return stillBlob
+    if (_isBlob(stillBlob)) blob = stillBlob
   } catch (err) {
     console.warn('ImageCapture still photo failed; falling back to video frame:', err)
   }
-  return await _captureVideoFrame(video)
+  if (!_isBlob(blob)) blob = await _captureVideoFrame(video)
+  return await _resizeCaptureBlobForPolicy(blob)
 }
 
 export async function startCamera(options = {}) {
@@ -327,16 +411,14 @@ export async function startCamera(options = {}) {
     if (!preserveBatch) {
       state.sessionStart = new Date()
       state.capturedPhotos = []
-      state.captureDraft = {
-        habitat: '',
-        notes: '',
-        uncertain: false,
-        visibility: getDefaultVisibility(),
-      }
+      state.captureDraft = _defaultCaptureDraft()
     }
     state.batchCount = state.capturedPhotos.length
     document.getElementById('batch-count').textContent = String(state.batchCount)
     document.getElementById('batch-area').style.display = state.batchCount ? 'flex' : 'none'
+    pendingCaptureCount = 0
+    finishCaptureWhenPendingComplete = false
+    _syncCaptureControls()
   } catch (err) {
     const denied = document.getElementById('camera-denied')
     const body   = document.getElementById('camera-denied-body')
@@ -344,7 +426,7 @@ export async function startCamera(options = {}) {
     if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
       const ua = navigator.userAgent
       let instructions
-      if (_isNativeApp()) {
+      if (isNativeApp()) {
         instructions = t('capture.cameraPermissionAndroid')
       } else if (/iPhone|iPad/.test(ua)) {
         instructions = t('capture.cameraPermissionIphone')
@@ -399,9 +481,10 @@ function capturePhoto() {
     ctx.textBaseline = 'middle'
     ctx.fillText(emoji, 400, 300)
 
+    _setPendingCaptureDelta(1)
     const blobPromise = new Promise((resolve) => {
       canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.9)
-    })
+    }).finally(() => _setPendingCaptureDelta(-1))
     blobPromise.catch(() => {})
 
     state.capturedPhotos.push({
@@ -433,6 +516,7 @@ function capturePhoto() {
       aiCropSourceH: previewH,
     }
 
+    _setPendingCaptureDelta(1)
     const blobPromise = _captureCameraBlob(video).then(async blob => {
       const dimensions = await _getImageBlobDimensions(blob)
       if (dimensions.width && dimensions.height) {
@@ -441,8 +525,8 @@ function capturePhoto() {
         photo.aiCropSourceH = dimensions.height
       }
       return blob
-    })
-    
+    }).finally(() => _setPendingCaptureDelta(-1))
+
     // Add a dummy catch to prevent UnhandledPromiseRejection if it's not awaited immediately
     blobPromise.catch(() => {})
 
@@ -466,9 +550,49 @@ function capturePhoto() {
 }
 
 function finishCapture() {
+  if (pendingCaptureCount > 0) {
+    finishCaptureWhenPendingComplete = true
+    showToast('Saving photo...')
+    return
+  }
   stopCamera()
   document.getElementById('bottom-nav').style.display = 'flex'
+  const handler = captureCompleteHandler
+  if (handler) {
+    captureCompleteHandler = null
+    const photos = [...state.capturedPhotos]
+    state.capturedPhotos = []
+    state.batchCount = 0
+    state.reviewContext = null
+    document.getElementById('batch-count').textContent = '0'
+    document.getElementById('batch-area').style.display = 'none'
+    _syncCaptureControls()
+    Promise.resolve(handler(photos)).catch(error => {
+      console.error('Capture completion handler failed:', error)
+      showToast(error?.message || 'Could not add captured photo')
+    })
+    return
+  }
   navigate('review')
+}
+
+function cancelCapture() {
+  captureCompleteHandler = null
+  stopCamera()
+  state.capturedPhotos = []
+  state.reviewContext = null
+  state.batchCount = 0
+  pendingCaptureCount = 0
+  finishCaptureWhenPendingComplete = false
+  state.sessionStart = null
+  state.captureDraft = {
+    ..._defaultCaptureDraft(),
+  }
+  document.getElementById('batch-count').textContent = '0'
+  document.getElementById('batch-area').style.display = 'none'
+  _syncCaptureControls()
+  document.getElementById('bottom-nav').style.display = 'flex'
+  navigate('home')
 }
 
 function _syncPreviewFit(video) {

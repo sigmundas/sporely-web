@@ -1,9 +1,12 @@
+import { VISIBILITY_PUBLIC, normalizeVisibility as normalizeUiVisibility } from './visibility.js'
+
 const DEFAULT_VISIBILITY_KEY = 'sporely-default-visibility'
-const SYNC_OVER_MOBILE_DATA_KEY = 'sporely-sync-over-mobile-data'
+const USE_SYSTEM_CAMERA_KEY = 'sporely-use-system-camera'
 const LAST_SYNC_AT_KEY = 'sporely-last-sync-at'
 const ARTSORAKEL_MAX_EDGE_KEY = 'sporely-artsorakel-max-edge'
 const PHOTO_GAP_MINUTES_KEY = 'sporely-photo-gap'
 const DEFAULT_ARTSORAKEL_MAX_EDGE = 500
+export const NATIVE_CAMERA_JPEG_QUALITY = 75
 
 export function normalizeArtsorakelMaxEdge(value) {
   const parsed = Number.parseInt(value, 10)
@@ -50,16 +53,11 @@ export function setPhotoGapMinutes(value) {
 }
 
 export function normalizeVisibility(value) {
-  const normalized = String(value || '').trim().toLowerCase()
-  return normalized === 'private' || normalized === 'public' ? normalized : 'friends'
+  return normalizeUiVisibility(value, VISIBILITY_PUBLIC)
 }
 
 export function getDefaultVisibility() {
-  try {
-    return normalizeVisibility(localStorage.getItem(DEFAULT_VISIBILITY_KEY))
-  } catch (_) {
-    return 'friends'
-  }
+  return VISIBILITY_PUBLIC
 }
 
 export function setDefaultVisibility(value) {
@@ -68,17 +66,17 @@ export function setDefaultVisibility(value) {
   } catch (_) {}
 }
 
-export function getSyncOverMobileDataEnabled() {
+export function getUseSystemCamera() {
   try {
-    return localStorage.getItem(SYNC_OVER_MOBILE_DATA_KEY) !== '0'
+    return localStorage.getItem(USE_SYSTEM_CAMERA_KEY) === '1'
   } catch (_) {
-    return true
+    return false
   }
 }
 
-export function setSyncOverMobileDataEnabled(enabled) {
+export function setUseSystemCamera(enabled) {
   try {
-    localStorage.setItem(SYNC_OVER_MOBILE_DATA_KEY, enabled ? '1' : '0')
+    localStorage.setItem(USE_SYSTEM_CAMERA_KEY, enabled ? '1' : '0')
   } catch (_) {}
 }
 
@@ -112,7 +110,7 @@ export function isProbablyCellularConnection() {
 }
 
 export function canSyncOnCurrentConnection() {
-  return getSyncOverMobileDataEnabled() || !isProbablyCellularConnection()
+  return true // Always sync, removed mobile data toggle constraint
 }
 
 export function onConnectionTypeChange(callback) {

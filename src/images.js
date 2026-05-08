@@ -6,10 +6,6 @@ const SIGNED_URL_TTL_SECONDS = 3600
 const SIGNED_URL_CACHE = new Map()
 const MEDIA_BASE_URL = String(import.meta.env.VITE_MEDIA_BASE_URL || 'https://media.sporely.no').replace(/\/+$/, '')
 const MEDIA_UPLOAD_BASE_URL = String(import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || '').replace(/\/+$/, '')
-const THUMB_VARIANTS = {
-  small: { maxEdge: 240, quality: 0.82 },
-  medium: { maxEdge: 720, quality: 0.82 },
-}
 const UPLOAD_METADATA_FIELDS = [
   'upload_mode',
   'source_width',
@@ -65,16 +61,38 @@ function _splitPath(storagePath) {
   return { dir: parts.join('/'), fileName }
 }
 
+export function imageExtensionForMimeType(type) {
+  const normalized = String(type || '').split(';')[0].trim().toLowerCase()
+  if (normalized === 'image/webp') return 'webp'
+  if (normalized === 'image/avif') return 'avif'
+  if (normalized === 'image/jpeg' || normalized === 'image/jpg') return 'jpg'
+  if (normalized === 'image/heic') return 'heic'
+  if (normalized === 'image/heif') return 'heif'
+  return 'jpg'
+}
+
+export function imageExtensionForBlob(blob) {
+  return imageExtensionForMimeType(blob?.type)
+}
+
 export function getVariantPath(storagePath, variant = 'original') {
   const key = normalizeMediaKey(storagePath)
   if (!key || variant === 'original') return key
   const { dir, fileName } = _splitPath(storagePath)
-  return dir ? `${dir}/thumb_${variant}_${fileName}` : `thumb_${variant}_${fileName}`
+  const variantName = ['thumb', 'small', 'medium', 'cards'].includes(String(variant || '').toLowerCase())
+    ? `thumb_${fileName}`
+    : `${variant}_${fileName}`
+  return dir ? `${dir}/${variantName}` : variantName
 }
 
 export function getPublicMediaUrl(storagePath, variant = 'original') {
-  const key = getVariantPath(storagePath, variant)
+  const key = normalizeMediaKey(storagePath)
   if (!key) return ''
+  
+  if (variant !== 'original') {
+    const variantKey = getVariantPath(storagePath, variant)
+    return `${MEDIA_BASE_URL}/${variantKey}`
+  }
   return `${MEDIA_BASE_URL}/${key}`
 }
 
@@ -147,6 +165,35 @@ async function _deleteViaWorker(path) {
   }
 }
 
+async function _downloadViaWorker(path) {
+  const normalizedPath = normalizeMediaKey(path)
+  if (!normalizedPath) throw new Error('Missing storage path')
+
+  const { data: { session } } = await supabase.auth.getSession()
+  const accessToken = session?.access_token
+  if (!accessToken) throw new Error('Missing authenticated session for media download')
+
+  const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  })
+
+  if (!response.ok) {
+    let detail = response.statusText || 'Download failed'
+    try {
+      const payload = await response.json()
+      if (payload?.message) detail = payload.message
+    } catch (_) {}
+    throw new Error(`Worker download failed: ${detail}`)
+  }
+
+  const blob = await response.blob()
+  if (!_isBlob(blob)) throw new Error('Worker download returned invalid data')
+  return blob
+}
+
 async function _uploadToStorage(path, blob, options = {}) {
   if (MEDIA_UPLOAD_BASE_URL) {
     await _uploadViaWorker(path, blob, options)
@@ -163,7 +210,7 @@ function _loadImage(blob) {
     const url = URL.createObjectURL(blob)
     const img = new Image()
     img.onload = () => {
-      URL.revokeObjectURL(url)
+      img._sporelyObjectUrl = url
       resolve(img)
     }
     img.onerror = () => {
@@ -174,51 +221,141 @@ function _loadImage(blob) {
   })
 }
 
-async function _createThumbnailBlob(blob, maxEdge, quality) {
-  if (!_isBlob(blob)) return null
+function _releaseImage(img) {
+  const url = img?._sporelyObjectUrl
+  if (url) URL.revokeObjectURL(url)
+  if (img) img.src = ''
+}
 
-  const img = await _loadImage(blob)
-  const width = img.naturalWidth || img.width
-  const height = img.naturalHeight || img.height
-  if (!width || !height) throw new Error('Image has zero dimensions')
+function _targetSizeForPolicy(width, height, uploadPolicy) {
+  const sourceWidth = Math.max(1, Number(width) || 0)
+  const sourceHeight = Math.max(1, Number(height) || 0)
+  const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+  let maxEdge = 1600
+  if (policy.uploadMode === 'full') {
+    const pixels = sourceWidth * sourceHeight
+    maxEdge = pixels > 13_000_000 ? 4000 : Math.max(sourceWidth, sourceHeight)
+  }
+  const scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight))
+  return {
+    targetWidth: Math.max(1, Math.round(sourceWidth * scale)),
+    targetHeight: Math.max(1, Math.round(sourceHeight * scale)),
+  }
+}
 
-  const scale = Math.min(1, maxEdge / Math.max(width, height))
-  const targetWidth = Math.max(1, Math.round(width * scale))
-  const targetHeight = Math.max(1, Math.round(height * scale))
+const ENCODE_CANDIDATES = [
+  { type: 'image/webp', quality: 0.65 },
+  { type: 'image/jpeg', quality: 0.75 },
+]
+let _imageWorker = null
+let _imageWorkerSeq = 0
+const _imageWorkerRequests = new Map()
 
-  if (scale === 1 && blob.type === 'image/jpeg') return blob
+function _getImageWorker() {
+  if (_imageWorker) return _imageWorker
+  if (typeof Worker === 'undefined' || typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') {
+    return null
+  }
+  _imageWorker = new Worker(new URL('./image-worker.js', import.meta.url), { type: 'module' })
+  _imageWorker.onmessage = event => {
+    const { id, result, error } = event.data || {}
+    const pending = _imageWorkerRequests.get(id)
+    if (!pending) return
+    _imageWorkerRequests.delete(id)
+    if (error) pending.reject(new Error(error))
+    else pending.resolve(result)
+  }
+  _imageWorker.onerror = event => {
+    const error = new Error(event?.message || 'Image worker failed')
+    for (const pending of _imageWorkerRequests.values()) pending.reject(error)
+    _imageWorkerRequests.clear()
+    _imageWorker?.terminate?.()
+    _imageWorker = null
+  }
+  return _imageWorker
+}
 
-  const canvas = document.createElement('canvas')
-  canvas.width = targetWidth
-  canvas.height = targetHeight
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas context unavailable')
-  ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
+async function _canvasToEncodedBlob(canvas, candidates = ENCODE_CANDIDATES) {
+  for (const candidate of candidates) {
+    const blob = await new Promise(resolve => {
+      canvas.toBlob(nextBlob => resolve(nextBlob), candidate.type, candidate.quality)
+    })
+    if (blob?.type === candidate.type && blob.size > 0) return blob
+  }
+  throw new Error('Image encoding failed')
+}
 
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      thumbBlob => thumbBlob ? resolve(thumbBlob) : reject(new Error('Thumbnail encode failed')),
-      'image/jpeg',
-      quality,
-    )
+function _configureCanvasContext(ctx) {
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+}
+
+function _drawHighQuality(source, sourceWidth, sourceHeight, targetCanvas, targetWidth, targetHeight) {
+  let currentSource = source
+  let currentWidth = sourceWidth
+  let currentHeight = sourceHeight
+  const scratchCanvases = []
+
+  while (currentWidth / targetWidth > 2 || currentHeight / targetHeight > 2) {
+    const nextWidth = Math.max(targetWidth, Math.round(currentWidth / 2))
+    const nextHeight = Math.max(targetHeight, Math.round(currentHeight / 2))
+    const scratch = document.createElement('canvas')
+    scratch.width = nextWidth
+    scratch.height = nextHeight
+    const scratchCtx = scratch.getContext('2d', { alpha: false })
+    if (!scratchCtx) break
+    _configureCanvasContext(scratchCtx)
+    scratchCtx.drawImage(currentSource, 0, 0, currentWidth, currentHeight, 0, 0, nextWidth, nextHeight)
+    if (currentSource instanceof HTMLCanvasElement) scratchCanvases.push(currentSource)
+    currentSource = scratch
+    currentWidth = nextWidth
+    currentHeight = nextHeight
+  }
+
+  const targetCtx = targetCanvas.getContext('2d', { alpha: false })
+  if (!targetCtx) throw new Error('Canvas context unavailable')
+  _configureCanvasContext(targetCtx)
+  targetCtx.drawImage(currentSource, 0, 0, currentWidth, currentHeight, 0, 0, targetWidth, targetHeight)
+
+  if (currentSource instanceof HTMLCanvasElement && currentSource !== targetCanvas) scratchCanvases.push(currentSource)
+  scratchCanvases.forEach(canvas => {
+    canvas.width = 0
+    canvas.height = 0
   })
 }
 
-function _fitWithinMaxPixels(width, height, maxPixels, options = {}) {
-  const pixels = Math.max(1, Number(width) || 0) * Math.max(1, Number(height) || 0)
-  const resizeThresholdPixels = Math.max(Number(maxPixels) || 0, Number(options.resizeThresholdPixels) || 0)
-  if (!maxPixels || pixels <= maxPixels || (resizeThresholdPixels && pixels < resizeThresholdPixels)) {
-    return {
-      targetWidth: width,
-      targetHeight: height,
-      resized: false,
+async function _prepareUploadBlobInWorker(blob, policy) {
+  const worker = _getImageWorker()
+  if (!worker) return null
+  const bitmap = await createImageBitmap(blob)
+  const id = `image-${++_imageWorkerSeq}`
+  const result = await new Promise((resolve, reject) => {
+    _imageWorkerRequests.set(id, { resolve, reject })
+    try {
+      worker.postMessage({ id, bitmap, policy }, [bitmap])
+    } catch (error) {
+      _imageWorkerRequests.delete(id)
+      bitmap?.close?.()
+      reject(error)
     }
-  }
-  const scale = Math.sqrt(maxPixels / pixels)
+  })
+  if (!result?.fullBytes || !result?.fullType) return null
+
+  const uploadBlob = new Blob([result.fullBytes], { type: result.fullType })
+  const thumbBlob = result.thumbBytes && result.thumbType
+    ? new Blob([result.thumbBytes], { type: result.thumbType })
+    : null
   return {
-    targetWidth: Math.max(1, Math.round(width * scale)),
-    targetHeight: Math.max(1, Math.round(height * scale)),
-    resized: true,
+    uploadBlob,
+    variants: thumbBlob ? { thumb: thumbBlob } : {},
+    uploadMeta: {
+      upload_mode: policy.uploadMode || 'reduced',
+      source_width: result.sourceWidth,
+      source_height: result.sourceHeight,
+      stored_width: result.targetWidth,
+      stored_height: result.targetHeight,
+      stored_bytes: uploadBlob.size || result.fullSize || 0,
+    },
   }
 }
 
@@ -226,6 +363,14 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
   if (!_isBlob(blob)) throw new Error('Missing image blob')
 
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+
+  try {
+    const prepared = await _prepareUploadBlobInWorker(blob, policy)
+    if (prepared) return prepared
+  } catch (err) {
+    console.warn('Image worker processing failed; falling back to main thread:', err)
+  }
+  
   let img
   try {
     img = await _loadImage(blob)
@@ -233,8 +378,9 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     // Browser cannot decode the image (e.g. HEIC fallback). Just upload original.
     return {
       uploadBlob: blob,
+      variants: {},
       uploadMeta: {
-        upload_mode: 'original',
+        upload_mode: 'full',
         source_width: null,
         source_height: null,
         stored_width: null,
@@ -247,10 +393,12 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
   const sourceWidth = img.naturalWidth || img.width
   const sourceHeight = img.naturalHeight || img.height
   if (!sourceWidth || !sourceHeight) {
+    _releaseImage(img)
     return {
       uploadBlob: blob,
+      variants: {},
       uploadMeta: {
-        upload_mode: 'original',
+        upload_mode: 'full',
         source_width: null,
         source_height: null,
         stored_width: null,
@@ -260,82 +408,71 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     }
   }
 
-  const fitted = _fitWithinMaxPixels(sourceWidth, sourceHeight, policy.maxPixels, {
-    resizeThresholdPixels: policy.resizeThresholdPixels,
-  })
-  let uploadBlob = blob
+  const { targetWidth, targetHeight } = _targetSizeForPolicy(sourceWidth, sourceHeight, policy)
 
-  if (fitted.resized || blob.type !== 'image/jpeg') {
-    const canvas = document.createElement('canvas')
-    canvas.width = fitted.targetWidth
-    canvas.height = fitted.targetHeight
-    const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('Canvas context unavailable')
-    ctx.drawImage(img, 0, 0, fitted.targetWidth, fitted.targetHeight)
-    uploadBlob = await new Promise((resolve, reject) => {
-      canvas.toBlob(
-        nextBlob => nextBlob ? resolve(nextBlob) : reject(new Error('Upload encode failed')),
-        'image/jpeg',
-        fitted.resized ? 0.9 : 0.92,
-      )
-    })
-  }
+  const canvas = document.createElement('canvas')
+  const thumbCanvas = document.createElement('canvas')
+  try {
+    canvas.width = targetWidth
+    canvas.height = targetHeight
+    _drawHighQuality(img, sourceWidth, sourceHeight, canvas, targetWidth, targetHeight)
 
-  return {
-    uploadBlob,
-    uploadMeta: {
-      upload_mode: policy.uploadMode || 'reduced',
-      source_width: sourceWidth,
-      source_height: sourceHeight,
-      stored_width: fitted.targetWidth,
-      stored_height: fitted.targetHeight,
-      stored_bytes: uploadBlob.size || 0,
-    },
+    const fullBlob = await _canvasToEncodedBlob(canvas)
+    await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
+
+    const thumbScale = Math.min(1, 400 / Math.max(targetWidth, targetHeight))
+    const thumbWidth = Math.max(1, Math.round(targetWidth * thumbScale))
+    const thumbHeight = Math.max(1, Math.round(targetHeight * thumbScale))
+    thumbCanvas.width = thumbWidth
+    thumbCanvas.height = thumbHeight
+    _drawHighQuality(canvas, targetWidth, targetHeight, thumbCanvas, thumbWidth, thumbHeight)
+    const thumbBlob = await _canvasToEncodedBlob(thumbCanvas, [
+      { type: 'image/webp', quality: 0.65 },
+      { type: 'image/jpeg', quality: 0.75 },
+    ])
+    await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
+
+    return {
+      uploadBlob: fullBlob,
+      variants: thumbBlob ? { thumb: thumbBlob } : {},
+      uploadMeta: {
+        upload_mode: policy.uploadMode || 'reduced',
+        source_width: sourceWidth,
+        source_height: sourceHeight,
+        stored_width: targetWidth,
+        stored_height: targetHeight,
+        stored_bytes: fullBlob.size || 0,
+      },
+    }
+  } finally {
+    canvas.width = 0
+    canvas.height = 0
+    thumbCanvas.width = 0
+    thumbCanvas.height = 0
+    _releaseImage(img)
   }
 }
 
 export async function prepareImageVariants(blob, uploadPolicy) {
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
-  const { uploadBlob, uploadMeta } = await _prepareUploadBlob(blob, policy)
+  const { uploadBlob, uploadMeta, variants } = await _prepareUploadBlob(blob, policy)
 
-  const variants = {}
-  const uploads = Object.entries(THUMB_VARIANTS).map(async ([variant, config]) => {
-    try {
-      const thumbBlob = await _createThumbnailBlob(uploadBlob, config.maxEdge, config.quality)
-      if (_isBlob(thumbBlob)) {
-        variants[variant] = thumbBlob
-      }
-    } catch (err) {
-      console.warn(`Thumbnail preparation failed for ${variant}:`, err)
-    }
-  })
-
-  await Promise.all(uploads)
-  
   return { uploadBlob, uploadMeta, variants }
 }
 
 export async function uploadPreparedObservationImageVariants(preparedImage, storagePath, options = {}) {
   const uploadPolicy = options?.uploadPolicy || getEffectiveCloudUploadPolicy()
   const uploadOptions = {
-    uploadMode: preparedImage.uploadMeta.upload_mode,
+    uploadMode: preparedImage.uploadMeta?.upload_mode || uploadPolicy.uploadMode,
     cloudPlan: uploadPolicy.cloudPlan,
     uploadOrigin: options?.uploadOrigin || 'web',
   }
 
   await _uploadToStorage(storagePath, preparedImage.uploadBlob, uploadOptions)
-
-  const uploads = Object.entries(preparedImage.variants || {}).map(async ([variant, thumbBlob]) => {
-    if (_isBlob(thumbBlob)) {
-      try {
-        await _uploadToStorage(getVariantPath(storagePath, variant), thumbBlob, uploadOptions)
-      } catch (err) {
-        console.warn(`Thumbnail upload failed for ${variant}:`, err)
-      }
-    }
-  })
-
-  await Promise.all(uploads)
+  if (preparedImage.variants?.thumb) {
+    const thumbPath = getVariantPath(storagePath, 'thumb')
+    await _uploadToStorage(thumbPath, preparedImage.variants.thumb, uploadOptions)
+  }
   return preparedImage.uploadMeta
 }
 
@@ -357,22 +494,54 @@ export async function deleteObservationMedia(paths) {
   const normalized = [...new Set((paths || [])
     .map(normalizeMediaKey)
     .filter(Boolean)
-    .flatMap(path => [
-      path,
-      ...Object.keys(THUMB_VARIANTS).map(variant => getVariantPath(path, variant)),
-    ]))]
+  )]
   if (!normalized.length) return
 
+  const withVariants = [...new Set(normalized.flatMap(path => [
+    path,
+    getVariantPath(path, 'thumb'),
+  ]))]
+
   if (MEDIA_UPLOAD_BASE_URL) {
-    await Promise.all(normalized.map(path => _deleteViaWorker(path)))
+    await Promise.all(withVariants.map(path => _deleteViaWorker(path)))
     return
   }
 
   const { error } = await supabase.storage
     .from('observation-images')
-    .remove(normalized)
+    .remove(withVariants)
 
   if (error) throw new Error(`Storage delete failed: ${error.message}`)
+}
+
+export async function downloadObservationImageBlob(storagePath, options = {}) {
+  const originalPath = normalizeMediaKey(storagePath)
+  if (!originalPath) throw new Error('Missing image storage path')
+
+  const variant = options.variant || 'medium'
+  const candidatePaths = variant === 'original'
+    ? [originalPath]
+    : [getVariantPath(originalPath, variant), originalPath]
+
+  let lastError = null
+  for (const path of [...new Set(candidatePaths.filter(Boolean))]) {
+    if (MEDIA_UPLOAD_BASE_URL) {
+      try {
+        const data = await _downloadViaWorker(path)
+        if (_isBlob(data)) return data
+      } catch (err) {
+        lastError = err
+      }
+    }
+
+    const { data, error } = await supabase.storage
+      .from('observation-images')
+      .download(path)
+    if (!error && _isBlob(data)) return data
+    lastError = error
+  }
+
+  throw new Error(`Image download failed: ${lastError?.message || originalPath}`)
 }
 
 export async function insertObservationImage(observationImage) {
@@ -475,7 +644,7 @@ export async function syncObservationMediaKeys(observationId, storagePath, optio
 
   const imageKey = normalizeMediaKey(storagePath)
   if (!imageKey) return false
-  const thumbKey = getVariantPath(imageKey, 'small')
+  const thumbKey = getVariantPath(imageKey, 'thumb')
 
   const { error: combinedError } = await supabase
     .from('observations')
@@ -553,9 +722,14 @@ export async function resolveMediaSources(paths, options = {}) {
   return normalizedPaths.map(originalPath => {
     if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
     const variantPath = getVariantPath(originalPath, variant)
-    const fallbackUrl = variant === 'original'
-      ? (signed[originalPath] || null)
-      : (signed[variantPath] || signed[originalPath] || null)
+    
+    let fallbackUrl = variant === 'original' ? signed[originalPath] || null : null;
+    if (variant !== 'original') {
+      fallbackUrl = signed[variantPath]
+        || signed[originalPath]
+        || getPublicMediaUrl(originalPath, 'original');
+    }
+    
     const primaryUrl = getPublicMediaUrl(originalPath, variant) || fallbackUrl
     return {
       key: originalPath,

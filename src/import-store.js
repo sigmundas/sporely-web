@@ -2,6 +2,7 @@
 // Blobs are converted to ArrayBuffers for storage (Blobs themselves aren't transferable).
 // All async work happens OUTSIDE the IDB transaction to avoid auto-commit.
 import { getDefaultVisibility } from './settings.js'
+import { normalizeCaptureVisibility } from './visibility.js'
 
 const DB_NAME = 'sporely'
 const DB_VERSION = 1
@@ -36,8 +37,12 @@ export async function saveImportSessions(sessions) {
       id: s.id,
       ts: s.ts.getTime(),
       locationName: s.locationName || '',
+      locationSuggestions: Array.isArray(s.locationSuggestions) ? [...s.locationSuggestions] : [],
+      locationLookup: s.locationLookup || null,
+      locationLookupKey: s.locationLookupKey || '',
+      locationAutoApplied: s.locationAutoApplied || '',
       taxon: s.taxon || null,
-      visibility: s.visibility || getDefaultVisibility(),
+      visibility: normalizeCaptureVisibility(s.visibility, getDefaultVisibility()),
       imageMeta: (s.imageMeta || []).map(meta => ({
         aiCropRect: meta?.aiCropRect || null,
         aiCropSourceW: meta?.aiCropSourceW ?? null,
@@ -92,8 +97,12 @@ export async function loadImportSessions() {
           id: r.id,
           ts: new Date(r.ts),
           locationName: r.locationName,
+          locationSuggestions: Array.isArray(r.locationSuggestions) ? [...r.locationSuggestions] : [],
+          locationLookup: r.locationLookup || null,
+          locationLookupKey: r.locationLookupKey || '',
+          locationAutoApplied: r.locationAutoApplied || '',
           taxon: r.taxon,
-          visibility: r.visibility || getDefaultVisibility(),
+          visibility: normalizeCaptureVisibility(r.visibility, getDefaultVisibility()),
           files,
           aiFiles: (r.aiBlobs || r.blobs).map(ab => new Blob([ab], { type: 'image/jpeg' })),
           blobUrls,

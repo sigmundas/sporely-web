@@ -116,6 +116,10 @@ See also:
   - Block filtering: Omits observations authored by users present in the viewer's `user_blocks` list.
   - Ban filtering: Omits observations where the author `is_banned = true`.
 
+### User Finds Feed (Web App)
+- When a user clicks a profile card on the People or Home tabs, the web app fetches both `observations` (to catch friend-visible posts) and `observations_community_view` (to catch all public posts) for that specific `user_id`.
+- The results are merged and deduplicated on the client to ensure the viewer sees exactly what they are permitted to see.
+
 ---
 
 ## Storage inventory

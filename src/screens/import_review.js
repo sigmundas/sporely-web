@@ -1,10 +1,8 @@
+import { Preferences } from '@capacitor/preferences';
 import { state } from '../state.js';
 import { formatDate, formatTime, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
-import { Capacitor, registerPlugin } from '@capacitor/core';
-import { Filesystem } from '@capacitor/filesystem';
-import { FilePicker } from '@capawesome/capacitor-file-picker';
 import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, createManualTaxon, isArtsorakelNetworkError } from '../artsorakel.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { openFinds } from './finds.js';
@@ -12,33 +10,20 @@ import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
-import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes } from '../settings.js';
+import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js';
+import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
+import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
+import { isAndroidNativeApp } from '../camera-actions.js';
+import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
 
-const NativePhotoPicker = registerPlugin('NativePhotoPicker');
-const NativeCamera = registerPlugin('NativeCamera');
 let sessions = [];
 let expandedSessionIds = new Set();
 let sourceItems = [];
-let exifrModulePromise = null;
 const importAiBatchState = {
   running: false,
   completedUnits: 0,
   totalUnits: 0,
 };
-const EXIF_DATETIME_PICK = ['DateTimeOriginal', 'CreateDate', 'ModifyDate'];
-const RAW_GPS_PICK = [
-  'GPSLatitude',
-  'GPSLatitudeRef',
-  'GPSLongitude',
-  'GPSLongitudeRef',
-  'GPSAltitude',
-  'GPSAltitudeRef',
-  'GPSHPositioningError',
-  'latitude',
-  'longitude',
-  'altitude',
-];
-const IMPORT_AI_MAX_EDGE = 1920;
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
@@ -269,8 +254,12 @@ function _buildSessionsFromSourceItems() {
       gpsAltitude: exifGps?.altitude ?? null,
       gpsAccuracy: exifGps?.accuracy ?? null,
       locationName: previous?.locationName || '',
+      locationSuggestions: Array.isArray(previous?.locationSuggestions) ? [...previous.locationSuggestions] : [],
+      locationLookup: previous?.locationLookup || null,
+      locationLookupKey: previous?.locationLookupKey || '',
+      locationAutoApplied: previous?.locationAutoApplied || '',
       taxon: previous?.taxon || null,
-      visibility: previous?.visibility || getDefaultVisibility(),
+      visibility: normalizeCaptureVisibility(previous?.visibility, getDefaultVisibility()),
       exifDebug: group.map(item => item.dbg).filter(Boolean),
     };
   });
@@ -388,10 +377,6 @@ function sessionById(sid) {
   return sessions.find(s => s.id === sid);
 }
 
-function _isNativeApp() {
-  return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.());
-}
-
 export function initImportReview() {
   document.getElementById('import-back').addEventListener('click', _cancelImport);
   document.getElementById('import-cancel-btn').addEventListener('click', _cancelImport);
@@ -458,13 +443,13 @@ export function restoreImportSessions(savedSessions) {
 }
 
 export async function openPhotoImportPicker() {
-  if (_isNativeApp() && Capacitor.getPlatform?.() === 'android') {
+  if (isAndroidNativeApp()) {
     try {
-      const result = await _pickImagesWithNativePhotoPicker();
+      const result = await pickImagesWithNativePhotoPicker();
       await _handleNativePhotoResult(result);
       return;
     } catch (err) {
-      if (_isPickerCancel(err)) return;
+      if (isPickerCancel(err)) return;
       console.warn('Native photo picker failed, falling back to browser input:', err);
       _hideProgress();
     }
@@ -488,12 +473,21 @@ export async function openPhotoImportPicker() {
 }
 
 export async function openNativeCamera() {
-  if (!_isNativeApp() || Capacitor.getPlatform?.() !== 'android') {
-    showToast('Native Cam is available in the Android app.')
+  if (!isAndroidNativeApp()) {
+    showToast('Sporely Cam is available in the Android app.')
     return
   }
 
   try {
+    if (getUseSystemCamera()) {
+      const result = await NativeCamera.openSystemCamera();
+      await _handleNativePhotoResult(result);
+      return;
+    }
+
+    const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' });
+    const useHdr = useHdrStr !== 'false';
+
     const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
       ? {
           latitude: state.gps.lat,
@@ -502,11 +496,14 @@ export async function openNativeCamera() {
           accuracy: Number.isFinite(state.gps.accuracy) ? state.gps.accuracy : null,
         }
       : null
-    await _handleNativePhotoResult(await NativeCamera.capturePhotos(gps ? { gps } : {}))
+
+    const options = { useHdr, jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
+    if (gps) options.gps = gps;
+    await _handleNativePhotoResult(await NativeCamera.capturePhotos(options))
   } catch (err) {
-    if (_isPickerCancel(err)) return
-    console.warn('Native camera failed:', err)
-    showToast(`Native Cam: ${err?.message || err}`)
+    if (isPickerCancel(err)) return
+    console.warn('Sporely camera failed:', err)
+    showToast(`Sporely Cam: ${err?.message || err}`)
     _hideProgress()
   }
 }
@@ -522,33 +519,18 @@ async function _handleNativePhotoResult(result) {
   const files = [];
   for (let i = 0; i < photos.length; i++) {
     _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
-    files.push(await _nativePickedPhotoToFile(photos[i], i));
+    files.push(await nativePickedPhotoToFile(photos[i], i));
   }
   await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos });
 }
 
-async function _pickImagesWithFilePicker() {
-  // Request permissions first to ensure ACCESS_MEDIA_LOCATION is handled where available.
-  await FilePicker.requestPermissions();
-  return FilePicker.pickImages({ multiple: true, readData: false });
-}
-
-async function _pickImagesWithNativePhotoPicker() {
-  try {
-    await FilePicker.requestPermissions({ permissions: ['accessMediaLocation'] });
-  } catch (error) {
-    console.warn('Could not request media-location permission before import:', error);
-  }
-  return NativePhotoPicker.pickImages();
-}
-
 export async function openFileImportPicker() {
-  if (_isNativeApp() && Capacitor.getPlatform?.() === 'android') {
+  if (isAndroidNativeApp()) {
     try {
-      await _handleNativePhotoResult(await _pickImagesWithNativePhotoPicker());
+      await _handleNativePhotoResult(await pickImagesWithNativePhotoPicker());
       return;
     } catch (err) {
-      if (_isPickerCancel(err)) return;
+      if (isPickerCancel(err)) return;
       console.warn('Native photo picker failed, falling back to browser input:', err);
       _hideProgress();
     }
@@ -565,6 +547,7 @@ export async function openFileImportPicker() {
             'image/jpeg': ['.jpg', '.jpeg'],
             'image/png': ['.png'],
             'image/webp': ['.webp'],
+            'image/avif': ['.avif'],
             'image/heic': ['.heic'],
             'image/heif': ['.heif'],
           },
@@ -602,11 +585,11 @@ async function handleSelectedFiles(files, options = {}) {
   const withTimes = await Promise.all(files.map(async (f, idx) => {
     const nativePhoto = nativePhotos[idx];
     if (nativePhoto) {
-      const { time, lat, lon, altitude, accuracy, dbg } = await _captureNativePhotoExif(nativePhoto, f);
+      const { time, lat, lon, altitude, accuracy, dbg } = await captureNativePhotoExif(nativePhoto, f);
       return {
         file: f,
         nativePhoto,
-        metadataPromise: _createNativeMetadataHydrationPromise(nativePhoto, f),
+        metadataPromise: createNativeMetadataHydrationPromise(nativePhoto, f),
         captureTime: time,
         lat,
         lon,
@@ -615,7 +598,7 @@ async function handleSelectedFiles(files, options = {}) {
         dbg,
       };
     }
-    const { time, lat, lon, altitude, accuracy, dbg } = await _captureExif(f);
+    const { time, lat, lon, altitude, accuracy, dbg } = await captureExif(f);
     return { file: f, captureTime: time, lat, lon, altitude, accuracy, dbg };
   }));
 
@@ -631,7 +614,7 @@ async function handleSelectedFiles(files, options = {}) {
   for (let idx = 0; idx < withTimes.length; idx++) {
     const item = withTimes[idx];
     _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
-    const processed = await _processFile(item.file, { nativePhoto: item.nativePhoto });
+    const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
     sourceItems.push({
       id: `i${idx}`,
       blob: processed.blob,
@@ -689,30 +672,49 @@ function _hideProgress() {
 
 function _prefillSessionLocations() {
   sessions.forEach(async session => {
-    if (!_isUsableCoordinate(Number(session.gpsLat), Number(session.gpsLon)) || session.locationName) return;
-    const name = await _reverseGeocode(session.gpsLat, session.gpsLon);
-    if (name && !session.locationName) {
-      session.locationName = name;
-      const input = document.querySelector(`.import-loc-input[data-sid="${session.id}"]`);
-      const locEl = document.querySelector(`.import-card[data-sid="${session.id}"] .import-card-loc`);
-      if (input) input.value = name;
-      if (locEl) locEl.textContent = name;
-      _persistSessions();
-    }
+    const lat = Number(session.gpsLat);
+    const lon = Number(session.gpsLon);
+    const lookupKey = lookupCoordinateKey(lat, lon);
+    if (!lookupKey) return;
+    if (session.locationLookupKey === lookupKey && Array.isArray(session.locationSuggestions)) return;
+
+    session.locationLookupKey = lookupKey;
+    const previousAuto = session.locationAutoApplied || '';
+    try {
+      const result = await lookupReverseLocation(lat, lon, {
+        onUpdate: updated => _applySessionLocationLookup(session.id, lookupKey, updated),
+      });
+      if (session.locationLookupKey !== lookupKey) return;
+      _applySessionLocationLookup(session.id, lookupKey, result, previousAuto);
+    } catch (_) {}
   });
 }
 
-// ── EXIF / capture time + GPS ─────────────────────────────────────────────────
-// Read DateTimeOriginal and GPS separately.
-// exifr.gps() is specifically designed to reliably return {latitude, longitude}
-// across JPEG, HEIC/HEIF and other formats — more robust than parse() + gps:true.
-function _isHeicLike(file) {
-  return /\.(heic|heif)$/i.test(file?.name || '') || /heic|heif/i.test(file?.type || '');
+function _applySessionLocationLookup(sessionId, lookupKey, result, previousAuto = null) {
+  const session = sessionById(sessionId);
+  if (!session || session.locationLookupKey !== lookupKey) return;
+
+  const nextSuggestions = result?.suggestions || [];
+  session.locationSuggestions = nextSuggestions;
+  session.locationLookup = result || null;
+  const first = nextSuggestions[0] || '';
+  const autoValue = previousAuto ?? session.locationAutoApplied ?? '';
+  if (first && (!session.locationName || session.locationName === autoValue)) {
+    session.locationName = first;
+    session.locationAutoApplied = first;
+  }
+
+  _syncLocationInput(session);
+  _persistSessions();
 }
 
-function _isPickerCancel(err) {
-  const message = String(err?.message || err || '').toLowerCase();
-  return err?.name === 'AbortError' || err?.code === 'CANCELLED' || message.includes('cancel');
+function _syncLocationInput(session) {
+  if (!session?.id) return;
+  const input = document.querySelector(`.import-loc-input[data-sid="${session.id}"]`);
+  const locEl = document.querySelector(`.import-card[data-sid="${session.id}"] .import-card-loc`);
+  if (input) input.value = session.locationName || '';
+  if (locEl) locEl.textContent = session.locationName || '—';
+  _renderImportLocationDropdown(session.id, false);
 }
 
 function _openBrowserFileInput(inputId) {
@@ -796,7 +798,7 @@ async function _nativePickedPhotoToFile(photo, index) {
 }
 
 function _shouldHydrateNativeMetadata(photo, file) {
-  if (Capacitor.getPlatform?.() !== 'android') return false;
+  if (!isAndroidApp()) return false;
   if (!photo?.originalPath) return false;
   if (photo.originalPath === photo.path && !_isHeicLike(file)) return false;
   const rawGps = _extractLatLonFromRawGps(photo.exif);
@@ -1181,26 +1183,13 @@ async function _captureExif(file) {
   return { time, lat, lon, altitude, accuracy, dbg };
 }
 
-async function _reverseGeocode(lat, lon) {
-  try {
-    const res = await fetch(
-      `https://stedsnavn.artsdatabanken.no/v1/punkt?lat=${lat}&lng=${lon}&zoom=55`
-    );
-    if (res.ok) {
-      const data = await res.json();
-      return data?.navn ?? null;
-    }
-  } catch (_) {}
-  return null;
-}
-
 // Prepare an imported file for preview + AI without eagerly re-encoding the full upload blob.
 // Strategy: if the browser can decode the image, keep the original file for upload/preview and
 // only generate a reduced AI JPEG. This avoids expensive full-resolution canvas encodes on
 // Android imports. If decode fails (e.g. some HEIC flows outside Safari/native conversion),
 // we fall back to the original file as-is.
 function _isAndroidNativeJpegImport(file, nativePhoto) {
-  return Capacitor.getPlatform?.() === 'android'
+  return isAndroidApp()
     && !!nativePhoto
     && file?.type === 'image/jpeg';
 }
@@ -1310,7 +1299,7 @@ export function renderSessions() {
   list.querySelectorAll('.import-vis-radio[data-sid]').forEach(input => {
     input.addEventListener('change', () => {
       const s = sessionById(input.dataset.sid);
-      if (s) s.visibility = input.value;
+      if (s) s.visibility = normalizeCaptureVisibility(input.value, getDefaultVisibility());
       _persistSessions();
     });
   });
@@ -1347,12 +1336,23 @@ function buildCardHTML(session) {
       ${hasAiCropRect(imageMeta[i]?.aiCropRect) ? '<div class="ai-crop-thumb-badge">AI crop</div>' : ''}
       <button class="import-strip-delete" data-sid="${sid}" data-idx="${i}">×</button>
     </div>`
-  ).join('');
+  ).join('') + `
+    <div class="import-strip-item import-strip-add" data-sid="${sid}">
+      <button class="import-strip-add-half import-strip-add-cam" data-sid="${sid}" type="button" aria-label="Add from camera">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h3l1.6-2h4.8L16 6h3a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
+      </button>
+      <div class="import-strip-add-divider"></div>
+      <button class="import-strip-add-half import-strip-add-file" data-sid="${sid}" type="button" aria-label="Add from file">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="2" ry="2"/><rect x="7" y="7" width="14" height="14" rx="2" ry="2"/></svg>
+      </button>
+    </div>
+  `;
 
   const taxonVal = session.taxon ? escHtml(session.taxon.displayName) : '';
   const locVal = escHtml(session.locationName);
   const aiPredictions = Array.isArray(session.aiPredictions) ? session.aiPredictions : [];
-  const visChecked = v => session.visibility === v ? 'checked' : '';
+  const sessionVisibility = normalizeCaptureVisibility(session.visibility, getDefaultVisibility());
+  const visChecked = v => sessionVisibility === v ? 'checked' : '';
   const heicWithoutGps = session.gpsLat === null && (session.exifDebug || []).some(d =>
     /\.(heic|heif)$/i.test(d?.fileName || '') || /heic|heif/i.test(d?.fileType || '')
   );
@@ -1394,9 +1394,12 @@ function buildCardHTML(session) {
     </div>
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">${t('detail.location')}</div>
-      <input class="detail-text-input import-loc-input" type="text"
-        data-sid="${sid}" placeholder="—" readonly
-        value="${locVal}">
+      <div class="location-suggest-wrap import-location-wrap">
+        <input class="detail-text-input import-loc-input" type="text"
+          data-sid="${sid}" placeholder="—" autocomplete="off" spellcheck="false"
+          value="${locVal}">
+        <ul class="location-suggestion-dropdown import-location-dropdown" data-sid="${sid}" style="display:none"></ul>
+      </div>
       ${missingGpsHint}
     </div>
     <div class="detail-field" style="margin-top:4px">
@@ -1404,7 +1407,6 @@ function buildCardHTML(session) {
       <div class="vis-radio-group">
         <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="private" ${visChecked('private')}> <span>${translateVisibility('private')}</span></label>
         <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="friends" ${visChecked('friends')}> <span>${translateVisibility('friends')}</span></label>
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="public" ${visChecked('public')}> <span>${translateVisibility('public')}</span></label>
       </div>
     </div>
   </div>
@@ -1413,9 +1415,67 @@ function buildCardHTML(session) {
 </div>`;
 }
 
+function _wireImportLocationInput(sid, card) {
+  const input = card.querySelector(`.import-loc-input[data-sid="${sid}"]`);
+  if (!input || input._wired) return;
+  input._wired = true;
+
+  input.addEventListener('focus', () => _renderImportLocationDropdown(sid, true));
+  input.addEventListener('click', () => _renderImportLocationDropdown(sid, true));
+  input.addEventListener('input', () => {
+    const session = sessionById(sid);
+    if (!session) return;
+    session.locationName = input.value.trim();
+    const locEl = card.querySelector('.import-card-loc');
+    if (locEl) locEl.textContent = session.locationName || '—';
+    _persistSessions();
+    _renderImportLocationDropdown(sid, document.activeElement === input);
+  });
+  input.addEventListener('blur', () => {
+    setTimeout(() => _renderImportLocationDropdown(sid, false), 160);
+  });
+}
+
+function _renderImportLocationDropdown(sid, show) {
+  const session = sessionById(sid);
+  const dropdown = document.querySelector(`.import-location-dropdown[data-sid="${sid}"]`);
+  const input = document.querySelector(`.import-loc-input[data-sid="${sid}"]`);
+  if (!dropdown || !input) return;
+
+  const options = Array.isArray(session?.locationSuggestions) ? session.locationSuggestions : [];
+  if (!show || !options.length) {
+    dropdown.style.display = 'none';
+    dropdown.innerHTML = '';
+    return;
+  }
+
+  dropdown.innerHTML = options
+    .map((name, index) => `<li data-index="${index}">${escHtml(name)}</li>`)
+    .join('');
+  dropdown.style.display = 'block';
+  dropdown.querySelectorAll('li').forEach((item, index) => {
+    item.addEventListener('mousedown', event => {
+      event.preventDefault();
+      const name = options[index] || '';
+      const nextSession = sessionById(sid);
+      if (nextSession) {
+        nextSession.locationName = name;
+        nextSession.locationAutoApplied = name;
+      }
+      input.value = name;
+      const locEl = document.querySelector(`.import-card[data-sid="${sid}"] .import-card-loc`);
+      if (locEl) locEl.textContent = name || '—';
+      dropdown.style.display = 'none';
+      _persistSessions();
+    });
+  });
+}
+
 function _wireCard(sid) {
   const card = document.querySelector(`.import-card[data-sid="${sid}"]`);
   if (!card) return;
+  _wireImportLocationInput(sid, card);
+
   const input = card.querySelector(`.import-taxon-input[data-sid="${sid}"]`);
   const dropdown = card.querySelector(`.import-taxon-dropdown[data-sid="${sid}"]`);
   if (!input || !dropdown || input._wired) return;
@@ -1476,6 +1536,7 @@ function _wireCard(sid) {
   _wireAiResults(sid, input, aiResults, session?.aiPredictions || [])
   card.querySelectorAll(`.import-strip-item[data-sid="${sid}"]`).forEach(item => {
     if (item._wired) return
+    if (item.classList.contains('import-strip-add')) return
     item._wired = true
     item.addEventListener('click', event => {
       if (event.target.closest('.import-strip-delete')) return
@@ -1568,7 +1629,11 @@ async function saveAll() {
   const allBlobUrls = sessions.flatMap(s => s.blobUrls);
   let savedCount = 0;
 
-  for (const session of activeSessions) {
+  _setProgress(0, activeSessions.length, t('import.processing'));
+  await new Promise(r => setTimeout(r, 100)); // Yield to let button un-press
+
+  for (let i = 0; i < activeSessions.length; i++) {
+    const session = activeSessions[i];
     try {
       if ((session.gpsLat === null || session.gpsLon === null) && session.metadataPromise) {
         await session.metadataPromise;
@@ -1586,7 +1651,9 @@ async function saveAll() {
         genus: session.taxon?.genus || null,
         species: session.taxon?.specificEpithet || null,
         common_name: session.taxon?.vernacularName || null,
-        visibility: session.visibility || getDefaultVisibility(),
+        visibility: toCloudVisibility(normalizeVisibility(session.visibility, getDefaultVisibility())),
+        is_draft: true,
+        location_precision: 'exact',
       };
 
       _ensureSessionImageMeta(session);
@@ -1597,6 +1664,7 @@ async function saveAll() {
         aiCropSourceH: session.imageMeta[index]?.aiCropSourceH ?? null,
       })));
       savedCount++;
+      _setProgress(i + 1, activeSessions.length, t('import.processing'));
     } catch (err) {
       console.error('Failed to save session', session.id, err);
       showToast(t('import.failedOneGroup'));
@@ -1609,6 +1677,7 @@ async function saveAll() {
   sourceItems = [];
   clearImportSessions();
   if (savedCount > 0) showToast(t('import.saved', { count: tp('counts.observation', savedCount) }));
+  _hideProgress();
   saveBtn.disabled = false;
   await openFinds('mine', { resetSearch: true });
 }
@@ -1678,6 +1747,160 @@ function _prepareImportBlobs(file) {
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('load failed')); };
     img.src = url;
   });
+}
+
+// ── Session specific additions ────────────────────────────────────────────────
+
+async function _openCameraForSession(sid) {
+  if (isAndroidNativeApp()) {
+    try {
+      if (getUseSystemCamera()) {
+        const result = await NativeCamera.openSystemCamera();
+        const photos = Array.isArray(result?.photos) ? result.photos : [];
+        if (!photos.length) return;
+        _setProgress(0, photos.length, t('import.readingFiles'));
+        const files = [];
+        for (let i = 0; i < photos.length; i++) {
+          _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
+          files.push(await nativePickedPhotoToFile(photos[i], i));
+        }
+        await _addFilesToSession(sid, files, { nativePhotos: photos });
+        return;
+      }
+
+      const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' });
+      const useHdr = useHdrStr !== 'false';
+
+      const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
+        ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
+        : null;
+
+      const options = { useHdr, jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
+      if (gps) options.gps = gps;
+      const result = await NativeCamera.capturePhotos(options);
+      const photos = Array.isArray(result?.photos) ? result.photos : [];
+      if (!photos.length) return;
+      
+      _setProgress(0, photos.length, t('import.readingFiles'));
+      const files = [];
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
+        files.push(await nativePickedPhotoToFile(photos[i], i));
+      }
+      await _addFilesToSession(sid, files, { nativePhotos: photos });
+    } catch (err) {
+      if (isPickerCancel(err)) return;
+      showToast(`Sporely Cam: ${err?.message || err}`);
+      _hideProgress();
+    }
+  } else {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.capture = 'environment';
+    input.onchange = async (e) => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      await _addFilesToSession(sid, files);
+    };
+    input.click();
+  }
+}
+
+async function _openPickerForSession(sid) {
+  if (isAndroidNativeApp()) {
+    try {
+      const result = await pickImagesWithNativePhotoPicker();
+      const photos = Array.isArray(result?.photos) ? result.photos : [];
+      if (!photos.length) return;
+      _setProgress(0, photos.length, t('import.readingFiles'));
+      const files = [];
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
+        files.push(await nativePickedPhotoToFile(photos[i], i));
+      }
+      await _addFilesToSession(sid, files, { nativePhotos: photos });
+      return;
+    } catch (err) {
+      if (isPickerCancel(err)) return;
+      _hideProgress();
+    }
+  }
+
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.accept = 'image/*';
+  if (/android/i.test(navigator.userAgent)) {
+    input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif';
+  }
+  input.onchange = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    await _addFilesToSession(sid, files);
+  };
+  input.click();
+}
+
+async function _addFilesToSession(sid, files, options = {}) {
+  const session = sessionById(sid);
+  if (!session || !files.length) return;
+  const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
+  _setProgress(0, files.length, t('import.readingTimestamps'));
+  
+  const withTimes = await Promise.all(files.map(async (f, idx) => {
+    const nativePhoto = nativePhotos[idx];
+    if (nativePhoto) {
+      const { time, lat, lon, altitude, accuracy, dbg } = await captureNativePhotoExif(nativePhoto, f);
+      return { file: f, nativePhoto, metadataPromise: createNativeMetadataHydrationPromise(nativePhoto, f), captureTime: time, lat, lon, altitude, accuracy, dbg };
+    }
+    const { time, lat, lon, altitude, accuracy, dbg } = await captureExif(f);
+    return { file: f, captureTime: time, lat, lon, altitude, accuracy, dbg };
+  }));
+
+  let doneCount = 0;
+  for (let idx = 0; idx < withTimes.length; idx++) {
+    const item = withTimes[idx];
+    _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
+    const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
+    const newItem = {
+      id: `i_add_${Date.now()}_${idx}`,
+      blob: processed.blob,
+      aiBlob: processed.aiBlob || processed.blob,
+      meta: processed.meta,
+      metadataPromise: item.metadataPromise || null,
+      captureTime: session.ts.getTime(), // Force to match session so it is not ripped out by photo gap
+      lat: item.lat ?? null,
+      lon: item.lon ?? null,
+      altitude: item.altitude ?? null,
+      accuracy: item.accuracy ?? null,
+      dbg: item.dbg || null,
+    };
+    sourceItems.push(newItem);
+    session.sourceItemIds.push(newItem.id);
+    session.files.push(newItem.blob);
+    session.aiFiles.push(newItem.aiBlob);
+    session.blobUrls.push(URL.createObjectURL(newItem.aiBlob));
+    session.imageMeta.push(newItem.meta);
+    session.metadataPromises.push(newItem.metadataPromise);
+    session.photoTimes.push(newItem.captureTime);
+    session.photoGps.push({ lat: newItem.lat, lon: newItem.lon, altitude: newItem.altitude, accuracy: newItem.accuracy });
+    session.photoDebug.push(newItem.dbg);
+    
+    if (session.gpsLat === null && _isUsableCoordinate(newItem.lat, newItem.lon)) {
+      session.gpsLat = newItem.lat;
+      session.gpsLon = newItem.lon;
+      session.gpsAltitude = newItem.altitude;
+      session.gpsAccuracy = newItem.accuracy;
+    }
+    doneCount++;
+  }
+  
+  _hideProgress();
+  _attachSessionMetadataHydration();
+  _persistSessions();
+  renderSessions();
+  _prefillSessionLocations();
 }
 
 // Use local date string to avoid UTC midnight shift

@@ -6,7 +6,7 @@ export const state = {
     habitat: '',
     notes: '',
     uncertain: false,
-    visibility: 'friends',
+    visibility: 'public',
   },
   batchCount: 0,
   sessionStart: null,
@@ -18,4 +18,8 @@ export const state = {
   findsView: 'cards',
   findsGroupBySpecies: false,
   findsUncertainOnly: false,
+  findsSporesOnly: false,
+  findsTargetUserId: null,
+  findsTargetUsername: null,
+  findsTargetAvatarUrl: null,
 }

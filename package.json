@@ -1,7 +1,7 @@
 {
   "name": "sporely-web",
   "private": true,
-  "version": "0.3.115",
+  "version": "0.4.21",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -25,6 +25,8 @@
     "@capacitor/cli": "^8.3.0",
     "@capacitor/core": "^8.3.0",
     "@capacitor/filesystem": "^8.1.2",
+    "@capacitor/preferences": "^8.0.1",
+    "@capawesome/capacitor-background-task": "^8.0.2",
     "@capawesome/capacitor-file-picker": "^8.0.2",
     "@supabase/supabase-js": "^2.49.4",
     "exifr": "^7.1.3",

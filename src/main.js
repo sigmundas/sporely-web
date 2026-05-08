@@ -1,5 +1,6 @@
 import './style.css'
 import './theme.js'   // applies saved theme immediately, no flash
+import { Preferences } from '@capacitor/preferences'
 
 import { supabase } from './supabase.js'
 import { getLocale, initI18n, onLocaleChange, setLocale, t } from './i18n.js'
@@ -26,7 +27,7 @@ import { initCapture } from './screens/capture.js'
 import { buildReviewGrid, initReview } from './screens/review.js'
 import { initFindDetail } from './screens/find_detail.js'
 import { initPhotoViewer } from './photo-viewer.js'
-import { initImportReview, renderSessions, restoreImportSessions } from './screens/import_review.js'
+import { initImportReview, openNativeCamera, renderSessions, restoreImportSessions } from './screens/import_review.js'
 import { clearImportSessions, loadImportSessions } from './import-store.js'
 import { initProfile, loadProfile, refreshHeaderProfileButtons } from './screens/profile.js'
 import { initPeople, loadPeople } from './screens/people.js'
@@ -39,15 +40,18 @@ import {
   getArtsorakelMaxEdge,
   getDefaultVisibility,
   getPhotoGapMinutes,
-  getSyncOverMobileDataEnabled,
   setArtsorakelMaxEdge,
   setDefaultVisibility,
   setLastSyncAt,
   setPhotoGapMinutes,
-  setSyncOverMobileDataEnabled,
+  getUseSystemCamera,
+  setUseSystemCamera,
 } from './settings.js'
+import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel } from './camera-actions.js'
+import { isAndroidApp } from './platform.js'
 
 initI18n()
+setNativeCameraOpener(openNativeCamera)
 
 let _syncFeedbackBound = false
 let _appBootstrapped = false
@@ -233,9 +237,14 @@ function initSettings() {
     })
   })
 
-  document.getElementById('settings-mobile-sync-toggle')?.addEventListener('change', event => {
-    setSyncOverMobileDataEnabled(event.target.checked)
-    if (event.target.checked) triggerSync()
+  const cameraAppRow = document.getElementById('settings-camera-app-row')
+  if (cameraAppRow) cameraAppRow.style.display = isAndroidApp() ? 'flex' : 'none'
+  document.querySelectorAll('.settings-camera-app-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const useSystemCamera = btn.dataset.cameraApp === 'native'
+      setUseSystemCamera(useSystemCamera)
+      _syncSettingsUI()
+    })
   })
 
   document.querySelectorAll('.settings-default-visibility-btn').forEach(btn => {
@@ -244,6 +253,23 @@ function initSettings() {
       _syncSettingsUI()
     })
   })
+
+  const hdrToggle = document.getElementById('settings-hdr-toggle')
+  const nativeCameraRows = [
+    document.getElementById('settings-camera-label'),
+    document.getElementById('settings-hdr-row'),
+  ]
+  nativeCameraRows.forEach(row => {
+    if (row) row.style.display = isAndroidApp() ? '' : 'none'
+  })
+  if (hdrToggle) {
+    Preferences.get({ key: 'useHdr' }).then(({ value }) => {
+      hdrToggle.checked = getUseSystemCamera() ? false : value !== 'false'
+    })
+    hdrToggle.addEventListener('change', event => {
+      Preferences.set({ key: 'useHdr', value: event.target.checked ? 'true' : 'false' })
+    })
+  }
 
   document.getElementById('settings-clear-cache-btn')?.addEventListener('click', async event => {
     const btn = event.currentTarget
@@ -289,13 +315,31 @@ function _syncSettingsUI() {
     btn.classList.toggle('active', btn.dataset.imageResolutionMode === selectedResolution)
   })
 
-  const mobileSyncToggle = document.getElementById('settings-mobile-sync-toggle')
-  if (mobileSyncToggle) mobileSyncToggle.checked = getSyncOverMobileDataEnabled()
-
   const defaultVisibility = getDefaultVisibility()
   document.querySelectorAll('.settings-default-visibility-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.defaultVisibility === defaultVisibility)
   })
+
+  const useSystemCamera = getUseSystemCamera()
+  document.querySelectorAll('.settings-camera-app-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.cameraApp === (useSystemCamera ? 'native' : 'sporely'))
+  })
+  const acCameraLabel = document.querySelector('#ac-camera .action-card-label')
+  if (acCameraLabel) acCameraLabel.textContent = getEffectiveCameraLabel()
+
+  const hdrToggle = document.getElementById('settings-hdr-toggle')
+  const hdrRow = document.getElementById('settings-hdr-row')
+  if (hdrToggle) {
+    hdrToggle.disabled = useSystemCamera
+    if (useSystemCamera) {
+      hdrToggle.checked = false
+    } else {
+      Preferences.get({ key: 'useHdr' }).then(({ value }) => {
+        if (!getUseSystemCamera()) hdrToggle.checked = value !== 'false'
+      })
+    }
+    hdrRow?.classList.toggle('settings-row-disabled', useSystemCamera)
+  }
 }
 
 // ── Nav ───────────────────────────────────────────────────────────────────────
@@ -309,6 +353,7 @@ function initNav() {
     loadFinds()
   })
   document.getElementById('nav-map').addEventListener('click', () => navigate('map'))
+  document.getElementById('map-fab')?.addEventListener('click', openPreferredCamera)
   document.getElementById('nav-people').addEventListener('click', () => {
     navigate('people')
     loadPeople()
@@ -340,6 +385,7 @@ async function bootApp(user) {
 
   runBootStep('sync-feedback', () => initSyncFeedback())
   runBootStep('settings', () => initSettings())
+  runBootStep('camera-fallback-warning', () => initCameraFallbackWarning())
   runBootStep('navigation', () => initNav())
   runBootStep('home', () => initHome())
   runBootStep('finds', () => initFinds())

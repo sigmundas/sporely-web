@@ -1,99 +1,65 @@
 # Sporely-web Development Plan
 
-## Native Android Camera Capture Flow
-- [x] Step 1: Install `@capgo/camera-preview` and verify Android Manifest permissions (`CAMERA`, `ACCESS_COARSE_LOCATION`, `ACCESS_FINE_LOCATION`).
-- [x] Step 2: Add platform routing logic to detect Android and apply transparent CSS to the WebView.
-- [x] Step 3: Initialize Android native camera (`toBack: true`) and bind to the primary 1x wide-angle lens.
-- [x] Step 4: Implement native capture using `withExifLocation: true` and `storeToFile: true`, followed by proper cleanup (`stop()`).
+## Phase 7 - Transparency, Social Trails, and Privacy Slots
+- [x] Remove sticky capture visibility toggle. New capture/review flows default to public draft observations.
+- [x] Save new web observations with `visibility = public`, `is_draft = true`, and `location_precision = exact`.
+- [x] Add `Feed 🧭` tab backed by `observations_follow_view`.
+- [x] Add Draft badge on gallery cards when `is_draft = true`.
+- [x] Add Find Detail author avatar/name, friend request, follow-user, and follow-observation controls.
+- [x] Add `(1 slot)` labels under Private and Friends in Find Detail for free users.
+- [ ] Apply and verify `database/supabase_phase7_transparency_social_trails.sql` in Supabase after the original Phase 7 migration.
+- [ ] Verify disposable-account RLS paths for owner, accepted friend, stranger, blocked user, banned profile, and privacy slot limit.
 
-### Camera Flicker Troubleshooting (Android 15 Edge-to-Edge)
-**Failed Attempts:**
-- JS `setTimeout` DOM reflow (only repaints HTML, fails to fix native `SurfaceView` compositing).
-- *Lifecycle Clue:* Flicker persists at the bottom of the screen upon initial start, but disappears completely if the device screen is turned off and back on while the camera is active. This indicates the native Android `SurfaceView` or Window compositor is out of sync with the navigation bar insets until a full `onPause`/`onResume` lifecycle event forces a correct layout recalculation.
-- Programmatic background/foreground toggle (requires physical home button press by user).
-- *XML Opt-Out:* Added `<item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>` to `styles.xml` (ignored by Android 15 / Capacitor 6+).
-- *EdgeToEdge Plugin:* Calling `EdgeToEdge.enable()` stabilized the layout but didn't cure the flicker below the crop frame.
-- *Removed CSS box-shadow:* Didn't fix the surface tearing.
-- *toBack: false (Render ON TOP):* Abandoned. While it killed the transparency flicker, manually syncing CSS coordinates with native hardware coordinates across different Android pixel densities caused the camera to shift down and spawn black borders.
+## Camera Behavior Summary (Sporely Cam vs Web Cam)
 
-### Moving Back to Full-Screen Camera (Android 15 Bug Fixes)
-We are going back to a full-screen background camera (`toBack: true`) with our UI floating on top.
-- Step 1: Fullscreen Camera Initialization (`toBack: true`, `window.screen` width/height, `aspectMode: 'cover'`)
-- Step 2: Absolute App Transparency (`--ion-background-color`, `html`, `body`, `ion-app`, `ion-content` transparent)
-- Step 3: Removed all camera crop guides and overlays temporarily to completely isolate the camera view and focus on resolving the flicker.
-- Step 4: Fix Samsung Lens Selection (programmatic selection using `CameraPreview.getAvailableDevices()` to bypass software restrictions).
-- Step 5: Initialization Race Condition (Added a 500ms delay before `CameraPreview.start()` so Android 15 edge-to-edge layout settles).
-- Step 6: Native Android Window UI Flags (Replaced deprecated flags with modern `WindowCompat.setDecorFitsSystemWindows(getWindow(), false)` to prevent Capacitor layout loops).
-- Step 7: Disabled Capacitor's margin engine (`adjustMarginsForEdgeToEdge: 'disable'`) and shifted UI positioning natively to CSS using `env(safe-area-inset-bottom, 20px)`. **Result: Failed.** Layout is still unstable/flickering at the bottom until the screen is cycled off and on.
-- Step 8: Reverted the native edge-to-edge layout workarounds in `MainActivity.java`, `capacitor.config.json`, and `styles.xml` to return to standard Capacitor layout management.
+**Sporely Cam (Native Android / CameraX)**
+- **Availability:** Active only when running the installed Android app (via Capacitor).
+- **Hardware & Quality:** Direct access to native CameraX APIs. Utilizes the best available lens (e.g., 1x lens) and captures at true, high-resolution original quality (e.g., 12 MP). Supports legacy OEM HDR extensions and modern Android 14+ Ultra HDR (JPEG_R format).
+- **Metadata:** Natively preserves full EXIF orientation and accurate GPS location data seamlessly during capture.
 
-### Standard WebRTC Camera Recovery (Samsung Torch Heuristic)
-Now that we are back on the standard `navigator.mediaDevices.getUserMedia()` flow (Capgo native camera moved to `camera-fallback` branch), we need to fix the Samsung S25 issue where it defaults to the ultra-wide lens. Since OEM string labels like 'camera 0' are useless, we built a 'torch heuristic' initialization function.
-
-- [x] Calls `navigator.mediaDevices.enumerateDevices()` and filters for all videoinput devices that are rear-facing.
-- [x] Loops through these specific device IDs one by one, opening a temporary video stream for each.
-- [x] Inspects the active video track using `track.getCapabilities().torch`.
-- [x] Also probes `ImageCapture.getPhotoCapabilities().fillLightMode` for flash support when `torch` is not exposed.
-- [x] Saves the deviceId if torch/flash capability is true.
-- [x] Stops all temporary video tracks to free up hardware memory.
-- [x] Starts main application camera feed using that specific deviceId in the `getUserMedia` constraints.
-- [x] Removed Capgo native CameraPreview code from main branch.
-
-#### 2026-04-29 Samsung S25 Findings
-**What did not work**
-- The WebRTC torch heuristic was implemented, but device testing still showed the ultra-wide camera. This likely means Samsung/Chrome WebView is exposing a logical rear camera where the selected `deviceId` does not map cleanly to the physical 1x sensor, or it does not expose torch/flash capability on the separate physical camera entries in a useful way.
-- Relying on `deviceId: { exact }` alone is not enough on the S25. Even if we identify a rear/torch-capable logical camera, WebRTC may still choose the ultra-wide physical lens internally.
-- The previous camera capture path was not still-photo capture. It grabbed the current WebRTC video frame with `canvas.drawImage(video, ...)`. On the S25 this produced a cropped video frame around `2400x3200`, then app code downscaled the long edge to `1920`, resulting in `1440x1920` output. That explains the observed 2.8 MP captures.
-- Requesting `width: { ideal: 1920 }, height: { ideal: 1440 }` encourages a video-mode resolution, not full still capture. It cannot produce a true 12 MP photo by itself.
-- Adding `advanced: [{ zoom: 1 }]` directly in initial `getUserMedia()` constraints is fragile because unsupported zoom constraints can cause startup rejection or be ignored.
-
-**What may work**
-- Use WebRTC only for preview and use `ImageCapture.takePhoto()` for the shutter. `takePhoto()` is the browser still-photo API and can return a larger JPEG than the live video frame when the WebView exposes still-photo capabilities.
-- Ask `ImageCapture.getPhotoCapabilities()` for max `imageWidth` / `imageHeight`, then call `takePhoto({ imageWidth, imageHeight, fillLightMode: 'off' })`. This has been implemented as the first capture path, with video-frame canvas capture kept only as fallback.
-- Remove the app-side 1920 long-edge resize from camera capture. Upload resizing should be handled later by the existing cloud upload policy, not at shutter time.
-- Keep zoom application after stream startup via `track.applyConstraints()` and only if `track.getCapabilities().zoom` exposes a valid range. If WebRTC exposes a logical rear camera only, testing zoom values greater than 1 may force the logical camera from ultra-wide toward the 1x field of view, even when device IDs do not.
-- If WebRTC still returns the ultra-wide lens and/or `ImageCapture.takePhoto()` still returns video-mode crops, the likely working solution is native Android CameraX/Camera2 for capture: enumerate physical cameras, choose the back camera with flash/torch and normal focal length, bind a Preview use case plus ImageCapture use case, and return the captured JPEG(s) to the WebView. This would also support multi-shot capture before returning to the app, but must avoid the previous native preview flicker path.
-
-#### 2026-04-29 ImageCapture Results and Dual Camera Plan
-**Latest hardware result**
-- Current WebRTC implementation now captures high-resolution stills around 12 MP using `ImageCapture.takePhoto()`.
-- The selected lens is still the ultra-wide lens on the Samsung S25.
-- Preview and captured JPEG now show the same field of view, so the old mismatch between preview/video crop and output is gone.
-- When imported into `sporely-py`, the captured image appears rotated -90 degrees. This suggests the JPEG has EXIF orientation that desktop import is not honoring, or native/WebView still capture is writing pixels/orientation differently than expected.
-- GPS EXIF is missing from the captured JPEG. This may be acceptable because Sporely already stores capture GPS in the cloud/local observation DB, but we should either transfer coordinates from cloud DB to local DB during desktop sync/import or explicitly write GPS EXIF before upload/export.
-
-**Product direction**
-- Keep the current WebRTC `ImageCapture.takePhoto()` implementation as **Sporely Cam**. It is useful because it gives high-resolution 12 MP captures and works without the native flicker path, even though S25 lens selection is wrong.
-- Add a third capture/import button in the web app: **Native Cam**. This button is Android-only and launches a native CameraX/Camera2 capture flow.
-- Native Cam should use Android CameraX/Camera2 to select the back physical camera with flash/torch and normal/wide focal length, avoiding Samsung WebView's logical-camera ultra-wide selection.
-- Native Cam should return one or more JPEGs plus metadata to the existing Sporely review/import pipeline, so multi-shot capture can be supported before returning to the web UI.
-- Native Cam must normalize orientation before returning files, or write a correct EXIF orientation tag that both web and `sporely-py` honor.
-- Native Cam should either write GPS EXIF using current app/device coordinates or return GPS metadata alongside the photo so the observation DB remains the source of truth.
-
-**Implementation tasks**
-- [x] Rename/label the existing WebRTC camera entry point as **Sporely Cam** in the UI where users choose capture/import.
-- [x] Add **Native Cam** as a third Android-only button in the web app.
-- [x] Add a `NativeCamera` Capacitor plugin and register it in `MainActivity`.
-- [x] Add Android CameraX dependencies.
-- [x] Build first native CameraX capture activity with Preview + ImageCapture, multi-shot queue, Done/Cancel controls, and a 1x/back-camera selector based on Camera2 characteristics.
-- [x] Return captured cache-file paths and metadata to JS.
-- [x] Reuse the existing import/review path to convert returned native files into `File`/Blob entries.
-- [x] Initial Android device test: Native Cam launches, captures, returns photos to the app, and works as the new native capture path.
-- [ ] Verify on Samsung S25: selected lens is 1x, capture is 12 MP, preview matches output, orientation is correct in `sporely-py`, and GPS strategy is documented.
+**Web Cam (HTML5 `getUserMedia` / PWA)**
+- **Availability:** Used when accessing `app.sporely.no` from a mobile browser (Safari/Chrome) or installed as a PWA.
+- **Hardware & Quality:** Captures frames from a `<video>` stream painted to an HTML `<canvas>`. Output resolution is artificially constrained by browser WebRTC stream limits, typically resulting in lower image quality than native captures.
+- **Metadata:** Mobile browsers aggressively strip EXIF data (like GPS coordinates) from browser-based captures to protect privacy.
+- **UI Handling:** The app displays an `android-web-camera-warning-overlay` and `exif-warning-overlay` to advise Android web users of this limitation, recommending they install the native Sporely app for proper location handling and image quality.
 
 ## UI fixes
-- Missing location data popup: Remove "when using the quick "Photos & videos" picker". Add the sentence: "(Or just use Sporely cam to capture location)"
-- Group import review screen: Instead of Queue all, just use Add (Legg til
-- Remove the New observation after.. /Photo import section in Settings (It is now in the group import page - make sure this setting is stored until next time)
-- [x] Remove the F-stop and location info boxes from Capture screen. Add lens/zoom selection buttons reading from device hardware API and move the batch badge above the Done button.
-- On the Finds tab: Species is not translated
-- Finds tab, when 1 card per row is shown: Add an icon that indicates if there are spore measures for the observation. This could be like a small almond shaped brown icon, same row and just before the "sharing" icon (friends/public/private). 
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
 - Add a legend drop-down to the map page. Selection: Genus (more will come). this will show a legend with colors, corresponding the the dots on the map.
-- The card with number of finds, number of species, and number of spores: Tapping finds: open screen with finds, filtered for that user (card could appear on home tab or people tab): Species filter off. Tapping species: same as for tapping finds, but with species filter on. Tapping spores: filter only finds for that user with spore measurements.
+
+
+## Location
+
+- [ ] **Use a latest-request guard.** Track a request id plus rounded coordinates in the UI. If the user changes photos/coordinates before the lookup returns, ignore the stale result so an old place name cannot fill a new observation.
+
+### Server-Side Lookup Flow
+- [ ] **Nominatim first for country detection.** Query `https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json`, parse `display_name`, `address.country_code`, and `address.country`, and keep the full `display_name` as fallback/reference.
+- [ ] **Build short Nominatim suggestions as separate entries.** Do not show the full local-to-regional chain as the normal Location text. Suggest `address.amenity || address.road` as one dropdown item, then `address.neighbourhood || address.suburb` as another item.
+- [ ] **Norway branch:** if `country_code === "no"`, query `https://stedsnavn.artsdatabanken.no/v1/punkt?lat={lat}&lng={lon}&zoom=45`. Use `navn` first only when `dist <= 0.006`; otherwise discard it and fall back to Nominatim suggestions.
+- [ ] **Denmark branch:** if `country_code === "dk"`, query `https://api.dataforsyningen.dk/adgangsadresser/reverse?x={lon}&y={lat}`. Put the best DAWA local label first, then the Nominatim local suggestions.
+- [ ] **Other countries:** use Nominatim local suggestions first; use `display_name` only if no local address parts are available.
+- [ ] **Deduplicate suggestions while preserving source priority.** Norway order is Artsdatabanken then Nominatim. Denmark order is DAWA then Nominatim.
+
+### Web UI Behavior
+- [ ] **Resolve once per observation/session.** For a multi-photo observation, reuse the resolved place name for attached photos unless coordinates differ meaningfully.
+- [ ] **Auto-fill the first suggestion.** The Location field should receive the first suggestion when it is empty or still contains the previous auto-filled value.
+- [ ] **Show all suggestions on field focus/click.** The dropdown should contain separate entries, not a comma-joined string.
+- [ ] **Persist useful country metadata.** Store or carry `country_code`, `country_name`, and `nominatim_display_name` alongside the observation/import draft when available.
+- [ ] **Drive regional UI from country.** Norway uses Artsobservasjoner-oriented fields, Sweden uses Artportalen-oriented fields, Denmark is pending Danmarks Svampeatlas, and other countries use iNaturalist/Sporely Cloud defaults. Hide regional biotope/substrate controls outside Norway and Sweden, while keeping them visible until country is known.
+
+### Tests
+- [ ] **Unit-test normalization fixtures.** Add fixtures for Norway, Denmark, Sweden, and a non-Nordic country. Assert suggestion order, deduplication, country parsing, and fallback behavior.
+- [ ] **Test stale lookup handling.** Simulate two coordinate lookups resolving out of order and verify only the latest result updates the draft.
 
 ## Code Review & Refactoring
 *Review this code with a strict refactor/audit mindset. Do not praise. Look for concrete problems only.*
+
+### 2026-04-30 Camera Settings Review Findings
+- [ ] Settings can show `Native Cam` selected while browser/PWA users are actually routed to `Sporely Cam`; make the settings UI show the effective camera mode or hide/disable native selection outside the Android app.
+- [ ] Capture reset/default draft logic is duplicated across `capture.js` and `review.js`; centralize `defaultCaptureDraft()` and `resetCaptureSession()` near `state.js`.
+- [ ] Remove dead `capture.importPhotos` i18n keys after removing the capture-screen gallery button.
+- [x] Consolidate duplicated platform detection helpers (`_isNativeApp`, Android-native checks) into a shared platform helper.
+- [ ] Remove or gate production camera debug logs in `capture.js`.
 
 For each issue you find, return:
 - severity: low / medium / high
@@ -180,28 +146,13 @@ Important:
 
 ### Existing Refactor & Audit Tasks
 - [ ] **Optional server-side change summary** — a future Supabase RPC/view could return one per-observation “meaningful cloud change” summary and remove most remaining client-side deep comparison work.
+- [ ] **Profile/account parity QA** — Verify web Profile and desktop Profile & Cloud read/write the same Supabase `profiles` fields: `username`, `display_name`, `bio`, and `avatar_url`. Confirm desktop `profile_email` follows the Supabase auth email and is not treated as an independent account identifier while signed in.
+- [ ] **Desktop account migration UX** — Design a safer migration path for users who want a new Sporely Cloud account without duplicating synced observations or losing valuable spore data. The desktop account lock should keep blocking accidental account switches until this exists.
 - [ ] **Import Flow Memory Architecture** — Refactor `import_review.js` and `import-store.js` to a streaming architecture. Currently, large imports (40+ photos) can exhaust mobile browser memory and crash the app because all full-resolution JPEGs are decoded and held in RAM simultaneously before being written to IndexedDB. The fix requires:
     - Streaming each processed blob directly to IndexedDB in `_processFile` and releasing it from RAM.
     - Keeping only lightweight metadata and downscaled `aiBlob` URLs in the active memory array (`sourceItems`).
     - Avoiding the massive memory spike caused by `Promise.all(files.map(f => f.arrayBuffer()))` in `import-store.js`.
     - *Note on Platforms (PWA vs APK):* This bottleneck is most severe for iPhone users running the app as a PWA (Safari), where per-tab memory limits are very strict (crashing often around 150-300MB). Android users on the native Capacitor APK have a higher WebView memory ceiling (often 500MB+ on modern devices like the S25) and benefit from native HEIC-to-JPEG conversion, but they will still eventually crash on huge imports until this streaming fix is implemented.
-
-## Bugs
-- I can't delete observations from app.sporely.no. Deleting from the installed apk app works. Error: "Delete failed: failed to fetch"
-- Android HEIC import location regression was traced to metadata/display handling, not only conversion:
-  EXIF GPS must be extracted before Canvas/native conversion, altitude must travel with the import
-  session, and reverse-geocode results need a latest-request guard so an old place name cannot fill
-  the Location field for a new photo.
-- Follow-up: Android Photo Picker URIs can return redacted GPS as `0,0`. The APK import bridge now
-  uses `ACTION_OPEN_DOCUMENT` and rejects `0,0` coordinates instead of reverse-geocoding them.
-- Device test confirmed HEIC GPS works again in the Android APK. Tradeoff: Android now shows the
-  document picker, often starting in "Recent"; users may need the side menu → Images for the full
-  library. Consider adding a future two-choice import UI: "Gallery" for friendlier browsing and
-  "Metadata-safe import" for geotagged originals.
-- Test JPG `20260418_154138.jpg` has Samsung/time EXIF but no GPS tags according to `exifr`; no
-  app fix is expected for that file unless we intentionally fall back to current device location.
-- Web "ID Needed" was aligned with the desktop model: it is now "Uncertain ID", backed by the
-  existing `uncertain` flag, displayed with a `?` prefix, and filterable from Finds.
 
 ## Upload Debug Log
 *Goal: keep a running, dated log of cross-platform photo import, upload, queue, thumbnail, and Artsorakel behavior so regressions are easier to track.*
@@ -678,9 +629,7 @@ return new Promise((resolve, reject) => {
 - [ ] **Literature Overlays** — Overlay reference bounding boxes on user plots for immediate ID comparison.
 
 ### E. Performance & QC Optimization (R2 & Free Tier Focus)
-- [x] **Local Image Processing** — The web app already creates thumbnail variants locally before upload.
 - [ ] **Outlier Verification UI** — Link Plotly click events to the R2-hosted thumbnails for instant QC.
-- [x] **Zero-Egress Gallery** — Gallery reads now prefer Cloudflare R2 via `media.sporely.no`.
 
 ## Long-Term Goals (Phase 3)
 - [ ] **In-Browser Measurement** — Replicate manual spore clicking and calibration using HTML5 Canvas.
@@ -737,7 +686,7 @@ return new Promise((resolve, reject) => {
 | Native Android gallery import with HEIC GPS | ✅ Real — custom Capacitor plugin + Filesystem read |
 | Observation insert to Supabase | ✅ Real |
 | Image upload to Cloudflare R2 | ✅ Real — via `upload.sporely.no` worker |
-| Grid/card thumbnails | ✅ Real — `small` + `medium` variants generated at upload time |
+| Grid/card thumbnails | ✅ Real — primary `thumb_` variant generated at upload time, with legacy `small` + `medium` fallback support |
 | Profile avatar upload/crop | ✅ Real |
 | Self-service account deletion | ✅ Real — via Supabase Edge Function `delete-account` |
 | Finds list from Supabase | ✅ Real |
@@ -748,14 +697,12 @@ return new Promise((resolve, reject) => {
 | Camera permission denied overlay | ✅ Real — platform-specific instructions |
 | Friends finds + thumbnails | ✅ Real — `observations_friend_view` + R2 public CDN |
 | Community finds | ✅ Real — `observations_community_view` (visibility = public) |
+| User finds | ✅ Real — filtered Finds screen from a specific user profile |
+| Spores filter | ✅ Real — toggle to show only observations with spore measurements |
 | Map view | ✅ Real — Leaflet + OpenStreetMap |
 | Offline queue | ✅ Real — IndexedDB queue, syncs on reconnect |
 | Import review recovery after app suspension | ✅ Real — IndexedDB `pending_import` store |
-| Friends feed | 🟡 Stubbed — toast only |
-| Capture draft save/resume | ❌ Removed — capture review is now direct cancel/save |
-| Push notifications | ❌ Not started |
-Not doing this: | Pro Subscription (RevenueCat) | 🟡 Groundwork in place — schema + upload metadata are live, but no billing/IAP flow yet |
-| Hardware Sync (Macro-to-GPS) | ❌ Not started |
+
 
 ## Infrastructure Status
 
@@ -781,21 +728,7 @@ Not doing this: | Pro Subscription (RevenueCat) | 🟡 Groundwork in place — s
 ## User Testing & QA Checklist
 *A list of manual checks to verify recently implemented features.*
 
-### 1. AI Crop Workflow & Gallery Overlays
-- **Importing:** Import a photo. Verify that a default AI crop is pre-seeded and that clicking the crop button allows you to pan/zoom.
-- **Artsorakel:** Run Artsorakel on a cropped image and ensure it correctly analyzes the cropped region.
-- **Detail Gallery Overlays:** Open one of your own observations in the Find Detail screen.
-  - Verify that a square "AI crop" button appears in the bottom-left of field images (but not microscope images).
-  - Verify that a "Trashcan" button appears in the top-right.
-  - Click the "AI crop" button to ensure the full-screen crop editor opens.
-  - Click the image itself (not the buttons) to ensure the fullscreen swipeable photo viewer opens.
-  - Click the "Trashcan" button, verify the translated confirmation dialog appears ("Delete this image?"), and confirm it deletes the image from the gallery and cloud.
-- **Cross-Platform:** Edit a crop on the web, then sync the Sporely desktop app to verify the crop metadata transfers correctly.
 
-### 2. Friends Feed
-- Navigate to the **Finds** screen and select the **Friends** tab.
-- Verify that a list of your friends' observations appears.
-- Verify that the feed is correctly sorted chronologically (newest first).
 
 ### 3. Memory & Import Limits (Device Testing)
 - **Android APK (e.g., S25):** Import ~40 photos at once. Verify that the import succeeds without crashing and that the review thumbnails do not render as "broken image" icons (thanks to the recent `aiBlob` memory fix).
@@ -822,3 +755,87 @@ Not doing this: | Pro Subscription (RevenueCat) | 🟡 Groundwork in place — s
   - Log in as the test user. Try to save a new observation with an image. Verify the Cloudflare worker rejects the upload and/or the database trigger rejects the save. Try to leave a comment and verify the database trigger rejects it.
 - **Ban Enforcement (Read/Hide):**
   - Log in as a normal user. Verify that all past observations from the banned test user are completely hidden from the Community and Friends feeds.
+
+# Phase 6: 12MP/2MP Conditional WebP/JPEG Pipeline
+*Goal: Implement a reliable client-side compression pipeline for iOS and Android, keeping high-fidelity R2 storage without depending on Cloudflare Image Resizing.*
+
+### 2026-05-05 Status
+- ✅ JPEG/WebP upload now works on both iOS and Android.
+- ✅ Web encoding uses WebP first (`image/webp`, quality 0.65) and falls back to JPEG (`image/jpeg`, quality 0.75), with R2 filenames matching the actual blob MIME type.
+- ✅ The primary thumbnail variant is `thumb_{filename}` at 400px max edge, generated as WebP/JPEG according to browser support.
+- ✅ Image resize/encode work runs in `src/image-worker.js` using `ImageBitmap` transfer and `OffscreenCanvas` where supported.
+- ✅ Sync queue image bytes are persisted as `ArrayBuffer` values in IndexedDB, so retries can resume after app suspension or process death.
+- ✅ `@capawesome/capacitor-background-task` is wired for Capacitor background attempts when the app becomes hidden.
+- ✅ Web import/add-photo paths now accept `.avif`/`image/avif` for browser-decodable AVIF inputs, but the web app still does not encode AVIF.
+
+## Step 1: Conditional Resize & Conversion (Web App)
+Update image processing logic in `src/images.js` and `src/image-worker.js` to handle the user's resolution settings while protecting device memory:
+- **Sequential Processing:** Process queued images one by one.
+- **Resolution Logic:**
+  - **If 2MP Mode:** Resize the image to a max edge of **1600px**.
+  - **If 12MP Mode:** Do **not** resize unless the source image is **>13MP** (guard against extreme resolution bloat). If >13MP, downscale to a 4000px max edge (~12MP).
+- **The "Double-Bake" Upload:** Every capture/import generates:
+  1. `{id}.{webp|jpg}`: The 2MP or 12MP optimized file.
+  2. `thumb_{id}.{webp|jpg}`: A 400px max-edge thumbnail for fast feed/card rendering.
+- **Memory Management:** Explicitly clear the canvas after every photo:
+  ```javascript
+  canvas.width = 0; canvas.height = 0;
+  URL.revokeObjectURL(img.src);
+  ```
+
+## Step 2: Native Camera Revert (Android)
+- **Revert HDR Bloat:** In the native Capacitor plugin (`NativeCameraActivity.java`), set `ImageCapture.Builder` back to `CAPTURE_MODE_MINIMIZE_LATENCY`.
+- **Native Capture Quality:** Set native `jpegQuality` to **75** so native captures use the fixed JPEG policy.
+
+## Step 3: Desktop Sync Integration
+- Ensure the desktop app pulls direct R2 keys for `.webp`, `.jpg`, `.jpeg`, and future `.avif` files instead of relying on Cloudflare CDN edge resize parameters.
+- Keep desktop thumbnail naming aligned with web: the single `thumb_{filename}` variant.
+
+## Fix issues: Image Pipeline Reset & Optimization**
+
+### **1. Historical Context (The Problem)**
+We attempted to move from raw JPEG uploads to a "Double-Bake" client-side optimization strategy (generating a Full-res and a 400px Thumbnail variant before upload). 
+*   **The Intent:** Use AVIF to save space and R2 egress costs.
+*   **The Failure:** Mobile browsers (especially iOS Safari) do not support **encoding** AVIF via `canvas.toBlob`. The system silently fell back to **PNG**, resulting in 30MB files that exceed Cloudflare’s 15MB upload limit.
+*   **The Memory Issue:** Large 12MP blobs are disappearing from memory on iOS, causing "Object not found" errors in the sync queue because we stored temporary Blob URLs instead of persistent data.
+*   **Current Resolution:** WebP/JPEG encoding is now the web/mobile production path. AVIF is allowed as an input/display format when the browser can decode it, but AVIF encoding is deferred to desktop/server-side contexts where encoder support is explicit.
+
+### **2. Technical Specifications & Constraints**
+*   **Storage:** Cloudflare R2 (CORS is already configured for `PUT`/`POST`).
+*   **Client Hardware:** Samsung S25 (Android/Capacitor) and iPhone 13 (iOS/Web).
+*   **Target:** 12MP resolution with modern compression.
+
+### **3. The Multi-Threaded "ArrayBuffer" Directive**
+
+#### **A. Move to Web Workers (Avoid UI Freezes)**
+The main thread must remain responsive. Move all image resizing and encoding into a `worker.js`. Use `OffscreenCanvas` for the operations. 
+*   Pass the captured photo to the worker as an `ImageBitmap` (Transferable) to keep memory usage low.
+
+#### **B. Intelligent Encoding Fallback**
+Do not force a file extension. The browser must decide the format, and the code must label it correctly:
+1.  **Primary (Android + supported browsers):** Attempt `image/webp` at 0.65 quality.
+2.  **Secondary (iOS/Legacy):** If WebP fails, use `image/jpeg` at 0.75 quality.
+3.  **Filenaming:** The extension in the R2 path must match the actual blob type (e.g., `image_full.webp` or `image_full.jpg`). **Never use .png.**
+
+#### **C. IndexedDB Resiliency (No more "Ghost" Objects)**
+iOS Safari purges Blob URLs under memory pressure. 
+1.  After encoding, convert the Blob to an **ArrayBuffer** (`await blob.arrayBuffer()`).
+2.  Store the **raw bytes** (ArrayBuffer) in IndexedDB.
+3.  The Sync Queue should pull the bytes from IndexedDB and reconstruct the Blob only at the moment of upload.
+
+#### **D. Native Feature Gating**
+*   **HDR Toggle:** The "Use HDR" setting is only valid for the **Native Android** (CameraX) app. 
+*   **UI Fix:** Hide the HDR toggle in the web app/iOS view to avoid "placebo" settings that don't talk to hardware.
+
+#### **E. Memory "Kill Switch"**
+After processing each image in the sequential queue:
+*   Set `canvas.width = 0` and `canvas.height = 0`.
+*   Call `URL.revokeObjectURL()` on all temporary sources.
+
+### **4. Files Needing Cleanup**
+*   `images.js`: Update the `toBlob` logic and fallback checks.
+*   `sync-queue.js`: Change Blob storage to ArrayBuffer storage.
+*   `main.js`: Update the Settings UI to hide the HDR toggle on non-Android platforms.
+*   `worker.js`: (New File) Create the off-thread processing logic.
+
+---

@@ -1,7 +1,10 @@
 import { supabase } from './supabase.js'
-import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants } from './images.js'
+import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, imageExtensionForMimeType } from './images.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
+import { BackgroundTask } from '@capawesome/capacitor-background-task'
+import { isNativeApp } from './platform.js'
+import { normalizeObservationVisibility, toCloudVisibility } from './visibility.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -10,9 +13,34 @@ const SYNC_SUCCESS_EVENT = 'sporely-sync-upload-complete'
 const RETRY_DELAY_MS = 30_000
 const _queuedPreviewUrls = new Map()
 let _retryTimer = null
+let _currentSyncPromise = null
+let _backgroundTaskId = null
+let _backgroundTaskStarting = false
+const _activeQueueOperations = new Set()
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
+}
+
+function _isArrayBuffer(value) {
+  return value instanceof ArrayBuffer || ArrayBuffer.isView(value)
+}
+
+function _blobFromStoredBytes(bytes, type = 'image/jpeg') {
+  if (!_isArrayBuffer(bytes)) return null
+  const data = bytes instanceof ArrayBuffer
+    ? bytes
+    : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  return new Blob([data], { type: type || 'image/jpeg' })
+}
+
+async function _blobToStoredBytes(blob) {
+  if (!_isBlob(blob)) return null
+  return {
+    bytes: await blob.arrayBuffer(),
+    type: blob.type || 'image/jpeg',
+    size: blob.size || 0,
+  }
 }
 
 function openDB() {
@@ -50,6 +78,14 @@ function notifySyncSuccess(detail) {
   window.dispatchEvent(new CustomEvent(SYNC_SUCCESS_EVENT, { detail }))
 }
 
+function _trackQueueOperation(promise) {
+  const tracked = Promise.resolve(promise).finally(() => {
+    _activeQueueOperations.delete(tracked)
+  })
+  _activeQueueOperations.add(tracked)
+  return tracked
+}
+
 function _revokeQueuedPreviewUrl(id) {
   const existing = _queuedPreviewUrls.get(id)
   if (!existing) return
@@ -66,7 +102,7 @@ function _previewUrlForQueueItem(item) {
 
   const entry = _normalizeQueuedImages(item?.imageEntries || item?.imageBlobs)[0]
   if (!entry) return null
-  const blobToUrl = entry.variants?.small || entry.variants?.medium || entry.uploadBlob || entry.blob
+  const blobToUrl = entry.uploadBlob || entry.blob
   if (!_isBlob(blobToUrl)) return null
 
   const nextUrl = URL.createObjectURL(blobToUrl)
@@ -93,19 +129,23 @@ async function _updateQueueItem(itemId, updater) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite')
     const store = tx.objectStore(STORE_NAME)
-
-    readOne(store, itemId)
-      .then(current => {
-        if (!current) {
-          resolve(null)
-          return
-        }
-        const next = updater(current)
-        store.put(next)
-        tx.oncomplete = () => resolve(next)
-        tx.onerror = () => reject(tx.error)
-      })
-      .catch(reject)
+    let nextValue = null
+    const req = store.get(itemId)
+    req.onerror = () => reject(req.error || tx.error)
+    req.onsuccess = () => {
+      try {
+        const current = req.result || null
+        if (!current) return
+        nextValue = updater(current)
+        if (nextValue) store.put(nextValue)
+      } catch (error) {
+        tx.abort()
+        reject(error)
+      }
+    }
+    tx.oncomplete = () => resolve(nextValue)
+    tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error || new Error('Queue update aborted'))
   })
 }
 
@@ -156,47 +196,85 @@ function _normalizeQueuedImages(imageEntries) {
         variants: null,
       }
     }
-    const realBlob = _isBlob(entry?.blob) ? entry.blob : (_isBlob(entry?.file) ? entry.file : null)
+    const realBlob = _isBlob(entry?.blob)
+      ? entry.blob
+      : (_isBlob(entry?.file)
+        ? entry.file
+        : _blobFromStoredBytes(entry?.blobBytes || entry?.originalBytes, entry?.blobType || entry?.originalType))
+    const uploadBlob = _isBlob(entry?.uploadBlob)
+      ? entry.uploadBlob
+      : _blobFromStoredBytes(entry?.uploadBytes, entry?.uploadType)
+    const thumbBlob = _isBlob(entry?.variants?.thumb)
+      ? entry.variants.thumb
+      : _blobFromStoredBytes(entry?.variantBytes?.thumb, entry?.variantTypes?.thumb)
     return {
       blob: realBlob,
       aiCropRect: entry?.aiCropRect || null,
       aiCropSourceW: entry?.aiCropSourceW ?? null,
       aiCropSourceH: entry?.aiCropSourceH ?? null,
-      uploadBlob: _isBlob(entry?.uploadBlob) ? entry.uploadBlob : null,
+      uploadBlob,
       uploadMeta: entry?.uploadMeta || null,
-      variants: entry?.variants || null,
+      variants: thumbBlob ? { thumb: thumbBlob } : (entry?.variants || null),
     }
   }).filter(entry => _isBlob(entry.blob) || _isBlob(entry.uploadBlob))
 }
 
-export async function enqueueObservation(obsPayload, imageEntries) {
-  const queuedImages = _normalizeQueuedImages(imageEntries)
-
-  let uploadPolicy = _cloudPlanCache.get(obsPayload.user_id)
-  if (!uploadPolicy) {
-    uploadPolicy = await fetchCloudPlanProfile(obsPayload.user_id)
-    _cloudPlanCache.set(obsPayload.user_id, uploadPolicy)
+async function _serializeQueuedImagesForStorage(images) {
+  const serialized = []
+  for (const image of images || []) {
+    serialized.push(await _serializeQueuedImageForStorage(image))
   }
+  return serialized
+}
 
-  const preparedImages = []
-  for (const image of queuedImages) {
-    if (_isBlob(image.blob) && !image.uploadBlob) {
-      const prepared = await prepareImageVariants(image.blob, uploadPolicy)
-      preparedImages.push({
-        ...image,
-        uploadBlob: prepared.uploadBlob,
-        uploadMeta: prepared.uploadMeta,
-        variants: prepared.variants,
-      })
-    } else {
-      preparedImages.push(image)
+async function _serializeQueuedImageForStorage(image) {
+  const upload = await _blobToStoredBytes(image?.uploadBlob)
+  const thumb = await _blobToStoredBytes(image?.variants?.thumb)
+  const original = upload ? null : await _blobToStoredBytes(image?.blob)
+  return {
+    aiCropRect: image?.aiCropRect || null,
+    aiCropSourceW: image?.aiCropSourceW ?? null,
+    aiCropSourceH: image?.aiCropSourceH ?? null,
+    blobBytes: original?.bytes || null,
+    blobType: original?.type || null,
+    blobSize: original?.size || null,
+    uploadBytes: upload?.bytes || null,
+    uploadType: upload?.type || null,
+    uploadSize: upload?.size || null,
+    uploadMeta: image?.uploadMeta || null,
+    variantBytes: thumb ? { thumb: thumb.bytes } : null,
+    variantTypes: thumb ? { thumb: thumb.type } : null,
+    variantSizes: thumb ? { thumb: thumb.size } : null,
+  }
+}
+
+async function _persistPreparedQueuedImage(itemId, index, preparedImage) {
+  const storedImage = await _serializeQueuedImageForStorage(preparedImage)
+  await _updateQueueItem(itemId, current => {
+    if (!current) return current
+    const entries = [...(current.imageEntries || current.imageBlobs || [])]
+    entries[index] = {
+      ...(entries[index] || {}),
+      ...storedImage,
     }
-  }
+    return {
+      ...current,
+      imageEntries: entries,
+    }
+  })
+}
 
+export async function enqueueObservation(obsPayload, imageEntries) {
+  return _trackQueueOperation(_enqueueObservation(obsPayload, imageEntries))
+}
+
+async function _enqueueObservation(obsPayload, imageEntries) {
+  const queuedImages = _normalizeQueuedImages(imageEntries)
+  const persistentImages = await _serializeQueuedImagesForStorage(queuedImages)
   const db = await openDB()
   const queueItem = {
     obsPayload,
-    imageEntries: preparedImages,
+    imageEntries: persistentImages,
     userId: obsPayload.user_id,
     ts: Date.now(),
   }
@@ -237,7 +315,9 @@ export async function getQueuedObservations(userId) {
       location: item.obsPayload.location || null,
       notes: item.obsPayload.notes || null,
       uncertain: !!item.obsPayload.uncertain,
-      visibility: item.obsPayload.visibility || 'friends',
+      visibility: normalizeObservationVisibility(item.obsPayload.visibility),
+      is_draft: item.obsPayload.is_draft !== false,
+      location_precision: item.obsPayload.location_precision || 'exact',
       gps_latitude: item.obsPayload.gps_latitude ?? item.obsPayload.gpsLat ?? null,
       gps_longitude: item.obsPayload.gps_longitude ?? item.obsPayload.gpsLon ?? null,
       gps_altitude: item.obsPayload.gps_altitude ?? item.obsPayload.gpsAltitude ?? null,
@@ -335,26 +415,57 @@ async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'loc
   })
 }
 
-export async function triggerSync() {
-  if (isSyncing || !navigator.onLine || !canSyncOnCurrentConnection()) return
+async function _findRemoteObservationForQueueItem(item) {
+  const payload = item?.obsPayload || {}
+  const capturedAt = String(payload.captured_at || '').trim()
+  const userId = String(item?.userId || payload.user_id || '').trim()
+  if (!capturedAt || !userId) return null
+
+  const { data, error } = await supabase
+    .from('observations')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('captured_at', capturedAt)
+    .order('id', { ascending: false })
+    .limit(1)
+
+  if (error) {
+    if (error?.message?.includes('captured_at')) return null
+    throw error
+  }
+
+  return Array.isArray(data) ? data[0]?.id || null : null
+}
+
+async function _runSyncQueue() {
+  if (!navigator.onLine || !canSyncOnCurrentConnection()) return
   
   // Ensure the user hasn't logged out while items were pending
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return
 
-  isSyncing = true
+  const items = await _readQueueItems()
 
-  try {
-    const items = await _readQueueItems()
+  if (!items || !items.length) return
 
-    if (!items || !items.length) return
-
-    for (const item of items) {
-      if (!navigator.onLine) break
+  for (const item of items) {
+    if (!navigator.onLine) break
       
       try {
         const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
         let obsId = item.remoteObservationId || null
+
+        if (!obsId) {
+          obsId = await _findRemoteObservationForQueueItem(item)
+          if (obsId) {
+            const updatedItem = await _updateQueueItem(item.id, current => current ? {
+              ...current,
+              remoteObservationId: obsId,
+              syncRecoveredRemoteIdAt: Date.now(),
+            } : current)
+            if (!updatedItem) continue
+          }
+        }
 
         // 1. Upload parent observation once, then persist the remote ID for retries.
         if (!obsId) {
@@ -362,7 +473,10 @@ export async function triggerSync() {
             syncImageCount: queuedImages.length,
           })
 
-          const payload = { ...item.obsPayload }
+          const payload = {
+            ...item.obsPayload,
+            visibility: toCloudVisibility(item.obsPayload.visibility, 'public'),
+          }
           if (payload.gpsLat !== undefined) {
             payload.gps_latitude = payload.gpsLat
             delete payload.gpsLat
@@ -383,6 +497,10 @@ export async function triggerSync() {
           if (error?.message?.includes('captured_at')) {
             const { captured_at: _, ...payloadWithout } = payload
             ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithout).select('id').single())
+          }
+          if (error?.message?.includes('is_draft') || error?.message?.includes('location_precision')) {
+            const { is_draft: _isDraft, location_precision: _locationPrecision, ...payloadWithoutPhase7 } = payload
+            ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithoutPhase7).select('id').single())
           }
           if (error) throw error
 
@@ -429,7 +547,7 @@ export async function triggerSync() {
           })
           let preparedImage = image
           const preparedUploadMode = image.uploadMeta?.upload_mode || null
-          if (image.blob instanceof Blob && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
+          if (_isBlob(image.blob) && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
             const prepared = await prepareImageVariants(image.blob, uploadPolicy)
             preparedImage = {
               ...image,
@@ -437,9 +555,12 @@ export async function triggerSync() {
               uploadMeta: prepared.uploadMeta,
               variants: prepared.variants,
             }
+            await _persistPreparedQueuedImage(item.id, i, preparedImage)
           }
 
-          const path = `${item.userId}/${obsId}/${i}_${item.ts}.jpg`
+          const blobType = preparedImage.uploadBlob?.type || preparedImage.uploadType || ''
+          const ext = imageExtensionForMimeType(blobType)
+          const path = `${item.userId}/${obsId}/${i}_${item.ts}.${ext}`
           
           const uploadMeta = await uploadPreparedObservationImageVariants(preparedImage, path, {
             uploadPolicy,
@@ -459,13 +580,13 @@ export async function triggerSync() {
           await syncObservationMediaKeys(obsId, path, { sortOrder: i })
 
           completedImageIndexes.add(i)
-          await _updateQueueItem(item.id, current => ({
+          await _updateQueueItem(item.id, current => current ? {
             ...current,
             remoteObservationId: obsId,
             completedImageIndexes: [...completedImageIndexes].sort((a, b) => a - b),
             syncImageIndex: i + 1,
             syncImageCount: queuedImages.length,
-          }))
+          } : current)
         }
 
         // 3. Confirm remote DB/image state, then purge from the offline queue.
@@ -478,9 +599,59 @@ export async function triggerSync() {
         _scheduleSyncRetry()
         break // Network or RLS failure — halt processing to avoid looping errors
       }
-    }
-  } finally {
-    isSyncing = false
+  }
+}
+
+export async function triggerSync() {
+  if (isSyncing) return _currentSyncPromise
+
+  isSyncing = true
+  _currentSyncPromise = _trackQueueOperation(_runSyncQueue())
+    .finally(() => {
+      isSyncing = false
+      _currentSyncPromise = null
+    })
+  return _currentSyncPromise
+}
+
+async function _drainQueueForBackgroundTask() {
+  const active = [..._activeQueueOperations]
+  if (active.length) {
+    await Promise.allSettled(active)
+  }
+  await triggerSync()
+}
+
+export async function requestBackgroundSync() {
+  if (!isNativeApp()) {
+    await triggerSync()
+    return
+  }
+  if (_backgroundTaskId || _backgroundTaskStarting) return
+
+  _backgroundTaskStarting = true
+  try {
+    const taskId = await BackgroundTask.beforeExit(async () => {
+      try {
+        await _drainQueueForBackgroundTask()
+      } catch (error) {
+        console.warn('Background sync task failed:', error)
+      } finally {
+        try {
+          BackgroundTask.finish({ taskId })
+        } catch (finishError) {
+          console.warn('Background task finish failed:', finishError)
+        }
+        _backgroundTaskId = null
+        _backgroundTaskStarting = false
+      }
+    })
+    _backgroundTaskId = taskId
+  } catch (error) {
+    _backgroundTaskId = null
+    _backgroundTaskStarting = false
+    console.warn('Background task request failed; continuing foreground sync only:', error)
+    await triggerSync()
   }
 }
 
@@ -493,6 +664,7 @@ window.addEventListener('focus', triggerSync)
 window.addEventListener('pageshow', triggerSync)
 onConnectionTypeChange(triggerSync)
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') requestBackgroundSync()
   if (document.visibilityState === 'visible') triggerSync()
 })
 setTimeout(triggerSync, 1000)

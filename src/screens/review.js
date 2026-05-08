@@ -8,8 +8,11 @@ import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
-import { hasAiCropRect } from '../image_crop.js'
+import { createImageCropMeta, hasAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
+import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
+import { isAndroidNativeApp } from '../camera-actions.js'
+import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
@@ -76,7 +79,6 @@ export function buildGpsMetaHtml(gps) {
 export function initReview() {
   document.getElementById('review-close')
     .addEventListener('click', cancelReview)
-  document.getElementById('add-photo-btn').addEventListener('click', () => navigate('capture'))
   document.getElementById('review-cancel-btn').addEventListener('click', cancelReview)
   document.getElementById('review-save-btn').addEventListener('click', saveObservationBatch)
   document.getElementById('review-habitat').addEventListener('input', event => {
@@ -91,7 +93,7 @@ export function initReview() {
   })
   document.querySelectorAll('input[name="review-vis"]').forEach(radio => {
     radio.addEventListener('change', event => {
-      if (event.target.checked) state.captureDraft.visibility = event.target.value
+      if (event.target.checked) state.captureDraft.visibility = normalizeVisibility(event.target.value, getDefaultVisibility())
     })
   })
   initLocationField()
@@ -135,7 +137,7 @@ export function openImportedReview(session) {
   state.sessionStart = session?.ts || new Date()
   state.captureDraft = {
     ..._defaultCaptureDraft(),
-    visibility: session?.visibility || getDefaultVisibility(),
+    visibility: normalizeVisibility(session?.visibility, getDefaultVisibility()),
   }
   state.reviewContext = {
     source: 'import',
@@ -305,17 +307,17 @@ export function buildReviewGrid() {
   document.getElementById('review-habitat').value = state.captureDraft.habitat || ''
   document.getElementById('review-notes').value = state.captureDraft.notes || ''
   document.getElementById('review-uncertain').checked = !!state.captureDraft.uncertain
-  const visibility = state.captureDraft.visibility || getDefaultVisibility()
+    const visibility = normalizeVisibility(state.captureDraft.visibility, getDefaultVisibility())
   const visibilityRadio = document.querySelector(`input[name="review-vis"][value="${visibility}"]`)
   if (visibilityRadio) visibilityRadio.checked = true
   const locationInput = document.getElementById('location-name-input')
   if (locationInput) {
     locationInput.value = reviewContext?.source === 'import'
-      ? (reviewContext.locationName || '')
+      ? (locationInput.value || reviewContext.locationName || '')
       : (reviewContext?.locationName || locationInput.value || '')
   }
-  const addPhotoBtn = document.getElementById('add-photo-btn')
-  if (addPhotoBtn) addPhotoBtn.style.display = reviewContext?.source === 'import' ? 'none' : ''
+  const addPhotoBtn = document.getElementById('add-photo-btn');
+  if (addPhotoBtn) addPhotoBtn.style.display = 'none';
 
   const grid = document.getElementById('observation-grid')
   grid.classList.add('review-session-grid')
@@ -415,6 +417,27 @@ function loadThumbnails(photos) {
       placeholder.textContent = p.emoji || '🍄'
       gallery.appendChild(placeholder)
     }
+
+    const addCardContainer = document.createElement('div')
+    addCardContainer.className = 'detail-gallery-item-wrap'
+    addCardContainer.innerHTML = `
+      <div class="gallery-add-placeholder">
+        <div class="gallery-add-title">${t('import.addImage') || 'Add Image'}</div>
+        <div class="gallery-add-btn-wrap">
+          <button class="gallery-add-btn gallery-add-btn-cam" type="button" aria-label="Add from camera">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h3l1.6-2h4.8L16 6h3a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
+            <span>${t('import.camera') || 'Camera'}</span>
+          </button>
+          <button class="gallery-add-btn gallery-add-btn-file" type="button" aria-label="Add from file">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span>${t('import.upload') || 'Upload'}</span>
+          </button>
+        </div>
+      </div>
+    `
+    gallery.appendChild(addCardContainer)
+    addCardContainer.querySelector('.gallery-add-btn-cam').addEventListener('click', _openCameraForReview)
+    addCardContainer.querySelector('.gallery-add-btn-file').addEventListener('click', _openPickerForReview)
   })()
 }
 
@@ -646,7 +669,8 @@ async function saveObservationBatch() {
 
   const btn = document.getElementById('review-save-btn')
   if (btn) btn.disabled = true
-  showToast(t('review.syncing'))
+  
+  _setProgress(0, 1, 'Preparing observation...')
 
   try {
     await _awaitImportedReviewMetadata()
@@ -657,7 +681,7 @@ async function saveObservationBatch() {
       }))
     )
 
-    const visibility = state.captureDraft.visibility || getDefaultVisibility()
+    const visibility = normalizeVisibility(state.captureDraft.visibility, getDefaultVisibility())
     const leadGps = photos.find(photo => photo.gps)?.gps || null
     const leadPhoto = photos[0] || {}
     const taxon = photos.find(photo => photo.taxon)?.taxon || {}
@@ -677,7 +701,9 @@ async function saveObservationBatch() {
       genus:         taxon.genus || null,
       species:       taxon.specificEpithet || null,
       common_name:   taxon.vernacularName || null,
-      visibility,
+      visibility: toCloudVisibility(visibility),
+      is_draft: true,
+      location_precision: 'exact',
     }
 
     const imageEntries = photos
@@ -688,6 +714,9 @@ async function saveObservationBatch() {
         aiCropSourceW: photo.aiCropSourceW ?? null,
         aiCropSourceH: photo.aiCropSourceH ?? null,
       }))
+      
+    _setProgress(0, 1, 'Encoding images for storage...')
+    await new Promise(r => setTimeout(r, 100)) // Yield to let button un-press
     await enqueueObservation(obsPayload, imageEntries)
 
     showToast(t('review.synced', { count: tp('counts.photo', photos.length) }))
@@ -702,6 +731,126 @@ async function saveObservationBatch() {
     showToast(t('review.syncFailed', { message: err.message }))
     console.error('Sync error:', err)
   } finally {
+    _hideProgress()
     if (btn) btn.disabled = false
   }
+}
+
+async function _openCameraForReview() {
+  if (isAndroidNativeApp()) {
+    try {
+      const gps = state.gps && isUsableCoordinate(state.gps.lat, state.gps.lon)
+        ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
+        : null
+      const result = await NativeCamera.capturePhotos(gps ? { gps } : {})
+      const photos = Array.isArray(result?.photos) ? result.photos : []
+      if (!photos.length) return
+      _setProgress(0, photos.length, t('import.readingFiles'))
+      const files = []
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+        files.push(await nativePickedPhotoToFile(photos[i], i))
+      }
+      await _addFilesToReview(files, { nativePhotos: photos })
+    } catch (err) {
+      if (isPickerCancel(err)) return
+      showToast(`Sporely Cam: ${err?.message || err}`)
+      _hideProgress()
+    }
+  } else {
+    navigate('capture')
+  }
+}
+
+async function _openPickerForReview() {
+  if (isAndroidNativeApp()) {
+    try {
+      const result = await pickImagesWithNativePhotoPicker()
+      const photos = Array.isArray(result?.photos) ? result.photos : []
+      if (!photos.length) return
+      _setProgress(0, photos.length, t('import.readingFiles'))
+      const files = []
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+        files.push(await nativePickedPhotoToFile(photos[i], i))
+      }
+      await _addFilesToReview(files, { nativePhotos: photos })
+      return
+    } catch (err) {
+      if (isPickerCancel(err)) return
+      _hideProgress()
+    }
+  }
+
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.multiple = true
+  input.accept = 'image/*'
+  if (/android/i.test(navigator.userAgent)) {
+    input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif'
+  }
+  input.onchange = async (e) => {
+    const files = Array.from(e.target.files || [])
+    if (!files.length) return
+    await _addFilesToReview(files)
+  }
+  input.click()
+}
+
+async function _addFilesToReview(files, options = {}) {
+  const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : []
+  _setProgress(0, files.length, t('import.readingTimestamps'))
+
+  const withTimes = await Promise.all(files.map(async (f, idx) => {
+    const nativePhoto = nativePhotos[idx]
+    if (nativePhoto) {
+      const { time, lat, lon, altitude, accuracy, dbg } = await captureNativePhotoExif(nativePhoto, f)
+      return { file: f, nativePhoto, metadataPromise: createNativeMetadataHydrationPromise(nativePhoto, f), captureTime: time, lat, lon, altitude, accuracy, dbg }
+    }
+    const { time, lat, lon, altitude, accuracy, dbg } = await captureExif(f)
+    return { file: f, captureTime: time, lat, lon, altitude, accuracy, dbg }
+  }))
+
+  let doneCount = 0
+  for (let idx = 0; idx < withTimes.length; idx++) {
+    const item = withTimes[idx]
+    _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }))
+    const processed = await processFile(item.file, { nativePhoto: item.nativePhoto })
+    const gps = isUsableCoordinate(item.lat, item.lon) ? { lat: item.lat, lon: item.lon, altitude: item.altitude, accuracy: item.accuracy } : null
+
+    const newPhoto = {
+      blob: processed.blob,
+      aiBlob: processed.aiBlob || processed.blob,
+      blobPromise: null,
+      gps,
+      ts: new Date(item.captureTime),
+      emoji: '🖼️',
+      aiCropRect: processed.meta?.aiCropRect || null,
+      aiCropSourceW: processed.meta?.aiCropSourceW ?? null,
+      aiCropSourceH: processed.meta?.aiCropSourceH ?? null,
+      taxon: state.capturedPhotos[0]?.taxon || null,
+    }
+    state.capturedPhotos.push(newPhoto)
+    doneCount++
+  }
+
+  state.capturedPhotos.sort((a, b) => (a.ts || 0) - (b.ts || 0))
+  state.batchCount = state.capturedPhotos.length
+
+  _hideProgress()
+  buildReviewGrid()
+}
+
+function _setProgress(done, total, label) {
+  const overlay = document.getElementById('import-progress')
+  if (!overlay) return
+  overlay.style.display = 'flex'
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  document.getElementById('import-progress-fill').style.width = pct + '%'
+  document.getElementById('import-progress-label').textContent = label || t('import.processing')
+}
+
+function _hideProgress() {
+  const overlay = document.getElementById('import-progress')
+  if (overlay) overlay.style.display = 'none'
 }

@@ -51,6 +51,7 @@ const messages = {
     'common.close': 'Close',
     'home.sporelyCam': 'Sporely Cam',
     'home.nativeCam': 'Native Cam',
+    'home.webCam': 'Web Cam',
     'home.importPhotos': 'Import Photos',
     'home.recentFinds': 'Recent Finds',
     'home.history': 'History →',
@@ -79,6 +80,8 @@ const messages = {
     'capture.photoCaptured': 'Photo {count} captured',
     'capture.importPhotos': 'Import photos',
     'capture.lightReading': 'LIGHT: {lux} LUX / F-STOP: {fStop}',
+    'capture.privateMode': 'Save Privately',
+    'capture.friendsMode': 'Live Share',
     'review.review': 'Review',
     'review.addPhoto': 'Add photo',
     'review.fieldMetadata': 'Location data',
@@ -168,6 +171,8 @@ const messages = {
     'finds.newObservationAria': 'New observation',
     'finds.couldNotLoad': 'Could not load finds',
     'finds.noFriends': 'No friends\' finds yet.',
+    'finds.noFollowed': 'No followed finds yet.',
+    'finds.draftBadge': 'Draft',
     'finds.noObservations': 'No observations yet.',
     'finds.noObservationsCapture': 'No observations yet — go capture some!',
     'finds.noResults': 'No results for "{query}".',
@@ -187,6 +192,7 @@ const messages = {
     'map.clear': 'Clear',
     'map.viewDetails': 'View details →',
     'scope.mine': 'Mine',
+    'scope.feed': 'Feed',
     'scope.friends': 'Friends',
     'scope.community': 'Public',
     'scope.all': 'All',
@@ -225,6 +231,16 @@ const messages = {
     'profile.sent': 'Sent',
     'profile.add': 'Add',
     'profile.cloudPlan': 'Account status',
+    'social.friendRequest': 'Send friend request',
+    'social.friendPending': 'Friend request sent',
+    'social.friendAccepted': 'Friends',
+    'social.followUser': 'Follow user',
+    'social.unfollowUser': 'Unfollow user',
+    'social.followObservation': 'Follow observation',
+    'social.unfollowObservation': 'Unfollow observation',
+    'social.followed': 'Following',
+    'social.followFailed': 'Could not update follow.',
+    'social.friendFailed': 'Could not send friend request.',
     'profile.cloudStorage': 'Account',
     'profile.uploads': 'Image resolution',
     'profile.storage': 'Sync history',
@@ -260,14 +276,16 @@ const messages = {
     'settings.min': 'min',
     'settings.photoGapHint': 'Photo import from your device will group images based on time between photos.',
     'settings.artsorakel': 'Artsorakel',
-    'settings.artsorakelMaxEdge': 'Max width/height',
+    'settings.artsorakelMaxEdge': 'Max width/height (px)',
     'settings.artsorakelMaxEdgeHint': 'Images sent to Artsorakel will be resized so neither width nor height exceeds this value.',
-    'settings.px': 'px',
     'settings.imageResolution': 'Image resolution',
     'settings.imageResolutionReduced': 'Default (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
-    'settings.sync': 'Sync',
-    'settings.syncOverMobileData': 'Sync over mobile data',
+    'settings.camera': 'Camera',
+    'settings.useHdr': 'Use HDR (Sporely Cam)',
+    'settings.cameraApp': 'Camera App',
+    'settings.sporely': 'Sporely',
+    'settings.native': 'Native',
     'settings.defaultVisibility': 'Default visibility',
     'settings.data': 'Data',
     'settings.clearLocalCache': 'Clear local cache',
@@ -282,6 +300,9 @@ const messages = {
     'import.convertingFile': 'Converting {current} of {total}…',
     'import.failed': 'Import failed',
     'import.saveAll': 'Queue All',
+    'import.addImage': 'Add Image',
+    'import.camera': 'Camera',
+    'import.upload': 'Upload',
     'import.currentGpsUnavailable': 'Current GPS unavailable',
     'import.overwriteExifConfirm': 'Current location will overwrite the EXIF location. Continue?',
     'import.noHeicGps': 'No photo GPS found in this HEIC. On some iPhone web uploads, location metadata is not exposed to the browser.',
@@ -292,7 +313,9 @@ const messages = {
     'import.saved': 'Queued {count} for upload',
     'import.queuedSingle': 'Added to sync queue',
     'import.exifWarningTitle': 'Missing Location Data?',
-    'import.exifWarningDesc': 'Android web browsers automatically remove GPS location from photos. Install the Sporely app from Play Store to import location data with your images. (Or just use Sporely cam to capture location)',
+    'import.exifWarningDesc': 'Android web browsers automatically remove GPS location from photos. Install the Sporely app from Play Store to import location data with your images.',
+    'camera.androidWebWarningTitle': 'Better image quality in the app',
+    'camera.androidWebWarningDesc': 'For the best image quality and location handling on Android, download the Sporely app from Play Store. You can continue with the web camera if you prefer.',
     'import.dontShowAgain': 'Don\'t show this again',
     'import.continueAnyway': 'Continue anyway',
     'counts.photo.one': '{count} photo',
@@ -308,6 +331,7 @@ const messages = {
     'crop.noCropHint': 'Tap a photo to set AI crop',
     'crop.statusSome': '{cropped}/{total} AI crop',
     'visibility.private': 'Private',
+    'visibility.draft': 'Private',
     'visibility.friends': 'Friends',
     'visibility.public': 'Public',
   },
@@ -358,7 +382,8 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Lukk',
     'home.sporelyCam': 'Sporely Cam',
-    'home.nativeCam': 'Native Cam',
+    'home.nativeCam': 'Systemkamera',
+    'home.webCam': 'Web Cam',
     'home.importPhotos': 'Importer bilder',
     'home.recentFinds': 'Siste funn',
     'home.history': 'Historikk →',
@@ -387,6 +412,8 @@ const messages = {
     'capture.photoCaptured': 'Bilde {count} tatt',
     'capture.importPhotos': 'Importer bilder',
     'capture.lightReading': 'LYS: {lux} LUX / F-STOPP: {fStop}',
+    'capture.privateMode': 'Lagre privat',
+    'capture.friendsMode': 'Del live',
     'review.review': 'Gjennomgang',
     'review.addPhoto': 'Legg til bilde',
     'review.fieldMetadata': 'Stedsdata',
@@ -497,7 +524,6 @@ const messages = {
     'scope.mine': 'Mine',
     'scope.friends': 'Venner',
     'scope.community': 'Offentlig',
-    'scope.all': 'Alle',
     'profile.title': 'Profil',
     'profile.fullNameOptional': 'Fullt navn (valgfritt)',
     'profile.saveProfile': 'Lagre profil',
@@ -568,14 +594,16 @@ const messages = {
     'settings.min': 'min',
     'settings.photoGapHint': 'Bildeimport fra enheten grupperer bilder basert på tiden mellom bildene.',
     'settings.artsorakel': 'Artsorakel',
-    'settings.artsorakelMaxEdge': 'Maks bredde/høyde',
+    'settings.artsorakelMaxEdge': 'Maks bredde/høyde (px)',
     'settings.artsorakelMaxEdgeHint': 'Bilder sendt til Artsorakel skaleres slik at verken bredde eller høyde overstiger denne verdien.',
-    'settings.px': 'px',
     'settings.imageResolution': 'Bildeoppløsning',
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Maks (12MP)',
-    'settings.sync': 'Synk',
-    'settings.syncOverMobileData': 'Synk over mobildata',
+    'settings.camera': 'Kamera',
+    'settings.useHdr': 'Bruk HDR (Sporely Cam)',
+    'settings.cameraApp': 'Kamera-app',
+    'settings.sporely': 'Sporely',
+    'settings.native': 'System',
     'settings.defaultVisibility': 'Standard synlighet',
     'settings.data': 'Data',
     'settings.clearLocalCache': 'Tøm lokal cache',
@@ -590,6 +618,9 @@ const messages = {
     'import.convertingFile': 'Konverterer {current} av {total}…',
     'import.failed': 'Import feilet',
     'import.saveAll': 'Legg alle i kø',
+    'import.addImage': 'Legg til bilde',
+    'import.camera': 'Kamera',
+    'import.upload': 'Last opp',
     'import.currentGpsUnavailable': 'Nåværende GPS er utilgjengelig',
     'import.overwriteExifConfirm': 'Nåværende sted vil overskrive EXIF-stedet. Fortsette?',
     'import.noHeicGps': 'Fant ingen GPS-data i dette HEIC-bildet. På noen iPhone-opplastinger på web eksponeres ikke stedsmetadata til nettleseren.',
@@ -600,7 +631,9 @@ const messages = {
     'import.saved': 'Satte {count} i kø for opplasting',
     'import.queuedSingle': 'Lagt til i synkøen',
     'import.exifWarningTitle': 'Mangler stedsdata?',
-    'import.exifWarningDesc': 'Nettlesere på Android fjerner automatisk GPS-posisjon fra bilder for å beskytte personvernet ditt. Installer Sporely-appen fra Play Store for å importere stedsdata med bildene dine. (Eller bare bruk Sporely cam for å fange posisjon)',
+    'import.exifWarningDesc': 'Nettlesere på Android fjerner automatisk GPS-posisjon fra bilder for å beskytte personvernet ditt. Installer Sporely-appen fra Play Store for å importere stedsdata med bildene dine.',
+    'camera.androidWebWarningTitle': 'Bedre bildekvalitet i appen',
+    'camera.androidWebWarningDesc': 'For best bildekvalitet og stedshåndtering på Android, last ned Sporely-appen fra Play Store. Du kan fortsette med webkameraet hvis du vil.',
     'import.dontShowAgain': 'Ikke vis dette igjen',
     'import.continueAnyway': 'Fortsett likevel',
     'counts.photo.one': '{count} bilde',
@@ -616,6 +649,7 @@ const messages = {
     'crop.noCropHint': 'Trykk på et bilde for å angi AI-beskjæring',
     'crop.statusSome': '{cropped}/{total} AI-beskjæring',
     'visibility.private': 'Privat',
+    'visibility.draft': 'Privat',
     'visibility.friends': 'Venner',
     'visibility.public': 'Offentlig',
   },
@@ -666,7 +700,8 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Stäng',
     'home.sporelyCam': 'Sporely Cam',
-    'home.nativeCam': 'Native Cam',
+    'home.nativeCam': 'Systemkamera',
+    'home.webCam': 'Web Cam',
     'home.importPhotos': 'Importera bilder',
     'home.recentFinds': 'Senaste fynd',
     'home.history': 'Historik →',
@@ -695,6 +730,8 @@ const messages = {
     'capture.photoCaptured': 'Bild {count} tagen',
     'capture.importPhotos': 'Importera bilder',
     'capture.lightReading': 'LJUS: {lux} LUX / F-STOPP: {fStop}',
+    'capture.privateMode': 'Spara privat',
+    'capture.friendsMode': 'Dela live',
     'review.review': 'Granskning',
     'review.addPhoto': 'Lägg till bild',
     'review.fieldMetadata': 'Platsdata',
@@ -805,7 +842,6 @@ const messages = {
     'scope.mine': 'Mina',
     'scope.friends': 'Vänner',
     'scope.community': 'Offentligt',
-    'scope.all': 'Alla',
     'profile.title': 'Profil',
     'profile.fullNameOptional': 'Fullständigt namn (valfritt)',
     'profile.saveProfile': 'Spara profil',
@@ -876,14 +912,16 @@ const messages = {
     'settings.min': 'min',
     'settings.photoGapHint': 'Bildimport från enheten grupperar bilder baserat på tiden mellan bilderna.',
     'settings.artsorakel': 'Artsorakel',
-    'settings.artsorakelMaxEdge': 'Max bredd/höjd',
+    'settings.artsorakelMaxEdge': 'Max bredd/höjd (px)',
     'settings.artsorakelMaxEdgeHint': 'Bilder som skickas till Artsorakel skalas så att varken bredd eller höjd överstiger detta värde.',
-    'settings.px': 'px',
     'settings.imageResolution': 'Bildupplösning',
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
-    'settings.sync': 'Synk',
-    'settings.syncOverMobileData': 'Synka via mobildata',
+    'settings.camera': 'Kamera',
+    'settings.useHdr': 'Använd HDR (Sporely Cam)',
+    'settings.cameraApp': 'Kamera-app',
+    'settings.sporely': 'Sporely',
+    'settings.native': 'System',
     'settings.defaultVisibility': 'Standard synlighet',
     'settings.data': 'Data',
     'settings.clearLocalCache': 'Rensa lokal cache',
@@ -898,6 +936,9 @@ const messages = {
     'import.convertingFile': 'Konverterar {current} av {total}…',
     'import.failed': 'Import misslyckades',
     'import.saveAll': 'Köa alla',
+    'import.addImage': 'Lägg till bild',
+    'import.camera': 'Kamera',
+    'import.upload': 'Ladda upp',
     'import.currentGpsUnavailable': 'Nuvarande GPS är inte tillgänglig',
     'import.overwriteExifConfirm': 'Nuvarande plats kommer att skriva över EXIF-platsen. Fortsätta?',
     'import.noHeicGps': 'Ingen GPS hittades i denna HEIC-bild. I vissa iPhone-uppladdningar på webben exponeras inte platsmetadata till webbläsaren.',
@@ -908,7 +949,9 @@ const messages = {
     'import.saved': 'Köade {count} för uppladdning',
     'import.queuedSingle': 'Tillagd i synkkön',
     'import.exifWarningTitle': 'Saknas platsdata?',
-    'import.exifWarningDesc': 'Webbläsare på Android tar automatiskt bort GPS-plats från bilder. Installera Sporely-appen från Play Store för att importera platsdata med dina bilder. (Eller använd bara Sporely cam för att fånga platsen)',
+    'import.exifWarningDesc': 'Webbläsare på Android tar automatiskt bort GPS-plats från bilder. Installera Sporely-appen från Play Store för att importera platsdata med dina bilder.',
+    'camera.androidWebWarningTitle': 'Bättre bildkvalitet i appen',
+    'camera.androidWebWarningDesc': 'För bästa bildkvalitet och platshantering på Android, ladda ner Sporely-appen från Play Store. Du kan fortsätta med webbkameran om du vill.',
     'import.dontShowAgain': 'Visa inte detta igen',
     'import.continueAnyway': 'Fortsätt ändå',
     'counts.photo.one': '{count} bild',
@@ -924,6 +967,7 @@ const messages = {
     'crop.noCropHint': 'Tryck på en bild för att ange AI-beskärning',
     'crop.statusSome': '{cropped}/{total} AI-beskärning',
     'visibility.private': 'Privat',
+    'visibility.draft': 'Privat',
     'visibility.friends': 'Vänner',
     'visibility.public': 'Offentlig',
   },
@@ -974,7 +1018,8 @@ const messages = {
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Schließen',
     'home.sporelyCam': 'Sporely Cam',
-    'home.nativeCam': 'Native Cam',
+    'home.nativeCam': 'Native Kamera',
+    'home.webCam': 'Web Cam',
     'home.importPhotos': 'Fotos importieren',
     'home.recentFinds': 'Letzte Funde',
     'home.history': 'Verlauf →',
@@ -1003,6 +1048,8 @@ const messages = {
     'capture.photoCaptured': 'Foto {count} aufgenommen',
     'capture.importPhotos': 'Fotos importieren',
     'capture.lightReading': 'LICHT: {lux} LUX / BLENDE: {fStop}',
+    'capture.privateMode': 'Privat speichern',
+    'capture.friendsMode': 'Live teilen',
     'review.review': 'Prüfen',
     'review.addPhoto': 'Foto hinzufügen',
     'review.fieldMetadata': 'Standortdaten',
@@ -1113,7 +1160,6 @@ const messages = {
     'scope.mine': 'Meine',
     'scope.friends': 'Freunde',
     'scope.community': 'Öffentlich',
-    'scope.all': 'Alle',
     'profile.title': 'Profil',
     'profile.fullNameOptional': 'Vollständiger Name (optional)',
     'profile.saveProfile': 'Profil speichern',
@@ -1184,14 +1230,16 @@ const messages = {
     'settings.min': 'min',
     'settings.photoGapHint': 'Der Fotoimport von deinem Gerät gruppiert Bilder anhand der Zeit zwischen den Fotos.',
     'settings.artsorakel': 'Artsorakel',
-    'settings.artsorakelMaxEdge': 'Max. Breite/Höhe',
+    'settings.artsorakelMaxEdge': 'Max. Breite/Höhe (px)',
     'settings.artsorakelMaxEdgeHint': 'An Artsorakel gesendete Bilder werden so skaliert, dass weder Breite noch Höhe diesen Wert überschreitet.',
-    'settings.px': 'px',
     'settings.imageResolution': 'Bildauflösung',
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max. (12MP)',
-    'settings.sync': 'Sync',
-    'settings.syncOverMobileData': 'Über mobile Daten synchronisieren',
+    'settings.camera': 'Kamera',
+    'settings.useHdr': 'HDR verwenden (Sporely Cam)',
+    'settings.cameraApp': 'Kamera-App',
+    'settings.sporely': 'Sporely',
+    'settings.native': 'System',
     'settings.defaultVisibility': 'Standard-Sichtbarkeit',
     'settings.data': 'Daten',
     'settings.clearLocalCache': 'Lokalen Cache leeren',
@@ -1206,6 +1254,9 @@ const messages = {
     'import.convertingFile': 'Konvertiere {current} von {total}…',
     'import.failed': 'Import fehlgeschlagen',
     'import.saveAll': 'Alle in die Warteschlange',
+    'import.addImage': 'Bild hinzufügen',
+    'import.camera': 'Kamera',
+    'import.upload': 'Hochladen',
     'import.currentGpsUnavailable': 'Aktuelles GPS nicht verfügbar',
     'import.overwriteExifConfirm': 'Der aktuelle Ort überschreibt den EXIF-Ort. Fortfahren?',
     'import.noHeicGps': 'Für dieses HEIC-Foto wurden keine GPS-Daten gefunden. Bei manchen iPhone-Webuploads werden Standortmetadaten nicht an den Browser weitergegeben.',
@@ -1216,7 +1267,9 @@ const messages = {
     'import.saved': '{count} zum Upload vorgemerkt',
     'import.queuedSingle': 'Zur Sync-Warteschlange hinzugefügt',
     'import.exifWarningTitle': 'Fehlen Standortdaten?',
-    'import.exifWarningDesc': 'Android-Webbrowser entfernen automatisch die GPS-Position aus Fotos. Installiere die Sporely-App aus dem Play Store, um Standortdaten mit deinen Bildern zu importieren. (Oder nutze einfach die Sporely Cam zur Standorterfassung)',
+    'import.exifWarningDesc': 'Android-Webbrowser entfernen automatisch die GPS-Position aus Fotos. Installiere die Sporely-App aus dem Play Store, um Standortdaten mit deinen Bildern zu importieren.',
+    'camera.androidWebWarningTitle': 'Bessere Bildqualität in der App',
+    'camera.androidWebWarningDesc': 'Für die beste Bildqualität und Standortverarbeitung auf Android lade die Sporely-App aus dem Play Store herunter. Du kannst auch mit der Webkamera fortfahren.',
     'import.dontShowAgain': 'Nicht mehr anzeigen',
     'import.continueAnyway': 'Trotzdem fortfahren',
     'counts.photo.one': '{count} Foto',
@@ -1232,6 +1285,7 @@ const messages = {
     'crop.noCropHint': 'Foto antippen, um KI-Ausschnitt festzulegen',
     'crop.statusSome': '{cropped}/{total} KI-Ausschnitt',
     'visibility.private': 'Privat',
+    'visibility.draft': 'Privat',
     'visibility.friends': 'Freunde',
     'visibility.public': 'Öffentlich',
   },
@@ -1326,7 +1380,8 @@ export function getTaxonomyLanguage() {
 }
 
 export function translateVisibility(value) {
-  return t(`visibility.${value || 'private'}`)
+  const normalized = String(value || 'private').trim().toLowerCase()
+  return t(`visibility.${normalized === 'draft' ? 'private' : normalized}`)
 }
 
 export function formatDate(value, options = {}) {
@@ -1427,12 +1482,12 @@ export function applyStaticTranslations() {
   setText('#home-stat-finds-label', 'stats.finds')
   setText('#home-stat-species-label', 'stats.species')
   setText('#home-stat-spores-label', 'stats.spores')
-  setText('#ac-sporely-cam .action-card-label', 'home.sporelyCam')
-  setText('#ac-native-cam .action-card-label', 'home.nativeCam')
+  setText('#ac-camera .action-card-label', 'home.sporelyCam')
   setText('#ac-import .action-card-label', 'home.importPhotos')
 
   setText('#gps-display', 'capture.acquiring')
   setText('.batch-active-label', 'capture.batchActive')
+  setText('#capture-cancel-btn', 'common.cancel')
   setText('#done-btn', 'capture.done')
   setText('.camera-denied-title', 'capture.cameraAccessNeeded')
   setText('#camera-retry-btn', 'capture.tryAgain')
@@ -1495,10 +1550,15 @@ export function applyStaticTranslations() {
   setText('#exif-warning-dont-show-label', 'import.dontShowAgain')
   setText('#exif-warning-cancel', 'common.cancel')
   setText('#exif-warning-continue', 'import.continueAnyway')
+  setText('#android-web-camera-warning-title', 'camera.androidWebWarningTitle')
+  setText('#android-web-camera-warning-desc', 'camera.androidWebWarningDesc')
+  setText('#android-web-camera-warning-dont-show-label', 'import.dontShowAgain')
+  setText('#android-web-camera-warning-cancel', 'common.cancel')
+  setText('#android-web-camera-warning-continue', 'import.continueAnyway')
 
-  setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.friends'), t('scope.community')])
-  setText('#finds-subtitle', 'finds.documentedObservations')
+  setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.feed'), t('scope.friends'), t('scope.community')])
   setText('#finds-refresh-label', 'finds.pullToRefresh')
+  setText('#finds-filter-spores-label', 'stats.spores')
 
   setText('#profile-header-label', 'profile.title')
   setText('#profile-save-btn', 'profile.saveProfile')
@@ -1542,13 +1602,15 @@ export function applyStaticTranslations() {
   setText('#settings-gap-hint', 'settings.photoGapHint')
   setText('#settings-artsorakel-label', 'settings.artsorakel')
   setText('#settings-artsorakel-max-edge-label', 'settings.artsorakelMaxEdge')
-  setText('#settings-artsorakel-max-edge-unit', 'settings.px')
   setText('#settings-artsorakel-max-edge-hint', 'settings.artsorakelMaxEdgeHint')
   setText('#settings-image-resolution-label', 'settings.imageResolution')
   setText('#settings-resolution-reduced', 'settings.imageResolutionReduced')
   setText('#settings-resolution-max', 'settings.imageResolutionMax')
-  setText('#settings-sync-label', 'settings.sync')
-  setText('#settings-mobile-sync-label', 'settings.syncOverMobileData')
+  setText('#settings-camera-label', 'settings.camera')
+  setText('#settings-camera-app-label', 'settings.cameraApp')
+  setText('.settings-camera-app-btn[data-camera-app="sporely"]', 'settings.sporely')
+  setText('.settings-camera-app-btn[data-camera-app="native"]', 'settings.native')
+  setText('#settings-hdr-label', 'settings.useHdr')
   setText('#settings-default-visibility-label', 'settings.defaultVisibility')
   setText('#settings-default-visibility-private', 'visibility.private')
   setText('#settings-default-visibility-friends', 'visibility.friends')
@@ -1572,7 +1634,7 @@ export function applyStaticTranslations() {
   setAria('#photo-viewer-prev', 'photo.previous')
   setAria('#photo-viewer-next', 'photo.next')
   setAria('#shutter-btn', 'capture.capturePhoto')
-  setAria('#capture-import-btn', 'capture.importPhotos')
+  setAria('#capture-cancel-btn', 'common.cancel')
 
   setTitle('#finds-view-cards', 'finds.singleColumn')
   setTitle('#finds-view-two', 'finds.twoColumns')

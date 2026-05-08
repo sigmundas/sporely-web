@@ -8,6 +8,8 @@ import { formatScientificName } from '../artsorakel.js'
 import { QUEUE_EVENT, getQueuedObservations, deleteQueuedObservation, triggerSync } from '../sync-queue.js'
 import { openFindDetail } from './find_detail.js'
 import { imageHtml, wireImageFallback } from '../image-helpers.js'
+import { openPreferredCamera } from '../camera-actions.js'
+import { normalizeObservationVisibility } from '../visibility.js'
 
 let currentScope = 'mine'
 const _cache = {}   // scope → array of observations
@@ -23,6 +25,22 @@ let _pullDistance = 0
 let _isRefreshing = false
 let _queuedRefreshTimer = null
 let _loadFindsSeq = 0
+
+const MINE_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, is_draft, location_precision, spore_statistics'
+const MINE_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, spore_statistics'
+const FEED_SELECT = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, is_draft, location_precision, spore_statistics'
+const FEED_SELECT_LEGACY = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, spore_statistics'
+
+function _isPhase7ColumnError(error) {
+  const message = String(error?.message || '').toLowerCase()
+  return !!error && (message.includes('is_draft') || message.includes('location_precision'))
+}
+
+async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
+  const result = await makeQuery(columns)
+  if (_isPhase7ColumnError(result.error)) return makeQuery(legacyColumns)
+  return result
+}
 
 function _formatFingerprintCoord(value) {
   const num = Number(value)
@@ -43,7 +61,7 @@ function _observationMatchKey(obs) {
     obs.genus || '',
     obs.species || '',
     obs.common_name || '',
-    obs.visibility || '',
+    normalizeObservationVisibility(obs.visibility),
     _formatFingerprintCoord(obs.gps_latitude),
     _formatFingerprintCoord(obs.gps_longitude),
   ].join('|')
@@ -176,7 +194,7 @@ function _bindPullToRefresh() {
 export function initFinds() {
   _bindPullToRefresh()
   document.getElementById('finds-fab')
-    .addEventListener('click', () => navigate('capture'))
+    .addEventListener('click', openPreferredCamera)
 
   // Search bar
   const searchBtn   = document.getElementById('finds-search-btn')
@@ -229,6 +247,15 @@ export function initFinds() {
     _syncUncertainToggle()
     _applyFilter()
   })
+  document.getElementById('finds-filter-spores')?.addEventListener('click', () => {
+    state.findsSporesOnly = !state.findsSporesOnly
+    _syncSporesToggle()
+    _applyFilter()
+  })
+
+  document.getElementById('finds-user-back')?.addEventListener('click', () => {
+    openFinds('mine', { resetSearch: true, resetFilters: true })
+  })
 
   // Scope tabs
   document.querySelectorAll('.scope-tab').forEach(btn => {
@@ -246,9 +273,42 @@ export function initFinds() {
 }
 
 function _syncScopeTabs() {
-  document.querySelectorAll('.scope-tab').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.scope === currentScope)
-  })
+  const scopeTabs = document.getElementById('finds-scope-tabs')
+  const userBar = document.getElementById('finds-user-bar')
+
+  if (currentScope === 'user') {
+    if (scopeTabs) scopeTabs.style.display = 'none'
+    if (userBar) {
+      userBar.style.display = 'flex'
+      const nameEl = document.getElementById('finds-user-name')
+      if (nameEl) nameEl.textContent = state.findsTargetUsername || ''
+
+      const avatarEl = document.getElementById('finds-user-avatar')
+      if (avatarEl) {
+        const label = state.findsTargetUsername || state.findsTargetUserId || '?'
+        const initial = String(label).replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
+        
+        let avatarHtml = `<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;">${_esc(initial)}</div>`
+        const guessedUrl = state.findsTargetUserId ? supabase.storage.from('avatars').getPublicUrl(`${state.findsTargetUserId}/avatar.jpg`).data.publicUrl : ''
+        const primaryUrl = state.findsTargetAvatarUrl || guessedUrl
+        
+        if (primaryUrl) {
+          avatarHtml += `<img src="${_esc(primaryUrl)}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;" onerror="if (!this.dataset.triedGuessed && '${_esc(guessedUrl)}' && this.src !== '${_esc(guessedUrl)}') { this.dataset.triedGuessed = 'true'; this.src = '${_esc(guessedUrl)}'; } else { this.style.display='none'; }">`
+        }
+        
+        avatarEl.innerHTML = avatarHtml
+        avatarEl.style.position = 'relative'
+        avatarEl.style.overflow = 'hidden'
+      }
+    }
+  } else {
+    if (scopeTabs) scopeTabs.style.display = 'flex'
+    if (userBar) userBar.style.display = 'none'
+    document.querySelectorAll('.scope-tab').forEach(btn => {
+      if (btn.dataset.scope === 'mine') btn.textContent = t('scope.mine')
+      btn.classList.toggle('active', btn.dataset.scope === currentScope)
+    })
+  }
 }
 
 function _syncSpeciesToggle() {
@@ -263,9 +323,25 @@ function _syncUncertainToggle() {
   btn.setAttribute('aria-pressed', state.findsUncertainOnly ? 'true' : 'false')
 }
 
+function _syncSporesToggle() {
+  const btn = document.getElementById('finds-filter-spores')
+  if (!btn) return
+  btn.classList.toggle('active', !!state.findsSporesOnly)
+  btn.setAttribute('aria-pressed', state.findsSporesOnly ? 'true' : 'false')
+}
+
 function _setScope(scope, options = {}) {
   currentScope = scope || 'mine'
-  _syncScopeTabs()
+
+  if (scope === 'user') {
+    state.findsTargetUserId = options.userId
+    state.findsTargetUsername = options.username
+    state.findsTargetAvatarUrl = options.avatarUrl
+  } else {
+    state.findsTargetUserId = null
+    state.findsTargetUsername = null
+    state.findsTargetAvatarUrl = null
+  }
 
   if (options.resetSearch) {
     state.searchQuery = ''
@@ -275,15 +351,28 @@ function _setScope(scope, options = {}) {
     if (searchBar) searchBar.classList.remove('open')
   }
 
+  if (options.resetFilters) {
+    state.findsGroupBySpecies = false
+    state.findsUncertainOnly = false
+    state.findsSporesOnly = false
+  }
+
   if (options.groupBySpecies !== undefined) {
     state.findsGroupBySpecies = !!options.groupBySpecies
-    _syncSpeciesToggle()
   }
 
   if (options.uncertainOnly !== undefined) {
     state.findsUncertainOnly = !!options.uncertainOnly
-    _syncUncertainToggle()
   }
+
+  if (options.sporesOnly !== undefined) {
+    state.findsSporesOnly = !!options.sporesOnly
+  }
+
+  _syncScopeTabs()
+  _syncSpeciesToggle()
+  _syncUncertainToggle()
+  _syncSporesToggle()
 }
 
 export async function openFinds(scope = currentScope, options = {}) {
@@ -321,12 +410,22 @@ export async function loadFinds() {
   if (!state.user) return
   const loadSeq = ++_loadFindsSeq
 
+  const speciesBtn = document.getElementById('finds-group-species')
+  if (speciesBtn) {
+    speciesBtn.textContent = t('detail.species') || 'Species'
+  }
+
   _syncScopeTabs()
   _syncSpeciesToggle()
   _syncUncertainToggle()
+  _syncSporesToggle()
 
   if (currentScope === 'mine') {
     await _fetchMine()
+  } else if (currentScope === 'user') {
+    await _fetchUser(state.findsTargetUserId)
+  } else if (currentScope === 'feed') {
+    await _fetchFollowFeed()
   } else if (currentScope === 'friends') {
     await _fetchFriends()
   } else {
@@ -339,51 +438,123 @@ export async function loadFinds() {
 }
 
 async function _fetchMine() {
-  const { data, error } = await supabase
-    .from('observations')
-    .select('id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type')
-    .eq('user_id', state.user.id)
-    .order('date', { ascending: false })
-    .limit(100)
+  const { data, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations')
+      .select(columns)
+      .eq('user_id', state.user.id)
+      .order('date', { ascending: false })
+      .limit(100),
+    MINE_SELECT,
+    MINE_SELECT_LEGACY,
+  )
 
   if (error) { showToast(t('finds.couldNotLoad')); _cache['mine'] = []; return }
 
   const queued = await getQueuedObservations(state.user.id)
   const synced = (data || []).filter(obs => !queued.some(queuedObs => _observationsLikelySame(queuedObs, obs)))
   const items = [...queued, ...synced]
+  await _attachSporeFlags(items)
   items.sort((a, b) => _sortTs(b) - _sortTs(a))
   _cache['mine'] = items
 }
 
 async function _fetchFriends() {
-  const { data, error } = await supabase
-    .from('observations_friend_view')
-    .select('id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude')
-    .neq('user_id', state.user.id)
-    .order('date', { ascending: false })
-    .limit(100)
+  const { data, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations_friend_view')
+      .select(columns)
+      .neq('user_id', state.user.id)
+      .order('date', { ascending: false })
+      .limit(100),
+    FEED_SELECT,
+    FEED_SELECT_LEGACY,
+  )
 
   if (error) { 
     console.error('Failed to fetch friends feed:', error)
     _cache['friends'] = []; 
     return 
   }
+  await _attachSporeFlags(data)
   _cache['friends'] = data || []
 }
 
 async function _fetchCommunity() {
-  const { data, error } = await supabase
-    .from('observations_community_view')
-    .select('id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude')
-    .order('date', { ascending: false })
-    .limit(100)
+  const { data, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations_community_view')
+      .select(columns)
+      .order('date', { ascending: false })
+      .limit(100),
+    FEED_SELECT,
+    FEED_SELECT_LEGACY,
+  )
 
   if (error) { 
     console.error('Failed to fetch community feed:', error)
     _cache['community'] = []; 
     return 
   }
+  await _attachSporeFlags(data)
   _cache['community'] = data || []
+}
+
+async function _fetchFollowFeed() {
+  const { data, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations_follow_view')
+      .select(columns)
+      .order('date', { ascending: false })
+      .limit(100),
+    FEED_SELECT,
+    FEED_SELECT_LEGACY,
+  )
+
+  if (error) {
+    console.warn('Failed to fetch followed feed:', error.message)
+    _cache['feed'] = []
+    return
+  }
+  await _attachSporeFlags(data)
+  _cache['feed'] = data || []
+}
+
+async function _fetchUser(userId) {
+  if (!userId) return
+  const [friendRes, publicRes] = await Promise.all([
+    _withPhase7Fallback(
+      columns => supabase.from('observations').select(columns).eq('user_id', userId).order('date', { ascending: false }).limit(100),
+      MINE_SELECT,
+      MINE_SELECT_LEGACY,
+    ),
+    _withPhase7Fallback(
+      columns => supabase.from('observations_community_view').select(columns).eq('user_id', userId).order('date', { ascending: false }).limit(100),
+      FEED_SELECT,
+      FEED_SELECT_LEGACY,
+    )
+  ])
+  
+  const seen = new Set()
+  const combined = []
+  for (const obs of [...(friendRes.data || []), ...(publicRes.data || [])]) {
+    if (!seen.has(obs.id)) {
+      seen.add(obs.id)
+      combined.push(obs)
+    }
+  }
+  await _attachSporeFlags(combined)
+  combined.sort((a, b) => _sortTs(b) - _sortTs(a))
+  _cache['user'] = combined
+}
+
+async function _attachSporeFlags(observations) {
+  if (!observations || !observations.length) return
+  observations.forEach(o => {
+    if (o.spore_statistics || o.spore_short) {
+      o.has_spores = true
+    }
+  })
 }
 
 async function _loadProfilesForScope(data) {
@@ -425,23 +596,26 @@ function _sortTs(obs) {
 
 function _applyFilter() {
   const list     = document.getElementById('finds-list')
-  const subtitle = document.getElementById('finds-subtitle')
   const raw  = _cache[currentScope] || []
   const q    = (state.searchQuery || '').toLowerCase().trim()
-  const filtered = state.findsUncertainOnly ? raw.filter(obs => !!obs.uncertain) : raw
+  
+  let filtered = raw
+  if (state.findsUncertainOnly) filtered = filtered.filter(obs => !!obs.uncertain)
+  if (state.findsSporesOnly) filtered = filtered.filter(obs => !!obs.has_spores || !!obs.spore_short || !!obs.spore_statistics)
+  
   const data = q ? filtered.filter(obs => _matches(obs, q)) : filtered
 
   if (state.findsGroupBySpecies) {
-    _renderBySpecies(list, subtitle, data, { variant: state.findsView })
+    _renderBySpecies(list, data, { variant: state.findsView })
     return
   }
 
   if (state.findsView === 'two') {
-    _renderCards(list, subtitle, data, { variant: 'two', isFriends: currentScope === 'friends' })
+    _renderCards(list, data, { variant: 'two', isFriends: currentScope === 'friends' })
   } else if (state.findsView === 'three') {
-    _renderCards(list, subtitle, data, { variant: 'three', isFriends: currentScope === 'friends' })
+    _renderCards(list, data, { variant: 'three', isFriends: currentScope === 'friends' })
   } else {
-    _renderCards(list, subtitle, data, { variant: 'cards', isFriends: currentScope === 'friends' })
+    _renderCards(list, data, { variant: 'cards', isFriends: currentScope === 'friends' })
   }
 }
 
@@ -468,7 +642,7 @@ function _pendingStatusText(obs) {
         ? t('finds.pendingUploading', { current: Math.min(current, total), total })
         : t('finds.pendingUpload')
     case 'retrying':
-      return t('finds.pendingRetrying')
+      return obs._syncErrorMessage ? `${t('finds.pendingRetrying')}: ${obs._syncErrorMessage}` : t('finds.pendingRetrying')
     default:
       return t('finds.pendingUpload')
   }
@@ -538,6 +712,19 @@ function _authorChip(obs, options = {}) {
   </div>`
 }
 
+function _draftBadge(obs) {
+  return obs?.is_draft === true
+    ? `<span class="find-card-draft-badge">${_esc(t('finds.draftBadge'))}</span>`
+    : ''
+}
+
+function _emptyFindsText(q, options = {}) {
+  if (q) return t('finds.noResults', { query: q })
+  if (currentScope === 'feed') return t('finds.noFollowed')
+  if (options.isFriends || currentScope === 'friends') return t('finds.noFriends')
+  return options.capture ? t('finds.noObservationsCapture') : t('finds.noObservations')
+}
+
 // ── Render: by species ────────────────────────────────────────────────────────
 
 function _speciesKey(obs) {
@@ -558,14 +745,12 @@ function _uncertainPrefix(obs) {
   return obs?.uncertain ? '<span class="find-card-uncertain" aria-label="Uncertain ID">?</span> ' : ''
 }
 
-function _renderBySpecies(list, subtitle, data, options = {}) {
+function _renderBySpecies(list, data, options = {}) {
   const variant = options.variant || 'cards'
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
-    subtitle.textContent = q
-      ? t('finds.noResults', { query: q })
-      : currentScope === 'friends' ? t('finds.noFriends') : t('finds.noObservations')
-    list.innerHTML = ''
+    const emptyText = _emptyFindsText(q)
+    list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
   }
 
@@ -586,7 +771,6 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
     })
 
   const speciesCount = groups.filter(([k]) => k !== '\x00unidentified').length
-  subtitle.textContent = `${tp('finds.observationCount', data.length)} · ${tp('finds.speciesCount', speciesCount)}`
 
   const allObs = groups.flatMap(([, g]) => g.items).filter(o => !o._pendingSync)
   const imageVariant = variant === 'cards' ? 'medium' : 'small'
@@ -631,6 +815,9 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
         const statusIcon = obs._pendingSync
           ? `<svg class="find-card-vis-icon find-card-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
           : ''
+        const sporesIcon = obs.has_spores
+          ? `<svg class="find-card-vis-icon" style="stroke: var(--amber);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>`
+          : ''
         const metaLead = obs._pendingSync
           ? `<span class="find-card-loc-text">${_esc(_pendingStatusText(obs))}</span>`
           : loc
@@ -646,10 +833,10 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
           )
           html += `<div class="find-card-wrap find-card-wrap--two">
             <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
-                <div class="find-card-loc">${metaLead}${statusIcon}${_deleteQueueBtn(obs)}</div>
+                <div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>
               </div>
             </div>
           </div>`
@@ -664,10 +851,10 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
           )
           html += `<div class="find-card-wrap find-card-wrap--three">
             <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
               <div class="find-card-body find-card-body--three">
                 ${compactNameHtml}
-                ${obs._pendingSync ? `<div class="find-card-loc">${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
+                ${obs._pendingSync ? `<div class="find-card-loc">${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
               </div>
             </div>
           </div>`
@@ -686,14 +873,18 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
                 <div class="find-card-polaroid-frame">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
                 <div class="find-card-polaroid-frame">${imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
               </div>`
-            : imageHtml(cardImg?.first || cardImg, '', 'find-card-photo-placeholder')
+            : cardImg?.first
+              ? `<div class="find-card-polaroid find-card-polaroid--single">
+                  <div class="find-card-polaroid-frame find-card-polaroid-frame--single">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                </div>`
+              : imageHtml(cardImg, '', 'find-card-photo-placeholder')
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-            <div class="find-card-photo-wrap">${photoWrapInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+            <div class="find-card-photo-wrap">${photoWrapInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
             <div class="find-card-body">
               <div class="find-card-name-row">${nameHtml}${countBadge}</div>
-              <div class="find-card-loc">${metaLead}${statusIcon}${_deleteQueueBtn(obs)}</div>
+              <div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>
             </div>
           </div>
         </div>`
@@ -721,17 +912,14 @@ function _renderBySpecies(list, subtitle, data, options = {}) {
 
 // ── Render: tiles ─────────────────────────────────────────────────────────────
 
-function _renderTiles(list, subtitle, data) {
+function _renderTiles(list, data) {
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
-    subtitle.textContent = q
-      ? t('finds.noResults', { query: q })
-      : currentScope === 'friends' ? t('finds.noFriends') : t('finds.noObservations')
-    list.innerHTML = ''
+    const emptyText = _emptyFindsText(q)
+    list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
   }
 
-  subtitle.textContent = tp('finds.observationCount', data.length)
 
   fetchFirstImages(data.filter(obs => !obs._pendingSync).map(o => o.id), { variant: 'small' }).then(imageUrls => {
     let html = '<div class="find-tiles-grid">'
@@ -745,7 +933,7 @@ function _renderTiles(list, subtitle, data) {
         'find-tile-empty'
       )
       html += `<div class="find-tile" data-id="${obs.id}">
-        <div class="find-tile-photo">${photo}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
+        <div class="find-tile-photo">${photo}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
         <div class="find-tile-name">${obs.uncertain ? '? ' : ''}${name}</div>
       </div>`
     })
@@ -768,19 +956,16 @@ function _renderTiles(list, subtitle, data) {
 
 // ── Render: cards ─────────────────────────────────────────────────────────────
 
-function _renderCards(list, subtitle, data, options) {
+function _renderCards(list, data, options) {
   const variant = options?.variant || 'cards'
   const isFriends = !!options?.isFriends
   const q = (state.searchQuery || '').trim()
   if (!data.length) {
-    subtitle.textContent = q
-      ? t('finds.noResults', { query: q })
-      : isFriends ? t('finds.noFriends') : t('finds.noObservationsCapture')
-    list.innerHTML = ''
+    const emptyText = _emptyFindsText(q, { isFriends, capture: true })
+    list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
   }
 
-  subtitle.textContent = tp('finds.observationCount', data.length)
 
   const nonPending = data.filter(obs => !obs._pendingSync).map(o => o.id)
   const imageVariant = variant === 'cards' ? 'medium' : 'small'
@@ -838,11 +1023,14 @@ function _renderCards(list, subtitle, data, options) {
 
         const statusIcon = obs._pendingSync
           ? `<svg class="find-card-vis-icon find-card-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
-          : obs.visibility === 'private'
+          : normalizeObservationVisibility(obs.visibility) === 'private'
             ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`
-            : obs.visibility === 'friends'
+            : normalizeObservationVisibility(obs.visibility) === 'friends'
               ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
               : ''
+        const sporesIcon = obs.has_spores
+          ? `<svg class="find-card-vis-icon" style="stroke: var(--amber);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>`
+          : ''
         const locText = obs._pendingSync ? _pendingStatusText(obs) : loc
 
         const metaLead = obs._pendingSync
@@ -860,13 +1048,13 @@ function _renderCards(list, subtitle, data, options) {
           )
           html += `<div class="find-card-wrap find-card-wrap--two">
             <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
                 ${authorMeta}
-                ${locText || statusIcon ? `<div class="find-card-loc">
+                ${locText || statusIcon || sporesIcon ? `<div class="find-card-loc">
                   ${metaLead}
-                  ${statusIcon}${_deleteQueueBtn(obs)}
+                  ${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}
                 </div>` : ''}
               </div>
             </div>
@@ -882,10 +1070,10 @@ function _renderCards(list, subtitle, data, options) {
           )
           html += `<div class="find-card-wrap find-card-wrap--three">
             <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
               <div class="find-card-body find-card-body--three">
                 ${compactNameHtml}
-                ${obs._pendingSync ? `<div class="find-card-loc">${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
+                ${obs._pendingSync ? `<div class="find-card-loc">${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
               </div>
             </div>
           </div>`
@@ -905,17 +1093,21 @@ function _renderCards(list, subtitle, data, options) {
                 <div class="find-card-polaroid-frame">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
                 <div class="find-card-polaroid-frame">${imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
               </div>`
-            : imageHtml(cardImg?.first || cardImg, '', 'find-card-photo-placeholder')
+            : cardImg?.first
+              ? `<div class="find-card-polaroid find-card-polaroid--single">
+                  <div class="find-card-polaroid-frame find-card-polaroid-frame--single">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                </div>`
+              : imageHtml(cardImg, '', 'find-card-photo-placeholder')
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-            <div class="find-card-photo-wrap">${photoWrapInner}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+            <div class="find-card-photo-wrap">${photoWrapInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
             <div class="find-card-body">
               <div class="find-card-name-row">${nameHtml}${countBadge}</div>
               ${authorMeta}
-              ${locText || statusIcon ? `<div class="find-card-loc">
+              ${locText || statusIcon || sporesIcon ? `<div class="find-card-loc">
                 ${metaLead}
-                ${statusIcon}${_deleteQueueBtn(obs)}
+                ${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}
               </div>` : ''}
             </div>
           </div>

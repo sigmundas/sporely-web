@@ -3,23 +3,55 @@ import { formatDate, formatTime, getTaxonomyLanguage, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, isArtsorakelNetworkError } from '../artsorakel.js'
+import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, runArtsorakelForMediaKeys, isArtsorakelNetworkError } from '../artsorakel.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
-import { deleteObservationMedia, resolveMediaSources, updateObservationImageCrop } from '../images.js'
+import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
-import { normalizeAiCropRect } from '../image_crop.js'
+import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
-import { getDefaultVisibility, setLastSyncAt } from '../settings.js'
+import { getDefaultVisibility, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
+import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
+import { Preferences } from '@capacitor/preferences'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
+import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js'
+import { fetchCloudPlanProfile } from '../cloud-plan.js'
+import { isAndroidNativeApp } from '../camera-actions.js'
+import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
+import { setCaptureCompleteHandler } from './capture.js'
 
 let currentObs    = null
 let selectedTaxon = null
 let currentObsIsOwner = false
 let returnScreenOverride = null
 let hideCancelOverride = false
+let detailLocationSuggestions = []
+let detailLocationLookupKey = ''
+let detailLocationAutoApplied = ''
+let detailImageRows = []
+let detailImageSources = []
+let detailAiSources = []
+let detailAuthorProfile = null
+let detailFriendship = null
+let detailFollowState = { user: false, observation: false }
+
+const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
+const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
+const DETAIL_VIEW_SELECT = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
+const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
+
+function _isPhase7ColumnError(error) {
+  const message = String(error?.message || '').toLowerCase()
+  return !!error && (message.includes('is_draft') || message.includes('location_precision'))
+}
+
+async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
+  const result = await makeQuery(columns)
+  if (_isPhase7ColumnError(result.error)) return makeQuery(legacyColumns)
+  return result
+}
 
 export function initFindDetail() {
   const backBtn = document.getElementById('detail-back')
@@ -45,7 +77,23 @@ export function initFindDetail() {
     setTimeout(() => { dropdown.style.display = 'none' }, 200)
   })
 
+  const locationInput = document.getElementById('detail-location')
+  if (locationInput) {
+    locationInput.addEventListener('focus', () => _renderDetailLocationDropdown(true))
+    locationInput.addEventListener('click', () => _renderDetailLocationDropdown(true))
+    locationInput.addEventListener('input', () => {
+      _renderDetailLocationDropdown(document.activeElement === locationInput)
+    })
+    locationInput.addEventListener('blur', () => {
+      setTimeout(() => _renderDetailLocationDropdown(false), 160)
+    })
+  }
+
   document.getElementById('detail-ai-btn').addEventListener('click', _runAI)
+  document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
+  document.getElementById('detail-friend-btn')?.addEventListener('click', _sendFriendRequestFromDetail)
+  document.getElementById('detail-follow-user-btn')?.addEventListener('click', () => _toggleFollow('user'))
+  document.getElementById('detail-follow-observation-btn')?.addEventListener('click', () => _toggleFollow('observation'))
   document.getElementById('detail-uncertain').addEventListener('change', () => {
     if (!currentObs) return
     const value = document.getElementById('detail-taxon-input').value.trim()
@@ -87,11 +135,29 @@ export async function openFindDetail(obsId, options = {}) {
   if (cancelBtn) cancelBtn.style.display = hideCancelOverride ? 'none' : ''
   navigate('find-detail')
 
-  const { data: obs, error } = await supabase
-    .from('observations')
-    .select('id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility')
-    .eq('id', obsId)
-    .single()
+  let { data: obs, error } = await _withPhase7Fallback(
+    columns => supabase
+      .from('observations')
+      .select(columns)
+      .eq('id', obsId)
+      .single(),
+    DETAIL_SELECT,
+    DETAIL_SELECT_LEGACY,
+  )
+
+  if (error || !obs) {
+    const communityRes = await _withPhase7Fallback(
+      columns => supabase
+        .from('observations_community_view')
+        .select(columns)
+        .eq('id', obsId)
+        .single(),
+      DETAIL_VIEW_SELECT,
+      DETAIL_VIEW_SELECT_LEGACY,
+    )
+    obs = communityRes.data || null
+    error = communityRes.error
+  }
 
   if (error || !obs) {
     showToast(t('detail.couldNotLoadObservation'))
@@ -101,7 +167,9 @@ export async function openFindDetail(obsId, options = {}) {
 
   currentObs = obs
   currentObsIsOwner = obs.user_id === state.user?.id
+  await _loadDetailAuthorAndSocial()
   _applyOwnershipMode(currentObsIsOwner)
+  _renderDetailAuthorAndSocial()
 
   const displayName = formatDisplayName(obs.genus || '', obs.species || '', obs.common_name)
   _setDetailHeader({
@@ -114,6 +182,7 @@ export async function openFindDetail(obsId, options = {}) {
   document.getElementById('detail-taxon-input').value = displayName.trim()
 
   document.getElementById('detail-location').value = obs.location || ''
+  _startDetailLocationLookup(obs)
 
   document.getElementById('detail-habitat').value     = obs.habitat   || ''
   document.getElementById('detail-notes').value       = obs.notes     || ''
@@ -146,7 +215,7 @@ export async function openFindDetail(obsId, options = {}) {
   }
 
   // Set visibility radio
-  const vis = obs.visibility || 'friends'
+  const vis = normalizeVisibility(obs.visibility, 'public')
   const visRadio = document.querySelector(`input[name="detail-vis"][value="${vis}"]`)
   if (visRadio) visRadio.checked = true
 
@@ -170,102 +239,179 @@ export async function openFindDetail(obsId, options = {}) {
 
   const gallery = document.getElementById('detail-gallery')
   gallery.innerHTML = ''
+  detailImageRows = []
+  detailImageSources = []
+  detailAiSources = []
+  detailAuthorProfile = null
+  detailFriendship = null
+  detailFollowState = { user: false, observation: false }
 
   if (imgData?.length) {
-    const sources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
-    const aiSources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'medium' })
+    const originalSources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
+    const displaySources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'medium' })
+    const aiSources = displaySources
+    detailImageRows = [...imgData]
+    detailImageSources = [...originalSources]
+    detailAiSources = [...aiSources]
 
-    sources.forEach((source, index) => {
-      if (!source?.primaryUrl && !source?.fallbackUrl) return
-      
-      const row = imgData[index]
-      const isMicroscope = (row?.image_type || 'field') === 'microscope'
-
-      const container = document.createElement('div')
-      container.className = 'detail-gallery-item-wrap'
-      
-      const img = document.createElement('img')
-      const aiSource = aiSources[index] || null
-      img.className = 'detail-gallery-img'
-      img.src       = source.primaryUrl || source.fallbackUrl
-      img.loading   = 'lazy'
-      img.alt       = ''
-      img.dataset.aiSrc = aiSource?.primaryUrl || aiSource?.fallbackUrl || img.src
-      img.dataset.aiFallback = source.fallbackUrl || source.primaryUrl || img.src
-      if (source.fallbackUrl && source.fallbackUrl !== source.primaryUrl) {
-        img.addEventListener('error', () => {
-          if (img.dataset.fallbackApplied === 'true') return
-          img.dataset.fallbackApplied = 'true'
-          img.src = source.fallbackUrl
-        }, { once: true })
-      }
-      
-      img.style.cursor = 'pointer'
-      img.addEventListener('click', () => {
-        const galleryImgs = Array.from(gallery.querySelectorAll('.detail-gallery-img'))
-        openPhotoViewer(galleryImgs.map(i => i.src), index)
+    displaySources.forEach((source, index) => {
+      _appendDetailGalleryImage(imgData[index], source, aiSources[index] || null, {
+        index,
+        originalSource: originalSources[index] || null,
       })
-
-      container.appendChild(img)
-
-      if (currentObsIsOwner) {
-        if (!isMicroscope) {
-          const cropBtn = document.createElement('button')
-          cropBtn.className = 'detail-overlay-btn detail-overlay-crop'
-          cropBtn.textContent = 'AI crop'
-          cropBtn.addEventListener('click', (e) => {
-            e.stopPropagation()
-            openAiCropEditor({
-              title: t('crop.editorTitle'),
-              startIndex: index,
-              images: imgData.map((r, i) => ({
-                url: sources[i]?.primaryUrl || sources[i]?.fallbackUrl || '',
-                aiCropRect: normalizeAiCropRect({
-                  x1: r.ai_crop_x1, y1: r.ai_crop_y1,
-                  x2: r.ai_crop_x2, y2: r.ai_crop_y2,
-                }),
-              })),
-              onChange: (idx, meta) => {
-                const r = imgData[idx]
-                if (!r) return
-                r.ai_crop_x1 = meta.aiCropRect?.x1 ?? null
-                r.ai_crop_y1 = meta.aiCropRect?.y1 ?? null
-                r.ai_crop_x2 = meta.aiCropRect?.x2 ?? null
-                r.ai_crop_y2 = meta.aiCropRect?.y2 ?? null
-                updateObservationImageCrop(r.id, meta)
-              },
-            })
-          })
-          container.appendChild(cropBtn)
-        }
-
-        const delBtn = document.createElement('button')
-        delBtn.className = 'detail-overlay-btn detail-overlay-delete'
-        delBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/></svg>'
-        delBtn.addEventListener('click', async (e) => {
-          e.stopPropagation()
-          if (!confirm(t('detail.confirmDeleteImage') || 'Delete this image?')) return
-          
-          delBtn.disabled = true
-          try {
-            await deleteObservationMedia([row.storage_path])
-            await supabase.from('observation_images').delete().eq('id', row.id)
-            openFindDetail(currentObs.id)
-          } catch (err) {
-            console.error('Failed to delete image:', err)
-            showToast(err.message)
-            delBtn.disabled = false
-          }
-        })
-        container.appendChild(delBtn)
-      }
-
-      gallery.appendChild(container)
     })
+  }
+
+  if (currentObsIsOwner) {
+    const addCardContainer = document.createElement('div')
+    addCardContainer.className = 'detail-gallery-item-wrap'
+    addCardContainer.innerHTML = `
+      <div class="gallery-add-placeholder">
+        <div class="gallery-add-title">${t('import.addImage') || 'Add Image'}</div>
+        <div class="gallery-add-btn-wrap">
+          <button class="gallery-add-btn gallery-add-btn-cam" type="button" aria-label="Add from camera">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h3l1.6-2h4.8L16 6h3a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
+            <span>${t('import.camera') || 'Camera'}</span>
+          </button>
+          <button class="gallery-add-btn gallery-add-btn-file" type="button" aria-label="Add from file">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span>${t('import.upload') || 'Upload'}</span>
+          </button>
+        </div>
+      </div>
+    `
+    gallery.appendChild(addCardContainer)
+    addCardContainer.querySelector('.gallery-add-btn-cam').addEventListener('click', () => _openCameraForDetail())
+    addCardContainer.querySelector('.gallery-add-btn-file').addEventListener('click', () => _openPickerForDetail())
   }
 
   // Load comments async (don't await)
   _loadComments(obsId)
+}
+
+function _mediaSourceUrl(source) {
+  return source?.primaryUrl || source?.fallbackUrl || ''
+}
+
+function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
+  const originalSource = options.originalSource || source
+  const displayUrl = _mediaSourceUrl(source) || _mediaSourceUrl(originalSource)
+  if (!row || !displayUrl) return null
+  const gallery = document.getElementById('detail-gallery')
+  if (!gallery) return null
+
+  const index = Number.isInteger(options.index) ? options.index : detailImageRows.length
+  const isMicroscope = (row?.image_type || 'field') === 'microscope'
+  const container = document.createElement('div')
+  container.className = 'detail-gallery-item-wrap'
+  container.dataset.imageId = row.id || ''
+
+  const img = document.createElement('img')
+  img.className = 'detail-gallery-img'
+  img.src = displayUrl
+  img.loading = 'lazy'
+  img.alt = ''
+  img.dataset.storagePath = row.storage_path || ''
+  img.dataset.fullSrc = _mediaSourceUrl(originalSource) || displayUrl
+  img.dataset.aiSrc = _mediaSourceUrl(aiSource) || displayUrl
+  img.dataset.aiFallback = _mediaSourceUrl(originalSource) || _mediaSourceUrl(source) || displayUrl
+  if (source.fallbackUrl && source.fallbackUrl !== source.primaryUrl) {
+    img.addEventListener('error', () => {
+      if (img.dataset.fallbackApplied === 'true') return
+      img.dataset.fallbackApplied = 'true'
+      img.src = source.fallbackUrl
+    }, { once: true })
+  }
+
+  img.style.cursor = 'pointer'
+  img.addEventListener('click', () => {
+    const galleryImgs = Array.from(gallery.querySelectorAll('.detail-gallery-img'))
+    const currentIndex = galleryImgs.indexOf(img)
+    openPhotoViewer(galleryImgs.map(i => i.dataset.fullSrc || i.src), Math.max(0, currentIndex))
+  })
+  container.appendChild(img)
+
+  if (currentObsIsOwner) {
+    if (!isMicroscope) {
+      const cropBtn = document.createElement('button')
+      cropBtn.className = 'detail-overlay-btn detail-overlay-crop'
+      cropBtn.textContent = 'AI crop'
+      cropBtn.addEventListener('click', (e) => {
+        e.stopPropagation()
+        const startIndex = detailImageRows.findIndex(r => String(r.id) === String(row.id))
+        openAiCropEditor({
+          title: t('crop.editorTitle'),
+          startIndex: Math.max(0, startIndex),
+          images: detailImageRows.map((r, i) => ({
+            url: _mediaSourceUrl(detailImageSources[i]) || _mediaSourceUrl(detailAiSources[i]) || '',
+            aiCropRect: normalizeAiCropRect({
+              x1: r.ai_crop_x1, y1: r.ai_crop_y1,
+              x2: r.ai_crop_x2, y2: r.ai_crop_y2,
+            }),
+          })),
+          onChange: (idx, meta) => {
+            const r = detailImageRows[idx]
+            if (!r) return
+            r.ai_crop_x1 = meta.aiCropRect?.x1 ?? null
+            r.ai_crop_y1 = meta.aiCropRect?.y1 ?? null
+            r.ai_crop_x2 = meta.aiCropRect?.x2 ?? null
+            r.ai_crop_y2 = meta.aiCropRect?.y2 ?? null
+            updateObservationImageCrop(r.id, meta)
+          },
+        })
+      })
+      container.appendChild(cropBtn)
+    }
+
+    const delBtn = document.createElement('button')
+    delBtn.className = 'detail-overlay-btn detail-overlay-delete'
+    delBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/></svg>'
+    delBtn.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      if (!confirm(t('detail.confirmDeleteImage') || 'Delete this image?')) return
+
+      delBtn.disabled = true
+      try {
+        await deleteObservationMedia([row.storage_path])
+        await supabase.from('observation_images').delete().eq('id', row.id)
+        const rowIndex = detailImageRows.findIndex(r => String(r.id) === String(row.id))
+        if (rowIndex >= 0) {
+          detailImageRows.splice(rowIndex, 1)
+          detailImageSources.splice(rowIndex, 1)
+          detailAiSources.splice(rowIndex, 1)
+        }
+
+        const { data: remaining } = await supabase
+          .from('observation_images')
+          .select('storage_path')
+          .eq('observation_id', currentObs.id)
+          .order('sort_order', { ascending: true })
+          .limit(1)
+        if (remaining && remaining.length > 0) {
+          await syncObservationMediaKeys(currentObs.id, remaining[0].storage_path, { sortOrder: 0 })
+        } else {
+          await supabase.from('observations').update({ image_key: null, thumb_key: null }).eq('id', currentObs.id)
+        }
+        container.remove()
+      } catch (err) {
+        console.error('Failed to delete image:', err)
+        showToast(err.message)
+        delBtn.disabled = false
+      }
+    })
+    container.appendChild(delBtn)
+  }
+
+  const addCard = gallery.querySelector('.gallery-add-placeholder')?.closest('.detail-gallery-item-wrap')
+  if (addCard && !options.appendAfterAddCard) gallery.insertBefore(container, addCard)
+  else gallery.appendChild(container)
+
+  if (!options.skipStateInsert && !detailImageRows.some(r => String(r.id) === String(row.id))) {
+    detailImageRows.splice(index, 0, row)
+    detailImageSources.splice(index, 0, originalSource)
+    detailAiSources.splice(index, 0, aiSource)
+  }
+  return container
 }
 
 async function _runAI() {
@@ -280,23 +426,27 @@ async function _runAI() {
 
   try {
     async function fetchAiBlobForImage(img) {
-      const urls = [
-        img.dataset.aiSrc || '',
-        img.dataset.aiFallback || '',
-        img.src || '',
-      ].filter(Boolean)
+      try {
+        return await downloadObservationImageBlob(img.dataset.storagePath, { variant: 'medium' })
+      } catch (storageError) {
+        const urls = [
+          img.dataset.aiFallback || '',
+          img.dataset.aiSrc || '',
+          img.src || '',
+        ].filter(Boolean)
 
-      let lastError = null
-      for (const url of urls) {
-        try {
-          const resp = await fetch(url)
-          if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
-          return await resp.blob()
-        } catch (error) {
-          lastError = error
+        let lastError = storageError
+        for (const url of urls) {
+          try {
+            const resp = await fetch(url)
+            if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
+            return await resp.blob()
+          } catch (error) {
+            lastError = error
+          }
         }
+        throw lastError || new Error('Image fetch failed')
       }
-      throw lastError || new Error('Image fetch failed')
     }
 
     const blobResults = await Promise.allSettled(
@@ -305,7 +455,19 @@ async function _runAI() {
     const blobs = blobResults
       .filter(result => result.status === 'fulfilled' && result.value instanceof Blob)
       .map(result => result.value)
-    const predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage())
+    const mediaKeys = galleryImgs
+      .map(img => img.dataset.storagePath || '')
+      .filter(Boolean)
+
+    let predictions = null
+    if (blobs.length) {
+      predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage(), { tolerateFailures: true })
+    } else if (mediaKeys.length) {
+      console.warn('Artsorakel image download failed for existing observation:', blobResults)
+      predictions = await runArtsorakelForMediaKeys(mediaKeys, getTaxonomyLanguage(), { variant: 'medium' })
+    } else {
+      throw new Error('Could not load observation images for Artsorakel')
+    }
 
     if (!predictions?.length) {
       showToast(t('review.noMatch'))
@@ -349,6 +511,7 @@ async function _runAI() {
     } else {
       showToast(t('common.artsorakelError', { message }))
     }
+    console.warn('Artsorakel detail error:', err)
   } finally {
     btn.disabled = false
     btn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
@@ -376,12 +539,20 @@ function _resetForm() {
   document.getElementById('detail-taxon-input').value = ''
   document.getElementById('detail-taxon-dropdown').style.display = 'none'
   document.getElementById('detail-location').value    = ''
+  detailLocationSuggestions = []
+  detailLocationLookupKey = ''
+  detailLocationAutoApplied = ''
+  _renderDetailLocationDropdown(false)
   document.getElementById('detail-habitat').value     = ''
   const coordsEl = document.getElementById('detail-coords')
   if (coordsEl) { coordsEl.innerHTML = ''; coordsEl.style.display = 'none' }
   document.getElementById('detail-notes').value       = ''
   document.getElementById('detail-uncertain').checked = false
   _setDetailHeader({ fallbackName: t('detail.unknownSpecies') })
+  detailAuthorProfile = null
+  detailFriendship = null
+  detailFollowState = { user: false, observation: false }
+  _renderDetailAuthorAndSocial()
   document.getElementById('detail-date').textContent  = '—'
   const timeEl = document.getElementById('detail-time')
   const timeVal = document.getElementById('detail-time-val')
@@ -394,7 +565,7 @@ function _resetForm() {
   if (cancelBtn) cancelBtn.style.display = ''
 
   // Reset visibility to default
-  const r = document.querySelector(`input[name="detail-vis"][value="${getDefaultVisibility()}"]`)
+  const r = document.querySelector(`input[name="detail-vis"][value="${normalizeVisibility(getDefaultVisibility(), 'public')}"]`)
   if (r) r.checked = true
 
   // Clear comments
@@ -403,6 +574,214 @@ function _resetForm() {
   const commentInput = document.getElementById('comment-input')
   if (commentInput) commentInput.value = ''
   _applyOwnershipMode(true)
+}
+
+function _startDetailLocationLookup(obs) {
+  const lat = Number(obs?.gps_latitude)
+  const lon = Number(obs?.gps_longitude)
+  const lookupKey = lookupCoordinateKey(lat, lon)
+  detailLocationSuggestions = []
+  detailLocationLookupKey = lookupKey
+  detailLocationAutoApplied = ''
+  _renderDetailLocationDropdown(false)
+  if (!lookupKey) return
+
+  lookupReverseLocation(lat, lon, {
+    onUpdate: updated => _applyDetailLocationLookup(lookupKey, updated),
+  })
+    .then(result => _applyDetailLocationLookup(lookupKey, result))
+    .catch(() => {})
+}
+
+function _applyDetailLocationLookup(lookupKey, result) {
+  if (lookupKey !== detailLocationLookupKey) return
+  detailLocationSuggestions = result?.suggestions || []
+  const first = detailLocationSuggestions[0] || ''
+  const input = document.getElementById('detail-location')
+  if (input && first && (!input.value.trim() || input.value.trim() === detailLocationAutoApplied)) {
+    input.value = first
+    detailLocationAutoApplied = first
+  }
+  _renderDetailLocationDropdown(document.activeElement === input)
+}
+
+function _renderDetailLocationDropdown(show) {
+  const dropdown = document.getElementById('detail-location-dropdown')
+  const input = document.getElementById('detail-location')
+  if (!dropdown || !input) return
+  if (!show || !currentObsIsOwner || !detailLocationSuggestions.length) {
+    dropdown.style.display = 'none'
+    dropdown.innerHTML = ''
+    return
+  }
+
+  dropdown.innerHTML = detailLocationSuggestions
+    .map((name, index) => `<li data-index="${index}">${_esc(name)}</li>`)
+    .join('')
+  dropdown.style.display = 'block'
+  dropdown.querySelectorAll('li').forEach((item, index) => {
+    item.addEventListener('mousedown', event => {
+      event.preventDefault()
+      const name = detailLocationSuggestions[index] || ''
+      input.value = name
+      detailLocationAutoApplied = name
+      dropdown.style.display = 'none'
+    })
+  })
+}
+
+function _profileLabel(profile, fallback = t('common.unknown')) {
+  if (profile?.username) return `@${profile.username}`
+  if (profile?.display_name) return profile.display_name
+  return fallback
+}
+
+function _profileInitial(profile, fallback = '?') {
+  const source = profile?.username || profile?.display_name || fallback
+  return String(source).replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
+}
+
+async function _loadDetailAuthorAndSocial() {
+  detailAuthorProfile = null
+  detailFriendship = null
+  detailFollowState = { user: false, observation: false }
+  if (!currentObs?.user_id) return
+
+  const isOwner = currentObs.user_id === state.user?.id
+  const profilePromise = supabase
+    .from('profiles')
+    .select('id, username, display_name, avatar_url')
+    .eq('id', currentObs.user_id)
+    .maybeSingle()
+
+  const friendshipPromise = isOwner ? Promise.resolve({ data: [] }) : supabase
+    .from('friendships')
+    .select('id, requester_id, addressee_id, status')
+    .or(`and(requester_id.eq.${state.user.id},addressee_id.eq.${currentObs.user_id}),and(requester_id.eq.${currentObs.user_id},addressee_id.eq.${state.user.id})`)
+    .limit(1)
+
+  const followsPromise = isOwner ? Promise.resolve({ data: [] }) : supabase
+    .from('follows')
+    .select('target_type, target_id')
+    .eq('user_id', state.user.id)
+    .in('target_type', ['user', 'observation'])
+    .in('target_id', [currentObs.user_id, currentObs.id])
+
+  const [profileRes, friendshipRes, followsRes] = await Promise.all([profilePromise, friendshipPromise, followsPromise])
+  if (!profileRes.error) detailAuthorProfile = profileRes.data || null
+  if (!friendshipRes.error) detailFriendship = friendshipRes.data?.[0] || null
+  if (!followsRes.error) {
+    for (const row of followsRes.data || []) {
+      if (row.target_type === 'user' && String(row.target_id) === String(currentObs.user_id)) detailFollowState.user = true
+      if (row.target_type === 'observation' && String(row.target_id) === String(currentObs.id)) detailFollowState.observation = true
+    }
+  }
+}
+
+function _renderDetailAuthorAndSocial() {
+  const authorBtn = document.getElementById('detail-author')
+  const authorName = document.getElementById('detail-author-name')
+  const authorAvatar = document.getElementById('detail-author-avatar')
+  const socialRow = document.getElementById('detail-social-row')
+  const friendBtn = document.getElementById('detail-friend-btn')
+  const followUserBtn = document.getElementById('detail-follow-user-btn')
+  const followObsBtn = document.getElementById('detail-follow-observation-btn')
+  const isOwner = currentObs?.user_id === state.user?.id
+
+  if (authorBtn && currentObs?.user_id) {
+    const label = isOwner ? t('common.you') : _profileLabel(detailAuthorProfile)
+    authorBtn.style.display = 'inline-flex'
+    if (authorName) authorName.textContent = label
+    if (authorAvatar) {
+      const avatarUrl = detailAuthorProfile?.avatar_url || ''
+      authorAvatar.innerHTML = avatarUrl
+        ? `<img src="${_esc(avatarUrl)}" alt="" loading="lazy" decoding="async">`
+        : _esc(_profileInitial(detailAuthorProfile, label))
+    }
+  } else if (authorBtn) {
+    authorBtn.style.display = 'none'
+  }
+
+  if (socialRow) socialRow.style.display = !isOwner && currentObs?.user_id ? 'flex' : 'none'
+  if (followObsBtn) followObsBtn.style.display = !isOwner && currentObs?.id ? 'inline-flex' : 'none'
+
+  if (friendBtn) {
+    const status = detailFriendship?.status || ''
+    const accepted = status === 'accepted'
+    const pending = status === 'pending'
+    friendBtn.textContent = accepted ? '❤️' : '🤍'
+    friendBtn.classList.toggle('active', accepted)
+    friendBtn.disabled = accepted || pending
+    friendBtn.title = accepted ? t('social.friendAccepted') : pending ? t('social.friendPending') : t('social.friendRequest')
+    friendBtn.setAttribute('aria-label', friendBtn.title)
+  }
+
+  if (followUserBtn) {
+    followUserBtn.classList.toggle('active', !!detailFollowState.user)
+    followUserBtn.title = detailFollowState.user ? t('social.unfollowUser') : t('social.followUser')
+    followUserBtn.setAttribute('aria-label', followUserBtn.title)
+  }
+
+  if (followObsBtn) {
+    followObsBtn.classList.toggle('active', !!detailFollowState.observation)
+    followObsBtn.title = detailFollowState.observation ? t('social.unfollowObservation') : t('social.followObservation')
+    followObsBtn.setAttribute('aria-label', followObsBtn.title)
+  }
+}
+
+function _openAuthorFinds() {
+  if (!currentObs?.user_id || currentObs.user_id === state.user?.id) return
+  openFinds('user', {
+    userId: currentObs.user_id,
+    username: _profileLabel(detailAuthorProfile),
+    avatarUrl: detailAuthorProfile?.avatar_url || '',
+    resetSearch: true,
+    resetFilters: true,
+  })
+}
+
+async function _sendFriendRequestFromDetail() {
+  if (!currentObs?.user_id || currentObs.user_id === state.user?.id) return
+  const btn = document.getElementById('detail-friend-btn')
+  if (btn) btn.disabled = true
+  const { data, error } = await supabase
+    .from('friendships')
+    .insert({ requester_id: state.user.id, addressee_id: currentObs.user_id, status: 'pending' })
+    .select('id, requester_id, addressee_id, status')
+    .single()
+
+  if (error && error.code !== '23505') {
+    showToast(t('social.friendFailed'))
+    if (btn) btn.disabled = false
+    return
+  }
+
+  detailFriendship = data || { status: 'pending' }
+  _renderDetailAuthorAndSocial()
+}
+
+async function _toggleFollow(kind) {
+  if (!currentObs || currentObs.user_id === state.user?.id) return
+  const targetType = kind === 'user' ? 'user' : 'observation'
+  const targetId = targetType === 'user' ? currentObs.user_id : currentObs.id
+  const key = targetType === 'user' ? 'user' : 'observation'
+  const currentlyFollowing = !!detailFollowState[key]
+  const btn = document.getElementById(targetType === 'user' ? 'detail-follow-user-btn' : 'detail-follow-observation-btn')
+  if (btn) btn.disabled = true
+
+  const result = currentlyFollowing
+    ? await supabase.from('follows').delete().eq('user_id', state.user.id).eq('target_type', targetType).eq('target_id', targetId)
+    : await supabase.from('follows').insert({ user_id: state.user.id, target_type: targetType, target_id: targetId })
+
+  if (result.error && result.error.code !== '23505') {
+    showToast(t('social.followFailed'))
+    if (btn) btn.disabled = false
+    return
+  }
+
+  detailFollowState[key] = !currentlyFollowing
+  if (btn) btn.disabled = false
+  _renderDetailAuthorAndSocial()
 }
 
 function _applyOwnershipMode(isOwner) {
@@ -423,7 +802,7 @@ function _applyOwnershipMode(isOwner) {
   if (deleteBtn) deleteBtn.style.display = isOwner ? '' : 'none'
   if (aiBtn) aiBtn.disabled = !isOwner
   if (taxonInput) taxonInput.disabled = !isOwner
-  if (locationInput) locationInput.readOnly = true
+  if (locationInput) locationInput.readOnly = !isOwner
   if (habitatInput) habitatInput.readOnly = !isOwner
   if (notesInput) notesInput.readOnly = !isOwner
   if (uncertainInput) uncertainInput.disabled = !isOwner
@@ -433,6 +812,10 @@ function _applyOwnershipMode(isOwner) {
 
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.disabled = !isOwner
+  })
+  const isPro = state.cloudPlan?.cloudPlan === 'pro' || !!state.cloudPlan?.fullResStorageEnabled
+  document.querySelectorAll('#detail-visibility .vis-option--slot small').forEach(label => {
+    label.style.display = isPro ? 'none' : ''
   })
 
   let modContainer = document.getElementById('detail-mod-container')
@@ -535,10 +918,11 @@ async function _save() {
   btn.disabled = true
 
   const patch = {
+    location:   document.getElementById('detail-location').value.trim()  || null,
     habitat:    document.getElementById('detail-habitat').value.trim()   || null,
     notes:      document.getElementById('detail-notes').value.trim()     || null,
     uncertain:  document.getElementById('detail-uncertain').checked,
-    visibility: document.querySelector('input[name="detail-vis"]:checked')?.value || 'friends',
+    visibility: toCloudVisibility(document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'),
   }
 
   const taxonInputValue = document.getElementById('detail-taxon-input').value.trim()
@@ -857,4 +1241,197 @@ async function _sendComment() {
   showToast(t('comments.posted'))
   _loadComments(currentObs.id)
 
+}
+
+async function _openCameraForDetail() {
+  if (isAndroidNativeApp()) {
+    try {
+      if (getUseSystemCamera()) {
+        const result = await NativeCamera.openSystemCamera()
+        const photos = Array.isArray(result?.photos) ? result.photos : []
+        if (!photos.length) return
+
+        _setProgress(0, photos.length, t('import.readingFiles'))
+        const files = []
+        for (let i = 0; i < photos.length; i++) {
+          _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+          files.push(await nativePickedPhotoToFile(photos[i], i))
+        }
+        await _addPhotosToObservation(files)
+        return
+      }
+
+      const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' })
+      const useHdr = useHdrStr !== 'false'
+      const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
+        ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
+        : null
+      const options = { useHdr, jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
+      if (gps) options.gps = gps
+      const result = await NativeCamera.capturePhotos(options)
+      const photos = Array.isArray(result?.photos) ? result.photos : []
+      if (!photos.length) return
+
+      _setProgress(0, photos.length, t('import.readingFiles'))
+      const files = []
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+        files.push(await nativePickedPhotoToFile(photos[i], i))
+      }
+      await _addPhotosToObservation(files)
+    } catch (err) {
+      if (isPickerCancel(err)) return
+      showToast(`Sporely Cam: ${err?.message || err}`)
+      _hideProgress()
+    }
+  } else {
+    setCaptureCompleteHandler(async photos => {
+      const files = []
+      for (let i = 0; i < photos.length; i++) {
+        const photo = photos[i]
+        const blob = photo?.blob || await photo?.blobPromise
+        if (!blob) continue
+        files.push(new File(
+          [blob],
+          `sporely-capture-${i + 1}.${imageExtensionForBlob(blob)}`,
+          { type: blob.type || 'image/jpeg', lastModified: photo?.ts?.getTime?.() || Date.now() }
+        ))
+      }
+      if (!files.length) {
+        if (currentObs?.id) await openFindDetail(currentObs.id)
+        return
+      }
+      await _addPhotosToObservation(files)
+    })
+    navigate('capture')
+  }
+}
+
+async function _openPickerForDetail() {
+  if (isAndroidNativeApp()) {
+    try {
+      const result = await pickImagesWithNativePhotoPicker()
+      const photos = Array.isArray(result?.photos) ? result.photos : []
+      if (!photos.length) return
+      _setProgress(0, photos.length, t('import.readingFiles'))
+      const files = []
+      for (let i = 0; i < photos.length; i++) {
+        _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+        files.push(await nativePickedPhotoToFile(photos[i], i))
+      }
+      await _addPhotosToObservation(files)
+      return
+    } catch (err) {
+      if (isPickerCancel(err)) return
+      _hideProgress()
+    }
+  }
+
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.multiple = true
+  input.accept = 'image/*'
+  if (/android/i.test(navigator.userAgent)) {
+    input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif'
+  }
+  input.onchange = async (e) => {
+    const files = Array.from(e.target.files || [])
+    if (!files.length) return
+    await _addPhotosToObservation(files)
+  }
+  input.click()
+}
+
+async function _addPhotosToObservation(files) {
+  if (!currentObs || !files.length) return
+
+  const obsId = currentObs.id
+  const userId = currentObs.user_id
+
+  _setProgress(0, files.length, `Adding ${files.length} photo(s)...`)
+  const saveBtn = document.getElementById('detail-save-btn')
+  if (saveBtn) saveBtn.disabled = true
+
+  try {
+    const { data: existingImages } = await supabase
+      .from('observation_images')
+      .select('sort_order')
+      .eq('observation_id', obsId)
+      .order('sort_order', { ascending: false })
+      .limit(1)
+
+    let nextSortOrder = 0
+    if (existingImages?.length) {
+      nextSortOrder = (existingImages[0].sort_order || 0) + 1
+    }
+
+    const uploadPolicy = await fetchCloudPlanProfile(userId)
+
+    for (let i = 0; i < files.length; i++) {
+      _setProgress(i, files.length, `Uploading ${i + 1} of ${files.length}...`)
+      const file = files[i]
+      const sortOrder = nextSortOrder + i
+
+      const preparedImage = await prepareImageVariants(file, uploadPolicy)
+      const storagePath = `${userId}/${obsId}/${sortOrder}_${Date.now()}.${imageExtensionForBlob(preparedImage.uploadBlob)}`
+      await uploadPreparedObservationImageVariants(preparedImage, storagePath, { uploadPolicy })
+      const cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })
+      await insertObservationImage({
+        observation_id: obsId,
+        user_id: userId,
+        storage_path: storagePath,
+        image_type: 'field',
+        sort_order: sortOrder,
+        ...preparedImage.uploadMeta,
+        ...cropMeta,
+      })
+
+      if (sortOrder === 0) {
+        await syncObservationMediaKeys(obsId, storagePath, { sortOrder: 0 })
+      }
+
+      const { data: insertedRows } = await supabase
+        .from('observation_images')
+        .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2')
+        .eq('observation_id', obsId)
+        .eq('sort_order', sortOrder)
+        .order('id', { ascending: false })
+        .limit(1)
+      const insertedRow = insertedRows?.[0] || {
+        id: `new-${sortOrder}-${Date.now()}`,
+        storage_path: storagePath,
+        sort_order: sortOrder,
+        image_type: 'field',
+        ai_crop_x1: cropMeta.aiCropRect?.x1 ?? null,
+        ai_crop_y1: cropMeta.aiCropRect?.y1 ?? null,
+        ai_crop_x2: cropMeta.aiCropRect?.x2 ?? null,
+        ai_crop_y2: cropMeta.aiCropRect?.y2 ?? null,
+      }
+      const [originalSource] = await resolveMediaSources([storagePath], { variant: 'original' })
+      const [displaySource] = await resolveMediaSources([storagePath], { variant: 'medium' })
+      _appendDetailGalleryImage(insertedRow, displaySource, displaySource, { originalSource })
+    }
+
+    showToast(`${files.length} photo(s) added.`)
+  } catch (err) {
+    console.error('Failed to add photos to observation:', err)
+    showToast(`Error adding photos: ${err.message}`)
+  } finally {
+    _hideProgress()
+    if (saveBtn) saveBtn.disabled = false
+  }
+}
+
+function _setProgress(done, total, label) {
+  const overlay = document.getElementById('import-progress')
+  if (!overlay) return
+  overlay.style.display = 'flex'
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  document.getElementById('import-progress-fill').style.width = pct + '%'
+  document.getElementById('import-progress-label').textContent = label || t('import.processing')
+}
+
+function _hideProgress() {
+  const overlay = document.getElementById('import-progress')
+  if (overlay) overlay.style.display = 'none'
 }

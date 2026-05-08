@@ -89,12 +89,18 @@
           <input type="password" id="signup-password" name="password" class="auth-input" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password">
         </label>
         <p class="auth-help" id="signup-password-help">Use at least 8 characters, including uppercase, lowercase, number, and symbol.</p>
-        <button type="submit" class="auth-btn" id="signup-btn">Create account</button>
+      <label class="auth-label" style="display:flex; align-items:center; gap:8px; margin-top:16px; margin-bottom:24px; cursor:pointer; flex-direction:row;">
+        <input type="checkbox" id="signup-tos" required style="width:16px;height:16px;accent-color:var(--brand, #4CAF50)">
+        <span style="font-size:13px; font-weight:normal; color:var(--text-dim, #aaa)">I agree to <a href="https://sporely.no/terms" target="_blank" style="color:var(--brand, #4CAF50); text-decoration:none;">terms of service and privacy policy</a></span>
+      </label>
+    <!-- Turnstile CAPTCHA -->
+    <div id="turnstile-container" style="margin-bottom:16px;display:none;justify-content:center"></div>
+
+      <div style="display:flex; justify-content:center;">
+      <button type="submit" class="auth-btn" id="signup-btn" style="padding-left:32px; padding-right:32px; min-width:200px;">Create account</button>
+      </div>
         <p class="auth-switch"><span id="signup-switch-prefix">Already have one?</span> <a href="#" id="show-login">Sign in</a></p>
       </form>
-
-      <!-- Turnstile CAPTCHA -->
-      <div id="turnstile-container" style="margin-top:12px;display:none;justify-content:center"></div>
 
       <!-- Install hint (mobile only, injected by JS) -->
       <div class="auth-install-hint" id="auth-install-hint" style="display:none">
@@ -136,23 +142,19 @@
       const copy = {
         en: {
           ios: '<strong>Install on iPhone:</strong> Tap the share button <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> in Safari, then <strong>"Add to Home Screen"</strong>',
-          android: '<strong>Install on Android:</strong> Tap the menu <strong>⋮</strong> in Chrome, then <strong>"Add to Home screen"</strong>',
-          androidOther: '<strong>Install on Android:</strong> Open this page in Chrome, then tap the menu <strong>⋮</strong> and choose <strong>"Add to Home screen"</strong>'
+          android: '<strong>Get the app:</strong> Download Sporely from the Google Play Store for the best experience.'
         },
         no: {
           ios: '<strong>Installer på iPhone:</strong> Trykk på delingsknappen <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> i Safari, og velg deretter <strong>"Legg til på hjemmeskjermen"</strong>',
-          android: '<strong>Installer på Android:</strong> Trykk på menyen <strong>⋮</strong> i Chrome, og velg deretter <strong>"Legg til på startskjermen"</strong>',
-          androidOther: '<strong>Installer på Android:</strong> Åpne denne siden i Chrome, trykk på menyen <strong>⋮</strong>, og velg <strong>"Legg til på startskjermen"</strong>'
+          android: '<strong>Skaff deg appen:</strong> Last ned Sporely fra Google Play Store for den beste opplevelsen.'
         },
         sv: {
           ios: '<strong>Installera på iPhone:</strong> Tryck på delningsknappen <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> i Safari och välj sedan <strong>"Lägg till på hemskärmen"</strong>',
-          android: '<strong>Installera på Android:</strong> Tryck på menyn <strong>⋮</strong> i Chrome och välj sedan <strong>"Lägg till på startskärmen"</strong>',
-          androidOther: '<strong>Installera på Android:</strong> Öppna sidan i Chrome, tryck på menyn <strong>⋮</strong> och välj <strong>"Lägg till på startskärmen"</strong>'
+          android: '<strong>Hämta appen:</strong> Ladda ner Sporely från Google Play Store för bästa upplevelse.'
         },
         de: {
           ios: '<strong>Auf dem iPhone installieren:</strong> Tippe in Safari auf die Teilen-Schaltfläche <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> und wähle dann <strong>"Zum Home-Bildschirm"</strong>',
-          android: '<strong>Auf Android installieren:</strong> Tippe in Chrome auf das Menü <strong>⋮</strong> und wähle dann <strong>"Zum Startbildschirm hinzufügen"</strong>',
-          androidOther: '<strong>Auf Android installieren:</strong> Öffne diese Seite in Chrome, tippe auf das Menü <strong>⋮</strong> und wähle <strong>"Zum Startbildschirm hinzufügen"</strong>'
+          android: '<strong>Hol dir die App:</strong> Lade Sporely aus dem Google Play Store herunter, um das beste Erlebnis zu haben.'
         }
       }[lang]
 
@@ -160,8 +162,8 @@
         icon.textContent = '📲'
         text.innerHTML = copy.ios
       } else {
-        icon.textContent = '📲'
-        text.innerHTML = isAndroidChrome ? copy.android : copy.androidOther
+        icon.textContent = '🍄'
+        text.innerHTML = copy.android
       }
       hint.style.display = 'flex'
     })()
@@ -194,17 +196,11 @@
 
       <div class="home-content">
         <div class="action-grid">
-          <div class="action-card" id="ac-sporely-cam">
-            <div class="action-card-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h4l2-2h4l2 2h4a1 1 0 0 1 1 1v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13" r="4"/></svg>
-            </div>
-            <div class="action-card-label">Sporely Cam</div>
-          </div>
-          <div class="action-card native-only" id="ac-native-cam" style="display:none">
+          <div class="action-card" id="ac-camera">
             <div class="action-card-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 6h3l1.6-2h4.8L16 6h3a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/><path d="M18 9h.01"/></svg>
             </div>
-            <div class="action-card-label">Native Cam</div>
+            <div class="action-card-label">Sporely Cam</div>
           </div>
           <div class="action-card" id="ac-import">
             <div class="action-card-icon">
@@ -242,10 +238,10 @@
             <div class="home-stat-lbl" id="home-stat-species-label">Species</div>
           </button>
           <div class="home-stat-div"></div>
-          <div class="home-stat">
+          <button class="home-stat home-stat--btn" id="hstat-spores-btn">
             <div class="home-stat-val" id="hstat-spores">—</div>
             <div class="home-stat-lbl" id="home-stat-spores-label">Spores</div>
-          </div>
+          </button>
         </div>
 
         <input type="file" id="import-photo-input" class="hidden-file-input" accept="image/*" multiple>
@@ -258,16 +254,34 @@
     <div id="exif-warning-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); z-index:2000; align-items:center; justify-content:center; padding:20px; backdrop-filter:blur(4px);">
       <div style="background:var(--bg-main, #111); border:1px solid var(--border, #333); border-radius:20px; width:100%; max-width:400px; padding:24px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
         <div id="exif-warning-title" style="font-size:20px; font-weight:600; margin-bottom:12px;">Missing Location Data?</div>
-        <div id="exif-warning-desc" style="font-size:15px; color:var(--text-dim, #aaa); line-height:1.5; margin-bottom:24px;">Android web browsers automatically remove GPS location from photos when using the quick "Photos & videos" picker. Install the Sporely app from Play Store to import location data with your images.</div>
-        
+      <div id="exif-warning-desc" style="font-size:15px; color:var(--text-dim, #aaa); line-height:1.5; margin-bottom:24px;">Android web browsers automatically remove GPS location from photos. Install the Sporely app from Play Store to import location data with your images. (Or just use Sporely cam to capture location)</div>
+
         <label style="display:flex; align-items:center; gap:12px; margin-bottom:24px; cursor:pointer;">
           <input type="checkbox" id="exif-warning-dont-show" style="width:20px; height:20px; accent-color:var(--brand, #4CAF50); cursor:pointer;">
           <span id="exif-warning-dont-show-label" style="font-size:15px; user-select:none;">Don't show this again</span>
         </label>
-        
+
         <div style="display:flex; gap:12px; justify-content:flex-end;">
           <button class="btn-secondary" id="exif-warning-cancel" style="flex:1;">Cancel</button>
           <button class="btn-primary" id="exif-warning-continue" style="flex:1;">Continue anyway</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════ ANDROID WEB CAMERA WARNING ══════════════════════════ -->
+    <div id="android-web-camera-warning-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.6); z-index:2000; align-items:center; justify-content:center; padding:20px; backdrop-filter:blur(4px);">
+      <div style="background:var(--bg-main, #111); border:1px solid var(--border, #333); border-radius:20px; width:100%; max-width:400px; padding:24px; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div id="android-web-camera-warning-title" style="font-size:20px; font-weight:600; margin-bottom:12px;">Better image quality in the app</div>
+        <div id="android-web-camera-warning-desc" style="font-size:15px; color:var(--text-dim, #aaa); line-height:1.5; margin-bottom:24px;">For the best image quality and location handling on Android, download the Sporely app from Play Store. You can continue with the web camera if you prefer.</div>
+
+        <label style="display:flex; align-items:center; gap:12px; margin-bottom:24px; cursor:pointer;">
+          <input type="checkbox" id="android-web-camera-warning-dont-show" style="width:20px; height:20px; accent-color:var(--brand, #4CAF50); cursor:pointer;">
+          <span id="android-web-camera-warning-dont-show-label" style="font-size:15px; user-select:none;">Don't show this again</span>
+        </label>
+
+        <div style="display:flex; gap:12px; justify-content:flex-end;">
+          <button class="btn-secondary" id="android-web-camera-warning-cancel" style="flex:1;">Cancel</button>
+          <button class="btn-primary" id="android-web-camera-warning-continue" style="flex:1;">Continue anyway</button>
         </div>
       </div>
     </div>
@@ -304,14 +318,24 @@
         </div>
       </div>
 
-      <div class="scope-tabs">
-        <button class="scope-tab active" data-scope="mine">Mine</button>
-        <button class="scope-tab" data-scope="friends">Friends</button>
-        <button class="scope-tab" data-scope="community">Community</button>
+      <div style="display:flex; align-items:center; justify-content:center; padding: 8px 18px 4px;">
+        <div class="scope-tabs" id="finds-scope-tabs">
+          <button class="scope-tab active" data-scope="mine">Mine</button>
+          <button class="scope-tab" data-scope="feed">Feed</button>
+          <button class="scope-tab" data-scope="friends">Friends</button>
+          <button class="scope-tab" data-scope="community">Community</button>
+        </div>
+        <div id="finds-user-bar" style="display:none; align-items:center; gap:8px; padding: 12px 0 0 18px; flex:1;">
+          <button class="detail-back-btn" id="finds-user-back" type="button" style="padding:0; margin-right:4px;" aria-label="Back">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+          <div class="friend-avatar" id="finds-user-avatar" style="width:26px;height:26px;font-size:11px;border:1px solid var(--green-mid);">?</div>
+          <div style="font-size:14px; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:140px;" id="finds-user-name"></div>
+        </div>
       </div>
 
       <div class="finds-topbar">
-        <div class="finds-subtitle-bar" id="finds-subtitle">Documented observations.</div>
+        <button class="finds-view-btn finds-view-btn-text" id="finds-filter-spores"><span id="finds-filter-spores-label">Spores</span></button>
         <div class="finds-view-btns">
           <button class="finds-view-btn finds-view-btn-text" id="finds-group-species" title="Group by species" aria-label="Group by species">Species</button>
           <button class="finds-view-btn finds-view-btn-text finds-view-btn-mark" id="finds-filter-uncertain" title="Uncertain ID" aria-label="Show uncertain IDs only">?</button>
@@ -348,7 +372,7 @@
         </div>
 
         <div class="capture-controls" id="capture-controls">
-          <div class="capture-controls-row" style="position:absolute; bottom:100%; left:0; right:0; padding:0 24px 16px; display:flex; justify-content:space-between; align-items:flex-end; pointer-events:none;">
+          <div class="capture-controls-row" style="position:absolute; bottom:calc(100% - 32px); left:0; right:0; padding:0 24px 16px; display:flex; justify-content:space-between; align-items:flex-end; pointer-events:none;">
             <div id="zoom-controls" class="zoom-controls" style="pointer-events:auto;"></div>
             <div class="batch-badge-area" id="batch-area" style="display:none; pointer-events:auto;">
               <div class="batch-stack" style="width: 44px; height: 44px;">
@@ -358,9 +382,7 @@
               </div>
             </div>
           </div>
-          <button class="icon-btn" id="capture-import-btn" aria-label="Import photos" style="color:white; background:rgba(0,0,0,0.5); border-radius:50%; width:48px; height:48px; display:flex; align-items:center; justify-content:center; margin-left:16px;">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="24" height="24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-          </button>
+          <button class="capture-cancel-btn" id="capture-cancel-btn">Cancel</button>
           <button class="shutter-btn" id="shutter-btn" aria-label="Capture photo">
             <div class="shutter-inner"></div>
           </button>
@@ -399,7 +421,7 @@
           <div class="field-meta-row">
             <div class="field-meta-key">Location</div>
             <div class="field-meta-val location-field-val">
-              <input id="location-name-input" type="text" placeholder="—" class="location-name-input" autocomplete="off" spellcheck="false" readonly>
+              <input id="location-name-input" type="text" placeholder="—" class="location-name-input" autocomplete="off" spellcheck="false">
               <button id="location-apply-btn" class="location-apply-btn" style="display:none">Current location</button>
             </div>
           </div>
@@ -420,8 +442,8 @@
             <div class="field-meta-val">
               <div class="vis-radio-group" id="review-visibility">
                 <label class="vis-option"><input type="radio" name="review-vis" value="private"> <span>Private</span></label>
-                <label class="vis-option"><input type="radio" name="review-vis" value="friends" checked> <span>Friends</span></label>
-                <label class="vis-option"><input type="radio" name="review-vis" value="public"> <span>Public</span></label>
+                <label class="vis-option"><input type="radio" name="review-vis" value="friends"> <span>Friends</span></label>
+                <label class="vis-option"><input type="radio" name="review-vis" value="public" checked> <span>Public</span></label>
               </div>
             </div>
           </div>
@@ -472,11 +494,19 @@
             <div class="detail-title-common" id="detail-title-common">Unknown species</div>
             <div class="detail-title-latin" id="detail-title-latin" style="display:none"></div>
           </div>
+          <button class="detail-author" id="detail-author" type="button" style="display:none">
+            <span class="detail-author-name" id="detail-author-name"></span>
+            <span class="detail-author-avatar" id="detail-author-avatar">?</span>
+          </button>
           <div class="detail-date-time">
             <span id="detail-date">—</span>
             <span id="detail-time" style="display:none">· <span id="detail-time-val"></span></span>
           </div>
           <div class="detail-observation-badge" id="detail-readonly-note" style="display:none"></div>
+        </div>
+        <div class="detail-social-row" id="detail-social-row" style="display:none">
+          <button class="detail-social-btn" id="detail-friend-btn" type="button">🤍</button>
+          <button class="detail-social-btn" id="detail-follow-user-btn" type="button">🧭</button>
         </div>
         <div class="detail-gallery" id="detail-gallery"></div>
         <div class="detail-coords-bar" id="detail-coords" style="display:none"></div>
@@ -489,15 +519,21 @@
                 placeholder="Unknown species" autocomplete="off" spellcheck="false">
               <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
             </div>
-            <button class="ai-id-btn" id="detail-ai-btn" style="margin-top:8px;width:100%">
-              <div class="ai-dot"></div> Identify with Artsorakel AI
-            </button>
+            <div class="detail-ai-row">
+              <button class="ai-id-btn" id="detail-ai-btn">
+                <div class="ai-dot"></div> Identify with Artsorakel AI
+              </button>
+              <button class="detail-follow-btn" id="detail-follow-observation-btn" type="button" aria-label="Follow observation" title="Follow observation">🧭</button>
+            </div>
             <div id="detail-ai-results" style="display:none"></div>
           </div>
 
           <div class="detail-field">
             <div class="detail-field-label">Location</div>
-            <input id="detail-location" class="detail-text-input" type="text" placeholder="—">
+            <div class="location-suggest-wrap detail-location-wrap">
+              <input id="detail-location" class="detail-text-input" type="text" placeholder="—" autocomplete="off" spellcheck="false">
+              <ul id="detail-location-dropdown" class="location-suggestion-dropdown" style="display:none"></ul>
+            </div>
             <button id="detail-current-location-btn" class="location-apply-btn detail-location-btn" style="display:none">Current location</button>
           </div>
 
@@ -524,8 +560,8 @@
           <div class="detail-field" style="margin-top:8px">
             <div class="detail-field-label">Sharing</div>
             <div class="vis-radio-group" id="detail-visibility">
-              <label class="vis-option"><input type="radio" name="detail-vis" value="private"> <span>Private</span></label>
-              <label class="vis-option"><input type="radio" name="detail-vis" value="friends"> <span>Friends</span></label>
+              <label class="vis-option vis-option--slot"><input type="radio" name="detail-vis" value="private"> <span>Private<small>(1 slot)</small></span></label>
+              <label class="vis-option vis-option--slot"><input type="radio" name="detail-vis" value="friends"> <span>Friends<small>(1 slot)</small></span></label>
               <label class="vis-option"><input type="radio" name="detail-vis" value="public"> <span>Public</span></label>
             </div>
           </div>
@@ -586,7 +622,7 @@
         <div class="review-action-btns">
           <button class="btn-secondary" id="import-cancel-btn">Cancel</button>
           <button class="btn-secondary" id="import-ai-all-btn">AI ID All</button>
-          <button class="btn-primary" id="import-save-btn">Save All</button>
+      <button class="btn-primary" id="import-save-btn">Add</button>
         </div>
         <div class="sync-footer-text">Creates observations in Sporely Cloud</div>
       </div>
@@ -607,8 +643,9 @@
         </div>
         <div class="map-scope-bar">
           <button class="map-scope-btn active" data-scope="mine">Mine</button>
+          <button class="map-scope-btn" data-scope="feed">Feed</button>
           <button class="map-scope-btn" data-scope="friends">Friends</button>
-          <button class="map-scope-btn" data-scope="all">All</button>
+          <button class="map-scope-btn" data-scope="public">Public</button>
         </div>
       </div>
       <div id="map-container"></div>
@@ -835,23 +872,10 @@
           </select>
         </div>
 
-        <div class="settings-section-label" id="settings-photo-import-label" style="margin-top:22px">Photo Import</div>
-        <div class="settings-gap-row">
-          <div class="settings-gap-label" id="settings-gap-label">New observation after</div>
-          <div class="settings-stepper" aria-labelledby="settings-gap-label">
-            <button type="button" class="settings-stepper-btn" id="settings-gap-decrement" aria-label="Decrease photo gap">-</button>
-            <output id="settings-gap-input" class="settings-gap-input settings-gap-display" aria-live="polite">1</output>
-            <button type="button" class="settings-stepper-btn" id="settings-gap-increment" aria-label="Increase photo gap">+</button>
-          </div>
-          <span class="settings-gap-unit" id="settings-gap-unit">min</span>
-        </div>
-        <p class="settings-gap-hint" id="settings-gap-hint">Photo import from your device will group images based on time between photos.</p>
-
         <div class="settings-section-label" id="settings-artsorakel-label" style="margin-top:22px">Artsorakel</div>
         <div class="settings-gap-row">
-          <label for="settings-artsorakel-max-edge" class="settings-gap-label" id="settings-artsorakel-max-edge-label">Max width/height</label>
+          <label for="settings-artsorakel-max-edge" class="settings-gap-label" id="settings-artsorakel-max-edge-label">Max width/height (px)</label>
           <input type="number" id="settings-artsorakel-max-edge" class="settings-gap-input" min="100" max="4000" step="50" inputmode="numeric" style="width:88px">
-          <span class="settings-gap-unit" id="settings-artsorakel-max-edge-unit">px</span>
         </div>
         <p class="settings-gap-hint" id="settings-artsorakel-max-edge-hint">Images sent to Artsorakel will be resized so neither width nor height exceeds this value.</p>
 
@@ -863,22 +887,30 @@
           </div>
         </div>
 
-        <div class="settings-section-label" id="settings-sync-label" style="margin-top:22px">Sync</div>
-        <div class="settings-row">
+        <div class="settings-section-label" id="settings-camera-label" style="margin-top:22px">Camera</div>
+        <div class="settings-row" style="margin-bottom:10px" id="settings-camera-app-row">
           <div>
-            <div class="settings-row-title" id="settings-mobile-sync-label">Sync over mobile data</div>
+            <div class="settings-row-title" id="settings-camera-app-label">Camera App</div>
+          </div>
+          <div class="theme-segment settings-camera-app-segment" style="width: 160px; margin: 0;">
+            <button class="theme-seg-btn settings-camera-app-btn" data-camera-app="sporely">Sporely</button>
+            <button class="theme-seg-btn settings-camera-app-btn" data-camera-app="native">Native</button>
+          </div>
+        </div>
+        <div class="settings-row" id="settings-hdr-row">
+          <div>
+            <div class="settings-row-title" id="settings-hdr-label">Use HDR (Sporely Cam)</div>
           </div>
           <label class="settings-switch">
-            <input type="checkbox" id="settings-mobile-sync-toggle" checked>
+            <input type="checkbox" id="settings-hdr-toggle">
             <span></span>
           </label>
         </div>
 
-        <div class="settings-section-label" id="settings-default-visibility-label" style="margin-top:22px">Default visibility</div>
-        <div class="theme-segment settings-default-visibility-segment">
+        <div class="settings-section-label" id="settings-default-visibility-label" style="margin-top:22px;display:none">Default visibility</div>
+        <div class="theme-segment settings-default-visibility-segment" style="display:none">
           <button class="theme-seg-btn settings-default-visibility-btn" id="settings-default-visibility-private" data-default-visibility="private">Private</button>
           <button class="theme-seg-btn settings-default-visibility-btn" id="settings-default-visibility-friends" data-default-visibility="friends">Friends</button>
-          <button class="theme-seg-btn settings-default-visibility-btn" id="settings-default-visibility-public" data-default-visibility="public">Public</button>
         </div>
 
         <div class="settings-section-label" id="settings-data-label" style="margin-top:22px">Data</div>
