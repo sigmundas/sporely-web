@@ -391,7 +391,7 @@ async function _captureCameraBlob(video) {
     console.warn('ImageCapture still photo failed; falling back to video frame:', err)
   }
   if (!_isBlob(blob)) blob = await _captureVideoFrame(video)
-  return await _resizeCaptureBlobForPolicy(blob)
+  return blob
 }
 
 export async function startCamera(options = {}) {
