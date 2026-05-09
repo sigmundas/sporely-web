@@ -10,6 +10,8 @@ import { openFindDetail } from './find_detail.js'
 import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openPreferredCamera } from '../camera-actions.js'
 import { normalizeObservationVisibility } from '../visibility.js'
+import { buildPeopleCard, wireAvatarFallback } from './people.js'
+
 
 const _cache = {}   // scope → array of observations
 let _profileMap = {}
@@ -290,30 +292,58 @@ function _syncScopeTabs() {
     if (scopeTabs) scopeTabs.style.display = 'none'
     if (userBar) {
       userBar.style.display = 'flex'
-      const nameEl = document.getElementById('finds-user-name')
-      if (nameEl) nameEl.textContent = state.findsTargetUsername || ''
+      userBar.style.flexDirection = 'column'
+      userBar.style.alignItems = 'stretch'
+      userBar.style.padding = '12px 18px 0'
+      userBar.style.gap = '12px'
+      
+      const uid = state.findsTargetUserId;
+      
+      // Just the back button initially, no "Unknown" text
+      userBar.innerHTML = `
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button class="detail-back-btn" id="finds-user-back" type="button" style="padding:0; margin-right:4px;" aria-label="Back">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div id="finds-user-card-root"></div>
+      `;
+      
+      document.getElementById('finds-user-back')?.addEventListener('click', () => {
+        openFinds('mine', { resetSearch: true, resetFilters: true })
+      })
 
-      const avatarEl = document.getElementById('finds-user-avatar')
-      if (avatarEl) {
-        const label = state.findsTargetUsername || state.findsTargetUserId || '?'
-        const initial = String(label).replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
-        
-        let avatarHtml = `<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;">${_esc(initial)}</div>`
-        const guessedUrl = state.findsTargetUserId ? supabase.storage.from('avatars').getPublicUrl(`${state.findsTargetUserId}/avatar.jpg`).data.publicUrl : ''
-        const primaryUrl = state.findsTargetAvatarUrl || guessedUrl
-        
-        if (primaryUrl) {
-          avatarHtml += `<img src="${_esc(primaryUrl)}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;" onerror="if (!this.dataset.triedGuessed && '${_esc(guessedUrl)}' && this.src !== '${_esc(guessedUrl)}') { this.dataset.triedGuessed = 'true'; this.src = '${_esc(guessedUrl)}'; } else { this.style.display='none'; }">`
-        }
-        
-        avatarEl.innerHTML = avatarHtml
-        avatarEl.style.position = 'relative'
-        avatarEl.style.overflow = 'hidden'
+      if (uid) {
+        supabase.from('profiles').select('*').eq('id', uid).maybeSingle().then(({data: person}) => {
+          if (!person) return;
+          const root = document.getElementById('finds-user-card-root');
+          if (!root) return; // Might have navigated away
+          
+          const personFormatted = {
+            user_id: person.id,
+            avatar_url: person.avatar_url,
+            display_name: person.display_name,
+            username: person.username,
+            bio: person.bio,
+            finds: person.public_find_count || 0,
+            species: person.public_species_count || 0,
+            spores: person.public_spore_count || 0
+          };
+          
+          root.innerHTML = buildPeopleCard(personFormatted);
+          wireAvatarFallback(root);
+        });
       }
     }
   } else {
     if (scopeTabs) scopeTabs.style.display = 'flex'
-    if (userBar) userBar.style.display = 'none'
+    if (userBar) {
+      userBar.style.display = 'none'
+      userBar.style.flexDirection = ''
+      userBar.style.alignItems = 'center'
+      userBar.style.padding = '12px 0 0 18px'
+      userBar.style.gap = '8px'
+    }
     document.querySelectorAll('.scope-tab').forEach(btn => {
       if (btn.dataset.scope === 'mine') btn.textContent = t('scope.mine')
       btn.classList.toggle('active', _normalizeScope(btn.dataset.scope) === currentScope)
@@ -597,8 +627,20 @@ async function _loadProfilesForScope(data) {
     _profileMap = {}
     return
   }
+  
+  const paths = userIds.map(uid => `${uid}/avatar.jpg`)
+  const { data: signedData } = await supabase.storage.from('avatars').createSignedUrls(paths, 3600)
+  const signedMap = {}
+  if (signedData) {
+    signedData.forEach(item => {
+      if (item.signedUrl) signedMap[item.path.split('/')[0]] = item.signedUrl
+    })
+  }
 
-  _profileMap = Object.fromEntries((profiles || []).map(profile => [profile.id, profile]))
+  _profileMap = Object.fromEntries((profiles || []).map(profile => {
+    if (signedMap[profile.id]) profile.avatar_url = signedMap[profile.id]
+    return [profile.id, profile]
+  }))
 }
 
 // ── Filter + dispatch ─────────────────────────────────────────────────────────

@@ -284,19 +284,35 @@ async function _loadProfileMap(observations) {
     console.warn('Could not load recent-find profiles:', error.message)
     return {}
   }
+  
+  const paths = userIds.map(uid => `${uid}/avatar.jpg`)
+  const { data: signedData } = await supabase.storage.from('avatars').createSignedUrls(paths, 3600)
+  const signedMap = {}
+  if (signedData) {
+    signedData.forEach(item => {
+      if (item.signedUrl) signedMap[item.path.split('/')[0]] = item.signedUrl
+    })
+  }
 
-  return Object.fromEntries((data || []).map(profile => [profile.id, profile]))
+  return Object.fromEntries((data || []).map(profile => {
+    if (signedMap[profile.id]) profile.avatar_url = signedMap[profile.id]
+    return [profile.id, profile]
+  }))
 }
 
 function _homeAuthorChip(obs, profileMap) {
-  if (obs._owner === 'mine' || obs.user_id === state.user?.id) return ''
-  const profile = profileMap[obs.user_id]
-  const label = profile?.username ? `@${profile.username}` : (profile?.display_name || t('common.unknown'))
-  if (profile?.avatar_url) {
-    return `<div class="observation-author-chip observation-author-chip--home" title="${_esc(label)}">
-      <img src="${_esc(profile.avatar_url)}" alt="${_esc(label)}" loading="lazy" decoding="async">
-    </div>`
+  if (obs._owner === 'mine' || obs.user_id === state.user?.id) return '';
+  const profile = profileMap[obs.user_id] || {};
+  const label = profile.username ? `@${profile.username}` : (profile.display_name || t('common.unknown'));
+  const initial = String(profile.username || profile.display_name || '?').replace(/^@/, '').trim().charAt(0).toUpperCase() || '?';
+  let url = profile.avatar_url;
+  if (url && !url.startsWith("http")) {
+    url = supabase.storage.from("avatars").getPublicUrl(url).data.publicUrl;
+  } else if (!url && profile.id) {
+    url = supabase.storage.from("avatars").getPublicUrl(`${profile.id}/avatar.jpg`).data.publicUrl;
   }
-  const initial = String(profile?.username || profile?.display_name || '?').replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
-  return `<div class="observation-author-chip observation-author-chip--initial observation-author-chip--home" title="${_esc(label)}">${_esc(initial)}</div>`
+  if (url) {
+    return `<div class="observation-author-chip observation-author-chip--home" title="${_esc(label)}"><img src="${_esc(url)}" alt="${_esc(label)}" loading="lazy" decoding="async" onerror="const p=this.parentElement; this.outerHTML='${_esc(initial)}'; p.classList.add('observation-author-chip--initial');"></div>`;
+  }
+  return `<div class="observation-author-chip observation-author-chip--initial observation-author-chip--home" title="${_esc(label)}">${_esc(initial)}</div>`;
 }

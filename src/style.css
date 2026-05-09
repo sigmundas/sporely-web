@@ -1610,6 +1610,8 @@ html, body {
   white-space: nowrap;
 }
 .detail-author-avatar {
+  width: 36px !important;
+  height: 36px !important;
   width: 28px;
   height: 28px;
   border-radius: 999px;
@@ -3501,3 +3503,7 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
 }
 .mention-dropdown li:last-child { border-bottom: none; }
 .mention-dropdown li:active { background: var(--card); }
+
+html.light .observation-author-chip--initial { color: #ffffff; }
+html.light .people-card-avatar-fallback { color: #ffffff; }
+html.light .detail-author-avatar { color: #ffffff; }

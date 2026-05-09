@@ -61,8 +61,8 @@ export async function loadPeople(options = {}) {
       ? t('people.resultsCount', { count: rows.length })
       : t('people.recentlyPublic')
 
-    list.innerHTML = rows.map(person => _buildPeopleCard(person)).join('')
-    _wireAvatarFallback(list)
+    list.innerHTML = rows.map(person => buildPeopleCard(person)).join('')
+    wireAvatarFallback(list)
 
     list.querySelectorAll('.people-card-count[data-action]').forEach(btn => {
       btn.addEventListener('click', e => {
@@ -88,13 +88,29 @@ export async function loadPeople(options = {}) {
   }
 }
 
+async function _enrichWithSignedUrls(people) {
+  if (!people || !people.length) return people;
+  const paths = people.map(p => `${p.user_id}/avatar.jpg`);
+  const { data: signedData } = await supabase.storage.from('avatars').createSignedUrls(paths, 3600);
+  if (signedData) {
+    const signedMap = {};
+    signedData.forEach(item => {
+      if (item.signedUrl) signedMap[item.path.split('/')[0]] = item.signedUrl;
+    });
+    people.forEach(p => {
+      if (signedMap[p.user_id]) p.avatar_url = signedMap[p.user_id];
+    });
+  }
+  return people;
+}
+
 async function _loadRecentPublicPeople() {
   const { data, error } = await supabase.rpc('search_people_directory', {
     p_query: null,
     p_limit: 24,
   })
   if (error) throw error
-  return (data || []).map(_normalizePersonRow)
+  return await _enrichWithSignedUrls((data || []).map(_normalizePersonRow))
 }
 
 async function _loadSearchPeople(query) {
@@ -103,7 +119,7 @@ async function _loadSearchPeople(query) {
     p_limit: 24,
   })
   if (error) throw error
-  return (data || []).map(_normalizePersonRow)
+  return await _enrichWithSignedUrls((data || []).map(_normalizePersonRow))
 }
 
 function _normalizePersonRow(row) {
@@ -119,10 +135,14 @@ function _normalizePersonRow(row) {
   }
 }
 
-function _buildPeopleCard(person) {
-   const dbAvatarUrl = person.avatar_url || null
-   const guessedAvatarUrl = supabase.storage.from('avatars').getPublicUrl(`${person.user_id}/avatar.jpg`).data.publicUrl
-   const avatarUrl = dbAvatarUrl || guessedAvatarUrl
+export function buildPeopleCard(person) {
+   let dbAvatarUrl = person.avatar_url || null;
+   if (dbAvatarUrl && !dbAvatarUrl.startsWith('http')) {
+     dbAvatarUrl = supabase.storage.from('avatars').getPublicUrl(dbAvatarUrl).data.publicUrl;
+   }
+   const guessedAvatarUrl = supabase.storage.from('avatars').getPublicUrl(`${person.user_id}/avatar.jpg`).data.publicUrl;
+   const avatarUrl = dbAvatarUrl || guessedAvatarUrl;
+
    const displayName = person.display_name && person.display_name.trim() ? person.display_name : null
    const username = person.username && person.username.trim() ? person.username : null
    const primaryName = displayName || (username ? `@${username}` : t('common.unknown'))
@@ -159,7 +179,7 @@ function _buildCount(labelKey, value, actionId) {
   </div>`
 }
 
-function _wireAvatarFallback(root) {
+export function wireAvatarFallback(root) {
   root.querySelectorAll('.people-card-avatar-img[data-fallback-initials]').forEach(img => {
     const handleError = () => {
       if (!img.dataset.triedGuessed && img.dataset.guessedUrl && img.src !== img.dataset.guessedUrl) {

@@ -734,7 +734,17 @@ async function _loadDetailAuthorAndSocial() {
     .in('target_id', followTargets)
 
   const [profileRes, friendshipRes, followsRes] = await Promise.all([profilePromise, friendshipPromise, followsPromise])
-  if (!profileRes.error) detailAuthorProfile = profileRes.data || null
+  if (!profileRes.error && profileRes.data) {
+    detailAuthorProfile = profileRes.data;
+    if (detailAuthorProfile.id) {
+       const { data: signedData } = await supabase.storage.from('avatars').createSignedUrl(`${detailAuthorProfile.id}/avatar.jpg`, 3600);
+       if (signedData && signedData.signedUrl) {
+         detailAuthorProfile.avatar_url = signedData.signedUrl;
+       }
+    }
+  } else {
+    detailAuthorProfile = null;
+  }
   if (!friendshipRes.error) detailFriendship = friendshipRes.data?.[0] || null
   if (!followsRes.error) {
     for (const row of followsRes.data || []) {
@@ -762,10 +772,18 @@ function _renderDetailAuthorAndSocial() {
     authorBtn.style.display = 'inline-flex'
     if (authorName) authorName.textContent = label
     if (authorAvatar) {
-      const avatarUrl = detailAuthorProfile?.avatar_url || ''
-      authorAvatar.innerHTML = avatarUrl
-        ? `<img src="${_esc(avatarUrl)}" alt="" loading="lazy" decoding="async">`
-        : _esc(_profileInitial(detailAuthorProfile, label))
+      let avatarUrl = detailAuthorProfile?.avatar_url;
+      if (avatarUrl && !avatarUrl.startsWith('http')) {
+        avatarUrl = supabase.storage.from('avatars').getPublicUrl(avatarUrl).data.publicUrl;
+      } else if (!avatarUrl && detailAuthorProfile?.id) {
+        avatarUrl = supabase.storage.from('avatars').getPublicUrl(`${detailAuthorProfile.id}/avatar.jpg`).data.publicUrl;
+      }
+      const initial = _esc(_profileInitial(detailAuthorProfile, label));
+      if (avatarUrl) {
+        authorAvatar.innerHTML = `<img src="${_esc(avatarUrl)}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"><span style="display:none;width:100%;height:100%;align-items:center;justify-content:center;">${initial}</span>`;
+      } else {
+        authorAvatar.innerHTML = initial;
+      }
     }
   } else if (authorBtn) {
     authorBtn.style.display = 'none'

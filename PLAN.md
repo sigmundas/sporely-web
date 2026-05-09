@@ -23,6 +23,24 @@
 - **Metadata:** Mobile browsers aggressively strip EXIF data (like GPS coordinates) from browser-based captures to protect privacy.
 - **UI Handling:** The app displays an `android-web-camera-warning-overlay` and `exif-warning-overlay` to advise Android web users of this limitation, recommending they install the native Sporely app for proper location handling and image quality.
 
+
+
+## UI fixes - Avatar Display & Private Buckets (Continued)
+- **Issue**: Even after the previous URL handling logic, avatars for other users were completely failing to load across all tabs. The only avatar that successfully loaded was the current user's avatar in the top-right profile corner.
+- **Root Cause & Solution**: The `avatars` bucket in Supabase is set to private. Therefore, attempting to use `getPublicUrl()` blindly creates URLs that instantly return a 403 Forbidden or 400 from Supabase for any user looking at them. The current user's profile button worked precisely because `profile.js` explicitly had logic to fall back and request a secure `createSignedUrl` if the public one failed to load.
+- **Fix Applied**: Instead of hacking asynchronous error-fallback listeners onto every single `<img>` tag in the DOM, I intercepted the core data loading streams (`_loadProfileMap` in `home.js`, `_loadProfilesForScope` in `finds.js`, `_loadRecentPublicPeople` in `people.js`, and the observer logic in `find_detail.js`). Using Supabase's `createSignedUrls` API, the application now securely bulk-fetches temporary, working signed URLs for every user displayed on screen before the HTML is even rendered.
+
+## UI fixes - Avatar Display & Light Mode
+- **Issue**: Avatars were showing up as broken links, and the fallback initials were invisible in light mode (appearing as just a blank green circle/square).
+- **What was tried**: 
+  - Updated `avatar_url` handling in `home.js` and `find_detail.js` to correctly resolve relative Supabase Storage URLs to public URLs.
+  - Replaced the custom "Unknown" user bar in `finds.js` by reusing the native People card component from `people.js`.
+  - Fixed JavaScript `ReferenceError`s caused by exposing and renaming internal `_buildPeopleCard` and `_wireAvatarFallback` methods.
+  - Fortified `wireAvatarFallback` to detect 0-width natural images that fail silently before the `onerror` listener binds.
+  - Re-wrote the `onerror` fallback logic for the Home tab author chip to completely replace the `<img/>` with initials, preventing CSS clipping issues.
+- **Root Cause & Next Steps**: The user was still only seeing "initials" (or blank green circles) because they had no avatar uploaded, but the CSS colors for the fallback text in **light mode** were exactly the same as the background (`--green-accent` on `--green-deep`), rendering the text invisible.
+- **Fix Applied**: Updated `src/style.css` to force the text color to `#ffffff` for `.observation-author-chip--initial`, `.people-card-avatar-fallback`, and `.detail-author-avatar` exclusively in `html.light`.
+
 ## UI fixes
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
 - Add a legend drop-down to the map page. Selection: Genus (more will come). this will show a legend with colors, corresponding the the dots on the map.
