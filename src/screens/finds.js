@@ -11,7 +11,6 @@ import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openPreferredCamera } from '../camera-actions.js'
 import { normalizeObservationVisibility } from '../visibility.js'
 
-let currentScope = 'mine'
 const _cache = {}   // scope → array of observations
 let _profileMap = {}
 let _pendingScrollRestore = null
@@ -28,8 +27,18 @@ let _loadFindsSeq = 0
 
 const MINE_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, is_draft, location_precision, spore_statistics'
 const MINE_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, spore_statistics'
-const FEED_SELECT = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, is_draft, location_precision, spore_statistics'
-const FEED_SELECT_LEGACY = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, spore_statistics'
+const FEED_SELECT = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, is_draft, location_precision'
+const FEED_SELECT_LEGACY = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude'
+const OBSERVATION_SCOPES = new Set(['mine', 'feed', 'friends', 'public'])
+
+function _normalizeScope(scope) {
+  if (scope === 'community') return 'public'
+  return OBSERVATION_SCOPES.has(scope) ? scope : 'mine'
+}
+
+function _currentScope() {
+  return state.findsTargetUserId ? 'user' : _normalizeScope(state.observationScope)
+}
 
 function _isPhase7ColumnError(error) {
   const message = String(error?.message || '').toLowerCase()
@@ -242,14 +251,14 @@ export function initFinds() {
     _syncSpeciesToggle()
     _applyFilter()
   })
-  document.getElementById('finds-filter-uncertain').addEventListener('click', () => {
-    state.findsUncertainOnly = !state.findsUncertainOnly
-    _syncUncertainToggle()
-    _applyFilter()
-  })
   document.getElementById('finds-filter-spores')?.addEventListener('click', () => {
     state.findsSporesOnly = !state.findsSporesOnly
     _syncSporesToggle()
+    _applyFilter()
+  })
+  document.getElementById('finds-filter-draft')?.addEventListener('click', () => {
+    state.findsDraftOnly = !state.findsDraftOnly
+    _syncDraftToggle()
     _applyFilter()
   })
 
@@ -266,7 +275,7 @@ export function initFinds() {
   })
 
   window.addEventListener(QUEUE_EVENT, () => {
-    if (state.currentScreen === 'finds' && currentScope === 'mine') {
+    if (state.currentScreen === 'finds' && _currentScope() === 'mine') {
       requestFindsRefresh()
     }
   })
@@ -275,6 +284,7 @@ export function initFinds() {
 function _syncScopeTabs() {
   const scopeTabs = document.getElementById('finds-scope-tabs')
   const userBar = document.getElementById('finds-user-bar')
+  const currentScope = _currentScope()
 
   if (currentScope === 'user') {
     if (scopeTabs) scopeTabs.style.display = 'none'
@@ -306,21 +316,16 @@ function _syncScopeTabs() {
     if (userBar) userBar.style.display = 'none'
     document.querySelectorAll('.scope-tab').forEach(btn => {
       if (btn.dataset.scope === 'mine') btn.textContent = t('scope.mine')
-      btn.classList.toggle('active', btn.dataset.scope === currentScope)
+      btn.classList.toggle('active', _normalizeScope(btn.dataset.scope) === currentScope)
     })
   }
 }
 
 function _syncSpeciesToggle() {
-  document.getElementById('finds-group-species')
-    ?.classList.toggle('active', !!state.findsGroupBySpecies)
-}
-
-function _syncUncertainToggle() {
-  const btn = document.getElementById('finds-filter-uncertain')
+  const btn = document.getElementById('finds-group-species')
   if (!btn) return
-  btn.classList.toggle('active', !!state.findsUncertainOnly)
-  btn.setAttribute('aria-pressed', state.findsUncertainOnly ? 'true' : 'false')
+  btn.classList.toggle('active', !!state.findsGroupBySpecies)
+  btn.setAttribute('aria-pressed', state.findsGroupBySpecies ? 'true' : 'false')
 }
 
 function _syncSporesToggle() {
@@ -330,14 +335,22 @@ function _syncSporesToggle() {
   btn.setAttribute('aria-pressed', state.findsSporesOnly ? 'true' : 'false')
 }
 
+function _syncDraftToggle() {
+  const btn = document.getElementById('finds-filter-draft')
+  if (!btn) return
+  btn.classList.toggle('active', !!state.findsDraftOnly)
+  btn.setAttribute('aria-pressed', state.findsDraftOnly ? 'true' : 'false')
+}
+
 function _setScope(scope, options = {}) {
-  currentScope = scope || 'mine'
+  const nextScope = scope === 'user' ? 'user' : _normalizeScope(scope || state.observationScope)
 
   if (scope === 'user') {
     state.findsTargetUserId = options.userId
     state.findsTargetUsername = options.username
     state.findsTargetAvatarUrl = options.avatarUrl
   } else {
+    state.observationScope = nextScope
     state.findsTargetUserId = null
     state.findsTargetUsername = null
     state.findsTargetAvatarUrl = null
@@ -353,29 +366,29 @@ function _setScope(scope, options = {}) {
 
   if (options.resetFilters) {
     state.findsGroupBySpecies = false
-    state.findsUncertainOnly = false
     state.findsSporesOnly = false
+    state.findsDraftOnly = false
   }
 
   if (options.groupBySpecies !== undefined) {
     state.findsGroupBySpecies = !!options.groupBySpecies
   }
 
-  if (options.uncertainOnly !== undefined) {
-    state.findsUncertainOnly = !!options.uncertainOnly
-  }
-
   if (options.sporesOnly !== undefined) {
     state.findsSporesOnly = !!options.sporesOnly
   }
 
+  if (options.draftOnly !== undefined) {
+    state.findsDraftOnly = !!options.draftOnly
+  }
+
   _syncScopeTabs()
   _syncSpeciesToggle()
-  _syncUncertainToggle()
   _syncSporesToggle()
+  _syncDraftToggle()
 }
 
-export async function openFinds(scope = currentScope, options = {}) {
+export async function openFinds(scope = _currentScope(), options = {}) {
   _setScope(scope, options)
   navigate('finds')
   await loadFinds()
@@ -398,9 +411,12 @@ function _setFindsView(view) {
 }
 
 function _syncViewBtns() {
-  document.getElementById('finds-view-cards').classList.toggle('active', state.findsView === 'cards')
-  document.getElementById('finds-view-two').classList.toggle('active', state.findsView === 'two')
-  document.getElementById('finds-view-three').classList.toggle('active', state.findsView === 'three')
+  document.querySelectorAll('.finds-view-btns .finds-view-btn').forEach(btn => {
+    const active = btn.id === `finds-view-${state.findsView}`
+    btn.classList.toggle('active', active)
+    btn.setAttribute('aria-checked', active ? 'true' : 'false')
+    btn.setAttribute('role', 'radio')
+  })
 }
 
 // ── Load ──────────────────────────────────────────────────────────────────────
@@ -409,6 +425,7 @@ export async function loadFinds() {
   const list = document.getElementById('finds-list')
   if (!state.user) return
   const loadSeq = ++_loadFindsSeq
+  const currentScope = _currentScope()
 
   const speciesBtn = document.getElementById('finds-group-species')
   if (speciesBtn) {
@@ -417,8 +434,8 @@ export async function loadFinds() {
 
   _syncScopeTabs()
   _syncSpeciesToggle()
-  _syncUncertainToggle()
   _syncSporesToggle()
+  _syncDraftToggle()
 
   if (currentScope === 'mine') {
     await _fetchMine()
@@ -428,8 +445,11 @@ export async function loadFinds() {
     await _fetchFollowFeed()
   } else if (currentScope === 'friends') {
     await _fetchFriends()
-  } else {
+  } else if (currentScope === 'public') {
     await _fetchCommunity()
+  } else {
+    state.observationScope = 'mine'
+    await _fetchMine()
   }
 
   await _loadProfilesForScope(_cache[currentScope] || [])
@@ -471,10 +491,10 @@ async function _fetchFriends() {
     FEED_SELECT_LEGACY,
   )
 
-  if (error) { 
+  if (error) {
     console.error('Failed to fetch friends feed:', error)
-    _cache['friends'] = []; 
-    return 
+    _cache['friends'] = []
+    return
   }
   await _attachSporeFlags(data)
   _cache['friends'] = data || []
@@ -491,13 +511,13 @@ async function _fetchCommunity() {
     FEED_SELECT_LEGACY,
   )
 
-  if (error) { 
+  if (error) {
     console.error('Failed to fetch community feed:', error)
-    _cache['community'] = []; 
-    return 
+    _cache['public'] = [];
+    return
   }
   await _attachSporeFlags(data)
-  _cache['community'] = data || []
+  _cache['public'] = data || []
 }
 
 async function _fetchFollowFeed() {
@@ -596,12 +616,13 @@ function _sortTs(obs) {
 
 function _applyFilter() {
   const list     = document.getElementById('finds-list')
+  const currentScope = _currentScope()
   const raw  = _cache[currentScope] || []
   const q    = (state.searchQuery || '').toLowerCase().trim()
   
   let filtered = raw
-  if (state.findsUncertainOnly) filtered = filtered.filter(obs => !!obs.uncertain)
   if (state.findsSporesOnly) filtered = filtered.filter(obs => !!obs.has_spores || !!obs.spore_short || !!obs.spore_statistics)
+  if (state.findsDraftOnly) filtered = filtered.filter(obs => obs?.is_draft === true)
   
   const data = q ? filtered.filter(obs => _matches(obs, q)) : filtered
 
@@ -719,6 +740,7 @@ function _draftBadge(obs) {
 }
 
 function _emptyFindsText(q, options = {}) {
+  const currentScope = _currentScope()
   if (q) return t('finds.noResults', { query: q })
   if (currentScope === 'feed') return t('finds.noFollowed')
   if (options.isFriends || currentScope === 'friends') return t('finds.noFriends')

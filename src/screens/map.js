@@ -10,8 +10,34 @@ import { esc as _esc } from '../esc.js'
 
 let map          = null
 let markerLayer  = null
-let currentScope = 'mine'
 const _mapData   = { mine: [], friends: [], feed: [], public: [] }   // cached for re-filtering
+const OBSERVATION_SCOPES = new Set(['mine', 'feed', 'friends', 'public'])
+const MAP_SELECT = 'id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain, location_precision'
+const MAP_SELECT_LEGACY = 'id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain'
+
+function _normalizeScope(scope) {
+  if (scope === 'community') return 'public'
+  return OBSERVATION_SCOPES.has(scope) ? scope : 'mine'
+}
+
+function _currentScope() {
+  return _normalizeScope(state.observationScope)
+}
+
+function _syncMapScopeBtns() {
+  const currentScope = _currentScope()
+  document.querySelectorAll('.map-scope-btn').forEach(btn => {
+    btn.classList.toggle('active', _normalizeScope(btn.dataset.scope) === currentScope)
+  })
+}
+
+async function _withLocationPrecisionFallback(makeQuery) {
+  const result = await makeQuery(MAP_SELECT)
+  if (String(result.error?.message || '').toLowerCase().includes('location_precision')) {
+    return makeQuery(MAP_SELECT_LEGACY)
+  }
+  return result
+}
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
@@ -29,9 +55,8 @@ export function initMap() {
   // Scope toggle
   document.querySelectorAll('.map-scope-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.map-scope-btn').forEach(b => b.classList.remove('active'))
-      btn.classList.add('active')
-      currentScope = btn.dataset.scope
+      state.observationScope = _normalizeScope(btn.dataset.scope)
+      _syncMapScopeBtns()
       loadMap()
     })
   })
@@ -87,6 +112,8 @@ export function initMap() {
 export async function loadMap() {
   requestAnimationFrame(() => map?.invalidateSize())
   if (!state.user) return
+  const currentScope = _currentScope()
+  _syncMapScopeBtns()
 
   // Pre-fill search from shared state
   const searchInput = document.getElementById('map-search-input')
@@ -102,42 +129,42 @@ export async function loadMap() {
   document.querySelectorAll('.map-scope-btn[data-scope="public"]').forEach(el => el.textContent = t('scope.community'))
 
   if (currentScope === 'mine') {
-    const { data } = await supabase
+    const { data } = await _withLocationPrecisionFallback(columns => supabase
       .from('observations')
-      .select('id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
+      .select(columns)
       .eq('user_id', state.user.id)
       .not('gps_latitude', 'is', null)
-      .not('gps_longitude', 'is', null)
+      .not('gps_longitude', 'is', null))
     _mapData.mine    = data || []
     _mapData.friends = []
     _mapData.feed    = []
     _mapData.public  = []
 
   } else if (currentScope === 'friends') {
-    const { data } = await supabase
+    const { data } = await _withLocationPrecisionFallback(columns => supabase
       .from('observations_friend_view')
-      .select('id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
+      .select(columns)
       .neq('user_id', state.user.id)
       .not('gps_latitude', 'is', null)
-      .not('gps_longitude', 'is', null)
+      .not('gps_longitude', 'is', null))
     _mapData.mine    = []
     _mapData.friends = data || []
     _mapData.feed    = []
     _mapData.public  = []
 
   } else if (currentScope === 'feed') {
-    const { data } = await supabase
+    const { data } = await _withLocationPrecisionFallback(columns => supabase
       .from('observations_follow_view')
-      .select('id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
+      .select(columns)
       .not('gps_latitude', 'is', null)
-      .not('gps_longitude', 'is', null)
+      .not('gps_longitude', 'is', null))
     _mapData.feed = data || []
   } else if (currentScope === 'public') {
-    const { data } = await supabase
+    const { data } = await _withLocationPrecisionFallback(columns => supabase
       .from('observations_community_view')
-      .select('id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain')
+      .select(columns)
       .not('gps_latitude', 'is', null)
-      .not('gps_longitude', 'is', null)
+      .not('gps_longitude', 'is', null))
     _mapData.public = data || []
   } else {
     _mapData.mine    = []
@@ -152,6 +179,7 @@ export async function loadMap() {
 // ── Filter + render markers ───────────────────────────────────────────────────
 
 function _mapSearchPool() {
+  const currentScope = _currentScope()
   return _mapData[currentScope] || []
 }
 
@@ -200,6 +228,7 @@ function _matchesMap(obs, q) {
 function _applyMapFilter() {
   markerLayer.clearLayers()
   const q = (state.searchQuery || '').toLowerCase().trim()
+  const currentScope = _currentScope()
 
   const data = _mapData[currentScope] || []
   const filtered = q ? data.filter(o => _matchesMap(o, q)) : data
@@ -261,5 +290,16 @@ function _addMarkers(observations) {
       if (btn) btn.addEventListener('click', () => openFindDetail(obs.id))
     })
     marker.addTo(markerLayer)
+    if (obs.location_precision === 'fuzzed') {
+      L.circle([obs.gps_latitude, obs.gps_longitude], {
+        radius: 600,
+        className: 'map-fuzzed-circle',
+        color: '#5a9e62',
+        fillColor: '#5a9e62',
+        fillOpacity: 0.12,
+        opacity: 0.45,
+        weight: 1.5,
+      }).addTo(markerLayer)
+    }
   })
 }

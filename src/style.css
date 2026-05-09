@@ -842,23 +842,39 @@ html, body {
 
 .finds-topbar {
   display: flex; align-items: center; justify-content: space-between;
+  gap: 6px;
   padding: 8px 14px 0;
 }
-.finds-view-btns { display: flex; gap: 2px; }
+.finds-view-btns {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--card);
+}
 .finds-view-btn {
   background: transparent;
-  border: 1px solid var(--border);
+  border: none;
   cursor: pointer;
-  padding: 5px 12px;
-  border-radius: 20px;
-  color: var(--text-dim);
+  padding: 5px 10px;
+  border-radius: 18px;
+  color: var(--text-secondary);
   display: flex; align-items: center;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background 0.15s, color 0.15s;
   justify-content: center;
   min-width: 28px;
   font-family: 'DM Mono', monospace;
   font-size: 12px;
   font-weight: 600;
+}
+.finds-topbar .finds-toggle-btn {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.finds-topbar .finds-view-btns {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 .finds-view-btn-mark {
   font-size: 15px;
@@ -866,7 +882,12 @@ html, body {
 }
 .finds-view-btn.active {
   background: var(--green-deep); color: var(--green-accent);
-  border-color: var(--green-mid);
+}
+.finds-toggle-btn {
+  border: 1px solid var(--border);
+  background: var(--card);
+  border-radius: 20px;
+  padding: 5px 12px;
 }
 
 /* ── Tile grid view ── */
@@ -1133,6 +1154,9 @@ html, body {
 .map-pin--friend {
   background: #5b9bd5;
   box-shadow: 0 0 0 2px #5b9bd5, 0 2px 6px rgba(0,0,0,0.6);
+}
+.map-fuzzed-circle {
+  color: var(--green-bright);
 }
 
 /* ── FINDS SCREEN ── */
@@ -2485,6 +2509,14 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   gap: 6px;
   flex-wrap: wrap;
 }
+.vis-radio-group--segmented {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--card);
+}
 .vis-option {
   display: flex;
   align-items: center;
@@ -2508,6 +2540,12 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   transition: all 0.15s;
   font-family: 'Outfit', sans-serif;
 }
+.vis-radio-group--segmented .vis-option span {
+  border: none;
+  border-radius: 18px;
+  color: var(--text-secondary);
+  background: transparent;
+}
 .vis-option span small {
   margin-top: 1px;
   font-size: 9px;
@@ -2518,6 +2556,37 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   background: var(--green-deep);
   color: var(--green-accent);
   border-color: var(--green-mid);
+}
+.detail-pill-toggle {
+  display: inline-flex;
+  cursor: pointer;
+}
+.detail-pill-toggle input {
+  display: none;
+}
+.detail-pill-toggle span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.detail-pill-toggle input:checked + span {
+  background: var(--green-deep);
+  color: var(--green-accent);
+  border-color: var(--green-mid);
+}
+.privacy-slot-note {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 /* ── Comments section ─────────────────────────────────────────────────────── */
@@ -2785,7 +2854,10 @@ html.light .header-sync-tag {
 /* Active buttons — green-accent (#2D4B32) text on green-deep (#2D4B32) bg is invisible in light mode */
 html.light .scope-tab.active { color: #ffffff; }
 html.light .map-scope-btn.active { color: #ffffff; }
+html.light .finds-view-btn.active { color: #ffffff; }
+html.light .finds-view-btn.active svg { color: #ffffff; stroke: currentColor; }
 html.light .vis-option input[type="radio"]:checked + span { color: #ffffff; }
+html.light .detail-pill-toggle input:checked + span { color: #ffffff; }
 html.light .screen-fab,
 html.light .finds-fab { background: var(--green-bright); color: #ffffff; box-shadow: 0 4px 20px rgba(45,75,50,0.30); }
 html.light #ac-camera {

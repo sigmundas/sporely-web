@@ -35,7 +35,8 @@ let detailImageSources = []
 let detailAiSources = []
 let detailAuthorProfile = null
 let detailFriendship = null
-let detailFollowState = { user: false, observation: false }
+let detailFollowState = { user: false, observation: false, taxon: false }
+let detailPrivacySlotCount = null
 
 const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
 const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
@@ -94,6 +95,10 @@ export function initFindDetail() {
   document.getElementById('detail-friend-btn')?.addEventListener('click', _sendFriendRequestFromDetail)
   document.getElementById('detail-follow-user-btn')?.addEventListener('click', () => _toggleFollow('user'))
   document.getElementById('detail-follow-observation-btn')?.addEventListener('click', () => _toggleFollow('observation'))
+  document.getElementById('detail-follow-taxon-btn')?.addEventListener('click', () => _toggleFollow('taxon'))
+  document.querySelectorAll('input[name="detail-vis"], input[name="detail-location-precision"], #detail-draft').forEach(input => {
+    input.addEventListener('change', _renderPrivacySlotNote)
+  })
   document.getElementById('detail-uncertain').addEventListener('change', () => {
     if (!currentObs) return
     const value = document.getElementById('detail-taxon-input').value.trim()
@@ -218,6 +223,14 @@ export async function openFindDetail(obsId, options = {}) {
   const vis = normalizeVisibility(obs.visibility, 'public')
   const visRadio = document.querySelector(`input[name="detail-vis"][value="${vis}"]`)
   if (visRadio) visRadio.checked = true
+  const draftInput = document.getElementById('detail-draft')
+  if (draftInput) draftInput.checked = obs.is_draft !== false
+  const precision = obs.location_precision === 'fuzzed' ? 'fuzzed' : 'exact'
+  const precisionRadio = document.querySelector(`input[name="detail-location-precision"][value="${precision}"]`)
+  if (precisionRadio) precisionRadio.checked = true
+  detailPrivacySlotCount = null
+  _renderPrivacySlotNote()
+  _loadPrivacySlotCount()
 
   // Try to load with crop columns; fall back if the migration hasn't been applied yet
   let imgData = null
@@ -244,7 +257,7 @@ export async function openFindDetail(obsId, options = {}) {
   detailAiSources = []
   detailAuthorProfile = null
   detailFriendship = null
-  detailFollowState = { user: false, observation: false }
+  detailFollowState = { user: false, observation: false, taxon: false }
 
   if (imgData?.length) {
     const originalSources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
@@ -551,7 +564,8 @@ function _resetForm() {
   _setDetailHeader({ fallbackName: t('detail.unknownSpecies') })
   detailAuthorProfile = null
   detailFriendship = null
-  detailFollowState = { user: false, observation: false }
+  detailFollowState = { user: false, observation: false, taxon: false }
+  detailPrivacySlotCount = null
   _renderDetailAuthorAndSocial()
   document.getElementById('detail-date').textContent  = '—'
   const timeEl = document.getElementById('detail-time')
@@ -567,6 +581,11 @@ function _resetForm() {
   // Reset visibility to default
   const r = document.querySelector(`input[name="detail-vis"][value="${normalizeVisibility(getDefaultVisibility(), 'public')}"]`)
   if (r) r.checked = true
+  const draftInput = document.getElementById('detail-draft')
+  if (draftInput) draftInput.checked = true
+  const exactInput = document.querySelector('input[name="detail-location-precision"][value="exact"]')
+  if (exactInput) exactInput.checked = true
+  _renderPrivacySlotNote()
 
   // Clear comments
   const commentsList = document.getElementById('comments-list')
@@ -630,6 +649,51 @@ function _renderDetailLocationDropdown(show) {
   })
 }
 
+function _currentDetailUsesPrivacySlot() {
+  const visibility = document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'
+  const precision = document.querySelector('input[name="detail-location-precision"]:checked')?.value || 'exact'
+  return visibility !== 'public' || precision === 'fuzzed'
+}
+
+function _renderPrivacySlotNote() {
+  const note = document.getElementById('detail-privacy-slot-note')
+  if (!note) return
+
+  const draftPill = document.getElementById('detail-draft-pill')
+  const isDraft = document.getElementById('detail-draft')?.checked !== false
+  if (draftPill) draftPill.textContent = isDraft ? t('detail.draft') : t('detail.ready')
+
+  const isPro = state.cloudPlan?.cloudPlan === 'pro' || !!state.cloudPlan?.fullResStorageEnabled
+  const currentText = _currentDetailUsesPrivacySlot()
+    ? t('privacySlots.currentUses')
+    : t('privacySlots.currentFree')
+
+  if (isPro) {
+    note.textContent = `${t('privacySlots.pro')} ${currentText}`
+    return
+  }
+
+  const usageText = Number.isFinite(detailPrivacySlotCount)
+    ? t('privacySlots.used', { used: detailPrivacySlotCount, limit: 20 })
+    : t('privacySlots.usedUnknown')
+  note.textContent = `${usageText} ${currentText}`
+}
+
+async function _loadPrivacySlotCount() {
+  if (!state.user?.id) return
+  const { data, error } = await supabase.rpc('non_public_observation_count', {
+    profile_id: state.user.id,
+  })
+  if (error) {
+    detailPrivacySlotCount = null
+    _renderPrivacySlotNote()
+    return
+  }
+  const count = Number(data)
+  detailPrivacySlotCount = Number.isFinite(count) ? count : null
+  _renderPrivacySlotNote()
+}
+
 function _profileLabel(profile, fallback = t('common.unknown')) {
   if (profile?.username) return `@${profile.username}`
   if (profile?.display_name) return profile.display_name
@@ -660,12 +724,14 @@ async function _loadDetailAuthorAndSocial() {
     .or(`and(requester_id.eq.${state.user.id},addressee_id.eq.${currentObs.user_id}),and(requester_id.eq.${currentObs.user_id},addressee_id.eq.${state.user.id})`)
     .limit(1)
 
+  const taxonFollow = _taxonFollowTarget(currentObs)
+  const followTargets = [currentObs.user_id, currentObs.id, taxonFollow?.targetId].filter(Boolean)
   const followsPromise = isOwner ? Promise.resolve({ data: [] }) : supabase
     .from('follows')
     .select('target_type, target_id')
     .eq('user_id', state.user.id)
-    .in('target_type', ['user', 'observation'])
-    .in('target_id', [currentObs.user_id, currentObs.id])
+    .in('target_type', ['user', 'observation', 'species', 'genus'])
+    .in('target_id', followTargets)
 
   const [profileRes, friendshipRes, followsRes] = await Promise.all([profilePromise, friendshipPromise, followsPromise])
   if (!profileRes.error) detailAuthorProfile = profileRes.data || null
@@ -674,6 +740,7 @@ async function _loadDetailAuthorAndSocial() {
     for (const row of followsRes.data || []) {
       if (row.target_type === 'user' && String(row.target_id) === String(currentObs.user_id)) detailFollowState.user = true
       if (row.target_type === 'observation' && String(row.target_id) === String(currentObs.id)) detailFollowState.observation = true
+      if (taxonFollow && row.target_type === taxonFollow.targetType && String(row.target_id).toLowerCase() === String(taxonFollow.targetId).toLowerCase()) detailFollowState.taxon = true
     }
   }
 }
@@ -686,7 +753,9 @@ function _renderDetailAuthorAndSocial() {
   const friendBtn = document.getElementById('detail-friend-btn')
   const followUserBtn = document.getElementById('detail-follow-user-btn')
   const followObsBtn = document.getElementById('detail-follow-observation-btn')
+  const followTaxonBtn = document.getElementById('detail-follow-taxon-btn')
   const isOwner = currentObs?.user_id === state.user?.id
+  const taxonFollow = _taxonFollowTarget(currentObs)
 
   if (authorBtn && currentObs?.user_id) {
     const label = isOwner ? t('common.you') : _profileLabel(detailAuthorProfile)
@@ -704,6 +773,7 @@ function _renderDetailAuthorAndSocial() {
 
   if (socialRow) socialRow.style.display = !isOwner && currentObs?.user_id ? 'flex' : 'none'
   if (followObsBtn) followObsBtn.style.display = !isOwner && currentObs?.id ? 'inline-flex' : 'none'
+  if (followTaxonBtn) followTaxonBtn.style.display = !isOwner && taxonFollow ? 'inline-flex' : 'none'
 
   if (friendBtn) {
     const status = detailFriendship?.status || ''
@@ -727,6 +797,20 @@ function _renderDetailAuthorAndSocial() {
     followObsBtn.title = detailFollowState.observation ? t('social.unfollowObservation') : t('social.followObservation')
     followObsBtn.setAttribute('aria-label', followObsBtn.title)
   }
+
+  if (followTaxonBtn && taxonFollow) {
+    followTaxonBtn.classList.toggle('active', !!detailFollowState.taxon)
+    followTaxonBtn.title = detailFollowState.taxon ? t('social.unfollowTaxon') : t('social.followTaxon')
+    followTaxonBtn.setAttribute('aria-label', followTaxonBtn.title)
+  }
+}
+
+function _taxonFollowTarget(obs) {
+  const genus = String(obs?.genus || '').trim()
+  const species = String(obs?.species || '').trim()
+  if (genus && species) return { targetType: 'species', targetId: `${genus} ${species}` }
+  if (genus) return { targetType: 'genus', targetId: genus }
+  return null
 }
 
 function _openAuthorFinds() {
@@ -762,11 +846,13 @@ async function _sendFriendRequestFromDetail() {
 
 async function _toggleFollow(kind) {
   if (!currentObs || currentObs.user_id === state.user?.id) return
-  const targetType = kind === 'user' ? 'user' : 'observation'
-  const targetId = targetType === 'user' ? currentObs.user_id : currentObs.id
-  const key = targetType === 'user' ? 'user' : 'observation'
+  const taxonFollow = kind === 'taxon' ? _taxonFollowTarget(currentObs) : null
+  if (kind === 'taxon' && !taxonFollow) return
+  const targetType = kind === 'user' ? 'user' : kind === 'taxon' ? taxonFollow.targetType : 'observation'
+  const targetId = kind === 'user' ? currentObs.user_id : kind === 'taxon' ? taxonFollow.targetId : currentObs.id
+  const key = kind === 'taxon' ? 'taxon' : targetType === 'user' ? 'user' : 'observation'
   const currentlyFollowing = !!detailFollowState[key]
-  const btn = document.getElementById(targetType === 'user' ? 'detail-follow-user-btn' : 'detail-follow-observation-btn')
+  const btn = document.getElementById(kind === 'user' ? 'detail-follow-user-btn' : kind === 'taxon' ? 'detail-follow-taxon-btn' : 'detail-follow-observation-btn')
   if (btn) btn.disabled = true
 
   const result = currentlyFollowing
@@ -806,6 +892,8 @@ function _applyOwnershipMode(isOwner) {
   if (habitatInput) habitatInput.readOnly = !isOwner
   if (notesInput) notesInput.readOnly = !isOwner
   if (uncertainInput) uncertainInput.disabled = !isOwner
+  const draftInput = document.getElementById('detail-draft')
+  if (draftInput) draftInput.disabled = !isOwner
 
   const currentLocationBtn = document.getElementById('detail-current-location-btn')
   if (currentLocationBtn) currentLocationBtn.style.display = 'none'
@@ -813,10 +901,10 @@ function _applyOwnershipMode(isOwner) {
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.disabled = !isOwner
   })
-  const isPro = state.cloudPlan?.cloudPlan === 'pro' || !!state.cloudPlan?.fullResStorageEnabled
-  document.querySelectorAll('#detail-visibility .vis-option--slot small').forEach(label => {
-    label.style.display = isPro ? 'none' : ''
+  document.querySelectorAll('input[name="detail-location-precision"]').forEach(radio => {
+    radio.disabled = !isOwner
   })
+  _renderPrivacySlotNote()
 
   let modContainer = document.getElementById('detail-mod-container')
   if (!isOwner) {
@@ -923,6 +1011,8 @@ async function _save() {
     notes:      document.getElementById('detail-notes').value.trim()     || null,
     uncertain:  document.getElementById('detail-uncertain').checked,
     visibility: toCloudVisibility(document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'),
+    is_draft: document.getElementById('detail-draft')?.checked !== false,
+    location_precision: document.querySelector('input[name="detail-location-precision"]:checked')?.value === 'fuzzed' ? 'fuzzed' : 'exact',
   }
 
   const taxonInputValue = document.getElementById('detail-taxon-input').value.trim()
@@ -942,11 +1032,20 @@ async function _save() {
     patch.common_name = null
   }
 
-  const { error } = await supabase
+  let { error } = await supabase
     .from('observations')
     .update(patch)
     .eq('id', currentObs.id)
     .eq('user_id', state.user.id)
+
+  if (_isPhase7ColumnError(error)) {
+    const { is_draft: _isDraft, location_precision: _locationPrecision, ...legacyPatch } = patch
+    ;({ error } = await supabase
+      .from('observations')
+      .update(legacyPatch)
+      .eq('id', currentObs.id)
+      .eq('user_id', state.user.id))
+  }
 
   btn.disabled = false
 
@@ -957,6 +1056,7 @@ async function _save() {
 
   setLastSyncAt()
   showToast(t('detail.saved'))
+  _loadPrivacySlotCount()
   _goBack()
 }
 

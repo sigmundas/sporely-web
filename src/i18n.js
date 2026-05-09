@@ -173,6 +173,7 @@ const messages = {
     'finds.noFriends': 'No friends\' finds yet.',
     'finds.noFollowed': 'No followed finds yet.',
     'finds.draftBadge': 'Draft',
+    'finds.drafts': 'Draft',
     'finds.noObservations': 'No observations yet.',
     'finds.noObservationsCapture': 'No observations yet — go capture some!',
     'finds.noResults': 'No results for "{query}".',
@@ -238,6 +239,8 @@ const messages = {
     'social.unfollowUser': 'Unfollow user',
     'social.followObservation': 'Follow observation',
     'social.unfollowObservation': 'Unfollow observation',
+    'social.followTaxon': 'Follow species',
+    'social.unfollowTaxon': 'Unfollow species',
     'social.followed': 'Following',
     'social.followFailed': 'Could not update follow.',
     'social.friendFailed': 'Could not send friend request.',
@@ -334,6 +337,17 @@ const messages = {
     'visibility.draft': 'Private',
     'visibility.friends': 'Friends',
     'visibility.public': 'Public',
+    'detail.workflow': 'Workflow',
+    'detail.draft': 'Draft',
+    'detail.ready': 'Ready',
+    'privacySlots.used': '{used}/{limit} privacy slots used.',
+    'privacySlots.usedUnknown': 'Privacy slot use unavailable.',
+    'privacySlots.currentUses': 'Current find uses 1 privacy slot.',
+    'privacySlots.currentFree': 'Current find does not use a privacy slot.',
+    'privacySlots.pro': 'Pro account: privacy slots are unlimited.',
+    'locationPrecision.label': 'Location precision',
+    'locationPrecision.exact': 'Exact',
+    'locationPrecision.fuzzed': 'Obscured',
   },
   nb_NO: {
     'app.name': 'Sporely',
@@ -503,6 +517,9 @@ const messages = {
     'finds.newObservationAria': 'Ny observasjon',
     'finds.couldNotLoad': 'Kunne ikke laste funn',
     'finds.noFriends': 'Ingen venners funn ennå.',
+    'finds.noFollowed': 'Ingen fulgte funn ennå.',
+    'finds.draftBadge': 'Utkast',
+    'finds.drafts': 'Utkast',
     'finds.noObservations': 'Ingen observasjoner ennå.',
     'finds.noObservationsCapture': 'Ingen observasjoner ennå — gå og ta noen!',
     'finds.noResults': 'Ingen treff for "{query}".',
@@ -522,6 +539,7 @@ const messages = {
     'map.clear': 'Tøm',
     'map.viewDetails': 'Vis detaljer →',
     'scope.mine': 'Mine',
+    'scope.feed': 'Feed',
     'scope.friends': 'Venner',
     'scope.community': 'Offentlig',
     'profile.title': 'Profil',
@@ -652,6 +670,17 @@ const messages = {
     'visibility.draft': 'Privat',
     'visibility.friends': 'Venner',
     'visibility.public': 'Offentlig',
+    'detail.workflow': 'Arbeidsflyt',
+    'detail.draft': 'Utkast',
+    'detail.ready': 'Klar',
+    'privacySlots.used': '{used}/{limit} personvernplasser brukt.',
+    'privacySlots.usedUnknown': 'Bruk av personvernplasser er utilgjengelig.',
+    'privacySlots.currentUses': 'Dette funnet bruker 1 personvernplass.',
+    'privacySlots.currentFree': 'Dette funnet bruker ikke personvernplass.',
+    'privacySlots.pro': 'Pro-konto: personvernplasser er ubegrenset.',
+    'locationPrecision.label': 'Posisjonspresisjon',
+    'locationPrecision.exact': 'Nøyaktig',
+    'locationPrecision.fuzzed': 'Skjult',
   },
   sv_SE: {
     'app.name': 'Sporely',
@@ -821,6 +850,9 @@ const messages = {
     'finds.newObservationAria': 'Ny observation',
     'finds.couldNotLoad': 'Kunde inte ladda fynd',
     'finds.noFriends': 'Inga vänners fynd ännu.',
+    'finds.noFollowed': 'Inga följda fynd ännu.',
+    'finds.draftBadge': 'Utkast',
+    'finds.drafts': 'Utkast',
     'finds.noObservations': 'Inga observationer ännu.',
     'finds.noObservationsCapture': 'Inga observationer ännu — gå ut och ta några!',
     'finds.noResults': 'Inga träffar för "{query}".',
@@ -840,6 +872,7 @@ const messages = {
     'map.clear': 'Rensa',
     'map.viewDetails': 'Visa detaljer →',
     'scope.mine': 'Mina',
+    'scope.feed': 'Flöde',
     'scope.friends': 'Vänner',
     'scope.community': 'Offentligt',
     'profile.title': 'Profil',
@@ -970,6 +1003,17 @@ const messages = {
     'visibility.draft': 'Privat',
     'visibility.friends': 'Vänner',
     'visibility.public': 'Offentlig',
+    'detail.workflow': 'Arbetsflöde',
+    'detail.draft': 'Utkast',
+    'detail.ready': 'Klar',
+    'privacySlots.used': '{used}/{limit} integritetsplatser använda.',
+    'privacySlots.usedUnknown': 'Användning av integritetsplatser är inte tillgänglig.',
+    'privacySlots.currentUses': 'Detta fynd använder 1 integritetsplats.',
+    'privacySlots.currentFree': 'Detta fynd använder ingen integritetsplats.',
+    'privacySlots.pro': 'Pro-konto: integritetsplatser är obegränsade.',
+    'locationPrecision.label': 'Platsprecision',
+    'locationPrecision.exact': 'Exakt',
+    'locationPrecision.fuzzed': 'Dold',
   },
   de_DE: {
     'app.name': 'Sporely',
@@ -1139,6 +1183,9 @@ const messages = {
     'finds.newObservationAria': 'Neue Beobachtung',
     'finds.couldNotLoad': 'Funde konnten nicht geladen werden',
     'finds.noFriends': 'Noch keine Funde von Freunden.',
+    'finds.noFollowed': 'Noch keine Funde im Feed.',
+    'finds.draftBadge': 'Entwurf',
+    'finds.drafts': 'Entwurf',
     'finds.noObservations': 'Noch keine Beobachtungen.',
     'finds.noObservationsCapture': 'Noch keine Beobachtungen — geh raus und erfasse welche!',
     'finds.noResults': 'Keine Treffer für "{query}".',
@@ -1158,6 +1205,7 @@ const messages = {
     'map.clear': 'Leeren',
     'map.viewDetails': 'Details anzeigen →',
     'scope.mine': 'Meine',
+    'scope.feed': 'Feed',
     'scope.friends': 'Freunde',
     'scope.community': 'Öffentlich',
     'profile.title': 'Profil',
@@ -1288,6 +1336,17 @@ const messages = {
     'visibility.draft': 'Privat',
     'visibility.friends': 'Freunde',
     'visibility.public': 'Öffentlich',
+    'detail.workflow': 'Workflow',
+    'detail.draft': 'Entwurf',
+    'detail.ready': 'Bereit',
+    'privacySlots.used': '{used}/{limit} Datenschutzplätze verwendet.',
+    'privacySlots.usedUnknown': 'Datenschutzplatz-Nutzung nicht verfügbar.',
+    'privacySlots.currentUses': 'Dieser Fund nutzt 1 Datenschutzplatz.',
+    'privacySlots.currentFree': 'Dieser Fund nutzt keinen Datenschutzplatz.',
+    'privacySlots.pro': 'Pro-Konto: Datenschutzplätze sind unbegrenzt.',
+    'locationPrecision.label': 'Standortgenauigkeit',
+    'locationPrecision.exact': 'Genau',
+    'locationPrecision.fuzzed': 'Verschleiert',
   },
 }
 
@@ -1524,7 +1583,9 @@ export function applyStaticTranslations() {
     t('detail.location'),
     t('detail.habitat'),
     t('detail.notes'),
+    t('detail.workflow'),
     t('detail.sharing'),
+    t('locationPrecision.label'),
   ])
   setText('#detail-current-location-btn', 'detail.currentLocation')
   setText('#screen-find-detail .field-meta-key', 'detail.idNeeded')
@@ -1537,6 +1598,12 @@ export function applyStaticTranslations() {
     t('visibility.private'),
     t('visibility.friends'),
     t('visibility.public'),
+  ])
+  setText('#detail-draft-pill', 'detail.draft')
+  setText('#detail-location-precision-label', 'locationPrecision.label')
+  setAllText('#detail-location-precision .vis-option span', [
+    t('locationPrecision.exact'),
+    t('locationPrecision.fuzzed'),
   ])
 
   setText('#import-back-label', 'detail.backHome')
@@ -1559,6 +1626,7 @@ export function applyStaticTranslations() {
   setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.feed'), t('scope.friends'), t('scope.community')])
   setText('#finds-refresh-label', 'finds.pullToRefresh')
   setText('#finds-filter-spores-label', 'stats.spores')
+  setText('#finds-filter-draft-label', 'finds.drafts')
 
   setText('#profile-header-label', 'profile.title')
   setText('#profile-save-btn', 'profile.saveProfile')
@@ -1587,7 +1655,7 @@ export function applyStaticTranslations() {
   setText('#nav-finds .nav-label', 'nav.finds')
   setText('#nav-map .nav-label', 'nav.map')
   setText('#nav-profile .nav-label', 'nav.profile')
-  setAllText('#screen-map .map-scope-btn', [t('scope.mine'), t('scope.friends'), t('scope.all')])
+  setAllText('#screen-map .map-scope-btn', [t('scope.mine'), t('scope.feed'), t('scope.friends'), t('scope.community')])
 
   setText('.settings-title', 'settings.title')
   setText('#settings-appearance-label', 'settings.appearance')
@@ -1622,7 +1690,7 @@ export function applyStaticTranslations() {
   setAria('#settings-close-btn', 'common.close')
   setAria('#finds-search-btn', 'finds.searchAria')
   setAria('#finds-search-clear', 'finds.clearSearch')
-  setAria('#finds-filter-uncertain', 'finds.uncertainIds')
+  setAria('#finds-filter-draft', 'finds.drafts')
   setAria('#home-fab', 'finds.newObservationAria')
   setAria('#finds-fab', 'finds.newObservationAria')
   setAria('#map-fab', 'finds.newObservationAria')
@@ -1639,7 +1707,7 @@ export function applyStaticTranslations() {
   setTitle('#finds-view-cards', 'finds.singleColumn')
   setTitle('#finds-view-two', 'finds.twoColumns')
   setTitle('#finds-view-three', 'finds.threeColumns')
-  setTitle('#finds-filter-uncertain', 'finds.uncertainIds')
+  setTitle('#finds-filter-draft', 'finds.drafts')
   setTitle('#finds-view-tiles', 'finds.tinyGrid')
 
   const versionEl = document.getElementById('settings-version')

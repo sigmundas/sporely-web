@@ -323,7 +323,7 @@
           <button class="scope-tab active" data-scope="mine">Mine</button>
           <button class="scope-tab" data-scope="feed">Feed</button>
           <button class="scope-tab" data-scope="friends">Friends</button>
-          <button class="scope-tab" data-scope="community">Community</button>
+          <button class="scope-tab" data-scope="public">Public</button>
         </div>
         <div id="finds-user-bar" style="display:none; align-items:center; gap:8px; padding: 12px 0 0 18px; flex:1;">
           <button class="detail-back-btn" id="finds-user-back" type="button" style="padding:0; margin-right:4px;" aria-label="Back">
@@ -335,10 +335,10 @@
       </div>
 
       <div class="finds-topbar">
-        <button class="finds-view-btn finds-view-btn-text" id="finds-filter-spores"><span id="finds-filter-spores-label">Spores</span></button>
-        <div class="finds-view-btns">
-          <button class="finds-view-btn finds-view-btn-text" id="finds-group-species" title="Group by species" aria-label="Group by species">Species</button>
-          <button class="finds-view-btn finds-view-btn-text finds-view-btn-mark" id="finds-filter-uncertain" title="Uncertain ID" aria-label="Show uncertain IDs only">?</button>
+        <button class="finds-view-btn finds-view-btn-text finds-toggle-btn" id="finds-filter-spores"><span id="finds-filter-spores-label">Spores</span></button>
+        <button class="finds-view-btn finds-view-btn-text finds-toggle-btn" id="finds-group-species" title="Group by species" aria-label="Group by species">Species</button>
+        <button class="finds-view-btn finds-view-btn-text finds-toggle-btn" id="finds-filter-draft"><span id="finds-filter-draft-label">Draft</span></button>
+        <div class="finds-view-btns" role="radiogroup" aria-label="Card layout">
           <button class="finds-view-btn active" id="finds-view-cards" title="Detailed view" aria-label="Detailed view">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="4" rx="1.5"/><rect x="3" y="20" width="18" height="1" rx="0.5" opacity="0.4"/></svg>
           </button>
@@ -524,6 +524,7 @@
                 <div class="ai-dot"></div> Identify with Artsorakel AI
               </button>
               <button class="detail-follow-btn" id="detail-follow-observation-btn" type="button" aria-label="Follow observation" title="Follow observation">🧭</button>
+              <button class="detail-follow-btn" id="detail-follow-taxon-btn" type="button" aria-label="Follow species" title="Follow species">S</button>
             </div>
             <div id="detail-ai-results" style="display:none"></div>
           </div>
@@ -558,11 +559,28 @@
           </div>
 
           <div class="detail-field" style="margin-top:8px">
-            <div class="detail-field-label">Sharing</div>
-            <div class="vis-radio-group" id="detail-visibility">
-              <label class="vis-option vis-option--slot"><input type="radio" name="detail-vis" value="private"> <span>Private<small>(1 slot)</small></span></label>
-              <label class="vis-option vis-option--slot"><input type="radio" name="detail-vis" value="friends"> <span>Friends<small>(1 slot)</small></span></label>
+            <div class="detail-field-label" id="detail-draft-label">Workflow</div>
+            <label class="detail-pill-toggle">
+              <input type="checkbox" id="detail-draft">
+              <span id="detail-draft-pill">Draft</span>
+            </label>
+          </div>
+
+          <div class="detail-field" style="margin-top:8px">
+            <div class="detail-field-label" id="detail-sharing-label">Sharing</div>
+            <div class="vis-radio-group vis-radio-group--segmented" id="detail-visibility">
+              <label class="vis-option"><input type="radio" name="detail-vis" value="private"> <span>Private</span></label>
+              <label class="vis-option"><input type="radio" name="detail-vis" value="friends"> <span>Friends</span></label>
               <label class="vis-option"><input type="radio" name="detail-vis" value="public"> <span>Public</span></label>
+            </div>
+            <div class="privacy-slot-note" id="detail-privacy-slot-note"></div>
+          </div>
+
+          <div class="detail-field" style="margin-top:8px">
+            <div class="detail-field-label" id="detail-location-precision-label">Location precision</div>
+            <div class="vis-radio-group vis-radio-group--segmented" id="detail-location-precision">
+              <label class="vis-option"><input type="radio" name="detail-location-precision" value="exact"> <span>Exact</span></label>
+              <label class="vis-option"><input type="radio" name="detail-location-precision" value="fuzzed"> <span>Obscured</span></label>
             </div>
           </div>
         </div>

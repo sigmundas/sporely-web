@@ -1,12 +1,12 @@
 
 By making **Drafts Public by default**, you allow the community to see the "Live Stream" of science happening.
 * **The UI:** In the feed, a "Draft" has a subtle **"Draft"** badge.
-* **The Logic:** It doesn't appear in the "Featured" or "Verified" lists, but it *is* on the map.
-* **The Benefit:** If someone sees a public draft of a rare species, they can "Follow" it to get notified when you finally upload the spore measurements or a final ID.
+* **The Logic:** It doesn't appear in the "Featured" or "Verified" lists, but it *is* on the map. (No implementation of Featured or Verified yet)
+* **The Benefit:** If someone sees a public draft of a rare species, they can "Follow" it to get notified when you finally upload the spore measurements or a final ID. Also for just following a species or genus they are interested in.
 
 If a user wants to work on a find in total secrecy (e.g., they found a massive Porcini patch and don't want anyone seeing the exact pin until the season is over), they toggle it to **Private**.
 * **Cost:** This consumes **1 Privacy Slot**.
-* **Slot Count:** I think **20 slots** is the "sweet spot." Ten feels a bit stingy if someone is doing a heavy microscopy weekend. Twenty allows for a full "Foray" to be kept private while they process the data.
+* **20 slots** is the "sweet spot." Ten feels a bit stingy if someone is doing a heavy microscopy weekend. Twenty allows for a full "Foray" to be kept private while they process the data.
 
 
 This is a significant refinement. We are moving from a "Safety First" (hidden by default) model to an **"Open Science First"** (transparent by default) model. This is much better for data density and user growth.
@@ -48,15 +48,7 @@ A "Privacy Slot" is consumed if an observation is **not** fully transparent.
 * **Header Row:** Add the Author's Avatar and Username in the top-right corner, aligned with the Species name. Also show the draft tag somwhere up there.
 * **Social Controls:** * When viewing another user's find: Show `🤍` (Friend Request) and `🧭` (Follow User).
     * **Reciprocity:** Heart turns `❤️` when a friendship is accepted.
-* **Sharing Section:** Keep the three buttons (`Private`, `Friends`, `Public`) but add a small `(1 slot)` label under Private and Friends for free users.
-
-### Finds Tab (Main Feed)
-* **New Tab:** Add **`Feed 🧭`** alongside `Mine`, `Friends`, and `Public`.
-* **Draft Indicator:** Add a "Draft" corner badge to cards in the gallery that have `is_draft = true`.
-
----
-
-## 3. Revised Phase 7 Todo-List for Agent
+* **Sharing Section:** Keep the three buttons (`Private`, `Friends`, `Public`) but add a small (1/20) label under Private and Friends for free users. Update the app so it knows how many slots are used, when making new private drafts etc. 
 
 - [ ] **SQL Migration (Schema):**
     - [ ] Add `is_draft` (bool) and `location_precision` (text) to `observations`.
