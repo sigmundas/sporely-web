@@ -314,25 +314,43 @@ function _syncScopeTabs() {
       })
 
       if (uid) {
-        supabase.from('profiles').select('*').eq('id', uid).maybeSingle().then(({data: person}) => {
-          if (!person) return;
-          const root = document.getElementById('finds-user-card-root');
-          if (!root) return; // Might have navigated away
-          
+        if (state.findsTargetUsername !== undefined || state.findsTargetDisplayName !== undefined) {
           const personFormatted = {
-            user_id: person.id,
-            avatar_url: person.avatar_url,
-            display_name: person.display_name,
-            username: person.username,
-            bio: person.bio,
-            finds: person.public_find_count || 0,
-            species: person.public_species_count || 0,
-            spores: person.public_spore_count || 0
+            user_id: uid,
+            avatar_url: state.findsTargetAvatarUrl,
+            display_name: state.findsTargetDisplayName,
+            username: state.findsTargetUsername,
+            bio: state.findsTargetBio,
+            finds: state.findsTargetFinds || 0,
+            species: state.findsTargetSpecies || 0,
+            spores: state.findsTargetSpores || 0
           };
-          
-          root.innerHTML = buildPeopleCard(personFormatted);
-          wireAvatarFallback(root);
-        });
+          const root = document.getElementById('finds-user-card-root');
+          if (root) {
+            root.innerHTML = buildPeopleCard(personFormatted);
+            wireAvatarFallback(root);
+          }
+        } else {
+          supabase.from('profiles').select('*').eq('id', uid).maybeSingle().then(({data: person}) => {
+            if (!person) return;
+            const root = document.getElementById('finds-user-card-root');
+            if (!root) return; // Might have navigated away
+            
+            const personFormatted = {
+              user_id: person.id,
+              avatar_url: person.avatar_url,
+              display_name: person.display_name,
+              username: person.username,
+              bio: person.bio,
+              finds: 0,
+              species: 0,
+              spores: 0
+            };
+            
+            root.innerHTML = buildPeopleCard(personFormatted);
+            wireAvatarFallback(root);
+          });
+        }
       }
     }
   } else {
@@ -379,11 +397,21 @@ function _setScope(scope, options = {}) {
     state.findsTargetUserId = options.userId
     state.findsTargetUsername = options.username
     state.findsTargetAvatarUrl = options.avatarUrl
+    state.findsTargetDisplayName = options.displayName
+    state.findsTargetBio = options.bio
+    state.findsTargetFinds = options.finds
+    state.findsTargetSpecies = options.species
+    state.findsTargetSpores = options.spores
   } else {
     state.observationScope = nextScope
     state.findsTargetUserId = null
     state.findsTargetUsername = null
     state.findsTargetAvatarUrl = null
+    state.findsTargetDisplayName = null
+    state.findsTargetBio = null
+    state.findsTargetFinds = 0
+    state.findsTargetSpecies = 0
+    state.findsTargetSpores = 0
   }
 
   if (options.resetSearch) {

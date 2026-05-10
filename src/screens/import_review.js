@@ -188,18 +188,27 @@ async function _runAiIdAll() {
 }
 
 function _syncPhotoGapDisplays(value = getPhotoGapMinutes()) {
-  const normalized = String(value);
+  const isSeconds = value < 1;
+  const displayValue = String(isSeconds ? Math.round(value * 60) : Math.round(value));
+  const unitText = isSeconds ? 'sec' : 'min';
+
   const importGapInput = document.getElementById('import-gap-input');
   if (importGapInput) {
-    importGapInput.value = normalized;
-    importGapInput.textContent = normalized;
+    importGapInput.value = value;
+    importGapInput.textContent = displayValue;
   }
+  const importGapUnit = document.getElementById('import-gap-unit');
+  if (importGapUnit) importGapUnit.textContent = unitText;
+
   const settingsGapInput = document.getElementById('settings-gap-input');
   if (settingsGapInput) {
-    settingsGapInput.value = normalized;
-    settingsGapInput.textContent = normalized;
+    settingsGapInput.value = value;
+    settingsGapInput.textContent = displayValue;
   }
-  return Number(normalized);
+  const settingsGapUnit = document.getElementById('settings-gap-unit');
+  if (settingsGapUnit) settingsGapUnit.textContent = unitText;
+
+  return value;
 }
 
 function _disposeSessionBlobUrls(items = sessions) {
@@ -260,6 +269,9 @@ function _buildSessionsFromSourceItems() {
       locationAutoApplied: previous?.locationAutoApplied || '',
       taxon: previous?.taxon || null,
       visibility: normalizeCaptureVisibility(previous?.visibility, getDefaultVisibility()),
+      is_draft: previous?.is_draft !== false,
+      location_precision: previous?.location_precision || 'exact',
+      uncertain: previous?.uncertain || false,
       exifDebug: group.map(item => item.dbg).filter(Boolean),
     };
   });
@@ -386,10 +398,14 @@ export function initImportReview() {
   document.getElementById('import-browse-input').addEventListener('change', handleFileSelect);
   _updateImportFooterUi();
   document.getElementById('import-gap-decrement')?.addEventListener('click', () => {
-    _applyImportPhotoGapChange(getPhotoGapMinutes() - 1);
+    const current = getPhotoGapMinutes();
+    _applyImportPhotoGapChange(current <= 1 ? current - (5 / 60) : current - 1);
   });
   document.getElementById('import-gap-increment')?.addEventListener('click', () => {
-    _applyImportPhotoGapChange(getPhotoGapMinutes() + 1);
+    const current = getPhotoGapMinutes();
+    let next = current < 1 ? current + (5 / 60) : current + 1;
+    if (Math.abs(next - 1) < 0.001) next = 1;
+    _applyImportPhotoGapChange(next);
   });
   _syncPhotoGapDisplays();
 }
@@ -1234,7 +1250,6 @@ export function renderSessions() {
   const n = sessions.length;
   countEl.textContent = tp('counts.group', n);
   if (gapLabel) gapLabel.textContent = t('settings.newObservationAfter');
-  if (gapUnit) gapUnit.textContent = document.querySelector('#settings-sheet .settings-gap-unit')?.textContent || 'min';
   if (gapInput) _syncPhotoGapDisplays();
   if (groupingControls) groupingControls.style.display = n > 1 ? 'block' : 'none';
 
@@ -1301,6 +1316,45 @@ export function renderSessions() {
       const s = sessionById(input.dataset.sid);
       if (s) s.visibility = normalizeCaptureVisibility(input.value, getDefaultVisibility());
       _persistSessions();
+      
+      const group = input.closest('.scope-tabs');
+      if (group) {
+        group.querySelectorAll('.scope-tab').forEach(tab => tab.classList.remove('active'));
+        input.closest('.scope-tab').classList.add('active');
+      }
+    });
+  });
+
+  list.querySelectorAll('.import-draft-checkbox[data-sid]').forEach(input => {
+    input.addEventListener('change', () => {
+      const s = sessionById(input.dataset.sid);
+      if (s) s.is_draft = input.checked;
+      _persistSessions();
+    });
+  });
+
+  list.querySelectorAll('.import-obscure-checkbox[data-sid]').forEach(input => {
+    input.addEventListener('change', () => {
+      const s = sessionById(input.dataset.sid);
+      if (s) s.location_precision = input.checked ? 'fuzzed' : 'exact';
+      _persistSessions();
+    });
+  });
+
+  list.querySelectorAll('.import-uncertain-checkbox[data-sid]').forEach(input => {
+    input.addEventListener('change', () => {
+      const s = sessionById(input.dataset.sid);
+      if (s) {
+        s.uncertain = input.checked;
+        const card = input.closest('.import-card');
+        if (card) {
+          const speciesEl = card.querySelector('.import-card-species');
+          if (speciesEl && s.taxon) {
+            speciesEl.innerHTML = escHtml(s.uncertain ? `? ${s.taxon.displayName.replace(/^\?\s*/, '')}` : s.taxon.displayName.replace(/^\?\s*/, ''));
+          }
+        }
+      }
+      _persistSessions();
     });
   });
 
@@ -1322,7 +1376,7 @@ function buildCardHTML(session) {
   const imageMeta = _ensureSessionImageMeta(session);
   const croppedCount = imageMeta.filter(meta => hasAiCropRect(meta?.aiCropRect)).length;
   const speciesText = session.taxon
-    ? escHtml(session.taxon.displayName)
+    ? escHtml(session.uncertain ? `? ${session.taxon.displayName.replace(/^\?\s*/, '')}` : session.taxon.displayName.replace(/^\?\s*/, ''))
     : `<span style="opacity:0.45">${t('detail.unknownSpecies')}</span>`;
 
   const stackImgs = session.blobUrls.slice(0, 3);
@@ -1402,11 +1456,19 @@ function buildCardHTML(session) {
       </div>
       ${missingGpsHint}
     </div>
-    <div class="detail-field" style="margin-top:4px">
+    <div class="detail-field" style="margin-top:8px">
+      <div class="vis-radio-group" style="flex-wrap: wrap; gap: 8px;">
+        <label class="detail-pill-toggle"><input type="checkbox" class="import-uncertain-checkbox" data-sid="${sid}" ${session.uncertain ? 'checked' : ''}> <span>${escHtml(t('detail.idNeeded'))}</span></label>
+        <label class="detail-pill-toggle"><input type="checkbox" class="import-draft-checkbox" data-sid="${sid}" ${session.is_draft !== false ? 'checked' : ''}> <span>${escHtml(t('detail.draft'))}</span></label>
+        <label class="detail-pill-toggle"><input type="checkbox" class="import-obscure-checkbox" data-sid="${sid}" ${session.location_precision === 'fuzzed' ? 'checked' : ''}> <span>${escHtml(t('locationPrecision.fuzzed'))}</span></label>
+      </div>
+    </div>
+    <div class="detail-field" style="margin-top:8px">
       <div class="detail-field-label">${t('detail.sharing')}</div>
-      <div class="vis-radio-group">
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="private" ${visChecked('private')}> <span>${translateVisibility('private')}</span></label>
-        <label class="vis-option"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="friends" ${visChecked('friends')}> <span>${translateVisibility('friends')}</span></label>
+      <div class="scope-tabs" style="display:inline-flex">
+        <label class="scope-tab ${sessionVisibility === 'private' ? 'active' : ''}"><input type="radio" class="import-vis-radio" style="display:none" name="vis-${sid}" data-sid="${sid}" value="private" ${visChecked('private')}> <span>${translateVisibility('private')}</span></label>
+        <label class="scope-tab ${sessionVisibility === 'friends' ? 'active' : ''}"><input type="radio" class="import-vis-radio" style="display:none" name="vis-${sid}" data-sid="${sid}" value="friends" ${visChecked('friends')}> <span>${translateVisibility('friends')}</span></label>
+        <label class="scope-tab ${sessionVisibility === 'public' ? 'active' : ''}"><input type="radio" class="import-vis-radio" style="display:none" name="vis-${sid}" data-sid="${sid}" value="public" ${visChecked('public')}> <span>${translateVisibility('public')}</span></label>
       </div>
     </div>
   </div>
@@ -1652,8 +1714,9 @@ async function saveAll() {
         species: session.taxon?.specificEpithet || null,
         common_name: session.taxon?.vernacularName || null,
         visibility: toCloudVisibility(normalizeVisibility(session.visibility, getDefaultVisibility())),
-        is_draft: true,
-        location_precision: 'exact',
+        is_draft: session.is_draft !== false,
+        location_precision: session.location_precision || 'exact',
+        uncertain: !!session.uncertain,
       };
 
       _ensureSessionImageMeta(session);

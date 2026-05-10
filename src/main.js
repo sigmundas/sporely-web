@@ -213,10 +213,21 @@ function initSettings() {
   function _setPhotoGap(value) {
     const v = setPhotoGapMinutes(value)
     gapInput.value = v
-    gapInput.textContent = String(v)
+    const isSeconds = v < 1
+    gapInput.textContent = String(isSeconds ? Math.round(v * 60) : Math.round(v))
+    const gapUnit = document.getElementById('settings-gap-unit')
+    if (gapUnit) gapUnit.textContent = isSeconds ? 'sec' : 'min'
   }
-  document.getElementById('settings-gap-decrement')?.addEventListener('click', () => _setPhotoGap(Number(gapInput.value || 1) - 1))
-  document.getElementById('settings-gap-increment')?.addEventListener('click', () => _setPhotoGap(Number(gapInput.value || 1) + 1))
+  document.getElementById('settings-gap-decrement')?.addEventListener('click', () => {
+    const current = Number.parseFloat(gapInput.value || 1)
+    _setPhotoGap(current <= 1 ? current - (5 / 60) : current - 1)
+  })
+  document.getElementById('settings-gap-increment')?.addEventListener('click', () => {
+    const current = Number.parseFloat(gapInput.value || 1)
+    let next = current < 1 ? current + (5 / 60) : current + 1
+    if (Math.abs(next - 1) < 0.001) next = 1
+    _setPhotoGap(next)
+  })
 
   const artsorakelMaxEdgeInput = document.getElementById('settings-artsorakel-max-edge')
   artsorakelMaxEdgeInput?.addEventListener('change', () => {
@@ -298,8 +309,12 @@ function _syncSettingsUI() {
   })
   const gapInput = document.getElementById('settings-gap-input')
   if (gapInput) {
-    gapInput.value = String(getPhotoGapMinutes())
-    gapInput.textContent = gapInput.value
+    const value = getPhotoGapMinutes()
+    gapInput.value = String(value)
+    const isSeconds = value < 1
+    gapInput.textContent = String(isSeconds ? Math.round(value * 60) : Math.round(value))
+    const gapUnit = document.getElementById('settings-gap-unit')
+    if (gapUnit) gapUnit.textContent = isSeconds ? 'sec' : 'min'
   }
   const artsorakelMaxEdgeInput = document.getElementById('settings-artsorakel-max-edge')
   if (artsorakelMaxEdgeInput) artsorakelMaxEdgeInput.value = String(getArtsorakelMaxEdge())

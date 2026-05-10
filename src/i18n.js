@@ -1559,7 +1559,7 @@ export function applyStaticTranslations() {
     t('review.latLon'),
     t('review.gpsAccuracy'),
     t('review.altitude'),
-    t('review.sharing'),
+    t('locationPrecision.label'),
     t('review.idNeeded'),
   ])
   setAllText('#screen-review .detail-field-label', [
@@ -1570,11 +1570,13 @@ export function applyStaticTranslations() {
   setText('#review-cancel-btn', 'common.cancel')
   setText('#review-save-btn', 'common.save')
   setText('#screen-review .sync-footer-text', 'review.createsOne')
-  setAllText('#review-visibility .vis-option span', [
+  setAllText('#review-visibility .scope-tab span', [
     t('visibility.private'),
     t('visibility.friends'),
     t('visibility.public'),
   ])
+  setText('#review-obscured span', 'locationPrecision.fuzzed')
+  setText('#review-draft span', 'detail.draft')
 
   setText('#detail-back-label', 'detail.backFinds')
   setText('#detail-title-common', 'detail.unknownSpecies')
@@ -1585,7 +1587,6 @@ export function applyStaticTranslations() {
     t('detail.notes'),
     t('detail.workflow'),
     t('detail.sharing'),
-    t('locationPrecision.label'),
   ])
   setText('#detail-current-location-btn', 'detail.currentLocation')
   setText('#screen-find-detail .field-meta-key', 'detail.idNeeded')
@@ -1594,17 +1595,13 @@ export function applyStaticTranslations() {
   setText('#detail-delete-btn', 'common.delete')
   setText('#detail-cancel-btn', 'common.cancel')
   setText('#detail-save-btn', 'common.save')
-  setAllText('#detail-visibility .vis-option span', [
+  setAllText('#detail-visibility .scope-tab span', [
     t('visibility.private'),
     t('visibility.friends'),
     t('visibility.public'),
   ])
   setText('#detail-draft-pill', 'detail.draft')
-  setText('#detail-location-precision-label', 'locationPrecision.label')
-  setAllText('#detail-location-precision .vis-option span', [
-    t('locationPrecision.exact'),
-    t('locationPrecision.fuzzed'),
-  ])
+  setText('#detail-obscured span', 'locationPrecision.fuzzed')
 
   setText('#import-back-label', 'detail.backHome')
   setText('#import-cancel-btn', 'common.cancel')

@@ -6,6 +6,8 @@ export const state = {
     habitat: '',
     notes: '',
     uncertain: false,
+    is_draft: true,
+    location_precision: 'exact',
     visibility: 'public',
   },
   batchCount: 0,
@@ -23,4 +25,9 @@ export const state = {
   findsTargetUserId: null,
   findsTargetUsername: null,
   findsTargetAvatarUrl: null,
+  findsTargetDisplayName: null,
+  findsTargetBio: null,
+  findsTargetFinds: 0,
+  findsTargetSpecies: 0,
+  findsTargetSpores: 0,
 }

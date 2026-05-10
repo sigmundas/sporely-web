@@ -99,6 +99,8 @@ export function initFindDetail() {
   document.querySelectorAll('input[name="detail-vis"], input[name="detail-location-precision"], #detail-draft').forEach(input => {
     input.addEventListener('change', _renderPrivacySlotNote)
   })
+  const obscuredInput = document.getElementById('detail-obscured')
+  if (obscuredInput) obscuredInput.addEventListener('change', _renderPrivacySlotNote)
   document.getElementById('detail-uncertain').addEventListener('change', () => {
     if (!currentObs) return
     const value = document.getElementById('detail-taxon-input').value.trim()
@@ -216,18 +218,25 @@ export async function openFindDetail(obsId, options = {}) {
       altitude: obs.gps_altitude,
       accuracy: obs.gps_accuracy,
     })
-    coordsEl.style.display = obs.gps_latitude ? 'block' : 'none'
+    if (obs.location_precision === 'fuzzed') {
+      coordsEl.innerHTML += `<div style="margin-top:8px;"><span class="find-card-draft-badge" style="background:var(--bg-elevated); color:var(--text-dim); border: 1px solid var(--border);">${_esc(t('locationPrecision.fuzzed'))}</span></div>`
+    }
+    coordsEl.style.display = obs.gps_latitude || obs.location_precision === 'fuzzed' ? 'block' : 'none'
   }
 
   // Set visibility radio
   const vis = normalizeVisibility(obs.visibility, 'public')
   const visRadio = document.querySelector(`input[name="detail-vis"][value="${vis}"]`)
-  if (visRadio) visRadio.checked = true
+  if (visRadio) {
+    visRadio.checked = true
+    document.querySelectorAll('input[name="detail-vis"]').forEach(r => {
+      r.closest('.scope-tab').classList.toggle('active', r.checked)
+    })
+  }
   const draftInput = document.getElementById('detail-draft')
   if (draftInput) draftInput.checked = obs.is_draft !== false
-  const precision = obs.location_precision === 'fuzzed' ? 'fuzzed' : 'exact'
-  const precisionRadio = document.querySelector(`input[name="detail-location-precision"][value="${precision}"]`)
-  if (precisionRadio) precisionRadio.checked = true
+  const obscuredInput = document.getElementById('detail-obscured')
+  if (obscuredInput) obscuredInput.checked = obs.location_precision === 'fuzzed'
   detailPrivacySlotCount = null
   _renderPrivacySlotNote()
   _loadPrivacySlotCount()
@@ -580,11 +589,16 @@ function _resetForm() {
 
   // Reset visibility to default
   const r = document.querySelector(`input[name="detail-vis"][value="${normalizeVisibility(getDefaultVisibility(), 'public')}"]`)
-  if (r) r.checked = true
+  if (r) {
+    r.checked = true
+    document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
+      radio.closest('.scope-tab').classList.toggle('active', radio.checked)
+    })
+  }
   const draftInput = document.getElementById('detail-draft')
   if (draftInput) draftInput.checked = true
-  const exactInput = document.querySelector('input[name="detail-location-precision"][value="exact"]')
-  if (exactInput) exactInput.checked = true
+  const obscuredInput = document.getElementById('detail-obscured')
+  if (obscuredInput) obscuredInput.checked = false
   _renderPrivacySlotNote()
 
   // Clear comments
@@ -651,7 +665,7 @@ function _renderDetailLocationDropdown(show) {
 
 function _currentDetailUsesPrivacySlot() {
   const visibility = document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'
-  const precision = document.querySelector('input[name="detail-location-precision"]:checked')?.value || 'exact'
+  const precision = document.getElementById('detail-obscured')?.checked ? 'fuzzed' : 'exact'
   return visibility !== 'public' || precision === 'fuzzed'
 }
 
@@ -734,17 +748,7 @@ async function _loadDetailAuthorAndSocial() {
     .in('target_id', followTargets)
 
   const [profileRes, friendshipRes, followsRes] = await Promise.all([profilePromise, friendshipPromise, followsPromise])
-  if (!profileRes.error && profileRes.data) {
-    detailAuthorProfile = profileRes.data;
-    if (detailAuthorProfile.id) {
-       const { data: signedData } = await supabase.storage.from('avatars').createSignedUrl(`${detailAuthorProfile.id}/avatar.jpg`, 3600);
-       if (signedData && signedData.signedUrl) {
-         detailAuthorProfile.avatar_url = signedData.signedUrl;
-       }
-    }
-  } else {
-    detailAuthorProfile = null;
-  }
+  if (!profileRes.error) detailAuthorProfile = profileRes.data || null
   if (!friendshipRes.error) detailFriendship = friendshipRes.data?.[0] || null
   if (!followsRes.error) {
     for (const row of followsRes.data || []) {
@@ -772,18 +776,10 @@ function _renderDetailAuthorAndSocial() {
     authorBtn.style.display = 'inline-flex'
     if (authorName) authorName.textContent = label
     if (authorAvatar) {
-      let avatarUrl = detailAuthorProfile?.avatar_url;
-      if (avatarUrl && !avatarUrl.startsWith('http')) {
-        avatarUrl = supabase.storage.from('avatars').getPublicUrl(avatarUrl).data.publicUrl;
-      } else if (!avatarUrl && detailAuthorProfile?.id) {
-        avatarUrl = supabase.storage.from('avatars').getPublicUrl(`${detailAuthorProfile.id}/avatar.jpg`).data.publicUrl;
-      }
-      const initial = _esc(_profileInitial(detailAuthorProfile, label));
-      if (avatarUrl) {
-        authorAvatar.innerHTML = `<img src="${_esc(avatarUrl)}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"><span style="display:none;width:100%;height:100%;align-items:center;justify-content:center;">${initial}</span>`;
-      } else {
-        authorAvatar.innerHTML = initial;
-      }
+      const avatarUrl = detailAuthorProfile?.avatar_url || ''
+      authorAvatar.innerHTML = avatarUrl
+        ? `<img src="${_esc(avatarUrl)}" alt="" loading="lazy" decoding="async">`
+        : _esc(_profileInitial(detailAuthorProfile, label))
     }
   } else if (authorBtn) {
     authorBtn.style.display = 'none'
@@ -911,17 +907,22 @@ function _applyOwnershipMode(isOwner) {
   if (notesInput) notesInput.readOnly = !isOwner
   if (uncertainInput) uncertainInput.disabled = !isOwner
   const draftInput = document.getElementById('detail-draft')
-  if (draftInput) draftInput.disabled = !isOwner
+  if (draftInput) {
+    draftInput.disabled = !isOwner
+    const workflowField = draftInput.closest('.detail-field')
+    if (workflowField) workflowField.style.display = isOwner ? '' : 'none'
+  }
 
   const currentLocationBtn = document.getElementById('detail-current-location-btn')
   if (currentLocationBtn) currentLocationBtn.style.display = 'none'
 
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.disabled = !isOwner
+    const sharingField = radio.closest('.detail-field')
+    if (sharingField) sharingField.style.display = isOwner ? '' : 'none'
   })
-  document.querySelectorAll('input[name="detail-location-precision"]').forEach(radio => {
-    radio.disabled = !isOwner
-  })
+  const obscuredInput = document.getElementById('detail-obscured')
+  if (obscuredInput) obscuredInput.disabled = !isOwner
   _renderPrivacySlotNote()
 
   let modContainer = document.getElementById('detail-mod-container')
@@ -1003,7 +1004,12 @@ function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackN
   const markedPrimary = uncertain ? `? ${primaryName.replace(/^\?\s*/, '')}` : primaryName.replace(/^\?\s*/, '')
   const markedLatin = uncertain ? `? ${latinName.replace(/^\?\s*/, '')}` : latinName.replace(/^\?\s*/, '')
 
-  commonEl.textContent = markedPrimary
+  commonEl.innerHTML = _esc(markedPrimary)
+  const draftBadgeEl = document.getElementById('detail-draft-badge')
+  if (draftBadgeEl) {
+    draftBadgeEl.style.display = currentObs?.is_draft === true ? '' : 'none'
+    draftBadgeEl.textContent = t('finds.draftBadge')
+  }
   if (latinName && latinName.toLowerCase() !== primaryName.toLowerCase()) {
     latinEl.textContent = markedLatin
     latinEl.style.display = 'block'
@@ -1030,7 +1036,7 @@ async function _save() {
     uncertain:  document.getElementById('detail-uncertain').checked,
     visibility: toCloudVisibility(document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'),
     is_draft: document.getElementById('detail-draft')?.checked !== false,
-    location_precision: document.querySelector('input[name="detail-location-precision"]:checked')?.value === 'fuzzed' ? 'fuzzed' : 'exact',
+    location_precision: document.getElementById('detail-obscured')?.checked ? 'fuzzed' : 'exact',
   }
 
   const taxonInputValue = document.getElementById('detail-taxon-input').value.trim()

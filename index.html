@@ -438,13 +438,12 @@
             <div class="field-meta-val" id="meta-altitude">— ASL</div>
           </div>
           <div class="field-meta-row">
-            <div class="field-meta-key">Sharing</div>
+            <div class="field-meta-key" id="review-location-precision-label">Location precision</div>
             <div class="field-meta-val">
-              <div class="vis-radio-group" id="review-visibility">
-                <label class="vis-option"><input type="radio" name="review-vis" value="private"> <span>Private</span></label>
-                <label class="vis-option"><input type="radio" name="review-vis" value="friends"> <span>Friends</span></label>
-                <label class="vis-option"><input type="radio" name="review-vis" value="public" checked> <span>Public</span></label>
-              </div>
+              <label class="detail-pill-toggle">
+                <input type="checkbox" id="review-obscured">
+                <span>Obscured</span>
+              </label>
             </div>
           </div>
         </div>
@@ -466,6 +465,23 @@
               <input type="checkbox" id="review-uncertain">
               <span class="detail-toggle-track"><span class="detail-toggle-thumb"></span></span>
             </label>
+          </div>
+        </div>
+
+        <div class="detail-field" style="margin-bottom:12px">
+          <div class="detail-field-label">Workflow</div>
+          <label class="detail-pill-toggle">
+            <input type="checkbox" id="review-draft" checked>
+            <span>Draft</span>
+          </label>
+        </div>
+
+        <div class="detail-field" style="margin-bottom:12px">
+          <div class="detail-field-label">Sharing</div>
+          <div class="scope-tabs" id="review-visibility" style="display:inline-flex">
+            <label class="scope-tab"><input type="radio" name="review-vis" value="private" style="display:none"> <span>Private</span></label>
+            <label class="scope-tab"><input type="radio" name="review-vis" value="friends" style="display:none"> <span>Friends</span></label>
+            <label class="scope-tab active"><input type="radio" name="review-vis" value="public" style="display:none" checked> <span>Public</span></label>
           </div>
         </div>
       </div>
@@ -498,9 +514,12 @@
             <span class="detail-author-name" id="detail-author-name"></span>
             <span class="detail-author-avatar" id="detail-author-avatar">?</span>
           </button>
-          <div class="detail-date-time">
+        <div class="detail-date-time" style="display:flex; justify-content:space-between; align-items:flex-end;">
+          <div>
             <span id="detail-date">—</span>
             <span id="detail-time" style="display:none">· <span id="detail-time-val"></span></span>
+          </div>
+          <span id="detail-draft-badge" class="find-card-draft-badge" style="display:none; margin-bottom: 2px;">Draft</span>
           </div>
           <div class="detail-observation-badge" id="detail-readonly-note" style="display:none"></div>
         </div>
@@ -536,6 +555,12 @@
               <ul id="detail-location-dropdown" class="location-suggestion-dropdown" style="display:none"></ul>
             </div>
             <button id="detail-current-location-btn" class="location-apply-btn detail-location-btn" style="display:none">Current location</button>
+            <div style="margin-top: 8px;">
+              <label class="detail-pill-toggle">
+                <input type="checkbox" id="detail-obscured">
+                <span>Obscured</span>
+              </label>
+            </div>
           </div>
 
           <div class="detail-field">
@@ -568,20 +593,12 @@
 
           <div class="detail-field" style="margin-top:8px">
             <div class="detail-field-label" id="detail-sharing-label">Sharing</div>
-            <div class="vis-radio-group vis-radio-group--segmented" id="detail-visibility">
-              <label class="vis-option"><input type="radio" name="detail-vis" value="private"> <span>Private</span></label>
-              <label class="vis-option"><input type="radio" name="detail-vis" value="friends"> <span>Friends</span></label>
-              <label class="vis-option"><input type="radio" name="detail-vis" value="public"> <span>Public</span></label>
+            <div class="scope-tabs" id="detail-visibility" style="display:inline-flex">
+              <label class="scope-tab"><input type="radio" name="detail-vis" value="private" style="display:none"> <span>Private</span></label>
+              <label class="scope-tab"><input type="radio" name="detail-vis" value="friends" style="display:none"> <span>Friends</span></label>
+              <label class="scope-tab"><input type="radio" name="detail-vis" value="public" style="display:none"> <span>Public</span></label>
             </div>
             <div class="privacy-slot-note" id="detail-privacy-slot-note"></div>
-          </div>
-
-          <div class="detail-field" style="margin-top:8px">
-            <div class="detail-field-label" id="detail-location-precision-label">Location precision</div>
-            <div class="vis-radio-group vis-radio-group--segmented" id="detail-location-precision">
-              <label class="vis-option"><input type="radio" name="detail-location-precision" value="exact"> <span>Exact</span></label>
-              <label class="vis-option"><input type="radio" name="detail-location-precision" value="fuzzed"> <span>Obscured</span></label>
-            </div>
           </div>
         </div>
 

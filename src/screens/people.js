@@ -39,7 +39,7 @@ export async function loadPeople(options = {}) {
 
   if (!list || !state.user) return
   if (clearBtn) clearBtn.style.display = requestedQuery ? 'flex' : 'none'
-  if (subtitle) subtitle.textContent = requestedQuery ? t('people.searching') : t('people.recentlyPublic')
+  if (subtitle) subtitle.textContent = requestedQuery ? t('people.searching') : ''
   list.innerHTML = `<div class="people-empty">${t('common.loading')}</div>`
 
   try {
@@ -52,14 +52,14 @@ export async function loadPeople(options = {}) {
     if (!rows.length) {
       if (subtitle) subtitle.textContent = requestedQuery
         ? t('people.noResults', { query: requestedQuery })
-        : t('people.recentlyPublic')
+        : ''
       list.innerHTML = `<div class="people-empty">${requestedQuery ? t('people.noMatches') : t('people.noneYet')}</div>`
       return
     }
 
     if (subtitle) subtitle.textContent = requestedQuery
       ? t('people.resultsCount', { count: rows.length })
-      : t('people.recentlyPublic')
+      : ''
 
     list.innerHTML = rows.map(person => buildPeopleCard(person)).join('')
     wireAvatarFallback(list)
@@ -73,6 +73,11 @@ export async function loadPeople(options = {}) {
           userId: card.dataset.userId,
           username: card.dataset.username,
           avatarUrl: card.dataset.avatarUrl,
+          displayName: card.dataset.displayName,
+          bio: card.dataset.bio,
+          finds: card.dataset.finds,
+          species: card.dataset.species,
+          spores: card.dataset.spores,
           resetSearch: true,
           resetFilters: true,
           groupBySpecies: action === 'species',
@@ -150,7 +155,7 @@ export function buildPeopleCard(person) {
    const bio = String(person.bio || '').trim()
    const avatarHtml = `<img class="people-card-avatar-img" src="${_esc(avatarUrl)}" alt="" data-fallback-initials="${initials}" data-guessed-url="${_esc(guessedAvatarUrl)}">`
 
-   return `<article class="people-card" data-user-id="${_esc(person.user_id)}" data-username="${_esc(username || '')}" data-avatar-url="${_esc(avatarUrl)}">
+   return `<article class="people-card" data-user-id="${_esc(person.user_id)}" data-username="${_esc(username || '')}" data-avatar-url="${_esc(avatarUrl)}" data-display-name="${_esc(person.display_name || '')}" data-bio="${_esc(person.bio || '')}" data-finds="${Number(person.finds) || 0}" data-species="${Number(person.species) || 0}" data-spores="${Number(person.spores) || 0}">
       <div class="people-card-head">
         <div class="people-card-avatar">${avatarHtml}</div>
         <div class="people-card-title-wrap">

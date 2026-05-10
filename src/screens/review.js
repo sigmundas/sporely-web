@@ -23,6 +23,8 @@ function _defaultCaptureDraft() {
     habitat: '',
     notes: '',
     uncertain: false,
+    is_draft: true,
+    location_precision: 'exact',
     visibility: getDefaultVisibility(),
   }
 }
@@ -96,6 +98,17 @@ export function initReview() {
       if (event.target.checked) state.captureDraft.visibility = normalizeVisibility(event.target.value, getDefaultVisibility())
     })
   })
+  const draftToggle = document.getElementById('review-draft')
+  if (draftToggle) {
+    draftToggle.addEventListener('change', event => {
+      state.captureDraft.is_draft = event.target.checked
+    })
+  }
+  document.querySelectorAll('input[name="review-location-precision"]').forEach(radio => {
+    radio.addEventListener('change', event => {
+      if (event.target.checked) state.captureDraft.location_precision = event.target.value
+    })
+  })
   initLocationField()
 }
 
@@ -138,6 +151,9 @@ export function openImportedReview(session) {
   state.captureDraft = {
     ..._defaultCaptureDraft(),
     visibility: normalizeVisibility(session?.visibility, getDefaultVisibility()),
+    is_draft: session?.is_draft !== false,
+    location_precision: session?.location_precision || 'exact',
+    uncertain: session?.uncertain || false,
   }
   state.reviewContext = {
     source: 'import',
@@ -702,8 +718,8 @@ async function saveObservationBatch() {
       species:       taxon.specificEpithet || null,
       common_name:   taxon.vernacularName || null,
       visibility: toCloudVisibility(visibility),
-      is_draft: true,
-      location_precision: 'exact',
+      is_draft: state.captureDraft.is_draft !== false,
+      location_precision: state.captureDraft.location_precision || 'exact',
     }
 
     const imageEntries = photos

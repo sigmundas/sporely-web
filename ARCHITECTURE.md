@@ -163,9 +163,10 @@ R2 bucket `sporely-media` is exposed publicly via Cloudflare. All media URLs are
 
 `src/images.js` prepares web/mobile uploads before they are sent to R2.
 
+- **Memory Management:** To avoid mobile browser Out-Of-Memory (OOM) crashes, heavy image work is strictly kept out of background sync loops. The canvas memory must be explicitly wiped (`canvas.width = 0; canvas.height = 0`) and object URLs revoked immediately after use.
 - Image work is attempted off the main thread in `src/image-worker.js`.
 - The worker receives an `ImageBitmap` as a transferable and uses `OffscreenCanvas`.
-- Encoding tries WebP first (`image/webp`, quality 0.65) and falls back to JPEG (`image/jpeg`, quality 0.75). AVIF is not used because mobile browser AVIF encoding support is unreliable.
+- Encoding tries WebP first (`image/webp`, quality 0.65) and falls back to JPEG (`image/jpeg`, quality 0.75). AVIF encoding is **not** used because mobile browsers (especially iOS Safari) silently fail and fall back to uncompressed PNGs, generating massive payload sizes.
 - Free/reduced mode limits images to about 2 MP with a 1600px max edge.
 - Pro/max mode keeps near-12 MP images unless the source is above the large-image guard, then downsizes to about 4000px max edge.
 - Downscaling uses progressive halving plus high-quality canvas smoothing to avoid aliasing-heavy thumbnails.
@@ -212,11 +213,16 @@ The worker proxies AI species identification requests to `https://ai.artsdataban
 ### ⚠️ Upload Request Gotchas
 
 - **iOS Safari Fetch Hangs:** Never stream an IndexedDB-backed `Blob` directly into a `fetch()` body on iOS/WebKit. The web app must always convert it to an `ArrayBuffer` first (`await blob.arrayBuffer()`) before passing it to `fetch`, otherwise the upload may silently hang or send 0 bytes.
+- **IndexedDB Transaction Auto-Close:** IndexedDB `readwrite` transactions will silently auto-close if the thread `await`s slow asynchronous work (like Canvas rendering or encoding) while the transaction is open. Always complete heavy async operations *before* opening the IndexedDB transaction.
+- **OOM in Background Sync:** Heavy Canvas rendering must *never* happen in a background sync loop (`triggerSync()`). It will trigger silent Out-Of-Memory (OOM) crashes on mobile WebViews. Image processing must happen in the foreground during the initial save/enqueue phase.
+- **Cross-Context Blob Checks:** Never use strict `instanceof Blob` checks across environments (e.g. Capacitor FilePicker vs IndexedDB). They often fail. Use duck-typing checks on the `size` and `type` properties.
 - **CORS Preflight on PUT:** Avoid adding custom non-standard headers (like `X-Sporely-Upload-Mode`) to the R2 upload `PUT` request. Custom headers force strict CORS preflight (`OPTIONS`) behavior on mobile PWAs, which can unexpectedly block uploads depending on network/cache conditions.
 
 ---
 
 ## Database schema (Supabase side)
+
+> For full Supabase schema details, ownership rules, and RLS behavior, see SUPABASE_DB.md.
 
 Full SQL is in `sporely/database/` (the desktop app repo).
 Key tables used by the web app:
@@ -226,14 +232,14 @@ Maps 1-to-1 with the desktop SQLite `observations` table.
 Extra cloud-only columns:
 - `user_id uuid` — FK to `auth.users` (set by RLS, never trusted from client)
 - `desktop_id int` — local SQLite `id`, used for dedup on sync
-- `is_draft bool` — WIP state; public draft observations appear in the live science feed/map but are not treated as featured/verified.
-- `visibility text` — cloud sharing scope (`private` / `friends` / `public`). New web/mobile observations default to `public`.
-- `location_precision text` — `exact` or `fuzzed`; community/follow views expose exact GPS unless the user explicitly chose `fuzzed`.
+- `is_draft bool` — WIP state. Defaults to `true` (Drafts are public by default to promote Open Science streams, but hidden from featured/verified lists).
+- `visibility text` — Cloud sharing scope. Values are `public`, `friends`, or `private` (legacy `draft` scope has been retired).
+- `location_precision text` — `exact` or `fuzzed`.
 - `location_public bool` — legacy compatibility flag; new privacy behavior is driven by `visibility` and `location_precision`.
 - `image_key text` — relative R2 key of the cover image
 - `thumb_key text` — relative R2 key of the cover thumbnail
 
-Privacy slots are enforced by Supabase: a free account uses one slot when `visibility != 'public' OR location_precision = 'fuzzed'`. The current free limit is 20; pro accounts are unlimited.
+Privacy slots are enforced by a Postgres trigger: a free account uses one of its 20 slots when an observation is not fully transparent (`visibility != 'public' OR location_precision != 'exact'`). Pro accounts are unlimited.
 
 ### `follows`
 Stores the web social trail subscriptions used by the `Feed 🧭` tab:
