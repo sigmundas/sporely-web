@@ -22,10 +22,28 @@ export function getLocationName() {
   return document.getElementById('location-name-input')?.value.trim() || ''
 }
 
+export function openLocationSuggestions() {
+  const input = document.getElementById('location-name-input')
+  if (!input) return
+
+  try {
+    input.focus({ preventScroll: true })
+  } catch {
+    input.focus()
+  }
+
+  _renderDropdown(true)
+}
+
 // Call once in initReview() — wires manual input plus lookup suggestions.
 export function initLocationField() {
   const input = document.getElementById('location-name-input')
-  if (!input || input._locationWired) return
+  _wireReviewLocationTrigger()
+  if (!input) return
+  if (input._locationWired) {
+    _updateApplyBtn()
+    return
+  }
 
   input._locationWired = true
   input.readOnly = false
@@ -37,7 +55,7 @@ export function initLocationField() {
     _renderDropdown(document.activeElement === input)
   })
   input.addEventListener('blur', () => {
-    setTimeout(() => _renderDropdown(false), 160)
+    setTimeout(() => _renderDropdown(false), 250)
   })
 
   _updateApplyBtn()
@@ -74,27 +92,19 @@ function _applyLookupResult(result, key) {
     lastApplied = first
   }
 
+  const reviewLocation = document.getElementById('review-location')
+  if (reviewLocation && first) {
+    reviewLocation.textContent = first
+    reviewLocation.title = first
+  }
+
   _updateApplyBtn()
   _renderDropdown(document.activeElement === input)
 }
 
-function _ensureDropdown() {
-  const input = document.getElementById('location-name-input')
-  const wrap = input?.closest('.location-field-val')
-  if (!input || !wrap) return null
-  let dropdown = wrap.querySelector('.location-suggestion-dropdown')
-  if (!dropdown) {
-    dropdown = document.createElement('ul')
-    dropdown.className = 'location-suggestion-dropdown'
-    dropdown.style.display = 'none'
-    wrap.appendChild(dropdown)
-  }
-  return dropdown
-}
-
 function _renderDropdown(show) {
   const input = document.getElementById('location-name-input')
-  const dropdown = _ensureDropdown()
+  const dropdown = document.getElementById('location-suggestion-dropdown')
   if (!input || !dropdown) return
 
   if (!show || !suggestions.length) {
@@ -108,14 +118,18 @@ function _renderDropdown(show) {
     .join('')
   dropdown.style.display = 'block'
   dropdown.querySelectorAll('li').forEach((item, index) => {
-    item.addEventListener('mousedown', event => {
+    const handleSelect = event => {
       event.preventDefault()
+      event.stopPropagation()
       const name = suggestions[index] || ''
       input.value = name
       lastApplied = name
       dropdown.style.display = 'none'
       _updateApplyBtn()
-    })
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    item.addEventListener('mousedown', handleSelect)
+    item.addEventListener('touchstart', handleSelect, { passive: false })
   })
 }
 
@@ -124,6 +138,32 @@ function _updateApplyBtn() {
   if (!btn) return
   btn.style.display = 'none'
   btn.disabled = true
+}
+
+function _wireReviewLocationTrigger() {
+  const triggers = [
+    document.getElementById('review-location'),
+    document.getElementById('review-coords-text'),
+  ].filter(Boolean)
+
+  for (const el of triggers) {
+    if (el._locationTriggerWired) continue
+    el._locationTriggerWired = true
+
+    el.setAttribute('role', 'button')
+    el.setAttribute('tabindex', '0')
+
+    const open = event => {
+      event.preventDefault()
+      event.stopPropagation()
+      openLocationSuggestions()
+    }
+
+    el.addEventListener('click', open)
+    el.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') open(event)
+    })
+  }
 }
 
 function _esc(value) {

@@ -35,7 +35,7 @@ let detailImageSources = []
 let detailAiSources = []
 let detailAuthorProfile = null
 let detailFriendship = null
-let detailFollowState = { user: false, observation: false, taxon: false }
+let detailFollowState = { user: false, observation: false, taxon: false, genus: false }
 let detailPrivacySlotCount = null
 
 const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
@@ -93,9 +93,6 @@ export function initFindDetail() {
   document.getElementById('detail-ai-btn').addEventListener('click', _runAI)
   document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
   document.getElementById('detail-friend-btn')?.addEventListener('click', _sendFriendRequestFromDetail)
-  document.getElementById('detail-follow-user-btn')?.addEventListener('click', () => _toggleFollow('user'))
-  document.getElementById('detail-follow-observation-btn')?.addEventListener('click', () => _toggleFollow('observation'))
-  document.getElementById('detail-follow-taxon-btn')?.addEventListener('click', () => _toggleFollow('taxon'))
   document.querySelectorAll('input[name="detail-vis"], input[name="detail-location-precision"], #detail-draft').forEach(input => {
     input.addEventListener('change', event => {
       if (input.name === 'detail-vis' && input.checked) {
@@ -272,15 +269,35 @@ export async function openFindDetail(obsId, options = {}) {
   detailAiSources = []
   detailAuthorProfile = null
   detailFriendship = null
-  detailFollowState = { user: false, observation: false, taxon: false }
+  detailFollowState = { user: false, observation: false, taxon: false, genus: false }
+
+  let topRow = document.getElementById('detail-top-row');
+  let introEl = document.querySelector('.detail-intro');
+  if (!topRow && introEl) {
+    topRow = document.createElement('div');
+    topRow.id = 'detail-top-row';
+    topRow.className = 'detail-top-row';
+    introEl.parentNode.insertBefore(topRow, introEl);
+  }
+
+  let actionBar = document.getElementById('detail-action-bar');
+  if (!actionBar) {
+    actionBar = document.createElement('div');
+    actionBar.id = 'detail-action-bar';
+    actionBar.className = 'detail-action-bar';
+    const gallery = document.getElementById('detail-gallery');
+    if (gallery && gallery.parentNode) {
+      gallery.parentNode.insertBefore(actionBar, gallery);
+    }
+  }
 
   let bannerEl = document.getElementById('detail-status-banner');
   if (!bannerEl) {
     bannerEl = document.createElement('div');
     bannerEl.id = 'detail-status-banner';
-    if (gallery && gallery.parentNode) {
-      gallery.parentNode.insertBefore(bannerEl, gallery);
-    }
+  }
+  if (bannerEl.parentNode) {
+    bannerEl.parentNode.removeChild(bannerEl);
   }
 
   bannerEl.innerHTML = '';
@@ -309,6 +326,9 @@ export async function openFindDetail(obsId, options = {}) {
   }
 
   bannerEl.style.display = showBanner ? 'flex' : 'none';
+  if (topRow && bannerEl.parentNode !== topRow) {
+    topRow.appendChild(bannerEl);
+  }
 
   if (imgData?.length) {
     const originalSources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
@@ -618,7 +638,7 @@ function _resetForm() {
   _setDetailHeader({ fallbackName: t('detail.unknownSpecies') })
   detailAuthorProfile = null
   detailFriendship = null
-  detailFollowState = { user: false, observation: false, taxon: false }
+  detailFollowState = { user: false, observation: false, taxon: false, genus: false }
   detailPrivacySlotCount = null
   _renderDetailAuthorAndSocial()
   document.getElementById('detail-date').textContent  = '—'
@@ -698,13 +718,16 @@ function _renderDetailLocationDropdown(show) {
     .join('')
   dropdown.style.display = 'block'
   dropdown.querySelectorAll('li').forEach((item, index) => {
-    item.addEventListener('mousedown', event => {
+    const handleSelect = event => {
       event.preventDefault()
+      event.stopPropagation()
       const name = detailLocationSuggestions[index] || ''
       input.value = name
       detailLocationAutoApplied = name
       dropdown.style.display = 'none'
-    })
+    }
+    item.addEventListener('mousedown', handleSelect)
+    item.addEventListener('touchstart', handleSelect, { passive: false })
   })
 }
 
@@ -767,7 +790,7 @@ function _profileInitial(profile, fallback = '?') {
 async function _loadDetailAuthorAndSocial() {
   detailAuthorProfile = null
   detailFriendship = null
-  detailFollowState = { user: false, observation: false }
+  detailFollowState = { user: false, observation: false, taxon: false, genus: false }
   if (!currentObs?.user_id) return
 
   const isOwner = currentObs.user_id === state.user?.id
@@ -784,7 +807,7 @@ async function _loadDetailAuthorAndSocial() {
     .limit(1)
 
   const taxonFollow = _taxonFollowTarget(currentObs)
-  const followTargets = [currentObs.user_id, currentObs.id, taxonFollow?.targetId].filter(Boolean)
+  const followTargets = [currentObs.user_id, currentObs.id, taxonFollow?.targetId, currentObs.genus].filter(Boolean)
   const followsPromise = isOwner ? Promise.resolve({ data: [] }) : supabase
     .from('follows')
     .select('target_type, target_id')
@@ -800,6 +823,7 @@ async function _loadDetailAuthorAndSocial() {
       if (row.target_type === 'user' && String(row.target_id) === String(currentObs.user_id)) detailFollowState.user = true
       if (row.target_type === 'observation' && String(row.target_id) === String(currentObs.id)) detailFollowState.observation = true
       if (taxonFollow && row.target_type === taxonFollow.targetType && String(row.target_id).toLowerCase() === String(taxonFollow.targetId).toLowerCase()) detailFollowState.taxon = true
+      if (row.target_type === 'genus' && String(row.target_id).toLowerCase() === String(currentObs.genus || '').toLowerCase()) detailFollowState.genus = true
     }
   }
 }
@@ -809,58 +833,143 @@ function _renderDetailAuthorAndSocial() {
   const authorName = document.getElementById('detail-author-name')
   const authorAvatar = document.getElementById('detail-author-avatar')
   const socialRow = document.getElementById('detail-social-row')
-  const friendBtn = document.getElementById('detail-friend-btn')
-  const followUserBtn = document.getElementById('detail-follow-user-btn')
-  const followObsBtn = document.getElementById('detail-follow-observation-btn')
-  const followTaxonBtn = document.getElementById('detail-follow-taxon-btn')
   const isOwner = currentObs?.user_id === state.user?.id
   const taxonFollow = _taxonFollowTarget(currentObs)
+  const topRow = document.getElementById('detail-top-row')
 
   if (authorBtn && currentObs?.user_id) {
-    const label = isOwner ? t('common.you') : _profileLabel(detailAuthorProfile)
-    authorBtn.style.display = 'inline-flex'
-    if (authorName) authorName.textContent = label
+    const handle = isOwner ? t('common.you') : `@${detailAuthorProfile?.username || ''}`
+    const fullName = isOwner ? '' : (detailAuthorProfile?.display_name || '')
+    const showName = fullName && fullName !== detailAuthorProfile?.username
+    authorBtn.style.display = 'flex'
+    if (authorName) {
+      authorName.innerHTML = `<span class="author-handle">${_esc(handle)}</span>${showName ? `<span class="author-role">${_esc(fullName)}</span>` : ''}`
+    }
     if (authorAvatar) {
       const avatarUrl = detailAuthorProfile?.avatar_url || ''
       authorAvatar.innerHTML = avatarUrl
         ? `<img src="${_esc(avatarUrl)}" alt="" loading="lazy" decoding="async">`
-        : _esc(_profileInitial(detailAuthorProfile, label))
+        : _esc(_profileInitial(detailAuthorProfile, handle))
+    }
+    if (topRow && authorBtn.parentNode !== topRow) {
+      topRow.insertBefore(authorBtn, topRow.firstChild)
     }
   } else if (authorBtn) {
     authorBtn.style.display = 'none'
   }
 
-  if (socialRow) socialRow.style.display = !isOwner && currentObs?.user_id ? 'flex' : 'none'
-  if (followObsBtn) followObsBtn.style.display = !isOwner && currentObs?.id ? 'inline-flex' : 'none'
-  if (followTaxonBtn) followTaxonBtn.style.display = !isOwner && taxonFollow ? 'inline-flex' : 'none'
+  let actionBar = document.getElementById('detail-action-bar');
+  if (actionBar) {
+    if (isOwner || !currentObs?.user_id) {
+      actionBar.style.display = 'none';
+    } else {
+      actionBar.style.display = 'flex';
+      
+      const status = detailFriendship?.status || ''
+      const accepted = status === 'accepted'
+      const pending = status === 'pending'
+      
+      let friendText = accepted ? 'Friends' : (pending ? 'Pending' : 'Add Friend');
+      let friendIconClass = accepted ? 'friend-btn-icon active' : 'friend-btn-icon';
+      
+      let followText = '';
+      let followAction = '';
+      let isFollowActive = false;
+      
+      if (detailFollowState.taxon && taxonFollow && taxonFollow.targetType === 'species') {
+         followText = 'Following Species';
+         followAction = 'taxon';
+         isFollowActive = true;
+      } else if (detailFollowState.genus || (detailFollowState.taxon && taxonFollow && taxonFollow.targetType === 'genus')) {
+         followText = 'Following Genus';
+         followAction = 'genus';
+         isFollowActive = true;
+      }
+      
+      let followHtml = '';
+      if (isFollowActive) {
+        followHtml = `
+          <button id="new-follow-btn" class="action-btn active" data-action="${followAction}">
+            <svg class="follow-btn-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            <span>${followText}</span>
+          </button>
+        `;
+      } else {
+        followHtml = `
+          <div class="follow-dropdown-wrap" id="follow-dropdown-wrap">
+            <button id="new-follow-btn" class="action-btn follow-inactive">
+              <svg class="follow-btn-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon></svg>
+              <span>Follow</span>
+              <svg class="follow-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="follow-menu" id="follow-menu" style="display: none;">
+              ${taxonFollow && taxonFollow.targetType === 'species' ? `
+              <button class="follow-menu-item" data-action="taxon">
+                <span class="follow-menu-title">Follow Species</span>
+                <span class="follow-menu-sub">${_esc(taxonFollow.targetId)}</span>
+              </button>
+              ${currentObs.genus ? '<div class="follow-menu-div"></div>' : ''}
+              ` : ''}
+              ${currentObs.genus ? `
+              <button class="follow-menu-item" data-action="genus">
+                <span class="follow-menu-title">Follow Genus</span>
+                <span class="follow-menu-sub">${_esc(currentObs.genus)}</span>
+              </button>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }
 
-  if (friendBtn) {
-    const status = detailFriendship?.status || ''
-    const accepted = status === 'accepted'
-    const pending = status === 'pending'
-    friendBtn.textContent = accepted ? '❤️' : '🤍'
-    friendBtn.classList.toggle('active', accepted)
-    friendBtn.disabled = accepted || pending
-    friendBtn.title = accepted ? t('social.friendAccepted') : pending ? t('social.friendPending') : t('social.friendRequest')
-    friendBtn.setAttribute('aria-label', friendBtn.title)
-  }
-
-  if (followUserBtn) {
-    followUserBtn.classList.toggle('active', !!detailFollowState.user)
-    followUserBtn.title = detailFollowState.user ? t('social.unfollowUser') : t('social.followUser')
-    followUserBtn.setAttribute('aria-label', followUserBtn.title)
-  }
-
-  if (followObsBtn) {
-    followObsBtn.classList.toggle('active', !!detailFollowState.observation)
-    followObsBtn.title = detailFollowState.observation ? t('social.unfollowObservation') : t('social.followObservation')
-    followObsBtn.setAttribute('aria-label', followObsBtn.title)
-  }
-
-  if (followTaxonBtn && taxonFollow) {
-    followTaxonBtn.classList.toggle('active', !!detailFollowState.taxon)
-    followTaxonBtn.title = detailFollowState.taxon ? t('social.unfollowTaxon') : t('social.followTaxon')
-    followTaxonBtn.setAttribute('aria-label', followTaxonBtn.title)
+      actionBar.innerHTML = `
+        <button id="new-friend-btn" class="action-btn" ${accepted || pending ? 'disabled' : ''}>
+          <svg class="friend-btn-icon ${accepted ? 'is-friend' : ''}" width="20" height="20" viewBox="0 0 24 24" fill="${accepted ? 'var(--red)' : 'none'}" stroke="${accepted ? 'var(--red)' : 'currentColor'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
+          <span>${friendText}</span>
+        </button>
+        ${followHtml}
+      `;
+      
+      document.getElementById('new-friend-btn').addEventListener('click', _sendFriendRequestFromDetail);
+      
+      const followBtn = document.getElementById('new-follow-btn');
+      
+      if (isFollowActive) {
+        followBtn.addEventListener('click', (e) => {
+          _toggleFollowSpecific(followBtn.dataset.action);
+        });
+      } else {
+        const followWrap = document.getElementById('follow-dropdown-wrap');
+        const followMenu = document.getElementById('follow-menu');
+        
+        followBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const isOpening = followMenu.style.display === 'none';
+          followMenu.style.display = isOpening ? 'block' : 'none';
+          followBtn.classList.toggle('menu-open', isOpening);
+          
+          if (isOpening) {
+            const closeMenu = (ev) => {
+              if (!followWrap.contains(ev.target)) {
+                followMenu.style.display = 'none';
+                followBtn.classList.remove('menu-open');
+                document.removeEventListener('click', closeMenu);
+              }
+            };
+            setTimeout(() => document.addEventListener('click', closeMenu), 0);
+          }
+        });
+        
+        followMenu.querySelectorAll('.follow-menu-item').forEach(item => {
+          item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            followMenu.style.display = 'none';
+            followBtn.classList.remove('menu-open');
+            const action = item.dataset.action;
+            _toggleFollowSpecific(action);
+          });
+        });
+      }
+    }
   }
 }
 
@@ -885,7 +994,7 @@ function _openAuthorFinds() {
 
 async function _sendFriendRequestFromDetail() {
   if (!currentObs?.user_id || currentObs.user_id === state.user?.id) return
-  const btn = document.getElementById('detail-friend-btn')
+  const btn = document.getElementById('new-friend-btn') || document.getElementById('detail-friend-btn')
   if (btn) btn.disabled = true
   const { data, error } = await supabase
     .from('friendships')
@@ -899,19 +1008,41 @@ async function _sendFriendRequestFromDetail() {
     return
   }
 
+  showToast(t('social.friendRequestSent') || 'Friend request sent')
   detailFriendship = data || { status: 'pending' }
   _renderDetailAuthorAndSocial()
 }
 
-async function _toggleFollow(kind) {
+async function _toggleFollowSpecific(kind) {
   if (!currentObs || currentObs.user_id === state.user?.id) return
-  const taxonFollow = kind === 'taxon' ? _taxonFollowTarget(currentObs) : null
-  if (kind === 'taxon' && !taxonFollow) return
-  const targetType = kind === 'user' ? 'user' : kind === 'taxon' ? taxonFollow.targetType : 'observation'
-  const targetId = kind === 'user' ? currentObs.user_id : kind === 'taxon' ? taxonFollow.targetId : currentObs.id
-  const key = kind === 'taxon' ? 'taxon' : targetType === 'user' ? 'user' : 'observation'
-  const currentlyFollowing = !!detailFollowState[key]
-  const btn = document.getElementById(kind === 'user' ? 'detail-follow-user-btn' : kind === 'taxon' ? 'detail-follow-taxon-btn' : 'detail-follow-observation-btn')
+  let targetType, targetId, key;
+  
+  if (kind === 'genus') {
+    targetType = 'genus';
+    targetId = currentObs.genus;
+    key = 'genus';
+  } else if (kind === 'taxon') {
+    const tf = _taxonFollowTarget(currentObs);
+    if (!tf) return;
+    targetType = tf.targetType;
+    targetId = tf.targetId;
+    key = 'taxon';
+  } else if (kind === 'user') {
+    targetType = 'user';
+    targetId = currentObs.user_id;
+    key = 'user';
+  } else if (kind === 'observation') {
+    targetType = 'observation';
+    targetId = currentObs.id;
+    key = 'observation';
+  } else {
+    return;
+  }
+  
+  if (!targetId) return;
+
+  const currentlyFollowing = !!detailFollowState[key];
+  const btn = document.getElementById('new-follow-btn');
   if (btn) btn.disabled = true
 
   const result = currentlyFollowing

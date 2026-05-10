@@ -1320,7 +1320,7 @@ html, body {
   margin-bottom: 6px;
 }
 .find-card-scientific {
-  font-family: 'Instrument Serif', serif;
+  font-family: 'Outfit', sans-serif;
   font-style: italic; font-weight: 400;
   font-size: 15px;
 }
@@ -1476,26 +1476,24 @@ html, body {
 
 /* ── DETAIL STATUS BANNER ── */
 #detail-status-banner {
-  width: 100%;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
   display: flex;
-  gap: 8px;
-  padding: 8px 16px;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  width: auto;
+  justify-content: flex-end;
   flex-wrap: wrap;
-  align-items: center;
 }
 
 .detail-status-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 10px;
-  border-radius: 5px;
-  font-family: 'DM Mono', monospace;
-  font-size: 10px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
 }
 .detail-status-tag.tag-draft {
   background: var(--amber-dim);
@@ -1621,7 +1619,7 @@ html, body {
 }
 .detail-title-latin {
   margin-top: 1px;
-  font-family: 'Instrument Serif', 'Brush Script MT', cursive;
+  font-family: 'Outfit', sans-serif;
   font-size: 17px;
   line-height: 1.08;
   color: var(--text-secondary);
@@ -1636,39 +1634,58 @@ html, body {
   white-space: nowrap;
   grid-column: 1 / -1;
 }
-.detail-author {
-  display: inline-flex;
+.detail-top-row {
+  display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 7px;
-  max-width: 142px;
-  border: none;
+  padding-top: 8px;
+  margin-bottom: 12px;
+  width: 100%;
+}
+.detail-author {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   background: transparent;
-  color: var(--text-secondary);
-  font-family: 'Outfit', sans-serif;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 0;
+  border: none;
   cursor: pointer;
+  text-align: left;
+  padding: 0;
 }
 .detail-author-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+}
+.detail-author-name .author-handle {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+.detail-author-name .author-role {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.2;
+  margin-top: 2px;
 }
 .detail-author-avatar {
-  width: 28px;
-  height: 28px;
+  width: 40px;
+  height: 40px;
+  order: -1;
   border-radius: 999px;
-  border: 1px solid var(--green-mid);
   background: var(--green-deep);
   color: var(--green-accent);
-  display: inline-flex;
+  border: 2px solid var(--border);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
+  font-weight: 700;
+  font-size: 16px;
   overflow: hidden;
-  font-size: 11px;
+  flex-shrink: 0;
 }
 .detail-author-avatar img {
   width: 100%;
@@ -1676,34 +1693,121 @@ html, body {
   object-fit: cover;
   display: block;
 }
-.detail-social-row {
-  gap: 8px;
-  margin: -2px 0 10px;
+/* Hide legacy social buttons inside the species box / social row */
+#detail-follow-taxon-btn,
+#detail-follow-genus-btn,
+#detail-follow-observation-btn,
+#detail-follow-user-btn,
+#detail-social-row {
+  display: none !important;
 }
-.detail-social-btn,
-.detail-follow-btn {
-  display: inline-flex;
+.detail-action-bar {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--card);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 16px;
+  gap: 12px;
+  margin-top: 16px;
+  margin-bottom: 16px;
+  position: relative;
+  z-index: 20;
 }
-.detail-social-btn.active,
-.detail-follow-btn.active {
-  border-color: var(--green-mid);
+.action-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-weight: 500;
+  font-size: 14px;
+  font-family: 'Outfit', sans-serif;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+.action-btn.follow-inactive {
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
+  color: var(--btn-text);
+}
+.action-btn.follow-inactive:hover {
+  background: var(--btn-active);
+}
+.action-btn.active {
   background: var(--green-deep);
+  border: 1px solid var(--green-mid);
   color: var(--green-accent);
 }
-.detail-social-btn:disabled,
-.detail-follow-btn:disabled {
-  opacity: 0.7;
-  cursor: default;
+#new-friend-btn {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+#new-friend-btn:hover:not(:disabled) {
+  background: var(--card-raised);
+}
+.friend-btn-icon {
+  width: 20px;
+  height: 20px;
+}
+.friend-btn-icon.active {
+  fill: currentColor;
+}
+.follow-dropdown-wrap {
+  position: relative;
+}
+.follow-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 224px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.2);
+  padding: 8px 0;
+  z-index: 30;
+  transform-origin: top;
+  animation: menu-pop 0.15s ease-out forwards;
+}
+@keyframes menu-pop {
+  from { opacity: 0; transform: scaleY(0.95); }
+  to { opacity: 1; transform: scaleY(1); }
+}
+.follow-menu-item {
+  width: 100%;
+  text-align: left;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  transition: background 0.15s;
+}
+.follow-menu-item:hover {
+  background: var(--card-raised);
+}
+.follow-menu-title {
+  font-weight: 500;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.follow-menu-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+  margin-top: 2px;
+}
+.follow-menu-div {
+  height: 1px;
+  background: var(--border-dim);
+  width: 100%;
+}
+.follow-btn-icon, .follow-chevron {
+  width: 18px;
+  height: 18px;
+}
+.menu-open .follow-chevron {
+  transform: rotate(180deg);
 }
 .detail-coords-bar {
   font-family: 'DM Mono', monospace; font-size: 11px;
@@ -2025,8 +2129,26 @@ html, body {
   text-transform: uppercase; color: var(--text-dim);
   margin-bottom: 4px;
 }
-.review-location { font-size: 20px; font-weight: 700; color: var(--white); }
-.review-coords { display: flex; align-items: center; gap: 4px; font-family: 'DM Mono', monospace; font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+.review-location {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--white);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.review-location:active { opacity: 0.75; }
+.review-coords {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 3px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.review-coords:active { opacity: 0.75; }
 .close-btn {
   width: 32px; height: 32px; border-radius: 50%;
   background: var(--card); border: 1px solid var(--border);
@@ -2109,13 +2231,6 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   transition: border-color 0.15s;
 }
 .observation-card:active { border-color: var(--green-bright); }
-.capture-session-card {
-  border-radius: 12px;
-  overflow: hidden;
-  background: var(--card);
-  border: 1px solid var(--border);
-  padding: 12px;
-}
 .capture-session-empty {
   min-height: 140px;
   display: flex;
@@ -2254,13 +2369,15 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
-  overflow: hidden;
+  overflow: visible;
   margin-bottom: 20px;
 }
 .field-meta-header {
   padding: 10px 14px;
   background: var(--card-raised);
   border-bottom: 1px solid var(--border);
+  border-top-left-radius: 11px;
+  border-top-right-radius: 11px;
   font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
   text-transform: uppercase; color: var(--text-dim);
 }
@@ -2269,7 +2386,11 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-dim);
 }
-.field-meta-row:last-child { border-bottom: none; }
+.field-meta-row:last-child { 
+  border-bottom: none;
+  border-bottom-left-radius: 11px;
+  border-bottom-right-radius: 11px;
+}
 .field-meta-key { font-size: 11px; color: var(--text-secondary); letter-spacing: 0.04em; }
 .field-meta-val { font-family: 'DM Mono', monospace; font-size: 12px; color: var(--text-data); font-weight: 500; }
 .field-meta-val.green { color: var(--green-accent); }
@@ -2283,18 +2404,18 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
 }
 .location-field-val { display: flex; align-items: center; gap: 6px; justify-content: flex-end; flex: 1; position: relative; }
 .location-name-input {
-  background: transparent; border: none; border-bottom: 1px solid var(--border);
+  background: transparent; border: none;
   color: var(--text-data); font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500;
-  text-align: right; width: 150px; outline: none; padding: 0 2px;
+  text-align: right; width: 100%; outline: none; padding: 0 2px;
 }
 .location-name-input::placeholder { color: var(--text-dim); }
-.location-suggest-wrap { position: relative; }
+.location-suggest-wrap { position: relative; width: 100%; }
 .location-suggestion-dropdown {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
   right: 0;
-  z-index: 120;
+  z-index: 1000;
   margin: 0;
   padding: 4px 0;
   list-style: none;
@@ -2917,6 +3038,8 @@ html.light #ac-camera .action-card-icon,
 html.light #ac-camera .action-card-label { color: #ffffff; }
 /* Friend avatar initial — green-accent on green-deep */
 html.light .friend-avatar { color: #ffffff; }
+html.light .observation-author-chip--initial { color: #ffffff; }
+html.light .detail-author-avatar { color: #ffffff; }
 
 /* Primary button — restore dark green bg in light mode */
 html.light .btn-primary { background: var(--green-deep); border-color: var(--green-mid); color: #ffffff; }
@@ -2991,6 +3114,21 @@ html.light .btn-danger {
   color: var(--red);
 }
 html.light .btn-danger:active { background: #fee2e2; }
+html.light .action-btn.follow-inactive {
+  background: var(--green-bright);
+  border-color: var(--green-mid);
+  color: #fff;
+}
+html.light .action-btn.active {
+  background: var(--green-deep);
+  border-color: var(--green-deep);
+  color: #fff;
+}
+html.light #new-friend-btn {
+  background: #fff;
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
 
 /* Toggle thumb stays white regardless */
 html.light .detail-toggle-thumb { background: #ffffff; }

@@ -387,9 +387,7 @@ export function buildReviewGrid() {
   let html = ''
 
   if (count === 0) {
-    html = `<div class="capture-session-card" style="opacity:0.4;pointer-events:none">
-      <div class="capture-session-empty">${t('review.noCaptures')}</div>
-    </div>`
+    html = `<div class="capture-session-empty" style="opacity:0.4;pointer-events:none">${t('review.noCaptures')}</div>`
   } else {
     const displayName = sharedTaxon
       ? formatDisplayName(sharedTaxon.genus, sharedTaxon.specificEpithet, sharedTaxon.vernacularName)
@@ -407,50 +405,55 @@ export function buildReviewGrid() {
 
     const croppedCount = photos.filter(photo => hasAiCropRect(photo.aiCropRect)).length
 
-    html = `<div class="capture-session-card">
+    html = `
       <div class="detail-gallery capture-session-gallery" id="review-gallery"></div>
       <div class="capture-session-summary">${summary}</div>
       <div class="capture-session-crop-status">${croppedCount ? `${croppedCount}/${count} AI crop` : 'Tap a photo to add AI crop'}</div>
-      <div class="detail-field capture-session-species">
-        <div class="detail-field-label">${t('detail.species')}</div>
-        <div class="taxon-field-wrap">
-          <input
-            class="taxon-input detail-taxon-input"
-            type="text"
-            placeholder="${t('detail.unknownSpecies')}"
-            value="${displayName}"
-            data-idx="0"
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
+      
+      <div class="field-meta-section capture-session-species">
+        <div class="field-meta-header">${t('detail.species')}</div>
+        <div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;">
+          <div class="taxon-field-wrap">
+            <input
+              class="taxon-input detail-taxon-input"
+              type="text"
+              placeholder="${t('detail.unknownSpecies')}"
+              value="${displayName}"
+              data-idx="0"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
+          </div>
+          ${hasBlob ? `<div class="detail-ai-row" style="margin-top: 0;">
+            <button class="ai-id-btn" id="review-ai-btn" style="width:100%">
+              <div class="ai-dot"></div> ${t('detail.identifyAI')}
+            </button>
+          </div>` : ''}
+          <div class="artsorakel-results" data-idx="0" style="display:none"></div>
+          <div class="detail-uncertain-row" style="display:flex;align-items:center;justify-content:space-between;width:100%;">
+            <span class="field-meta-key">${t('detail.idNeeded') || 'Uncertain ID'}</span>
+            <label class="detail-toggle">
+              <input type="checkbox" id="review-uncertain-card" ${state.captureDraft.uncertain ? 'checked' : ''}>
+              <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
+            </label>
+          </div>
+          <div class="detail-draft-row" style="display:flex;align-items:center;justify-content:space-between;width:100%;">
+            <span class="field-meta-key">${t('detail.draft') || 'Draft'}</span>
+            <label class="detail-toggle">
+              <input type="checkbox" id="review-draft-card" ${state.captureDraft.is_draft !== false ? 'checked' : ''}>
+              <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
+            </label>
+          </div>
         </div>
-        ${hasBlob ? `<div class="detail-ai-row">
-          <button class="ai-id-btn" id="review-ai-btn" style="width:100%">
-            <div class="ai-dot"></div> ${t('detail.identifyAI')}
-          </button>
-        </div>` : ''}
-        <div class="artsorakel-results" data-idx="0" style="display:none"></div>
-        <div class="detail-uncertain-row" style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;width:100%;">
-          <span class="field-meta-key">${t('detail.idNeeded') || 'Uncertain ID'}</span>
-          <label class="detail-toggle">
-            <input type="checkbox" id="review-uncertain-card" ${state.captureDraft.uncertain ? 'checked' : ''}>
-            <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
-          </label>
-        </div>
-        <div class="detail-draft-row" style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;width:100%;">
-          <span class="field-meta-key">${t('detail.draft') || 'Draft'}</span>
-          <label class="detail-toggle">
-            <input type="checkbox" id="review-draft-card" ${state.captureDraft.is_draft !== false ? 'checked' : ''}>
-            <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
-          </label>
-        </div>
-      </div>
-    </div>`
+      </div>`
   }
 
   grid.innerHTML = html
 
+  // Re-run the idempotent location wiring after the review body/card content
+  // has been rebuilt.
+  initLocationField()
   wireCardEvents()
   loadThumbnails(photos)
 }

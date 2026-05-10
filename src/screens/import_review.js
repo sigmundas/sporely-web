@@ -1516,8 +1516,9 @@ function _renderImportLocationDropdown(sid, show) {
     .join('');
   dropdown.style.display = 'block';
   dropdown.querySelectorAll('li').forEach((item, index) => {
-    item.addEventListener('mousedown', event => {
+    const handleSelect = event => {
       event.preventDefault();
+      event.stopPropagation();
       const name = options[index] || '';
       const nextSession = sessionById(sid);
       if (nextSession) {
@@ -1529,7 +1530,9 @@ function _renderImportLocationDropdown(sid, show) {
       if (locEl) locEl.textContent = name || '—';
       dropdown.style.display = 'none';
       _persistSessions();
-    });
+    }
+    item.addEventListener('mousedown', handleSelect);
+    item.addEventListener('touchstart', handleSelect, { passive: false });
   });
 }
 
