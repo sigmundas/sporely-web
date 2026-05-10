@@ -8,6 +8,7 @@ import {
   getViewportStateFromCropRect,
   normalizeAiCropRect,
 } from './image_crop.js'
+import { t } from './i18n.js'
 
 let overlay = null
 let titleEl = null
@@ -92,7 +93,7 @@ function _commitCurrentCrop() {
 function _syncChrome() {
   if (!session) return
 
-  titleEl.textContent = session.title || 'AI crop'
+  titleEl.textContent = session.title || t('crop.title') || 'AI crop'
   counterEl.textContent = session.images.length > 1 ? `${currentIndex + 1} / ${session.images.length}` : ''
   prevBtn.style.display = currentIndex > 0 ? 'flex' : 'none'
   nextBtn.style.display = currentIndex < session.images.length - 1 ? 'flex' : 'none'
@@ -285,7 +286,7 @@ export function openAiCropEditor(options) {
   if (!overlay || !options?.images?.length) return
 
   session = {
-    title: options.title || 'AI crop',
+    title: options.title || t('crop.title') || 'AI crop',
     images: options.images,
     onChange: options.onChange,
     onClose: options.onClose,

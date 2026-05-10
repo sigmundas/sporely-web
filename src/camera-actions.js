@@ -1,6 +1,7 @@
 import { t } from './i18n.js'
 import { navigate } from './router.js'
 import { getUseSystemCamera } from './settings.js'
+import { isNativeApp, isAndroidApp } from './platform.js'
 
 const ANDROID_WEB_CAMERA_WARNING_KEY = 'sporely-hide-android-web-camera-warning'
 
@@ -11,15 +12,14 @@ export function setNativeCameraOpener(opener) {
 }
 
 export function isAndroidNativeApp() {
-  return !!window.Capacitor?.isNativePlatform?.()
-    && window.Capacitor?.getPlatform?.() === 'android'
+  return isAndroidApp()
 }
 
 function _isIosWebApp() {
   const ua = navigator.userAgent || ''
   const navPlatform = navigator.platform || ''
   const capacitorPlatform = window.Capacitor?.getPlatform?.()
-  if (window.Capacitor?.isNativePlatform?.()) return false
+  if (isNativeApp()) return false
   return capacitorPlatform === 'ios'
     || /iphone|ipad|ipod/i.test(ua)
     || (/macintosh/i.test(ua) && /mac/i.test(navPlatform) && Number(navigator.maxTouchPoints || 0) > 1)
@@ -27,7 +27,7 @@ function _isIosWebApp() {
 
 function _isAndroidWebApp() {
   const platform = window.Capacitor?.getPlatform?.()
-  if (window.Capacitor?.isNativePlatform?.() || platform === 'android') return false
+  if (isNativeApp() || platform === 'android') return false
   return /android/i.test(navigator.userAgent || '')
 }
 

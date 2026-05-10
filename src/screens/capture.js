@@ -115,14 +115,14 @@ async function _getPrimaryMainCameraId() {
             return cachedPrimaryMainCameraId
           }
         } catch (err) {
-          console.warn('Torch heuristic: failed to inspect camera:', device.label || device.deviceId, err)
+          if (import.meta.env.DEV) console.warn('Torch heuristic: failed to inspect camera:', device.label || device.deviceId, err)
         }
       }
 
-          if (import.meta.env.DEV) console.log('Torch heuristic: no torch-capable camera found; falling back to environment camera.')
+      if (import.meta.env.DEV) console.log('Torch heuristic: no torch-capable camera found; falling back to environment camera.')
       return null
     } catch (err) {
-      console.warn('Torch heuristic failed:', err)
+      if (import.meta.env.DEV) console.warn('Torch heuristic failed:', err)
       if (_isPermissionDeniedError(err)) throw err
       return null
     } finally {
@@ -148,7 +148,7 @@ async function _applyPrimaryLensPreferences(stream) {
       }
     }
   } catch (err) {
-    console.warn('Camera zoom preference could not be applied:', err)
+    if (import.meta.env.DEV) console.warn('Camera zoom preference could not be applied:', err)
   }
 
   if (typeof track.getSettings === 'function') {
@@ -175,7 +175,7 @@ async function tryGetUserMedia() {
       return stream
     } catch (err) {
       cachedPrimaryMainCameraId = null
-      console.warn('Failed to start camera with heuristic deviceId, falling back...', err)
+      if (import.meta.env.DEV) console.warn('Failed to start camera with heuristic deviceId, falling back...', err)
     }
   }
 
@@ -272,7 +272,7 @@ async function _takeStillPhoto(video) {
       if (capabilities?.fillLightMode?.includes?.('off')) photoSettings.fillLightMode = 'off'
     }
   } catch (err) {
-    console.warn('Photo capabilities unavailable; taking still with defaults:', err)
+    if (import.meta.env.DEV) console.warn('Photo capabilities unavailable; taking still with defaults:', err)
   }
 
   const blob = await imageCapture.takePhoto(photoSettings)
@@ -291,7 +291,7 @@ async function _captureVideoFrame(video) {
   const h = video.videoHeight
 
   if (!w || !h) {
-    showToast('Camera not fully ready')
+    showToast(t('capture.cameraNotReady') || 'Camera not fully ready')
     return null
   }
 
@@ -309,60 +309,6 @@ async function _captureVideoFrame(video) {
 
   if (import.meta.env.DEV) console.log('Captured fallback video frame:', { width: w, height: h, bytes: blob.size })
   return blob
-}
-
-async function _loadImage(blob) {
-  return await new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(blob)
-    const img = new Image()
-    img.onload = () => {
-      URL.revokeObjectURL(url)
-      resolve(img)
-    }
-    img.onerror = () => {
-      URL.revokeObjectURL(url)
-      reject(new Error('Image decode failed'))
-    }
-    img.src = url
-  })
-}
-
-async function _resizeCaptureBlobForPolicy(blob) {
-  if (!_isBlob(blob)) return blob
-  const policy = getEffectiveCloudUploadPolicy(state.cloudPlan)
-  const maxPixels = Number(policy?.maxPixels) || 0
-  if (!maxPixels || policy.uploadMode === 'full') return blob
-
-  let img
-  try {
-    img = await _loadImage(blob)
-  } catch (err) {
-    console.warn('Could not decode captured image for resolution policy:', err)
-    return blob
-  }
-
-  const sourceWidth = img.naturalWidth || img.width
-  const sourceHeight = img.naturalHeight || img.height
-  const sourcePixels = sourceWidth * sourceHeight
-  if (!sourceWidth || !sourceHeight || sourcePixels <= maxPixels) return blob
-
-  const scale = Math.sqrt(maxPixels / sourcePixels)
-  const targetWidth = Math.max(1, Math.round(sourceWidth * scale))
-  const targetHeight = Math.max(1, Math.round(sourceHeight * scale))
-  const canvas = document.createElement('canvas')
-  canvas.width = targetWidth
-  canvas.height = targetHeight
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return blob
-  ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
-
-  const resized = await new Promise((resolve, reject) => {
-    canvas.toBlob(nextBlob => {
-      if (nextBlob) resolve(nextBlob)
-      else reject(new Error('Capture resize failed'))
-    }, 'image/jpeg', 0.9)
-  })
-  return resized
 }
 
 function _syncCaptureControls() {
@@ -388,7 +334,7 @@ async function _captureCameraBlob(video) {
     const stillBlob = await _takeStillPhoto(video)
     if (_isBlob(stillBlob)) blob = stillBlob
   } catch (err) {
-    console.warn('ImageCapture still photo failed; falling back to video frame:', err)
+    if (import.meta.env.DEV) console.warn('ImageCapture still photo failed; falling back to video frame:', err)
   }
   if (!_isBlob(blob)) blob = await _captureVideoFrame(video)
   return blob
@@ -501,7 +447,7 @@ function capturePhoto() {
     const previewW = video.videoWidth
     const previewH = video.videoHeight
     if (!previewW || !previewH) {
-      showToast('Camera not fully ready')
+      showToast(t('capture.cameraNotReady') || 'Camera not fully ready')
       return
     }
 
@@ -552,7 +498,7 @@ function capturePhoto() {
 function finishCapture() {
   if (pendingCaptureCount > 0) {
     finishCaptureWhenPendingComplete = true
-    showToast('Saving photo...')
+    showToast(t('capture.savingPhoto') || 'Saving photo...')
     return
   }
   stopCamera()
@@ -569,7 +515,7 @@ function finishCapture() {
     _syncCaptureControls()
     Promise.resolve(handler(photos)).catch(error => {
       console.error('Capture completion handler failed:', error)
-      showToast(error?.message || 'Could not add captured photo')
+      showToast(error?.message || t('capture.addPhotoError') || 'Could not add captured photo')
     })
     return
   }
