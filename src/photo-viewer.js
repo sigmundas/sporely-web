@@ -29,6 +29,13 @@ export function initPhotoViewer() {
   _img.addEventListener('touchmove', _onTouchMove, { passive: false })
   _img.addEventListener('touchend', _onTouchEnd, { passive: false })
 
+  _img.addEventListener('error', () => {
+    if (_img.dataset.fallbackSrc && _img.dataset.fallbackApplied !== 'true') {
+      _img.dataset.fallbackApplied = 'true'
+      _img.src = _img.dataset.fallbackSrc
+    }
+  })
+
   document.addEventListener('keydown', e => {
     if (_overlay.style.display === 'none') return
     if (e.key === 'ArrowLeft') _navigate(-1)
@@ -54,7 +61,15 @@ export function closePhotoViewer() {
 
 function _showCurrent() {
   _resetTransform()
-  _img.src = _photos[_current]
+  const photo = _photos[_current]
+  _img.src = typeof photo === 'string' ? photo : (photo?.src || '')
+  if (typeof photo === 'object' && photo.fallbackSrc) {
+    _img.dataset.fallbackSrc = photo.fallbackSrc
+    _img.dataset.fallbackApplied = 'false'
+  } else {
+    delete _img.dataset.fallbackSrc
+    delete _img.dataset.fallbackApplied
+  }
   _counter.textContent = _photos.length > 1 ? `${_current + 1} / ${_photos.length}` : ''
   _prevBtn.style.display = (_current > 0 && _photos.length > 1) ? 'flex' : 'none'
   _nextBtn.style.display = (_current < _photos.length - 1 && _photos.length > 1) ? 'flex' : 'none'
@@ -104,7 +119,14 @@ function _onTouchStart(e) {
       if (_scale > 1) {
         _resetTransform()
       } else {
+          const cx = window.innerWidth / 2
+          const cy = window.innerHeight / 2
+          const tx = e.touches[0].clientX
+          const ty = e.touches[0].clientY
         _scale = 2.5
+          _panX = tx - cx - (tx - cx - _panX) * 2.5
+          _panY = ty - cy - (ty - cy - _panY) * 2.5
+          _constrainPan()
         _applyTransform()
       }
       _lastTap = 0
@@ -128,8 +150,13 @@ function _onTouchMove(e) {
     const my0 = (_startTouches[0].clientY + _startTouches[1].clientY) / 2
     const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2
     const my = (e.touches[0].clientY + e.touches[1].clientY) / 2
-    _panX = _startPanX + (mx - mx0)
-    _panY = _startPanY + (my - my0)
+    
+    const cx = window.innerWidth / 2
+    const cy = window.innerHeight / 2
+    const ratio = _scale / _startScale
+    _panX = mx - cx - (mx0 - cx - _startPanX) * ratio
+    _panY = my - cy - (my0 - cy - _startPanY) * ratio
+
     _constrainPan()
     _applyTransform()
   } else if (e.touches.length === 1 && _startTouches?.length === 1) {

@@ -4,7 +4,6 @@ import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
-import { getEffectiveCloudUploadPolicy } from '../cloud-plan.js'
 import { isNativeApp } from '../platform.js'
 
 let cachedPrimaryMainCameraId = null
@@ -192,22 +191,9 @@ async function tryGetUserMedia() {
     await _applyPrimaryLensPreferences(stream)
     return stream
   } catch {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: CAMERA_VIDEO_WIDTH_IDEAL },
-          height: { ideal: CAMERA_VIDEO_HEIGHT_IDEAL },
-        },
-        audio: false,
-      })
-      await _applyPrimaryLensPreferences(stream)
-      return stream
-    } catch {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
-      await _applyPrimaryLensPreferences(stream)
-      return stream
-    }
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
+    await _applyPrimaryLensPreferences(stream)
+    return stream
   }
 }
 
@@ -267,8 +253,8 @@ async function _takeStillPhoto(video) {
       const capabilities = await imageCapture.getPhotoCapabilities()
       const imageWidth = _finiteMaxRangeValue(capabilities?.imageWidth)
       const imageHeight = _finiteMaxRangeValue(capabilities?.imageHeight)
-      if (imageWidth) photoSettings.imageWidth = imageWidth
-      if (imageHeight) photoSettings.imageHeight = imageHeight
+      if (imageWidth) photoSettings.imageWidth = Math.min(imageWidth, CAMERA_VIDEO_WIDTH_IDEAL)
+      if (imageHeight) photoSettings.imageHeight = Math.min(imageHeight, CAMERA_VIDEO_HEIGHT_IDEAL)
       if (capabilities?.fillLightMode?.includes?.('off')) photoSettings.fillLightMode = 'off'
     }
   } catch (err) {

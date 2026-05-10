@@ -438,11 +438,11 @@
             <div class="field-meta-val" id="meta-altitude">— ASL</div>
           </div>
           <div class="field-meta-row">
-            <div class="field-meta-key" id="review-location-precision-label">Location precision</div>
+            <div class="field-meta-key" id="review-location-precision-label">Obscure location</div>
             <div class="field-meta-val">
-              <label class="detail-pill-toggle">
+              <label class="detail-toggle">
                 <input type="checkbox" id="review-obscured">
-                <span>Obscured</span>
+                <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
               </label>
             </div>
           </div>
@@ -458,30 +458,12 @@
           <textarea id="review-notes" class="detail-textarea" placeholder="Field notes…" rows="4"></textarea>
         </div>
 
-        <div class="field-meta-section" style="margin-bottom:20px">
-          <div class="field-meta-row">
-            <div class="field-meta-key">Uncertain ID</div>
-            <label class="detail-toggle">
-              <input type="checkbox" id="review-uncertain">
-              <span class="detail-toggle-track"><span class="detail-toggle-thumb"></span></span>
-            </label>
-          </div>
-        </div>
-
-        <div class="detail-field" style="margin-bottom:12px">
-          <div class="detail-field-label">Workflow</div>
-          <label class="detail-pill-toggle">
-            <input type="checkbox" id="review-draft" checked>
-            <span>Draft</span>
-          </label>
-        </div>
-
         <div class="detail-field" style="margin-bottom:12px">
           <div class="detail-field-label">Sharing</div>
           <div class="scope-tabs" id="review-visibility" style="display:inline-flex">
-            <label class="scope-tab"><input type="radio" name="review-vis" value="private" style="display:none"> <span>Private</span></label>
-            <label class="scope-tab"><input type="radio" name="review-vis" value="friends" style="display:none"> <span>Friends</span></label>
-            <label class="scope-tab active"><input type="radio" name="review-vis" value="public" style="display:none" checked> <span>Public</span></label>
+            <label class="scope-tab"><input type="radio" name="review-vis" value="private"> <span>Private</span></label>
+            <label class="scope-tab"><input type="radio" name="review-vis" value="friends"> <span>Friends</span></label>
+            <label class="scope-tab active"><input type="radio" name="review-vis" value="public" checked> <span>Public</span></label>
           </div>
         </div>
       </div>
@@ -528,7 +510,6 @@
           <button class="detail-social-btn" id="detail-follow-user-btn" type="button">🧭</button>
         </div>
         <div class="detail-gallery" id="detail-gallery"></div>
-        <div class="detail-coords-bar" id="detail-coords" style="display:none"></div>
 
         <div class="detail-form">
           <div class="detail-field">
@@ -545,21 +526,44 @@
               <button class="detail-follow-btn" id="detail-follow-observation-btn" type="button" aria-label="Follow observation" title="Follow observation">🧭</button>
               <button class="detail-follow-btn" id="detail-follow-taxon-btn" type="button" aria-label="Follow species" title="Follow species">S</button>
             </div>
+            <div class="detail-uncertain-row" style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;width:100%;">
+              <span class="field-meta-key" id="detail-uncertain-label">Uncertain ID</span>
+              <label class="detail-toggle">
+                <input type="checkbox" id="detail-uncertain">
+                <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
+              </label>
+            </div>
+            <div class="detail-draft-row" style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;width:100%;">
+              <span class="field-meta-key" id="detail-draft-label">Draft</span>
+              <label class="detail-toggle">
+                <input type="checkbox" id="detail-draft">
+                <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
+              </label>
+            </div>
             <div id="detail-ai-results" style="display:none"></div>
           </div>
 
-          <div class="detail-field">
-            <div class="detail-field-label">Location</div>
-            <div class="location-suggest-wrap detail-location-wrap">
-              <input id="detail-location" class="detail-text-input" type="text" placeholder="—" autocomplete="off" spellcheck="false">
-              <ul id="detail-location-dropdown" class="location-suggestion-dropdown" style="display:none"></ul>
+          <div class="field-meta-section">
+            <div class="field-meta-header" id="detail-location-data-header">Location data</div>
+            <div class="field-meta-row">
+              <div class="field-meta-key" id="detail-location-label">Location</div>
+              <div class="field-meta-val location-field-val">
+                <div class="location-suggest-wrap detail-location-wrap">
+                  <input id="detail-location" type="text" placeholder="—" class="location-name-input" autocomplete="off" spellcheck="false">
+                  <ul id="detail-location-dropdown" class="location-suggestion-dropdown" style="display:none"></ul>
+                </div>
+                <button id="detail-current-location-btn" class="location-apply-btn detail-location-btn" style="display:none; position:absolute; right:0; top:100%; z-index:10; margin-top:8px;">Current location</button>
+              </div>
             </div>
-            <button id="detail-current-location-btn" class="location-apply-btn detail-location-btn" style="display:none">Current location</button>
-            <div style="margin-top: 8px;">
-              <label class="detail-pill-toggle">
-                <input type="checkbox" id="detail-obscured">
-                <span>Obscured</span>
-              </label>
+            <div id="detail-coords" style="display:none;"></div>
+            <div class="field-meta-row">
+              <span class="field-meta-key" id="detail-location-precision-label">Obscure location</span>
+              <div class="field-meta-val">
+                <label class="detail-toggle">
+                  <input type="checkbox" id="detail-obscured">
+                  <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
+                </label>
+              </div>
             </div>
           </div>
 
@@ -573,30 +577,12 @@
             <textarea id="detail-notes" class="detail-textarea" placeholder="Field notes…" rows="4"></textarea>
           </div>
 
-          <div class="field-meta-section" style="margin-top:12px">
-            <div class="field-meta-row">
-              <div class="field-meta-key">Uncertain ID</div>
-              <label class="detail-toggle">
-                <input type="checkbox" id="detail-uncertain">
-                <span class="detail-toggle-track"><span class="detail-toggle-thumb"></span></span>
-              </label>
-            </div>
-          </div>
-
-          <div class="detail-field" style="margin-top:8px">
-            <div class="detail-field-label" id="detail-draft-label">Workflow</div>
-            <label class="detail-pill-toggle">
-              <input type="checkbox" id="detail-draft">
-              <span id="detail-draft-pill">Draft</span>
-            </label>
-          </div>
-
           <div class="detail-field" style="margin-top:8px">
             <div class="detail-field-label" id="detail-sharing-label">Sharing</div>
             <div class="scope-tabs" id="detail-visibility" style="display:inline-flex">
-              <label class="scope-tab"><input type="radio" name="detail-vis" value="private" style="display:none"> <span>Private</span></label>
-              <label class="scope-tab"><input type="radio" name="detail-vis" value="friends" style="display:none"> <span>Friends</span></label>
-              <label class="scope-tab"><input type="radio" name="detail-vis" value="public" style="display:none"> <span>Public</span></label>
+              <label class="scope-tab"><input type="radio" name="detail-vis" value="private"> <span>Private</span></label>
+              <label class="scope-tab"><input type="radio" name="detail-vis" value="friends"> <span>Friends</span></label>
+              <label class="scope-tab"><input type="radio" name="detail-vis" value="public"> <span>Public</span></label>
             </div>
             <div class="privacy-slot-note" id="detail-privacy-slot-note"></div>
           </div>

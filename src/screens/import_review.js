@@ -1466,9 +1466,9 @@ function buildCardHTML(session) {
     <div class="detail-field" style="margin-top:8px">
       <div class="detail-field-label">${t('detail.sharing')}</div>
       <div class="scope-tabs" style="display:inline-flex">
-        <label class="scope-tab ${sessionVisibility === 'private' ? 'active' : ''}"><input type="radio" class="import-vis-radio" style="display:none" name="vis-${sid}" data-sid="${sid}" value="private" ${visChecked('private')}> <span>${translateVisibility('private')}</span></label>
-        <label class="scope-tab ${sessionVisibility === 'friends' ? 'active' : ''}"><input type="radio" class="import-vis-radio" style="display:none" name="vis-${sid}" data-sid="${sid}" value="friends" ${visChecked('friends')}> <span>${translateVisibility('friends')}</span></label>
-        <label class="scope-tab ${sessionVisibility === 'public' ? 'active' : ''}"><input type="radio" class="import-vis-radio" style="display:none" name="vis-${sid}" data-sid="${sid}" value="public" ${visChecked('public')}> <span>${translateVisibility('public')}</span></label>
+        <label class="scope-tab ${sessionVisibility === 'private' ? 'active' : ''}"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="private" ${visChecked('private')}> <span>${translateVisibility('private')}</span></label>
+        <label class="scope-tab ${sessionVisibility === 'friends' ? 'active' : ''}"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="friends" ${visChecked('friends')}> <span>${translateVisibility('friends')}</span></label>
+        <label class="scope-tab ${sessionVisibility === 'public' ? 'active' : ''}"><input type="radio" class="import-vis-radio" name="vis-${sid}" data-sid="${sid}" value="public" ${visChecked('public')}> <span>${translateVisibility('public')}</span></label>
       </div>
     </div>
   </div>

@@ -1,13 +1,7 @@
 # Sporely-web Development Plan
 
 ## Phase 7 - Transparency, Social Trails, and Privacy Slots
-- [x] Remove sticky capture visibility toggle. New capture/review flows default to public draft observations.
-- [x] Save new web observations with `visibility = public`, `is_draft = true`, and `location_precision = exact`.
-- [x] Add `Feed 🧭` tab backed by `observations_follow_view`.
-- [x] Add Draft badge on gallery cards when `is_draft = true`.
-- [x] Add Find Detail author avatar/name, friend request, follow-user, and follow-observation controls.
-- [x] Add `(1 slot)` labels under Private and Friends in Find Detail for free users.
-- [ ] Apply and verify `database/supabase_phase7_transparency_social_trails.sql` in Supabase after the original Phase 7 migration.
+
 - [ ] Verify disposable-account RLS paths for owner, accepted friend, stranger, blocked user, banned profile, and privacy slot limit.
 
 ## Camera Behavior Summary (Sporely Cam vs Web Cam)
@@ -23,25 +17,14 @@
 - **Metadata:** Mobile browsers aggressively strip EXIF data (like GPS coordinates) from browser-based captures to protect privacy.
 - **UI Handling:** The app displays an `android-web-camera-warning-overlay` and `exif-warning-overlay` to advise Android web users of this limitation, recommending they install the native Sporely app for proper location handling and image quality.
 
+## UI fixes, minor
+- Lock screen rotation for the app in general - camera should still record orientation
+- Make a distinct draft/obscured/private banner that is as wide as the screen. Place this just above the thumbnail view in edit-observations. So if an observation is obscured, draft or private, make a tag in this banner for each condition that is true. Remove those other Draft and obscured tags that are now in the upper left corner.
+- edit observation - Location group: replace this box with the same box called Location data on the review screen (after taking a single photo)
+- remove the Workflow box, with the Draft toggle. Put the Draft toggle in the Sharing box.
+- add the Uncertain ID toggle to the Species box
 
-
-## UI fixes - Avatar Display & Private Buckets (Continued)
-- **Issue**: Even after the previous URL handling logic, avatars for other users were completely failing to load across all tabs. The only avatar that successfully loaded was the current user's avatar in the top-right profile corner.
-- **Root Cause & Solution**: The `avatars` bucket in Supabase is set to private. Therefore, attempting to use `getPublicUrl()` blindly creates URLs that instantly return a 403 Forbidden or 400 from Supabase for any user looking at them. The current user's profile button worked precisely because `profile.js` explicitly had logic to fall back and request a secure `createSignedUrl` if the public one failed to load.
-- **Fix Applied**: Instead of hacking asynchronous error-fallback listeners onto every single `<img>` tag in the DOM, I intercepted the core data loading streams (`_loadProfileMap` in `home.js`, `_loadProfilesForScope` in `finds.js`, `_loadRecentPublicPeople` in `people.js`, and the observer logic in `find_detail.js`). Using Supabase's `createSignedUrls` API, the application now securely bulk-fetches temporary, working signed URLs for every user displayed on screen before the HTML is even rendered.
-
-## UI fixes - Avatar Display & Light Mode
-- **Issue**: Avatars were showing up as broken links, and the fallback initials were invisible in light mode (appearing as just a blank green circle/square).
-- **What was tried**: 
-  - Updated `avatar_url` handling in `home.js` and `find_detail.js` to correctly resolve relative Supabase Storage URLs to public URLs.
-  - Replaced the custom "Unknown" user bar in `finds.js` by reusing the native People card component from `people.js`.
-  - Fixed JavaScript `ReferenceError`s caused by exposing and renaming internal `_buildPeopleCard` and `_wireAvatarFallback` methods.
-  - Fortified `wireAvatarFallback` to detect 0-width natural images that fail silently before the `onerror` listener binds.
-  - Re-wrote the `onerror` fallback logic for the Home tab author chip to completely replace the `<img/>` with initials, preventing CSS clipping issues.
-- **Root Cause & Next Steps**: The user was still only seeing "initials" (or blank green circles) because they had no avatar uploaded, but the CSS colors for the fallback text in **light mode** were exactly the same as the background (`--green-accent` on `--green-deep`), rendering the text invisible.
-- **Fix Applied**: Updated `src/style.css` to force the text color to `#ffffff` for `.observation-author-chip--initial`, `.people-card-avatar-fallback`, and `.detail-author-avatar` exclusively in `html.light`.
-
-## UI fixes
+## UI fixes, major
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
 - Add a legend drop-down to the map page. Selection: Genus (more will come). this will show a legend with colors, corresponding the the dots on the map.
 

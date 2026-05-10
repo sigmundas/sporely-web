@@ -786,6 +786,14 @@ html, body {
 .scope-tab.active {
   background: var(--green-deep); color: var(--green-accent);
 }
+.scope-tab input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+  pointer-events: none;
+}
 .finds-search-bar {
   overflow: hidden;
   max-height: 0;
@@ -1466,6 +1474,45 @@ html, body {
 .screen-fab:active,
 .finds-fab:active { transform: scale(0.93); box-shadow: 0 2px 10px rgba(94,180,90,0.2); }
 
+/* ── DETAIL STATUS BANNER ── */
+#detail-status-banner {
+  width: 100%;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.detail-status-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.detail-status-tag.tag-draft {
+  background: var(--amber-dim);
+  border: 1px solid rgba(212,146,74,0.35);
+  color: var(--amber);
+}
+.detail-status-tag.tag-obscured {
+  background: rgba(90,158,98,0.12);
+  border: 1px solid rgba(90,158,98,0.3);
+  color: var(--green-bright);
+}
+.detail-status-tag.tag-private {
+  background: var(--red-dim);
+  border: 1px solid rgba(192,88,72,0.35);
+  color: var(--red);
+}
+
 /* ── FIND DETAIL SCREEN ── */
 .detail-back-btn {
   display: flex; align-items: center; gap: 4px;
@@ -1610,8 +1657,6 @@ html, body {
   white-space: nowrap;
 }
 .detail-author-avatar {
-  width: 36px !important;
-  height: 36px !important;
   width: 28px;
   height: 28px;
   border-radius: 999px;
@@ -3503,7 +3548,3 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
 }
 .mention-dropdown li:last-child { border-bottom: none; }
 .mention-dropdown li:active { background: var(--card); }
-
-html.light .observation-author-chip--initial { color: #ffffff; }
-html.light .people-card-avatar-fallback { color: #ffffff; }
-html.light .detail-author-avatar { color: #ffffff; }

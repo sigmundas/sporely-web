@@ -97,7 +97,16 @@ export function initFindDetail() {
   document.getElementById('detail-follow-observation-btn')?.addEventListener('click', () => _toggleFollow('observation'))
   document.getElementById('detail-follow-taxon-btn')?.addEventListener('click', () => _toggleFollow('taxon'))
   document.querySelectorAll('input[name="detail-vis"], input[name="detail-location-precision"], #detail-draft').forEach(input => {
-    input.addEventListener('change', _renderPrivacySlotNote)
+    input.addEventListener('change', event => {
+      if (input.name === 'detail-vis' && input.checked) {
+        const group = input.closest('.scope-tabs')
+        if (group) {
+          group.querySelectorAll('.scope-tab').forEach(tab => tab.classList.remove('active'))
+          input.closest('.scope-tab').classList.add('active')
+        }
+      }
+      _renderPrivacySlotNote()
+    })
   })
   const obscuredInput = document.getElementById('detail-obscured')
   if (obscuredInput) obscuredInput.addEventListener('change', _renderPrivacySlotNote)
@@ -218,10 +227,7 @@ export async function openFindDetail(obsId, options = {}) {
       altitude: obs.gps_altitude,
       accuracy: obs.gps_accuracy,
     })
-    if (obs.location_precision === 'fuzzed') {
-      coordsEl.innerHTML += `<div style="margin-top:8px;"><span class="find-card-draft-badge" style="background:var(--bg-elevated); color:var(--text-dim); border: 1px solid var(--border);">${_esc(t('locationPrecision.fuzzed'))}</span></div>`
-    }
-    coordsEl.style.display = obs.gps_latitude || obs.location_precision === 'fuzzed' ? 'block' : 'none'
+    coordsEl.style.display = obs.gps_latitude ? 'block' : 'none'
   }
 
   // Set visibility radio
@@ -267,6 +273,42 @@ export async function openFindDetail(obsId, options = {}) {
   detailAuthorProfile = null
   detailFriendship = null
   detailFollowState = { user: false, observation: false, taxon: false }
+
+  let bannerEl = document.getElementById('detail-status-banner');
+  if (!bannerEl) {
+    bannerEl = document.createElement('div');
+    bannerEl.id = 'detail-status-banner';
+    if (gallery && gallery.parentNode) {
+      gallery.parentNode.insertBefore(bannerEl, gallery);
+    }
+  }
+
+  bannerEl.innerHTML = '';
+  let showBanner = false;
+
+  if (obs.is_draft) {
+    const tag = document.createElement('span');
+    tag.className = 'detail-status-tag tag-draft';
+    tag.textContent = t('detail.draft') || 'Draft';
+    bannerEl.appendChild(tag);
+    showBanner = true;
+  }
+  if (obs.location_precision === 'fuzzed') {
+    const tag = document.createElement('span');
+    tag.className = 'detail-status-tag tag-obscured';
+    tag.textContent = t('locationPrecision.fuzzed') || 'Obscured';
+    bannerEl.appendChild(tag);
+    showBanner = true;
+  }
+  if (normalizeVisibility(obs.visibility, 'public') === 'private') {
+    const tag = document.createElement('span');
+    tag.className = 'detail-status-tag tag-private';
+    tag.textContent = t('visibility.private') || 'Private';
+    bannerEl.appendChild(tag);
+    showBanner = true;
+  }
+
+  bannerEl.style.display = showBanner ? 'flex' : 'none';
 
   if (imgData?.length) {
     const originalSources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
@@ -349,7 +391,10 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   img.addEventListener('click', () => {
     const galleryImgs = Array.from(gallery.querySelectorAll('.detail-gallery-img'))
     const currentIndex = galleryImgs.indexOf(img)
-    openPhotoViewer(galleryImgs.map(i => i.dataset.fullSrc || i.src), Math.max(0, currentIndex))
+    openPhotoViewer(galleryImgs.map(i => ({
+      src: i.dataset.fullSrc || i.src,
+      fallbackSrc: i.src
+    })), Math.max(0, currentIndex))
   })
   container.appendChild(img)
 
@@ -907,11 +952,7 @@ function _applyOwnershipMode(isOwner) {
   if (notesInput) notesInput.readOnly = !isOwner
   if (uncertainInput) uncertainInput.disabled = !isOwner
   const draftInput = document.getElementById('detail-draft')
-  if (draftInput) {
-    draftInput.disabled = !isOwner
-    const workflowField = draftInput.closest('.detail-field')
-    if (workflowField) workflowField.style.display = isOwner ? '' : 'none'
-  }
+  if (draftInput) draftInput.disabled = !isOwner
 
   const currentLocationBtn = document.getElementById('detail-current-location-btn')
   if (currentLocationBtn) currentLocationBtn.style.display = 'none'
@@ -1007,8 +1048,7 @@ function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackN
   commonEl.innerHTML = _esc(markedPrimary)
   const draftBadgeEl = document.getElementById('detail-draft-badge')
   if (draftBadgeEl) {
-    draftBadgeEl.style.display = currentObs?.is_draft === true ? '' : 'none'
-    draftBadgeEl.textContent = t('finds.draftBadge')
+    draftBadgeEl.style.display = 'none'
   }
   if (latinName && latinName.toLowerCase() !== primaryName.toLowerCase()) {
     latinEl.textContent = markedLatin
@@ -1499,16 +1539,22 @@ async function _addPhotosToObservation(files) {
       const preparedImage = await prepareImageVariants(file, uploadPolicy)
       const storagePath = `${userId}/${obsId}/${sortOrder}_${Date.now()}.${imageExtensionForBlob(preparedImage.uploadBlob)}`
       await uploadPreparedObservationImageVariants(preparedImage, storagePath, { uploadPolicy })
-      const cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })
-      await insertObservationImage({
-        observation_id: obsId,
-        user_id: userId,
-        storage_path: storagePath,
-        image_type: 'field',
-        sort_order: sortOrder,
-        ...preparedImage.uploadMeta,
-        ...cropMeta,
-      })
+      
+      try {
+        const cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })
+        await insertObservationImage({
+          observation_id: obsId,
+          user_id: userId,
+          storage_path: storagePath,
+          image_type: 'field',
+          sort_order: sortOrder,
+          ...preparedImage.uploadMeta,
+          ...cropMeta,
+        })
+      } catch (err) {
+        await deleteObservationMedia([storagePath]).catch(() => {})
+        throw err
+      }
 
       if (sortOrder === 0) {
         await syncObservationMediaKeys(obsId, storagePath, { sortOrder: 0 })

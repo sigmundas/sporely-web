@@ -116,7 +116,7 @@ const messages = {
     'detail.backGeneric': 'Back',
     'detail.unknownSpecies': 'Unknown species',
     'detail.species': 'Species',
-    'detail.identifyAI': 'Identify with Artsorakel AI',
+    'detail.identifyAI': 'Identify with Artsorakel',
     'detail.location': 'Location',
     'detail.currentLocation': 'Current location',
     'detail.habitat': 'Habitat',
@@ -345,9 +345,10 @@ const messages = {
     'privacySlots.currentUses': 'Current find uses 1 privacy slot.',
     'privacySlots.currentFree': 'Current find does not use a privacy slot.',
     'privacySlots.pro': 'Pro account: privacy slots are unlimited.',
-    'locationPrecision.label': 'Location precision',
+    'locationPrecision.label': 'Obscure location',
     'locationPrecision.exact': 'Exact',
     'locationPrecision.fuzzed': 'Obscured',
+    'privacySlots.obscureHint': 'Obscuring a public find uses 1 privacy slot.',
   },
   nb_NO: {
     'app.name': 'Sporely',
@@ -462,7 +463,7 @@ const messages = {
     'detail.backGeneric': 'Tilbake',
     'detail.unknownSpecies': 'Ukjent art',
     'detail.species': 'Art',
-    'detail.identifyAI': 'Identifiser med Artsorakel AI',
+    'detail.identifyAI': 'Identifiser med Artsorakel',
     'detail.location': 'Sted',
     'detail.currentLocation': 'Nåværende sted',
     'detail.habitat': 'Habitat',
@@ -678,9 +679,10 @@ const messages = {
     'privacySlots.currentUses': 'Dette funnet bruker 1 personvernplass.',
     'privacySlots.currentFree': 'Dette funnet bruker ikke personvernplass.',
     'privacySlots.pro': 'Pro-konto: personvernplasser er ubegrenset.',
-    'locationPrecision.label': 'Posisjonspresisjon',
+    'locationPrecision.label': 'Skjul posisjon',
     'locationPrecision.exact': 'Nøyaktig',
     'locationPrecision.fuzzed': 'Skjult',
+    'privacySlots.obscureHint': 'Å skjule et offentlig funn bruker 1 personvernplass.',
   },
   sv_SE: {
     'app.name': 'Sporely',
@@ -795,7 +797,7 @@ const messages = {
     'detail.backGeneric': 'Tillbaka',
     'detail.unknownSpecies': 'Okänd art',
     'detail.species': 'Art',
-    'detail.identifyAI': 'Identifiera med Artsorakel AI',
+    'detail.identifyAI': 'Identifiera med Artsorakel',
     'detail.location': 'Plats',
     'detail.currentLocation': 'Nuvarande plats',
     'detail.habitat': 'Habitat',
@@ -1011,9 +1013,10 @@ const messages = {
     'privacySlots.currentUses': 'Detta fynd använder 1 integritetsplats.',
     'privacySlots.currentFree': 'Detta fynd använder ingen integritetsplats.',
     'privacySlots.pro': 'Pro-konto: integritetsplatser är obegränsade.',
-    'locationPrecision.label': 'Platsprecision',
+    'locationPrecision.label': 'Dölj plats',
     'locationPrecision.exact': 'Exakt',
     'locationPrecision.fuzzed': 'Dold',
+    'privacySlots.obscureHint': 'Att dölja ett offentligt fynd använder 1 integritetsplats.',
   },
   de_DE: {
     'app.name': 'Sporely',
@@ -1128,7 +1131,7 @@ const messages = {
     'detail.backGeneric': 'Zurück',
     'detail.unknownSpecies': 'Unbekannte Art',
     'detail.species': 'Art',
-    'detail.identifyAI': 'Mit Artsorakel AI bestimmen',
+    'detail.identifyAI': 'Mit Artsorakel bestimmen',
     'detail.location': 'Ort',
     'detail.currentLocation': 'Aktueller Ort',
     'detail.habitat': 'Habitat',
@@ -1344,9 +1347,10 @@ const messages = {
     'privacySlots.currentUses': 'Dieser Fund nutzt 1 Datenschutzplatz.',
     'privacySlots.currentFree': 'Dieser Fund nutzt keinen Datenschutzplatz.',
     'privacySlots.pro': 'Pro-Konto: Datenschutzplätze sind unbegrenzt.',
-    'locationPrecision.label': 'Standortgenauigkeit',
+    'locationPrecision.label': 'Standort verbergen',
     'locationPrecision.exact': 'Genau',
     'locationPrecision.fuzzed': 'Verschleiert',
+    'privacySlots.obscureHint': 'Das Verbergen eines öffentlichen Fundes nutzt 1 Datenschutzplatz.',
   },
 }
 
@@ -1575,21 +1579,22 @@ export function applyStaticTranslations() {
     t('visibility.friends'),
     t('visibility.public'),
   ])
-  setText('#review-obscured span', 'locationPrecision.fuzzed')
-  setText('#review-draft span', 'detail.draft')
+  setText('#review-location-precision-label', 'locationPrecision.label')
 
   setText('#detail-back-label', 'detail.backFinds')
   setText('#detail-title-common', 'detail.unknownSpecies')
   setAllText('#screen-find-detail .detail-field-label', [
     t('detail.species'),
-    t('detail.location'),
     t('detail.habitat'),
     t('detail.notes'),
-    t('detail.workflow'),
     t('detail.sharing'),
   ])
+  setText('#detail-location-data-header', 'review.fieldMetadata')
+  setText('#detail-location-label', 'detail.location')
+  setText('#detail-location-precision-label', 'locationPrecision.label')
+  setText('#detail-uncertain-label', 'detail.idNeeded')
+  setText('#detail-draft-label', 'detail.draft')
   setText('#detail-current-location-btn', 'detail.currentLocation')
-  setText('#screen-find-detail .field-meta-key', 'detail.idNeeded')
   setText('#comments-section .comments-title', 'comments.title')
   setText('#comment-send-btn', 'comments.send')
   setText('#detail-delete-btn', 'common.delete')
@@ -1600,8 +1605,6 @@ export function applyStaticTranslations() {
     t('visibility.friends'),
     t('visibility.public'),
   ])
-  setText('#detail-draft-pill', 'detail.draft')
-  setText('#detail-obscured span', 'locationPrecision.fuzzed')
 
   setText('#import-back-label', 'detail.backHome')
   setText('#import-cancel-btn', 'common.cancel')

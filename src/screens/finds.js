@@ -203,6 +203,9 @@ function _bindPullToRefresh() {
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
 export function initFinds() {
+  if (screen.orientation && screen.orientation.lock) {
+    screen.orientation.lock('portrait').catch(() => {});
+  }
   _bindPullToRefresh()
   document.getElementById('finds-fab')
     .addEventListener('click', openPreferredCamera)
@@ -269,7 +272,7 @@ export function initFinds() {
   })
 
   // Scope tabs
-  document.querySelectorAll('.scope-tab').forEach(btn => {
+  document.querySelectorAll('#finds-scope-tabs .scope-tab').forEach(btn => {
     btn.addEventListener('click', () => {
       _setScope(btn.dataset.scope)
       loadFinds()
@@ -362,7 +365,7 @@ function _syncScopeTabs() {
       userBar.style.padding = '12px 0 0 18px'
       userBar.style.gap = '8px'
     }
-    document.querySelectorAll('.scope-tab').forEach(btn => {
+    document.querySelectorAll('#finds-scope-tabs .scope-tab').forEach(btn => {
       if (btn.dataset.scope === 'mine') btn.textContent = t('scope.mine')
       btn.classList.toggle('active', _normalizeScope(btn.dataset.scope) === currentScope)
     })

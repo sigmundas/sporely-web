@@ -201,7 +201,7 @@ async function _uploadToStorage(path, blob, options = {}) {
   }
   const { error } = await supabase.storage
     .from('observation-images')
-    .upload(path, blob, { contentType: 'image/jpeg', upsert: true })
+    .upload(path, blob, { contentType: blob?.type || 'image/jpeg', upsert: true })
   if (error) throw new Error(`Storage upload failed: ${error.message}`)
 }
 

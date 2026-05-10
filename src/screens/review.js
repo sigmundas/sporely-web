@@ -63,19 +63,40 @@ export function buildGpsMetaHtml(gps) {
   const altitude = Number.isFinite(gps.altitude) ? `${Math.round(gps.altitude)} m ASL` : '— ASL'
   
   return `
-    <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:13px;">
-      <span style="color:var(--text-dim)">${t('review.latLon')}</span>
-      <span style="font-variant-numeric: tabular-nums">${coords}</span>
+    <div class="field-meta-row">
+      <span class="field-meta-key">${t('review.latLon')}</span>
+      <span class="field-meta-val" style="font-variant-numeric: tabular-nums">${coords}</span>
     </div>
-    <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:13px;">
-      <span style="color:var(--text-dim)">${t('review.gpsAccuracy')}</span>
-      <span style="font-variant-numeric: tabular-nums">${accuracy}</span>
+    <div class="field-meta-row">
+      <span class="field-meta-key">${t('review.gpsAccuracy')}</span>
+      <span class="field-meta-val" style="font-variant-numeric: tabular-nums">${accuracy}</span>
     </div>
-    <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:13px;">
-      <span style="color:var(--text-dim)">${t('review.altitude')}</span>
-      <span style="font-variant-numeric: tabular-nums">${altitude}</span>
+    <div class="field-meta-row">
+      <span class="field-meta-key">${t('review.altitude')}</span>
+      <span class="field-meta-val" style="font-variant-numeric: tabular-nums">${altitude}</span>
     </div>
   `
+}
+
+function _updateReviewObscureHint() {
+  let obscureHint = document.getElementById('review-obscured-hint')
+  if (!obscureHint) {
+    const obscuredInput = document.getElementById('review-obscured')
+    const obscuredRow = obscuredInput?.closest('.field-meta-row')
+    if (obscuredRow) {
+      obscureHint = document.createElement('div')
+      obscureHint.id = 'review-obscured-hint'
+      obscureHint.className = 'field-meta-row'
+      obscureHint.style.cssText = 'padding-top:4px; border-top:none;'
+      obscureHint.innerHTML = `<div class="field-meta-key" style="font-size:10px; color:var(--amber); white-space:normal;">${t('privacySlots.obscureHint') || 'Obscuring a public find uses 1 privacy slot.'}</div>`
+      obscuredRow.parentNode.insertBefore(obscureHint, obscuredRow.nextSibling)
+      obscuredRow.style.borderBottom = 'none'
+    }
+  }
+  if (obscureHint) {
+    const isPro = state.cloudPlan?.cloudPlan === 'pro' || !!state.cloudPlan?.fullResStorageEnabled
+    obscureHint.style.display = (!isPro && state.captureDraft.location_precision === 'fuzzed' && state.captureDraft.visibility === 'public') ? 'flex' : 'none'
+  }
 }
 
 export function initReview() {
@@ -95,7 +116,15 @@ export function initReview() {
   })
   document.querySelectorAll('input[name="review-vis"]').forEach(radio => {
     radio.addEventListener('change', event => {
-      if (event.target.checked) state.captureDraft.visibility = normalizeVisibility(event.target.value, getDefaultVisibility())
+      if (event.target.checked) {
+        state.captureDraft.visibility = normalizeVisibility(event.target.value, getDefaultVisibility())
+        const group = event.target.closest('.scope-tabs')
+        if (group) {
+          group.querySelectorAll('.scope-tab').forEach(tab => tab.classList.remove('active'))
+          event.target.closest('.scope-tab').classList.add('active')
+        }
+      }
+      _updateReviewObscureHint()
     })
   })
   const draftToggle = document.getElementById('review-draft')
@@ -109,6 +138,15 @@ export function initReview() {
       if (event.target.checked) state.captureDraft.location_precision = event.target.value
     })
   })
+
+  const reviewObscured = document.getElementById('review-obscured')
+  if (reviewObscured) {
+    reviewObscured.addEventListener('change', event => {
+      state.captureDraft.location_precision = event.target.checked ? 'fuzzed' : 'exact'
+      _updateReviewObscureHint()
+    })
+  }
+
   initLocationField()
 }
 
@@ -322,16 +360,25 @@ export function buildReviewGrid() {
 
   document.getElementById('review-habitat').value = state.captureDraft.habitat || ''
   document.getElementById('review-notes').value = state.captureDraft.notes || ''
-  document.getElementById('review-uncertain').checked = !!state.captureDraft.uncertain
     const visibility = normalizeVisibility(state.captureDraft.visibility, getDefaultVisibility())
   const visibilityRadio = document.querySelector(`input[name="review-vis"][value="${visibility}"]`)
-  if (visibilityRadio) visibilityRadio.checked = true
+  if (visibilityRadio) {
+    visibilityRadio.checked = true
+    const group = visibilityRadio.closest('.scope-tabs')
+    if (group) {
+      group.querySelectorAll('.scope-tab').forEach(tab => tab.classList.remove('active'))
+      visibilityRadio.closest('.scope-tab').classList.add('active')
+    }
+  }
   const locationInput = document.getElementById('location-name-input')
   if (locationInput) {
     locationInput.value = reviewContext?.source === 'import'
       ? (locationInput.value || reviewContext.locationName || '')
       : (reviewContext?.locationName || locationInput.value || '')
   }
+  const reviewObscured = document.getElementById('review-obscured')
+  if (reviewObscured) reviewObscured.checked = state.captureDraft.location_precision === 'fuzzed'
+  _updateReviewObscureHint()
   const addPhotoBtn = document.getElementById('add-photo-btn');
   if (addPhotoBtn) addPhotoBtn.style.display = 'none';
 
@@ -378,10 +425,26 @@ export function buildReviewGrid() {
           />
           <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
         </div>
-        ${hasBlob ? `<button class="ai-id-btn" id="review-ai-btn" style="margin-top:8px;width:100%">
-          <div class="ai-dot"></div> ${t('detail.identifyAI')}
-        </button>` : ''}
+        ${hasBlob ? `<div class="detail-ai-row">
+          <button class="ai-id-btn" id="review-ai-btn" style="width:100%">
+            <div class="ai-dot"></div> ${t('detail.identifyAI')}
+          </button>
+        </div>` : ''}
         <div class="artsorakel-results" data-idx="0" style="display:none"></div>
+        <div class="detail-uncertain-row" style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;width:100%;">
+          <span class="field-meta-key">${t('detail.idNeeded') || 'Uncertain ID'}</span>
+          <label class="detail-toggle">
+            <input type="checkbox" id="review-uncertain-card" ${state.captureDraft.uncertain ? 'checked' : ''}>
+            <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
+          </label>
+        </div>
+        <div class="detail-draft-row" style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;width:100%;">
+          <span class="field-meta-key">${t('detail.draft') || 'Draft'}</span>
+          <label class="detail-toggle">
+            <input type="checkbox" id="review-draft-card" ${state.captureDraft.is_draft !== false ? 'checked' : ''}>
+            <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
+          </label>
+        </div>
       </div>
     </div>`
   }
@@ -462,6 +525,22 @@ function loadThumbnails(photos) {
 function wireCardEvents() {
   const aiBtn = document.getElementById('review-ai-btn')
   if (aiBtn) aiBtn.addEventListener('click', () => handleArtsorakelBtn(0))
+
+  // Wire the in-card uncertain toggle (replaces the static #review-uncertain)
+  const uncertainCard = document.getElementById('review-uncertain-card')
+  if (uncertainCard) {
+    uncertainCard.addEventListener('change', event => {
+      state.captureDraft.uncertain = event.target.checked
+      buildReviewGrid()
+    })
+  }
+
+  const draftCard = document.getElementById('review-draft-card')
+  if (draftCard) {
+    draftCard.addEventListener('change', event => {
+      state.captureDraft.is_draft = event.target.checked
+    })
+  }
 
   // Taxon autocomplete inputs
   document.querySelectorAll('.taxon-input').forEach(input => {
