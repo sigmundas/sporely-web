@@ -14,9 +14,8 @@ const RETRY_DELAY_MS = 30_000
 const _queuedPreviewUrls = new Map()
 let _retryTimer = null
 let _currentSyncPromise = null
-let _backgroundTaskId = null
-let _backgroundTaskStarting = false
 const _activeQueueOperations = new Set()
+let _backgroundTaskRegistered = false
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
@@ -627,31 +626,29 @@ export async function requestBackgroundSync() {
     await triggerSync()
     return
   }
-  if (_backgroundTaskId || _backgroundTaskStarting) return
+  if (_backgroundTaskRegistered) return
+  _backgroundTaskRegistered = true
 
-  _backgroundTaskStarting = true
   try {
-    const taskId = await BackgroundTask.beforeExit(async () => {
+    await BackgroundTask.beforeExit(async (data) => {
+      const activeId = data?.taskId
       try {
         await _drainQueueForBackgroundTask()
       } catch (error) {
         console.warn('Background sync task failed:', error)
       } finally {
         try {
-          BackgroundTask.finish({ taskId })
+          if (activeId) {
+            BackgroundTask.finish({ taskId: activeId })
+          }
         } catch (finishError) {
           console.warn('Background task finish failed:', finishError)
         }
-        _backgroundTaskId = null
-        _backgroundTaskStarting = false
       }
     })
-    _backgroundTaskId = taskId
   } catch (error) {
-    _backgroundTaskId = null
-    _backgroundTaskStarting = false
-    console.warn('Background task request failed; continuing foreground sync only:', error)
-    await triggerSync()
+    _backgroundTaskRegistered = false
+    console.warn('Background task registration failed:', error)
   }
 }
 
@@ -664,7 +661,12 @@ window.addEventListener('focus', triggerSync)
 window.addEventListener('pageshow', triggerSync)
 onConnectionTypeChange(triggerSync)
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') requestBackgroundSync()
   if (document.visibilityState === 'visible') triggerSync()
+  else if (!isNativeApp()) triggerSync()
 })
-setTimeout(triggerSync, 1000)
+setTimeout(() => {
+  triggerSync()
+  if (isNativeApp()) {
+    requestBackgroundSync()
+  }
+}, 1000)
