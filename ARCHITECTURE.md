@@ -88,36 +88,6 @@ sporely-web/
 
 ---
 
-## Auth flow
-
-```
-page load
-  └─ handleUrlHashError()     read #error=... hash from Supabase redirects
-       └─ clears hash, shows friendly message + resend link if otp_expired
-  └─ supabase.auth.getSession()
-       ├─ session exists  → bootApp(user)     show app shell
-       └─ no session      → showAuthOverlay() show login/signup forms
-                               └─ login/signup success → bootApp(user)
-
-onAuthStateChange listener handles:
-  SIGNED_IN  → bootApp if not already booted (tab resume, magic link)
-  SIGNED_OUT → wipe state.user, show auth overlay
-```
-
-### Signup edge cases
-
-| Supabase response | Cause | Handled as |
-|---|---|---|
-| No error, no session | Email confirmation required | "Check inbox" + resend link (green) |
-| No error, no session, `data.user` is null | Address already registered (unconfirmed) | Same — resend link |
-| Error: "already registered" | Address confirmed, just needs login | Switch to login form with message |
-| Login error: "not confirmed" | Signed up but never clicked link | "Check inbox" + resend link |
-| `#error_code=otp_expired` in URL hash | Confirmation link expired | Friendly message, signup form shown |
-
-Resend uses `supabase.auth.resend({ type: 'signup', email })`.
-
----
-
 ## Supabase connection
 
 **Project URL:** `https://zkpjklzfwzefhjluvhfw.supabase.co`
@@ -141,9 +111,7 @@ All media is stored in Cloudflare R2, not Supabase Storage.
 - **JWT verification:** Worker fetches the JWKS from Supabase (`/auth/v1/.well-known/jwks.json`) and verifies the ES256 signature using Web Crypto. The JWKS is cached in-memory for 10 minutes.
 - **Key rule:** Upload path must start with the JWT `sub` (user ID) — enforced by the worker.
 - **Current client policy:** Free accounts upload reduced 2 MP images. Pro/full-res accounts can choose `Reduced (2MP)` or `Max (12MP)` in Settings. Max keeps near-12 MP originals when friendly to quality and only resizes images from 14 MP and up down to 12 MP.
-- **HEIC Fallback (Web):** If the browser cannot natively decode an image into a Canvas (e.g., HEIC files in Chrome/Firefox without native conversion), the resize step gracefully fails and the app uploads the original, unmodified file with `upload_mode: 'original'`.
 - **Storage tally/quota:** After successful R2 writes/deletes, the worker updates `profiles.total_storage_bytes`, compatibility `profiles.storage_used_bytes`, and original-image `profiles.image_count` through the Supabase RPC in `supabase/profile-storage-usage.sql`. Free-tier storage can be limited per profile via `storage_quota_bytes` or globally via worker `FREE_STORAGE_QUOTA_BYTES`.
-- **Worker secret:** The worker needs Cloudflare secret `SUPABASE_SERVICE_ROLE_KEY` so backend-only profile tally updates can bypass RLS. This secret must never be committed or exposed to the frontend.
 - **Source:** `cloudflare/r2-upload-worker/src/index.js`
 - **Config:** `cloudflare/r2-upload-worker/wrangler.toml`
 
@@ -156,67 +124,12 @@ so LAN dev testing from a phone works without hardcoding IPs.
 ### Media serving (`media.sporely.no`)
 
 R2 bucket `sporely-media` is exposed publicly via Cloudflare. All media URLs are
-**relative keys** stored in the database — never full URLs. The key is prefixed with
-`{user_id}/{obs_id}/` for path-based ownership.
-
-### Client image preparation
-
-`src/images.js` prepares web/mobile uploads before they are sent to R2.
-
-- **Memory Management:** To avoid mobile browser Out-Of-Memory (OOM) crashes, heavy image work is strictly kept out of background sync loops. The canvas memory must be explicitly wiped (`canvas.width = 0; canvas.height = 0`) and object URLs revoked immediately after use.
-- Image work is attempted off the main thread in `src/image-worker.js`.
-- The worker receives an `ImageBitmap` as a transferable and uses `OffscreenCanvas`.
-- Encoding tries WebP first (`image/webp`, quality 0.65) and falls back to JPEG (`image/jpeg`, quality 0.75). AVIF encoding is **not** used because mobile browsers (especially iOS Safari) silently fail and fall back to uncompressed PNGs, generating massive payload sizes.
-- Free/reduced mode limits images to about 2 MP with a 1600px max edge.
-- Pro/max mode keeps near-12 MP images unless the source is above the large-image guard, then downsizes to about 4000px max edge.
-- Downscaling uses progressive halving plus high-quality canvas smoothing to avoid aliasing-heavy thumbnails.
-
-### Thumbnail variants
-
-`src/images.js` generates and reads one thumbnail variant:
-- `thumb_{filename}` — 400px max edge, WebP 70% or JPEG 65% fallback
-
-### Offline queue and background sync
-
-`src/sync-queue.js` is the durable upload boundary for new observations.
-
-- Queue rows are written to IndexedDB before image processing begins.
-- Image bytes are stored as `ArrayBuffer` values, not Blob URLs, so the queue survives browser memory pressure and process kills.
-- After image preparation succeeds, prepared upload bytes and thumbnail bytes are written back into the same queue row so sync can resume without re-encoding.
-- The queue records `remoteObservationId`, `completedImageIndexes`, `syncStage`, `syncImageIndex`, and `syncImageCount`.
-- On resume, sync reconciles against Supabase `observation_images` by `sort_order`, so already-uploaded images are skipped.
-- If the process dies after inserting the parent observation but before `remoteObservationId` is saved locally, the queue attempts to recover the cloud row by matching `user_id` and `captured_at`.
-
-When the Capacitor app is backgrounded, `document.visibilitychange` requests a short-lived background task through `@capawesome/capacitor-background-task`. The task drains any active queue preparation/upload promise and then calls `triggerSync()`. This extends the chance that current work finishes when the app is minimized or the screen turns off, but it is still subject to Android/iOS background execution limits.
-
+**relative keys** stored in the database — never full URLs.
 
 ### Deploying the worker
 
 **⚠️ Deploy after every worker change.** The worker is NOT automatically deployed when you
-commit. If you add a new route or fix a bug in `src/index.js` and forget to run
-`wrangler deploy`, the old version keeps running in production and the new code has no
-effect. Symptom: routes that exist in source return 404 in production.
-
-### Artsorakel proxy (`POST /artsorakel`)
-
-The worker proxies AI species identification requests to `https://ai.artsdatabanken.no`.
-
-- **Body forwarding:** Use `await request.arrayBuffer()` — do **not** pass `request.body`
-  (the ReadableStream) directly to the upstream `fetch`. Streaming a multipart body through
-  two fetch hops can produce a malformed request that the upstream silently accepts but
-  returns only the "please update" stub prediction. Buffering the body first guarantees the
-  full multipart payload is forwarded intact.
-- **Response:** Buffer the upstream response with `await upstream.arrayBuffer()` before
-  returning it. This avoids partial-body issues on slow upstream connections.
-
-
-### ⚠️ Upload Request Gotchas
-
-- **iOS Safari Fetch Hangs:** Never stream an IndexedDB-backed `Blob` directly into a `fetch()` body on iOS/WebKit. The web app must always convert it to an `ArrayBuffer` first (`await blob.arrayBuffer()`) before passing it to `fetch`, otherwise the upload may silently hang or send 0 bytes.
-- **IndexedDB Transaction Auto-Close:** IndexedDB `readwrite` transactions will silently auto-close if the thread `await`s slow asynchronous work (like Canvas rendering or encoding) while the transaction is open. Always complete heavy async operations *before* opening the IndexedDB transaction.
-- **OOM in Background Sync:** Heavy Canvas rendering must *never* happen in a background sync loop (`triggerSync()`). It will trigger silent Out-Of-Memory (OOM) crashes on mobile WebViews. Image processing must happen in the foreground during the initial save/enqueue phase.
-- **Cross-Context Blob Checks:** Never use strict `instanceof Blob` checks across environments (e.g. Capacitor FilePicker vs IndexedDB). They often fail. Use duck-typing checks on the `size` and `type` properties.
-- **CORS Preflight on PUT:** Avoid adding custom non-standard headers (like `X-Sporely-Upload-Mode`) to the R2 upload `PUT` request. Custom headers force strict CORS preflight (`OPTIONS`) behavior on mobile PWAs, which can unexpectedly block uploads depending on network/cache conditions.
+commit.
 
 ---
 
