@@ -30,7 +30,7 @@ const INAT_WEB_CALLBACK_PATH = '/auth/inaturalist/callback'
 const INAT_DEFAULT_SCOPE = 'write'
 const INAT_NATIVE_PROVIDER_ID = 'inaturalist'
 const API_TOKEN_LIFETIME_MS = 20 * 60 * 60 * 1000
-const DEBUG_INAT_OAUTH = true
+const DEBUG_INAT_OAUTH = false
 const SUCCESSFUL_SESSION_KEYS = [
   INAT_ACCESS_TOKEN_KEY,
   INAT_REFRESH_TOKEN_KEY,
@@ -635,15 +635,6 @@ export async function connectInaturalist(options = {}) {
         providerId: INAT_NATIVE_PROVIDER_ID,
         scope: INAT_DEFAULT_SCOPE,
       },
-    })
-    console.log('[inat-oauth] raw plugin result shape', {
-      hasResult: !!loginResult,
-      topKeys: loginResult ? Object.keys(loginResult) : [],
-      resultKeys: loginResult?.result ? Object.keys(loginResult.result) : [],
-      accessTokenKeys: loginResult?.result?.accessToken
-        ? Object.keys(loginResult.result.accessToken)
-        : [],
-      hasAccessTokenToken: !!loginResult?.result?.accessToken?.token,
     })
     const normalizedResult = normalizeCapgoOAuth2Result(loginResult)
     _debugInatOAuth('native login returned', {

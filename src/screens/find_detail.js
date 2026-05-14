@@ -12,7 +12,7 @@ import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
-import { getDefaultVisibility, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
+import { getArtsorakelMaxEdge, getDefaultVisibility, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { Preferences } from '@capacitor/preferences'
 import { refreshHome } from './home.js'
@@ -22,6 +22,7 @@ import { fetchCloudPlanProfile } from '../cloud-plan.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 import { setCaptureCompleteHandler } from './capture.js'
+import { getBlobImageDimensions } from '../image_crop.js'
 
 let currentObs    = null
 let selectedTaxon = null
@@ -503,6 +504,170 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   return container
 }
 
+function _storagePathExtension(storagePath) {
+  const value = String(storagePath || '').trim()
+  const name = value.split('/').pop() || value
+  const idx = name.lastIndexOf('.')
+  return idx >= 0 ? name.slice(idx + 1).toLowerCase() : ''
+}
+
+async function _describeDetailBlob(blob) {
+  if (!(blob instanceof Blob)) {
+    return { blobType: '', blobSize: 0, width: null, height: null }
+  }
+  try {
+    const dims = await getBlobImageDimensions(blob)
+    return {
+      blobType: blob.type || '',
+      blobSize: blob.size || 0,
+      width: dims?.width ?? null,
+      height: dims?.height ?? null,
+    }
+  } catch (_) {
+    return {
+      blobType: blob.type || '',
+      blobSize: blob.size || 0,
+      width: null,
+      height: null,
+    }
+  }
+}
+
+async function _loadDetailIdentifyBlob(img, variant = 'medium') {
+  const storagePath = img?.dataset?.storagePath || ''
+  const fallbackUrls = [
+    img?.dataset?.aiFallback || '',
+    img?.dataset?.aiSrc || '',
+    img?.src || '',
+  ].filter(Boolean)
+
+  try {
+    const blob = await downloadObservationImageBlob(storagePath, { variant })
+    return {
+      blob,
+      usedFallbackUrl: false,
+      sourceMode: 'blob',
+      storagePathExtension: _storagePathExtension(storagePath),
+      requestedVariant: variant,
+    }
+  } catch (storageError) {
+    let lastError = storageError
+    for (const url of fallbackUrls) {
+      try {
+        const resp = await fetch(url)
+        if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
+        const blob = await resp.blob()
+        return {
+          blob,
+          usedFallbackUrl: true,
+          sourceMode: 'fallback-url',
+          storagePathExtension: _storagePathExtension(storagePath),
+          requestedVariant: variant,
+        }
+      } catch (error) {
+        lastError = error
+      }
+    }
+    throw lastError || storageError || new Error('Image fetch failed')
+  }
+}
+
+function _isArtsorakelBlobFallbackError(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  return message.includes('artsdata ai 500')
+    || (message.includes('artsdata ai') && message.includes('500'))
+    || (message.includes('endpoint') && message.includes('status=500'))
+    || (message.includes('status 500') && message.includes('artsorakel'))
+}
+
+export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'medium') {
+  return await Promise.all((galleryImgs || []).map(async img => {
+    try {
+      const result = await _loadDetailIdentifyBlob(img, variant)
+      if (!(result.blob instanceof Blob)) return null
+      return {
+        ...result,
+        debug: await _describeDetailBlob(result.blob),
+      }
+    } catch (error) {
+      return {
+        blob: null,
+        error,
+        usedFallbackUrl: false,
+        sourceMode: 'failed',
+        storagePathExtension: _storagePathExtension(img?.dataset?.storagePath || ''),
+        requestedVariant: variant,
+        debug: { blobType: '', blobSize: 0, width: null, height: null },
+      }
+    }
+  }))
+}
+
+export async function runDetailIdentify(service, galleryImgs, options = {}) {
+  const identifyInputs = await prepareDetailIdentifyInputs(galleryImgs, options.variant || 'medium')
+  const blobs = identifyInputs
+    .filter(item => item?.blob instanceof Blob)
+    .map(item => item.blob)
+  const mediaKeys = (galleryImgs || [])
+    .map(img => img?.dataset?.storagePath || '')
+    .filter(Boolean)
+
+  identifyInputs.forEach(item => {
+    if (!item) return
+    console.debug('[detail-ai] identify input', {
+      service,
+      storagePathExtension: item.storagePathExtension,
+      requestedVariant: item.requestedVariant,
+      blobType: item.debug?.blobType || '',
+      blobSize: item.debug?.blobSize || 0,
+      width: item.debug?.width ?? null,
+      height: item.debug?.height ?? null,
+      usedFallbackUrl: item.usedFallbackUrl,
+      mediaKeysCount: mediaKeys.length,
+      sourceMode: item.sourceMode,
+      pathMode: 'blob',
+    })
+  })
+
+  const language = options.language || getTaxonomyLanguage()
+  const identifyBlobs = options.identifyBlobs || runIdentifyForBlobs
+  const identifyMediaKeys = options.identifyMediaKeys || runIdentifyForMediaKeys
+
+  if (blobs.length) {
+    try {
+      const identifyOptions = service === ID_SERVICE_ARTSORAKEL
+        ? { tolerateFailures: true, maxEdge: Math.min(getArtsorakelMaxEdge(), 1024) }
+        : { tolerateFailures: true }
+      return await identifyBlobs(blobs, service, language, identifyOptions)
+    } catch (error) {
+      if (service === ID_SERVICE_ARTSORAKEL && mediaKeys.length && _isArtsorakelBlobFallbackError(error)) {
+        console.debug('[detail-ai] falling back to media keys', {
+          service,
+          mediaKeysCount: mediaKeys.length,
+          pathMode: 'media-keys',
+          reason: String(error?.message || error || ''),
+        })
+        return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium' })
+      }
+      throw error
+    }
+  }
+
+  if (mediaKeys.length && service === ID_SERVICE_ARTSORAKEL) {
+    console.debug('[detail-ai] using media-key identify', {
+      service,
+      mediaKeysCount: mediaKeys.length,
+      pathMode: 'media-keys',
+    })
+    return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium' })
+  }
+
+  if (service === ID_SERVICE_ARTSORAKEL) {
+    throw new Error('Could not load observation images for Artsorakel')
+  }
+  throw new Error('Could not load observation images for iNaturalist')
+}
+
 async function _runAI(service) {
   const btn       = document.getElementById(service === ID_SERVICE_INATURALIST ? 'detail-inat-btn' : 'detail-arts-btn')
   const buttons = [
@@ -518,51 +683,7 @@ async function _runAI(service) {
   resultsEl.style.display = 'none'
 
   try {
-    async function fetchAiBlobForImage(img) {
-      try {
-        return await downloadObservationImageBlob(img.dataset.storagePath, { variant: 'medium' })
-      } catch (storageError) {
-        const urls = [
-          img.dataset.aiFallback || '',
-          img.dataset.aiSrc || '',
-          img.src || '',
-        ].filter(Boolean)
-
-        let lastError = storageError
-        for (const url of urls) {
-          try {
-            const resp = await fetch(url)
-            if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
-            return await resp.blob()
-          } catch (error) {
-            lastError = error
-          }
-        }
-        throw lastError || new Error('Image fetch failed')
-      }
-    }
-
-    const blobResults = await Promise.allSettled(
-      galleryImgs.map(fetchAiBlobForImage)
-    )
-    const blobs = blobResults
-      .filter(result => result.status === 'fulfilled' && result.value instanceof Blob)
-      .map(result => result.value)
-    const mediaKeys = galleryImgs
-      .map(img => img.dataset.storagePath || '')
-      .filter(Boolean)
-
-    let predictions = null
-    if (blobs.length) {
-      predictions = await runIdentifyForBlobs(blobs, service, getTaxonomyLanguage(), { tolerateFailures: true })
-    } else if (mediaKeys.length && service === ID_SERVICE_ARTSORAKEL) {
-      console.warn('Artsorakel image download failed for existing observation:', blobResults)
-      predictions = await runIdentifyForMediaKeys(mediaKeys, service, getTaxonomyLanguage(), { variant: 'medium' })
-    } else if (service === ID_SERVICE_ARTSORAKEL) {
-      throw new Error('Could not load observation images for Artsorakel')
-    } else {
-      throw new Error('Could not load observation images for iNaturalist')
-    }
+    const predictions = await runDetailIdentify(service, galleryImgs, { variant: 'medium' })
 
     if (!predictions?.length) {
       showToast(getIdentifyNoMatchMessage(service))

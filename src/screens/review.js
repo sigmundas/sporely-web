@@ -649,6 +649,46 @@ async function resolveBlob(photo) {
   return null
 }
 
+function _storageSourceLabel(photo) {
+  return photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob'
+}
+
+async function _describeReviewBlob(blob) {
+  if (!(blob instanceof Blob)) {
+    return { blobType: '', blobSize: 0, width: null, height: null }
+  }
+  try {
+    const { getBlobImageDimensions } = await import('../image_crop.js')
+    const dims = await getBlobImageDimensions(blob)
+    return {
+      blobType: blob.type || '',
+      blobSize: blob.size || 0,
+      width: dims?.width ?? null,
+      height: dims?.height ?? null,
+    }
+  } catch (_) {
+    return {
+      blobType: blob.type || '',
+      blobSize: blob.size || 0,
+      width: null,
+      height: null,
+    }
+  }
+}
+
+export async function prepareReviewIdentifyInputs(photos = state.capturedPhotos) {
+  return (await Promise.all((photos || []).map(async photo => {
+    const blob = photo.aiBlob instanceof Blob ? photo.aiBlob : await resolveBlob(photo)
+    if (!(blob instanceof Blob)) return null
+    return {
+      blob,
+      cropRect: photo.aiCropRect || null,
+      source: _storageSourceLabel(photo),
+      debug: await _describeReviewBlob(blob),
+    }
+  }))).filter(Boolean)
+}
+
 async function handleIdentifyBtn(service, i) {
   const btn = document.getElementById(service === ID_SERVICE_INATURALIST ? 'review-inat-btn' : 'review-arts-btn')
   const buttons = [
@@ -667,11 +707,19 @@ async function handleIdentifyBtn(service, i) {
   })
 
   try {
-    const blobs = (await Promise.all(state.capturedPhotos.map(async photo => ({
-      blob: _isBlob(photo.aiBlob) ? photo.aiBlob : await resolveBlob(photo),
-      cropRect: photo.aiCropRect || null,
-    }))))
-      .filter(item => _isBlob(item.blob))
+    const blobs = await prepareReviewIdentifyInputs()
+    blobs.forEach(item => {
+      console.debug('[review-ai] identify input', {
+        service,
+        source: item.source,
+        blobType: item.debug.blobType,
+        blobSize: item.debug.blobSize,
+        width: item.debug.width,
+        height: item.debug.height,
+        cropRect: !!item.cropRect,
+        blobCount: blobs.length,
+      })
+    })
     const predictions = await runIdentifyForBlobs(blobs, service, getTaxonomyLanguage())
 
     if (!predictions || predictions.length === 0) {

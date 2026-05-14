@@ -469,15 +469,6 @@ async function _handleInaturalistOAuthReturn(url) {
   return outcome
 }
 
-function _logInaturalistConnectDebug() {
-  console.debug('[inat-oauth] connect click', {
-    isAndroidApp: isAndroidApp(),
-    getPlatform: getPlatform(),
-    capacitorIsNativePlatform: !!window.Capacitor?.isNativePlatform?.(),
-    selectedConnectPlatform: getPlatform() === 'android' ? 'android' : 'web',
-  })
-}
-
 async function bootApp(user) {
   state.user = user
   hideAuthOverlay()
@@ -514,7 +505,6 @@ async function bootApp(user) {
     document.querySelectorAll('.inat-connect-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         try {
-          _logInaturalistConnectDebug()
           const session = await connectInaturalist()
           if (session?.connected) {
             await _syncInaturalistUi()

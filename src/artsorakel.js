@@ -11,12 +11,17 @@ import { createCroppedImageBlob, normalizeAiCropRect } from './image_crop.js'
 import { getArtsorakelMaxEdge } from './settings.js'
 
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
-const ARTSDATA_PROXY_BASE_URL = String(
-  import.meta.env.VITE_ARTSORAKEL_BASE_URL || import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || ''
-).replace(/\/+$/, '')
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
+}
+
+function _envText(key) {
+  return String(globalThis.__SPORLEY_TEST_ENV__?.[key] ?? import.meta.env?.[key] ?? '').trim()
+}
+
+function _getArtsorakelProxyBaseUrl() {
+  return _envText('VITE_ARTSORAKEL_BASE_URL').replace(/\/+$/, '')
 }
 
 function _buildNetworkErrorMessage(error) {
@@ -128,35 +133,146 @@ function pickUrl(pred, taxon) {
   return 'https://artsdatabanken.no'
 }
 
-async function _resizeForAi(blob) {
-  if (!_isBlob(blob)) return blob
-  return new Promise((resolve) => {
-    const url = URL.createObjectURL(blob)
-    const img = new Image()
-    img.onload = () => {
-      try {
-        const maxEdge = Math.max(1, getArtsorakelMaxEdge())
-        const sourceMaxEdge = Math.max(img.naturalWidth || 0, img.naturalHeight || 0)
-        if (!sourceMaxEdge || sourceMaxEdge <= maxEdge) { resolve(blob); return }
-        const scale = maxEdge / sourceMaxEdge
-        const w = Math.max(1, Math.round(img.naturalWidth * scale))
-        const h = Math.max(1, Math.round(img.naturalHeight * scale))
-        const canvas = document.createElement('canvas')
-        canvas.width = w
-        canvas.height = h
-        const ctx = canvas.getContext('2d')
-        if (!ctx) { resolve(blob); return }
-        ctx.drawImage(img, 0, 0, w, h)
-        canvas.toBlob(resized => resolve(_isBlob(resized) ? resized : blob), 'image/jpeg', 0.88)
-      } catch (_) {
-        resolve(blob)
-      } finally {
-        URL.revokeObjectURL(url)
+function _buildArtsorakelFilename(blob) {
+  const type = String(blob?.type || '').toLowerCase()
+  if (type === 'image/jpeg' || type === 'image/jpg') return 'photo.jpg'
+  if (type === 'image/webp') return 'photo.webp'
+  if (type === 'image/png') return 'photo.png'
+  if (type === 'image/avif') return 'photo.avif'
+  if (type === 'image/heic') return 'photo.heic'
+  if (type === 'image/heif') return 'photo.heif'
+  return 'photo.jpg'
+}
+
+function _shortText(value, limit = 240) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text
+}
+
+function _responseBodyExcerpt(payload) {
+  if (!payload) return ''
+  if (typeof payload === 'string') return _shortText(payload)
+  if (typeof payload === 'object') {
+    return _shortText(
+      payload.message
+      || payload.error_description
+      || payload.error
+      || payload.detail
+      || JSON.stringify(payload)
+    )
+  }
+  return _shortText(String(payload))
+}
+
+function _endpointMeta(kind, url) {
+  try {
+    const parsed = new URL(url)
+    return { kind, origin: parsed.origin, path: parsed.pathname }
+  } catch (_) {
+    return { kind, origin: '', path: String(url || '') }
+  }
+}
+
+async function _prepareArtsorakelImageBlob(blob, options = {}) {
+  const inputMeta = {
+    inputType: blob?.type || '',
+    inputSize: Number(blob?.size || 0),
+    sourceWidth: null,
+    sourceHeight: null,
+    sourceMaxEdge: null,
+    targetWidth: null,
+    targetHeight: null,
+    resized: false,
+    converted: false,
+    prepared: false,
+    fallback: false,
+    maxEdge: Math.max(1, Number(options.maxEdge || getArtsorakelMaxEdge()) || 1),
+  }
+
+  if (!_isBlob(blob)) return { blob, ...inputMeta, outputType: inputMeta.inputType, outputSize: inputMeta.inputSize }
+
+  if (typeof Image === 'undefined' || typeof document === 'undefined' || typeof URL === 'undefined') {
+    return { blob, ...inputMeta, outputType: inputMeta.inputType, outputSize: inputMeta.inputSize }
+  }
+
+  let img = null
+  let objectUrl = null
+
+  try {
+    objectUrl = URL.createObjectURL(blob)
+    img = await new Promise((resolve, reject) => {
+      const nextImg = new Image()
+      nextImg.onload = () => resolve(nextImg)
+      nextImg.onerror = () => reject(new Error('Image decode failed'))
+      nextImg.src = objectUrl
+    })
+
+    const sourceWidth = img.naturalWidth || img.width || null
+    const sourceHeight = img.naturalHeight || img.height || null
+    const sourceMaxEdge = Math.max(Number(sourceWidth) || 0, Number(sourceHeight) || 0) || null
+    const needsResize = Number.isFinite(sourceMaxEdge) && sourceMaxEdge > inputMeta.maxEdge
+    const needsJpeg = options.forceJpeg === true || needsResize || String(blob.type || '').toLowerCase() !== 'image/jpeg'
+
+    inputMeta.sourceWidth = sourceWidth
+    inputMeta.sourceHeight = sourceHeight
+    inputMeta.sourceMaxEdge = sourceMaxEdge
+
+    if (!sourceWidth || !sourceHeight || (!needsResize && !needsJpeg)) {
+      return {
+        blob,
+        ...inputMeta,
+        outputType: blob.type || '',
+        outputSize: Number(blob.size || 0),
       }
     }
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(blob) }
-    img.src = url
-  })
+
+    const targetWidth = needsResize
+      ? Math.max(1, Math.round(sourceWidth * (inputMeta.maxEdge / sourceMaxEdge)))
+      : sourceWidth
+    const targetHeight = needsResize
+      ? Math.max(1, Math.round(sourceHeight * (inputMeta.maxEdge / sourceMaxEdge)))
+      : sourceHeight
+    const canvas = document.createElement('canvas')
+    canvas.width = targetWidth
+    canvas.height = targetHeight
+    const ctx = canvas.getContext('2d', { alpha: false })
+    if (!ctx) throw new Error('Canvas context unavailable')
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(img, 0, 0, sourceWidth, sourceHeight, 0, 0, targetWidth, targetHeight)
+
+    const outputBlob = await new Promise(resolve => {
+      canvas.toBlob(nextBlob => resolve(_isBlob(nextBlob) ? nextBlob : null), 'image/jpeg', 0.88)
+    })
+    if (!_isBlob(outputBlob) || outputBlob.type !== 'image/jpeg') {
+      throw new Error('Artsorakel JPEG export failed')
+    }
+
+    inputMeta.targetWidth = targetWidth
+    inputMeta.targetHeight = targetHeight
+    inputMeta.resized = needsResize
+    inputMeta.converted = needsJpeg
+    inputMeta.prepared = true
+    return {
+      blob: outputBlob,
+      ...inputMeta,
+      outputType: outputBlob.type,
+      outputSize: outputBlob.size,
+    }
+  } catch (error) {
+    console.warn('Artsorakel image preparation failed; using original blob:', error)
+    return {
+      blob,
+      ...inputMeta,
+      fallback: true,
+      outputType: blob.type || '',
+      outputSize: Number(blob.size || 0),
+    }
+  } finally {
+    if (objectUrl) URL.revokeObjectURL(objectUrl)
+    if (img) img.src = ''
+  }
 }
 
 /**
@@ -167,16 +283,35 @@ async function _resizeForAi(blob) {
 export async function runArtsorakel(blob, lang = 'no', options = {}) {
   if (!_isBlob(blob)) return null
 
-  const aiBlob = await _resizeForAi(blob)
+  const prepared = options.prepared === true && _isBlob(options.preparedBlob)
+    ? {
+        blob: options.preparedBlob,
+        inputType: blob.type || '',
+        inputSize: Number(blob.size || 0),
+        outputType: options.preparedBlob.type || '',
+        outputSize: Number(options.preparedBlob.size || 0),
+        sourceWidth: options.preparedMeta?.sourceWidth ?? null,
+        sourceHeight: options.preparedMeta?.sourceHeight ?? null,
+        sourceMaxEdge: options.preparedMeta?.sourceMaxEdge ?? null,
+        targetWidth: options.preparedMeta?.targetWidth ?? null,
+        targetHeight: options.preparedMeta?.targetHeight ?? null,
+        resized: !!options.preparedMeta?.resized,
+        converted: !!options.preparedMeta?.converted,
+        prepared: true,
+        fallback: !!options.preparedMeta?.fallback,
+        maxEdge: Math.max(1, Number(options.preparedMeta?.maxEdge || getArtsorakelMaxEdge()) || 1),
+      }
+    : await _prepareArtsorakelImageBlob(blob, options)
+
+  const aiBlob = prepared.blob
   const langNorm = normalizeLang(lang)
   const onImageSent = typeof options?.onImageSent === 'function' ? options.onImageSent : null
   const onIdReceived = typeof options?.onIdReceived === 'function' ? options.onIdReceived : null
   const signal = options?.signal
-  let proxyHeaders = null
 
-  async function tryPost(url, fieldName, headers = null) {
+  async function tryPost(url, fieldName, headers = null, kind = 'direct') {
     const form = new FormData()
-    form.append(fieldName, aiBlob, 'photo.jpg')
+    form.append(fieldName, aiBlob, _buildArtsorakelFilename(aiBlob))
     const request = {
       method: 'POST',
       body: form,
@@ -185,17 +320,59 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
     if (headers) {
       request.headers = headers
     }
-    return fetch(url, request)
+    const response = await fetch(url, request)
+    if (!response.ok) {
+      let payload = null
+      try {
+        const text = typeof response.text === 'function' ? await response.text() : ''
+        try {
+          payload = text ? JSON.parse(text) : null
+        } catch (_) {
+          payload = text
+        }
+      } catch (_) {}
+      const meta = _endpointMeta(kind, url)
+      const error = new Error(
+        `${meta.kind} endpoint ${meta.origin}${meta.path} field=${fieldName} status=${response.status}${response.statusText ? ` ${response.statusText}` : ''}${_responseBodyExcerpt(payload) ? ` body=${_responseBodyExcerpt(payload)}` : ''} blob=${aiBlob.type || 'unknown'}:${aiBlob.size || 0}`
+      )
+      error.status = response.status
+      error.statusText = response.statusText
+      error.endpointKind = meta.kind
+      error.endpointOrigin = meta.origin
+      error.endpointPath = meta.path
+      error.fieldName = fieldName
+      error.responseBody = payload
+      error.blobType = aiBlob.type || ''
+      error.blobSize = aiBlob.size || 0
+      throw error
+    }
+    return response
   }
 
-  async function runAgainstEndpoint(url, headers = null) {
-    let res = await tryPost(url, 'image', headers)
-    if (!res.ok) res = await tryPost(url, 'file', headers)
-    if (!res.ok) throw new Error(`Artsdata AI ${res.status}`)
-    return res
+  async function runAgainstEndpoint(url, headers = null, kind = 'direct') {
+    const attempts = []
+    let lastError = null
+    for (const fieldName of ['image', 'file']) {
+      try {
+        const response = await tryPost(url, fieldName, headers, kind)
+        return response
+      } catch (error) {
+        lastError = error
+        attempts.push(error)
+      }
+    }
+    const endpoint = _endpointMeta(kind, url)
+    const details = attempts.length ? ` ${attempts.map(err => err.message).join(' | ')}` : ''
+    const error = new Error(`Artsdata AI ${endpoint.kind} failed:${details}`.trim())
+    error.cause = lastError || null
+    error.attempts = attempts
+    throw error
   }
 
-  if (ARTSDATA_PROXY_BASE_URL) {
+  const proxyBaseUrl = _getArtsorakelProxyBaseUrl()
+  let proxyHeaders = null
+
+  if (proxyBaseUrl) {
     const { data: { session } } = await supabase.auth.getSession()
     if (session?.access_token) {
       proxyHeaders = { Authorization: `Bearer ${session.access_token}` }
@@ -206,9 +383,9 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
   let lastError = null
   onImageSent?.()
 
-  if (ARTSDATA_PROXY_BASE_URL) {
+  if (proxyBaseUrl) {
     try {
-      res = await runAgainstEndpoint(`${ARTSDATA_PROXY_BASE_URL}/artsorakel`, proxyHeaders)
+      res = await runAgainstEndpoint(`${proxyBaseUrl}/artsorakel`, proxyHeaders, 'proxy')
     } catch (error) {
       lastError = error
       console.warn('Artsorakel proxy failed, falling back to direct endpoint:', error)
@@ -217,9 +394,16 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
 
   if (!res) {
     try {
-      res = await runAgainstEndpoint(ARTSDATA_AI_URL)
+      res = await runAgainstEndpoint(ARTSDATA_AI_URL, null, 'direct')
     } catch (error) {
-      throw lastError || error
+      const combined = lastError
+        ? new Error(`${lastError.message}; direct fallback failed: ${error.message}`)
+        : error
+      if (combined === error) throw error
+      combined.cause = error
+      combined.proxyError = lastError
+      combined.directError = error
+      throw combined
     }
   }
 
@@ -308,30 +492,48 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
     const rawBlob = _isBlob(item) ? item : item?.blob
     if (!_isBlob(rawBlob)) return null
 
-    // Resize to ≤1MP before cropping so createCroppedImageBlob doesn't OOM
-    // on high-resolution imported photos (camera blobs are already ≤1MP via this path too).
-    const resizedBlob = await _resizeForAi(rawBlob)
+    const prepared = await _prepareArtsorakelImageBlob(rawBlob, options)
+    const preparedBlob = prepared.blob
 
     const cropRect = _isBlob(item) ? null : normalizeAiCropRect(item.cropRect)
-    if (!cropRect) return resizedBlob
+    if (!cropRect) return { blob: preparedBlob, preparedMeta: prepared }
 
     try {
-      return await createCroppedImageBlob(resizedBlob, cropRect)
+      const croppedBlob = await createCroppedImageBlob(preparedBlob, cropRect)
+      return {
+        blob: croppedBlob,
+        preparedMeta: {
+          ...prepared,
+          converted: true,
+          prepared: true,
+        },
+      }
     } catch (error) {
       console.warn('AI crop export failed, falling back to resized image:', error)
-      return resizedBlob
+      return { blob: preparedBlob, preparedMeta: prepared }
     }
-  }))).filter(blob => _isBlob(blob))
+  }))).filter(item => _isBlob(item?.blob))
 
   if (!preparedBlobs.length) return null
 
   if (preparedBlobs.length === 1) {
-    return runArtsorakel(preparedBlobs[0], lang, options)
+    const [single] = preparedBlobs
+    return runArtsorakel(single.blob, lang, {
+      ...options,
+      prepared: true,
+      preparedBlob: single.blob,
+      preparedMeta: single.preparedMeta,
+    })
   }
 
   const tolerateFailures = options?.tolerateFailures === true
   const responses = tolerateFailures
-    ? await Promise.allSettled(preparedBlobs.map(blob => runArtsorakel(blob, lang, options)))
+    ? await Promise.allSettled(preparedBlobs.map(item => runArtsorakel(item.blob, lang, {
+        ...options,
+        prepared: true,
+        preparedBlob: item.blob,
+        preparedMeta: item.preparedMeta,
+      })))
         .then(results => {
           const fulfilled = results
             .filter(result => result.status === 'fulfilled')
@@ -340,7 +542,12 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
           const firstError = results.find(result => result.status === 'rejected')?.reason
           throw firstError || new Error('Artsorakel failed for all images')
         })
-    : await Promise.all(preparedBlobs.map(blob => runArtsorakel(blob, lang, options)))
+    : await Promise.all(preparedBlobs.map(item => runArtsorakel(item.blob, lang, {
+        ...options,
+        prepared: true,
+        preparedBlob: item.blob,
+        preparedMeta: item.preparedMeta,
+      })))
   return _combinePredictionResponses(responses, preparedBlobs.length)
 }
 
@@ -349,7 +556,8 @@ export async function runArtsorakelForMediaKeys(mediaKeys, lang = 'no', options 
     .map(key => String(key || '').trim())
     .filter(Boolean))]
   if (!keys.length) return null
-  if (!ARTSDATA_PROXY_BASE_URL) {
+  const proxyBaseUrl = _getArtsorakelProxyBaseUrl()
+  if (!proxyBaseUrl) {
     throw new Error('Artsorakel media proxy unavailable')
   }
 
@@ -357,7 +565,7 @@ export async function runArtsorakelForMediaKeys(mediaKeys, lang = 'no', options 
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for Artsorakel media')
 
-  const response = await fetch(`${ARTSDATA_PROXY_BASE_URL}/artsorakel/media`, {
+  const response = await fetch(`${proxyBaseUrl}/artsorakel/media`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
