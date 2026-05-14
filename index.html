@@ -522,13 +522,33 @@
                 placeholder="Unknown species" autocomplete="off" spellcheck="false">
               <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
             </div>
-            <div class="detail-ai-row">
-              <button class="ai-id-btn" id="detail-inat-btn" data-identify-service-button="inat">
-                <div class="ai-dot"></div> iNaturalist
-              </button>
-              <button class="ai-id-btn" id="detail-arts-btn" data-identify-service-button="artsorakel">
-                <div class="ai-dot"></div> Artsorakel
-              </button>
+            <div class="detail-ai-stack" data-identify-comparison-state>
+              <div class="detail-ai-controls">
+                <button class="ai-id-btn ai-id-run-btn" id="detail-ai-run-btn" type="button" data-identify-run-button>
+                  <span class="ai-id-dot"></span>
+                  <span data-identify-run-label>AI ID</span>
+                </button>
+                <div class="detail-ai-service-tabs" role="tablist" aria-label="AI services">
+                  <button type="button" class="ai-id-service-tab" data-identify-service-tab="artsorakel">
+                    <span class="ai-id-dot"></span>
+                    <span class="ai-id-service-tab-label">Artsorakel</span>
+                    <span class="ai-id-service-tab-state" style="display:none"></span>
+                    <span class="ai-id-service-tab-reason" style="display:none"></span>
+                  </button>
+                  <button type="button" class="ai-id-service-tab" data-identify-service-tab="inat">
+                    <span class="ai-id-dot"></span>
+                    <span class="ai-id-service-tab-label">iNaturalist</span>
+                    <span class="ai-id-service-tab-state" style="display:none"></span>
+                    <span class="ai-id-service-tab-reason" style="display:none"></span>
+                  </button>
+                </div>
+              </div>
+              <div class="detail-ai-results-shell">
+                <div class="detail-ai-stale-note" style="display:none" data-identify-stale-note>Results outdated - run AI ID again.</div>
+                <div id="detail-ai-results" class="detail-ai-results" data-identify-results data-identify-service="artsorakel"></div>
+              </div>
+            </div>
+            <div class="detail-follow-row">
               <button class="detail-follow-btn" id="detail-follow-observation-btn" type="button" aria-label="Follow observation" title="Follow observation">🧭</button>
               <button class="detail-follow-btn" id="detail-follow-taxon-btn" type="button" aria-label="Follow species" title="Follow species">S</button>
             </div>
@@ -546,7 +566,6 @@
                 <div class="detail-toggle-track"><div class="detail-toggle-thumb"></div></div>
               </label>
             </div>
-            <div id="detail-ai-results" style="display:none"></div>
           </div>
 
           <div class="field-meta-section">

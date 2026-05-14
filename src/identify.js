@@ -285,8 +285,8 @@ export function syncIdentifyButtonLabels() {
   const defaultLabel = getIdentifyButtonLabel(defaultService)
   const setLabel = (el, label) => {
     if (!el) return
-    if (el.querySelector?.('.ai-dot')) {
-      el.innerHTML = `<div class="ai-dot"></div> ${label}`
+    if (el.querySelector?.('.ai-id-dot') || el.querySelector?.('.ai-dot')) {
+      el.innerHTML = `<span class="ai-id-dot"></span> ${label}`
     } else {
       el.textContent = label
     }

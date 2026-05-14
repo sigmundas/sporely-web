@@ -1,5 +1,5 @@
 const LOCATION_LOOKUP_BASE_URL = String(
-  import.meta.env.VITE_LOCATION_LOOKUP_BASE_URL || import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || ''
+  import.meta.env?.VITE_LOCATION_LOOKUP_BASE_URL || import.meta.env?.VITE_MEDIA_UPLOAD_BASE_URL || ''
 ).replace(/\/+$/, '')
 const ARTS_MAX_DIST = 0.006
 const INTERNATIONAL_LOOKUP_INTERVAL_MS = 1000

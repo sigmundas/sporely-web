@@ -4,8 +4,8 @@ import { getEffectiveCloudUploadPolicy } from './cloud-plan.js'
 
 const SIGNED_URL_TTL_SECONDS = 3600
 const SIGNED_URL_CACHE = new Map()
-const MEDIA_BASE_URL = String(import.meta.env.VITE_MEDIA_BASE_URL || 'https://media.sporely.no').replace(/\/+$/, '')
-const MEDIA_UPLOAD_BASE_URL = String(import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || '').replace(/\/+$/, '')
+const MEDIA_BASE_URL = String(import.meta.env?.VITE_MEDIA_BASE_URL || 'https://media.sporely.no').replace(/\/+$/, '')
+const MEDIA_UPLOAD_BASE_URL = String(import.meta.env?.VITE_MEDIA_UPLOAD_BASE_URL || '').replace(/\/+$/, '')
 const UPLOAD_METADATA_FIELDS = [
   'upload_mode',
   'source_width',

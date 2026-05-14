@@ -2,7 +2,7 @@ import { supabase } from '../supabase.js'
 import { getLocale, setLocale, t } from '../i18n.js'
 import { isNativeApp } from '../platform.js'
 
-const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAC0h9RON_lYu5ib_'
+const TURNSTILE_SITE_KEY = import.meta.env?.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAC0h9RON_lYu5ib_'
 let _captchaToken      = null
 let _turnstileWidgetId = null
 
@@ -30,9 +30,9 @@ function _isLocalTestingHost(hostname = window.location.hostname) {
   )
 }
 
-const BYPASS_TURNSTILE = isNativeApp() || (import.meta.env.DEV && _isLocalTestingHost())
+const BYPASS_TURNSTILE = isNativeApp() || (import.meta.env?.DEV && _isLocalTestingHost())
 const PASSWORD_RESET_WEB_ORIGIN = 'https://app.sporely.no'
-const PERSIST_AUTH_DRAFTS = import.meta.env.DEV
+const PERSIST_AUTH_DRAFTS = !!import.meta.env?.DEV
 const AUTH_DRAFT_KEY = 'sporely-auth-draft'
 const PASSWORD_RECOVERY_HINT_KEY = 'sporely-password-recovery-hint'
 const PASSWORD_RECOVERY_HINT_TTL_MS = 1000 * 60 * 60

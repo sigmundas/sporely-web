@@ -15,7 +15,17 @@ import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } fr
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
-import { getIdentifyBusyLabel, getIdentifyButtonLabel, getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, formatIdentifyScore, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
+import { getIdentifyBusyLabel, getIdentifyButtonLabel, getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
+import {
+  buildIdentifyFingerprint,
+  chooseIdentifyComparisonActiveService,
+  getAvailableIdentifyServices,
+  renderIdentifyResultRows,
+  renderIdentifyServiceTab,
+  runIdentifyComparisonForBlobs,
+  ID_SERVICE_ARTSORAKEL,
+  normalizeIdentifyService,
+} from '../ai-identification.js';
 
 let sessions = [];
 let expandedSessionIds = new Set();
@@ -69,32 +79,194 @@ function _applySessionAiPrediction(session, prediction) {
   return true;
 }
 
-function _renderSessionAiResults(predictions, service = getDefaultIdService()) {
-  if (!Array.isArray(predictions) || !predictions.length) return '';
-  return predictions.map((prediction, index) =>
-    `<div class="ai-result-item" data-idx="${index}">
-      <span class="ai-result-name">${escHtml(prediction.displayName)}</span>
-      <span class="ai-result-pct">${formatIdentifyScore(service, prediction.probability)}</span>
-    </div>`
-  ).join('');
+function _ensureSessionAiState(session) {
+  if (!session) return null;
+  if (!session.aiPredictionsByService) session.aiPredictionsByService = {};
+  if (!session.aiAvailability) session.aiAvailability = {};
+  if (!session.aiActiveService) session.aiActiveService = getDefaultIdService();
+  if (!session.aiCurrentFingerprint) session.aiCurrentFingerprint = '';
+  if (!session.aiRequestedFingerprint) session.aiRequestedFingerprint = '';
+  if (!session.aiAvailabilityFingerprint) session.aiAvailabilityFingerprint = '';
+  if (Array.isArray(session.aiPredictions) && session.aiPredictions.length) {
+    session.aiPredictionsByService[normalizeIdentifyService(session.aiService || getDefaultIdService())] = session.aiPredictions;
+  }
+  return session;
 }
 
-function _wireAiResults(sid, input, aiResults, predictions, service = getDefaultIdService()) {
-  if (!input || !aiResults || !Array.isArray(predictions) || !predictions.length) return;
-  aiResults._predictions = predictions;
-  aiResults.querySelectorAll('.ai-result-item').forEach((el, index) => {
-    if (el._wired) return;
-    el._wired = true;
-    el.addEventListener('click', () => {
-      const prediction = predictions[index];
-      const session = sessionById(sid);
-      if (!_applySessionAiPrediction(session, prediction)) return;
-      _persistSessions();
-      input.value = prediction.displayName;
-      aiResults.style.display = 'none';
-      renderSessions();
+function _sessionAiInputs(session) {
+  return (session?.files || []).map((blob, index) => ({
+    id: `session-${session.id}-${index}`,
+    blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
+    cropRect: session.imageMeta?.[index]?.aiCropRect || null,
+    cropSourceW: session.imageMeta?.[index]?.aiCropSourceW ?? null,
+    cropSourceH: session.imageMeta?.[index]?.aiCropSourceH ?? null,
+    sourceType: 'blob',
+  })).filter(item => _isBlob(item.blob));
+}
+
+function _sessionAiFingerprint(session) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) return null
+  return buildIdentifyFingerprint({
+    service: ID_SERVICE_ARTSORAKEL,
+    language: getTaxonomyLanguage(),
+    images: _sessionAiInputs(session),
+  })
+}
+
+async function _syncSessionAiAvailability(session) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) return
+  const fingerprint = _sessionAiFingerprint(normalized)
+  if (!fingerprint) return
+  const availabilityList = await getAvailableIdentifyServices({
+    blobs: _sessionAiInputs(normalized).map(item => item.blob),
+  })
+  const availabilityFingerprint = JSON.stringify({
+    fingerprint: fingerprint.requestFingerprint,
+    availability: availabilityList.map(item => ({
+      service: item.service,
+      available: !!item.available,
+      reason: item.reason || '',
+    })),
+  })
+  if (normalized.aiAvailabilityFingerprint === availabilityFingerprint) return
+  normalized.aiAvailability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+  normalized.aiAvailabilityFingerprint = availabilityFingerprint
+  if (normalized.aiCurrentFingerprint === fingerprint.requestFingerprint) {
+    renderSessions()
+  }
+}
+
+function _sessionAiResultState(session, service) {
+  const normalized = _ensureSessionAiState(session)
+  const svc = normalizeIdentifyService(service)
+  const result = normalized?.aiPredictionsByService?.[svc] || null
+  const availability = normalized?.aiAvailability?.[svc] || null
+  return {
+    service: svc,
+    active: normalized?.aiActiveService === svc,
+    available: availability?.available ?? false,
+    reason: availability?.reason || '',
+    status: result?.status || (normalized?.aiRunning ? 'running' : 'idle'),
+    topPrediction: result?.topPrediction || null,
+    topProbability: result?.topProbability ?? null,
+    errorMessage: result?.errorMessage || '',
+  }
+}
+
+function _renderSessionAiResults(session) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) return ''
+  const activeService = normalizeIdentifyService(normalized.aiActiveService)
+  const result = normalized.aiPredictionsByService?.[activeService] || null
+  if (result?.predictions?.length) {
+    return renderIdentifyResultRows(activeService, result.predictions)
+  }
+  if (result?.status === 'unavailable') {
+    return `<div class="ai-results-empty">${normalized.aiAvailability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+  }
+  if (normalized.aiRunning) {
+    return `<div class="ai-results-empty">${t('common.loading')}</div>`
+  }
+  if (normalized.aiStale) {
+    return `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
+  }
+  return `<div class="ai-results-empty">${t('review.noMatch') || 'No match'}</div>`
+}
+
+function _renderSessionAiControls(session) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) return ''
+  const fingerprint = _sessionAiFingerprint(normalized)
+  if (fingerprint) {
+    normalized.aiCurrentFingerprint = fingerprint.requestFingerprint
+    normalized.aiStale = Boolean(normalized.aiRequestedFingerprint && normalized.aiRequestedFingerprint !== fingerprint.requestFingerprint)
+  }
+  void _syncSessionAiAvailability(normalized)
+  const activeService = normalizeIdentifyService(normalized.aiActiveService)
+  const activeResult = normalized.aiPredictionsByService?.[activeService] || null
+  const runState = normalized.aiRunning
+    ? 'running'
+    : (activeResult?.status || 'idle')
+  const anyAvailable = Object.values(normalized.aiAvailability || {}).some(item => item?.available)
+  const runLabel = normalized.aiRunning ? (t('common.loading') || 'Loading') : (t('review.aiId') || 'AI ID')
+  const staleNote = normalized.aiStale ? `<div class="detail-ai-stale-note">${t('review.resultsOutdated') || 'Results outdated - run AI ID again.'}</div>` : ''
+  return `
+    <div class="detail-ai-stack" data-identify-comparison-state data-sid="${escHtml(normalized.id)}">
+      <div class="detail-ai-controls">
+        <button class="ai-id-btn ai-id-run-btn" type="button" data-identify-run-button data-sid="${escHtml(normalized.id)}" ${normalized.aiRunning || !anyAvailable ? 'disabled' : ''}>
+          <span class="ai-id-dot ${runState === 'running' ? 'is-running' : runState === 'success' || runState === 'no_match' || runState === 'stale' ? 'is-complete' : runState === 'unavailable' ? 'is-unavailable' : runState === 'error' ? 'is-error' : ''}"></span>
+          <span>${escHtml(runLabel)}</span>
+        </button>
+        <div class="detail-ai-service-tabs" role="tablist" aria-label="AI services">
+          ${renderIdentifyServiceTab(_sessionAiResultState(normalized, ID_SERVICE_ARTSORAKEL))}
+          ${renderIdentifyServiceTab(_sessionAiResultState(normalized, ID_SERVICE_INATURALIST))}
+        </div>
+      </div>
+      <div class="detail-ai-results-shell">
+        ${staleNote}
+        <div class="detail-ai-results ai-results-import" data-sid="${escHtml(normalized.id)}" data-identify-results data-identify-service="${activeService}">
+          ${_renderSessionAiResults(normalized)}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function _runSessionAiComparison(sid) {
+  const session = sessionById(sid);
+  if (!session?.files?.length || importAiBatchState.running) return;
+  const normalized = _ensureSessionAiState(session);
+  const fingerprint = _sessionAiFingerprint(normalized);
+  if (!fingerprint) return;
+
+  normalized.aiRunning = true;
+  normalized.aiRequestedFingerprint = fingerprint.requestFingerprint;
+  normalized.aiCurrentFingerprint = fingerprint.requestFingerprint;
+  normalized.aiStale = false;
+  renderSessions();
+
+  try {
+    const availabilityList = await getAvailableIdentifyServices({
+      blobs: _sessionAiInputs(normalized).map(item => item.blob),
     });
-  });
+    const availability = Object.fromEntries(availabilityList.map(item => [item.service, item]));
+    normalized.aiAvailability = availability;
+    normalized.aiAvailabilityFingerprint = fingerprint.requestFingerprint;
+
+    const comparison = await runIdentifyComparisonForBlobs(
+      _sessionAiInputs(normalized).map(item => ({
+        blob: item.blob,
+        cropRect: item.cropRect,
+      })),
+      {
+        language: getTaxonomyLanguage(),
+        availability,
+        defaultService: normalized.aiActiveService,
+      },
+    );
+
+    normalized.aiPredictionsByService = comparison.resultsByService;
+    normalized.aiActiveService = comparison.activeService;
+    normalized.aiStale = false;
+
+    const activeResult = comparison.resultsByService?.[comparison.activeService] || null;
+    if (activeResult?.status === 'no_match' && Object.values(comparison.resultsByService).every(result => result?.status === 'no_match' || result?.status === 'unavailable')) {
+      showToast(getIdentifyNoMatchMessage(comparison.activeService));
+    }
+  } catch (err) {
+    console.error('Identification AI error:', err);
+    showToast(getIdentifyUnavailableMessage(normalized.aiActiveService || getDefaultIdService()));
+  } finally {
+    normalized.aiRunning = false;
+    normalized.aiService = normalized.aiActiveService;
+    if (Array.isArray(normalized.aiPredictionsByService?.[normalized.aiActiveService]?.predictions)) {
+      normalized.aiPredictions = normalized.aiPredictionsByService[normalized.aiActiveService].predictions;
+    }
+    _persistSessions();
+    renderSessions();
+  }
 }
 
 function _updateImportFooterUi() {
@@ -123,7 +295,7 @@ function _updateImportFooterUi() {
   if (progressText) progressText.textContent = total > 0 ? `${done}/${total}` : '';
 
   document
-    .querySelectorAll('#import-session-list .import-card-delete, #import-session-list .import-strip-delete, #import-session-list .ai-id-btn-import, #import-session-list .import-vis-radio, #import-session-list .import-taxon-input')
+    .querySelectorAll('#import-session-list .import-card-delete, #import-session-list .import-strip-delete, #import-session-list .import-vis-radio, #import-session-list .import-taxon-input')
     .forEach(el => {
       el.disabled = running;
     });
@@ -1375,7 +1547,6 @@ export function renderSessions() {
 
 function buildCardHTML(session) {
   const sid = session.id;
-  const service = session.aiService || getDefaultIdService();
   const dateStr = formatDate(session.ts, { month: 'short', day: 'numeric' });
   const timeStr = formatTime(session.ts, { hour: '2-digit', minute: '2-digit' });
   const photoCount = session.files.length;
@@ -1410,7 +1581,6 @@ function buildCardHTML(session) {
 
   const taxonVal = session.taxon ? escHtml(session.taxon.displayName) : '';
   const locVal = escHtml(session.locationName);
-  const aiPredictions = Array.isArray(session.aiPredictions) ? session.aiPredictions : [];
   const sessionVisibility = normalizeCaptureVisibility(session.visibility, getDefaultVisibility());
   const visChecked = v => sessionVisibility === v ? 'checked' : '';
   const heicWithoutGps = session.gpsLat === null && (session.exifDebug || []).some(d =>
@@ -1447,10 +1617,7 @@ function buildCardHTML(session) {
           value="${taxonVal}">
         <ul class="taxon-dropdown import-taxon-dropdown" data-sid="${sid}" style="display:none"></ul>
       </div>
-      <button class="ai-id-btn-import" data-sid="${sid}" data-identify-default-label="true" ${importAiBatchState.running ? 'disabled' : ''}>
-        <div class="ai-dot"></div> ${getIdentifyButtonLabel(service)}
-      </button>
-      <div class="ai-results-import" data-sid="${sid}" data-service="${service}" style="${aiPredictions.length ? '' : 'display:none'}">${_renderSessionAiResults(aiPredictions, service)}</div>
+      ${session.files.length ? _renderSessionAiControls(session) : ''}
     </div>
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">${t('detail.location')}</div>
@@ -1601,11 +1768,7 @@ function _wireCard(sid) {
     setTimeout(() => { dropdown.style.display = 'none'; }, 200);
   });
 
-  const aiBtn = card.querySelector(`.ai-id-btn-import[data-sid="${sid}"]`)
-  const aiResults = card.querySelector(`.ai-results-import[data-sid="${sid}"]`)
   const session = sessionById(sid)
-  const service = session?.aiService || getDefaultIdService()
-  _wireAiResults(sid, input, aiResults, session?.aiPredictions || [], service)
   card.querySelectorAll(`.import-strip-item[data-sid="${sid}"]`).forEach(item => {
     if (item._wired) return
     if (item.classList.contains('import-strip-add')) return
@@ -1618,56 +1781,45 @@ function _wireCard(sid) {
       _openSessionCropEditor(session, startIndex)
     })
   })
-  if (aiBtn && aiResults && !aiBtn._wired) {
-    aiBtn._wired = true
-    aiBtn.addEventListener('click', async () => {
-      if (importAiBatchState.running) return
+  const aiRunBtn = card.querySelector(`[data-identify-run-button][data-sid="${sid}"]`)
+  const aiResults = card.querySelector(`[data-identify-results][data-sid="${sid}"]`)
+  if (aiRunBtn && !aiRunBtn._wired) {
+    aiRunBtn._wired = true
+    aiRunBtn.addEventListener('click', () => _runSessionAiComparison(sid))
+  }
+
+  card.querySelectorAll('[data-identify-service-tab][data-sid]').forEach(tab => {
+    if (tab._wired) return
+    tab._wired = true
+    tab.addEventListener('click', () => {
       const session = sessionById(sid)
-      if (!session?.files?.length) return
-      const service = session.aiService || getDefaultIdService()
-      aiBtn.disabled = true
-      aiBtn.textContent = getIdentifyBusyLabel(service)
-      try {
-        const predictions = await runIdentifyForBlobs(
-          session.files.map((blob, index) => ({
-            blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
-            cropRect: session.imageMeta?.[index]?.aiCropRect || null,
-          })),
-          service,
-          getTaxonomyLanguage(),
-        )
-        if (!predictions?.length) {
-          session.aiPredictions = []
-          session.aiService = service
-          aiResults.style.display = 'none'
-          _persistSessions()
-          showToast(getIdentifyNoMatchMessage(service))
-          return
-        }
-        session.aiPredictions = predictions
-        session.aiService = service
-        aiResults.innerHTML = _renderSessionAiResults(predictions, service)
-        aiResults.style.display = 'block'
+      if (!session) return
+      session.aiActiveService = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+      _persistSessions()
+      renderSessions()
+    })
+  })
+
+  if (aiResults) {
+    aiResults.querySelectorAll('[data-identify-result]').forEach(el => {
+      if (el._wired) return
+      el._wired = true
+      el.addEventListener('click', () => {
+        const prediction = JSON.parse(el.dataset.identifyResult)
+        const session = sessionById(sid)
+        if (!session) return
+        if (!_applySessionAiPrediction(session, prediction)) return
+        const serviceKey = normalizeIdentifyService(prediction.service || session.aiActiveService || getDefaultIdService())
+        session.aiActiveService = serviceKey
+        session.aiPredictionsByService ||= {}
         _persistSessions()
-        _wireAiResults(sid, input, aiResults, predictions, service)
-      } catch (err) {
-        console.error('Identification AI error:', err)
-        const message = String(err?.message || 'Unknown error')
-        if (service === ID_SERVICE_INATURALIST && message.toLowerCase().includes('missing inaturalist api token')) {
-          showToast(t('settings.inaturalistLoginMissing'))
-        } else if (message.includes('CORS') || message.toLowerCase().includes('failed to fetch')) {
-          showToast(getIdentifyUnavailableMessage(service))
-        } else {
-          showToast(service === ID_SERVICE_INATURALIST
-            ? t('common.errorPrefix', { message })
-            : t('common.artsorakelError', { message }))
-        }
-      } finally {
-        aiBtn.disabled = false
-        aiBtn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyButtonLabel(service)}`
-      }
+        input.value = prediction.displayName
+        renderSessions()
+      })
     })
   }
+
+  void _syncSessionAiAvailability(session)
 }
 
 function _openSessionCropEditor(session, startIndex = 0) {

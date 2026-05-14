@@ -4,7 +4,17 @@ import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
 import { searchTaxa, formatDisplayName } from '../artsorakel.js'
-import { getIdentifyButtonLabel, getIdentifyBusyLabel, getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, formatIdentifyScore, runIdentifyForBlobs, runIdentifyForMediaKeys, ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST } from '../identify.js'
+import {
+  buildIdentifyFingerprint,
+  chooseIdentifyComparisonActiveService,
+  getAvailableIdentifyServices,
+  loadObservationIdentifications,
+  renderIdentifyResultRows,
+  saveIdentificationRun,
+  ID_SERVICE_ARTSORAKEL,
+  ID_SERVICE_INATURALIST,
+  normalizeIdentifyService,
+} from '../ai-identification.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
@@ -14,6 +24,7 @@ import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
 import { getArtsorakelMaxEdge, getDefaultVisibility, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
+import { runIdentifyForBlobs, runIdentifyForMediaKeys } from '../identify.js'
 import { Preferences } from '@capacitor/preferences'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
@@ -39,6 +50,18 @@ let detailAuthorProfile = null
 let detailFriendship = null
 let detailFollowState = { user: false, observation: false, taxon: false, genus: false }
 let detailPrivacySlotCount = null
+const detailAiState = {
+  running: false,
+  activeService: ID_SERVICE_ARTSORAKEL,
+  availability: {},
+  resultsByService: {},
+  cachedRows: [],
+  currentFingerprint: '',
+  requestedFingerprint: '',
+  currentFingerprintByService: {},
+  requestedFingerprintByService: {},
+  stale: false,
+}
 
 const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
 const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
@@ -92,8 +115,13 @@ export function initFindDetail() {
     })
   }
 
-  document.getElementById('detail-inat-btn').addEventListener('click', () => _runAI(ID_SERVICE_INATURALIST))
-  document.getElementById('detail-arts-btn').addEventListener('click', () => _runAI(ID_SERVICE_ARTSORAKEL))
+  document.querySelector('[data-identify-run-button]')?.addEventListener('click', _runDetailAiComparison)
+  document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
+    tab.addEventListener('click', () => {
+      detailAiState.activeService = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+      _renderDetailAiResults()
+    })
+  })
   document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
   document.getElementById('detail-friend-btn')?.addEventListener('click', _sendFriendRequestFromDetail)
   document.querySelectorAll('input[name="detail-vis"], input[name="detail-location-precision"], #detail-draft').forEach(input => {
@@ -136,6 +164,16 @@ export async function openFindDetail(obsId, options = {}) {
   currentObsIsOwner = false
   returnScreenOverride = options.returnScreen || null
   hideCancelOverride = !!options.hideCancel
+  detailAiState.running = false
+  detailAiState.activeService = ID_SERVICE_ARTSORAKEL
+  detailAiState.availability = {}
+  detailAiState.resultsByService = {}
+  detailAiState.cachedRows = []
+  detailAiState.currentFingerprint = ''
+  detailAiState.requestedFingerprint = ''
+  detailAiState.currentFingerprintByService = {}
+  detailAiState.requestedFingerprintByService = {}
+  detailAiState.stale = false
 
   // Update back button label — state.currentScreen is still the previous screen at this point
   const prevLabel = {
@@ -349,6 +387,8 @@ export async function openFindDetail(obsId, options = {}) {
     })
   }
 
+  await _loadDetailAiCache()
+
   if (currentObsIsOwner) {
     const addCardContainer = document.createElement('div')
     addCardContainer.className = 'detail-gallery-item-wrap'
@@ -447,6 +487,10 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
             r.ai_crop_x2 = meta.aiCropRect?.x2 ?? null
             r.ai_crop_y2 = meta.aiCropRect?.y2 ?? null
             updateObservationImageCrop(r.id, meta)
+            _markDetailAiStale()
+          },
+          onClose: committed => {
+            if (committed) _markDetailAiStale()
           },
         })
       })
@@ -483,6 +527,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
           await supabase.from('observations').update({ image_key: null, thumb_key: null }).eq('id', currentObs.id)
         }
         container.remove()
+        _markDetailAiStale()
       } catch (err) {
         console.error('Failed to delete image:', err)
         showToast(err.message)
@@ -612,23 +657,6 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
     .map(img => img?.dataset?.storagePath || '')
     .filter(Boolean)
 
-  identifyInputs.forEach(item => {
-    if (!item) return
-    console.debug('[detail-ai] identify input', {
-      service,
-      storagePathExtension: item.storagePathExtension,
-      requestedVariant: item.requestedVariant,
-      blobType: item.debug?.blobType || '',
-      blobSize: item.debug?.blobSize || 0,
-      width: item.debug?.width ?? null,
-      height: item.debug?.height ?? null,
-      usedFallbackUrl: item.usedFallbackUrl,
-      mediaKeysCount: mediaKeys.length,
-      sourceMode: item.sourceMode,
-      pathMode: 'blob',
-    })
-  })
-
   const language = options.language || getTaxonomyLanguage()
   const identifyBlobs = options.identifyBlobs || runIdentifyForBlobs
   const identifyMediaKeys = options.identifyMediaKeys || runIdentifyForMediaKeys
@@ -641,12 +669,6 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
       return await identifyBlobs(blobs, service, language, identifyOptions)
     } catch (error) {
       if (service === ID_SERVICE_ARTSORAKEL && mediaKeys.length && _isArtsorakelBlobFallbackError(error)) {
-        console.debug('[detail-ai] falling back to media keys', {
-          service,
-          mediaKeysCount: mediaKeys.length,
-          pathMode: 'media-keys',
-          reason: String(error?.message || error || ''),
-        })
         return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium' })
       }
       throw error
@@ -654,11 +676,6 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
   }
 
   if (mediaKeys.length && service === ID_SERVICE_ARTSORAKEL) {
-    console.debug('[detail-ai] using media-key identify', {
-      service,
-      mediaKeysCount: mediaKeys.length,
-      pathMode: 'media-keys',
-    })
     return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium' })
   }
 
@@ -668,78 +685,316 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
   throw new Error('Could not load observation images for iNaturalist')
 }
 
-async function _runAI(service) {
-  const btn       = document.getElementById(service === ID_SERVICE_INATURALIST ? 'detail-inat-btn' : 'detail-arts-btn')
-  const buttons = [
-    document.getElementById('detail-inat-btn'),
-    document.getElementById('detail-arts-btn'),
-  ].filter(Boolean)
+function _detailImageFingerprint(service = ID_SERVICE_ARTSORAKEL) {
+  return buildIdentifyFingerprint({
+    service,
+    observationId: currentObs?.id || null,
+    language: getTaxonomyLanguage(),
+    images: detailImageRows.map((row, index) => ({
+      id: row.id || `detail-${index}`,
+      mediaKey: row.storage_path || null,
+      cropRect: normalizeAiCropRect({
+        x1: row.ai_crop_x1,
+        y1: row.ai_crop_y1,
+        x2: row.ai_crop_x2,
+        y2: row.ai_crop_y2,
+      }),
+      sourceType: 'media',
+    })),
+  })
+}
+
+function _detailIdentifyInputs() {
+  return Array.from(document.querySelectorAll('#detail-gallery img'))
+}
+
+function _detailAiTabState(service) {
+  const result = detailAiState.resultsByService[service] || null
+  const availability = detailAiState.availability?.[service] || null
+  return {
+    service,
+    active: detailAiState.activeService === service,
+    available: availability?.available ?? false,
+    reason: availability?.reason || '',
+    status: result?.status || (detailAiState.running ? 'running' : 'idle'),
+    errorMessage: result?.errorMessage || '',
+    topProbability: result?.topProbability ?? null,
+    topPrediction: result?.topPrediction || null,
+  }
+}
+
+function _renderDetailAiTabs() {
+  const anyAvailable = Object.values(detailAiState.availability || {}).some(item => item?.available)
+  const runBtn = document.querySelector('[data-identify-run-button]')
+  if (runBtn) {
+    runBtn.disabled = !anyAvailable || detailAiState.running || !currentObsIsOwner
+    const activeService = normalizeIdentifyService(detailAiState.activeService)
+    const activeResult = detailAiState.resultsByService[activeService] || null
+    const runDot = runBtn.querySelector('.ai-id-dot')
+    if (runDot) {
+      runDot.className = [
+        'ai-id-dot',
+        detailAiState.running ? 'is-running' : '',
+        activeResult?.status === 'success' || activeResult?.status === 'no_match' || activeResult?.status === 'stale' ? 'is-complete' : '',
+        !anyAvailable ? 'is-unavailable' : '',
+        activeResult?.status === 'error' ? 'is-error' : '',
+      ].filter(Boolean).join(' ')
+    }
+    const runLabel = runBtn.querySelector('[data-identify-run-label]')
+    if (runLabel) {
+      runLabel.textContent = detailAiState.running
+        ? (t('common.loading') || 'Loading')
+        : (t('review.aiId') || 'AI ID')
+    }
+  }
+  document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
+    const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+    const state = _detailAiTabState(service)
+    tab.classList.toggle('is-active', state.active)
+    tab.classList.toggle('is-disabled', !state.available)
+    tab.classList.toggle('is-running', state.status === 'running')
+    tab.classList.toggle('has-results', state.status === 'success' || state.status === 'no_match' || state.status === 'stale')
+    tab.classList.toggle('has-error', state.status === 'error')
+    tab.disabled = !state.available || detailAiState.running
+    const dot = tab.querySelector('.ai-id-dot')
+    if (dot) {
+      dot.className = [
+        'ai-id-dot',
+        state.status === 'running' ? 'is-running' : '',
+        state.status === 'success' || state.status === 'no_match' || state.status === 'stale' ? 'is-complete' : '',
+        !state.available ? 'is-unavailable' : '',
+        state.status === 'error' ? 'is-error' : '',
+      ].filter(Boolean).join(' ')
+    }
+    const stateLabel = tab.querySelector('.ai-id-service-tab-state')
+    if (stateLabel) {
+      stateLabel.textContent = state.status === 'running'
+        ? (t('common.loading') || 'Loading')
+        : state.status === 'error'
+          ? 'Error'
+        : state.status === 'no_match'
+            ? (t('review.noMatch') || 'No match')
+            : (state.status === 'success' || state.status === 'stale')
+              ? state.topPrediction?.confidenceText || `${Math.round(Number(state.topProbability || 0) * 100)}%`
+              : ''
+      stateLabel.style.display = stateLabel.textContent ? '' : 'none'
+    }
+    const reason = tab.querySelector('.ai-id-service-tab-reason')
+    if (reason) {
+      reason.textContent = state.available ? '' : (state.reason || '')
+      reason.style.display = state.available ? 'none' : ''
+    }
+  })
+}
+
+function _renderDetailAiResults() {
   const resultsEl = document.getElementById('detail-ai-results')
-  const galleryImgs = Array.from(document.querySelectorAll('#detail-gallery img'))
-  if (!galleryImgs.length) { showToast(t('detail.noPhotoToIdentify')); return }
-
-  buttons.forEach(actionBtn => { actionBtn.disabled = true })
-  btn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyBusyLabel(service)}`
-  resultsEl.style.display = 'none'
-
-  try {
-    const predictions = await runDetailIdentify(service, galleryImgs, { variant: 'medium' })
-
-    if (!predictions?.length) {
-      showToast(getIdentifyNoMatchMessage(service))
+  if (!resultsEl) return
+  const activeService = normalizeIdentifyService(detailAiState.activeService)
+  const result = detailAiState.resultsByService[activeService] || null
+  resultsEl.dataset.identifyService = activeService
+  const staleNote = document.querySelector('[data-identify-stale-note]')
+  if (staleNote) staleNote.style.display = detailAiState.stale ? '' : 'none'
+  if (detailAiState.running && (!result?.predictions || !result.predictions.length)) {
+    resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
+    resultsEl.style.display = 'block'
+    return
+  }
+  if (!result?.predictions?.length) {
+    if (result?.status === 'unavailable') {
+      resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+      resultsEl.style.display = 'block'
       return
     }
-
-    resultsEl.innerHTML = predictions.map((p, i) =>
-      `<div class="ai-result" data-idx="${i}">
-        <span class="ai-prob">${formatIdentifyScore(service, p.probability)}</span>
-        <span class="ai-name">${_esc(p.displayName)}</span>
-      </div>`
-    ).join('')
+    resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.stale ? (t('review.resultsOutdated') || 'Results outdated') : (t('review.noMatch') || 'No match')}</div>`
     resultsEl.style.display = 'block'
-    resultsEl._predictions = predictions
+    return
+  }
 
-    resultsEl.querySelectorAll('.ai-result').forEach((el, i) => {
-      el.addEventListener('click', () => {
-        const p = predictions[i]
-        const parts = (p.scientificName || '').trim().split(' ')
-        selectedTaxon = {
-          genus:           parts[0] || null,
-          specificEpithet: parts[1] || null,
-          vernacularName:  p.vernacularName || null,
-          displayName:     p.displayName,
-        }
-        document.getElementById('detail-taxon-input').value = p.displayName
-        _setDetailHeader({
-          commonName: selectedTaxon.vernacularName || '',
-          genus: selectedTaxon.genus || '',
-          species: selectedTaxon.specificEpithet || '',
-          fallbackName: p.displayName || t('detail.unknownSpecies'),
-          uncertain: document.getElementById('detail-uncertain')?.checked,
-        })
-        resultsEl.style.display = 'none'
+  resultsEl.innerHTML = renderIdentifyResultRows(activeService, result.predictions)
+  resultsEl.style.display = 'block'
+  resultsEl.querySelectorAll('[data-identify-result]').forEach(el => {
+    el.addEventListener('click', () => {
+      const prediction = JSON.parse(el.dataset.identifyResult)
+      const parts = String(prediction.scientificName || '').trim().split(/\s+/)
+      selectedTaxon = {
+        genus: parts[0] || null,
+        specificEpithet: parts[1] || null,
+        vernacularName: prediction.vernacularName || null,
+        displayName: prediction.displayName,
+      }
+      document.getElementById('detail-taxon-input').value = prediction.displayName
+      _setDetailHeader({
+        commonName: selectedTaxon.vernacularName || '',
+        genus: selectedTaxon.genus || '',
+        species: selectedTaxon.specificEpithet || '',
+        fallbackName: prediction.displayName || t('detail.unknownSpecies'),
+        uncertain: document.getElementById('detail-uncertain')?.checked,
       })
     })
-  } catch (err) {
-    const message = String(err?.message || 'Unknown error')
-    if (message.includes('CORS') || message.toLowerCase().includes('failed to fetch')) {
-      showToast(getIdentifyUnavailableMessage(service))
-    } else if (service === ID_SERVICE_INATURALIST && message.toLowerCase().includes('missing inaturalist api token')) {
-      showToast(t('settings.inaturalistLoginMissing'))
-    } else {
-      showToast(service === ID_SERVICE_INATURALIST
-        ? t('common.errorPrefix', { message })
-        : t('common.artsorakelError', { message }))
+  })
+}
+
+function _markDetailAiStale() {
+  detailAiState.stale = true
+  _renderDetailAiTabs()
+  _renderDetailAiResults()
+}
+
+async function _loadDetailAiCache() {
+  if (!currentObs?.id) return
+  const fingerprints = {
+    [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
+    [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
+  }
+  detailAiState.currentFingerprintByService = Object.fromEntries(
+    Object.entries(fingerprints).map(([service, fp]) => [service, fp.requestFingerprint]),
+  )
+  detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL] || ''
+  detailAiState.availability = Object.fromEntries((await getAvailableIdentifyServices({
+    mediaKeys: detailImageRows.map(row => row.storage_path).filter(Boolean),
+  })).map(item => [item.service, item]))
+  const rows = await loadObservationIdentifications(currentObs.id).catch(error => {
+    console.warn('Failed to load cached AI rows:', error)
+    return []
+  })
+  detailAiState.cachedRows = rows
+  const byService = {}
+  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
+    const row = rows.find(item => normalizeIdentifyService(item.service) === service)
+    if (!row) continue
+    const result = {
+      service,
+      status: row.status || 'success',
+      predictions: Array.isArray(row.results) ? row.results : [],
+      topPrediction: row.results?.[0] ? {
+        ...row.results[0],
+        confidenceText: `${Math.round(Number(row.top_probability ?? row.results[0]?.probability ?? 0) * 100)}%`,
+      } : null,
+      topProbability: row.top_probability ?? row.results?.[0]?.probability ?? null,
+      topScientificName: row.top_scientific_name || row.results?.[0]?.scientificName || null,
+      topVernacularName: row.top_vernacular_name || row.results?.[0]?.vernacularName || null,
+      topTaxonId: row.top_taxon_id || row.results?.[0]?.taxonId || null,
+      errorMessage: row.error_message || '',
+      request_fingerprint: row.request_fingerprint || '',
     }
-    console.warn('Identification detail error:', err)
-  } finally {
-    buttons.forEach(actionBtn => {
-      actionBtn.disabled = false
-      const actionService = actionBtn.id === 'detail-inat-btn'
-        ? ID_SERVICE_INATURALIST
-        : ID_SERVICE_ARTSORAKEL
-      actionBtn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyButtonLabel(actionService)}`
+    if (row.request_fingerprint !== detailAiState.currentFingerprintByService[service]) {
+      result.status = 'stale'
+    }
+    byService[service] = result
+  }
+
+  detailAiState.resultsByService = byService
+  detailAiState.activeService = chooseIdentifyComparisonActiveService(byService, ID_SERVICE_ARTSORAKEL)
+  detailAiState.stale = rows.some(row => {
+    const service = normalizeIdentifyService(row.service)
+    return byService[service] && row.request_fingerprint !== detailAiState.currentFingerprintByService[service]
+  })
+  _renderDetailAiTabs()
+  _renderDetailAiResults()
+}
+
+async function _runDetailAiComparison() {
+  const galleryImgs = _detailIdentifyInputs()
+  if (!galleryImgs.length) {
+    showToast(t('detail.noPhotoToIdentify'))
+    return
+  }
+  if (detailAiState.running) return
+
+  const serviceFingerprints = {
+    [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
+    [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
+  }
+  const availabilityList = await getAvailableIdentifyServices({
+    mediaKeys: detailImageRows.map(row => row.storage_path).filter(Boolean),
+  })
+  const availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+  detailAiState.currentFingerprintByService = Object.fromEntries(
+    Object.entries(serviceFingerprints).map(([service, fp]) => [service, fp.requestFingerprint]),
+  )
+  detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL] || ''
+  detailAiState.requestedFingerprintByService = { ...detailAiState.currentFingerprintByService }
+  detailAiState.requestedFingerprint = detailAiState.currentFingerprint
+  detailAiState.running = true
+  detailAiState.stale = false
+  detailAiState.availability = availability
+  _renderDetailAiTabs()
+  _renderDetailAiResults()
+
+  try {
+    const tasks = [
+      availability[ID_SERVICE_ARTSORAKEL]?.available
+        ? _runDetailServiceComparison(ID_SERVICE_ARTSORAKEL, galleryImgs)
+        : Promise.resolve({
+            service: ID_SERVICE_ARTSORAKEL,
+            status: 'unavailable',
+            predictions: [],
+            errorMessage: availability[ID_SERVICE_ARTSORAKEL]?.reason || '',
+          }),
+      availability[ID_SERVICE_INATURALIST]?.available
+        ? _runDetailServiceComparison(ID_SERVICE_INATURALIST, galleryImgs)
+        : Promise.resolve({
+            service: ID_SERVICE_INATURALIST,
+            status: 'unavailable',
+            predictions: [],
+            errorMessage: availability[ID_SERVICE_INATURALIST]?.reason || '',
+          }),
+    ]
+    const settled = await Promise.allSettled(tasks)
+    const resultsByService = {}
+    ;[ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST].forEach((service, index) => {
+      const item = settled[index]
+      if (item.status === 'fulfilled') {
+        resultsByService[service] = item.value
+      } else {
+        resultsByService[service] = {
+          service,
+          status: 'error',
+          predictions: [],
+          errorMessage: String(item.reason?.message || item.reason || 'Unknown error'),
+        }
+      }
     })
+    detailAiState.resultsByService = resultsByService
+    detailAiState.activeService = chooseIdentifyComparisonActiveService(resultsByService, ID_SERVICE_ARTSORAKEL)
+    detailAiState.stale = false
+
+    await Promise.allSettled(Object.values(resultsByService).map(result => {
+      if (!currentObs?.id || !state.user?.id || !result?.service || result.status === 'unavailable') return Promise.resolve(null)
+      const serviceFingerprint = serviceFingerprints[result.service] || _detailImageFingerprint(result.service)
+      return saveIdentificationRun({
+        observationId: currentObs.id,
+        userId: state.user.id,
+        service: result.service,
+        requestFingerprint: serviceFingerprint.requestFingerprint,
+        imageFingerprint: serviceFingerprint.imageFingerprint,
+        cropFingerprint: serviceFingerprint.cropFingerprint,
+        language: getTaxonomyLanguage(),
+        results: result.predictions || [],
+        status: result.status,
+        errorMessage: result.errorMessage || null,
+        topPrediction: result.topPrediction || null,
+      })
+    }))
+  } catch (error) {
+    console.error('Identification detail error:', error)
+    showToast(t('common.errorPrefix', { message: String(error?.message || error || 'Unknown error') }))
+  } finally {
+    detailAiState.running = false
+    _renderDetailAiTabs()
+    _renderDetailAiResults()
+  }
+}
+
+async function _runDetailServiceComparison(service, galleryImgs) {
+  const result = await runDetailIdentify(service, galleryImgs, { variant: 'medium' })
+  return {
+    service,
+    status: Array.isArray(result) && result.length ? 'success' : 'no_match',
+    predictions: result || [],
+    topPrediction: result?.[0] || null,
+    topProbability: result?.[0]?.probability ?? null,
   }
 }
 
@@ -787,8 +1042,18 @@ function _resetForm() {
   document.getElementById('detail-gallery').innerHTML = ''
   const aiResults = document.getElementById('detail-ai-results')
   if (aiResults) { aiResults.style.display = 'none'; aiResults.innerHTML = '' }
+  const staleNote = document.querySelector('[data-identify-stale-note]')
+  if (staleNote) staleNote.style.display = 'none'
   const cancelBtn = document.getElementById('detail-cancel-btn')
   if (cancelBtn) cancelBtn.style.display = ''
+  detailAiState.running = false
+  detailAiState.activeService = ID_SERVICE_ARTSORAKEL
+  detailAiState.availability = {}
+  detailAiState.resultsByService = {}
+  detailAiState.cachedRows = []
+  detailAiState.currentFingerprint = ''
+  detailAiState.requestedFingerprint = ''
+  detailAiState.stale = false
 
   // Reset visibility to default
   const r = document.querySelector(`input[name="detail-vis"][value="${normalizeVisibility(getDefaultVisibility(), 'public')}"]`)
@@ -1202,10 +1467,8 @@ function _applyOwnershipMode(isOwner) {
   const readonlyNote = document.getElementById('detail-readonly-note')
   const saveBtn = document.getElementById('detail-save-btn')
   const deleteBtn = document.getElementById('detail-delete-btn')
-  const aiBtns = [
-    document.getElementById('detail-inat-btn'),
-    document.getElementById('detail-arts-btn'),
-  ]
+  const aiRunBtn = document.querySelector('[data-identify-run-button]')
+  const aiTabs = Array.from(document.querySelectorAll('[data-identify-service-tab]'))
   const taxonInput = document.getElementById('detail-taxon-input')
   const locationInput = document.getElementById('detail-location')
   const habitatInput = document.getElementById('detail-habitat')
@@ -1217,8 +1480,9 @@ function _applyOwnershipMode(isOwner) {
   }
   if (saveBtn) saveBtn.style.display = isOwner ? '' : 'none'
   if (deleteBtn) deleteBtn.style.display = isOwner ? '' : 'none'
-  aiBtns.forEach(btn => {
-    if (btn) btn.disabled = !isOwner
+  if (aiRunBtn) aiRunBtn.disabled = !isOwner
+  aiTabs.forEach(tab => {
+    tab.disabled = !isOwner || tab.classList.contains('is-disabled')
   })
   if (taxonInput) taxonInput.disabled = !isOwner
   if (locationInput) locationInput.readOnly = !isOwner
@@ -1857,6 +2121,7 @@ async function _addPhotosToObservation(files) {
     }
 
     showToast(`${files.length} photo(s) added.`)
+    _markDetailAiStale()
   } catch (err) {
     console.error('Failed to add photos to observation:', err)
     showToast(`Error adding photos: ${err.message}`)

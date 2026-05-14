@@ -1,11 +1,11 @@
 // src/platform.js (Conceptual file, as it was not provided in context)
 
 export function getPlatform() {
-  return window.Capacitor?.getPlatform?.();
+  return globalThis.window?.Capacitor?.getPlatform?.();
 }
 
 export function isNativeApp() {
-  return !!window.Capacitor?.isNativePlatform?.();
+  return !!globalThis.window?.Capacitor?.isNativePlatform?.();
 }
 
 export function isAndroidApp() {

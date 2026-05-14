@@ -653,20 +653,22 @@ export async function requestBackgroundSync() {
 }
 
 // Boot logic: Listen for connection restoral, and also check when the file is first evaluated.
-window.addEventListener(CLOUD_UPLOAD_POLICY_CHANGED_EVENT, () => {
-  _cloudPlanCache.clear()
-})
-window.addEventListener('online', triggerSync)
-window.addEventListener('focus', triggerSync)
-window.addEventListener('pageshow', triggerSync)
-onConnectionTypeChange(triggerSync)
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') triggerSync()
-  else if (!isNativeApp()) triggerSync()
-})
-setTimeout(() => {
-  triggerSync()
-  if (isNativeApp()) {
-    requestBackgroundSync()
-  }
-}, 1000)
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  window.addEventListener(CLOUD_UPLOAD_POLICY_CHANGED_EVENT, () => {
+    _cloudPlanCache.clear()
+  })
+  window.addEventListener('online', triggerSync)
+  window.addEventListener('focus', triggerSync)
+  window.addEventListener('pageshow', triggerSync)
+  onConnectionTypeChange(triggerSync)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') triggerSync()
+    else if (!isNativeApp()) triggerSync()
+  })
+  setTimeout(() => {
+    triggerSync()
+    if (isNativeApp()) {
+      requestBackgroundSync()
+    }
+  }, 1000)
+}

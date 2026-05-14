@@ -3,7 +3,17 @@ import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { searchTaxa, formatDisplayName, createManualTaxon } from '../artsorakel.js'
-import { getIdentifyButtonLabel, getIdentifyBusyLabel, getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, formatIdentifyScore, runIdentifyForBlobs, ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST } from '../identify.js'
+import {
+  buildIdentifyFingerprint,
+  chooseIdentifyComparisonActiveService,
+  getAvailableIdentifyServices,
+  renderIdentifyResultRows,
+  renderIdentifyServiceTab,
+  runIdentifyComparisonForBlobs,
+  ID_SERVICE_ARTSORAKEL,
+  ID_SERVICE_INATURALIST,
+  normalizeIdentifyService,
+} from '../ai-identification.js'
 import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
@@ -14,6 +24,17 @@ import { getDefaultVisibility } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
+
+const reviewAiState = {
+  running: false,
+  activeService: ID_SERVICE_ARTSORAKEL,
+  requestedFingerprint: '',
+  currentFingerprint: '',
+  availabilityFingerprint: '',
+  stale: false,
+  availability: {},
+  resultsByService: {},
+}
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
@@ -153,6 +174,14 @@ export function initReview() {
 
 export function openImportedReview(session) {
   resetLocationState()
+  reviewAiState.running = false
+  reviewAiState.activeService = ID_SERVICE_ARTSORAKEL
+  reviewAiState.requestedFingerprint = ''
+  reviewAiState.currentFingerprint = ''
+  reviewAiState.availabilityFingerprint = ''
+  reviewAiState.stale = false
+  reviewAiState.availability = {}
+  reviewAiState.resultsByService = {}
   const gpsAltitude = _firstFiniteNumber(
     session?.gpsAltitude,
     ...(session?.photoGps || []).map(gps => gps?.altitude),
@@ -405,6 +434,26 @@ export function buildReviewGrid() {
       : `${tp('counts.photo', count)} · ${firstTime} - ${lastTime}`
 
     const croppedCount = photos.filter(photo => hasAiCropRect(photo.aiCropRect)).length
+    const aiFingerprint = buildIdentifyFingerprint({
+      service: ID_SERVICE_ARTSORAKEL,
+      language: getTaxonomyLanguage(),
+      images: photos.map((photo, index) => ({
+        id: `review-${index}`,
+        blob: photo.aiBlob instanceof Blob ? photo.aiBlob : photo.blob instanceof Blob ? photo.blob : null,
+        cropRect: photo.aiCropRect || null,
+        cropSourceW: photo.aiCropSourceW ?? null,
+        cropSourceH: photo.aiCropSourceH ?? null,
+        sourceType: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
+      })).filter(item => item.blob instanceof Blob),
+    })
+    reviewAiState.currentFingerprint = aiFingerprint.requestFingerprint
+    if (reviewAiState.requestedFingerprint && reviewAiState.requestedFingerprint !== reviewAiState.currentFingerprint) {
+      reviewAiState.stale = true
+    }
+    if (!reviewAiState.activeService || !reviewAiState.resultsByService[reviewAiState.activeService]) {
+      reviewAiState.activeService = chooseIdentifyComparisonActiveService(reviewAiState.resultsByService, ID_SERVICE_ARTSORAKEL)
+    }
+    void _syncReviewAiAvailability()
 
     html = `
       <div class="detail-gallery capture-session-gallery" id="review-gallery"></div>
@@ -426,15 +475,7 @@ export function buildReviewGrid() {
             />
             <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
           </div>
-          ${hasBlob ? `<div class="detail-ai-row" style="margin-top: 0;">
-            <button class="ai-id-btn" id="review-inat-btn" data-identify-service-button="inat">
-              <div class="ai-dot"></div> ${t('detail.identifyInaturalist')}
-            </button>
-            <button class="ai-id-btn" id="review-arts-btn" data-identify-service-button="artsorakel">
-              <div class="ai-dot"></div> ${t('detail.identifyArtsorakel')}
-            </button>
-          </div>` : ''}
-          <div class="artsorakel-results identify-results" data-idx="0" style="display:none"></div>
+          ${hasBlob ? _renderReviewAiControls() : ''}
           <div class="detail-uncertain-row" style="display:flex;align-items:center;justify-content:space-between;width:100%;">
             <span class="field-meta-key">${t('detail.idNeeded') || 'Uncertain ID'}</span>
             <label class="detail-toggle">
@@ -530,10 +571,44 @@ function loadThumbnails(photos) {
 // ── Per-card event wiring ─────────────────────────────────────────────────────
 
 function wireCardEvents() {
-  const inatBtn = document.getElementById('review-inat-btn')
-  if (inatBtn) inatBtn.addEventListener('click', () => handleIdentifyBtn(ID_SERVICE_INATURALIST, 0))
-  const artsBtn = document.getElementById('review-arts-btn')
-  if (artsBtn) artsBtn.addEventListener('click', () => handleIdentifyBtn(ID_SERVICE_ARTSORAKEL, 0))
+  const runBtn = document.querySelector('[data-identify-run-button]')
+  if (runBtn && !runBtn._wired) {
+    runBtn._wired = true
+    runBtn.addEventListener('click', _runReviewComparison)
+  }
+
+  document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
+    if (tab._wired) return
+    tab._wired = true
+    tab.addEventListener('click', () => {
+      reviewAiState.activeService = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+      buildReviewGrid()
+    })
+  })
+
+  document.querySelectorAll('[data-identify-result]').forEach(result => {
+    if (result._wired) return
+    result._wired = true
+    result.addEventListener('click', event => {
+      event.preventDefault()
+      const pred = JSON.parse(result.dataset.identifyResult)
+      const parts = (pred.scientificName || '').split(/\s+/)
+      const taxon = {
+        genus: parts[0] || '',
+        specificEpithet: parts[1] || '',
+        vernacularName: pred.vernacularName || null,
+        scientificName: pred.scientificName || null,
+        displayName: pred.displayName,
+      }
+      applyTaxon(0, taxon)
+      reviewAiState.resultsByService[normalizeIdentifyService(pred.service)] = {
+        ...(reviewAiState.resultsByService[normalizeIdentifyService(pred.service)] || {}),
+        selectedTaxon: taxon,
+      }
+      reviewAiState.stale = reviewAiState.requestedFingerprint !== reviewAiState.currentFingerprint
+      buildReviewGrid()
+    })
+  })
 
   // Wire the in-card uncertain toggle (replaces the static #review-uncertain)
   const uncertainCard = document.getElementById('review-uncertain-card')
@@ -630,7 +705,7 @@ function setSharedTaxon(taxon, options = {}) {
     document.querySelectorAll('.taxon-dropdown').forEach(dropdown => {
       dropdown.style.display = 'none'
     })
-    document.querySelectorAll('.artsorakel-results').forEach(result => {
+    document.querySelectorAll('[data-identify-results]').forEach(result => {
       result.style.display = 'none'
     })
   }
@@ -647,10 +722,6 @@ async function resolveBlob(photo) {
   if (photo.blob instanceof Blob) return photo.blob
   if (photo.blobPromise) return photo.blobPromise
   return null
-}
-
-function _storageSourceLabel(photo) {
-  return photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob'
 }
 
 async function _describeReviewBlob(blob) {
@@ -677,100 +748,178 @@ async function _describeReviewBlob(blob) {
 }
 
 export async function prepareReviewIdentifyInputs(photos = state.capturedPhotos) {
-  return (await Promise.all((photos || []).map(async photo => {
+  return (await Promise.all((photos || []).map(async (photo, index) => {
     const blob = photo.aiBlob instanceof Blob ? photo.aiBlob : await resolveBlob(photo)
     if (!(blob instanceof Blob)) return null
     return {
+      id: `review-${index}`,
       blob,
       cropRect: photo.aiCropRect || null,
-      source: _storageSourceLabel(photo),
+      source: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
+      sourceType: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
       debug: await _describeReviewBlob(blob),
     }
   }))).filter(Boolean)
 }
 
-async function handleIdentifyBtn(service, i) {
-  const btn = document.getElementById(service === ID_SERVICE_INATURALIST ? 'review-inat-btn' : 'review-arts-btn')
-  const buttons = [
-    document.getElementById('review-inat-btn'),
-    document.getElementById('review-arts-btn'),
-  ].filter(Boolean)
-  const resultsEl = document.querySelector(`.artsorakel-results[data-idx="${i}"]`)
-  if (!btn || !resultsEl) return
+function _reviewCaptureImages() {
+  return (state.capturedPhotos || [])
+    .map((photo, index) => ({
+      id: `review-${index}`,
+      blob: photo.aiBlob instanceof Blob ? photo.aiBlob : photo.blob instanceof Blob ? photo.blob : null,
+      cropRect: photo.aiCropRect || null,
+      cropSourceW: photo.aiCropSourceW ?? null,
+      cropSourceH: photo.aiCropSourceH ?? null,
+      sourceType: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
+    }))
+    .filter(item => item.blob instanceof Blob)
+}
 
-  buttons.forEach(actionBtn => {
-    actionBtn.disabled = true
+function _reviewAiTabState(service, statusOverride = null) {
+  const result = reviewAiState.resultsByService[service] || null
+  return {
+    service,
+    active: reviewAiState.activeService === service,
+    available: reviewAiState.availability?.[service]?.available ?? false,
+    reason: reviewAiState.availability?.[service]?.reason || '',
+    status: statusOverride || result?.status || (reviewAiState.running ? 'running' : 'idle'),
+    errorMessage: result?.errorMessage || '',
+    topProbability: result?.topProbability ?? null,
+    topPrediction: result?.topPrediction || null,
+  }
+}
+
+function _reviewAiResultsHtml() {
+  const activeService = normalizeIdentifyService(reviewAiState.activeService)
+  const result = reviewAiState.resultsByService[activeService] || null
+  if (!result?.predictions?.length) {
+    if (result?.status === 'unavailable') {
+      return `<div class="ai-results-empty">${reviewAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+    }
+    return reviewAiState.running
+      ? `<div class="ai-results-empty">${t('common.loading')}</div>`
+      : `<div class="ai-results-empty">${reviewAiState.stale ? (t('review.resultsOutdated') || 'Results outdated') : (t('review.noMatch') || 'No match')}</div>`
+  }
+  return renderIdentifyResultRows(activeService, result.predictions)
+}
+
+function _renderReviewAiControls() {
+  const services = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]
+  const staleClass = reviewAiState.stale ? ' is-stale' : ''
+  const activeService = normalizeIdentifyService(reviewAiState.activeService)
+  const activeResult = reviewAiState.resultsByService[activeService] || null
+  const activeState = activeResult?.status || (reviewAiState.running ? 'running' : 'idle')
+  const anyAvailable = services.some(service => reviewAiState.availability?.[service]?.available)
+  const runState = reviewAiState.running ? 'running' : activeState
+  const buttonLabel = reviewAiState.running
+    ? (t('common.loading') || 'Loading')
+    : (t('review.aiId') || 'AI ID')
+  return `
+    <div class="detail-ai-stack${staleClass}" data-identify-comparison-state>
+      <div class="detail-ai-controls">
+        <button
+          type="button"
+          class="ai-id-btn ai-id-run-btn"
+          data-identify-run-button
+          ${reviewAiState.running || !anyAvailable ? 'disabled' : ''}
+        >
+          <span class="ai-id-dot ${runState === 'running' ? 'is-running' : runState === 'success' || runState === 'no_match' || runState === 'stale' ? 'is-complete' : runState === 'unavailable' ? 'is-unavailable' : runState === 'error' ? 'is-error' : ''}"></span>
+          <span>${buttonLabel}</span>
+        </button>
+        <div class="detail-ai-service-tabs" role="tablist" aria-label="AI services">
+          ${services.map(service => renderIdentifyServiceTab(_reviewAiTabState(service))).join('')}
+        </div>
+      </div>
+      <div class="detail-ai-results-shell">
+        ${reviewAiState.stale ? `<div class="detail-ai-stale-note">${t('review.resultsOutdated') || 'Results outdated - run AI ID again.'}</div>` : ''}
+        <div class="detail-ai-results" data-identify-results data-identify-service="${activeService}">
+          ${_reviewAiResultsHtml()}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+async function _syncReviewAiAvailability() {
+  if (reviewAiState.running) return
+  const fingerprint = reviewAiState.currentFingerprint
+  if (!fingerprint) return
+  const images = _reviewCaptureImages()
+  const availabilityList = await getAvailableIdentifyServices({
+    blobs: images.map(item => item.blob),
   })
-  btn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyBusyLabel(service)}`
-  document.querySelectorAll('.artsorakel-results').forEach(result => {
-    result.style.display = 'none'
+  const availabilityFingerprint = JSON.stringify({
+    fingerprint,
+    availability: availabilityList.map(item => ({
+      service: item.service,
+      available: !!item.available,
+      reason: item.reason || '',
+    })),
   })
+  if (reviewAiState.availabilityFingerprint === availabilityFingerprint) return
+  reviewAiState.availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+  reviewAiState.availabilityFingerprint = availabilityFingerprint
+  if (reviewAiState.currentFingerprint === fingerprint) {
+    buildReviewGrid()
+  }
+}
+
+async function _runReviewComparison() {
+  if (reviewAiState.running) return
+  const blobs = await prepareReviewIdentifyInputs()
+  if (!blobs.length) {
+    showToast(t('detail.noPhotoToIdentify'))
+    return
+  }
+
+  const fingerprint = buildIdentifyFingerprint({
+    service: ID_SERVICE_ARTSORAKEL,
+    language: getTaxonomyLanguage(),
+    images: blobs,
+  })
+  reviewAiState.currentFingerprint = fingerprint.requestFingerprint
+  reviewAiState.stale = Boolean(reviewAiState.requestedFingerprint && reviewAiState.requestedFingerprint !== fingerprint.requestFingerprint)
+  reviewAiState.running = true
+  reviewAiState.requestedFingerprint = fingerprint.requestFingerprint
+
+  const availability = await getAvailableIdentifyServices({
+    blobs: blobs.map(item => item.blob),
+  })
+  reviewAiState.availability = Object.fromEntries(availability.map(item => [item.service, item]))
+  reviewAiState.resultsByService = Object.fromEntries(
+    availability.map(item => [
+      item.service,
+      {
+        service: item.service,
+        status: item.available ? 'running' : 'unavailable',
+        available: item.available,
+        reason: item.reason || '',
+        predictions: [],
+      },
+    ]),
+  )
+  reviewAiState.activeService = chooseIdentifyComparisonActiveService(reviewAiState.resultsByService, reviewAiState.activeService)
+  buildReviewGrid()
 
   try {
-    const blobs = await prepareReviewIdentifyInputs()
-    blobs.forEach(item => {
-      console.debug('[review-ai] identify input', {
-        service,
-        source: item.source,
-        blobType: item.debug.blobType,
-        blobSize: item.debug.blobSize,
-        width: item.debug.width,
-        height: item.debug.height,
-        cropRect: !!item.cropRect,
-        blobCount: blobs.length,
-      })
-    })
-    const predictions = await runIdentifyForBlobs(blobs, service, getTaxonomyLanguage())
-
-    if (!predictions || predictions.length === 0) {
-      showToast(getIdentifyNoMatchMessage(service))
-      return
-    }
-
-    resultsEl.innerHTML = predictions.map((p, pi) =>
-      `<div class="ai-result" data-pi="${pi}" data-idx="${i}" data-taxon='${JSON.stringify(p).replace(/'/g, '&#39;')}'>
-        <span class="ai-prob">${formatIdentifyScore(service, p.probability)}</span>
-        <span class="ai-name">${p.displayName}</span>
-      </div>`
-    ).join('')
-    resultsEl.style.display = 'block'
-
-    resultsEl.querySelectorAll('.ai-result').forEach(el => {
-      el.addEventListener('click', () => {
-        const pred = JSON.parse(el.dataset.taxon)
-        // Map AI result to a taxon-shaped object
-        const parts = (pred.scientificName || '').split(/\s+/)
-        const taxon = {
-          genus:           parts[0] || '',
-          specificEpithet: parts[1] || '',
-          vernacularName:  pred.vernacularName || null,
-          scientificName:  pred.scientificName || null,
-          displayName:     pred.displayName,
-        }
-        applyTaxon(i, taxon)
-        resultsEl.style.display = 'none'
-      })
-    })
-  } catch (err) {
-    const message = String(err?.message || 'Unknown error')
-    if (message.includes('CORS') || message.toLowerCase().includes('failed to fetch')) {
-      showToast(getIdentifyUnavailableMessage(service))
-    } else if (service === ID_SERVICE_INATURALIST && message.toLowerCase().includes('missing inaturalist api token')) {
-      showToast(t('settings.inaturalistLoginMissing'))
-    } else {
-      showToast(service === ID_SERVICE_INATURALIST
-        ? t('common.errorPrefix', { message })
-        : t('common.artsorakelError', { message }))
-    }
-    console.warn('Identification error:', err)
+    const comparison = await runIdentifyComparisonForBlobs(
+      blobs,
+      {
+        language: getTaxonomyLanguage(),
+        availability: reviewAiState.availability,
+        defaultService: reviewAiState.activeService,
+      },
+    )
+    reviewAiState.resultsByService = comparison.resultsByService
+    reviewAiState.activeService = comparison.activeService
+    reviewAiState.stale = false
+  } catch (error) {
+    console.error('Identification error:', error)
+    showToast(t('common.errorPrefix', { message: String(error?.message || error || 'Unknown error') }))
   } finally {
-    buttons.forEach(actionBtn => {
-      actionBtn.disabled = false
-      const actionService = actionBtn.id === 'review-inat-btn'
-        ? ID_SERVICE_INATURALIST
-        : ID_SERVICE_ARTSORAKEL
-      actionBtn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyButtonLabel(actionService)}`
-    })
+    reviewAiState.running = false
+    reviewAiState.requestedFingerprint = reviewAiState.currentFingerprint
+    buildReviewGrid()
   }
 }
 
@@ -817,6 +966,14 @@ function cancelReview() {
   state.reviewContext = null
   state.batchCount = 0
   state.captureDraft = _defaultCaptureDraft()
+  reviewAiState.running = false
+  reviewAiState.activeService = ID_SERVICE_ARTSORAKEL
+  reviewAiState.requestedFingerprint = ''
+  reviewAiState.currentFingerprint = ''
+  reviewAiState.availabilityFingerprint = ''
+  reviewAiState.stale = false
+  reviewAiState.availability = {}
+  reviewAiState.resultsByService = {}
   resetLocationState()
   navigate('home')
 }

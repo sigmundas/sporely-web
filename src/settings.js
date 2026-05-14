@@ -22,7 +22,7 @@ export function getArtsorakelMaxEdge() {
   try {
     return normalizeArtsorakelMaxEdge(localStorage.getItem(ARTSORAKEL_MAX_EDGE_KEY))
   } catch (_) {
-    return DEFAULT_ARTSORAKEL_MAX_EDGE
+    return typeof window === 'undefined' ? 1024 : DEFAULT_ARTSORAKEL_MAX_EDGE
   }
 }
 
