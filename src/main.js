@@ -35,13 +35,13 @@ import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
 import { fetchCloudPlanProfile, getStoredImageResolutionMode, setStoredImageResolutionMode } from './cloud-plan.js'
 import { clearMediaUrlCache } from './images.js'
-import { isWebInatOAuthConfigured } from './inaturalist.js' // Assuming this function exists in inaturalist.js
+import { isWebInatOAuthConfigured } from './inaturalist.js'
 import {
-  buildInaturalistAuthorizationUrl,
-  completeInaturalistOAuthCallback,
+  connectInaturalist,
   forgetInaturalistSession,
+  initializeInaturalistOAuth,
   loadInaturalistSession,
-  parseInaturalistCallbackUrl,
+  maybeHandleInaturalistOAuthReturn,
 } from './inaturalist.js'
 import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
 import {
@@ -58,7 +58,7 @@ import {
   setUseSystemCamera,
 } from './settings.js'
 import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel, isAndroidNativeApp } from './camera-actions.js'
-import { isAndroidApp } from './platform.js'
+import { getPlatform, isAndroidApp } from './platform.js'
 
 initI18n()
 setNativeCameraOpener(openNativeCamera)
@@ -440,6 +440,44 @@ function initNav() {
   })
 }
 
+function _cleanInaturalistCallbackUrl() {
+  try {
+    window.history.replaceState({}, document.title, '/')
+  } catch (error) {
+    console.warn('Failed to clean iNaturalist callback URL:', error)
+  }
+}
+
+async function _handleInaturalistOAuthReturn(url) {
+  const outcome = await maybeHandleInaturalistOAuthReturn(url, {
+    onSuccess: async () => {
+      showToast(t('settings.inaturalistLoginSuccess'))
+      if (_appBootstrapped) {
+        await _syncInaturalistUi()
+      }
+    },
+    onError: error => {
+      showToast(t('common.errorPrefix', { message: error.message || String(error) }))
+      console.error('iNaturalist OAuth failed:', error)
+    },
+  })
+
+  if (outcome?.scrubUrl) {
+    _cleanInaturalistCallbackUrl()
+  }
+
+  return outcome
+}
+
+function _logInaturalistConnectDebug() {
+  console.debug('[inat-oauth] connect click', {
+    isAndroidApp: isAndroidApp(),
+    getPlatform: getPlatform(),
+    capacitorIsNativePlatform: !!window.Capacitor?.isNativePlatform?.(),
+    selectedConnectPlatform: getPlatform() === 'android' ? 'android' : 'web',
+  })
+}
+
 async function bootApp(user) {
   state.user = user
   hideAuthOverlay()
@@ -476,10 +514,15 @@ async function bootApp(user) {
     document.querySelectorAll('.inat-connect-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         try {
-          const authUrl = await buildInaturalistAuthorizationUrl();
-          window.location.href = authUrl;
+          _logInaturalistConnectDebug()
+          const session = await connectInaturalist()
+          if (session?.connected) {
+            await _syncInaturalistUi()
+            showToast(t('settings.inaturalistLoginSuccess'))
+          }
         } catch (error) {
-          showToast(error.message);
+          console.error('[inat-oauth] connect failed', error)
+          showToast(error.message)
         }
       });
     });
@@ -529,26 +572,13 @@ onLocaleChange(() => {
   syncIdentifyButtonLabels()
 })
 
-async function handleInatCallback() {
-  const callbackResult = parseInaturalistCallbackUrl(window.location.href);
-  if (callbackResult.matches_inat) {
-    if (callbackResult.kind === 'success') {
-      try {
-        await completeInaturalistOAuthCallback(callbackResult.code, callbackResult.state);
-        showToast(t('settings.inaturalistLoginSuccess'));
-        window.history.replaceState({}, document.title, window.location.pathname);
-      } catch (error) {
-        showToast(t('common.errorPrefix', { message: error.message }));
-        console.error('iNaturalist OAuth failed:', error);
-      }
-    } else if (callbackResult.kind === 'error') {
-      showToast(t('common.errorPrefix', { message: callbackResult.errorDescription || callbackResult.error }));
-      console.error('iNaturalist OAuth error:', callbackResult);
-    }
-  }
-}
-
 async function init() {
+  await initializeInaturalistOAuth()
+
+  if (getPlatform() !== 'android') {
+    await _handleInaturalistOAuthReturn(window.location.href)
+  }
+
   const authState = getInitialAuthState()
   const hasHashError = handleUrlHashError()
   if (!authState.isRecovery && hasPasswordRecoveryHint()) {
@@ -608,7 +638,6 @@ async function init() {
     }
   }
 
-  await handleInatCallback();
 }
 
 init()
