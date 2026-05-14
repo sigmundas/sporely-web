@@ -3,18 +3,19 @@ import { state } from '../state.js';
 import { formatDate, formatTime, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
-import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, createManualTaxon, isArtsorakelNetworkError } from '../artsorakel.js';
+import { searchTaxa, formatDisplayName, createManualTaxon } from '../artsorakel.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
-import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js';
+import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js';
 import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
+import { getIdentifyBusyLabel, getIdentifyButtonLabel, getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, formatIdentifyScore, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
 
 let sessions = [];
 let expandedSessionIds = new Set();
@@ -68,17 +69,17 @@ function _applySessionAiPrediction(session, prediction) {
   return true;
 }
 
-function _renderSessionAiResults(predictions) {
+function _renderSessionAiResults(predictions, service = getDefaultIdService()) {
   if (!Array.isArray(predictions) || !predictions.length) return '';
   return predictions.map((prediction, index) =>
     `<div class="ai-result-item" data-idx="${index}">
       <span class="ai-result-name">${escHtml(prediction.displayName)}</span>
-      <span class="ai-result-pct">${Math.round(prediction.probability * 100)}%</span>
+      <span class="ai-result-pct">${formatIdentifyScore(service, prediction.probability)}</span>
     </div>`
   ).join('');
 }
 
-function _wireAiResults(sid, input, aiResults, predictions) {
+function _wireAiResults(sid, input, aiResults, predictions, service = getDefaultIdService()) {
   if (!input || !aiResults || !Array.isArray(predictions) || !predictions.length) return;
   aiResults._predictions = predictions;
   aiResults.querySelectorAll('.ai-result-item').forEach((el, index) => {
@@ -114,7 +115,7 @@ function _updateImportFooterUi() {
   if (cancelBtn) cancelBtn.disabled = running;
   if (saveBtn) saveBtn.disabled = running;
   if (aiBtn) {
-    aiBtn.textContent = running ? t('import.identifying') : t('import.aiIdAll');
+    aiBtn.textContent = running ? getIdentifyBusyLabel(getDefaultIdService()) : getIdentifyButtonLabel(getDefaultIdService());
     aiBtn.disabled = running || !hasTargets;
   }
   if (progress) progress.style.display = running && total > 0 ? 'flex' : 'none';
@@ -133,6 +134,7 @@ async function _runAiIdAll() {
   const targets = _getBatchAiTargets();
   const totalUnits = _getBatchAiTotalUnits(targets);
   if (!targets.length || totalUnits <= 0) return;
+  const service = getDefaultIdService();
 
   importAiBatchState.running = true;
   importAiBatchState.completedUnits = 0;
@@ -146,11 +148,12 @@ async function _runAiIdAll() {
   try {
     for (const session of targets) {
       try {
-        const predictions = await runArtsorakelForBlobs(
+        const predictions = await runIdentifyForBlobs(
           session.files.map((blob, index) => ({
             blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
             cropRect: session.imageMeta?.[index]?.aiCropRect || null,
           })),
+          service,
           getTaxonomyLanguage(),
           {
             onImageSent: () => _incrementBatchAiProgress(),
@@ -160,17 +163,19 @@ async function _runAiIdAll() {
 
         if (Array.isArray(predictions) && predictions.length) {
           session.aiPredictions = predictions;
+          session.aiService = service;
           _applySessionAiPrediction(session, predictions[0]);
           successCount++;
         } else {
           session.aiPredictions = [];
+          session.aiService = service;
           noMatchCount++;
         }
         _persistSessions();
         renderSessions();
       } catch (err) {
         failureCount++;
-        console.error('Batch Artsorakel AI error:', err);
+        console.error('Batch identification AI error:', err);
       }
     }
   } finally {
@@ -179,11 +184,11 @@ async function _runAiIdAll() {
   }
 
   if (failureCount && successCount === 0 && noMatchCount === 0) {
-    showToast(t('review.aiUnavailable'));
+    showToast(getIdentifyUnavailableMessage(service));
   } else if (!successCount && noMatchCount > 0) {
-    showToast(t('review.noMatch'));
+    showToast(getIdentifyNoMatchMessage(service));
   } else if (failureCount > 0) {
-    showToast(t('review.aiUnavailable'));
+    showToast(getIdentifyUnavailableMessage(service));
   }
 }
 
@@ -1370,6 +1375,7 @@ export function renderSessions() {
 
 function buildCardHTML(session) {
   const sid = session.id;
+  const service = session.aiService || getDefaultIdService();
   const dateStr = formatDate(session.ts, { month: 'short', day: 'numeric' });
   const timeStr = formatTime(session.ts, { hour: '2-digit', minute: '2-digit' });
   const photoCount = session.files.length;
@@ -1441,10 +1447,10 @@ function buildCardHTML(session) {
           value="${taxonVal}">
         <ul class="taxon-dropdown import-taxon-dropdown" data-sid="${sid}" style="display:none"></ul>
       </div>
-      <button class="ai-id-btn-import" data-sid="${sid}" ${importAiBatchState.running ? 'disabled' : ''}>
-        <div class="ai-dot"></div> ${t('detail.identifyAI')}
+      <button class="ai-id-btn-import" data-sid="${sid}" data-identify-default-label="true" ${importAiBatchState.running ? 'disabled' : ''}>
+        <div class="ai-dot"></div> ${getIdentifyButtonLabel(service)}
       </button>
-      <div class="ai-results-import" data-sid="${sid}" style="${aiPredictions.length ? '' : 'display:none'}">${_renderSessionAiResults(aiPredictions)}</div>
+      <div class="ai-results-import" data-sid="${sid}" data-service="${service}" style="${aiPredictions.length ? '' : 'display:none'}">${_renderSessionAiResults(aiPredictions, service)}</div>
     </div>
     <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">${t('detail.location')}</div>
@@ -1598,7 +1604,8 @@ function _wireCard(sid) {
   const aiBtn = card.querySelector(`.ai-id-btn-import[data-sid="${sid}"]`)
   const aiResults = card.querySelector(`.ai-results-import[data-sid="${sid}"]`)
   const session = sessionById(sid)
-  _wireAiResults(sid, input, aiResults, session?.aiPredictions || [])
+  const service = session?.aiService || getDefaultIdService()
+  _wireAiResults(sid, input, aiResults, session?.aiPredictions || [], service)
   card.querySelectorAll(`.import-strip-item[data-sid="${sid}"]`).forEach(item => {
     if (item._wired) return
     if (item.classList.contains('import-strip-add')) return
@@ -1617,39 +1624,47 @@ function _wireCard(sid) {
       if (importAiBatchState.running) return
       const session = sessionById(sid)
       if (!session?.files?.length) return
+      const service = session.aiService || getDefaultIdService()
       aiBtn.disabled = true
-      aiBtn.textContent = t('import.identifying')
+      aiBtn.textContent = getIdentifyBusyLabel(service)
       try {
-        const predictions = await runArtsorakelForBlobs(
+        const predictions = await runIdentifyForBlobs(
           session.files.map((blob, index) => ({
             blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
             cropRect: session.imageMeta?.[index]?.aiCropRect || null,
           })),
+          service,
           getTaxonomyLanguage(),
         )
         if (!predictions?.length) {
           session.aiPredictions = []
+          session.aiService = service
           aiResults.style.display = 'none'
           _persistSessions()
-          showToast(t('review.noMatch'))
+          showToast(getIdentifyNoMatchMessage(service))
           return
         }
         session.aiPredictions = predictions
-        aiResults.innerHTML = _renderSessionAiResults(predictions)
+        session.aiService = service
+        aiResults.innerHTML = _renderSessionAiResults(predictions, service)
         aiResults.style.display = 'block'
         _persistSessions()
-        _wireAiResults(sid, input, aiResults, predictions)
+        _wireAiResults(sid, input, aiResults, predictions, service)
       } catch (err) {
-        console.error('Artsorakel AI error:', err)
+        console.error('Identification AI error:', err)
         const message = String(err?.message || 'Unknown error')
-        if (isArtsorakelNetworkError(err) || message.includes('CORS')) {
-          showToast(t('review.aiUnavailable'))
+        if (service === ID_SERVICE_INATURALIST && message.toLowerCase().includes('missing inaturalist api token')) {
+          showToast(t('settings.inaturalistLoginMissing'))
+        } else if (message.includes('CORS') || message.toLowerCase().includes('failed to fetch')) {
+          showToast(getIdentifyUnavailableMessage(service))
         } else {
-          showToast(t('common.artsorakelError', { message }))
+          showToast(service === ID_SERVICE_INATURALIST
+            ? t('common.errorPrefix', { message })
+            : t('common.artsorakelError', { message }))
         }
       } finally {
         aiBtn.disabled = false
-        aiBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
+        aiBtn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyButtonLabel(service)}`
       }
     })
   }

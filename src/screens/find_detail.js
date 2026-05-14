@@ -3,7 +3,8 @@ import { formatDate, formatTime, getTaxonomyLanguage, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, runArtsorakelForMediaKeys, isArtsorakelNetworkError } from '../artsorakel.js'
+import { searchTaxa, formatDisplayName } from '../artsorakel.js'
+import { getIdentifyButtonLabel, getIdentifyBusyLabel, getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, formatIdentifyScore, runIdentifyForBlobs, runIdentifyForMediaKeys, ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST } from '../identify.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
@@ -90,7 +91,8 @@ export function initFindDetail() {
     })
   }
 
-  document.getElementById('detail-ai-btn').addEventListener('click', _runAI)
+  document.getElementById('detail-inat-btn').addEventListener('click', () => _runAI(ID_SERVICE_INATURALIST))
+  document.getElementById('detail-arts-btn').addEventListener('click', () => _runAI(ID_SERVICE_ARTSORAKEL))
   document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
   document.getElementById('detail-friend-btn')?.addEventListener('click', _sendFriendRequestFromDetail)
   document.querySelectorAll('input[name="detail-vis"], input[name="detail-location-precision"], #detail-draft').forEach(input => {
@@ -501,14 +503,18 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   return container
 }
 
-async function _runAI() {
-  const btn       = document.getElementById('detail-ai-btn')
+async function _runAI(service) {
+  const btn       = document.getElementById(service === ID_SERVICE_INATURALIST ? 'detail-inat-btn' : 'detail-arts-btn')
+  const buttons = [
+    document.getElementById('detail-inat-btn'),
+    document.getElementById('detail-arts-btn'),
+  ].filter(Boolean)
   const resultsEl = document.getElementById('detail-ai-results')
   const galleryImgs = Array.from(document.querySelectorAll('#detail-gallery img'))
   if (!galleryImgs.length) { showToast(t('detail.noPhotoToIdentify')); return }
 
-  btn.disabled = true
-  btn.innerHTML = `<div class="ai-dot"></div> ${t('review.identifying')}`
+  buttons.forEach(actionBtn => { actionBtn.disabled = true })
+  btn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyBusyLabel(service)}`
   resultsEl.style.display = 'none'
 
   try {
@@ -548,22 +554,24 @@ async function _runAI() {
 
     let predictions = null
     if (blobs.length) {
-      predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage(), { tolerateFailures: true })
-    } else if (mediaKeys.length) {
+      predictions = await runIdentifyForBlobs(blobs, service, getTaxonomyLanguage(), { tolerateFailures: true })
+    } else if (mediaKeys.length && service === ID_SERVICE_ARTSORAKEL) {
       console.warn('Artsorakel image download failed for existing observation:', blobResults)
-      predictions = await runArtsorakelForMediaKeys(mediaKeys, getTaxonomyLanguage(), { variant: 'medium' })
-    } else {
+      predictions = await runIdentifyForMediaKeys(mediaKeys, service, getTaxonomyLanguage(), { variant: 'medium' })
+    } else if (service === ID_SERVICE_ARTSORAKEL) {
       throw new Error('Could not load observation images for Artsorakel')
+    } else {
+      throw new Error('Could not load observation images for iNaturalist')
     }
 
     if (!predictions?.length) {
-      showToast(t('review.noMatch'))
+      showToast(getIdentifyNoMatchMessage(service))
       return
     }
 
     resultsEl.innerHTML = predictions.map((p, i) =>
       `<div class="ai-result" data-idx="${i}">
-        <span class="ai-prob">${Math.round(p.probability * 100)}%</span>
+        <span class="ai-prob">${formatIdentifyScore(service, p.probability)}</span>
         <span class="ai-name">${_esc(p.displayName)}</span>
       </div>`
     ).join('')
@@ -593,15 +601,24 @@ async function _runAI() {
     })
   } catch (err) {
     const message = String(err?.message || 'Unknown error')
-    if (isArtsorakelNetworkError(err) || message.includes('CORS')) {
-      showToast(t('review.aiUnavailable'))
+    if (message.includes('CORS') || message.toLowerCase().includes('failed to fetch')) {
+      showToast(getIdentifyUnavailableMessage(service))
+    } else if (service === ID_SERVICE_INATURALIST && message.toLowerCase().includes('missing inaturalist api token')) {
+      showToast(t('settings.inaturalistLoginMissing'))
     } else {
-      showToast(t('common.artsorakelError', { message }))
+      showToast(service === ID_SERVICE_INATURALIST
+        ? t('common.errorPrefix', { message })
+        : t('common.artsorakelError', { message }))
     }
-    console.warn('Artsorakel detail error:', err)
+    console.warn('Identification detail error:', err)
   } finally {
-    btn.disabled = false
-    btn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
+    buttons.forEach(actionBtn => {
+      actionBtn.disabled = false
+      const actionService = actionBtn.id === 'detail-inat-btn'
+        ? ID_SERVICE_INATURALIST
+        : ID_SERVICE_ARTSORAKEL
+      actionBtn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyButtonLabel(actionService)}`
+    })
   }
 }
 
@@ -1064,7 +1081,10 @@ function _applyOwnershipMode(isOwner) {
   const readonlyNote = document.getElementById('detail-readonly-note')
   const saveBtn = document.getElementById('detail-save-btn')
   const deleteBtn = document.getElementById('detail-delete-btn')
-  const aiBtn = document.getElementById('detail-ai-btn')
+  const aiBtns = [
+    document.getElementById('detail-inat-btn'),
+    document.getElementById('detail-arts-btn'),
+  ]
   const taxonInput = document.getElementById('detail-taxon-input')
   const locationInput = document.getElementById('detail-location')
   const habitatInput = document.getElementById('detail-habitat')
@@ -1076,7 +1096,9 @@ function _applyOwnershipMode(isOwner) {
   }
   if (saveBtn) saveBtn.style.display = isOwner ? '' : 'none'
   if (deleteBtn) deleteBtn.style.display = isOwner ? '' : 'none'
-  if (aiBtn) aiBtn.disabled = !isOwner
+  aiBtns.forEach(btn => {
+    if (btn) btn.disabled = !isOwner
+  })
   if (taxonInput) taxonInput.disabled = !isOwner
   if (locationInput) locationInput.readOnly = !isOwner
   if (habitatInput) habitatInput.readOnly = !isOwner

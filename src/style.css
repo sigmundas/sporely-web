@@ -769,6 +769,44 @@ html, body {
   border-color: var(--red);
 }
 
+.settings-inat-card,
+.profile-inat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+}
+
+.settings-inat-status,
+.profile-inat-status {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.settings-inat-actions,
+.profile-inat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-inat-actions .btn-primary,
+.profile-inat-actions .btn-primary {
+  flex: 1 1 190px;
+  min-width: 0;
+}
+
+.settings-inat-actions .sign-out-btn,
+.profile-inat-actions .sign-out-btn {
+  margin: 0;
+  flex: 1 1 140px;
+}
+
 /* ── SCOPE TABS (Finds + Map) ── */
 .scope-tabs {
   display: inline-flex; gap: 4px;
@@ -2177,6 +2215,7 @@ html, body {
 .ai-id-btn:active { background: var(--btn-active); }
 .detail-ai-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
 }
@@ -2184,6 +2223,13 @@ html, body {
   flex: 1;
   min-width: 0;
   justify-content: center;
+}
+.settings-id-service-segment {
+  width: min(100%, 320px);
+}
+.settings-id-service-btn {
+  flex: 1;
+  min-width: 0;
 }
 .ai-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--btn-text); animation: pulse 1.5s infinite; }
 .import-current-location-btn {

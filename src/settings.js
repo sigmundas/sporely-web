@@ -1,11 +1,14 @@
 import { VISIBILITY_PUBLIC, normalizeVisibility as normalizeUiVisibility } from './visibility.js'
 
 const DEFAULT_VISIBILITY_KEY = 'sporely-default-visibility'
+const DEFAULT_ID_SERVICE_KEY = 'sporely-default-id-service'
 const USE_SYSTEM_CAMERA_KEY = 'sporely-use-system-camera'
 const LAST_SYNC_AT_KEY = 'sporely-last-sync-at'
 const ARTSORAKEL_MAX_EDGE_KEY = 'sporely-artsorakel-max-edge'
 const PHOTO_GAP_MINUTES_KEY = 'sporely-photo-gap'
 const DEFAULT_ARTSORAKEL_MAX_EDGE = 500
+export const ID_SERVICE_ARTSORAKEL = 'artsorakel'
+export const ID_SERVICE_INATURALIST = 'inat'
 export const NATIVE_CAMERA_JPEG_QUALITY = 75
 
 export function normalizeArtsorakelMaxEdge(value) {
@@ -63,6 +66,26 @@ export function getDefaultVisibility() {
 export function setDefaultVisibility(value) {
   try {
     localStorage.setItem(DEFAULT_VISIBILITY_KEY, normalizeVisibility(value))
+  } catch (_) {}
+}
+
+export function normalizeIdentifyService(value) {
+  return String(value || '').trim() === ID_SERVICE_INATURALIST
+    ? ID_SERVICE_INATURALIST
+    : ID_SERVICE_ARTSORAKEL
+}
+
+export function getDefaultIdService() {
+  try {
+    return normalizeIdentifyService(localStorage.getItem(DEFAULT_ID_SERVICE_KEY))
+  } catch (_) {
+    return ID_SERVICE_ARTSORAKEL
+  }
+}
+
+export function setDefaultIdService(value) {
+  try {
+    localStorage.setItem(DEFAULT_ID_SERVICE_KEY, normalizeIdentifyService(value))
   } catch (_) {}
 }
 

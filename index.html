@@ -523,8 +523,11 @@
               <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
             </div>
             <div class="detail-ai-row">
-              <button class="ai-id-btn" id="detail-ai-btn">
-                <div class="ai-dot"></div> Identify with Artsorakel AI
+              <button class="ai-id-btn" id="detail-inat-btn" data-identify-service-button="inat">
+                <div class="ai-dot"></div> iNaturalist
+              </button>
+              <button class="ai-id-btn" id="detail-arts-btn" data-identify-service-button="artsorakel">
+                <div class="ai-dot"></div> Artsorakel
               </button>
               <button class="detail-follow-btn" id="detail-follow-observation-btn" type="button" aria-label="Follow observation" title="Follow observation">🧭</button>
               <button class="detail-follow-btn" id="detail-follow-taxon-btn" type="button" aria-label="Follow species" title="Follow species">S</button>
@@ -734,6 +737,15 @@
             <textarea id="profile-bio" class="profile-field-input profile-bio-input" placeholder="Bio" rows="3"></textarea>
             <div class="profile-email-display" id="profile-email-display"></div>
             <button id="profile-save-btn" class="btn-primary" style="width:100%;margin-top:6px;padding:9px">Save profile</button>
+            <div class="profile-inat-card" id="profile-inat-section" style="display:none">
+              <div class="profile-inat-title">iNaturalist</div>
+              <div class="profile-inat-status" id="profile-inat-status">Not logged in</div>
+              <div class="profile-inat-actions">
+                <button type="button" class="btn-primary inat-connect-btn" id="profile-inat-connect-btn">Log in with iNaturalist</button>
+                <button type="button" class="sign-out-btn inat-forget-btn" id="profile-inat-forget-btn">Forget login</button>
+                <p class="inat-web-login-hint" id="profile-inat-web-login-hint" style="display:none; font-size:12px; color:var(--text-dim); margin-top:8px; text-align:center;"></p>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -902,6 +914,23 @@
           <input type="number" id="settings-artsorakel-max-edge" class="settings-gap-input" min="100" max="4000" step="50" inputmode="numeric" style="width:88px">
         </div>
         <p class="settings-gap-hint" id="settings-artsorakel-max-edge-hint">Images sent to Artsorakel will be resized so neither width nor height exceeds this value.</p>
+
+        <div class="settings-section-label" id="settings-id-service-label" style="margin-top:22px">Identification service</div>
+        <div class="theme-segment settings-id-service-segment">
+          <button class="theme-seg-btn settings-id-service-btn" id="settings-id-service-inaturalist" data-id-service="inat" data-identify-service-label="inat">iNaturalist</button>
+          <button class="theme-seg-btn settings-id-service-btn" id="settings-id-service-artsorakel" data-id-service="artsorakel" data-identify-service-label="artsorakel">Artsorakel</button>
+        </div>
+        <p class="settings-gap-hint" id="settings-id-service-hint">Used as the default on grouped finds.</p>
+
+        <div class="settings-inat-card" id="settings-inat-section">
+          <div class="settings-inat-status" id="settings-inat-status">Not logged in</div>
+          <div class="settings-inat-actions">
+            <button type="button" class="btn-primary inat-connect-btn" id="settings-inat-connect-btn">Log in with iNaturalist</button>
+            <button type="button" class="sign-out-btn inat-forget-btn" id="settings-inat-forget-btn">Forget login</button>
+            <p class="inat-web-login-hint" id="settings-inat-web-login-hint" style="display:none; font-size:12px; color:var(--text-dim); margin-top:8px; text-align:center;"></p>
+          </div>
+        </div>
+
 
         <div id="settings-image-resolution-section" style="display:none">
           <div class="settings-section-label" id="settings-image-resolution-label" style="margin-top:22px">Image resolution</div>

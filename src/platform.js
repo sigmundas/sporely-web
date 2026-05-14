@@ -1,12 +1,13 @@
+// src/platform.js (Conceptual file, as it was not provided in context)
+
+export function getPlatform() {
+  return window.Capacitor?.getPlatform?.();
+}
+
 export function isNativeApp() {
-  return !!window.Capacitor?.isNativePlatform?.() ||
-         ['android', 'ios'].includes(window.Capacitor?.getPlatform?.());
+  return !!window.Capacitor?.isNativePlatform?.();
 }
 
 export function isAndroidApp() {
-  return isNativeApp() && window.Capacitor?.getPlatform?.() === 'android';
-}
-
-export function isIOSApp() {
-  return isNativeApp() && window.Capacitor?.getPlatform?.() === 'ios';
+  return getPlatform() === 'android';
 }

@@ -2,7 +2,8 @@ import { formatTime, getTaxonomyLanguage, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, runArtsorakelForBlobs, formatDisplayName, createManualTaxon, isArtsorakelNetworkError } from '../artsorakel.js'
+import { searchTaxa, formatDisplayName, createManualTaxon } from '../artsorakel.js'
+import { getIdentifyButtonLabel, getIdentifyBusyLabel, getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, formatIdentifyScore, runIdentifyForBlobs, ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST } from '../identify.js'
 import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
@@ -426,11 +427,14 @@ export function buildReviewGrid() {
             <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
           </div>
           ${hasBlob ? `<div class="detail-ai-row" style="margin-top: 0;">
-            <button class="ai-id-btn" id="review-ai-btn" style="width:100%">
-              <div class="ai-dot"></div> ${t('detail.identifyAI')}
+            <button class="ai-id-btn" id="review-inat-btn" data-identify-service-button="inat">
+              <div class="ai-dot"></div> ${t('detail.identifyInaturalist')}
+            </button>
+            <button class="ai-id-btn" id="review-arts-btn" data-identify-service-button="artsorakel">
+              <div class="ai-dot"></div> ${t('detail.identifyArtsorakel')}
             </button>
           </div>` : ''}
-          <div class="artsorakel-results" data-idx="0" style="display:none"></div>
+          <div class="artsorakel-results identify-results" data-idx="0" style="display:none"></div>
           <div class="detail-uncertain-row" style="display:flex;align-items:center;justify-content:space-between;width:100%;">
             <span class="field-meta-key">${t('detail.idNeeded') || 'Uncertain ID'}</span>
             <label class="detail-toggle">
@@ -526,8 +530,10 @@ function loadThumbnails(photos) {
 // ── Per-card event wiring ─────────────────────────────────────────────────────
 
 function wireCardEvents() {
-  const aiBtn = document.getElementById('review-ai-btn')
-  if (aiBtn) aiBtn.addEventListener('click', () => handleArtsorakelBtn(0))
+  const inatBtn = document.getElementById('review-inat-btn')
+  if (inatBtn) inatBtn.addEventListener('click', () => handleIdentifyBtn(ID_SERVICE_INATURALIST, 0))
+  const artsBtn = document.getElementById('review-arts-btn')
+  if (artsBtn) artsBtn.addEventListener('click', () => handleIdentifyBtn(ID_SERVICE_ARTSORAKEL, 0))
 
   // Wire the in-card uncertain toggle (replaces the static #review-uncertain)
   const uncertainCard = document.getElementById('review-uncertain-card')
@@ -635,7 +641,7 @@ function applyTaxon(i, taxon) {
   setSharedTaxon(taxon, { syncInputs: true, hideMenus: true })
 }
 
-// ── Artsorakel AI ─────────────────────────────────────────────────────────────
+// ── Identification AI ────────────────────────────────────────────────────────
 
 async function resolveBlob(photo) {
   if (photo.blob instanceof Blob) return photo.blob
@@ -643,16 +649,19 @@ async function resolveBlob(photo) {
   return null
 }
 
-async function handleArtsorakelBtn(i) {
-  const btn = document.getElementById('review-ai-btn')
+async function handleIdentifyBtn(service, i) {
+  const btn = document.getElementById(service === ID_SERVICE_INATURALIST ? 'review-inat-btn' : 'review-arts-btn')
+  const buttons = [
+    document.getElementById('review-inat-btn'),
+    document.getElementById('review-arts-btn'),
+  ].filter(Boolean)
   const resultsEl = document.querySelector(`.artsorakel-results[data-idx="${i}"]`)
   if (!btn || !resultsEl) return
 
-  const buttons = [btn]
   buttons.forEach(actionBtn => {
     actionBtn.disabled = true
-    actionBtn.innerHTML = `<div class="ai-dot"></div> ${t('review.identifying')}`
   })
+  btn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyBusyLabel(service)}`
   document.querySelectorAll('.artsorakel-results').forEach(result => {
     result.style.display = 'none'
   })
@@ -663,16 +672,16 @@ async function handleArtsorakelBtn(i) {
       cropRect: photo.aiCropRect || null,
     }))))
       .filter(item => _isBlob(item.blob))
-    const predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage())
+    const predictions = await runIdentifyForBlobs(blobs, service, getTaxonomyLanguage())
 
     if (!predictions || predictions.length === 0) {
-      showToast(t('review.noMatch'))
+      showToast(getIdentifyNoMatchMessage(service))
       return
     }
 
     resultsEl.innerHTML = predictions.map((p, pi) =>
       `<div class="ai-result" data-pi="${pi}" data-idx="${i}" data-taxon='${JSON.stringify(p).replace(/'/g, '&#39;')}'>
-        <span class="ai-prob">${Math.round(p.probability * 100)}%</span>
+        <span class="ai-prob">${formatIdentifyScore(service, p.probability)}</span>
         <span class="ai-name">${p.displayName}</span>
       </div>`
     ).join('')
@@ -696,16 +705,23 @@ async function handleArtsorakelBtn(i) {
     })
   } catch (err) {
     const message = String(err?.message || 'Unknown error')
-    if (isArtsorakelNetworkError(err) || message.includes('CORS')) {
-      showToast(t('review.aiUnavailable'))
+    if (message.includes('CORS') || message.toLowerCase().includes('failed to fetch')) {
+      showToast(getIdentifyUnavailableMessage(service))
+    } else if (service === ID_SERVICE_INATURALIST && message.toLowerCase().includes('missing inaturalist api token')) {
+      showToast(t('settings.inaturalistLoginMissing'))
     } else {
-      showToast(t('common.artsorakelError', { message }))
+      showToast(service === ID_SERVICE_INATURALIST
+        ? t('common.errorPrefix', { message })
+        : t('common.artsorakelError', { message }))
     }
-    console.warn('Artsorakel error:', err)
+    console.warn('Identification error:', err)
   } finally {
     buttons.forEach(actionBtn => {
       actionBtn.disabled = false
-      actionBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
+      const actionService = actionBtn.id === 'review-inat-btn'
+        ? ID_SERVICE_INATURALIST
+        : ID_SERVICE_ARTSORAKEL
+      actionBtn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyButtonLabel(actionService)}`
     })
   }
 }

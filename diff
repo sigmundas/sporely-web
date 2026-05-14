@@ -1,0 +1,1914 @@
+diff --git a/PLAN.md b/PLAN.md
+index a9e9251..a131a07 100644
+--- a/PLAN.md
++++ b/PLAN.md
+@@ -4,6 +4,11 @@
+ 
+ - [ ] Verify disposable-account RLS paths for owner, accepted friend, stranger, blocked user, banned profile, and privacy slot limit.
+ 
++## iNaturalist ID
++- Goal: one-click iNaturalist login on web and Android, with the username saved automatically after auth and the session persisted reliably.
++- Tried: username input in Settings, localhost callback flow, native `com.sporelab.sporely://auth` deep links, localStorage for pending PKCE state, worker-proxied token exchange, worker-side JWT fetch, and `Browser.open()` on Android.
++- Current direction: keep the callback handling split for web vs Android, let the worker return `api_token`, then fetch `/v1/users/me` to store the username.
++
+ ## Camera Behavior Summary (Sporely Cam vs Web Cam)
+ 
+ **Sporely Cam (Native Android / CameraX)**
+diff --git a/android/app/build.gradle b/android/app/build.gradle
+index 17bb695..b697574 100644
+--- a/android/app/build.gradle
++++ b/android/app/build.gradle
+@@ -7,8 +7,8 @@ android {
+         applicationId "com.sporelab.sporely"
+         minSdkVersion rootProject.ext.minSdkVersion
+         targetSdkVersion rootProject.ext.targetSdkVersion
+-        versionCode 215
+-        versionName "0.4.22"
++        versionCode 218
++        versionName "0.4.25"
+         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+         aaptOptions {
+              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 3b3619d..1defead 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -38,6 +38,13 @@
+                 <category android:name="android.intent.category.LAUNCHER" />
+             </intent-filter>
+ 
++            <intent-filter>
++                <action android:name="android.intent.action.VIEW" />
++                <category android:name="android.intent.category.DEFAULT" />
++                <category android:name="android.intent.category.BROWSABLE" />
++                <data android:scheme="@string/custom_url_scheme" android:host="auth" />
++            </intent-filter>
++
+         </activity>
+ 
+         <activity
+diff --git a/android/app/src/main/java/com/sporelab/sporely/MainActivity.java b/android/app/src/main/java/com/sporelab/sporely/MainActivity.java
+index 6ec86d4..0efeead 100644
+--- a/android/app/src/main/java/com/sporelab/sporely/MainActivity.java
++++ b/android/app/src/main/java/com/sporelab/sporely/MainActivity.java
+@@ -1,7 +1,10 @@
+ package com.sporelab.sporely;
+ 
++import android.content.Intent;
++import android.net.Uri;
+ import android.os.Bundle;
+ import com.getcapacitor.BridgeActivity;
++import com.getcapacitor.JSObject;
+ 
+ public class MainActivity extends BridgeActivity {
+     @Override
+@@ -10,4 +13,36 @@ public class MainActivity extends BridgeActivity {
+         registerPlugin(NativeCameraPlugin.class);
+         super.onCreate(savedInstanceState);
+     }
++
++    @Override
++    protected void onNewIntent(Intent intent) {
++        super.onNewIntent(intent);
++        setIntent(intent);
++        emitAppUrlOpen(intent);
++    }
++
++    private void emitAppUrlOpen(Intent intent) {
++        if (getBridge() == null || intent == null) {
++            return;
++        }
++
++        Uri data = intent.getData();
++        if (data == null) {
++            return;
++        }
++
++        String scheme = data.getScheme();
++        if (scheme == null || !scheme.equals(getString(R.string.custom_url_scheme))) {
++            return;
++        }
++
++        JSObject payload = new JSObject();
++        payload.put("url", data.toString());
++        String payloadJson = payload.toString();
++        getBridge().eval(
++            "window.__sporelyPendingAppUrlOpen = " + payloadJson + ";"
++                + "window.dispatchEvent(new CustomEvent('appUrlOpen', { detail: " + payloadJson + " }));",
++            null
++        );
++    }
+ }
+diff --git a/cloudflare/r2-upload-worker/src/index.js b/cloudflare/r2-upload-worker/src/index.js
+index a1392de..3bfd213 100644
+--- a/cloudflare/r2-upload-worker/src/index.js
++++ b/cloudflare/r2-upload-worker/src/index.js
+@@ -8,10 +8,12 @@ const DEFAULT_ALLOWED_HEADERS = [
+   'X-Sporely-Upload-Mode',
+   'X-Sporely-Cloud-Plan',
+   'X-Sporely-Upload-Origin',
++  'X-Inaturalist-Token',
+ ].join(', ')
+ const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
+ const ARTS_MAX_DIST = 0.006
+ const NOMINATIM_INTERVAL_MS = 1000
++const DEFAULT_INAT_CLIENT_ID = 'bJW2eDa8qF8GJIQbQbuG_LBgmOQYRGMh9-Ja58QBqmc'
+ 
+ let cachedJwks = null
+ let cachedJwksAt = 0
+@@ -58,6 +60,14 @@ async function handleRequest(request, env, ctx) {
+     return handleArtsorakelMedia(request, env, ctx)
+   }
+ 
++  if (request.method === 'POST' && url.pathname === '/inaturalist/login') {
++    return handleInaturalistLogin(request, env, ctx)
++  }
++
++  if (request.method === 'POST' && url.pathname === '/inaturalist/suggest') {
++    return handleInaturalistSuggest(request, env, ctx)
++  }
++
+   if (request.method === 'PUT' && url.pathname.startsWith('/upload/')) {
+     return handleUpload(request, env, ctx, url)
+   }
+@@ -647,6 +657,210 @@ async function handleArtsorakelMedia(request, env, ctx) {
+   )
+ }
+ 
++async function fetchInaturalistJwt(accessToken) {
++  const response = await fetch('https://www.inaturalist.org/users/api_token', {
++    headers: {
++      Accept: 'application/json',
++      Authorization: `Bearer ${String(accessToken || '').trim()}`,
++    },
++  })
++  const apiPayload = await safeJsonObject(response)
++  if (!response.ok) {
++    throw httpError(
++      response.status || 502,
++      'inat_api_token_failed',
++      stringOrNull(apiPayload?.error_description || apiPayload?.error || apiPayload?.message) || 'iNaturalist API token request failed',
++    )
++  }
++
++  const apiToken = stringOrNull(apiPayload?.api_token)
++  if (!apiToken) {
++    throw httpError(502, 'inat_api_token_failed', 'iNaturalist API token response did not include api_token')
++  }
++
++  return apiToken
++}
++
++async function handleInaturalistLogin(request, env, ctx) {
++  const origin = resolveAllowedOrigin(request, env)
++  if (request.headers.get('Origin') && !origin) {
++    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
++  }
++
++  const authHeader = request.headers.get('Authorization')
++  const token = parseBearerToken(authHeader)
++  await verifySupabaseJwt(token, env, ctx)
++
++  let body
++  try {
++    body = await request.json()
++  } catch (_) {
++    throw httpError(400, 'invalid_json', 'Request body must be JSON')
++  }
++
++  const username = String(body?.username || body?.email || '').trim()
++  const password = String(body?.password || '').trim()
++  const clientId = String(body?.client_id || env.INAT_CLIENT_ID || DEFAULT_INAT_CLIENT_ID).trim() || DEFAULT_INAT_CLIENT_ID
++  const grantType = String(body?.grant_type || '').trim().toLowerCase()
++  let tokenResponse
++  let tokenPayload
++
++  if (grantType === 'authorization_code' || grantType === 'refresh_token') {
++    const redirectUri = String(body?.redirect_uri || '').trim()
++    if (!redirectUri) {
++      throw httpError(400, 'missing_redirect_uri', 'redirect_uri is required')
++    }
++
++    const tokenParams = new URLSearchParams({
++      client_id: clientId,
++      redirect_uri: redirectUri,
++      scope: 'write',
++    })
++    if (grantType === 'authorization_code') {
++      const code = String(body?.code || '').trim()
++      const codeVerifier = String(body?.code_verifier || '').trim()
++      if (!code) {
++        throw httpError(400, 'missing_code', 'Authorization code is required')
++      }
++      if (!codeVerifier && !String(body?.client_secret || '').trim()) {
++        throw httpError(400, 'missing_code_verifier', 'code_verifier is required')
++      }
++      tokenParams.set('grant_type', 'authorization_code')
++      tokenParams.set('code', code)
++      if (codeVerifier) tokenParams.set('code_verifier', codeVerifier)
++      const clientSecret = String(body?.client_secret || env.INAT_CLIENT_SECRET || '').trim()
++      if (clientSecret) tokenParams.set('client_secret', clientSecret)
++    } else {
++      const refreshToken = String(body?.refresh_token || '').trim()
++      if (!refreshToken) {
++        throw httpError(400, 'missing_refresh_token', 'refresh_token is required')
++      }
++      tokenParams.set('grant_type', 'refresh_token')
++      tokenParams.set('refresh_token', refreshToken)
++      const clientSecret = String(body?.client_secret || env.INAT_CLIENT_SECRET || '').trim()
++      if (clientSecret) tokenParams.set('client_secret', clientSecret)
++    }
++
++    tokenResponse = await fetch('https://www.inaturalist.org/oauth/token', {
++      method: 'POST',
++      headers: {
++        Accept: 'application/json',
++        'Content-Type': 'application/x-www-form-urlencoded',
++      },
++      body: tokenParams,
++    })
++    tokenPayload = await safeJsonObject(tokenResponse)
++    if (!tokenResponse.ok) {
++      throw httpError(
++        tokenResponse.status || 502,
++        'inat_login_failed',
++        stringOrNull(tokenPayload?.error_description || tokenPayload?.error || tokenPayload?.message) || 'iNaturalist login failed',
++      )
++    }
++  } else {
++    if (!username || !password) {
++      throw httpError(400, 'missing_credentials', 'Username and password are required')
++    }
++    tokenResponse = await fetch('https://www.inaturalist.org/oauth/token', {
++      method: 'POST',
++      headers: {
++        Accept: 'application/json',
++        'Content-Type': 'application/x-www-form-urlencoded',
++      },
++      body: new URLSearchParams({
++        grant_type: 'password',
++        username,
++        password,
++        client_id: clientId,
++        scope: 'write',
++      }),
++    })
++
++    tokenPayload = await safeJsonObject(tokenResponse)
++    if (!tokenResponse.ok) {
++      throw httpError(
++        tokenResponse.status || 502,
++        'inat_login_failed',
++        stringOrNull(tokenPayload?.error_description || tokenPayload?.error || tokenPayload?.message) || 'iNaturalist login failed',
++      )
++    }
++  }
++
++  const accessToken = stringOrNull(tokenPayload?.access_token)
++  if (!accessToken) {
++    throw httpError(502, 'inat_login_failed', 'iNaturalist login did not return an access token')
++  }
++
++  const apiToken = await fetchInaturalistJwt(accessToken)
++
++  const createdAt = Math.floor(Date.now() / 1000)
++  const expiresIn = Number(tokenPayload?.expires_in || 0) || 2 * 60 * 60
++  const apiExpiresIn = 20 * 60 * 60
++
++  return jsonResponse(
++    {
++      ok: true,
++      access_token: accessToken,
++      refresh_token: stringOrNull(tokenPayload?.refresh_token),
++      token_type: stringOrNull(tokenPayload?.token_type) || 'Bearer',
++      created_at: createdAt,
++      expires_in: expiresIn,
++      access_created_at: createdAt,
++      access_expires_in: expiresIn,
++      api_token: apiToken,
++      api_token_created_at: createdAt,
++      api_token_expires_in: apiExpiresIn,
++    },
++    200,
++    request,
++    env,
++    origin,
++  )
++}
++
++async function handleInaturalistSuggest(request, env, ctx) {
++  const origin = resolveAllowedOrigin(request, env)
++  if (request.headers.get('Origin') && !origin) {
++    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
++  }
++
++  const authHeader = request.headers.get('Authorization')
++  const token = parseBearerToken(authHeader)
++  await verifySupabaseJwt(token, env, ctx)
++
++  const iNatToken = stringOrNull(request.headers.get('X-Inaturalist-Token'))
++  if (!iNatToken) {
++    throw httpError(401, 'missing_inaturalist_token', 'Missing iNaturalist API token')
++  }
++  if (!request.body) {
++    throw httpError(400, 'missing_body', 'Request body is required')
++  }
++
++  const contentType = String(request.headers.get('Content-Type') || '').trim()
++  const bodyBuffer = await request.arrayBuffer()
++  const upstream = await fetch('https://api.inaturalist.org/v2/taxa/suggest', {
++    method: 'POST',
++    headers: {
++      ...(contentType ? { 'Content-Type': contentType } : {}),
++      Authorization: iNatToken,
++      Accept: 'application/json',
++      'User-Agent': String(env.INAT_USER_AGENT || 'SporelyApp/1.0 (contact@sporely.no)'),
++    },
++    body: bodyBuffer,
++  })
++
++  const upstreamBody = await upstream.arrayBuffer()
++  const responseHeaders = corsHeaders(request, env, origin)
++  const upstreamContentType = upstream.headers.get('Content-Type')
++  if (upstreamContentType) {
++    responseHeaders.set('Content-Type', upstreamContentType)
++  }
++  return new Response(upstreamBody, {
++    status: upstream.status,
++    headers: responseHeaders,
++  })
++}
++
+ async function getMediaObjectForAi(env, key, variant) {
+   const candidates = mediaCandidateKeys(key, variant)
+   for (const candidate of candidates) {
+diff --git a/index.html b/index.html
+index 1d839bc..7f50e93 100644
+--- a/index.html
++++ b/index.html
+@@ -523,8 +523,8 @@
+               <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
+             </div>
+             <div class="detail-ai-row">
+-              <button class="ai-id-btn" id="detail-ai-btn">
+-                <div class="ai-dot"></div> Identify with Artsorakel AI
++              <button class="ai-id-btn" id="detail-ai-btn" data-identify-button data-running="0">
++                <div class="ai-dot"></div> Identify with Artsorakel
+               </button>
+               <button class="detail-follow-btn" id="detail-follow-observation-btn" type="button" aria-label="Follow observation" title="Follow observation">🧭</button>
+               <button class="detail-follow-btn" id="detail-follow-taxon-btn" type="button" aria-label="Follow species" title="Follow species">S</button>
+@@ -903,6 +903,30 @@
+         </div>
+         <p class="settings-gap-hint" id="settings-artsorakel-max-edge-hint">Images sent to Artsorakel will be resized so neither width nor height exceeds this value.</p>
+ 
++        <div class="settings-section-label" id="settings-default-id-service-label" style="margin-top:22px">Default ID service</div>
++        <div class="scope-tabs settings-id-service-tabs" style="display:inline-flex">
++          <label class="scope-tab">
++            <input type="radio" name="settings-id-service" value="artsorakel">
++            <span id="settings-default-id-service-artsorakel">Artsorakel</span>
++          </label>
++          <label class="scope-tab">
++            <input type="radio" name="settings-id-service" value="inat">
++            <span id="settings-default-id-service-inaturalist">iNaturalist</span>
++          </label>
++        </div>
++
++        <div class="settings-section-label" id="settings-inaturalist-login-title" style="margin-top:22px">iNaturalist login</div>
++        <p class="settings-gap-hint" id="settings-inaturalist-login-hint">Sporely will open iNaturalist in your browser to finish sign-in.</p>
++        <div class="settings-login-card">
++          <div id="settings-inaturalist-logged-out-view">
++            <div class="settings-login-actions">
++              <button type="button" class="settings-clear-cache-btn settings-login-save-btn" id="settings-inaturalist-save-btn">Log in with iNaturalist</button>
++            </div>
++          </div>
++          <button type="button" class="settings-login-forget-btn" id="settings-inaturalist-forget-btn">Forget login</button>
++          <div class="settings-login-status" id="settings-inaturalist-login-status"></div>
++        </div>
++
+         <div id="settings-image-resolution-section" style="display:none">
+           <div class="settings-section-label" id="settings-image-resolution-label" style="margin-top:22px">Image resolution</div>
+           <div class="theme-segment settings-resolution-segment">
+diff --git a/package-lock.json b/package-lock.json
+index 95d7157..c0925a9 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "sporely-web",
+-  "version": "0.4.22",
++  "version": "0.4.25",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "sporely-web",
+-      "version": "0.4.22",
++      "version": "0.4.25",
+       "dependencies": {
+         "@capacitor/android": "^8.3.0",
+         "@capacitor/cli": "^8.3.0",
+diff --git a/package.json b/package.json
+index a2af28f..d2e8a9b 100644
+--- a/package.json
++++ b/package.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "sporely-web",
+   "private": true,
+-  "version": "0.4.22",
++  "version": "0.4.25",
+   "type": "module",
+   "engines": {
+     "node": ">=22.0.0"
+diff --git a/src/i18n.js b/src/i18n.js
+index 5c75ecb..31ea833 100644
+--- a/src/i18n.js
++++ b/src/i18n.js
+@@ -48,6 +48,7 @@ const messages = {
+     'common.you': 'You',
+     'common.errorPrefix': 'Error: {message}',
+     'common.artsorakelError': 'Artsorakel: {message}',
++    'common.idServiceError': '{service}: {message}',
+     'common.close': 'Close',
+     'home.sporelyCam': 'Sporely Cam',
+     'home.nativeCam': 'Native Cam',
+@@ -100,8 +101,8 @@ const messages = {
+     'review.noCaptures': 'No captures yet',
+     'review.capturedRange': 'Captured {start} — {end}',
+     'review.identifying': 'Identifying…',
+-    'review.noMatch': 'Artsorakel returned no suggestion',
+-    'review.aiUnavailable': 'Artsorakel unavailable right now.',
++    'review.idNoMatch': 'No suggestion returned',
++    'review.idUnavailable': 'ID service unavailable right now.',
+     'review.noPhotosToIdentify': 'No photos to identify',
+     'review.runningAi': 'Running Artsorakel on {count}…',
+     'review.notSignedIn': 'Not signed in',
+@@ -116,7 +117,8 @@ const messages = {
+     'detail.backGeneric': 'Back',
+     'detail.unknownSpecies': 'Unknown species',
+     'detail.species': 'Species',
+-    'detail.identifyAI': 'Identify with Artsorakel',
++    'detail.identifyArtsorakel': 'Identify with Artsorakel',
++    'detail.identifyInaturalist': 'Identify with iNaturalist',
+     'detail.location': 'Location',
+     'detail.currentLocation': 'Current location',
+     'detail.habitat': 'Habitat',
+@@ -279,8 +281,22 @@ const messages = {
+     'settings.min': 'min',
+     'settings.photoGapHint': 'Photo import from your device will group images based on time between photos.',
+     'settings.artsorakel': 'Artsorakel',
++    'settings.inaturalist': 'iNaturalist',
++    'settings.defaultIdService': 'Default ID service',
++    'settings.idServiceArtsorakel': 'Artsorakel',
++    'settings.idServiceInaturalist': 'iNaturalist',
+     'settings.artsorakelMaxEdge': 'Max width/height (px)',
+     'settings.artsorakelMaxEdgeHint': 'Images sent to Artsorakel will be resized so neither width nor height exceeds this value.',
++    'settings.inaturalistLoginTitle': 'iNaturalist login',
++    'settings.inaturalistUsername': 'Username or email',
++    'settings.inaturalistAuthorize': 'Log in with iNaturalist',
++    'settings.inaturalistForgetLogin': 'Forget login',
++    'settings.inaturalistLoginHint': 'Sporely will open iNaturalist in your browser to finish sign-in.',
++    'settings.inaturalistAuthorizing': 'Opening iNaturalist authorization...',
++    'settings.inaturalistLoginSaved': 'Authorized as {username}',
++    'settings.inaturalistLoginDraft': 'Ready to authorize {username}',
++    'settings.inaturalistLoginPending': 'Waiting for iNaturalist authorization',
++    'settings.inaturalistLoginMissing': 'No iNaturalist authorization saved',
+     'settings.imageResolution': 'Image resolution',
+     'settings.imageResolutionReduced': 'Default (2MP)',
+     'settings.imageResolutionMax': 'Max (12MP)',
+@@ -1671,6 +1687,13 @@ export function applyStaticTranslations() {
+   setText('#settings-artsorakel-label', 'settings.artsorakel')
+   setText('#settings-artsorakel-max-edge-label', 'settings.artsorakelMaxEdge')
+   setText('#settings-artsorakel-max-edge-hint', 'settings.artsorakelMaxEdgeHint')
++  setText('#settings-default-id-service-label', 'settings.defaultIdService')
++  setText('#settings-default-id-service-artsorakel', 'settings.idServiceArtsorakel')
++  setText('#settings-default-id-service-inaturalist', 'settings.idServiceInaturalist')
++  setText('#settings-inaturalist-login-title', 'settings.inaturalistLoginTitle')
++  setText('#settings-inaturalist-login-hint', 'settings.inaturalistLoginHint')
++  setText('#settings-inaturalist-save-btn', 'settings.inaturalistAuthorize')
++  setText('#settings-inaturalist-forget-btn', 'settings.inaturalistForgetLogin')
+   setText('#settings-image-resolution-label', 'settings.imageResolution')
+   setText('#settings-resolution-reduced', 'settings.imageResolutionReduced')
+   setText('#settings-resolution-max', 'settings.imageResolutionMax')
+diff --git a/src/inaturalist.js b/src/inaturalist.js
+new file mode 100644
+index 0000000..8491735
+--- /dev/null
++++ b/src/inaturalist.js
+@@ -0,0 +1,632 @@
++import { supabase } from './supabase.js'
++import { t } from './i18n.js'
++import { isNativeApp } from './platform.js'
++import {
++  clearInaturalistApiTokenRecord,
++  clearInaturalistLoginDraft,
++  getDefaultIdService,
++  getInaturalistApiTokenRecord,
++  getInaturalistLoginDraft,
++  ID_SERVICE_ARTSORAKEL,
++  ID_SERVICE_INATURALIST,
++  setInaturalistApiTokenRecord,
++  setInaturalistLoginDraft,
++} from './settings.js'
++
++const INAT_WORKER_BASE_URL = String(
++  import.meta.env.VITE_INATURALIST_BASE_URL || import.meta.env.VITE_ARTSORAKEL_BASE_URL || import.meta.env.VITE_MEDIA_UPLOAD_BASE_URL || ''
++).replace(/\/+$/, '')
++const DEFAULT_CLIENT_ID = 'bJW2eDa8qF8GJIQbQbuG_LBgmOQYRGMh9-Ja58QBqmc'
++const DEFAULT_SCOPE = 'write'
++const DEFAULT_TOKEN_TTL_MS = 20 * 60 * 60 * 1000
++const DEFAULT_ACCESS_TOKEN_TTL_MS = 2 * 60 * 60 * 1000
++const OAUTH_PENDING_KEY = 'sporely-inaturalist-oauth-pending'
++const INAT_NATIVE_REDIRECT_URI = 'com.sporelab.sporely://auth'
++const INAT_CALLBACK_REDIRECT_URI = 'http://localhost:8000/callback'
++
++function _isBlob(value) {
++  return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
++}
++
++function _buildNetworkErrorMessage(error) {
++  return String(error?.message || error || '').trim().toLowerCase()
++}
++
++function _safeStorageGet(key, storage = localStorage) {
++  try {
++    return storage.getItem(key) || ''
++  } catch (_) {
++    return ''
++  }
++}
++
++function _safeStorageSet(key, value, storage = localStorage) {
++  try {
++    if (value) storage.setItem(key, String(value))
++    else storage.removeItem(key)
++  } catch (_) {}
++}
++
++function _safeJsonParse(text) {
++  try {
++    const value = JSON.parse(String(text || ''))
++    return value && typeof value === 'object' ? value : null
++  } catch (_) {
++    return null
++  }
++}
++
++function _randomBase64Url(bytes = 32) {
++  const buffer = new Uint8Array(bytes)
++  crypto.getRandomValues(buffer)
++  let binary = ''
++  for (const byte of buffer) binary += String.fromCharCode(byte)
++  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
++}
++
++async function _sha256Base64Url(value) {
++  if (!globalThis.crypto?.subtle?.digest) return ''
++  const data = new TextEncoder().encode(String(value || ''))
++  const digest = await crypto.subtle.digest('SHA-256', data)
++  const bytes = new Uint8Array(digest)
++  let binary = ''
++  for (const byte of bytes) binary += String.fromCharCode(byte)
++  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
++}
++
++function _getPendingOAuthRecord() {
++  return _safeJsonParse(_safeStorageGet(OAUTH_PENDING_KEY)) || null
++}
++
++function _setPendingOAuthRecord(record) {
++  _safeStorageSet(OAUTH_PENDING_KEY, record ? JSON.stringify(record) : '', localStorage)
++}
++
++function _clearPendingOAuthRecord() {
++  _setPendingOAuthRecord(null)
++}
++
++function _buildRedirectUri() {
++  if (isNativeApp() || (typeof window !== 'undefined' && ['capacitor:', 'file:'].includes(window.location?.protocol))) {
++    return INAT_NATIVE_REDIRECT_URI
++  }
++  if (typeof window !== 'undefined' && window.location?.hostname === 'app.sporely.no') {
++    return 'https://app.sporely.no/'
++  }
++  return INAT_CALLBACK_REDIRECT_URI
++}
++
++function _getOAuthAuthorizeUrl({ state, codeChallenge, redirectUri }) {
++  const url = new URL('https://www.inaturalist.org/oauth/authorize')
++  url.searchParams.set('client_id', DEFAULT_CLIENT_ID)
++  url.searchParams.set('redirect_uri', redirectUri)
++  url.searchParams.set('response_type', 'code')
++  url.searchParams.set('scope', DEFAULT_SCOPE)
++  url.searchParams.set('state', state)
++  if (codeChallenge) {
++    url.searchParams.set('code_challenge', codeChallenge)
++    url.searchParams.set('code_challenge_method', 'S256')
++  }
++  return url.toString()
++}
++
++export function isInaturalistNetworkError(error) {
++  const message = _buildNetworkErrorMessage(error)
++  return (
++    message.includes('failed to fetch')
++    || message.includes('networkerror')
++    || message.includes('load failed')
++    || message.includes('fetch failed')
++    || message.includes('network request failed')
++  )
++}
++
++export function getInaturalistServiceLabel() {
++  return t('settings.inaturalist')
++}
++
++export function getIdentifyServiceLabel(service) {
++  return normalizeIdService(service) === ID_SERVICE_INATURALIST
++    ? getInaturalistServiceLabel()
++    : t('settings.artsorakel')
++}
++
++export function getIdentifyButtonLabel(service) {
++  return normalizeIdService(service) === ID_SERVICE_INATURALIST
++    ? t('detail.identifyInaturalist')
++    : t('detail.identifyArtsorakel')
++}
++
++export function normalizeIdService(value) {
++  const raw = String(value || '').trim().toLowerCase()
++  return raw === ID_SERVICE_INATURALIST ? ID_SERVICE_INATURALIST : ID_SERVICE_ARTSORAKEL
++}
++
++export function getDefaultIdentifyServiceLabel() {
++  return getIdentifyServiceLabel(getDefaultIdService())
++}
++
++export function syncIdentifyButtonLabels(service = getDefaultIdService()) {
++  const label = getIdentifyButtonLabel(service)
++  document.querySelectorAll('[data-identify-button]').forEach(button => {
++    button.dataset.label = label
++    if (button.dataset.running === '1') return
++    button.innerHTML = `<div class="ai-dot"></div> ${label}`
++  })
++}
++
++async function _getSupabaseAccessToken() {
++  const { data: { session } } = await supabase.auth.getSession()
++  return session?.access_token || ''
++}
++
++async function _authorizedWorkerFetch(path, options = {}) {
++  if (!INAT_WORKER_BASE_URL) {
++    throw new Error('iNaturalist proxy unavailable')
++  }
++  const accessToken = await _getSupabaseAccessToken()
++  if (!accessToken) {
++    throw new Error('Missing authenticated session for iNaturalist')
++  }
++  const headers = new Headers(options.headers || {})
++  headers.set('Authorization', `Bearer ${accessToken}`)
++  return fetch(`${INAT_WORKER_BASE_URL}${path}`, {
++    ...options,
++    headers,
++  })
++}
++
++function _tokenExpiresAt(record) {
++  const expiresAt = Number(record?.expiresAt || 0)
++  if (expiresAt) return expiresAt
++  const createdAt = Number(record?.createdAt || 0)
++  return createdAt ? createdAt + DEFAULT_TOKEN_TTL_MS : 0
++}
++
++export function getInaturalistLoginState() {
++  const draft = getInaturalistLoginDraft()
++  const token = getInaturalistApiTokenRecord()
++  const pending = _getPendingOAuthRecord()
++  return {
++    username: draft.username,
++    hasToken: !!token.apiToken,
++    hasAccessToken: !!token.accessToken,
++    hasRefreshToken: !!token.refreshToken,
++    isPendingAuth: !!pending?.state && !!pending?.redirectUri,
++    tokenExpiresAt: _tokenExpiresAt(token),
++    accessTokenExpiresAt: Number(token.accessTokenExpiresAt || 0) || 0,
++  }
++}
++
++export function clearInaturalistSession() {
++  clearInaturalistLoginDraft()
++  clearInaturalistApiTokenRecord()
++  _clearPendingOAuthRecord()
++}
++
++export async function beginInaturalistAuthorization() {
++  clearInaturalistLoginDraft()
++  const state = _randomBase64Url(24)
++  const codeVerifier = _randomBase64Url(48)
++  const codeChallenge = await _sha256Base64Url(codeVerifier)
++  const pendingCodeVerifier = codeChallenge ? codeVerifier : ''
++  const redirectUri = _buildRedirectUri()
++  if (!redirectUri) {
++    throw new Error('iNaturalist authorization redirect is unavailable.')
++  }
++
++  _setPendingOAuthRecord({
++    state,
++    codeVerifier: pendingCodeVerifier,
++    redirectUri,
++    createdAt: Date.now(),
++  })
++
++  return _getOAuthAuthorizeUrl({
++    state,
++    codeChallenge,
++    redirectUri,
++  })
++}
++
++export async function saveInaturalistLogin() {
++  return beginInaturalistAuthorization()
++}
++
++async function _exchangeOAuthCode(code, codeVerifier, redirectUri) {
++  const body = {
++    grant_type: 'authorization_code',
++    code,
++    redirect_uri: redirectUri,
++    client_id: DEFAULT_CLIENT_ID,
++  }
++  if (codeVerifier) body.code_verifier = codeVerifier
++  const response = await _authorizedWorkerFetch('/inaturalist/login', {
++    method: 'POST',
++    headers: { 'Content-Type': 'application/json' },
++    body: JSON.stringify(body),
++  })
++  const payload = await response.json().catch(() => ({}))
++  if (!response.ok) {
++    throw new Error(payload?.message || payload?.error || 'iNaturalist login failed')
++  }
++  return payload
++}
++
++async function _exchangeRefreshToken(refreshToken, redirectUri = _buildRedirectUri()) {
++  const response = await _authorizedWorkerFetch('/inaturalist/login', {
++    method: 'POST',
++    headers: { 'Content-Type': 'application/json' },
++    body: JSON.stringify({
++      grant_type: 'refresh_token',
++      refresh_token: refreshToken,
++      redirect_uri: redirectUri,
++      client_id: DEFAULT_CLIENT_ID,
++    }),
++  })
++  const payload = await response.json().catch(() => ({}))
++  if (!response.ok) {
++    throw new Error(payload?.message || payload?.error || 'iNaturalist token refresh failed')
++  }
++  return payload
++}
++
++function _persistOAuthTokens(payload, username) {
++  const apiToken = String(payload?.api_token || payload?.apiToken || '').trim()
++  if (!apiToken) {
++    throw new Error('iNaturalist login failed: No API token (JWT) received from server.')
++  }
++
++  const accessCreatedAtSeconds = Number(payload?.access_created_at || payload?.accessCreatedAt || payload?.created_at || payload?.createdAt || Math.floor(Date.now() / 1000)) || Math.floor(Date.now() / 1000)
++  const accessExpiresInSeconds = Number(payload?.access_expires_in || payload?.accessExpiresIn || payload?.expires_in || payload?.expiresIn || (DEFAULT_ACCESS_TOKEN_TTL_MS / 1000)) || (DEFAULT_ACCESS_TOKEN_TTL_MS / 1000)
++  const apiCreatedAtSeconds = Number(payload?.api_token_created_at || payload?.apiTokenCreatedAt || accessCreatedAtSeconds) || accessCreatedAtSeconds
++  const apiExpiresInSeconds = Number(payload?.api_token_expires_in || payload?.apiTokenExpiresIn || (DEFAULT_TOKEN_TTL_MS / 1000)) || (DEFAULT_TOKEN_TTL_MS / 1000)
++  const apiExpiresAt = Number(payload?.api_token_expires_at || payload?.apiTokenExpiresAt || ((apiCreatedAtSeconds * 1000) + (apiExpiresInSeconds * 1000))) || (Date.now() + DEFAULT_TOKEN_TTL_MS)
++  const accessToken = String(payload?.access_token || payload?.accessToken || '').trim()
++  const refreshToken = String(payload?.refresh_token || payload?.refreshToken || '').trim()
++
++  setInaturalistApiTokenRecord({
++    apiToken,
++    createdAt: apiCreatedAtSeconds * 1000,
++    expiresAt: apiExpiresAt,
++    accessToken,
++    accessTokenCreatedAt: accessCreatedAtSeconds * 1000,
++    accessTokenExpiresAt: Number(payload?.access_expires_at || payload?.accessExpiresAt || ((accessCreatedAtSeconds * 1000) + (accessExpiresInSeconds * 1000))) || (Date.now() + DEFAULT_ACCESS_TOKEN_TTL_MS),
++    refreshToken,
++  })
++
++  return {
++    username: String(username || '').trim(),
++    apiToken,
++    accessToken,
++    refreshToken,
++    createdAt: apiCreatedAtSeconds * 1000,
++    expiresAt: apiExpiresAt,
++  }
++}
++
++async function _fetchInaturalistCurrentUser(apiToken) {
++  const response = await fetch('https://api.inaturalist.org/v1/users/me', {
++    headers: {
++      Accept: 'application/json',
++      Authorization: `Bearer ${String(apiToken || '').trim()}`,
++    },
++  })
++  const payload = await response.json().catch(() => ({}))
++  if (!response.ok) {
++    throw new Error(payload?.error_description || payload?.error || payload?.message || 'iNaturalist user lookup failed')
++  }
++  return payload
++}
++
++function _extractInaturalistUsername(payload) {
++  const candidates = [payload?.results, payload?.user, payload?.data, payload]
++
++  for (const candidate of candidates) {
++    if (Array.isArray(candidate)) {
++      for (const item of candidate) {
++        const username = _extractInaturalistUsername(item)
++        if (username) return username
++      }
++      continue
++    }
++
++    if (!candidate || typeof candidate !== 'object') continue
++
++    for (const key of ['login', 'username', 'user_login', 'preferred_username']) {
++      const value = String(candidate[key] || '').trim()
++      if (value) return value
++    }
++  }
++
++  return ''
++}
++
++async function _completeInaturalistLoginFromUrl(urlInput, { clearBrowserUrl = false } = {}) {
++  if (!urlInput) return null
++  const url = urlInput instanceof URL ? new URL(urlInput.toString()) : new URL(String(urlInput))
++  const code = String(url.searchParams.get('code') || '').trim()
++  const state = String(url.searchParams.get('state') || '').trim()
++  const error = String(url.searchParams.get('error') || '').trim()
++  const errorDescription = String(url.searchParams.get('error_description') || '').trim()
++  if (!code && !error) return null
++
++  const clearCallbackParams = () => {
++    if (!clearBrowserUrl || typeof window === 'undefined' || !window.history?.replaceState || !window.location) return
++    const current = new URL(window.location.href)
++    current.searchParams.delete('code')
++    current.searchParams.delete('state')
++    current.searchParams.delete('scope')
++    current.searchParams.delete('code_verifier')
++    current.searchParams.delete('redirect_uri')
++    current.searchParams.delete('error')
++    current.searchParams.delete('error_description')
++    try {
++      window.history.replaceState({}, document.title, current.toString())
++    } catch (_) {}
++  }
++
++  const pending = _getPendingOAuthRecord()
++  if (!pending?.state || !pending?.redirectUri) {
++    _clearPendingOAuthRecord()
++    clearCallbackParams()
++    throw new Error(errorDescription || error || 'Missing iNaturalist authorization state.')
++  }
++  if (error) {
++    _clearPendingOAuthRecord()
++    clearCallbackParams()
++    throw new Error(errorDescription || error || 'iNaturalist authorization failed.')
++  }
++  if (state !== pending.state) {
++    _clearPendingOAuthRecord()
++    clearCallbackParams()
++    throw new Error('iNaturalist authorization state mismatch.')
++  }
++  if (!pending.codeVerifier) {
++    _clearPendingOAuthRecord()
++    clearCallbackParams()
++    throw new Error('Missing PKCE verifier. Please try logging in again.')
++  }
++
++  try {
++    const payload = await _exchangeOAuthCode(code, pending.codeVerifier, pending.redirectUri)
++    const saved = _persistOAuthTokens(payload, getInaturalistLoginDraft().username)
++    try {
++      const mePayload = await _fetchInaturalistCurrentUser(saved.apiToken || saved.accessToken)
++      const username = _extractInaturalistUsername(mePayload)
++      if (username) {
++        setInaturalistLoginDraft(username)
++        saved.username = username
++      }
++    } catch (lookupError) {
++      console.warn('iNaturalist user lookup failed after login:', lookupError)
++    }
++    _clearPendingOAuthRecord()
++    clearCallbackParams()
++    return saved
++  } catch (err) {
++    _clearPendingOAuthRecord()
++    clearCallbackParams()
++    throw err
++  }
++}
++
++export async function completeInaturalistLoginFromCallback() {
++  if (typeof window === 'undefined' || !window.location) return null
++  return _completeInaturalistLoginFromUrl(window.location.href, { clearBrowserUrl: true })
++}
++
++export async function completeInaturalistLoginFromCallbackUrl(callbackUrl) {
++  return _completeInaturalistLoginFromUrl(callbackUrl, { clearBrowserUrl: false })
++}
++
++async function _ensureApiToken() {
++  const record = getInaturalistApiTokenRecord()
++  const now = Date.now()
++  if (record.apiToken && _tokenExpiresAt(record) > now + 60 * 1000) {
++    return record.apiToken
++  }
++
++  if (record.refreshToken) {
++    const refreshed = await _exchangeRefreshToken(record.refreshToken)
++    const saved = _persistOAuthTokens(refreshed, getInaturalistLoginDraft().username)
++    return saved.apiToken
++  }
++
++  throw new Error('Log in to iNaturalist in Settings first.')
++}
++
++function _firstCommonName(value) {
++  if (Array.isArray(value)) {
++    for (const item of value) {
++      const name = _firstCommonName(item)
++      if (name) return name
++    }
++    return ''
++  }
++  if (value && typeof value === 'object') {
++    for (const key of ['en', 'no', 'nb', 'sv', 'da', 'de']) {
++      const name = _firstCommonName(value[key])
++      if (name) return name
++    }
++    for (const item of Object.values(value)) {
++      const name = _firstCommonName(item)
++      if (name) return name
++    }
++    return ''
++  }
++  const text = String(value || '').trim()
++  if (!text) return ''
++  const cleaned = text.replace(/^\s*['"]|['"]\s*$/g, '')
++  const parts = cleaned.split(/\s*(?:\r?\n|[,;/|•·・]|\s+-\s+|\s+\bor\b\s+|\s+\band\b\s+)\s*/i)
++  return String(parts[0] || cleaned).trim()
++}
++
++function _preferredCommonName(taxon = {}) {
++  if (!taxon || typeof taxon !== 'object') return ''
++  for (const key of ['preferred_common_name', 'preferred_common_names', 'common_name', 'common_names']) {
++    const value = _firstCommonName(taxon[key])
++    if (value) return value
++  }
++  return ''
++}
++
++function _scientificName(taxon = {}) {
++  if (!taxon || typeof taxon !== 'object') return ''
++  return String(taxon.scientificName || taxon.scientific_name || taxon.name || '').trim()
++}
++
++function _scorePrediction(pred) {
++  for (const key of ['combined_score', 'vision_score', 'probability', 'score', 'frequency_score']) {
++    const value = Number(pred?.[key])
++    if (Number.isFinite(value)) return value
++  }
++  return 0
++}
++
++function _normalizePrediction(pred) {
++  const taxon = pred?.taxon && typeof pred.taxon === 'object' ? pred.taxon : {}
++  const scientificName = _scientificName(taxon)
++  const vernacularName = _preferredCommonName(taxon)
++  const displayName = vernacularName && scientificName && vernacularName.toLowerCase() !== scientificName.toLowerCase()
++    ? `${vernacularName} (${scientificName})`
++    : vernacularName || scientificName || t('common.unknown')
++  return {
++    taxonId: taxon.id || null,
++    probability: _scorePrediction(pred),
++    scientificName: scientificName || null,
++    vernacularName: vernacularName || null,
++    displayName,
++    adbUrl: taxon.id ? `https://www.inaturalist.org/taxa/${taxon.id}` : 'https://www.inaturalist.org',
++    taxon,
++  }
++}
++
++function _extractPredictions(data) {
++  if (Array.isArray(data)) return data
++  if (!data || typeof data !== 'object') return []
++  if (Array.isArray(data.results)) return data.results
++  if (Array.isArray(data.predictions)) return data.predictions
++  if (Array.isArray(data.items)) return data.items
++  if (Array.isArray(data.data)) return data.data
++  return []
++}
++
++function _combinePredictionResponses(responses, totalBlobs) {
++  const combined = new Map()
++  responses
++    .filter(predictions => Array.isArray(predictions))
++    .forEach(predictions => {
++      predictions.forEach(prediction => {
++        const key = prediction.taxonId || prediction.scientificName?.toLowerCase() || prediction.displayName?.toLowerCase()
++        if (!key) return
++        const existing = combined.get(key) || {
++          ...prediction,
++          probabilitySum: 0,
++          hitCount: 0,
++        }
++        existing.probabilitySum += Number(prediction.probability || 0)
++        existing.hitCount += 1
++        existing.probability = existing.probabilitySum / totalBlobs
++        if (!existing.scientificName && prediction.scientificName) existing.scientificName = prediction.scientificName
++        if (!existing.vernacularName && prediction.vernacularName) existing.vernacularName = prediction.vernacularName
++        if (!existing.displayName && prediction.displayName) existing.displayName = prediction.displayName
++        if (!existing.adbUrl && prediction.adbUrl) existing.adbUrl = prediction.adbUrl
++        combined.set(key, existing)
++      })
++    })
++
++  return Array.from(combined.values())
++    .sort((a, b) =>
++      b.probabilitySum - a.probabilitySum
++      || b.hitCount - a.hitCount
++      || b.probability - a.probability
++    )
++    .slice(0, 5)
++    .map(({ probabilitySum, hitCount, ...prediction }) => prediction)
++}
++
++async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
++  const apiToken = await _ensureApiToken()
++  const onImageSent = typeof options?.onImageSent === 'function' ? options.onImageSent : null
++  const onIdReceived = typeof options?.onIdReceived === 'function' ? options.onIdReceived : null
++  onImageSent?.()
++  const form = new FormData()
++  form.append('source', 'visual')
++  form.append('locale', String(lang || 'en'))
++  form.append('fields', JSON.stringify({
++    combined_score: true,
++    vision_score: true,
++    taxon: {
++      id: true,
++      name: true,
++      rank: true,
++      preferred_common_name: true,
++      preferred_common_names: true,
++      common_name: true,
++      common_names: true,
++    },
++  }))
++  if (options?.lat !== undefined && options?.lat !== null && options?.lat !== '') {
++    form.append('lat', String(options.lat))
++  }
++  if (options?.lon !== undefined && options?.lon !== null && options?.lon !== '') {
++    form.append('lng', String(options.lon))
++  }
++  if (options?.observedOn) {
++    form.append('observed_on', String(options.observedOn))
++  }
++  form.append('image', blob, 'photo.jpg')
++
++  const response = await _authorizedWorkerFetch('/inaturalist/suggest', {
++    method: 'POST',
++    headers: {
++      'X-Inaturalist-Token': apiToken,
++    },
++    body: form,
++    signal: options?.signal,
++  })
++
++  const payload = await response.json().catch(() => ({}))
++  if (!response.ok) {
++    throw new Error(payload?.message || payload?.error || 'iNaturalist suggestion failed')
++  }
++  const predictions = _extractPredictions(payload).map(_normalizePrediction).filter(pred => pred.displayName)
++  onIdReceived?.(predictions)
++  return predictions
++}
++
++export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
++  const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
++    const rawBlob = _isBlob(item) ? item : item?.blob
++    return _isBlob(rawBlob) ? rawBlob : null
++  }))).filter(blob => _isBlob(blob))
++
++  if (!preparedBlobs.length) return null
++
++  if (preparedBlobs.length === 1) {
++    return _runInaturalistSuggestion(preparedBlobs[0], lang, options)
++  }
++
++  const tolerateFailures = options?.tolerateFailures === true
++  const responses = tolerateFailures
++    ? await Promise.allSettled(preparedBlobs.map(blob => _runInaturalistSuggestion(blob, lang, options)))
++        .then(results => {
++          const fulfilled = results
++            .filter(result => result.status === 'fulfilled')
++            .map(result => result.value)
++          if (fulfilled.length) return fulfilled
++          const firstError = results.find(result => result.status === 'rejected')?.reason
++          throw firstError || new Error('iNaturalist failed for all images')
++        })
++    : await Promise.all(preparedBlobs.map(blob => _runInaturalistSuggestion(blob, lang, options)))
++
++  return _combinePredictionResponses(responses, preparedBlobs.length)
++}
++
++export function getInaturalistLoginHint() {
++  const { username, hasToken } = getInaturalistLoginState()
++  if (username && hasToken) return t('settings.inaturalistLoginSaved', { username })
++  if (username) return t('settings.inaturalistLoginDraft', { username })
++  return t('settings.inaturalistLoginMissing')
++}
+diff --git a/src/main.js b/src/main.js
+index 76019d5..35613aa 100644
+--- a/src/main.js
++++ b/src/main.js
+@@ -39,14 +39,18 @@ import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
+ import {
+   getArtsorakelMaxEdge,
+   getDefaultVisibility,
++  getDefaultIdService,
++  getInaturalistLoginDraft,
+   getPhotoGapMinutes,
+   setArtsorakelMaxEdge,
+   setDefaultVisibility,
++  setDefaultIdService,
+   setLastSyncAt,
+   setPhotoGapMinutes,
+   getUseSystemCamera,
+   setUseSystemCamera,
+ } from './settings.js'
++import { beginInaturalistAuthorization, clearInaturalistSession, completeInaturalistLoginFromCallback, completeInaturalistLoginFromCallbackUrl, getInaturalistLoginState, syncIdentifyButtonLabels } from './inaturalist.js'
+ import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel } from './camera-actions.js'
+ import { isAndroidApp } from './platform.js'
+ 
+@@ -55,6 +59,8 @@ setNativeCameraOpener(openNativeCamera)
+ 
+ let _syncFeedbackBound = false
+ let _appBootstrapped = false
++let _inatDeepLinkListenerInstalled = false
++let _inatCallbackProcessed = false
+ 
+ function initSyncFeedback() {
+   if (_syncFeedbackBound) return
+@@ -240,6 +246,43 @@ function initSettings() {
+     setLocale(localeSelect.value)
+   })
+ 
++  const idServiceRadios = Array.from(document.querySelectorAll('input[name="settings-id-service"]'))
++  const inatLoginStatus = document.getElementById('settings-inaturalist-login-status')
++  const inatSaveBtn = document.getElementById('settings-inaturalist-save-btn')
++  const inatForgetBtn = document.getElementById('settings-inaturalist-forget-btn')
++
++  idServiceRadios.forEach(radio => {
++    radio.addEventListener('change', () => {
++      if (!radio.checked) return
++      setDefaultIdService(radio.value)
++      _syncSettingsUI()
++      syncIdentifyButtonLabels()
++    })
++  })
++
++  inatSaveBtn?.addEventListener('click', async () => {
++    inatSaveBtn.disabled = true
++    try {
++      const authUrl = await beginInaturalistAuthorization()
++      showToast(t('settings.inaturalistAuthorizing'))
++      window.location.assign(authUrl)
++    } catch (error) {
++      const message = error?.message || String(error || 'Unknown error')
++      showToast(t('common.idServiceError', { service: t('settings.inaturalist'), message }))
++    } finally {
++      inatSaveBtn.disabled = false
++      _syncSettingsUI()
++      syncIdentifyButtonLabels()
++    }
++  })
++
++  inatForgetBtn?.addEventListener('click', () => {
++    clearInaturalistSession()
++    showToast(t('settings.inaturalistLoginMissing'))
++    _syncSettingsUI()
++    syncIdentifyButtonLabels()
++  })
++
+   document.querySelectorAll('.settings-resolution-btn').forEach(btn => {
+     btn.addEventListener('click', async () => {
+       setStoredImageResolutionMode(btn.dataset.imageResolutionMode)
+@@ -303,6 +346,9 @@ function initSettings() {
+ }
+ 
+ function _syncSettingsUI() {
++  const inatLoginState = getInaturalistLoginState()
++  console.log('Syncing Settings UI. Inat State:', inatLoginState)
++
+   const current = localStorage.getItem('sporely-theme') || 'dark'
+   document.querySelectorAll('.theme-seg-btn[data-theme]').forEach(b => {
+     b.classList.toggle('active', b.dataset.theme === current)
+@@ -335,6 +381,36 @@ function _syncSettingsUI() {
+     btn.classList.toggle('active', btn.dataset.defaultVisibility === defaultVisibility)
+   })
+ 
++  const defaultIdService = getDefaultIdService()
++  document.querySelectorAll('input[name="settings-id-service"]').forEach(radio => {
++    const active = radio.value === defaultIdService
++    radio.checked = active
++    radio.closest('.scope-tab')?.classList.toggle('active', active)
++  })
++  syncIdentifyButtonLabels(defaultIdService)
++
++  const inatLoggedOutView = document.getElementById('settings-inaturalist-logged-out-view')
++  const inatForgetBtn = document.getElementById('settings-inaturalist-forget-btn')
++  const inatLoginStatus = document.getElementById('settings-inaturalist-login-status')
++  const hasSavedInatSession = !!inatLoginState.hasToken
++  const hasDraftUsername = !!String(inatLoginState.username || '').trim()
++
++  if (inatLoggedOutView) {
++    inatLoggedOutView.style.display = hasSavedInatSession ? 'none' : ''
++  }
++  if (inatForgetBtn) {
++    inatForgetBtn.style.display = hasSavedInatSession || hasDraftUsername ? '' : 'none'
++  }
++  if (inatLoginStatus) {
++    if (hasSavedInatSession && hasDraftUsername) {
++      inatLoginStatus.textContent = t('settings.inaturalistLoginSaved', { username: inatLoginState.username })
++    } else if (hasSavedInatSession) {
++      inatLoginStatus.textContent = 'Connected to iNaturalist'
++    } else {
++      inatLoginStatus.textContent = 'Not logged in'
++    }
++  }
++
+   const useSystemCamera = getUseSystemCamera()
+   document.querySelectorAll('.settings-camera-app-btn').forEach(btn => {
+     btn.classList.toggle('active', btn.dataset.cameraApp === (useSystemCamera ? 'native' : 'sporely'))
+@@ -357,6 +433,41 @@ function _syncSettingsUI() {
+   }
+ }
+ 
++function _installInaturalistDeepLinkListener() {
++  if (_inatDeepLinkListenerInstalled || typeof window === 'undefined') return
++  _inatDeepLinkListenerInstalled = true
++
++  const handleCallbackUrl = async callbackUrl => {
++    if (!callbackUrl) return
++    if (_inatCallbackProcessed) return
++    _inatCallbackProcessed = true
++    try {
++      console.log('iNaturalist deep link callback:', callbackUrl)
++      const authResult = await completeInaturalistLoginFromCallbackUrl(callbackUrl)
++      if (authResult) {
++        _syncSettingsUI()
++        syncIdentifyButtonLabels()
++        showToast(t('settings.inaturalistLoginSaved', { username: authResult.username || getInaturalistLoginDraft().username || t('settings.inaturalist') }))
++      }
++    } catch (error) {
++      const message = error?.message || String(error || 'Unknown error')
++      console.warn('iNaturalist authorization callback failed:', message, error)
++      showToast(t('common.idServiceError', { service: t('settings.inaturalist'), message }))
++    }
++  }
++
++  window.addEventListener('appUrlOpen', async event => {
++    const callbackUrl = String(event?.detail?.url || event?.detail?.href || '').trim()
++    await handleCallbackUrl(callbackUrl)
++  })
++
++  const pendingCallback = String(window.__sporelyPendingAppUrlOpen?.url || '').trim()
++  if (pendingCallback) {
++    window.__sporelyPendingAppUrlOpen = null
++    void handleCallbackUrl(pendingCallback)
++  }
++}
++
+ // ── Nav ───────────────────────────────────────────────────────────────────────
+ function initNav() {
+   document.getElementById('nav-home').addEventListener('click', () => {
+@@ -385,6 +496,24 @@ async function bootApp(user) {
+   state.user = user
+   hideAuthOverlay()
+   showAuthError('')
++  _installInaturalistDeepLinkListener()
++
++  if (!_inatCallbackProcessed) {
++    _inatCallbackProcessed = true
++    try {
++      console.log('iNaturalist boot callback check:', window.location.href)
++      const authResult = await completeInaturalistLoginFromCallback()
++      if (authResult) {
++        _syncSettingsUI()
++        syncIdentifyButtonLabels()
++        showToast(t('settings.inaturalistLoginSaved', { username: authResult.username || getInaturalistLoginDraft().username || t('settings.inaturalist') }))
++      }
++    } catch (error) {
++      const message = error?.message || String(error || 'Unknown error')
++      console.warn('iNaturalist authorization callback failed:', message, error)
++      showToast(t('common.idServiceError', { service: t('settings.inaturalist'), message }))
++    }
++  }
+ 
+   if (_appBootstrapped) return
+   _appBootstrapped = true
+@@ -400,6 +529,7 @@ async function bootApp(user) {
+ 
+   runBootStep('sync-feedback', () => initSyncFeedback())
+   runBootStep('settings', () => initSettings())
++  runBootStep('settings-ui', () => _syncSettingsUI())
+   runBootStep('camera-fallback-warning', () => initCameraFallbackWarning())
+   runBootStep('navigation', () => initNav())
+   runBootStep('home', () => initHome())
+diff --git a/src/screens/find_detail.js b/src/screens/find_detail.js
+index 5972a46..22d578d 100644
+--- a/src/screens/find_detail.js
++++ b/src/screens/find_detail.js
+@@ -4,6 +4,7 @@ import { state } from '../state.js'
+ import { navigate, goBack } from '../router.js'
+ import { showToast } from '../toast.js'
+ import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, runArtsorakelForMediaKeys, isArtsorakelNetworkError } from '../artsorakel.js'
++import { runInaturalistForBlobs, getIdentifyButtonLabel, getIdentifyServiceLabel, isInaturalistNetworkError, syncIdentifyButtonLabels } from '../inaturalist.js'
+ import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
+ import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob } from '../images.js'
+ import { loadFinds, openFinds } from './finds.js'
+@@ -11,7 +12,7 @@ import { openPhotoViewer } from '../photo-viewer.js'
+ import { openAiCropEditor } from '../ai-crop-editor.js'
+ import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
+ import { esc as _esc } from '../esc.js'
+-import { getDefaultVisibility, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
++import { getDefaultVisibility, getDefaultIdService, ID_SERVICE_INATURALIST, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
+ import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
+ import { Preferences } from '@capacitor/preferences'
+ import { refreshHome } from './home.js'
+@@ -93,6 +94,7 @@ export function initFindDetail() {
+   document.getElementById('detail-ai-btn').addEventListener('click', _runAI)
+   document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
+   document.getElementById('detail-friend-btn')?.addEventListener('click', _sendFriendRequestFromDetail)
++
+   document.querySelectorAll('input[name="detail-vis"], input[name="detail-location-precision"], #detail-draft').forEach(input => {
+     input.addEventListener('change', event => {
+       if (input.name === 'detail-vis' && input.checked) {
+@@ -506,8 +508,10 @@ async function _runAI() {
+   const resultsEl = document.getElementById('detail-ai-results')
+   const galleryImgs = Array.from(document.querySelectorAll('#detail-gallery img'))
+   if (!galleryImgs.length) { showToast(t('detail.noPhotoToIdentify')); return }
++  const service = getDefaultIdService()
+ 
+   btn.disabled = true
++  btn.dataset.running = '1'
+   btn.innerHTML = `<div class="ai-dot"></div> ${t('review.identifying')}`
+   resultsEl.style.display = 'none'
+ 
+@@ -548,16 +552,24 @@ async function _runAI() {
+ 
+     let predictions = null
+     if (blobs.length) {
+-      predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage(), { tolerateFailures: true })
++      const runner = service === ID_SERVICE_INATURALIST ? runInaturalistForBlobs : runArtsorakelForBlobs
++      predictions = await runner(
++        blobs,
++        getTaxonomyLanguage(),
++        service === ID_SERVICE_INATURALIST ? { tolerateFailures: true } : { tolerateFailures: true },
++      )
+     } else if (mediaKeys.length) {
++      if (service === ID_SERVICE_INATURALIST) {
++        throw new Error('Could not load observation images for iNaturalist')
++      }
+       console.warn('Artsorakel image download failed for existing observation:', blobResults)
+       predictions = await runArtsorakelForMediaKeys(mediaKeys, getTaxonomyLanguage(), { variant: 'medium' })
+     } else {
+-      throw new Error('Could not load observation images for Artsorakel')
++      throw new Error(`Could not load observation images for ${getIdentifyServiceLabel(service)}`)
+     }
+ 
+     if (!predictions?.length) {
+-      showToast(t('review.noMatch'))
++      showToast(t('review.idNoMatch'))
+       return
+     }
+ 
+@@ -593,15 +605,24 @@ async function _runAI() {
+     })
+   } catch (err) {
+     const message = String(err?.message || 'Unknown error')
+-    if (isArtsorakelNetworkError(err) || message.includes('CORS')) {
+-      showToast(t('review.aiUnavailable'))
++    const authMissing = message.includes('log in to inaturalist') || message.includes('missing authenticated session for inaturalist') || message.includes('missing inaturalist api token')
++    if (service === ID_SERVICE_INATURALIST && authMissing) {
++      showToast(t('settings.inaturalistLoginMissing'))
++    } else if (
++      (service === ID_SERVICE_INATURALIST && isInaturalistNetworkError(err))
++      || (service !== ID_SERVICE_INATURALIST && isArtsorakelNetworkError(err))
++      || message.includes('CORS')
++    ) {
++      showToast(t('review.idUnavailable'))
+     } else {
+-      showToast(t('common.artsorakelError', { message }))
++      showToast(t('common.idServiceError', { service: getIdentifyServiceLabel(service), message }))
+     }
+-    console.warn('Artsorakel detail error:', err)
++    console.warn(`${getIdentifyServiceLabel(service)} detail error:`, err)
+   } finally {
+     btn.disabled = false
+-    btn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
++    btn.dataset.running = '0'
++    btn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyButtonLabel(service)}`
++    syncIdentifyButtonLabels()
+   }
+ }
+ 
+diff --git a/src/screens/import_review.js b/src/screens/import_review.js
+index 5e2ec46..5f9fbe1 100644
+--- a/src/screens/import_review.js
++++ b/src/screens/import_review.js
+@@ -4,13 +4,14 @@ import { formatDate, formatTime, getTaxonomyLanguage, t, tp, translateVisibility
+ import { navigate } from '../router.js';
+ import { showToast } from '../toast.js';
+ import { searchTaxa, formatDisplayName, runArtsorakelForBlobs, createManualTaxon, isArtsorakelNetworkError } from '../artsorakel.js';
++import { runInaturalistForBlobs, getIdentifyButtonLabel, getIdentifyServiceLabel, isInaturalistNetworkError, syncIdentifyButtonLabels } from '../inaturalist.js';
+ import { enqueueObservation } from '../sync-queue.js';
+ import { openFinds } from './finds.js';
+ import { openImportedReview } from './review.js';
+ import { saveImportSessions, clearImportSessions } from '../import-store.js';
+ import { openAiCropEditor } from '../ai-crop-editor.js';
+ import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
+-import { getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js';
++import { getDefaultVisibility, getDefaultIdService, ID_SERVICE_INATURALIST, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js';
+ import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
+ import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
+ import { isAndroidNativeApp } from '../camera-actions.js';
+@@ -126,6 +127,7 @@ function _updateImportFooterUi() {
+     .forEach(el => {
+       el.disabled = running;
+     });
++  syncIdentifyButtonLabels();
+ }
+ 
+ async function _runAiIdAll() {
+@@ -133,6 +135,7 @@ async function _runAiIdAll() {
+   const targets = _getBatchAiTargets();
+   const totalUnits = _getBatchAiTotalUnits(targets);
+   if (!targets.length || totalUnits <= 0) return;
++  const service = getDefaultIdService();
+ 
+   importAiBatchState.running = true;
+   importAiBatchState.completedUnits = 0;
+@@ -146,16 +149,23 @@ async function _runAiIdAll() {
+   try {
+     for (const session of targets) {
+       try {
+-        const predictions = await runArtsorakelForBlobs(
++        const runner = service === ID_SERVICE_INATURALIST ? runInaturalistForBlobs : runArtsorakelForBlobs
++        const predictions = await runner(
+           session.files.map((blob, index) => ({
+             blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
+             cropRect: session.imageMeta?.[index]?.aiCropRect || null,
+           })),
+           getTaxonomyLanguage(),
+-          {
+-            onImageSent: () => _incrementBatchAiProgress(),
+-            onIdReceived: () => _incrementBatchAiProgress(),
+-          },
++          service === ID_SERVICE_INATURALIST
++            ? {
++                tolerateFailures: true,
++                onImageSent: () => _incrementBatchAiProgress(),
++                onIdReceived: () => _incrementBatchAiProgress(),
++              }
++            : {
++                onImageSent: () => _incrementBatchAiProgress(),
++                onIdReceived: () => _incrementBatchAiProgress(),
++              },
+         );
+ 
+         if (Array.isArray(predictions) && predictions.length) {
+@@ -170,7 +180,7 @@ async function _runAiIdAll() {
+         renderSessions();
+       } catch (err) {
+         failureCount++;
+-        console.error('Batch Artsorakel AI error:', err);
++        console.error(`${getIdentifyServiceLabel(service)} batch AI error:`, err);
+       }
+     }
+   } finally {
+@@ -179,11 +189,11 @@ async function _runAiIdAll() {
+   }
+ 
+   if (failureCount && successCount === 0 && noMatchCount === 0) {
+-    showToast(t('review.aiUnavailable'));
++    showToast(t('review.idUnavailable'));
+   } else if (!successCount && noMatchCount > 0) {
+-    showToast(t('review.noMatch'));
++    showToast(t('review.idNoMatch'));
+   } else if (failureCount > 0) {
+-    showToast(t('review.aiUnavailable'));
++    showToast(t('review.idUnavailable'));
+   }
+ }
+ 
+@@ -1441,8 +1451,8 @@ function buildCardHTML(session) {
+           value="${taxonVal}">
+         <ul class="taxon-dropdown import-taxon-dropdown" data-sid="${sid}" style="display:none"></ul>
+       </div>
+-      <button class="ai-id-btn-import" data-sid="${sid}" ${importAiBatchState.running ? 'disabled' : ''}>
+-        <div class="ai-dot"></div> ${t('detail.identifyAI')}
++      <button class="ai-id-btn-import" data-sid="${sid}" data-identify-button data-running="0" ${importAiBatchState.running ? 'disabled' : ''}>
++        <div class="ai-dot"></div> ${getIdentifyButtonLabel(getDefaultIdService())}
+       </button>
+       <div class="ai-results-import" data-sid="${sid}" style="${aiPredictions.length ? '' : 'display:none'}">${_renderSessionAiResults(aiPredictions)}</div>
+     </div>
+@@ -1617,21 +1627,25 @@ function _wireCard(sid) {
+       if (importAiBatchState.running) return
+       const session = sessionById(sid)
+       if (!session?.files?.length) return
++      const service = getDefaultIdService()
+       aiBtn.disabled = true
++      aiBtn.dataset.running = '1'
+       aiBtn.textContent = t('import.identifying')
+       try {
+-        const predictions = await runArtsorakelForBlobs(
++        const runner = service === ID_SERVICE_INATURALIST ? runInaturalistForBlobs : runArtsorakelForBlobs
++        const predictions = await runner(
+           session.files.map((blob, index) => ({
+             blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
+             cropRect: session.imageMeta?.[index]?.aiCropRect || null,
+           })),
+           getTaxonomyLanguage(),
++          service === ID_SERVICE_INATURALIST ? { tolerateFailures: true } : {},
+         )
+         if (!predictions?.length) {
+           session.aiPredictions = []
+           aiResults.style.display = 'none'
+           _persistSessions()
+-          showToast(t('review.noMatch'))
++          showToast(t('review.idNoMatch'))
+           return
+         }
+         session.aiPredictions = predictions
+@@ -1640,16 +1654,24 @@ function _wireCard(sid) {
+         _persistSessions()
+         _wireAiResults(sid, input, aiResults, predictions)
+       } catch (err) {
+-        console.error('Artsorakel AI error:', err)
++        console.error(`${getIdentifyServiceLabel(service)} AI error:`, err)
+         const message = String(err?.message || 'Unknown error')
+-        if (isArtsorakelNetworkError(err) || message.includes('CORS')) {
+-          showToast(t('review.aiUnavailable'))
++        const authMissing = message.includes('log in to inaturalist') || message.includes('missing authenticated session for inaturalist') || message.includes('missing inaturalist api token')
++        if (service === ID_SERVICE_INATURALIST && authMissing) {
++          showToast(t('settings.inaturalistLoginMissing'))
++        } else if (
++          (service === ID_SERVICE_INATURALIST && isInaturalistNetworkError(err))
++          || (service !== ID_SERVICE_INATURALIST && isArtsorakelNetworkError(err))
++          || message.includes('CORS')
++        ) {
++          showToast(t('review.idUnavailable'))
+         } else {
+-          showToast(t('common.artsorakelError', { message }))
++          showToast(t('common.idServiceError', { service: getIdentifyServiceLabel(service), message }))
+         }
+       } finally {
+         aiBtn.disabled = false
+-        aiBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
++        aiBtn.dataset.running = '0'
++        aiBtn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyButtonLabel(service)}`
+       }
+     })
+   }
+diff --git a/src/screens/review.js b/src/screens/review.js
+index cb140ff..02a334e 100644
+--- a/src/screens/review.js
++++ b/src/screens/review.js
+@@ -3,13 +3,14 @@ import { state } from '../state.js'
+ import { navigate } from '../router.js'
+ import { showToast } from '../toast.js'
+ import { searchTaxa, runArtsorakelForBlobs, formatDisplayName, createManualTaxon, isArtsorakelNetworkError } from '../artsorakel.js'
++import { runInaturalistForBlobs, getIdentifyButtonLabel, getIdentifyServiceLabel, isInaturalistNetworkError, syncIdentifyButtonLabels } from '../inaturalist.js'
+ import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
+ import { refreshHome } from './home.js'
+ import { openFinds } from './finds.js'
+ import { enqueueObservation } from '../sync-queue.js'
+ import { openAiCropEditor } from '../ai-crop-editor.js'
+ import { createImageCropMeta, hasAiCropRect } from '../image_crop.js'
+-import { getDefaultVisibility } from '../settings.js'
++import { getDefaultVisibility, getDefaultIdService, ID_SERVICE_INATURALIST } from '../settings.js'
+ import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
+ import { isAndroidNativeApp } from '../camera-actions.js'
+ import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
+@@ -426,8 +427,8 @@ export function buildReviewGrid() {
+             <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
+           </div>
+           ${hasBlob ? `<div class="detail-ai-row" style="margin-top: 0;">
+-            <button class="ai-id-btn" id="review-ai-btn" style="width:100%">
+-              <div class="ai-dot"></div> ${t('detail.identifyAI')}
++            <button class="ai-id-btn" id="review-ai-btn" data-identify-button data-running="0" style="width:100%">
++              <div class="ai-dot"></div> ${getIdentifyButtonLabel(getDefaultIdService())}
+             </button>
+           </div>` : ''}
+           <div class="artsorakel-results" data-idx="0" style="display:none"></div>
+@@ -527,7 +528,7 @@ function loadThumbnails(photos) {
+ 
+ function wireCardEvents() {
+   const aiBtn = document.getElementById('review-ai-btn')
+-  if (aiBtn) aiBtn.addEventListener('click', () => handleArtsorakelBtn(0))
++  if (aiBtn) aiBtn.addEventListener('click', () => handleIdentifyBtn(0))
+ 
+   // Wire the in-card uncertain toggle (replaces the static #review-uncertain)
+   const uncertainCard = document.getElementById('review-uncertain-card')
+@@ -643,13 +644,15 @@ async function resolveBlob(photo) {
+   return null
+ }
+ 
+-async function handleArtsorakelBtn(i) {
++async function handleIdentifyBtn(i) {
+   const btn = document.getElementById('review-ai-btn')
+   const resultsEl = document.querySelector(`.artsorakel-results[data-idx="${i}"]`)
+   if (!btn || !resultsEl) return
++  const service = getDefaultIdService()
+ 
+   const buttons = [btn]
+   buttons.forEach(actionBtn => {
++    actionBtn.dataset.running = '1'
+     actionBtn.disabled = true
+     actionBtn.innerHTML = `<div class="ai-dot"></div> ${t('review.identifying')}`
+   })
+@@ -663,10 +666,12 @@ async function handleArtsorakelBtn(i) {
+       cropRect: photo.aiCropRect || null,
+     }))))
+       .filter(item => _isBlob(item.blob))
+-    const predictions = await runArtsorakelForBlobs(blobs, getTaxonomyLanguage())
++    const predictions = service === ID_SERVICE_INATURALIST
++      ? await runInaturalistForBlobs(blobs, getTaxonomyLanguage(), { tolerateFailures: true })
++      : await runArtsorakelForBlobs(blobs, getTaxonomyLanguage())
+ 
+     if (!predictions || predictions.length === 0) {
+-      showToast(t('review.noMatch'))
++      showToast(t('review.idNoMatch'))
+       return
+     }
+ 
+@@ -696,17 +701,26 @@ async function handleArtsorakelBtn(i) {
+     })
+   } catch (err) {
+     const message = String(err?.message || 'Unknown error')
+-    if (isArtsorakelNetworkError(err) || message.includes('CORS')) {
+-      showToast(t('review.aiUnavailable'))
++    const authMissing = message.includes('log in to inaturalist') || message.includes('missing authenticated session for inaturalist') || message.includes('missing inaturalist api token')
++    if (service === ID_SERVICE_INATURALIST && authMissing) {
++      showToast(t('settings.inaturalistLoginMissing'))
++    } else if (
++      (service === ID_SERVICE_INATURALIST && isInaturalistNetworkError(err))
++      || (service !== ID_SERVICE_INATURALIST && isArtsorakelNetworkError(err))
++      || message.includes('CORS')
++    ) {
++      showToast(t('review.idUnavailable'))
+     } else {
+-      showToast(t('common.artsorakelError', { message }))
++      showToast(t('common.idServiceError', { service: getIdentifyServiceLabel(service), message }))
+     }
+-    console.warn('Artsorakel error:', err)
++    console.warn(`${getIdentifyServiceLabel(service)} error:`, err)
+   } finally {
+     buttons.forEach(actionBtn => {
++      actionBtn.dataset.running = '0'
+       actionBtn.disabled = false
+-      actionBtn.innerHTML = `<div class="ai-dot"></div> ${t('detail.identifyAI')}`
++      actionBtn.innerHTML = `<div class="ai-dot"></div> ${getIdentifyButtonLabel(service)}`
+     })
++    syncIdentifyButtonLabels()
+   }
+ }
+ 
+diff --git a/src/settings.js b/src/settings.js
+index 0d4c2d0..5649338 100644
+--- a/src/settings.js
++++ b/src/settings.js
+@@ -1,12 +1,25 @@
+ import { VISIBILITY_PUBLIC, normalizeVisibility as normalizeUiVisibility } from './visibility.js'
+ 
+ const DEFAULT_VISIBILITY_KEY = 'sporely-default-visibility'
++const DEFAULT_ID_SERVICE_KEY = 'sporely-default-id-service'
+ const USE_SYSTEM_CAMERA_KEY = 'sporely-use-system-camera'
+ const LAST_SYNC_AT_KEY = 'sporely-last-sync-at'
+ const ARTSORAKEL_MAX_EDGE_KEY = 'sporely-artsorakel-max-edge'
+ const PHOTO_GAP_MINUTES_KEY = 'sporely-photo-gap'
++const INAT_USERNAME_KEY = 'sporely-inaturalist-username'
++const INAT_PASSWORD_KEY = 'sporely-inaturalist-password'
++const INAT_API_TOKEN_KEY = 'sporely-inaturalist-api-token'
++const INAT_API_TOKEN_CREATED_AT_KEY = 'sporely-inaturalist-api-token-created-at'
++const INAT_API_TOKEN_EXPIRES_AT_KEY = 'sporely-inaturalist-api-token-expires-at'
++const INAT_ACCESS_TOKEN_KEY = 'sporely-inaturalist-access-token'
++const INAT_ACCESS_TOKEN_CREATED_AT_KEY = 'sporely-inaturalist-access-token-created-at'
++const INAT_ACCESS_TOKEN_EXPIRES_AT_KEY = 'sporely-inaturalist-access-token-expires-at'
++const INAT_REFRESH_TOKEN_KEY = 'sporely-inaturalist-refresh-token'
+ const DEFAULT_ARTSORAKEL_MAX_EDGE = 500
+ export const NATIVE_CAMERA_JPEG_QUALITY = 75
++export const ID_SERVICE_ARTSORAKEL = 'artsorakel'
++export const ID_SERVICE_INATURALIST = 'inat'
++const VALID_ID_SERVICES = new Set([ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST])
+ 
+ export function normalizeArtsorakelMaxEdge(value) {
+   const parsed = Number.parseInt(value, 10)
+@@ -52,6 +65,27 @@ export function setPhotoGapMinutes(value) {
+   return normalized
+ }
+ 
++export function normalizeIdService(value, fallback = ID_SERVICE_ARTSORAKEL) {
++  const raw = String(value || '').trim().toLowerCase()
++  if (VALID_ID_SERVICES.has(raw)) return raw
++  const fallbackRaw = String(fallback || '').trim().toLowerCase()
++  return VALID_ID_SERVICES.has(fallbackRaw) ? fallbackRaw : ID_SERVICE_ARTSORAKEL
++}
++
++export function getDefaultIdService() {
++  try {
++    return normalizeIdService(localStorage.getItem(DEFAULT_ID_SERVICE_KEY))
++  } catch (_) {
++    return ID_SERVICE_ARTSORAKEL
++  }
++}
++
++export function setDefaultIdService(value) {
++  try {
++    localStorage.setItem(DEFAULT_ID_SERVICE_KEY, normalizeIdService(value))
++  } catch (_) {}
++}
++
+ export function normalizeVisibility(value) {
+   return normalizeUiVisibility(value, VISIBILITY_PUBLIC)
+ }
+@@ -80,6 +114,79 @@ export function setUseSystemCamera(enabled) {
+   } catch (_) {}
+ }
+ 
++export function getInaturalistLoginDraft() {
++  try {
++    return {
++      username: localStorage.getItem(INAT_USERNAME_KEY) || '',
++      password: '',
++    }
++  } catch (_) {
++    return { username: '', password: '' }
++  }
++}
++
++export function setInaturalistLoginDraft(username) {
++  try {
++    if (username) localStorage.setItem(INAT_USERNAME_KEY, String(username))
++    else localStorage.removeItem(INAT_USERNAME_KEY)
++    localStorage.removeItem(INAT_PASSWORD_KEY)
++  } catch (_) {}
++}
++
++export function clearInaturalistLoginDraft() {
++  try {
++    localStorage.removeItem(INAT_USERNAME_KEY)
++    localStorage.removeItem(INAT_PASSWORD_KEY)
++  } catch (_) {}
++}
++
++export function getInaturalistApiTokenRecord() {
++  try {
++    return {
++      apiToken: localStorage.getItem(INAT_API_TOKEN_KEY) || '',
++      createdAt: Number(localStorage.getItem(INAT_API_TOKEN_CREATED_AT_KEY) || 0) || 0,
++      expiresAt: Number(localStorage.getItem(INAT_API_TOKEN_EXPIRES_AT_KEY) || 0) || 0,
++      accessToken: localStorage.getItem(INAT_ACCESS_TOKEN_KEY) || '',
++      accessTokenCreatedAt: Number(localStorage.getItem(INAT_ACCESS_TOKEN_CREATED_AT_KEY) || 0) || 0,
++      accessTokenExpiresAt: Number(localStorage.getItem(INAT_ACCESS_TOKEN_EXPIRES_AT_KEY) || 0) || 0,
++      refreshToken: localStorage.getItem(INAT_REFRESH_TOKEN_KEY) || '',
++    }
++  } catch (_) {
++    return { apiToken: '', createdAt: 0, expiresAt: 0, accessToken: '', accessTokenCreatedAt: 0, accessTokenExpiresAt: 0, refreshToken: '' }
++  }
++}
++
++export function setInaturalistApiTokenRecord({
++  apiToken = '',
++  createdAt = 0,
++  expiresAt = 0,
++  accessToken = '',
++  accessTokenCreatedAt = 0,
++  accessTokenExpiresAt = 0,
++  refreshToken = '',
++} = {}) {
++  try {
++    if (apiToken) localStorage.setItem(INAT_API_TOKEN_KEY, String(apiToken))
++    else localStorage.removeItem(INAT_API_TOKEN_KEY)
++    if (createdAt) localStorage.setItem(INAT_API_TOKEN_CREATED_AT_KEY, String(Number(createdAt) || 0))
++    else localStorage.removeItem(INAT_API_TOKEN_CREATED_AT_KEY)
++    if (expiresAt) localStorage.setItem(INAT_API_TOKEN_EXPIRES_AT_KEY, String(Number(expiresAt) || 0))
++    else localStorage.removeItem(INAT_API_TOKEN_EXPIRES_AT_KEY)
++    if (accessToken) localStorage.setItem(INAT_ACCESS_TOKEN_KEY, String(accessToken))
++    else localStorage.removeItem(INAT_ACCESS_TOKEN_KEY)
++    if (accessTokenCreatedAt) localStorage.setItem(INAT_ACCESS_TOKEN_CREATED_AT_KEY, String(Number(accessTokenCreatedAt) || 0))
++    else localStorage.removeItem(INAT_ACCESS_TOKEN_CREATED_AT_KEY)
++    if (accessTokenExpiresAt) localStorage.setItem(INAT_ACCESS_TOKEN_EXPIRES_AT_KEY, String(Number(accessTokenExpiresAt) || 0))
++    else localStorage.removeItem(INAT_ACCESS_TOKEN_EXPIRES_AT_KEY)
++    if (refreshToken) localStorage.setItem(INAT_REFRESH_TOKEN_KEY, String(refreshToken))
++    else localStorage.removeItem(INAT_REFRESH_TOKEN_KEY)
++  } catch (_) {}
++}
++
++export function clearInaturalistApiTokenRecord() {
++  setInaturalistApiTokenRecord({})
++}
++
+ export function getLastSyncAt() {
+   try {
+     const value = localStorage.getItem(LAST_SYNC_AT_KEY)
+diff --git a/src/style.css b/src/style.css
+index d5145d2..c693c18 100644
+--- a/src/style.css
++++ b/src/style.css
+@@ -3378,6 +3378,55 @@ html.light .ai-dot { background: rgba(255,255,255,0.75); }
+ .settings-gap-hint {
+   margin-top: 8px; font-size: 11px; color: var(--text-dim); line-height: 1.5;
+ }
++.settings-login-card {
++  margin-top: 10px;
++  padding: 12px;
++  border: 1px solid var(--border);
++  border-radius: 12px;
++  background: var(--card);
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++}
++.settings-login-field {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  font-size: 13px;
++  color: var(--text-secondary);
++}
++.settings-login-input {
++  width: 100%;
++  text-align: left;
++}
++.settings-login-actions {
++  display: flex;
++  gap: 8px;
++  flex-wrap: wrap;
++}
++.settings-login-save-btn {
++  flex: 1 1 160px;
++}
++.settings-login-forget-btn {
++  flex: 1 1 140px;
++  border: 1px solid var(--border);
++  border-radius: 8px;
++  padding: 10px 12px;
++  background: transparent;
++  color: var(--text-secondary);
++  font-family: 'Outfit', sans-serif;
++  font-size: 13px;
++  font-weight: 600;
++  cursor: pointer;
++}
++.settings-login-forget-btn:active {
++  background: var(--card-raised);
++}
++.settings-login-status {
++  font-size: 11px;
++  line-height: 1.4;
++  color: var(--text-dim);
++}
+ .settings-row {
+   display: flex;
+   align-items: center;
+diff --git a/vite.config.js b/vite.config.js
+index 21ec863..383e9af 100644
+--- a/vite.config.js
++++ b/vite.config.js
+@@ -1,6 +1,5 @@
+ import { readFileSync } from 'node:fs'
+ import { defineConfig } from 'vite'
+-import basicSsl from '@vitejs/plugin-basic-ssl'
+ 
+ const pkg = JSON.parse(
+   readFileSync(new URL('./package.json', import.meta.url), 'utf8')
+@@ -14,9 +13,14 @@ export default defineConfig({
+   define: {
+     __APP_VERSION__: JSON.stringify(pkg.version),
+   },
+-  plugins: [basicSsl()],
+   server: {
+     host: true,
+-    https: true,
++    port: 8000,
++    strictPort: true,
++  },
++  preview: {
++    host: true,
++    port: 8000,
++    strictPort: true,
+   },
+ })
