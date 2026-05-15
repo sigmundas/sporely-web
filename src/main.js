@@ -231,11 +231,11 @@ function initSettings() {
   }
   document.getElementById('settings-gap-decrement')?.addEventListener('click', () => {
     const current = Number.parseFloat(gapInput.value || 1)
-    _setPhotoGap(current <= 1 ? current - (5 / 60) : current - 1)
+    _setPhotoGap(current <= 1 ? current - (10 / 60) : current - 1)
   })
   document.getElementById('settings-gap-increment')?.addEventListener('click', () => {
     const current = Number.parseFloat(gapInput.value || 1)
-    let next = current < 1 ? current + (5 / 60) : current + 1
+    let next = current < 1 ? current + (10 / 60) : current + 1
     if (Math.abs(next - 1) < 0.001) next = 1
     _setPhotoGap(next)
   })

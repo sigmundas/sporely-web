@@ -6,42 +6,40 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "scriptsInfo": {
-    "check:node": "Fails early if Node is older than 22.",
-    "predev": "Runs automatically before npm run dev.",
-    "prebuild": "Runs automatically before npm run build.",
-    "prepreview": "Runs automatically before npm run preview.",
-    "sync:version": "Copies package.json version into native/app metadata.",
-    "sync:version:bump-code": "Copies version and bumps Android versionCode.",
-    "dev": "Starts the local Vite development server.",
-    "build": "Builds the production web files.",
-    "preview": "Serves the production build locally.",
-    "preview:host": "Serves the production build on the local network.",
-    "prod:preview": "Builds production files, then serves them with Vite preview.",
-    "android:copy": "Builds web files and copies them into the Android project.",
-    "android:sync": "Builds web files and syncs Capacitor Android plugins/config.",
-    "android:install": "Builds, syncs Android, and installs the debug app on a connected device.",
-    "android:patch-version": "Bumps package patch version and Android versionCode without making a git tag.",
-    "android:test-apk": "Full APK test flow: bump version, build, sync Android, install debug app."
-  },
-  "scripts": {
-    "check:node": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (major < 22) { console.error('\\nNode 22+ is required for sporely-web. Current: ' + process.version + '\\nUse nvm install 22 && nvm use 22\\n'); process.exit(1); }\"",
-    "predev": "npm run check:node",
-    "prebuild": "npm run check:node",
-    "prepreview": "npm run check:node",
-    "sync:version": "node scripts/sync-version.mjs",
-    "sync:version:bump-code": "node scripts/sync-version.mjs --bump-code",
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "preview:host": "vite preview --host",
-    "prod:preview": "npm run build && npm run preview:host",
-    "android:copy": "npm run build && npx cap copy android",
-    "android:sync": "npm run build && npx cap sync android",
-    "android:install": "npm run build && npx cap sync android && cd android && ./gradlew :app:installDebug",
-    "android:patch-version": "npm version patch --no-git-tag-version && npm run sync:version:bump-code",
-    "android:test-apk": "npm run android:patch-version && npm run build && npx cap sync android && cd android && ./gradlew :app:installDebug"
-  },
+"scriptsInfo": {
+  "check:node": "Fails early if the active Node version is older than 22.",
+  "predev": "Runs automatically before npm run dev; checks Node version.",
+  "prebuild": "Runs automatically before npm run build; checks Node version.",
+  "prepreview:host": "Runs automatically before npm run preview:host; checks Node version.",
+
+  "dev": "Starts the Vite development server with live reload, reachable from other devices on the network.",
+  "build": "Builds the production web app into dist/.",
+  "preview:host": "Builds the production app, then serves it on the local network for browser/iPhone testing.",
+
+  "sync:version:bump-code": "Updates native app version metadata and bumps Android versionCode.",
+  "android:install": "Builds the web app, syncs Capacitor Android, then installs the debug app on a connected Android device.",
+  "android:install:bump": "Bumps package patch version and Android versionCode, then installs the debug app.",
+
+  "test": "Runs the Node test files such as *.test.js."
+},
+"scripts": {
+  "check:node": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (major < 22) { console.error('\\nNode 22+ is required for sporely-web. Current: ' + process.version + '\\nUse nvm install 22 && nvm use 22\\n'); process.exit(1); }\"",
+
+  "predev": "npm run check:node",
+  "prebuild": "npm run check:node",
+  "prepreview:host": "npm run check:node",
+
+  "dev": "vite --host",
+  "build": "vite build",
+  "preview:host": "npm run build && vite preview --host",
+
+  "sync:version:bump-code": "node scripts/sync-version.mjs --bump-code",
+
+  "android:install": "npm run build && npx cap sync android && cd android && ./gradlew :app:installDebug",
+  "android:install:bump": "npm version patch --no-git-tag-version && npm run sync:version:bump-code && npm run android:install",
+
+  "test": "node --test"
+},
   "dependencies": {
     "@capacitor/android": "^8.3.0",
     "@capacitor/app": "^8.1.0",

@@ -830,11 +830,11 @@ export function initImportReview() {
   void _syncImportAiDefaultAvailability();
   document.getElementById('import-gap-decrement')?.addEventListener('click', () => {
     const current = getPhotoGapMinutes();
-    _applyImportPhotoGapChange(current <= 1 ? current - (5 / 60) : current - 1);
+    _applyImportPhotoGapChange(current <= 1 ? current - (10 / 60) : current - 1);
   });
   document.getElementById('import-gap-increment')?.addEventListener('click', () => {
     const current = getPhotoGapMinutes();
-    let next = current < 1 ? current + (5 / 60) : current + 1;
+    let next = current < 1 ? current + (10 / 60) : current + 1;
     if (Math.abs(next - 1) < 0.001) next = 1;
     _applyImportPhotoGapChange(next);
   });

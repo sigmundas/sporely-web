@@ -35,7 +35,7 @@ export function setArtsorakelMaxEdge(value) {
 export function normalizePhotoGapMinutes(value) {
   const parsed = Number.parseFloat(value)
   return Number.isFinite(parsed)
-    ? Math.max(5 / 60, Math.min(120, parsed))
+    ? Math.max(10 / 60, Math.min(120, parsed))
     : 1
 }
 
