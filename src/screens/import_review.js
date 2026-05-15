@@ -14,15 +14,16 @@ import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhoto
 import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
+import { loadInaturalistSession } from '../inaturalist.js';
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
-import { getIdentifyBusyLabel, getIdentifyButtonLabel, getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
+import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
 import {
   buildIdentifyFingerprint,
-  chooseIdentifyComparisonActiveService,
   getAvailableIdentifyServices,
+  getIdentifyConfidenceState,
   renderIdentifyResultRows,
   renderIdentifyServiceTab,
-  runIdentifyComparisonForBlobs,
+  renderIdentifyServiceStateSummary,
   ID_SERVICE_ARTSORAKEL,
   normalizeIdentifyService,
 } from '../ai-identification.js';
@@ -34,6 +35,9 @@ const importAiBatchState = {
   running: false,
   completedUnits: 0,
   totalUnits: 0,
+  defaultServiceAvailable: true,
+  defaultServiceReason: '',
+  defaultServiceLabel: '',
 };
 
 function _isBlob(b) {
@@ -48,6 +52,7 @@ function _resetImportAiBatchState() {
   importAiBatchState.running = false;
   importAiBatchState.completedUnits = 0;
   importAiBatchState.totalUnits = 0;
+  importAiBatchState.defaultServiceLabel = '';
 }
 
 function _getBatchAiTargets() {
@@ -79,17 +84,114 @@ function _applySessionAiPrediction(session, prediction) {
   return true;
 }
 
+function _applySessionAiTopPrediction(session, predictions = []) {
+  if (!Array.isArray(predictions) || !predictions.length) return false;
+  return _applySessionAiPrediction(session, predictions[0]);
+}
+
+function _storeSessionAiServiceResult(session, service, result = {}, fingerprint = null) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) return null
+  const svc = normalizeIdentifyService(service)
+  const predictions = Array.isArray(result.predictions) ? result.predictions : []
+  const status = result.status || (predictions.length ? 'success' : 'no_match')
+  const nextState = {
+    ..._emptyServiceState(),
+    ...(normalized.aiServiceState?.[svc] || {}),
+    status,
+    topScore: Number.isFinite(Number(result.topProbability))
+      ? Number(result.topProbability)
+      : (Number.isFinite(Number(predictions[0]?.probability)) ? Number(predictions[0].probability) : null),
+    topProbability: Number.isFinite(Number(result.topProbability))
+      ? Number(result.topProbability)
+      : (Number.isFinite(Number(predictions[0]?.probability)) ? Number(predictions[0].probability) : null),
+    errorMessage: result.errorMessage || '',
+    requestFingerprint: fingerprint?.requestFingerprint || result.requestFingerprint || '',
+    imageFingerprint: fingerprint?.imageFingerprint || result.imageFingerprint || '',
+    cropFingerprint: fingerprint?.cropFingerprint || result.cropFingerprint || '',
+  }
+
+  normalized.aiPredictionsByService[svc] = predictions
+  normalized.aiServiceState[svc] = nextState
+  normalized.aiActiveService = svc
+  normalized.aiService = svc
+  normalized.aiPredictions = predictions
+  return nextState
+}
+
+function _emptyServiceState() {
+  return {
+    status: 'idle',
+    topScore: null,
+    topProbability: null,
+    errorMessage: '',
+    requestFingerprint: '',
+    imageFingerprint: '',
+    cropFingerprint: '',
+  };
+}
+
+function _normalizePredictionList(value) {
+  if (Array.isArray(value)) return value
+  if (value && typeof value === 'object' && Array.isArray(value.predictions)) return value.predictions
+  return []
+}
+
+function _normalizeLegacyServiceState(value, predictions = []) {
+  if (!value || typeof value !== 'object') {
+    return {
+      ..._emptyServiceState(),
+      status: Array.isArray(predictions) && predictions.length ? 'success' : 'idle',
+    }
+  }
+
+  const status = value.status || (Array.isArray(predictions) && predictions.length ? 'success' : 'idle')
+  const topScore = Number.isFinite(Number(value.topScore))
+    ? Number(value.topScore)
+    : (Number.isFinite(Number(value.topProbability)) ? Number(value.topProbability) : null)
+
+  return {
+    ..._emptyServiceState(),
+    ...value,
+    status,
+    topScore,
+    topProbability: topScore,
+    errorMessage: value.errorMessage || value.error || '',
+    requestFingerprint: value.requestFingerprint || value.request_fingerprint || '',
+    imageFingerprint: value.imageFingerprint || value.image_fingerprint || '',
+    cropFingerprint: value.cropFingerprint || value.crop_fingerprint || '',
+  }
+}
+
 function _ensureSessionAiState(session) {
   if (!session) return null;
-  if (!session.aiPredictionsByService) session.aiPredictionsByService = {};
+  if (!session.aiPredictionsByService || typeof session.aiPredictionsByService !== 'object') session.aiPredictionsByService = {};
+  if (!session.aiServiceState || typeof session.aiServiceState !== 'object') session.aiServiceState = {};
   if (!session.aiAvailability) session.aiAvailability = {};
   if (!session.aiActiveService) session.aiActiveService = getDefaultIdService();
   if (!session.aiCurrentFingerprint) session.aiCurrentFingerprint = '';
   if (!session.aiRequestedFingerprint) session.aiRequestedFingerprint = '';
   if (!session.aiAvailabilityFingerprint) session.aiAvailabilityFingerprint = '';
-  if (Array.isArray(session.aiPredictions) && session.aiPredictions.length) {
-    session.aiPredictionsByService[normalizeIdentifyService(session.aiService || getDefaultIdService())] = session.aiPredictions;
+  const legacyService = normalizeIdentifyService(session.aiService || session.aiActiveService || getDefaultIdService());
+  if (Array.isArray(session.aiPredictions) && session.aiPredictions.length && !session.aiPredictionsByService[legacyService]) {
+    session.aiPredictionsByService[legacyService] = session.aiPredictions;
   }
+
+  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
+    const predictions = _normalizePredictionList(session.aiPredictionsByService[service])
+    session.aiPredictionsByService[service] = predictions
+    session.aiServiceState[service] = _normalizeLegacyServiceState(session.aiServiceState[service], predictions)
+    if (!session.aiServiceState[service].status || session.aiServiceState[service].status === 'idle') {
+      session.aiServiceState[service].status = predictions.length ? 'success' : 'idle'
+    }
+    if (predictions.length && !session.aiServiceState[service].topScore && Number.isFinite(Number(predictions[0]?.probability))) {
+      session.aiServiceState[service].topScore = Number(predictions[0].probability)
+      session.aiServiceState[service].topProbability = Number(predictions[0].probability)
+    }
+  }
+
+  session.aiActiveService = normalizeIdentifyService(session.aiActiveService || session.aiService || getDefaultIdService());
+  session.aiService = session.aiActiveService;
   return session;
 }
 
@@ -100,7 +202,8 @@ function _sessionAiInputs(session) {
     cropRect: session.imageMeta?.[index]?.aiCropRect || null,
     cropSourceW: session.imageMeta?.[index]?.aiCropSourceW ?? null,
     cropSourceH: session.imageMeta?.[index]?.aiCropSourceH ?? null,
-    sourceType: 'blob',
+    source: _isBlob(session.aiFiles?.[index]) ? 'session.aiFiles' : 'session.files',
+    sourceType: _isBlob(session.aiFiles?.[index]) ? 'session.aiFiles' : 'session.files',
   })).filter(item => _isBlob(item.blob));
 }
 
@@ -138,20 +241,65 @@ async function _syncSessionAiAvailability(session) {
   }
 }
 
+async function _syncImportAiDefaultAvailability() {
+  const defaultService = getDefaultIdService()
+  let available = true
+  let reason = ''
+  let label = defaultService === ID_SERVICE_INATURALIST
+    ? (t('settings.idServiceInaturalist') || 'iNaturalist')
+    : (t('settings.idServiceArtsorakel') || 'Artsorakel')
+
+  if (defaultService === ID_SERVICE_INATURALIST) {
+    const session = await loadInaturalistSession()
+    available = Boolean(session?.connected && (session?.api_token || session?.apiToken))
+    reason = available ? '' : (t('settings.inaturalistLoginMissing') || 'Please log in to iNaturalist first.')
+  } else {
+    const hasTargets = _getBatchAiTargets().length > 0
+    available = hasTargets
+    reason = hasTargets ? '' : (t('review.noPhotosToIdentify') || t('review.noCaptures') || 'No images available.')
+  }
+
+  const changed = importAiBatchState.defaultServiceAvailable !== available
+    || importAiBatchState.defaultServiceReason !== reason
+    || importAiBatchState.defaultServiceLabel !== label
+  importAiBatchState.defaultServiceAvailable = available
+  importAiBatchState.defaultServiceReason = reason
+  importAiBatchState.defaultServiceLabel = label
+  if (changed) _updateImportFooterUi()
+}
+
 function _sessionAiResultState(session, service) {
   const normalized = _ensureSessionAiState(session)
   const svc = normalizeIdentifyService(service)
-  const result = normalized?.aiPredictionsByService?.[svc] || null
+  const predictions = normalized?.aiPredictionsByService?.[svc] || []
+  const serviceState = normalized?.aiServiceState?.[svc] || _emptyServiceState()
   const availability = normalized?.aiAvailability?.[svc] || null
+  const fingerprint = _sessionAiFingerprint(normalized)
+  const stale = Boolean(
+    fingerprint?.imageFingerprint
+    && fingerprint?.cropFingerprint
+    && (
+      serviceState?.imageFingerprint !== fingerprint.imageFingerprint
+      || serviceState?.cropFingerprint !== fingerprint.cropFingerprint
+    )
+    && (serviceState.status !== 'idle' || predictions.length)
+  )
+  const status = stale
+    ? 'stale'
+    : (serviceState.status || (predictions.length ? 'success' : 'idle'))
+  const topProbability = Number.isFinite(Number(serviceState.topScore))
+    ? Number(serviceState.topScore)
+    : (predictions[0]?.probability ?? null)
   return {
     service: svc,
     active: normalized?.aiActiveService === svc,
     available: availability?.available ?? false,
     reason: availability?.reason || '',
-    status: result?.status || (normalized?.aiRunning ? 'running' : 'idle'),
-    topPrediction: result?.topPrediction || null,
-    topProbability: result?.topProbability ?? null,
-    errorMessage: result?.errorMessage || '',
+    status: normalized?.aiRunning ? 'running' : status,
+    topPrediction: predictions[0] || null,
+    topProbability,
+    errorMessage: serviceState.errorMessage || '',
+    stale,
   }
 }
 
@@ -159,18 +307,25 @@ function _renderSessionAiResults(session) {
   const normalized = _ensureSessionAiState(session)
   if (!normalized) return ''
   const activeService = normalizeIdentifyService(normalized.aiActiveService)
-  const result = normalized.aiPredictionsByService?.[activeService] || null
-  if (result?.predictions?.length) {
-    return renderIdentifyResultRows(activeService, result.predictions)
+  const predictions = normalized.aiPredictionsByService?.[activeService] || []
+  const serviceState = normalized.aiServiceState?.[activeService] || _emptyServiceState()
+  if (predictions.length) {
+    return renderIdentifyResultRows(activeService, predictions)
   }
-  if (result?.status === 'unavailable') {
-    return `<div class="ai-results-empty">${normalized.aiAvailability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+  if (serviceState.status === 'unavailable') {
+    return `<div class="ai-results-empty">${normalized.aiAvailability?.[activeService]?.reason || serviceState.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+  }
+  if (serviceState.status === 'error') {
+    return `<div class="ai-results-empty">${serviceState.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
   }
   if (normalized.aiRunning) {
-    return `<div class="ai-results-empty">${t('common.loading')}</div>`
+    return `<div class="ai-results-empty">${t('import.identifying') || t('common.loading')}</div>`
   }
-  if (normalized.aiStale) {
+  if (serviceState.status === 'stale' || normalized.aiStale) {
     return `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
+  }
+  if (serviceState.status === 'no_match') {
+    return `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`
   }
   return `<div class="ai-results-empty">${t('review.noMatch') || 'No match'}</div>`
 }
@@ -181,22 +336,28 @@ function _renderSessionAiControls(session) {
   const fingerprint = _sessionAiFingerprint(normalized)
   if (fingerprint) {
     normalized.aiCurrentFingerprint = fingerprint.requestFingerprint
-    normalized.aiStale = Boolean(normalized.aiRequestedFingerprint && normalized.aiRequestedFingerprint !== fingerprint.requestFingerprint)
+    normalized.aiStale = Boolean(
+      normalized.aiRequestedFingerprint
+      && normalized.aiRequestedFingerprint !== fingerprint.requestFingerprint
+      && Object.values(normalized.aiServiceState || {}).some(item => item?.status && item.status !== 'idle')
+    )
   }
   void _syncSessionAiAvailability(normalized)
   const activeService = normalizeIdentifyService(normalized.aiActiveService)
-  const activeResult = normalized.aiPredictionsByService?.[activeService] || null
+  const activeResult = normalized.aiServiceState?.[activeService] || _emptyServiceState()
+  const activePredictions = normalized.aiPredictionsByService?.[activeService] || []
+  const confidence = getIdentifyConfidenceState(activeResult.topProbability ?? activeResult.topScore ?? 0, { checkThreshold: 0.65 })
   const runState = normalized.aiRunning
     ? 'running'
-    : (activeResult?.status || 'idle')
+    : (activeResult.status || (activePredictions.length ? 'success' : 'idle'))
   const anyAvailable = Object.values(normalized.aiAvailability || {}).some(item => item?.available)
-  const runLabel = normalized.aiRunning ? (t('common.loading') || 'Loading') : (t('review.aiId') || 'AI ID')
-  const staleNote = normalized.aiStale ? `<div class="detail-ai-stale-note">${t('review.resultsOutdated') || 'Results outdated - run AI ID again.'}</div>` : ''
+  const runLabel = t('review.aiId') || 'AI Photo ID'
+  const staleNote = normalized.aiStale ? `<div class="detail-ai-stale-note">${t('review.resultsOutdated') || 'Results outdated - run AI Photo ID again.'}</div>` : ''
   return `
     <div class="detail-ai-stack" data-identify-comparison-state data-sid="${escHtml(normalized.id)}">
       <div class="detail-ai-controls">
         <button class="ai-id-btn ai-id-run-btn" type="button" data-identify-run-button data-sid="${escHtml(normalized.id)}" ${normalized.aiRunning || !anyAvailable ? 'disabled' : ''}>
-          <span class="ai-id-dot ${runState === 'running' ? 'is-running' : runState === 'success' || runState === 'no_match' || runState === 'stale' ? 'is-complete' : runState === 'unavailable' ? 'is-unavailable' : runState === 'error' ? 'is-error' : ''}"></span>
+          <span class="ai-id-dot ${runState === 'running' ? 'is-running' : runState === 'success' || runState === 'stale' ? (confidence.icon === 'check' ? 'is-complete' : confidence.tone) : runState === 'no_match' ? 'is-complete' : runState === 'unavailable' ? 'is-unavailable' : runState === 'error' ? 'is-error' : ''}"></span>
           <span>${escHtml(runLabel)}</span>
         </button>
         <div class="detail-ai-service-tabs" role="tablist" aria-label="AI services">
@@ -214,58 +375,123 @@ function _renderSessionAiControls(session) {
   `;
 }
 
-async function _runSessionAiComparison(sid) {
-  const session = sessionById(sid);
-  if (!session?.files?.length || importAiBatchState.running) return;
-  const normalized = _ensureSessionAiState(session);
-  const fingerprint = _sessionAiFingerprint(normalized);
-  if (!fingerprint) return;
+function _sessionServiceNeedsRerun(session, service) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) return false
+  const svc = normalizeIdentifyService(service)
+  const state = normalized.aiServiceState?.[svc] || _emptyServiceState()
+  const predictions = normalized.aiPredictionsByService?.[svc] || []
+  const fingerprint = _sessionAiFingerprint(normalized)
+  const stale = Boolean(
+    fingerprint?.imageFingerprint
+    && fingerprint?.cropFingerprint
+    && (
+      state.imageFingerprint !== fingerprint.imageFingerprint
+      || state.cropFingerprint !== fingerprint.cropFingerprint
+    )
+    && (state.status !== 'idle' || predictions.length),
+  )
+  return stale || state.status === 'idle'
+}
 
-  normalized.aiRunning = true;
-  normalized.aiRequestedFingerprint = fingerprint.requestFingerprint;
-  normalized.aiCurrentFingerprint = fingerprint.requestFingerprint;
-  normalized.aiStale = false;
-  renderSessions();
+async function _runSessionAiService(sid, service, options = {}) {
+  const session = sessionById(sid)
+  if (!session?.files?.length || (importAiBatchState.running && !options.allowDuringBatch)) return
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) return
+  const svc = normalizeIdentifyService(service)
+  const fingerprint = _sessionAiFingerprint(normalized)
+  if (!fingerprint) return
+
+  const availabilityList = await getAvailableIdentifyServices({
+    blobs: _sessionAiInputs(normalized).map(item => item.blob),
+  })
+  const availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+  normalized.aiAvailability = availability
+  normalized.aiAvailabilityFingerprint = fingerprint.requestFingerprint
+
+  const serviceAvailability = availability[svc]
+  if (!serviceAvailability?.available) {
+    _storeSessionAiServiceResult(session, svc, {
+      status: 'unavailable',
+      errorMessage: serviceAvailability?.reason || '',
+      predictions: [],
+    }, fingerprint)
+    normalized.aiRunning = false
+    _persistSessions()
+    renderSessions()
+    return
+  }
+
+  normalized.aiRunning = true
+  normalized.aiActiveService = svc
+  normalized.aiService = svc
+  normalized.aiCurrentFingerprint = fingerprint.requestFingerprint
+  normalized.aiRequestedFingerprint = fingerprint.requestFingerprint
+  normalized.aiServiceState[svc] = {
+    ..._emptyServiceState(),
+    ...(normalized.aiServiceState?.[svc] || {}),
+    status: 'running',
+    requestFingerprint: fingerprint.requestFingerprint,
+  }
+  _persistSessions()
+  renderSessions()
 
   try {
-    const availabilityList = await getAvailableIdentifyServices({
-      blobs: _sessionAiInputs(normalized).map(item => item.blob),
-    });
-    const availability = Object.fromEntries(availabilityList.map(item => [item.service, item]));
-    normalized.aiAvailability = availability;
-    normalized.aiAvailabilityFingerprint = fingerprint.requestFingerprint;
-
-    const comparison = await runIdentifyComparisonForBlobs(
+    const predictions = await runIdentifyForBlobs(
       _sessionAiInputs(normalized).map(item => ({
         blob: item.blob,
         cropRect: item.cropRect,
       })),
+      svc,
+      getTaxonomyLanguage(),
       {
-        language: getTaxonomyLanguage(),
+        screen: 'import-review',
         availability,
-        defaultService: normalized.aiActiveService,
+        onImageSent: options.onImageSent,
+        onIdReceived: options.onIdReceived,
       },
-    );
+    )
 
-    normalized.aiPredictionsByService = comparison.resultsByService;
-    normalized.aiActiveService = comparison.activeService;
-    normalized.aiStale = false;
-
-    const activeResult = comparison.resultsByService?.[comparison.activeService] || null;
-    if (activeResult?.status === 'no_match' && Object.values(comparison.resultsByService).every(result => result?.status === 'no_match' || result?.status === 'unavailable')) {
-      showToast(getIdentifyNoMatchMessage(comparison.activeService));
-    }
+    _storeSessionAiServiceResult(session, svc, {
+      status: Array.isArray(predictions) && predictions.length ? 'success' : 'no_match',
+      predictions: Array.isArray(predictions) ? predictions : [],
+    }, fingerprint)
   } catch (err) {
-    console.error('Identification AI error:', err);
-    showToast(getIdentifyUnavailableMessage(normalized.aiActiveService || getDefaultIdService()));
+    _storeSessionAiServiceResult(session, svc, {
+      status: 'error',
+      errorMessage: String(err?.message || err || 'Unknown error'),
+      predictions: [],
+    }, fingerprint)
+    console.error('Session identification AI error:', err)
   } finally {
-    normalized.aiRunning = false;
-    normalized.aiService = normalized.aiActiveService;
-    if (Array.isArray(normalized.aiPredictionsByService?.[normalized.aiActiveService]?.predictions)) {
-      normalized.aiPredictions = normalized.aiPredictionsByService[normalized.aiActiveService].predictions;
-    }
-    _persistSessions();
-    renderSessions();
+    normalized.aiRunning = false
+    normalized.aiService = normalized.aiActiveService
+    normalized.aiPredictions = normalized.aiPredictionsByService?.[svc] || []
+    _persistSessions()
+    renderSessions()
+  }
+}
+
+async function _runSessionAiComparison(sid) {
+  const session = sessionById(sid)
+  if (!session?.files?.length || importAiBatchState.running) return
+  const service = getDefaultIdService()
+  const serviceLabel = service === ID_SERVICE_INATURALIST
+    ? (t('settings.idServiceInaturalist') || 'iNaturalist')
+    : (t('settings.idServiceArtsorakel') || 'Artsorakel')
+  importAiBatchState.defaultServiceLabel = serviceLabel
+  const sessionAi = _ensureSessionAiState(session)
+  if (!sessionAi) return
+  await _runSessionAiService(sid, service)
+
+  const serviceState = sessionAi.aiServiceState?.[service] || _emptyServiceState()
+  if (serviceState.status === 'no_match') {
+    showToast(getIdentifyNoMatchMessage(service))
+  } else if (serviceState.status === 'error') {
+    showToast(getIdentifyUnavailableMessage(service))
+  } else if (serviceState.status === 'unavailable') {
+    showToast(serviceState.errorMessage || getIdentifyUnavailableMessage(service))
   }
 }
 
@@ -287,8 +513,10 @@ function _updateImportFooterUi() {
   if (cancelBtn) cancelBtn.disabled = running;
   if (saveBtn) saveBtn.disabled = running;
   if (aiBtn) {
-    aiBtn.textContent = running ? getIdentifyBusyLabel(getDefaultIdService()) : getIdentifyButtonLabel(getDefaultIdService());
-    aiBtn.disabled = running || !hasTargets;
+    aiBtn.textContent = t('import.aiIdAll') || 'ID All';
+    const unavailable = importAiBatchState.defaultServiceAvailable === false;
+    aiBtn.disabled = running || !hasTargets || unavailable;
+    aiBtn.title = unavailable ? importAiBatchState.defaultServiceReason || '' : '';
   }
   if (progress) progress.style.display = running && total > 0 ? 'flex' : 'none';
   if (progressFill) progressFill.style.width = `${pct}%`;
@@ -299,6 +527,17 @@ function _updateImportFooterUi() {
     .forEach(el => {
       el.disabled = running;
     });
+
+  const footerText = document.querySelector('#screen-import-review .sync-footer-text');
+  if (footerText) {
+    if (running && importAiBatchState.defaultServiceLabel) {
+      footerText.textContent = t('import.photoIdBy', { service: importAiBatchState.defaultServiceLabel })
+    } else if (importAiBatchState.defaultServiceAvailable === false && importAiBatchState.defaultServiceReason) {
+      footerText.textContent = importAiBatchState.defaultServiceReason
+    } else {
+      footerText.textContent = t('review.createsMany')
+    }
+  }
 }
 
 async function _runAiIdAll() {
@@ -307,6 +546,20 @@ async function _runAiIdAll() {
   const totalUnits = _getBatchAiTotalUnits(targets);
   if (!targets.length || totalUnits <= 0) return;
   const service = getDefaultIdService();
+  importAiBatchState.defaultServiceLabel = service === ID_SERVICE_INATURALIST
+    ? (t('settings.idServiceInaturalist') || 'iNaturalist')
+    : (t('settings.idServiceArtsorakel') || 'Artsorakel')
+  if (service === ID_SERVICE_INATURALIST) {
+    const session = await loadInaturalistSession();
+    const inatAvailable = Boolean(session?.connected && (session?.api_token || session?.apiToken));
+    if (!inatAvailable) {
+      showToast(getIdentifyUnavailableMessage(service));
+      importAiBatchState.defaultServiceAvailable = false;
+      importAiBatchState.defaultServiceReason = getIdentifyUnavailableMessage(service);
+      _updateImportFooterUi();
+      return;
+    }
+  }
 
   importAiBatchState.running = true;
   importAiBatchState.completedUnits = 0;
@@ -320,29 +573,29 @@ async function _runAiIdAll() {
   try {
     for (const session of targets) {
       try {
-        const predictions = await runIdentifyForBlobs(
-          session.files.map((blob, index) => ({
-            blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
-            cropRect: session.imageMeta?.[index]?.aiCropRect || null,
-          })),
-          service,
-          getTaxonomyLanguage(),
-          {
-            onImageSent: () => _incrementBatchAiProgress(),
-            onIdReceived: () => _incrementBatchAiProgress(),
-          },
-        );
-
-        if (Array.isArray(predictions) && predictions.length) {
-          session.aiPredictions = predictions;
-          session.aiService = service;
-          _applySessionAiPrediction(session, predictions[0]);
-          successCount++;
-        } else {
-          session.aiPredictions = [];
-          session.aiService = service;
-          noMatchCount++;
+        const normalized = _ensureSessionAiState(session);
+        normalized.aiServiceState[service] = {
+          ..._emptyServiceState(),
+          ...(normalized.aiServiceState?.[service] || {}),
+          status: 'running',
+        };
+        _persistSessions();
+        renderSessions();
+        await _runSessionAiService(session.id, service, {
+          onImageSent: () => _incrementBatchAiProgress(),
+          onIdReceived: () => _incrementBatchAiProgress(),
+          allowDuringBatch: true,
+        });
+        const sessionState = _ensureSessionAiState(session);
+        const predictions = sessionState.aiPredictionsByService?.[service] || [];
+        if (_applySessionAiTopPrediction(session, predictions)) {
+          _persistSessions();
+          renderSessions();
         }
+        const serviceState = _ensureSessionAiState(session).aiServiceState?.[service] || _emptyServiceState();
+        if (serviceState.status === 'success') successCount++;
+        else if (serviceState.status === 'no_match') noMatchCount++;
+        else failureCount++;
         _persistSessions();
         renderSessions();
       } catch (err) {
@@ -574,6 +827,7 @@ export function initImportReview() {
   document.getElementById('import-photo-input').addEventListener('change', handleFileSelect);
   document.getElementById('import-browse-input').addEventListener('change', handleFileSelect);
   _updateImportFooterUi();
+  void _syncImportAiDefaultAvailability();
   document.getElementById('import-gap-decrement')?.addEventListener('click', () => {
     const current = getPhotoGapMinutes();
     _applyImportPhotoGapChange(current <= 1 ? current - (5 / 60) : current - 1);
@@ -1543,6 +1797,7 @@ export function renderSessions() {
   });
 
   _updateImportFooterUi();
+  void _syncImportAiDefaultAvailability();
 }
 
 function buildCardHTML(session) {
@@ -1555,6 +1810,10 @@ function buildCardHTML(session) {
   const speciesText = session.taxon
     ? escHtml(session.uncertain ? `? ${session.taxon.displayName.replace(/^\?\s*/, '')}` : session.taxon.displayName.replace(/^\?\s*/, ''))
     : `<span style="opacity:0.45">${t('detail.unknownSpecies')}</span>`;
+  const activeService = normalizeIdentifyService(session.aiActiveService || getDefaultIdService());
+  const aiStateHtml = session.files.length
+    ? renderIdentifyServiceStateSummary(_sessionAiResultState(session, activeService))
+    : '';
 
   const stackImgs = session.blobUrls.slice(0, 3);
   const polaroids = stackImgs.map((url, i) =>
@@ -1599,6 +1858,7 @@ function buildCardHTML(session) {
       <div class="import-card-datetime"><span>${dateStr}</span><span>${timeStr} · ${tp('counts.photo', photoCount)}</span></div>
       <div class="import-card-loc">${session.locationName ? escHtml(session.locationName) : '—'}</div>
       <div class="import-card-species">${speciesText}</div>
+      ${aiStateHtml ? `<div class="import-card-ai-state">${aiStateHtml}</div>` : ''}
       <div class="import-card-crop-status">${croppedCount ? t('crop.statusSome', { cropped: croppedCount, total: photoCount }) : t('crop.noCropHint')}</div>
     </div>
     <button class="import-card-delete" data-sid="${sid}" aria-label="${t('common.delete')}">
@@ -1733,6 +1993,7 @@ function _wireCard(sid) {
     if (!q) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
     debounceTimer = setTimeout(async () => {
       try {
+        if (q.length < 2) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
         const results = await searchTaxa(q, getTaxonomyLanguage());
         if (!results?.length) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
         dropdown.innerHTML = results.map((r, i) => {
@@ -1741,8 +2002,9 @@ function _wireCard(sid) {
         }).join('');
         dropdown.style.display = 'block';
         dropdown.querySelectorAll('li').forEach((li, i) => {
-          li.addEventListener('mousedown', e => {
-            e.preventDefault();
+          const selectTaxon = event => {
+            event.preventDefault();
+            event.stopPropagation();
             const r = results[i];
             const display = formatDisplayName(r.genus, r.specificEpithet, r.vernacularName);
             const session = sessionById(sid);
@@ -1758,7 +2020,11 @@ function _wireCard(sid) {
             input.value = display;
             dropdown.style.display = 'none';
             dropdown.innerHTML = '';
-          });
+            input.blur?.();
+            renderSessions();
+          };
+          li.addEventListener('pointerdown', selectTaxon);
+          li.addEventListener('mousedown', selectTaxon);
         });
       } catch (_) { dropdown.style.display = 'none'; }
     }, 280);
@@ -1794,9 +2060,15 @@ function _wireCard(sid) {
     tab.addEventListener('click', () => {
       const session = sessionById(sid)
       if (!session) return
-      session.aiActiveService = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+      const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+      const normalized = _ensureSessionAiState(session)
+      session.aiActiveService = service
+      session.aiService = service
       _persistSessions()
       renderSessions()
+      if (_sessionServiceNeedsRerun(normalized, service)) {
+        void _runSessionAiService(sid, service)
+      }
     })
   })
 
@@ -1811,9 +2083,11 @@ function _wireCard(sid) {
         if (!_applySessionAiPrediction(session, prediction)) return
         const serviceKey = normalizeIdentifyService(prediction.service || session.aiActiveService || getDefaultIdService())
         session.aiActiveService = serviceKey
+        session.aiService = serviceKey
         session.aiPredictionsByService ||= {}
         _persistSessions()
         input.value = prediction.displayName
+        input.blur?.()
         renderSessions()
       })
     })
@@ -2146,4 +2420,13 @@ function escHtml(str) {
   return String(str)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+export {
+  _ensureSessionAiState,
+  _sessionAiResultState,
+  _storeSessionAiServiceResult,
+  _sessionServiceNeedsRerun,
+  _applySessionAiPrediction,
+  _applySessionAiTopPrediction,
 }

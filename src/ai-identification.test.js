@@ -1,11 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 
 import {
   buildIdentifyFingerprint,
   loadObservationIdentifications,
   markIdentificationStaleIfFingerprintChanged,
   maybeLoadCachedIdentification,
+  formatAiSuggestionDisplay,
+  renderIdentifyResultRows,
+  renderIdentifyServiceTab,
+  renderIdentifyServiceStateSummary,
   runIdentifyComparisonForBlobs,
   saveIdentificationRun,
 } from './ai-identification.js'
@@ -147,6 +152,92 @@ test('comparison helper preserves the working service when the other one fails',
   assert.equal(result.resultsByService.artsorakel.status, 'success')
   assert.equal(result.resultsByService.inat.status, 'error')
   assert.equal(result.resultsByService.artsorakel.predictions[0].scientificName, 'Morchella esculenta')
+})
+
+test('formatting AI suggestions keeps vernacular and scientific names on separate lines', () => {
+  const display = formatAiSuggestionDisplay({
+    vernacularName: 'knivkjuke',
+    scientificName: 'Piptoporus betulinus',
+    displayName: 'knivkjuke (Piptoporus betulinus)',
+  })
+
+  assert.deepEqual(display, {
+    title: 'knivkjuke',
+    subtitle: 'Piptoporus betulinus',
+  })
+
+  const html = renderIdentifyResultRows('artsorakel', [{
+    vernacularName: 'knivkjuke',
+    scientificName: 'Piptoporus betulinus',
+    probability: 0.91,
+  }])
+
+  assert.match(html, /knivkjuke/)
+  assert.match(html, /Piptoporus betulinus/)
+  assert.doesNotMatch(html, /knivkjuke \(Piptoporus betulinus\)/)
+})
+
+test('service tabs render no-match, running, and success states with the right icon semantics', () => {
+  const noMatch = renderIdentifyServiceTab({
+    service: 'artsorakel',
+    status: 'no_match',
+    available: true,
+  })
+  assert.match(noMatch, /ai-id-service-tab-icon-x/)
+  assert.doesNotMatch(noMatch, /Loading/i)
+
+  const running = renderIdentifyServiceTab({
+    service: 'inat',
+    status: 'running',
+    available: true,
+  })
+  assert.match(running, /ai-id-service-tab-icon-dot/)
+  assert.doesNotMatch(running, /Loading/i)
+
+  const success = renderIdentifyServiceTab({
+    service: 'artsorakel',
+    status: 'success',
+    available: true,
+    topProbability: 0.87,
+  })
+  assert.match(success, /ai-id-service-tab-icon-check/)
+  assert.match(success, /87%/)
+
+  const lowConfidence = renderIdentifyServiceTab({
+    service: 'inat',
+    status: 'success',
+    available: true,
+    topProbability: 0.27,
+  })
+  assert.match(lowConfidence, /ai-id-service-tab-icon-dot/)
+  assert.match(lowConfidence, /ai-id-service-tab-score is-low/)
+  assert.match(lowConfidence, /ai-confidence-badge is-low/)
+  assert.match(lowConfidence, /27%/)
+})
+
+test('collapsed AI status chips render the active service and confidence percentage', () => {
+  const html = renderIdentifyServiceStateSummary({
+    service: 'inat',
+    active: true,
+    available: true,
+    status: 'success',
+    topProbability: 0.87,
+  })
+
+  assert.match(html, /ai-id-service-state/)
+  assert.match(html, /iNaturalist/)
+  assert.match(html, /87%/)
+  assert.match(html, /ai-id-service-tab-icon-check/)
+})
+
+test('confidence score spans do not use filled backgrounds', () => {
+  const css = fs.readFileSync(new URL('./style.css', import.meta.url), 'utf8')
+  for (const tone of ['good', 'warn', 'low']) {
+    assert.doesNotMatch(
+      css,
+      new RegExp(`\\.ai-id-service-tab-score\\.${tone}[\\s\\S]*background:`, 'm'),
+    )
+  }
 })
 
 test('fingerprints change when image or crop inputs change', () => {

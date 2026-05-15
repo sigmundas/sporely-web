@@ -7,6 +7,7 @@ import {
   buildIdentifyFingerprint,
   chooseIdentifyComparisonActiveService,
   getAvailableIdentifyServices,
+  getIdentifyConfidenceState,
   renderIdentifyResultRows,
   renderIdentifyServiceTab,
   runIdentifyComparisonForBlobs,
@@ -14,6 +15,7 @@ import {
   ID_SERVICE_INATURALIST,
   normalizeIdentifyService,
 } from '../ai-identification.js'
+import { getIdentifyNoMatchMessage } from '../identify.js'
 import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
@@ -27,6 +29,7 @@ import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePi
 
 const reviewAiState = {
   running: false,
+  hasRun: false,
   activeService: ID_SERVICE_ARTSORAKEL,
   requestedFingerprint: '',
   currentFingerprint: '',
@@ -174,14 +177,7 @@ export function initReview() {
 
 export function openImportedReview(session) {
   resetLocationState()
-  reviewAiState.running = false
-  reviewAiState.activeService = ID_SERVICE_ARTSORAKEL
-  reviewAiState.requestedFingerprint = ''
-  reviewAiState.currentFingerprint = ''
-  reviewAiState.availabilityFingerprint = ''
-  reviewAiState.stale = false
-  reviewAiState.availability = {}
-  reviewAiState.resultsByService = {}
+  resetReviewAiState()
   const gpsAltitude = _firstFiniteNumber(
     session?.gpsAltitude,
     ...(session?.photoGps || []).map(gps => gps?.altitude),
@@ -272,6 +268,18 @@ function _applyImportedReviewGps(reviewGps) {
   }
   buildReviewGrid()
   return true
+}
+
+export function resetReviewAiState() {
+  reviewAiState.running = false
+  reviewAiState.hasRun = false
+  reviewAiState.activeService = ID_SERVICE_ARTSORAKEL
+  reviewAiState.requestedFingerprint = ''
+  reviewAiState.currentFingerprint = ''
+  reviewAiState.availabilityFingerprint = ''
+  reviewAiState.stale = false
+  reviewAiState.availability = {}
+  reviewAiState.resultsByService = {}
 }
 
 function _mergeHydratedGps(reviewGps) {
@@ -447,9 +455,11 @@ export function buildReviewGrid() {
       })).filter(item => item.blob instanceof Blob),
     })
     reviewAiState.currentFingerprint = aiFingerprint.requestFingerprint
-    if (reviewAiState.requestedFingerprint && reviewAiState.requestedFingerprint !== reviewAiState.currentFingerprint) {
-      reviewAiState.stale = true
-    }
+    reviewAiState.stale = Boolean(
+      reviewAiState.hasRun
+      && reviewAiState.requestedFingerprint
+      && reviewAiState.requestedFingerprint !== reviewAiState.currentFingerprint,
+    )
     if (!reviewAiState.activeService || !reviewAiState.resultsByService[reviewAiState.activeService]) {
       reviewAiState.activeService = chooseIdentifyComparisonActiveService(reviewAiState.resultsByService, ID_SERVICE_ARTSORAKEL)
     }
@@ -657,10 +667,10 @@ async function handleTaxonInput(input) {
     applyTaxon(i, null)
     return
   }
-  if (q.length < 2) { ul.style.display = 'none'; return }
+  if (q.length < 2) { ul.style.display = 'none'; ul.innerHTML = ''; return }
 
   const results = await searchTaxa(q, getTaxonomyLanguage())
-  if (!results.length) { ul.style.display = 'none'; return }
+  if (!results.length) { ul.style.display = 'none'; ul.innerHTML = ''; return }
 
   ul.innerHTML = results.map(r =>
     `<li data-idx="${i}" data-taxon='${JSON.stringify(r).replace(/'/g, '&#39;')}'>
@@ -671,16 +681,26 @@ async function handleTaxonInput(input) {
   ul.style.display = 'block'
 
   ul.querySelectorAll('li').forEach(li => {
-    li.addEventListener('mousedown', () => {
+    const selectTaxon = event => {
+      event.preventDefault()
+      event.stopPropagation()
       const taxon = JSON.parse(li.dataset.taxon)
       applyTaxon(i, taxon)
-    })
+      hideDropdown(i)
+      ul.innerHTML = ''
+      input.blur?.()
+    }
+    li.addEventListener('pointerdown', selectTaxon)
+    li.addEventListener('mousedown', selectTaxon)
   })
 }
 
 function hideDropdown(i) {
   const ul = document.querySelector(`.taxon-dropdown[data-idx="${i}"]`)
-  if (ul) ul.style.display = 'none'
+  if (ul) {
+    ul.style.display = 'none'
+    ul.innerHTML = ''
+  }
 }
 
 function _syncReviewSpeciesLabel(taxon = null) {
@@ -704,6 +724,7 @@ function setSharedTaxon(taxon, options = {}) {
   if (options.hideMenus !== false) {
     document.querySelectorAll('.taxon-dropdown').forEach(dropdown => {
       dropdown.style.display = 'none'
+      dropdown.innerHTML = ''
     })
     document.querySelectorAll('[data-identify-results]').forEach(result => {
       result.style.display = 'none'
@@ -796,11 +817,29 @@ function _reviewAiResultsHtml() {
     if (result?.status === 'unavailable') {
       return `<div class="ai-results-empty">${reviewAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
     }
+    if (result?.status === 'error') {
+      return `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
+    }
+    if (result?.status === 'no_match') {
+      return `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`
+    }
     return reviewAiState.running
       ? `<div class="ai-results-empty">${t('common.loading')}</div>`
       : `<div class="ai-results-empty">${reviewAiState.stale ? (t('review.resultsOutdated') || 'Results outdated') : (t('review.noMatch') || 'No match')}</div>`
   }
   return renderIdentifyResultRows(activeService, result.predictions)
+}
+
+function _predictionToTaxon(prediction = {}) {
+  const scientificName = String(prediction.scientificName || '').trim()
+  const parts = scientificName.split(/\s+/)
+  return {
+    genus: parts[0] || null,
+    specificEpithet: parts[1] || null,
+    vernacularName: prediction.vernacularName || null,
+    scientificName: scientificName || null,
+    displayName: prediction.vernacularName || scientificName || t('common.unknown'),
+  }
 }
 
 function _renderReviewAiControls() {
@@ -809,11 +848,10 @@ function _renderReviewAiControls() {
   const activeService = normalizeIdentifyService(reviewAiState.activeService)
   const activeResult = reviewAiState.resultsByService[activeService] || null
   const activeState = activeResult?.status || (reviewAiState.running ? 'running' : 'idle')
+  const confidence = getIdentifyConfidenceState(activeResult?.topProbability ?? activeResult?.topScore ?? 0, { checkThreshold: 0.65 })
   const anyAvailable = services.some(service => reviewAiState.availability?.[service]?.available)
   const runState = reviewAiState.running ? 'running' : activeState
-  const buttonLabel = reviewAiState.running
-    ? (t('common.loading') || 'Loading')
-    : (t('review.aiId') || 'AI ID')
+  const buttonLabel = t('review.aiId') || 'AI Photo ID'
   return `
     <div class="detail-ai-stack${staleClass}" data-identify-comparison-state>
       <div class="detail-ai-controls">
@@ -823,7 +861,7 @@ function _renderReviewAiControls() {
           data-identify-run-button
           ${reviewAiState.running || !anyAvailable ? 'disabled' : ''}
         >
-          <span class="ai-id-dot ${runState === 'running' ? 'is-running' : runState === 'success' || runState === 'no_match' || runState === 'stale' ? 'is-complete' : runState === 'unavailable' ? 'is-unavailable' : runState === 'error' ? 'is-error' : ''}"></span>
+          <span class="ai-id-dot ${runState === 'running' ? 'is-running' : runState === 'success' || runState === 'stale' ? (confidence.icon === 'check' ? 'is-complete' : confidence.tone) : runState === 'no_match' ? 'is-complete' : runState === 'unavailable' ? 'is-unavailable' : runState === 'error' ? 'is-error' : ''}"></span>
           <span>${buttonLabel}</span>
         </button>
         <div class="detail-ai-service-tabs" role="tablist" aria-label="AI services">
@@ -831,7 +869,7 @@ function _renderReviewAiControls() {
         </div>
       </div>
       <div class="detail-ai-results-shell">
-        ${reviewAiState.stale ? `<div class="detail-ai-stale-note">${t('review.resultsOutdated') || 'Results outdated - run AI ID again.'}</div>` : ''}
+        ${reviewAiState.stale ? `<div class="detail-ai-stale-note">${t('review.resultsOutdated') || 'Results outdated - run AI Photo ID again.'}</div>` : ''}
         <div class="detail-ai-results" data-identify-results data-identify-service="${activeService}">
           ${_reviewAiResultsHtml()}
         </div>
@@ -878,7 +916,7 @@ async function _runReviewComparison() {
     images: blobs,
   })
   reviewAiState.currentFingerprint = fingerprint.requestFingerprint
-  reviewAiState.stale = Boolean(reviewAiState.requestedFingerprint && reviewAiState.requestedFingerprint !== fingerprint.requestFingerprint)
+  reviewAiState.stale = Boolean(reviewAiState.hasRun && reviewAiState.requestedFingerprint && reviewAiState.requestedFingerprint !== fingerprint.requestFingerprint)
   reviewAiState.running = true
   reviewAiState.requestedFingerprint = fingerprint.requestFingerprint
 
@@ -908,11 +946,19 @@ async function _runReviewComparison() {
         language: getTaxonomyLanguage(),
         availability: reviewAiState.availability,
         defaultService: reviewAiState.activeService,
+        screen: 'review',
       },
     )
     reviewAiState.resultsByService = comparison.resultsByService
     reviewAiState.activeService = comparison.activeService
     reviewAiState.stale = false
+    reviewAiState.hasRun = Object.values(comparison.resultsByService || {}).some(result =>
+      result?.status === 'success' || result?.status === 'no_match'
+    )
+    const topResult = comparison.resultsByService?.[comparison.activeService] || null
+    if (topResult?.status === 'success' && topResult?.topPrediction) {
+      applyTaxon(0, _predictionToTaxon(topResult.topPrediction))
+    }
   } catch (error) {
     console.error('Identification error:', error)
     showToast(t('common.errorPrefix', { message: String(error?.message || error || 'Unknown error') }))
@@ -968,6 +1014,7 @@ function cancelReview() {
   state.captureDraft = _defaultCaptureDraft()
   reviewAiState.running = false
   reviewAiState.activeService = ID_SERVICE_ARTSORAKEL
+  reviewAiState.hasRun = false
   reviewAiState.requestedFingerprint = ''
   reviewAiState.currentFingerprint = ''
   reviewAiState.availabilityFingerprint = ''

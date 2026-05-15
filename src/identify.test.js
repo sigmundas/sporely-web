@@ -5,6 +5,7 @@ import {
   formatIdentifyScore,
   runInaturalistForBlobs,
 } from './identify.js'
+import { prepareImageBlobForUpload } from './image_crop.js'
 import {
   getDefaultIdService,
   ID_SERVICE_ARTSORAKEL,
@@ -105,4 +106,128 @@ test('builds an iNaturalist suggestion request and normalizes the response', asy
   assert.equal(predictions.length, 1)
   assert.equal(predictions[0].displayName, 'Fly agaric (Amanita muscaria)')
   assert.equal(predictions[0].probability, 0.82)
+})
+
+test('sorts single-image iNaturalist predictions from high to low probability', async () => {
+  const storage = {
+    values: new Map([
+      ['sporely.inat.oauth.api_token', 'test-jwt'],
+    ]),
+    async getItem(key) {
+      return this.values.has(key) ? this.values.get(key) : null
+    },
+    async setItem(key, value) {
+      this.values.set(key, String(value))
+    },
+    async removeItem(key) {
+      this.values.delete(key)
+    },
+  }
+
+  const fetchImpl = async () => ({
+    ok: true,
+    async json() {
+      return {
+        results: [
+          {
+            combined_score: 12,
+            taxon: {
+              id: 3,
+              name: 'Taxon three',
+              preferred_common_name: 'Third',
+            },
+          },
+          {
+            combined_score: 93,
+            taxon: {
+              id: 1,
+              name: 'Taxon one',
+              preferred_common_name: 'First',
+            },
+          },
+          {
+            combined_score: 71,
+            taxon: {
+              id: 2,
+              name: 'Taxon two',
+              preferred_common_name: 'Second',
+            },
+          },
+        ],
+      }
+    },
+  })
+
+  const predictions = await runInaturalistForBlobs([new Blob(['x'], { type: 'image/jpeg' })], 'en', {
+    storage,
+    fetchImpl,
+  })
+
+  assert.deepEqual(predictions.map(prediction => prediction.probability), [0.93, 0.71, 0.12])
+  assert.deepEqual(predictions.map(prediction => prediction.displayName), [
+    'First (Taxon one)',
+    'Second (Taxon two)',
+    'Third (Taxon three)',
+  ])
+})
+
+test('converts non-JPEG image uploads to JPEG for AI inference', async () => {
+  const originalImage = globalThis.Image
+  const originalDocument = globalThis.document
+  const originalURL = globalThis.URL
+
+  class FakeImage {
+    constructor() {
+      this.naturalWidth = 1600
+      this.naturalHeight = 1200
+      this.width = 1600
+      this.height = 1200
+    }
+
+    set src(_value) {
+      queueMicrotask(() => this.onload?.())
+    }
+  }
+
+  globalThis.Image = FakeImage
+  globalThis.document = {
+    createElement(tag) {
+      if (tag !== 'canvas') return null
+      return {
+        width: 0,
+        height: 0,
+        getContext() {
+          return {
+            drawImage() {},
+            imageSmoothingEnabled: true,
+            imageSmoothingQuality: 'high',
+          }
+        },
+        toBlob(callback) {
+          callback(new Blob(['jpeg'], { type: 'image/jpeg' }))
+        },
+      }
+    },
+  }
+  globalThis.URL = {
+    createObjectURL() {
+      return 'blob:fake'
+    },
+    revokeObjectURL() {},
+  }
+
+  try {
+    const prepared = await prepareImageBlobForUpload(new Blob(['x'], { type: 'image/png' }), {
+      forceJpeg: true,
+      maxEdge: 1920,
+    })
+
+    assert.equal(prepared.blob.type, 'image/jpeg')
+    assert.equal(prepared.outputType, 'image/jpeg')
+    assert.equal(prepared.prepared, true)
+  } finally {
+    globalThis.Image = originalImage
+    globalThis.document = originalDocument
+    globalThis.URL = originalURL
+  }
 })

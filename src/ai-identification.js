@@ -30,6 +30,10 @@ function _normalizeProbability(value) {
   return Math.max(0, Math.min(1, number))
 }
 
+function _toFraction(score) {
+  return _normalizeProbability(score)
+}
+
 function _normalizeImageInput(input = {}, index = 0) {
   const cropRect = normalizeAiCropRect(input.cropRect ?? input.aiCropRect ?? null)
   const blob = _isBlob(input.blob) ? input.blob : null
@@ -42,16 +46,17 @@ function _normalizeImageInput(input = {}, index = 0) {
     || input.path
     || ''
   )
-  const sourceWidth = Number.isFinite(Number(input.cropSourceWidth ?? input.aiCropSourceW))
-    ? Number(input.cropSourceWidth ?? input.aiCropSourceW)
+  const sourceWidthValue = input.cropSourceW ?? input.cropSourceWidth ?? input.aiCropSourceW
+  const sourceHeightValue = input.cropSourceH ?? input.cropSourceHeight ?? input.aiCropSourceH
+  const sourceWidth = Number.isFinite(Number(sourceWidthValue))
+    ? Number(sourceWidthValue)
     : null
-  const sourceHeight = Number.isFinite(Number(input.cropSourceHeight ?? input.aiCropSourceH))
-    ? Number(input.cropSourceHeight ?? input.aiCropSourceH)
+  const sourceHeight = Number.isFinite(Number(sourceHeightValue))
+    ? Number(sourceHeightValue)
     : null
 
   return {
     index,
-    id: _normalizeText(input.id ?? input.imageId ?? input.mediaId ?? '') || null,
     mediaKey: mediaKey || null,
     blobType: blob?.type || _normalizeText(input.blobType ?? ''),
     blobSize: Number.isFinite(Number(input.blobSize ?? blob?.size))
@@ -67,6 +72,12 @@ function _normalizeImageInput(input = {}, index = 0) {
 
 function _stableFingerprint(payload) {
   return JSON.stringify(payload)
+}
+
+function _identifyServiceLabel(service) {
+  return normalizeIdentifyService(service) === ID_SERVICE_INATURALIST
+    ? (t('settings.idServiceInaturalist') || 'iNaturalist')
+    : (t('settings.idServiceArtsorakel') || 'Artsorakel')
 }
 
 function _getPredictionName(prediction = {}) {
@@ -103,6 +114,105 @@ export function normalizeIdentifyPrediction(service, prediction = {}) {
     taxon: prediction.taxon || null,
     rawScore: prediction.rawScore ?? prediction.score ?? prediction.combined_score ?? prediction.vision_score ?? null,
   }
+}
+
+export function formatAiSuggestionDisplay(prediction = {}) {
+  const scientificName = _normalizeText(prediction.scientificName || prediction.scientific_name || prediction.name || '')
+  const vernacularName = _normalizeText(prediction.vernacularName || prediction.vernacular_name || prediction.commonName || '')
+
+  if (vernacularName && scientificName && vernacularName.toLowerCase() !== scientificName.toLowerCase()) {
+    return {
+      title: vernacularName,
+      subtitle: scientificName,
+    }
+  }
+
+  if (vernacularName) {
+    return {
+      title: vernacularName,
+      subtitle: '',
+    }
+  }
+
+  return {
+    title: scientificName || _normalizeText(prediction.displayName || prediction.display_name || '') || t('common.unknown'),
+    subtitle: '',
+  }
+}
+
+function _renderServiceIcon(serviceState = {}) {
+  const status = serviceState.status || 'idle'
+  const topProbability = Number(serviceState.topProbability ?? serviceState.topScore ?? 0)
+  const confidence = getIdentifyConfidenceState(topProbability, { checkThreshold: 0.65 })
+  if (status === 'running') {
+    return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot is-running" aria-hidden="true"></span>`
+  }
+  if (status === 'success' || status === 'stale') {
+    if (confidence.icon === 'dot') {
+      return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot ${confidence.tone}" aria-hidden="true"></span>`
+    }
+    return `
+      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-check" aria-hidden="true">
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <path d="M3.2 8.7 6.3 11.8 12.8 4.8" />
+        </svg>
+      </span>
+    `
+  }
+  if (status === 'no_match' || status === 'error') {
+    return `
+      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-x ${status === 'error' ? 'is-error' : ''}" aria-hidden="true">
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <path d="M4 4 12 12M12 4 4 12" />
+        </svg>
+      </span>
+    `
+  }
+  if (serviceState.available === false) {
+    return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot is-unavailable" aria-hidden="true"></span>`
+  }
+  return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot" aria-hidden="true"></span>`
+}
+
+export function getIdentifyConfidenceState(score, options = {}) {
+  const value = _toFraction(score)
+  const lowThreshold = Number.isFinite(Number(options.lowThreshold)) ? Number(options.lowThreshold) : 0.4
+  const warnThreshold = Number.isFinite(Number(options.warnThreshold)) ? Number(options.warnThreshold) : 0.6
+  const checkThreshold = Number.isFinite(Number(options.checkThreshold)) ? Number(options.checkThreshold) : 0.65
+
+  if (value >= checkThreshold) {
+    return { tone: 'is-good', icon: 'check', value }
+  }
+  if (value < lowThreshold) {
+    return { tone: 'is-low', icon: 'dot', value }
+  }
+  if (value < warnThreshold) {
+    return { tone: 'is-warn', icon: 'dot', value }
+  }
+  return { tone: 'is-good', icon: 'dot', value }
+}
+
+export function renderIdentifyConfidenceBadge(score, options = {}) {
+  const confidence = getIdentifyConfidenceState(score, options)
+  const percent = `${Math.round(confidence.value * 100)}%`
+  if (confidence.icon === 'check') {
+    return `
+      <span class="ai-confidence-badge ${confidence.tone}" aria-hidden="true">
+        <span class="ai-confidence-badge-icon ai-confidence-badge-icon-check">
+          <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+            <path d="M3.2 8.7 6.3 11.8 12.8 4.8" />
+          </svg>
+        </span>
+        <span class="ai-confidence-badge-value">${_esc(percent)}</span>
+      </span>
+    `
+  }
+  return `
+    <span class="ai-confidence-badge ${confidence.tone}" aria-hidden="true">
+      <span class="ai-confidence-badge-icon ai-confidence-badge-icon-dot"></span>
+      <span class="ai-confidence-badge-value">${_esc(percent)}</span>
+    </span>
+  `
 }
 
 export function normalizeIdentifyRunResult(service, predictions = [], metadata = {}) {
@@ -154,7 +264,6 @@ export function buildIdentifyFingerprint(inputs = {}) {
       mediaKey: image.mediaKey,
       blobType: image.blobType,
       blobSize: image.blobSize,
-      sourceType: image.sourceType,
       updatedAt: image.updatedAt,
     })),
   })
@@ -246,6 +355,7 @@ function _buildServiceOptions(service, options = {}) {
     signal: options.signal,
     onImageSent: options.onImageSent,
     onIdReceived: options.onIdReceived,
+    screen: options.screen,
     tolerateFailures: true,
   }
 
@@ -492,9 +602,7 @@ export async function saveIdentificationRun({
 
 export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
   const service = normalizeIdentifyService(serviceState.service)
-  const label = service === ID_SERVICE_INATURALIST
-    ? (t('settings.idServiceInaturalist') || 'iNaturalist')
-    : (t('settings.idServiceArtsorakel') || 'Artsorakel')
+  const label = _identifyServiceLabel(service)
   const statusClass = [
     'ai-id-service-tab',
     serviceState.active ? 'is-active' : '',
@@ -503,37 +611,51 @@ export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
     serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'has-results' : '',
     serviceState.status === 'error' ? 'has-error' : '',
   ].filter(Boolean).join(' ')
-  const stateLabel = serviceState.status === 'running'
-    ? (t('common.loading') || 'Loading')
-    : serviceState.status === 'error'
-      ? (serviceState.errorMessage || 'Error')
-      : serviceState.status === 'no_match'
-        ? (t('review.noMatch') || 'No match')
-        : (serviceState.status === 'success' || serviceState.status === 'stale')
-          ? (serviceState.topPrediction?.confidenceText || `${Math.round(Number(serviceState.topProbability || 0) * 100)}%`)
-          : ''
-  const iconClass = [
-    'ai-id-dot',
-    serviceState.status === 'running' ? 'is-running' : '',
-    serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'is-complete' : '',
-    serviceState.available === false ? 'is-unavailable' : '',
-    serviceState.status === 'error' ? 'is-error' : '',
-  ].filter(Boolean).join(' ')
-  const unavailableReason = serviceState.available === false
-    ? (serviceState.reason || options.unavailableReason || '')
+  const topProbability = Number(serviceState.topProbability ?? serviceState.topScore ?? 0)
+  const confidence = getIdentifyConfidenceState(topProbability, { checkThreshold: 0.65 })
+  const stateLabel = (serviceState.status === 'success' || serviceState.status === 'stale')
+    ? (serviceState.topPrediction?.confidenceText || `${Math.round(topProbability * 100)}%`)
     : ''
   return `
     <button
       type="button"
       class="${statusClass}"
       data-identify-service-tab="${service}"
+      title="${_esc(serviceState.available === false ? (serviceState.reason || options.unavailableReason || '') : (serviceState.errorMessage || ''))}"
       ${serviceState.available === false ? 'disabled aria-disabled="true"' : ''}
     >
-      <span class="${iconClass}"></span>
+      ${_renderServiceIcon(serviceState)}
       <span class="ai-id-service-tab-label">${_esc(label)}</span>
-      ${stateLabel ? `<span class="ai-id-service-tab-state">${_esc(stateLabel)}</span>` : ''}
-      ${unavailableReason ? `<span class="ai-id-service-tab-reason">${_esc(unavailableReason)}</span>` : ''}
+      ${stateLabel ? `<span class="ai-id-service-tab-score ${confidence.tone}">${renderIdentifyConfidenceBadge(topProbability, { checkThreshold: 0.65 })}</span>` : ''}
     </button>
+  `
+}
+
+export function renderIdentifyServiceStateSummary(serviceState = {}, options = {}) {
+  const service = normalizeIdentifyService(serviceState.service)
+  const label = _identifyServiceLabel(service)
+  const statusClass = [
+    'ai-id-service-state',
+    serviceState.active ? 'is-active' : '',
+    serviceState.available === false ? 'is-disabled' : '',
+    serviceState.status === 'running' ? 'is-running' : '',
+    serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'has-results' : '',
+    serviceState.status === 'error' ? 'has-error' : '',
+  ].filter(Boolean).join(' ')
+  const topProbability = Number(serviceState.topProbability ?? serviceState.topScore ?? 0)
+  const confidence = getIdentifyConfidenceState(topProbability, { checkThreshold: 0.65 })
+  const stateLabel = (serviceState.status === 'success' || serviceState.status === 'stale')
+    ? (serviceState.topPrediction?.confidenceText || `${Math.round(topProbability * 100)}%`)
+    : ''
+  return `
+    <span
+      class="${statusClass}"
+      title="${_esc(serviceState.available === false ? (serviceState.reason || options.unavailableReason || '') : (serviceState.errorMessage || ''))}"
+    >
+      ${_renderServiceIcon(serviceState)}
+      <span class="ai-id-service-state-label">${_esc(label)}</span>
+      ${stateLabel ? `<span class="ai-id-service-state-score ${confidence.tone}">${renderIdentifyConfidenceBadge(topProbability, { checkThreshold: 0.65 })}</span>` : ''}
+    </span>
   `
 }
 
@@ -544,10 +666,15 @@ export function renderIdentifyResultRows(service, predictions = []) {
     .map(prediction => `
       <button type="button" class="ai-result-row" data-identify-result='${JSON.stringify(prediction).replace(/'/g, '&#39;')}'>
         <span class="ai-result-row-main">
-          <span class="ai-result-row-name">${_esc(prediction.displayName)}</span>
-          ${prediction.scientificName && prediction.scientificName !== prediction.displayName ? `<span class="ai-result-row-sci">${_esc(prediction.scientificName)}</span>` : ''}
+          ${(() => {
+            const display = formatAiSuggestionDisplay(prediction)
+            return `
+              <span class="ai-result-row-name">${_esc(display.title)}</span>
+              ${display.subtitle ? `<span class="ai-result-row-sci">${_esc(display.subtitle)}</span>` : ''}
+            `
+          })()}
         </span>
-        <span class="ai-result-row-score">${_esc(prediction.confidenceText || formatIdentifyScore(normalizedService, prediction.probability))}</span>
+        <span class="ai-result-row-score">${renderIdentifyConfidenceBadge(prediction.probability, { checkThreshold: 0.65 })}</span>
       </button>
     `)
     .join('')

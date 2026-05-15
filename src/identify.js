@@ -1,5 +1,6 @@
 import { t } from './i18n.js'
 import { loadInaturalistSession } from './inaturalist.js'
+import { getBlobImageDimensions, prepareImageBlobForUpload } from './image_crop.js'
 import {
   getDefaultIdService,
   ID_SERVICE_ARTSORAKEL,
@@ -8,6 +9,23 @@ import {
 } from './settings.js'
 
 const INAT_SUGGEST_URL = 'https://api.inaturalist.org/v2/taxa/suggest'
+const INAT_MAX_EDGE = 1920
+
+function _isDebugAiIdEnabled() {
+  try {
+    return globalThis.localStorage?.getItem('sporely-debug-ai-id') === 'true'
+      || globalThis.localStorage?.getItem('sporely-debug-inat-oauth') === 'true'
+      || globalThis.sessionStorage?.getItem('sporely-debug-ai-id') === 'true'
+      || globalThis.location?.search?.includes('debug_ai_id=1')
+  } catch (_) {
+    return false
+  }
+}
+
+function _debugAiId(message, details = {}) {
+  if (!_isDebugAiIdEnabled()) return
+  console.debug(`[ai-id] ${message}`, details)
+}
 
 function _isBlob(value) {
   return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
@@ -19,6 +37,17 @@ function _normalizeString(value) {
 
 function _isNumber(value) {
   return Number.isFinite(Number(value))
+}
+
+function _buildInaturalistFilename(blob) {
+  const type = String(blob?.type || '').toLowerCase()
+  if (type === 'image/jpeg' || type === 'image/jpg' || !type) return 'photo.jpg'
+  if (type === 'image/png') return 'photo.png'
+  if (type === 'image/webp') return 'photo.webp'
+  if (type === 'image/avif') return 'photo.avif'
+  if (type === 'image/heic') return 'photo.heic'
+  if (type === 'image/heif') return 'photo.heif'
+  return 'photo.jpg'
 }
 
 function _toFraction(score) {
@@ -155,6 +184,28 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
     options.onImageSent()
   }
 
+  const prepared = await prepareImageBlobForUpload(blob, {
+    maxEdge: Math.max(1, Number(options.maxEdge || INAT_MAX_EDGE) || INAT_MAX_EDGE),
+    forceJpeg: true,
+  })
+  const aiBlob = prepared.blob
+  const filename = _buildInaturalistFilename(aiBlob)
+  const dims = prepared.sourceWidth && prepared.sourceHeight
+    ? { width: prepared.sourceWidth, height: prepared.sourceHeight }
+    : (await getBlobImageDimensions(blob).catch(() => null))
+
+  _debugAiId('prepared inaturalist upload', {
+    service: ID_SERVICE_INATURALIST,
+    screen: options.screen || '',
+    inputType: blob?.type || '',
+    inputSize: Number(blob?.size || 0),
+    decodedWidth: dims?.width ?? null,
+    decodedHeight: dims?.height ?? null,
+    preparedType: aiBlob?.type || '',
+    preparedSize: Number(aiBlob?.size || 0),
+    filename,
+  })
+
   const form = new FormData()
   form.append('source', 'visual')
   form.append('locale', String(lang || 'en'))
@@ -174,7 +225,7 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
   if (_isNumber(options?.lat)) form.append('lat', String(options.lat))
   if (_isNumber(options?.lon)) form.append('lng', String(options.lon))
   if (options?.observedOn) form.append('observed_on', String(options.observedOn))
-  form.append('image', blob, 'photo.jpg')
+  form.append('image', aiBlob, filename)
 
   const response = await (options.fetchImpl || fetch)(INAT_SUGGEST_URL, {
     method: 'POST',
@@ -194,6 +245,7 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
   const predictions = _extractPredictionItems(payload)
     .map(_normalizeInaturalistPrediction)
     .filter(prediction => prediction.displayName)
+    .sort((a, b) => b.probability - a.probability)
   if (typeof options?.onIdReceived === 'function') {
     options.onIdReceived(predictions)
   }
@@ -207,9 +259,7 @@ export function getIdentifyServiceLabel(service) {
 }
 
 export function getIdentifyButtonLabel(service) {
-  return normalizeIdentifyService(service) === ID_SERVICE_INATURALIST
-    ? t('detail.identifyInaturalist')
-    : t('detail.identifyArtsorakel')
+  return t('review.aiId') || 'AI Photo ID'
 }
 
 export function getIdentifyBusyLabel(service) {
@@ -295,7 +345,7 @@ export function syncIdentifyButtonLabels() {
     setLabel(el, defaultLabel)
   })
   const importAllBtn = document.getElementById('import-ai-all-btn')
-  if (importAllBtn) setLabel(importAllBtn, defaultLabel)
+  if (importAllBtn) setLabel(importAllBtn, t('import.aiIdAll') || 'ID All')
   document.querySelectorAll('[data-identify-service-label]').forEach(el => {
     const service = el.dataset.identifyServiceLabel
     setLabel(el, getIdentifyServiceLabel(service))

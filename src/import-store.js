@@ -56,6 +56,7 @@ export async function saveImportSessions(sessions) {
       aiAvailability: s.aiAvailability || {},
       aiPredictions: Array.isArray(s.aiPredictions) ? s.aiPredictions : [],
       aiPredictionsByService: s.aiPredictionsByService || {},
+      aiServiceState: s.aiServiceState || {},
       imageMeta: (s.imageMeta || []).map(meta => ({
         aiCropRect: meta?.aiCropRect || null,
         aiCropSourceW: meta?.aiCropSourceW ?? null,
@@ -129,6 +130,7 @@ export async function loadImportSessions() {
           aiAvailability: r.aiAvailability || {},
           aiPredictions: Array.isArray(r.aiPredictions) ? r.aiPredictions : [],
           aiPredictionsByService: r.aiPredictionsByService || {},
+          aiServiceState: r.aiServiceState || {},
           files,
           aiFiles: (r.aiBlobs || r.blobs).map(ab => new Blob([ab], { type: 'image/jpeg' })),
           blobUrls,

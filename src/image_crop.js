@@ -21,6 +21,10 @@ function _loadBlobImage(blob) {
   })
 }
 
+function _isBlob(value) {
+  return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
+}
+
 export function normalizeAiCropRect(rect) {
   if (!rect) return null
 
@@ -206,6 +210,123 @@ export async function getBlobImageDimensions(blob) {
   return {
     width: img.naturalWidth || img.width || null,
     height: img.naturalHeight || img.height || null,
+  }
+}
+
+export async function prepareImageBlobForUpload(blob, options = {}) {
+  const inputMeta = {
+    inputType: blob?.type || '',
+    inputSize: Number(blob?.size || 0),
+    sourceWidth: null,
+    sourceHeight: null,
+    sourceMaxEdge: null,
+    targetWidth: null,
+    targetHeight: null,
+    resized: false,
+    converted: false,
+    prepared: false,
+    fallback: false,
+    maxEdge: Math.max(1, Number(options.maxEdge || 1920) || 1920),
+  }
+
+  if (!(blob instanceof Blob)) {
+    return { blob, ...inputMeta, outputType: inputMeta.inputType, outputSize: inputMeta.inputSize }
+  }
+
+  const imageCtor = globalThis.Image
+  const documentApi = globalThis.document
+  const urlApi = globalThis.URL
+
+  if (typeof imageCtor === 'undefined' || typeof documentApi === 'undefined' || typeof urlApi === 'undefined') {
+    return { blob, ...inputMeta, outputType: inputMeta.inputType, outputSize: inputMeta.inputSize }
+  }
+
+  let img = null
+  let objectUrl = null
+
+  try {
+    objectUrl = urlApi.createObjectURL(blob)
+    img = await new Promise((resolve, reject) => {
+      const nextImg = new imageCtor()
+      nextImg.onload = () => resolve(nextImg)
+      nextImg.onerror = () => reject(new Error('Image decode failed'))
+      nextImg.src = objectUrl
+    })
+
+    const sourceWidth = img.naturalWidth || img.width || null
+    const sourceHeight = img.naturalHeight || img.height || null
+    const sourceMaxEdge = Math.max(Number(sourceWidth) || 0, Number(sourceHeight) || 0) || null
+    const needsResize = Number.isFinite(sourceMaxEdge) && sourceMaxEdge > inputMeta.maxEdge
+    const normalizedType = String(blob.type || '').toLowerCase()
+    const needsJpeg = options.forceJpeg === true ? normalizedType !== 'image/jpeg' : normalizedType !== 'image/jpeg'
+
+    inputMeta.sourceWidth = sourceWidth
+    inputMeta.sourceHeight = sourceHeight
+    inputMeta.sourceMaxEdge = sourceMaxEdge
+
+    if (!sourceWidth || !sourceHeight || (!needsResize && !needsJpeg)) {
+      return {
+        blob,
+        ...inputMeta,
+        outputType: blob.type || '',
+        outputSize: Number(blob.size || 0),
+      }
+    }
+
+    const targetWidth = needsResize
+      ? Math.max(1, Math.round(sourceWidth * (inputMeta.maxEdge / sourceMaxEdge)))
+      : sourceWidth
+    const targetHeight = needsResize
+      ? Math.max(1, Math.round(sourceHeight * (inputMeta.maxEdge / sourceMaxEdge)))
+      : sourceHeight
+    const canvas = documentApi.createElement('canvas')
+    canvas.width = targetWidth
+    canvas.height = targetHeight
+    const ctx = canvas.getContext('2d', { alpha: false })
+    if (!ctx) throw new Error('Canvas context unavailable')
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(img, 0, 0, sourceWidth, sourceHeight, 0, 0, targetWidth, targetHeight)
+
+    const outputBlob = await new Promise(resolve => {
+      canvas.toBlob(nextBlob => resolve(_isBlob(nextBlob) ? nextBlob : null), 'image/jpeg', 0.88)
+    })
+    if (!_isBlob(outputBlob) || outputBlob.type !== 'image/jpeg') {
+      throw new Error('JPEG export failed')
+    }
+
+    inputMeta.targetWidth = targetWidth
+    inputMeta.targetHeight = targetHeight
+    inputMeta.resized = needsResize
+    inputMeta.converted = needsJpeg
+    inputMeta.prepared = true
+    return {
+      blob: outputBlob,
+      ...inputMeta,
+      outputType: outputBlob.type,
+      outputSize: outputBlob.size,
+    }
+  } catch (error) {
+    const errorMessage = String(error?.message || error || '')
+    if (globalThis.__SPORLEY_DEBUG_IMAGE_PREP__ === true) {
+      console.debug('[image-prep] fallback', {
+        inputType: inputMeta.inputType,
+        inputSize: inputMeta.inputSize,
+        maxEdge: inputMeta.maxEdge,
+        errorMessage,
+      })
+    }
+    return {
+      blob,
+      ...inputMeta,
+      fallback: true,
+      errorMessage,
+      outputType: blob.type || '',
+      outputSize: Number(blob.size || 0),
+    }
+  } finally {
+    if (objectUrl) urlApi.revokeObjectURL?.(objectUrl)
+    if (img) img.src = ''
   }
 }
 

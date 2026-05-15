@@ -5,6 +5,7 @@ import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { getDefaultVisibility } from '../settings.js'
 import { isNativeApp } from '../platform.js'
+import { resetReviewAiState } from './review.js'
 
 let cachedPrimaryMainCameraId = null
 let primaryMainCameraPromise = null
@@ -344,6 +345,7 @@ export async function startCamera(options = {}) {
       state.sessionStart = new Date()
       state.capturedPhotos = []
       state.captureDraft = _defaultCaptureDraft()
+      resetReviewAiState()
     }
     state.batchCount = state.capturedPhotos.length
     document.getElementById('batch-count').textContent = String(state.batchCount)
@@ -520,6 +522,7 @@ function cancelCapture() {
   state.captureDraft = {
     ..._defaultCaptureDraft(),
   }
+  resetReviewAiState()
   document.getElementById('batch-count').textContent = '0'
   document.getElementById('batch-area').style.display = 'none'
   _syncCaptureControls()

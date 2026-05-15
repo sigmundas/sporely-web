@@ -8,6 +8,7 @@ import {
   buildIdentifyFingerprint,
   chooseIdentifyComparisonActiveService,
   getAvailableIdentifyServices,
+  getIdentifyConfidenceState,
   loadObservationIdentifications,
   renderIdentifyResultRows,
   saveIdentificationRun,
@@ -24,7 +25,7 @@ import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
 import { getArtsorakelMaxEdge, getDefaultVisibility, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
-import { runIdentifyForBlobs, runIdentifyForMediaKeys } from '../identify.js'
+import { getIdentifyNoMatchMessage, runIdentifyForBlobs, runIdentifyForMediaKeys } from '../identify.js'
 import { Preferences } from '@capacitor/preferences'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
@@ -118,8 +119,7 @@ export function initFindDetail() {
   document.querySelector('[data-identify-run-button]')?.addEventListener('click', _runDetailAiComparison)
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
     tab.addEventListener('click', () => {
-      detailAiState.activeService = normalizeIdentifyService(tab.dataset.identifyServiceTab)
-      _renderDetailAiResults()
+      _setDetailAiActiveService(tab.dataset.identifyServiceTab)
     })
   })
   document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
@@ -625,6 +625,33 @@ function _isArtsorakelBlobFallbackError(error) {
     || (message.includes('status 500') && message.includes('artsorakel'))
 }
 
+function getDetailIdentifySources() {
+  const galleryImgs = Array.from(document.querySelectorAll('#detail-gallery img'))
+  const hasStoredSources = detailImageRows.length > 0 || detailImageSources.length > 0 || detailAiSources.length > 0
+  if (galleryImgs.length || !hasStoredSources) {
+    return { galleryImgs, hasStoredSources }
+  }
+
+  const pseudoImgs = detailImageRows.map((row, index) => {
+    const originalSource = detailImageSources[index] || null
+    const aiSource = detailAiSources[index] || null
+    return {
+      dataset: {
+        storagePath: row.storage_path || '',
+        aiFallback: originalSource?.fallbackUrl || originalSource?.primaryUrl || '',
+        aiSrc: aiSource?.primaryUrl || '',
+        fullSrc: originalSource?.primaryUrl || '',
+      },
+      src: aiSource?.primaryUrl || originalSource?.primaryUrl || '',
+    }
+  })
+
+  return {
+    galleryImgs: pseudoImgs,
+    hasStoredSources,
+  }
+}
+
 export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'medium') {
   return await Promise.all((galleryImgs || []).map(async img => {
     try {
@@ -664,19 +691,19 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
   if (blobs.length) {
     try {
       const identifyOptions = service === ID_SERVICE_ARTSORAKEL
-        ? { tolerateFailures: true, maxEdge: Math.min(getArtsorakelMaxEdge(), 1024) }
-        : { tolerateFailures: true }
+        ? { tolerateFailures: true, maxEdge: Math.min(getArtsorakelMaxEdge(), 1024), screen: 'detail' }
+        : { tolerateFailures: true, screen: 'detail' }
       return await identifyBlobs(blobs, service, language, identifyOptions)
     } catch (error) {
       if (service === ID_SERVICE_ARTSORAKEL && mediaKeys.length && _isArtsorakelBlobFallbackError(error)) {
-        return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium' })
+        return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium', screen: 'detail' })
       }
       throw error
     }
   }
 
   if (mediaKeys.length && service === ID_SERVICE_ARTSORAKEL) {
-    return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium' })
+    return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium', screen: 'detail' })
   }
 
   if (service === ID_SERVICE_ARTSORAKEL) {
@@ -704,10 +731,6 @@ function _detailImageFingerprint(service = ID_SERVICE_ARTSORAKEL) {
   })
 }
 
-function _detailIdentifyInputs() {
-  return Array.from(document.querySelectorAll('#detail-gallery img'))
-}
-
 function _detailAiTabState(service) {
   const result = detailAiState.resultsByService[service] || null
   const availability = detailAiState.availability?.[service] || null
@@ -723,6 +746,34 @@ function _detailAiTabState(service) {
   }
 }
 
+function _detailAiServiceIconHtml(state) {
+  if (state.status === 'running') {
+    return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot is-running" aria-hidden="true"></span>`
+  }
+  if (state.status === 'success' || state.status === 'stale') {
+    return `
+      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-check" aria-hidden="true">
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <path d="M3.2 8.7 6.3 11.8 12.8 4.8" />
+        </svg>
+      </span>
+    `
+  }
+  if (state.status === 'no_match' || state.status === 'error') {
+    return `
+      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-x ${state.status === 'error' ? 'is-error' : ''}" aria-hidden="true">
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <path d="M4 4 12 12M12 4 4 12" />
+        </svg>
+      </span>
+    `
+  }
+  if (!state.available) {
+    return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot is-unavailable" aria-hidden="true"></span>`
+  }
+  return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot" aria-hidden="true"></span>`
+}
+
 function _renderDetailAiTabs() {
   const anyAvailable = Object.values(detailAiState.availability || {}).some(item => item?.available)
   const runBtn = document.querySelector('[data-identify-run-button]')
@@ -730,21 +781,22 @@ function _renderDetailAiTabs() {
     runBtn.disabled = !anyAvailable || detailAiState.running || !currentObsIsOwner
     const activeService = normalizeIdentifyService(detailAiState.activeService)
     const activeResult = detailAiState.resultsByService[activeService] || null
+    const confidence = getIdentifyConfidenceState(activeResult?.topProbability ?? activeResult?.topScore ?? 0, { checkThreshold: 0.65 })
     const runDot = runBtn.querySelector('.ai-id-dot')
     if (runDot) {
       runDot.className = [
         'ai-id-dot',
         detailAiState.running ? 'is-running' : '',
-        activeResult?.status === 'success' || activeResult?.status === 'no_match' || activeResult?.status === 'stale' ? 'is-complete' : '',
+        activeResult?.status === 'success' || activeResult?.status === 'stale'
+          ? (confidence.icon === 'check' ? 'is-complete' : confidence.tone)
+          : activeResult?.status === 'no_match' ? 'is-complete' : '',
         !anyAvailable ? 'is-unavailable' : '',
         activeResult?.status === 'error' ? 'is-error' : '',
       ].filter(Boolean).join(' ')
     }
     const runLabel = runBtn.querySelector('[data-identify-run-label]')
     if (runLabel) {
-      runLabel.textContent = detailAiState.running
-        ? (t('common.loading') || 'Loading')
-        : (t('review.aiId') || 'AI ID')
+      runLabel.textContent = t('review.aiId') || 'AI Photo ID'
     }
   }
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
@@ -756,33 +808,16 @@ function _renderDetailAiTabs() {
     tab.classList.toggle('has-results', state.status === 'success' || state.status === 'no_match' || state.status === 'stale')
     tab.classList.toggle('has-error', state.status === 'error')
     tab.disabled = !state.available || detailAiState.running
-    const dot = tab.querySelector('.ai-id-dot')
-    if (dot) {
-      dot.className = [
-        'ai-id-dot',
-        state.status === 'running' ? 'is-running' : '',
-        state.status === 'success' || state.status === 'no_match' || state.status === 'stale' ? 'is-complete' : '',
-        !state.available ? 'is-unavailable' : '',
-        state.status === 'error' ? 'is-error' : '',
-      ].filter(Boolean).join(' ')
+    const icon = tab.querySelector('.ai-id-service-tab-icon')
+    if (icon) {
+      icon.outerHTML = _detailAiServiceIconHtml(state)
     }
-    const stateLabel = tab.querySelector('.ai-id-service-tab-state')
-    if (stateLabel) {
-      stateLabel.textContent = state.status === 'running'
-        ? (t('common.loading') || 'Loading')
-        : state.status === 'error'
-          ? 'Error'
-        : state.status === 'no_match'
-            ? (t('review.noMatch') || 'No match')
-            : (state.status === 'success' || state.status === 'stale')
-              ? state.topPrediction?.confidenceText || `${Math.round(Number(state.topProbability || 0) * 100)}%`
-              : ''
-      stateLabel.style.display = stateLabel.textContent ? '' : 'none'
-    }
-    const reason = tab.querySelector('.ai-id-service-tab-reason')
-    if (reason) {
-      reason.textContent = state.available ? '' : (state.reason || '')
-      reason.style.display = state.available ? 'none' : ''
+    const score = tab.querySelector('.ai-id-service-tab-score')
+    if (score) {
+      score.textContent = (state.status === 'success' || state.status === 'stale')
+        ? (state.topPrediction?.confidenceText || `${Math.round(Number(state.topProbability || 0) * 100)}%`)
+        : ''
+      score.style.display = score.textContent ? '' : 'none'
     }
   })
 }
@@ -803,6 +838,16 @@ function _renderDetailAiResults() {
   if (!result?.predictions?.length) {
     if (result?.status === 'unavailable') {
       resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+      resultsEl.style.display = 'block'
+      return
+    }
+    if (result?.status === 'error') {
+      resultsEl.innerHTML = `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
+      resultsEl.style.display = 'block'
+      return
+    }
+    if (result?.status === 'no_match') {
+      resultsEl.innerHTML = `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`
       resultsEl.style.display = 'block'
       return
     }
@@ -833,6 +878,12 @@ function _renderDetailAiResults() {
       })
     })
   })
+}
+
+function _setDetailAiActiveService(service) {
+  detailAiState.activeService = normalizeIdentifyService(service)
+  _renderDetailAiTabs()
+  _renderDetailAiResults()
 }
 
 function _markDetailAiStale() {
@@ -895,8 +946,9 @@ async function _loadDetailAiCache() {
 }
 
 async function _runDetailAiComparison() {
-  const galleryImgs = _detailIdentifyInputs()
-  if (!galleryImgs.length) {
+  const sources = getDetailIdentifySources()
+  const galleryImgs = sources.galleryImgs
+  if (!galleryImgs.length && !sources.hasStoredSources) {
     showToast(t('detail.noPhotoToIdentify'))
     return
   }
@@ -2143,4 +2195,10 @@ function _setProgress(done, total, label) {
 function _hideProgress() {
   const overlay = document.getElementById('import-progress')
   if (overlay) overlay.style.display = 'none'
+}
+
+export {
+  _setDetailAiActiveService,
+  _renderDetailAiTabs,
+  _renderDetailAiResults,
 }
