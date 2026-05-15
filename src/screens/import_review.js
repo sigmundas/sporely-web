@@ -20,7 +20,6 @@ import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyFo
 import {
   buildIdentifyFingerprint,
   getAvailableIdentifyServices,
-  getIdentifyConfidenceState,
   renderIdentifyResultRows,
   renderIdentifyServiceTab,
   renderIdentifyServiceStateSummary,
@@ -346,7 +345,6 @@ function _renderSessionAiControls(session) {
   const activeService = normalizeIdentifyService(normalized.aiActiveService)
   const activeResult = normalized.aiServiceState?.[activeService] || _emptyServiceState()
   const activePredictions = normalized.aiPredictionsByService?.[activeService] || []
-  const confidence = getIdentifyConfidenceState(activeResult.topProbability ?? activeResult.topScore ?? 0, { checkThreshold: 0.65 })
   const runState = normalized.aiRunning
     ? 'running'
     : (activeResult.status || (activePredictions.length ? 'success' : 'idle'))
@@ -357,8 +355,7 @@ function _renderSessionAiControls(session) {
     <div class="detail-ai-stack" data-identify-comparison-state data-sid="${escHtml(normalized.id)}">
       <div class="detail-ai-controls">
         <button class="ai-id-btn ai-id-run-btn" type="button" data-identify-run-button data-sid="${escHtml(normalized.id)}" ${normalized.aiRunning || !anyAvailable ? 'disabled' : ''}>
-          <span class="ai-id-dot ${runState === 'running' ? 'is-running' : runState === 'success' || runState === 'stale' ? (confidence.icon === 'check' ? 'is-complete' : confidence.tone) : runState === 'no_match' ? 'is-complete' : runState === 'unavailable' ? 'is-unavailable' : runState === 'error' ? 'is-error' : ''}"></span>
-          <span>${escHtml(runLabel)}</span>
+          <span data-identify-run-label>${runState === 'running' ? 'Loading...' : escHtml(runLabel)}</span>
         </button>
         <div class="detail-ai-service-tabs" role="tablist" aria-label="AI services">
           ${renderIdentifyServiceTab(_sessionAiResultState(normalized, ID_SERVICE_ARTSORAKEL))}

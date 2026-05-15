@@ -80,6 +80,22 @@ function _identifyServiceLabel(service) {
     : (t('settings.idServiceArtsorakel') || 'Artsorakel')
 }
 
+export function _renderPieSpinnerIcon(tone = '') {
+  return `<span class="ai-id-service-tab-icon ai-pie-spinner ${tone}" aria-hidden="true">
+    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+      <path class="ai-pie-spinner-fill" pathLength="100" d="M8 4 A4 4 0 1 1 8 12 A4 4 0 1 1 8 4" />
+    </svg>
+  </span>`
+}
+
+export function _renderPieSpinnerDot(tone = '') {
+  return `<span class="ai-id-dot ai-pie-spinner ${tone}" aria-hidden="true">
+    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+      <path class="ai-pie-spinner-fill" pathLength="100" d="M8 4 A4 4 0 1 1 8 12 A4 4 0 1 1 8 4" />
+    </svg>
+  </span>`
+}
+
 function _getPredictionName(prediction = {}) {
   const scientificName = _normalizeText(prediction.scientificName || prediction.scientific_name || prediction.name || '')
   const vernacularName = _normalizeText(prediction.vernacularName || prediction.vernacular_name || prediction.commonName || '')
@@ -145,7 +161,7 @@ function _renderServiceIcon(serviceState = {}) {
   const topProbability = Number(serviceState.topProbability ?? serviceState.topScore ?? 0)
   const confidence = getIdentifyConfidenceState(topProbability, { checkThreshold: 0.65 })
   if (status === 'running') {
-    return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot is-running" aria-hidden="true"></span>`
+    return _renderPieSpinnerIcon()
   }
   if (status === 'success' || status === 'stale') {
     if (confidence.icon === 'dot') {
@@ -209,7 +225,6 @@ export function renderIdentifyConfidenceBadge(score, options = {}) {
   }
   return `
     <span class="ai-confidence-badge ${confidence.tone}" aria-hidden="true">
-      <span class="ai-confidence-badge-icon ai-confidence-badge-icon-dot"></span>
       <span class="ai-confidence-badge-value">${_esc(percent)}</span>
     </span>
   `

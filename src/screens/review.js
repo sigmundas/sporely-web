@@ -7,7 +7,6 @@ import {
   buildIdentifyFingerprint,
   chooseIdentifyComparisonActiveService,
   getAvailableIdentifyServices,
-  getIdentifyConfidenceState,
   renderIdentifyResultRows,
   renderIdentifyServiceTab,
   runIdentifyComparisonForBlobs,
@@ -848,7 +847,6 @@ function _renderReviewAiControls() {
   const activeService = normalizeIdentifyService(reviewAiState.activeService)
   const activeResult = reviewAiState.resultsByService[activeService] || null
   const activeState = activeResult?.status || (reviewAiState.running ? 'running' : 'idle')
-  const confidence = getIdentifyConfidenceState(activeResult?.topProbability ?? activeResult?.topScore ?? 0, { checkThreshold: 0.65 })
   const anyAvailable = services.some(service => reviewAiState.availability?.[service]?.available)
   const runState = reviewAiState.running ? 'running' : activeState
   const buttonLabel = t('review.aiId') || 'AI Photo ID'
@@ -861,8 +859,7 @@ function _renderReviewAiControls() {
           data-identify-run-button
           ${reviewAiState.running || !anyAvailable ? 'disabled' : ''}
         >
-          <span class="ai-id-dot ${runState === 'running' ? 'is-running' : runState === 'success' || runState === 'stale' ? (confidence.icon === 'check' ? 'is-complete' : confidence.tone) : runState === 'no_match' ? 'is-complete' : runState === 'unavailable' ? 'is-unavailable' : runState === 'error' ? 'is-error' : ''}"></span>
-          <span>${buttonLabel}</span>
+          <span data-identify-run-label>${runState === 'running' ? 'Loading...' : buttonLabel}</span>
         </button>
         <div class="detail-ai-service-tabs" role="tablist" aria-label="AI services">
           ${services.map(service => renderIdentifyServiceTab(_reviewAiTabState(service))).join('')}

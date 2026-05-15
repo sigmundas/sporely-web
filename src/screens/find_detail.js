@@ -8,7 +8,7 @@ import {
   buildIdentifyFingerprint,
   chooseIdentifyComparisonActiveService,
   getAvailableIdentifyServices,
-  getIdentifyConfidenceState,
+  _renderPieSpinnerIcon,
   loadObservationIdentifications,
   renderIdentifyResultRows,
   saveIdentificationRun,
@@ -53,6 +53,7 @@ let detailFollowState = { user: false, observation: false, taxon: false, genus: 
 let detailPrivacySlotCount = null
 const detailAiState = {
   running: false,
+  runningByService: {},
   activeService: ID_SERVICE_ARTSORAKEL,
   availability: {},
   resultsByService: {},
@@ -734,12 +735,13 @@ function _detailImageFingerprint(service = ID_SERVICE_ARTSORAKEL) {
 function _detailAiTabState(service) {
   const result = detailAiState.resultsByService[service] || null
   const availability = detailAiState.availability?.[service] || null
+  const isRunning = detailAiState.runningByService?.[service] ?? false
   return {
     service,
     active: detailAiState.activeService === service,
     available: availability?.available ?? false,
     reason: availability?.reason || '',
-    status: result?.status || (detailAiState.running ? 'running' : 'idle'),
+    status: result?.status || (isRunning ? 'running' : 'idle'),
     errorMessage: result?.errorMessage || '',
     topProbability: result?.topProbability ?? null,
     topPrediction: result?.topPrediction || null,
@@ -748,7 +750,7 @@ function _detailAiTabState(service) {
 
 function _detailAiServiceIconHtml(state) {
   if (state.status === 'running') {
-    return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot is-running" aria-hidden="true"></span>`
+    return _renderPieSpinnerIcon()
   }
   if (state.status === 'success' || state.status === 'stale') {
     return `
@@ -779,24 +781,9 @@ function _renderDetailAiTabs() {
   const runBtn = document.querySelector('[data-identify-run-button]')
   if (runBtn) {
     runBtn.disabled = !anyAvailable || detailAiState.running || !currentObsIsOwner
-    const activeService = normalizeIdentifyService(detailAiState.activeService)
-    const activeResult = detailAiState.resultsByService[activeService] || null
-    const confidence = getIdentifyConfidenceState(activeResult?.topProbability ?? activeResult?.topScore ?? 0, { checkThreshold: 0.65 })
-    const runDot = runBtn.querySelector('.ai-id-dot')
-    if (runDot) {
-      runDot.className = [
-        'ai-id-dot',
-        detailAiState.running ? 'is-running' : '',
-        activeResult?.status === 'success' || activeResult?.status === 'stale'
-          ? (confidence.icon === 'check' ? 'is-complete' : confidence.tone)
-          : activeResult?.status === 'no_match' ? 'is-complete' : '',
-        !anyAvailable ? 'is-unavailable' : '',
-        activeResult?.status === 'error' ? 'is-error' : '',
-      ].filter(Boolean).join(' ')
-    }
     const runLabel = runBtn.querySelector('[data-identify-run-label]')
     if (runLabel) {
-      runLabel.textContent = t('review.aiId') || 'AI Photo ID'
+      runLabel.textContent = detailAiState.running ? 'Loading...' : (t('review.aiId') || 'AI Photo ID')
     }
   }
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
@@ -878,6 +865,42 @@ function _renderDetailAiResults() {
       })
     })
   })
+}
+
+function _applyDetailAiServiceResult(service, result = {}) {
+  const normalizedService = normalizeIdentifyService(service)
+  detailAiState.resultsByService = {
+    ...(detailAiState.resultsByService || {}),
+    [normalizedService]: {
+      service: normalizedService,
+      status: result.status || 'idle',
+      predictions: Array.isArray(result.predictions) ? result.predictions : [],
+      topPrediction: result.topPrediction || null,
+      topProbability: result.topProbability ?? null,
+      topScientificName: result.topScientificName || null,
+      topVernacularName: result.topVernacularName || null,
+      topTaxonId: result.topTaxonId || null,
+      errorMessage: result.errorMessage || '',
+      available: result.available ?? detailAiState.availability?.[normalizedService]?.available ?? false,
+      reason: result.reason || detailAiState.availability?.[normalizedService]?.reason || '',
+      request_fingerprint: result.request_fingerprint || '',
+    },
+  }
+  const activeResult = detailAiState.resultsByService[detailAiState.activeService] || null
+  if (
+    normalizedService
+    && (result.status === 'success' || result.status === 'stale' || result.status === 'no_match' || result.status === 'error' || result.status === 'unavailable')
+    && (
+      !activeResult
+      || activeResult.status === 'running'
+      || activeResult.status === 'idle'
+      || !activeResult.predictions?.length
+    )
+  ) {
+    detailAiState.activeService = normalizedService
+  }
+  _renderDetailAiTabs()
+  _renderDetailAiResults()
 }
 
 function _setDetailAiActiveService(service) {
@@ -971,28 +994,77 @@ async function _runDetailAiComparison() {
   detailAiState.running = true
   detailAiState.stale = false
   detailAiState.availability = availability
+  detailAiState.runningByService = Object.fromEntries(
+    [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST].map(service => [
+      service,
+      Boolean(availability[service]?.available),
+    ]),
+  )
+  detailAiState.resultsByService = Object.fromEntries(
+    [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST].map(service => {
+      const serviceAvailability = availability[service]
+      return [
+        service,
+        {
+          service,
+          status: serviceAvailability?.available ? 'running' : 'unavailable',
+          predictions: [],
+          errorMessage: serviceAvailability?.reason || '',
+          available: serviceAvailability?.available ?? false,
+          reason: serviceAvailability?.reason || '',
+          topPrediction: null,
+          topProbability: null,
+        },
+      ]
+    }),
+  )
   _renderDetailAiTabs()
   _renderDetailAiResults()
 
   try {
-    const tasks = [
-      availability[ID_SERVICE_ARTSORAKEL]?.available
-        ? _runDetailServiceComparison(ID_SERVICE_ARTSORAKEL, galleryImgs)
-        : Promise.resolve({
-            service: ID_SERVICE_ARTSORAKEL,
-            status: 'unavailable',
-            predictions: [],
-            errorMessage: availability[ID_SERVICE_ARTSORAKEL]?.reason || '',
-          }),
-      availability[ID_SERVICE_INATURALIST]?.available
-        ? _runDetailServiceComparison(ID_SERVICE_INATURALIST, galleryImgs)
-        : Promise.resolve({
-            service: ID_SERVICE_INATURALIST,
-            status: 'unavailable',
-            predictions: [],
-            errorMessage: availability[ID_SERVICE_INATURALIST]?.reason || '',
-          }),
-    ]
+    const tasks = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST].map(async service => {
+      const serviceAvailability = availability[service]
+      if (!serviceAvailability?.available) {
+        detailAiState.runningByService = {
+          ...(detailAiState.runningByService || {}),
+          [service]: false,
+        }
+        const unavailableResult = {
+          service,
+          status: 'unavailable',
+          predictions: [],
+          errorMessage: serviceAvailability?.reason || '',
+          available: false,
+          reason: serviceAvailability?.reason || '',
+        }
+        _applyDetailAiServiceResult(service, unavailableResult)
+        return unavailableResult
+      }
+
+      try {
+        const result = await _runDetailServiceComparison(service, galleryImgs)
+        detailAiState.runningByService = {
+          ...(detailAiState.runningByService || {}),
+          [service]: false,
+        }
+        _applyDetailAiServiceResult(service, result)
+        return result
+      } catch (error) {
+        detailAiState.runningByService = {
+          ...(detailAiState.runningByService || {}),
+          [service]: false,
+        }
+        const failureResult = {
+          service,
+          status: 'error',
+          predictions: [],
+          errorMessage: String(error?.message || error || 'Unknown error'),
+        }
+        _applyDetailAiServiceResult(service, failureResult)
+        return failureResult
+      }
+    })
+
     const settled = await Promise.allSettled(tasks)
     const resultsByService = {}
     ;[ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST].forEach((service, index) => {
@@ -1008,11 +1080,14 @@ async function _runDetailAiComparison() {
         }
       }
     })
-    detailAiState.resultsByService = resultsByService
-    detailAiState.activeService = chooseIdentifyComparisonActiveService(resultsByService, ID_SERVICE_ARTSORAKEL)
+    detailAiState.resultsByService = {
+      ...(detailAiState.resultsByService || {}),
+      ...resultsByService,
+    }
+    detailAiState.activeService = chooseIdentifyComparisonActiveService(detailAiState.resultsByService, ID_SERVICE_ARTSORAKEL)
     detailAiState.stale = false
 
-    await Promise.allSettled(Object.values(resultsByService).map(result => {
+    await Promise.allSettled(Object.values(detailAiState.resultsByService).map(result => {
       if (!currentObs?.id || !state.user?.id || !result?.service || result.status === 'unavailable') return Promise.resolve(null)
       const serviceFingerprint = serviceFingerprints[result.service] || _detailImageFingerprint(result.service)
       return saveIdentificationRun({
@@ -1034,6 +1109,7 @@ async function _runDetailAiComparison() {
     showToast(t('common.errorPrefix', { message: String(error?.message || error || 'Unknown error') }))
   } finally {
     detailAiState.running = false
+    detailAiState.runningByService = {}
     _renderDetailAiTabs()
     _renderDetailAiResults()
   }
