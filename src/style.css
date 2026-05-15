@@ -611,7 +611,26 @@ html, body {
 .polaroid-p1 { transform: rotate(3deg) translate(10px, 2px); z-index: 2; }
 .polaroid-p2 { transform: rotate(-1deg) translate(4px, 0px); z-index: 3; }
 .import-card-info { flex: 1; min-width: 0; }
-.import-card-datetime { display: flex; justify-content: space-between; align-items: baseline; gap: 4px; margin-bottom: 4px; font-size: 12px; font-family: 'DM Mono', monospace; color: var(--text-data); }
+.import-card-datetime {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-family: 'DM Mono', monospace;
+  color: var(--text-data);
+}
+.import-card-datetime-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+.import-card-count {
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
 .import-card-time { font-size: 12px; font-family: 'DM Mono', monospace; color: var(--text-data); margin-bottom: 4px; }
 .import-card-loc { font-size: 13px; color: var(--text-secondary); margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .import-location-hint {
@@ -622,11 +641,6 @@ html, body {
 }
 .import-card-species { font-size: 12px; color: var(--text-dim); font-style: italic; }
 .import-card-species.identified { font-style: normal; color: var(--text-primary); }
-.import-card-crop-status {
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--green-accent);
-}
 .import-card-delete {
   flex-shrink: 0; background: none; border: none;
   color: var(--text-dim); cursor: pointer; padding: 4px;
@@ -2375,8 +2389,54 @@ html, body {
   justify-content: flex-end;
   white-space: nowrap;
 }
+.ai-id-service-state-score.is-good {
+  color: var(--green-bright);
+}
+.ai-id-service-state-score.is-warn {
+  color: #f0c24d;
+}
+.ai-id-service-state-score.is-low {
+  color: var(--red);
+}
 .import-card-ai-state {
   margin-bottom: 3px;
+}
+.import-card-crop-hint {
+  margin-top: 8px;
+  margin-bottom: 10px;
+}
+.import-strip-add {
+  width: 88px;
+  height: 88px;
+  padding: 0;
+}
+.import-strip-add-file {
+  width: 100%;
+  height: 100%;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--card-raised);
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  font-family: 'Outfit', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.import-strip-add-file svg {
+  width: 18px;
+  height: 18px;
+}
+.import-strip-add-file:active {
+  background: var(--card);
+  border-color: var(--text-dim);
+  color: var(--text-primary);
 }
 .ai-confidence-badge {
   display: inline-flex;

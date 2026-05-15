@@ -654,7 +654,7 @@ export function renderIdentifyServiceStateSummary(serviceState = {}, options = {
     >
       ${_renderServiceIcon(serviceState)}
       <span class="ai-id-service-state-label">${_esc(label)}</span>
-      ${stateLabel ? `<span class="ai-id-service-state-score ${confidence.tone}">${renderIdentifyConfidenceBadge(topProbability, { checkThreshold: 0.65 })}</span>` : ''}
+      ${stateLabel ? `<span class="ai-id-service-state-score ${confidence.tone}">${_esc(stateLabel)}</span>` : ''}
     </span>
   `
 }

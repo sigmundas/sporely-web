@@ -228,6 +228,7 @@ test('collapsed AI status chips render the active service and confidence percent
   assert.match(html, /iNaturalist/)
   assert.match(html, /87%/)
   assert.match(html, /ai-id-service-tab-icon-check/)
+  assert.doesNotMatch(html, /ai-confidence-badge/)
 })
 
 test('confidence score spans do not use filled backgrounds', () => {

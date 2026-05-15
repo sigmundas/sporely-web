@@ -681,7 +681,7 @@ function _buildSessionsFromSourceItems() {
       sourceItemIds: group.map(item => item.id),
       files: group.map(item => item.blob),
       aiFiles: group.map(item => _isBlob(item.aiBlob) ? item.aiBlob : item.blob),
-      blobUrls: group.map(item => URL.createObjectURL(item.aiBlob || item.blob)),
+      blobUrls: group.map(item => URL.createObjectURL(item.blob || item.aiBlob)),
       imageMeta: group.map(item => item.meta),
       metadataPromises: group.map(item => item.metadataPromise || null),
       photoTimes: group.map(item => item.captureTime),
@@ -1803,7 +1803,7 @@ export function renderSessions() {
 function buildCardHTML(session) {
   const sid = session.id;
   const dateStr = formatDate(session.ts, { month: 'short', day: 'numeric' });
-  const timeStr = formatTime(session.ts, { hour: '2-digit', minute: '2-digit' });
+  const timeStr = formatTime(session.ts, { hour: '2-digit', minute: '2-digit', hour12: false });
   const photoCount = session.files.length;
   const imageMeta = _ensureSessionImageMeta(session);
   const croppedCount = imageMeta.filter(meta => hasAiCropRect(meta?.aiCropRect)).length;
@@ -1814,7 +1814,6 @@ function buildCardHTML(session) {
   const aiStateHtml = session.files.length
     ? renderIdentifyServiceStateSummary(_sessionAiResultState(session, activeService))
     : '';
-
   const stackImgs = session.blobUrls.slice(0, 3);
   const polaroids = stackImgs.map((url, i) =>
     `<div class="polaroid-print polaroid-p${i}"><img src="${escHtml(url)}"></div>`
@@ -1828,12 +1827,13 @@ function buildCardHTML(session) {
     </div>`
   ).join('') + `
     <div class="import-strip-item import-strip-add" data-sid="${sid}">
-      <button class="import-strip-add-half import-strip-add-cam" data-sid="${sid}" type="button" aria-label="Add from camera">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h3l1.6-2h4.8L16 6h3a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
-      </button>
-      <div class="import-strip-add-divider"></div>
-      <button class="import-strip-add-half import-strip-add-file" data-sid="${sid}" type="button" aria-label="Add from file">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="2" ry="2"/><rect x="7" y="7" width="14" height="14" rx="2" ry="2"/></svg>
+      <button class="import-strip-add-file" data-sid="${sid}" type="button" aria-label="${t('import.upload') || 'Upload'}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <span>${t('import.upload') || 'Upload'}</span>
       </button>
     </div>
   `;
@@ -1855,11 +1855,16 @@ function buildCardHTML(session) {
       ${polaroids}
     </div>
     <div class="import-card-info">
-      <div class="import-card-datetime"><span>${dateStr}</span><span>${timeStr} · ${tp('counts.photo', photoCount)}</span></div>
+      <div class="import-card-datetime">
+        <div class="import-card-datetime-main">
+          <span>${dateStr}</span>
+          <span>${timeStr}</span>
+        </div>
+        <div class="import-card-count">${tp('counts.photo', photoCount)}</div>
+      </div>
       <div class="import-card-loc">${session.locationName ? escHtml(session.locationName) : '—'}</div>
       <div class="import-card-species">${speciesText}</div>
       ${aiStateHtml ? `<div class="import-card-ai-state">${aiStateHtml}</div>` : ''}
-      <div class="import-card-crop-status">${croppedCount ? t('crop.statusSome', { cropped: croppedCount, total: photoCount }) : t('crop.noCropHint')}</div>
     </div>
     <button class="import-card-delete" data-sid="${sid}" aria-label="${t('common.delete')}">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
@@ -1869,6 +1874,7 @@ function buildCardHTML(session) {
     <div class="import-photo-strip">
       ${stripItems}
     </div>
+    <div class="import-location-hint import-card-crop-hint">${t('crop.noCropHint')}</div>
     <div class="detail-field" style="margin-top:12px">
       <div class="detail-field-label">${t('detail.species')}</div>
       <div class="taxon-field-wrap">
@@ -2047,6 +2053,15 @@ function _wireCard(sid) {
       _openSessionCropEditor(session, startIndex)
     })
   })
+  const addFileBtn = card.querySelector(`.import-strip-add-file[data-sid="${sid}"]`)
+  if (addFileBtn && !addFileBtn._wired) {
+    addFileBtn._wired = true
+    addFileBtn.addEventListener('click', event => {
+      event.preventDefault()
+      event.stopPropagation()
+      void _openFileImportForSession(sid)
+    })
+  }
   const aiRunBtn = card.querySelector(`[data-identify-run-button][data-sid="${sid}"]`)
   const aiResults = card.querySelector(`[data-identify-results][data-sid="${sid}"]`)
   if (aiRunBtn && !aiRunBtn._wired) {
@@ -2094,6 +2109,22 @@ function _wireCard(sid) {
   }
 
   void _syncSessionAiAvailability(session)
+}
+
+async function _openFileImportForSession(sid) {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.multiple = true
+  input.accept = 'image/*'
+  if (/android/i.test(navigator.userAgent)) {
+    input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif'
+  }
+  input.onchange = async event => {
+    const files = Array.from(event.target.files || [])
+    if (!files.length) return
+    await _addFilesToSession(sid, files)
+  }
+  input.click()
 }
 
 function _openSessionCropEditor(session, startIndex = 0) {
@@ -2387,7 +2418,7 @@ async function _addFilesToSession(sid, files, options = {}) {
     session.sourceItemIds.push(newItem.id);
     session.files.push(newItem.blob);
     session.aiFiles.push(newItem.aiBlob);
-    session.blobUrls.push(URL.createObjectURL(newItem.aiBlob));
+    session.blobUrls.push(URL.createObjectURL(newItem.blob || newItem.aiBlob));
     session.imageMeta.push(newItem.meta);
     session.metadataPromises.push(newItem.metadataPromise);
     session.photoTimes.push(newItem.captureTime);

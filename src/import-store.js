@@ -29,6 +29,11 @@ function _txComplete(tx) {
   })
 }
 
+function _blobType(blob, fallback = 'image/jpeg') {
+  const type = String(blob?.type || '').trim()
+  return type || fallback
+}
+
 export async function saveImportSessions(sessions) {
   try {
     // Convert all blobs → ArrayBuffers before opening the transaction
@@ -75,7 +80,9 @@ export async function saveImportSessions(sessions) {
       gpsAltitude: s.gpsAltitude ?? null,
       gpsAccuracy: s.gpsAccuracy ?? null,
       blobs: await Promise.all(s.files.map(f => f.arrayBuffer())),
+      blobTypes: s.files.map(f => _blobType(f)),
       aiBlobs: await Promise.all((s.aiFiles || s.files).map(f => f.arrayBuffer())),
+      aiBlobTypes: (s.aiFiles || s.files).map(f => _blobType(f)),
     })))
 
     const db = await _open()
@@ -105,8 +112,9 @@ export async function loadImportSessions() {
     return records
       .sort((a, b) => a.ts - b.ts)
       .map(r => {
-        const files = r.blobs.map(ab => new Blob([ab], { type: 'image/jpeg' }))
+        const files = r.blobs.map((ab, index) => new Blob([ab], { type: r.blobTypes?.[index] || 'image/jpeg' }))
         const blobUrls = files.map(b => URL.createObjectURL(b))
+        const aiFiles = (r.aiBlobs || r.blobs).map((ab, index) => new Blob([ab], { type: r.aiBlobTypes?.[index] || r.blobTypes?.[index] || 'image/jpeg' }))
         return {
           id: r.id,
           ts: new Date(r.ts),
@@ -132,7 +140,7 @@ export async function loadImportSessions() {
           aiPredictionsByService: r.aiPredictionsByService || {},
           aiServiceState: r.aiServiceState || {},
           files,
-          aiFiles: (r.aiBlobs || r.blobs).map(ab => new Blob([ab], { type: 'image/jpeg' })),
+          aiFiles,
           blobUrls,
           sourceItemIds: [...(r.sourceItemIds || [])],
           photoTimes: [...(r.photoTimes || [])],
