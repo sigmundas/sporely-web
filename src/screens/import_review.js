@@ -121,6 +121,8 @@ function _storeSessionAiServiceResult(session, service, result = {}, fingerprint
   normalized.aiActiveService = svc
   normalized.aiService = svc
   normalized.aiPredictions = predictions
+  normalized.aiRunning = Object.values(normalized.aiServiceState || {})
+    .some(item => item?.status === 'running')
   return nextState
 }
 
@@ -134,6 +136,13 @@ function _emptyServiceState() {
     imageFingerprint: '',
     cropFingerprint: '',
   };
+}
+
+function _syncSessionAiRunningState(normalized) {
+  if (!normalized) return false
+  normalized.aiRunning = Object.values(normalized.aiServiceState || {})
+    .some(item => item?.status === 'running')
+  return normalized.aiRunning
 }
 
 function _normalizePredictionList(value) {
@@ -462,6 +471,7 @@ async function _runSessionAiService(sid, service, options = {}) {
 
   const availability = options.availability || Object.fromEntries((await getAvailableIdentifyServices({
     blobs: _sessionAiInputs(normalized).map(item => item.blob),
+    inaturalistSession: options.inaturalistSession ?? await loadInaturalistSession(),
   })).map(item => [item.service, item]))
   normalized.aiAvailability = availability
   normalized.aiAvailabilityFingerprint = fingerprint.requestFingerprint
@@ -473,7 +483,6 @@ async function _runSessionAiService(sid, service, options = {}) {
       errorMessage: serviceAvailability?.reason || '',
       predictions: [],
     }, fingerprint)
-    normalized.aiRunning = false
     _persistSessions()
     renderSessions()
     return
@@ -521,7 +530,7 @@ async function _runSessionAiService(sid, service, options = {}) {
     }, fingerprint)
     console.error('Session identification AI error:', err)
   } finally {
-    normalized.aiRunning = false
+    _syncSessionAiRunningState(normalized)
     normalized.aiService = normalized.aiActiveService
     normalized.aiPredictions = normalized.aiPredictionsByService?.[svc] || []
     _persistSessions()
@@ -574,14 +583,17 @@ async function _runSessionAiComparison(sid, options = {}) {
   }
 
   sessionAi.aiServiceState = markRequestedServicesRunning(sessionAi.aiServiceState, availability, services)
+  sessionAi.aiRunning = true
+  _persistSessions()
+  renderSessions()
 
-  for (const service of services) {
-    await _runSessionAiService(sid, service, {
-      onImageSent: options.onImageSent,
-      onIdReceived: options.onIdReceived,
-      allowDuringBatch: options.allowDuringBatch,
-      availability,
-    })
+  await Promise.allSettled(services.map(service => _runSessionAiService(sid, service, {
+    onImageSent: options.onImageSent,
+    onIdReceived: options.onIdReceived,
+    allowDuringBatch: options.allowDuringBatch,
+    availability,
+    inaturalistSession,
+  }).then(() => {
     const serviceState = sessionAi.aiServiceState?.[service] || _emptyServiceState()
     if (!options.suppressToasts) {
       if (serviceState.status === 'no_match') {
@@ -592,7 +604,9 @@ async function _runSessionAiComparison(sid, options = {}) {
         showToast(serviceState.errorMessage || getIdentifyUnavailableMessage(service))
       }
     }
-  }
+  })))
+
+  _syncSessionAiRunningState(sessionAi)
 
   sessionAi.aiActiveService = chooseIdentifyComparisonActiveService(sessionAi.aiServiceState || {}, resolution.primary)
   sessionAi.aiService = sessionAi.aiActiveService
