@@ -19,7 +19,7 @@ import {
   normalizeIdentifyService,
 } from '../ai-identification.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
-import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob } from '../images.js'
+import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
@@ -658,6 +658,10 @@ async function _loadDetailIdentifyBlob(img, variant = 'medium') {
       try {
         const resp = await fetch(url)
         if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
+        const contentType = String(resp.headers.get('content-type') || '').trim().toLowerCase()
+        if (contentType && !contentType.startsWith('image/')) {
+          throw new Error(`Non-image response (${contentType})`)
+        }
         const blob = await resp.blob()
         return {
           blob,
@@ -670,7 +674,7 @@ async function _loadDetailIdentifyBlob(img, variant = 'medium') {
         lastError = error
       }
     }
-    throw lastError || storageError || new Error('Image fetch failed')
+    throw new Error(`Could not read this image for identification${lastError?.message ? `: ${lastError.message}` : ''}`)
   }
 }
 
@@ -2377,7 +2381,15 @@ async function _addPhotosToObservation(files) {
   if (!currentObs || !files.length) return
 
   const obsId = currentObs.id
-  const userId = currentObs.user_id
+  const userId = String(state.user?.id || '').trim()
+  if (!userId) {
+    showToast(t('review.notSignedIn'))
+    return
+  }
+  if (currentObs.user_id && currentObs.user_id !== userId) {
+    showToast(t('detail.onlyOwnerEdit'))
+    return
+  }
 
   _setProgress(0, files.length, `Adding ${files.length} photo(s)...`)
   const saveBtn = document.getElementById('detail-save-btn')
@@ -2404,8 +2416,18 @@ async function _addPhotosToObservation(files) {
       const sortOrder = nextSortOrder + i
 
       const preparedImage = await prepareImageVariants(file, uploadPolicy)
-      const storagePath = `${userId}/${obsId}/${sortOrder}_${Date.now()}.${imageExtensionForBlob(preparedImage.uploadBlob)}`
-      await uploadPreparedObservationImageVariants(preparedImage, storagePath, { uploadPolicy })
+      const storagePath = buildObservationImageStoragePath({
+        userId,
+        observationId: obsId,
+        sortOrder,
+        timestamp: Date.now(),
+        extension: imageExtensionForBlob(preparedImage.uploadBlob),
+      })
+      await uploadPreparedObservationImageVariants(preparedImage, storagePath, {
+        uploadPolicy,
+        userId,
+        observationId: obsId,
+      })
       
       try {
         const cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })

@@ -159,6 +159,48 @@ test('comparison helper preserves the working service when the other one fails',
   assert.equal(result.resultsByService.artsorakel.predictions[0].scientificName, 'Morchella esculenta')
 })
 
+test('observation identification cache helpers tolerate a missing production table', async () => {
+  const missingTableError = {
+    code: 'PGRST205',
+    message: "Could not find the table 'public.observation_identifications' in the schema cache",
+  }
+
+  class MissingTableQuery {
+    select() { return this }
+    eq() { return this }
+    order() { return this }
+    update() { return this }
+    insert() { return this }
+    neq() { return this }
+    maybeSingle() { return Promise.resolve({ data: null, error: missingTableError }) }
+    then(resolve) {
+      resolve({ data: null, error: missingTableError })
+    }
+  }
+
+  const client = {
+    from() {
+      return new MissingTableQuery()
+    },
+  }
+
+  assert.deepEqual(await loadObservationIdentifications('obs-1', { supabaseClient: client }), [])
+  assert.equal(await maybeLoadCachedIdentification({
+    observationId: 'obs-1',
+    service: 'artsorakel',
+    requestFingerprint: 'fingerprint',
+    supabaseClient: client,
+  }), null)
+  assert.equal(await saveIdentificationRun({
+    observationId: 'obs-1',
+    userId: 'user-1',
+    service: 'artsorakel',
+    requestFingerprint: 'fingerprint',
+    results: [],
+    supabaseClient: client,
+  }), null)
+})
+
 test('formatting AI suggestions keeps vernacular and scientific names on separate lines', () => {
   const display = formatAiSuggestionDisplay({
     vernacularName: 'knivkjuke',

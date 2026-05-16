@@ -21,6 +21,15 @@ const SUPABASE_STORAGE_PATH_PATTERNS = [
   /\/storage\/v1\/object\/observation-images\/(.+)$/i,
 ]
 
+function _isDebugMediaUploadEnabled() {
+  try {
+    return import.meta.env?.DEV
+      || globalThis.localStorage?.getItem('sporely-debug-upload-keys') === 'true'
+  } catch (_) {
+    return false
+  }
+}
+
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
 }
@@ -53,6 +62,43 @@ export function normalizeMediaKey(value) {
   if (text.startsWith('observation-images/')) return text.slice('observation-images/'.length)
   if (text.startsWith('sporely-media/')) return text.slice('sporely-media/'.length)
   return text.replace(/^\/+/, '')
+}
+
+export function buildObservationImageStoragePath({
+  userId,
+  observationId,
+  sortOrder = 0,
+  timestamp = Date.now(),
+  extension = 'jpg',
+} = {}) {
+  const normalizedUserId = normalizeMediaKey(userId)
+  const normalizedObservationId = String(observationId || '').trim()
+  const normalizedSortOrder = Number.isFinite(Number(sortOrder)) ? Number(sortOrder) : 0
+  const normalizedTimestamp = Number.isFinite(Number(timestamp)) ? Number(timestamp) : Date.now()
+  const normalizedExtension = String(extension || '').trim().replace(/^\./, '') || 'jpg'
+  return `${normalizedUserId}/${normalizedObservationId}/${normalizedSortOrder}_${normalizedTimestamp}.${normalizedExtension}`
+}
+
+export function assertObservationImageStoragePathUserPrefix(storagePath, userId, context = {}) {
+  const normalizedPath = normalizeMediaKey(storagePath)
+  const normalizedUserId = normalizeMediaKey(userId)
+  if (!normalizedPath) throw new Error('Missing storage path')
+  if (!normalizedUserId) throw new Error('Missing authenticated user id for image upload')
+
+  if (!normalizedPath.startsWith(`${normalizedUserId}/`)) {
+    const diagnostics = {
+      authUserId: normalizedUserId,
+      keyPrefix: normalizedPath.split('/').slice(0, 2).join('/'),
+      observationId: context.observationId ?? null,
+      imageId: context.imageId ?? null,
+    }
+    if (_isDebugMediaUploadEnabled()) {
+      console.debug('[media-upload] invalid storage key prefix', diagnostics)
+    }
+    throw new Error('Upload key must start with the authenticated user id')
+  }
+
+  return normalizedPath
 }
 
 function _splitPath(storagePath) {
@@ -327,6 +373,9 @@ function _drawHighQuality(source, sourceWidth, sourceHeight, targetCanvas, targe
 async function _prepareUploadBlobInWorker(blob, policy) {
   const worker = _getImageWorker()
   if (!worker) return null
+  const normalizedType = String(blob?.type || '').split(';')[0].trim().toLowerCase()
+  if (normalizedType === 'image/heic' || normalizedType === 'image/heif') return null
+  if (normalizedType && !normalizedType.startsWith('image/')) return null
   const bitmap = await createImageBitmap(blob)
   const id = `image-${++_imageWorkerSeq}`
   const result = await new Promise((resolve, reject) => {
@@ -462,15 +511,19 @@ export async function prepareImageVariants(blob, uploadPolicy) {
 
 export async function uploadPreparedObservationImageVariants(preparedImage, storagePath, options = {}) {
   const uploadPolicy = options?.uploadPolicy || getEffectiveCloudUploadPolicy()
+  const normalizedPath = assertObservationImageStoragePathUserPrefix(storagePath, options?.userId, {
+    observationId: options?.observationId,
+    imageId: options?.imageId,
+  })
   const uploadOptions = {
     uploadMode: preparedImage.uploadMeta?.upload_mode || uploadPolicy.uploadMode,
     cloudPlan: uploadPolicy.cloudPlan,
     uploadOrigin: options?.uploadOrigin || 'web',
   }
 
-  await _uploadToStorage(storagePath, preparedImage.uploadBlob, uploadOptions)
+  await _uploadToStorage(normalizedPath, preparedImage.uploadBlob, uploadOptions)
   if (preparedImage.variants?.thumb) {
-    const thumbPath = getVariantPath(storagePath, 'thumb')
+    const thumbPath = getVariantPath(normalizedPath, 'thumb')
     await _uploadToStorage(thumbPath, preparedImage.variants.thumb, uploadOptions)
   }
   return preparedImage.uploadMeta

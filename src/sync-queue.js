@@ -1,5 +1,5 @@
 import { supabase } from './supabase.js'
-import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, imageExtensionForMimeType } from './images.js'
+import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, imageExtensionForMimeType, buildObservationImageStoragePath } from './images.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
 import { BackgroundTask } from '@capawesome/capacitor-background-task'
@@ -442,6 +442,7 @@ async function _runSyncQueue() {
   // Ensure the user hasn't logged out while items were pending
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return
+  const authUserId = String(session?.user?.id || '').trim()
 
   const items = await _readQueueItems()
 
@@ -536,6 +537,22 @@ async function _runSyncQueue() {
           uploadPolicy = await fetchCloudPlanProfile(item.userId)
           _cloudPlanCache.set(item.userId, uploadPolicy)
         }
+        const queueUserId = String(item.userId || '').trim()
+        if (!authUserId || authUserId !== queueUserId) {
+          const reason = authUserId
+            ? `Queued upload belongs to ${queueUserId || 'a different user'} but the current session is ${authUserId}`
+            : 'Missing authenticated user for queued upload'
+          await _setQueueSyncStatus(item.id, 'failed', {
+            syncErrorMessage: reason,
+            syncImageCount: queuedImages.length,
+          })
+          console.warn('Skipping queued upload with mismatched auth user:', {
+            itemId: item.id,
+            authUserId,
+            queueUserId,
+          })
+          continue
+        }
         for (let i = 0; i < queuedImages.length; i++) {
           if (completedImageIndexes.has(i)) continue
 
@@ -559,15 +576,23 @@ async function _runSyncQueue() {
 
           const blobType = preparedImage.uploadBlob?.type || preparedImage.uploadType || ''
           const ext = imageExtensionForMimeType(blobType)
-          const path = `${item.userId}/${obsId}/${i}_${item.ts}.${ext}`
+          const path = buildObservationImageStoragePath({
+            userId: authUserId,
+            observationId: obsId,
+            sortOrder: i,
+            timestamp: item.ts,
+            extension: ext,
+          })
           
           const uploadMeta = await uploadPreparedObservationImageVariants(preparedImage, path, {
             uploadPolicy,
             uploadOrigin: 'web',
+            userId: authUserId,
+            observationId: obsId,
           })
           await insertObservationImage({
             observation_id: obsId,
-            user_id: item.userId,
+            user_id: authUserId,
             storage_path: path,
             image_type: 'field',
             sort_order: i,
@@ -591,12 +616,20 @@ async function _runSyncQueue() {
         // 3. Confirm remote DB/image state, then purge from the offline queue.
         await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'local-sync')
       } catch (err) {
-        console.error('Background sync failed for queue item', item.id, err)
-        await _setQueueSyncStatus(item.id, 'retrying', {
-          syncErrorMessage: String(err?.message || err || 'Upload failed'),
+        const message = String(err?.message || err || 'Upload failed')
+        const unrecoverable = /authenticated user id|missing authenticated user|different signed-in user/i.test(message)
+        if (unrecoverable) {
+          console.warn('Background sync skipped for queue item', item.id, message)
+        } else {
+          console.error('Background sync failed for queue item', item.id, err)
+        }
+        await _setQueueSyncStatus(item.id, unrecoverable ? 'failed' : 'retrying', {
+          syncErrorMessage: message,
         })
-        _scheduleSyncRetry()
-        break // Network or RLS failure — halt processing to avoid looping errors
+        if (!unrecoverable) {
+          _scheduleSyncRetry()
+          break // Network or RLS failure — halt processing to avoid looping errors
+        }
       }
   }
 }

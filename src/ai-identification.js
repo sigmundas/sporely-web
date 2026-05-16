@@ -90,6 +90,18 @@ function _isDebugPhotoIdEnabled() {
   }
 }
 
+function _isMissingObservationIdentificationsTableError(error) {
+  const message = String(error?.message || error?.details || error?.hint || '').toLowerCase()
+  return (
+    error?.code === 'PGRST205'
+    || (message.includes('observation_identifications') && (
+      message.includes('could not find the table')
+      || message.includes('schema cache')
+      || message.includes('does not exist')
+    ))
+  )
+}
+
 export function debugPhotoId(message, details = {}) {
   if (!_isDebugPhotoIdEnabled()) return
   console.debug(`[photo-id] ${message}`, details)
@@ -559,16 +571,22 @@ export async function runIdentifyComparisonForMediaKeys(mediaKeys, options = {})
 export async function loadObservationIdentifications(observationId, options = {}) {
   if (!observationId) return []
   const client = options.supabaseClient || defaultSupabase
-  const { data, error } = await client
-    .from('observation_identifications')
-    .select('*')
-    .eq('observation_id', observationId)
-    .order('created_at', { ascending: false })
+  try {
+    const { data, error } = await client
+      .from('observation_identifications')
+      .select('*')
+      .eq('observation_id', observationId)
+      .order('created_at', { ascending: false })
 
-  if (error) {
+    if (error) {
+      if (_isMissingObservationIdentificationsTableError(error)) return []
+      throw error
+    }
+    return Array.isArray(data) ? data : []
+  } catch (error) {
+    if (_isMissingObservationIdentificationsTableError(error)) return []
     throw error
   }
-  return Array.isArray(data) ? data : []
 }
 
 export async function maybeLoadCachedIdentification({
@@ -579,15 +597,23 @@ export async function maybeLoadCachedIdentification({
 } = {}) {
   if (!observationId || !requestFingerprint) return null
   const normalizedService = normalizeIdentifyService(service)
-  const { data, error } = await supabaseClient
-    .from('observation_identifications')
-    .select('*')
-    .eq('observation_id', observationId)
-    .eq('service', normalizedService)
-    .eq('request_fingerprint', requestFingerprint)
-    .maybeSingle()
-  if (error) throw error
-  return data || null
+  try {
+    const { data, error } = await supabaseClient
+      .from('observation_identifications')
+      .select('*')
+      .eq('observation_id', observationId)
+      .eq('service', normalizedService)
+      .eq('request_fingerprint', requestFingerprint)
+      .maybeSingle()
+    if (error) {
+      if (_isMissingObservationIdentificationsTableError(error)) return null
+      throw error
+    }
+    return data || null
+  } catch (error) {
+    if (_isMissingObservationIdentificationsTableError(error)) return null
+    throw error
+  }
 }
 
 export function markIdentificationStaleIfFingerprintChanged(rows = [], currentFingerprint = '') {
@@ -618,70 +644,83 @@ export async function saveIdentificationRun({
   if (!observationId || !userId || !requestFingerprint) return null
 
   const normalizedService = normalizeIdentifyService(service)
-  const normalizedResult = normalizeIdentifyRunResult(normalizedService, results, {
-    status,
-    errorMessage,
-    language,
-    modelVersion,
-    imageFingerprint,
-    cropFingerprint,
-    requestFingerprint,
-  })
-  const payload = {
-    observation_id: observationId,
-    user_id: userId,
-    service: normalizedService,
-    source: 'ai',
-    status: normalizedResult.status,
-    image_fingerprint: imageFingerprint || '',
-    crop_fingerprint: cropFingerprint || null,
-    request_fingerprint: requestFingerprint,
-    language: language || null,
-    model_version: modelVersion || null,
-    results: normalizedResult.results,
-    top_scientific_name: topPrediction?.scientificName || normalizedResult.topScientificName || null,
-    top_vernacular_name: topPrediction?.vernacularName || normalizedResult.topVernacularName || null,
-    top_taxon_id: topPrediction?.taxonId || normalizedResult.topTaxonId || null,
-    top_probability: topPrediction?.probability ?? normalizedResult.topProbability ?? null,
-    error_message: errorMessage || null,
-    updated_at: new Date().toISOString(),
-  }
+  try {
+    const normalizedResult = normalizeIdentifyRunResult(normalizedService, results, {
+      status,
+      errorMessage,
+      language,
+      modelVersion,
+      imageFingerprint,
+      cropFingerprint,
+      requestFingerprint,
+    })
+    const payload = {
+      observation_id: observationId,
+      user_id: userId,
+      service: normalizedService,
+      source: 'ai',
+      status: normalizedResult.status,
+      image_fingerprint: imageFingerprint || '',
+      crop_fingerprint: cropFingerprint || null,
+      request_fingerprint: requestFingerprint,
+      language: language || null,
+      model_version: modelVersion || null,
+      results: normalizedResult.results,
+      top_scientific_name: topPrediction?.scientificName || normalizedResult.topScientificName || null,
+      top_vernacular_name: topPrediction?.vernacularName || normalizedResult.topVernacularName || null,
+      top_taxon_id: topPrediction?.taxonId || normalizedResult.topTaxonId || null,
+      top_probability: topPrediction?.probability ?? normalizedResult.topProbability ?? null,
+      error_message: errorMessage || null,
+      updated_at: new Date().toISOString(),
+    }
 
-  const { data: existing, error: loadError } = await supabaseClient
-    .from('observation_identifications')
-    .select('id')
-    .eq('observation_id', observationId)
-    .eq('service', normalizedService)
-    .eq('request_fingerprint', requestFingerprint)
-    .maybeSingle()
-  if (loadError) throw loadError
+    const { data: existing, error: loadError } = await supabaseClient
+      .from('observation_identifications')
+      .select('id')
+      .eq('observation_id', observationId)
+      .eq('service', normalizedService)
+      .eq('request_fingerprint', requestFingerprint)
+      .maybeSingle()
+    if (loadError) throw loadError
 
-  if (existing?.id) {
+    if (existing?.id) {
+      const { data, error } = await supabaseClient
+        .from('observation_identifications')
+        .update(payload)
+        .eq('id', existing.id)
+        .select('*')
+        .maybeSingle()
+      if (error) throw error
+      return data || null
+    }
+
+    const { error: staleError } = await supabaseClient
+      .from('observation_identifications')
+      .update({ status: 'stale', updated_at: new Date().toISOString() })
+      .eq('observation_id', observationId)
+      .eq('service', normalizedService)
+      .neq('request_fingerprint', requestFingerprint)
+    if (staleError) throw staleError
+
     const { data, error } = await supabaseClient
       .from('observation_identifications')
-      .update(payload)
-      .eq('id', existing.id)
+      .insert(payload)
       .select('*')
       .maybeSingle()
     if (error) throw error
     return data || null
+  } catch (error) {
+    if (_isMissingObservationIdentificationsTableError(error)) {
+      if (_isDebugPhotoIdEnabled()) {
+        console.debug('[photo-id] skipping observation_identifications write; table is unavailable', {
+          observationId,
+          service: normalizedService,
+        })
+      }
+      return null
+    }
+    throw error
   }
-
-  const { error: staleError } = await supabaseClient
-    .from('observation_identifications')
-    .update({ status: 'stale', updated_at: new Date().toISOString() })
-    .eq('observation_id', observationId)
-    .eq('service', normalizedService)
-    .neq('request_fingerprint', requestFingerprint)
-  if (staleError) throw staleError
-
-  const { data, error } = await supabaseClient
-    .from('observation_identifications')
-    .insert(payload)
-    .select('*')
-    .maybeSingle()
-  if (error) throw error
-  return data || null
 }
 
 export function renderIdentifyServiceTab(serviceState = {}, options = {}) {

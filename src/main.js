@@ -43,6 +43,7 @@ import {
   loadInaturalistSession,
   maybeHandleInaturalistOAuthReturn,
 } from './inaturalist.js'
+import { syncIdentifyButtonLabels } from './identify.js'
 import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
 import {
   getArtsorakelMaxEdge,

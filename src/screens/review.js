@@ -129,17 +129,16 @@ function _updateReviewObscureHint() {
 }
 
 export function initReview() {
-  document.getElementById('review-close')
-    .addEventListener('click', cancelReview)
-  document.getElementById('review-cancel-btn').addEventListener('click', cancelReview)
-  document.getElementById('review-save-btn').addEventListener('click', saveObservationBatch)
-  document.getElementById('review-habitat').addEventListener('input', event => {
+  document.getElementById('review-close')?.addEventListener('click', cancelReview)
+  document.getElementById('review-cancel-btn')?.addEventListener('click', cancelReview)
+  document.getElementById('review-save-btn')?.addEventListener('click', saveObservationBatch)
+  document.getElementById('review-habitat')?.addEventListener('input', event => {
     state.captureDraft.habitat = event.target.value
   })
-  document.getElementById('review-notes').addEventListener('input', event => {
+  document.getElementById('review-notes')?.addEventListener('input', event => {
     state.captureDraft.notes = event.target.value
   })
-  document.getElementById('review-uncertain').addEventListener('change', event => {
+  document.getElementById('review-uncertain')?.addEventListener('change', event => {
     state.captureDraft.uncertain = event.target.checked
     buildReviewGrid()
   })

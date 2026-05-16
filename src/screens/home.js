@@ -12,6 +12,15 @@ import { openFinds } from './finds.js'
 import { refreshHeaderProfileButtons } from './profile.js'
 import { imageHtml as _imageHtml, wireImageFallback as _wireImageFallback } from '../image-helpers.js'
 
+function _isDebugCommentQueryEnabled() {
+  try {
+    return import.meta.env?.DEV
+      || globalThis.localStorage?.getItem('sporely-debug-comment-queries') === 'true'
+  } catch (_) {
+    return false
+  }
+}
+
 export async function initHome() {
   document.getElementById('home-fab').addEventListener('click', openPreferredCamera)
   document.getElementById('ac-camera')?.addEventListener('click', openPreferredCamera)
@@ -145,13 +154,30 @@ async function loadRecentComments() {
   }
 
   // Also fetch comments that mention the current user (column may not exist yet — ignore error)
-  const { data: mentionData } = await supabase
-    .from('comments')
-    .select('id, body, created_at, user_id, observation_id')
-    .contains('mentioned_user_ids', [state.user.id])
-    .order('created_at', { ascending: false })
-    .limit(3)
-    .then(r => r.error?.message?.includes('mentioned_user_ids') ? { data: [] } : r)
+  if (_isDebugCommentQueryEnabled()) {
+    console.debug('[home-comments] mention preview query', {
+      userId: state.user.id,
+      limit: 3,
+      column: 'mentioned_user_ids',
+    })
+  }
+
+  let mentionData = []
+  try {
+    const { data: mentionedRows, error: mentionError } = await supabase
+      .from('comments')
+      .select('id, body, created_at, user_id, observation_id')
+      .contains('mentioned_user_ids', [state.user.id])
+      .order('created_at', { ascending: false })
+      .limit(3)
+    if (mentionError) throw mentionError
+    mentionData = mentionedRows || []
+  } catch (mentionError) {
+    const message = String(mentionError?.message || '').toLowerCase()
+    if (!message.includes('mentioned_user_ids')) {
+      console.warn('Recent comments mention load failed:', mentionError.message)
+    }
+  }
 
   const { data: blocks } = await supabase
     .from('user_blocks')
