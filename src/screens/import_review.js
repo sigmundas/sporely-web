@@ -22,6 +22,7 @@ import {
   chooseIdentifyComparisonActiveService,
   debugPhotoId,
   getAvailableIdentifyServices,
+  _renderPieSpinnerIcon,
   isTerminalAiServiceState,
   renderIdentifyResultRows,
   renderIdentifyServiceTab,
@@ -362,25 +363,23 @@ function _renderSessionAiResults(session) {
 function _renderSessionAiCardState(session) {
   const normalized = _ensureSessionAiState(session)
   if (!normalized?.files?.length) return ''
-  const states = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]
-    .map(service => _sessionAiResultState(normalized, service))
-    .filter(state => {
-      const status = state.status || 'idle'
-      if (status === 'idle') return false
-      if (status === 'unavailable' && state.available === false) return false
-      return true
-    })
-
-  if (states.length) {
-    return states
-      .map(state => renderIdentifyServiceStateSummary(state))
-      .join('')
+  const runningService = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]
+    .find(service => normalized.aiServiceState?.[service]?.status === 'running')
+  if (runningService) {
+    return `
+      <span class="ai-id-service-state is-running">
+        ${_renderPieSpinnerIcon()}
+        <span class="ai-id-service-state-label">AI ID</span>
+      </span>
+    `
   }
 
   const photoIdServices = _resolveSessionPhotoIdServices(normalized, {
     inaturalistAvailable: normalized.aiAvailability?.[ID_SERVICE_INATURALIST]?.available ?? false,
   })
-  return renderIdentifyServiceStateSummary(_sessionAiResultState(normalized, normalizeIdentifyService(normalized.aiActiveService || photoIdServices.primary)))
+  const activeService = normalizeIdentifyService(normalized.aiActiveService || photoIdServices.primary)
+  const bestService = chooseIdentifyComparisonActiveService(normalized.aiServiceState || {}, activeService)
+  return renderIdentifyServiceStateSummary(_sessionAiResultState(normalized, bestService))
 }
 
 function _renderSessionAiControls(session) {
@@ -595,10 +594,7 @@ async function _runSessionAiComparison(sid, options = {}) {
     }
   }
 
-  const requestedPrimaryState = sessionAi.aiServiceState?.[resolution.primary] || null
-  sessionAi.aiActiveService = isTerminalAiServiceState(requestedPrimaryState)
-    ? resolution.primary
-    : (requestedPrimaryState ? sessionAi.aiActiveService : chooseIdentifyComparisonActiveService(sessionAi.aiServiceState || {}, resolution.primary))
+  sessionAi.aiActiveService = chooseIdentifyComparisonActiveService(sessionAi.aiServiceState || {}, resolution.primary)
   sessionAi.aiService = sessionAi.aiActiveService
   _persistSessions()
   renderSessions()
@@ -694,10 +690,7 @@ async function _runAiIdAll() {
           inaturalistAvailable: sessionState.aiAvailability?.[ID_SERVICE_INATURALIST]?.available ?? inaturalistAvailable,
           comparisonRequested: true,
         });
-        const requestedPrimaryState = sessionState.aiServiceState?.[resolution.primary] || null
-        sessionState.aiActiveService = isTerminalAiServiceState(requestedPrimaryState)
-          ? resolution.primary
-          : (requestedPrimaryState ? sessionState.aiActiveService : chooseIdentifyComparisonActiveService(sessionState.aiServiceState || {}, resolution.primary))
+        sessionState.aiActiveService = chooseIdentifyComparisonActiveService(sessionState.aiServiceState || {}, resolution.primary)
         sessionState.aiService = sessionState.aiActiveService
         const activePredictions = sessionState.aiPredictionsByService?.[sessionState.aiActiveService] || []
         if (_applySessionAiTopPrediction(session, activePredictions)) {

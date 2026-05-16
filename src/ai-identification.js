@@ -98,7 +98,9 @@ export function debugPhotoId(message, details = {}) {
 export function _renderPieSpinnerIcon(tone = '') {
   return `<span class="ai-id-service-tab-icon ai-pie-spinner ${tone}" aria-hidden="true">
     <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <path class="ai-pie-spinner-fill" pathLength="100" d="M8 4 A4 4 0 1 1 8 12 A4 4 0 1 1 8 4" />
+      <path class="ai-pie-spinner-fill" pathLength="100" d="M8 4 A4 4 0 1 1 8 12 A4 4 0 1 1 8 4">
+        <animate attributeName="stroke-dasharray" values="0 100;100 0;0 100" keyTimes="0;0.5;1" dur="2.4s" repeatCount="indefinite" />
+      </path>
     </svg>
   </span>`
 }
@@ -106,7 +108,9 @@ export function _renderPieSpinnerIcon(tone = '') {
 export function _renderPieSpinnerDot(tone = '') {
   return `<span class="ai-id-dot ai-pie-spinner ${tone}" aria-hidden="true">
     <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <path class="ai-pie-spinner-fill" pathLength="100" d="M8 4 A4 4 0 1 1 8 12 A4 4 0 1 1 8 4" />
+      <path class="ai-pie-spinner-fill" pathLength="100" d="M8 4 A4 4 0 1 1 8 12 A4 4 0 1 1 8 4">
+        <animate attributeName="stroke-dasharray" values="0 100;100 0;0 100" keyTimes="0;0.5;1" dur="2.4s" repeatCount="indefinite" />
+      </path>
     </svg>
   </span>`
 }

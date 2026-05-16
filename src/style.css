@@ -2536,9 +2536,8 @@ html, body {
   stroke-linecap: butt;
   stroke-linejoin: round;
   stroke-width: 8;
-  animation: ai-pie-spinner-cycle 2.4s linear infinite;
+  stroke-dasharray: 0 100;
   stroke-dashoffset: 25;
-  will-change: stroke-dasharray;
 }
 .ai-pie-spinner.is-good {
   color: var(--green-bright);
@@ -2548,17 +2547,6 @@ html, body {
 }
 .ai-pie-spinner.is-low {
   color: var(--red);
-}
-@keyframes ai-pie-spinner-cycle {
-  0% {
-    stroke-dasharray: 0 100;
-  }
-  50% {
-    stroke-dasharray: 100 0;
-  }
-  100% {
-    stroke-dasharray: 0 100;
-  }
 }
 .detail-ai-results-shell {
   display: flex;
