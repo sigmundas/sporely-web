@@ -379,6 +379,21 @@ export function shouldRunServiceFromTab(serviceState = null) {
   return !serviceState || serviceState.status === 'idle' || serviceState.status === 'stale'
 }
 
+export function canViewServiceResult(serviceState = null) {
+  return Boolean(
+    serviceState?.canView
+    || ['success', 'no_match', 'error', 'stale', 'unavailable'].includes(serviceState?.status)
+    || Array.isArray(serviceState?.predictions) && serviceState.predictions.length > 0
+    || serviceState?.status === 'running'
+    || serviceState?.active
+  )
+}
+
+export function canRunService(serviceState = null) {
+  if (typeof serviceState?.canRun === 'boolean') return serviceState.canRun
+  return serviceState?.available !== false && shouldRunServiceFromTab(serviceState)
+}
+
 export function markRequestedServicesRunning(existingResults = {}, availability = {}, requestedServices = []) {
   const requested = new Set(
     (Array.isArray(requestedServices) ? requestedServices : [])
@@ -665,10 +680,13 @@ export async function saveIdentificationRun({
 export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
   const service = normalizeIdentifyService(serviceState.service)
   const label = _identifyServiceLabel(service)
+  const canView = canViewServiceResult(serviceState)
+  const canRun = canRunService(serviceState)
+  const isDisabled = !canView && !canRun
   const statusClass = [
     'ai-id-service-tab',
     serviceState.active ? 'is-active' : '',
-    serviceState.available === false ? 'is-disabled' : '',
+    isDisabled ? 'is-disabled' : '',
     serviceState.status === 'running' ? 'is-running' : '',
     serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'has-results' : '',
     serviceState.status === 'error' ? 'has-error' : '',
@@ -685,7 +703,7 @@ export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
       data-identify-service-tab="${service}"
       ${options.sid != null ? `data-sid="${_esc(options.sid)}"` : ''}
       title="${_esc(serviceState.available === false ? (serviceState.reason || options.unavailableReason || '') : (serviceState.errorMessage || ''))}"
-      ${serviceState.available === false ? 'disabled aria-disabled="true"' : ''}
+      ${isDisabled ? 'disabled aria-disabled="true"' : 'aria-disabled="false"'}
     >
       ${_renderServiceIcon(serviceState)}
       <span class="ai-id-service-tab-label">${_esc(label)}</span>

@@ -15,6 +15,8 @@ import {
   runIdentifyComparisonForBlobs,
   saveIdentificationRun,
   isTerminalAiServiceState,
+  canRunService,
+  canViewServiceResult,
   shouldRunServiceFromTab,
 } from './ai-identification.js'
 
@@ -226,6 +228,28 @@ test('service tabs accept a session id for scoped wiring', () => {
   }, { sid: 'session-42' })
 
   assert.match(html, /data-sid="session-42"/)
+})
+
+test('service tabs keep stored unavailable results clickable while disabling idle unavailable tabs', () => {
+  const storedUnavailable = renderIdentifyServiceTab({
+    service: 'inat',
+    status: 'unavailable',
+    available: false,
+    errorMessage: 'Please log in',
+  })
+  assert.doesNotMatch(storedUnavailable, /(?:^|[\s<])disabled(?:\s|=|>)/)
+  assert.match(storedUnavailable, /aria-disabled="false"/)
+
+  const idleUnavailable = renderIdentifyServiceTab({
+    service: 'inat',
+    status: 'idle',
+    available: false,
+  })
+  assert.match(idleUnavailable, /(?:^|[\s<])disabled(?:\s|=|>)/)
+  assert.match(idleUnavailable, /aria-disabled="true"/)
+
+  assert.equal(canViewServiceResult({ status: 'unavailable' }), true)
+  assert.equal(canRunService({ status: 'idle', available: false }), false)
 })
 
 test('collapsed AI status chips render the active service and confidence percentage', () => {

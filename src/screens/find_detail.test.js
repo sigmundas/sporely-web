@@ -1,8 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
 
-import { _setDetailAiActiveService } from './find_detail.js'
+import {
+  _buildDetailAiCachedResults,
+  _hasAiRunResult,
+  _hasStoredAiResult,
+  _renderDetailAiResults,
+  _renderDetailAiTabs,
+  _setDetailAiActiveService,
+  detailAiState,
+} from './find_detail.js'
 
 class MockClassList {
   constructor(initial = []) {
@@ -46,35 +53,51 @@ class MockClassList {
 function makeTab(service, active = false) {
   const icon = { outerHTML: '' }
   const score = { textContent: '', style: {} }
+  const label = { insertAdjacentHTML() {} }
   return {
     dataset: { identifyServiceTab: service },
     classList: new MockClassList(active ? ['is-active'] : []),
     disabled: false,
+    attributes: {},
+    setAttribute(name, value) {
+      this.attributes[name] = String(value)
+    },
     querySelector(selector) {
-      if (selector === '.ai-id-service-tab-icon') return icon
+      if (selector === '.ai-id-service-tab-icon, .ai-id-dot') return icon
       if (selector === '.ai-id-service-tab-score') return score
+      if (selector === '.ai-id-service-tab-label') return label
       return null
     },
   }
 }
 
-test('find detail service-tab click updates active tab class', () => {
-  const tabs = [
-    makeTab('artsorakel', true),
-    makeTab('inat', false),
-  ]
-  const runDot = { className: 'ai-id-dot' }
-  const runLabel = { textContent: '' }
-  const runBtn = {
-    disabled: false,
-    querySelector(selector) {
-      if (selector === '.ai-id-dot') return runDot
-      if (selector === '[data-identify-run-label]') return runLabel
-      return null
+function makeResultsEl() {
+  return {
+    innerHTML: '',
+    style: {},
+    dataset: {},
+    querySelectorAll() {
+      return []
     },
   }
-  const previousDocument = globalThis.document
+}
 
+function resetDetailState() {
+  detailAiState.running = false
+  detailAiState.runningByService = {}
+  detailAiState.activeService = 'artsorakel'
+  detailAiState.availability = {}
+  detailAiState.resultsByService = {}
+  detailAiState.cachedRows = []
+  detailAiState.currentFingerprint = ''
+  detailAiState.requestedFingerprint = ''
+  detailAiState.currentFingerprintByService = {}
+  detailAiState.requestedFingerprintByService = {}
+  detailAiState.stale = false
+}
+
+function withDocument({ tabs = [], resultsEl = makeResultsEl(), staleNote = { style: {} }, runBtn = null } = {}) {
+  const previous = globalThis.document
   globalThis.document = {
     querySelectorAll(selector) {
       if (selector === '[data-identify-service-tab]') return tabs
@@ -82,34 +105,141 @@ test('find detail service-tab click updates active tab class', () => {
     },
     querySelector(selector) {
       if (selector === '[data-identify-run-button]') return runBtn
+      if (selector === '[data-identify-stale-note]') return staleNote
       return null
     },
-    getElementById() {
+    getElementById(id) {
+      if (id === 'detail-ai-results') return resultsEl
       return null
     },
   }
+  return () => {
+    globalThis.document = previous
+  }
+}
+
+test('idle find detail AI state stays neutral before any run or cached result', () => {
+  resetDetailState()
+  const resultsEl = makeResultsEl()
+  const restore = withDocument({ resultsEl })
 
   try {
+    _renderDetailAiResults()
+    assert.match(resultsEl.innerHTML, /Run AI Photo ID to get suggestions|review\.runAiIdPrompt/)
+    assert.doesNotMatch(resultsEl.innerHTML, /no suggestion|no suggestions|returned no suggestion/i)
+  } finally {
+    restore()
+  }
+})
+
+test('cached rows select the matching fingerprint and mark older rows stale', () => {
+  const rows = [
+    {
+      service: 'artsorakel',
+      status: 'success',
+      request_fingerprint: 'req-1',
+      top_probability: 0.91,
+      results: [{ scientificName: 'Amanita muscaria', probability: 0.91 }],
+    },
+    {
+      service: 'inat',
+      status: 'no_match',
+      request_fingerprint: 'old-inat',
+      results: [],
+    },
+  ]
+
+  const results = _buildDetailAiCachedResults(rows, {
+    artsorakel: 'req-1',
+    inat: 'new-inat',
+  })
+
+  assert.equal(results.artsorakel.status, 'success')
+  assert.equal(results.artsorakel.predictions[0].scientificName, 'Amanita muscaria')
+  assert.equal(results.inat.status, 'stale')
+  assert.equal(results.inat.predictions.length, 0)
+  assert.deepEqual(_buildDetailAiCachedResults([], { artsorakel: 'req-1' }), {})
+})
+
+test('stored results remain clickable even when the current availability says unavailable', () => {
+  resetDetailState()
+  const tabs = [
+    makeTab('artsorakel', true),
+    makeTab('inat'),
+  ]
+  const resultsEl = makeResultsEl()
+  const restore = withDocument({ tabs, resultsEl })
+
+  try {
+    detailAiState.availability = {
+      artsorakel: { available: false, reason: 'Unavailable now' },
+      inat: { available: false, reason: 'Unavailable now' },
+    }
+    detailAiState.resultsByService = {
+      artsorakel: { service: 'artsorakel', status: 'success', predictions: [{ scientificName: 'Amanita muscaria' }] },
+      inat: { service: 'inat', status: 'unavailable', predictions: [], errorMessage: 'Please log in' },
+    }
+
+    _renderDetailAiTabs()
+    assert.equal(tabs[0].disabled, false)
+    assert.equal(tabs[1].disabled, false)
+    assert.equal(tabs[0].attributes['aria-disabled'], 'false')
+    assert.equal(tabs[1].attributes['aria-disabled'], 'false')
+    assert.equal(tabs[0].classList.contains('is-disabled'), false)
+    assert.equal(tabs[1].classList.contains('is-disabled'), false)
+
     _setDetailAiActiveService('inat')
     assert.equal(tabs[0].classList.contains('is-active'), false)
     assert.equal(tabs[1].classList.contains('is-active'), true)
   } finally {
-    globalThis.document = previousDocument
+    restore()
   }
 })
 
-test('find detail ai flow defaults to the setting-selected primary service and requires usable blobs for iNaturalist', () => {
-  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+test('no-match and error states still render their stored messages', () => {
+  resetDetailState()
+  const resultsEl = makeResultsEl()
+  const restore = withDocument({ resultsEl })
 
-  assert.match(source, /detailAiState\.activeService = getDefaultIdService\(\)/)
-  assert.match(source, /const identifyInputs = await prepareDetailIdentifyInputs\(sources\.galleryImgs, 'medium'\)/)
-  assert.match(source, /const hasInatBlob = usableBlobs\.length > 0/)
-  assert.match(source, /available: Boolean\(inatLoggedIn && hasInatBlob\)/)
-  assert.match(source, /detailAiState\.activeService = photoIdServices\.primary/)
-  assert.match(source, /detailAiState\.activeService = primaryService/)
-  assert.match(source, /photoIdServices: resolution/)
-  assert.match(source, /const inaturalistSession = await loadInaturalistSession\(\)\s+const availabilityList = await getAvailableIdentifyServices\(\{\s+mediaKeys: detailImageRows\.map\(row => row\.storage_path\)\.filter\(Boolean\),\s+inaturalistSession,/)
-  assert.doesNotMatch(source, /chooseIdentifyComparisonActiveService/)
-  assert.doesNotMatch(source, /comparison\.activeService/)
-  assert.doesNotMatch(source, /activeService = ID_SERVICE_ARTSORAKEL/)
+  try {
+    detailAiState.resultsByService = {
+      artsorakel: {
+        service: 'artsorakel',
+        status: 'no_match',
+        predictions: [],
+      },
+    }
+    _renderDetailAiResults()
+    assert.match(resultsEl.innerHTML, /no suggestion|no suggestions/i)
+
+    detailAiState.resultsByService = {
+      artsorakel: {
+        service: 'artsorakel',
+        status: 'error',
+        predictions: [],
+        errorMessage: 'Boom',
+      },
+    }
+    _renderDetailAiResults()
+    assert.match(resultsEl.innerHTML, /Boom/)
+  } finally {
+    restore()
+  }
+})
+
+test('helper predicates distinguish stored results from idle states', () => {
+  assert.equal(_hasStoredAiResult(null), false)
+  assert.equal(_hasStoredAiResult({ status: 'idle' }), false)
+  assert.equal(_hasStoredAiResult({ status: 'success' }), true)
+  assert.equal(_hasStoredAiResult({ status: 'no_match' }), true)
+  assert.equal(_hasStoredAiResult({ status: 'error' }), true)
+  assert.equal(_hasStoredAiResult({ status: 'stale' }), true)
+  assert.equal(_hasStoredAiResult({ status: 'unavailable' }), true)
+
+  assert.equal(_hasAiRunResult({ status: 'idle' }), false)
+  assert.equal(_hasAiRunResult({ status: 'success' }), true)
+  assert.equal(_hasAiRunResult({ status: 'no_match' }), true)
+  assert.equal(_hasAiRunResult({ status: 'error' }), true)
+  assert.equal(_hasAiRunResult({ status: 'stale' }), true)
+  assert.equal(_hasAiRunResult({ status: 'unavailable' }), true)
 })

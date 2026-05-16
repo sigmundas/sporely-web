@@ -69,6 +69,30 @@ const detailAiState = {
   stale: false,
 }
 
+function _hasStoredAiResult(result = null) {
+  return ['success', 'no_match', 'error', 'stale', 'unavailable'].includes(result?.status)
+    || (Array.isArray(result?.predictions) && result.predictions.length > 0)
+}
+
+function _hasAiRunResult(result = null) {
+  return ['success', 'no_match', 'error', 'unavailable', 'stale'].includes(result?.status)
+}
+
+function _canViewDetailAiResult(service, result = null) {
+  const normalizedService = normalizeIdentifyService(service)
+  return _hasStoredAiResult(result)
+    || detailAiState.activeService === normalizedService
+    || result?.status === 'running'
+}
+
+function _canRunDetailAiService(service, result = null) {
+  const normalizedService = normalizeIdentifyService(service)
+  return Boolean(detailAiState.availability?.[normalizedService]?.available)
+    && !detailAiState.running
+    && !detailAiState.runningByService?.[normalizedService]
+    && shouldRunServiceFromTab(result)
+}
+
 const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
 const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
 const DETAIL_VIEW_SELECT = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
@@ -126,13 +150,16 @@ export function initFindDetail() {
     tab.addEventListener('click', () => {
       const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
       const serviceState = detailAiState.resultsByService?.[service] || null
-      if (shouldRunServiceFromTab(serviceState)) {
-        void _runDetailAiComparison(service)
-        return
-      }
+      const canView = _hasStoredAiResult(serviceState)
+        || detailAiState.activeService === service
+        || serviceState?.status === 'running'
+      const canRun = _canRunDetailAiService(service, serviceState)
+      if (!canView && !canRun) return
       _setDetailAiActiveService(service)
       if (detailAiState.running) return
-      if (serviceState?.available === false) return
+      if (canRun) {
+        void _runDetailAiComparison(service)
+      }
     })
   })
   document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
@@ -751,6 +778,8 @@ function _detailAiTabState(service) {
   const result = detailAiState.resultsByService[service] || null
   const availability = detailAiState.availability?.[service] || null
   const running = !!detailAiState.runningByService?.[service]
+  const canView = _canViewDetailAiResult(service, result)
+  const canRun = _canRunDetailAiService(service, result)
   return {
     service,
     active: detailAiState.activeService === service,
@@ -760,6 +789,11 @@ function _detailAiTabState(service) {
     errorMessage: result?.errorMessage || '',
     topProbability: result?.topProbability ?? null,
     topPrediction: result?.topPrediction || null,
+    hasStored: _hasStoredAiResult(result),
+    hasRunResult: _hasAiRunResult(result),
+    canView,
+    canRun,
+    isDisabled: !canView && !canRun,
   }
 }
 
@@ -783,6 +817,45 @@ function _detailAiServiceIconHtml(state) {
   return _renderServiceIcon(state)
 }
 
+function _buildDetailAiCachedResult(row, currentFingerprint = '') {
+  if (!row) return null
+  const service = normalizeIdentifyService(row.service)
+  const current = String(currentFingerprint || '')
+  const rowFingerprint = String(row.request_fingerprint || '')
+  const result = {
+    service,
+    status: row.status || 'success',
+    predictions: Array.isArray(row.results) ? row.results : [],
+    topPrediction: row.results?.[0] ? {
+      ...row.results[0],
+      confidenceText: `${Math.round(Number(row.top_probability ?? row.results[0]?.probability ?? 0) * 100)}%`,
+    } : null,
+    topProbability: row.top_probability ?? row.results?.[0]?.probability ?? null,
+    topScientificName: row.top_scientific_name || row.results?.[0]?.scientificName || null,
+    topVernacularName: row.top_vernacular_name || row.results?.[0]?.vernacularName || null,
+    topTaxonId: row.top_taxon_id || row.results?.[0]?.taxonId || null,
+    errorMessage: row.error_message || '',
+    request_fingerprint: rowFingerprint,
+  }
+  if (rowFingerprint !== current && result.status !== 'stale') {
+    result.status = 'stale'
+  }
+  return result
+}
+
+function _buildDetailAiCachedResults(rows = [], currentFingerprintByService = {}) {
+  const byService = {}
+  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
+    const serviceRows = (Array.isArray(rows) ? rows : [])
+      .filter(item => normalizeIdentifyService(item.service) === service)
+    const row = serviceRows.find(item => item.request_fingerprint === currentFingerprintByService[service])
+      || serviceRows[0]
+    const result = _buildDetailAiCachedResult(row, currentFingerprintByService[service])
+    if (result) byService[service] = result
+  }
+  return byService
+}
+
 function _renderDetailAiTabs() {
   const photoIdServices = _resolveDetailPhotoIdServices(detailAiState.availability)
   const runBtn = document.querySelector('[data-identify-run-button]')
@@ -798,11 +871,12 @@ function _renderDetailAiTabs() {
     const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
     const state = _detailAiTabState(service)
     tab.classList.toggle('is-active', state.active)
-    tab.classList.toggle('is-disabled', !state.available)
+    tab.classList.toggle('is-disabled', state.isDisabled)
     tab.classList.toggle('is-running', state.status === 'running')
     tab.classList.toggle('has-results', state.status === 'success' || state.status === 'no_match' || state.status === 'stale')
     tab.classList.toggle('has-error', state.status === 'error')
-    tab.disabled = !state.available
+    tab.disabled = false
+    tab.setAttribute('aria-disabled', String(state.isDisabled))
     const icon = tab.querySelector('.ai-id-service-tab-icon, .ai-id-dot')
     if (icon) {
       icon.outerHTML = _detailAiServiceIconHtml(state)
@@ -840,6 +914,16 @@ function _renderDetailAiResults() {
   }
   if (result?.status === 'running') {
     resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
+    resultsEl.style.display = 'block'
+    return
+  }
+  if (!result || result?.status === 'idle') {
+    resultsEl.innerHTML = `<div class="ai-results-empty">${t('review.runAiIdPrompt') || 'Run AI Photo ID to get suggestions.'}</div>`
+    resultsEl.style.display = 'block'
+    return
+  }
+  if (result?.status === 'stale' && !result?.predictions?.length) {
+    resultsEl.innerHTML = `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
     resultsEl.style.display = 'block'
     return
   }
@@ -961,38 +1045,10 @@ async function _loadDetailAiCache() {
     return []
   })
   detailAiState.cachedRows = rows
-  const byService = {}
-  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
-    const row = rows.find(item => normalizeIdentifyService(item.service) === service)
-    if (!row) continue
-    const result = {
-      service,
-      status: row.status || 'success',
-      predictions: Array.isArray(row.results) ? row.results : [],
-      topPrediction: row.results?.[0] ? {
-        ...row.results[0],
-        confidenceText: `${Math.round(Number(row.top_probability ?? row.results[0]?.probability ?? 0) * 100)}%`,
-      } : null,
-      topProbability: row.top_probability ?? row.results?.[0]?.probability ?? null,
-      topScientificName: row.top_scientific_name || row.results?.[0]?.scientificName || null,
-      topVernacularName: row.top_vernacular_name || row.results?.[0]?.vernacularName || null,
-      topTaxonId: row.top_taxon_id || row.results?.[0]?.taxonId || null,
-      errorMessage: row.error_message || '',
-      request_fingerprint: row.request_fingerprint || '',
-    }
-    if (row.request_fingerprint !== detailAiState.currentFingerprintByService[service]) {
-      result.status = 'stale'
-    }
-    byService[service] = result
-  }
-
-  detailAiState.resultsByService = byService
+  detailAiState.resultsByService = _buildDetailAiCachedResults(rows, detailAiState.currentFingerprintByService)
   const photoIdServices = _resolveDetailPhotoIdServices(detailAiState.availability)
   detailAiState.activeService = detailAiState.activeService || photoIdServices.primary
-  detailAiState.stale = rows.some(row => {
-    const service = normalizeIdentifyService(row.service)
-    return byService[service] && row.request_fingerprint !== detailAiState.currentFingerprintByService[service]
-  })
+  detailAiState.stale = Object.values(detailAiState.resultsByService).some(result => result?.status === 'stale')
   _renderDetailAiTabs()
   _renderDetailAiResults()
 }
@@ -1160,7 +1216,7 @@ async function _runDetailAiComparison(serviceOverride = null) {
 
     await Promise.allSettled(requestedServices.map(service => {
       const result = detailAiState.resultsByService?.[service]
-      if (!currentObs?.id || !state.user?.id || !result?.service || result.status === 'unavailable' || result.status === 'idle') {
+      if (!currentObs?.id || !state.user?.id || !result?.service || result.status === 'idle') {
         return Promise.resolve(null)
       }
       const serviceFingerprint = serviceFingerprints[result.service] || _detailImageFingerprint(result.service)
@@ -2354,6 +2410,13 @@ function _hideProgress() {
 }
 
 export {
+  _canRunDetailAiService,
+  _canViewDetailAiResult,
+  _buildDetailAiCachedResult,
+  _buildDetailAiCachedResults,
+  _hasAiRunResult,
+  _hasStoredAiResult,
+  detailAiState,
   _setDetailAiActiveService,
   _renderDetailAiTabs,
   _renderDetailAiResults,
