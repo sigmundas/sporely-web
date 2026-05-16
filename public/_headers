@@ -1,3 +1,10 @@
+# Content Security Policy for the web app shell.
+# Keep this aligned with the live origins used by the app so report-only
+# warnings do not turn into enforced breakage later.
+/*
+  Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; manifest-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://media.sporely.no https://*.supabase.co; connect-src 'self' https://*.supabase.co https://challenges.cloudflare.com https://api.inaturalist.org https://www.inaturalist.org https://ai.artsdatabanken.no https://stedsnavn.artsdatabanken.no https://api.dataforsyningen.dk https://nominatim.openstreetmap.org https://upload.sporely.no https://media.sporely.no; frame-src 'self' https://challenges.cloudflare.com; worker-src 'self' blob:; media-src 'self' blob: data:;
+  Content-Security-Policy-Report-Only: default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; manifest-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://media.sporely.no https://*.supabase.co; connect-src 'self' https://*.supabase.co https://challenges.cloudflare.com https://api.inaturalist.org https://www.inaturalist.org https://ai.artsdatabanken.no https://stedsnavn.artsdatabanken.no https://api.dataforsyningen.dk https://nominatim.openstreetmap.org https://upload.sporely.no https://media.sporely.no; frame-src 'self' https://challenges.cloudflare.com; worker-src 'self' blob:; media-src 'self' blob: data:;
+
 # PWA manifest and icons — short cache so updates are picked up quickly
 /manifest.json
   Cache-Control: no-cache
