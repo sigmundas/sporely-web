@@ -276,6 +276,9 @@ export function buildIdentifyFingerprint(inputs = {}) {
   const language = _normalizeText(inputs.language || 'en') || 'en'
   const observationId = inputs.observationId ?? null
   const maxEdge = Number.isFinite(Number(inputs.maxEdge)) ? Number(inputs.maxEdge) : null
+  const preprocessVersion = Number.isFinite(Number(inputs.preprocessVersion))
+    ? Number(inputs.preprocessVersion)
+    : 2
   const images = (inputs.images || inputs.inputs || [])
     .map((item, index) => _normalizeImageInput(item, index))
 
@@ -284,6 +287,7 @@ export function buildIdentifyFingerprint(inputs = {}) {
     observationId,
     language,
     maxEdge,
+    preprocessVersion,
     images: images.map(image => ({
       id: image.id,
       mediaKey: image.mediaKey,
@@ -295,6 +299,7 @@ export function buildIdentifyFingerprint(inputs = {}) {
 
   const cropFingerprint = _stableFingerprint({
     service,
+    preprocessVersion,
     images: images.map(image => ({
       cropRect: image.cropRect,
       cropSourceW: image.cropSourceW,
@@ -307,6 +312,7 @@ export function buildIdentifyFingerprint(inputs = {}) {
     observationId,
     language,
     maxEdge,
+    preprocessVersion,
     imageFingerprint,
     cropFingerprint,
   })
@@ -316,6 +322,7 @@ export function buildIdentifyFingerprint(inputs = {}) {
     observationId,
     language,
     maxEdge,
+    preprocessVersion,
     images,
     imageFingerprint,
     cropFingerprint,

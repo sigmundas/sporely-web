@@ -7,7 +7,7 @@
 
 import { supabase } from './supabase.js'
 import { t } from './i18n.js'
-import { createCroppedImageBlob, normalizeAiCropRect, prepareImageBlobForUpload } from './image_crop.js'
+import { getBlobImageDimensions, normalizeAiCropRect, prepareImageBlobForUpload } from './image_crop.js'
 import { getArtsorakelMaxEdge } from './settings.js'
 
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
@@ -26,6 +26,99 @@ function _getArtsorakelProxyBaseUrl() {
 
 function _buildNetworkErrorMessage(error) {
   return String(error?.message || error || '').trim().toLowerCase()
+}
+
+function _isArtsorakelDebugEnabled() {
+  try {
+    return globalThis.localStorage?.getItem('sporely-debug-artsorakel') === 'true'
+  } catch (_) {
+    return false
+  }
+}
+
+function _getArtsorakelDebugStore() {
+  if (!globalThis.__sporelyAiDebug || typeof globalThis.__sporelyAiDebug !== 'object') {
+    globalThis.__sporelyAiDebug = {}
+  }
+  if (!Array.isArray(globalThis.__sporelyAiDebug.artsorakel)) {
+    globalThis.__sporelyAiDebug.artsorakel = []
+  }
+  return globalThis.__sporelyAiDebug.artsorakel
+}
+
+function _trimArtsorakelDebugStore() {
+  const store = _getArtsorakelDebugStore()
+  while (store.length > 20) {
+    const removed = store.shift()
+    for (const image of removed?.images || []) {
+      try {
+        if (image?.objectUrl) globalThis.URL?.revokeObjectURL?.(image.objectUrl)
+      } catch (_) {}
+    }
+  }
+}
+
+async function _buildArtsorakelDebugEntry({
+  aiBlob,
+  preparedMeta,
+  options = {},
+  url,
+  fieldName,
+  imageIndex = 0,
+  imageCount = 1,
+}) {
+  const dimensions = preparedMeta?.targetWidth && preparedMeta?.targetHeight
+    ? { width: preparedMeta.targetWidth, height: preparedMeta.targetHeight }
+    : (await getBlobImageDimensions(aiBlob).catch(() => null))
+  const objectUrl = globalThis.URL?.createObjectURL?.(aiBlob) || ''
+  return {
+    timestamp: new Date().toISOString(),
+    service: ID_SERVICE_ARTSORAKEL,
+    screen: options.screen || '',
+    endpoint: url,
+    fieldName,
+    imageCount,
+    imageIndex,
+    images: [{
+      blobType: aiBlob?.type || '',
+      blobSize: Number(aiBlob?.size || 0),
+      width: dimensions?.width ?? null,
+      height: dimensions?.height ?? null,
+      objectUrl,
+      wasCropped: !!preparedMeta?.cropped,
+      cropRect: preparedMeta?.cropRect || null,
+      cropSourceW: preparedMeta?.cropSourceW ?? null,
+      cropSourceH: preparedMeta?.cropSourceH ?? null,
+      sourceWidth: preparedMeta?.sourceWidth ?? null,
+      sourceHeight: preparedMeta?.sourceHeight ?? null,
+      maxEdge: preparedMeta?.maxEdge ?? null,
+    }],
+  }
+}
+
+async function _logArtsorakelRequestIfEnabled({
+  aiBlob,
+  preparedMeta,
+  options = {},
+  url,
+  fieldName,
+  imageIndex = 0,
+  imageCount = 1,
+}) {
+  if (!_isArtsorakelDebugEnabled() || url !== ARTSDATA_AI_URL) return
+  const entry = await _buildArtsorakelDebugEntry({
+    aiBlob,
+    preparedMeta,
+    options,
+    url,
+    fieldName,
+    imageIndex,
+    imageCount,
+  })
+  const store = _getArtsorakelDebugStore()
+  store.push(entry)
+  _trimArtsorakelDebugStore()
+  console.debug('[artsorakel-debug] outgoing request', entry)
 }
 
 export function isArtsorakelNetworkError(error) {
@@ -200,6 +293,10 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
         sourceWidth: options.preparedMeta?.sourceWidth ?? null,
         sourceHeight: options.preparedMeta?.sourceHeight ?? null,
         sourceMaxEdge: options.preparedMeta?.sourceMaxEdge ?? null,
+        cropRect: options.preparedMeta?.cropRect || null,
+        cropSourceW: options.preparedMeta?.cropSourceW ?? null,
+        cropSourceH: options.preparedMeta?.cropSourceH ?? null,
+        cropped: !!options.preparedMeta?.cropped,
         targetWidth: options.preparedMeta?.targetWidth ?? null,
         targetHeight: options.preparedMeta?.targetHeight ?? null,
         resized: !!options.preparedMeta?.resized,
@@ -227,6 +324,15 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
     if (headers) {
       request.headers = headers
     }
+    await _logArtsorakelRequestIfEnabled({
+      aiBlob,
+      preparedMeta: prepared,
+      options,
+      url,
+      fieldName,
+      imageIndex: Number(options.imageIndex || 0),
+      imageCount: Number(options.totalImages || 1),
+    })
     const response = await fetch(url, request)
     if (!response.ok) {
       let payload = null
@@ -399,26 +505,19 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
     const rawBlob = _isBlob(item) ? item : item?.blob
     if (!_isBlob(rawBlob)) return null
 
-    const prepared = await _prepareArtsorakelImageBlob(rawBlob, options)
-    const preparedBlob = prepared.blob
-
-    const cropRect = _isBlob(item) ? null : normalizeAiCropRect(item.cropRect)
-    if (!cropRect) return { blob: preparedBlob, preparedMeta: prepared }
-
-    try {
-      const croppedBlob = await createCroppedImageBlob(preparedBlob, cropRect)
+    if (item?.preprocessed === true && _isBlob(item.blob)) {
       return {
-        blob: croppedBlob,
-        preparedMeta: {
-          ...prepared,
-          converted: true,
-          prepared: true,
-        },
+        blob: item.blob,
+        preparedMeta: item.preparedMeta || item.debug || {},
       }
-    } catch (error) {
-      console.warn('AI crop export failed, falling back to resized image:', error)
-      return { blob: preparedBlob, preparedMeta: prepared }
     }
+
+    const cropRect = normalizeAiCropRect(item?.cropRect)
+    const prepared = await _prepareArtsorakelImageBlob(rawBlob, {
+      ...options,
+      cropRect,
+    })
+    return { blob: prepared.blob, preparedMeta: prepared }
   }))).filter(item => _isBlob(item?.blob))
 
   if (!preparedBlobs.length) return null
@@ -430,16 +529,20 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
       prepared: true,
       preparedBlob: single.blob,
       preparedMeta: single.preparedMeta,
+      totalImages: preparedBlobs.length,
+      imageIndex: 0,
     })
   }
 
   const tolerateFailures = options?.tolerateFailures === true
   const responses = tolerateFailures
-    ? await Promise.allSettled(preparedBlobs.map(item => runArtsorakel(item.blob, lang, {
+    ? await Promise.allSettled(preparedBlobs.map((item, index) => runArtsorakel(item.blob, lang, {
         ...options,
         prepared: true,
         preparedBlob: item.blob,
         preparedMeta: item.preparedMeta,
+        totalImages: preparedBlobs.length,
+        imageIndex: index,
       })))
         .then(results => {
           const fulfilled = results
@@ -449,11 +552,13 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
           const firstError = results.find(result => result.status === 'rejected')?.reason
           throw firstError || new Error('Artsorakel failed for all images')
         })
-    : await Promise.all(preparedBlobs.map(item => runArtsorakel(item.blob, lang, {
+    : await Promise.all(preparedBlobs.map((item, index) => runArtsorakel(item.blob, lang, {
         ...options,
         prepared: true,
         preparedBlob: item.blob,
         preparedMeta: item.preparedMeta,
+        totalImages: preparedBlobs.length,
+        imageIndex: index,
       })))
   return _combinePredictionResponses(responses, preparedBlobs.length)
 }

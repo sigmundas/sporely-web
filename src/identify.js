@@ -184,10 +184,33 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
     options.onImageSent()
   }
 
-  const prepared = await prepareImageBlobForUpload(blob, {
-    maxEdge: Math.max(1, Number(options.maxEdge || INAT_MAX_EDGE) || INAT_MAX_EDGE),
-    forceJpeg: true,
-  })
+  const prepared = options.prepared === true && _isBlob(options.preparedBlob)
+    ? {
+        blob: options.preparedBlob,
+        inputType: blob.type || '',
+        inputSize: Number(blob.size || 0),
+        outputType: options.preparedBlob.type || '',
+        outputSize: Number(options.preparedBlob.size || 0),
+        sourceWidth: options.preparedMeta?.sourceWidth ?? null,
+        sourceHeight: options.preparedMeta?.sourceHeight ?? null,
+        sourceMaxEdge: options.preparedMeta?.sourceMaxEdge ?? null,
+        targetWidth: options.preparedMeta?.targetWidth ?? null,
+        targetHeight: options.preparedMeta?.targetHeight ?? null,
+        resized: !!options.preparedMeta?.resized,
+        converted: !!options.preparedMeta?.converted,
+        prepared: true,
+        fallback: !!options.preparedMeta?.fallback,
+        cropRect: options.preparedMeta?.cropRect || null,
+        cropSourceW: options.preparedMeta?.cropSourceW ?? null,
+        cropSourceH: options.preparedMeta?.cropSourceH ?? null,
+        cropped: !!options.preparedMeta?.cropped,
+        maxEdge: Math.max(1, Number(options.preparedMeta?.maxEdge || options.maxEdge || INAT_MAX_EDGE) || INAT_MAX_EDGE),
+      }
+    : await prepareImageBlobForUpload(blob, {
+        maxEdge: Math.max(1, Number(options.maxEdge || INAT_MAX_EDGE) || INAT_MAX_EDGE),
+        forceJpeg: true,
+        cropRect: options.cropRect,
+      })
   const aiBlob = prepared.blob
   const filename = _buildInaturalistFilename(aiBlob)
   const dims = prepared.sourceWidth && prepared.sourceHeight
@@ -287,18 +310,48 @@ export function formatIdentifyScore(service, score) {
 export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
   const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
     const rawBlob = _isBlob(item) ? item : item?.blob
-    return _isBlob(rawBlob) ? rawBlob : null
-  }))).filter(_isBlob)
+    if (!_isBlob(rawBlob)) return null
+
+    if (item?.preprocessed === true && _isBlob(item.blob)) {
+      return {
+        blob: item.blob,
+        preparedMeta: item.preparedMeta || item.debug || {},
+      }
+    }
+
+    const prepared = await prepareImageBlobForUpload(rawBlob, {
+      maxEdge: Math.max(1, Number(options.maxEdge || INAT_MAX_EDGE) || INAT_MAX_EDGE),
+      forceJpeg: true,
+      cropRect: item?.cropRect,
+    })
+    return {
+      blob: prepared.blob,
+      preparedMeta: prepared,
+    }
+  }))).filter(item => _isBlob(item?.blob))
 
   if (!preparedBlobs.length) return []
 
   if (preparedBlobs.length === 1) {
-    return _runInaturalistSuggestion(preparedBlobs[0], lang, options)
+    const [single] = preparedBlobs
+    return _runInaturalistSuggestion(single.blob, lang, {
+      ...options,
+      prepared: true,
+      preparedBlob: single.blob,
+      preparedMeta: single.preparedMeta,
+    })
   }
 
   const tolerateFailures = options?.tolerateFailures === true
   const responses = tolerateFailures
-    ? await Promise.allSettled(preparedBlobs.map(blob => _runInaturalistSuggestion(blob, lang, options)))
+    ? await Promise.allSettled(preparedBlobs.map((item, index) => _runInaturalistSuggestion(item.blob, lang, {
+        ...options,
+        prepared: true,
+        preparedBlob: item.blob,
+        preparedMeta: item.preparedMeta,
+        imageIndex: index,
+        totalImages: preparedBlobs.length,
+      })))
         .then(results => {
           const fulfilled = results
             .filter(result => result.status === 'fulfilled')
@@ -307,7 +360,14 @@ export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
           const firstError = results.find(result => result.status === 'rejected')?.reason
           throw firstError || new Error('iNaturalist failed for all images')
         })
-    : await Promise.all(preparedBlobs.map(blob => _runInaturalistSuggestion(blob, lang, options)))
+    : await Promise.all(preparedBlobs.map((item, index) => _runInaturalistSuggestion(item.blob, lang, {
+        ...options,
+        prepared: true,
+        preparedBlob: item.blob,
+        preparedMeta: item.preparedMeta,
+        imageIndex: index,
+        totalImages: preparedBlobs.length,
+      })))
 
   return _combinePredictions(responses, preparedBlobs.length)
 }

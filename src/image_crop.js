@@ -7,14 +7,20 @@ function _clamp(value, min, max) {
 
 function _loadBlobImage(blob) {
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(blob)
-    const img = new Image()
+    const urlApi = globalThis.URL
+    const imageCtor = globalThis.Image
+    if (!urlApi?.createObjectURL || typeof imageCtor !== 'function') {
+      reject(new Error('Image decode unavailable'))
+      return
+    }
+    const url = urlApi.createObjectURL(blob)
+    const img = new imageCtor()
     img.onload = () => {
-      URL.revokeObjectURL(url)
+      urlApi.revokeObjectURL?.(url)
       resolve(img)
     }
     img.onerror = () => {
-      URL.revokeObjectURL(url)
+      urlApi.revokeObjectURL?.(url)
       reject(new Error('Image decode failed'))
     }
     img.src = url
@@ -23,6 +29,39 @@ function _loadBlobImage(blob) {
 
 function _isBlob(value) {
   return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
+}
+
+async function _decodeBlobImageSource(blob) {
+  if (typeof createImageBitmap === 'function' && typeof window !== 'undefined') {
+    try {
+      const bitmap = await createImageBitmap(blob)
+      const width = bitmap.width || null
+      const height = bitmap.height || null
+      if (width && height) {
+        return {
+          source: bitmap,
+          width,
+          height,
+          release() {
+            bitmap.close?.()
+          },
+        }
+      }
+      bitmap.close?.()
+    } catch (_) {
+      // Fall back to the existing image-element path below.
+    }
+  }
+
+  const img = await _loadBlobImage(blob)
+  return {
+    source: img,
+    width: img.naturalWidth || img.width || null,
+    height: img.naturalHeight || img.height || null,
+    release() {
+      img.src = ''
+    },
+  }
 }
 
 export function normalizeAiCropRect(rect) {
@@ -219,6 +258,10 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     inputSize: Number(blob?.size || 0),
     sourceWidth: null,
     sourceHeight: null,
+    cropRect: null,
+    cropSourceW: null,
+    cropSourceH: null,
+    cropped: false,
     sourceMaxEdge: null,
     targetWidth: null,
     targetHeight: null,
@@ -233,38 +276,62 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     return { blob, ...inputMeta, outputType: inputMeta.inputType, outputSize: inputMeta.inputSize }
   }
 
-  const imageCtor = globalThis.Image
   const documentApi = globalThis.document
   const urlApi = globalThis.URL
 
-  if (typeof imageCtor === 'undefined' || typeof documentApi === 'undefined' || typeof urlApi === 'undefined') {
+  if (typeof documentApi === 'undefined' || typeof urlApi === 'undefined') {
     return { blob, ...inputMeta, outputType: inputMeta.inputType, outputSize: inputMeta.inputSize }
   }
 
-  let img = null
+  let decoded = null
   let objectUrl = null
 
   try {
+    const cropRect = normalizeAiCropRect(options.cropRect)
     objectUrl = urlApi.createObjectURL(blob)
-    img = await new Promise((resolve, reject) => {
+    const imageCtor = globalThis.Image
+    if (typeof imageCtor === 'undefined') {
+      throw new Error('Image decode unavailable')
+    }
+    decoded = await new Promise((resolve, reject) => {
       const nextImg = new imageCtor()
-      nextImg.onload = () => resolve(nextImg)
+      nextImg.onload = () => resolve({
+        source: nextImg,
+        width: nextImg.naturalWidth || nextImg.width || null,
+        height: nextImg.naturalHeight || nextImg.height || null,
+        release() {
+          nextImg.src = ''
+        },
+      })
       nextImg.onerror = () => reject(new Error('Image decode failed'))
       nextImg.src = objectUrl
     })
 
-    const sourceWidth = img.naturalWidth || img.width || null
-    const sourceHeight = img.naturalHeight || img.height || null
+    const sourceWidth = decoded.width || null
+    const sourceHeight = decoded.height || null
     const sourceMaxEdge = Math.max(Number(sourceWidth) || 0, Number(sourceHeight) || 0) || null
-    const needsResize = Number.isFinite(sourceMaxEdge) && sourceMaxEdge > inputMeta.maxEdge
+    const cropWidth = cropRect && sourceWidth && sourceHeight
+      ? Math.max(1, Math.round((cropRect.x2 - cropRect.x1) * sourceWidth))
+      : sourceWidth
+    const cropHeight = cropRect && sourceWidth && sourceHeight
+      ? Math.max(1, Math.round((cropRect.y2 - cropRect.y1) * sourceHeight))
+      : sourceHeight
+    const workingWidth = cropRect ? cropWidth : sourceWidth
+    const workingHeight = cropRect ? cropHeight : sourceHeight
+    const workingMaxEdge = Math.max(Number(workingWidth) || 0, Number(workingHeight) || 0) || null
+    const needsResize = Number.isFinite(workingMaxEdge) && workingMaxEdge > inputMeta.maxEdge
     const normalizedType = String(blob.type || '').toLowerCase()
     const needsJpeg = options.forceJpeg === true ? normalizedType !== 'image/jpeg' : normalizedType !== 'image/jpeg'
 
     inputMeta.sourceWidth = sourceWidth
     inputMeta.sourceHeight = sourceHeight
     inputMeta.sourceMaxEdge = sourceMaxEdge
+    inputMeta.cropRect = cropRect
+    inputMeta.cropSourceW = sourceWidth
+    inputMeta.cropSourceH = sourceHeight
+    inputMeta.cropped = !!cropRect
 
-    if (!sourceWidth || !sourceHeight || (!needsResize && !needsJpeg)) {
+    if (!sourceWidth || !sourceHeight || (!cropRect && !needsResize && !needsJpeg)) {
       return {
         blob,
         ...inputMeta,
@@ -274,11 +341,11 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     }
 
     const targetWidth = needsResize
-      ? Math.max(1, Math.round(sourceWidth * (inputMeta.maxEdge / sourceMaxEdge)))
-      : sourceWidth
+      ? Math.max(1, Math.round(workingWidth * (inputMeta.maxEdge / workingMaxEdge)))
+      : workingWidth
     const targetHeight = needsResize
-      ? Math.max(1, Math.round(sourceHeight * (inputMeta.maxEdge / sourceMaxEdge)))
-      : sourceHeight
+      ? Math.max(1, Math.round(workingHeight * (inputMeta.maxEdge / workingMaxEdge)))
+      : workingHeight
     const canvas = documentApi.createElement('canvas')
     canvas.width = targetWidth
     canvas.height = targetHeight
@@ -286,7 +353,15 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     if (!ctx) throw new Error('Canvas context unavailable')
     ctx.imageSmoothingEnabled = true
     ctx.imageSmoothingQuality = 'high'
-    ctx.drawImage(img, 0, 0, sourceWidth, sourceHeight, 0, 0, targetWidth, targetHeight)
+    if (cropRect) {
+      const sourceX = Math.max(0, Math.round(cropRect.x1 * sourceWidth))
+      const sourceY = Math.max(0, Math.round(cropRect.y1 * sourceHeight))
+      const drawWidth = Math.max(1, Math.round((cropRect.x2 - cropRect.x1) * sourceWidth))
+      const drawHeight = Math.max(1, Math.round((cropRect.y2 - cropRect.y1) * sourceHeight))
+      ctx.drawImage(decoded.source, sourceX, sourceY, drawWidth, drawHeight, 0, 0, targetWidth, targetHeight)
+    } else {
+      ctx.drawImage(decoded.source, 0, 0, sourceWidth, sourceHeight, 0, 0, targetWidth, targetHeight)
+    }
 
     const outputBlob = await new Promise(resolve => {
       canvas.toBlob(nextBlob => resolve(_isBlob(nextBlob) ? nextBlob : null), 'image/jpeg', 0.88)
@@ -298,7 +373,7 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     inputMeta.targetWidth = targetWidth
     inputMeta.targetHeight = targetHeight
     inputMeta.resized = needsResize
-    inputMeta.converted = needsJpeg
+    inputMeta.converted = needsJpeg || !!cropRect
     inputMeta.prepared = true
     return {
       blob: outputBlob,
@@ -326,7 +401,7 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     }
   } finally {
     if (objectUrl) urlApi.revokeObjectURL?.(objectUrl)
-    if (img) img.src = ''
+    decoded?.release?.()
   }
 }
 

@@ -37,7 +37,7 @@ import { fetchCloudPlanProfile } from '../cloud-plan.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 import { setCaptureCompleteHandler } from './capture.js'
-import { getBlobImageDimensions } from '../image_crop.js'
+import { prepareImageBlobForUpload } from '../image_crop.js'
 
 let currentObs    = null
 let selectedTaxon = null
@@ -153,13 +153,8 @@ export function initFindDetail() {
       const canView = _hasStoredAiResult(serviceState)
         || detailAiState.activeService === service
         || serviceState?.status === 'running'
-      const canRun = _canRunDetailAiService(service, serviceState)
-      if (!canView && !canRun) return
+      if (!canView) return
       _setDetailAiActiveService(service)
-      if (detailAiState.running) return
-      if (canRun) {
-        void _runDetailAiComparison(service)
-      }
     })
   })
   document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
@@ -330,7 +325,7 @@ export async function openFindDetail(obsId, options = {}) {
   let imgData = null
   const { data: imgWithCrop, error: imgErr } = await supabase
     .from('observation_images')
-    .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2')
+    .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h')
     .eq('observation_id', obsId)
     .order('sort_order', { ascending: true })
   if (imgErr) {
@@ -339,7 +334,7 @@ export async function openFindDetail(obsId, options = {}) {
       .select('id, storage_path, sort_order')
       .eq('observation_id', obsId)
       .order('sort_order', { ascending: true })
-    imgData = (imgBase || []).map(r => ({ ...r, image_type: 'field', ai_crop_x1: null, ai_crop_y1: null, ai_crop_x2: null, ai_crop_y2: null }))
+    imgData = (imgBase || []).map(r => ({ ...r, image_type: 'field', ai_crop_x1: null, ai_crop_y1: null, ai_crop_x2: null, ai_crop_y2: null, ai_crop_source_w: null, ai_crop_source_h: null }))
   } else {
     imgData = imgWithCrop || []
   }
@@ -483,6 +478,12 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   img.dataset.fullSrc = _mediaSourceUrl(originalSource) || displayUrl
   img.dataset.aiSrc = _mediaSourceUrl(aiSource) || displayUrl
   img.dataset.aiFallback = _mediaSourceUrl(originalSource) || _mediaSourceUrl(source) || displayUrl
+  img.dataset.aiCropX1 = row.ai_crop_x1 ?? ''
+  img.dataset.aiCropY1 = row.ai_crop_y1 ?? ''
+  img.dataset.aiCropX2 = row.ai_crop_x2 ?? ''
+  img.dataset.aiCropY2 = row.ai_crop_y2 ?? ''
+  img.dataset.aiCropSourceW = row.ai_crop_source_w ?? ''
+  img.dataset.aiCropSourceH = row.ai_crop_source_h ?? ''
   if (source.fallbackUrl && source.fallbackUrl !== source.primaryUrl) {
     img.addEventListener('error', () => {
       if (img.dataset.fallbackApplied === 'true') return
@@ -519,6 +520,8 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
               x1: r.ai_crop_x1, y1: r.ai_crop_y1,
               x2: r.ai_crop_x2, y2: r.ai_crop_y2,
             }),
+            aiCropSourceW: r.ai_crop_source_w ?? null,
+            aiCropSourceH: r.ai_crop_source_h ?? null,
           })),
           onChange: (idx, meta) => {
             const r = detailImageRows[idx]
@@ -597,25 +600,38 @@ function _storagePathExtension(storagePath) {
   return idx >= 0 ? name.slice(idx + 1).toLowerCase() : ''
 }
 
-async function _describeDetailBlob(blob) {
-  if (!(blob instanceof Blob)) {
-    return { blobType: '', blobSize: 0, width: null, height: null }
-  }
+function _isDetailAiDebugFlagEnabled(flag) {
   try {
-    const dims = await getBlobImageDimensions(blob)
-    return {
-      blobType: blob.type || '',
-      blobSize: blob.size || 0,
-      width: dims?.width ?? null,
-      height: dims?.height ?? null,
-    }
+    return globalThis.localStorage?.getItem(flag) === 'true'
   } catch (_) {
-    return {
-      blobType: blob.type || '',
-      blobSize: blob.size || 0,
-      width: null,
-      height: null,
-    }
+    return false
+  }
+}
+
+function _isDetailAiCacheBypassEnabled() {
+  return _isDetailAiDebugFlagEnabled('sporely-debug-ai-bypass-cache')
+}
+
+function _isDetailAiNoSaveEnabled() {
+  return _isDetailAiDebugFlagEnabled('sporely-debug-ai-no-save')
+}
+
+function _readDetailAiCropMeta(source = {}) {
+  const readNumber = value => {
+    const number = Number(value)
+    return Number.isFinite(number) ? number : null
+  }
+  const dataset = source?.dataset || {}
+  const cropRect = normalizeAiCropRect({
+    x1: source?.aiCropRect?.x1 ?? source?.cropRect?.x1 ?? dataset.aiCropX1,
+    y1: source?.aiCropRect?.y1 ?? source?.cropRect?.y1 ?? dataset.aiCropY1,
+    x2: source?.aiCropRect?.x2 ?? source?.cropRect?.x2 ?? dataset.aiCropX2,
+    y2: source?.aiCropRect?.y2 ?? source?.cropRect?.y2 ?? dataset.aiCropY2,
+  })
+  return {
+    cropRect,
+    cropSourceW: readNumber(source?.aiCropSourceW ?? source?.cropSourceW ?? dataset.aiCropSourceW),
+    cropSourceH: readNumber(source?.aiCropSourceH ?? source?.cropSourceH ?? dataset.aiCropSourceH),
   }
 }
 
@@ -682,8 +698,22 @@ function getDetailIdentifySources() {
         aiFallback: originalSource?.fallbackUrl || originalSource?.primaryUrl || '',
         aiSrc: aiSource?.primaryUrl || '',
         fullSrc: originalSource?.primaryUrl || '',
+        aiCropX1: row.ai_crop_x1 ?? '',
+        aiCropY1: row.ai_crop_y1 ?? '',
+        aiCropX2: row.ai_crop_x2 ?? '',
+        aiCropY2: row.ai_crop_y2 ?? '',
+        aiCropSourceW: row.ai_crop_source_w ?? '',
+        aiCropSourceH: row.ai_crop_source_h ?? '',
       },
       src: aiSource?.primaryUrl || originalSource?.primaryUrl || '',
+      aiCropRect: normalizeAiCropRect({
+        x1: row.ai_crop_x1,
+        y1: row.ai_crop_y1,
+        x2: row.ai_crop_x2,
+        y2: row.ai_crop_y2,
+      }),
+      aiCropSourceW: row.ai_crop_source_w ?? null,
+      aiCropSourceH: row.ai_crop_source_h ?? null,
     }
   })
 
@@ -694,13 +724,43 @@ function getDetailIdentifySources() {
 }
 
 export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'medium') {
+  const options = typeof variant === 'string'
+    ? { variant }
+    : (variant || {})
+  const chosenVariant = options.variant || 'medium'
+  const maxEdge = Math.max(1, Number(options.maxEdge || getArtsorakelMaxEdge()) || getArtsorakelMaxEdge())
+
   return await Promise.all((galleryImgs || []).map(async img => {
     try {
-      const result = await _loadDetailIdentifyBlob(img, variant)
+      const result = await _loadDetailIdentifyBlob(img, chosenVariant)
       if (!(result.blob instanceof Blob)) return null
+      const cropMeta = _readDetailAiCropMeta(img)
+      const prepared = await prepareImageBlobForUpload(result.blob, {
+        cropRect: cropMeta.cropRect,
+        maxEdge,
+        forceJpeg: true,
+      })
+      const finalDebugWidth = prepared.targetWidth ?? prepared.sourceWidth ?? null
+      const finalDebugHeight = prepared.targetHeight ?? prepared.sourceHeight ?? null
       return {
         ...result,
-        debug: await _describeDetailBlob(result.blob),
+        blob: prepared.blob,
+        originalBlob: result.blob,
+        sourceBlob: result.blob,
+        cropRect: cropMeta.cropRect,
+        cropSourceW: cropMeta.cropSourceW,
+        cropSourceH: cropMeta.cropSourceH,
+        wasCropped: !!cropMeta.cropRect,
+        preparedMeta: prepared,
+        preprocessed: true,
+        debug: {
+          blobType: prepared.outputType || prepared.blob?.type || '',
+          blobSize: prepared.outputSize || prepared.blob?.size || 0,
+          width: finalDebugWidth,
+          height: finalDebugHeight,
+          sourceWidth: prepared.sourceWidth ?? null,
+          sourceHeight: prepared.sourceHeight ?? null,
+        },
       }
     } catch (error) {
       return {
@@ -709,7 +769,7 @@ export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'medium
         usedFallbackUrl: false,
         sourceMode: 'failed',
         storagePathExtension: _storagePathExtension(img?.dataset?.storagePath || ''),
-        requestedVariant: variant,
+        requestedVariant: chosenVariant,
         debug: { blobType: '', blobSize: 0, width: null, height: null },
       }
     }
@@ -719,10 +779,9 @@ export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'medium
 export async function runDetailIdentify(service, galleryImgs, options = {}) {
   const identifyInputs = Array.isArray(options.identifyInputs)
     ? options.identifyInputs
-    : await prepareDetailIdentifyInputs(galleryImgs, options.variant || 'medium')
+    : await prepareDetailIdentifyInputs(galleryImgs, { variant: options.variant || 'medium', maxEdge: options.maxEdge || getArtsorakelMaxEdge() })
   const blobs = identifyInputs
     .filter(item => item?.blob instanceof Blob)
-    .map(item => item.blob)
   const mediaKeys = (galleryImgs || [])
     .map(img => img?.dataset?.storagePath || '')
     .filter(Boolean)
@@ -734,9 +793,9 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
   if (blobs.length) {
     try {
       const identifyOptions = service === ID_SERVICE_ARTSORAKEL
-        ? { tolerateFailures: true, maxEdge: Math.min(getArtsorakelMaxEdge(), 1024), screen: 'detail' }
+        ? { tolerateFailures: true, maxEdge: getArtsorakelMaxEdge(), screen: 'detail' }
         : { tolerateFailures: true, screen: 'detail' }
-      return await identifyBlobs(blobs, service, language, identifyOptions)
+      return await identifyBlobs(identifyInputs, service, language, identifyOptions)
     } catch (error) {
       if (service === ID_SERVICE_ARTSORAKEL && mediaKeys.length && _isArtsorakelBlobFallbackError(error)) {
         return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium', screen: 'detail' })
@@ -760,6 +819,7 @@ function _detailImageFingerprint(service = ID_SERVICE_ARTSORAKEL) {
     service,
     observationId: currentObs?.id || null,
     language: getTaxonomyLanguage(),
+    preprocessVersion: 2,
     images: detailImageRows.map((row, index) => ({
       id: row.id || `detail-${index}`,
       mediaKey: row.storage_path || null,
@@ -769,6 +829,8 @@ function _detailImageFingerprint(service = ID_SERVICE_ARTSORAKEL) {
         x2: row.ai_crop_x2,
         y2: row.ai_crop_y2,
       }),
+      cropSourceW: row.ai_crop_source_w ?? null,
+      cropSourceH: row.ai_crop_source_h ?? null,
       sourceType: 'media',
     })),
   })
@@ -1018,10 +1080,9 @@ async function _loadDetailAiCache() {
   )
   detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL] || ''
   const sources = getDetailIdentifySources()
-  const identifyInputs = await prepareDetailIdentifyInputs(sources.galleryImgs, 'medium')
+  const identifyInputs = await prepareDetailIdentifyInputs(sources.galleryImgs, { variant: 'medium', maxEdge: getArtsorakelMaxEdge() })
   const usableBlobs = identifyInputs
     .filter(item => item?.blob instanceof Blob)
-    .map(item => item.blob)
   const hasInatBlob = usableBlobs.length > 0
   const inaturalistSession = await loadInaturalistSession()
   const availabilityList = await getAvailableIdentifyServices({
@@ -1069,10 +1130,9 @@ async function _runDetailAiComparison(serviceOverride = null) {
     [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
     [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
   }
-  const identifyInputs = await prepareDetailIdentifyInputs(galleryImgs, 'medium')
+  const identifyInputs = await prepareDetailIdentifyInputs(galleryImgs, { variant: 'medium', maxEdge: getArtsorakelMaxEdge() })
   const usableBlobs = identifyInputs
     .filter(item => item?.blob instanceof Blob)
-    .map(item => item.blob)
   const mediaKeys = galleryImgs
     .map(img => img?.dataset?.storagePath || '')
     .filter(Boolean)
@@ -1104,6 +1164,9 @@ async function _runDetailAiComparison(serviceOverride = null) {
   const primaryService = overrideService
     ? requestedServices[0]
     : (requestedServices[0] || resolution.primary)
+  if (_isDetailAiCacheBypassEnabled()) {
+    console.debug('[photo-id] bypassing cached identification')
+  }
   debugPhotoId('detail comparison', {
     storedPhotoIdMode: getPhotoIdMode(),
     localStoragePhotoIdMode: globalThis.localStorage?.getItem('sporely-photo-id-mode'),
@@ -1214,26 +1277,28 @@ async function _runDetailAiComparison(serviceOverride = null) {
     detailAiState.activeService = primaryService
     detailAiState.stale = false
 
-    await Promise.allSettled(requestedServices.map(service => {
-      const result = detailAiState.resultsByService?.[service]
-      if (!currentObs?.id || !state.user?.id || !result?.service || result.status === 'idle') {
-        return Promise.resolve(null)
-      }
-      const serviceFingerprint = serviceFingerprints[result.service] || _detailImageFingerprint(result.service)
-      return saveIdentificationRun({
-        observationId: currentObs.id,
-        userId: state.user.id,
-        service: result.service,
-        requestFingerprint: serviceFingerprint.requestFingerprint,
-        imageFingerprint: serviceFingerprint.imageFingerprint,
-        cropFingerprint: serviceFingerprint.cropFingerprint,
-        language: getTaxonomyLanguage(),
-        results: result.predictions || [],
-        status: result.status,
-        errorMessage: result.errorMessage || null,
-        topPrediction: result.topPrediction || null,
-      })
-    }))
+    if (!_isDetailAiNoSaveEnabled()) {
+      await Promise.allSettled(requestedServices.map(service => {
+        const result = detailAiState.resultsByService?.[service]
+        if (!currentObs?.id || !state.user?.id || !result?.service || result.status === 'idle') {
+          return Promise.resolve(null)
+        }
+        const serviceFingerprint = serviceFingerprints[result.service] || _detailImageFingerprint(result.service)
+        return saveIdentificationRun({
+          observationId: currentObs.id,
+          userId: state.user.id,
+          service: result.service,
+          requestFingerprint: serviceFingerprint.requestFingerprint,
+          imageFingerprint: serviceFingerprint.imageFingerprint,
+          cropFingerprint: serviceFingerprint.cropFingerprint,
+          language: getTaxonomyLanguage(),
+          results: result.predictions || [],
+          status: result.status,
+          errorMessage: result.errorMessage || null,
+          topPrediction: result.topPrediction || null,
+        })
+      }))
+    }
   } catch (error) {
     console.error('Identification detail error:', error)
     showToast(t('common.errorPrefix', { message: String(error?.message || error || 'Unknown error') }))
@@ -2364,7 +2429,7 @@ async function _addPhotosToObservation(files) {
 
       const { data: insertedRows } = await supabase
         .from('observation_images')
-        .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2')
+        .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h')
         .eq('observation_id', obsId)
         .eq('sort_order', sortOrder)
         .order('id', { ascending: false })
@@ -2378,6 +2443,8 @@ async function _addPhotosToObservation(files) {
         ai_crop_y1: cropMeta.aiCropRect?.y1 ?? null,
         ai_crop_x2: cropMeta.aiCropRect?.x2 ?? null,
         ai_crop_y2: cropMeta.aiCropRect?.y2 ?? null,
+        ai_crop_source_w: cropMeta.aiCropSourceW ?? null,
+        ai_crop_source_h: cropMeta.aiCropSourceH ?? null,
       }
       const [originalSource] = await resolveMediaSources([storagePath], { variant: 'original' })
       const [displaySource] = await resolveMediaSources([storagePath], { variant: 'medium' })
