@@ -17,6 +17,8 @@ import {
   runArtsorakelForMediaKeys,
 } from './artsorakel.js'
 
+const TEST_APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'
+
 function makeResponse({ ok = true, status = 200, statusText = 'OK', jsonBody = null, textBody = '' } = {}) {
   return {
     ok,
@@ -39,6 +41,8 @@ function installHarness() {
   const originalFormData = globalThis.FormData
   const originalImage = globalThis.Image
   const originalDocument = globalThis.document
+  const originalLocalStorage = globalThis.localStorage
+  const originalAiDebug = globalThis.__sporelyAiDebug
   const originalTestEnv = globalThis.__SPORLEY_TEST_ENV__
   const originalCreateObjectURL = globalThis.URL?.createObjectURL
   const originalRevokeObjectURL = globalThis.URL?.revokeObjectURL
@@ -130,7 +134,20 @@ function installHarness() {
       throw new Error(`Unexpected element: ${tag}`)
     },
   }
+  const localStorageStore = new Map()
+  globalThis.localStorage = {
+    getItem(key) {
+      return localStorageStore.has(key) ? localStorageStore.get(key) : null
+    },
+    setItem(key, value) {
+      localStorageStore.set(String(key), String(value))
+    },
+    removeItem(key) {
+      localStorageStore.delete(String(key))
+    },
+  }
   globalThis.__SPORLEY_TEST_ENV__ = {}
+  globalThis.__sporelyAiDebug = {}
   defineUrlMethod('createObjectURL', blob => {
     const url = `blob:test-${++urlSeq}`
     objectUrlToBlob.set(url, blob)
@@ -170,6 +187,8 @@ function installHarness() {
       globalThis.FormData = originalFormData
       globalThis.Image = originalImage
       globalThis.document = originalDocument
+      globalThis.localStorage = originalLocalStorage
+      globalThis.__sporelyAiDebug = originalAiDebug
       globalThis.__SPORLEY_TEST_ENV__ = originalTestEnv
       defineUrlMethod('createObjectURL', originalCreateObjectURL)
       defineUrlMethod('revokeObjectURL', originalRevokeObjectURL)
@@ -202,9 +221,12 @@ test('converts a small WebP blob to JPEG before posting', async () => {
 
     const form = calls[0].init.body
     const sent = form.get('image')
+    const headers = new Headers(calls[0].init.headers)
     assert.equal(calls[0].url, 'https://ai.artsdatabanken.no')
     assert.equal(sent.type, 'image/jpeg')
     assert.equal(form.entries[0].filename, 'photo.jpg')
+    assert.equal(headers.get('X-App-Name'), 'Sporely')
+    assert.equal(headers.get('X-App-Version'), TEST_APP_VERSION)
   })
 })
 
@@ -212,7 +234,7 @@ test('keeps a small JPEG blob as JPEG when no resize is needed', async () => {
   await withHarness(async harness => {
     const calls = []
     const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
-    harness.setBlobDimensions(blob, 800, 600)
+    harness.setBlobDimensions(blob, 400, 300)
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
       return makeResponse({ jsonBody: { predictions: [] } })
@@ -335,8 +357,8 @@ test('falls back to direct Artsorakel when the proxy fails', async () => {
     harness.setBlobDimensions(blob, 800, 600)
     harness.setEnv({ VITE_ARTSORAKEL_BASE_URL: 'https://proxy.example' })
     harness.setProxySession('proxy-token')
-    harness.setFetch(async (url) => {
-      calls.push(url)
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
       if (url.startsWith('https://proxy.example')) {
         return makeResponse({ ok: false, status: 500, statusText: 'Proxy Error', textBody: 'proxy failed' })
       }
@@ -345,9 +367,15 @@ test('falls back to direct Artsorakel when the proxy fails', async () => {
 
     await runArtsorakel(blob, 'no')
 
-    assert.equal(calls[0], 'https://proxy.example/artsorakel')
-    assert.equal(calls[1], 'https://proxy.example/artsorakel')
-    assert.equal(calls[2], 'https://ai.artsdatabanken.no')
+    const proxyHeaders = new Headers(calls[0].init.headers)
+    const directHeaders = new Headers(calls[2].init.headers)
+    assert.equal(calls[0].url, 'https://proxy.example/artsorakel')
+    assert.equal(calls[1].url, 'https://proxy.example/artsorakel')
+    assert.equal(calls[2].url, 'https://ai.artsdatabanken.no')
+    assert.equal(proxyHeaders.get('X-App-Name'), 'Sporely')
+    assert.equal(proxyHeaders.get('X-App-Version'), TEST_APP_VERSION)
+    assert.equal(directHeaders.get('X-App-Name'), 'Sporely')
+    assert.equal(directHeaders.get('X-App-Version'), TEST_APP_VERSION)
   })
 })
 
@@ -391,6 +419,63 @@ test('does not use VITE_MEDIA_UPLOAD_BASE_URL as an implicit Artsorakel proxy', 
   })
 })
 
+test('logs direct Artsorakel debug entries with the shared service id', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 800, 600)
+    globalThis.localStorage.setItem('sporely-debug-artsorakel', 'true')
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({ jsonBody: { predictions: [] } })
+    })
+
+    await runArtsorakel(blob, 'no')
+
+    assert.equal(calls.length, 1)
+    assert.equal(globalThis.__sporelyAiDebug.artsorakel.length, 1)
+    assert.equal(globalThis.__sporelyAiDebug.artsorakel[0].service, 'artsorakel')
+    assert.equal(globalThis.__sporelyAiDebug.artsorakel[0].endpoint, 'https://ai.artsdatabanken.no')
+  })
+})
+
+test('debug logging failures do not break the Artsorakel request', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const warnings = []
+    const originalWarn = console.warn
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 800, 600)
+    globalThis.localStorage.setItem('sporely-debug-artsorakel', 'true')
+    Object.defineProperty(globalThis.URL, 'createObjectURL', {
+      value: () => {
+        throw new Error('debug explode')
+      },
+      configurable: true,
+      writable: true,
+    })
+    console.warn = (...args) => {
+      warnings.push(args)
+    }
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({ jsonBody: { predictions: [] } })
+    })
+
+    try {
+      await runArtsorakel(blob, 'no')
+    } finally {
+      console.warn = originalWarn
+    }
+
+    assert.equal(calls.length, 1)
+    assert.equal(globalThis.__sporelyAiDebug?.artsorakel?.length || 0, 0)
+    assert.equal(warnings.length, 1)
+    assert.match(String(warnings[0][0] || ''), /artsorakel-debug/)
+    assert.match(String(warnings[0][1]?.message || warnings[0][1] || ''), /debug explode/)
+  })
+})
+
 test('runArtsorakelForMediaKeys requires a real Artsorakel proxy', async () => {
   await withHarness(async harness => {
     const calls = []
@@ -407,6 +492,36 @@ test('runArtsorakelForMediaKeys requires a real Artsorakel proxy', async () => {
       },
     )
     assert.equal(calls.length, 0)
+  })
+})
+
+test('runArtsorakelForMediaKeys sends app headers to the proxy', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    harness.setEnv({ VITE_ARTSORAKEL_BASE_URL: 'https://proxy.example' })
+    harness.setProxySession('proxy-token')
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({
+        jsonBody: {
+          ok: true,
+          total: 1,
+          responses: [{
+            key: 'media/key.jpg',
+            data: { predictions: [] },
+          }],
+          errors: [],
+        },
+      })
+    })
+
+    await runArtsorakelForMediaKeys(['media/key.jpg'], 'no')
+
+    const headers = new Headers(calls[0].init.headers)
+    assert.equal(calls[0].url, 'https://proxy.example/artsorakel/media')
+    assert.equal(headers.get('Authorization'), 'Bearer proxy-token')
+    assert.equal(headers.get('X-App-Name'), 'Sporely')
+    assert.equal(headers.get('X-App-Version'), TEST_APP_VERSION)
   })
 })
 
@@ -445,6 +560,41 @@ test('detail view falls back to media-key identify after an Artsdata AI 500', as
     assert.equal(blobIdentifyCalls, 1)
     assert.equal(mediaKeyIdentifyCalls, 1)
     assert.equal(predictions[0].displayName, 'King bolete')
+  })
+})
+
+test('detail Artsorakel identify loads the original image before maxEdge downscale', async () => {
+  await withHarness(async harness => {
+    const requestedPaths = []
+    const sourceBlob = new Blob(['original'], { type: 'image/webp' })
+    harness.setBlobDimensions(sourceBlob, 2400, 1600)
+    harness.setStorageDownloadImpl(async path => {
+      requestedPaths.push(path)
+      return {
+        data: sourceBlob,
+        error: null,
+      }
+    })
+
+    const galleryImgs = [{
+      dataset: {
+        storagePath: 'user/42/observation/image.webp',
+        aiFallback: 'https://example.invalid/fallback.webp',
+        aiSrc: 'https://example.invalid/source.webp',
+      },
+      src: 'https://example.invalid/source.webp',
+    }]
+
+    const predictions = await runDetailIdentify(ID_SERVICE_ARTSORAKEL, galleryImgs, {
+      identifyBlobs: async inputs => {
+        assert.equal(inputs[0].requestedVariant, 'original')
+        assert.equal(inputs[0].blob.type, 'image/jpeg')
+        return [{ probability: 0.91, scientificName: 'Boletus edulis' }]
+      },
+    })
+
+    assert.equal(requestedPaths[0], 'user/42/observation/image.webp')
+    assert.equal(predictions[0].scientificName, 'Boletus edulis')
   })
 })
 
@@ -497,7 +647,7 @@ test('detail identify helper exposes the storage-path fallback path for debuggin
     assert.equal(inputs[0].storagePathExtension, 'webp')
     assert.equal(inputs[0].blob.type, 'image/jpeg')
     assert.equal(inputs[0].debug.blobType, 'image/jpeg')
-    assert.equal(inputs[0].debug.width, 1024)
-    assert.equal(inputs[0].debug.height, 1024)
+    assert.equal(inputs[0].debug.width, 500)
+    assert.equal(inputs[0].debug.height, 500)
   })
 })

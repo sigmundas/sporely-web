@@ -541,9 +541,15 @@ async function handleArtsorakel(request, env, ctx) {
 
   const contentType = String(request.headers.get('Content-Type') || '').trim()
   const bodyBuffer = await request.arrayBuffer()
+  const appName = String(request.headers.get('X-App-Name') || '').trim()
+  const appVersion = String(request.headers.get('X-App-Version') || '').trim()
   const upstream = await fetch('https://ai.artsdatabanken.no', {
     method: 'POST',
-    headers: contentType ? { 'Content-Type': contentType } : {},
+    headers: {
+      ...(contentType ? { 'Content-Type': contentType } : {}),
+      ...(appName ? { 'X-App-Name': appName } : {}),
+      ...(appVersion ? { 'X-App-Version': appVersion } : {}),
+    },
     body: bodyBuffer,
   })
 
@@ -590,6 +596,11 @@ async function handleArtsorakelMedia(request, env, ctx) {
   }
 
   const variant = String(body?.variant || 'medium').trim() || 'medium'
+  const appHeaders = {}
+  const appName = String(request.headers.get('X-App-Name') || '').trim()
+  const appVersion = String(request.headers.get('X-App-Version') || '').trim()
+  if (appName) appHeaders['X-App-Name'] = appName
+  if (appVersion) appHeaders['X-App-Version'] = appVersion
   const responses = []
   const errors = []
 
@@ -614,7 +625,7 @@ async function handleArtsorakelMedia(request, env, ctx) {
     }
 
     try {
-      const data = await runArtsorakelForMediaObject(object)
+      const data = await runArtsorakelForMediaObject(object, appHeaders)
       responses.push({ key, data })
     } catch (error) {
       console.error('Artsorakel media request failed', error)
@@ -665,13 +676,13 @@ function mediaCandidateKeys(key, variant) {
   return [...new Set([primaryKey, key].filter(Boolean))]
 }
 
-async function runArtsorakelForMediaObject(object) {
+async function runArtsorakelForMediaObject(object, appHeaders = {}) {
   const contentType = String(object?.httpMetadata?.contentType || '').trim() || 'image/jpeg'
   const bodyBuffer = await object.arrayBuffer()
 
-  let upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'image')
+  let upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'image', appHeaders)
   if (!upstream.ok) {
-    upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'file')
+    upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'file', appHeaders)
   }
   if (!upstream.ok) {
     throw httpError(502, 'artsorakel_failed', `Artsdata AI ${upstream.status}`)
@@ -679,11 +690,12 @@ async function runArtsorakelForMediaObject(object) {
   return upstream.json()
 }
 
-function postArtsorakelBuffer(bodyBuffer, contentType, fieldName) {
+function postArtsorakelBuffer(bodyBuffer, contentType, fieldName, appHeaders = {}) {
   const form = new FormData()
   form.append(fieldName, new Blob([bodyBuffer], { type: contentType }), 'photo.jpg')
   return fetch('https://ai.artsdatabanken.no', {
     method: 'POST',
+    headers: appHeaders,
     body: form,
   })
 }

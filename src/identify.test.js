@@ -199,6 +199,126 @@ test('builds an iNaturalist suggestion request and normalizes the response', asy
   assert.equal(predictions[0].probability, 0.82)
 })
 
+test('logs iNaturalist debug request payloads when enabled', async () => {
+  const originalAiDebug = globalThis.__sporelyAiDebug
+  const originalLocalStorage = globalThis.localStorage
+  globalThis.__sporelyAiDebug = {}
+  globalThis.localStorage = createLocalStorageStub()
+  globalThis.localStorage.setItem('sporely-debug-inaturalist', 'true')
+
+  const storage = {
+    values: new Map([
+      ['sporely.inat.oauth.api_token', 'test-jwt'],
+    ]),
+    async getItem(key) {
+      return this.values.has(key) ? this.values.get(key) : null
+    },
+    async setItem(key, value) {
+      this.values.set(key, String(value))
+    },
+    async removeItem(key) {
+      this.values.delete(key)
+    },
+  }
+
+  const calls = []
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options })
+    return {
+      ok: true,
+      async json() {
+        return { results: [] }
+      },
+    }
+  }
+
+  try {
+    await runInaturalistForBlobs([new Blob(['x'], { type: 'image/jpeg' })], 'en', {
+      storage,
+      fetchImpl,
+    })
+
+    assert.equal(calls.length, 1)
+    assert.equal(globalThis.__sporelyAiDebug.inat.length, 1)
+    assert.equal(globalThis.__sporelyAiDebug.inat[0].service, 'inat')
+    assert.equal(globalThis.__sporelyAiDebug.inat[0].endpoint, 'https://api.inaturalist.org/v2/taxa/suggest')
+    assert.equal(globalThis.__sporelyAiDebug.inat[0].fieldName, 'image')
+  } finally {
+    globalThis.__sporelyAiDebug = originalAiDebug
+    globalThis.localStorage = originalLocalStorage
+  }
+})
+
+test('iNaturalist debug request logging failures do not break the request', async () => {
+  const originalAiDebug = globalThis.__sporelyAiDebug
+  const originalLocalStorage = globalThis.localStorage
+  const originalWarn = console.warn
+  const originalCreateObjectURL = globalThis.URL?.createObjectURL
+  globalThis.__sporelyAiDebug = {}
+  globalThis.localStorage = createLocalStorageStub()
+  globalThis.localStorage.setItem('sporely-debug-inaturalist', 'true')
+
+  Object.defineProperty(globalThis.URL, 'createObjectURL', {
+    value: () => {
+      throw new Error('debug explode')
+    },
+    configurable: true,
+    writable: true,
+  })
+
+  const storage = {
+    values: new Map([
+      ['sporely.inat.oauth.api_token', 'test-jwt'],
+    ]),
+    async getItem(key) {
+      return this.values.has(key) ? this.values.get(key) : null
+    },
+    async setItem(key, value) {
+      this.values.set(key, String(value))
+    },
+    async removeItem(key) {
+      this.values.delete(key)
+    },
+  }
+
+  const calls = []
+  const warnings = []
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options })
+    return {
+      ok: true,
+      async json() {
+        return { results: [] }
+      },
+    }
+  }
+
+  console.warn = (...args) => {
+    warnings.push(args)
+  }
+
+  try {
+    await runInaturalistForBlobs([new Blob(['x'], { type: 'image/jpeg' })], 'en', {
+      storage,
+      fetchImpl,
+    })
+
+    assert.equal(calls.length, 1)
+    assert.equal(warnings.length, 1)
+    assert.match(String(warnings[0][0] || ''), /inaturalist-debug/i)
+    assert.match(String(warnings[0][1]?.message || warnings[0][1] || ''), /debug explode/)
+  } finally {
+    console.warn = originalWarn
+    globalThis.__sporelyAiDebug = originalAiDebug
+    globalThis.localStorage = originalLocalStorage
+    Object.defineProperty(globalThis.URL, 'createObjectURL', {
+      value: originalCreateObjectURL,
+      configurable: true,
+      writable: true,
+    })
+  }
+})
+
 test('sorts single-image iNaturalist predictions from high to low probability', async () => {
   const storage = {
     values: new Map([

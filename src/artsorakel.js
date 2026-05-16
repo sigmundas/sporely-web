@@ -9,12 +9,27 @@ import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
 import { t } from './i18n.js'
 import { getBlobImageDimensions, normalizeAiCropRect, prepareImageBlobForUpload } from './image_crop.js'
-import { getArtsorakelMaxEdge } from './settings.js'
+import {
+  getArtsorakelMaxEdge,
+  ID_SERVICE_ARTSORAKEL,
+} from './settings.js'
 
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
+const SPORELY_APP_NAME = 'Sporely'
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
+}
+
+function _getAppVersion() {
+  return typeof __APP_VERSION__ !== 'undefined' ? String(__APP_VERSION__) : 'dev'
+}
+
+function _buildArtsorakelRequestHeaders(headers = null) {
+  const requestHeaders = new Headers(headers || undefined)
+  requestHeaders.set('X-App-Name', SPORELY_APP_NAME)
+  requestHeaders.set('X-App-Version', _getAppVersion())
+  return requestHeaders
 }
 
 function _envText(key) {
@@ -107,19 +122,23 @@ async function _logArtsorakelRequestIfEnabled({
   imageCount = 1,
 }) {
   if (!_isArtsorakelDebugEnabled() || url !== ARTSDATA_AI_URL) return
-  const entry = await _buildArtsorakelDebugEntry({
-    aiBlob,
-    preparedMeta,
-    options,
-    url,
-    fieldName,
-    imageIndex,
-    imageCount,
-  })
-  const store = _getArtsorakelDebugStore()
-  store.push(entry)
-  _trimArtsorakelDebugStore()
-  console.debug('[artsorakel-debug] outgoing request', entry)
+  try {
+    const entry = await _buildArtsorakelDebugEntry({
+      aiBlob,
+      preparedMeta,
+      options,
+      url,
+      fieldName,
+      imageIndex,
+      imageCount,
+    })
+    const store = _getArtsorakelDebugStore()
+    store.push(entry)
+    _trimArtsorakelDebugStore()
+    console.debug('[artsorakel-debug] outgoing request', entry)
+  } catch (error) {
+    console.warn('[artsorakel-debug] request logging failed', error)
+  }
 }
 
 export function isArtsorakelNetworkError(error) {
@@ -320,10 +339,8 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
     const request = {
       method: 'POST',
       body: form,
+      headers: _buildArtsorakelRequestHeaders(headers),
       signal,
-    }
-    if (headers) {
-      request.headers = headers
     }
     await _logArtsorakelRequestIfEnabled({
       aiBlob,
@@ -583,6 +600,8 @@ export async function runArtsorakelForMediaKeys(mediaKeys, lang = 'no', options 
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
+      'X-App-Name': SPORELY_APP_NAME,
+      'X-App-Version': _getAppVersion(),
     },
     body: JSON.stringify({
       keys,

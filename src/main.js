@@ -36,6 +36,7 @@ import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
 import { fetchCloudPlanProfile, getStoredImageResolutionMode, setStoredImageResolutionMode } from './cloud-plan.js'
 import { clearMediaUrlCache } from './images.js'
+import { hideSettingsOverlay, showSettingsOverlay } from './settings-overlay.js'
 import { isWebInatOAuthConfigured } from './inaturalist.js'
 import {
   connectInaturalist,
@@ -89,6 +90,7 @@ function initSettings() {
   const overlay = document.getElementById('settings-overlay')
   const sheet = document.getElementById('settings-sheet')
   const settingsBtn = document.getElementById('settings-btn')
+  let settingsOpener = null
   let dragStartY = 0
   let dragStartX = 0
   let dragCurrentY = 0
@@ -111,10 +113,10 @@ function initSettings() {
 
   function _openSettings(event) {
     event?.preventDefault()
+    settingsOpener = event?.currentTarget || document.activeElement || settingsBtn
     _blurActiveControl()
     _syncSettingsUI()
-    overlay.style.display = 'block'
-    overlay.setAttribute('aria-hidden', 'false')
+    showSettingsOverlay({ overlay })
     requestAnimationFrame(() => requestAnimationFrame(() => {
       overlay.classList.add('open')
       _blurActiveControl()
@@ -126,9 +128,7 @@ function initSettings() {
   function _closeSettings() {
     sheet.style.transition = ''
     sheet.style.transform = ''
-    overlay.classList.remove('open')
-    overlay.setAttribute('aria-hidden', 'true')
-    overlay.addEventListener('transitionend', () => { overlay.style.display = 'none' }, { once: true })
+    hideSettingsOverlay({ overlay, settingsOpener })
   }
 
   function _resetSettingsDrag() {

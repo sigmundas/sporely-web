@@ -423,8 +423,6 @@ export async function openFindDetail(obsId, options = {}) {
     })
   }
 
-  await _loadDetailAiCache()
-
   if (currentObsIsOwner) {
     const addCardContainer = document.createElement('div')
     addCardContainer.className = 'detail-gallery-item-wrap'
@@ -781,9 +779,16 @@ export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'medium
 }
 
 export async function runDetailIdentify(service, galleryImgs, options = {}) {
+  const normalizedService = normalizeIdentifyService(service)
   const identifyInputs = Array.isArray(options.identifyInputs)
+    && normalizedService !== ID_SERVICE_ARTSORAKEL
     ? options.identifyInputs
-    : await prepareDetailIdentifyInputs(galleryImgs, { variant: options.variant || 'medium', maxEdge: options.maxEdge || getArtsorakelMaxEdge() })
+    : await prepareDetailIdentifyInputs(galleryImgs, {
+        variant: normalizedService === ID_SERVICE_ARTSORAKEL
+          ? 'original'
+          : (options.variant || 'medium'),
+        maxEdge: options.maxEdge || getArtsorakelMaxEdge(),
+      })
   const blobs = identifyInputs
     .filter(item => item?.blob instanceof Blob)
   const mediaKeys = (galleryImgs || [])

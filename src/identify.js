@@ -10,6 +10,7 @@ import {
 
 const INAT_SUGGEST_URL = 'https://api.inaturalist.org/v2/taxa/suggest'
 const INAT_MAX_EDGE = 1920
+const INAT_DEBUG_REQUESTS_KEY = 'sporely-debug-inaturalist'
 
 function _isDebugAiIdEnabled() {
   try {
@@ -22,9 +23,106 @@ function _isDebugAiIdEnabled() {
   }
 }
 
+function _isDebugInaturalistRequestsEnabled() {
+  try {
+    return globalThis.localStorage?.getItem(INAT_DEBUG_REQUESTS_KEY) === 'true'
+  } catch (_) {
+    return false
+  }
+}
+
 function _debugAiId(message, details = {}) {
   if (!_isDebugAiIdEnabled()) return
   console.debug(`[ai-id] ${message}`, details)
+}
+
+function _getInaturalistDebugStore() {
+  if (!globalThis.__sporelyAiDebug || typeof globalThis.__sporelyAiDebug !== 'object') {
+    globalThis.__sporelyAiDebug = {}
+  }
+  if (!Array.isArray(globalThis.__sporelyAiDebug.inat)) {
+    globalThis.__sporelyAiDebug.inat = []
+  }
+  return globalThis.__sporelyAiDebug.inat
+}
+
+function _trimInaturalistDebugStore() {
+  const store = _getInaturalistDebugStore()
+  while (store.length > 20) {
+    const removed = store.shift()
+    for (const image of removed?.images || []) {
+      try {
+        if (image?.objectUrl) globalThis.URL?.revokeObjectURL?.(image.objectUrl)
+      } catch (_) {}
+    }
+  }
+}
+
+async function _buildInaturalistDebugEntry({
+  aiBlob,
+  preparedMeta,
+  options = {},
+  url,
+  fieldName = 'image',
+  imageIndex = 0,
+  imageCount = 1,
+}) {
+  const dimensions = preparedMeta?.targetWidth && preparedMeta?.targetHeight
+    ? { width: preparedMeta.targetWidth, height: preparedMeta.targetHeight }
+    : (await getBlobImageDimensions(aiBlob).catch(() => null))
+  const objectUrl = globalThis.URL?.createObjectURL?.(aiBlob) || ''
+  return {
+    timestamp: new Date().toISOString(),
+    service: ID_SERVICE_INATURALIST,
+    screen: options.screen || '',
+    endpoint: url,
+    fieldName,
+    imageCount,
+    imageIndex,
+    images: [{
+      blobType: aiBlob?.type || '',
+      blobSize: Number(aiBlob?.size || 0),
+      width: dimensions?.width ?? null,
+      height: dimensions?.height ?? null,
+      objectUrl,
+      wasCropped: !!preparedMeta?.cropped,
+      cropRect: preparedMeta?.cropRect || null,
+      cropSourceW: preparedMeta?.cropSourceW ?? null,
+      cropSourceH: preparedMeta?.cropSourceH ?? null,
+      sourceWidth: preparedMeta?.sourceWidth ?? null,
+      sourceHeight: preparedMeta?.sourceHeight ?? null,
+      maxEdge: preparedMeta?.maxEdge ?? null,
+    }],
+  }
+}
+
+async function _logInaturalistRequestIfEnabled({
+  aiBlob,
+  preparedMeta,
+  options = {},
+  url,
+  fieldName = 'image',
+  imageIndex = 0,
+  imageCount = 1,
+}) {
+  if (!_isDebugInaturalistRequestsEnabled()) return
+  try {
+    const entry = await _buildInaturalistDebugEntry({
+      aiBlob,
+      preparedMeta,
+      options,
+      url,
+      fieldName,
+      imageIndex,
+      imageCount,
+    })
+    const store = _getInaturalistDebugStore()
+    store.push(entry)
+    _trimInaturalistDebugStore()
+    console.debug('[inaturalist-debug] outgoing request', entry)
+  } catch (error) {
+    console.warn('[inaturalist-debug] request logging failed', error)
+  }
 }
 
 function _isBlob(value) {
@@ -249,6 +347,15 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
   if (_isNumber(options?.lon)) form.append('lng', String(options.lon))
   if (options?.observedOn) form.append('observed_on', String(options.observedOn))
   form.append('image', aiBlob, filename)
+  await _logInaturalistRequestIfEnabled({
+    aiBlob,
+    preparedMeta: prepared,
+    options,
+    url: INAT_SUGGEST_URL,
+    fieldName: 'image',
+    imageIndex: Number(options.imageIndex || 0),
+    imageCount: Number(options.totalImages || 1),
+  })
 
   const response = await (options.fetchImpl || fetch)(INAT_SUGGEST_URL, {
     method: 'POST',
