@@ -2398,6 +2398,9 @@ html, body {
   color: var(--red);
 }
 .import-card-ai-state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   margin-bottom: 3px;
 }
 .import-card-crop-hint {
@@ -2534,7 +2537,8 @@ html, body {
   stroke-linejoin: round;
   stroke-width: 8;
   animation: ai-pie-spinner-cycle 2.4s linear infinite;
-  will-change: stroke-dasharray, stroke-dashoffset;
+  stroke-dashoffset: 25;
+  will-change: stroke-dasharray;
 }
 .ai-pie-spinner.is-good {
   color: var(--green-bright);
@@ -2547,20 +2551,13 @@ html, body {
 }
 @keyframes ai-pie-spinner-cycle {
   0% {
-    stroke-dasharray: 100 0;
-    stroke-dashoffset: 100;
-  }
-  49.9% {
     stroke-dasharray: 0 100;
-    stroke-dashoffset: 0;
   }
   50% {
-    stroke-dasharray: 0 100;
-    stroke-dashoffset: 0;
+    stroke-dasharray: 100 0;
   }
   100% {
-    stroke-dasharray: 100 0;
-    stroke-dashoffset: 0;
+    stroke-dasharray: 0 100;
   }
 }
 .detail-ai-results-shell {
@@ -2587,12 +2584,21 @@ html, body {
   border: 1px dashed var(--border);
   border-radius: 10px;
 }
-.settings-id-service-segment {
+.settings-photo-id-mode-grid {
   width: min(100%, 320px);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
 }
-.settings-id-service-btn {
-  flex: 1;
+.settings-photo-id-mode-btn {
   min-width: 0;
+  width: 100%;
+  justify-content: center;
+  padding: 5px 12px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
 }
 .import-current-location-btn {
   width: 100%;
@@ -3616,6 +3622,10 @@ html.light .ai-id-btn { background: var(--green-deep); border-color: var(--green
 html.light .ai-id-service-tab {
   background: rgba(45,75,50,0.06);
   border-color: var(--border);
+  color: var(--green-deep);
+}
+html.light .ai-id-service-state {
+  color: var(--green-deep);
 }
 html.light .ai-id-service-tab.is-active {
   background: rgba(45,75,50,0.12);
@@ -3631,7 +3641,16 @@ html.light .ai-results-empty {
 }
 html.light .comment-send-btn { background: var(--green-deep); border-color: var(--green-mid); color: #ffffff; }
 html.light .comment-send-btn:active { background: var(--green-mid); }
-html.light .ai-id-dot { background: rgba(255,255,255,0.78); }
+html.light .ai-id-service-tab-icon-dot:not(.is-unavailable),
+html.light .ai-id-dot:not(.is-unavailable) {
+  color: var(--green-deep);
+  background: currentColor;
+}
+html.light .ai-id-service-tab-icon-dot.is-unavailable,
+html.light .ai-id-dot.is-unavailable {
+  color: var(--text-dim);
+  background: currentColor;
+}
 html.light .ai-id-dot.is-complete::before {
   border-right-color: var(--green-deep);
   border-bottom-color: var(--green-deep);

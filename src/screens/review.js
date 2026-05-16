@@ -1,35 +1,40 @@
-import { formatTime, getTaxonomyLanguage, t, tp } from '../i18n.js'
+import { formatTime, getLocale, getTaxonomyLanguage, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { searchTaxa, formatDisplayName, createManualTaxon } from '../artsorakel.js'
 import {
   buildIdentifyFingerprint,
-  chooseIdentifyComparisonActiveService,
+  debugPhotoId,
   getAvailableIdentifyServices,
+  _renderServiceIcon,
   renderIdentifyResultRows,
   renderIdentifyServiceTab,
+  markRequestedServicesRunning,
   runIdentifyComparisonForBlobs,
+  shouldRunServiceFromTab,
   ID_SERVICE_ARTSORAKEL,
   ID_SERVICE_INATURALIST,
   normalizeIdentifyService,
 } from '../ai-identification.js'
 import { getIdentifyNoMatchMessage } from '../identify.js'
+import { loadInaturalistSession } from '../inaturalist.js'
 import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js'
-import { getDefaultVisibility } from '../settings.js'
+import { getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
+import { getLocationLookup } from '../location.js'
 
 const reviewAiState = {
   running: false,
   hasRun: false,
-  activeService: ID_SERVICE_ARTSORAKEL,
+  activeService: null,
   requestedFingerprint: '',
   currentFingerprint: '',
   availabilityFingerprint: '',
@@ -222,6 +227,7 @@ export function openImportedReview(session) {
     source: 'import',
     gps: reviewGps,
     locationName: session?.locationName || '',
+    locationLookup: session?.locationLookup || null,
     metadataPromise: session?.metadataPromise || null,
   }
   _hydrateImportedReviewMetadata(session)
@@ -272,7 +278,7 @@ function _applyImportedReviewGps(reviewGps) {
 export function resetReviewAiState() {
   reviewAiState.running = false
   reviewAiState.hasRun = false
-  reviewAiState.activeService = ID_SERVICE_ARTSORAKEL
+  reviewAiState.activeService = null
   reviewAiState.requestedFingerprint = ''
   reviewAiState.currentFingerprint = ''
   reviewAiState.availabilityFingerprint = ''
@@ -331,6 +337,38 @@ async function _awaitImportedReviewMetadata() {
     _mergeHydratedGps(reviewGps)
   } catch (error) {
     console.warn('Import metadata hydration failed before save:', error)
+  }
+}
+
+function _reviewLocationLookup() {
+  return state.reviewContext?.locationLookup || getLocationLookup() || null
+}
+
+function _resolveReviewPhotoIdServices(availability = {}, options = {}) {
+  const lookup = _reviewLocationLookup()
+  return resolvePhotoIdServices({
+    mode: getPhotoIdMode(),
+    countryCode: lookup?.country_code || null,
+    countryName: lookup?.country_name || null,
+    locale: getLocale(),
+    inaturalistAvailable: availability?.[ID_SERVICE_INATURALIST]?.available ?? false,
+    comparisonRequested: !!options.comparisonRequested,
+  })
+}
+
+function _mergeReviewServiceState(service, result = {}) {
+  const normalizedService = normalizeIdentifyService(service)
+  const existing = reviewAiState.resultsByService?.[normalizedService] || {}
+  const availability = reviewAiState.availability?.[normalizedService] || {}
+  reviewAiState.resultsByService = {
+    ...(reviewAiState.resultsByService || {}),
+    [normalizedService]: {
+      ...existing,
+      ...result,
+      service: normalizedService,
+      available: result.available ?? availability.available ?? false,
+      reason: result.reason || availability.reason || '',
+    },
   }
 }
 
@@ -459,8 +497,9 @@ export function buildReviewGrid() {
       && reviewAiState.requestedFingerprint
       && reviewAiState.requestedFingerprint !== reviewAiState.currentFingerprint,
     )
-    if (!reviewAiState.activeService || !reviewAiState.resultsByService[reviewAiState.activeService]) {
-      reviewAiState.activeService = chooseIdentifyComparisonActiveService(reviewAiState.resultsByService, ID_SERVICE_ARTSORAKEL)
+    const photoIdServices = _resolveReviewPhotoIdServices(reviewAiState.availability)
+    if (!reviewAiState.activeService && Object.keys(reviewAiState.availability || {}).length) {
+      reviewAiState.activeService = photoIdServices.primary
     }
     void _syncReviewAiAvailability()
 
@@ -583,39 +622,22 @@ function wireCardEvents() {
   const runBtn = document.querySelector('[data-identify-run-button]')
   if (runBtn && !runBtn._wired) {
     runBtn._wired = true
-    runBtn.addEventListener('click', _runReviewComparison)
+    runBtn.addEventListener('click', () => _runReviewComparison())
   }
 
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
     if (tab._wired) return
     tab._wired = true
     tab.addEventListener('click', () => {
-      reviewAiState.activeService = normalizeIdentifyService(tab.dataset.identifyServiceTab)
-      buildReviewGrid()
-    })
-  })
-
-  document.querySelectorAll('[data-identify-result]').forEach(result => {
-    if (result._wired) return
-    result._wired = true
-    result.addEventListener('click', event => {
-      event.preventDefault()
-      const pred = JSON.parse(result.dataset.identifyResult)
-      const parts = (pred.scientificName || '').split(/\s+/)
-      const taxon = {
-        genus: parts[0] || '',
-        specificEpithet: parts[1] || '',
-        vernacularName: pred.vernacularName || null,
-        scientificName: pred.scientificName || null,
-        displayName: pred.displayName,
+      const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+      const serviceState = reviewAiState.resultsByService?.[service] || null
+      reviewAiState.activeService = service
+      _renderReviewAiBlock()
+      if (reviewAiState.running) return
+      if (serviceState?.available === false) return
+      if (shouldRunServiceFromTab(serviceState)) {
+        void _runReviewComparison(service)
       }
-      applyTaxon(0, taxon)
-      reviewAiState.resultsByService[normalizeIdentifyService(pred.service)] = {
-        ...(reviewAiState.resultsByService[normalizeIdentifyService(pred.service)] || {}),
-        selectedTaxon: taxon,
-      }
-      reviewAiState.stale = reviewAiState.requestedFingerprint !== reviewAiState.currentFingerprint
-      buildReviewGrid()
     })
   })
 
@@ -802,7 +824,7 @@ function _reviewAiTabState(service, statusOverride = null) {
     active: reviewAiState.activeService === service,
     available: reviewAiState.availability?.[service]?.available ?? false,
     reason: reviewAiState.availability?.[service]?.reason || '',
-    status: statusOverride || result?.status || (reviewAiState.running ? 'running' : 'idle'),
+    status: statusOverride || result?.status || 'idle',
     errorMessage: result?.errorMessage || '',
     topProbability: result?.topProbability ?? null,
     topPrediction: result?.topPrediction || null,
@@ -810,8 +832,11 @@ function _reviewAiTabState(service, statusOverride = null) {
 }
 
 function _reviewAiResultsHtml() {
-  const activeService = normalizeIdentifyService(reviewAiState.activeService)
+  const activeService = normalizeIdentifyService(reviewAiState.activeService || _resolveReviewPhotoIdServices(reviewAiState.availability).primary)
   const result = reviewAiState.resultsByService[activeService] || null
+  if (result?.status === 'running') {
+    return `<div class="ai-results-empty">${t('common.loading')}</div>`
+  }
   if (!result?.predictions?.length) {
     if (result?.status === 'unavailable') {
       return `<div class="ai-results-empty">${reviewAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
@@ -822,32 +847,111 @@ function _reviewAiResultsHtml() {
     if (result?.status === 'no_match') {
       return `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`
     }
-    return reviewAiState.running
-      ? `<div class="ai-results-empty">${t('common.loading')}</div>`
-      : `<div class="ai-results-empty">${reviewAiState.stale ? (t('review.resultsOutdated') || 'Results outdated') : (t('review.noMatch') || 'No match')}</div>`
+    return `<div class="ai-results-empty">${reviewAiState.stale ? (t('review.resultsOutdated') || 'Results outdated') : (t('review.noMatch') || 'No match')}</div>`
   }
   return renderIdentifyResultRows(activeService, result.predictions)
 }
 
-function _predictionToTaxon(prediction = {}) {
-  const scientificName = String(prediction.scientificName || '').trim()
-  const parts = scientificName.split(/\s+/)
-  return {
-    genus: parts[0] || null,
-    specificEpithet: parts[1] || null,
-    vernacularName: prediction.vernacularName || null,
-    scientificName: scientificName || null,
-    displayName: prediction.vernacularName || scientificName || t('common.unknown'),
-  }
+function _reviewAiDebugDump(label, resolution = null, requestedServices = [], sessionInfo = null) {
+  debugPhotoId(label, {
+    storedPhotoIdMode: getPhotoIdMode(),
+    localStoragePhotoIdMode: globalThis.localStorage?.getItem('sporely-photo-id-mode'),
+    legacyDefaultIdService: globalThis.localStorage?.getItem('sporely-default-id-service'),
+    inaturalistSessionConnected: Boolean(sessionInfo?.connected),
+    inaturalistHasApiToken: Boolean(sessionInfo?.api_token || sessionInfo?.apiToken),
+    availability: reviewAiState.availability || {},
+    photoIdServices: resolution || _resolveReviewPhotoIdServices(reviewAiState.availability),
+    requestedServices,
+  })
+}
+
+async function _runReviewAiService(service, blobs, options = {}) {
+  const normalizedService = normalizeIdentifyService(service)
+  const comparison = await runIdentifyComparisonForBlobs(
+    blobs,
+    {
+      ...options,
+      services: [normalizedService],
+      defaultService: normalizedService,
+      onServiceState: result => {
+        _mergeReviewServiceState(result.service, result)
+        reviewAiState.hasRun = Object.values(reviewAiState.resultsByService || {}).some(serviceResult =>
+          serviceResult?.status === 'success' || serviceResult?.status === 'no_match'
+        )
+        _renderReviewAiBlock()
+      },
+    },
+  )
+  const result = comparison.resultsByService?.[normalizedService]
+  if (result) _mergeReviewServiceState(normalizedService, result)
+  return result
+}
+
+function _renderReviewAiTabs() {
+  document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
+    const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+    const state = _reviewAiTabState(service)
+    tab.classList.toggle('is-active', state.active)
+    tab.classList.toggle('is-disabled', !state.available)
+    tab.classList.toggle('is-running', state.status === 'running')
+    tab.classList.toggle('has-results', state.status === 'success' || state.status === 'no_match' || state.status === 'stale')
+    tab.classList.toggle('has-error', state.status === 'error')
+    tab.disabled = !state.available
+    const icon = tab.querySelector('.ai-id-service-tab-icon')
+    if (icon) {
+      icon.outerHTML = _renderServiceIcon(state)
+    }
+    const score = tab.querySelector('.ai-id-service-tab-score')
+    if (score) {
+      score.textContent = (state.status === 'success' || state.status === 'stale')
+        ? (state.topPrediction?.confidenceText || `${Math.round(Number(state.topProbability || 0) * 100)}%`)
+        : ''
+      score.style.display = score.textContent ? '' : 'none'
+    }
+  })
+}
+
+function _renderReviewAiResults() {
+  const resultsEl = document.querySelector('[data-identify-results]')
+  if (!resultsEl) return
+  resultsEl.innerHTML = _reviewAiResultsHtml()
+  resultsEl.querySelectorAll('[data-identify-result]').forEach(result => {
+    if (result._wired) return
+    result._wired = true
+    result.addEventListener('click', event => {
+      event.preventDefault()
+      const pred = JSON.parse(result.dataset.identifyResult)
+      const parts = (pred.scientificName || '').split(/\s+/)
+      const taxon = {
+        genus: parts[0] || '',
+        specificEpithet: parts[1] || '',
+        vernacularName: pred.vernacularName || null,
+        scientificName: pred.scientificName || null,
+        displayName: pred.displayName,
+      }
+      applyTaxon(0, taxon)
+      reviewAiState.resultsByService[normalizeIdentifyService(pred.service)] = {
+        ...(reviewAiState.resultsByService[normalizeIdentifyService(pred.service)] || {}),
+        selectedTaxon: taxon,
+      }
+      reviewAiState.stale = reviewAiState.requestedFingerprint !== reviewAiState.currentFingerprint
+      _renderReviewAiBlock()
+    })
+  })
+}
+
+function _renderReviewAiBlock() {
+  _renderReviewAiTabs()
+  _renderReviewAiResults()
 }
 
 function _renderReviewAiControls() {
   const services = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]
   const staleClass = reviewAiState.stale ? ' is-stale' : ''
-  const activeService = normalizeIdentifyService(reviewAiState.activeService)
+  const photoIdServices = _resolveReviewPhotoIdServices(reviewAiState.availability)
+  const activeService = normalizeIdentifyService(reviewAiState.activeService || photoIdServices.primary)
   const activeResult = reviewAiState.resultsByService[activeService] || null
   const activeState = activeResult?.status || (reviewAiState.running ? 'running' : 'idle')
-  const anyAvailable = services.some(service => reviewAiState.availability?.[service]?.available)
   const runState = reviewAiState.running ? 'running' : activeState
   const buttonLabel = t('review.aiId') || 'AI Photo ID'
   return `
@@ -857,7 +961,7 @@ function _renderReviewAiControls() {
           type="button"
           class="ai-id-btn ai-id-run-btn"
           data-identify-run-button
-          ${reviewAiState.running || !anyAvailable ? 'disabled' : ''}
+          ${reviewAiState.running ? 'disabled' : ''}
         >
           <span data-identify-run-label>${runState === 'running' ? 'Loading...' : buttonLabel}</span>
         </button>
@@ -880,8 +984,10 @@ async function _syncReviewAiAvailability() {
   const fingerprint = reviewAiState.currentFingerprint
   if (!fingerprint) return
   const images = _reviewCaptureImages()
+  const inaturalistSession = await loadInaturalistSession()
   const availabilityList = await getAvailableIdentifyServices({
     blobs: images.map(item => item.blob),
+    inaturalistSession,
   })
   const availabilityFingerprint = JSON.stringify({
     fingerprint,
@@ -895,11 +1001,17 @@ async function _syncReviewAiAvailability() {
   reviewAiState.availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
   reviewAiState.availabilityFingerprint = availabilityFingerprint
   if (reviewAiState.currentFingerprint === fingerprint) {
-    buildReviewGrid()
+    if (!reviewAiState.activeService) {
+      reviewAiState.activeService = _resolveReviewPhotoIdServices(reviewAiState.availability).primary
+    }
+    _renderReviewAiBlock()
   }
 }
 
-async function _runReviewComparison() {
+async function _runReviewComparison(serviceOverride = null) {
+  const overrideService = typeof serviceOverride === 'string'
+    ? normalizeIdentifyService(serviceOverride)
+    : null
   if (reviewAiState.running) return
   const blobs = await prepareReviewIdentifyInputs()
   if (!blobs.length) {
@@ -917,52 +1029,56 @@ async function _runReviewComparison() {
   reviewAiState.running = true
   reviewAiState.requestedFingerprint = fingerprint.requestFingerprint
 
+  const inaturalistSession = await loadInaturalistSession()
   const availability = await getAvailableIdentifyServices({
     blobs: blobs.map(item => item.blob),
+    inaturalistSession,
   })
   reviewAiState.availability = Object.fromEntries(availability.map(item => [item.service, item]))
-  reviewAiState.resultsByService = Object.fromEntries(
-    availability.map(item => [
-      item.service,
-      {
-        service: item.service,
-        status: item.available ? 'running' : 'unavailable',
-        available: item.available,
-        reason: item.reason || '',
-        predictions: [],
-      },
-    ]),
-  )
-  reviewAiState.activeService = chooseIdentifyComparisonActiveService(reviewAiState.resultsByService, reviewAiState.activeService)
-  buildReviewGrid()
+  const photoIdServices = _resolveReviewPhotoIdServices(reviewAiState.availability, {
+    comparisonRequested: !overrideService,
+  })
+  const requestedServices = overrideService
+    ? [overrideService]
+    : photoIdServices.run
+  const primaryService = overrideService
+    ? requestedServices[0]
+    : (requestedServices[0] || photoIdServices.primary)
+  _reviewAiDebugDump('review comparison', photoIdServices, requestedServices, inaturalistSession)
+  reviewAiState.activeService = primaryService
+  reviewAiState.resultsByService = markRequestedServicesRunning(reviewAiState.resultsByService, reviewAiState.availability, requestedServices)
+  _renderReviewAiBlock()
+
+  if (!requestedServices.length) {
+    reviewAiState.running = false
+    reviewAiState.requestedFingerprint = reviewAiState.currentFingerprint
+    _renderReviewAiBlock()
+    return
+  }
 
   try {
-    const comparison = await runIdentifyComparisonForBlobs(
-      blobs,
-      {
+    const resultsByService = {}
+    for (const service of requestedServices) {
+      const result = await _runReviewAiService(service, blobs, {
         language: getTaxonomyLanguage(),
         availability: reviewAiState.availability,
-        defaultService: reviewAiState.activeService,
         screen: 'review',
-      },
-    )
-    reviewAiState.resultsByService = comparison.resultsByService
-    reviewAiState.activeService = comparison.activeService
+      })
+      if (result) resultsByService[service] = result
+    }
+    reviewAiState.activeService = primaryService
     reviewAiState.stale = false
-    reviewAiState.hasRun = Object.values(comparison.resultsByService || {}).some(result =>
+    reviewAiState.hasRun = Object.values(resultsByService).some(result =>
       result?.status === 'success' || result?.status === 'no_match'
     )
-    const topResult = comparison.resultsByService?.[comparison.activeService] || null
-    if (topResult?.status === 'success' && topResult?.topPrediction) {
-      applyTaxon(0, _predictionToTaxon(topResult.topPrediction))
-    }
   } catch (error) {
     console.error('Identification error:', error)
     showToast(t('common.errorPrefix', { message: String(error?.message || error || 'Unknown error') }))
   } finally {
     reviewAiState.running = false
     reviewAiState.requestedFingerprint = reviewAiState.currentFingerprint
-    buildReviewGrid()
+    reviewAiState.activeService = primaryService
+    _renderReviewAiBlock()
   }
 }
 
@@ -1010,7 +1126,7 @@ function cancelReview() {
   state.batchCount = 0
   state.captureDraft = _defaultCaptureDraft()
   reviewAiState.running = false
-  reviewAiState.activeService = ID_SERVICE_ARTSORAKEL
+  reviewAiState.activeService = null
   reviewAiState.hasRun = false
   reviewAiState.requestedFingerprint = ''
   reviewAiState.currentFingerprint = ''

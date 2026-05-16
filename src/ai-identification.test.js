@@ -6,6 +6,7 @@ import {
   buildIdentifyFingerprint,
   loadObservationIdentifications,
   markIdentificationStaleIfFingerprintChanged,
+  markRequestedServicesRunning,
   maybeLoadCachedIdentification,
   formatAiSuggestionDisplay,
   renderIdentifyResultRows,
@@ -13,6 +14,8 @@ import {
   renderIdentifyServiceStateSummary,
   runIdentifyComparisonForBlobs,
   saveIdentificationRun,
+  isTerminalAiServiceState,
+  shouldRunServiceFromTab,
 } from './ai-identification.js'
 
 function createSupabaseStub() {
@@ -191,7 +194,7 @@ test('service tabs render no-match, running, and success states with the right i
     status: 'running',
     available: true,
   })
-  assert.match(running, /ai-id-service-tab-icon-dot/)
+  assert.match(running, /ai-pie-spinner/)
   assert.doesNotMatch(running, /Loading/i)
 
   const success = renderIdentifyServiceTab({
@@ -209,10 +212,20 @@ test('service tabs render no-match, running, and success states with the right i
     available: true,
     topProbability: 0.27,
   })
-  assert.match(lowConfidence, /ai-id-service-tab-icon-dot/)
+  assert.match(lowConfidence, /ai-id-service-tab-icon-check/)
   assert.match(lowConfidence, /ai-id-service-tab-score is-low/)
   assert.match(lowConfidence, /ai-confidence-badge is-low/)
   assert.match(lowConfidence, /27%/)
+})
+
+test('service tabs accept a session id for scoped wiring', () => {
+  const html = renderIdentifyServiceTab({
+    service: 'artsorakel',
+    status: 'idle',
+    available: true,
+  }, { sid: 'session-42' })
+
+  assert.match(html, /data-sid="session-42"/)
 })
 
 test('collapsed AI status chips render the active service and confidence percentage', () => {
@@ -239,6 +252,48 @@ test('confidence score spans do not use filled backgrounds', () => {
       new RegExp(`\\.ai-id-service-tab-score\\.${tone}[\\s\\S]*background:`, 'm'),
     )
   }
+})
+
+test('requested services keep the other service state intact while one service reruns', () => {
+  const existing = {
+    artsorakel: {
+      service: 'artsorakel',
+      status: 'success',
+      available: true,
+      predictions: [{ scientificName: 'Amanita muscaria' }],
+      topProbability: 0.92,
+    },
+    inat: {
+      service: 'inat',
+      status: 'success',
+      available: true,
+      predictions: [{ scientificName: 'Amanita pantherina' }],
+      topProbability: 0.81,
+    },
+  }
+
+  const next = markRequestedServicesRunning(existing, {
+    artsorakel: { available: true, reason: '' },
+    inat: { available: true, reason: '' },
+  }, ['inat'])
+
+  assert.equal(next.artsorakel.status, 'success')
+  assert.equal(next.artsorakel.predictions[0].scientificName, 'Amanita muscaria')
+  assert.equal(next.inat.status, 'running')
+  assert.equal(next.inat.predictions[0].scientificName, 'Amanita pantherina')
+})
+
+test('terminal AI service states do not rerun from tab clicks', () => {
+  for (const status of ['no_match', 'error', 'unavailable']) {
+    assert.equal(isTerminalAiServiceState({ status }), true)
+    assert.equal(shouldRunServiceFromTab({ status }), false)
+  }
+
+  assert.equal(isTerminalAiServiceState({ status: 'success' }), true)
+  assert.equal(shouldRunServiceFromTab({ status: 'success' }), false)
+  assert.equal(shouldRunServiceFromTab({ status: 'idle' }), true)
+  assert.equal(shouldRunServiceFromTab({ status: 'stale' }), true)
+  assert.equal(shouldRunServiceFromTab({ status: 'running' }), false)
 })
 
 test('fingerprints change when image or crop inputs change', () => {

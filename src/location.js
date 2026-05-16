@@ -3,6 +3,7 @@ import { lookupCoordinateKey, lookupReverseLocation } from './location-lookup.js
 let suggestions = []
 let lastApplied = ''
 let lastLookupKey = ''
+let lastLookupResult = null
 let debounceTimer = null
 let lookupSeq = 0
 
@@ -11,11 +12,16 @@ export function resetLocationState() {
   suggestions = []
   lastApplied = ''
   lastLookupKey = ''
+  lastLookupResult = null
   clearTimeout(debounceTimer)
   const input = document.getElementById('location-name-input')
   if (input) input.value = ''
   _renderDropdown(false)
   _updateApplyBtn()
+}
+
+export function getLocationLookup() {
+  return lastLookupResult
 }
 
 export function getLocationName() {
@@ -82,6 +88,7 @@ export function startLocationLookup(lat, lon) {
 
 function _applyLookupResult(result, key) {
   if (key && key !== lastLookupKey) return
+  lastLookupResult = result || null
   suggestions = result?.suggestions || []
   const first = suggestions[0] || ''
   const input = document.getElementById('location-name-input')

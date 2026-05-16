@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 
 import { _setDetailAiActiveService } from './find_detail.js'
 
@@ -95,4 +96,20 @@ test('find detail service-tab click updates active tab class', () => {
   } finally {
     globalThis.document = previousDocument
   }
+})
+
+test('find detail ai flow defaults to the setting-selected primary service and requires usable blobs for iNaturalist', () => {
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+
+  assert.match(source, /detailAiState\.activeService = getDefaultIdService\(\)/)
+  assert.match(source, /const identifyInputs = await prepareDetailIdentifyInputs\(sources\.galleryImgs, 'medium'\)/)
+  assert.match(source, /const hasInatBlob = usableBlobs\.length > 0/)
+  assert.match(source, /available: Boolean\(inatLoggedIn && hasInatBlob\)/)
+  assert.match(source, /detailAiState\.activeService = photoIdServices\.primary/)
+  assert.match(source, /detailAiState\.activeService = primaryService/)
+  assert.match(source, /photoIdServices: resolution/)
+  assert.match(source, /const inaturalistSession = await loadInaturalistSession\(\)\s+const availabilityList = await getAvailableIdentifyServices\(\{\s+mediaKeys: detailImageRows\.map\(row => row\.storage_path\)\.filter\(Boolean\),\s+inaturalistSession,/)
+  assert.doesNotMatch(source, /chooseIdentifyComparisonActiveService/)
+  assert.doesNotMatch(source, /comparison\.activeService/)
+  assert.doesNotMatch(source, /activeService = ID_SERVICE_ARTSORAKEL/)
 })

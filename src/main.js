@@ -47,8 +47,8 @@ import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
 import {
   getArtsorakelMaxEdge,
   getDefaultVisibility,
-  getDefaultIdService,
-  setDefaultIdService,
+  getPhotoIdMode,
+  setPhotoIdMode,
   getPhotoGapMinutes,
   setArtsorakelMaxEdge,
   setDefaultVisibility,
@@ -276,10 +276,10 @@ function initSettings() {
     })
   })
 
-  // ID service segment buttons
-  document.querySelectorAll('.settings-id-service-btn').forEach(btn => {
+  // AI Photo ID mode buttons
+  document.querySelectorAll('.settings-photo-id-mode-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      setDefaultIdService(btn.dataset.idService)
+      setPhotoIdMode(btn.dataset.photoIdMode)
       _syncSettingsUI()
     })
   })
@@ -360,9 +360,9 @@ function _syncSettingsUI() {
   })
   const acCameraLabel = document.querySelector('#ac-camera .action-card-label')
 
-  const defaultIdService = getDefaultIdService()
-  document.querySelectorAll('.settings-id-service-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.idService === defaultIdService)
+  const photoIdMode = getPhotoIdMode()
+  document.querySelectorAll('.settings-photo-id-mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.photoIdMode === photoIdMode)
   })
 
   if (acCameraLabel) acCameraLabel.textContent = getEffectiveCameraLabel()

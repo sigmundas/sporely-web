@@ -298,7 +298,8 @@ const messages = {
     'settings.cameraApp': 'Camera App',
     'settings.sporely': 'Sporely',
     'settings.native': 'Native',
-    'settings.idService': 'Identification service',
+    'settings.photoIdMode': 'AI Photo ID mode',
+    'settings.photoIdModeHint': 'Auto uses Artsorakel in Scandinavia and iNaturalist elsewhere.',
     'settings.idServiceInaturalist': 'iNaturalist',
     'settings.idServiceArtsorakel': 'Artsorakel',
     'settings.defaultVisibility': 'Default visibility',
@@ -651,7 +652,8 @@ const messages = {
     'settings.cameraApp': 'Kamera-app',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
-    'settings.idService': 'Identifikasjonstjeneste',
+    'settings.photoIdMode': 'AI Photo ID-modus',
+    'settings.photoIdModeHint': 'Auto bruker Artsorakel i Skandinavia og iNaturalist ellers.',
     'settings.idServiceInaturalist': 'iNaturalist',
     'settings.idServiceArtsorakel': 'Artsorakel',
     'settings.defaultVisibility': 'Standard synlighet',
@@ -1004,7 +1006,8 @@ const messages = {
     'settings.cameraApp': 'Kamera-app',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
-    'settings.idService': 'Identifieringstjänst',
+    'settings.photoIdMode': 'AI Photo ID-läge',
+    'settings.photoIdModeHint': 'Auto använder Artsorakel i Skandinavien och iNaturalist annars.',
     'settings.idServiceInaturalist': 'iNaturalist',
     'settings.idServiceArtsorakel': 'Artsorakel',
     'settings.defaultVisibility': 'Standard synlighet',
@@ -1357,7 +1360,8 @@ const messages = {
     'settings.cameraApp': 'Kamera-App',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
-    'settings.idService': 'Bestimmungsdienst',
+    'settings.photoIdMode': 'AI Photo ID-Modus',
+    'settings.photoIdModeHint': 'Auto verwendet Artsorakel in Skandinavien und iNaturalist sonst.',
     'settings.idServiceInaturalist': 'iNaturalist',
     'settings.idServiceArtsorakel': 'Artsorakel',
     'settings.defaultVisibility': 'Standard-Sichtbarkeit',
@@ -1747,7 +1751,8 @@ export function applyStaticTranslations() {
   setText('#settings-artsorakel-label', 'settings.artsorakel')
   setText('#settings-artsorakel-max-edge-label', 'settings.artsorakelMaxEdge')
   setText('#settings-artsorakel-max-edge-hint', 'settings.artsorakelMaxEdgeHint')
-  setText('#settings-id-service-label', 'settings.idService')
+  setText('#settings-photo-id-mode-label', 'settings.photoIdMode')
+  setText('#settings-photo-id-mode-hint', 'settings.photoIdModeHint')
   setText('#settings-image-resolution-label', 'settings.imageResolution')
   setText('#settings-resolution-reduced', 'settings.imageResolutionReduced')
   setText('#settings-resolution-max', 'settings.imageResolutionMax')

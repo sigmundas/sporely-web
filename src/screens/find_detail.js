@@ -1,17 +1,19 @@
 import { supabase } from '../supabase.js'
-import { formatDate, formatTime, getTaxonomyLanguage, t } from '../i18n.js'
+import { formatDate, formatTime, getLocale, getTaxonomyLanguage, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
 import { searchTaxa, formatDisplayName } from '../artsorakel.js'
 import {
   buildIdentifyFingerprint,
-  chooseIdentifyComparisonActiveService,
+  debugPhotoId,
   getAvailableIdentifyServices,
-  _renderPieSpinnerIcon,
+  _renderServiceIcon,
   loadObservationIdentifications,
   renderIdentifyResultRows,
   saveIdentificationRun,
+  markRequestedServicesRunning,
+  shouldRunServiceFromTab,
   ID_SERVICE_ARTSORAKEL,
   ID_SERVICE_INATURALIST,
   normalizeIdentifyService,
@@ -23,9 +25,10 @@ import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
-import { getArtsorakelMaxEdge, getDefaultVisibility, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
+import { getArtsorakelMaxEdge, getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { getIdentifyNoMatchMessage, runIdentifyForBlobs, runIdentifyForMediaKeys } from '../identify.js'
+import { loadInaturalistSession } from '../inaturalist.js'
 import { Preferences } from '@capacitor/preferences'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
@@ -44,6 +47,7 @@ let hideCancelOverride = false
 let detailLocationSuggestions = []
 let detailLocationLookupKey = ''
 let detailLocationAutoApplied = ''
+let detailLocationLookup = null
 let detailImageRows = []
 let detailImageSources = []
 let detailAiSources = []
@@ -54,7 +58,7 @@ let detailPrivacySlotCount = null
 const detailAiState = {
   running: false,
   runningByService: {},
-  activeService: ID_SERVICE_ARTSORAKEL,
+  activeService: null,
   availability: {},
   resultsByService: {},
   cachedRows: [],
@@ -117,10 +121,18 @@ export function initFindDetail() {
     })
   }
 
-  document.querySelector('[data-identify-run-button]')?.addEventListener('click', _runDetailAiComparison)
+  document.querySelector('[data-identify-run-button]')?.addEventListener('click', () => _runDetailAiComparison())
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
     tab.addEventListener('click', () => {
-      _setDetailAiActiveService(tab.dataset.identifyServiceTab)
+      const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+      const serviceState = detailAiState.resultsByService?.[service] || null
+      if (shouldRunServiceFromTab(serviceState)) {
+        void _runDetailAiComparison(service)
+        return
+      }
+      _setDetailAiActiveService(service)
+      if (detailAiState.running) return
+      if (serviceState?.available === false) return
     })
   })
   document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
@@ -166,7 +178,7 @@ export async function openFindDetail(obsId, options = {}) {
   returnScreenOverride = options.returnScreen || null
   hideCancelOverride = !!options.hideCancel
   detailAiState.running = false
-  detailAiState.activeService = ID_SERVICE_ARTSORAKEL
+  detailAiState.activeService = null
   detailAiState.availability = {}
   detailAiState.resultsByService = {}
   detailAiState.cachedRows = []
@@ -175,6 +187,7 @@ export async function openFindDetail(obsId, options = {}) {
   detailAiState.currentFingerprintByService = {}
   detailAiState.requestedFingerprintByService = {}
   detailAiState.stale = false
+  detailLocationLookup = null
 
   // Update back button label — state.currentScreen is still the previous screen at this point
   const prevLabel = {
@@ -735,52 +748,45 @@ function _detailImageFingerprint(service = ID_SERVICE_ARTSORAKEL) {
 function _detailAiTabState(service) {
   const result = detailAiState.resultsByService[service] || null
   const availability = detailAiState.availability?.[service] || null
-  const isRunning = detailAiState.runningByService?.[service] ?? false
+  const running = !!detailAiState.runningByService?.[service]
   return {
     service,
     active: detailAiState.activeService === service,
     available: availability?.available ?? false,
     reason: availability?.reason || '',
-    status: result?.status || (isRunning ? 'running' : 'idle'),
+    status: running ? 'running' : (result?.status || 'idle'),
     errorMessage: result?.errorMessage || '',
     topProbability: result?.topProbability ?? null,
     topPrediction: result?.topPrediction || null,
   }
 }
 
+function _detailPhotoIdLookup() {
+  return detailLocationLookup || null
+}
+
+function _resolveDetailPhotoIdServices(availability = {}, options = {}) {
+  const lookup = _detailPhotoIdLookup()
+  return resolvePhotoIdServices({
+    mode: getPhotoIdMode(),
+    countryCode: lookup?.country_code || null,
+    countryName: lookup?.country_name || null,
+    locale: getLocale(),
+    inaturalistAvailable: availability?.[ID_SERVICE_INATURALIST]?.available ?? false,
+    comparisonRequested: !!options.comparisonRequested,
+  })
+}
+
 function _detailAiServiceIconHtml(state) {
-  if (state.status === 'running') {
-    return _renderPieSpinnerIcon()
-  }
-  if (state.status === 'success' || state.status === 'stale') {
-    return `
-      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-check" aria-hidden="true">
-        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-          <path d="M3.2 8.7 6.3 11.8 12.8 4.8" />
-        </svg>
-      </span>
-    `
-  }
-  if (state.status === 'no_match' || state.status === 'error') {
-    return `
-      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-x ${state.status === 'error' ? 'is-error' : ''}" aria-hidden="true">
-        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-          <path d="M4 4 12 12M12 4 4 12" />
-        </svg>
-      </span>
-    `
-  }
-  if (!state.available) {
-    return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot is-unavailable" aria-hidden="true"></span>`
-  }
-  return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot" aria-hidden="true"></span>`
+  return _renderServiceIcon(state)
 }
 
 function _renderDetailAiTabs() {
-  const anyAvailable = Object.values(detailAiState.availability || {}).some(item => item?.available)
+  const photoIdServices = _resolveDetailPhotoIdServices(detailAiState.availability)
   const runBtn = document.querySelector('[data-identify-run-button]')
   if (runBtn) {
-    runBtn.disabled = !anyAvailable || detailAiState.running || !currentObsIsOwner
+    const availabilityKnown = Object.keys(detailAiState.availability || {}).length > 0
+    runBtn.disabled = detailAiState.running || !currentObsIsOwner || (availabilityKnown && !photoIdServices.run.length)
     const runLabel = runBtn.querySelector('[data-identify-run-label]')
     if (runLabel) {
       runLabel.textContent = detailAiState.running ? 'Loading...' : (t('review.aiId') || 'AI Photo ID')
@@ -794,7 +800,7 @@ function _renderDetailAiTabs() {
     tab.classList.toggle('is-running', state.status === 'running')
     tab.classList.toggle('has-results', state.status === 'success' || state.status === 'no_match' || state.status === 'stale')
     tab.classList.toggle('has-error', state.status === 'error')
-    tab.disabled = !state.available || detailAiState.running
+    tab.disabled = !state.available
     const icon = tab.querySelector('.ai-id-service-tab-icon')
     if (icon) {
       icon.outerHTML = _detailAiServiceIconHtml(state)
@@ -812,12 +818,12 @@ function _renderDetailAiTabs() {
 function _renderDetailAiResults() {
   const resultsEl = document.getElementById('detail-ai-results')
   if (!resultsEl) return
-  const activeService = normalizeIdentifyService(detailAiState.activeService)
+  const activeService = normalizeIdentifyService(detailAiState.activeService || _resolveDetailPhotoIdServices(detailAiState.availability).primary)
   const result = detailAiState.resultsByService[activeService] || null
   resultsEl.dataset.identifyService = activeService
   const staleNote = document.querySelector('[data-identify-stale-note]')
   if (staleNote) staleNote.style.display = detailAiState.stale ? '' : 'none'
-  if (detailAiState.running && (!result?.predictions || !result.predictions.length)) {
+  if (detailAiState.runningByService?.[activeService] || result?.status === 'running') {
     resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
     resultsEl.style.display = 'block'
     return
@@ -886,19 +892,6 @@ function _applyDetailAiServiceResult(service, result = {}) {
       request_fingerprint: result.request_fingerprint || '',
     },
   }
-  const activeResult = detailAiState.resultsByService[detailAiState.activeService] || null
-  if (
-    normalizedService
-    && (result.status === 'success' || result.status === 'stale' || result.status === 'no_match' || result.status === 'error' || result.status === 'unavailable')
-    && (
-      !activeResult
-      || activeResult.status === 'running'
-      || activeResult.status === 'idle'
-      || !activeResult.predictions?.length
-    )
-  ) {
-    detailAiState.activeService = normalizedService
-  }
   _renderDetailAiTabs()
   _renderDetailAiResults()
 }
@@ -925,9 +918,29 @@ async function _loadDetailAiCache() {
     Object.entries(fingerprints).map(([service, fp]) => [service, fp.requestFingerprint]),
   )
   detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL] || ''
-  detailAiState.availability = Object.fromEntries((await getAvailableIdentifyServices({
+  const sources = getDetailIdentifySources()
+  const identifyInputs = await prepareDetailIdentifyInputs(sources.galleryImgs, 'medium')
+  const usableBlobs = identifyInputs
+    .filter(item => item?.blob instanceof Blob)
+    .map(item => item.blob)
+  const hasInatBlob = usableBlobs.length > 0
+  const inaturalistSession = await loadInaturalistSession()
+  const availabilityList = await getAvailableIdentifyServices({
     mediaKeys: detailImageRows.map(row => row.storage_path).filter(Boolean),
-  })).map(item => [item.service, item]))
+    inaturalistSession,
+  })
+  const inatLoggedIn = Boolean(inaturalistSession?.connected && (inaturalistSession?.api_token || inaturalistSession?.apiToken))
+  const inatReason = inatLoggedIn
+    ? (hasInatBlob ? '' : (t('detail.noPhotoToIdentify') || 'No usable photo available for iNaturalist.'))
+    : (t('settings.inaturalistLoginMissing') || 'Please log in to iNaturalist first.')
+  detailAiState.availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+  detailAiState.availability[ID_SERVICE_INATURALIST] = {
+    ...(detailAiState.availability[ID_SERVICE_INATURALIST] || {}),
+    service: ID_SERVICE_INATURALIST,
+    available: Boolean(inatLoggedIn && hasInatBlob),
+    disabled: !Boolean(inatLoggedIn && hasInatBlob),
+    reason: inatReason,
+  }
   const rows = await loadObservationIdentifications(currentObs.id).catch(error => {
     console.warn('Failed to load cached AI rows:', error)
     return []
@@ -959,7 +972,8 @@ async function _loadDetailAiCache() {
   }
 
   detailAiState.resultsByService = byService
-  detailAiState.activeService = chooseIdentifyComparisonActiveService(byService, ID_SERVICE_ARTSORAKEL)
+  const photoIdServices = _resolveDetailPhotoIdServices(detailAiState.availability)
+  detailAiState.activeService = detailAiState.activeService || photoIdServices.primary
   detailAiState.stale = rows.some(row => {
     const service = normalizeIdentifyService(row.service)
     return byService[service] && row.request_fingerprint !== detailAiState.currentFingerprintByService[service]
@@ -968,7 +982,10 @@ async function _loadDetailAiCache() {
   _renderDetailAiResults()
 }
 
-async function _runDetailAiComparison() {
+async function _runDetailAiComparison(serviceOverride = null) {
+  const overrideService = typeof serviceOverride === 'string'
+    ? normalizeIdentifyService(serviceOverride)
+    : null
   const sources = getDetailIdentifySources()
   const galleryImgs = sources.galleryImgs
   if (!galleryImgs.length && !sources.hasStoredSources) {
@@ -977,14 +994,68 @@ async function _runDetailAiComparison() {
   }
   if (detailAiState.running) return
 
+  if (overrideService) {
+    detailAiState.running = true
+    detailAiState.activeService = overrideService
+    detailAiState.runningByService = {
+      ...(detailAiState.runningByService || {}),
+      [overrideService]: true,
+    }
+    _renderDetailAiTabs()
+    _renderDetailAiResults()
+  }
+
   const serviceFingerprints = {
     [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
     [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
   }
+  const identifyInputs = await prepareDetailIdentifyInputs(galleryImgs, 'medium')
+  const usableBlobs = identifyInputs
+    .filter(item => item?.blob instanceof Blob)
+    .map(item => item.blob)
+  const hasInatBlob = usableBlobs.length > 0
+  const inaturalistSession = await loadInaturalistSession()
   const availabilityList = await getAvailableIdentifyServices({
     mediaKeys: detailImageRows.map(row => row.storage_path).filter(Boolean),
+    inaturalistSession,
   })
+  const inatLoggedIn = Boolean(inaturalistSession?.connected && (inaturalistSession?.api_token || inaturalistSession?.apiToken))
+  const inatReason = inatLoggedIn
+    ? (hasInatBlob ? '' : (t('detail.noPhotoToIdentify') || 'No usable photo available for iNaturalist.'))
+    : (t('settings.inaturalistLoginMissing') || 'Please log in to iNaturalist first.')
   const availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+  availability[ID_SERVICE_INATURALIST] = {
+    ...(availability[ID_SERVICE_INATURALIST] || {}),
+    service: ID_SERVICE_INATURALIST,
+    available: Boolean(inatLoggedIn && hasInatBlob),
+    disabled: !Boolean(inatLoggedIn && hasInatBlob),
+    reason: inatReason,
+  }
+  const resolution = _resolveDetailPhotoIdServices(availability, {
+    comparisonRequested: !overrideService,
+  })
+  const lookup = _detailPhotoIdLookup()
+  const requestedServices = overrideService
+    ? [overrideService]
+    : resolution.run
+  const primaryService = overrideService
+    ? requestedServices[0]
+    : (requestedServices[0] || resolution.primary)
+  debugPhotoId('detail comparison', {
+    storedPhotoIdMode: getPhotoIdMode(),
+    localStoragePhotoIdMode: globalThis.localStorage?.getItem('sporely-photo-id-mode'),
+    legacyDefaultIdService: globalThis.localStorage?.getItem('sporely-default-id-service'),
+    inaturalistSessionConnected: Boolean(inaturalistSession?.connected),
+    inaturalistHasApiToken: Boolean(inaturalistSession?.api_token || inaturalistSession?.apiToken),
+    availability,
+    photoIdServices: resolution,
+    resolvedServices: resolution,
+    requestedServices,
+    mode: resolution.mode,
+    countryCode: resolution.countryCode,
+    countryName: lookup?.country_name || null,
+    locale: resolution.locale,
+  })
   detailAiState.currentFingerprintByService = Object.fromEntries(
     Object.entries(serviceFingerprints).map(([service, fp]) => [service, fp.requestFingerprint]),
   )
@@ -997,32 +1068,24 @@ async function _runDetailAiComparison() {
   detailAiState.runningByService = Object.fromEntries(
     [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST].map(service => [
       service,
-      Boolean(availability[service]?.available),
+      Boolean(availability[service]?.available && requestedServices.includes(service)),
     ]),
   )
-  detailAiState.resultsByService = Object.fromEntries(
-    [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST].map(service => {
-      const serviceAvailability = availability[service]
-      return [
-        service,
-        {
-          service,
-          status: serviceAvailability?.available ? 'running' : 'unavailable',
-          predictions: [],
-          errorMessage: serviceAvailability?.reason || '',
-          available: serviceAvailability?.available ?? false,
-          reason: serviceAvailability?.reason || '',
-          topPrediction: null,
-          topProbability: null,
-        },
-      ]
-    }),
-  )
+  detailAiState.resultsByService = markRequestedServicesRunning(detailAiState.resultsByService, availability, requestedServices)
+  detailAiState.activeService = primaryService
   _renderDetailAiTabs()
   _renderDetailAiResults()
 
+  if (!requestedServices.length) {
+    detailAiState.running = false
+    detailAiState.runningByService = {}
+    _renderDetailAiTabs()
+    _renderDetailAiResults()
+    return
+  }
+
   try {
-    const tasks = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST].map(async service => {
+    const tasks = requestedServices.map(async service => {
       const serviceAvailability = availability[service]
       if (!serviceAvailability?.available) {
         detailAiState.runningByService = {
@@ -1067,7 +1130,7 @@ async function _runDetailAiComparison() {
 
     const settled = await Promise.allSettled(tasks)
     const resultsByService = {}
-    ;[ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST].forEach((service, index) => {
+    requestedServices.forEach((service, index) => {
       const item = settled[index]
       if (item.status === 'fulfilled') {
         resultsByService[service] = item.value
@@ -1084,11 +1147,14 @@ async function _runDetailAiComparison() {
       ...(detailAiState.resultsByService || {}),
       ...resultsByService,
     }
-    detailAiState.activeService = chooseIdentifyComparisonActiveService(detailAiState.resultsByService, ID_SERVICE_ARTSORAKEL)
+    detailAiState.activeService = primaryService
     detailAiState.stale = false
 
-    await Promise.allSettled(Object.values(detailAiState.resultsByService).map(result => {
-      if (!currentObs?.id || !state.user?.id || !result?.service || result.status === 'unavailable') return Promise.resolve(null)
+    await Promise.allSettled(requestedServices.map(service => {
+      const result = detailAiState.resultsByService?.[service]
+      if (!currentObs?.id || !state.user?.id || !result?.service || result.status === 'unavailable' || result.status === 'idle') {
+        return Promise.resolve(null)
+      }
       const serviceFingerprint = serviceFingerprints[result.service] || _detailImageFingerprint(result.service)
       return saveIdentificationRun({
         observationId: currentObs.id,
@@ -1150,6 +1216,7 @@ function _resetForm() {
   detailLocationSuggestions = []
   detailLocationLookupKey = ''
   detailLocationAutoApplied = ''
+  detailLocationLookup = null
   _renderDetailLocationDropdown(false)
   document.getElementById('detail-habitat').value     = ''
   const coordsEl = document.getElementById('detail-coords')
@@ -1175,7 +1242,7 @@ function _resetForm() {
   const cancelBtn = document.getElementById('detail-cancel-btn')
   if (cancelBtn) cancelBtn.style.display = ''
   detailAiState.running = false
-  detailAiState.activeService = ID_SERVICE_ARTSORAKEL
+  detailAiState.activeService = null
   detailAiState.availability = {}
   detailAiState.resultsByService = {}
   detailAiState.cachedRows = []
@@ -1212,6 +1279,7 @@ function _startDetailLocationLookup(obs) {
   detailLocationSuggestions = []
   detailLocationLookupKey = lookupKey
   detailLocationAutoApplied = ''
+  detailLocationLookup = null
   _renderDetailLocationDropdown(false)
   if (!lookupKey) return
 
@@ -1224,6 +1292,7 @@ function _startDetailLocationLookup(obs) {
 
 function _applyDetailLocationLookup(lookupKey, result) {
   if (lookupKey !== detailLocationLookupKey) return
+  detailLocationLookup = result || null
   detailLocationSuggestions = result?.suggestions || []
   const first = detailLocationSuggestions[0] || ''
   const input = document.getElementById('detail-location')

@@ -931,12 +931,14 @@
         </div>
         <p class="settings-gap-hint" id="settings-artsorakel-max-edge-hint">Images sent to Artsorakel will be resized so neither width nor height exceeds this value.</p>
 
-        <div class="settings-section-label" id="settings-id-service-label" style="margin-top:22px">Identification service</div>
-        <div class="theme-segment settings-id-service-segment">
-          <button class="theme-seg-btn settings-id-service-btn" id="settings-id-service-inaturalist" data-id-service="inat" data-identify-service-label="inat">iNaturalist</button>
-          <button class="theme-seg-btn settings-id-service-btn" id="settings-id-service-artsorakel" data-id-service="artsorakel" data-identify-service-label="artsorakel">Artsorakel</button>
+        <div class="settings-section-label" id="settings-photo-id-mode-label" style="margin-top:22px">AI Photo ID mode</div>
+        <div class="scope-tabs settings-photo-id-mode-grid">
+          <button class="scope-tab settings-photo-id-mode-btn" id="settings-photo-id-mode-auto" data-photo-id-mode="auto">Auto</button>
+          <button class="scope-tab settings-photo-id-mode-btn" id="settings-photo-id-mode-both" data-photo-id-mode="both">Both</button>
+          <button class="scope-tab settings-photo-id-mode-btn" id="settings-photo-id-mode-artsorakel" data-photo-id-mode="artsorakel">Artsorakel</button>
+          <button class="scope-tab settings-photo-id-mode-btn" id="settings-photo-id-mode-inat" data-photo-id-mode="inat">iNat</button>
         </div>
-        <p class="settings-gap-hint" id="settings-id-service-hint">Used as the default on grouped finds.</p>
+        <p class="settings-gap-hint" id="settings-photo-id-mode-hint">Auto uses Artsorakel in Scandinavia and iNaturalist elsewhere.</p>
 
         <div class="settings-inat-card" id="settings-inat-section">
           <div class="settings-inat-status" id="settings-inat-status">Not logged in</div>

@@ -1,45 +1,37 @@
 {
   "name": "sporely-web",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.5.5",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
   },
-"scriptsInfo": {
-  "check:node": "Fails early if the active Node version is older than 22.",
-  "predev": "Runs automatically before npm run dev; checks Node version.",
-  "prebuild": "Runs automatically before npm run build; checks Node version.",
-  "prepreview:host": "Runs automatically before npm run preview:host; checks Node version.",
-
-  "dev": "Starts the Vite development server with live reload, reachable from other devices on the network.",
-  "build": "Builds the production web app into dist/.",
-  "preview:host": "Builds the production app, then serves it on the local network for browser/iPhone testing.",
-
-  "sync:version:bump-code": "Updates native app version metadata and bumps Android versionCode.",
-  "android:install": "Builds the web app, syncs Capacitor Android, then installs the debug app on a connected Android device.",
-  "android:install:bump": "Bumps package patch version and Android versionCode, then installs the debug app.",
-
-  "test": "Runs the Node test files such as *.test.js."
-},
-"scripts": {
-  "check:node": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (major < 22) { console.error('\\nNode 22+ is required for sporely-web. Current: ' + process.version + '\\nUse nvm install 22 && nvm use 22\\n'); process.exit(1); }\"",
-
-  "predev": "npm run check:node",
-  "prebuild": "npm run check:node",
-  "prepreview:host": "npm run check:node",
-
-  "dev": "vite --host",
-  "build": "vite build",
-  "preview:host": "npm run build && vite preview --host",
-
-  "sync:version:bump-code": "node scripts/sync-version.mjs --bump-code",
-
-  "android:install": "npm run build && npx cap sync android && cd android && ./gradlew :app:installDebug",
-  "android:install:bump": "npm version patch --no-git-tag-version && npm run sync:version:bump-code && npm run android:install",
-
-  "test": "node --test"
-},
+  "scriptsInfo": {
+    "check:node": "Fails early if the active Node version is older than 22.",
+    "predev": "Runs automatically before npm run dev; checks Node version.",
+    "prebuild": "Runs automatically before npm run build; checks Node version.",
+    "prepreview:host": "Runs automatically before npm run preview:host; checks Node version.",
+    "dev": "Starts the Vite development server with live reload, reachable from other devices on the network.",
+    "build": "Builds the production web app into dist/.",
+    "preview:host": "Builds the production app, then serves it on the local network for browser/iPhone testing.",
+    "sync:version:bump-code": "Updates native app version metadata and bumps Android versionCode.",
+    "android:install": "Builds the web app, syncs Capacitor Android, then installs the debug app on a connected Android device.",
+    "android:install:bump": "Bumps package patch version and Android versionCode, then installs the debug app.",
+    "test": "Runs the Node test files such as *.test.js."
+  },
+  "scripts": {
+    "check:node": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (major < 22) { console.error('\\nNode 22+ is required for sporely-web. Current: ' + process.version + '\\nUse nvm install 22 && nvm use 22\\n'); process.exit(1); }\"",
+    "predev": "npm run check:node",
+    "prebuild": "npm run check:node",
+    "prepreview:host": "npm run check:node",
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview:host": "npm run build && vite preview --host",
+    "sync:version:bump-code": "node scripts/sync-version.mjs --bump-code",
+    "android:install": "npm run build && npx cap sync android && cd android && ./gradlew :app:installDebug",
+    "android:install:bump": "npm version patch --no-git-tag-version && npm run sync:version:bump-code && npm run android:install",
+    "test": "node --test"
+  },
   "dependencies": {
     "@capacitor/android": "^8.3.0",
     "@capacitor/app": "^8.1.0",

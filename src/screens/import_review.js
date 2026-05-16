@@ -1,6 +1,6 @@
 import { Preferences } from '@capacitor/preferences';
 import { state } from '../state.js';
-import { formatDate, formatTime, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
+import { formatDate, formatTime, getLocale, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
 import { searchTaxa, formatDisplayName, createManualTaxon } from '../artsorakel.js';
@@ -10,7 +10,7 @@ import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
-import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js';
+import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js';
 import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
@@ -19,10 +19,15 @@ import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePi
 import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
 import {
   buildIdentifyFingerprint,
+  chooseIdentifyComparisonActiveService,
+  debugPhotoId,
   getAvailableIdentifyServices,
+  isTerminalAiServiceState,
   renderIdentifyResultRows,
   renderIdentifyServiceTab,
   renderIdentifyServiceStateSummary,
+  markRequestedServicesRunning,
+  shouldRunServiceFromTab,
   ID_SERVICE_ARTSORAKEL,
   normalizeIdentifyService,
 } from '../ai-identification.js';
@@ -167,11 +172,15 @@ function _ensureSessionAiState(session) {
   if (!session.aiPredictionsByService || typeof session.aiPredictionsByService !== 'object') session.aiPredictionsByService = {};
   if (!session.aiServiceState || typeof session.aiServiceState !== 'object') session.aiServiceState = {};
   if (!session.aiAvailability) session.aiAvailability = {};
-  if (!session.aiActiveService) session.aiActiveService = getDefaultIdService();
+  if (!session.aiActiveService) {
+    session.aiActiveService = session.aiService ? normalizeIdentifyService(session.aiService) : null;
+  }
   if (!session.aiCurrentFingerprint) session.aiCurrentFingerprint = '';
   if (!session.aiRequestedFingerprint) session.aiRequestedFingerprint = '';
   if (!session.aiAvailabilityFingerprint) session.aiAvailabilityFingerprint = '';
-  const legacyService = normalizeIdentifyService(session.aiService || session.aiActiveService || getDefaultIdService());
+  const legacyService = session.aiService || session.aiActiveService
+    ? normalizeIdentifyService(session.aiService || session.aiActiveService)
+    : null;
   if (Array.isArray(session.aiPredictions) && session.aiPredictions.length && !session.aiPredictionsByService[legacyService]) {
     session.aiPredictionsByService[legacyService] = session.aiPredictions;
   }
@@ -189,8 +198,11 @@ function _ensureSessionAiState(session) {
     }
   }
 
-  session.aiActiveService = normalizeIdentifyService(session.aiActiveService || session.aiService || getDefaultIdService());
-  session.aiService = session.aiActiveService;
+  session.aiActiveService = session.aiActiveService
+    ? normalizeIdentifyService(session.aiActiveService)
+    : null;
+  session.aiService = session.aiActiveService
+    || (session.aiService ? normalizeIdentifyService(session.aiService) : null);
   return session;
 }
 
@@ -241,22 +253,18 @@ async function _syncSessionAiAvailability(session) {
 }
 
 async function _syncImportAiDefaultAvailability() {
-  const defaultService = getDefaultIdService()
-  let available = true
-  let reason = ''
-  let label = defaultService === ID_SERVICE_INATURALIST
-    ? (t('settings.idServiceInaturalist') || 'iNaturalist')
-    : (t('settings.idServiceArtsorakel') || 'Artsorakel')
-
-  if (defaultService === ID_SERVICE_INATURALIST) {
-    const session = await loadInaturalistSession()
-    available = Boolean(session?.connected && (session?.api_token || session?.apiToken))
-    reason = available ? '' : (t('settings.inaturalistLoginMissing') || 'Please log in to iNaturalist first.')
-  } else {
-    const hasTargets = _getBatchAiTargets().length > 0
-    available = hasTargets
-    reason = hasTargets ? '' : (t('review.noPhotosToIdentify') || t('review.noCaptures') || 'No images available.')
-  }
+  const hasTargets = _getBatchAiTargets().length > 0
+  const session = await loadInaturalistSession()
+  const inaturalistAvailable = Boolean(session?.connected && (session?.api_token || session?.apiToken))
+  const hasRunnableTarget = _getBatchAiTargets().some(target => _resolveSessionPhotoIdServices(target, {
+    inaturalistAvailable,
+    comparisonRequested: true,
+  }).run.length > 0)
+  const available = hasTargets && hasRunnableTarget
+  const reason = hasTargets
+    ? (hasRunnableTarget ? '' : (getIdentifyUnavailableMessage(ID_SERVICE_INATURALIST) || 'iNaturalist unavailable right now.'))
+    : (t('review.noPhotosToIdentify') || t('review.noCaptures') || 'No images available.')
+  const label = t('review.aiId') || 'AI Photo ID'
 
   const changed = importAiBatchState.defaultServiceAvailable !== available
     || importAiBatchState.defaultServiceReason !== reason
@@ -265,6 +273,25 @@ async function _syncImportAiDefaultAvailability() {
   importAiBatchState.defaultServiceReason = reason
   importAiBatchState.defaultServiceLabel = label
   if (changed) _updateImportFooterUi()
+}
+
+function _sessionPhotoIdLookup(session) {
+  return session?.locationLookup || null
+}
+
+function _resolveSessionPhotoIdServices(session, {
+  inaturalistAvailable = false,
+  comparisonRequested = false,
+} = {}) {
+  const lookup = _sessionPhotoIdLookup(session)
+  return resolvePhotoIdServices({
+    mode: getPhotoIdMode(),
+    countryCode: lookup?.country_code || null,
+    countryName: lookup?.country_name || null,
+    locale: getLocale(),
+    inaturalistAvailable,
+    comparisonRequested,
+  })
 }
 
 function _sessionAiResultState(session, service) {
@@ -294,7 +321,7 @@ function _sessionAiResultState(session, service) {
     active: normalized?.aiActiveService === svc,
     available: availability?.available ?? false,
     reason: availability?.reason || '',
-    status: normalized?.aiRunning ? 'running' : status,
+    status: serviceState.status === 'running' ? 'running' : status,
     topPrediction: predictions[0] || null,
     topProbability,
     errorMessage: serviceState.errorMessage || '',
@@ -305,7 +332,10 @@ function _sessionAiResultState(session, service) {
 function _renderSessionAiResults(session) {
   const normalized = _ensureSessionAiState(session)
   if (!normalized) return ''
-  const activeService = normalizeIdentifyService(normalized.aiActiveService)
+  const photoIdServices = _resolveSessionPhotoIdServices(normalized, {
+    inaturalistAvailable: normalized.aiAvailability?.[ID_SERVICE_INATURALIST]?.available ?? false,
+  })
+  const activeService = normalizeIdentifyService(normalized.aiActiveService || photoIdServices.primary)
   const predictions = normalized.aiPredictionsByService?.[activeService] || []
   const serviceState = normalized.aiServiceState?.[activeService] || _emptyServiceState()
   if (predictions.length) {
@@ -317,7 +347,7 @@ function _renderSessionAiResults(session) {
   if (serviceState.status === 'error') {
     return `<div class="ai-results-empty">${serviceState.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
   }
-  if (normalized.aiRunning) {
+  if (serviceState.status === 'running') {
     return `<div class="ai-results-empty">${t('import.identifying') || t('common.loading')}</div>`
   }
   if (serviceState.status === 'stale' || normalized.aiStale) {
@@ -327,6 +357,30 @@ function _renderSessionAiResults(session) {
     return `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`
   }
   return `<div class="ai-results-empty">${t('review.noMatch') || 'No match'}</div>`
+}
+
+function _renderSessionAiCardState(session) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized?.files?.length) return ''
+  const states = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]
+    .map(service => _sessionAiResultState(normalized, service))
+    .filter(state => {
+      const status = state.status || 'idle'
+      if (status === 'idle') return false
+      if (status === 'unavailable' && state.available === false) return false
+      return true
+    })
+
+  if (states.length) {
+    return states
+      .map(state => renderIdentifyServiceStateSummary(state))
+      .join('')
+  }
+
+  const photoIdServices = _resolveSessionPhotoIdServices(normalized, {
+    inaturalistAvailable: normalized.aiAvailability?.[ID_SERVICE_INATURALIST]?.available ?? false,
+  })
+  return renderIdentifyServiceStateSummary(_sessionAiResultState(normalized, normalizeIdentifyService(normalized.aiActiveService || photoIdServices.primary)))
 }
 
 function _renderSessionAiControls(session) {
@@ -342,29 +396,37 @@ function _renderSessionAiControls(session) {
     )
   }
   void _syncSessionAiAvailability(normalized)
-  const activeService = normalizeIdentifyService(normalized.aiActiveService)
+  const photoIdServices = _resolveSessionPhotoIdServices(normalized, {
+    inaturalistAvailable: normalized.aiAvailability?.[ID_SERVICE_INATURALIST]?.available ?? false,
+  })
+  const activeService = normalizeIdentifyService(normalized.aiActiveService || photoIdServices.primary)
   const activeResult = normalized.aiServiceState?.[activeService] || _emptyServiceState()
-  const activePredictions = normalized.aiPredictionsByService?.[activeService] || []
+  if (!isTerminalAiServiceState(activeResult) && activeResult.status !== 'running' && activeService !== photoIdServices.primary) {
+    normalized.aiActiveService = photoIdServices.primary
+    normalized.aiService = photoIdServices.primary
+  }
+  const resolvedActiveService = normalizeIdentifyService(normalized.aiActiveService || photoIdServices.primary)
+  const resolvedActiveResult = normalized.aiServiceState?.[resolvedActiveService] || _emptyServiceState()
+  const activePredictions = normalized.aiPredictionsByService?.[resolvedActiveService] || []
   const runState = normalized.aiRunning
     ? 'running'
-    : (activeResult.status || (activePredictions.length ? 'success' : 'idle'))
-  const anyAvailable = Object.values(normalized.aiAvailability || {}).some(item => item?.available)
+    : (resolvedActiveResult.status || (activePredictions.length ? 'success' : 'idle'))
   const runLabel = t('review.aiId') || 'AI Photo ID'
   const staleNote = normalized.aiStale ? `<div class="detail-ai-stale-note">${t('review.resultsOutdated') || 'Results outdated - run AI Photo ID again.'}</div>` : ''
   return `
     <div class="detail-ai-stack" data-identify-comparison-state data-sid="${escHtml(normalized.id)}">
       <div class="detail-ai-controls">
-        <button class="ai-id-btn ai-id-run-btn" type="button" data-identify-run-button data-sid="${escHtml(normalized.id)}" ${normalized.aiRunning || !anyAvailable ? 'disabled' : ''}>
+        <button class="ai-id-btn ai-id-run-btn" type="button" data-identify-run-button data-sid="${escHtml(normalized.id)}" ${normalized.aiRunning ? 'disabled' : ''}>
           <span data-identify-run-label>${runState === 'running' ? 'Loading...' : escHtml(runLabel)}</span>
         </button>
         <div class="detail-ai-service-tabs" role="tablist" aria-label="AI services">
-          ${renderIdentifyServiceTab(_sessionAiResultState(normalized, ID_SERVICE_ARTSORAKEL))}
-          ${renderIdentifyServiceTab(_sessionAiResultState(normalized, ID_SERVICE_INATURALIST))}
+          ${renderIdentifyServiceTab(_sessionAiResultState(normalized, ID_SERVICE_ARTSORAKEL), { sid: normalized.id })}
+          ${renderIdentifyServiceTab(_sessionAiResultState(normalized, ID_SERVICE_INATURALIST), { sid: normalized.id })}
         </div>
       </div>
       <div class="detail-ai-results-shell">
         ${staleNote}
-        <div class="detail-ai-results ai-results-import" data-sid="${escHtml(normalized.id)}" data-identify-results data-identify-service="${activeService}">
+        <div class="detail-ai-results ai-results-import" data-sid="${escHtml(normalized.id)}" data-identify-results data-identify-service="${resolvedActiveService}">
           ${_renderSessionAiResults(normalized)}
         </div>
       </div>
@@ -377,7 +439,6 @@ function _sessionServiceNeedsRerun(session, service) {
   if (!normalized) return false
   const svc = normalizeIdentifyService(service)
   const state = normalized.aiServiceState?.[svc] || _emptyServiceState()
-  const predictions = normalized.aiPredictionsByService?.[svc] || []
   const fingerprint = _sessionAiFingerprint(normalized)
   const stale = Boolean(
     fingerprint?.imageFingerprint
@@ -386,9 +447,9 @@ function _sessionServiceNeedsRerun(session, service) {
       state.imageFingerprint !== fingerprint.imageFingerprint
       || state.cropFingerprint !== fingerprint.cropFingerprint
     )
-    && (state.status !== 'idle' || predictions.length),
+    && shouldRunServiceFromTab(state),
   )
-  return stale || state.status === 'idle'
+  return stale || shouldRunServiceFromTab(state)
 }
 
 async function _runSessionAiService(sid, service, options = {}) {
@@ -400,10 +461,9 @@ async function _runSessionAiService(sid, service, options = {}) {
   const fingerprint = _sessionAiFingerprint(normalized)
   if (!fingerprint) return
 
-  const availabilityList = await getAvailableIdentifyServices({
+  const availability = options.availability || Object.fromEntries((await getAvailableIdentifyServices({
     blobs: _sessionAiInputs(normalized).map(item => item.blob),
-  })
-  const availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+  })).map(item => [item.service, item]))
   normalized.aiAvailability = availability
   normalized.aiAvailabilityFingerprint = fingerprint.requestFingerprint
 
@@ -425,9 +485,9 @@ async function _runSessionAiService(sid, service, options = {}) {
   normalized.aiService = svc
   normalized.aiCurrentFingerprint = fingerprint.requestFingerprint
   normalized.aiRequestedFingerprint = fingerprint.requestFingerprint
+  normalized.aiServiceState = markRequestedServicesRunning(normalized.aiServiceState, availability, [svc])
   normalized.aiServiceState[svc] = {
-    ..._emptyServiceState(),
-    ...(normalized.aiServiceState?.[svc] || {}),
+    ...normalized.aiServiceState[svc],
     status: 'running',
     requestFingerprint: fingerprint.requestFingerprint,
   }
@@ -470,26 +530,78 @@ async function _runSessionAiService(sid, service, options = {}) {
   }
 }
 
-async function _runSessionAiComparison(sid) {
+async function _runSessionAiComparison(sid, options = {}) {
   const session = sessionById(sid)
-  if (!session?.files?.length || importAiBatchState.running) return
-  const service = getDefaultIdService()
-  const serviceLabel = service === ID_SERVICE_INATURALIST
-    ? (t('settings.idServiceInaturalist') || 'iNaturalist')
-    : (t('settings.idServiceArtsorakel') || 'Artsorakel')
-  importAiBatchState.defaultServiceLabel = serviceLabel
+  if (!session?.files?.length || (importAiBatchState.running && !options.allowDuringBatch)) return
   const sessionAi = _ensureSessionAiState(session)
   if (!sessionAi) return
-  await _runSessionAiService(sid, service)
-
-  const serviceState = sessionAi.aiServiceState?.[service] || _emptyServiceState()
-  if (serviceState.status === 'no_match') {
-    showToast(getIdentifyNoMatchMessage(service))
-  } else if (serviceState.status === 'error') {
-    showToast(getIdentifyUnavailableMessage(service))
-  } else if (serviceState.status === 'unavailable') {
-    showToast(serviceState.errorMessage || getIdentifyUnavailableMessage(service))
+  const inaturalistSession = await loadInaturalistSession()
+  const availabilityList = await getAvailableIdentifyServices({
+    blobs: _sessionAiInputs(sessionAi).map(item => item.blob),
+    inaturalistSession,
+  })
+  const availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+  sessionAi.aiAvailability = availability
+  const inaturalistAvailable = availability?.[ID_SERVICE_INATURALIST]?.available ?? false
+  const resolution = _resolveSessionPhotoIdServices(session, {
+    inaturalistAvailable,
+    comparisonRequested: true,
+  })
+  const lookup = _sessionPhotoIdLookup(session)
+  const services = resolution.run
+  debugPhotoId('import comparison session', {
+    storedPhotoIdMode: getPhotoIdMode(),
+    localStoragePhotoIdMode: globalThis.localStorage?.getItem('sporely-photo-id-mode'),
+    legacyDefaultIdService: globalThis.localStorage?.getItem('sporely-default-id-service'),
+    inaturalistSessionConnected: Boolean(inaturalistSession?.connected),
+    inaturalistHasApiToken: Boolean(inaturalistSession?.api_token || inaturalistSession?.apiToken),
+    availability,
+    resolvedServices: resolution,
+    requestedServices: services,
+    mode: resolution.mode,
+    countryCode: resolution.countryCode,
+    countryName: lookup?.country_name || null,
+    locale: resolution.locale,
+    inaturalistAvailable,
+  })
+  if (!services.length) {
+    importAiBatchState.defaultServiceAvailable = false
+    importAiBatchState.defaultServiceReason = getIdentifyUnavailableMessage(resolution.primary)
+    _updateImportFooterUi()
+    if (!options.suppressToasts) {
+      showToast(importAiBatchState.defaultServiceReason)
+    }
+    return
   }
+
+  sessionAi.aiServiceState = markRequestedServicesRunning(sessionAi.aiServiceState, availability, services)
+
+  for (const service of services) {
+    await _runSessionAiService(sid, service, {
+      onImageSent: options.onImageSent,
+      onIdReceived: options.onIdReceived,
+      allowDuringBatch: options.allowDuringBatch,
+      availability,
+    })
+    const serviceState = sessionAi.aiServiceState?.[service] || _emptyServiceState()
+    if (!options.suppressToasts) {
+      if (serviceState.status === 'no_match') {
+        showToast(getIdentifyNoMatchMessage(service))
+      } else if (serviceState.status === 'error') {
+        showToast(getIdentifyUnavailableMessage(service))
+      } else if (serviceState.status === 'unavailable') {
+        showToast(serviceState.errorMessage || getIdentifyUnavailableMessage(service))
+      }
+    }
+  }
+
+  const requestedPrimaryState = sessionAi.aiServiceState?.[resolution.primary] || null
+  sessionAi.aiActiveService = isTerminalAiServiceState(requestedPrimaryState)
+    ? resolution.primary
+    : (requestedPrimaryState ? sessionAi.aiActiveService : chooseIdentifyComparisonActiveService(sessionAi.aiServiceState || {}, resolution.primary))
+  sessionAi.aiService = sessionAi.aiActiveService
+  _persistSessions()
+  renderSessions()
 }
 
 function _updateImportFooterUi() {
@@ -527,8 +639,8 @@ function _updateImportFooterUi() {
 
   const footerText = document.querySelector('#screen-import-review .sync-footer-text');
   if (footerText) {
-    if (running && importAiBatchState.defaultServiceLabel) {
-      footerText.textContent = t('import.photoIdBy', { service: importAiBatchState.defaultServiceLabel })
+    if (running) {
+      footerText.textContent = t('import.identifying') || t('common.loading')
     } else if (importAiBatchState.defaultServiceAvailable === false && importAiBatchState.defaultServiceReason) {
       footerText.textContent = importAiBatchState.defaultServiceReason
     } else {
@@ -540,22 +652,22 @@ function _updateImportFooterUi() {
 async function _runAiIdAll() {
   if (importAiBatchState.running) return;
   const targets = _getBatchAiTargets();
-  const totalUnits = _getBatchAiTotalUnits(targets);
-  if (!targets.length || totalUnits <= 0) return;
-  const service = getDefaultIdService();
-  importAiBatchState.defaultServiceLabel = service === ID_SERVICE_INATURALIST
-    ? (t('settings.idServiceInaturalist') || 'iNaturalist')
-    : (t('settings.idServiceArtsorakel') || 'Artsorakel')
-  if (service === ID_SERVICE_INATURALIST) {
-    const session = await loadInaturalistSession();
-    const inatAvailable = Boolean(session?.connected && (session?.api_token || session?.apiToken));
-    if (!inatAvailable) {
-      showToast(getIdentifyUnavailableMessage(service));
-      importAiBatchState.defaultServiceAvailable = false;
-      importAiBatchState.defaultServiceReason = getIdentifyUnavailableMessage(service);
-      _updateImportFooterUi();
-      return;
-    }
+  const inaturalistSession = await loadInaturalistSession();
+  const inaturalistAvailable = Boolean(inaturalistSession?.connected && (inaturalistSession?.api_token || inaturalistSession?.apiToken));
+  const totalUnits = targets.reduce((sum, session) => {
+    const services = _resolveSessionPhotoIdServices(session, {
+      inaturalistAvailable,
+      comparisonRequested: true,
+    }).run.length
+    return sum + ((session.files?.length || 0) * services)
+  }, 0)
+  if (!targets.length) return;
+  if (totalUnits <= 0) {
+    importAiBatchState.defaultServiceAvailable = false
+    importAiBatchState.defaultServiceReason = getIdentifyUnavailableMessage(ID_SERVICE_INATURALIST)
+    _updateImportFooterUi()
+    showToast(importAiBatchState.defaultServiceReason)
+    return
   }
 
   importAiBatchState.running = true;
@@ -566,37 +678,49 @@ async function _runAiIdAll() {
   let successCount = 0;
   let noMatchCount = 0;
   let failureCount = 0;
+  let firstFailureMessage = '';
 
   try {
     for (const session of targets) {
       try {
-        const normalized = _ensureSessionAiState(session);
-        normalized.aiServiceState[service] = {
-          ..._emptyServiceState(),
-          ...(normalized.aiServiceState?.[service] || {}),
-          status: 'running',
-        };
-        _persistSessions();
-        renderSessions();
-        await _runSessionAiService(session.id, service, {
+        await _runSessionAiComparison(session.id, {
           onImageSent: () => _incrementBatchAiProgress(),
           onIdReceived: () => _incrementBatchAiProgress(),
           allowDuringBatch: true,
+          suppressToasts: true,
         });
         const sessionState = _ensureSessionAiState(session);
-        const predictions = sessionState.aiPredictionsByService?.[service] || [];
-        if (_applySessionAiTopPrediction(session, predictions)) {
+        const resolution = _resolveSessionPhotoIdServices(session, {
+          inaturalistAvailable: sessionState.aiAvailability?.[ID_SERVICE_INATURALIST]?.available ?? inaturalistAvailable,
+          comparisonRequested: true,
+        });
+        const requestedPrimaryState = sessionState.aiServiceState?.[resolution.primary] || null
+        sessionState.aiActiveService = isTerminalAiServiceState(requestedPrimaryState)
+          ? resolution.primary
+          : (requestedPrimaryState ? sessionState.aiActiveService : chooseIdentifyComparisonActiveService(sessionState.aiServiceState || {}, resolution.primary))
+        sessionState.aiService = sessionState.aiActiveService
+        const activePredictions = sessionState.aiPredictionsByService?.[sessionState.aiActiveService] || []
+        if (_applySessionAiTopPrediction(session, activePredictions)) {
           _persistSessions();
           renderSessions();
         }
-        const serviceState = _ensureSessionAiState(session).aiServiceState?.[service] || _emptyServiceState();
-        if (serviceState.status === 'success') successCount++;
-        else if (serviceState.status === 'no_match') noMatchCount++;
-        else failureCount++;
+        for (const service of resolution.run) {
+          const serviceState = _ensureSessionAiState(session).aiServiceState?.[service] || _emptyServiceState();
+          if (serviceState.status === 'success') successCount++;
+          else if (serviceState.status === 'no_match') noMatchCount++;
+          else {
+            failureCount++;
+            const message = serviceState.errorMessage || getIdentifyUnavailableMessage(service) || ''
+            if (!firstFailureMessage && message) firstFailureMessage = message
+          }
+        }
         _persistSessions();
         renderSessions();
       } catch (err) {
         failureCount++;
+        if (!firstFailureMessage) {
+          firstFailureMessage = String(err?.message || err || '')
+        }
         console.error('Batch identification AI error:', err);
       }
     }
@@ -606,11 +730,13 @@ async function _runAiIdAll() {
   }
 
   if (failureCount && successCount === 0 && noMatchCount === 0) {
-    showToast(getIdentifyUnavailableMessage(service));
+    const message = firstFailureMessage || t('common.unknown')
+    showToast(t('common.errorPrefix', { message }));
   } else if (!successCount && noMatchCount > 0) {
-    showToast(getIdentifyNoMatchMessage(service));
+    showToast(t('review.noMatch'));
   } else if (failureCount > 0) {
-    showToast(getIdentifyUnavailableMessage(service));
+    const message = firstFailureMessage || t('common.unknown')
+    showToast(t('common.errorPrefix', { message }));
   }
 }
 
@@ -1803,14 +1929,21 @@ function buildCardHTML(session) {
   const timeStr = formatTime(session.ts, { hour: '2-digit', minute: '2-digit', hour12: false });
   const photoCount = session.files.length;
   const imageMeta = _ensureSessionImageMeta(session);
+  const normalized = _ensureSessionAiState(session);
   const croppedCount = imageMeta.filter(meta => hasAiCropRect(meta?.aiCropRect)).length;
   const speciesText = session.taxon
     ? escHtml(session.uncertain ? `? ${session.taxon.displayName.replace(/^\?\s*/, '')}` : session.taxon.displayName.replace(/^\?\s*/, ''))
     : `<span style="opacity:0.45">${t('detail.unknownSpecies')}</span>`;
-  const activeService = normalizeIdentifyService(session.aiActiveService || getDefaultIdService());
-  const aiStateHtml = session.files.length
-    ? renderIdentifyServiceStateSummary(_sessionAiResultState(session, activeService))
-    : '';
+  const photoIdServices = _resolveSessionPhotoIdServices(normalized || session, {
+    inaturalistAvailable: normalized?.aiAvailability?.[ID_SERVICE_INATURALIST]?.available ?? false,
+  });
+  const activeService = normalizeIdentifyService(normalized?.aiActiveService || photoIdServices.primary);
+  const activeState = normalized?.aiServiceState?.[activeService] || _emptyServiceState();
+  if (!isTerminalAiServiceState(activeState) && activeState.status !== 'running' && activeService !== photoIdServices.primary) {
+    normalized.aiActiveService = photoIdServices.primary;
+    normalized.aiService = photoIdServices.primary;
+  }
+  const aiStateHtml = _renderSessionAiCardState(session);
   const stackImgs = session.blobUrls.slice(0, 3);
   const polaroids = stackImgs.map((url, i) =>
     `<div class="polaroid-print polaroid-p${i}"><img src="${escHtml(url)}"></div>`

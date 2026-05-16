@@ -10,8 +10,15 @@ import {
   getDefaultIdService,
   ID_SERVICE_ARTSORAKEL,
   ID_SERVICE_INATURALIST,
+  PHOTO_ID_MODE_AUTO,
+  PHOTO_ID_MODE_ARTSORAKEL,
+  PHOTO_ID_MODE_INATURALIST,
+  PHOTO_ID_MODE_BOTH,
+  getPhotoIdMode,
   normalizeIdentifyService,
-  setDefaultIdService,
+  normalizePhotoIdMode,
+  resolvePhotoIdServices,
+  setPhotoIdMode,
 } from './settings.js'
 
 function createLocalStorageStub() {
@@ -29,23 +36,107 @@ function createLocalStorageStub() {
   }
 }
 
-test('normalizes and persists the default identification service', () => {
+test('normalizes and migrates AI Photo ID mode settings', () => {
   const original = globalThis.localStorage
   globalThis.localStorage = createLocalStorageStub()
 
   try {
+    assert.equal(normalizePhotoIdMode('auto'), PHOTO_ID_MODE_AUTO)
+    assert.equal(normalizePhotoIdMode('artsorakel'), PHOTO_ID_MODE_ARTSORAKEL)
+    assert.equal(normalizePhotoIdMode('inat'), PHOTO_ID_MODE_INATURALIST)
+    assert.equal(normalizePhotoIdMode('both'), PHOTO_ID_MODE_BOTH)
+    assert.equal(normalizePhotoIdMode('Artsorakel'), PHOTO_ID_MODE_ARTSORAKEL)
     assert.equal(normalizeIdentifyService('inat'), ID_SERVICE_INATURALIST)
     assert.equal(normalizeIdentifyService('Artsorakel'), ID_SERVICE_ARTSORAKEL)
-    assert.equal(getDefaultIdService(), ID_SERVICE_ARTSORAKEL)
 
-    setDefaultIdService('inat')
+    localStorage.setItem('sporely-default-id-service', 'inat')
+    assert.equal(getPhotoIdMode(), PHOTO_ID_MODE_INATURALIST)
+    assert.equal(localStorage.getItem('sporely-photo-id-mode'), PHOTO_ID_MODE_INATURALIST)
     assert.equal(getDefaultIdService(), ID_SERVICE_INATURALIST)
 
-    setDefaultIdService('anything-else')
+    setPhotoIdMode('artsorakel')
+    assert.equal(getPhotoIdMode(), PHOTO_ID_MODE_ARTSORAKEL)
     assert.equal(getDefaultIdService(), ID_SERVICE_ARTSORAKEL)
   } finally {
     globalThis.localStorage = original
   }
+})
+
+test('resolves photo ID services by mode, country, and iNaturalist availability', () => {
+  const autoNorway = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_AUTO,
+    countryCode: 'no',
+    inaturalistAvailable: true,
+  })
+  assert.equal(autoNorway.primary, ID_SERVICE_ARTSORAKEL)
+  assert.deepEqual(autoNorway.run, [ID_SERVICE_ARTSORAKEL])
+
+  const autoCountryName = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_AUTO,
+    countryName: 'Norge',
+    inaturalistAvailable: true,
+  })
+  assert.equal(autoCountryName.primary, ID_SERVICE_ARTSORAKEL)
+
+  for (const countryCode of ['se', 'dk', 'fi']) {
+    const result = resolvePhotoIdServices({
+      mode: PHOTO_ID_MODE_AUTO,
+      countryCode,
+      inaturalistAvailable: true,
+    })
+    assert.equal(result.primary, ID_SERVICE_ARTSORAKEL, countryCode)
+    assert.deepEqual(result.run, [ID_SERVICE_ARTSORAKEL], countryCode)
+  }
+
+  const autoOutsideNordics = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_AUTO,
+    countryCode: 'us',
+    inaturalistAvailable: true,
+  })
+  assert.equal(autoOutsideNordics.primary, ID_SERVICE_INATURALIST)
+  assert.deepEqual(autoOutsideNordics.run, [ID_SERVICE_INATURALIST])
+
+  const autoOutsideNordicsNoLogin = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_AUTO,
+    countryCode: 'us',
+    inaturalistAvailable: false,
+  })
+  assert.equal(autoOutsideNordicsNoLogin.primary, ID_SERVICE_ARTSORAKEL)
+  assert.deepEqual(autoOutsideNordicsNoLogin.run, [ID_SERVICE_ARTSORAKEL])
+  assert.equal(autoOutsideNordicsNoLogin.available.inat, false)
+  assert.equal(autoOutsideNordicsNoLogin.disabledReason.inat, 'login_required')
+
+  const autoLocaleHint = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_AUTO,
+    locale: 'nb_NO',
+    inaturalistAvailable: true,
+  })
+  assert.equal(autoLocaleHint.primary, ID_SERVICE_ARTSORAKEL)
+  assert.deepEqual(autoLocaleHint.run, [ID_SERVICE_ARTSORAKEL])
+
+  const bothLoggedIn = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_BOTH,
+    countryCode: 'us',
+    inaturalistAvailable: true,
+  })
+  assert.deepEqual(bothLoggedIn.run, [ID_SERVICE_INATURALIST, ID_SERVICE_ARTSORAKEL])
+
+  const bothNoLogin = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_BOTH,
+    countryCode: 'us',
+    inaturalistAvailable: false,
+  })
+  assert.deepEqual(bothNoLogin.run, [ID_SERVICE_ARTSORAKEL])
+  assert.equal(bothNoLogin.available.inat, false)
+
+  const inatNoLogin = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_INATURALIST,
+    countryCode: 'us',
+    inaturalistAvailable: false,
+  })
+  assert.equal(inatNoLogin.primary, ID_SERVICE_INATURALIST)
+  assert.deepEqual(inatNoLogin.run, [])
+  assert.equal(inatNoLogin.disabledReason.inat, 'login_required')
 })
 
 test('formats identification scores per service', () => {

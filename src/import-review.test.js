@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 
 import { buildIdentifyFingerprint } from './ai-identification.js'
 import {
@@ -62,7 +63,7 @@ test('import sessions keep service predictions and state separate', () => {
   assert.equal(inatState.status, 'idle')
 })
 
-test('import session service rerun detection only trips when the fingerprint changes', () => {
+test('import session terminal states stay stable across fingerprint changes for tab reruns', () => {
   const session = _ensureSessionAiState(makeSession())
   const fingerprint = buildIdentifyFingerprint({
     service: 'artsorakel',
@@ -87,8 +88,46 @@ test('import session service rerun detection only trips when the fingerprint cha
     ...session.imageMeta[0],
     aiCropRect: { x1: 0.1, y1: 0, x2: 1, y2: 1 },
   }
-  assert.equal(_sessionServiceNeedsRerun(session, 'artsorakel'), true)
+  assert.equal(_sessionServiceNeedsRerun(session, 'artsorakel'), false)
   assert.equal(_sessionServiceNeedsRerun(session, 'inat'), true)
+})
+
+test('import session keeps terminal service states from rerunning on tab clicks', () => {
+  const session = _ensureSessionAiState(makeSession())
+  const fingerprint = buildIdentifyFingerprint({
+    service: 'artsorakel',
+    language: 'en',
+    images: [{
+      id: 'session-1-0',
+      blob: session.aiFiles[0],
+      cropRect: session.imageMeta[0].aiCropRect,
+      cropSourceW: session.imageMeta[0].aiCropSourceW,
+      cropSourceH: session.imageMeta[0].aiCropSourceH,
+      sourceType: 'photo.aiBlob',
+    }],
+  })
+
+  for (const status of ['no_match', 'error', 'unavailable']) {
+    _storeSessionAiServiceResult(session, 'artsorakel', {
+      status,
+      predictions: [],
+      errorMessage: status === 'error' ? 'Boom' : '',
+    }, fingerprint)
+
+    assert.equal(_sessionServiceNeedsRerun(session, 'artsorakel'), false)
+  }
+})
+
+test('empty import sessions do not default to Artsorakel active service', () => {
+  const session = _ensureSessionAiState({
+    id: 'session-empty',
+    files: [],
+    aiPredictionsByService: {},
+    aiServiceState: {},
+  })
+
+  assert.equal(session.aiActiveService, null)
+  assert.equal(session.aiService, null)
 })
 
 test('ID All applies the top prediction to the session taxon', () => {
@@ -116,4 +155,54 @@ test('ID All applies the top prediction to the session taxon', () => {
     scientificName: 'Amanita muscaria',
     displayName: 'Fly agaric (Amanita muscaria)',
   })
+})
+
+test('service state only shows running for the service that is actually running', () => {
+  const session = _ensureSessionAiState(makeSession())
+  const fingerprint = buildIdentifyFingerprint({
+    service: 'artsorakel',
+    language: 'en',
+    images: [{
+      id: 'session-1-0',
+      blob: session.aiFiles[0],
+      cropRect: session.imageMeta[0].aiCropRect,
+      cropSourceW: session.imageMeta[0].aiCropSourceW,
+      cropSourceH: session.imageMeta[0].aiCropSourceH,
+      sourceType: 'photo.aiBlob',
+    }],
+  })
+  session.aiServiceState.artsorakel = {
+    service: 'artsorakel',
+    status: 'success',
+    topProbability: 0.91,
+    topScore: 0.91,
+    imageFingerprint: fingerprint.imageFingerprint,
+    cropFingerprint: fingerprint.cropFingerprint,
+    requestFingerprint: fingerprint.requestFingerprint,
+  }
+  session.aiServiceState.inat = {
+    service: 'inat',
+    status: 'running',
+    topProbability: null,
+    topScore: null,
+    imageFingerprint: fingerprint.imageFingerprint,
+    cropFingerprint: fingerprint.cropFingerprint,
+    requestFingerprint: fingerprint.requestFingerprint,
+  }
+  session.aiCurrentFingerprint = fingerprint.requestFingerprint
+  session.aiRequestedFingerprint = fingerprint.requestFingerprint
+
+  const arts = _sessionAiResultState(session, 'artsorakel')
+  const inat = _sessionAiResultState(session, 'inat')
+
+  assert.equal(arts.status, 'success')
+  assert.equal(inat.status, 'running')
+})
+
+test('import review source imports the comparison active-service helper', () => {
+  const source = fs.readFileSync(new URL('./screens/import_review.js', import.meta.url), 'utf8')
+  assert.match(source, /chooseIdentifyComparisonActiveService/)
+  assert.match(source, /allowDuringBatch/)
+  assert.match(source, /const availabilityList = await getAvailableIdentifyServices/)
+  assert.match(source, /sessionAi\.aiAvailability = availability/)
 })

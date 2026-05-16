@@ -2,6 +2,7 @@ import { VISIBILITY_PUBLIC, normalizeVisibility as normalizeUiVisibility } from 
 
 const DEFAULT_VISIBILITY_KEY = 'sporely-default-visibility'
 const DEFAULT_ID_SERVICE_KEY = 'sporely-default-id-service'
+const PHOTO_ID_MODE_KEY = 'sporely-photo-id-mode'
 const USE_SYSTEM_CAMERA_KEY = 'sporely-use-system-camera'
 const LAST_SYNC_AT_KEY = 'sporely-last-sync-at'
 const ARTSORAKEL_MAX_EDGE_KEY = 'sporely-artsorakel-max-edge'
@@ -9,7 +10,59 @@ const PHOTO_GAP_MINUTES_KEY = 'sporely-photo-gap'
 const DEFAULT_ARTSORAKEL_MAX_EDGE = 500
 export const ID_SERVICE_ARTSORAKEL = 'artsorakel'
 export const ID_SERVICE_INATURALIST = 'inat'
+export const PHOTO_ID_MODE_AUTO = 'auto'
+export const PHOTO_ID_MODE_ARTSORAKEL = 'artsorakel'
+export const PHOTO_ID_MODE_INATURALIST = 'inat'
+export const PHOTO_ID_MODE_BOTH = 'both'
 export const NATIVE_CAMERA_JPEG_QUALITY = 75
+
+const NORDIC_COUNTRY_CODES = new Set(['no', 'se', 'dk', 'fi', 'is', 'fo', 'gl', 'ax'])
+const COUNTRY_NAME_TO_CODE = new Map([
+  ['norway', 'no'],
+  ['norge', 'no'],
+  ['sweden', 'se'],
+  ['sverige', 'se'],
+  ['denmark', 'dk'],
+  ['danmark', 'dk'],
+  ['finland', 'fi'],
+  ['iceland', 'is'],
+  ['island', 'is'],
+  ['faroe islands', 'fo'],
+  ['færøerne', 'fo'],
+  ['faeroe islands', 'fo'],
+  ['greenland', 'gl'],
+  ['gronland', 'gl'],
+  ['grønland', 'gl'],
+  ['aland', 'ax'],
+  ['aaland', 'ax'],
+  ['åland', 'ax'],
+])
+const LOCALE_HINTS = new Set(['nb', 'no', 'nn', 'sv', 'da'])
+
+function _normalizeHintText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+}
+
+function _normalizeLocaleHint(value) {
+  const normalized = _normalizeHintText(value)
+  if (!normalized) return ''
+  return normalized.split(/[_-]/, 1)[0]
+}
+
+function _normalizeCountryCodeHint(value) {
+  const normalized = _normalizeHintText(value)
+  if (!normalized) return ''
+  if (NORDIC_COUNTRY_CODES.has(normalized)) return normalized
+  return COUNTRY_NAME_TO_CODE.get(normalized) || ''
+}
+
+function _isNordicCountryCode(value) {
+  return NORDIC_COUNTRY_CODES.has(_normalizeCountryCodeHint(value))
+}
 
 export function normalizeArtsorakelMaxEdge(value) {
   const parsed = Number.parseInt(value, 10)
@@ -75,18 +128,128 @@ export function normalizeIdentifyService(value) {
     : ID_SERVICE_ARTSORAKEL
 }
 
-export function getDefaultIdService() {
+export function normalizePhotoIdMode(value) {
+  const normalized = _normalizeHintText(value)
+  if (normalized === PHOTO_ID_MODE_AUTO) return PHOTO_ID_MODE_AUTO
+  if (normalized === PHOTO_ID_MODE_ARTSORAKEL) return PHOTO_ID_MODE_ARTSORAKEL
+  if (normalized === PHOTO_ID_MODE_INATURALIST || normalized === 'inaturalist') return PHOTO_ID_MODE_INATURALIST
+  if (normalized === PHOTO_ID_MODE_BOTH) return PHOTO_ID_MODE_BOTH
+  if (normalized === ID_SERVICE_ARTSORAKEL) return PHOTO_ID_MODE_ARTSORAKEL
+  if (normalized === ID_SERVICE_INATURALIST) return PHOTO_ID_MODE_INATURALIST
+  return PHOTO_ID_MODE_AUTO
+}
+
+export function getPhotoIdMode() {
   try {
-    return normalizeIdentifyService(localStorage.getItem(DEFAULT_ID_SERVICE_KEY))
-  } catch (_) {
-    return ID_SERVICE_ARTSORAKEL
+    const stored = localStorage.getItem(PHOTO_ID_MODE_KEY)
+    if (stored != null) return normalizePhotoIdMode(stored)
+
+    const legacyService = localStorage.getItem(DEFAULT_ID_SERVICE_KEY)
+    if (legacyService != null) {
+      const migrated = normalizePhotoIdMode(legacyService)
+      localStorage.setItem(PHOTO_ID_MODE_KEY, migrated)
+      return migrated
+    }
+  } catch (_) {}
+  return PHOTO_ID_MODE_AUTO
+}
+
+export function setPhotoIdMode(value) {
+  const normalized = normalizePhotoIdMode(value)
+  try {
+    localStorage.setItem(PHOTO_ID_MODE_KEY, normalized)
+  } catch (_) {}
+  return normalized
+}
+
+function _resolvePrimaryPhotoIdService({
+  mode = PHOTO_ID_MODE_AUTO,
+  countryCode = '',
+  countryName = '',
+  locale = '',
+  inaturalistAvailable = false,
+} = {}) {
+  const normalizedMode = normalizePhotoIdMode(mode)
+  const normalizedCountry = _normalizeCountryCodeHint(countryCode || countryName)
+  const localeHint = _normalizeLocaleHint(locale)
+  const nordicHint = _isNordicCountryCode(normalizedCountry)
+    || (!normalizedCountry && LOCALE_HINTS.has(localeHint))
+
+  if (normalizedMode === PHOTO_ID_MODE_ARTSORAKEL) return ID_SERVICE_ARTSORAKEL
+  if (normalizedMode === PHOTO_ID_MODE_INATURALIST) return ID_SERVICE_INATURALIST
+  if (normalizedMode === PHOTO_ID_MODE_BOTH) {
+    return nordicHint || !inaturalistAvailable ? ID_SERVICE_ARTSORAKEL : ID_SERVICE_INATURALIST
+  }
+
+  if (nordicHint) return ID_SERVICE_ARTSORAKEL
+  return inaturalistAvailable ? ID_SERVICE_INATURALIST : ID_SERVICE_ARTSORAKEL
+}
+
+export function resolvePhotoIdServices({
+  mode,
+  countryCode,
+  countryName,
+  lat,
+  lon,
+  locale,
+  inaturalistAvailable,
+  comparisonRequested = false,
+} = {}) {
+  const normalizedMode = normalizePhotoIdMode(mode)
+  const inatAvailable = !!inaturalistAvailable
+  const primary = _resolvePrimaryPhotoIdService({
+    mode: normalizedMode,
+    countryCode,
+    countryName,
+    locale,
+    inaturalistAvailable: inatAvailable,
+  })
+  const other = primary === ID_SERVICE_ARTSORAKEL ? ID_SERVICE_INATURALIST : ID_SERVICE_ARTSORAKEL
+  const available = {
+    [ID_SERVICE_ARTSORAKEL]: true,
+    [ID_SERVICE_INATURALIST]: inatAvailable,
+  }
+  const disabledReason = {
+    [ID_SERVICE_ARTSORAKEL]: null,
+    [ID_SERVICE_INATURALIST]: inatAvailable ? null : 'login_required',
+  }
+
+  let run = [primary]
+  if (normalizedMode === PHOTO_ID_MODE_BOTH) {
+    run = inatAvailable
+      ? [primary, other]
+      : [ID_SERVICE_ARTSORAKEL]
+  } else if (comparisonRequested && available[other]) {
+    run = [primary, other]
+  }
+
+  if (normalizedMode === PHOTO_ID_MODE_INATURALIST && !inatAvailable) {
+    run = []
+  }
+
+  return {
+    mode: normalizedMode,
+    primary,
+    run,
+    available,
+    disabledReason,
+    countryCode: _normalizeCountryCodeHint(countryCode || countryName) || null,
+    locale: _normalizeLocaleHint(locale) || '',
+    lat: Number.isFinite(Number(lat)) ? Number(lat) : null,
+    lon: Number.isFinite(Number(lon)) ? Number(lon) : null,
   }
 }
 
+export function getDefaultIdService() {
+  return resolvePhotoIdServices({ mode: getPhotoIdMode() }).primary
+}
+
 export function setDefaultIdService(value) {
+  const normalized = normalizeIdentifyService(value)
   try {
-    localStorage.setItem(DEFAULT_ID_SERVICE_KEY, normalizeIdentifyService(value))
+    localStorage.setItem(DEFAULT_ID_SERVICE_KEY, normalized)
   } catch (_) {}
+  setPhotoIdMode(normalized)
 }
 
 export function getUseSystemCamera() {

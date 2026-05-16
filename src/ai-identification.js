@@ -80,6 +80,21 @@ function _identifyServiceLabel(service) {
     : (t('settings.idServiceArtsorakel') || 'Artsorakel')
 }
 
+function _isDebugPhotoIdEnabled() {
+  try {
+    return globalThis.localStorage?.getItem('sporely-debug-ai-id') === 'true'
+      || globalThis.sessionStorage?.getItem('sporely-debug-ai-id') === 'true'
+      || globalThis.location?.search?.includes('debug_ai_id=1')
+  } catch (_) {
+    return false
+  }
+}
+
+export function debugPhotoId(message, details = {}) {
+  if (!_isDebugPhotoIdEnabled()) return
+  console.debug(`[photo-id] ${message}`, details)
+}
+
 export function _renderPieSpinnerIcon(tone = '') {
   return `<span class="ai-id-service-tab-icon ai-pie-spinner ${tone}" aria-hidden="true">
     <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
@@ -156,21 +171,16 @@ export function formatAiSuggestionDisplay(prediction = {}) {
   }
 }
 
-function _renderServiceIcon(serviceState = {}) {
+export function _renderServiceIcon(serviceState = {}) {
   const status = serviceState.status || 'idle'
-  const topProbability = Number(serviceState.topProbability ?? serviceState.topScore ?? 0)
-  const confidence = getIdentifyConfidenceState(topProbability, { checkThreshold: 0.65 })
   if (status === 'running') {
     return _renderPieSpinnerIcon()
   }
   if (status === 'success' || status === 'stale') {
-    if (confidence.icon === 'dot') {
-      return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot ${confidence.tone}" aria-hidden="true"></span>`
-    }
     return `
       <span class="ai-id-service-tab-icon ai-id-service-tab-icon-check" aria-hidden="true">
         <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-          <path d="M3.2 8.7 6.3 11.8 12.8 4.8" />
+          <path d="M4 8 L7 11 L13 4" />
         </svg>
       </span>
     `
@@ -359,6 +369,43 @@ export function chooseIdentifyComparisonActiveService(resultsByService = {}, def
     }
   }
   return bestService
+}
+
+export function isTerminalAiServiceState(serviceState = null) {
+  return ['success', 'no_match', 'error', 'unavailable'].includes(serviceState?.status)
+}
+
+export function shouldRunServiceFromTab(serviceState = null) {
+  return !serviceState || serviceState.status === 'idle' || serviceState.status === 'stale'
+}
+
+export function markRequestedServicesRunning(existingResults = {}, availability = {}, requestedServices = []) {
+  const requested = new Set(
+    (Array.isArray(requestedServices) ? requestedServices : [])
+      .map(service => normalizeIdentifyService(service)),
+  )
+  const next = {}
+  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
+    const existing = existingResults?.[service] || {}
+    const serviceAvailability = availability?.[service] || {}
+    const available = serviceAvailability.available ?? existing.available ?? false
+    const reason = serviceAvailability.reason || existing.reason || ''
+    const isRequested = requested.has(service)
+    const status = isRequested
+      ? (available ? 'running' : 'unavailable')
+      : (existing.status || (available ? 'idle' : 'unavailable'))
+    next[service] = {
+      ...existing,
+      service,
+      available,
+      reason,
+      status,
+      errorMessage: isRequested
+        ? (available ? '' : (existing.errorMessage || reason || ''))
+        : (existing.errorMessage || ''),
+    }
+  }
+  return next
 }
 
 function _buildServiceOptions(service, options = {}) {
@@ -636,6 +683,7 @@ export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
       type="button"
       class="${statusClass}"
       data-identify-service-tab="${service}"
+      ${options.sid != null ? `data-sid="${_esc(options.sid)}"` : ''}
       title="${_esc(serviceState.available === false ? (serviceState.reason || options.unavailableReason || '') : (serviceState.errorMessage || ''))}"
       ${serviceState.available === false ? 'disabled aria-disabled="true"' : ''}
     >
