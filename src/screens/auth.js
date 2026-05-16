@@ -1,4 +1,5 @@
 import { supabase } from '../supabase.js'
+import { getSharedAuthSession } from '../auth-session.js'
 import { getLocale, setLocale, t } from '../i18n.js'
 import { isNativeApp } from '../platform.js'
 
@@ -271,7 +272,7 @@ function _getPasswordResetRedirectUrl() {
 
 async function _waitForSession(maxAttempts = 5, delayMs = 150) {
   for (let i = 0; i < maxAttempts; i++) {
-    const { data: { session } } = await supabase.auth.getSession()
+    const session = await getSharedAuthSession({ refresh: true })
     if (session?.user) return session
     if (i < maxAttempts - 1) {
       await new Promise(resolve => setTimeout(resolve, delayMs))

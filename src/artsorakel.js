@@ -6,6 +6,7 @@
  */
 
 import { supabase } from './supabase.js'
+import { getSharedAuthSession } from './auth-session.js'
 import { t } from './i18n.js'
 import { getBlobImageDimensions, normalizeAiCropRect, prepareImageBlobForUpload } from './image_crop.js'
 import { getArtsorakelMaxEdge } from './settings.js'
@@ -386,7 +387,7 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
   let proxyHeaders = null
 
   if (proxyBaseUrl) {
-    const { data: { session } } = await supabase.auth.getSession()
+    const session = await getSharedAuthSession()
     if (session?.access_token) {
       proxyHeaders = { Authorization: `Bearer ${session.access_token}` }
     }
@@ -573,7 +574,7 @@ export async function runArtsorakelForMediaKeys(mediaKeys, lang = 'no', options 
     throw new Error('Artsorakel media proxy unavailable')
   }
 
-  const { data: { session } } = await supabase.auth.getSession()
+  const session = await getSharedAuthSession()
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for Artsorakel media')
 

@@ -15,6 +15,9 @@ import {
 } from './identify.js'
 import { esc as _esc } from './esc.js'
 
+const OBSERVATION_IDENTIFICATIONS_MISSING_CACHE_KEY = 'sporely-observation-identifications-missing'
+let _observationIdentificationsAvailable = null
+
 function _isBlob(value) {
   return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
 }
@@ -100,6 +103,24 @@ function _isMissingObservationIdentificationsTableError(error) {
       || message.includes('does not exist')
     ))
   )
+}
+
+function _isObservationIdentificationsTableUnavailable() {
+  if (_observationIdentificationsAvailable === false) return true
+  try {
+    if (globalThis.sessionStorage?.getItem(OBSERVATION_IDENTIFICATIONS_MISSING_CACHE_KEY) === 'true') {
+      _observationIdentificationsAvailable = false
+      return true
+    }
+  } catch (_) {}
+  return false
+}
+
+function _markObservationIdentificationsTableMissing() {
+  _observationIdentificationsAvailable = false
+  try {
+    globalThis.sessionStorage?.setItem(OBSERVATION_IDENTIFICATIONS_MISSING_CACHE_KEY, 'true')
+  } catch (_) {}
 }
 
 export function debugPhotoId(message, details = {}) {
@@ -570,6 +591,7 @@ export async function runIdentifyComparisonForMediaKeys(mediaKeys, options = {})
 
 export async function loadObservationIdentifications(observationId, options = {}) {
   if (!observationId) return []
+  if (_isObservationIdentificationsTableUnavailable()) return []
   const client = options.supabaseClient || defaultSupabase
   try {
     const { data, error } = await client
@@ -579,12 +601,18 @@ export async function loadObservationIdentifications(observationId, options = {}
       .order('created_at', { ascending: false })
 
     if (error) {
-      if (_isMissingObservationIdentificationsTableError(error)) return []
+      if (_isMissingObservationIdentificationsTableError(error)) {
+        _markObservationIdentificationsTableMissing()
+        return []
+      }
       throw error
     }
     return Array.isArray(data) ? data : []
   } catch (error) {
-    if (_isMissingObservationIdentificationsTableError(error)) return []
+    if (_isMissingObservationIdentificationsTableError(error)) {
+      _markObservationIdentificationsTableMissing()
+      return []
+    }
     throw error
   }
 }
@@ -596,6 +624,7 @@ export async function maybeLoadCachedIdentification({
   supabaseClient = defaultSupabase,
 } = {}) {
   if (!observationId || !requestFingerprint) return null
+  if (_isObservationIdentificationsTableUnavailable()) return null
   const normalizedService = normalizeIdentifyService(service)
   try {
     const { data, error } = await supabaseClient
@@ -606,12 +635,18 @@ export async function maybeLoadCachedIdentification({
       .eq('request_fingerprint', requestFingerprint)
       .maybeSingle()
     if (error) {
-      if (_isMissingObservationIdentificationsTableError(error)) return null
+      if (_isMissingObservationIdentificationsTableError(error)) {
+        _markObservationIdentificationsTableMissing()
+        return null
+      }
       throw error
     }
     return data || null
   } catch (error) {
-    if (_isMissingObservationIdentificationsTableError(error)) return null
+    if (_isMissingObservationIdentificationsTableError(error)) {
+      _markObservationIdentificationsTableMissing()
+      return null
+    }
     throw error
   }
 }
@@ -642,6 +677,7 @@ export async function saveIdentificationRun({
   supabaseClient = defaultSupabase,
 } = {}) {
   if (!observationId || !userId || !requestFingerprint) return null
+  if (_isObservationIdentificationsTableUnavailable()) return null
 
   const normalizedService = normalizeIdentifyService(service)
   try {
@@ -711,6 +747,7 @@ export async function saveIdentificationRun({
     return data || null
   } catch (error) {
     if (_isMissingObservationIdentificationsTableError(error)) {
+      _markObservationIdentificationsTableMissing()
       if (_isDebugPhotoIdEnabled()) {
         console.debug('[photo-id] skipping observation_identifications write; table is unavailable', {
           observationId,

@@ -5,6 +5,7 @@ import { Preferences } from '@capacitor/preferences'
 import { supabase } from './supabase.js'
 import { getLocale, initI18n, onLocaleChange, setLocale, t } from './i18n.js'
 import { state } from './state.js'
+import { clearSharedAuthSessionCache, getSharedAuthSession, seedSharedAuthSession } from './auth-session.js'
 import { startGeo } from './geo.js'
 import { navigate } from './router.js'
 import { applyTheme } from './theme.js'
@@ -66,6 +67,7 @@ setNativeCameraOpener(openNativeCamera)
 
 let _syncFeedbackBound = false
 let _appBootstrapped = false
+let _authStateSubscription = null
 
 function initSyncFeedback() {
   if (_syncFeedbackBound) return
@@ -471,6 +473,10 @@ async function _handleInaturalistOAuthReturn(url) {
 }
 
 async function bootApp(user) {
+  if (_appBootstrapped && state.user?.id === user?.id) {
+    return
+  }
+
   state.user = user
   hideAuthOverlay()
   showAuthError('')
@@ -583,14 +589,18 @@ async function init() {
     initAuth(async session => {
       recoveryModeActive = false
       clearPasswordRecoveryHint()
-      const bootSession = session || (await supabase.auth.getSession()).data.session
+      const bootSession = session || await getSharedAuthSession({ refresh: true })
       if (bootSession?.user) await bootApp(bootSession.user)
     }, skipDraftRestore)
     authUiInitialized = true
   }
 
-  supabase.auth.onAuthStateChange(async (event, session) => {
+  clearSharedAuthSessionCache()
+  const initialSession = await getSharedAuthSession({ refresh: true })
+
+  const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
     if (event === 'PASSWORD_RECOVERY') {
+      clearSharedAuthSessionCache()
       ensureAuthUiInitialized(true)
       recoveryModeActive = true
       showAuthOverlay()
@@ -598,12 +608,15 @@ async function init() {
       return
     }
     if (event === 'SIGNED_IN' && session?.user && !state.user) {
+      clearSharedAuthSessionCache()
+      seedSharedAuthSession(session)
       if (recoveryModeActive || document.getElementById('reset-password-form')?.style.display === 'block') {
         return // Do not boot app while resetting password
       }
       await bootApp(session.user)
     }
     if (event === 'SIGNED_OUT') {
+      clearSharedAuthSessionCache()
       state.user = null
       ensureAuthUiInitialized(true)
       showAuthOverlay()
@@ -611,14 +624,16 @@ async function init() {
       navigate('home')
     }
   })
+  _authStateSubscription = subscription
 
-  // Give Supabase a tick to finish any URL-based recovery bootstrap before we branch.
-  await new Promise(resolve => setTimeout(resolve, 0))
-  const { data: { session } } = await supabase.auth.getSession()
+  window.addEventListener('pagehide', () => {
+    _authStateSubscription?.unsubscribe?.()
+    _authStateSubscription = null
+  }, { once: true })
 
-  if (session?.user && !recoveryModeActive && document.getElementById('reset-password-form')?.style.display !== 'block') {
+  if (initialSession?.user && !recoveryModeActive && document.getElementById('reset-password-form')?.style.display !== 'block') {
     clearPasswordRecoveryHint()
-    await bootApp(session.user)
+    await bootApp(initialSession.user)
   } else {
     if (document.getElementById('auth-overlay').style.display !== 'flex') {
       showAuthOverlay()

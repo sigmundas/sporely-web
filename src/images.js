@@ -1,4 +1,5 @@
 import { supabase } from './supabase.js'
+import { getSharedAuthSession } from './auth-session.js'
 import { normalizeAiCropRect } from './image_crop.js'
 import { getEffectiveCloudUploadPolicy } from './cloud-plan.js'
 
@@ -158,7 +159,7 @@ async function _uploadViaWorker(path, blob, options = {}) {
   const normalizedPath = normalizeMediaKey(path)
   if (!normalizedPath) throw new Error('Missing storage path')
 
-  const { data: { session } } = await supabase.auth.getSession()
+  const session = await getSharedAuthSession()
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for media upload')
 
@@ -190,7 +191,7 @@ async function _deleteViaWorker(path) {
   const normalizedPath = normalizeMediaKey(path)
   if (!normalizedPath) return
 
-  const { data: { session } } = await supabase.auth.getSession()
+  const session = await getSharedAuthSession()
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for media delete')
 
@@ -215,7 +216,7 @@ async function _downloadViaWorker(path) {
   const normalizedPath = normalizeMediaKey(path)
   if (!normalizedPath) throw new Error('Missing storage path')
 
-  const { data: { session } } = await supabase.auth.getSession()
+  const session = await getSharedAuthSession()
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for media download')
 

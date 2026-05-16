@@ -17,8 +17,51 @@ function _isDebugCommentQueryEnabled() {
     return import.meta.env?.DEV
       || globalThis.localStorage?.getItem('sporely-debug-comment-queries') === 'true'
   } catch (_) {
+    return import.meta.env?.DEV || false
+  }
+}
+
+const MENTION_PREVIEW_CACHE_KEY = 'sporely-mention-preview-unavailable'
+let _mentionPreviewAvailable = null
+
+function _debugCommentQuery(message, details = {}) {
+  if (!_isDebugCommentQueryEnabled()) return
+  console.debug(`[home-comments] ${message}`, details)
+}
+
+function _isMentionPreviewUnavailablePermanently() {
+  try {
+    return globalThis.sessionStorage?.getItem(MENTION_PREVIEW_CACHE_KEY) === 'true'
+  } catch (_) {
     return false
   }
+}
+
+function _markMentionPreviewUnavailable() {
+  _mentionPreviewAvailable = false
+  try {
+    globalThis.sessionStorage?.setItem(MENTION_PREVIEW_CACHE_KEY, 'true')
+  } catch (_) {}
+}
+
+function _canLoadMentionPreview() {
+  if (_mentionPreviewAvailable === false) return false
+  if (_isMentionPreviewUnavailablePermanently()) {
+    _mentionPreviewAvailable = false
+    return false
+  }
+  return true
+}
+
+function _isMissingMentionPreviewSupport(error) {
+  const message = String(error?.message || error?.details || error?.hint || '').toLowerCase()
+  return (
+    message.includes('mentioned_user_ids')
+    || message.includes('could not find the table')
+    || message.includes('schema cache')
+    || message.includes('does not exist')
+    || error?.code === 'PGRST205'
+  )
 }
 
 export async function initHome() {
@@ -141,6 +184,12 @@ async function loadRecentComments() {
   if (!list) return
   if (!state.user) { list.innerHTML = ''; return }
 
+  _debugCommentQuery('latest comments query', {
+    userId: state.user.id,
+    limit: 5,
+    intent: 'load latest visible comments',
+  })
+
   const { data, error } = await supabase
     .from('comments')
     .select('id, body, created_at, user_id, observation_id')
@@ -153,29 +202,34 @@ async function loadRecentComments() {
     return
   }
 
-  // Also fetch comments that mention the current user (column may not exist yet — ignore error)
-  if (_isDebugCommentQueryEnabled()) {
-    console.debug('[home-comments] mention preview query', {
+  let mentionData = []
+  if (_canLoadMentionPreview()) {
+    _debugCommentQuery('mention preview query', {
       userId: state.user.id,
       limit: 3,
-      column: 'mentioned_user_ids',
+      intent: 'load comments that mention the current user',
+      filter: 'mentioned_user_ids contains auth user id',
     })
-  }
 
-  let mentionData = []
-  try {
-    const { data: mentionedRows, error: mentionError } = await supabase
-      .from('comments')
-      .select('id, body, created_at, user_id, observation_id')
-      .contains('mentioned_user_ids', [state.user.id])
-      .order('created_at', { ascending: false })
-      .limit(3)
-    if (mentionError) throw mentionError
-    mentionData = mentionedRows || []
-  } catch (mentionError) {
-    const message = String(mentionError?.message || '').toLowerCase()
-    if (!message.includes('mentioned_user_ids')) {
-      console.warn('Recent comments mention load failed:', mentionError.message)
+    try {
+      const { data: mentionedRows, error: mentionError } = await supabase
+        .from('comments')
+        .select('id, body, created_at, user_id, observation_id')
+        .contains('mentioned_user_ids', [state.user.id])
+        .order('created_at', { ascending: false })
+        .limit(3)
+      if (mentionError) throw mentionError
+      mentionData = mentionedRows || []
+    } catch (mentionError) {
+      if (_isMissingMentionPreviewSupport(mentionError)) {
+        _markMentionPreviewUnavailable()
+        _debugCommentQuery('mention preview unavailable; skipping future mention lookups', {
+          userId: state.user.id,
+          message: String(mentionError?.message || mentionError || ''),
+        })
+      } else {
+        console.warn('Recent comments mention load failed:', mentionError.message)
+      }
     }
   }
 

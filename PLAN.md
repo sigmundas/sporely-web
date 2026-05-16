@@ -3,6 +3,7 @@
 ## Phase 7 - Transparency, Social Trails, and Privacy Slots
 
 - [ ] Verify disposable-account RLS paths for owner, accepted friend, stranger, blocked user, banned profile, and privacy slot limit.
+- [ ] Reconcile Supabase migration history after the partially applied `20260516165528_add_observation_identifications.sql` migration. If `schema_migrations` already contains the version, run `supabase migration repair --status applied 20260516165528` before retrying `supabase db push`.
 
 ## Camera Behavior Summary (Sporely Cam vs Web Cam)
 
@@ -165,6 +166,14 @@ Important:
 - The Cloudflare Worker at `upload.sporely.no` does **not** auto-deploy with repo pushes; worker changes still require manual deployment.
 - This matters because several current symptoms look like: observation row inserted successfully, but media upload / image row / queue cleanup fails afterward.
  vcm
+### 2026-05-16 — Supabase Migration Repair Note
+
+- `20260516165528_add_observation_identifications.sql` was partially applied to the remote database, then failed when Supabase tried to insert the same version into `supabase_migrations.schema_migrations`.
+- The fix is to repair the migration history, not to relax the schema: keep `observation_identifications.observation_id` as `bigint` so it matches `observations.id`.
+- Recovery command sequence:
+  - `supabase login --token ...`
+  - `supabase migration repair --status applied 20260516165528`
+  - `supabase db push`
 ### 2026-04-18 — Agent Code Analysis & Proposed Fixes
 
 **1. Reliable UI Deduplication (`src/screens/finds.js`) - ✅ FIXED**

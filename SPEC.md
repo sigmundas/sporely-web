@@ -19,6 +19,7 @@
 - **Privacy Slots:** A database trigger consumes 1 slot for free accounts if an observation is not fully transparent (`visibility != 'public'` or `location_precision = 'fuzzed'`).
 - **Feed Views:** `observations_community_view` and `observations_friend_view` handle UGC compliance by implicitly filtering out content from blocked users (`user_blocks`) and banned authors (`profiles.is_banned = true`).
 - **Account Deletion:** Bypasses RLS via the `delete-account` Edge Function to fully remove user rows, Storage avatars, and orchestrate underlying data deletion.
+- **Schema Migrations:** `observation_identifications` is an optional cache table, and its `observation_id` must be `bigint` to match `observations.id`. If a migration partially applies, repair `supabase_migrations.schema_migrations` and rerun `supabase db push` instead of changing the schema to fit the failed history entry.
 
 ## Desktop Sync & Deduplication
 - **Cloud vs Local:** `sporely-web` writes to Supabase. `sporely-py` uses local SQLite and syncs to Supabase using REST APIs.

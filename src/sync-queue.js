@@ -1,4 +1,5 @@
 import { supabase } from './supabase.js'
+import { getSharedAuthSession } from './auth-session.js'
 import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, imageExtensionForMimeType, buildObservationImageStoragePath } from './images.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
@@ -11,14 +12,69 @@ const STORE_NAME = 'offline_queue'
 const QUEUE_EVENT = 'sporely-sync-queue-changed'
 const SYNC_SUCCESS_EVENT = 'sporely-sync-upload-complete'
 const RETRY_DELAY_MS = 30_000
+const BLOCKED_QUEUE_REASON = 'queued item belongs to a different auth user'
+const BLOCKED_QUEUE_STAGE = 'blocked'
+const QUEUE_NAMESPACE_PREFIX = 'sporely-upload-queue'
 const _queuedPreviewUrls = new Map()
 let _retryTimer = null
 let _currentSyncPromise = null
 const _activeQueueOperations = new Set()
 let _backgroundTaskRegistered = false
+const _devWarnedBlockedQueueItems = new Set()
 
 function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
+}
+
+function _isDebugQueueEnabled() {
+  try {
+    return import.meta.env?.DEV || globalThis.localStorage?.getItem('sporely-debug-sync-queue') === 'true'
+  } catch (_) {
+    return import.meta.env?.DEV || false
+  }
+}
+
+function _debugQueue(message, details = {}) {
+  if (!_isDebugQueueEnabled()) return
+  console.debug(`[sync-queue] ${message}`, details)
+}
+
+function _normalizeQueueUserId(value) {
+  return String(value || '').trim()
+}
+
+function _queueKeyForUser(userId) {
+  const normalized = _normalizeQueueUserId(userId) || 'anonymous'
+  return `${QUEUE_NAMESPACE_PREFIX}:${normalized}`
+}
+
+function _queueUserFromItem(item) {
+  return _normalizeQueueUserId(item?.queueUserId || item?.userId || item?.obsPayload?.user_id)
+}
+
+function _isBlockedQueueItem(item) {
+  return String(item?.syncStage || '').trim() === BLOCKED_QUEUE_STAGE
+}
+
+async function _markQueueItemBlocked(itemId, reason, extras = {}) {
+  await _updateQueueItem(itemId, current => current ? {
+    ...current,
+    syncStage: BLOCKED_QUEUE_STAGE,
+    syncErrorMessage: reason,
+    blockedReason: reason,
+    blockedAt: Date.now(),
+    blockedByUserId: extras.blockedByUserId || null,
+    blockedQueueUserId: extras.blockedQueueUserId || null,
+    syncImageIndex: extras.syncImageIndex ?? current.syncImageIndex ?? null,
+    syncImageCount: extras.syncImageCount ?? current.syncImageCount ?? null,
+    lastAttemptAt: Date.now(),
+  } : current)
+}
+
+function _warnBlockedQueueItemOnce(itemId, details) {
+  if (_devWarnedBlockedQueueItems.has(itemId)) return
+  _devWarnedBlockedQueueItems.add(itemId)
+  console.warn('Skipping blocked queued upload:', details)
 }
 
 function _isArrayBuffer(value) {
@@ -271,10 +327,13 @@ async function _enqueueObservation(obsPayload, imageEntries) {
   const queuedImages = _normalizeQueuedImages(imageEntries)
   const persistentImages = await _serializeQueuedImagesForStorage(queuedImages)
   const db = await openDB()
+  const queueUserId = _normalizeQueueUserId(obsPayload.user_id)
   const queueItem = {
     obsPayload,
     imageEntries: persistentImages,
-    userId: obsPayload.user_id,
+    userId: queueUserId,
+    queueUserId,
+    queueKey: _queueKeyForUser(queueUserId),
     ts: Date.now(),
   }
 
@@ -298,7 +357,12 @@ export async function getQueuedObservations(userId) {
   if (!userId) return []
 
   const items = await _readQueueItems()
-  const filteredItems = items.filter(item => item?.userId === userId && item?.obsPayload)
+  const queueKey = _queueKeyForUser(userId)
+  const filteredItems = items.filter(item => {
+    const itemQueueUserId = _queueUserFromItem(item)
+    const itemQueueKey = String(item?.queueKey || '').trim()
+    return (itemQueueKey === queueKey || itemQueueUserId === userId) && item?.obsPayload
+  })
   _pruneQueuedPreviewUrls(filteredItems.map(item => item.id))
 
   return filteredItems
@@ -330,6 +394,7 @@ export async function getQueuedObservations(userId) {
       _syncErrorMessage: item.syncErrorMessage || null,
       _syncImageIndex: item.syncImageIndex ?? null,
       _syncImageCount: item.syncImageCount ?? null,
+      _queueKey: item.queueKey || _queueKeyForUser(item.userId),
     }))
 }
 
@@ -339,6 +404,22 @@ export async function deleteQueuedObservation(queueId) {
 
   await _deleteQueueItem(numId)
   notifyQueueChanged()
+}
+
+export async function deleteQueuedObservationsForUser(userId) {
+  const queueKey = _queueKeyForUser(userId)
+  const items = await _readQueueItems()
+  const targets = items.filter(item => {
+    const itemQueueUserId = _queueUserFromItem(item)
+    const itemQueueKey = String(item?.queueKey || '').trim()
+    return itemQueueKey === queueKey || itemQueueUserId === userId
+  })
+
+  for (const item of targets) {
+    await _deleteQueueItem(item.id)
+  }
+  if (targets.length) notifyQueueChanged()
+  return targets.length
 }
 
 export { QUEUE_EVENT, SYNC_SUCCESS_EVENT }
@@ -438,199 +519,274 @@ async function _findRemoteObservationForQueueItem(item) {
 
 async function _runSyncQueue() {
   if (!navigator.onLine || !canSyncOnCurrentConnection()) return
-  
-  // Ensure the user hasn't logged out while items were pending
-  const { data: { session } } = await supabase.auth.getSession()
-  if (!session) return
-  const authUserId = String(session?.user?.id || '').trim()
+
+  const session = await getSharedAuthSession({ refresh: true })
+  if (!session?.user?.id) return
+  const authUserId = _normalizeQueueUserId(session.user.id)
 
   const items = await _readQueueItems()
-
   if (!items || !items.length) return
 
   for (const item of items) {
     if (!navigator.onLine) break
-      
-      try {
-        const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
-        let obsId = item.remoteObservationId || null
 
-        if (!obsId) {
-          obsId = await _findRemoteObservationForQueueItem(item)
-          if (obsId) {
-            const updatedItem = await _updateQueueItem(item.id, current => current ? {
-              ...current,
-              remoteObservationId: obsId,
-              syncRecoveredRemoteIdAt: Date.now(),
-            } : current)
-            if (!updatedItem) continue
-          }
-        }
+    try {
+      const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
+      const queueUserId = _queueUserFromItem(item)
+      const queueKey = String(item?.queueKey || '').trim() || _queueKeyForUser(queueUserId)
+      const observationPayload = item?.obsPayload || {}
+      const observationOwnerFieldName = Object.prototype.hasOwnProperty.call(observationPayload, 'user_id')
+        ? 'user_id'
+        : (Object.prototype.hasOwnProperty.call(observationPayload, 'owner_id')
+          ? 'owner_id'
+          : (Object.prototype.hasOwnProperty.call(observationPayload, 'created_by') ? 'created_by' : null))
+      const observationOwnerValue = observationOwnerFieldName ? observationPayload[observationOwnerFieldName] : null
+      const normalizedObservationOwnerValue = _normalizeQueueUserId(observationOwnerValue)
+      const action = _isBlockedQueueItem(item)
+        ? 'skip'
+        : (item.remoteObservationId ? 'upload' : 'insert observation')
+      _debugQueue('before processing item', {
+        itemId: item.id,
+        itemType: observationPayload ? 'observation' : 'unknown',
+        authUserId,
+        queueUserId,
+        queueKey,
+        observationOwnerFieldName,
+        observationOwnerValue: normalizedObservationOwnerValue || null,
+        hasSession: Boolean(session),
+        action,
+      })
 
-        // 1. Upload parent observation once, then persist the remote ID for retries.
-        if (!obsId) {
-          await _setQueueSyncStatus(item.id, 'saving-observation', {
-            syncImageCount: queuedImages.length,
-          })
+      if (_isBlockedQueueItem(item)) {
+        continue
+      }
 
-          const payload = {
-            ...item.obsPayload,
-            visibility: toCloudVisibility(item.obsPayload.visibility, 'public'),
-          }
-          if (payload.gpsLat !== undefined) {
-            payload.gps_latitude = payload.gpsLat
-            delete payload.gpsLat
-          }
-          if (payload.gpsLon !== undefined) {
-            payload.gps_longitude = payload.gpsLon
-            delete payload.gpsLon
-          }
-          if (payload.gpsAltitude !== undefined) {
-            payload.gps_altitude = payload.gpsAltitude
-            delete payload.gpsAltitude
-          }
-          if (payload.photoGps !== undefined) {
-            delete payload.photoGps
-          }
+      if (!queueUserId) {
+        const reason = 'queued item is missing an auth user id'
+        await _markQueueItemBlocked(item.id, reason, {
+          blockedByUserId: authUserId,
+          blockedQueueUserId: null,
+        })
+        _warnBlockedQueueItemOnce(item.id, { itemId: item.id, authUserId, queueUserId, reason })
+        continue
+      }
 
-          let { data: obsData, error } = await supabase.from('observations').insert(payload).select('id').single()
-          if (error?.message?.includes('captured_at')) {
-            const { captured_at: _, ...payloadWithout } = payload
-            ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithout).select('id').single())
-          }
-          if (error?.message?.includes('is_draft') || error?.message?.includes('location_precision')) {
-            const { is_draft: _isDraft, location_precision: _locationPrecision, ...payloadWithoutPhase7 } = payload
-            ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithoutPhase7).select('id').single())
-          }
-          if (error) throw error
+      if (queueUserId !== authUserId) {
+        await _markQueueItemBlocked(item.id, BLOCKED_QUEUE_REASON, {
+          blockedByUserId: authUserId,
+          blockedQueueUserId: queueUserId,
+        })
+        _warnBlockedQueueItemOnce(item.id, {
+          itemId: item.id,
+          authUserId,
+          queueUserId,
+        })
+        continue
+      }
 
-          obsId = obsData.id
-          const updatedItem = await _updateQueueItem(item.id, current => ({
+      if (normalizedObservationOwnerValue && normalizedObservationOwnerValue !== authUserId) {
+        const reason = 'queued observation owner does not match the current auth user'
+        await _markQueueItemBlocked(item.id, reason, {
+          blockedByUserId: authUserId,
+          blockedQueueUserId: queueUserId,
+        })
+        console.warn('Skipping queued upload with mismatched observation owner:', {
+          itemId: item.id,
+          authUserId,
+          queueUserId,
+          observationOwnerFieldName,
+          observationOwnerValue: normalizedObservationOwnerValue,
+        })
+        continue
+      }
+
+      let obsId = item.remoteObservationId || null
+      let repairedPayload = null
+
+      if (!obsId) {
+        obsId = await _findRemoteObservationForQueueItem({
+          ...item,
+          userId: queueUserId,
+          obsPayload: {
+            ...observationPayload,
+            user_id: authUserId,
+          },
+        })
+        if (obsId) {
+          const updatedItem = await _updateQueueItem(item.id, current => current ? {
             ...current,
             remoteObservationId: obsId,
-          }))
+            syncRecoveredRemoteIdAt: Date.now(),
+          } : current)
           if (!updatedItem) continue
         }
+      }
 
-        // 2. Reconcile against remote state so a stale local queue can heal itself.
-        const completedImageIndexes = new Set(
-          Array.isArray(item.completedImageIndexes) ? item.completedImageIndexes : []
-        )
-        await _setQueueSyncStatus(item.id, 'reconciling', {
+      // 1. Upload parent observation once, then persist the remote ID for retries.
+      if (!obsId) {
+        await _setQueueSyncStatus(item.id, 'saving-observation', {
           syncImageCount: queuedImages.length,
         })
-        const remoteState = await _fetchRemoteObservationState(obsId)
-        remoteState.completedIndexes.forEach(index => completedImageIndexes.add(index))
-        if (completedImageIndexes.size >= queuedImages.length) {
-          await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'remote-reconcile')
-          continue
+
+        repairedPayload = {
+          ...observationPayload,
+          user_id: authUserId,
+          visibility: toCloudVisibility(observationPayload.visibility, 'public'),
         }
-        if (remoteState.completedIndexes.length) {
-          await _updateQueueItem(item.id, current => current ? {
-            ...current,
-            completedImageIndexes: [...completedImageIndexes].sort((a, b) => a - b),
-          } : current)
+        delete repairedPayload.owner_id
+        delete repairedPayload.created_by
+        delete repairedPayload.userId
+        delete repairedPayload.queueUserId
+        delete repairedPayload.queueKey
+        delete repairedPayload.remoteObservationId
+        if (repairedPayload.gpsLat !== undefined) {
+          repairedPayload.gps_latitude = repairedPayload.gpsLat
+          delete repairedPayload.gpsLat
+        }
+        if (repairedPayload.gpsLon !== undefined) {
+          repairedPayload.gps_longitude = repairedPayload.gpsLon
+          delete repairedPayload.gpsLon
+        }
+        if (repairedPayload.gpsAltitude !== undefined) {
+          repairedPayload.gps_altitude = repairedPayload.gpsAltitude
+          delete repairedPayload.gpsAltitude
+        }
+        if (repairedPayload.photoGps !== undefined) {
+          delete repairedPayload.photoGps
         }
 
-        let uploadPolicy = _cloudPlanCache.get(item.userId)
-        if (!uploadPolicy) {
-          uploadPolicy = await fetchCloudPlanProfile(item.userId)
-          _cloudPlanCache.set(item.userId, uploadPolicy)
-        }
-        const queueUserId = String(item.userId || '').trim()
-        if (!authUserId || authUserId !== queueUserId) {
-          const reason = authUserId
-            ? `Queued upload belongs to ${queueUserId || 'a different user'} but the current session is ${authUserId}`
-            : 'Missing authenticated user for queued upload'
-          await _setQueueSyncStatus(item.id, 'failed', {
-            syncErrorMessage: reason,
-            syncImageCount: queuedImages.length,
-          })
-          console.warn('Skipping queued upload with mismatched auth user:', {
-            itemId: item.id,
-            authUserId,
-            queueUserId,
-          })
-          continue
-        }
-        for (let i = 0; i < queuedImages.length; i++) {
-          if (completedImageIndexes.has(i)) continue
-
-          const image = queuedImages[i]
-          await _setQueueSyncStatus(item.id, 'uploading-image', {
-            syncImageIndex: i + 1,
-            syncImageCount: queuedImages.length,
-          })
-          let preparedImage = image
-          const preparedUploadMode = image.uploadMeta?.upload_mode || null
-          if (_isBlob(image.blob) && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
-            const prepared = await prepareImageVariants(image.blob, uploadPolicy)
-            preparedImage = {
-              ...image,
-              uploadBlob: prepared.uploadBlob,
-              uploadMeta: prepared.uploadMeta,
-              variants: prepared.variants,
-            }
-            await _persistPreparedQueuedImage(item.id, i, preparedImage)
-          }
-
-          const blobType = preparedImage.uploadBlob?.type || preparedImage.uploadType || ''
-          const ext = imageExtensionForMimeType(blobType)
-          const path = buildObservationImageStoragePath({
-            userId: authUserId,
-            observationId: obsId,
-            sortOrder: i,
-            timestamp: item.ts,
-            extension: ext,
-          })
-          
-          const uploadMeta = await uploadPreparedObservationImageVariants(preparedImage, path, {
-            uploadPolicy,
-            uploadOrigin: 'web',
-            userId: authUserId,
-            observationId: obsId,
-          })
-          await insertObservationImage({
-            observation_id: obsId,
-            user_id: authUserId,
-            storage_path: path,
-            image_type: 'field',
-            sort_order: i,
-            aiCropRect: image.aiCropRect,
-            aiCropSourceW: image.aiCropSourceW,
-            aiCropSourceH: image.aiCropSourceH,
-            ...uploadMeta,
-          })
-          await syncObservationMediaKeys(obsId, path, { sortOrder: i })
-
-          completedImageIndexes.add(i)
-          await _updateQueueItem(item.id, current => current ? {
-            ...current,
-            remoteObservationId: obsId,
-            completedImageIndexes: [...completedImageIndexes].sort((a, b) => a - b),
-            syncImageIndex: i + 1,
-            syncImageCount: queuedImages.length,
-          } : current)
-        }
-
-        // 3. Confirm remote DB/image state, then purge from the offline queue.
-        await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'local-sync')
-      } catch (err) {
-        const message = String(err?.message || err || 'Upload failed')
-        const unrecoverable = /authenticated user id|missing authenticated user|different signed-in user/i.test(message)
-        if (unrecoverable) {
-          console.warn('Background sync skipped for queue item', item.id, message)
-        } else {
-          console.error('Background sync failed for queue item', item.id, err)
-        }
-        await _setQueueSyncStatus(item.id, unrecoverable ? 'failed' : 'retrying', {
-          syncErrorMessage: message,
+        _debugQueue('observation insert payload', {
+          itemId: item.id,
+          authUserId,
+          queueUserId,
+          observationOwnerFieldName: 'user_id',
+          observationOwnerValue: authUserId,
+          payloadKeys: Object.keys(repairedPayload).sort(),
         })
-        if (!unrecoverable) {
-          _scheduleSyncRetry()
-          break // Network or RLS failure — halt processing to avoid looping errors
+
+        let { data: obsData, error } = await supabase.from('observations').insert(repairedPayload).select('id').single()
+        if (error?.message?.includes('captured_at')) {
+          const { captured_at: _capturedAt, ...payloadWithout } = repairedPayload
+          ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithout).select('id').single())
         }
+        if (error?.message?.includes('is_draft') || error?.message?.includes('location_precision')) {
+          const { is_draft: _isDraft, location_precision: _locationPrecision, ...payloadWithoutPhase7 } = repairedPayload
+          ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithoutPhase7).select('id').single())
+        }
+        if (error) throw error
+
+        obsId = obsData.id
+        const updatedItem = await _updateQueueItem(item.id, current => ({
+          ...current,
+          remoteObservationId: obsId,
+          obsPayload: repairedPayload || current.obsPayload,
+        }))
+        if (!updatedItem) continue
       }
+
+      // 2. Reconcile against remote state so a stale local queue can heal itself.
+      const completedImageIndexes = new Set(
+        Array.isArray(item.completedImageIndexes) ? item.completedImageIndexes : []
+      )
+      await _setQueueSyncStatus(item.id, 'reconciling', {
+        syncImageCount: queuedImages.length,
+      })
+      const remoteState = await _fetchRemoteObservationState(obsId)
+      remoteState.completedIndexes.forEach(index => completedImageIndexes.add(index))
+      if (completedImageIndexes.size >= queuedImages.length) {
+        await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'remote-reconcile')
+        continue
+      }
+      if (remoteState.completedIndexes.length) {
+        await _updateQueueItem(item.id, current => current ? {
+          ...current,
+          completedImageIndexes: [...completedImageIndexes].sort((a, b) => a - b),
+        } : current)
+      }
+
+      let uploadPolicy = _cloudPlanCache.get(queueUserId)
+      if (!uploadPolicy) {
+        uploadPolicy = await fetchCloudPlanProfile(queueUserId)
+        _cloudPlanCache.set(queueUserId, uploadPolicy)
+      }
+      for (let i = 0; i < queuedImages.length; i++) {
+        if (completedImageIndexes.has(i)) continue
+
+        const image = queuedImages[i]
+        await _setQueueSyncStatus(item.id, 'uploading-image', {
+          syncImageIndex: i + 1,
+          syncImageCount: queuedImages.length,
+        })
+        let preparedImage = image
+        const preparedUploadMode = image.uploadMeta?.upload_mode || null
+        if (_isBlob(image.blob) && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
+          const prepared = await prepareImageVariants(image.blob, uploadPolicy)
+          preparedImage = {
+            ...image,
+            uploadBlob: prepared.uploadBlob,
+            uploadMeta: prepared.uploadMeta,
+            variants: prepared.variants,
+          }
+          await _persistPreparedQueuedImage(item.id, i, preparedImage)
+        }
+
+        const blobType = preparedImage.uploadBlob?.type || preparedImage.uploadType || ''
+        const ext = imageExtensionForMimeType(blobType)
+        const path = buildObservationImageStoragePath({
+          userId: authUserId,
+          observationId: obsId,
+          sortOrder: i,
+          timestamp: item.ts,
+          extension: ext,
+        })
+
+        const uploadMeta = await uploadPreparedObservationImageVariants(preparedImage, path, {
+          uploadPolicy,
+          uploadOrigin: 'web',
+          userId: authUserId,
+          observationId: obsId,
+        })
+        await insertObservationImage({
+          observation_id: obsId,
+          user_id: authUserId,
+          storage_path: path,
+          image_type: 'field',
+          sort_order: i,
+          aiCropRect: image.aiCropRect,
+          aiCropSourceW: image.aiCropSourceW,
+          aiCropSourceH: image.aiCropSourceH,
+          ...uploadMeta,
+        })
+        await syncObservationMediaKeys(obsId, path, { sortOrder: i })
+
+        completedImageIndexes.add(i)
+        await _updateQueueItem(item.id, current => current ? {
+          ...current,
+          remoteObservationId: obsId,
+          completedImageIndexes: [...completedImageIndexes].sort((a, b) => a - b),
+          syncImageIndex: i + 1,
+          syncImageCount: queuedImages.length,
+        } : current)
+      }
+
+      // 3. Confirm remote DB/image state, then purge from the offline queue.
+      await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'local-sync')
+    } catch (err) {
+      const message = String(err?.message || err || 'Upload failed')
+      const unrecoverable = /authenticated user id|missing authenticated user|different signed-in user|missing an auth user id|owner does not match|violates row-level security/i.test(message)
+      if (unrecoverable) {
+        console.warn('Background sync skipped for queue item', item.id, message)
+      } else {
+        console.error('Background sync failed for queue item', item.id, err)
+      }
+      await _setQueueSyncStatus(item.id, unrecoverable ? BLOCKED_QUEUE_STAGE : 'retrying', {
+        syncErrorMessage: message,
+      })
+      if (!unrecoverable) {
+        _scheduleSyncRetry()
+        break // Network or RLS failure — halt processing to avoid looping errors
+      }
+    }
   }
 }
 
