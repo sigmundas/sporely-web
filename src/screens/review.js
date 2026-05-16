@@ -1057,14 +1057,43 @@ async function _runReviewComparison(serviceOverride = null) {
   }
 
   try {
-    const resultsByService = {}
-    for (const service of requestedServices) {
-      const result = await _runReviewAiService(service, blobs, {
+    const tasks = requestedServices.map(service => {
+      const startTime = globalThis.performance?.now?.() ?? Date.now()
+      console.debug('[photo-id] review start', service, startTime)
+      return _runReviewAiService(service, blobs, {
         language: getTaxonomyLanguage(),
         availability: reviewAiState.availability,
         screen: 'review',
+      }).then(result => {
+        if (result) {
+          reviewAiState.resultsByService = {
+            ...(reviewAiState.resultsByService || {}),
+            [service]: result,
+          }
+          _renderReviewAiBlock()
+        }
+        return result
       })
-      if (result) resultsByService[service] = result
+    })
+
+    const settled = await Promise.allSettled(tasks)
+    const resultsByService = {}
+    requestedServices.forEach((service, index) => {
+      const item = settled[index]
+      if (item.status === 'fulfilled' && item.value) {
+        resultsByService[service] = item.value
+      } else {
+        resultsByService[service] = {
+          service,
+          status: 'error',
+          predictions: [],
+          errorMessage: String(item.reason?.message || item.reason || 'Unknown error'),
+        }
+      }
+    })
+    reviewAiState.resultsByService = {
+      ...(reviewAiState.resultsByService || {}),
+      ...resultsByService,
     }
     reviewAiState.activeService = primaryService
     reviewAiState.stale = false

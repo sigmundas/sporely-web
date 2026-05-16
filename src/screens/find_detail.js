@@ -690,7 +690,9 @@ export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'medium
 }
 
 export async function runDetailIdentify(service, galleryImgs, options = {}) {
-  const identifyInputs = await prepareDetailIdentifyInputs(galleryImgs, options.variant || 'medium')
+  const identifyInputs = Array.isArray(options.identifyInputs)
+    ? options.identifyInputs
+    : await prepareDetailIdentifyInputs(galleryImgs, options.variant || 'medium')
   const blobs = identifyInputs
     .filter(item => item?.blob instanceof Blob)
     .map(item => item.blob)
@@ -801,9 +803,17 @@ function _renderDetailAiTabs() {
     tab.classList.toggle('has-results', state.status === 'success' || state.status === 'no_match' || state.status === 'stale')
     tab.classList.toggle('has-error', state.status === 'error')
     tab.disabled = !state.available
-    const icon = tab.querySelector('.ai-id-service-tab-icon')
+    const icon = tab.querySelector('.ai-id-service-tab-icon, .ai-id-dot')
     if (icon) {
       icon.outerHTML = _detailAiServiceIconHtml(state)
+    } else {
+      const label = tab.querySelector('.ai-id-service-tab-label')
+      const iconHtml = _detailAiServiceIconHtml(state)
+      if (label) {
+        label.insertAdjacentHTML('beforebegin', iconHtml)
+      } else {
+        tab.insertAdjacentHTML('afterbegin', iconHtml)
+      }
     }
     const score = tab.querySelector('.ai-id-service-tab-score')
     if (score) {
@@ -818,12 +828,17 @@ function _renderDetailAiTabs() {
 function _renderDetailAiResults() {
   const resultsEl = document.getElementById('detail-ai-results')
   if (!resultsEl) return
-  const activeService = normalizeIdentifyService(detailAiState.activeService || _resolveDetailPhotoIdServices(detailAiState.availability).primary)
+  const activeService = normalizeIdentifyService(detailAiState.activeService)
   const result = detailAiState.resultsByService[activeService] || null
   resultsEl.dataset.identifyService = activeService
   const staleNote = document.querySelector('[data-identify-stale-note]')
   if (staleNote) staleNote.style.display = detailAiState.stale ? '' : 'none'
-  if (detailAiState.runningByService?.[activeService] || result?.status === 'running') {
+  if (detailAiState.runningByService?.[activeService]) {
+    resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
+    resultsEl.style.display = 'block'
+    return
+  }
+  if (result?.status === 'running') {
     resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
     resultsEl.style.display = 'block'
     return
@@ -994,17 +1009,6 @@ async function _runDetailAiComparison(serviceOverride = null) {
   }
   if (detailAiState.running) return
 
-  if (overrideService) {
-    detailAiState.running = true
-    detailAiState.activeService = overrideService
-    detailAiState.runningByService = {
-      ...(detailAiState.runningByService || {}),
-      [overrideService]: true,
-    }
-    _renderDetailAiTabs()
-    _renderDetailAiResults()
-  }
-
   const serviceFingerprints = {
     [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
     [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
@@ -1013,10 +1017,13 @@ async function _runDetailAiComparison(serviceOverride = null) {
   const usableBlobs = identifyInputs
     .filter(item => item?.blob instanceof Blob)
     .map(item => item.blob)
+  const mediaKeys = galleryImgs
+    .map(img => img?.dataset?.storagePath || '')
+    .filter(Boolean)
   const hasInatBlob = usableBlobs.length > 0
   const inaturalistSession = await loadInaturalistSession()
   const availabilityList = await getAvailableIdentifyServices({
-    mediaKeys: detailImageRows.map(row => row.storage_path).filter(Boolean),
+    mediaKeys,
     inaturalistSession,
   })
   const inatLoggedIn = Boolean(inaturalistSession?.connected && (inaturalistSession?.api_token || inaturalistSession?.apiToken))
@@ -1085,7 +1092,7 @@ async function _runDetailAiComparison(serviceOverride = null) {
   }
 
   try {
-    const tasks = requestedServices.map(async service => {
+    const tasks = requestedServices.map(service => {
       const serviceAvailability = availability[service]
       if (!serviceAvailability?.available) {
         detailAiState.runningByService = {
@@ -1101,18 +1108,19 @@ async function _runDetailAiComparison(serviceOverride = null) {
           reason: serviceAvailability?.reason || '',
         }
         _applyDetailAiServiceResult(service, unavailableResult)
-        return unavailableResult
+        return Promise.resolve(unavailableResult)
       }
 
-      try {
-        const result = await _runDetailServiceComparison(service, galleryImgs)
+      return _runDetailServiceComparison(service, galleryImgs, {
+        identifyInputs,
+      }).then(result => {
         detailAiState.runningByService = {
           ...(detailAiState.runningByService || {}),
           [service]: false,
         }
         _applyDetailAiServiceResult(service, result)
         return result
-      } catch (error) {
+      }).catch(error => {
         detailAiState.runningByService = {
           ...(detailAiState.runningByService || {}),
           [service]: false,
@@ -1125,7 +1133,7 @@ async function _runDetailAiComparison(serviceOverride = null) {
         }
         _applyDetailAiServiceResult(service, failureResult)
         return failureResult
-      }
+      })
     })
 
     const settled = await Promise.allSettled(tasks)
@@ -1181,8 +1189,11 @@ async function _runDetailAiComparison(serviceOverride = null) {
   }
 }
 
-async function _runDetailServiceComparison(service, galleryImgs) {
-  const result = await runDetailIdentify(service, galleryImgs, { variant: 'medium' })
+async function _runDetailServiceComparison(service, galleryImgs, options = {}) {
+  const result = await runDetailIdentify(service, galleryImgs, {
+    variant: 'medium',
+    identifyInputs: options.identifyInputs,
+  })
   return {
     service,
     status: Array.isArray(result) && result.length ? 'success' : 'no_match',
