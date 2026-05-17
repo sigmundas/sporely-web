@@ -252,7 +252,7 @@ export async function getBlobImageDimensions(blob) {
   }
 }
 
-export async function prepareImageBlobForUpload(blob, options = {}) {
+async function _prepareAiUploadBlob(blob, options = {}) {
   const inputMeta = {
     inputType: blob?.type || '',
     inputSize: Number(blob?.size || 0),
@@ -310,14 +310,15 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     const sourceWidth = decoded.width || null
     const sourceHeight = decoded.height || null
     const sourceMaxEdge = Math.max(Number(sourceWidth) || 0, Number(sourceHeight) || 0) || null
-    const cropWidth = cropRect && sourceWidth && sourceHeight
-      ? Math.max(1, Math.round((cropRect.x2 - cropRect.x1) * sourceWidth))
+    const normalizedCropRect = cropRect && sourceWidth && sourceHeight ? cropRect : null
+    const cropWidth = normalizedCropRect
+      ? Math.max(1, Math.round((normalizedCropRect.x2 - normalizedCropRect.x1) * sourceWidth))
       : sourceWidth
-    const cropHeight = cropRect && sourceWidth && sourceHeight
-      ? Math.max(1, Math.round((cropRect.y2 - cropRect.y1) * sourceHeight))
+    const cropHeight = normalizedCropRect
+      ? Math.max(1, Math.round((normalizedCropRect.y2 - normalizedCropRect.y1) * sourceHeight))
       : sourceHeight
-    const workingWidth = cropRect ? cropWidth : sourceWidth
-    const workingHeight = cropRect ? cropHeight : sourceHeight
+    const workingWidth = normalizedCropRect ? cropWidth : sourceWidth
+    const workingHeight = normalizedCropRect ? cropHeight : sourceHeight
     const workingMaxEdge = Math.max(Number(workingWidth) || 0, Number(workingHeight) || 0) || null
     const needsResize = Number.isFinite(workingMaxEdge) && workingMaxEdge > inputMeta.maxEdge
     const normalizedType = String(blob.type || '').toLowerCase()
@@ -326,12 +327,12 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     inputMeta.sourceWidth = sourceWidth
     inputMeta.sourceHeight = sourceHeight
     inputMeta.sourceMaxEdge = sourceMaxEdge
-    inputMeta.cropRect = cropRect
+    inputMeta.cropRect = normalizedCropRect
     inputMeta.cropSourceW = sourceWidth
     inputMeta.cropSourceH = sourceHeight
-    inputMeta.cropped = !!cropRect
+    inputMeta.cropped = !!normalizedCropRect
 
-    if (!sourceWidth || !sourceHeight || (!cropRect && !needsResize && !needsJpeg)) {
+    if (!sourceWidth || !sourceHeight || (!normalizedCropRect && !needsResize && !needsJpeg)) {
       return {
         blob,
         ...inputMeta,
@@ -353,11 +354,11 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     if (!ctx) throw new Error('Canvas context unavailable')
     ctx.imageSmoothingEnabled = true
     ctx.imageSmoothingQuality = 'high'
-    if (cropRect) {
-      const sourceX = Math.max(0, Math.round(cropRect.x1 * sourceWidth))
-      const sourceY = Math.max(0, Math.round(cropRect.y1 * sourceHeight))
-      const drawWidth = Math.max(1, Math.round((cropRect.x2 - cropRect.x1) * sourceWidth))
-      const drawHeight = Math.max(1, Math.round((cropRect.y2 - cropRect.y1) * sourceHeight))
+    if (normalizedCropRect) {
+      const sourceX = Math.max(0, Math.round(normalizedCropRect.x1 * sourceWidth))
+      const sourceY = Math.max(0, Math.round(normalizedCropRect.y1 * sourceHeight))
+      const drawWidth = Math.max(1, Math.round((normalizedCropRect.x2 - normalizedCropRect.x1) * sourceWidth))
+      const drawHeight = Math.max(1, Math.round((normalizedCropRect.y2 - normalizedCropRect.y1) * sourceHeight))
       ctx.drawImage(decoded.source, sourceX, sourceY, drawWidth, drawHeight, 0, 0, targetWidth, targetHeight)
     } else {
       ctx.drawImage(decoded.source, 0, 0, sourceWidth, sourceHeight, 0, 0, targetWidth, targetHeight)
@@ -373,7 +374,7 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     inputMeta.targetWidth = targetWidth
     inputMeta.targetHeight = targetHeight
     inputMeta.resized = needsResize
-    inputMeta.converted = needsJpeg || !!cropRect
+    inputMeta.converted = needsJpeg || !!normalizedCropRect
     inputMeta.prepared = true
     return {
       blob: outputBlob,
@@ -403,6 +404,19 @@ export async function prepareImageBlobForUpload(blob, options = {}) {
     if (objectUrl) urlApi.revokeObjectURL?.(objectUrl)
     decoded?.release?.()
   }
+}
+
+export async function generateAiUploadBlob(blob, cropRect, maxEdge = 1920) {
+  const prepared = await _prepareAiUploadBlob(blob, {
+    cropRect,
+    maxEdge,
+    forceJpeg: true,
+  })
+  return prepared.blob
+}
+
+export async function prepareImageBlobForUpload(blob, options = {}) {
+  return _prepareAiUploadBlob(blob, options)
 }
 
 export async function createImageCropMeta(blob, options = {}) {

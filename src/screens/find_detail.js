@@ -830,22 +830,45 @@ function _isDetailAiNoSaveEnabled() {
   return _isDetailAiDebugFlagEnabled('sporely-debug-ai-no-save')
 }
 
-function _readDetailAiCropMeta(source = {}) {
+function _detailIdentifyGps(obs = currentObs) {
+  const lat = Number(obs?.gps_latitude)
+  const lon = Number(obs?.gps_longitude)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null
+  if (Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001) return null
+  return { lat, lon }
+}
+
+function _detailIdentifyObservedOn(obs = currentObs) {
+  if (obs?.date) return String(obs.date).trim() || null
+  const capturedAt = obs?.captured_at ? new Date(obs.captured_at) : null
+  if (!capturedAt || Number.isNaN(capturedAt.getTime())) return null
+  return `${capturedAt.getFullYear()}-${String(capturedAt.getMonth() + 1).padStart(2, '0')}-${String(capturedAt.getDate()).padStart(2, '0')}`
+}
+
+function _readDetailAiCropMeta(source = {}, index = null) {
   const readNumber = value => {
     const number = Number(value)
     return Number.isFinite(number) ? number : null
   }
   const dataset = source?.dataset || {}
-  const cropRect = normalizeAiCropRect({
+  const row = Number.isInteger(index) ? detailImageRows[index] : null
+  const rowCropRect = row ? normalizeAiCropRect({
+    x1: row.ai_crop_x1,
+    y1: row.ai_crop_y1,
+    x2: row.ai_crop_x2,
+    y2: row.ai_crop_y2,
+  }) : null
+  const datasetCropRect = normalizeAiCropRect({
     x1: source?.aiCropRect?.x1 ?? source?.cropRect?.x1 ?? dataset.aiCropX1,
     y1: source?.aiCropRect?.y1 ?? source?.cropRect?.y1 ?? dataset.aiCropY1,
     x2: source?.aiCropRect?.x2 ?? source?.cropRect?.x2 ?? dataset.aiCropX2,
     y2: source?.aiCropRect?.y2 ?? source?.cropRect?.y2 ?? dataset.aiCropY2,
   })
   return {
-    cropRect,
-    cropSourceW: readNumber(source?.aiCropSourceW ?? source?.cropSourceW ?? dataset.aiCropSourceW),
-    cropSourceH: readNumber(source?.aiCropSourceH ?? source?.cropSourceH ?? dataset.aiCropSourceH),
+    cropRect: rowCropRect || datasetCropRect,
+    cropSourceW: readNumber(row?.ai_crop_source_w ?? source?.aiCropSourceW ?? source?.cropSourceW ?? dataset.aiCropSourceW),
+    cropSourceH: readNumber(row?.ai_crop_source_h ?? source?.aiCropSourceH ?? source?.cropSourceH ?? dataset.aiCropSourceH),
   }
 }
 
@@ -941,18 +964,19 @@ function getDetailIdentifySources() {
   }
 }
 
-export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'medium') {
+export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'original') {
   const options = typeof variant === 'string'
     ? { variant }
     : (variant || {})
-  const chosenVariant = options.variant || 'medium'
+  const chosenVariant = options.variant || 'original'
   const maxEdge = Math.max(1, Number(options.maxEdge || getArtsorakelMaxEdge()) || getArtsorakelMaxEdge())
 
-  return await Promise.all((galleryImgs || []).map(async img => {
+  return await Promise.all((galleryImgs || []).map(async (img, index) => {
     try {
       const result = await _loadDetailIdentifyBlob(img, chosenVariant)
       if (!(result.blob instanceof Blob)) return null
-      const cropMeta = _readDetailAiCropMeta(img)
+      const cropMeta = _readDetailAiCropMeta(img, index)
+      const gps = _detailIdentifyGps()
       const prepared = await prepareImageBlobForUpload(result.blob, {
         cropRect: cropMeta.cropRect,
         maxEdge,
@@ -968,6 +992,9 @@ export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'medium
         cropRect: cropMeta.cropRect,
         cropSourceW: cropMeta.cropSourceW,
         cropSourceH: cropMeta.cropSourceH,
+        lat: gps?.lat ?? null,
+        lon: gps?.lon ?? null,
+        observedOn: _detailIdentifyObservedOn(),
         wasCropped: !!cropMeta.cropRect,
         preparedMeta: prepared,
         preprocessed: true,
@@ -1002,7 +1029,7 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
     : await prepareDetailIdentifyInputs(galleryImgs, {
         variant: normalizedService === ID_SERVICE_ARTSORAKEL
           ? 'original'
-          : (options.variant || 'medium'),
+          : (options.variant || 'original'),
         maxEdge: options.maxEdge || getArtsorakelMaxEdge(),
       })
   const blobs = identifyInputs
@@ -1017,20 +1044,27 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
 
   if (blobs.length) {
     try {
+      const detailGps = _detailIdentifyGps()
       const identifyOptions = service === ID_SERVICE_ARTSORAKEL
         ? { tolerateFailures: true, maxEdge: getArtsorakelMaxEdge(), screen: 'detail' }
-        : { tolerateFailures: true, screen: 'detail' }
+        : {
+            tolerateFailures: true,
+            screen: 'detail',
+            lat: detailGps?.lat ?? null,
+            lon: detailGps?.lon ?? null,
+            observedOn: _detailIdentifyObservedOn(),
+          }
       return await identifyBlobs(identifyInputs, service, language, identifyOptions)
     } catch (error) {
       if (service === ID_SERVICE_ARTSORAKEL && mediaKeys.length && _isArtsorakelBlobFallbackError(error)) {
-        return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium', screen: 'detail' })
+        return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'original', screen: 'detail' })
       }
       throw error
     }
   }
 
   if (mediaKeys.length && service === ID_SERVICE_ARTSORAKEL) {
-    return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'medium', screen: 'detail' })
+    return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'original', screen: 'detail' })
   }
 
   if (service === ID_SERVICE_ARTSORAKEL) {
@@ -1385,7 +1419,7 @@ async function _loadDetailAiCache() {
 
   try {
     const sources = getDetailIdentifySources()
-    const identifyInputs = await prepareDetailIdentifyInputs(sources.galleryImgs, { variant: 'medium', maxEdge: getArtsorakelMaxEdge() })
+    const identifyInputs = await prepareDetailIdentifyInputs(sources.galleryImgs, { variant: 'original', maxEdge: getArtsorakelMaxEdge() })
     const usableBlobs = identifyInputs.filter(item => item?.blob instanceof Blob)
     const hasInatBlob = usableBlobs.length > 0
     const inaturalistSession = await loadInaturalistSession()
@@ -1429,7 +1463,7 @@ async function _runDetailAiComparison(serviceOverride = null) {
     [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
     [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
   }
-  const identifyInputs = await prepareDetailIdentifyInputs(galleryImgs, { variant: 'medium', maxEdge: getArtsorakelMaxEdge() })
+  const identifyInputs = await prepareDetailIdentifyInputs(galleryImgs, { variant: 'original', maxEdge: getArtsorakelMaxEdge() })
   const usableBlobs = identifyInputs
     .filter(item => item?.blob instanceof Blob)
   const mediaKeys = galleryImgs
@@ -1613,8 +1647,11 @@ async function _runDetailAiComparison(serviceOverride = null) {
 
 async function _runDetailServiceComparison(service, galleryImgs, options = {}) {
   const result = await runDetailIdentify(service, galleryImgs, {
-    variant: 'medium',
+    variant: 'original',
     identifyInputs: options.identifyInputs,
+    lat: _detailIdentifyGps()?.lat ?? null,
+    lon: _detailIdentifyGps()?.lon ?? null,
+    observedOn: _detailIdentifyObservedOn(),
   })
   return {
     service,

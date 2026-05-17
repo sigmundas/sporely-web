@@ -36,6 +36,7 @@ import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
 import { fetchCloudPlanProfile, getStoredImageResolutionMode, setStoredImageResolutionMode } from './cloud-plan.js'
 import { clearMediaUrlCache } from './images.js'
+import { initDebugDashboard, isDebugDashboardEnabled } from './debug-dashboard.js'
 import { hideSettingsOverlay, showSettingsOverlay } from './settings-overlay.js'
 import { isWebInatOAuthConfigured } from './inaturalist.js'
 import {
@@ -570,6 +571,10 @@ onLocaleChange(() => {
 })
 
 async function init() {
+  if (isDebugDashboardEnabled()) {
+    initDebugDashboard()
+  }
+
   await initializeInaturalistOAuth()
 
   if (getPlatform() !== 'android') {

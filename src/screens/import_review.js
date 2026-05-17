@@ -220,9 +220,17 @@ function _sessionAiInputs(session) {
   return (session?.files || []).map((blob, index) => ({
     id: `session-${session.id}-${index}`,
     blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
+    originalBlob: _isBlob(blob) ? blob : null,
     cropRect: session.imageMeta?.[index]?.aiCropRect || null,
     cropSourceW: session.imageMeta?.[index]?.aiCropSourceW ?? null,
     cropSourceH: session.imageMeta?.[index]?.aiCropSourceH ?? null,
+    lat: _isUsableCoordinate(session.photoGps?.[index]?.lat, session.photoGps?.[index]?.lon)
+      ? Number(session.photoGps[index].lat)
+      : (Number.isFinite(Number(session.gpsLat)) ? Number(session.gpsLat) : null),
+    lon: _isUsableCoordinate(session.photoGps?.[index]?.lat, session.photoGps?.[index]?.lon)
+      ? Number(session.photoGps[index].lon)
+      : (Number.isFinite(Number(session.gpsLon)) ? Number(session.gpsLon) : null),
+    observedOn: session.ts ? _localDate(session.ts) : null,
     source: _isBlob(session.aiFiles?.[index]) ? 'session.aiFiles' : 'session.files',
     sourceType: _isBlob(session.aiFiles?.[index]) ? 'session.aiFiles' : 'session.files',
   })).filter(item => _isBlob(item.blob));
@@ -244,7 +252,7 @@ async function _syncSessionAiAvailability(session) {
   const fingerprint = _sessionAiFingerprint(normalized)
   if (!fingerprint) return
   const availabilityList = await getAvailableIdentifyServices({
-    blobs: _sessionAiInputs(normalized).map(item => item.blob),
+    blobs: _sessionAiInputs(normalized),
   })
   const availabilityFingerprint = JSON.stringify({
     fingerprint: fingerprint.requestFingerprint,
@@ -506,13 +514,20 @@ async function _runSessionAiService(sid, service, options = {}) {
     const predictions = await runIdentifyForBlobs(
       _sessionAiInputs(normalized).map(item => ({
         blob: item.blob,
+        originalBlob: item.originalBlob || null,
         cropRect: item.cropRect,
+        lat: item.lat ?? null,
+        lon: item.lon ?? null,
+        observedOn: item.observedOn ?? null,
       })),
       svc,
       getTaxonomyLanguage(),
       {
         screen: 'import-review',
         availability,
+        lat: Number.isFinite(Number(normalized.gpsLat)) ? Number(normalized.gpsLat) : null,
+        lon: Number.isFinite(Number(normalized.gpsLon)) ? Number(normalized.gpsLon) : null,
+        observedOn: normalized.ts ? _localDate(normalized.ts) : null,
         onImageSent: options.onImageSent,
         onIdReceived: options.onIdReceived,
       },

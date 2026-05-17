@@ -9,7 +9,7 @@ import {
 } from './settings.js'
 
 const INAT_SUGGEST_URL = 'https://api.inaturalist.org/v2/taxa/suggest'
-const INAT_MAX_EDGE = 1920
+const INAT_MAX_EDGE = 299
 const INAT_DEBUG_REQUESTS_KEY = 'sporely-debug-inaturalist'
 
 function _isDebugAiIdEnabled() {
@@ -50,11 +50,10 @@ function _trimInaturalistDebugStore() {
   const store = _getInaturalistDebugStore()
   while (store.length > 20) {
     const removed = store.shift()
-    for (const image of removed?.images || []) {
-      try {
-        if (image?.objectUrl) globalThis.URL?.revokeObjectURL?.(image.objectUrl)
-      } catch (_) {}
-    }
+    const imageUrl = removed?.imageSrc || removed?.images?.[0]?.objectUrl || ''
+    try {
+      if (imageUrl) globalThis.URL?.revokeObjectURL?.(imageUrl)
+    } catch (_) {}
   }
 }
 
@@ -96,6 +95,51 @@ async function _buildInaturalistDebugEntry({
   }
 }
 
+async function _recordInaturalistDebugSnapshot({
+  aiBlob,
+  preparedMeta,
+  options = {},
+  url,
+  fieldName = 'image',
+  imageIndex = 0,
+  imageCount = 1,
+}) {
+  if (!_isDebugAiIdEnabled()) return
+  try {
+    const entry = await _buildInaturalistDebugEntry({
+      aiBlob,
+      preparedMeta,
+      options,
+      url,
+      fieldName,
+      imageIndex,
+      imageCount,
+    })
+    const imageUrl = entry.images?.[0]?.objectUrl || ''
+    entry.imageSrc = imageUrl
+    entry.metadata = {
+      lat: options?.lat ?? null,
+      lng: options?.lng ?? options?.lon ?? null,
+      observed_on: options?.observed_on ?? options?.observedOn ?? null,
+      inputType: entry.images?.[0]?.blobType || '',
+      inputSize: entry.images?.[0]?.blobSize ?? null,
+      sourceWidth: entry.images?.[0]?.sourceWidth ?? null,
+      sourceHeight: entry.images?.[0]?.sourceHeight ?? null,
+      targetWidth: entry.images?.[0]?.width ?? null,
+      targetHeight: entry.images?.[0]?.height ?? null,
+      maxEdge: entry.images?.[0]?.maxEdge ?? null,
+      wasCropped: !!entry.images?.[0]?.wasCropped,
+      cropRect: entry.images?.[0]?.cropRect || null,
+    }
+    const store = _getInaturalistDebugStore()
+    store.unshift(entry)
+    _trimInaturalistDebugStore()
+    console.debug('[inaturalist-debug] snapshot stored', entry)
+  } catch (error) {
+    console.warn('[inaturalist-debug] snapshot logging failed', error)
+  }
+}
+
 async function _logInaturalistRequestIfEnabled({
   aiBlob,
   preparedMeta,
@@ -105,7 +149,7 @@ async function _logInaturalistRequestIfEnabled({
   imageIndex = 0,
   imageCount = 1,
 }) {
-  if (!_isDebugInaturalistRequestsEnabled()) return
+  if (!_isDebugInaturalistRequestsEnabled() || _isDebugAiIdEnabled()) return
   try {
     const entry = await _buildInaturalistDebugEntry({
       aiBlob,
@@ -127,6 +171,13 @@ async function _logInaturalistRequestIfEnabled({
 
 function _isBlob(value) {
   return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
+}
+
+function _selectIdentifySourceBlob(item) {
+  if (_isBlob(item?.originalBlob)) return item.originalBlob
+  if (_isBlob(item?.sourceBlob)) return item.sourceBlob
+  if (_isBlob(item?.blob)) return item.blob
+  return _isBlob(item) ? item : null
 }
 
 function _normalizeString(value) {
@@ -302,10 +353,10 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
         cropSourceW: options.preparedMeta?.cropSourceW ?? null,
         cropSourceH: options.preparedMeta?.cropSourceH ?? null,
         cropped: !!options.preparedMeta?.cropped,
-        maxEdge: Math.max(1, Number(options.preparedMeta?.maxEdge || options.maxEdge || INAT_MAX_EDGE) || INAT_MAX_EDGE),
+        maxEdge: INAT_MAX_EDGE,
       }
     : await prepareImageBlobForUpload(blob, {
-        maxEdge: Math.max(1, Number(options.maxEdge || INAT_MAX_EDGE) || INAT_MAX_EDGE),
+        maxEdge: INAT_MAX_EDGE,
         forceJpeg: true,
         cropRect: options.cropRect,
       })
@@ -325,6 +376,16 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
     preparedType: aiBlob?.type || '',
     preparedSize: Number(aiBlob?.size || 0),
     filename,
+  })
+
+  await _recordInaturalistDebugSnapshot({
+    aiBlob,
+    preparedMeta: prepared,
+    options,
+    url: INAT_SUGGEST_URL,
+    fieldName: 'image',
+    imageIndex: Number(options.imageIndex || 0),
+    imageCount: Number(options.totalImages || 1),
   })
 
   const form = new FormData()
@@ -416,24 +477,34 @@ export function formatIdentifyScore(service, score) {
 
 export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
   const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
-    const rawBlob = _isBlob(item) ? item : item?.blob
+    const rawBlob = _selectIdentifySourceBlob(item)
     if (!_isBlob(rawBlob)) return null
 
-    if (item?.preprocessed === true && _isBlob(item.blob)) {
+    const itemLat = _isNumber(item?.lat) ? Number(item.lat) : null
+    const itemLon = _isNumber(item?.lon) ? Number(item.lon) : (_isNumber(item?.lng) ? Number(item.lng) : null)
+    const itemObservedOn = item?.observedOn || item?.observed_on || null
+
+    if (item?.preprocessed === true && _isBlob(item.blob) && !_isBlob(item?.originalBlob) && !_isBlob(item?.sourceBlob)) {
       return {
         blob: item.blob,
         preparedMeta: item.preparedMeta || item.debug || {},
+        lat: itemLat,
+        lon: itemLon,
+        observedOn: itemObservedOn,
       }
     }
 
     const prepared = await prepareImageBlobForUpload(rawBlob, {
-      maxEdge: Math.max(1, Number(options.maxEdge || INAT_MAX_EDGE) || INAT_MAX_EDGE),
+      maxEdge: INAT_MAX_EDGE,
       forceJpeg: true,
       cropRect: item?.cropRect,
     })
     return {
       blob: prepared.blob,
       preparedMeta: prepared,
+      lat: itemLat,
+      lon: itemLon,
+      observedOn: itemObservedOn,
     }
   }))).filter(item => _isBlob(item?.blob))
 
@@ -443,6 +514,9 @@ export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
     const [single] = preparedBlobs
     return _runInaturalistSuggestion(single.blob, lang, {
       ...options,
+      lat: single.lat ?? options.lat ?? null,
+      lon: single.lon ?? options.lon ?? options.lng ?? null,
+      observedOn: single.observedOn ?? options.observedOn ?? options.observed_on ?? null,
       prepared: true,
       preparedBlob: single.blob,
       preparedMeta: single.preparedMeta,
@@ -451,13 +525,16 @@ export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
 
   const tolerateFailures = options?.tolerateFailures === true
   const responses = tolerateFailures
-    ? await Promise.allSettled(preparedBlobs.map((item, index) => _runInaturalistSuggestion(item.blob, lang, {
-        ...options,
-        prepared: true,
-        preparedBlob: item.blob,
-        preparedMeta: item.preparedMeta,
-        imageIndex: index,
-        totalImages: preparedBlobs.length,
+      ? await Promise.allSettled(preparedBlobs.map((item, index) => _runInaturalistSuggestion(item.blob, lang, {
+          ...options,
+          lat: item.lat ?? options.lat ?? null,
+          lon: item.lon ?? options.lon ?? options.lng ?? null,
+          observedOn: item.observedOn ?? options.observedOn ?? options.observed_on ?? null,
+          prepared: true,
+          preparedBlob: item.blob,
+          preparedMeta: item.preparedMeta,
+          imageIndex: index,
+          totalImages: preparedBlobs.length,
       })))
         .then(results => {
           const fulfilled = results
@@ -469,6 +546,9 @@ export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
         })
     : await Promise.all(preparedBlobs.map((item, index) => _runInaturalistSuggestion(item.blob, lang, {
         ...options,
+        lat: item.lat ?? options.lat ?? null,
+        lon: item.lon ?? options.lon ?? options.lng ?? null,
+        observedOn: item.observedOn ?? options.observedOn ?? options.observed_on ?? null,
         prepared: true,
         preparedBlob: item.blob,
         preparedMeta: item.preparedMeta,

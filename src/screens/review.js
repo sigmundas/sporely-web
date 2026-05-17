@@ -791,11 +791,17 @@ async function _describeReviewBlob(blob) {
 export async function prepareReviewIdentifyInputs(photos = state.capturedPhotos) {
   return (await Promise.all((photos || []).map(async (photo, index) => {
     const blob = photo.aiBlob instanceof Blob ? photo.aiBlob : await resolveBlob(photo)
+    const originalBlob = photo.blob instanceof Blob ? photo.blob : await resolveBlob(photo)
     if (!(blob instanceof Blob)) return null
+    const gps = photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon) ? photo.gps : null
     return {
       id: `review-${index}`,
       blob,
+      originalBlob: originalBlob instanceof Blob ? originalBlob : null,
       cropRect: photo.aiCropRect || null,
+      lat: gps?.lat ?? null,
+      lon: gps?.lon ?? null,
+      observedOn: photo.ts ? _localDate(photo.ts) : null,
       source: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
       sourceType: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
       debug: await _describeReviewBlob(blob),
@@ -808,9 +814,13 @@ function _reviewCaptureImages() {
     .map((photo, index) => ({
       id: `review-${index}`,
       blob: photo.aiBlob instanceof Blob ? photo.aiBlob : photo.blob instanceof Blob ? photo.blob : null,
+      originalBlob: photo.blob instanceof Blob ? photo.blob : null,
       cropRect: photo.aiCropRect || null,
       cropSourceW: photo.aiCropSourceW ?? null,
       cropSourceH: photo.aiCropSourceH ?? null,
+      lat: photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon) ? Number(photo.gps.lat) : null,
+      lon: photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon) ? Number(photo.gps.lon) : null,
+      observedOn: photo.ts ? _localDate(photo.ts) : null,
       sourceType: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
     }))
     .filter(item => item.blob instanceof Blob)
@@ -872,6 +882,7 @@ async function _runReviewAiService(service, blobs, options = {}) {
       ...options,
       services: [normalizedService],
       defaultService: normalizedService,
+      screen: options.screen || 'review',
       onServiceState: result => {
         _mergeReviewServiceState(result.service, result)
         reviewAiState.hasRun = Object.values(reviewAiState.resultsByService || {}).some(serviceResult =>
@@ -985,7 +996,7 @@ async function _syncReviewAiAvailability() {
   const images = _reviewCaptureImages()
   const inaturalistSession = await loadInaturalistSession()
   const availabilityList = await getAvailableIdentifyServices({
-    blobs: images.map(item => item.blob),
+    blobs: images,
     inaturalistSession,
   })
   const availabilityFingerprint = JSON.stringify({
@@ -1062,6 +1073,15 @@ async function _runReviewComparison(serviceOverride = null) {
       return _runReviewAiService(service, blobs, {
         language: getTaxonomyLanguage(),
         availability: reviewAiState.availability,
+        lat: (() => {
+          const gps = state.reviewContext?.gps || state.capturedPhotos.find(photo => photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon))?.gps || null
+          return gps && isUsableCoordinate(gps.lat, gps.lon) ? Number(gps.lat) : null
+        })(),
+        lon: (() => {
+          const gps = state.reviewContext?.gps || state.capturedPhotos.find(photo => photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon))?.gps || null
+          return gps && isUsableCoordinate(gps.lat, gps.lon) ? Number(gps.lon) : null
+        })(),
+        observedOn: _localDate(state.capturedPhotos[0]?.ts || state.sessionStart || new Date()),
         screen: 'review',
       }).then(result => {
         if (result) {

@@ -21,6 +21,13 @@ function _isBlob(b) {
   return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
 }
 
+function _selectIdentifySourceBlob(item) {
+  if (_isBlob(item?.originalBlob)) return item.originalBlob
+  if (_isBlob(item?.sourceBlob)) return item.sourceBlob
+  if (_isBlob(item?.blob)) return item.blob
+  return _isBlob(item) ? item : null
+}
+
 function _getAppVersion() {
   return typeof __APP_VERSION__ !== 'undefined' ? String(__APP_VERSION__) : 'dev'
 }
@@ -520,10 +527,10 @@ function _combinePredictionResponses(responses, totalBlobs) {
 
 export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
   const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
-    const rawBlob = _isBlob(item) ? item : item?.blob
+    const rawBlob = _selectIdentifySourceBlob(item)
     if (!_isBlob(rawBlob)) return null
 
-    if (item?.preprocessed === true && _isBlob(item.blob)) {
+    if (item?.preprocessed === true && _isBlob(item.blob) && !_isBlob(item?.originalBlob) && !_isBlob(item?.sourceBlob)) {
       return {
         blob: item.blob,
         preparedMeta: item.preparedMeta || item.debug || {},

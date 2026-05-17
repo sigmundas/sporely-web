@@ -250,6 +250,56 @@ test('logs iNaturalist debug request payloads when enabled', async () => {
   }
 })
 
+test('stores iNaturalist debug snapshots for the AI debug dashboard when enabled', async () => {
+  const originalAiDebug = globalThis.__sporelyAiDebug
+  const originalLocalStorage = globalThis.localStorage
+  globalThis.__sporelyAiDebug = {}
+  globalThis.localStorage = createLocalStorageStub()
+  globalThis.localStorage.setItem('sporely-debug-ai-id', 'true')
+
+  const storage = {
+    values: new Map([
+      ['sporely.inat.oauth.api_token', 'test-jwt'],
+    ]),
+    async getItem(key) {
+      return this.values.has(key) ? this.values.get(key) : null
+    },
+    async setItem(key, value) {
+      this.values.set(key, String(value))
+    },
+    async removeItem(key) {
+      this.values.delete(key)
+    },
+  }
+
+  const fetchImpl = async () => ({
+    ok: true,
+    async json() {
+      return { results: [] }
+    },
+  })
+
+  try {
+    await runInaturalistForBlobs([new Blob(['x'], { type: 'image/jpeg' })], 'en', {
+      storage,
+      fetchImpl,
+      lat: 1.23,
+      lon: 4.56,
+      observedOn: '2026-05-17',
+    })
+
+    assert.equal(globalThis.__sporelyAiDebug.inat.length, 1)
+    assert.equal(globalThis.__sporelyAiDebug.inat[0].service, 'inat')
+    assert.equal(globalThis.__sporelyAiDebug.inat[0].imageSrc.startsWith('blob:'), true)
+    assert.equal(globalThis.__sporelyAiDebug.inat[0].metadata.lat, 1.23)
+    assert.equal(globalThis.__sporelyAiDebug.inat[0].metadata.lng, 4.56)
+    assert.equal(globalThis.__sporelyAiDebug.inat[0].metadata.observed_on, '2026-05-17')
+  } finally {
+    globalThis.__sporelyAiDebug = originalAiDebug
+    globalThis.localStorage = originalLocalStorage
+  }
+})
+
 test('iNaturalist debug request logging failures do not break the request', async () => {
   const originalAiDebug = globalThis.__sporelyAiDebug
   const originalLocalStorage = globalThis.localStorage

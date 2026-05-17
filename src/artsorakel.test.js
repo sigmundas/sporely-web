@@ -618,8 +618,10 @@ test('review inputs prefer current-session aiBlob values', async () => {
 
     assert.equal(inputs[0].source, 'photo.aiBlob')
     assert.equal(inputs[0].blob, aiBlob)
+    assert.equal(inputs[0].originalBlob, rawBlob)
     assert.equal(inputs[1].source, 'photo.blob')
     assert.equal(inputs[1].blob, rawBlob)
+    assert.equal(inputs[1].originalBlob, rawBlob)
   })
 })
 

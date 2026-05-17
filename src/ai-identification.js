@@ -41,9 +41,16 @@ function _hasFiniteScore(value) {
   return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
 }
 
+function _selectIdentifySourceBlob(item = null) {
+  if (_isBlob(item?.originalBlob)) return item.originalBlob
+  if (_isBlob(item?.sourceBlob)) return item.sourceBlob
+  if (_isBlob(item?.blob)) return item.blob
+  return _isBlob(item) ? item : null
+}
+
 function _normalizeImageInput(input = {}, index = 0) {
   const cropRect = normalizeAiCropRect(input.cropRect ?? input.aiCropRect ?? null)
-  const blob = _isBlob(input.blob) ? input.blob : null
+  const blob = _selectIdentifySourceBlob(input)
   const mediaKey = _normalizeText(
     input.mediaKey
     || input.media_key
@@ -392,7 +399,9 @@ export function buildIdentifyFingerprint(inputs = {}) {
 }
 
 export async function getIdentifyServiceAvailability(context = {}) {
-  const blobs = Array.isArray(context.blobs) ? context.blobs.filter(_isBlob) : []
+  const blobs = Array.isArray(context.blobs)
+    ? context.blobs.map(item => _selectIdentifySourceBlob(item)).filter(_isBlob)
+    : []
   const mediaKeys = Array.isArray(context.mediaKeys)
     ? context.mediaKeys.map(value => _normalizeText(value)).filter(Boolean)
     : []
@@ -568,7 +577,7 @@ async function _runIdentifyService(service, context = {}) {
 }
 
 export async function runIdentifyComparisonForBlobs(blobs, options = {}) {
-  const normalizedBlobs = (Array.isArray(blobs) ? blobs : []).map(item => _isBlob(item) ? item : item?.blob).filter(_isBlob)
+  const normalizedBlobs = (Array.isArray(blobs) ? blobs : []).filter(item => _selectIdentifySourceBlob(item))
   const serviceAvailability = options.availability || await getIdentifyServiceAvailability({
     blobs: normalizedBlobs,
     mediaKeys: options.mediaKeys || [],
