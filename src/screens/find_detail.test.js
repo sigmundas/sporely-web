@@ -89,6 +89,10 @@ function resetDetailState() {
   detailAiState.availability = {}
   detailAiState.resultsByService = {}
   detailAiState.cachedRows = []
+  detailAiState.selectedService = null
+  detailAiState.selectedPrediction = null
+  detailAiState.selectedPredictionByService = {}
+  detailAiState.selectedProbabilityByService = {}
   detailAiState.currentFingerprint = ''
   detailAiState.requestedFingerprint = ''
   detailAiState.currentFingerprintByService = {}
@@ -125,7 +129,8 @@ test('idle find detail AI state stays neutral before any run or cached result', 
 
   try {
     _renderDetailAiResults()
-    assert.match(resultsEl.innerHTML, /Run AI Photo ID to get suggestions|review\.runAiIdPrompt/)
+    assert.match(resultsEl.innerHTML, /Run AI Photo ID to get suggestions/i)
+    assert.doesNotMatch(resultsEl.innerHTML, /review\.runAiIdPrompt/)
     assert.doesNotMatch(resultsEl.innerHTML, /no suggestion|no suggestions|returned no suggestion/i)
   } finally {
     restore()
@@ -191,6 +196,99 @@ test('stored results remain clickable even when the current availability says un
     _setDetailAiActiveService('inat')
     assert.equal(tabs[0].classList.contains('is-active'), false)
     assert.equal(tabs[1].classList.contains('is-active'), true)
+  } finally {
+    restore()
+  }
+})
+
+test('selected AI service keeps its own probability and source highlight', () => {
+  resetDetailState()
+  const tabs = [
+    makeTab('artsorakel', true),
+    makeTab('inat'),
+  ]
+  const restore = withDocument({ tabs })
+
+  try {
+    detailAiState.availability = {
+      artsorakel: { available: true, reason: '' },
+      inat: { available: true, reason: '' },
+    }
+    detailAiState.resultsByService = {
+      artsorakel: {
+        service: 'artsorakel',
+        status: 'success',
+        topProbability: 0.91,
+        predictions: [
+          { scientificName: 'Amanita muscaria', probability: 0.53 },
+          { scientificName: 'Amanita rubescens', probability: 0.91 },
+        ],
+      },
+      inat: {
+        service: 'inat',
+        status: 'success',
+        topProbability: 0.74,
+        predictions: [
+          { scientificName: 'Amanita muscaria', probability: 0.41 },
+        ],
+      },
+    }
+    detailAiState.selectedService = 'artsorakel'
+    detailAiState.selectedPrediction = detailAiState.resultsByService.artsorakel.predictions[0]
+    detailAiState.selectedPredictionByService = {
+      artsorakel: detailAiState.resultsByService.artsorakel.predictions[0],
+      inat: detailAiState.resultsByService.inat.predictions[0],
+    }
+    detailAiState.selectedProbabilityByService = {
+      artsorakel: 0.53,
+      inat: 0.41,
+    }
+
+    _renderDetailAiTabs()
+
+    assert.equal(tabs[0].classList.contains('is-used'), true)
+    assert.equal(tabs[1].classList.contains('is-used'), false)
+    assert.equal(tabs[0].querySelector('.ai-id-service-tab-score').textContent, '53%')
+    assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '41%')
+  } finally {
+    restore()
+  }
+})
+
+test('missing cached probabilities do not render as 0%', () => {
+  resetDetailState()
+  const tabs = [
+    makeTab('artsorakel', true),
+    makeTab('inat'),
+  ]
+  const restore = withDocument({ tabs })
+
+  try {
+    detailAiState.availability = {
+      artsorakel: { available: true, reason: '' },
+      inat: { available: true, reason: '' },
+    }
+    detailAiState.resultsByService = {
+      artsorakel: {
+        service: 'artsorakel',
+        status: 'success',
+        topProbability: null,
+        topPrediction: null,
+        predictions: [{ scientificName: 'Amanita muscaria', probability: 0.91 }],
+      },
+      inat: {
+        service: 'inat',
+        status: 'success',
+        topProbability: null,
+        topPrediction: null,
+        predictions: [{ scientificName: 'Amanita muscaria', probability: 0.74 }],
+      },
+    }
+
+    _renderDetailAiTabs()
+
+    assert.equal(tabs[0].querySelector('.ai-id-service-tab-score').textContent, '')
+    assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '')
   } finally {
     restore()
   }

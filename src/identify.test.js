@@ -47,6 +47,7 @@ test('normalizes and migrates AI Photo ID mode settings', () => {
     assert.equal(normalizePhotoIdMode('both'), PHOTO_ID_MODE_BOTH)
     assert.equal(normalizePhotoIdMode('Artsorakel'), PHOTO_ID_MODE_ARTSORAKEL)
     assert.equal(normalizeIdentifyService('inat'), ID_SERVICE_INATURALIST)
+    assert.equal(normalizeIdentifyService('inaturalist'), ID_SERVICE_INATURALIST)
     assert.equal(normalizeIdentifyService('Artsorakel'), ID_SERVICE_ARTSORAKEL)
 
     localStorage.setItem('sporely-default-id-service', 'inat')

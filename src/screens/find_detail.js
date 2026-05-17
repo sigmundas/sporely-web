@@ -62,6 +62,10 @@ const detailAiState = {
   availability: {},
   resultsByService: {},
   cachedRows: [],
+  selectedService: null,
+  selectedPrediction: null,
+  selectedPredictionByService: {},
+  selectedProbabilityByService: {},
   currentFingerprint: '',
   requestedFingerprint: '',
   currentFingerprintByService: {},
@@ -76,6 +80,11 @@ function _hasStoredAiResult(result = null) {
 
 function _hasAiRunResult(result = null) {
   return ['success', 'no_match', 'error', 'unavailable', 'stale'].includes(result?.status)
+}
+
+function _tf(key, fallback) {
+  const value = t(key)
+  return value && value !== key ? value : fallback
 }
 
 function _canViewDetailAiResult(service, result = null) {
@@ -93,7 +102,172 @@ function _canRunDetailAiService(service, result = null) {
     && shouldRunServiceFromTab(result)
 }
 
-const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
+function _detailAiNormalizeText(value) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function _detailAiObservationScientificName(obs = currentObs) {
+  return _detailAiNormalizeText([obs?.genus, obs?.species].filter(Boolean).join(' '))
+}
+
+function _detailAiObservationCommonName(obs = currentObs) {
+  return _detailAiNormalizeText(obs?.common_name || '')
+}
+
+function _detailAiPredictionMatchesObservation(prediction = {}, obs = currentObs) {
+  const obsScientificName = _detailAiObservationScientificName(obs)
+  const obsCommonName = _detailAiObservationCommonName(obs)
+  const predictionScientificName = _detailAiNormalizeText(prediction?.scientificName || '')
+  const predictionCommonName = _detailAiNormalizeText(prediction?.vernacularName || '')
+  const predictionTaxonId = _detailAiNormalizeText(prediction?.taxonId || '')
+  const selectedTaxonId = _detailAiNormalizeText(obs?.ai_selected_taxon_id || '')
+  const selectedScientificName = _detailAiNormalizeText(obs?.ai_selected_scientific_name || '')
+
+  if (selectedTaxonId && predictionTaxonId && selectedTaxonId === predictionTaxonId) {
+    return true
+  }
+  if (selectedScientificName && predictionScientificName && selectedScientificName === predictionScientificName) {
+    return true
+  }
+  if (obsScientificName && predictionScientificName && obsScientificName === predictionScientificName) {
+    return true
+  }
+  if (obsCommonName && predictionCommonName && obsCommonName === predictionCommonName) {
+    return true
+  }
+  return false
+}
+
+function _detailAiPredictionsEquivalent(left = null, right = null) {
+  if (!left || !right) return false
+  const leftTaxonId = _detailAiNormalizeText(left?.taxonId || '')
+  const rightTaxonId = _detailAiNormalizeText(right?.taxonId || '')
+  const leftScientificName = _detailAiNormalizeText(left?.scientificName || '')
+  const rightScientificName = _detailAiNormalizeText(right?.scientificName || '')
+  return (
+    (leftTaxonId && rightTaxonId && leftTaxonId === rightTaxonId)
+    || (leftScientificName && rightScientificName && leftScientificName === rightScientificName)
+  )
+}
+
+function _detailAiPredictionMatchRank(prediction = {}, service = null, obs = currentObs) {
+  const normalizedService = normalizeIdentifyService(service || prediction?.service)
+  const obsScientificName = _detailAiObservationScientificName(obs)
+  const obsCommonName = _detailAiObservationCommonName(obs)
+  const predictionScientificName = _detailAiNormalizeText(prediction?.scientificName || '')
+  const predictionCommonName = _detailAiNormalizeText(prediction?.vernacularName || '')
+  const predictionTaxonId = _detailAiNormalizeText(prediction?.taxonId || '')
+  const selectedTaxonId = _detailAiNormalizeText(obs?.ai_selected_taxon_id || '')
+  const selectedScientificName = _detailAiNormalizeText(obs?.ai_selected_scientific_name || '')
+  const selectedService = normalizeIdentifyService(obs?.ai_selected_service || '')
+  const probability = Number(prediction?.probability ?? 0)
+
+  if (selectedService && selectedService === normalizedService) return 5000 + probability
+  if (selectedTaxonId && predictionTaxonId && selectedTaxonId === predictionTaxonId) return 4000 + probability
+  if (selectedScientificName && predictionScientificName && selectedScientificName === predictionScientificName) return 3000 + probability
+  if (obsScientificName && predictionScientificName && obsScientificName === predictionScientificName) return 2000 + probability
+  if (obsCommonName && predictionCommonName && obsCommonName === predictionCommonName) return 1000 + probability
+  if (probability > 0) return probability
+  return 0
+}
+
+function _detailAiPredictionProbability(prediction = null, fallback = null) {
+  if (!prediction) return Number.isFinite(Number(fallback)) ? Number(fallback) : null
+  const value = Number(prediction?.probability ?? fallback)
+  return Number.isFinite(value) ? value : null
+}
+
+function _detailAiHasProbability(value) {
+  return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+}
+
+function _detailAiSelectionStateFromResults(resultsByService = {}, obs = currentObs) {
+  const selectionByService = {}
+  const probabilityByService = {}
+  const explicitSelectedService = obs?.ai_selected_service
+    ? normalizeIdentifyService(obs.ai_selected_service)
+    : null
+  const explicitSelectedProbability = Number(obs?.ai_selected_probability)
+  const configuredPrimaryService = _resolveDetailPhotoIdServices({}).primary
+  const serviceCandidates = []
+
+  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
+    const result = resultsByService?.[service] || null
+    const predictions = Array.isArray(result?.predictions) ? result.predictions : []
+    let bestPrediction = null
+    let bestRank = -1
+    for (const prediction of predictions) {
+      const rank = _detailAiPredictionMatchRank(prediction, service, obs)
+      const probability = Number(prediction?.probability ?? 0)
+      if (
+        rank > bestRank
+        || (rank === bestRank && probability > Number(bestPrediction?.probability ?? -1))
+      ) {
+        bestPrediction = prediction
+        bestRank = rank
+      }
+    }
+
+    if (!bestPrediction && predictions.length) {
+      bestPrediction = predictions[0]
+      bestRank = _detailAiPredictionMatchRank(bestPrediction, service, obs)
+    }
+
+    if (bestPrediction) {
+      selectionByService[service] = bestPrediction
+      probabilityByService[service] = _detailAiPredictionProbability(bestPrediction, result?.topProbability)
+    } else if (Number.isFinite(Number(result?.topProbability))) {
+      probabilityByService[service] = Number(result.topProbability)
+    }
+
+    serviceCandidates.push({
+      service,
+      bestPrediction,
+      bestRank,
+      topProbability: Number(result?.topProbability ?? bestPrediction?.probability ?? -1),
+      hasPredictions: predictions.length > 0,
+    })
+  }
+
+  if (explicitSelectedService && resultsByService?.[explicitSelectedService]) {
+    const selectedResult = resultsByService[explicitSelectedService]
+    return {
+      selectedService: explicitSelectedService,
+      selectedPrediction: selectionByService[explicitSelectedService] || selectedResult?.predictions?.[0] || null,
+      selectedPredictionByService: selectionByService,
+      selectedProbabilityByService: {
+        ...probabilityByService,
+        ...(Number.isFinite(explicitSelectedProbability)
+          ? { [explicitSelectedService]: explicitSelectedProbability }
+          : {}),
+      },
+    }
+  }
+
+  const rankedCandidate = serviceCandidates
+    .filter(candidate => candidate.hasPredictions)
+    .sort((left, right) => {
+      if (right.bestRank !== left.bestRank) return right.bestRank - left.bestRank
+      if (right.topProbability !== left.topProbability) return right.topProbability - left.topProbability
+      if (left.service === configuredPrimaryService && right.service !== configuredPrimaryService) return -1
+      if (right.service === configuredPrimaryService && left.service !== configuredPrimaryService) return 1
+      return left.service.localeCompare(right.service)
+    })[0] || null
+
+  const selectedService = rankedCandidate?.service || null
+  const selectedPrediction = selectedService
+    ? (selectionByService[selectedService] || resultsByService?.[selectedService]?.predictions?.[0] || null)
+    : null
+
+  return {
+    selectedService,
+    selectedPrediction,
+    selectedPredictionByService: selectionByService,
+    selectedProbabilityByService: probabilityByService,
+  }
+}
+
+const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
 const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
 const DETAIL_VIEW_SELECT = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
 const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
@@ -103,9 +277,45 @@ function _isPhase7ColumnError(error) {
   return !!error && (message.includes('is_draft') || message.includes('location_precision'))
 }
 
+function _isMissingObservationColumnError(error, columnNames = []) {
+  const message = String(error?.message || error?.details || error?.hint || '').toLowerCase()
+  if (!message) return false
+  return (Array.isArray(columnNames) ? columnNames : []).some(column => message.includes(`'${String(column).toLowerCase()}'`) || message.includes(String(column).toLowerCase()))
+}
+
+function _missingObservationColumnsFromError(error) {
+  const message = String(error?.message || error?.details || error?.hint || '')
+  const matchedColumns = new Set()
+  const regex = /could not find the '([^']+)' column/gi
+  let match
+  while ((match = regex.exec(message))) {
+    matchedColumns.add(match[1])
+  }
+  return matchedColumns
+}
+
+function _removeMissingObservationColumnsFromPatch(patch = {}, error = null, fieldNames = []) {
+  const nextPatch = { ...patch }
+  const missingColumns = _missingObservationColumnsFromError(error)
+  const normalizedMissing = new Set(Array.from(missingColumns, value => String(value).toLowerCase()))
+  let removed = false
+  for (const field of fieldNames || []) {
+    const normalizedField = String(field || '').toLowerCase()
+    if (normalizedMissing.has(normalizedField) || _isMissingObservationColumnError(error, [field])) {
+      if (field in nextPatch) {
+        delete nextPatch[field]
+        removed = true
+      }
+    }
+  }
+  return { patch: nextPatch, removed }
+}
+
 async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
   const result = await makeQuery(columns)
-  if (_isPhase7ColumnError(result.error)) return makeQuery(legacyColumns)
+  if (_isPhase7ColumnError(result.error) || _isMissingObservationColumnError(result.error, ['ai_selected_service', 'ai_selected_taxon_id', 'ai_selected_scientific_name', 'ai_selected_probability', 'ai_selected_at'])) {
+    return makeQuery(legacyColumns)
+  }
   return result
 }
 
@@ -204,6 +414,10 @@ export async function openFindDetail(obsId, options = {}) {
   detailAiState.availability = {}
   detailAiState.resultsByService = {}
   detailAiState.cachedRows = []
+  detailAiState.selectedService = null
+  detailAiState.selectedPrediction = null
+  detailAiState.selectedPredictionByService = {}
+  detailAiState.selectedProbabilityByService = {}
   detailAiState.currentFingerprint = ''
   detailAiState.requestedFingerprint = ''
   detailAiState.currentFingerprintByService = {}
@@ -445,6 +659,8 @@ export async function openFindDetail(obsId, options = {}) {
     addCardContainer.querySelector('.gallery-add-btn-cam').addEventListener('click', () => _openCameraForDetail())
     addCardContainer.querySelector('.gallery-add-btn-file').addEventListener('click', () => _openPickerForDetail())
   }
+
+  await _loadDetailAiCache()
 
   // Load comments async (don't await)
   _loadComments(obsId)
@@ -851,15 +1067,30 @@ function _detailAiTabState(service) {
   const running = !!detailAiState.runningByService?.[service]
   const canView = _canViewDetailAiResult(service, result)
   const canRun = _canRunDetailAiService(service, result)
+  const selectedPrediction = detailAiState.selectedPredictionByService?.[service] || null
+  const selectedProbability = detailAiState.selectedProbabilityByService?.[service]
+  const displayProbability = _detailAiHasProbability(selectedProbability)
+    ? Number(selectedProbability)
+    : _detailAiHasProbability(selectedPrediction?.probability)
+      ? Number(selectedPrediction.probability)
+      : _detailAiHasProbability(result?.topProbability)
+        ? Number(result.topProbability)
+        : _detailAiHasProbability(result?.topPrediction?.probability)
+          ? Number(result.topPrediction.probability)
+          : null
   return {
     service,
     active: detailAiState.activeService === service,
+    isUsedForCurrentId: detailAiState.selectedService === service,
     available: availability?.available ?? false,
     reason: availability?.reason || '',
     status: running ? 'running' : (result?.status || 'idle'),
     errorMessage: result?.errorMessage || '',
     topProbability: result?.topProbability ?? null,
     topPrediction: result?.topPrediction || null,
+    selectedPrediction,
+    selectedProbability,
+    displayProbability,
     hasStored: _hasStoredAiResult(result),
     hasRunResult: _hasAiRunResult(result),
     canView,
@@ -935,13 +1166,14 @@ function _renderDetailAiTabs() {
     runBtn.disabled = detailAiState.running || !currentObsIsOwner || (availabilityKnown && !photoIdServices.run.length)
     const runLabel = runBtn.querySelector('[data-identify-run-label]')
     if (runLabel) {
-      runLabel.textContent = detailAiState.running ? 'Loading...' : (t('review.aiId') || 'AI Photo ID')
+      runLabel.textContent = detailAiState.running ? 'Loading...' : _tf('review.aiId', 'AI Photo ID')
     }
   }
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
     const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
     const state = _detailAiTabState(service)
     tab.classList.toggle('is-active', state.active)
+    tab.classList.toggle('is-used', state.isUsedForCurrentId)
     tab.classList.toggle('is-disabled', state.isDisabled)
     tab.classList.toggle('is-running', state.status === 'running')
     tab.classList.toggle('has-results', state.status === 'success' || state.status === 'no_match' || state.status === 'stale')
@@ -962,8 +1194,9 @@ function _renderDetailAiTabs() {
     }
     const score = tab.querySelector('.ai-id-service-tab-score')
     if (score) {
-      score.textContent = (state.status === 'success' || state.status === 'stale')
-        ? (state.topPrediction?.confidenceText || `${Math.round(Number(state.topProbability || 0) * 100)}%`)
+      const probability = state.displayProbability
+      score.textContent = _detailAiHasProbability(probability)
+        ? `${Math.round(Number(probability) * 100)}%`
         : ''
       score.style.display = score.textContent ? '' : 'none'
     }
@@ -989,7 +1222,7 @@ function _renderDetailAiResults() {
     return
   }
   if (!result || result?.status === 'idle') {
-    resultsEl.innerHTML = `<div class="ai-results-empty">${t('review.runAiIdPrompt') || 'Run AI Photo ID to get suggestions.'}</div>`
+    resultsEl.innerHTML = `<div class="ai-results-empty">${_tf('review.runAiIdPrompt', 'Run AI Photo ID to get suggestions.')}</div>`
     resultsEl.style.display = 'block'
     return
   }
@@ -1021,24 +1254,50 @@ function _renderDetailAiResults() {
 
   resultsEl.innerHTML = renderIdentifyResultRows(activeService, result.predictions)
   resultsEl.style.display = 'block'
+  const selectedPrediction = detailAiState.selectedPrediction
+  const selectedPredictionByService = detailAiState.selectedPredictionByService?.[activeService] || null
   resultsEl.querySelectorAll('[data-identify-result]').forEach(el => {
+    const prediction = JSON.parse(el.dataset.identifyResult)
+    const isSelected = Boolean(
+      _detailAiPredictionMatchesObservation(prediction, currentObs)
+      || _detailAiPredictionsEquivalent(prediction, selectedPrediction)
+      || _detailAiPredictionsEquivalent(prediction, selectedPredictionByService)
+    )
+    el.classList.toggle('is-selected', isSelected)
+    if (isSelected) {
+      el.setAttribute('aria-current', 'true')
+    } else {
+      el.removeAttribute('aria-current')
+    }
     el.addEventListener('click', () => {
-      const prediction = JSON.parse(el.dataset.identifyResult)
-      const parts = String(prediction.scientificName || '').trim().split(/\s+/)
+      const clickedPrediction = JSON.parse(el.dataset.identifyResult)
+      const parts = String(clickedPrediction.scientificName || '').trim().split(/\s+/)
       selectedTaxon = {
         genus: parts[0] || null,
         specificEpithet: parts[1] || null,
-        vernacularName: prediction.vernacularName || null,
-        displayName: prediction.displayName,
+        vernacularName: clickedPrediction.vernacularName || null,
+        displayName: clickedPrediction.displayName,
       }
-      document.getElementById('detail-taxon-input').value = prediction.displayName
+      detailAiState.selectedService = activeService
+      detailAiState.selectedPrediction = clickedPrediction
+      detailAiState.selectedPredictionByService = {
+        ...(detailAiState.selectedPredictionByService || {}),
+        [activeService]: clickedPrediction,
+      }
+      detailAiState.selectedProbabilityByService = {
+        ...(detailAiState.selectedProbabilityByService || {}),
+        [activeService]: _detailAiPredictionProbability(clickedPrediction),
+      }
+      document.getElementById('detail-taxon-input').value = clickedPrediction.displayName
       _setDetailHeader({
         commonName: selectedTaxon.vernacularName || '',
         genus: selectedTaxon.genus || '',
         species: selectedTaxon.specificEpithet || '',
-        fallbackName: prediction.displayName || t('detail.unknownSpecies'),
+        fallbackName: clickedPrediction.displayName || t('detail.unknownSpecies'),
         uncertain: document.getElementById('detail-uncertain')?.checked,
       })
+      _renderDetailAiTabs()
+      _renderDetailAiResults()
     })
   })
 }
@@ -1088,37 +1347,68 @@ async function _loadDetailAiCache() {
     Object.entries(fingerprints).map(([service, fp]) => [service, fp.requestFingerprint]),
   )
   detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL] || ''
-  const sources = getDetailIdentifySources()
-  const identifyInputs = await prepareDetailIdentifyInputs(sources.galleryImgs, { variant: 'medium', maxEdge: getArtsorakelMaxEdge() })
-  const usableBlobs = identifyInputs
-    .filter(item => item?.blob instanceof Blob)
-  const hasInatBlob = usableBlobs.length > 0
-  const inaturalistSession = await loadInaturalistSession()
-  const availabilityList = await getAvailableIdentifyServices({
-    mediaKeys: detailImageRows.map(row => row.storage_path).filter(Boolean),
-    inaturalistSession,
-  })
-  const inatLoggedIn = Boolean(inaturalistSession?.connected && (inaturalistSession?.api_token || inaturalistSession?.apiToken))
-  const inatReason = inatLoggedIn
-    ? (hasInatBlob ? '' : (t('detail.noPhotoToIdentify') || 'No usable photo available for iNaturalist.'))
-    : (t('settings.inaturalistLoginMissing') || 'Please log in to iNaturalist first.')
-  detailAiState.availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
-  detailAiState.availability[ID_SERVICE_INATURALIST] = {
-    ...(detailAiState.availability[ID_SERVICE_INATURALIST] || {}),
-    service: ID_SERVICE_INATURALIST,
-    available: Boolean(inatLoggedIn && hasInatBlob),
-    disabled: !Boolean(inatLoggedIn && hasInatBlob),
-    reason: inatReason,
-  }
   const rows = await loadObservationIdentifications(currentObs.id).catch(error => {
     console.warn('Failed to load cached AI rows:', error)
     return []
   })
   detailAiState.cachedRows = rows
   detailAiState.resultsByService = _buildDetailAiCachedResults(rows, detailAiState.currentFingerprintByService)
-  const photoIdServices = _resolveDetailPhotoIdServices(detailAiState.availability)
-  detailAiState.activeService = detailAiState.activeService || photoIdServices.primary
+  const selectionState = _detailAiSelectionStateFromResults(detailAiState.resultsByService, currentObs)
+  detailAiState.selectedService = selectionState.selectedService
+  detailAiState.selectedPrediction = selectionState.selectedPrediction
+  detailAiState.selectedPredictionByService = selectionState.selectedPredictionByService
+  detailAiState.selectedProbabilityByService = selectionState.selectedProbabilityByService
   detailAiState.stale = Object.values(detailAiState.resultsByService).some(result => result?.status === 'stale')
+
+  const configuredPrimaryService = _resolveDetailPhotoIdServices({}).primary
+  const firstStoredService = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]
+    .find(service => detailAiState.resultsByService?.[service]?.predictions?.length > 0)
+    || null
+  detailAiState.activeService = detailAiState.selectedService
+    || firstStoredService
+    || detailAiState.activeService
+    || configuredPrimaryService
+
+  if (_isDetailAiDebugFlagEnabled()) {
+    console.debug('[photo-id cache]', {
+      observationId: currentObs.id,
+      rowCount: rows.length,
+      services: rows.map(row => row?.service),
+      resultsByService: Object.keys(detailAiState.resultsByService || {}),
+      selectedService: detailAiState.selectedService,
+      activeService: detailAiState.activeService,
+    })
+  }
+
+  _renderDetailAiTabs()
+  _renderDetailAiResults()
+
+  try {
+    const sources = getDetailIdentifySources()
+    const identifyInputs = await prepareDetailIdentifyInputs(sources.galleryImgs, { variant: 'medium', maxEdge: getArtsorakelMaxEdge() })
+    const usableBlobs = identifyInputs.filter(item => item?.blob instanceof Blob)
+    const hasInatBlob = usableBlobs.length > 0
+    const inaturalistSession = await loadInaturalistSession()
+    const availabilityList = await getAvailableIdentifyServices({
+      mediaKeys: detailImageRows.map(row => row.storage_path).filter(Boolean),
+      inaturalistSession,
+    })
+    const inatLoggedIn = Boolean(inaturalistSession?.connected && (inaturalistSession?.api_token || inaturalistSession?.apiToken))
+    const inatReason = inatLoggedIn
+      ? (hasInatBlob ? '' : _tf('detail.noPhotoToIdentify', 'No usable photo available for iNaturalist.'))
+      : _tf('settings.inaturalistLoginMissing', 'Please log in to iNaturalist first.')
+    detailAiState.availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+    detailAiState.availability[ID_SERVICE_INATURALIST] = {
+      ...(detailAiState.availability[ID_SERVICE_INATURALIST] || {}),
+      service: ID_SERVICE_INATURALIST,
+      available: Boolean(inatLoggedIn && hasInatBlob),
+      disabled: !Boolean(inatLoggedIn && hasInatBlob),
+      reason: inatReason,
+    }
+  } catch (error) {
+    console.warn('Failed to load detail AI availability:', error)
+  }
+
   _renderDetailAiTabs()
   _renderDetailAiResults()
 }
@@ -1206,10 +1496,12 @@ async function _runDetailAiComparison(serviceOverride = null) {
       Boolean(availability[service]?.available && requestedServices.includes(service)),
     ]),
   )
-  detailAiState.resultsByService = markRequestedServicesRunning(detailAiState.resultsByService, availability, requestedServices)
-  detailAiState.activeService = primaryService
-  _renderDetailAiTabs()
-  _renderDetailAiResults()
+    detailAiState.resultsByService = markRequestedServicesRunning(detailAiState.resultsByService, availability, requestedServices)
+    detailAiState.activeService = primaryService
+    detailAiState.selectedPrediction = null
+    detailAiState.selectedPredictionByService = {}
+    _renderDetailAiTabs()
+    _renderDetailAiResults()
 
   if (!requestedServices.length) {
     detailAiState.running = false
@@ -1387,6 +1679,10 @@ function _resetForm() {
   detailAiState.availability = {}
   detailAiState.resultsByService = {}
   detailAiState.cachedRows = []
+  detailAiState.selectedService = null
+  detailAiState.selectedPrediction = null
+  detailAiState.selectedPredictionByService = {}
+  detailAiState.selectedProbabilityByService = {}
   detailAiState.currentFingerprint = ''
   detailAiState.requestedFingerprint = ''
   detailAiState.stale = false
@@ -1953,6 +2249,11 @@ async function _save() {
     visibility: toCloudVisibility(document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'),
     is_draft: document.getElementById('detail-draft')?.checked !== false,
     location_precision: document.getElementById('detail-obscured')?.checked ? 'fuzzed' : 'exact',
+    ai_selected_service: currentObs.ai_selected_service || null,
+    ai_selected_taxon_id: currentObs.ai_selected_taxon_id || null,
+    ai_selected_scientific_name: currentObs.ai_selected_scientific_name || null,
+    ai_selected_probability: currentObs.ai_selected_probability ?? null,
+    ai_selected_at: currentObs.ai_selected_at || null,
   }
 
   const taxonInputValue = document.getElementById('detail-taxon-input').value.trim()
@@ -1961,30 +2262,71 @@ async function _save() {
     currentObs.species || '',
     currentObs.common_name || '',
   ).trim()
+  const currentTaxonInput = _detailAiNormalizeText(taxonInputValue)
+  const currentDisplayTaxon = _detailAiNormalizeText(currentDisplayName)
+  const selectedPrediction = detailAiState.selectedPrediction || detailAiState.selectedPredictionByService?.[detailAiState.selectedService] || null
 
   if (selectedTaxon) {
     patch.genus       = selectedTaxon.genus            || null
     patch.species     = selectedTaxon.specificEpithet  || null
     patch.common_name = selectedTaxon.vernacularName   || null
+    patch.ai_selected_service = detailAiState.selectedService || selectedPrediction?.service || null
+    patch.ai_selected_taxon_id = selectedPrediction?.taxonId || null
+    patch.ai_selected_scientific_name = selectedPrediction?.scientificName || null
+    patch.ai_selected_probability = detailAiState.selectedService
+      ? detailAiState.selectedProbabilityByService?.[detailAiState.selectedService] ?? selectedPrediction?.probability ?? null
+      : selectedPrediction?.probability ?? null
+    patch.ai_selected_at = new Date().toISOString()
   } else if (taxonInputValue !== currentDisplayName) {
     patch.genus       = null
     patch.species     = taxonInputValue || null
     patch.common_name = null
+    patch.ai_selected_service = null
+    patch.ai_selected_taxon_id = null
+    patch.ai_selected_scientific_name = null
+    patch.ai_selected_probability = null
+    patch.ai_selected_at = null
   }
 
+  let updatePatch = { ...patch }
   let { error } = await supabase
     .from('observations')
-    .update(patch)
+    .update(updatePatch)
     .eq('id', currentObs.id)
     .eq('user_id', state.user.id)
 
-  if (_isPhase7ColumnError(error)) {
-    const { is_draft: _isDraft, location_precision: _locationPrecision, ...legacyPatch } = patch
-    ;({ error } = await supabase
-      .from('observations')
-      .update(legacyPatch)
-      .eq('id', currentObs.id)
-      .eq('user_id', state.user.id))
+  if (error) {
+    const aiFallback = _removeMissingObservationColumnsFromPatch(updatePatch, error, [
+      'ai_selected_service',
+      'ai_selected_taxon_id',
+      'ai_selected_scientific_name',
+      'ai_selected_probability',
+      'ai_selected_at',
+    ])
+    if (aiFallback.removed) {
+      updatePatch = aiFallback.patch
+      ;({ error } = await supabase
+        .from('observations')
+        .update(updatePatch)
+        .eq('id', currentObs.id)
+        .eq('user_id', state.user.id))
+    }
+  }
+
+  if (error) {
+    const legacyFallback = _removeMissingObservationColumnsFromPatch(
+      updatePatch,
+      error,
+      ['is_draft', 'location_precision'],
+    )
+    if (legacyFallback.removed) {
+      updatePatch = legacyFallback.patch
+      ;({ error } = await supabase
+        .from('observations')
+        .update(updatePatch)
+        .eq('id', currentObs.id)
+        .eq('user_id', state.user.id))
+    }
   }
 
   btn.disabled = false

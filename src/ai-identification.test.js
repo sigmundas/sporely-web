@@ -12,6 +12,7 @@ import {
   renderIdentifyResultRows,
   renderIdentifyServiceTab,
   renderIdentifyServiceStateSummary,
+  resetObservationIdentificationsTableAvailabilityForTests,
   runIdentifyComparisonForBlobs,
   saveIdentificationRun,
   isTerminalAiServiceState,
@@ -402,6 +403,7 @@ test('fingerprints change when image or crop inputs change', () => {
 })
 
 test('cached identification rows are reused and stale rows are marked when the fingerprint changes', async () => {
+  resetObservationIdentificationsTableAvailabilityForTests()
   const client = createSupabaseStub()
   const first = await saveIdentificationRun({
     observationId: 'obs-1',

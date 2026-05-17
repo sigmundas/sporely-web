@@ -37,6 +37,10 @@ function _toFraction(score) {
   return _normalizeProbability(score)
 }
 
+function _hasFiniteScore(value) {
+  return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+}
+
 function _normalizeImageInput(input = {}, index = 0) {
   const cropRect = normalizeAiCropRect(input.cropRect ?? input.aiCropRect ?? null)
   const blob = _isBlob(input.blob) ? input.blob : null
@@ -83,6 +87,23 @@ function _identifyServiceLabel(service) {
     : (t('settings.idServiceArtsorakel') || 'Artsorakel')
 }
 
+function _normalizeObservationIdentificationRow(row = {}) {
+  const service = normalizeIdentifyService(row.service)
+  const results = Array.isArray(row.results) ? row.results : []
+  return {
+    ...row,
+    service,
+    status: row.status || (results.length ? 'success' : 'no_match'),
+    results,
+    top_probability: row.top_probability ?? results[0]?.probability ?? null,
+    top_scientific_name: row.top_scientific_name || results[0]?.scientificName || null,
+    top_vernacular_name: row.top_vernacular_name || results[0]?.vernacularName || null,
+    top_taxon_id: row.top_taxon_id || results[0]?.taxonId || null,
+    request_fingerprint: row.request_fingerprint || '',
+    error_message: row.error_message || '',
+  }
+}
+
 function _isDebugPhotoIdEnabled() {
   try {
     return globalThis.localStorage?.getItem('sporely-debug-ai-id') === 'true'
@@ -120,6 +141,13 @@ function _markObservationIdentificationsTableMissing() {
   _observationIdentificationsAvailable = false
   try {
     globalThis.sessionStorage?.setItem(OBSERVATION_IDENTIFICATIONS_MISSING_CACHE_KEY, 'true')
+  } catch (_) {}
+}
+
+export function resetObservationIdentificationsTableAvailabilityForTests() {
+  _observationIdentificationsAvailable = null
+  try {
+    globalThis.sessionStorage?.removeItem(OBSERVATION_IDENTIFICATIONS_MISSING_CACHE_KEY)
   } catch (_) {}
 }
 
@@ -607,7 +635,7 @@ export async function loadObservationIdentifications(observationId, options = {}
       }
       throw error
     }
-    return Array.isArray(data) ? data : []
+    return (Array.isArray(data) ? data : []).map(_normalizeObservationIdentificationRow)
   } catch (error) {
     if (_isMissingObservationIdentificationsTableError(error)) {
       _markObservationIdentificationsTableMissing()
@@ -774,10 +802,18 @@ export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
     serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'has-results' : '',
     serviceState.status === 'error' ? 'has-error' : '',
   ].filter(Boolean).join(' ')
-  const topProbability = Number(serviceState.topProbability ?? serviceState.topScore ?? 0)
-  const confidence = getIdentifyConfidenceState(topProbability, { checkThreshold: 0.65 })
+  const rawTopProbability = serviceState.topProbability ?? serviceState.topScore ?? null
+  const topProbability = _hasFiniteScore(rawTopProbability) ? Number(rawTopProbability) : null
+  const badgeProbability = topProbability ?? (_hasFiniteScore(serviceState.topPrediction?.probability)
+    ? Number(serviceState.topPrediction.probability)
+    : null)
+  const confidence = getIdentifyConfidenceState(badgeProbability ?? 0, { checkThreshold: 0.65 })
   const stateLabel = (serviceState.status === 'success' || serviceState.status === 'stale')
-    ? (serviceState.topPrediction?.confidenceText || `${Math.round(topProbability * 100)}%`)
+    ? (serviceState.topPrediction?.confidenceText
+      ? serviceState.topPrediction?.confidenceText
+      : (_hasFiniteScore(topProbability)
+        ? `${Math.round(Number(topProbability) * 100)}%`
+        : ''))
     : ''
   return `
     <button
@@ -790,7 +826,7 @@ export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
     >
       ${_renderServiceIcon(serviceState)}
       <span class="ai-id-service-tab-label">${_esc(label)}</span>
-      ${stateLabel ? `<span class="ai-id-service-tab-score ${confidence.tone}">${renderIdentifyConfidenceBadge(topProbability, { checkThreshold: 0.65 })}</span>` : ''}
+      ${stateLabel && badgeProbability !== null ? `<span class="ai-id-service-tab-score ${confidence.tone}">${renderIdentifyConfidenceBadge(badgeProbability, { checkThreshold: 0.65 })}</span>` : ''}
     </button>
   `
 }
@@ -806,10 +842,18 @@ export function renderIdentifyServiceStateSummary(serviceState = {}, options = {
     serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'has-results' : '',
     serviceState.status === 'error' ? 'has-error' : '',
   ].filter(Boolean).join(' ')
-  const topProbability = Number(serviceState.topProbability ?? serviceState.topScore ?? 0)
-  const confidence = getIdentifyConfidenceState(topProbability, { checkThreshold: 0.65 })
+  const rawTopProbability = serviceState.topProbability ?? serviceState.topScore ?? null
+  const topProbability = _hasFiniteScore(rawTopProbability) ? Number(rawTopProbability) : null
+  const badgeProbability = topProbability ?? (_hasFiniteScore(serviceState.topPrediction?.probability)
+    ? Number(serviceState.topPrediction.probability)
+    : null)
+  const confidence = getIdentifyConfidenceState(badgeProbability ?? 0, { checkThreshold: 0.65 })
   const stateLabel = (serviceState.status === 'success' || serviceState.status === 'stale')
-    ? (serviceState.topPrediction?.confidenceText || `${Math.round(topProbability * 100)}%`)
+    ? (serviceState.topPrediction?.confidenceText
+      ? serviceState.topPrediction?.confidenceText
+      : (_hasFiniteScore(topProbability)
+        ? `${Math.round(Number(topProbability) * 100)}%`
+        : ''))
     : ''
   return `
     <span
@@ -818,7 +862,7 @@ export function renderIdentifyServiceStateSummary(serviceState = {}, options = {
     >
       ${_renderServiceIcon(serviceState)}
       <span class="ai-id-service-state-label">${_esc(label)}</span>
-      ${stateLabel ? `<span class="ai-id-service-state-score ${confidence.tone}">${_esc(stateLabel)}</span>` : ''}
+      ${stateLabel && badgeProbability !== null ? `<span class="ai-id-service-state-score ${confidence.tone}">${_esc(stateLabel)}</span>` : ''}
     </span>
   `
 }

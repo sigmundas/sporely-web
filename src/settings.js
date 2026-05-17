@@ -123,7 +123,8 @@ export function setDefaultVisibility(value) {
 }
 
 export function normalizeIdentifyService(value) {
-  return String(value || '').trim() === ID_SERVICE_INATURALIST
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === ID_SERVICE_INATURALIST || normalized === 'inaturalist'
     ? ID_SERVICE_INATURALIST
     : ID_SERVICE_ARTSORAKEL
 }
