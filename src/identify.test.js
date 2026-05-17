@@ -5,7 +5,7 @@ import {
   formatIdentifyScore,
   runInaturalistForBlobs,
 } from './identify.js'
-import { prepareImageBlobForUpload } from './image_crop.js'
+import { createCroppedImageBlob, prepareImageBlobForUpload } from './image_crop.js'
 import {
   getDefaultIdService,
   ID_SERVICE_ARTSORAKEL,
@@ -32,6 +32,72 @@ function createLocalStorageStub() {
     },
     removeItem(key) {
       values.delete(key)
+    },
+  }
+}
+
+function createImageCropTestEnv({
+  width = 1600,
+  height = 1200,
+  outputType = 'image/jpeg',
+} = {}) {
+  const createdCanvases = []
+  const drawImageCalls = []
+  const originalImage = globalThis.Image
+  const originalDocument = globalThis.document
+  const originalURL = globalThis.URL
+
+  class FakeImage {
+    constructor() {
+      this.naturalWidth = width
+      this.naturalHeight = height
+      this.width = width
+      this.height = height
+    }
+
+    set src(_value) {
+      queueMicrotask(() => this.onload?.())
+    }
+  }
+
+  globalThis.Image = FakeImage
+  globalThis.document = {
+    createElement(tag) {
+      if (tag !== 'canvas') return null
+      const canvas = {
+        width: 0,
+        height: 0,
+        getContext() {
+          return {
+            drawImage(...args) {
+              drawImageCalls.push(args)
+            },
+            imageSmoothingEnabled: true,
+            imageSmoothingQuality: 'high',
+          }
+        },
+        toBlob(callback) {
+          callback(new Blob(['jpeg'], { type: outputType }))
+        },
+      }
+      createdCanvases.push(canvas)
+      return canvas
+    },
+  }
+  globalThis.URL = {
+    createObjectURL() {
+      return 'blob:fake'
+    },
+    revokeObjectURL() {},
+  }
+
+  return {
+    createdCanvases,
+    drawImageCalls,
+    restore() {
+      globalThis.Image = originalImage
+      globalThis.document = originalDocument
+      globalThis.URL = originalURL
     },
   }
 }
@@ -433,63 +499,46 @@ test('sorts single-image iNaturalist predictions from high to low probability', 
   ])
 })
 
-test('converts non-JPEG image uploads to JPEG for AI inference', async () => {
-  const originalImage = globalThis.Image
-  const originalDocument = globalThis.document
-  const originalURL = globalThis.URL
-
-  class FakeImage {
-    constructor() {
-      this.naturalWidth = 1600
-      this.naturalHeight = 1200
-      this.width = 1600
-      this.height = 1200
-    }
-
-    set src(_value) {
-      queueMicrotask(() => this.onload?.())
-    }
-  }
-
-  globalThis.Image = FakeImage
-  globalThis.document = {
-    createElement(tag) {
-      if (tag !== 'canvas') return null
-      return {
-        width: 0,
-        height: 0,
-        getContext() {
-          return {
-            drawImage() {},
-            imageSmoothingEnabled: true,
-            imageSmoothingQuality: 'high',
-          }
-        },
-        toBlob(callback) {
-          callback(new Blob(['jpeg'], { type: 'image/jpeg' }))
-        },
-      }
-    },
-  }
-  globalThis.URL = {
-    createObjectURL() {
-      return 'blob:fake'
-    },
-    revokeObjectURL() {},
-  }
+test('squares and resizes iNaturalist uploads before sending', async () => {
+  const env = createImageCropTestEnv()
 
   try {
     const prepared = await prepareImageBlobForUpload(new Blob(['x'], { type: 'image/png' }), {
       forceJpeg: true,
-      maxEdge: 1920,
+      maxEdge: 299,
+      squareCrop: true,
     })
 
     assert.equal(prepared.blob.type, 'image/jpeg')
     assert.equal(prepared.outputType, 'image/jpeg')
     assert.equal(prepared.prepared, true)
+    assert.equal(prepared.cropped, true)
+    assert.equal(prepared.resized, true)
+    assert.equal(prepared.targetWidth, 299)
+    assert.equal(prepared.targetHeight, 299)
+    assert.equal(env.createdCanvases[0].width, 299)
+    assert.equal(env.createdCanvases[0].height, 299)
+    assert.deepEqual(env.drawImageCalls[0].slice(1, 5), [200, 0, 1200, 1200])
   } finally {
-    globalThis.Image = originalImage
-    globalThis.document = originalDocument
-    globalThis.URL = originalURL
+    env.restore()
+  }
+})
+
+test('createCroppedImageBlob center-crops 4:3 images into a square canvas', async () => {
+  const env = createImageCropTestEnv()
+
+  try {
+    const cropped = await createCroppedImageBlob(
+      new Blob(['x'], { type: 'image/png' }),
+      { x1: 0, y1: 0, x2: 1, y2: 1 },
+      { type: 'image/jpeg' },
+    )
+
+    assert.equal(cropped.type, 'image/jpeg')
+    assert.equal(env.createdCanvases[0].width, 1200)
+    assert.equal(env.createdCanvases[0].height, 1200)
+    assert.deepEqual(env.drawImageCalls[0].slice(1, 5), [200, 0, 1200, 1200])
+  } finally {
+    env.restore()
   }
 })

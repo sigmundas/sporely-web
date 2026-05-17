@@ -359,6 +359,7 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
         maxEdge: INAT_MAX_EDGE,
         forceJpeg: true,
         cropRect: options.cropRect,
+        squareCrop: true,
       })
   const aiBlob = prepared.blob
   const filename = _buildInaturalistFilename(aiBlob)
@@ -498,6 +499,7 @@ export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
       maxEdge: INAT_MAX_EDGE,
       forceJpeg: true,
       cropRect: item?.cropRect,
+      squareCrop: true,
     })
     return {
       blob: prepared.blob,

@@ -4106,21 +4106,45 @@ html.light .ai-id-dot.is-complete::before {
   flex: 1;
   overflow: hidden;
   touch-action: none;
+  isolation: isolate;
 }
 .ai-crop-frame {
+  --green: #7cff24b6;
+  --bright-green: #7cff24;
+  --corner-len: 10%;
+  --corner-thickness: 3px;
   position: absolute;
   left: 50%;
   top: 50%;
   width: var(--ai-crop-frame-w);
   height: var(--ai-crop-frame-h);
   transform: translate(-50%, -50%);
-  border-radius: 24px;
-  border: 2px solid rgba(255,255,255,0.96);
-  box-shadow:
-    0 0 0 999px rgba(0,0,0,0.36),
-    0 20px 48px rgba(0,0,0,0.24),
-    inset 0 0 0 1px rgba(255,255,255,0.16);
+  border: 1px solid var(--green);
+  box-sizing: border-box;
   pointer-events: none;
+  mix-blend-mode: overlay;
+}
+.ai-crop-frame::before,
+.ai-crop-frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  mix-blend-mode: normal;
+}
+.ai-crop-frame::before {
+  box-shadow: 0 0 0 9999px rgba(0,0,0,0.6);
+}
+.ai-crop-frame::after {
+  background:
+    linear-gradient(to right, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) left top / 100% var(--corner-thickness) no-repeat,
+    linear-gradient(to left, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) right top / 100% var(--corner-thickness) no-repeat,
+    linear-gradient(to right, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) left bottom / 100% var(--corner-thickness) no-repeat,
+    linear-gradient(to left, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) right bottom / 100% var(--corner-thickness) no-repeat,
+    linear-gradient(to bottom, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) left top / var(--corner-thickness) 100% no-repeat,
+    linear-gradient(to bottom, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) right top / var(--corner-thickness) 100% no-repeat,
+    linear-gradient(to top, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) left bottom / var(--corner-thickness) 100% no-repeat,
+    linear-gradient(to top, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) right bottom / var(--corner-thickness) 100% no-repeat;
 }
 .ai-crop-hint {
   padding: 10px 18px 0;

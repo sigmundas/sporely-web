@@ -88,6 +88,34 @@ export function hasAiCropRect(rect) {
   return !!normalizeAiCropRect(rect)
 }
 
+function _getSquareCropBounds(sourceWidth, sourceHeight, rect = null) {
+  const width = Number(sourceWidth)
+  const height = Number(sourceHeight)
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null
+  }
+
+  const normalized = normalizeAiCropRect(rect)
+  const left = normalized ? normalized.x1 * width : 0
+  const top = normalized ? normalized.y1 * height : 0
+  const right = normalized ? normalized.x2 * width : width
+  const bottom = normalized ? normalized.y2 * height : height
+
+  const cropWidth = Math.max(1, Math.round(right - left))
+  const cropHeight = Math.max(1, Math.round(bottom - top))
+  const size = Math.max(1, Math.min(cropWidth, cropHeight))
+  const centerX = left + cropWidth / 2
+  const centerY = top + cropHeight / 2
+  const maxX = Math.max(0, Math.round(width - size))
+  const maxY = Math.max(0, Math.round(height - size))
+
+  return {
+    x: _clamp(Math.round(centerX - size / 2), 0, maxX),
+    y: _clamp(Math.round(centerY - size / 2), 0, maxY),
+    size,
+  }
+}
+
 export function getDefaultAiCropRect(sourceWidth, sourceHeight, options = {}) {
   const width = Number(sourceWidth)
   const height = Number(sourceHeight)
@@ -95,9 +123,6 @@ export function getDefaultAiCropRect(sourceWidth, sourceHeight, options = {}) {
     return null
   }
 
-  const aspectRatio = Number(options.aspectRatio) > 0
-    ? Number(options.aspectRatio)
-    : AI_CROP_ASPECT_RATIO
   const coverage = _clamp(
     Number.isFinite(Number(options.coverage))
       ? Number(options.coverage)
@@ -106,48 +131,30 @@ export function getDefaultAiCropRect(sourceWidth, sourceHeight, options = {}) {
     1,
   )
 
-  let cropWidth = width
-  let cropHeight = cropWidth / aspectRatio
-  if (cropHeight > height) {
-    cropHeight = height
-    cropWidth = cropHeight * aspectRatio
-  }
-
-  cropWidth *= coverage
-  cropHeight *= coverage
-
-  const x = (width - cropWidth) / 2
-  const y = (height - cropHeight) / 2
+  const cropSize = Math.min(width, height) * coverage
+  const x = (width - cropSize) / 2
+  const y = (height - cropSize) / 2
 
   return normalizeAiCropRect({
     x1: x / width,
     y1: y / height,
-    x2: (x + cropWidth) / width,
-    y2: (y + cropHeight) / height,
+    x2: (x + cropSize) / width,
+    y2: (y + cropSize) / height,
   })
 }
 
 export function getCropFrameSize(containerWidth, containerHeight, options = {}) {
-  const aspectRatio = Number(options.aspectRatio) > 0
-    ? Number(options.aspectRatio)
-    : AI_CROP_ASPECT_RATIO
   const padding = Math.max(0, Number(options.padding) || 24)
   const widthRatio = _clamp(Number(options.widthRatio) || 0.76, 0.2, 1)
 
   const maxWidth = Math.max(1, containerWidth - padding * 2)
   const maxHeight = Math.max(1, containerHeight - padding * 2)
 
-  let width = Math.min(maxWidth, containerWidth * widthRatio)
-  let height = width / aspectRatio
-
-  if (height > maxHeight) {
-    height = maxHeight
-    width = height * aspectRatio
-  }
+  const size = Math.min(maxWidth, maxHeight, containerWidth * widthRatio)
 
   return {
-    width: Math.max(1, Math.round(width)),
-    height: Math.max(1, Math.round(height)),
+    width: Math.max(1, Math.round(size)),
+    height: Math.max(1, Math.round(size)),
   }
 }
 
@@ -288,6 +295,7 @@ async function _prepareAiUploadBlob(blob, options = {}) {
 
   try {
     const cropRect = normalizeAiCropRect(options.cropRect)
+    const squareCrop = options.squareCrop === true
     objectUrl = urlApi.createObjectURL(blob)
     const imageCtor = globalThis.Image
     if (typeof imageCtor === 'undefined') {
@@ -311,14 +319,22 @@ async function _prepareAiUploadBlob(blob, options = {}) {
     const sourceHeight = decoded.height || null
     const sourceMaxEdge = Math.max(Number(sourceWidth) || 0, Number(sourceHeight) || 0) || null
     const normalizedCropRect = cropRect && sourceWidth && sourceHeight ? cropRect : null
-    const cropWidth = normalizedCropRect
-      ? Math.max(1, Math.round((normalizedCropRect.x2 - normalizedCropRect.x1) * sourceWidth))
+    const cropBounds = squareCrop
+      ? _getSquareCropBounds(sourceWidth, sourceHeight, normalizedCropRect)
+      : (normalizedCropRect
+        ? {
+            x: Math.max(0, Math.round(normalizedCropRect.x1 * sourceWidth)),
+            y: Math.max(0, Math.round(normalizedCropRect.y1 * sourceHeight)),
+            width: Math.max(1, Math.round((normalizedCropRect.x2 - normalizedCropRect.x1) * sourceWidth)),
+            height: Math.max(1, Math.round((normalizedCropRect.y2 - normalizedCropRect.y1) * sourceHeight)),
+          }
+        : null)
+    const workingWidth = cropBounds
+      ? (squareCrop ? cropBounds.size : cropBounds.width)
       : sourceWidth
-    const cropHeight = normalizedCropRect
-      ? Math.max(1, Math.round((normalizedCropRect.y2 - normalizedCropRect.y1) * sourceHeight))
+    const workingHeight = cropBounds
+      ? (squareCrop ? cropBounds.size : cropBounds.height)
       : sourceHeight
-    const workingWidth = normalizedCropRect ? cropWidth : sourceWidth
-    const workingHeight = normalizedCropRect ? cropHeight : sourceHeight
     const workingMaxEdge = Math.max(Number(workingWidth) || 0, Number(workingHeight) || 0) || null
     const needsResize = Number.isFinite(workingMaxEdge) && workingMaxEdge > inputMeta.maxEdge
     const normalizedType = String(blob.type || '').toLowerCase()
@@ -330,9 +346,9 @@ async function _prepareAiUploadBlob(blob, options = {}) {
     inputMeta.cropRect = normalizedCropRect
     inputMeta.cropSourceW = sourceWidth
     inputMeta.cropSourceH = sourceHeight
-    inputMeta.cropped = !!normalizedCropRect
+    inputMeta.cropped = !!cropBounds
 
-    if (!sourceWidth || !sourceHeight || (!normalizedCropRect && !needsResize && !needsJpeg)) {
+    if (!sourceWidth || !sourceHeight || (!cropBounds && !needsResize && !needsJpeg)) {
       return {
         blob,
         ...inputMeta,
@@ -354,12 +370,10 @@ async function _prepareAiUploadBlob(blob, options = {}) {
     if (!ctx) throw new Error('Canvas context unavailable')
     ctx.imageSmoothingEnabled = true
     ctx.imageSmoothingQuality = 'high'
-    if (normalizedCropRect) {
-      const sourceX = Math.max(0, Math.round(normalizedCropRect.x1 * sourceWidth))
-      const sourceY = Math.max(0, Math.round(normalizedCropRect.y1 * sourceHeight))
-      const drawWidth = Math.max(1, Math.round((normalizedCropRect.x2 - normalizedCropRect.x1) * sourceWidth))
-      const drawHeight = Math.max(1, Math.round((normalizedCropRect.y2 - normalizedCropRect.y1) * sourceHeight))
-      ctx.drawImage(decoded.source, sourceX, sourceY, drawWidth, drawHeight, 0, 0, targetWidth, targetHeight)
+    if (cropBounds) {
+      const drawWidth = squareCrop ? cropBounds.size : cropBounds.width
+      const drawHeight = squareCrop ? cropBounds.size : cropBounds.height
+      ctx.drawImage(decoded.source, cropBounds.x, cropBounds.y, drawWidth, drawHeight, 0, 0, targetWidth, targetHeight)
     } else {
       ctx.drawImage(decoded.source, 0, 0, sourceWidth, sourceHeight, 0, 0, targetWidth, targetHeight)
     }
@@ -374,7 +388,7 @@ async function _prepareAiUploadBlob(blob, options = {}) {
     inputMeta.targetWidth = targetWidth
     inputMeta.targetHeight = targetHeight
     inputMeta.resized = needsResize
-    inputMeta.converted = needsJpeg || !!normalizedCropRect
+    inputMeta.converted = needsJpeg || !!cropBounds
     inputMeta.prepared = true
     return {
       blob: outputBlob,
@@ -437,42 +451,75 @@ export async function createImageCropMeta(blob, options = {}) {
 }
 
 export async function createCroppedImageBlob(blob, rect, options = {}) {
+  if (!(blob instanceof Blob)) return blob
+
+  const documentApi = globalThis.document
+  const urlApi = globalThis.URL
+  if (typeof documentApi === 'undefined' || typeof urlApi === 'undefined') {
+    return blob
+  }
+
   const normalized = normalizeAiCropRect(rect)
-  if (!(blob instanceof Blob) || !normalized) return blob
+  let decoded = null
+  let objectUrl = null
 
-  const img = await _loadBlobImage(blob)
-  const sourceWidth = img.naturalWidth || img.width
-  const sourceHeight = img.naturalHeight || img.height
-  if (!sourceWidth || !sourceHeight) return blob
+  try {
+    objectUrl = urlApi.createObjectURL(blob)
+    const imageCtor = globalThis.Image
+    if (typeof imageCtor === 'undefined') {
+      throw new Error('Image decode unavailable')
+    }
+    decoded = await new Promise((resolve, reject) => {
+      const nextImg = new imageCtor()
+      nextImg.onload = () => resolve({
+        source: nextImg,
+        width: nextImg.naturalWidth || nextImg.width || null,
+        height: nextImg.naturalHeight || nextImg.height || null,
+        release() {
+          nextImg.src = ''
+        },
+      })
+      nextImg.onerror = () => reject(new Error('Image decode failed'))
+      nextImg.src = objectUrl
+    })
 
-  const cropWidth = Math.max(1, Math.round((normalized.x2 - normalized.x1) * sourceWidth))
-  const cropHeight = Math.max(1, Math.round((normalized.y2 - normalized.y1) * sourceHeight))
-  const sourceX = Math.max(0, Math.round(normalized.x1 * sourceWidth))
-  const sourceY = Math.max(0, Math.round(normalized.y1 * sourceHeight))
+    const sourceWidth = decoded.width || null
+    const sourceHeight = decoded.height || null
+    const cropBounds = _getSquareCropBounds(sourceWidth, sourceHeight, normalized)
+    if (!cropBounds) return blob
 
-  const canvas = document.createElement('canvas')
-  canvas.width = cropWidth
-  canvas.height = cropHeight
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas context unavailable')
-
-  ctx.drawImage(
-    img,
-    sourceX,
-    sourceY,
-    cropWidth,
-    cropHeight,
-    0,
-    0,
-    cropWidth,
-    cropHeight,
-  )
-
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      cropped => cropped ? resolve(cropped) : reject(new Error('Crop export failed')),
-      options.type || 'image/jpeg',
-      options.quality ?? 0.92,
+    const maxEdge = Number(options.maxEdge)
+    const targetSize = Number.isFinite(maxEdge) && maxEdge > 0 && cropBounds.size > maxEdge
+      ? Math.max(1, Math.round(maxEdge))
+      : cropBounds.size
+    const canvas = documentApi.createElement('canvas')
+    canvas.width = targetSize
+    canvas.height = targetSize
+    const ctx = canvas.getContext('2d', { alpha: false })
+    if (!ctx) throw new Error('Canvas context unavailable')
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(
+      decoded.source,
+      cropBounds.x,
+      cropBounds.y,
+      cropBounds.size,
+      cropBounds.size,
+      0,
+      0,
+      targetSize,
+      targetSize,
     )
-  })
+
+    return await new Promise((resolve, reject) => {
+      canvas.toBlob(
+        cropped => cropped ? resolve(cropped) : reject(new Error('Crop export failed')),
+        options.type || 'image/jpeg',
+        options.quality ?? 0.92,
+      )
+    })
+  } finally {
+    if (objectUrl) urlApi.revokeObjectURL?.(objectUrl)
+    decoded?.release?.()
+  }
 }
