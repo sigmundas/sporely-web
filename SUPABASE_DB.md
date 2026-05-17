@@ -10,7 +10,7 @@ This document is the source of truth for the Supabase/Postgres side of Sporely W
 
 See also:
 - `ARCHITECTURE.md` for product-level architecture
-- `CLAUDE.md` for repo/agent usage conventions
+- `SPEC.md` for repo/agent usage conventions
 
 ---
 
@@ -79,9 +79,9 @@ See also:
 ### Community spore-data RPCs
 - Public contributor / measurement aggregates should be exposed through `SECURITY DEFINER` RPCs, not by granting blanket public `SELECT` on `spore_measurements`
 - Existing SQL draft:
-  - `sporely-py/database/supabase_spore_community_schema.sql`
+  - `sporely-web/supabase/migrations/supabase_spore_community_schema.sql`
 - People-directory RPC:
-  - `sporely-py/database/supabase_people_directory.sql`
+  - `sporely-web/supabase/migrations/supabase_people_directory.sql`
 - Relevant functions in that SQL draft include:
   - `search_community_spore_datasets`
   - `get_community_spore_dataset`
@@ -204,7 +204,7 @@ For `avatars`:
 ## Operational checklist (recommended)
 
 1. **Run unique constraints SQL**
-   - File: `sporely/database/supabase_unique_constraints.sql`
+   - File: `sporely-web/supabase/migrations/supabase_unique_constraints.sql`
    - Purpose: add/ensure `UNIQUE (desktop_id, user_id)` (or equivalent)
    - Status: ✅ Applied
 2. **Verify Storage bucket existence**

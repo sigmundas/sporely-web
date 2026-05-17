@@ -729,7 +729,7 @@ return new Promise((resolve, reject) => {
 | `taxa` + `taxa_vernacular` tables | ✅ Populated (110k taxa, 70k vernacular names) |
 | `search_taxa` RPC | ✅ Deployed |
 | `delete-account` Edge Function | ⚠️ In repo — must be deployed in Supabase before the UI button works |
-| Unique constraints on observations | ⚠️ Not yet run — see `supabase_unique_constraints.sql` |
+| Unique constraints on observations | ⚠️ Not yet run — see `supabase/migrations/supabase_unique_constraints.sql` |
 
 ## Ongoing Database & Operations Tasks
 - Ensure `delete-account` Edge Function is deployed and functional.
