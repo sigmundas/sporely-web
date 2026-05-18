@@ -80,6 +80,8 @@ public class NativeCameraActivity extends AppCompatActivity {
     private static final double FULL_FRAME_DIAGONAL_MM = 43.2666153;
     private static final int SPORELY_GREEN = Color.rgb(88, 155, 82);
     private static final int SPORELY_GREEN_DARK = Color.rgb(38, 72, 43);
+    private static final String PREFS_NAME = "CapacitorStorage";
+    private static final String PREF_USE_HDR = "useHdr";
     private static final int CONTROLS_BOTTOM_MARGIN_DP = 96;
     private static final int ACTION_BUTTON_HEIGHT_DP = 52;
     private static final int ACTION_BUTTON_WIDTH_DP = 104;
@@ -88,6 +90,7 @@ public class NativeCameraActivity extends AppCompatActivity {
     private static final int CONTROL_ROW_BOTTOM_PADDING_DP = 18;
     private static final int SHUTTER_BUTTON_SIZE_DP = 82;
     private static final int NIGHT_TOGGLE_ABOVE_CONTROLS_DP = CONTROL_ROW_HEIGHT_DP + 76;
+    private static final int HDR_TOGGLE_ABOVE_CONTROLS_DP = NIGHT_TOGGLE_ABOVE_CONTROLS_DP + 44;
     private static final int FOCUS_RING_SIZE_DP = 74;
     private static final Size TARGET_CAPTURE_SIZE = new Size(4000, 3000);
 
@@ -112,7 +115,10 @@ public class NativeCameraActivity extends AppCompatActivity {
     private ExtensionsManager extensionsManager;
     private boolean isNightModeAvailable = false;
     private boolean isNightModeEnabled = false;
+    private boolean useHdrEnabled = true;
+    private TextView hdrModeToggle;
     private TextView nightModeToggle;
+    private FrameLayout.LayoutParams hdrModeParams;
     private FrameLayout.LayoutParams nightModeParams;
     private OrientationEventListener orientationListener;
     private int captureRotation = Surface.ROTATION_0;
@@ -125,6 +131,7 @@ public class NativeCameraActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         captureLocation = parseLocation(getIntent().getStringExtra(EXTRA_GPS_JSON));
         captureRotation = getDisplayRotation();
+        useHdrEnabled = readUseHdrPreference();
         orientationListener = new OrientationEventListener(this) {
             @Override
             public void onOrientationChanged(int orientation) {
@@ -232,6 +239,16 @@ public class NativeCameraActivity extends AppCompatActivity {
         root.addView(batchStack, batchParams);
         updateCaptureActionState();
 
+        hdrModeToggle = makeExtensionToggleButton("HDR");
+        hdrModeToggle.setOnClickListener(v -> toggleHdrMode());
+        hdrModeParams = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM | Gravity.END
+        );
+        hdrModeParams.setMargins(0, 0, dp(ACTION_BUTTON_SIDE_MARGIN_DP), dp(CONTROLS_BOTTOM_MARGIN_DP + HDR_TOGGLE_ABOVE_CONTROLS_DP));
+        root.addView(hdrModeToggle, hdrModeParams);
+
         nightModeToggle = makeExtensionToggleButton("Night");
         nightModeToggle.setOnClickListener(v -> toggleNightMode());
         nightModeParams = new FrameLayout.LayoutParams(
@@ -241,6 +258,7 @@ public class NativeCameraActivity extends AppCompatActivity {
         );
         nightModeParams.setMargins(0, 0, dp(ACTION_BUTTON_SIDE_MARGIN_DP), dp(CONTROLS_BOTTOM_MARGIN_DP + NIGHT_TOGGLE_ABOVE_CONTROLS_DP));
         root.addView(nightModeToggle, nightModeParams);
+        updateExtensionToggleUI();
 
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             applySystemBarInsets(insets);
@@ -260,6 +278,10 @@ public class NativeCameraActivity extends AppCompatActivity {
         int batchBottom = controlsBottom + dp(CONTROL_ROW_HEIGHT_DP);
         if (batchParams != null && batchParams.bottomMargin != batchBottom) {
             batchParams.setMargins(0, 0, dp(28), batchBottom);
+        }
+        int hdrBottom = controlsBottom + dp(HDR_TOGGLE_ABOVE_CONTROLS_DP);
+        if (hdrModeParams != null && hdrModeParams.bottomMargin != hdrBottom) {
+            hdrModeParams.setMargins(0, 0, dp(ACTION_BUTTON_SIDE_MARGIN_DP), hdrBottom);
         }
         int nightBottom = controlsBottom + dp(NIGHT_TOGGLE_ABOVE_CONTROLS_DP);
         if (nightModeParams != null && nightModeParams.bottomMargin != nightBottom) {
@@ -462,12 +484,10 @@ public class NativeCameraActivity extends AppCompatActivity {
         }
         updateExtensionToggleUI();
 
-        boolean useHdr = getIntent().getBooleanExtra("useHdr", false);
-
         if (isNightModeEnabled && isNightModeAvailable && extensionsManager != null) {
             finalSelector = extensionsManager.getExtensionEnabledCameraSelector(baseSelector, ExtensionMode.NIGHT);
             finalPhysicalCameraId = null;
-        } else if (useHdr) {
+        } else if (useHdrEnabled) {
             boolean extensionHdr = false;
             if (extensionsManager != null) {
                 if (extensionsManager.isExtensionAvailable(baseSelector, ExtensionMode.HDR)) {
@@ -525,7 +545,22 @@ public class NativeCameraActivity extends AppCompatActivity {
         bindCamera(extensionsManager);
     }
 
+    private void toggleHdrMode() {
+        useHdrEnabled = !useHdrEnabled;
+        persistUseHdrPreference(useHdrEnabled);
+        updateExtensionToggleUI();
+        bindCamera(extensionsManager);
+    }
+
     private void updateExtensionToggleUI() {
+        if (hdrModeToggle != null) {
+            hdrModeToggle.setVisibility(View.VISIBLE);
+            if (useHdrEnabled) {
+                hdrModeToggle.setBackground(makeRoundedBackground(SPORELY_GREEN, 8, 1, SPORELY_GREEN));
+            } else {
+                hdrModeToggle.setBackground(makeRoundedBackground(Color.argb(140, 0, 0, 0), 8, 1, Color.argb(100, 255, 255, 255)));
+            }
+        }
         if (nightModeToggle != null) {
             nightModeToggle.setVisibility(isNightModeAvailable ? View.VISIBLE : View.GONE);
             if (isNightModeEnabled) {
@@ -534,6 +569,18 @@ public class NativeCameraActivity extends AppCompatActivity {
                 nightModeToggle.setBackground(makeRoundedBackground(Color.argb(140, 0, 0, 0), 8, 1, Color.argb(100, 255, 255, 255)));
             }
         }
+    }
+
+    private boolean readUseHdrPreference() {
+        String value = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(PREF_USE_HDR, null);
+        return value == null || !"false".equalsIgnoreCase(value);
+    }
+
+    private void persistUseHdrPreference(boolean enabled) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(PREF_USE_HDR, enabled ? "true" : "false")
+            .apply();
     }
 
     @SuppressWarnings("deprecation")

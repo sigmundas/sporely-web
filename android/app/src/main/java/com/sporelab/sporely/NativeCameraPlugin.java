@@ -23,9 +23,6 @@ public class NativeCameraPlugin extends Plugin {
     @PluginMethod
     public void capturePhotos(PluginCall call) {
         Intent intent = new Intent(getActivity(), NativeCameraActivity.class);
-        
-        Boolean useHdr = call.getBoolean("useHdr", false);
-        intent.putExtra("useHdr", useHdr != null ? useHdr : false);
 
         Integer jpegQuality = call.getInt("jpegQuality", 75);
         intent.putExtra("jpegQuality", jpegQuality != null ? jpegQuality : 75);

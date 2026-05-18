@@ -7,47 +7,24 @@
 ## UI fixes, minor
 - [x] Lock screen rotation for the app in general - camera should still record orientation
 - Make a distinct draft/obscured/private banner that is as wide as the screen. Place this just above the thumbnail view in edit-observations. So if an observation is obscured, draft or private, make a tag in this banner for each condition that is true. Remove those other Draft and obscured tags that are now in the upper left corner.
-- edit observation - Location group: replace this box with the same box called Location data on the review screen (after taking a single photo)
-- remove the Workflow box, with the Draft toggle. Put the Draft toggle in the Sharing box.
-- add the Uncertain ID toggle to the Species box
+
+
 
 ## UI fixes, major
 - Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
-- Add a legend drop-down to the map page. Selection: Genus (more will come). this will show a legend with colors, corresponding the the dots on the map.
+- Add a legend drop-down to the map page. Selection: Genus, Month, User. this will show a legend with colors, corresponding the the dots on the map. 
 
-
-## Location
-
-- [ ] **Use a latest-request guard.** Track a request id plus rounded coordinates in the UI. If the user changes photos/coordinates before the lookup returns, ignore the stale result so an old place name cannot fill a new observation.
-
-### Server-Side Lookup Flow
-- [ ] **Nominatim first for country detection.** Query `https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json`, parse `display_name`, `address.country_code`, and `address.country`, and keep the full `display_name` as fallback/reference.
-- [ ] **Build short Nominatim suggestions as separate entries.** Do not show the full local-to-regional chain as the normal Location text. Suggest `address.amenity || address.road` as one dropdown item, then `address.neighbourhood || address.suburb` as another item.
-- [ ] **Norway branch:** if `country_code === "no"`, query `https://stedsnavn.artsdatabanken.no/v1/punkt?lat={lat}&lng={lon}&zoom=45`. Use `navn` first only when `dist <= 0.006`; otherwise discard it and fall back to Nominatim suggestions.
-- [ ] **Denmark branch:** if `country_code === "dk"`, query `https://api.dataforsyningen.dk/adgangsadresser/reverse?x={lon}&y={lat}`. Put the best DAWA local label first, then the Nominatim local suggestions.
-- [ ] **Other countries:** use Nominatim local suggestions first; use `display_name` only if no local address parts are available.
-- [ ] **Deduplicate suggestions while preserving source priority.** Norway order is Artsdatabanken then Nominatim. Denmark order is DAWA then Nominatim.
-
-### Web UI Behavior
-- [ ] **Resolve once per observation/session.** For a multi-photo observation, reuse the resolved place name for attached photos unless coordinates differ meaningfully.
-- [ ] **Auto-fill the first suggestion.** The Location field should receive the first suggestion when it is empty or still contains the previous auto-filled value.
-- [ ] **Show all suggestions on field focus/click.** The dropdown should contain separate entries, not a comma-joined string.
-- [ ] **Persist useful country metadata.** Store or carry `country_code`, `country_name`, and `nominatim_display_name` alongside the observation/import draft when available.
-- [ ] **Drive regional UI from country.** Norway uses Artsobservasjoner-oriented fields, Sweden uses Artportalen-oriented fields, Denmark is pending Danmarks Svampeatlas, and other countries use iNaturalist/Sporely Cloud defaults. Hide regional biotope/substrate controls outside Norway and Sweden, while keeping them visible until country is known.
-
-### Tests
-- [ ] **Unit-test normalization fixtures.** Add fixtures for Norway, Denmark, Sweden, and a non-Nordic country. Assert suggestion order, deduplication, country parsing, and fallback behavior.
-- [ ] **Test stale lookup handling.** Simulate two coordinate lookups resolving out of order and verify only the latest result updates the draft.
 
 ## Code Review & Refactoring
 *Review this code with a strict refactor/audit mindset. Do not praise. Look for concrete problems only.*
 
 ### 2026-04-30 Camera Settings Review Findings
-- [ ] Settings can show `Native Cam` selected while browser/PWA users are actually routed to `Sporely Cam`; make the settings UI show the effective camera mode or hide/disable native selection outside the Android app.
+- [x] Settings can show `Native Cam` selected while browser/PWA users are actually routed to `Sporely Cam` - current UI no longer exposes the native selector outside the Android app, and the home card uses `getEffectiveCameraLabel()`.
 - [ ] Capture reset/default draft logic is duplicated across `capture.js` and `review.js`; centralize `defaultCaptureDraft()` and `resetCaptureSession()` near `state.js`.
 - [ ] Remove dead `capture.importPhotos` i18n keys after removing the capture-screen gallery button.
 - [x] Consolidate duplicated platform detection helpers (`_isNativeApp`, Android-native checks) into a shared platform helper.
-- [ ] Remove or gate production camera debug logs in `capture.js`.
+- [x] Remove or gate production camera debug logs in `capture.js` - the remaining camera logging is DEV-gated or part of normal warning/error paths.
+- [ ] Import review still does main-thread EXIF parsing and browser-decodable canvas conversion in `captureExif()` / `processFile()`; upload resizing is already workerized, so the remaining risk is the import-time UI thread work.
 
 For each issue you find, return:
 - severity: low / medium / high
@@ -820,8 +797,8 @@ iOS Safari purges Blob URLs under memory pressure.
 3.  The Sync Queue should pull the bytes from IndexedDB and reconstruct the Blob only at the moment of upload.
 
 #### **D. Native Feature Gating**
-*   **HDR Toggle:** The "Use HDR" setting is only valid for the **Native Android** (CameraX) app. 
-*   **UI Fix:** Hide the HDR toggle in the web app/iOS view to avoid "placebo" settings that don't talk to hardware.
+*   **HDR Toggle:** HDR is only valid for the **Native Android** (CameraX) app.
+*   **UI Fix:** The HDR control now lives in the native camera UI and is hidden from the web app/iOS view.
 
 #### **E. Memory "Kill Switch"**
 After processing each image in the sequential queue:
@@ -831,7 +808,7 @@ After processing each image in the sequential queue:
 ### **4. Files Needing Cleanup**
 *   `images.js`: Update the `toBlob` logic and fallback checks.
 *   `sync-queue.js`: Change Blob storage to ArrayBuffer storage.
-*   `main.js`: Update the Settings UI to hide the HDR toggle on non-Android platforms.
+*   `NativeCameraActivity.java`: Native HDR/night controls live here now.
 *   `worker.js`: (New File) Create the off-thread processing logic.
 
 ---

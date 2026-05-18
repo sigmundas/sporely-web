@@ -1,4 +1,3 @@
-import { Preferences } from '@capacitor/preferences';
 import { state } from '../state.js';
 import { formatDate, formatTime, getLocale, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
@@ -1077,9 +1076,6 @@ export async function openNativeCamera() {
       return;
     }
 
-    const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' });
-    const useHdr = useHdrStr !== 'false';
-
     const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
       ? {
           latitude: state.gps.lat,
@@ -1089,7 +1085,7 @@ export async function openNativeCamera() {
         }
       : null
 
-    const options = { useHdr, jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
+    const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
     if (gps) options.gps = gps;
     await _handleNativePhotoResult(await NativeCamera.capturePhotos(options))
   } catch (err) {
@@ -2458,14 +2454,11 @@ async function _openCameraForSession(sid) {
         return;
       }
 
-      const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' });
-      const useHdr = useHdrStr !== 'false';
-
       const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
         ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
         : null;
 
-      const options = { useHdr, jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
+      const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
       if (gps) options.gps = gps;
       const result = await NativeCamera.capturePhotos(options);
       const photos = Array.isArray(result?.photos) ? result.photos : [];

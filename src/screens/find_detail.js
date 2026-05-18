@@ -29,7 +29,6 @@ import { getArtsorakelMaxEdge, getDefaultVisibility, getPhotoIdMode, resolvePhot
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { getIdentifyNoMatchMessage, runIdentifyForBlobs, runIdentifyForMediaKeys } from '../identify.js'
 import { loadInaturalistSession } from '../inaturalist.js'
-import { Preferences } from '@capacitor/preferences'
 import { refreshHome } from './home.js'
 import { buildGpsMetaHtml } from './review.js'
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js'
@@ -2680,12 +2679,10 @@ async function _openCameraForDetail() {
         return
       }
 
-      const { value: useHdrStr } = await Preferences.get({ key: 'useHdr' })
-      const useHdr = useHdrStr !== 'false'
       const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
         ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
         : null
-      const options = { useHdr, jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
+      const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
       if (gps) options.gps = gps
       const result = await NativeCamera.capturePhotos(options)
       const photos = Array.isArray(result?.photos) ? result.photos : []

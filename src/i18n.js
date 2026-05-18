@@ -294,7 +294,6 @@ const messages = {
     'settings.imageResolutionReduced': 'Default (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
     'settings.camera': 'Camera',
-    'settings.useHdr': 'Use HDR (Sporely Cam)',
     'settings.cameraApp': 'Camera App',
     'settings.sporely': 'Sporely',
     'settings.native': 'Native',
@@ -648,7 +647,6 @@ const messages = {
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Maks (12MP)',
     'settings.camera': 'Kamera',
-    'settings.useHdr': 'Bruk HDR (Sporely Cam)',
     'settings.cameraApp': 'Kamera-app',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
@@ -1002,7 +1000,6 @@ const messages = {
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max (12MP)',
     'settings.camera': 'Kamera',
-    'settings.useHdr': 'Använd HDR (Sporely Cam)',
     'settings.cameraApp': 'Kamera-app',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
@@ -1356,7 +1353,6 @@ const messages = {
     'settings.imageResolutionReduced': 'Standard (2MP)',
     'settings.imageResolutionMax': 'Max. (12MP)',
     'settings.camera': 'Kamera',
-    'settings.useHdr': 'HDR verwenden (Sporely Cam)',
     'settings.cameraApp': 'Kamera-App',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
@@ -1761,7 +1757,6 @@ export function applyStaticTranslations() {
   setText('#settings-camera-app-label', 'settings.cameraApp')
   setText('.settings-camera-app-btn[data-camera-app="sporely"]', 'settings.sporely')
   setText('.settings-camera-app-btn[data-camera-app="native"]', 'settings.native')
-  setText('#settings-hdr-label', 'settings.useHdr')
   setText('#settings-default-visibility-label', 'settings.defaultVisibility')
   setText('#settings-default-visibility-private', 'visibility.private')
   setText('#settings-default-visibility-friends', 'visibility.friends')

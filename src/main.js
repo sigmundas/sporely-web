@@ -1,6 +1,5 @@
 import './style.css'
 import './theme.js'   // applies saved theme immediately, no flash
-import { Preferences } from '@capacitor/preferences'
 
 import { supabase } from './supabase.js'
 import { getLocale, initI18n, onLocaleChange, setLocale, t } from './i18n.js'
@@ -294,23 +293,6 @@ function initSettings() {
     })
   })
 
-  const hdrToggle = document.getElementById('settings-hdr-toggle')
-  const nativeCameraRows = [
-    document.getElementById('settings-camera-label'),
-    document.getElementById('settings-hdr-row'),
-  ]
-  nativeCameraRows.forEach(row => {
-    if (row) row.style.display = isAndroidApp() ? '' : 'none'
-  })
-  if (hdrToggle) {
-    Preferences.get({ key: 'useHdr' }).then(({ value }) => {
-      hdrToggle.checked = getUseSystemCamera() ? false : value !== 'false'
-    })
-    hdrToggle.addEventListener('change', event => {
-      Preferences.set({ key: 'useHdr', value: event.target.checked ? 'true' : 'false' })
-    })
-  }
-
   document.getElementById('settings-clear-cache-btn')?.addEventListener('click', async event => {
     const btn = event.currentTarget
     if (!window.confirm(t('settings.clearLocalCacheConfirm'))) return
@@ -376,20 +358,6 @@ function _syncSettingsUI() {
   })
 
   if (acCameraLabel) acCameraLabel.textContent = getEffectiveCameraLabel()
-
-  const hdrToggle = document.getElementById('settings-hdr-toggle')
-  const hdrRow = document.getElementById('settings-hdr-row')
-  if (hdrToggle) {
-    hdrToggle.disabled = useSystemCamera
-    if (useSystemCamera) {
-      hdrToggle.checked = false
-    } else {
-      Preferences.get({ key: 'useHdr' }).then(({ value }) => {
-        if (!getUseSystemCamera()) hdrToggle.checked = value !== 'false'
-      })
-    }
-    hdrRow?.classList.toggle('settings-row-disabled', useSystemCamera)
-  }
 }
 
 // Function to update iNaturalist UI elements based on platform and config

@@ -4109,8 +4109,8 @@ html.light .ai-id-dot.is-complete::before {
   isolation: isolate;
 }
 .ai-crop-frame {
-  --green: #7cff24b6;
-  --bright-green: #7cff24;
+  --border-color: #f3ff32b6;
+  --corner-color: #f3ff32ec;
   --corner-len: 10%;
   --corner-thickness: 3px;
   position: absolute;
@@ -4119,7 +4119,7 @@ html.light .ai-id-dot.is-complete::before {
   width: var(--ai-crop-frame-w);
   height: var(--ai-crop-frame-h);
   transform: translate(-50%, -50%);
-  border: 1px solid var(--green);
+  border: 2px solid var(--border-color);
   box-sizing: border-box;
   pointer-events: none;
   mix-blend-mode: overlay;
@@ -4137,14 +4137,14 @@ html.light .ai-id-dot.is-complete::before {
 }
 .ai-crop-frame::after {
   background:
-    linear-gradient(to right, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) left top / 100% var(--corner-thickness) no-repeat,
-    linear-gradient(to left, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) right top / 100% var(--corner-thickness) no-repeat,
-    linear-gradient(to right, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) left bottom / 100% var(--corner-thickness) no-repeat,
-    linear-gradient(to left, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) right bottom / 100% var(--corner-thickness) no-repeat,
-    linear-gradient(to bottom, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) left top / var(--corner-thickness) 100% no-repeat,
-    linear-gradient(to bottom, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) right top / var(--corner-thickness) 100% no-repeat,
-    linear-gradient(to top, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) left bottom / var(--corner-thickness) 100% no-repeat,
-    linear-gradient(to top, var(--bright-green) 0 var(--corner-len), transparent var(--corner-len)) right bottom / var(--corner-thickness) 100% no-repeat;
+    linear-gradient(to right, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) left top / 100% var(--corner-thickness) no-repeat,
+    linear-gradient(to left, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) right top / 100% var(--corner-thickness) no-repeat,
+    linear-gradient(to right, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) left bottom / 100% var(--corner-thickness) no-repeat,
+    linear-gradient(to left, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) right bottom / 100% var(--corner-thickness) no-repeat,
+    linear-gradient(to bottom, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) left top / var(--corner-thickness) 100% no-repeat,
+    linear-gradient(to bottom, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) right top / var(--corner-thickness) 100% no-repeat,
+    linear-gradient(to top, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) left bottom / var(--corner-thickness) 100% no-repeat,
+    linear-gradient(to top, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) right bottom / var(--corner-thickness) 100% no-repeat;
 }
 .ai-crop-hint {
   padding: 10px 18px 0;

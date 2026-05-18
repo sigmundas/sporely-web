@@ -43,6 +43,11 @@
 - **Native (Android / CameraX):** Active only when running the installed Android app via Capacitor. Uses native CameraX capture paths, the best available lens when possible, and true original-resolution photos around 12 MP. Retains EXIF orientation and GPS securely without canvas stripping. Supports legacy OEM HDR extensions and Android 14+ Ultra HDR (`JPEG_R`).
 - **Web (`getUserMedia` / PWA):** Used in mobile browsers and installed PWAs. Streams video into HTML `<canvas>`, which is typically constrained by browser capture limits and yields lower image quality than native capture. Browsers strip EXIF/GPS from canvas blobs, so the app compensates with `navigator.geolocation` during capture. The UI warns Android web users to install the native app when camera quality or metadata fidelity matters.
 
+## Location Lookup
+Sporely resolves place names through Nominatim first so it can reliably capture `country_code`, `country_name`, and the raw `display_name` for fallback use. That lookup drives the local suggestion list and keeps the full address string available when there are no shorter address parts to show.
+
+For Norway and Denmark, the lookup flow adds a country-specific local source ahead of the Nominatim suggestions. Norway prefers Artsdatabanken when the returned point is close enough; Denmark prefers DAWA-style address labels. The UI keeps the first suggestion as the auto-fill value, exposes the full suggestion list on focus, and stores the resolved lookup alongside the observation or import session so the same place name can be reused for multi-photo observations.
+
 ## Capture & Import Flow
 - **Capture:** `capturePhoto()` returns `{ blobPromise, gps, ts, aiCropRect }`. `saveObservationBatch()` waits for all blob promises before enqueueing to IndexedDB.
 - **Import:** Uses NativePhotoPicker (Android EXIF/GPS via temp files) or browser native picker. Sorts and groups images by capture time. Generates reduced AI blobs up front. Location metadata is separated from blobs.
