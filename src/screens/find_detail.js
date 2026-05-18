@@ -181,59 +181,30 @@ function _detailAiHasProbability(value) {
 }
 
 function _detailAiSelectionStateFromResults(resultsByService = {}, obs = currentObs) {
-  const selectionByService = {}
   const probabilityByService = {}
   const explicitSelectedService = obs?.ai_selected_service
     ? normalizeIdentifyService(obs.ai_selected_service)
     : null
   const explicitSelectedProbability = Number(obs?.ai_selected_probability)
-  const configuredPrimaryService = _resolveDetailPhotoIdServices({}).primary
-  const serviceCandidates = []
 
   for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
     const result = resultsByService?.[service] || null
     const predictions = Array.isArray(result?.predictions) ? result.predictions : []
-    let bestPrediction = null
-    let bestRank = -1
-    for (const prediction of predictions) {
-      const rank = _detailAiPredictionMatchRank(prediction, service, obs)
-      const probability = Number(prediction?.probability ?? 0)
-      if (
-        rank > bestRank
-        || (rank === bestRank && probability > Number(bestPrediction?.probability ?? -1))
-      ) {
-        bestPrediction = prediction
-        bestRank = rank
-      }
-    }
-
-    if (!bestPrediction && predictions.length) {
-      bestPrediction = predictions[0]
-      bestRank = _detailAiPredictionMatchRank(bestPrediction, service, obs)
-    }
-
-    if (bestPrediction) {
-      selectionByService[service] = bestPrediction
-      probabilityByService[service] = _detailAiPredictionProbability(bestPrediction, result?.topProbability)
-    } else if (Number.isFinite(Number(result?.topProbability))) {
+    if (Number.isFinite(Number(result?.topProbability))) {
       probabilityByService[service] = Number(result.topProbability)
     }
-
-    serviceCandidates.push({
-      service,
-      bestPrediction,
-      bestRank,
-      topProbability: Number(result?.topProbability ?? bestPrediction?.probability ?? -1),
-      hasPredictions: predictions.length > 0,
-    })
   }
 
   if (explicitSelectedService && resultsByService?.[explicitSelectedService]) {
     const selectedResult = resultsByService[explicitSelectedService]
+    const explicitPrediction = (Array.isArray(selectedResult?.predictions) ? selectedResult.predictions : [])
+      .find(prediction => _detailAiPredictionMatchesObservation(prediction, obs))
     return {
       selectedService: explicitSelectedService,
-      selectedPrediction: selectionByService[explicitSelectedService] || selectedResult?.predictions?.[0] || null,
-      selectedPredictionByService: selectionByService,
+      selectedPrediction: explicitPrediction || null,
+      selectedPredictionByService: explicitPrediction
+        ? { [explicitSelectedService]: explicitPrediction }
+        : {},
       selectedProbabilityByService: {
         ...probabilityByService,
         ...(Number.isFinite(explicitSelectedProbability)
@@ -243,25 +214,10 @@ function _detailAiSelectionStateFromResults(resultsByService = {}, obs = current
     }
   }
 
-  const rankedCandidate = serviceCandidates
-    .filter(candidate => candidate.hasPredictions)
-    .sort((left, right) => {
-      if (right.bestRank !== left.bestRank) return right.bestRank - left.bestRank
-      if (right.topProbability !== left.topProbability) return right.topProbability - left.topProbability
-      if (left.service === configuredPrimaryService && right.service !== configuredPrimaryService) return -1
-      if (right.service === configuredPrimaryService && left.service !== configuredPrimaryService) return 1
-      return left.service.localeCompare(right.service)
-    })[0] || null
-
-  const selectedService = rankedCandidate?.service || null
-  const selectedPrediction = selectedService
-    ? (selectionByService[selectedService] || resultsByService?.[selectedService]?.predictions?.[0] || null)
-    : null
-
   return {
-    selectedService,
-    selectedPrediction,
-    selectedPredictionByService: selectionByService,
+    selectedService: null,
+    selectedPrediction: null,
+    selectedPredictionByService: {},
     selectedProbabilityByService: probabilityByService,
   }
 }
@@ -270,6 +226,13 @@ const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_na
 const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
 const DETAIL_VIEW_SELECT = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
 const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
+const DETAIL_AI_SELECTION_FIELDS = [
+  'ai_selected_service',
+  'ai_selected_taxon_id',
+  'ai_selected_scientific_name',
+  'ai_selected_probability',
+  'ai_selected_at',
+]
 
 function _isPhase7ColumnError(error) {
   const message = String(error?.message || '').toLowerCase()
@@ -312,10 +275,86 @@ function _removeMissingObservationColumnsFromPatch(patch = {}, error = null, fie
 
 async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
   const result = await makeQuery(columns)
-  if (_isPhase7ColumnError(result.error) || _isMissingObservationColumnError(result.error, ['ai_selected_service', 'ai_selected_taxon_id', 'ai_selected_scientific_name', 'ai_selected_probability', 'ai_selected_at'])) {
+  if (_isPhase7ColumnError(result.error) || _isMissingObservationColumnError(result.error, DETAIL_AI_SELECTION_FIELDS)) {
     return makeQuery(legacyColumns)
   }
   return result
+}
+
+function _buildDetailAiSelectionPatch(selectionState = {}) {
+  const selectedPrediction = selectionState.selectedPrediction || null
+  const selectedService = normalizeIdentifyService(
+    selectionState.selectedService || selectedPrediction?.service || '',
+  )
+
+  if (!selectedPrediction || !selectedService) return null
+
+  return {
+    ai_selected_service: selectedService,
+    ai_selected_taxon_id: selectedPrediction?.taxonId || null,
+    ai_selected_scientific_name: selectedPrediction?.scientificName || null,
+    ai_selected_probability: _detailAiPredictionProbability(selectedPrediction),
+    ai_selected_at: new Date().toISOString(),
+  }
+}
+
+async function _persistDetailAiSelection(selectionState = {}) {
+  if (!currentObs?.id || !state.user?.id || !currentObsIsOwner) return null
+
+  const patch = _buildDetailAiSelectionPatch(selectionState)
+  if (!patch) return null
+
+  let updatePatch = { ...patch }
+  let { error } = await supabase
+    .from('observations')
+    .update(updatePatch)
+    .eq('id', currentObs.id)
+    .eq('user_id', state.user.id)
+
+  if (error) {
+    const aiFallback = _removeMissingObservationColumnsFromPatch(updatePatch, error, DETAIL_AI_SELECTION_FIELDS)
+    if (aiFallback.removed) {
+      updatePatch = aiFallback.patch
+      if (!Object.keys(updatePatch).length) return null
+      ;({ error } = await supabase
+        .from('observations')
+        .update(updatePatch)
+        .eq('id', currentObs.id)
+        .eq('user_id', state.user.id))
+    }
+  }
+
+  if (error) throw error
+
+  currentObs = {
+    ...currentObs,
+    ...updatePatch,
+  }
+  _renderDetailAiTabs()
+  _renderDetailAiResults()
+  return updatePatch
+}
+
+async function _persistDetailImageCrops() {
+  if (!currentObs?.id || !state.user?.id || !currentObsIsOwner) return
+
+  const settled = await Promise.allSettled(detailImageRows.map(async row => {
+    if (!row?.id) return
+    await updateObservationImageCrop(row.id, {
+      aiCropRect: normalizeAiCropRect({
+        x1: row.ai_crop_x1,
+        y1: row.ai_crop_y1,
+        x2: row.ai_crop_x2,
+        y2: row.ai_crop_y2,
+      }),
+      aiCropSourceW: row.ai_crop_source_w ?? null,
+      aiCropSourceH: row.ai_crop_source_h ?? null,
+    })
+  }))
+  const rejected = settled.find(item => item.status === 'rejected')
+  if (rejected) {
+    console.warn('Failed to persist detail image crops:', rejected.reason)
+  }
 }
 
 export function initFindDetail() {
@@ -1288,14 +1327,9 @@ function _renderDetailAiResults() {
   resultsEl.innerHTML = renderIdentifyResultRows(activeService, result.predictions)
   resultsEl.style.display = 'block'
   const selectedPrediction = detailAiState.selectedPrediction
-  const selectedPredictionByService = detailAiState.selectedPredictionByService?.[activeService] || null
   resultsEl.querySelectorAll('[data-identify-result]').forEach(el => {
     const prediction = JSON.parse(el.dataset.identifyResult)
-    const isSelected = Boolean(
-      _detailAiPredictionMatchesObservation(prediction, currentObs)
-      || _detailAiPredictionsEquivalent(prediction, selectedPrediction)
-      || _detailAiPredictionsEquivalent(prediction, selectedPredictionByService)
-    )
+    const isSelected = Boolean(_detailAiPredictionsEquivalent(prediction, selectedPrediction))
     el.classList.toggle('is-selected', isSelected)
     if (isSelected) {
       el.setAttribute('aria-current', 'true')
@@ -1458,10 +1492,6 @@ async function _runDetailAiComparison(serviceOverride = null) {
   }
   if (detailAiState.running) return
 
-  const serviceFingerprints = {
-    [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
-    [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
-  }
   const identifyInputs = await prepareDetailIdentifyInputs(galleryImgs, { variant: 'original', maxEdge: getArtsorakelMaxEdge() })
   const usableBlobs = identifyInputs
     .filter(item => item?.blob instanceof Blob)
@@ -1514,12 +1544,6 @@ async function _runDetailAiComparison(serviceOverride = null) {
     countryName: lookup?.country_name || null,
     locale: resolution.locale,
   })
-  detailAiState.currentFingerprintByService = Object.fromEntries(
-    Object.entries(serviceFingerprints).map(([service, fp]) => [service, fp.requestFingerprint]),
-  )
-  detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL] || ''
-  detailAiState.requestedFingerprintByService = { ...detailAiState.currentFingerprintByService }
-  detailAiState.requestedFingerprint = detailAiState.currentFingerprint
   detailAiState.running = true
   detailAiState.stale = false
   detailAiState.availability = availability
@@ -1545,6 +1569,17 @@ async function _runDetailAiComparison(serviceOverride = null) {
   }
 
   try {
+    await _persistDetailImageCrops()
+    const serviceFingerprints = {
+      [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
+      [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
+    }
+    detailAiState.currentFingerprintByService = Object.fromEntries(
+      Object.entries(serviceFingerprints).map(([service, fp]) => [service, fp.requestFingerprint]),
+    )
+    detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL] || ''
+    detailAiState.requestedFingerprintByService = { ...detailAiState.currentFingerprintByService }
+    detailAiState.requestedFingerprint = detailAiState.currentFingerprint
     const tasks = requestedServices.map(service => {
       const serviceAvailability = availability[service]
       if (!serviceAvailability?.available) {
@@ -1610,9 +1645,16 @@ async function _runDetailAiComparison(serviceOverride = null) {
     }
     detailAiState.activeService = primaryService
     detailAiState.stale = false
+    const selectionState = _detailAiSelectionStateFromResults(detailAiState.resultsByService, currentObs)
+    detailAiState.selectedService = selectionState.selectedService
+    detailAiState.selectedPrediction = selectionState.selectedPrediction
+    detailAiState.selectedPredictionByService = selectionState.selectedPredictionByService
+    detailAiState.selectedProbabilityByService = selectionState.selectedProbabilityByService
+    _renderDetailAiTabs()
+    _renderDetailAiResults()
 
     if (!_isDetailAiNoSaveEnabled()) {
-      await Promise.allSettled(requestedServices.map(service => {
+      const saveTasks = requestedServices.map(service => {
         const result = detailAiState.resultsByService?.[service]
         if (!currentObs?.id || !state.user?.id || !result?.service || result.status === 'idle') {
           return Promise.resolve(null)
@@ -1631,7 +1673,14 @@ async function _runDetailAiComparison(serviceOverride = null) {
           errorMessage: result.errorMessage || null,
           topPrediction: result.topPrediction || null,
         })
-      }))
+      })
+      if (selectionState.selectedPrediction) {
+        saveTasks.push(_persistDetailAiSelection(selectionState).catch(error => {
+          console.warn('Failed to persist detail AI selection:', error)
+          return null
+        }))
+      }
+      await Promise.allSettled(saveTasks)
     }
   } catch (error) {
     console.error('Identification detail error:', error)
@@ -2333,11 +2382,7 @@ async function _save() {
 
   if (error) {
     const aiFallback = _removeMissingObservationColumnsFromPatch(updatePatch, error, [
-      'ai_selected_service',
-      'ai_selected_taxon_id',
-      'ai_selected_scientific_name',
-      'ai_selected_probability',
-      'ai_selected_at',
+      ...DETAIL_AI_SELECTION_FIELDS,
     ])
     if (aiFallback.removed) {
       updatePatch = aiFallback.patch

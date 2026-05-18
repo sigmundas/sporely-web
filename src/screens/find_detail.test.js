@@ -72,12 +72,32 @@ function makeTab(service, active = false) {
 }
 
 function makeResultsEl() {
+  const items = []
   return {
     innerHTML: '',
     style: {},
     dataset: {},
-    querySelectorAll() {
+    querySelectorAll(selector) {
+      if (selector === '[data-identify-result]') return items
       return []
+    },
+    _items: items,
+  }
+}
+
+function makeIdentifyResultItem(prediction) {
+  return {
+    dataset: {
+      identifyResult: JSON.stringify(prediction),
+    },
+    classList: new MockClassList(),
+    attributes: {},
+    addEventListener() {},
+    setAttribute(name, value) {
+      this.attributes[name] = String(value)
+    },
+    removeAttribute(name) {
+      delete this.attributes[name]
     },
   }
 }
@@ -252,6 +272,56 @@ test('selected AI service keeps its own probability and source highlight', () =>
     assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '41%')
   } finally {
     restore()
+  }
+})
+
+test('detail AI results only highlight an explicit selected species', () => {
+  resetDetailState()
+
+  const first = { scientificName: 'Amanita muscaria', probability: 0.91 }
+  const second = { scientificName: 'Amanita rubescens', probability: 0.74 }
+
+  const firstResultsEl = makeResultsEl()
+  firstResultsEl._items.push(makeIdentifyResultItem(first), makeIdentifyResultItem(second))
+  const firstRestore = withDocument({ resultsEl: firstResultsEl })
+
+  try {
+    detailAiState.activeService = 'artsorakel'
+    detailAiState.resultsByService = {
+      artsorakel: {
+        service: 'artsorakel',
+        status: 'success',
+        predictions: [first, second],
+      },
+    }
+    detailAiState.selectedService = null
+    detailAiState.selectedPrediction = null
+    detailAiState.selectedPredictionByService = {}
+
+    _renderDetailAiResults()
+
+    assert.equal(firstResultsEl._items[0].classList.contains('is-selected'), false)
+    assert.equal(firstResultsEl._items[1].classList.contains('is-selected'), false)
+  } finally {
+    firstRestore()
+  }
+
+  const secondResultsEl = makeResultsEl()
+  secondResultsEl._items.push(makeIdentifyResultItem(first), makeIdentifyResultItem(second))
+  const secondRestore = withDocument({ resultsEl: secondResultsEl })
+
+  try {
+    detailAiState.selectedService = 'artsorakel'
+    detailAiState.selectedPrediction = second
+    detailAiState.selectedPredictionByService = { artsorakel: second }
+
+    _renderDetailAiResults()
+
+    assert.equal(secondResultsEl._items[0].classList.contains('is-selected'), false)
+    assert.equal(secondResultsEl._items[1].classList.contains('is-selected'), true)
+    assert.equal(secondResultsEl._items[1].attributes['aria-current'], 'true')
+  } finally {
+    secondRestore()
   }
 })
 
