@@ -18,6 +18,8 @@ export function startGeo() {
       const gpsDisplay = document.getElementById('gps-display')
       if (gpsDisplay) gpsDisplay.textContent = `${lat}° N, ${lon}° E`
 
+      window.dispatchEvent(new CustomEvent('sporely:gps-updated', { detail: state.gps }))
+
       if (state.reviewContext?.source !== 'import') {
         const reviewCoords = document.getElementById('review-coords-text')
         if (reviewCoords)

@@ -10,8 +10,10 @@ import { esc as _esc } from '../esc.js'
 
 let map          = null
 let markerLayer  = null
+let locationLayer = null
 const _mapData   = { mine: [], friends: [], feed: [], public: [] }   // cached for re-filtering
 const OBSERVATION_SCOPES = new Set(['mine', 'feed', 'friends', 'public'])
+const MAP_TIME_SCOPES = new Set(['all', 'day', 'week', 'month'])
 const MAP_SELECT = 'id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain, location_precision'
 const MAP_SELECT_LEGACY = 'id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain'
 
@@ -24,11 +26,123 @@ function _currentScope() {
   return _normalizeScope(state.observationScope)
 }
 
+function _normalizeTimeScope(scope) {
+  return MAP_TIME_SCOPES.has(scope) ? scope : 'month'
+}
+
+function _currentTimeScope() {
+  return _normalizeTimeScope(state.mapTimeScope)
+}
+
 function _syncMapScopeBtns() {
   const currentScope = _currentScope()
   document.querySelectorAll('.map-scope-btn').forEach(btn => {
     btn.classList.toggle('active', _normalizeScope(btn.dataset.scope) === currentScope)
   })
+}
+
+function _syncMapTimeBtns() {
+  const currentTimeScope = _currentTimeScope()
+  document.querySelectorAll('.map-time-btn').forEach(btn => {
+    btn.classList.toggle('active', _normalizeTimeScope(btn.dataset.time) === currentTimeScope)
+  })
+}
+
+function _timeFilterCutoff() {
+  const now = Date.now()
+  switch (_currentTimeScope()) {
+    case 'all':
+      return null
+    case 'day':
+      return new Date(now - 24 * 60 * 60 * 1000)
+    case 'week':
+      return new Date(now - 7 * 24 * 60 * 60 * 1000)
+    case 'month':
+      return new Date(now - 30 * 24 * 60 * 60 * 1000)
+    default:
+      return null
+  }
+}
+
+function _applyTimeFilter(query) {
+  const cutoff = _timeFilterCutoff()
+  return cutoff ? query.gte('date', _dateOnlyString(cutoff)) : query
+}
+
+function _dateOnlyString(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function _hasValidLocation() {
+  return Number.isFinite(state.gps?.lat) && Number.isFinite(state.gps?.lon)
+}
+
+function _syncLocationBtn() {
+  const btn = document.getElementById('map-locate-btn')
+  if (!btn) return
+  const label = t('detail.currentLocation')
+  btn.setAttribute('aria-label', label)
+  btn.title = label
+  btn.disabled = !_hasValidLocation()
+}
+
+function _currentLocationBounds() {
+  if (!_hasValidLocation()) return null
+
+  const lat = state.gps.lat
+  const lon = state.gps.lon
+  const latDelta = 1_000 / 111_320
+  const lonDelta = 1_000 / (111_320 * Math.max(0.2, Math.cos(lat * Math.PI / 180)))
+  return L.latLngBounds(
+    [lat - latDelta, lon - lonDelta],
+    [lat + latDelta, lon + lonDelta],
+  )
+}
+
+function _centerOnCurrentLocation() {
+  const bounds = _currentLocationBounds()
+  if (!bounds || !map) return
+  map.fitBounds(bounds, { padding: [24, 24], maxZoom: 15 })
+}
+
+function _renderCurrentLocation() {
+  if (!locationLayer) return
+  locationLayer.clearLayers()
+  _syncLocationBtn()
+  if (!_hasValidLocation()) return
+
+  const { lat, lon, accuracy } = state.gps
+  const icon = L.divIcon({
+    className: '',
+    html: `
+      <div class="map-location-marker">
+        <span class="map-location-marker__halo" aria-hidden="true"></span>
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.18 7 13 7 13s7-7.82 7-13c0-3.87-3.13-7-7-7Zm0 9.25A2.25 2.25 0 1 1 12 6.75a2.25 2.25 0 0 1 0 4.5Z" fill="currentColor"/>
+        </svg>
+      </div>
+    `,
+    iconSize: [34, 34],
+    iconAnchor: [17, 31],
+    popupAnchor: [0, -18],
+  })
+
+  L.marker([lat, lon], { icon, interactive: false }).addTo(locationLayer)
+
+  if (Number.isFinite(accuracy) && accuracy > 0) {
+    L.circle([lat, lon], {
+      radius: accuracy,
+      className: 'map-location-accuracy',
+      color: '#8fc8ff',
+      fillColor: '#8fc8ff',
+      fillOpacity: 0.12,
+      opacity: 0.4,
+      weight: 1,
+    }).addTo(locationLayer)
+  }
 }
 
 async function _withLocationPrecisionFallback(makeQuery) {
@@ -50,13 +164,25 @@ export function initMap() {
   }).addTo(map)
 
   markerLayer = L.layerGroup().addTo(map)
+  locationLayer = L.layerGroup().addTo(map)
   map.setView([62.5, 15], 5)
+
+  document.getElementById('map-locate-btn')?.addEventListener('click', _centerOnCurrentLocation)
+  window.addEventListener('sporely:gps-updated', _renderCurrentLocation)
 
   // Scope toggle
   document.querySelectorAll('.map-scope-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       state.observationScope = _normalizeScope(btn.dataset.scope)
       _syncMapScopeBtns()
+      loadMap()
+    })
+  })
+
+  document.querySelectorAll('.map-time-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.mapTimeScope = _normalizeTimeScope(btn.dataset.time)
+      _syncMapTimeBtns()
       loadMap()
     })
   })
@@ -114,6 +240,8 @@ export async function loadMap() {
   if (!state.user) return
   const currentScope = _currentScope()
   _syncMapScopeBtns()
+  _syncMapTimeBtns()
+  _syncLocationBtn()
 
   // Pre-fill search from shared state
   const searchInput = document.getElementById('map-search-input')
@@ -129,42 +257,42 @@ export async function loadMap() {
   document.querySelectorAll('.map-scope-btn[data-scope="public"]').forEach(el => el.textContent = t('scope.community'))
 
   if (currentScope === 'mine') {
-    const { data } = await _withLocationPrecisionFallback(columns => supabase
+    const { data } = await _withLocationPrecisionFallback(columns => _applyTimeFilter(supabase
       .from('observations')
       .select(columns)
       .eq('user_id', state.user.id)
       .not('gps_latitude', 'is', null)
-      .not('gps_longitude', 'is', null))
+      .not('gps_longitude', 'is', null)))
     _mapData.mine    = data || []
     _mapData.friends = []
     _mapData.feed    = []
     _mapData.public  = []
 
   } else if (currentScope === 'friends') {
-    const { data } = await _withLocationPrecisionFallback(columns => supabase
+    const { data } = await _withLocationPrecisionFallback(columns => _applyTimeFilter(supabase
       .from('observations_friend_view')
       .select(columns)
       .neq('user_id', state.user.id)
       .not('gps_latitude', 'is', null)
-      .not('gps_longitude', 'is', null))
+      .not('gps_longitude', 'is', null)))
     _mapData.mine    = []
     _mapData.friends = data || []
     _mapData.feed    = []
     _mapData.public  = []
 
   } else if (currentScope === 'feed') {
-    const { data } = await _withLocationPrecisionFallback(columns => supabase
+    const { data } = await _withLocationPrecisionFallback(columns => _applyTimeFilter(supabase
       .from('observations_follow_view')
       .select(columns)
       .not('gps_latitude', 'is', null)
-      .not('gps_longitude', 'is', null))
+      .not('gps_longitude', 'is', null)))
     _mapData.feed = data || []
   } else if (currentScope === 'public') {
-    const { data } = await _withLocationPrecisionFallback(columns => supabase
+    const { data } = await _withLocationPrecisionFallback(columns => _applyTimeFilter(supabase
       .from('observations_community_view')
       .select(columns)
       .not('gps_latitude', 'is', null)
-      .not('gps_longitude', 'is', null))
+      .not('gps_longitude', 'is', null)))
     _mapData.public = data || []
   } else {
     _mapData.mine    = []
@@ -233,12 +361,16 @@ function _applyMapFilter() {
   const data = _mapData[currentScope] || []
   const filtered = q ? data.filter(o => _matchesMap(o, q)) : data
   _addMarkers(filtered)
+  _renderCurrentLocation()
 
   // Fit bounds
   const allLayers = []
   markerLayer.eachLayer(l => allLayers.push(l))
   if (!allLayers.length) {
-    if (state.gps) map.setView([state.gps.lat, state.gps.lon], 13)
+    const bounds = _currentLocationBounds()
+    if (bounds) {
+      map.fitBounds(bounds, { padding: [24, 24], maxZoom: 15 })
+    }
     return
   }
   const latlngs = allLayers.map(l => l.getLatLng())

@@ -18,6 +18,7 @@ export const state = {
   cloudPlan: null,
   searchQuery: '',
   observationScope: 'mine',
+  mapTimeScope: 'month',
   findsView: 'cards',
   findsGroupBySpecies: false,
   findsSporesOnly: false,

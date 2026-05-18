@@ -48,6 +48,12 @@ Sporely resolves place names through Nominatim first so it can reliably capture 
 
 For Norway and Denmark, the lookup flow adds a country-specific local source ahead of the Nominatim suggestions. Norway prefers Artsdatabanken when the returned point is close enough; Denmark prefers DAWA-style address labels. The UI keeps the first suggestion as the auto-fill value, exposes the full suggestion list on focus, and stores the resolved lookup alongside the observation or import session so the same place name can be reused for multi-photo observations.
 
+## Map Current Location
+The map shows the device's current GPS position as a dedicated Leaflet pin with an accuracy ring. A locate button recenters the map to an approximate 2x2 km view around `state.gps`, and the pin updates whenever `startGeo()` emits a GPS update.
+
+## Map Time Filter
+The map scope now has a second row of buttons for `All`, `Past 24h`, `Past week`, and `Past month`. It filters observations by the observation `date` field on the server before rendering the pins, and `Past month` is the default selection.
+
 ## Capture & Import Flow
 - **Capture:** `capturePhoto()` returns `{ blobPromise, gps, ts, aiCropRect }`. `saveObservationBatch()` waits for all blob promises before enqueueing to IndexedDB.
 - **Import:** Uses NativePhotoPicker (Android EXIF/GPS via temp files) or browser native picker. Sorts and groups images by capture time. Generates reduced AI blobs up front. Location metadata is separated from blobs.

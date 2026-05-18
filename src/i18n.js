@@ -201,6 +201,9 @@ const messages = {
     'map.filter': 'Filter map…',
     'map.clear': 'Clear',
     'map.viewDetails': 'View details →',
+    'map.past24h': 'Past 24h',
+    'map.pastWeek': 'Past week',
+    'map.pastMonth': 'Past month',
     'scope.mine': 'Mine',
     'scope.feed': 'Feed',
     'scope.friends': 'Friends',
@@ -567,6 +570,9 @@ const messages = {
     'map.filter': 'Filtrer kart…',
     'map.clear': 'Tøm',
     'map.viewDetails': 'Vis detaljer →',
+    'map.past24h': 'Siste 24 t',
+    'map.pastWeek': 'Siste uke',
+    'map.pastMonth': 'Siste måned',
     'scope.mine': 'Mine',
     'scope.feed': 'Feed',
     'scope.friends': 'Venner',
@@ -920,6 +926,9 @@ const messages = {
     'map.filter': 'Filtrera karta…',
     'map.clear': 'Rensa',
     'map.viewDetails': 'Visa detaljer →',
+    'map.past24h': 'Senaste 24 h',
+    'map.pastWeek': 'Senaste vecka',
+    'map.pastMonth': 'Senaste månad',
     'scope.mine': 'Mina',
     'scope.feed': 'Flöde',
     'scope.friends': 'Vänner',
@@ -1273,6 +1282,9 @@ const messages = {
     'map.filter': 'Karte filtern…',
     'map.clear': 'Leeren',
     'map.viewDetails': 'Details anzeigen →',
+    'map.past24h': 'Letzte 24 Std.',
+    'map.pastWeek': 'Letzte Woche',
+    'map.pastMonth': 'Letzter Monat',
     'scope.mine': 'Meine',
     'scope.feed': 'Feed',
     'scope.friends': 'Freunde',
@@ -1732,6 +1744,7 @@ export function applyStaticTranslations() {
   setText('#nav-map .nav-label', 'nav.map')
   setText('#nav-profile .nav-label', 'nav.profile')
   setAllText('#screen-map .map-scope-btn', [t('scope.mine'), t('scope.feed'), t('scope.friends'), t('scope.community')])
+  setAllText('#screen-map .map-time-btn', [t('scope.all'), t('map.past24h'), t('map.pastWeek'), t('map.pastMonth')])
 
   setText('.settings-title', 'settings.title')
   setText('#settings-appearance-label', 'settings.appearance')

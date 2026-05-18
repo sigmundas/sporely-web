@@ -10,8 +10,7 @@
 
 
 
-## UI fixes, major
-- Add a time based filter on the map page: A row of buttons, same as the Friends filter, with Past 24h, Past week, Past month.
+## UI fixes, map
 - Add a legend drop-down to the map page. Selection: Genus, Month, User. this will show a legend with colors, corresponding the the dots on the map. 
 
 
