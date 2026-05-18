@@ -19,6 +19,7 @@ import android.os.Bundle;
 import android.util.Size;
 import android.util.SizeF;
 import android.view.Gravity;
+import android.view.OrientationEventListener;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
@@ -113,6 +114,8 @@ public class NativeCameraActivity extends AppCompatActivity {
     private boolean isNightModeEnabled = false;
     private TextView nightModeToggle;
     private FrameLayout.LayoutParams nightModeParams;
+    private OrientationEventListener orientationListener;
+    private int captureRotation = Surface.ROTATION_0;
     private final Runnable hideFocusRingRunnable = () -> {
         if (focusRing != null) focusRing.setVisibility(View.GONE);
     };
@@ -121,6 +124,13 @@ public class NativeCameraActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         captureLocation = parseLocation(getIntent().getStringExtra(EXTRA_GPS_JSON));
+        captureRotation = getDisplayRotation();
+        orientationListener = new OrientationEventListener(this) {
+            @Override
+            public void onOrientationChanged(int orientation) {
+                updateCaptureRotation(orientation);
+            }
+        };
         buildLayout();
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
@@ -134,6 +144,22 @@ public class NativeCameraActivity extends AppCompatActivity {
         } else {
             ActivityCompat.requestPermissions(this, new String[] { Manifest.permission.CAMERA }, REQUEST_CAMERA_PERMISSION);
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (orientationListener != null && orientationListener.canDetectOrientation()) {
+            orientationListener.enable();
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        if (orientationListener != null) {
+            orientationListener.disable();
+        }
+        super.onPause();
     }
 
     @Override
@@ -478,7 +504,7 @@ public class NativeCameraActivity extends AppCompatActivity {
             .setResolutionSelector(captureResolutionSelector)
             .setOutputFormat(outputFormat)
             .setJpegQuality(jpegQuality)
-            .setTargetRotation(getDisplayRotation());
+            .setTargetRotation(getCaptureRotation());
 
         if (finalPhysicalCameraId != null) {
             new Camera2Interop.Extender<>(previewBuilder).setPhysicalCameraId(finalPhysicalCameraId);
@@ -487,6 +513,7 @@ public class NativeCameraActivity extends AppCompatActivity {
 
         Preview preview = previewBuilder.build();
         imageCapture = captureBuilder.build();
+        imageCapture.setTargetRotation(getCaptureRotation());
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
         camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
     }
@@ -515,6 +542,26 @@ public class NativeCameraActivity extends AppCompatActivity {
             return getDisplay() != null ? getDisplay().getRotation() : Surface.ROTATION_0;
         }
         return getWindowManager().getDefaultDisplay().getRotation();
+    }
+
+    private int getCaptureRotation() {
+        return captureRotation;
+    }
+
+    private void updateCaptureRotation(int orientationDegrees) {
+        if (orientationDegrees == OrientationEventListener.ORIENTATION_UNKNOWN) return;
+        int nextRotation = orientationDegrees >= 315 || orientationDegrees < 45
+            ? Surface.ROTATION_0
+            : orientationDegrees < 135
+                ? Surface.ROTATION_90
+                : orientationDegrees < 225
+                    ? Surface.ROTATION_180
+                    : Surface.ROTATION_270;
+        if (captureRotation == nextRotation) return;
+        captureRotation = nextRotation;
+        if (imageCapture != null) {
+            imageCapture.setTargetRotation(captureRotation);
+        }
     }
 
     private SelectedCamera selectBackMainCamera(ProcessCameraProvider provider) {
@@ -586,6 +633,7 @@ public class NativeCameraActivity extends AppCompatActivity {
 
     private void capturePhoto() {
         if (imageCapture == null) return;
+        imageCapture.setTargetRotation(getCaptureRotation());
 
         long now = System.currentTimeMillis();
         if (now - lastCaptureTime < 450) return; // Prevent rapid double-bounce captures

@@ -40,8 +40,8 @@
 - **Edge cases:** Handles unconfirmed accounts, already registered, and expired OTPs natively by offering "Check inbox" + resend links.
 
 ## Camera Behaviors
-- **Native (Android / CameraX):** Capacitor hook for 12MP captures. Retains EXIF/GPS securely without canvas stripping. Supports Android 14+ Ultra HDR (`JPEG_R`).
-- **Web (`getUserMedia` / PWA):** Video stream mapped to HTML `<canvas>` (~2MP limit). Browsers strip EXIF/GPS from canvas blobs, so the app manually compensates via `navigator.geolocation` during capture.
+- **Native (Android / CameraX):** Active only when running the installed Android app via Capacitor. Uses native CameraX capture paths, the best available lens when possible, and true original-resolution photos around 12 MP. Retains EXIF orientation and GPS securely without canvas stripping. Supports legacy OEM HDR extensions and Android 14+ Ultra HDR (`JPEG_R`).
+- **Web (`getUserMedia` / PWA):** Used in mobile browsers and installed PWAs. Streams video into HTML `<canvas>`, which is typically constrained by browser capture limits and yields lower image quality than native capture. Browsers strip EXIF/GPS from canvas blobs, so the app compensates with `navigator.geolocation` during capture. The UI warns Android web users to install the native app when camera quality or metadata fidelity matters.
 
 ## Capture & Import Flow
 - **Capture:** `capturePhoto()` returns `{ blobPromise, gps, ts, aiCropRect }`. `saveObservationBatch()` waits for all blob promises before enqueueing to IndexedDB.

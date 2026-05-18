@@ -71,6 +71,12 @@ let _syncFeedbackBound = false
 let _appBootstrapped = false
 let _authStateSubscription = null
 
+function _lockPortraitOrientation() {
+  const lock = globalThis.screen?.orientation?.lock
+  if (typeof lock !== 'function') return
+  lock.call(globalThis.screen.orientation, 'portrait').catch(() => {})
+}
+
 function initSyncFeedback() {
   if (_syncFeedbackBound) return
   _syncFeedbackBound = true
@@ -576,6 +582,8 @@ async function init() {
   }
 
   await initializeInaturalistOAuth()
+  _lockPortraitOrientation()
+  document.addEventListener('pointerdown', _lockPortraitOrientation, { once: true, passive: true })
 
   if (getPlatform() !== 'android') {
     await _handleInaturalistOAuthReturn(window.location.href)

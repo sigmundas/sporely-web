@@ -3,23 +3,9 @@
 ## Phase 7 - Transparency, Social Trails, and Privacy Slots
 
 - [ ] Verify disposable-account RLS paths for owner, accepted friend, stranger, blocked user, banned profile, and privacy slot limit.
-- [ ] Reconcile Supabase migration history after the partially applied `20260516165528_add_observation_identifications.sql` migration. If `schema_migrations` already contains the version, run `supabase migration repair --status applied 20260516165528` before retrying `supabase db push`.
-
-## Camera Behavior Summary (Sporely Cam vs Web Cam)
-
-**Sporely Cam (Native Android / CameraX)**
-- **Availability:** Active only when running the installed Android app (via Capacitor).
-- **Hardware & Quality:** Direct access to native CameraX APIs. Utilizes the best available lens (e.g., 1x lens) and captures at true, high-resolution original quality (e.g., 12 MP). Supports legacy OEM HDR extensions and modern Android 14+ Ultra HDR (JPEG_R format).
-- **Metadata:** Natively preserves full EXIF orientation and accurate GPS location data seamlessly during capture.
-
-**Web Cam (HTML5 `getUserMedia` / PWA)**
-- **Availability:** Used when accessing `app.sporely.no` from a mobile browser (Safari/Chrome) or installed as a PWA.
-- **Hardware & Quality:** Captures frames from a `<video>` stream painted to an HTML `<canvas>`. Output resolution is artificially constrained by browser WebRTC stream limits, typically resulting in lower image quality than native captures.
-- **Metadata:** Mobile browsers aggressively strip EXIF data (like GPS coordinates) from browser-based captures to protect privacy.
-- **UI Handling:** The app displays an `android-web-camera-warning-overlay` and `exif-warning-overlay` to advise Android web users of this limitation, recommending they install the native Sporely app for proper location handling and image quality.
 
 ## UI fixes, minor
-- Lock screen rotation for the app in general - camera should still record orientation
+- [x] Lock screen rotation for the app in general - camera should still record orientation
 - Make a distinct draft/obscured/private banner that is as wide as the screen. Place this just above the thumbnail view in edit-observations. So if an observation is obscured, draft or private, make a tag in this banner for each condition that is true. Remove those other Draft and obscured tags that are now in the upper left corner.
 - edit observation - Location group: replace this box with the same box called Location data on the review screen (after taking a single photo)
 - remove the Workflow box, with the Draft toggle. Put the Draft toggle in the Sharing box.
