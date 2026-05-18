@@ -118,6 +118,12 @@ Important:
     - Keeping only lightweight metadata and downscaled `aiBlob` URLs in the active memory array (`sourceItems`).
     - Avoiding the massive memory spike caused by `Promise.all(files.map(f => f.arrayBuffer()))` in `import-store.js`.
     - *Note on Platforms (PWA vs APK):* This bottleneck is most severe for iPhone users running the app as a PWA (Safari), where per-tab memory limits are very strict (crashing often around 150-300MB). Android users on the native Capacitor APK have a higher WebView memory ceiling (often 500MB+ on modern devices like the S25) and benefit from native HEIC-to-JPEG conversion, but they will still eventually crash on huge imports until this streaming fix is implemented.
+- [ ] **Import / Review Refactor Track** — Split the shared import/review logic into smaller, reusable boundaries before more behavior drifts:
+    - Centralize EXIF coercion and coordinate math in `src/utils/geo-utils.js`, then remove the duplicated `_isUsableCoordinate`, `_coerceExifDate`, `_coerceExifNumber`, and `_toDecimalDegrees` helpers from `review.js`, `import_review.js`, and `import-helpers.js`.
+    - Extend `image-worker.js` so it handles initial metadata extraction and preview generation, not just upload resize work, and remove the `exifr` dependency from the import main thread path.
+    - Move the import `sessions` array into `state.js` as dedicated import state so navigation and global reset paths clear it predictably instead of relying on local shadow state.
+    - Add a single `createDefaultObservation()` factory that both `review.js` and `import_review.js` use so draft defaults like visibility, `is_draft`, and `location_precision` stay identical.
+    - Audit import hydration and blob URL disposal for delete/navigation races so pending metadata promises do not resurrect removed sessions or leave stale object URLs behind.
 
 ## Upload Debug Log
 *Goal: keep a running, dated log of cross-platform photo import, upload, queue, thumbnail, and Artsorakel behavior so regressions are easier to track.*
