@@ -15,7 +15,9 @@
 
 
 ## Code Review & Refactoring
-*Review this code with a strict refactor/audit mindset. Do not praise. Look for concrete problems only.*
+
+# Image Processing Pipeline Refactor Plan
+
 
 ### 2026-04-30 Camera Settings Review Findings
 - [x] Settings can show `Native Cam` selected while browser/PWA users are actually routed to `Sporely Cam` - current UI no longer exposes the native selector outside the Android app, and the home card uses `getEffectiveCameraLabel()`.
