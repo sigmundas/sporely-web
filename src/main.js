@@ -545,9 +545,7 @@ onLocaleChange(() => {
 })
 
 async function init() {
-  if (isDebugDashboardEnabled()) {
-    initDebugDashboard()
-  }
+  initDebugDashboard()
 
   await initializeInaturalistOAuth()
   _lockPortraitOrientation()

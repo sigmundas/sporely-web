@@ -27,6 +27,14 @@ function _isEnabled() {
   return isDebugDashboardEnabled()
 }
 
+function _teardownDashboardUi() {
+  _dashboardRoot?.remove()
+  _dashboardRoot = null
+  _launcherRoot?.remove()
+  _launcherRoot = null
+  _dashboardVisible = false
+}
+
 function _ensureNamespace() {
   if (!globalThis.__sporelyAiDebug || typeof globalThis.__sporelyAiDebug !== 'object') {
     globalThis.__sporelyAiDebug = {}
@@ -489,7 +497,7 @@ function _ensureTimers() {
           initDebugDashboard()
         }
       } else if (_launcherRoot?.isConnected || _dashboardRoot?.isConnected) {
-        destroyDebugDashboard()
+        _teardownDashboardUi()
       }
     }, MONITOR_MS)
   }
@@ -716,18 +724,14 @@ export function destroyDebugDashboard() {
     clearInterval(_monitorTimer)
     _monitorTimer = null
   }
-  _dashboardRoot?.remove()
-  _dashboardRoot = null
-  _launcherRoot?.remove()
-  _launcherRoot = null
-  _dashboardVisible = false
+  _teardownDashboardUi()
 }
 
 export function initDebugDashboard() {
   _ensureTimers()
 
   if (!_isEnabled()) {
-    destroyDebugDashboard()
+    _teardownDashboardUi()
     return null
   }
 

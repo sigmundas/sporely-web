@@ -141,19 +141,18 @@ function _normalizePersonRow(row) {
 }
 
 export function buildPeopleCard(person) {
-   let dbAvatarUrl = person.avatar_url || null;
-   if (dbAvatarUrl && !dbAvatarUrl.startsWith('http')) {
-     dbAvatarUrl = supabase.storage.from('avatars').getPublicUrl(dbAvatarUrl).data.publicUrl;
-   }
-   const guessedAvatarUrl = supabase.storage.from('avatars').getPublicUrl(`${person.user_id}/avatar.jpg`).data.publicUrl;
-   const avatarUrl = dbAvatarUrl || guessedAvatarUrl;
+   const avatarUrl = typeof person.avatar_url === 'string' && /^https?:\/\//i.test(person.avatar_url)
+     ? person.avatar_url
+     : ''
 
    const displayName = person.display_name && person.display_name.trim() ? person.display_name : null
    const username = person.username && person.username.trim() ? person.username : null
    const primaryName = displayName || (username ? `@${username}` : t('common.unknown'))
    const initials = _esc(_initials(displayName || username))
    const bio = String(person.bio || '').trim()
-   const avatarHtml = `<img class="people-card-avatar-img" src="${_esc(avatarUrl)}" alt="" data-fallback-initials="${initials}" data-guessed-url="${_esc(guessedAvatarUrl)}">`
+   const avatarHtml = avatarUrl
+     ? `<img class="people-card-avatar-img" src="${_esc(avatarUrl)}" alt="" data-fallback-initials="${initials}" data-guessed-url="">`
+     : `<div class="people-card-avatar-fallback">${initials}</div>`
 
    return `<article class="people-card" data-user-id="${_esc(person.user_id)}" data-username="${_esc(username || '')}" data-avatar-url="${_esc(avatarUrl)}" data-display-name="${_esc(person.display_name || '')}" data-bio="${_esc(person.bio || '')}" data-finds="${Number(person.finds) || 0}" data-species="${Number(person.species) || 0}" data-spores="${Number(person.spores) || 0}">
       <div class="people-card-head">
@@ -187,11 +186,6 @@ function _buildCount(labelKey, value, actionId) {
 export function wireAvatarFallback(root) {
   root.querySelectorAll('.people-card-avatar-img[data-fallback-initials]').forEach(img => {
     const handleError = () => {
-      if (!img.dataset.triedGuessed && img.dataset.guessedUrl && img.src !== img.dataset.guessedUrl) {
-        img.dataset.triedGuessed = 'true'
-        img.src = img.dataset.guessedUrl
-        return
-      }
       const initials = img.dataset.fallbackInitials || '?'
       img.replaceWith(_createAvatarFallback(initials))
     }

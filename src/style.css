@@ -1197,7 +1197,7 @@ html, body {
 }
 /* Map scope bar (now inside overlay-top, static positioning) */
 .map-scope-bar {
-  display: flex; gap: 4px;
+  display: flex; align-items: center; gap: 4px;
   background: rgba(13,17,9,0.88); backdrop-filter: blur(8px);
   border: 1px solid var(--border); border-radius: 22px; padding: 4px;
   pointer-events: auto;
@@ -1216,6 +1216,27 @@ html, body {
   background: rgba(13,17,9,0.88); backdrop-filter: blur(8px);
   border: 1px solid var(--border); border-radius: 22px; padding: 4px;
   pointer-events: auto;
+}
+.map-locate-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  border: 1px solid rgba(126, 200, 122, 0.35);
+  background: rgba(13, 17, 9, 0.9);
+  color: var(--green-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(10px);
+}
+.map-locate-btn:disabled {
+  opacity: 0.45;
+  color: var(--text-dim);
+  cursor: default;
 }
 
 /* Friend-colored map pin */
@@ -1919,30 +1940,13 @@ html, body {
 /* ── MAP SCREEN ── */
 #screen-map { padding: 0; overflow: hidden; }
 #map-container { width: 100%; height: 100%; }
-#screen-map .screen-map-locate {
+#screen-map .map-locate-btn {
   position: absolute;
-  right: 18px;
-  bottom: calc(var(--nav-h) + var(--safe-bottom) + 86px);
+  left: 18px;
+  bottom: calc(var(--nav-h) + var(--safe-bottom) + 28px);
   z-index: 2000;
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-  border: 1px solid rgba(126, 200, 122, 0.35);
-  background: rgba(13, 17, 9, 0.9);
-  color: var(--green-accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32);
-  backdrop-filter: blur(10px);
-  cursor: pointer;
   pointer-events: auto;
   transform: translateZ(0);
-}
-#screen-map .screen-map-locate:disabled {
-  opacity: 0.45;
-  color: var(--text-dim);
-  cursor: default;
 }
 #screen-map .screen-fab {
   position: absolute;
@@ -3687,6 +3691,17 @@ html.light .map-profile-btn {
 /* Map search light mode */
 html.light .map-search-row,
 html.light .map-scope-bar { background: rgba(255,255,255,0.92); }
+html.light .map-time-bar { background: rgba(255,255,255,0.92); }
+html.light .map-time-btn.active { color: #ffffff; }
+html.light .map-locate-btn {
+  background: rgba(255,255,255,0.92);
+  border-color: rgba(45,75,50,0.18);
+  color: var(--green-deep);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+html.light .map-locate-btn:disabled {
+  color: var(--text-dim);
+}
 
 /* Search bar light mode */
 html.light .finds-search-inner { background: #f0f4f0; }
