@@ -423,6 +423,7 @@ function capturePhoto() {
       aiCropRect: null,
       aiCropSourceW: 800,
       aiCropSourceH: 600,
+      aiCropIsCustom: false,
     })
   } else {
     const previewW = video.videoWidth
@@ -441,6 +442,7 @@ function capturePhoto() {
       aiCropRect: getDefaultAiCropRect(previewW, previewH),
       aiCropSourceW: previewW,
       aiCropSourceH: previewH,
+      aiCropIsCustom: false,
     }
 
     _setPendingCaptureDelta(1)
@@ -450,6 +452,7 @@ function capturePhoto() {
         photo.aiCropRect = getDefaultAiCropRect(dimensions.width, dimensions.height)
         photo.aiCropSourceW = dimensions.width
         photo.aiCropSourceH = dimensions.height
+        photo.aiCropIsCustom = false
       }
       return blob
     }).finally(() => _setPendingCaptureDelta(-1))

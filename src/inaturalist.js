@@ -1,6 +1,7 @@
 import { Preferences } from '@capacitor/preferences'
 import { SocialLogin } from '@capgo/capacitor-social-login'
 import { getPlatform } from './platform.js'
+import { recordDebugJsonResponse } from './debug-activity.js'
 
 export const INAT_WEB_CLIENT_ID = import.meta.env?.VITE_INAT_WEB_CLIENT_ID || 'CMLiS0BuLpF0-izU9hHTb-j_44SY3A4dhAoTB-uf5_0'
 export const INAT_WEB_REDIRECT_URI = import.meta.env?.VITE_INAT_WEB_REDIRECT_URI || 'https://app.sporely.no/auth/inaturalist/callback'
@@ -267,6 +268,14 @@ async function _fetchJson(fetchImpl, url, options = {}) {
   const { label, ...fetchOptions } = options || {}
   const response = await fetchImpl(url, fetchOptions)
   const payload = await _responseBody(response)
+  recordDebugJsonResponse({
+    source: 'inaturalist',
+    label: label || String(url),
+    endpoint: String(url),
+    status: response.status,
+    ok: response.ok,
+    body: payload,
+  })
   if (!response.ok) {
     throw new Error(_httpErrorMessage(label || url, response, payload))
   }
@@ -445,6 +454,14 @@ async function _fetchUserProfileWithOauthAccessToken(accessToken, fetchImpl = _d
     },
   })
   const payload = await _responseBody(response)
+  recordDebugJsonResponse({
+    source: 'inaturalist',
+    label: INAT_USER_PROFILE_URL,
+    endpoint: INAT_USER_PROFILE_URL,
+    status: response.status,
+    ok: response.ok,
+    body: payload,
+  })
   _debugInatOAuth('profile fetch completed', {
     url: INAT_USER_PROFILE_URL,
     status: response.status,
@@ -469,6 +486,14 @@ export async function fetchInaturalistProfileWithApiToken(apiToken, fetchImpl = 
     },
   })
   const payload = await _responseBody(response)
+  recordDebugJsonResponse({
+    source: 'inaturalist',
+    label: INAT_USER_PROFILE_URL,
+    endpoint: INAT_USER_PROFILE_URL,
+    status: response.status,
+    ok: response.ok,
+    body: payload,
+  })
   _debugInatOAuth('profile fetch with api token completed', {
     url: INAT_USER_PROFILE_URL,
     status: response.status,
@@ -493,6 +518,14 @@ export async function fetchInaturalistApiToken(accessToken, fetchImpl = _default
     },
   })
   const payload = await _responseBody(response)
+  recordDebugJsonResponse({
+    source: 'inaturalist',
+    label: INAT_API_TOKEN_URL,
+    endpoint: INAT_API_TOKEN_URL,
+    status: response.status,
+    ok: response.ok,
+    body: payload,
+  })
   _debugInatOAuth('api token fetch completed', {
     url: INAT_API_TOKEN_URL,
     status: response.status,

@@ -117,7 +117,7 @@ Acceptance checks:
 
 ### Acceptance blocker: restore stronger EXIF/GPS fallback behavior
 
-Status: [ ] Not fixed
+Status: [x]  fixed
 
 The import screen now delegates EXIF/GPS handling to `src/screens/import-helpers.js`, but the deleted local helper block had stronger HEIC/HEIF and GPS fallback behavior than the shared helper.
 

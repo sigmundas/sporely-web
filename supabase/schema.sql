@@ -944,6 +944,7 @@ CREATE TABLE IF NOT EXISTS "public"."observation_images" (
     "ai_crop_y2" double precision,
     "ai_crop_source_w" integer,
     "ai_crop_source_h" integer,
+    "ai_crop_is_custom" boolean DEFAULT false,
     "crop_mode" "text",
     "scale_bar_x1" double precision,
     "scale_bar_y1" double precision,
@@ -2451,7 +2452,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
 
 
 

@@ -7,6 +7,7 @@ import {
   getDefaultAiCropRect,
   getViewportStateFromCropRect,
   normalizeAiCropRect,
+  normalizeAiCropIsCustom,
 } from './image_crop.js'
 import { t } from './i18n.js'
 
@@ -38,6 +39,13 @@ let dragStartX = 0
 let dragStartY = 0
 let dragStartOffsetX = 0
 let dragStartOffsetY = 0
+let currentCropIsCustom = false
+let currentCropWasReset = false
+
+function _markCurrentCropCustom() {
+  currentCropIsCustom = true
+  currentCropWasReset = false
+}
 
 function _applyImageTransform() {
   if (!imageEl || !viewportEl || !imageWidth || !imageHeight) return
@@ -72,6 +80,10 @@ function _constrainOffsets() {
 function _commitCurrentCrop() {
   if (!session?.images?.[currentIndex] || !imageWidth || !imageHeight) return
 
+  if (!currentCropWasReset) {
+    currentCropIsCustom = true
+  }
+
   const rect = getCropRectFromViewport({
     imageWidth,
     imageHeight,
@@ -83,11 +95,18 @@ function _commitCurrentCrop() {
     offsetY,
   })
 
-  session.onChange?.(currentIndex, {
+  const nextMeta = {
     aiCropRect: rect,
     aiCropSourceW: imageWidth,
     aiCropSourceH: imageHeight,
-  })
+    aiCropIsCustom: normalizeAiCropIsCustom(currentCropIsCustom),
+  }
+  session.images[currentIndex] = {
+    ...session.images[currentIndex],
+    ...nextMeta,
+  }
+
+  session.onChange?.(currentIndex, nextMeta)
 }
 
 function _syncChrome() {
@@ -102,6 +121,8 @@ function _syncChrome() {
 function _resetCurrentCrop() {
   if (!imageWidth || !imageHeight) return
 
+  currentCropIsCustom = false
+  currentCropWasReset = true
   const rect = getDefaultAiCropRect(imageWidth, imageHeight, {
     aspectRatio: AI_CROP_ASPECT_RATIO,
   })
@@ -122,6 +143,8 @@ function _loadCurrentImage() {
   if (!session?.images?.length) return
 
   const item = session.images[currentIndex]
+  currentCropIsCustom = normalizeAiCropIsCustom(item?.aiCropIsCustom)
+  currentCropWasReset = false
   imageWidth = 0
   imageHeight = 0
   imageEl.style.width = '0px'
@@ -149,15 +172,20 @@ function _dist(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y)
 }
 
-function _close(commit) {
+async function _close(commit) {
   if (commit) _commitCurrentCrop()
   if (!overlay) return
+  const onClose = session?.onClose
   overlay.style.display = 'none'
   document.body.style.overflow = ''
   imageEl.removeAttribute('src')
-  session?.onClose?.(commit)
   session = null
   pointers.clear()
+  try {
+    await Promise.resolve(onClose?.(commit))
+  } catch (error) {
+    console.warn('AI crop editor onClose failed:', error)
+  }
 }
 
 export function initAiCropEditor() {
@@ -200,6 +228,7 @@ export function initAiCropEditor() {
       pinchStartDistance = _dist(pts[0], pts[1])
       pinchStartZoom = zoom
     }
+    _markCurrentCropCustom()
   })
 
   viewportEl.addEventListener('pointermove', event => {
@@ -216,6 +245,7 @@ export function initAiCropEditor() {
       zoom = Math.max(1, Math.min(8, pinchStartZoom * (nextDistance / pinchStartDistance)))
     }
 
+    _markCurrentCropCustom()
     _constrainOffsets()
     _applyImageTransform()
   })
@@ -239,6 +269,7 @@ export function initAiCropEditor() {
     if (!session) return
     event.preventDefault()
     zoom = Math.max(1, Math.min(8, zoom * (event.deltaY < 0 ? 1.08 : 0.92)))
+    _markCurrentCropCustom()
     _constrainOffsets()
     _applyImageTransform()
   }, { passive: false })

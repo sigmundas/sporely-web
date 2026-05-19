@@ -1,9 +1,11 @@
 import { loadInaturalistSession, loadInatPendingState } from './inaturalist.js'
+import { clearDebugNamespace, ensureDebugNamespace, isDebugDashboardEnabled, revokeDebugObjectUrl } from './debug-activity.js'
+
+export { isDebugDashboardEnabled } from './debug-activity.js'
 
 const DASH_ID = 'sporely-debug-dash'
 const LAUNCHER_ID = 'sporely-debug-dash-launcher'
 const STYLE_ID = 'sporely-debug-dash-style'
-const DASHBOARD_FLAG_KEY = 'sporely-debug-dashboard'
 const REFRESH_MS = 2000
 const MONITOR_MS = 1000
 
@@ -14,14 +16,6 @@ let _launcherRoot = null
 let _dashboardVisible = false
 let _rendering = false
 let _rerenderRequested = false
-
-export function isDebugDashboardEnabled() {
-  try {
-    return globalThis.localStorage?.getItem(DASHBOARD_FLAG_KEY) === 'true'
-  } catch (_) {
-    return false
-  }
-}
 
 function _isEnabled() {
   return isDebugDashboardEnabled()
@@ -36,16 +30,7 @@ function _teardownDashboardUi() {
 }
 
 function _ensureNamespace() {
-  if (!globalThis.__sporelyAiDebug || typeof globalThis.__sporelyAiDebug !== 'object') {
-    globalThis.__sporelyAiDebug = {}
-  }
-  if (!Array.isArray(globalThis.__sporelyAiDebug.inat)) {
-    globalThis.__sporelyAiDebug.inat = []
-  }
-  if (!Array.isArray(globalThis.__sporelyAiDebug.artsorakel)) {
-    globalThis.__sporelyAiDebug.artsorakel = []
-  }
-  return globalThis.__sporelyAiDebug
+  return ensureDebugNamespace()
 }
 
 function _ensureStyles() {
@@ -311,6 +296,9 @@ function _snapshotMetaText(snapshot) {
     const compact = { ...metadata }
     delete compact.objectUrl
     delete compact.imageSrc
+    delete compact.debugPreviewUrl
+    delete compact.previewUrl
+    delete compact.sourceUrl
     return JSON.stringify(compact, null, 2)
   } catch (_) {
     return '{}'
@@ -318,11 +306,27 @@ function _snapshotMetaText(snapshot) {
 }
 
 function _snapshotImageUrl(snapshot) {
+  const debugPreviewUrl = String(snapshot?.debugPreviewUrl || snapshot?.previewUrl || snapshot?.sourceUrl || '').trim()
+  if (debugPreviewUrl) return debugPreviewUrl
   const imageSrc = String(snapshot?.imageSrc || '').trim()
   if (imageSrc) return imageSrc
+  const imagePreviewUrl = String(snapshot?.images?.[0]?.debugPreviewUrl || snapshot?.images?.[0]?.previewUrl || snapshot?.images?.[0]?.sourceUrl || '').trim()
+  if (imagePreviewUrl) return imagePreviewUrl
   const objectUrl = String(snapshot?.images?.[0]?.objectUrl || '').trim()
   if (objectUrl) return objectUrl
   return ''
+}
+
+function _shortJson(value, limit = 2400) {
+  try {
+    const text = typeof value === 'string'
+      ? value
+      : JSON.stringify(value, null, 2)
+    if (!text) return ''
+    return text.length > limit ? `${text.slice(0, limit - 1)}…` : text
+  } catch (_) {
+    return ''
+  }
 }
 
 function _makeKvRow(label, value, tone = '') {
@@ -449,12 +453,75 @@ function _makeSnapshotSection(title, snapshots, emptyMessage) {
   return block
 }
 
+function _makeTextEntryCard(entry, label, bodyText, tone = '') {
+  const card = document.createElement('article')
+  card.className = 'dbg-card'
+
+  const meta = document.createElement('div')
+  meta.className = 'dbg-card-meta'
+
+  const timeLine = document.createElement('div')
+  timeLine.textContent = _formatDate(entry.timestamp)
+
+  const labelLine = document.createElement('div')
+  labelLine.style.fontWeight = '700'
+  labelLine.style.color = tone === 'warn'
+    ? 'rgba(255, 213, 125, 0.96)'
+    : tone === 'bad'
+      ? 'rgba(255, 157, 157, 0.96)'
+      : 'rgba(233, 255, 237, 0.96)'
+  labelLine.textContent = label
+
+  const pre = document.createElement('pre')
+  pre.textContent = bodyText || ''
+
+  meta.append(timeLine, labelLine, pre)
+  card.append(meta)
+  return card
+}
+
+function _makeLogSection(title, entries, emptyMessage, entryToCard) {
+  const block = document.createElement('section')
+  block.className = 'dbg-block'
+
+  const head = document.createElement('div')
+  head.className = 'dbg-block-title'
+
+  const label = document.createElement('span')
+  label.textContent = title
+
+  const count = document.createElement('span')
+  count.textContent = `${entries.length}`
+  count.style.color = 'rgba(219, 255, 225, 0.65)'
+
+  head.append(label, count)
+  block.appendChild(head)
+
+  if (!entries.length) {
+    const empty = document.createElement('div')
+    empty.className = 'dbg-empty'
+    empty.textContent = emptyMessage
+    block.appendChild(empty)
+    return block
+  }
+
+  const grid = document.createElement('div')
+  grid.className = 'dbg-grid'
+  for (const entry of entries.slice(0, 20)) {
+    grid.appendChild(entryToCard(entry))
+  }
+  block.appendChild(grid)
+  return block
+}
+
 function _clearStoreEntries(store) {
   if (!Array.isArray(store)) return
   for (const snapshot of store) {
     try {
-      if (snapshot?.imageSrc) {
-        globalThis.URL?.revokeObjectURL?.(snapshot.imageSrc)
+      revokeDebugObjectUrl(snapshot?.imageSrc || snapshot?.debugPreviewUrl || snapshot?.previewUrl || snapshot?.sourceUrl || '')
+      revokeDebugObjectUrl(snapshot?.images?.[0]?.objectUrl || snapshot?.images?.[0]?.debugPreviewUrl || '')
+      for (const image of snapshot?.images || []) {
+        revokeDebugObjectUrl(image?.objectUrl || image?.debugPreviewUrl || '')
       }
     } catch (_) {}
   }
@@ -577,6 +644,8 @@ async function _renderInto(root) {
     const debug = _ensureNamespace()
     const inatSnapshots = Array.isArray(debug.inat) ? debug.inat : []
     const artsSnapshots = Array.isArray(debug.artsorakel) ? debug.artsorakel : []
+    const imageEvents = Array.isArray(debug.images) ? debug.images : []
+    const jsonResponses = Array.isArray(debug.jsonResponses) ? debug.jsonResponses : []
     const now = Date.now()
 
     const hasApiToken = !!String(session?.api_token || session?.apiToken || '').trim()
@@ -653,6 +722,23 @@ async function _renderInto(root) {
 
     body.append(
       tokenBlock,
+      _makeLogSection(
+        'Image pipeline events',
+        imageEvents,
+        'No image pipeline events yet.',
+        entry => _makeTextEntryCard(entry, entry.message || 'image event', _shortJson(entry.details)),
+      ),
+      _makeLogSection(
+        'Latest JSON responses',
+        jsonResponses,
+        'No JSON responses yet.',
+        entry => _makeTextEntryCard(
+          entry,
+          `${entry.label || entry.endpoint || 'json response'}${Number.isFinite(Number(entry.status)) ? ` • ${entry.status}` : ''}`,
+          _shortJson(entry.body || entry.responseBody || entry.payload || entry.data),
+          entry.ok === false ? 'bad' : '',
+        ),
+      ),
       _makeSnapshotSection('Latest iNat snapshots', inatSnapshots, 'No iNat snapshots yet.'),
       _makeSnapshotSection('Latest Artsorakel snapshots', artsSnapshots, 'No Artsorakel snapshots yet.'),
     )
@@ -668,8 +754,7 @@ async function _renderInto(root) {
 
     refreshBtn.addEventListener('click', () => void _renderInto(root))
     clearBtn.addEventListener('click', () => {
-      _clearStoreEntries(debug.inat)
-      _clearStoreEntries(debug.artsorakel)
+      clearDebugNamespace()
       void _renderInto(root)
     })
     closeBtn.addEventListener('click', () => hideDebugDashboard())

@@ -1,3 +1,5 @@
+import { recordDebugJsonResponse } from './debug-activity.js'
+
 const LOCATION_LOOKUP_BASE_URL = String(
   import.meta.env?.VITE_LOCATION_LOOKUP_BASE_URL || import.meta.env?.VITE_MEDIA_UPLOAD_BASE_URL || ''
 ).replace(/\/+$/, '')
@@ -82,13 +84,8 @@ async function lookupInternationalLocation(latitude, longitude, options = {}) {
       url.searchParams.set('lat', String(latitude))
       url.searchParams.set('lon', String(longitude))
       url.searchParams.set('prefer', 'international')
-      const response = await fetch(url, {
-        signal: options.signal,
-        headers: { Accept: 'application/json' },
-      })
-      if (response.ok) {
-        return normalizeLocationLookupResult(await response.json(), latitude, longitude)
-      }
+      const payload = await fetchJson(url, options)
+      return normalizeLocationLookupResult(payload, latitude, longitude)
     } catch (error) {
       if (error?.name === 'AbortError') throw error
     }
@@ -216,8 +213,17 @@ async function fetchJson(url, options = {}) {
     signal: options.signal,
     headers: { Accept: 'application/json' },
   })
+  const payload = await response.json().catch(() => null)
+  recordDebugJsonResponse({
+    source: 'location-lookup',
+    label: String(url),
+    endpoint: String(url),
+    status: response.status,
+    ok: response.ok,
+    body: payload,
+  })
   if (!response.ok) throw new Error(`Location lookup failed: ${response.status}`)
-  return response.json()
+  return payload
 }
 
 function delay(ms) {

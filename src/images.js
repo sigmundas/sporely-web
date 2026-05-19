@@ -555,6 +555,32 @@ function _isMissingColumnError(error, columnName) {
     && (text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find'))
 }
 
+function _shouldWarnAiCropFallback() {
+  try {
+    return Boolean(import.meta.env?.DEV)
+      || globalThis.localStorage?.getItem('sporely-debug-dashboard') === 'true'
+      || globalThis.localStorage?.getItem('sporely-debug-image-pipeline') === 'true'
+      || globalThis.localStorage?.getItem('sporely-debug-ai-id') === 'true'
+      || globalThis.localStorage?.getItem('sporely-debug-artsorakel') === 'true'
+      || globalThis.localStorage?.getItem('sporely-debug-inaturalist') === 'true'
+  } catch (_) {
+    return Boolean(import.meta.env?.DEV)
+  }
+}
+
+function _warnMissingAiCropCustomFallback(action, error, details = {}) {
+  if (!_shouldWarnAiCropFallback()) return
+  console.warn(`[${action}] observation_images.ai_crop_is_custom missing; saving crop without custom flag`, {
+    ...details,
+    error: {
+      code: error?.code || null,
+      message: error?.message || '',
+      details: error?.details || '',
+      hint: error?.hint || '',
+    },
+  })
+}
+
 export async function deleteObservationMedia(paths) {
   const normalized = [...new Set((paths || [])
     .map(normalizeMediaKey)
@@ -616,6 +642,7 @@ export async function insertObservationImage(observationImage) {
   const cropRect = normalizeAiCropRect(observationImage?.aiCropRect)
   const cropSourceW = observationImage?.aiCropSourceW ?? null
   const cropSourceH = observationImage?.aiCropSourceH ?? null
+  const aiCropIsCustom = observationImage?.aiCropIsCustom === true
   const basePayload = {
     observation_id: observationImage?.observation_id,
     user_id: observationImage?.user_id,
@@ -632,6 +659,7 @@ export async function insertObservationImage(observationImage) {
     ai_crop_y2: cropRect?.y2 ?? null,
     ai_crop_source_w: cropSourceW,
     ai_crop_source_h: cropSourceH,
+    ai_crop_is_custom: aiCropIsCustom,
   }
   const payloadWithUploadMeta = {
     ...payloadWithCrop,
@@ -656,6 +684,7 @@ export async function insertObservationImage(observationImage) {
     'ai_crop_y2',
     'ai_crop_source_w',
     'ai_crop_source_h',
+    'ai_crop_is_custom',
   ]
 
   const uploadFieldMissing = UPLOAD_METADATA_FIELDS.some(field => _isMissingColumnError(error, field))
@@ -664,7 +693,21 @@ export async function insertObservationImage(observationImage) {
       .from('observation_images')
       .insert(payloadWithCrop)
     if (!retryError) return false
-    if (!cropFieldNames.some(field => _isMissingColumnError(retryError, field))) {
+    if (_isMissingColumnError(retryError, 'ai_crop_is_custom')) {
+      _warnMissingAiCropCustomFallback('insertObservationImage', retryError, {
+        observationId: basePayload.observation_id ?? null,
+        storagePath: basePayload.storage_path || '',
+      })
+      const payloadWithoutCustom = { ...payloadWithCrop }
+      delete payloadWithoutCustom.ai_crop_is_custom
+      const { error: cropRetryError } = await supabase
+        .from('observation_images')
+        .insert(payloadWithoutCustom)
+      if (!cropRetryError) return false
+      if (!cropFieldNames.filter(field => field !== 'ai_crop_is_custom').some(field => _isMissingColumnError(cropRetryError, field))) {
+        throw cropRetryError
+      }
+    } else if (!cropFieldNames.filter(field => field !== 'ai_crop_is_custom').some(field => _isMissingColumnError(retryError, field))) {
       throw retryError
     }
     const { error: fallbackError } = await supabase
@@ -674,7 +717,28 @@ export async function insertObservationImage(observationImage) {
     return false
   }
 
-  if (!cropFieldNames.some(field => _isMissingColumnError(error, field))) {
+  if (_isMissingColumnError(error, 'ai_crop_is_custom')) {
+    _warnMissingAiCropCustomFallback('insertObservationImage', error, {
+      observationId: basePayload.observation_id ?? null,
+      storagePath: basePayload.storage_path || '',
+    })
+    const payloadWithoutCustom = { ...payloadWithCrop }
+    delete payloadWithoutCustom.ai_crop_is_custom
+    const { error: retryError } = await supabase
+      .from('observation_images')
+      .insert(payloadWithoutCustom)
+    if (!retryError) return false
+    if (!cropFieldNames.filter(field => field !== 'ai_crop_is_custom').some(field => _isMissingColumnError(retryError, field))) {
+      throw retryError
+    }
+    const { error: fallbackError } = await supabase
+      .from('observation_images')
+      .insert(basePayload)
+    if (fallbackError) throw fallbackError
+    return false
+  }
+
+  if (!cropFieldNames.filter(field => field !== 'ai_crop_is_custom').some(field => _isMissingColumnError(error, field))) {
     throw error
   }
 
@@ -687,22 +751,63 @@ export async function insertObservationImage(observationImage) {
 }
 
 export async function updateObservationImageCrop(imageId, cropData) {
-  if (!imageId) return
+  if (!imageId) return false
   const cropRect = normalizeAiCropRect(cropData?.aiCropRect)
+  const aiCropIsCustom = cropData?.aiCropIsCustom === true
+  const payload = {
+    ai_crop_x1: cropRect?.x1 ?? null,
+    ai_crop_y1: cropRect?.y1 ?? null,
+    ai_crop_x2: cropRect?.x2 ?? null,
+    ai_crop_y2: cropRect?.y2 ?? null,
+    ai_crop_source_w: cropData?.aiCropSourceW ?? null,
+    ai_crop_source_h: cropData?.aiCropSourceH ?? null,
+    ai_crop_is_custom: aiCropIsCustom,
+  }
   const { error } = await supabase
     .from('observation_images')
-    .update({
+    .update(payload)
+    .eq('id', imageId)
+  if (!error) return true
+  if (_isMissingColumnError(error, 'ai_crop_is_custom')) {
+    _warnMissingAiCropCustomFallback('updateObservationImageCrop', error, {
+      imageId,
+    })
+    const retryPayload = {
       ai_crop_x1: cropRect?.x1 ?? null,
       ai_crop_y1: cropRect?.y1 ?? null,
       ai_crop_x2: cropRect?.x2 ?? null,
       ai_crop_y2: cropRect?.y2 ?? null,
       ai_crop_source_w: cropData?.aiCropSourceW ?? null,
       ai_crop_source_h: cropData?.aiCropSourceH ?? null,
+    }
+    const { error: retryError } = await supabase
+      .from('observation_images')
+      .update(retryPayload)
+      .eq('id', imageId)
+    if (!retryError) return true
+    console.warn('updateObservationImageCrop fallback failed:', {
+      imageId,
+      error: {
+        code: retryError?.code || null,
+        message: retryError?.message || '',
+        details: retryError?.details || '',
+        hint: retryError?.hint || '',
+      },
     })
-    .eq('id', imageId)
-  if (error && !_isMissingColumnError(error, 'ai_crop_x1')) {
-    console.warn('updateObservationImageCrop failed:', error)
+    throw retryError
   }
+  if (error && !_isMissingColumnError(error, 'ai_crop_x1')) {
+    console.warn('updateObservationImageCrop failed:', {
+      imageId,
+      error: {
+        code: error?.code || null,
+        message: error?.message || '',
+        details: error?.details || '',
+        hint: error?.hint || '',
+      },
+    })
+  }
+  throw error
 }
 
 export async function syncObservationMediaKeys(observationId, storagePath, options = {}) {

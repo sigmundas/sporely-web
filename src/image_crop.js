@@ -86,6 +86,14 @@ export function hasAiCropRect(rect) {
   return !!normalizeAiCropRect(rect)
 }
 
+export function normalizeAiCropIsCustom(value) {
+  return value === true
+}
+
+export function shouldShowAiCropOverlay(rect, isCustom) {
+  return normalizeAiCropIsCustom(isCustom) && hasAiCropRect(rect)
+}
+
 function _getSquareCropBounds(sourceWidth, sourceHeight, rect = null) {
   const width = Number(sourceWidth)
   const height = Number(sourceHeight)
@@ -445,6 +453,7 @@ export async function createImageCropMeta(blob, options = {}) {
     ),
     aiCropSourceW: width,
     aiCropSourceH: height,
+    aiCropIsCustom: normalizeAiCropIsCustom(options.aiCropIsCustom),
   }
 }
 

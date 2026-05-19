@@ -8,13 +8,14 @@ import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
-import { createImageCropMeta, hasAiCropRect } from '../image_crop.js';
+import { shouldShowAiCropOverlay } from '../image_crop.js';
+import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js';
 import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js';
 import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
 import { loadInaturalistSession } from '../inaturalist.js';
-import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile, shouldWarnAboutDesktopBrowserHeicImport } from './import-helpers.js';
+import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
 import { debugImagePipeline } from '../image-pipeline-debug.js';
 import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
 import {
@@ -242,6 +243,7 @@ function _sessionAiInputs(session) {
     cropRect: session.imageMeta?.[index]?.aiCropRect || null,
     cropSourceW: session.imageMeta?.[index]?.aiCropSourceW ?? null,
     cropSourceH: session.imageMeta?.[index]?.aiCropSourceH ?? null,
+    debugPreviewUrl: _sessionDebugPreviewUrl(session, index),
     lat: isUsableCoordinate(Number(session.photoGps?.[index]?.lat), Number(session.photoGps?.[index]?.lon))
       ? Number(session.photoGps[index].lat)
       : (Number.isFinite(Number(session.gpsLat)) ? Number(session.gpsLat) : null),
@@ -537,6 +539,7 @@ async function _runSessionAiService(sid, service, options = {}) {
         lat: item.lat ?? null,
         lon: item.lon ?? null,
         observedOn: item.observedOn ?? null,
+        debugPreviewUrl: item.debugPreviewUrl || '',
       })),
       svc,
       getTaxonomyLanguage(),
@@ -807,7 +810,21 @@ function _syncPhotoGapDisplays(value = getPhotoGapMinutes()) {
 function _disposeSessionBlobUrls(items = sessions) {
   (items || []).forEach(session => {
     (session?.blobUrls || []).forEach(url => URL.revokeObjectURL(url));
+    (session?.debugPreviewUrls || []).forEach(url => revokeDebugObjectUrl(url));
+    if (Array.isArray(session?.debugPreviewUrls)) session.debugPreviewUrls.length = 0;
   });
+}
+
+function _sessionDebugPreviewUrl(session, index) {
+  if (!shouldCaptureDebugPreviewUrls() || !session) return ''
+  if (!Array.isArray(session.debugPreviewUrls)) session.debugPreviewUrls = []
+  const existing = session.debugPreviewUrls[index]
+  if (existing) return existing
+  const sourceBlob = isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : session.files?.[index]
+  if (!isBlob(sourceBlob) || typeof URL?.createObjectURL !== 'function') return ''
+  const url = URL.createObjectURL(sourceBlob)
+  session.debugPreviewUrls[index] = url
+  return url
 }
 
 function _groupSourceItems(items, gapMs) {
@@ -895,6 +912,7 @@ function _flattenSourceItemsFromSessions(savedSessions) {
         aiCropRect: null,
         aiCropSourceW: null,
         aiCropSourceH: null,
+        aiCropIsCustom: false,
       },
       metadataPromise: session.metadataPromises?.[index] || null,
       captureTime: session.photoTimes?.[index] || session.ts?.getTime?.() || Date.now(),
@@ -915,6 +933,7 @@ function _ensureSessionImageMeta(session) {
       aiCropRect: null,
       aiCropSourceW: null,
       aiCropSourceH: null,
+      aiCropIsCustom: false,
     });
   }
   return session.imageMeta;
@@ -1050,7 +1069,7 @@ function _applyImportPhotoGapChange(value) {
   _buildSessionsFromSourceItems();
   if (sessions.length === 1) {
     const session = sessions[0];
-    session.blobUrls.forEach(url => URL.revokeObjectURL(url));
+    _disposeSessionBlobUrls([session]);
     sessions = [];
     expandedSessionIds = new Set();
     sourceItems = [];
@@ -1081,6 +1100,7 @@ function _cancelImport() {
 
 // Restore a previously-saved import session (app was killed mid-review)
 export function restoreImportSessions(savedSessions) {
+  _disposeSessionBlobUrls()
   sessions = savedSessions;
   sourceItems = _flattenSourceItemsFromSessions(savedSessions);
   expandedSessionIds = new Set(savedSessions.map(session => session.id));
@@ -1296,7 +1316,7 @@ async function handleSelectedFiles(files, options = {}) {
   // Single group → open the same Review screen as camera capture.
   if (sessions.length === 1) {
     const session = sessions[0];
-    session.blobUrls.forEach(url => URL.revokeObjectURL(url));
+    _disposeSessionBlobUrls([session]);
     sessions = [];
     expandedSessionIds = new Set();
     sourceItems = [];
@@ -1313,21 +1333,7 @@ async function handleSelectedFiles(files, options = {}) {
 }
 
 function _filterUnsupportedBrowserFiles(files, nativePhotos = []) {
-  const supportedFiles = [];
-  const supportedNativePhotos = [];
-  let warned = false;
-  for (let idx = 0; idx < files.length; idx++) {
-    const file = files[idx];
-    const nativePhoto = nativePhotos[idx];
-    if (shouldWarnAboutDesktopBrowserHeicImport(file)) {
-      warned = true;
-      continue;
-    }
-    supportedFiles.push(file);
-    if (nativePhoto) supportedNativePhotos.push(nativePhoto);
-  }
-  if (warned) showToast(t('import.heicBrowserUnsupported'));
-  return { files: supportedFiles, nativePhotos: supportedNativePhotos };
+  return { files, nativePhotos };
 }
 
 // ── Progress overlay ─────────────────────────────────────────────────────────
@@ -1556,7 +1562,6 @@ function buildCardHTML(session) {
   const photoCount = session.files.length;
   const imageMeta = _ensureSessionImageMeta(session);
   const normalized = _ensureSessionAiState(session);
-  const croppedCount = imageMeta.filter(meta => hasAiCropRect(meta?.aiCropRect)).length;
   const speciesText = session.taxon
     ? escHtml(session.uncertain ? `? ${session.taxon.displayName.replace(/^\?\s*/, '')}` : session.taxon.displayName.replace(/^\?\s*/, ''))
     : `<span style="opacity:0.45">${t('detail.unknownSpecies')}</span>`;
@@ -1578,7 +1583,7 @@ function buildCardHTML(session) {
   const stripItems = session.blobUrls.map((url, i) =>
     `<div class="import-strip-item" data-sid="${sid}" data-idx="${i}">
       <img src="${escHtml(url)}" class="import-strip-thumb" loading="lazy">
-      ${hasAiCropRect(imageMeta[i]?.aiCropRect) ? '<div class="ai-crop-thumb-badge">AI crop</div>' : ''}
+      ${shouldShowAiCropOverlay(imageMeta[i]?.aiCropRect, imageMeta[i]?.aiCropIsCustom) ? '<div class="ai-crop-thumb-badge">AI crop</div>' : ''}
       <button class="import-strip-delete" data-sid="${sid}" data-idx="${i}">×</button>
     </div>`
   ).join('') + `
@@ -1891,6 +1896,7 @@ function _openSessionCropEditor(session, startIndex = 0) {
     images: session.blobUrls.map((url, index) => ({
       url,
       aiCropRect: imageMeta[index]?.aiCropRect || null,
+      aiCropIsCustom: imageMeta[index]?.aiCropIsCustom === true,
     })),
     onChange: (index, nextMeta) => {
       imageMeta[index] = {
@@ -1962,6 +1968,7 @@ async function saveAll() {
         aiCropRect: session.imageMeta[index]?.aiCropRect || null,
         aiCropSourceW: session.imageMeta[index]?.aiCropSourceW ?? null,
         aiCropSourceH: session.imageMeta[index]?.aiCropSourceH ?? null,
+        aiCropIsCustom: session.imageMeta[index]?.aiCropIsCustom === true,
       })));
       savedCount++;
       _setProgress(i + 1, activeSessions.length, t('import.processing'));
@@ -1972,6 +1979,7 @@ async function saveAll() {
   }
 
   allBlobUrls.forEach(url => URL.revokeObjectURL(url));
+  _disposeSessionBlobUrls()
   sessions = [];
   expandedSessionIds = new Set();
   sourceItems = [];

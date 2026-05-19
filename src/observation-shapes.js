@@ -21,6 +21,7 @@
  * @property {Object|null} aiCropRect
  * @property {number|null} aiCropSourceW
  * @property {number|null} aiCropSourceH
+ * @property {boolean|null} aiCropIsCustom
  * @property {Object|null} uploadMeta
  * @property {{ thumb: Blob }|null} variants
  */
@@ -40,6 +41,7 @@
  * @property {Object|null} aiCropRect
  * @property {number|null} aiCropSourceW
  * @property {number|null} aiCropSourceH
+ * @property {boolean|null} aiCropIsCustom
  * @property {Object|null} taxon
  */
 

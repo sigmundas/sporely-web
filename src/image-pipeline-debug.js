@@ -1,3 +1,5 @@
+import { recordDebugImageEvent } from './debug-activity.js'
+
 const IMAGE_PIPELINE_DEBUG_KEY = 'sporely-debug-image-pipeline'
 
 export function isImagePipelineDebugEnabled() {
@@ -10,6 +12,7 @@ export function isImagePipelineDebugEnabled() {
 }
 
 export function debugImagePipeline(message, details = {}) {
+  recordDebugImageEvent(message, details)
   if (!isImagePipelineDebugEnabled()) return
   console.debug(`[image-pipeline] ${message}`, details)
 }

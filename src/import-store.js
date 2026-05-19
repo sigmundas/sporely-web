@@ -67,6 +67,7 @@ export async function saveImportSessions(sessions) {
         aiCropRect: meta?.aiCropRect || null,
         aiCropSourceW: meta?.aiCropSourceW ?? null,
         aiCropSourceH: meta?.aiCropSourceH ?? null,
+        aiCropIsCustom: meta?.aiCropIsCustom === true,
       })),
       sourceItemIds: [...(s.sourceItemIds || [])],
       photoTimes: [...(s.photoTimes || [])],
@@ -169,6 +170,7 @@ export async function loadImportSessions() {
             aiCropRect: meta?.aiCropRect || null,
             aiCropSourceW: meta?.aiCropSourceW ?? null,
             aiCropSourceH: meta?.aiCropSourceH ?? null,
+            aiCropIsCustom: meta?.aiCropIsCustom === true,
           })),
         }
       })

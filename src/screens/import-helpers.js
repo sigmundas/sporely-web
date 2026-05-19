@@ -3,7 +3,6 @@ import { FilePicker } from '@capawesome/capacitor-file-picker'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { createImageCropMeta } from '../image_crop.js'
 import { normalizeCoordinatePair } from '../observation-shapes.js'
-import { isPhoneWebApp } from '../platform.js'
 
 export const NativePhotoPicker = registerPlugin('NativePhotoPicker')
 export const NativeCamera = registerPlugin('NativeCamera')
@@ -61,10 +60,6 @@ export async function nativePickedPhotoToFile(photo, index) {
 
 export function isHeicLikeFile(file) {
   return /\.(heic|heif)$/i.test(file?.name || '') || /heic|heif/i.test(file?.type || '')
-}
-
-export function shouldWarnAboutDesktopBrowserHeicImport(file) {
-  return !isPhoneWebApp() && isHeicLikeFile(file)
 }
 
 function normalizeNativeMimeType(mimeType, format) {
@@ -568,14 +563,14 @@ export async function captureExif(file) {
 
 export async function processFile(file, options = {}) {
   if (isAndroidNativeApp() && !!options.nativePhoto && file?.type === 'image/jpeg') {
-    return { blob: file, aiBlob: file, meta: { aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null } }
+    return { blob: file, aiBlob: file, meta: { aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null, aiCropIsCustom: false } }
   }
   try {
     const { blob, aiBlob, metaSource } = await _prepareImportBlobs(file)
     const meta = await createImageCropMeta(metaSource || blob, { preseed: true })
     return { blob, aiBlob, meta }
   } catch (_) {}
-  const meta = await createImageCropMeta(file, { preseed: true }).catch(() => ({ aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null }))
+  const meta = await createImageCropMeta(file, { preseed: true }).catch(() => ({ aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null, aiCropIsCustom: false }))
   return { blob: file, aiBlob: file, meta }
 }
 

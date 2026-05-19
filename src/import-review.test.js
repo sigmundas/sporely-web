@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
 import { buildIdentifyFingerprint } from './ai-identification.js'
+import { shouldShowAiCropOverlay } from './image_crop.js'
 import {
   _ensureSessionAiState,
   _applySessionAiTopPrediction,
@@ -20,6 +21,7 @@ function makeSession() {
       aiCropRect: { x1: 0, y1: 0, x2: 1, y2: 1 },
       aiCropSourceW: 1600,
       aiCropSourceH: 1200,
+      aiCropIsCustom: false,
     }],
     aiPredictions: [],
     aiPredictionsByService: {},
@@ -205,4 +207,10 @@ test('import review source imports the comparison active-service helper', () => 
   assert.match(source, /allowDuringBatch/)
   assert.match(source, /const availabilityList = await getAvailableIdentifyServices/)
   assert.match(source, /sessionAi\.aiAvailability = availability/)
+})
+
+test('ai crop overlays only display for custom crops', () => {
+  const rect = { x1: 0.1, y1: 0.1, x2: 0.9, y2: 0.9 }
+  assert.equal(shouldShowAiCropOverlay(rect, false), false)
+  assert.equal(shouldShowAiCropOverlay(rect, true), true)
 })

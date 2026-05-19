@@ -24,11 +24,12 @@ import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
-import { createImageCropMeta, hasAiCropRect } from '../image_crop.js'
+import { normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
+import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js'
 import { getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
-import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile, shouldWarnAboutDesktopBrowserHeicImport } from './import-helpers.js'
+import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 import { getLocationLookup } from '../location.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
 import {
@@ -54,6 +55,23 @@ const reviewAiState = {
   resultsByService: {},
 }
 
+let reviewThumbCropObserver = null
+let reviewThumbCropFrameUpdates = new WeakMap()
+
+function _clearReviewThumbCropObserver() {
+  reviewThumbCropObserver?.disconnect()
+  reviewThumbCropObserver = null
+  reviewThumbCropFrameUpdates = new WeakMap()
+}
+
+function _disposeReviewDebugPreviewUrls(photos = state.capturedPhotos) {
+  (photos || []).forEach(photo => {
+    if (!photo?._debugPreviewUrl) return
+    revokeDebugObjectUrl(photo._debugPreviewUrl)
+    delete photo._debugPreviewUrl
+  })
+}
+
 function _firstFiniteNumber(...values) {
   for (const value of values) {
     if (value === null || value === undefined || value === '') continue
@@ -61,6 +79,53 @@ function _firstFiniteNumber(...values) {
     if (Number.isFinite(number)) return number
   }
   return null
+}
+
+function _renderReviewThumbCropFrame(item, img, rect) {
+  const normalized = normalizeAiCropRect(rect)
+  if (!item || !img || !normalized) return null
+
+  const frame = document.createElement('div')
+  frame.className = 'ai-crop-frame ai-crop-frame--thumb'
+  frame.setAttribute('aria-hidden', 'true')
+  item.appendChild(frame)
+
+  const update = () => {
+    if (!item.isConnected || !img.isConnected) return
+
+    const itemRect = item.getBoundingClientRect()
+    const imgRect = img.getBoundingClientRect()
+    if (!itemRect.width || !itemRect.height || !imgRect.width || !imgRect.height) return
+
+    const left = imgRect.left - itemRect.left + imgRect.width * normalized.x1
+    const top = imgRect.top - itemRect.top + imgRect.height * normalized.y1
+    const width = imgRect.width * (normalized.x2 - normalized.x1)
+    const height = imgRect.height * (normalized.y2 - normalized.y1)
+
+    frame.style.left = `${left}px`
+    frame.style.top = `${top}px`
+    frame.style.width = `${width}px`
+    frame.style.height = `${height}px`
+  }
+
+  reviewThumbCropFrameUpdates.set(item, update)
+  item.__reviewThumbCropUpdate = update
+  if (typeof ResizeObserver !== 'undefined') {
+    if (!reviewThumbCropObserver) {
+      reviewThumbCropObserver = new ResizeObserver(entries => {
+        for (const entry of entries) {
+          reviewThumbCropFrameUpdates.get(entry.target)?.()
+        }
+      })
+    }
+    reviewThumbCropObserver.observe(item)
+  }
+
+  const scheduleUpdate = () => requestAnimationFrame(update)
+  img.addEventListener('load', scheduleUpdate, { once: true })
+  scheduleUpdate()
+
+  return frame
 }
 
 export function formatCoordinate(value, positive, negative, digits = 5) {
@@ -201,6 +266,7 @@ export function openImportedReview(session) {
     aiCropRect: session?.imageMeta?.[index]?.aiCropRect || null,
     aiCropSourceW: session?.imageMeta?.[index]?.aiCropSourceW ?? null,
     aiCropSourceH: session?.imageMeta?.[index]?.aiCropSourceH ?? null,
+    aiCropIsCustom: session?.imageMeta?.[index]?.aiCropIsCustom === true,
     taxon: taxon ? { ...taxon } : null,
   }))
   state.batchCount = state.capturedPhotos.length
@@ -263,6 +329,7 @@ function _applyImportedReviewGps(reviewGps) {
 }
 
 export function resetReviewAiState() {
+  _clearReviewThumbCropObserver()
   reviewAiState.running = false
   reviewAiState.hasRun = false
   reviewAiState.activeService = null
@@ -465,7 +532,7 @@ export function buildReviewGrid() {
       ? `${tp('counts.photo', 1)} · ${firstTime}`
       : `${tp('counts.photo', count)} · ${firstTime} - ${lastTime}`
 
-    const croppedCount = photos.filter(photo => hasAiCropRect(photo.aiCropRect)).length
+    const croppedCount = photos.filter(photo => shouldShowAiCropOverlay(photo.aiCropRect, photo.aiCropIsCustom)).length
     const aiFingerprint = buildIdentifyFingerprint({
       service: ID_SERVICE_ARTSORAKEL,
       language: getTaxonomyLanguage(),
@@ -475,6 +542,7 @@ export function buildReviewGrid() {
         cropRect: photo.aiCropRect || null,
         cropSourceW: photo.aiCropSourceW ?? null,
         cropSourceH: photo.aiCropSourceH ?? null,
+        aiCropIsCustom: photo.aiCropIsCustom === true,
         sourceType: isBlob(photo?.aiBlob) ? 'photo.aiBlob' : 'photo.blob',
       })).filter(item => isBlob(item.blob)),
     })
@@ -542,6 +610,8 @@ function loadThumbnails(photos) {
   const gallery = document.getElementById('review-gallery')
   if (!gallery) return
 
+  _clearReviewThumbCropObserver()
+
   gallery.innerHTML = ''
   ;(async () => {
     for (let index = 0; index < photos.length; index++) {
@@ -563,7 +633,8 @@ function loadThumbnails(photos) {
         img.alt = ''
         item.appendChild(img)
 
-        if (hasAiCropRect(p.aiCropRect)) {
+        if (shouldShowAiCropOverlay(p.aiCropRect, p.aiCropIsCustom)) {
+          _renderReviewThumbCropFrame(item, img, p.aiCropRect)
           const badge = document.createElement('div')
           badge.className = 'ai-crop-thumb-badge'
           badge.textContent = 'AI crop'
@@ -571,6 +642,9 @@ function loadThumbnails(photos) {
         }
 
         gallery.appendChild(item)
+        if (shouldShowAiCropOverlay(p.aiCropRect, p.aiCropIsCustom)) {
+          requestAnimationFrame(() => item.__reviewThumbCropUpdate?.())
+        }
         continue
       }
 
@@ -782,11 +856,16 @@ export async function prepareReviewIdentifyInputs(photos = state.capturedPhotos)
     const originalBlob = isBlob(photo.blob) ? photo.blob : await resolveBlob(photo)
     if (!isBlob(blob)) return null
     const gps = photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon) ? photo.gps : null
+    const debugPreviewUrl = shouldCaptureDebugPreviewUrls() && typeof URL?.createObjectURL === 'function'
+      ? (photo._debugPreviewUrl || (photo._debugPreviewUrl = URL.createObjectURL(blob)))
+      : ''
     return {
       id: `review-${index}`,
       blob,
       originalBlob: isBlob(originalBlob) ? originalBlob : null,
       cropRect: photo.aiCropRect || null,
+      aiCropIsCustom: photo.aiCropIsCustom === true,
+      debugPreviewUrl,
       lat: gps?.lat ?? null,
       lon: gps?.lon ?? null,
       observedOn: photo.ts ? _localDate(photo.ts) : null,
@@ -806,6 +885,7 @@ function _reviewCaptureImages() {
       cropRect: photo.aiCropRect || null,
       cropSourceW: photo.aiCropSourceW ?? null,
       cropSourceH: photo.aiCropSourceH ?? null,
+      aiCropIsCustom: photo.aiCropIsCustom === true,
       lat: photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon) ? Number(photo.gps.lat) : null,
       lon: photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon) ? Number(photo.gps.lon) : null,
       observedOn: photo.ts ? _localDate(photo.ts) : null,
@@ -1129,6 +1209,7 @@ async function _openReviewCropEditor(startIndex = 0) {
     reviewImages.push({
       url: URL.createObjectURL(blob),
       aiCropRect: photo.aiCropRect || null,
+      aiCropIsCustom: photo.aiCropIsCustom === true,
     })
     indexMap.push(photoIndex)
   }
@@ -1157,6 +1238,7 @@ async function _openReviewCropEditor(startIndex = 0) {
 // ── Draft / sync ──────────────────────────────────────────────────────────────
 
 function cancelReview() {
+  _disposeReviewDebugPreviewUrls()
   state.capturedPhotos = []
   state.reviewContext = null
   state.batchCount = 0
@@ -1234,6 +1316,7 @@ async function saveObservationBatch() {
         aiCropRect: photo.aiCropRect || null,
         aiCropSourceW: photo.aiCropSourceW ?? null,
         aiCropSourceH: photo.aiCropSourceH ?? null,
+        aiCropIsCustom: photo.aiCropIsCustom === true,
       }))
 
     debugImagePipeline('review batch ready for queue', {
@@ -1250,6 +1333,7 @@ async function saveObservationBatch() {
       photoCount: photos.length,
       imageEntryCount: imageEntries.length,
     })
+    _disposeReviewDebugPreviewUrls()
     state.capturedPhotos = []
     state.reviewContext = null
     state.batchCount = 0
@@ -1261,6 +1345,7 @@ async function saveObservationBatch() {
     showToast(t('review.syncFailed', { message: err.message }))
     console.error('Sync error:', err)
   } finally {
+    _disposeReviewDebugPreviewUrls()
     _hideProgress()
     if (btn) btn.disabled = false
   }
@@ -1362,6 +1447,7 @@ async function _addFilesToReview(files, options = {}) {
       aiCropRect: processed.meta?.aiCropRect || null,
       aiCropSourceW: processed.meta?.aiCropSourceW ?? null,
       aiCropSourceH: processed.meta?.aiCropSourceH ?? null,
+      aiCropIsCustom: processed.meta?.aiCropIsCustom === true,
       taxon: state.capturedPhotos[0]?.taxon || null,
     }
     state.capturedPhotos.push(newPhoto)
@@ -1376,21 +1462,7 @@ async function _addFilesToReview(files, options = {}) {
 }
 
 function _filterUnsupportedBrowserFiles(files, nativePhotos = []) {
-  const supportedFiles = []
-  const supportedNativePhotos = []
-  let warned = false
-  for (let idx = 0; idx < files.length; idx++) {
-    const file = files[idx]
-    const nativePhoto = nativePhotos[idx]
-    if (shouldWarnAboutDesktopBrowserHeicImport(file)) {
-      warned = true
-      continue
-    }
-    supportedFiles.push(file)
-    if (nativePhoto) supportedNativePhotos.push(nativePhoto)
-  }
-  if (warned) showToast(t('import.heicBrowserUnsupported'))
-  return { files: supportedFiles, nativePhotos: supportedNativePhotos }
+  return { files, nativePhotos }
 }
 
 function _setProgress(done, total, label) {

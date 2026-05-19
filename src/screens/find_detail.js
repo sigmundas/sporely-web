@@ -23,7 +23,7 @@ import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSourc
 import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
-import { createImageCropMeta, normalizeAiCropRect } from '../image_crop.js'
+import { createImageCropMeta, normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
 import { getArtsorakelMaxEdge, getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
@@ -71,6 +71,95 @@ const detailAiState = {
   currentFingerprintByService: {},
   requestedFingerprintByService: {},
   stale: false,
+}
+
+let detailThumbCropObserver = null
+let detailThumbCropFrameUpdates = new WeakMap()
+let detailImageCropDirty = false
+
+function _clearDetailThumbCropObserver() {
+  detailThumbCropObserver?.disconnect()
+  detailThumbCropObserver = null
+  detailThumbCropFrameUpdates = new WeakMap()
+}
+
+function _findDetailGalleryItemByImageId(imageId) {
+  const targetId = String(imageId || '').trim()
+  if (!targetId) return null
+  return Array.from(document.querySelectorAll('#detail-gallery .detail-gallery-item-wrap'))
+    .find(item => String(item?.dataset?.imageId || '').trim() === targetId) || null
+}
+
+function _renderDetailThumbCropFrame(item, img, rect) {
+  const normalized = normalizeAiCropRect(rect)
+  if (!item || !img || !normalized) return null
+
+  const frame = document.createElement('div')
+  frame.className = 'ai-crop-frame ai-crop-frame--thumb'
+  frame.setAttribute('aria-hidden', 'true')
+  item.appendChild(frame)
+
+  const update = () => {
+    if (!item.isConnected || !img.isConnected) return
+
+    const itemRect = item.getBoundingClientRect()
+    const imgRect = img.getBoundingClientRect()
+    if (!itemRect.width || !itemRect.height || !imgRect.width || !imgRect.height) return
+
+    const left = imgRect.left - itemRect.left + imgRect.width * normalized.x1
+    const top = imgRect.top - itemRect.top + imgRect.height * normalized.y1
+    const width = imgRect.width * (normalized.x2 - normalized.x1)
+    const height = imgRect.height * (normalized.y2 - normalized.y1)
+
+    frame.style.left = `${left}px`
+    frame.style.top = `${top}px`
+    frame.style.width = `${width}px`
+    frame.style.height = `${height}px`
+  }
+
+  detailThumbCropFrameUpdates.set(item, update)
+  item.__detailThumbCropUpdate = update
+  if (typeof ResizeObserver !== 'undefined') {
+    if (!detailThumbCropObserver) {
+      detailThumbCropObserver = new ResizeObserver(entries => {
+        for (const entry of entries) {
+          detailThumbCropFrameUpdates.get(entry.target)?.()
+        }
+      })
+    }
+    detailThumbCropObserver.observe(item)
+  }
+
+  const scheduleUpdate = () => requestAnimationFrame(update)
+  img.addEventListener('load', scheduleUpdate, { once: true })
+  scheduleUpdate()
+
+  return frame
+}
+
+function _syncDetailThumbCropOverlay(item, row) {
+  if (!item || !row) return
+  const img = item.querySelector('.detail-gallery-img')
+  if (!img) return
+
+  item.querySelectorAll('.ai-crop-frame--thumb, .ai-crop-thumb-badge').forEach(node => node.remove())
+  detailThumbCropFrameUpdates.delete(item)
+  delete item.__detailThumbCropUpdate
+
+  const rect = normalizeAiCropRect({
+    x1: row.ai_crop_x1,
+    y1: row.ai_crop_y1,
+    x2: row.ai_crop_x2,
+    y2: row.ai_crop_y2,
+  })
+  if (!shouldShowAiCropOverlay(rect, row.ai_crop_is_custom === true)) return
+
+  _renderDetailThumbCropFrame(item, img, rect)
+  const badge = document.createElement('div')
+  badge.className = 'ai-crop-thumb-badge'
+  badge.textContent = 'AI crop'
+  item.appendChild(badge)
+  requestAnimationFrame(() => item.__detailThumbCropUpdate?.())
 }
 
 function _hasStoredAiResult(result = null) {
@@ -337,7 +426,8 @@ async function _persistDetailAiSelection(selectionState = {}) {
 }
 
 async function _persistDetailImageCrops() {
-  if (!currentObs?.id || !state.user?.id || !currentObsIsOwner) return
+  if (!detailImageCropDirty) return null
+  if (!currentObs?.id || !state.user?.id || !currentObsIsOwner) return null
 
   const settled = await Promise.allSettled(detailImageRows.map(async row => {
     if (!row?.id) return
@@ -350,12 +440,16 @@ async function _persistDetailImageCrops() {
       }),
       aiCropSourceW: row.ai_crop_source_w ?? null,
       aiCropSourceH: row.ai_crop_source_h ?? null,
+      aiCropIsCustom: row.ai_crop_is_custom === true,
     })
   }))
   const rejected = settled.find(item => item.status === 'rejected')
   if (rejected) {
     console.warn('Failed to persist detail image crops:', rejected.reason)
+    return rejected.reason
   }
+  detailImageCropDirty = false
+  return null
 }
 
 export function initFindDetail() {
@@ -462,6 +556,7 @@ export async function openFindDetail(obsId, options = {}) {
   detailAiState.currentFingerprintByService = {}
   detailAiState.requestedFingerprintByService = {}
   detailAiState.stale = false
+  detailImageCropDirty = false
   detailLocationLookup = null
 
   // Update back button label — state.currentScreen is still the previous screen at this point
@@ -578,21 +673,31 @@ export async function openFindDetail(obsId, options = {}) {
   let imgData = null
   const { data: imgWithCrop, error: imgErr } = await supabase
     .from('observation_images')
-    .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h')
+    .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom')
     .eq('observation_id', obsId)
     .order('sort_order', { ascending: true })
   if (imgErr) {
-    const { data: imgBase } = await supabase
+    const { data: imgWithoutCustom, error: imgWithoutCustomErr } = await supabase
       .from('observation_images')
-      .select('id, storage_path, sort_order')
+      .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h')
       .eq('observation_id', obsId)
       .order('sort_order', { ascending: true })
-    imgData = (imgBase || []).map(r => ({ ...r, image_type: 'field', ai_crop_x1: null, ai_crop_y1: null, ai_crop_x2: null, ai_crop_y2: null, ai_crop_source_w: null, ai_crop_source_h: null }))
+    if (!imgWithoutCustomErr) {
+      imgData = (imgWithoutCustom || []).map(r => ({ ...r, ai_crop_is_custom: false }))
+    } else {
+      const { data: imgBase } = await supabase
+        .from('observation_images')
+        .select('id, storage_path, sort_order')
+        .eq('observation_id', obsId)
+        .order('sort_order', { ascending: true })
+      imgData = (imgBase || []).map(r => ({ ...r, image_type: 'field', ai_crop_x1: null, ai_crop_y1: null, ai_crop_x2: null, ai_crop_y2: null, ai_crop_source_w: null, ai_crop_source_h: null, ai_crop_is_custom: false }))
+    }
   } else {
     imgData = imgWithCrop || []
   }
 
   const gallery = document.getElementById('detail-gallery')
+  _clearDetailThumbCropObserver()
   gallery.innerHTML = ''
   detailImageRows = []
   detailImageSources = []
@@ -737,6 +842,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   img.dataset.aiCropY2 = row.ai_crop_y2 ?? ''
   img.dataset.aiCropSourceW = row.ai_crop_source_w ?? ''
   img.dataset.aiCropSourceH = row.ai_crop_source_h ?? ''
+  img.dataset.aiCropIsCustom = row.ai_crop_is_custom === true ? 'true' : ''
   if (source.fallbackUrl && source.fallbackUrl !== source.primaryUrl) {
     img.addEventListener('error', () => {
       if (img.dataset.fallbackApplied === 'true') return
@@ -755,6 +861,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
     })), Math.max(0, currentIndex))
   })
   container.appendChild(img)
+  _syncDetailThumbCropOverlay(container, row)
 
   if (currentObsIsOwner) {
     if (!isMicroscope) {
@@ -775,19 +882,43 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
             }),
             aiCropSourceW: r.ai_crop_source_w ?? null,
             aiCropSourceH: r.ai_crop_source_h ?? null,
+            aiCropIsCustom: r.ai_crop_is_custom === true,
           })),
           onChange: (idx, meta) => {
             const r = detailImageRows[idx]
             if (!r) return
-            r.ai_crop_x1 = meta.aiCropRect?.x1 ?? null
-            r.ai_crop_y1 = meta.aiCropRect?.y1 ?? null
-            r.ai_crop_x2 = meta.aiCropRect?.x2 ?? null
-            r.ai_crop_y2 = meta.aiCropRect?.y2 ?? null
-            updateObservationImageCrop(r.id, meta)
+            const nextRect = normalizeAiCropRect(meta.aiCropRect)
+            r.ai_crop_x1 = nextRect?.x1 ?? null
+            r.ai_crop_y1 = nextRect?.y1 ?? null
+            r.ai_crop_x2 = nextRect?.x2 ?? null
+            r.ai_crop_y2 = nextRect?.y2 ?? null
+            r.ai_crop_source_w = meta.aiCropSourceW ?? null
+            r.ai_crop_source_h = meta.aiCropSourceH ?? null
+            r.ai_crop_is_custom = meta.aiCropIsCustom === true
+            detailImageCropDirty = true
+            const item = _findDetailGalleryItemByImageId(r.id)
+            if (item) {
+              const img = item.querySelector('.detail-gallery-img')
+              if (img) {
+                img.dataset.aiCropX1 = r.ai_crop_x1 ?? ''
+                img.dataset.aiCropY1 = r.ai_crop_y1 ?? ''
+                img.dataset.aiCropX2 = r.ai_crop_x2 ?? ''
+                img.dataset.aiCropY2 = r.ai_crop_y2 ?? ''
+                img.dataset.aiCropSourceW = r.ai_crop_source_w ?? ''
+                img.dataset.aiCropSourceH = r.ai_crop_source_h ?? ''
+                img.dataset.aiCropIsCustom = r.ai_crop_is_custom === true ? 'true' : ''
+              }
+              _syncDetailThumbCropOverlay(item, r)
+            }
             _markDetailAiStale()
           },
-          onClose: committed => {
-            if (committed) _markDetailAiStale()
+          onClose: async committed => {
+            if (!committed) return
+            _markDetailAiStale()
+            const cropError = await _persistDetailImageCrops()
+            if (cropError) {
+              showToast(t('detail.saveFailed', { message: String(cropError?.message || cropError || 'Unknown error') }))
+            }
           },
         })
       })
@@ -908,6 +1039,9 @@ function _readDetailAiCropMeta(source = {}, index = null) {
     cropRect: rowCropRect || datasetCropRect,
     cropSourceW: readNumber(row?.ai_crop_source_w ?? source?.aiCropSourceW ?? source?.cropSourceW ?? dataset.aiCropSourceW),
     cropSourceH: readNumber(row?.ai_crop_source_h ?? source?.aiCropSourceH ?? source?.cropSourceH ?? dataset.aiCropSourceH),
+    cropIsCustom: row?.ai_crop_is_custom === true
+      || source?.aiCropIsCustom === true
+      || dataset.aiCropIsCustom === 'true',
   }
 }
 
@@ -984,6 +1118,7 @@ function getDetailIdentifySources() {
         aiCropY2: row.ai_crop_y2 ?? '',
         aiCropSourceW: row.ai_crop_source_w ?? '',
         aiCropSourceH: row.ai_crop_source_h ?? '',
+        aiCropIsCustom: row.ai_crop_is_custom === true ? 'true' : '',
       },
       src: aiSource?.primaryUrl || originalSource?.primaryUrl || '',
       aiCropRect: normalizeAiCropRect({
@@ -994,6 +1129,7 @@ function getDetailIdentifySources() {
       }),
       aiCropSourceW: row.ai_crop_source_w ?? null,
       aiCropSourceH: row.ai_crop_source_h ?? null,
+      aiCropIsCustom: row.ai_crop_is_custom === true,
     }
   })
 
@@ -1028,6 +1164,12 @@ export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'origin
         blob: prepared.blob,
         originalBlob: result.blob,
         sourceBlob: result.blob,
+        debugPreviewUrl: String(
+          img?.dataset?.aiSrc
+          || img?.dataset?.fullSrc
+          || img?.src
+          || '',
+        ).trim(),
         cropRect: cropMeta.cropRect,
         cropSourceW: cropMeta.cropSourceW,
         cropSourceH: cropMeta.cropSourceH,
@@ -1711,8 +1853,15 @@ async function _runDetailServiceComparison(service, galleryImgs, options = {}) {
   }
 }
 
-function _goBack(event) {
+async function _goBack(event) {
   if (event) event.preventDefault()
+  if (detailImageCropDirty) {
+    const cropError = await _persistDetailImageCrops()
+    if (cropError) {
+      showToast(t('detail.saveFailed', { message: String(cropError?.message || cropError || 'Unknown error') }))
+      return
+    }
+  }
   if (returnScreenOverride) {
     const target = returnScreenOverride
     returnScreenOverride = null
@@ -1772,6 +1921,7 @@ function _resetForm() {
   detailAiState.currentFingerprint = ''
   detailAiState.requestedFingerprint = ''
   detailAiState.stale = false
+  detailImageCropDirty = false
 
   // Reset visibility to default
   const r = document.querySelector(`input[name="detail-vis"][value="${normalizeVisibility(getDefaultVisibility(), 'public')}"]`)
@@ -2418,6 +2568,15 @@ async function _save() {
     return
   }
 
+  if (detailImageCropDirty) {
+    const cropError = await _persistDetailImageCrops()
+    if (cropError) {
+      btn.disabled = false
+      showToast(t('detail.saveFailed', { message: String(cropError?.message || cropError || 'Unknown error') }))
+      return
+    }
+  }
+
   setLastSyncAt()
   showToast(t('detail.saved'))
   _loadPrivacySlotCount()
@@ -2878,7 +3037,7 @@ async function _addPhotosToObservation(files) {
 
       const { data: insertedRows } = await supabase
         .from('observation_images')
-        .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h')
+        .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom')
         .eq('observation_id', obsId)
         .eq('sort_order', sortOrder)
         .order('id', { ascending: false })
@@ -2894,6 +3053,7 @@ async function _addPhotosToObservation(files) {
         ai_crop_y2: cropMeta.aiCropRect?.y2 ?? null,
         ai_crop_source_w: cropMeta.aiCropSourceW ?? null,
         ai_crop_source_h: cropMeta.aiCropSourceH ?? null,
+        ai_crop_is_custom: cropMeta.aiCropIsCustom === true,
       }
       const [originalSource] = await resolveMediaSources([storagePath], { variant: 'original' })
       const [displaySource] = await resolveMediaSources([storagePath], { variant: 'medium' })

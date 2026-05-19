@@ -10,6 +10,7 @@ import { getSharedAuthSession } from './auth-session.js'
 import { t } from './i18n.js'
 import { getBlobImageDimensions, normalizeAiCropRect, prepareImageBlobForUpload } from './image_crop.js'
 import { isBlob } from './observation-shapes.js'
+import { recordDebugJsonResponse, revokeDebugObjectUrl } from './debug-activity.js'
 import {
   getArtsorakelMaxEdge,
   ID_SERVICE_ARTSORAKEL,
@@ -70,10 +71,9 @@ function _trimArtsorakelDebugStore() {
   const store = _getArtsorakelDebugStore()
   while (store.length > 20) {
     const removed = store.shift()
+    revokeDebugObjectUrl(removed?.imageSrc || removed?.debugPreviewUrl || removed?.previewUrl || removed?.sourceUrl || '')
     for (const image of removed?.images || []) {
-      try {
-        if (image?.objectUrl) globalThis.URL?.revokeObjectURL?.(image.objectUrl)
-      } catch (_) {}
+      revokeDebugObjectUrl(image?.objectUrl || image?.debugPreviewUrl || '')
     }
   }
 }
@@ -91,6 +91,8 @@ async function _buildArtsorakelDebugEntry({
     ? { width: preparedMeta.targetWidth, height: preparedMeta.targetHeight }
     : (await getBlobImageDimensions(aiBlob).catch(() => null))
   const objectUrl = globalThis.URL?.createObjectURL?.(aiBlob) || ''
+  const debugPreviewUrl = String(options?.debugPreviewUrl || preparedMeta?.debugPreviewUrl || '').trim()
+  const previewUrl = debugPreviewUrl || objectUrl
   return {
     timestamp: new Date().toISOString(),
     service: ID_SERVICE_ARTSORAKEL,
@@ -105,6 +107,7 @@ async function _buildArtsorakelDebugEntry({
       width: dimensions?.width ?? null,
       height: dimensions?.height ?? null,
       objectUrl,
+      debugPreviewUrl: previewUrl,
       wasCropped: !!preparedMeta?.cropped,
       cropRect: preparedMeta?.cropRect || null,
       cropSourceW: preparedMeta?.cropSourceW ?? null,
@@ -113,6 +116,8 @@ async function _buildArtsorakelDebugEntry({
       sourceHeight: preparedMeta?.sourceHeight ?? null,
       maxEdge: preparedMeta?.maxEdge ?? null,
     }],
+    debugPreviewUrl: previewUrl,
+    imageSrc: previewUrl,
   }
 }
 
@@ -367,6 +372,17 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
         }
       } catch (_) {}
       const meta = _endpointMeta(kind, url)
+      recordDebugJsonResponse({
+        source: 'artsorakel',
+        label: `${meta.kind} ${meta.origin}${meta.path}`,
+        endpoint: url,
+        status: response.status,
+        ok: false,
+        body: payload,
+        fieldName,
+        imageIndex: Number(options.imageIndex || 0),
+        imageCount: Number(options.totalImages || 1),
+      })
       const error = new Error(
         `${meta.kind} endpoint ${meta.origin}${meta.path} field=${fieldName} status=${response.status}${response.statusText ? ` ${response.statusText}` : ''}${_responseBodyExcerpt(payload) ? ` body=${_responseBodyExcerpt(payload)}` : ''} blob=${aiBlob.type || 'unknown'}:${aiBlob.size || 0}`
       )
@@ -443,6 +459,17 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
   }
 
   const data = await res.json()
+  recordDebugJsonResponse({
+    source: 'artsorakel',
+    label: `direct ${ARTSDATA_AI_URL}`,
+    endpoint: ARTSDATA_AI_URL,
+    status: res.status,
+    ok: res.ok,
+    body: data,
+    fieldName: 'image',
+    imageIndex: Number(options.imageIndex || 0),
+    imageCount: Number(options.totalImages || 1),
+  })
   const predictions = _extractPredictions(data)
   onIdReceived?.(predictions)
 
@@ -530,7 +557,10 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
     if (item?.preprocessed === true && isBlob(item.blob) && !isBlob(item?.originalBlob) && !isBlob(item?.sourceBlob)) {
       return {
         blob: item.blob,
-        preparedMeta: item.preparedMeta || item.debug || {},
+        preparedMeta: {
+          ...(item.preparedMeta || item.debug || {}),
+          debugPreviewUrl: item.debugPreviewUrl || item.previewUrl || item.sourceUrl || '',
+        },
       }
     }
 
@@ -539,7 +569,13 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
       ...options,
       cropRect,
     })
-    return { blob: prepared.blob, preparedMeta: prepared }
+    return {
+      blob: prepared.blob,
+      preparedMeta: {
+        ...prepared,
+        debugPreviewUrl: item.debugPreviewUrl || item.previewUrl || item.sourceUrl || '',
+      },
+    }
   }))).filter(item => isBlob(item?.blob))
 
   if (!preparedBlobs.length) return null
@@ -625,6 +661,14 @@ export async function runArtsorakelForMediaKeys(mediaKeys, lang = 'no', options 
   }
 
   const payload = await response.json()
+  recordDebugJsonResponse({
+    source: 'artsorakel',
+    label: `${proxyBaseUrl}/artsorakel/media`,
+    endpoint: `${proxyBaseUrl}/artsorakel/media`,
+    status: response.status,
+    ok: response.ok,
+    body: payload,
+  })
   const langNorm = normalizeLang(lang)
   const responses = (payload?.responses || [])
     .map(item => _normalizePredictions(item?.data || item, langNorm))

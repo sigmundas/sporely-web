@@ -2,6 +2,7 @@ import { t } from './i18n.js'
 import { loadInaturalistSession } from './inaturalist.js'
 import { getBlobImageDimensions, prepareImageBlobForUpload } from './image_crop.js'
 import { isBlob } from './observation-shapes.js'
+import { recordDebugJsonResponse, revokeDebugObjectUrl } from './debug-activity.js'
 import {
   getDefaultIdService,
   ID_SERVICE_ARTSORAKEL,
@@ -51,10 +52,8 @@ function _trimInaturalistDebugStore() {
   const store = _getInaturalistDebugStore()
   while (store.length > 20) {
     const removed = store.shift()
-    const imageUrl = removed?.imageSrc || removed?.images?.[0]?.objectUrl || ''
-    try {
-      if (imageUrl) globalThis.URL?.revokeObjectURL?.(imageUrl)
-    } catch (_) {}
+    revokeDebugObjectUrl(removed?.imageSrc || removed?.debugPreviewUrl || removed?.previewUrl || removed?.sourceUrl || '')
+    revokeDebugObjectUrl(removed?.images?.[0]?.objectUrl || removed?.images?.[0]?.debugPreviewUrl || '')
   }
 }
 
@@ -71,6 +70,8 @@ async function _buildInaturalistDebugEntry({
     ? { width: preparedMeta.targetWidth, height: preparedMeta.targetHeight }
     : (await getBlobImageDimensions(aiBlob).catch(() => null))
   const objectUrl = globalThis.URL?.createObjectURL?.(aiBlob) || ''
+  const debugPreviewUrl = String(options?.debugPreviewUrl || preparedMeta?.debugPreviewUrl || '').trim()
+  const previewUrl = debugPreviewUrl || objectUrl
   return {
     timestamp: new Date().toISOString(),
     service: ID_SERVICE_INATURALIST,
@@ -85,6 +86,7 @@ async function _buildInaturalistDebugEntry({
       width: dimensions?.width ?? null,
       height: dimensions?.height ?? null,
       objectUrl,
+      debugPreviewUrl: previewUrl,
       wasCropped: !!preparedMeta?.cropped,
       cropRect: preparedMeta?.cropRect || null,
       cropSourceW: preparedMeta?.cropSourceW ?? null,
@@ -93,6 +95,8 @@ async function _buildInaturalistDebugEntry({
       sourceHeight: preparedMeta?.sourceHeight ?? null,
       maxEdge: preparedMeta?.maxEdge ?? null,
     }],
+    debugPreviewUrl: previewUrl,
+    imageSrc: previewUrl,
   }
 }
 
@@ -427,6 +431,17 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
   })
 
   const payload = await response.json().catch(() => ({}))
+  recordDebugJsonResponse({
+    source: 'inaturalist',
+    label: INAT_SUGGEST_URL,
+    endpoint: INAT_SUGGEST_URL,
+    status: response.status,
+    ok: response.ok,
+    body: payload,
+    fieldName: 'image',
+    imageIndex: Number(options.imageIndex || 0),
+    imageCount: Number(options.totalImages || 1),
+  })
   if (!response.ok) {
     throw new Error(payload?.error_description || payload?.error || payload?.message || 'iNaturalist suggestion failed')
   }
@@ -485,7 +500,10 @@ export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
     if (item?.preprocessed === true && isBlob(item.blob) && !isBlob(item?.originalBlob) && !isBlob(item?.sourceBlob)) {
       return {
         blob: item.blob,
-        preparedMeta: item.preparedMeta || item.debug || {},
+        preparedMeta: {
+          ...(item.preparedMeta || item.debug || {}),
+          debugPreviewUrl: item.debugPreviewUrl || item.previewUrl || item.sourceUrl || '',
+        },
         lat: itemLat,
         lon: itemLon,
         observedOn: itemObservedOn,
@@ -500,7 +518,10 @@ export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
     })
     return {
       blob: prepared.blob,
-      preparedMeta: prepared,
+      preparedMeta: {
+        ...prepared,
+        debugPreviewUrl: item.debugPreviewUrl || item.previewUrl || item.sourceUrl || '',
+      },
       lat: itemLat,
       lon: itemLon,
       observedOn: itemObservedOn,

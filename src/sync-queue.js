@@ -251,6 +251,7 @@ function _normalizeQueuedImages(imageEntries) {
         aiCropRect: null,
         aiCropSourceW: null,
         aiCropSourceH: null,
+        aiCropIsCustom: false,
         uploadBlob: null,
         uploadMeta: null,
         variants: null,
@@ -272,6 +273,7 @@ function _normalizeQueuedImages(imageEntries) {
       aiCropRect: entry?.aiCropRect || null,
       aiCropSourceW: entry?.aiCropSourceW ?? null,
       aiCropSourceH: entry?.aiCropSourceH ?? null,
+      aiCropIsCustom: entry?.aiCropIsCustom === true,
       uploadBlob,
       uploadMeta: entry?.uploadMeta || null,
       variants: thumbBlob ? { thumb: thumbBlob } : (entry?.variants || null),
@@ -295,6 +297,7 @@ async function _serializeQueuedImageForStorage(image) {
     aiCropRect: image?.aiCropRect || null,
     aiCropSourceW: image?.aiCropSourceW ?? null,
     aiCropSourceH: image?.aiCropSourceH ?? null,
+    aiCropIsCustom: image?.aiCropIsCustom === true,
     blobBytes: original?.bytes || null,
     blobType: original?.type || null,
     blobSize: original?.size || null,
@@ -763,6 +766,7 @@ async function _runSyncQueue() {
           aiCropRect: image.aiCropRect,
           aiCropSourceW: image.aiCropSourceW,
           aiCropSourceH: image.aiCropSourceH,
+          aiCropIsCustom: image.aiCropIsCustom === true,
           ...uploadMeta,
         })
         await syncObservationMediaKeys(obsId, path, { sortOrder: i })
