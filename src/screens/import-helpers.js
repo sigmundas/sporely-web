@@ -371,22 +371,40 @@ export async function captureNativePhotoExif(photo, file, options = {}) {
     }
   }
 
-  try {
-    const exif = window.Capacitor?.Plugins?.FilePicker?.getExif ? await FilePicker.getExif({ path: photo.path }) : null
-    if (exif) {
-      if (!dbg.nativeExif) dbg.nativeExif = JSON.stringify(exif)
-      _applyRawGpsCandidate(target, exif, 'nativeExif', dbg)
-      if (dbg.nativeExifOrientation === null) dbg.nativeExifOrientation = _coerceExifNumber(exif.Orientation ?? null)
-      if (dbg.nativeExifPostOrientation === null) dbg.nativeExifPostOrientation = _coerceExifNumber(exif.Orientation ?? null)
+  const nativeExifHasCoreMetadata = hasNativeTime && lat !== null && lon !== null
+  const canUseFilePickerExif = !isAndroidNativeApp() && !!window.Capacitor?.Plugins?.FilePicker?.getExif
 
-      const dt = _coerceExifDate(exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate || photo.capturedAt)
-      if (dt) {
-        time = dt.getTime()
-        hasNativeTime = true
+  if (!nativeExifHasCoreMetadata && canUseFilePickerExif) {
+    try {
+      const exif = await FilePicker.getExif({ path: photo.path })
+      if (exif) {
+        if (!dbg.nativeExif) dbg.nativeExif = JSON.stringify(exif)
+        _applyRawGpsCandidate(target, exif, 'nativeExif', dbg)
+        if (dbg.nativeExifOrientation === null) dbg.nativeExifOrientation = _coerceExifNumber(exif.Orientation ?? null)
+        if (dbg.nativeExifPostOrientation === null) dbg.nativeExifPostOrientation = _coerceExifNumber(exif.Orientation ?? null)
+
+        const dt = _coerceExifDate(exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate || photo.capturedAt)
+        if (dt) {
+          time = dt.getTime()
+          hasNativeTime = true
+        }
+      }
+    } catch (err) {
+      const message = String(err?.message || err || '')
+      if (message.toLowerCase().includes('not implemented on android')) {
+        if (isImagePipelineDebugEnabled()) {
+          debugImagePipeline('filepicker getExif skipped on android', {
+            captureSource: options.captureSource || null,
+            screenPath: options.screenPath || null,
+            sourcePath: photo?.path || null,
+            sourcePathType: describeNativePath(photo?.path),
+            reason: message,
+          })
+        }
+      } else {
+        console.warn('Native EXIF extraction failed, trying JS fallback:', err)
       }
     }
-  } catch (err) {
-    console.warn('Native EXIF extraction failed, trying JS fallback:', err)
   }
 
   if (lat !== null && lon !== null && altitude !== null && accuracy !== null && hasNativeTime) {
