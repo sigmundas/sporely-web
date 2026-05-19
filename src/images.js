@@ -790,15 +790,20 @@ export async function resolveMediaSources(paths, options = {}) {
   return normalizedPaths.map(originalPath => {
     if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
     const variantPath = getVariantPath(originalPath, variant)
-    
-    let fallbackUrl = variant === 'original' ? signed[originalPath] || null : null;
-    if (variant !== 'original') {
-      fallbackUrl = signed[variantPath]
-        || signed[originalPath]
-        || getPublicMediaUrl(originalPath, 'original');
+    const originalUrl = getPublicMediaUrl(originalPath, 'original')
+
+    if (variant === 'original') {
+      return {
+        key: originalPath,
+        primaryUrl: signed[originalPath] || originalUrl,
+        fallbackUrl: null,
+      }
     }
-    
-    const primaryUrl = getPublicMediaUrl(originalPath, variant) || fallbackUrl
+
+    const signedVariantUrl = signed[variantPath] || null
+    const signedOriginalUrl = signed[originalPath] || null
+    const primaryUrl = signedVariantUrl || signedOriginalUrl || originalUrl
+    const fallbackUrl = signedOriginalUrl || originalUrl
     return {
       key: originalPath,
       primaryUrl,

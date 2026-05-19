@@ -88,19 +88,17 @@ export async function refreshHeaderProfileButtons(profile = null) {
   }
 
   const initials = _initials(summary?.username || state.user?.email || '')
-  let avatarUrl = summary?.avatar_url || ''
+  const signedAvatarUrl = await _getSignedAvatarUrl(uid, true)
+  let avatarUrl = ''
   let isValid = false
 
-  if (avatarUrl) {
-    avatarUrl = _withCacheBust(avatarUrl, true)
-    isValid = await _canLoadImage(avatarUrl)
+  if (signedAvatarUrl && await _canLoadImage(signedAvatarUrl)) {
+    avatarUrl = signedAvatarUrl
+    isValid = true
   }
-  if (!isValid) {
-    const signed = await _getSignedAvatarUrl(uid, true)
-    if (signed && await _canLoadImage(signed)) {
-      avatarUrl = signed
-      isValid = true
-    }
+  if (!isValid && summary?.avatar_url) {
+    avatarUrl = _withCacheBust(summary.avatar_url, true)
+    isValid = await _canLoadImage(avatarUrl)
   }
 
   const targets = [
@@ -455,8 +453,8 @@ async function _setProfileAvatarSource({ uid, preferredUrl = '', cacheBust = fal
     if (url && !candidates.includes(url)) candidates.push(url)
   }
 
-  addCandidate(_withCacheBust(preferredUrl, cacheBust))
   addCandidate(await _getSignedAvatarUrl(uid, cacheBust))
+  addCandidate(_withCacheBust(preferredUrl, cacheBust))
 
   for (const candidate of candidates) {
     if (await _canLoadImage(candidate)) {

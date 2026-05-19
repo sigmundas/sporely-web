@@ -14,10 +14,9 @@ import { imageHtml as _imageHtml, wireImageFallback as _wireImageFallback } from
 
 function _isDebugCommentQueryEnabled() {
   try {
-    return import.meta.env?.DEV
-      || globalThis.localStorage?.getItem('sporely-debug-comment-queries') === 'true'
+    return globalThis.localStorage?.getItem('sporely-debug-comment-queries') === 'true'
   } catch (_) {
-    return import.meta.env?.DEV || false
+    return false
   }
 }
 
