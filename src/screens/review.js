@@ -1354,6 +1354,8 @@ async function saveObservationBatch() {
 async function _openCameraForReview() {
   if (isAndroidNativeApp()) {
     try {
+      const screenPath = 'review:add-photo'
+      const captureSource = 'Sporely native camera'
       const gps = state.gps && isUsableCoordinate(state.gps.lat, state.gps.lon)
         ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
         : null
@@ -1364,9 +1366,9 @@ async function _openCameraForReview() {
       const files = []
       for (let i = 0; i < photos.length; i++) {
         _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
-        files.push(await nativePickedPhotoToFile(photos[i], i))
+        files.push(await nativePickedPhotoToFile(photos[i], i, { captureSource, screenPath }))
       }
-      await _addFilesToReview(files, { nativePhotos: photos })
+      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath })
     } catch (err) {
       if (isPickerCancel(err)) return
       showToast(`Sporely Cam: ${err?.message || err}`)
@@ -1380,6 +1382,8 @@ async function _openCameraForReview() {
 async function _openPickerForReview() {
   if (isAndroidNativeApp()) {
     try {
+      const screenPath = 'review:add-photo'
+      const captureSource = 'native picker/import'
       const result = await pickImagesWithNativePhotoPicker()
       const photos = Array.isArray(result?.photos) ? result.photos : []
       if (!photos.length) return
@@ -1387,9 +1391,9 @@ async function _openPickerForReview() {
       const files = []
       for (let i = 0; i < photos.length; i++) {
         _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
-        files.push(await nativePickedPhotoToFile(photos[i], i))
+        files.push(await nativePickedPhotoToFile(photos[i], i, { captureSource, screenPath }))
       }
-      await _addFilesToReview(files, { nativePhotos: photos })
+      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath })
       return
     } catch (err) {
       if (isPickerCancel(err)) return
@@ -1414,6 +1418,8 @@ async function _openPickerForReview() {
 
 async function _addFilesToReview(files, options = {}) {
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : []
+  const captureSource = options.captureSource || 'Sporely native camera'
+  const screenPath = options.screenPath || 'review:add-photo'
   const supportedSelection = _filterUnsupportedBrowserFiles(files, nativePhotos)
   const supportedFiles = supportedSelection.files
   const supportedNativePhotos = supportedSelection.nativePhotos
@@ -1423,7 +1429,7 @@ async function _addFilesToReview(files, options = {}) {
   const withTimes = await Promise.all(supportedFiles.map(async (f, idx) => {
     const nativePhoto = supportedNativePhotos[idx]
     if (nativePhoto) {
-      const { time, lat, lon, altitude, accuracy, dbg } = await captureNativePhotoExif(nativePhoto, f)
+      const { time, lat, lon, altitude, accuracy, dbg } = await captureNativePhotoExif(nativePhoto, f, { captureSource, screenPath })
       return { file: f, nativePhoto, metadataPromise: createNativeMetadataHydrationPromise(nativePhoto, f), captureTime: time, lat, lon, altitude, accuracy, dbg }
     }
     const { time, lat, lon, altitude, accuracy, dbg } = await captureExif(f)
@@ -1434,7 +1440,7 @@ async function _addFilesToReview(files, options = {}) {
   for (let idx = 0; idx < withTimes.length; idx++) {
     const item = withTimes[idx]
     _setProgress(doneCount, supportedFiles.length, t('import.convertingFile', { current: doneCount + 1, total: supportedFiles.length }))
-    const processed = await processFile(item.file, { nativePhoto: item.nativePhoto })
+    const processed = await processFile(item.file, { nativePhoto: item.nativePhoto, captureSource, screenPath })
     const gps = isUsableCoordinate(item.lat, item.lon) ? { lat: item.lat, lon: item.lon, altitude: item.altitude, accuracy: item.accuracy } : null
 
     const newPhoto = {

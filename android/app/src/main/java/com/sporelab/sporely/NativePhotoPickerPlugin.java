@@ -126,6 +126,7 @@ public class NativePhotoPickerPlugin extends Plugin {
                     if (!Double.isNaN(altitude)) exifJson.put("GPSAltitude", altitude);
                     exifOrientation = exif.getAttributeInt(
                         ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+                    exifJson.put("Orientation", exifOrientation);
                 }
             } catch (Exception ignored) {}
 

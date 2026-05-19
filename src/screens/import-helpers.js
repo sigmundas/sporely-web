@@ -1,7 +1,8 @@
 import { Capacitor, registerPlugin } from '@capacitor/core'
 import { FilePicker } from '@capawesome/capacitor-file-picker'
 import { isAndroidNativeApp } from '../camera-actions.js'
-import { createImageCropMeta } from '../image_crop.js'
+import { createImageCropMeta, getBlobImageDimensions } from '../image_crop.js'
+import { debugImagePipeline, isImagePipelineDebugEnabled } from '../image-pipeline-debug.js'
 import { normalizeCoordinatePair } from '../observation-shapes.js'
 
 export const NativePhotoPicker = registerPlugin('NativePhotoPicker')
@@ -30,7 +31,7 @@ export async function pickImagesWithNativePhotoPicker() {
   return NativePhotoPicker.pickImages()
 }
 
-export async function nativePickedPhotoToFile(photo, index) {
+export async function nativePickedPhotoToFile(photo, index, options = {}) {
   let mimeType = normalizeNativeMimeType(photo?.mimeType, photo?.format)
   let path = photo.path
 
@@ -52,10 +53,32 @@ export async function nativePickedPhotoToFile(photo, index) {
   const blob = await res.blob()
 
   const fileName = guessNativeFileName(photo, index, mimeType)
-  return new File([blob], fileName, {
+  const file = new File([blob], fileName, {
     type: mimeType,
     lastModified: Date.now(),
   })
+  if (isImagePipelineDebugEnabled()) {
+    const dims = await getBlobImageDimensions(file).catch(() => null)
+    debugImagePipeline('android native photo file', {
+      captureSource: options.captureSource || null,
+      screenPath: options.screenPath || null,
+      sourceName: photo?.name || fileName,
+      sourcePath: photo?.path || null,
+      sourcePathType: describeNativePath(photo?.path),
+      originalPath: photo?.originalPath || null,
+      originalPathType: describeNativePath(photo?.originalPath),
+      mimeType,
+      format: photo?.format || null,
+      originalMimeType: photo?.originalMimeType || null,
+      originalFormat: photo?.originalFormat || null,
+      convertedHeicToJpeg: mimeType === 'image/jpeg' && (photo?.format === 'heic' || photo?.format === 'heif' || photo?.originalFormat === 'heic' || photo?.originalFormat === 'heif'),
+      decodedWidth: dims?.width ?? null,
+      decodedHeight: dims?.height ?? null,
+      nativeDebug: photo?.debug || null,
+      nativePhoto: summarizeNativePhoto(photo, options),
+    })
+  }
+  return file
 }
 
 export function isHeicLikeFile(file) {
@@ -288,7 +311,7 @@ function _applyRawGpsCandidate(target, rawGps, sourceLabel, dbg) {
   }
 }
 
-export async function captureNativePhotoExif(photo, file) {
+export async function captureNativePhotoExif(photo, file, options = {}) {
   let time = file.lastModified || Date.now()
   let lat = null
   let lon = null
@@ -300,10 +323,19 @@ export async function captureNativePhotoExif(photo, file) {
     fileSize: file.size,
     fileType: file.type,
     nativePath: photo?.path || null,
+    nativePathType: describeNativePath(photo?.path),
+    originalPath: photo?.originalPath || null,
+    originalPathType: describeNativePath(photo?.originalPath),
+    captureSource: options.captureSource || null,
+    screenPath: options.screenPath || null,
     nativeMimeType: photo?.mimeType || null,
     altitudeSource: null,
     gpsSource: null,
     nativeExif: null,
+    nativeDebug: null,
+    nativePhoto: summarizeNativePhoto(photo, options),
+    nativeExifOrientation: null,
+    nativeExifPostOrientation: null,
     gpsResult: null,
     gpsFallback: null,
     rawGpsFile: null,
@@ -328,6 +360,9 @@ export async function captureNativePhotoExif(photo, file) {
   if (photo?.exif && typeof photo.exif === 'object') {
     dbg.nativeExif = JSON.stringify(photo.exif)
     _applyRawGpsCandidate(target, photo.exif, 'nativeExif', dbg)
+    dbg.nativeExifOrientation = _coerceExifNumber(photo?.debug?.preOrientation ?? photo.exif?.Orientation ?? null)
+    dbg.nativeExifPostOrientation = _coerceExifNumber(photo?.debug?.postOrientation ?? photo.exif?.Orientation ?? null)
+    if (photo?.debug) dbg.nativeDebug = JSON.stringify(photo.debug)
 
     const dt = _coerceExifDate(photo.exif.DateTimeOriginal || photo.exif.CreateDate || photo.exif.ModifyDate || photo.capturedAt)
     if (dt) {
@@ -341,6 +376,8 @@ export async function captureNativePhotoExif(photo, file) {
     if (exif) {
       if (!dbg.nativeExif) dbg.nativeExif = JSON.stringify(exif)
       _applyRawGpsCandidate(target, exif, 'nativeExif', dbg)
+      if (dbg.nativeExifOrientation === null) dbg.nativeExifOrientation = _coerceExifNumber(exif.Orientation ?? null)
+      if (dbg.nativeExifPostOrientation === null) dbg.nativeExifPostOrientation = _coerceExifNumber(exif.Orientation ?? null)
 
       const dt = _coerceExifDate(exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate || photo.capturedAt)
       if (dt) {
@@ -372,6 +409,29 @@ export async function captureNativePhotoExif(photo, file) {
     dbg.jsFallback = true
   } catch (err) {
     console.warn('JS EXIF extraction fallback failed:', err)
+  }
+
+  if (isImagePipelineDebugEnabled()) {
+    debugImagePipeline('android native photo exif', {
+      captureSource: options.captureSource || null,
+      screenPath: options.screenPath || null,
+      sourceName: photo?.name || file.name || '',
+      sourcePath: photo?.path || null,
+      sourcePathType: describeNativePath(photo?.path),
+      originalPath: photo?.originalPath || null,
+      originalPathType: describeNativePath(photo?.originalPath),
+      mimeType: photo?.mimeType || file.type || '',
+      format: photo?.format || null,
+      nativePhoto: summarizeNativePhoto(photo, options),
+      nativeExifOrientation: dbg.nativeExifOrientation,
+      nativeExifPostOrientation: dbg.nativeExifPostOrientation,
+      nativeDebug: dbg.nativeDebug,
+      nativeExif: dbg.nativeExif,
+      nativePath: dbg.nativePath,
+      fileName: file.name || '',
+      fileType: file.type || '',
+      fileSize: file.size || 0,
+    })
   }
 
   return { time, lat, lon, altitude, accuracy, dbg }
@@ -563,6 +623,27 @@ export async function captureExif(file) {
 
 export async function processFile(file, options = {}) {
   if (isAndroidNativeApp() && !!options.nativePhoto && file?.type === 'image/jpeg') {
+    if (isImagePipelineDebugEnabled()) {
+      debugImagePipeline('android native jpeg process', {
+        captureSource: options.captureSource || options.nativePhoto?.captureSource || null,
+        screenPath: options.screenPath || options.nativePhoto?.screenPath || null,
+        sourceName: options.nativePhoto?.name || file.name || '',
+        sourcePath: options.nativePhoto?.path || null,
+        sourcePathType: describeNativePath(options.nativePhoto?.path),
+        originalPath: options.nativePhoto?.originalPath || null,
+        originalPathType: describeNativePath(options.nativePhoto?.originalPath),
+        mimeType: options.nativePhoto?.mimeType || file.type || '',
+        format: options.nativePhoto?.format || null,
+        nativePhoto: summarizeNativePhoto(options.nativePhoto, options),
+        nativeDebug: options.nativePhoto?.debug || null,
+        fastPath: true,
+        usedCanvas: false,
+        stayedOriginal: true,
+        fileName: file.name || '',
+        fileType: file.type || '',
+        fileSize: file.size || 0,
+      })
+    }
     return { blob: file, aiBlob: file, meta: { aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null, aiCropIsCustom: false } }
   }
   try {
@@ -572,6 +653,35 @@ export async function processFile(file, options = {}) {
   } catch (_) {}
   const meta = await createImageCropMeta(file, { preseed: true }).catch(() => ({ aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null, aiCropIsCustom: false }))
   return { blob: file, aiBlob: file, meta }
+}
+
+function describeNativePath(path) {
+  const value = String(path || '').trim()
+  if (!value) return null
+  if (/^content:/i.test(value)) return 'content-uri'
+  if (/^file:/i.test(value)) return 'file-uri'
+  if (value.startsWith('/')) return 'file-path'
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return 'uri'
+  return 'path'
+}
+
+function summarizeNativePhoto(photo = {}, options = {}) {
+  return {
+    name: photo?.name || null,
+    path: photo?.path || null,
+    pathType: describeNativePath(photo?.path),
+    originalPath: photo?.originalPath || null,
+    originalPathType: describeNativePath(photo?.originalPath),
+    mimeType: photo?.mimeType || null,
+    originalMimeType: photo?.originalMimeType || null,
+    format: photo?.format || null,
+    originalFormat: photo?.originalFormat || null,
+    converted: photo?.converted === true,
+    nativeOrientation: _coerceExifNumber(photo?.debug?.preOrientation ?? photo?.exif?.Orientation ?? null),
+    nativePostOrientation: _coerceExifNumber(photo?.debug?.postOrientation ?? photo?.exif?.Orientation ?? null),
+    captureSource: options.captureSource || null,
+    screenPath: options.screenPath || null,
+  }
 }
 
 function _prepareImportBlobs(file) {

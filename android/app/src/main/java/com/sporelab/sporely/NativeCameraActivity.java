@@ -18,6 +18,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.util.Size;
 import android.util.SizeF;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.OrientationEventListener;
 import android.view.MotionEvent;
@@ -76,6 +77,7 @@ public class NativeCameraActivity extends AppCompatActivity {
     public static final String EXTRA_GPS_JSON = "com.sporelab.sporely.NativeCamera.GPS";
     public static final String EXTRA_PHOTOS_JSON = "com.sporelab.sporely.NativeCamera.PHOTOS";
 
+    private static final String TAG = "SporelyNativeCamera";
     private static final int REQUEST_CAMERA_PERMISSION = 41;
     private static final double FULL_FRAME_DIAGONAL_MM = 43.2666153;
     private static final int SPORELY_GREEN = Color.rgb(88, 155, 82);
@@ -120,8 +122,11 @@ public class NativeCameraActivity extends AppCompatActivity {
     private TextView nightModeToggle;
     private FrameLayout.LayoutParams hdrModeParams;
     private FrameLayout.LayoutParams nightModeParams;
+    private final Map<String, CaptureDebugInfo> captureDebugByPath = new LinkedHashMap<>();
     private OrientationEventListener orientationListener;
     private int captureRotation = Surface.ROTATION_0;
+    private int lastOrientationDegrees = OrientationEventListener.ORIENTATION_UNKNOWN;
+    private CameraInfo activeCameraInfo;
     private final Runnable hideFocusRingRunnable = () -> {
         if (focusRing != null) focusRing.setVisibility(View.GONE);
     };
@@ -135,6 +140,7 @@ public class NativeCameraActivity extends AppCompatActivity {
         orientationListener = new OrientationEventListener(this) {
             @Override
             public void onOrientationChanged(int orientation) {
+                lastOrientationDegrees = orientation;
                 updateCaptureRotation(orientation);
             }
         };
@@ -472,6 +478,7 @@ public class NativeCameraActivity extends AppCompatActivity {
         camera = null;
 
         SelectedCamera selected = selectBackMainCamera(cameraProvider);
+        activeCameraInfo = selected.cameraInfo;
         CameraSelector finalSelector = selected.selector;
         String finalPhysicalCameraId = selected.physicalCameraId;
         int outputFormat = ImageCapture.OUTPUT_FORMAT_JPEG;
@@ -534,6 +541,7 @@ public class NativeCameraActivity extends AppCompatActivity {
         Preview preview = previewBuilder.build();
         imageCapture = captureBuilder.build();
         imageCapture.setTargetRotation(getCaptureRotation());
+        logRotationState("bindCamera", null, null);
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
         camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
     }
@@ -595,20 +603,38 @@ public class NativeCameraActivity extends AppCompatActivity {
         return captureRotation;
     }
 
+    private int resolveCaptureRotation() {
+        if (lastOrientationDegrees != OrientationEventListener.ORIENTATION_UNKNOWN) {
+            return orientationDegreesToSurfaceRotation(lastOrientationDegrees);
+        }
+        return captureRotation;
+    }
+
     private void updateCaptureRotation(int orientationDegrees) {
         if (orientationDegrees == OrientationEventListener.ORIENTATION_UNKNOWN) return;
-        int nextRotation = orientationDegrees >= 315 || orientationDegrees < 45
-            ? Surface.ROTATION_0
-            : orientationDegrees < 135
-                ? Surface.ROTATION_90
-                : orientationDegrees < 225
-                    ? Surface.ROTATION_180
-                    : Surface.ROTATION_270;
+        int nextRotation = orientationDegreesToSurfaceRotation(orientationDegrees);
         if (captureRotation == nextRotation) return;
         captureRotation = nextRotation;
         if (imageCapture != null) {
             imageCapture.setTargetRotation(captureRotation);
         }
+        logRotationState("orientationChanged", null, null);
+    }
+
+    private int orientationDegreesToSurfaceRotation(int orientationDegrees) {
+        if (orientationDegrees == OrientationEventListener.ORIENTATION_UNKNOWN) {
+            return getDisplayRotation();
+        }
+        if (orientationDegrees >= 45 && orientationDegrees < 135) {
+            return Surface.ROTATION_270;
+        }
+        if (orientationDegrees >= 135 && orientationDegrees < 225) {
+            return Surface.ROTATION_180;
+        }
+        if (orientationDegrees >= 225 && orientationDegrees < 315) {
+            return Surface.ROTATION_90;
+        }
+        return Surface.ROTATION_0;
     }
 
     private SelectedCamera selectBackMainCamera(ProcessCameraProvider provider) {
@@ -680,7 +706,8 @@ public class NativeCameraActivity extends AppCompatActivity {
 
     private void capturePhoto() {
         if (imageCapture == null) return;
-        imageCapture.setTargetRotation(getCaptureRotation());
+        int targetRotation = resolveCaptureRotation();
+        imageCapture.setTargetRotation(targetRotation);
 
         long now = System.currentTimeMillis();
         if (now - lastCaptureTime < 450) return; // Prevent rapid double-bounce captures
@@ -705,6 +732,7 @@ public class NativeCameraActivity extends AppCompatActivity {
 
         File file = new File(dir, "sporely-native-" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 6) + ".jpg");
         long capturedAtMillis = System.currentTimeMillis();
+        logRotationState("captureStart", file, targetRotation);
         ImageCapture.Metadata metadata = new ImageCapture.Metadata();
         if (captureLocation != null) metadata.setLocation(captureLocation);
 
@@ -722,8 +750,11 @@ public class NativeCameraActivity extends AppCompatActivity {
                     return;
                 }
                 try {
-                    normalizeOrientation(file, capturedAtMillis);
+                    CaptureDebugInfo debugInfo = normalizeOrientation(file, capturedAtMillis);
+                    captureDebugByPath.put(file.getAbsolutePath(), debugInfo);
+                    logSavedExifState("cameraXSave", file, debugInfo);
                     writeCaptureExif(file, capturedAtMillis);
+                    logSavedExifState("finalReturn", file, debugInfo);
                 } catch (Exception ex) {
                     Toast.makeText(NativeCameraActivity.this, "Metadata write failed: " + ex.getMessage(), Toast.LENGTH_SHORT).show();
                 }
@@ -771,6 +802,7 @@ public class NativeCameraActivity extends AppCompatActivity {
             }
         }
         capturedFiles.clear();
+        clearCaptureDebugByPath();
         if (countBadge != null) countBadge.setText("0");
         if (batchStack != null) batchStack.setVisibility(FrameLayout.GONE);
     }
@@ -817,6 +849,7 @@ public class NativeCameraActivity extends AppCompatActivity {
         putExifString(exif, "FNumber", fileExif.getAttribute(ExifInterface.TAG_F_NUMBER));
         putExifString(exif, "ISOSpeedRatings", fileExif.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS));
         putExifString(exif, "PhotographicSensitivity", fileExif.getAttribute(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY));
+        exif.put("Orientation", fileExif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL));
         if (captureLocation != null) {
             exif.put("latitude", captureLocation.getLatitude());
             exif.put("longitude", captureLocation.getLongitude());
@@ -833,6 +866,10 @@ public class NativeCameraActivity extends AppCompatActivity {
         photo.put("format", "jpeg");
         photo.put("originalFormat", "jpeg");
         photo.put("converted", false);
+        CaptureDebugInfo debugInfo = captureDebugByPath.get(file.getAbsolutePath());
+        if (debugInfo != null) {
+            photo.put("debug", debugInfo.toJson());
+        }
         photo.put("exif", exif);
         return photo;
     }
@@ -870,39 +907,103 @@ public class NativeCameraActivity extends AppCompatActivity {
         exif.saveAttributes();
     }
 
-    private void normalizeOrientation(File file, long capturedAtMillis) throws IOException {
+    private CaptureDebugInfo normalizeOrientation(File file, long capturedAtMillis) throws IOException {
+        // Experiment: preserve the native-camera JPEG exactly as captured and only record diagnostics.
         ExifInterface exif = new ExifInterface(file.getAbsolutePath());
-        Map<String, String> preservedExif = readPreservedExif(exif);
-        int orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
-        int degrees = exifOrientationToDegrees(orientation);
-        if (degrees == 0) {
-            restorePreservedExif(exif, preservedExif);
-            applyCameraFallbackExif(exif);
-            applyTimestampExif(exif, capturedAtMillis);
-            exif.setAttribute(ExifInterface.TAG_ORIENTATION, String.valueOf(ExifInterface.ORIENTATION_NORMAL));
-            exif.saveAttributes();
-            return;
+        Size bounds = readImageBounds(file);
+        Integer orientation = readExifOrientation(exif);
+        int preWidth = bounds.getWidth();
+        int preHeight = bounds.getHeight();
+        return new CaptureDebugInfo(orientation, orientation, 0, preWidth, preHeight, preWidth, preHeight, true);
+    }
+
+    private Size readImageBounds(File file) {
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+        return new Size(Math.max(0, options.outWidth), Math.max(0, options.outHeight));
+    }
+
+    private Integer readExifOrientation(ExifInterface exif) {
+        String rawOrientation = exif.getAttribute(ExifInterface.TAG_ORIENTATION);
+        if (isBlank(rawOrientation)) {
+            return null;
         }
+        return exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+    }
 
-        Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
-        if (bitmap == null) return;
-        Matrix matrix = new Matrix();
-        matrix.postRotate(degrees);
-        Bitmap rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
-        if (rotated != bitmap) bitmap.recycle();
+    private void logRotationState(String phase, File file, Integer targetRotation) {
+        Integer sensorOrientation = getActiveSensorOrientationDegrees();
+        String message = String.format(
+            Locale.US,
+            "%s requestedOrientation=%d displayRotation=%s physicalOrientationDegrees=%s mappedTargetRotation=%s imageCaptureTargetRotation=%s sensorOrientation=%s file=%s",
+            phase,
+            getRequestedOrientation(),
+            describeSurfaceRotation(getDisplayRotation()),
+            describePhysicalOrientationDegrees(lastOrientationDegrees),
+            describeSurfaceRotation(targetRotation != null ? targetRotation : getCaptureRotation()),
+            imageCapture != null ? describeSurfaceRotation(imageCapture.getTargetRotation()) : "null",
+            sensorOrientation != null ? String.valueOf(sensorOrientation) : "null",
+            file != null ? file.getAbsolutePath() : "null"
+        );
+        Log.i(TAG, message);
+    }
 
-        try (FileOutputStream out = new FileOutputStream(file, false)) {
-            rotated.compress(Bitmap.CompressFormat.JPEG, 95, out);
-        } finally {
-            rotated.recycle();
+    private void logSavedExifState(String phase, File file, CaptureDebugInfo debugInfo) {
+        try {
+            ExifInterface exif = new ExifInterface(file.getAbsolutePath());
+            Integer exifOrientation = readExifOrientation(exif);
+            Size bounds = readImageBounds(file);
+            String message = String.format(
+                Locale.US,
+                "%s exifOrientation=%s exifOrientationDegrees=%s width=%d height=%d debugPreOrientation=%s debugPostOrientation=%s debugAppliedRotationDegrees=%d debugSkipped=%s file=%s",
+                phase,
+                describeExifOrientation(exifOrientation),
+                exifOrientation != null ? String.valueOf(exifOrientationToDegrees(exifOrientation)) : "null",
+                bounds.getWidth(),
+                bounds.getHeight(),
+                debugInfo != null ? describeExifOrientation(debugInfo.preOrientation) : "null",
+                debugInfo != null ? describeExifOrientation(debugInfo.postOrientation) : "null",
+                debugInfo != null ? debugInfo.appliedRotationDegrees : 0,
+                debugInfo != null && debugInfo.orientationNormalizationSkipped,
+                file.getAbsolutePath()
+            );
+            Log.i(TAG, message);
+        } catch (Exception ex) {
+            Log.w(TAG, "Could not log capture EXIF state: " + ex.getMessage());
         }
+    }
 
-        ExifInterface nextExif = new ExifInterface(file.getAbsolutePath());
-        restorePreservedExif(nextExif, preservedExif);
-        applyCameraFallbackExif(nextExif);
-        applyTimestampExif(nextExif, capturedAtMillis);
-        nextExif.setAttribute(ExifInterface.TAG_ORIENTATION, String.valueOf(ExifInterface.ORIENTATION_NORMAL));
-        nextExif.saveAttributes();
+    private Integer getActiveSensorOrientationDegrees() {
+        if (activeCameraInfo == null) return null;
+        try {
+            return Camera2CameraInfo.from(activeCameraInfo)
+                .getCameraCharacteristic(CameraCharacteristics.SENSOR_ORIENTATION);
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private String describeSurfaceRotation(int rotation) {
+        if (rotation == Surface.ROTATION_0) return "ROTATION_0(0)";
+        if (rotation == Surface.ROTATION_90) return "ROTATION_90(1)";
+        if (rotation == Surface.ROTATION_180) return "ROTATION_180(2)";
+        if (rotation == Surface.ROTATION_270) return "ROTATION_270(3)";
+        return "UNKNOWN(" + rotation + ")";
+    }
+
+    private String describePhysicalOrientationDegrees(int orientationDegrees) {
+        if (orientationDegrees == OrientationEventListener.ORIENTATION_UNKNOWN) return "UNKNOWN";
+        return String.valueOf(orientationDegrees);
+    }
+
+    private String describeExifOrientation(Integer orientation) {
+        if (orientation == null) return "null";
+        if (orientation == ExifInterface.ORIENTATION_NORMAL) return "NORMAL(1)";
+        if (orientation == ExifInterface.ORIENTATION_ROTATE_90) return "ROTATE_90(6)";
+        if (orientation == ExifInterface.ORIENTATION_ROTATE_180) return "ROTATE_180(3)";
+        if (orientation == ExifInterface.ORIENTATION_ROTATE_270) return "ROTATE_270(8)";
+        return "OTHER(" + orientation + ")";
     }
 
     private Map<String, String> readPreservedExif(ExifInterface exif) {
@@ -985,6 +1086,45 @@ public class NativeCameraActivity extends AppCompatActivity {
         if (orientation == ExifInterface.ORIENTATION_ROTATE_180) return 180;
         if (orientation == ExifInterface.ORIENTATION_ROTATE_270) return 270;
         return 0;
+    }
+
+    private void clearCaptureDebugByPath() {
+        captureDebugByPath.clear();
+    }
+
+    private static class CaptureDebugInfo {
+        final Integer preOrientation;
+        final Integer postOrientation;
+        final int appliedRotationDegrees;
+        final int preWidth;
+        final int preHeight;
+        final int postWidth;
+        final int postHeight;
+        final boolean orientationNormalizationSkipped;
+
+        CaptureDebugInfo(Integer preOrientation, Integer postOrientation, int appliedRotationDegrees, int preWidth, int preHeight, int postWidth, int postHeight, boolean orientationNormalizationSkipped) {
+            this.preOrientation = preOrientation;
+            this.postOrientation = postOrientation;
+            this.appliedRotationDegrees = appliedRotationDegrees;
+            this.preWidth = preWidth;
+            this.preHeight = preHeight;
+            this.postWidth = postWidth;
+            this.postHeight = postHeight;
+            this.orientationNormalizationSkipped = orientationNormalizationSkipped;
+        }
+
+        JSONObject toJson() throws Exception {
+            JSONObject json = new JSONObject();
+            json.put("preOrientation", preOrientation != null ? preOrientation : JSONObject.NULL);
+            json.put("postOrientation", postOrientation != null ? postOrientation : JSONObject.NULL);
+            json.put("appliedRotationDegrees", appliedRotationDegrees);
+            json.put("preWidth", preWidth);
+            json.put("preHeight", preHeight);
+            json.put("postWidth", postWidth);
+            json.put("postHeight", postHeight);
+            json.put("orientationNormalizationSkipped", orientationNormalizationSkipped);
+            return json;
+        }
     }
 
     private static class SelectedCamera {

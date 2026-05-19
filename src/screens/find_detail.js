@@ -2869,7 +2869,9 @@ async function _sendComment() {
 async function _openCameraForDetail() {
   if (isAndroidNativeApp()) {
     try {
+      const screenPath = 'find_detail:add-photo'
       if (getUseSystemCamera()) {
+        const captureSource = 'system camera'
         const result = await NativeCamera.openSystemCamera()
         const photos = Array.isArray(result?.photos) ? result.photos : []
         if (!photos.length) return
@@ -2878,12 +2880,13 @@ async function _openCameraForDetail() {
         const files = []
         for (let i = 0; i < photos.length; i++) {
           _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
-          files.push(await nativePickedPhotoToFile(photos[i], i))
+          files.push(await nativePickedPhotoToFile(photos[i], i, { captureSource, screenPath }))
         }
         await _addPhotosToObservation(files)
         return
       }
 
+      const captureSource = 'Sporely native camera'
       const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
         ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
         : null
@@ -2897,7 +2900,7 @@ async function _openCameraForDetail() {
       const files = []
       for (let i = 0; i < photos.length; i++) {
         _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
-        files.push(await nativePickedPhotoToFile(photos[i], i))
+        files.push(await nativePickedPhotoToFile(photos[i], i, { captureSource, screenPath }))
       }
       await _addPhotosToObservation(files)
     } catch (err) {
@@ -2931,6 +2934,8 @@ async function _openCameraForDetail() {
 async function _openPickerForDetail() {
   if (isAndroidNativeApp()) {
     try {
+      const screenPath = 'find_detail:add-photo'
+      const captureSource = 'native picker/import'
       const result = await pickImagesWithNativePhotoPicker()
       const photos = Array.isArray(result?.photos) ? result.photos : []
       if (!photos.length) return
@@ -2938,7 +2943,7 @@ async function _openPickerForDetail() {
       const files = []
       for (let i = 0; i < photos.length; i++) {
         _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
-        files.push(await nativePickedPhotoToFile(photos[i], i))
+        files.push(await nativePickedPhotoToFile(photos[i], i, { captureSource, screenPath }))
       }
       await _addPhotosToObservation(files)
       return

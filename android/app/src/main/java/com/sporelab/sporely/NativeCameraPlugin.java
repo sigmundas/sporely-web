@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.net.Uri;
 import android.provider.MediaStore;
 import androidx.core.content.FileProvider;
+import androidx.exifinterface.media.ExifInterface;
 import androidx.activity.result.ActivityResult;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -81,11 +82,25 @@ public class NativeCameraPlugin extends Plugin {
             return;
         }
         try {
+            File photoFile = systemCameraFilePath != null ? new File(systemCameraFilePath) : null;
+            JSObject exif = new JSObject();
+            if (photoFile != null && photoFile.exists()) {
+                try {
+                    ExifInterface fileExif = new ExifInterface(photoFile.getAbsolutePath());
+                    exif.put("Orientation", fileExif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL));
+                } catch (Exception ignored) {}
+            }
+
             JSObject photo = new JSObject();
             photo.put("path", systemCameraFilePath);
             photo.put("originalPath", systemCameraFilePath);
+            photo.put("name", photoFile != null ? photoFile.getName() : "system-camera.jpg");
             photo.put("mimeType", "image/jpeg");
+            photo.put("originalMimeType", "image/jpeg");
             photo.put("format", "jpeg");
+            photo.put("originalFormat", "jpeg");
+            photo.put("converted", false);
+            photo.put("exif", exif);
             
             JSONArray photos = new JSONArray();
             photos.put(photo);
