@@ -3,6 +3,7 @@
 // All async work happens OUTSIDE the IDB transaction to avoid auto-commit.
 import { getDefaultVisibility } from './settings.js'
 import { normalizeCaptureVisibility } from './visibility.js'
+import { debugImagePipeline } from './image-pipeline-debug.js'
 
 const DB_NAME = 'sporely'
 const DB_VERSION = 1
@@ -85,6 +86,11 @@ export async function saveImportSessions(sessions) {
       aiBlobTypes: (s.aiFiles || s.files).map(f => _blobType(f)),
     })))
 
+    debugImagePipeline('save import sessions', {
+      sessionCount: records.length,
+      photoCount: records.reduce((sum, record) => sum + (Array.isArray(record.blobs) ? record.blobs.length : 0), 0),
+    })
+
     const db = await _open()
     const tx = db.transaction(STORE, 'readwrite')
     const store = tx.objectStore(STORE)
@@ -108,6 +114,11 @@ export async function loadImportSessions() {
     })
     db.close()
     if (!records?.length) return []
+
+    debugImagePipeline('load import sessions', {
+      recordCount: records.length,
+      photoCount: records.reduce((sum, record) => sum + (Array.isArray(record.blobs) ? record.blobs.length : 0), 0),
+    })
 
     return records
       .sort((a, b) => a.ts - b.ts)
@@ -169,6 +180,7 @@ export async function loadImportSessions() {
 
 export async function clearImportSessions() {
   try {
+    debugImagePipeline('clear import sessions')
     const db = await _open()
     const tx = db.transaction(STORE, 'readwrite')
     tx.objectStore(STORE).clear()

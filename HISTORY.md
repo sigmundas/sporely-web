@@ -1,8 +1,38 @@
 # Sporely Web — History & Debugging Notes
 
+## Purpose
+
+`HISTORY.md` keeps completed implementation notes, debugging history, gotchas, and archived plans.
+
+It should not be used as the current task plan. Current tasks belong in `PLAN.md`.
+
 ## Planning History
 
-### 2026-05-19 - Image Pipeline Refactor Archive
+### 2026-05-19 — PLAN.md cleanup and recovered-file triage
+
+- `PLAN.md` was recovered after an agent damaged it.
+- The recovered file still mixed active tasks, dated debug logs, completed implementation notes, and long agent prompt material.
+- Cleanup rule:
+  - keep active tasks in `PLAN.md`
+  - keep completed/debugging/history material here
+  - move stable status tables to separate docs
+  - delete obsolete prompt text unless it is intentionally archived
+- The image pipeline refactor remains conservative because the app currently works.
+- Phase 1 added:
+  - `docs/image-pipeline-phase1.md`
+  - opt-in image-pipeline debug logging
+- The next intended image pipeline step is helper extraction only:
+  - shared `isBlob`
+  - neutral coordinate helper
+  - default draft factory
+  - simple image shape comments/JSDoc
+- Explicitly not next:
+  - no `image-intake.js`
+  - no full intake rewrite
+  - no streaming import architecture yet
+  - no EXIF-worker migration yet
+
+### 2026-05-19 — Image Pipeline Refactor Archive
 
 - Moved the long image-pipeline refactor plan out of `PLAN.md` so the plan can stay focused on active backlog items.
 - Scope stayed `sporely-web` only.
@@ -12,9 +42,10 @@
 - Deferred until later: streaming every processed image directly to IndexedDB, moving EXIF extraction into `image-worker.js`, and removing schema fallbacks too early.
 - If memory or object URL issues surface, address cleanup before any intake rewrite.
 
-### 2026-05-19 - Active Plan Cleanup
+### 2026-05-19 — Active Plan Cleanup
 
 - `PLAN.md` now holds only the active backlog and links back here for archived planning context.
+
 
 ## Upload Request Gotchas
 - **iOS Safari Fetch Hangs:** Never stream an IndexedDB-backed `Blob` directly into a `fetch()` body on iOS/WebKit. Convert it to an `ArrayBuffer` first (`await blob.arrayBuffer()`) before passing it to `fetch`, otherwise the upload may silently hang or send 0 bytes.

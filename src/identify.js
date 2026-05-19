@@ -1,6 +1,7 @@
 import { t } from './i18n.js'
 import { loadInaturalistSession } from './inaturalist.js'
 import { getBlobImageDimensions, prepareImageBlobForUpload } from './image_crop.js'
+import { isBlob } from './observation-shapes.js'
 import {
   getDefaultIdService,
   ID_SERVICE_ARTSORAKEL,
@@ -169,15 +170,11 @@ async function _logInaturalistRequestIfEnabled({
   }
 }
 
-function _isBlob(value) {
-  return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
-}
-
 function _selectIdentifySourceBlob(item) {
-  if (_isBlob(item?.originalBlob)) return item.originalBlob
-  if (_isBlob(item?.sourceBlob)) return item.sourceBlob
-  if (_isBlob(item?.blob)) return item.blob
-  return _isBlob(item) ? item : null
+  if (isBlob(item?.originalBlob)) return item.originalBlob
+  if (isBlob(item?.sourceBlob)) return item.sourceBlob
+  if (isBlob(item?.blob)) return item.blob
+  return isBlob(item) ? item : null
 }
 
 function _normalizeString(value) {
@@ -333,7 +330,7 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
     options.onImageSent()
   }
 
-  const prepared = options.prepared === true && _isBlob(options.preparedBlob)
+  const prepared = options.prepared === true && isBlob(options.preparedBlob)
     ? {
         blob: options.preparedBlob,
         inputType: blob.type || '',
@@ -479,13 +476,13 @@ export function formatIdentifyScore(service, score) {
 export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
   const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
     const rawBlob = _selectIdentifySourceBlob(item)
-    if (!_isBlob(rawBlob)) return null
+    if (!isBlob(rawBlob)) return null
 
     const itemLat = _isNumber(item?.lat) ? Number(item.lat) : null
     const itemLon = _isNumber(item?.lon) ? Number(item.lon) : (_isNumber(item?.lng) ? Number(item.lng) : null)
     const itemObservedOn = item?.observedOn || item?.observed_on || null
 
-    if (item?.preprocessed === true && _isBlob(item.blob) && !_isBlob(item?.originalBlob) && !_isBlob(item?.sourceBlob)) {
+    if (item?.preprocessed === true && isBlob(item.blob) && !isBlob(item?.originalBlob) && !isBlob(item?.sourceBlob)) {
       return {
         blob: item.blob,
         preparedMeta: item.preparedMeta || item.debug || {},
@@ -508,7 +505,7 @@ export async function runInaturalistForBlobs(blobs, lang = 'en', options = {}) {
       lon: itemLon,
       observedOn: itemObservedOn,
     }
-  }))).filter(item => _isBlob(item?.blob))
+  }))).filter(item => isBlob(item?.blob))
 
   if (!preparedBlobs.length) return []
 

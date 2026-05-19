@@ -6,6 +6,8 @@ import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.j
 import { BackgroundTask } from '@capawesome/capacitor-background-task'
 import { isNativeApp } from './platform.js'
 import { normalizeObservationVisibility, toCloudVisibility } from './visibility.js'
+import { debugImagePipeline } from './image-pipeline-debug.js'
+import { isBlob } from './observation-shapes.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -21,10 +23,6 @@ let _currentSyncPromise = null
 const _activeQueueOperations = new Set()
 let _backgroundTaskRegistered = false
 const _devWarnedBlockedQueueItems = new Set()
-
-function _isBlob(b) {
-  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
-}
 
 function _isDebugQueueEnabled() {
   try {
@@ -90,7 +88,7 @@ function _blobFromStoredBytes(bytes, type = 'image/jpeg') {
 }
 
 async function _blobToStoredBytes(blob) {
-  if (!_isBlob(blob)) return null
+  if (!isBlob(blob)) return null
   return {
     bytes: await blob.arrayBuffer(),
     type: blob.type || 'image/jpeg',
@@ -158,7 +156,7 @@ function _previewUrlForQueueItem(item) {
   const entry = _normalizeQueuedImages(item?.imageEntries || item?.imageBlobs)[0]
   if (!entry) return null
   const blobToUrl = entry.uploadBlob || entry.blob
-  if (!_isBlob(blobToUrl)) return null
+  if (!isBlob(blobToUrl)) return null
 
   const nextUrl = URL.createObjectURL(blobToUrl)
   _queuedPreviewUrls.set(id, nextUrl)
@@ -238,9 +236,16 @@ function _scheduleSyncRetry() {
   }, RETRY_DELAY_MS)
 }
 
+/**
+ * Normalize the mixed queue image shapes we persist: live blobs, restored
+ * blobs, and byte-backed records from IndexedDB.
+ *
+ * @param {Array<import('./observation-shapes.js').ObservationImageEntry|Blob|Object>} imageEntries
+ * @returns {Array<import('./observation-shapes.js').ObservationImageEntry>}
+ */
 function _normalizeQueuedImages(imageEntries) {
   return (imageEntries || []).map(entry => {
-    if (_isBlob(entry)) {
+    if (isBlob(entry)) {
       return {
         blob: entry,
         aiCropRect: null,
@@ -251,15 +256,15 @@ function _normalizeQueuedImages(imageEntries) {
         variants: null,
       }
     }
-    const realBlob = _isBlob(entry?.blob)
+    const realBlob = isBlob(entry?.blob)
       ? entry.blob
-      : (_isBlob(entry?.file)
+      : (isBlob(entry?.file)
         ? entry.file
         : _blobFromStoredBytes(entry?.blobBytes || entry?.originalBytes, entry?.blobType || entry?.originalType))
-    const uploadBlob = _isBlob(entry?.uploadBlob)
+    const uploadBlob = isBlob(entry?.uploadBlob)
       ? entry.uploadBlob
       : _blobFromStoredBytes(entry?.uploadBytes, entry?.uploadType)
-    const thumbBlob = _isBlob(entry?.variants?.thumb)
+    const thumbBlob = isBlob(entry?.variants?.thumb)
       ? entry.variants.thumb
       : _blobFromStoredBytes(entry?.variantBytes?.thumb, entry?.variantTypes?.thumb)
     return {
@@ -271,7 +276,7 @@ function _normalizeQueuedImages(imageEntries) {
       uploadMeta: entry?.uploadMeta || null,
       variants: thumbBlob ? { thumb: thumbBlob } : (entry?.variants || null),
     }
-  }).filter(entry => _isBlob(entry.blob) || _isBlob(entry.uploadBlob))
+  }).filter(entry => isBlob(entry.blob) || isBlob(entry.uploadBlob))
 }
 
 async function _serializeQueuedImagesForStorage(images) {
@@ -320,6 +325,9 @@ async function _persistPreparedQueuedImage(itemId, index, preparedImage) {
 }
 
 export async function enqueueObservation(obsPayload, imageEntries) {
+  debugImagePipeline('enqueue observation', {
+    imageEntryCount: Array.isArray(imageEntries) ? imageEntries.length : 0,
+  })
   return _trackQueueOperation(_enqueueObservation(obsPayload, imageEntries))
 }
 
@@ -719,7 +727,7 @@ async function _runSyncQueue() {
         })
         let preparedImage = image
         const preparedUploadMode = image.uploadMeta?.upload_mode || null
-        if (_isBlob(image.blob) && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
+        if (isBlob(image.blob) && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
           const prepared = await prepareImageVariants(image.blob, uploadPolicy)
           preparedImage = {
             ...image,
@@ -793,6 +801,7 @@ async function _runSyncQueue() {
 export async function triggerSync() {
   if (isSyncing) return _currentSyncPromise
 
+  debugImagePipeline('trigger sync requested')
   isSyncing = true
   _currentSyncPromise = _trackQueueOperation(_runSyncQueue())
     .finally(() => {

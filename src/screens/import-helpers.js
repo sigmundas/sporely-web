@@ -1,8 +1,8 @@
 import { Capacitor, registerPlugin } from '@capacitor/core'
 import { FilePicker } from '@capawesome/capacitor-file-picker'
 import { isAndroidNativeApp } from '../camera-actions.js'
-import { isUsableCoordinate } from './review.js'
 import { createImageCropMeta } from '../image_crop.js'
+import { normalizeCoordinatePair } from '../observation-shapes.js'
 
 export const NativePhotoPicker = registerPlugin('NativePhotoPicker')
 export const NativeCamera = registerPlugin('NativeCamera')
@@ -102,8 +102,21 @@ function _coerceExifDate(value) {
 function _coerceExifNumber(value) {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
   if (typeof value === 'string') {
-    const num = Number(value)
-    return Number.isFinite(num) ? num : null
+    const trimmed = value.trim()
+    if (!trimmed) return null
+    const num = Number(trimmed)
+    if (Number.isFinite(num)) return num
+    const match = trimmed.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/i)
+    if (!match) return null
+    const parsed = Number(match[0])
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const num = _coerceExifNumber(item)
+      if (num !== null) return num
+    }
+    return null
   }
   if (value && typeof value === 'object') {
     if (Number.isFinite(value.numerator) && Number.isFinite(value.denominator) && value.denominator) {
@@ -128,6 +141,20 @@ function _toDecimalDegrees(value) {
   return _coerceExifNumber(value)
 }
 
+function _normalizeExifKey(key) {
+  return String(key || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+function _getRawGpsValue(rawGps, keys = []) {
+  if (!rawGps || typeof rawGps !== 'object') return null
+  const wanted = new Set(keys.map(_normalizeExifKey))
+  for (const [key, value] of Object.entries(rawGps)) {
+    if (!wanted.has(_normalizeExifKey(key))) continue
+    if (value !== null && value !== undefined) return value
+  }
+  return null
+}
+
 function _withHemisphere(value, ref, negativeRef) {
   if (value === null) return null
   const normalized = String(ref || '').trim().toUpperCase()
@@ -135,44 +162,126 @@ function _withHemisphere(value, ref, negativeRef) {
   return Math.abs(value)
 }
 
-function _extractLatLonFromRawGps(rawGps) {
+export function _extractLatLonFromRawGps(rawGps) {
   if (!rawGps || typeof rawGps !== 'object') return { lat: null, lon: null }
 
-  let lat = rawGps.latitude
-  let lon = rawGps.longitude
+  const latValue = _getRawGpsValue(rawGps, ['latitude', 'GPSLatitude', 'Latitude', 'GpsLatitude', 'lat'])
+  const lonValue = _getRawGpsValue(rawGps, ['longitude', 'GPSLongitude', 'Longitude', 'GpsLongitude', 'lon'])
+  const latRef = _getRawGpsValue(rawGps, ['latitudeRef', 'GPSLatitudeRef', 'LatitudeRef', 'GpsLatitudeRef', 'latRef'])
+  const lonRef = _getRawGpsValue(rawGps, ['longitudeRef', 'GPSLongitudeRef', 'LongitudeRef', 'GpsLongitudeRef', 'lonRef'])
 
-  if (lat == null) lat = _withHemisphere(_toDecimalDegrees(rawGps.GPSLatitude), rawGps.GPSLatitudeRef, 'S')
-  if (lon == null) lon = _withHemisphere(_toDecimalDegrees(rawGps.GPSLongitude), rawGps.GPSLongitudeRef, 'W')
+  let lat = _toDecimalDegrees(latValue)
+  let lon = _toDecimalDegrees(lonValue)
+
+  if (lat == null) lat = _withHemisphere(_toDecimalDegrees(_getRawGpsValue(rawGps, ['GPSLatitude', 'Latitude', 'GpsLatitude'])), latRef, 'S')
+  if (lon == null) lon = _withHemisphere(_toDecimalDegrees(_getRawGpsValue(rawGps, ['GPSLongitude', 'Longitude', 'GpsLongitude'])), lonRef, 'W')
 
   lat = _coerceExifNumber(lat)
   lon = _coerceExifNumber(lon)
-  if (!isUsableCoordinate(lat, lon)) return { lat: null, lon: null }
-  return { lat, lon }
+  return normalizeCoordinatePair(lat, lon) || { lat: null, lon: null }
 }
 
-function _extractAltitudeFromRawGps(rawGps) {
+export function _extractAltitudeRefFromRawGps(rawGps) {
   if (!rawGps || typeof rawGps !== 'object') return null
-  const candidates = [rawGps.altitude, rawGps.GPSAltitude, rawGps.GpsAltitude]
-  let altitude = null
-  for (const candidate of candidates) {
-    altitude = _coerceExifNumber(candidate)
-    if (altitude !== null) break
+  const rawRef = _getRawGpsValue(rawGps, [
+    'GPSAltitudeRef',
+    'GpsAltitudeRef',
+    'GPS Altitude Ref',
+    'gpsAltitudeRef',
+    'gps_altitude_ref',
+    'AltitudeRef',
+    'altitudeRef',
+  ])
+  if (rawRef === null || rawRef === undefined) return null
+  if (Array.isArray(rawRef)) {
+    for (const item of rawRef) {
+      const next = _extractAltitudeRefFromRawGps({ GPSAltitudeRef: item })
+      if (next !== null) return next
+    }
+    return null
   }
+  if (typeof rawRef === 'number') {
+    return rawRef === 0 || rawRef === 1 ? rawRef : null
+  }
+  if (typeof rawRef === 'string') {
+    const normalized = rawRef.trim().toLowerCase()
+    if (!normalized) return null
+    const num = Number(normalized)
+    if (Number.isFinite(num) && (num === 0 || num === 1)) return num
+    if (normalized.includes('below')) return 1
+    if (normalized.includes('above')) return 0
+  }
+  if (typeof rawRef === 'object') {
+    return _extractAltitudeRefFromRawGps({
+      GPSAltitudeRef: rawRef.value ?? rawRef.text ?? rawRef.description ?? rawRef.label ?? rawRef.ref ?? rawRef.altitudeRef ?? null,
+    })
+  }
+  return null
+}
+
+export function _extractAltitudeFromRawGps(rawGps) {
+  if (!rawGps || typeof rawGps !== 'object') return null
+  const altitudeValue = _getRawGpsValue(rawGps, [
+    'altitude',
+    'Altitude',
+    'GPSAltitude',
+    'GpsAltitude',
+    'GPS Altitude',
+    'gpsAltitude',
+    'gps_altitude',
+  ])
+  const altitude = _coerceExifNumber(altitudeValue)
   if (!Number.isFinite(altitude)) return null
-  const ref = _coerceExifNumber(rawGps.GPSAltitudeRef ?? rawGps.GpsAltitudeRef)
-  return ref === 1 ? -Math.abs(altitude) : altitude
+  const ref = _extractAltitudeRefFromRawGps(rawGps)
+  return ref === 1 ? -Math.abs(altitude) : Math.abs(altitude)
 }
 
-function _extractAccuracyFromRawGps(rawGps) {
+export function _extractAccuracyFromRawGps(rawGps) {
   if (!rawGps || typeof rawGps !== 'object') return null
-  const candidates = [rawGps.GPSHPositioningError, rawGps.accuracy]
-  let accuracy = null
-  for (const candidate of candidates) {
-    accuracy = _coerceExifNumber(candidate)
-    if (accuracy !== null && accuracy > 0) break
-  }
+  const accuracyValue = _getRawGpsValue(rawGps, [
+    'GPSHPositioningError',
+    'GpsHPositioningError',
+    'GPS H Positioning Error',
+    'gpsHPositioningError',
+    'gps_h_positioning_error',
+    'accuracy',
+    'Accuracy',
+  ])
+  const accuracy = _coerceExifNumber(accuracyValue)
   if (!Number.isFinite(accuracy)) return null
   return accuracy
+}
+
+function _applyRawGpsCandidate(target, rawGps, sourceLabel, dbg) {
+  if (!rawGps || typeof rawGps !== 'object') return
+  const { lat, lon } = _extractLatLonFromRawGps(rawGps)
+  if (lat !== null && target.lat === null) {
+    target.lat = lat
+    target.gpsSource = target.gpsSource || sourceLabel
+  }
+  if (lon !== null && target.lon === null) {
+    target.lon = lon
+    target.gpsSource = target.gpsSource || sourceLabel
+  }
+
+  const altitude = _extractAltitudeFromRawGps(rawGps)
+  if (altitude !== null && target.altitude === null) {
+    target.altitude = altitude
+    target.altitudeSource = target.altitudeSource || sourceLabel
+  }
+
+  const accuracy = _extractAccuracyFromRawGps(rawGps)
+  if (accuracy !== null && target.accuracy === null) {
+    target.accuracy = accuracy
+    target.gpsSource = target.gpsSource || sourceLabel
+  }
+
+  if (dbg && !dbg.gpsSource && (lat !== null || lon !== null || accuracy !== null)) {
+    dbg.gpsSource = sourceLabel
+  }
+  if (dbg && !dbg.altitudeSource && altitude !== null) {
+    dbg.altitudeSource = sourceLabel
+  }
 }
 
 export async function captureNativePhotoExif(photo, file) {
@@ -181,55 +290,81 @@ export async function captureNativePhotoExif(photo, file) {
   let lon = null
   let altitude = null
   let accuracy = null
+  let hasNativeTime = false
   const dbg = {
     fileName: file.name,
     fileSize: file.size,
     fileType: file.type,
     nativePath: photo?.path || null,
     nativeMimeType: photo?.mimeType || null,
+    altitudeSource: null,
+    gpsSource: null,
+    nativeExif: null,
+    gpsResult: null,
+    gpsFallback: null,
+    rawGpsFile: null,
+    rawGpsBuffer: null,
+  }
+
+  const target = {
+    get lat() { return lat },
+    set lat(value) { lat = value },
+    get lon() { return lon },
+    set lon(value) { lon = value },
+    get altitude() { return altitude },
+    set altitude(value) { altitude = value },
+    get accuracy() { return accuracy },
+    set accuracy(value) { accuracy = value },
+    get gpsSource() { return dbg.gpsSource },
+    set gpsSource(value) { dbg.gpsSource = value },
+    get altitudeSource() { return dbg.altitudeSource },
+    set altitudeSource(value) { dbg.altitudeSource = value },
   }
 
   if (photo?.exif && typeof photo.exif === 'object') {
     dbg.nativeExif = JSON.stringify(photo.exif)
-    const rawNativeGps = _extractLatLonFromRawGps(photo.exif)
-    if (rawNativeGps.lat !== null) lat = rawNativeGps.lat
-    if (rawNativeGps.lon !== null) lon = rawNativeGps.lon
-    altitude = _extractAltitudeFromRawGps(photo.exif)
-    accuracy = _extractAccuracyFromRawGps(photo.exif)
+    _applyRawGpsCandidate(target, photo.exif, 'nativeExif', dbg)
 
     const dt = _coerceExifDate(photo.exif.DateTimeOriginal || photo.exif.CreateDate || photo.exif.ModifyDate || photo.capturedAt)
-    if (dt) time = dt.getTime()
-    return { time, lat, lon, altitude, accuracy, dbg }
+    if (dt) {
+      time = dt.getTime()
+      hasNativeTime = true
+    }
   }
 
   try {
     const exif = window.Capacitor?.Plugins?.FilePicker?.getExif ? await FilePicker.getExif({ path: photo.path }) : null
     if (exif) {
-      dbg.nativeExif = JSON.stringify(exif)
-      const rawNativeGps = _extractLatLonFromRawGps(exif)
-      if (rawNativeGps.lat !== null) lat = rawNativeGps.lat
-      if (rawNativeGps.lon !== null) lon = rawNativeGps.lon
-      altitude = _extractAltitudeFromRawGps(exif)
-      accuracy = _extractAccuracyFromRawGps(exif)
+      if (!dbg.nativeExif) dbg.nativeExif = JSON.stringify(exif)
+      _applyRawGpsCandidate(target, exif, 'nativeExif', dbg)
 
       const dt = _coerceExifDate(exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate || photo.capturedAt)
-      if (dt) time = dt.getTime()
-
-      if (lat !== null && lon !== null) {
-        return { time, lat, lon, altitude, accuracy, dbg }
+      if (dt) {
+        time = dt.getTime()
+        hasNativeTime = true
       }
     }
   } catch (err) {
     console.warn('Native EXIF extraction failed, trying JS fallback:', err)
   }
 
+  if (lat !== null && lon !== null && altitude !== null && accuracy !== null && hasNativeTime) {
+    return { time, lat, lon, altitude, accuracy, dbg }
+  }
+
   try {
     const jsExif = await captureExif(file)
-    if (jsExif.lat !== null) lat = jsExif.lat
-    if (jsExif.lon !== null) lon = jsExif.lon
-    if (jsExif.altitude !== null) altitude = jsExif.altitude
-    if (jsExif.accuracy !== null) accuracy = jsExif.accuracy
-    if (jsExif.time) time = jsExif.time
+    if (jsExif.lat !== null && lat === null) lat = jsExif.lat
+    if (jsExif.lon !== null && lon === null) lon = jsExif.lon
+    if (jsExif.altitude !== null && altitude === null) altitude = jsExif.altitude
+    if (jsExif.accuracy !== null && accuracy === null) accuracy = jsExif.accuracy
+    if (!hasNativeTime && jsExif.time) time = jsExif.time
+    if (!dbg.gpsSource && jsExif.dbg?.gpsSource) dbg.gpsSource = `jsFallback:${jsExif.dbg.gpsSource}`
+    if (!dbg.altitudeSource && jsExif.dbg?.altitudeSource) dbg.altitudeSource = `jsFallback:${jsExif.dbg.altitudeSource}`
+    dbg.gpsResult = dbg.gpsResult || jsExif.dbg?.gpsResult || null
+    dbg.gpsFallback = dbg.gpsFallback || jsExif.dbg?.gpsFallback || null
+    dbg.rawGpsFile = dbg.rawGpsFile || jsExif.dbg?.rawGpsFile || null
+    dbg.rawGpsBuffer = dbg.rawGpsBuffer || jsExif.dbg?.rawGpsBuffer || null
     dbg.jsFallback = true
   } catch (err) {
     console.warn('JS EXIF extraction fallback failed:', err)
@@ -242,8 +377,13 @@ function _shouldHydrateNativeMetadata(photo, file) {
   if (!isAndroidNativeApp()) return false
   if (!photo?.originalPath) return false
   if (photo.originalPath === photo.path && !_isHeicLike(file)) return false
-  const rawGps = _extractLatLonFromRawGps(photo.exif)
-  return rawGps.lat === null || rawGps.lon === null
+  const rawGps = photo?.exif && typeof photo.exif === 'object' ? photo.exif : null
+  const coords = _extractLatLonFromRawGps(rawGps)
+  const altitude = _extractAltitudeFromRawGps(rawGps)
+  const hasNativeTime = Boolean(_coerceExifDate(
+    rawGps?.DateTimeOriginal || rawGps?.CreateDate || rawGps?.ModifyDate || photo?.capturedAt,
+  ))
+  return coords.lat === null || coords.lon === null || altitude === null || !hasNativeTime
 }
 
 export function createNativeMetadataHydrationPromise(photo, file) {
@@ -303,20 +443,74 @@ export async function captureExif(file) {
   let lon = null
   let altitude = null
   let accuracy = null
-  let dbg = { fileName: file.name, fileSize: file.size, fileType: file.type, bufSize: 0, gpsResult: null, gpsError: null, exifError: null }
+  let dbg = {
+    fileName: file.name,
+    fileSize: file.size,
+    fileType: file.type,
+    bufSize: 0,
+    gpsResult: null,
+    gpsFallback: null,
+    rawGpsFile: null,
+    rawGpsBuffer: null,
+    altitudeSource: null,
+    gpsSource: null,
+    gpsError: null,
+    exifError: null,
+  }
   const fullRead = _isHeicLike(file) ? { chunked: false } : {}
 
-  const setGps = (res) => {
-    const nextLat = _coerceExifNumber(res?.latitude)
-    const nextLon = _coerceExifNumber(res?.longitude)
-    if (isUsableCoordinate(nextLat, nextLon)) {
-      lat = nextLat
-      lon = nextLon
-    }
-    const nextAltitude = _extractAltitudeFromRawGps(res)
-    if (nextAltitude !== null) altitude = nextAltitude
-    const nextAccuracy = _extractAccuracyFromRawGps(res)
-    if (nextAccuracy !== null) accuracy = nextAccuracy
+  const target = {
+    get lat() { return lat },
+    set lat(value) { lat = value },
+    get lon() { return lon },
+    set lon(value) { lon = value },
+    get altitude() { return altitude },
+    set altitude(value) { altitude = value },
+    get accuracy() { return accuracy },
+    set accuracy(value) { accuracy = value },
+    get gpsSource() { return dbg.gpsSource },
+    set gpsSource(value) { dbg.gpsSource = value },
+    get altitudeSource() { return dbg.altitudeSource },
+    set altitudeSource(value) { dbg.altitudeSource = value },
+  }
+
+  try {
+    const exif = await exifr.parse(file, { pick: EXIF_DATETIME_PICK, ...fullRead })
+    const dt = exif?.DateTimeOriginal || exif?.CreateDate || exif?.ModifyDate
+    if (dt instanceof Date) time = dt.getTime()
+  } catch (_) {}
+
+  try {
+    const gpsResult = await exifr.gps(file, fullRead)
+    dbg.gpsResult = gpsResult ? JSON.stringify(gpsResult) : 'null'
+    _applyRawGpsCandidate(target, gpsResult, 'gpsResult', dbg)
+  } catch (_) {}
+
+  if (lat === null || lon === null || altitude === null || accuracy === null) {
+    try {
+      const fallback = await exifr.parse(file, { gps: true, tiff: true, xmp: true, ...fullRead })
+      dbg.gpsFallback = fallback ? JSON.stringify(fallback) : 'null'
+      _applyRawGpsCandidate(target, fallback, 'gpsFallback', dbg)
+    } catch (_) {}
+  }
+
+  if (lat === null || lon === null || altitude === null || accuracy === null) {
+    try {
+      const rawGps = await exifr.parse(file, {
+        pick: RAW_GPS_PICK,
+        gps: true,
+        tiff: true,
+        reviveValues: false,
+        translateValues: false,
+        ...fullRead,
+      })
+      dbg.rawGpsFile = rawGps ? JSON.stringify(rawGps) : 'null'
+      _applyRawGpsCandidate(target, rawGps, 'rawGpsFile', dbg)
+    } catch (_) {}
+  }
+
+  if (lat !== null && lon !== null && altitude !== null && accuracy !== null) {
+    return { time, lat, lon, altitude, accuracy, dbg }
   }
 
   let buf
@@ -325,7 +519,7 @@ export async function captureExif(file) {
     dbg.bufSize = buf.byteLength
   } catch (e) {
     dbg.bufError = String(e)
-    return { time, lat, lon, altitude, dbg }
+    return { time, lat, lon, altitude, accuracy, dbg }
   }
 
   try {
@@ -339,17 +533,22 @@ export async function captureExif(file) {
   try {
     const gpsResult = await exifr.gps(buf)
     dbg.gpsBufferResult = gpsResult ? JSON.stringify(gpsResult) : 'null'
-    setGps(gpsResult)
+    _applyRawGpsCandidate(target, gpsResult, 'gpsBufferResult', dbg)
   } catch (e) {
     dbg.gpsBufferError = String(e)
   }
 
-  if (lat === null) {
+  if (lat === null || lon === null || altitude === null || accuracy === null) {
     try {
-      const rawGps = await exifr.parse(buf, { pick: RAW_GPS_PICK, gps: true, tiff: true, reviveValues: false, translateValues: false })
+      const rawGps = await exifr.parse(buf, {
+        pick: RAW_GPS_PICK,
+        gps: true,
+        tiff: true,
+        reviveValues: false,
+        translateValues: false,
+      })
       dbg.rawGpsBuffer = rawGps ? JSON.stringify(rawGps) : 'null'
-      const extracted = _extractLatLonFromRawGps(rawGps)
-      setGps({ ...rawGps, latitude: extracted.lat, longitude: extracted.lon })
+      _applyRawGpsCandidate(target, rawGps, 'rawGpsBuffer', dbg)
     } catch (e) {
       dbg.rawGpsBufferError = String(e)
     }

@@ -1,3 +1,5 @@
+import { isBlob } from './observation-shapes.js'
+
 export const AI_CROP_ASPECT_RATIO = 1
 export const DEFAULT_AI_CROP_COVERAGE = 0.76
 
@@ -25,10 +27,6 @@ function _loadBlobImage(blob) {
     }
     img.src = url
   })
-}
-
-function _isBlob(value) {
-  return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
 }
 
 async function _decodeBlobImageSource(blob) {
@@ -251,7 +249,7 @@ export function getCropRectFromViewport({
 }
 
 export async function getBlobImageDimensions(blob) {
-  if (!(blob instanceof Blob)) return null
+  if (!isBlob(blob)) return null
   const img = await _loadBlobImage(blob)
   return {
     width: img.naturalWidth || img.width || null,
@@ -279,7 +277,7 @@ async function _prepareAiUploadBlob(blob, options = {}) {
     maxEdge: Math.max(1, Number(options.maxEdge || 1920) || 1920),
   }
 
-  if (!(blob instanceof Blob)) {
+  if (!isBlob(blob)) {
     return { blob, ...inputMeta, outputType: inputMeta.inputType, outputSize: inputMeta.inputSize }
   }
 
@@ -379,9 +377,9 @@ async function _prepareAiUploadBlob(blob, options = {}) {
     }
 
     const outputBlob = await new Promise(resolve => {
-      canvas.toBlob(nextBlob => resolve(_isBlob(nextBlob) ? nextBlob : null), 'image/jpeg', 0.88)
+      canvas.toBlob(nextBlob => resolve(isBlob(nextBlob) ? nextBlob : null), 'image/jpeg', 0.88)
     })
-    if (!_isBlob(outputBlob) || outputBlob.type !== 'image/jpeg') {
+    if (!isBlob(outputBlob) || outputBlob.type !== 'image/jpeg') {
       throw new Error('JPEG export failed')
     }
 
@@ -451,7 +449,7 @@ export async function createImageCropMeta(blob, options = {}) {
 }
 
 export async function createCroppedImageBlob(blob, rect, options = {}) {
-  if (!(blob instanceof Blob)) return blob
+  if (!isBlob(blob)) return blob
 
   const documentApi = globalThis.document
   const urlApi = globalThis.URL

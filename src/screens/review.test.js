@@ -27,7 +27,7 @@ test('review ai flow keeps the setting-selected primary service and refreshes av
   assert.match(source, /reviewAiState\.activeService = _resolveReviewPhotoIdServices\(reviewAiState\.availability\)\.primary/)
   assert.match(source, /const primaryService = overrideService\s*\?\s*requestedServices\[0\]\s*:\s*\(requestedServices\[0\] \|\| photoIdServices\.primary\)/)
   assert.match(source, /reviewAiState\.activeService = primaryService/)
-  assert.match(source, /const inaturalistSession = await loadInaturalistSession\(\)\s+const availabilityList = await getAvailableIdentifyServices\(\{\s+blobs: images\.map\(item => item\.blob\),\s+inaturalistSession,/)
+  assert.match(source, /const inaturalistSession = await loadInaturalistSession\(\)\s+const availabilityList = await getAvailableIdentifyServices\(\{\s+blobs: images,\s+inaturalistSession,/)
   assert.match(source, /if \(!reviewAiState\.activeService\) {\s+reviewAiState\.activeService = _resolveReviewPhotoIdServices\(reviewAiState\.availability\)\.primary\s+}/)
   assert.match(source, /reviewAiState\.running = false\s+reviewAiState\.requestedFingerprint = reviewAiState\.currentFingerprint\s+reviewAiState\.activeService = primaryService\s+_renderReviewAiBlock\(\)/)
   assert.doesNotMatch(source, /chooseIdentifyComparisonActiveService/)

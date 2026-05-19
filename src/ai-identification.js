@@ -13,14 +13,31 @@ import {
   runIdentifyForBlobs,
   runIdentifyForMediaKeys,
 } from './identify.js'
+import { isBlob } from './observation-shapes.js'
 import { esc as _esc } from './esc.js'
+
+/**
+ * AI identification image input shape. Callers pass the decode blob plus the
+ * optional original/source blob, crop metadata, and storage key context.
+ *
+ * @typedef {Object} IdentifyImageInput
+ * @property {Blob|null} [blob]
+ * @property {Blob|null} [originalBlob]
+ * @property {Blob|null} [sourceBlob]
+ * @property {Object|null} [cropRect]
+ * @property {number|null} [cropSourceW]
+ * @property {number|null} [cropSourceH]
+ * @property {string|null} [mediaKey]
+ * @property {string|null} [media_key]
+ * @property {string|null} [storagePath]
+ * @property {string|null} [storage_path]
+ * @property {string|null} [key]
+ * @property {string|null} [path]
+ * @property {string|null} [sourceType]
+ */
 
 const OBSERVATION_IDENTIFICATIONS_MISSING_CACHE_KEY = 'sporely-observation-identifications-missing'
 let _observationIdentificationsAvailable = null
-
-function _isBlob(value) {
-  return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
-}
 
 function _normalizeText(value) {
   return String(value ?? '').trim()
@@ -42,12 +59,17 @@ function _hasFiniteScore(value) {
 }
 
 function _selectIdentifySourceBlob(item = null) {
-  if (_isBlob(item?.originalBlob)) return item.originalBlob
-  if (_isBlob(item?.sourceBlob)) return item.sourceBlob
-  if (_isBlob(item?.blob)) return item.blob
-  return _isBlob(item) ? item : null
+  if (isBlob(item?.originalBlob)) return item.originalBlob
+  if (isBlob(item?.sourceBlob)) return item.sourceBlob
+  if (isBlob(item?.blob)) return item.blob
+  return isBlob(item) ? item : null
 }
 
+/**
+ * @param {IdentifyImageInput} input
+ * @param {number} index
+ * @returns {Object}
+ */
 function _normalizeImageInput(input = {}, index = 0) {
   const cropRect = normalizeAiCropRect(input.cropRect ?? input.aiCropRect ?? null)
   const blob = _selectIdentifySourceBlob(input)
@@ -400,7 +422,7 @@ export function buildIdentifyFingerprint(inputs = {}) {
 
 export async function getIdentifyServiceAvailability(context = {}) {
   const blobs = Array.isArray(context.blobs)
-    ? context.blobs.map(item => _selectIdentifySourceBlob(item)).filter(_isBlob)
+    ? context.blobs.map(item => _selectIdentifySourceBlob(item)).filter(isBlob)
     : []
   const mediaKeys = Array.isArray(context.mediaKeys)
     ? context.mediaKeys.map(value => _normalizeText(value)).filter(Boolean)

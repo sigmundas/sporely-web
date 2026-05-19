@@ -15,7 +15,17 @@ import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.j
 import { isAndroidNativeApp } from '../camera-actions.js';
 import { loadInaturalistSession } from '../inaturalist.js';
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
+import { debugImagePipeline } from '../image-pipeline-debug.js';
 import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
+import {
+  isBlob,
+  isUsableCoordinate,
+  normalizeObservationGps,
+} from '../observation-shapes.js';
+import {
+  createDefaultObservationDraft,
+  createDefaultObservationPayload,
+} from '../observation-defaults.js';
 import {
   buildIdentifyFingerprint,
   chooseIdentifyComparisonActiveService,
@@ -44,11 +54,11 @@ const importAiBatchState = {
   defaultServiceLabel: '',
 };
 
-function _isBlob(b) {
-  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
-}
-
 function _persistSessions() {
+  debugImagePipeline('persist import sessions', {
+    sessionCount: sessions.length,
+    sourceItemCount: sourceItems.length,
+  })
   saveImportSessions(sessions);
 }
 
@@ -73,6 +83,15 @@ function _incrementBatchAiProgress(step = 1) {
     importAiBatchState.completedUnits + step,
   );
   _updateImportFooterUi();
+}
+
+function _firstFiniteNumber(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === '') continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
 }
 
 function _applySessionAiPrediction(session, prediction) {
@@ -218,21 +237,21 @@ function _ensureSessionAiState(session) {
 function _sessionAiInputs(session) {
   return (session?.files || []).map((blob, index) => ({
     id: `session-${session.id}-${index}`,
-    blob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
-    originalBlob: _isBlob(blob) ? blob : null,
+    blob: isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
+    originalBlob: isBlob(blob) ? blob : null,
     cropRect: session.imageMeta?.[index]?.aiCropRect || null,
     cropSourceW: session.imageMeta?.[index]?.aiCropSourceW ?? null,
     cropSourceH: session.imageMeta?.[index]?.aiCropSourceH ?? null,
-    lat: _isUsableCoordinate(session.photoGps?.[index]?.lat, session.photoGps?.[index]?.lon)
+    lat: isUsableCoordinate(Number(session.photoGps?.[index]?.lat), Number(session.photoGps?.[index]?.lon))
       ? Number(session.photoGps[index].lat)
       : (Number.isFinite(Number(session.gpsLat)) ? Number(session.gpsLat) : null),
-    lon: _isUsableCoordinate(session.photoGps?.[index]?.lat, session.photoGps?.[index]?.lon)
+    lon: isUsableCoordinate(Number(session.photoGps?.[index]?.lat), Number(session.photoGps?.[index]?.lon))
       ? Number(session.photoGps[index].lon)
       : (Number.isFinite(Number(session.gpsLon)) ? Number(session.gpsLon) : null),
     observedOn: session.ts ? _localDate(session.ts) : null,
-    source: _isBlob(session.aiFiles?.[index]) ? 'session.aiFiles' : 'session.files',
-    sourceType: _isBlob(session.aiFiles?.[index]) ? 'session.aiFiles' : 'session.files',
-  })).filter(item => _isBlob(item.blob));
+    source: isBlob(session.aiFiles?.[index]) ? 'session.aiFiles' : 'session.files',
+    sourceType: isBlob(session.aiFiles?.[index]) ? 'session.aiFiles' : 'session.files',
+  })).filter(item => isBlob(item.blob));
 }
 
 function _sessionAiFingerprint(session) {
@@ -819,12 +838,20 @@ function _buildSessionsFromSourceItems() {
   sessions = grouped.map((group, idx) => {
     const key = _groupKey(group);
     const previous = previousByKey.get(key);
-    const exifGps = group.find(item => _isUsableCoordinate(item.lat, item.lon));
+    const exifGps = group.find(item => isUsableCoordinate(item.lat, item.lon));
+    const sessionAltitude = _firstFiniteNumber(
+      exifGps?.altitude,
+      ...group.map(item => item.altitude),
+    );
+    const sessionAccuracy = _firstFiniteNumber(
+      exifGps?.accuracy,
+      ...group.map(item => item.accuracy),
+    );
     return {
       id: previous?.id || `s${idx}`,
       sourceItemIds: group.map(item => item.id),
       files: group.map(item => item.blob),
-      aiFiles: group.map(item => _isBlob(item.aiBlob) ? item.aiBlob : item.blob),
+      aiFiles: group.map(item => isBlob(item.aiBlob) ? item.aiBlob : item.blob),
       blobUrls: group.map(item => URL.createObjectURL(item.blob || item.aiBlob)),
       imageMeta: group.map(item => item.meta),
       metadataPromises: group.map(item => item.metadataPromise || null),
@@ -834,8 +861,8 @@ function _buildSessionsFromSourceItems() {
       ts: new Date(group[0].captureTime),
       gpsLat: exifGps?.lat ?? null,
       gpsLon: exifGps?.lon ?? null,
-      gpsAltitude: exifGps?.altitude ?? null,
-      gpsAccuracy: exifGps?.accuracy ?? null,
+      gpsAltitude: sessionAltitude,
+      gpsAccuracy: sessionAccuracy,
       locationName: previous?.locationName || '',
       locationSuggestions: Array.isArray(previous?.locationSuggestions) ? [...previous.locationSuggestions] : [],
       locationLookup: previous?.locationLookup || null,
@@ -849,6 +876,12 @@ function _buildSessionsFromSourceItems() {
       exifDebug: group.map(item => item.dbg).filter(Boolean),
     };
   });
+
+  debugImagePipeline('build import sessions', {
+    sourceItemCount: sourceItems.length,
+    sessionCount: sessions.length,
+    photoCount: grouped.reduce((sum, group) => sum + group.length, 0),
+  })
 }
 
 function _flattenSourceItemsFromSessions(savedSessions) {
@@ -857,7 +890,7 @@ function _flattenSourceItemsFromSessions(savedSessions) {
     (session.files || []).map((blob, index) => ({
       id: session.sourceItemIds?.[index] || `restored-${fallbackCounter++}`,
       blob,
-      aiBlob: _isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
+      aiBlob: isBlob(session.aiFiles?.[index]) ? session.aiFiles[index] : blob,
       meta: session.imageMeta?.[index] || {
         aiCropRect: null,
         aiCropSourceW: null,
@@ -891,7 +924,7 @@ function _applyMetadataToSession(session, index, metadata) {
   if (!session || !metadata) return false;
   const lat = Number(metadata.lat);
   const lon = Number(metadata.lon);
-  const hasGps = _isUsableCoordinate(lat, lon);
+  const hasGps = isUsableCoordinate(lat, lon);
   const altitude = Number(metadata.altitude);
   const accuracy = Number(metadata.accuracy);
   const time = Number(metadata.time);
@@ -903,29 +936,52 @@ function _applyMetadataToSession(session, index, metadata) {
     changed = true;
   }
 
+  if (!Array.isArray(session.photoGps)) session.photoGps = [];
+  if (!session.photoGps[index]) session.photoGps[index] = {}
+  const photoGps = session.photoGps[index]
+  const nextPhotoGps = { ...photoGps }
   if (hasGps) {
-    if (!Array.isArray(session.photoGps)) session.photoGps = [];
-    session.photoGps[index] = {
-      ...(session.photoGps[index] || {}),
-      lat,
-      lon,
-      altitude: Number.isFinite(altitude) ? altitude : (session.photoGps[index]?.altitude ?? null),
-      accuracy: Number.isFinite(accuracy) ? accuracy : (session.photoGps[index]?.accuracy ?? null),
-    };
-    if (session.gpsLat === null || session.gpsLon === null) {
-      session.gpsLat = lat;
-      session.gpsLon = lon;
-      session.gpsAltitude = Number.isFinite(altitude) ? altitude : null;
-      session.gpsAccuracy = Number.isFinite(accuracy) ? accuracy : null;
-      changed = true;
+    if (photoGps.lat !== lat || photoGps.lon !== lon) changed = true
+    nextPhotoGps.lat = lat
+    nextPhotoGps.lon = lon
+  }
+  if (Number.isFinite(altitude)) {
+    if (photoGps.altitude !== altitude) changed = true
+    nextPhotoGps.altitude = altitude
+    if (session.gpsAltitude == null) {
+      session.gpsAltitude = altitude
+      changed = true
     }
+  } else if (nextPhotoGps.altitude === undefined) {
+    nextPhotoGps.altitude = photoGps.altitude ?? null
+  }
+  if (Number.isFinite(accuracy)) {
+    if (photoGps.accuracy !== accuracy) changed = true
+    nextPhotoGps.accuracy = accuracy
+    if (session.gpsAccuracy == null) {
+      session.gpsAccuracy = accuracy
+      changed = true
+    }
+  } else if (nextPhotoGps.accuracy === undefined) {
+    nextPhotoGps.accuracy = photoGps.accuracy ?? null
+  }
+  session.photoGps[index] = nextPhotoGps
+
+  if (hasGps && (session.gpsLat === null || session.gpsLon === null)) {
+    session.gpsLat = lat
+    session.gpsLon = lon
+    if (session.gpsAltitude == null && Number.isFinite(altitude)) session.gpsAltitude = altitude
+    if (session.gpsAccuracy == null && Number.isFinite(accuracy)) session.gpsAccuracy = accuracy
+    changed = true
+  }
+  if (!hasGps && (session.gpsAltitude == null || session.gpsAccuracy == null)) {
     if (session.gpsAltitude == null && Number.isFinite(altitude)) {
-      session.gpsAltitude = altitude;
-      changed = true;
+      session.gpsAltitude = altitude
+      changed = true
     }
     if (session.gpsAccuracy == null && Number.isFinite(accuracy)) {
-      session.gpsAccuracy = accuracy;
-      changed = true;
+      session.gpsAccuracy = accuracy
+      changed = true
     }
   }
 
@@ -1166,6 +1222,11 @@ async function handleSelectedFiles(files, options = {}) {
   if (!files.length) return;
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
 
+  debugImagePipeline('import files selected', {
+    fileCount: files.length,
+    nativePhotoCount: nativePhotos.length,
+  })
+
   _setProgress(0, files.length, t('import.readingTimestamps'));
 
   // Read EXIF capture time + GPS for each file.
@@ -1221,6 +1282,10 @@ async function handleSelectedFiles(files, options = {}) {
 
   _buildSessionsFromSourceItems();
   _attachSessionMetadataHydration();
+  debugImagePipeline('import files processed', {
+    sourceItemCount: sourceItems.length,
+    sessionCount: sessions.length,
+  })
 
   _hideProgress();
 
@@ -1330,485 +1395,6 @@ async function _handleSelectedFilesWithFeedback(files, options = {}) {
     _hideProgress();
     showToast(t('import.failed'));
   }
-}
-
-function _coerceExifDate(value) {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? null : date;
-  }
-  if (typeof value === 'string' && value.trim()) {
-    const normalized = value.includes(':') && value.includes(' ')
-      ? value.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')
-      : value;
-    const date = new Date(normalized);
-    return Number.isNaN(date.getTime()) ? null : date;
-  }
-  return null;
-}
-
-async function _getExifr() {
-  if (!exifrModulePromise) {
-    exifrModulePromise = import('exifr/dist/full.esm.mjs').then(module => module.default);
-  }
-  return exifrModulePromise;
-}
-
-async function _nativePickedPhotoToFile(photo, index) {
-  let mimeType = _normalizeNativeMimeType(photo?.mimeType, photo?.format);
-  let path = photo.path;
-
-  // Use the plugin's native convertHeicToJpeg (High Speed) if the format is HEIC
-  if (mimeType === 'image/heic' || mimeType === 'image/heif' || photo?.format === 'heic' || photo?.format === 'heif') {
-    try {
-      if (window.Capacitor?.Plugins?.FilePicker?.convertHeicToJpeg) {
-        const converted = await FilePicker.convertHeicToJpeg({ path });
-        path = converted.path;
-        mimeType = 'image/jpeg';
-      }
-    } catch (e) {
-      console.warn('Native HEIC conversion failed:', e);
-    }
-  }
-
-  // Fast native file read using Capacitor protocol (avoids blocking base64 encode)
-  const url = Capacitor.convertFileSrc(_normalizeNativePathForFetch(path));
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Could not read native photo (${res.status})`);
-  const blob = await res.blob();
-
-  const fileName = _guessNativeFileName(photo, index, mimeType);
-  return new File([blob], fileName, {
-    type: mimeType,
-    lastModified: Date.now(),
-  });
-}
-
-function _shouldHydrateNativeMetadata(photo, file) {
-  if (!isAndroidApp()) return false;
-  if (!photo?.originalPath) return false;
-  if (photo.originalPath === photo.path && !_isHeicLike(file)) return false;
-  const rawGps = _extractLatLonFromRawGps(photo.exif);
-  return rawGps.lat === null || rawGps.lon === null;
-}
-
-function _createNativeMetadataHydrationPromise(photo, file) {
-  if (!_shouldHydrateNativeMetadata(photo, file)) return null;
-  return _captureNativeOriginalExif(photo).catch(error => ({
-    time: file.lastModified || Date.now(),
-    lat: null,
-    lon: null,
-    altitude: null,
-    accuracy: null,
-    dbg: {
-      fileName: file.name,
-      fileSize: file.size,
-      fileType: file.type,
-      nativePath: photo?.path || null,
-      originalPath: photo?.originalPath || null,
-      backgroundExifError: String(error),
-    },
-  }));
-}
-
-async function _captureNativeOriginalExif(photo) {
-  const path = photo?.originalPath || photo?.path;
-  if (!path) throw new Error('Missing native original path');
-  const mimeType = _normalizeNativeMimeType(photo?.originalMimeType || photo?.mimeType, photo?.originalFormat || photo?.format);
-  const url = Capacitor.convertFileSrc(_normalizeNativePathForFetch(path));
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Could not read native original photo (${res.status})`);
-  const blob = await res.blob();
-  const fileName = _guessNativeFileName({
-    name: photo?.name || '',
-    mimeType,
-    format: photo?.originalFormat || photo?.format,
-  }, 0, mimeType);
-  const originalFile = new File([blob], fileName, {
-    type: mimeType,
-    lastModified: Date.now(),
-  });
-  return _captureExif(originalFile);
-}
-
-function _normalizeNativePathForFetch(path) {
-  const value = String(path || '');
-  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return value;
-  return value.startsWith('/') ? `file://${value}` : value;
-}
-
-function _normalizeNativeMimeType(mimeType, format) {
-  const normalizedMime = String(mimeType || '').trim().toLowerCase();
-  if (normalizedMime) return normalizedMime;
-  const normalizedFormat = String(format || '').trim().toLowerCase();
-  if (normalizedFormat === 'jpg') return 'image/jpeg';
-  if (normalizedFormat) return `image/${normalizedFormat}`;
-  return 'image/jpeg';
-}
-
-function _guessNativeFileName(photo, index, mimeType) {
-  const fromName = String(photo?.name || '').trim();
-  if (fromName) return fromName;
-  const ext = mimeType === 'image/heic' ? '.heic'
-    : mimeType === 'image/heif' ? '.heif'
-    : mimeType === 'image/png' ? '.png'
-    : '.jpg';
-  return `native-import-${index + 1}${ext}`;
-}
-
-function _filesystemReadResultToBlob(data, mimeType) {
-  if (data instanceof Blob) return data;
-  if (typeof data !== 'string') throw new Error('Unexpected Filesystem.readFile result');
-  const base64 = data.includes(',') ? data.split(',').pop() : data;
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return new Blob([bytes], { type: mimeType });
-}
-
-function _coerceExifNumber(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value === 'string') {
-    const num = Number(value);
-    return Number.isFinite(num) ? num : null;
-  }
-  if (value && typeof value === 'object') {
-    if (Number.isFinite(value.numerator) && Number.isFinite(value.denominator) && value.denominator) {
-      return value.numerator / value.denominator;
-    }
-    if (Number.isFinite(value.num) && Number.isFinite(value.den) && value.den) {
-      return value.num / value.den;
-    }
-  }
-  return null;
-}
-
-function _isUsableCoordinate(lat, lon) {
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
-  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return false;
-  return !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001);
-}
-
-function _toDecimalDegrees(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (Array.isArray(value)) {
-    const parts = value.map(_coerceExifNumber).filter(part => part !== null);
-    if (!parts.length) return null;
-    if (parts.length === 1) return parts[0];
-    if (parts.length === 2) return parts[0] + (parts[1] / 60);
-    return parts[0] + (parts[1] / 60) + (parts[2] / 3600);
-  }
-  return _coerceExifNumber(value);
-}
-
-function _withHemisphere(value, ref, negativeRef) {
-  if (value === null) return null;
-  const normalized = String(ref || '').trim().toUpperCase();
-  if (normalized === negativeRef) return -Math.abs(value);
-  return Math.abs(value);
-}
-
-function _extractLatLonFromRawGps(rawGps) {
-  if (!rawGps || typeof rawGps !== 'object') return { lat: null, lon: null };
-
-  let lat = rawGps.latitude;
-  let lon = rawGps.longitude;
-
-  if (lat == null) lat = _withHemisphere(_toDecimalDegrees(rawGps.GPSLatitude), rawGps.GPSLatitudeRef, 'S');
-  if (lon == null) lon = _withHemisphere(_toDecimalDegrees(rawGps.GPSLongitude), rawGps.GPSLongitudeRef, 'W');
-
-  lat = _coerceExifNumber(lat);
-  lon = _coerceExifNumber(lon);
-  if (!_isUsableCoordinate(lat, lon)) return { lat: null, lon: null };
-  return { lat, lon };
-}
-
-function _extractAltitudeFromRawGps(rawGps) {
-  if (!rawGps || typeof rawGps !== 'object') return null;
-  const candidates = [
-    rawGps.altitude,
-    rawGps.GPSAltitude,
-    rawGps.GpsAltitude,
-  ];
-  let altitude = null;
-  for (const candidate of candidates) {
-    altitude = _coerceExifNumber(candidate);
-    if (altitude !== null) break;
-  }
-  if (!Number.isFinite(altitude)) return null;
-  const ref = _coerceExifNumber(rawGps.GPSAltitudeRef ?? rawGps.GpsAltitudeRef);
-  return ref === 1 ? -Math.abs(altitude) : altitude;
-}
-
-function _extractAccuracyFromRawGps(rawGps) {
-  if (!rawGps || typeof rawGps !== 'object') return null;
-  const candidates = [
-    rawGps.GPSHPositioningError,
-    rawGps.accuracy
-  ];
-  let accuracy = null;
-  for (const candidate of candidates) {
-    accuracy = _coerceExifNumber(candidate);
-    if (accuracy !== null && accuracy > 0) break;
-  }
-  if (!Number.isFinite(accuracy)) return null;
-  return accuracy;
-}
-
-async function _captureNativePhotoExif(photo, file) {
-  let time = file.lastModified || Date.now();
-  let lat = null;
-  let lon = null;
-  let altitude = null;
-  let accuracy = null;
-  const dbg = {
-    fileName: file.name,
-    fileSize: file.size,
-    fileType: file.type,
-    nativePath: photo?.path || null,
-    nativeMimeType: photo?.mimeType || null,
-  };
-
-  if (photo?.exif && typeof photo.exif === 'object') {
-    dbg.nativeExif = JSON.stringify(photo.exif);
-    const rawNativeGps = _extractLatLonFromRawGps(photo.exif);
-    if (rawNativeGps.lat !== null) lat = rawNativeGps.lat;
-    if (rawNativeGps.lon !== null) lon = rawNativeGps.lon;
-    altitude = _extractAltitudeFromRawGps(photo.exif);
-    accuracy = _extractAccuracyFromRawGps(photo.exif);
-
-    const dt = _coerceExifDate(photo.exif.DateTimeOriginal || photo.exif.CreateDate || photo.exif.ModifyDate || photo.capturedAt);
-    if (dt) time = dt.getTime();
-
-    // Custom Android NativePhotoPicker already did the expensive metadata read
-    // before optional HEIC conversion. Trust that result and avoid a slow JS
-    // exifr fallback over the converted cache JPEG, especially for single HEIC imports.
-    return { time, lat, lon, altitude, accuracy, dbg };
-  }
-
-  try {
-    // FAST PATH: Extract EXIF natively without loading the file into JS memory
-    const exif = window.Capacitor?.Plugins?.FilePicker?.getExif ? await FilePicker.getExif({ path: photo.path }) : null;
-    if (exif) {
-      dbg.nativeExif = JSON.stringify(exif);
-      const rawNativeGps = _extractLatLonFromRawGps(exif);
-      if (rawNativeGps.lat !== null) lat = rawNativeGps.lat;
-      if (rawNativeGps.lon !== null) lon = rawNativeGps.lon;
-      altitude = _extractAltitudeFromRawGps(exif);
-      accuracy = _extractAccuracyFromRawGps(exif);
-
-      const dt = _coerceExifDate(exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate || photo.capturedAt);
-      if (dt) time = dt.getTime();
-
-      // If native extraction found the coordinates, return immediately! (Lightning fast)
-      if (lat !== null && lon !== null) {
-        return { time, lat, lon, altitude, accuracy, dbg };
-      }
-    }
-  } catch (err) {
-    console.warn('Native EXIF extraction failed, trying JS fallback:', err);
-  }
-
-  // SLOW PATH: Only run the JS fallback if native EXIF failed or lacked GPS
-  try {
-    const jsExif = await _captureExif(file);
-    if (jsExif.lat !== null) lat = jsExif.lat;
-    if (jsExif.lon !== null) lon = jsExif.lon;
-    if (jsExif.altitude !== null) altitude = jsExif.altitude;
-    if (jsExif.accuracy !== null) accuracy = jsExif.accuracy;
-    if (jsExif.time) time = jsExif.time;
-    dbg.jsFallback = true;
-  } catch (err) {
-    console.warn('JS EXIF extraction fallback failed:', err);
-  }
-
-  return { time, lat, lon, altitude, accuracy, dbg };
-}
-
-async function _captureExif(file) {
-  const exifr = await _getExifr();
-  let time = file.lastModified;
-  let lat  = null;
-  let lon  = null;
-  let altitude = null;
-  let accuracy = null;
-  let dbg  = { fileName: file.name, fileSize: file.size, fileType: file.type, bufSize: 0, gpsResult: null, gpsError: null, exifError: null };
-  const fullRead = _isHeicLike(file) ? { chunked: false } : {};
-
-  const setGps = (res) => {
-    const nextLat = _coerceExifNumber(res?.latitude);
-    const nextLon = _coerceExifNumber(res?.longitude);
-    if (_isUsableCoordinate(nextLat, nextLon)) {
-      lat = nextLat;
-      lon = nextLon;
-    }
-    const nextAltitude = _extractAltitudeFromRawGps(res);
-    if (nextAltitude !== null) altitude = nextAltitude;
-    const nextAccuracy = _extractAccuracyFromRawGps(res);
-    if (nextAccuracy !== null) accuracy = nextAccuracy;
-  };
-
-  // Read the full file into an ArrayBuffer before passing to exifr.
-  // exifr uses chunked reads in the browser and can miss GPS data in HEIC files
-  // if the GPS box falls outside the initial chunk window.
-  // Optimization: Read only the first 2MB instead of the entire 10MB+ file
-  let buf;
-  try {
-    buf = await file.slice(0, 2 * 1024 * 1024).arrayBuffer();
-    dbg.bufSize = buf.byteLength;
-  } catch (e) {
-    dbg.bufError = String(e);
-    console.warn('[EXIF] arrayBuffer() failed:', e);
-    return { time, lat, lon, altitude, dbg };
-  }
-
-  // Try the original File first. exifr officially supports HEIC/HEIF blobs/files,
-  // and this path lets it follow container pointers itself instead of depending on
-  // our manual buffer strategy.
-  try {
-    const exif = await exifr.parse(file, { pick: EXIF_DATETIME_PICK, ...fullRead });
-    const dt = exif?.DateTimeOriginal || exif?.CreateDate || exif?.ModifyDate;
-    if (dt instanceof Date) time = dt.getTime();
-    dbg.exifFile = exif ? JSON.stringify(exif) : 'null';
-  } catch (e) {
-    dbg.exifFileError = String(e);
-    console.warn('[EXIF] parseExif(file) failed:', e);
-  }
-
-  try {
-    const exif = await exifr.parse(buf, { pick: EXIF_DATETIME_PICK });
-    const dt = exif?.DateTimeOriginal || exif?.CreateDate || exif?.ModifyDate;
-    if (dt instanceof Date) time = dt.getTime();
-  } catch (e) {
-    dbg.exifError = String(e);
-    console.warn('[EXIF] parseExif(buffer) failed:', e);
-  }
-
-  // Try parseGps() first; fall back to parse({gps:true}) for formats where gps() alone may fail
-  try {
-    const gpsResult = await exifr.gps(file, fullRead);
-    dbg.gpsResult = gpsResult ? JSON.stringify(gpsResult) : 'null';
-    setGps(gpsResult);
-  } catch (e) {
-    dbg.gpsError = String(e);
-    console.warn('[EXIF] parseGps(file) failed:', e);
-  }
-
-  if (lat === null) {
-    try {
-      const gpsResult = await exifr.gps(buf);
-      dbg.gpsBufferResult = gpsResult ? JSON.stringify(gpsResult) : 'null';
-      setGps(gpsResult);
-    } catch (e) {
-      dbg.gpsBufferError = String(e);
-      console.warn('[EXIF] parseGps(buffer) failed:', e);
-    }
-  }
-
-  // Second attempt using parse({gps:true}) if parseGps returned nothing
-  if (lat === null) {
-    try {
-      const fallback = await exifr.parse(file, { gps: true, tiff: true, xmp: true, ...fullRead });
-      dbg.gpsFallback = fallback ? JSON.stringify(fallback) : 'null';
-      setGps(fallback);
-    } catch (e) {
-      dbg.gpsFallbackError = String(e);
-      console.warn('[EXIF] parse(file, {gps:true}) fallback failed:', e);
-    }
-  }
-
-  if (lat === null) {
-    try {
-      const fallback = await exifr.parse(buf, { gps: true, tiff: true, xmp: true });
-      dbg.gpsBufferFallback = fallback ? JSON.stringify(fallback) : 'null';
-      setGps(fallback);
-    } catch (e) {
-      dbg.gpsBufferFallbackError = String(e);
-      console.warn('[EXIF] parse(buffer, {gps:true}) fallback failed:', e);
-    }
-  }
-
-  // Last attempt: read raw GPS tags and convert them ourselves, mirroring the
-  // Python app's HEIC path where we decode GPS IFD data and then derive decimal coords.
-  if (lat === null) {
-    try {
-      const rawGps = await exifr.parse(file, {
-        pick: RAW_GPS_PICK,
-        gps: true,
-        tiff: true,
-        reviveValues: false,
-        translateValues: false,
-        ...fullRead,
-      });
-      dbg.rawGpsFile = rawGps ? JSON.stringify(rawGps) : 'null';
-      const extracted = _extractLatLonFromRawGps(rawGps);
-      setGps({ ...rawGps, latitude: extracted.lat, longitude: extracted.lon });
-    } catch (e) {
-      dbg.rawGpsFileError = String(e);
-      console.warn('[EXIF] raw GPS file parse failed:', e);
-    }
-  }
-
-  if (lat === null) {
-    try {
-      const rawGps = await exifr.parse(buf, {
-        pick: RAW_GPS_PICK,
-        gps: true,
-        tiff: true,
-        reviveValues: false,
-        translateValues: false,
-      });
-      dbg.rawGpsBuffer = rawGps ? JSON.stringify(rawGps) : 'null';
-      const extracted = _extractLatLonFromRawGps(rawGps);
-      setGps({ ...rawGps, latitude: extracted.lat, longitude: extracted.lon });
-    } catch (e) {
-      dbg.rawGpsBufferError = String(e);
-      console.warn('[EXIF] raw GPS buffer parse failed:', e);
-    }
-  }
-
-  return { time, lat, lon, altitude, accuracy, dbg };
-}
-
-// Prepare an imported file for preview + AI without eagerly re-encoding the full upload blob.
-// Strategy: if the browser can decode the image, keep the original file for upload/preview and
-// only generate a reduced AI JPEG. This avoids expensive full-resolution canvas encodes on
-// Android imports. If decode fails (e.g. some HEIC flows outside Safari/native conversion),
-// we fall back to the original file as-is.
-function _isAndroidNativeJpegImport(file, nativePhoto) {
-  return isAndroidApp()
-    && !!nativePhoto
-    && file?.type === 'image/jpeg';
-}
-
-async function _processFile(file, options = {}) {
-  if (_isAndroidNativeJpegImport(file, options.nativePhoto)) {
-    return {
-      blob: file,
-      aiBlob: file,
-      meta: {
-        aiCropRect: null,
-        aiCropSourceW: null,
-        aiCropSourceH: null,
-      },
-    };
-  }
-
-  // 1. Browser-decodable path.
-  try {
-    const { blob, aiBlob, metaSource } = await _prepareImportBlobs(file);
-    const meta = await createImageCropMeta(metaSource || blob, { preseed: true });
-    return { blob, aiBlob, meta };
-  } catch (_) {}
-
-  // 2. Final fallback — original file (may still show blank if browser can't decode it).
-  const meta = await createImageCropMeta(file, { preseed: true }).catch(() => ({
-    aiCropRect: null,
-    aiCropSourceW: null,
-    aiCropSourceH: null,
-  }));
-  return { blob: file, aiBlob: file, meta };
 }
 
 export function renderSessions() {
@@ -2320,17 +1906,23 @@ async function saveAll() {
   for (let i = 0; i < activeSessions.length; i++) {
     const session = activeSessions[i];
     try {
-      if ((session.gpsLat === null || session.gpsLon === null) && session.metadataPromise) {
+      if ((session.gpsLat === null || session.gpsLon === null || session.gpsAltitude === null) && session.metadataPromise) {
         await session.metadataPromise;
       }
-      const obsPayload = {
+      const leadGps = normalizeObservationGps({
+        lat: session.gpsLat,
+        lon: session.gpsLon,
+        altitude: session.gpsAltitude,
+        accuracy: session.gpsAccuracy,
+      })
+      const obsPayload = createDefaultObservationPayload({
         user_id: state.user.id,
         date: _localDate(session.ts),
         captured_at: session.ts.toISOString(),
-        gps_latitude: session.gpsLat ?? null,
-        gps_longitude: session.gpsLon ?? null,
-        gps_altitude: session.gpsAltitude ?? null,
-        gps_accuracy: session.gpsAccuracy ?? null,
+        gps_latitude: leadGps?.lat ?? null,
+        gps_longitude: leadGps?.lon ?? null,
+        gps_altitude: leadGps?.altitude ?? null,
+        gps_accuracy: leadGps?.accuracy ?? null,
         location: session.locationName || null,
         source_type: 'personal',
         genus: session.taxon?.genus || null,
@@ -2340,7 +1932,7 @@ async function saveAll() {
         is_draft: session.is_draft !== false,
         location_precision: session.location_precision || 'exact',
         uncertain: !!session.uncertain,
-      };
+      });
 
       _ensureSessionImageMeta(session);
       await enqueueObservation(obsPayload, session.files.map((blob, index) => ({
@@ -2570,7 +2162,7 @@ async function _addFilesToSession(sid, files, options = {}) {
     session.photoGps.push({ lat: newItem.lat, lon: newItem.lon, altitude: newItem.altitude, accuracy: newItem.accuracy });
     session.photoDebug.push(newItem.dbg);
     
-    if (session.gpsLat === null && _isUsableCoordinate(newItem.lat, newItem.lon)) {
+    if (session.gpsLat === null && isUsableCoordinate(newItem.lat, newItem.lon)) {
       session.gpsLat = newItem.lat;
       session.gpsLon = newItem.lon;
       session.gpsAltitude = newItem.altitude;

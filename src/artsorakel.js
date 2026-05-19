@@ -9,6 +9,7 @@ import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
 import { t } from './i18n.js'
 import { getBlobImageDimensions, normalizeAiCropRect, prepareImageBlobForUpload } from './image_crop.js'
+import { isBlob } from './observation-shapes.js'
 import {
   getArtsorakelMaxEdge,
   ID_SERVICE_ARTSORAKEL,
@@ -17,15 +18,11 @@ import {
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
 const SPORELY_APP_NAME = 'Sporely'
 
-function _isBlob(b) {
-  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
-}
-
 function _selectIdentifySourceBlob(item) {
-  if (_isBlob(item?.originalBlob)) return item.originalBlob
-  if (_isBlob(item?.sourceBlob)) return item.sourceBlob
-  if (_isBlob(item?.blob)) return item.blob
-  return _isBlob(item) ? item : null
+  if (isBlob(item?.originalBlob)) return item.originalBlob
+  if (isBlob(item?.sourceBlob)) return item.sourceBlob
+  if (isBlob(item?.blob)) return item.blob
+  return isBlob(item) ? item : null
 }
 
 function _getAppVersion() {
@@ -308,9 +305,9 @@ async function _prepareArtsorakelImageBlob(blob, options = {}) {
  * Throws on network/API error.
  */
 export async function runArtsorakel(blob, lang = 'no', options = {}) {
-  if (!_isBlob(blob)) return null
+  if (!isBlob(blob)) return null
 
-  const prepared = options.prepared === true && _isBlob(options.preparedBlob)
+  const prepared = options.prepared === true && isBlob(options.preparedBlob)
     ? {
         blob: options.preparedBlob,
         inputType: blob.type || '',
@@ -528,9 +525,9 @@ function _combinePredictionResponses(responses, totalBlobs) {
 export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
   const preparedBlobs = (await Promise.all((blobs || []).map(async item => {
     const rawBlob = _selectIdentifySourceBlob(item)
-    if (!_isBlob(rawBlob)) return null
+    if (!isBlob(rawBlob)) return null
 
-    if (item?.preprocessed === true && _isBlob(item.blob) && !_isBlob(item?.originalBlob) && !_isBlob(item?.sourceBlob)) {
+    if (item?.preprocessed === true && isBlob(item.blob) && !isBlob(item?.originalBlob) && !isBlob(item?.sourceBlob)) {
       return {
         blob: item.blob,
         preparedMeta: item.preparedMeta || item.debug || {},
@@ -543,7 +540,7 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
       cropRect,
     })
     return { blob: prepared.blob, preparedMeta: prepared }
-  }))).filter(item => _isBlob(item?.blob))
+  }))).filter(item => isBlob(item?.blob))
 
   if (!preparedBlobs.length) return null
 

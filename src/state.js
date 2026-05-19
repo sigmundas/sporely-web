@@ -1,15 +1,10 @@
+import { createDefaultObservationDraft } from './observation-defaults.js'
+
 export const state = {
   currentScreen: 'home',
   capturedPhotos: [],
   reviewContext: null,
-  captureDraft: {
-    habitat: '',
-    notes: '',
-    uncertain: false,
-    is_draft: true,
-    location_precision: 'exact',
-    visibility: 'public',
-  },
+  captureDraft: createDefaultObservationDraft(),
   batchCount: 0,
   sessionStart: null,
   gps: null,

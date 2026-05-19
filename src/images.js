@@ -2,6 +2,8 @@ import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
 import { normalizeAiCropRect } from './image_crop.js'
 import { getEffectiveCloudUploadPolicy } from './cloud-plan.js'
+import { debugImagePipeline } from './image-pipeline-debug.js'
+import { isBlob } from './observation-shapes.js'
 
 const SIGNED_URL_TTL_SECONDS = 3600
 const SIGNED_URL_CACHE = new Map()
@@ -29,10 +31,6 @@ function _isDebugMediaUploadEnabled() {
   } catch (_) {
     return false
   }
-}
-
-function _isBlob(b) {
-  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
 }
 
 export function normalizeMediaKey(value) {
@@ -237,7 +235,7 @@ async function _downloadViaWorker(path) {
   }
 
   const blob = await response.blob()
-  if (!_isBlob(blob)) throw new Error('Worker download returned invalid data')
+  if (!isBlob(blob)) throw new Error('Worker download returned invalid data')
   return blob
 }
 
@@ -410,7 +408,7 @@ async function _prepareUploadBlobInWorker(blob, policy) {
 }
 
 async function _prepareUploadBlob(blob, uploadPolicy) {
-  if (!_isBlob(blob)) throw new Error('Missing image blob')
+  if (!isBlob(blob)) throw new Error('Missing image blob')
 
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
 
@@ -505,6 +503,11 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
 
 export async function prepareImageVariants(blob, uploadPolicy) {
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+  debugImagePipeline('prepare image variants', {
+    blobType: blob?.type || '',
+    blobSize: blob?.size || 0,
+    uploadMode: policy.uploadMode || 'reduced',
+  })
   const { uploadBlob, uploadMeta, variants } = await _prepareUploadBlob(blob, policy)
 
   return { uploadBlob, uploadMeta, variants }
@@ -515,6 +518,10 @@ export async function uploadPreparedObservationImageVariants(preparedImage, stor
   const normalizedPath = assertObservationImageStoragePathUserPrefix(storagePath, options?.userId, {
     observationId: options?.observationId,
     imageId: options?.imageId,
+  })
+  debugImagePipeline('upload prepared observation image variants', {
+    uploadMode: preparedImage.uploadMeta?.upload_mode || uploadPolicy.uploadMode || 'reduced',
+    hasThumb: !!preparedImage.variants?.thumb,
   })
   const uploadOptions = {
     uploadMode: preparedImage.uploadMeta?.upload_mode || uploadPolicy.uploadMode,
@@ -532,6 +539,10 @@ export async function uploadPreparedObservationImageVariants(preparedImage, stor
 
 export async function uploadObservationImageVariants(blob, storagePath, options = {}) {
   const uploadPolicy = options?.uploadPolicy || getEffectiveCloudUploadPolicy()
+  debugImagePipeline('upload observation image variants', {
+    blobType: blob?.type || '',
+    blobSize: blob?.size || 0,
+  })
   const preparedImage = await prepareImageVariants(blob, uploadPolicy)
   return uploadPreparedObservationImageVariants(preparedImage, storagePath, options)
 }
@@ -571,6 +582,9 @@ export async function deleteObservationMedia(paths) {
 export async function downloadObservationImageBlob(storagePath, options = {}) {
   const originalPath = normalizeMediaKey(storagePath)
   if (!originalPath) throw new Error('Missing image storage path')
+  debugImagePipeline('download observation image blob', {
+    variant: options.variant || 'medium',
+  })
 
   const variant = options.variant || 'medium'
   const candidatePaths = variant === 'original'
@@ -582,7 +596,7 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
     if (MEDIA_UPLOAD_BASE_URL) {
       try {
         const data = await _downloadViaWorker(path)
-        if (_isBlob(data)) return data
+        if (isBlob(data)) return data
       } catch (err) {
         lastError = err
       }
@@ -591,7 +605,7 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
     const { data, error } = await supabase.storage
       .from('observation-images')
       .download(path)
-    if (!error && _isBlob(data)) return data
+    if (!error && isBlob(data)) return data
     lastError = error
   }
 

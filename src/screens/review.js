@@ -30,6 +30,17 @@ import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 import { getLocationLookup } from '../location.js'
+import { debugImagePipeline } from '../image-pipeline-debug.js'
+import {
+  isBlob,
+  isUsableCoordinate as sharedIsUsableCoordinate,
+  normalizeCoordinatePair,
+  normalizeObservationGps,
+} from '../observation-shapes.js'
+import {
+  createDefaultObservationDraft,
+  createDefaultObservationPayload,
+} from '../observation-defaults.js'
 
 const reviewAiState = {
   running: false,
@@ -41,21 +52,6 @@ const reviewAiState = {
   stale: false,
   availability: {},
   resultsByService: {},
-}
-
-function _isBlob(b) {
-  return b instanceof Blob || (b && typeof b.size === 'number' && typeof b.type === 'string')
-}
-
-function _defaultCaptureDraft() {
-  return {
-    habitat: '',
-    notes: '',
-    uncertain: false,
-    is_draft: true,
-    location_precision: 'exact',
-    visibility: getDefaultVisibility(),
-  }
 }
 
 function _firstFiniteNumber(...values) {
@@ -78,11 +74,7 @@ export function formatLatLon(gps, digits = 5) {
   return `${formatCoordinate(gps.lat, 'N', 'S', digits)}, ${formatCoordinate(gps.lon, 'E', 'W', digits)}`
 }
 
-export function isUsableCoordinate(lat, lon) {
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false
-  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return false
-  return !(Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001)
-}
+export const isUsableCoordinate = sharedIsUsableCoordinate
 
 export function buildGpsMetaHtml(gps) {
   if (!gps || !isUsableCoordinate(gps.lat, gps.lon)) return ''
@@ -189,12 +181,10 @@ export function openImportedReview(session) {
     session?.gpsAccuracy,
     ...(session?.photoGps || []).map(gps => gps?.accuracy),
   )
-  const sessionLat = Number(session?.gpsLat)
-  const sessionLon = Number(session?.gpsLon)
-  const reviewGps = isUsableCoordinate(sessionLat, sessionLon)
+  const reviewCoords = normalizeCoordinatePair(session?.gpsLat, session?.gpsLon)
+  const reviewGps = reviewCoords
     ? {
-        lat: sessionLat,
-        lon: sessionLon,
+        ...reviewCoords,
         accuracy: gpsAccuracy,
         altitude: gpsAltitude,
       }
@@ -203,7 +193,7 @@ export function openImportedReview(session) {
   const taxon = session?.taxon ? { ...session.taxon } : null
   state.capturedPhotos = (session?.files || []).map((blob, index) => ({
     blob,
-    aiBlob: _isBlob(session?.aiFiles?.[index]) ? session.aiFiles[index] : blob,
+    aiBlob: isBlob(session?.aiFiles?.[index]) ? session.aiFiles[index] : blob,
     blobPromise: null,
     gps: reviewGps,
     ts: session?.ts || new Date(),
@@ -215,13 +205,12 @@ export function openImportedReview(session) {
   }))
   state.batchCount = state.capturedPhotos.length
   state.sessionStart = session?.ts || new Date()
-  state.captureDraft = {
-    ..._defaultCaptureDraft(),
+  state.captureDraft = createDefaultObservationDraft({
     visibility: normalizeVisibility(session?.visibility, getDefaultVisibility()),
     is_draft: session?.is_draft !== false,
     location_precision: session?.location_precision || 'exact',
     uncertain: session?.uncertain || false,
-  }
+  })
   state.reviewContext = {
     source: 'import',
     gps: reviewGps,
@@ -234,16 +223,14 @@ export function openImportedReview(session) {
 }
 
 function _metadataGps(metadataSession) {
-  const lat = Number(metadataSession?.gpsLat)
-  const lon = Number(metadataSession?.gpsLon)
-  if (isUsableCoordinate(lat, lon)) {
+  const reviewGps = normalizeCoordinatePair(metadataSession?.gpsLat, metadataSession?.gpsLon)
+  if (reviewGps) {
     return {
-      lat,
-      lon,
-        accuracy: _firstFiniteNumber(
-          metadataSession?.gpsAccuracy,
-          ...(metadataSession?.photoGps || []).map(gps => gps?.accuracy),
-        ),
+      ...reviewGps,
+      accuracy: _firstFiniteNumber(
+        metadataSession?.gpsAccuracy,
+        ...(metadataSession?.photoGps || []).map(gps => gps?.accuracy),
+      ),
       altitude: _firstFiniteNumber(
         metadataSession?.gpsAltitude,
         ...(metadataSession?.photoGps || []).map(gps => gps?.altitude),
@@ -251,13 +238,14 @@ function _metadataGps(metadataSession) {
     }
   }
   const photoGps = (metadataSession?.photoGps || []).find(gps =>
-    isUsableCoordinate(Number(gps?.lat), Number(gps?.lon))
+    normalizeCoordinatePair(gps?.lat, gps?.lon)
   )
   if (!photoGps) return null
+  const coords = normalizeCoordinatePair(photoGps.lat, photoGps.lon)
+  if (!coords) return null
   return {
-    lat: Number(photoGps.lat),
-    lon: Number(photoGps.lon),
-      accuracy: _firstFiniteNumber(photoGps.accuracy),
+    ...coords,
+    accuracy: _firstFiniteNumber(photoGps.accuracy),
     altitude: _firstFiniteNumber(photoGps.altitude),
   }
 }
@@ -472,7 +460,7 @@ export function buildReviewGrid() {
     const lastTime = photos[count - 1]?.ts
       ? formatTime(photos[count - 1].ts, { hour: '2-digit', minute: '2-digit' })
       : '—'
-    const hasBlob = photos.some(photo => photo.blobPromise || (photo.blob instanceof Blob))
+    const hasBlob = photos.some(photo => photo.blobPromise || isBlob(photo.blob))
     const summary = count === 1
       ? `${tp('counts.photo', 1)} · ${firstTime}`
       : `${tp('counts.photo', count)} · ${firstTime} - ${lastTime}`
@@ -483,12 +471,12 @@ export function buildReviewGrid() {
       language: getTaxonomyLanguage(),
       images: photos.map((photo, index) => ({
         id: `review-${index}`,
-        blob: photo.aiBlob instanceof Blob ? photo.aiBlob : photo.blob instanceof Blob ? photo.blob : null,
+        blob: isBlob(photo.aiBlob) ? photo.aiBlob : isBlob(photo.blob) ? photo.blob : null,
         cropRect: photo.aiCropRect || null,
         cropSourceW: photo.aiCropSourceW ?? null,
         cropSourceH: photo.aiCropSourceH ?? null,
-        sourceType: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
-      })).filter(item => item.blob instanceof Blob),
+        sourceType: isBlob(photo?.aiBlob) ? 'photo.aiBlob' : 'photo.blob',
+      })).filter(item => isBlob(item.blob)),
     })
     reviewAiState.currentFingerprint = aiFingerprint.requestFingerprint
     reviewAiState.stale = Boolean(
@@ -558,10 +546,10 @@ function loadThumbnails(photos) {
   ;(async () => {
     for (let index = 0; index < photos.length; index++) {
       const p = photos[index]
-      let blob = _isBlob(p.blob) ? p.blob : null
+      let blob = isBlob(p.blob) ? p.blob : null
       if (!blob && p.blobPromise) blob = await p.blobPromise
 
-      if (_isBlob(blob)) {
+      if (isBlob(blob)) {
         const url = URL.createObjectURL(blob)
         const item = document.createElement('button')
         item.type = 'button'
@@ -760,13 +748,13 @@ function applyTaxon(i, taxon) {
 // ── Identification AI ────────────────────────────────────────────────────────
 
 async function resolveBlob(photo) {
-  if (photo.blob instanceof Blob) return photo.blob
+  if (isBlob(photo.blob)) return photo.blob
   if (photo.blobPromise) return photo.blobPromise
   return null
 }
 
 async function _describeReviewBlob(blob) {
-  if (!(blob instanceof Blob)) {
+  if (!isBlob(blob)) {
     return { blobType: '', blobSize: 0, width: null, height: null }
   }
   try {
@@ -790,20 +778,20 @@ async function _describeReviewBlob(blob) {
 
 export async function prepareReviewIdentifyInputs(photos = state.capturedPhotos) {
   return (await Promise.all((photos || []).map(async (photo, index) => {
-    const blob = photo.aiBlob instanceof Blob ? photo.aiBlob : await resolveBlob(photo)
-    const originalBlob = photo.blob instanceof Blob ? photo.blob : await resolveBlob(photo)
-    if (!(blob instanceof Blob)) return null
+    const blob = isBlob(photo.aiBlob) ? photo.aiBlob : await resolveBlob(photo)
+    const originalBlob = isBlob(photo.blob) ? photo.blob : await resolveBlob(photo)
+    if (!isBlob(blob)) return null
     const gps = photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon) ? photo.gps : null
     return {
       id: `review-${index}`,
       blob,
-      originalBlob: originalBlob instanceof Blob ? originalBlob : null,
+      originalBlob: isBlob(originalBlob) ? originalBlob : null,
       cropRect: photo.aiCropRect || null,
       lat: gps?.lat ?? null,
       lon: gps?.lon ?? null,
       observedOn: photo.ts ? _localDate(photo.ts) : null,
-      source: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
-      sourceType: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
+      source: isBlob(photo?.aiBlob) ? 'photo.aiBlob' : 'photo.blob',
+      sourceType: isBlob(photo?.aiBlob) ? 'photo.aiBlob' : 'photo.blob',
       debug: await _describeReviewBlob(blob),
     }
   }))).filter(Boolean)
@@ -813,17 +801,17 @@ function _reviewCaptureImages() {
   return (state.capturedPhotos || [])
     .map((photo, index) => ({
       id: `review-${index}`,
-      blob: photo.aiBlob instanceof Blob ? photo.aiBlob : photo.blob instanceof Blob ? photo.blob : null,
-      originalBlob: photo.blob instanceof Blob ? photo.blob : null,
+      blob: isBlob(photo.aiBlob) ? photo.aiBlob : isBlob(photo.blob) ? photo.blob : null,
+      originalBlob: isBlob(photo.blob) ? photo.blob : null,
       cropRect: photo.aiCropRect || null,
       cropSourceW: photo.aiCropSourceW ?? null,
       cropSourceH: photo.aiCropSourceH ?? null,
       lat: photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon) ? Number(photo.gps.lat) : null,
       lon: photo.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon) ? Number(photo.gps.lon) : null,
       observedOn: photo.ts ? _localDate(photo.ts) : null,
-      sourceType: photo?.aiBlob instanceof Blob ? 'photo.aiBlob' : 'photo.blob',
+      sourceType: isBlob(photo?.aiBlob) ? 'photo.aiBlob' : 'photo.blob',
     }))
-    .filter(item => item.blob instanceof Blob)
+    .filter(item => isBlob(item.blob))
 }
 
 function _reviewAiTabState(service, statusOverride = null) {
@@ -1137,7 +1125,7 @@ async function _openReviewCropEditor(startIndex = 0) {
   for (let photoIndex = 0; photoIndex < state.capturedPhotos.length; photoIndex++) {
     const photo = state.capturedPhotos[photoIndex]
     const blob = await resolveBlob(photo)
-    if (!_isBlob(blob)) continue
+    if (!isBlob(blob)) continue
     reviewImages.push({
       url: URL.createObjectURL(blob),
       aiCropRect: photo.aiCropRect || null,
@@ -1172,7 +1160,7 @@ function cancelReview() {
   state.capturedPhotos = []
   state.reviewContext = null
   state.batchCount = 0
-  state.captureDraft = _defaultCaptureDraft()
+  state.captureDraft = createDefaultObservationDraft()
   reviewAiState.running = false
   reviewAiState.activeService = null
   reviewAiState.hasRun = false
@@ -1194,6 +1182,10 @@ async function saveObservationBatch() {
   if (!state.user) { showToast(t('review.notSignedIn')); return }
   if (!state.capturedPhotos.length) { showToast(t('review.noPhotosToSync')); return }
 
+  debugImagePipeline('save review batch requested', {
+    photoCount: state.capturedPhotos.length,
+  })
+
   const btn = document.getElementById('review-save-btn')
   if (btn) btn.disabled = true
   
@@ -1209,48 +1201,59 @@ async function saveObservationBatch() {
     )
 
     const visibility = normalizeVisibility(state.captureDraft.visibility, getDefaultVisibility())
-    const leadGps = photos.find(photo => photo.gps)?.gps || null
+    const leadPhotoWithGps = photos.find(photo => normalizeObservationGps(photo.gps))
+    const leadGps = normalizeObservationGps(state.reviewContext?.gps)
+      || normalizeObservationGps(leadPhotoWithGps?.gps)
     const leadPhoto = photos[0] || {}
     const taxon = photos.find(photo => photo.taxon)?.taxon || {}
-    const obsPayload = {
-      user_id:       state.user.id,
-      date:          _localDate(leadPhoto.ts || new Date()),
-      captured_at:   (leadPhoto.ts || new Date()).toISOString(),
-      gps_latitude:  leadGps?.lat ?? null,
+    const obsPayload = createDefaultObservationPayload({
+      user_id: state.user.id,
+      date: _localDate(leadPhoto.ts || new Date()),
+      captured_at: (leadPhoto.ts || new Date()).toISOString(),
+      gps_latitude: leadGps?.lat ?? null,
       gps_longitude: leadGps?.lon ?? null,
-      gps_altitude:  leadGps?.altitude ?? null,
-      gps_accuracy:  leadGps?.accuracy ?? null,
-      location:      getLocationName() || null,
-      habitat:       state.captureDraft.habitat.trim() || null,
-      notes:         state.captureDraft.notes.trim() || null,
-      uncertain:     !!state.captureDraft.uncertain,
-      source_type:   'personal',
-      genus:         taxon.genus || null,
-      species:       taxon.specificEpithet || null,
-      common_name:   taxon.vernacularName || null,
+      gps_altitude: leadGps?.altitude ?? null,
+      gps_accuracy: leadGps?.accuracy ?? null,
+      location: getLocationName() || null,
+      habitat: state.captureDraft.habitat.trim() || null,
+      notes: state.captureDraft.notes.trim() || null,
+      uncertain: !!state.captureDraft.uncertain,
+      source_type: 'personal',
+      genus: taxon.genus || null,
+      species: taxon.specificEpithet || null,
+      common_name: taxon.vernacularName || null,
       visibility: toCloudVisibility(visibility),
       is_draft: state.captureDraft.is_draft !== false,
       location_precision: state.captureDraft.location_precision || 'exact',
-    }
+    })
 
     const imageEntries = photos
-      .filter(photo => _isBlob(photo.blob))
+      .filter(photo => isBlob(photo.blob))
       .map(photo => ({
         blob: photo.blob,
         aiCropRect: photo.aiCropRect || null,
         aiCropSourceW: photo.aiCropSourceW ?? null,
         aiCropSourceH: photo.aiCropSourceH ?? null,
       }))
+
+    debugImagePipeline('review batch ready for queue', {
+      photoCount: photos.length,
+      imageEntryCount: imageEntries.length,
+    })
       
     _setProgress(0, 1, 'Encoding images for storage...')
     await new Promise(r => setTimeout(r, 100)) // Yield to let button un-press
     await enqueueObservation(obsPayload, imageEntries)
 
     showToast(t('review.synced', { count: tp('counts.photo', photos.length) }))
+    debugImagePipeline('review batch enqueued successfully', {
+      photoCount: photos.length,
+      imageEntryCount: imageEntries.length,
+    })
     state.capturedPhotos = []
     state.reviewContext = null
     state.batchCount = 0
-    state.captureDraft = _defaultCaptureDraft()
+    state.captureDraft = createDefaultObservationDraft()
     resetLocationState()
     await refreshHome()
     await openFinds('mine', { resetSearch: true })

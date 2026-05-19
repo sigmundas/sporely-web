@@ -37,6 +37,7 @@ import { isAndroidNativeApp } from '../camera-actions.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 import { setCaptureCompleteHandler } from './capture.js'
 import { prepareImageBlobForUpload } from '../image_crop.js'
+import { isBlob } from '../observation-shapes.js'
 
 let currentObs    = null
 let selectedTaxon = null
@@ -1012,7 +1013,7 @@ export async function prepareDetailIdentifyInputs(galleryImgs, variant = 'origin
   return await Promise.all((galleryImgs || []).map(async (img, index) => {
     try {
       const result = await _loadDetailIdentifyBlob(img, chosenVariant)
-      if (!(result.blob instanceof Blob)) return null
+      if (!isBlob(result.blob)) return null
       const cropMeta = _readDetailAiCropMeta(img, index)
       const gps = _detailIdentifyGps()
       const prepared = await prepareImageBlobForUpload(result.blob, {
@@ -1071,7 +1072,7 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
         maxEdge: options.maxEdge || getArtsorakelMaxEdge(),
       })
   const blobs = identifyInputs
-    .filter(item => item?.blob instanceof Blob)
+    .filter(item => isBlob(item?.blob))
   const mediaKeys = (galleryImgs || [])
     .map(img => img?.dataset?.storagePath || '')
     .filter(Boolean)
@@ -1453,7 +1454,7 @@ async function _loadDetailAiCache() {
   try {
     const sources = getDetailIdentifySources()
     const identifyInputs = await prepareDetailIdentifyInputs(sources.galleryImgs, { variant: 'original', maxEdge: getArtsorakelMaxEdge() })
-    const usableBlobs = identifyInputs.filter(item => item?.blob instanceof Blob)
+    const usableBlobs = identifyInputs.filter(item => isBlob(item?.blob))
     const hasInatBlob = usableBlobs.length > 0
     const inaturalistSession = await loadInaturalistSession()
     const availabilityList = await getAvailableIdentifyServices({
@@ -1494,7 +1495,7 @@ async function _runDetailAiComparison(serviceOverride = null) {
 
   const identifyInputs = await prepareDetailIdentifyInputs(galleryImgs, { variant: 'original', maxEdge: getArtsorakelMaxEdge() })
   const usableBlobs = identifyInputs
-    .filter(item => item?.blob instanceof Blob)
+    .filter(item => isBlob(item?.blob))
   const mediaKeys = galleryImgs
     .map(img => img?.dataset?.storagePath || '')
     .filter(Boolean)

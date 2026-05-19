@@ -40,6 +40,7 @@ If you want a bit more context without diving straight into the code:
 
 - database and policy notes: [SUPABASE_DB.md](SUPABASE_DB.md)
 - app/code structure: [ARCHITECTURE.md](ARCHITECTURE.md)
+- image pipeline checklist and current flow notes: [docs/image-pipeline-phase1.md](docs/image-pipeline-phase1.md)
 
 ## Local Development
 

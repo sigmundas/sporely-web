@@ -3,9 +3,11 @@ import { t } from '../i18n.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
-import { getDefaultVisibility } from '../settings.js'
 import { isNativeApp } from '../platform.js'
+import { debugImagePipeline } from '../image-pipeline-debug.js'
 import { resetReviewAiState } from './review.js'
+import { createDefaultObservationDraft } from '../observation-defaults.js'
+import { isBlob } from '../observation-shapes.js'
 
 let cachedPrimaryMainCameraId = null
 let primaryMainCameraPromise = null
@@ -28,15 +30,6 @@ export function initCapture() {
     document.getElementById('camera-denied').style.display = 'none'
     startCamera()
   })
-}
-
-function _defaultCaptureDraft() {
-  return {
-    habitat: '',
-    notes: '',
-    uncertain: false,
-    visibility: getDefaultVisibility(),
-  }
 }
 
 function _stopMediaStream(stream) {
@@ -198,17 +191,13 @@ async function tryGetUserMedia() {
   }
 }
 
-function _isBlob(value) {
-  return value instanceof Blob || (value && typeof value.size === 'number' && typeof value.type === 'string')
-}
-
 function _finiteMaxRangeValue(range) {
   const max = Number(range?.max)
   return Number.isFinite(max) && max > 0 ? Math.round(max) : null
 }
 
 async function _getImageBlobDimensions(blob) {
-  if (!_isBlob(blob)) return { width: null, height: null }
+  if (!isBlob(blob)) return { width: null, height: null }
 
   if (typeof createImageBitmap === 'function') {
     try {
@@ -263,7 +252,7 @@ async function _takeStillPhoto(video) {
   }
 
   const blob = await imageCapture.takePhoto(photoSettings)
-  if (!_isBlob(blob)) throw new Error('Still photo capture returned no image')
+  if (!isBlob(blob)) throw new Error('Still photo capture returned no image')
   if (import.meta.env.DEV) console.log('Captured still photo via ImageCapture:', {
     bytes: blob.size,
     type: blob.type,
@@ -319,11 +308,11 @@ async function _captureCameraBlob(video) {
   let blob = null
   try {
     const stillBlob = await _takeStillPhoto(video)
-    if (_isBlob(stillBlob)) blob = stillBlob
+    if (isBlob(stillBlob)) blob = stillBlob
   } catch (err) {
     if (import.meta.env.DEV) console.warn('ImageCapture still photo failed; falling back to video frame:', err)
   }
-  if (!_isBlob(blob)) blob = await _captureVideoFrame(video)
+  if (!isBlob(blob)) blob = await _captureVideoFrame(video)
   return blob
 }
 
@@ -344,7 +333,7 @@ export async function startCamera(options = {}) {
     if (!preserveBatch) {
       state.sessionStart = new Date()
       state.capturedPhotos = []
-      state.captureDraft = _defaultCaptureDraft()
+      state.captureDraft = createDefaultObservationDraft()
       resetReviewAiState()
     }
     state.batchCount = state.capturedPhotos.length
@@ -400,6 +389,10 @@ export function stopCamera() {
 
 function capturePhoto() {
   const video  = document.getElementById('camera-video')
+  debugImagePipeline('capture photo requested', {
+    hasCameraStream: !!video?.srcObject,
+    batchCount: state.batchCount,
+  })
 
   if (!video.srcObject) {
     // Demo mode — no real camera
@@ -484,6 +477,10 @@ function capturePhoto() {
 }
 
 function finishCapture() {
+  debugImagePipeline('finish capture requested', {
+    pendingCaptureCount,
+    batchCount: state.batchCount,
+  })
   if (pendingCaptureCount > 0) {
     finishCaptureWhenPendingComplete = true
     showToast(t('capture.savingPhoto') || 'Saving photo...')
@@ -511,6 +508,7 @@ function finishCapture() {
 }
 
 function cancelCapture() {
+  debugImagePipeline('cancel capture')
   captureCompleteHandler = null
   stopCamera()
   state.capturedPhotos = []
@@ -519,9 +517,7 @@ function cancelCapture() {
   pendingCaptureCount = 0
   finishCaptureWhenPendingComplete = false
   state.sessionStart = null
-  state.captureDraft = {
-    ..._defaultCaptureDraft(),
-  }
+  state.captureDraft = createDefaultObservationDraft()
   resetReviewAiState()
   document.getElementById('batch-count').textContent = '0'
   document.getElementById('batch-area').style.display = 'none'
