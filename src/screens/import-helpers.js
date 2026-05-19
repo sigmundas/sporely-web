@@ -3,6 +3,7 @@ import { FilePicker } from '@capawesome/capacitor-file-picker'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { createImageCropMeta } from '../image_crop.js'
 import { normalizeCoordinatePair } from '../observation-shapes.js'
+import { isPhoneWebApp } from '../platform.js'
 
 export const NativePhotoPicker = registerPlugin('NativePhotoPicker')
 export const NativeCamera = registerPlugin('NativeCamera')
@@ -56,6 +57,14 @@ export async function nativePickedPhotoToFile(photo, index) {
     type: mimeType,
     lastModified: Date.now(),
   })
+}
+
+export function isHeicLikeFile(file) {
+  return /\.(heic|heif)$/i.test(file?.name || '') || /heic|heif/i.test(file?.type || '')
+}
+
+export function shouldWarnAboutDesktopBrowserHeicImport(file) {
+  return !isPhoneWebApp() && isHeicLikeFile(file)
 }
 
 function normalizeNativeMimeType(mimeType, format) {
@@ -433,7 +442,7 @@ async function _getExifr() {
 }
 
 function _isHeicLike(file) {
-  return /\.(heic|heif)$/i.test(file?.name || '') || /heic|heif/i.test(file?.type || '')
+  return isHeicLikeFile(file)
 }
 
 export async function captureExif(file) {

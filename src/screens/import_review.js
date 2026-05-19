@@ -14,7 +14,7 @@ import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } fr
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
 import { loadInaturalistSession } from '../inaturalist.js';
-import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
+import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile, shouldWarnAboutDesktopBrowserHeicImport } from './import-helpers.js';
 import { debugImagePipeline } from '../image-pipeline-debug.js';
 import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
 import {
@@ -1221,18 +1221,22 @@ export async function handleFileSelect(event) {
 async function handleSelectedFiles(files, options = {}) {
   if (!files.length) return;
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
+  const supportedSelection = _filterUnsupportedBrowserFiles(files, nativePhotos);
+  const supportedFiles = supportedSelection.files;
+  const supportedNativePhotos = supportedSelection.nativePhotos;
+  if (!supportedFiles.length) return;
 
   debugImagePipeline('import files selected', {
-    fileCount: files.length,
-    nativePhotoCount: nativePhotos.length,
+    fileCount: supportedFiles.length,
+    nativePhotoCount: supportedNativePhotos.length,
   })
 
-  _setProgress(0, files.length, t('import.readingTimestamps'));
+  _setProgress(0, supportedFiles.length, t('import.readingTimestamps'));
 
   // Read EXIF capture time + GPS for each file.
   // Android/iOS often set file.lastModified to sync date, not shutter time.
-  const withTimes = await Promise.all(files.map(async (f, idx) => {
-    const nativePhoto = nativePhotos[idx];
+  const withTimes = await Promise.all(supportedFiles.map(async (f, idx) => {
+    const nativePhoto = supportedNativePhotos[idx];
     if (nativePhoto) {
       const { time, lat, lon, altitude, accuracy, dbg } = await captureNativePhotoExif(nativePhoto, f);
       return {
@@ -1262,7 +1266,7 @@ async function handleSelectedFiles(files, options = {}) {
   let doneCount = 0;
   for (let idx = 0; idx < withTimes.length; idx++) {
     const item = withTimes[idx];
-    _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
+    _setProgress(doneCount, supportedFiles.length, t('import.convertingFile', { current: doneCount + 1, total: supportedFiles.length }));
     const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
     sourceItems.push({
       id: `i${idx}`,
@@ -1306,6 +1310,24 @@ async function handleSelectedFiles(files, options = {}) {
   navigate('import-review');
   renderSessions();
   _prefillSessionLocations();
+}
+
+function _filterUnsupportedBrowserFiles(files, nativePhotos = []) {
+  const supportedFiles = [];
+  const supportedNativePhotos = [];
+  let warned = false;
+  for (let idx = 0; idx < files.length; idx++) {
+    const file = files[idx];
+    const nativePhoto = nativePhotos[idx];
+    if (shouldWarnAboutDesktopBrowserHeicImport(file)) {
+      warned = true;
+      continue;
+    }
+    supportedFiles.push(file);
+    if (nativePhoto) supportedNativePhotos.push(nativePhoto);
+  }
+  if (warned) showToast(t('import.heicBrowserUnsupported'));
+  return { files: supportedFiles, nativePhotos: supportedNativePhotos };
 }
 
 // ── Progress overlay ─────────────────────────────────────────────────────────
