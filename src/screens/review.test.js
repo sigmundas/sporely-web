@@ -21,6 +21,14 @@ test('review service-tab clicks update the ai block without rebuilding the grid'
   assert.match(source, /_renderReviewAiResults\(\)[\s\S]*resultsEl\.innerHTML = _reviewAiResultsHtml\(\)/)
 })
 
+test('review crop hint switches to adjust copy and disappears once a custom crop exists', () => {
+  const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
+
+  assert.match(source, /const cropStatusHtml = croppedCount\s*\?\s*''\s*:\s*`<div class="capture-session-crop-status">\$\{t\('review\.aiCropHint'\)\}<\/div>`/)
+  assert.match(source, /shouldShowAiCropOverlay\(p\.aiCropRect, p\.aiCropIsCustom\)/)
+  assert.doesNotMatch(source, /Tap a photo to add AI crop/)
+})
+
 test('review ai flow keeps the setting-selected primary service and refreshes availability without rebuilding the grid', () => {
   const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
 

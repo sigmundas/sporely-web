@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 
 import {
   _buildDetailAiCachedResults,
@@ -244,6 +245,13 @@ test('stored results remain clickable even when the current availability says un
   } finally {
     restore()
   }
+})
+
+test('detail ai run path stays disabled for non-owners and starts from a safe reset state', () => {
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+
+  assert.match(source, /if \(!currentObsIsOwner\) return/)
+  assert.match(source, /_applyOwnershipMode\(false\)/)
 })
 
 test('selected AI service keeps its own probability and source highlight', () => {

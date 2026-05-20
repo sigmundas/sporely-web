@@ -1739,6 +1739,7 @@ async function _loadDetailAiCache() {
 }
 
 async function _runDetailAiComparison(serviceOverride = null) {
+  if (!currentObsIsOwner) return
   const overrideService = typeof serviceOverride === 'string'
     ? normalizeIdentifyService(serviceOverride)
     : null
@@ -2058,7 +2059,7 @@ function _resetForm() {
   const commentInput = document.getElementById('comment-input')
   if (commentInput) commentInput.value = ''
   _syncDetailCommentComposer()
-  _applyOwnershipMode(true)
+  _applyOwnershipMode(false)
 }
 
 function _startDetailLocationLookup(obs) {

@@ -557,11 +557,14 @@ export function buildReviewGrid() {
       reviewAiState.activeService = photoIdServices.primary
     }
     void _syncReviewAiAvailability()
+    const cropStatusHtml = croppedCount
+      ? ''
+      : `<div class="capture-session-crop-status">${t('review.aiCropHint')}</div>`
 
     html = `
       <div class="detail-gallery capture-session-gallery" id="review-gallery"></div>
       <div class="capture-session-summary">${summary}</div>
-      <div class="capture-session-crop-status">${croppedCount ? `${croppedCount}/${count} AI crop` : 'Tap a photo to add AI crop'}</div>
+      ${cropStatusHtml}
       
       <div class="field-meta-section capture-session-species">
         <div class="field-meta-header">${t('detail.species')}</div>

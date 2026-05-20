@@ -102,6 +102,8 @@ const messages = {
     'review.identifying': 'Identifying…',
     'review.noMatch': 'Artsorakel returned no suggestion',
     'review.aiUnavailable': 'Artsorakel unavailable right now.',
+    'review.aiCropHint': 'Tap a photo to adjust AI ID crop',
+    'review.runAiIdPrompt': 'Run AI Photo ID to get suggestions.',
     'review.noMatchArtsorakel': 'Artsorakel returned no suggestion',
     'review.inaturalistUnavailable': 'iNaturalist unavailable right now.',
     'review.noPhotosToIdentify': 'No photos to identify',
@@ -298,6 +300,8 @@ const messages = {
     'settings.imageResolutionMax': 'Max (12MP)',
     'settings.camera': 'Camera',
     'settings.cameraApp': 'Camera App',
+    'settings.cameraAppHint': 'With Sporely Cam, you can take multiple photos in one go.',
+    'settings.photoIdModeBoth': 'Both',
     'settings.sporely': 'Sporely',
     'settings.native': 'Native',
     'settings.photoIdMode': 'AI Photo ID mode',
@@ -313,7 +317,10 @@ const messages = {
     'settings.inaturalistLoggedInAs': 'Logged in as {username}',
     'settings.inaturalistWebLoginHint': 'Web login for iNaturalist is not configured on this server.',
     'settings.inaturalistLoginMissing': 'Please log in to iNaturalist first.',
+    'settings.inaturalistConnect': 'Log in with iNaturalist',
+    'settings.inaturalistForgetLogin': 'Forget login',
     'settings.inaturalistLoginSuccess': 'Successfully logged in to iNaturalist.',
+    'settings.inaturalistLoggedOut': 'Logged out from iNaturalist.',
     'settings.clearLocalCacheConfirm': 'Clear temporary import photos and browser media cache? Queued observations will stay safe.',
     'settings.localCacheCleared': 'Local cache cleared',
     'settings.localCacheFailed': 'Could not clear cache: {message}',
@@ -471,6 +478,8 @@ const messages = {
     'review.identifying': 'Identifiserer…',
     'review.noMatch': 'Artsorakel ga ingen forslag',
     'review.aiUnavailable': 'Artsorakel er utilgjengelig akkurat nå.',
+    'review.aiCropHint': 'Trykk på et bilde for å justere AI-ID-beskjæring.',
+    'review.runAiIdPrompt': 'Kjør AI Photo ID for å få forslag.',
     'review.noMatchArtsorakel': 'Artsorakel ga ingen forslag',
     'review.inaturalistUnavailable': 'iNaturalist er utilgjengelig akkurat nå.',
     'review.noPhotosToIdentify': 'Ingen bilder å identifisere',
@@ -654,6 +663,8 @@ const messages = {
     'settings.imageResolutionMax': 'Maks (12MP)',
     'settings.camera': 'Kamera',
     'settings.cameraApp': 'Kamera-app',
+    'settings.cameraAppHint': 'Med Sporely Cam kan du ta flere bilder på én gang.',
+    'settings.photoIdModeBoth': 'Begge',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
     'settings.photoIdMode': 'AI Photo ID-modus',
@@ -669,7 +680,10 @@ const messages = {
     'settings.inaturalistLoggedInAs': 'Logget inn som {username}',
     'settings.inaturalistWebLoginHint': 'Nettinnlogging for iNaturalist er ikke konfigurert på denne serveren.',
     'settings.inaturalistLoginMissing': 'Vennligst logg inn på iNaturalist først.',
+    'settings.inaturalistConnect': 'Logg inn med iNaturalist',
+    'settings.inaturalistForgetLogin': 'Glem innlogging',
     'settings.inaturalistLoginSuccess': 'Vellykket innlogging på iNaturalist.',
+    'settings.inaturalistLoggedOut': 'Logget ut av iNaturalist.',
     'settings.clearLocalCacheConfirm': 'Tømme midlertidige importbilder og nettleserens mediecache? Observasjoner i kø beholdes.',
     'settings.localCacheCleared': 'Lokal cache tømt',
     'settings.localCacheFailed': 'Kunne ikke tømme cache: {message}',
@@ -827,6 +841,8 @@ const messages = {
     'review.identifying': 'Identifierar…',
     'review.noMatch': 'Artsorakel gav inga förslag',
     'review.aiUnavailable': 'Artsorakel är inte tillgängligt just nu.',
+    'review.aiCropHint': 'Tryck på ett foto för att justera AI-ID-beskärningen.',
+    'review.runAiIdPrompt': 'Kör AI Photo ID för att få förslag.',
     'review.noMatchArtsorakel': 'Artsorakel gav inga förslag',
     'review.inaturalistUnavailable': 'iNaturalist är inte tillgängligt just nu.',
     'review.noPhotosToIdentify': 'Inga bilder att identifiera',
@@ -1010,6 +1026,8 @@ const messages = {
     'settings.imageResolutionMax': 'Max (12MP)',
     'settings.camera': 'Kamera',
     'settings.cameraApp': 'Kamera-app',
+    'settings.cameraAppHint': 'Med Sporely Cam kan du ta flera bilder på en gång.',
+    'settings.photoIdModeBoth': 'Båda',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
     'settings.photoIdMode': 'AI Photo ID-läge',
@@ -1025,7 +1043,10 @@ const messages = {
     'settings.inaturalistLoggedInAs': 'Inloggad som {username}',
     'settings.inaturalistWebLoginHint': 'Webbinloggning för iNaturalist är inte konfigurerad på den här servern.',
     'settings.inaturalistLoginMissing': 'Vänligen logga in på iNaturalist först.',
+    'settings.inaturalistConnect': 'Logga in med iNaturalist',
+    'settings.inaturalistForgetLogin': 'Glöm inloggning',
     'settings.inaturalistLoginSuccess': 'Inloggningen till iNaturalist lyckades.',
+    'settings.inaturalistLoggedOut': 'Loggade ut från iNaturalist.',
     'settings.clearLocalCacheConfirm': 'Rensa tillfälliga importbilder och webbläsarens mediecache? Köade observationer behålls.',
     'settings.localCacheCleared': 'Lokal cache rensad',
     'settings.localCacheFailed': 'Kunde inte rensa cache: {message}',
@@ -1183,6 +1204,8 @@ const messages = {
     'review.identifying': 'Identifiziere…',
     'review.noMatch': 'Artsorakel hat keinen Vorschlag geliefert',
     'review.aiUnavailable': 'Artsorakel ist derzeit nicht verfügbar.',
+    'review.aiCropHint': 'Tippe auf ein Foto, um den AI-ID-Zuschnitt anzupassen.',
+    'review.runAiIdPrompt': 'Starte AI Photo ID, um Vorschläge zu erhalten.',
     'review.noMatchArtsorakel': 'Artsorakel hat keinen Vorschlag geliefert',
     'review.inaturalistUnavailable': 'iNaturalist ist derzeit nicht verfügbar.',
     'review.noPhotosToIdentify': 'Keine Fotos zum Identifizieren',
@@ -1366,6 +1389,8 @@ const messages = {
     'settings.imageResolutionMax': 'Max. (12MP)',
     'settings.camera': 'Kamera',
     'settings.cameraApp': 'Kamera-App',
+    'settings.cameraAppHint': 'Mit Sporely Cam kannst du mehrere Fotos auf einmal aufnehmen.',
+    'settings.photoIdModeBoth': 'Beide',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
     'settings.photoIdMode': 'AI Photo ID-Modus',
@@ -1381,7 +1406,10 @@ const messages = {
     'settings.inaturalistLoggedInAs': 'Angemeldet als {username}',
     'settings.inaturalistWebLoginHint': 'Die Web-Anmeldung für iNaturalist ist auf diesem Server nicht konfiguriert.',
     'settings.inaturalistLoginMissing': 'Bitte melde dich zuerst bei iNaturalist an.',
+    'settings.inaturalistConnect': 'Mit iNaturalist anmelden',
+    'settings.inaturalistForgetLogin': 'Login vergessen',
     'settings.inaturalistLoginSuccess': 'Erfolgreich bei iNaturalist angemeldet.',
+    'settings.inaturalistLoggedOut': 'Von iNaturalist abgemeldet.',
     'settings.clearLocalCacheConfirm': 'Temporäre Importfotos und Browser-Mediencache löschen? Beobachtungen in der Warteschlange bleiben erhalten.',
     'settings.localCacheCleared': 'Lokaler Cache geleert',
     'settings.localCacheFailed': 'Cache konnte nicht geleert werden: {message}',
@@ -1762,12 +1790,16 @@ export function applyStaticTranslations() {
   setText('#settings-artsorakel-max-edge-hint', 'settings.artsorakelMaxEdgeHint')
   setText('#settings-photo-id-mode-label', 'settings.photoIdMode')
   setText('#settings-photo-id-mode-hint', 'settings.photoIdModeHint')
+  setText('#settings-photo-id-mode-both', 'settings.photoIdModeBoth')
   setText('#settings-image-resolution-label', 'settings.imageResolution')
   setText('#settings-resolution-reduced', 'settings.imageResolutionReduced')
   setText('#settings-resolution-max', 'settings.imageResolutionMax')
   setText('#profile-inat-web-login-hint', 'settings.inaturalistWebLoginHint')
+  setText('#profile-inat-connect-btn', 'settings.inaturalistConnect')
+  setText('#settings-inat-connect-btn', 'settings.inaturalistConnect')
   setText('#settings-camera-label', 'settings.camera')
   setText('#settings-camera-app-label', 'settings.cameraApp')
+  setText('#settings-camera-app-hint', 'settings.cameraAppHint')
   setText('.settings-camera-app-btn[data-camera-app="sporely"]', 'settings.sporely')
   setText('.settings-camera-app-btn[data-camera-app="native"]', 'settings.native')
   setText('#settings-default-visibility-label', 'settings.defaultVisibility')
@@ -1777,6 +1809,8 @@ export function applyStaticTranslations() {
   setText('#settings-data-label', 'settings.data')
   setText('#settings-clear-cache-btn', 'settings.clearLocalCache')
   setText('#settings-inat-label', 'settings.inaturalist')
+  setText('#settings-inat-forget-btn', 'settings.inaturalistForgetLogin')
+  setText('#profile-inat-forget-btn', 'settings.inaturalistForgetLogin')
   setText('#settings-clear-cache-hint', 'settings.clearLocalCacheHint')
   setAria('#settings-btn', 'settings.title')
   setAria('#settings-close-btn', 'common.close')
