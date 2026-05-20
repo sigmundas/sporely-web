@@ -172,6 +172,10 @@ function _tf(key, fallback) {
   return value && value !== key ? value : fallback
 }
 
+function _detailAiRunDisabledTitle() {
+  return _tf('detail.onlyOwnerRunAiId', 'Only the owner can run AI Photo ID')
+}
+
 function _canViewDetailAiResult(service, result = null) {
   void service
   return _hasStoredAiResult(result)
@@ -1491,10 +1495,20 @@ function _renderDetailAiTabs() {
   const runBtn = document.querySelector('[data-identify-run-button]')
   if (runBtn) {
     const availabilityKnown = Object.keys(detailAiState.availability || {}).length > 0
-    runBtn.disabled = detailAiState.running || !currentObsIsOwner || (availabilityKnown && !photoIdServices.run.length)
+    const runDisabled = detailAiState.running || !currentObsIsOwner || (availabilityKnown && !photoIdServices.run.length)
+    runBtn.disabled = runDisabled
+    runBtn.setAttribute('aria-disabled', String(runDisabled))
     const runLabel = runBtn.querySelector('[data-identify-run-label]')
     if (runLabel) {
       runLabel.textContent = detailAiState.running ? 'Loading...' : _tf('review.aiId', 'AI Photo ID')
+    }
+    if (!currentObsIsOwner) {
+      const runTitle = _detailAiRunDisabledTitle()
+      runBtn.title = runTitle
+      runBtn.setAttribute('aria-label', runTitle)
+    } else {
+      runBtn.removeAttribute('title')
+      runBtn.setAttribute('aria-label', _tf('review.aiId', 'AI Photo ID'))
     }
   }
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
@@ -1696,14 +1710,30 @@ async function _loadDetailAiCache() {
     || detailAiState.activeService
     || configuredPrimaryService
 
-  if (_isDetailAiDebugFlagEnabled()) {
-    console.debug('[photo-id cache]', {
-      observationId: currentObs.id,
+  if (import.meta.env?.DEV || _isDetailAiDebugFlagEnabled('sporely-debug-ai-id')) {
+    console.debug('[detail-ai cache load]', {
+      observationId: currentObs?.id,
+      ownerId: currentObs?.user_id,
+      viewerId: state.user?.id,
+      currentObsIsOwner,
       rowCount: rows.length,
-      services: rows.map(row => row?.service),
-      resultsByService: Object.keys(detailAiState.resultsByService || {}),
-      selectedService: detailAiState.selectedService,
-      activeService: detailAiState.activeService,
+      rows: rows.map(r => ({
+        service: r.service,
+        status: r.status,
+        top_probability: r.top_probability,
+        resultCount: Array.isArray(r.results) ? r.results.length : null,
+        request_fingerprint: r.request_fingerprint,
+      })),
+      resultsByService: Object.fromEntries(
+        Object.entries(detailAiState.resultsByService || {}).map(([service, result]) => [
+          service,
+          {
+            status: result?.status,
+            topProbability: result?.topProbability,
+            predictionCount: result?.predictions?.length || 0,
+          },
+        ]),
+      ),
     })
   }
 
@@ -2615,9 +2645,21 @@ function _applyOwnershipMode(isOwner) {
   }
   if (saveBtn) saveBtn.style.display = isOwner ? '' : 'none'
   if (deleteBtn) deleteBtn.style.display = isOwner ? '' : 'none'
-  if (aiRunBtn) aiRunBtn.disabled = !isOwner
+  if (aiRunBtn) {
+    aiRunBtn.disabled = !isOwner
+    aiRunBtn.setAttribute('aria-disabled', String(!isOwner))
+    if (!isOwner) {
+      const runTitle = _detailAiRunDisabledTitle()
+      aiRunBtn.title = runTitle
+      aiRunBtn.setAttribute('aria-label', runTitle)
+    } else {
+      aiRunBtn.removeAttribute('title')
+      aiRunBtn.setAttribute('aria-label', _tf('review.aiId', 'AI Photo ID'))
+    }
+  }
   aiTabs.forEach(tab => {
-    tab.disabled = !isOwner || tab.classList.contains('is-disabled')
+    tab.disabled = false
+    tab.setAttribute('aria-disabled', 'false')
   })
   if (taxonInput) taxonInput.disabled = !isOwner
   if (locationInput) locationInput.readOnly = !isOwner

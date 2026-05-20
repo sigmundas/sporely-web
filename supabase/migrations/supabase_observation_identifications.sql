@@ -1,5 +1,5 @@
 -- Observation AI identification cache/history.
--- Owner-only access: users can manage their own observation identifications.
+-- Visible-observation read access with owner-only writes.
 
 CREATE TABLE IF NOT EXISTS public.observation_identifications (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -38,17 +38,17 @@ CREATE INDEX IF NOT EXISTS observation_identifications_user_created_idx
 ALTER TABLE public.observation_identifications ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS observation_identifications_select_own ON public.observation_identifications;
-CREATE POLICY observation_identifications_select_own
+DROP POLICY IF EXISTS observation_identifications_select_visible ON public.observation_identifications;
+CREATE POLICY observation_identifications_select_visible
   ON public.observation_identifications
   FOR SELECT
   TO authenticated
   USING (
-    user_id = auth.uid()
-    AND EXISTS (
+    EXISTS (
       SELECT 1
       FROM public.observations o
       WHERE o.id = observation_identifications.observation_id
-        AND o.user_id = auth.uid()
+        AND public.can_read_observation(o.user_id, o.visibility)
     )
   );
 

@@ -252,6 +252,9 @@ test('detail ai run path stays disabled for non-owners and starts from a safe re
 
   assert.match(source, /if \(!currentObsIsOwner\) return/)
   assert.match(source, /_applyOwnershipMode\(false\)/)
+  assert.match(source, /detail\.onlyOwnerRunAiId/)
+  assert.match(source, /Only the owner can run AI Photo ID/)
+  assert.doesNotMatch(source, /tab\.disabled = !isOwner \|\| tab\.classList\.contains\('is-disabled'\)/)
 })
 
 test('selected AI service keeps its own probability and source highlight', () => {

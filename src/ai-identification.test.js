@@ -263,6 +263,19 @@ test('service tabs render no-match, running, and success states with the right i
   assert.match(lowConfidence, /27%/)
 })
 
+test('service tabs prefer explicit display probability over stored top probability', () => {
+  const html = renderIdentifyServiceTab({
+    service: 'artsorakel',
+    status: 'idle',
+    available: true,
+    displayProbability: 0.53,
+    topProbability: 0.91,
+  })
+
+  assert.match(html, /53%/)
+  assert.doesNotMatch(html, /91%/)
+})
+
 test('service tabs accept a session id for scoped wiring', () => {
   const html = renderIdentifyServiceTab({
     service: 'artsorakel',
@@ -364,13 +377,15 @@ test('terminal AI service states do not rerun from tab clicks', () => {
 })
 
 test('fingerprints change when image or crop inputs change', () => {
+  const blob100 = new Blob([new Uint8Array(100)], { type: 'image/jpeg' })
+  const blob120 = new Blob([new Uint8Array(120)], { type: 'image/jpeg' })
   const base = buildIdentifyFingerprint({
     service: 'artsorakel',
     language: 'en',
     images: [
       {
         id: 'img-1',
-        blob: { size: 100, type: 'image/jpeg' },
+        blob: blob100,
         cropRect: { x1: 0, y1: 0, x2: 1, y2: 1 },
       },
     ],
@@ -381,7 +396,7 @@ test('fingerprints change when image or crop inputs change', () => {
     images: [
       {
         id: 'img-1',
-        blob: { size: 100, type: 'image/jpeg' },
+        blob: blob100,
         cropRect: { x1: 0.1, y1: 0, x2: 1, y2: 1 },
       },
     ],
@@ -392,7 +407,7 @@ test('fingerprints change when image or crop inputs change', () => {
     images: [
       {
         id: 'img-2',
-        blob: { size: 120, type: 'image/jpeg' },
+        blob: blob120,
         cropRect: { x1: 0, y1: 0, x2: 1, y2: 1 },
       },
     ],

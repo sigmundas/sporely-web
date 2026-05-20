@@ -1,6 +1,7 @@
 import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
 import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, imageExtensionForMimeType, buildObservationImageStoragePath } from './images.js'
+import { saveIdentificationRun } from './ai-identification.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
 import { BackgroundTask } from '@capawesome/capacitor-background-task'
@@ -528,6 +529,55 @@ async function _findRemoteObservationForQueueItem(item) {
   return Array.isArray(data) ? data[0]?.id || null : null
 }
 
+async function _persistQueuedObservationIdentifications({
+  observationId,
+  userId,
+  runs,
+  debugContext = {},
+} = {}) {
+  if (!observationId || !userId || !Array.isArray(runs) || !runs.length) return
+
+  for (const run of runs) {
+    if (!run || !run.service || !run.requestFingerprint) continue
+    if (!['success', 'no_match', 'error', 'stale', 'unavailable'].includes(run.status)) continue
+
+    try {
+      if (_isDebugQueueEnabled()) {
+        _debugQueue('persisting queued AI identification run', {
+          observationId,
+          service: run.service,
+          status: run.status,
+          ...debugContext,
+        })
+      }
+
+      await saveIdentificationRun({
+        observationId,
+        userId,
+        service: run.service,
+        requestFingerprint: run.requestFingerprint,
+        imageFingerprint: run.imageFingerprint || '',
+        cropFingerprint: run.cropFingerprint || null,
+        language: run.language || null,
+        modelVersion: run.modelVersion || null,
+        status: run.status || 'success',
+        results: Array.isArray(run.results) ? run.results : [],
+        errorMessage: run.errorMessage || null,
+        topPrediction: run.topPrediction || null,
+      })
+    } catch (error) {
+      console.warn('Failed to persist queued AI identification run:', {
+        observationId,
+        service: run.service,
+        status: run.status,
+        error: {
+          message: error?.message || String(error || 'Unknown error'),
+        },
+      })
+    }
+  }
+}
+
 async function _runSyncQueue() {
   if (!navigator.onLine || !canSyncOnCurrentConnection()) return
 
@@ -546,6 +596,9 @@ async function _runSyncQueue() {
       const queueUserId = _queueUserFromItem(item)
       const queueKey = String(item?.queueKey || '').trim() || _queueKeyForUser(queueUserId)
       const observationPayload = item?.obsPayload || {}
+      const queuedAiIdentificationRuns = Array.isArray(observationPayload.aiIdentificationRuns)
+        ? observationPayload.aiIdentificationRuns
+        : []
       const observationOwnerFieldName = Object.prototype.hasOwnProperty.call(observationPayload, 'user_id')
         ? 'user_id'
         : (Object.prototype.hasOwnProperty.call(observationPayload, 'owner_id')
@@ -650,6 +703,7 @@ async function _runSyncQueue() {
         delete repairedPayload.queueUserId
         delete repairedPayload.queueKey
         delete repairedPayload.remoteObservationId
+        delete repairedPayload.aiIdentificationRuns
         if (repairedPayload.gpsLat !== undefined) {
           repairedPayload.gps_latitude = repairedPayload.gpsLat
           delete repairedPayload.gpsLat
@@ -690,7 +744,10 @@ async function _runSyncQueue() {
         const updatedItem = await _updateQueueItem(item.id, current => ({
           ...current,
           remoteObservationId: obsId,
-          obsPayload: repairedPayload || current.obsPayload,
+          obsPayload: {
+            ...(repairedPayload || current.obsPayload || {}),
+            aiIdentificationRuns: queuedAiIdentificationRuns,
+          },
         }))
         if (!updatedItem) continue
       }
@@ -705,6 +762,15 @@ async function _runSyncQueue() {
       const remoteState = await _fetchRemoteObservationState(obsId)
       remoteState.completedIndexes.forEach(index => completedImageIndexes.add(index))
       if (completedImageIndexes.size >= queuedImages.length) {
+        await _persistQueuedObservationIdentifications({
+          observationId: obsId,
+          userId: authUserId,
+          runs: queuedAiIdentificationRuns,
+          debugContext: {
+            itemId: item.id,
+            stage: 'remote-reconcile',
+          },
+        })
         await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'remote-reconcile')
         continue
       }
@@ -780,6 +846,15 @@ async function _runSyncQueue() {
           syncImageCount: queuedImages.length,
         } : current)
       }
+
+      await _persistQueuedObservationIdentifications({
+        observationId: obsId,
+        userId: authUserId,
+        runs: queuedAiIdentificationRuns,
+        debugContext: {
+          itemId: item.id,
+        },
+      })
 
       // 3. Confirm remote DB/image state, then purge from the offline queue.
       await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'local-sync')

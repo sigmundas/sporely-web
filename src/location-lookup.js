@@ -1,4 +1,12 @@
 import { recordDebugJsonResponse } from './debug-activity.js'
+import {
+  MAX_LOCATION_SUGGESTIONS,
+  buildDawaSuggestion,
+  buildLocationSuggestionsFromNominatim,
+  dedupeText,
+} from './location-suggestion-builder.js'
+
+export { buildDawaSuggestion, buildLocationSuggestionsFromNominatim } from './location-suggestion-builder.js'
 
 const LOCATION_LOOKUP_BASE_URL = String(
   import.meta.env?.VITE_LOCATION_LOOKUP_BASE_URL || import.meta.env?.VITE_MEDIA_UPLOAD_BASE_URL || ''
@@ -26,9 +34,9 @@ export function lookupCoordinateKey(lat, lon, digits = 5) {
 
 export function normalizeLocationLookupResult(raw, lat = null, lon = null) {
   const countryCode = String(raw?.country_code || raw?.countryCode || '').trim().toLowerCase()
-  const maxSuggestions = countryCode === 'no' ? 3 : 2
-  const suggestions = _dedupeStrings(raw?.suggestions || raw?.places || [])
-    .slice(0, maxSuggestions)
+  const suggestions = dedupeText(
+    raw?.suggestions || raw?.places || raw?.debug?.final_suggestions || []
+  ).slice(0, MAX_LOCATION_SUGGESTIONS)
 
   return {
     suggestions,
@@ -37,6 +45,7 @@ export function normalizeLocationLookupResult(raw, lat = null, lon = null) {
     country_code: countryCode || null,
     country_name: _stringOrNull(raw?.country_name || raw?.countryName),
     nominatim_display_name: _stringOrNull(raw?.nominatim_display_name || raw?.nominatimDisplayName),
+    debug: raw?.debug && typeof raw.debug === 'object' ? raw.debug : null,
     source: _stringOrNull(raw?.source),
   }
 }
@@ -73,6 +82,7 @@ export function mergeLocationLookupResults(primary, secondary) {
     country_code: countryCode,
     country_name: primary?.country_name || secondary?.country_name || null,
     nominatim_display_name: secondary?.nominatim_display_name || primary?.nominatim_display_name || null,
+    debug: secondary?.debug || primary?.debug || null,
     source: primary?.source || secondary?.source || null,
   })
 }
@@ -145,8 +155,8 @@ async function lookupReverseLocationDirect(lat, lon, options = {}) {
 
   const address = nominatim?.address || {}
   const countryCode = String(address.country_code || '').trim().toLowerCase()
-  const nominatimSuggestions = buildNominatimSuggestions(address, nominatim?.display_name)
-  let suggestions = [...nominatimSuggestions]
+  const nominatimDetails = buildLocationSuggestionsFromNominatim(nominatim || {})
+  let suggestions = [...nominatimDetails.suggestions]
   let source = 'nominatim'
 
   if (countryCode === 'no') {
@@ -159,7 +169,7 @@ async function lookupReverseLocationDirect(lat, lon, options = {}) {
       const name = _stringOrNull(artsdata?.navn)
       const dist = Number(artsdata?.dist)
       if (name && Number.isFinite(dist) && dist <= 0.006) {
-        suggestions = [name, ...nominatimSuggestions]
+        suggestions = [name, ...nominatimDetails.suggestions]
         source = 'artsdatabanken'
       }
     } catch (_) {}
@@ -171,41 +181,53 @@ async function lookupReverseLocationDirect(lat, lon, options = {}) {
       const dawa = await fetchJson(url, options)
       const label = buildDawaSuggestion(dawa)
       if (label) {
-        suggestions = [label, ...nominatimSuggestions]
+        suggestions = [label, ...nominatimDetails.suggestions]
         source = 'dawa'
       }
     } catch (_) {}
   }
 
+  const finalSuggestions = dedupeText(suggestions).slice(0, MAX_LOCATION_SUGGESTIONS)
+  const locationDebug = {
+    raw_nominatim_display_name: nominatimDetails.nominatim_display_name,
+    structured_address_fields_used: nominatimDetails.structured_address_fields_used,
+    display_name_parts_used: nominatimDetails.display_name_parts_used,
+    final_suggestions: finalSuggestions,
+  }
+
+  if (nominatim) {
+    recordDebugJsonResponse({
+      source: 'location-lookup',
+      label: 'location lookup summary',
+      endpoint: 'https://nominatim.openstreetmap.org/reverse',
+      status: 200,
+      ok: true,
+      body: {
+        ...locationDebug,
+        country_code: countryCode || null,
+        country_name: address.country || null,
+        source,
+      },
+    })
+  }
+
   return normalizeLocationLookupResult({
-    suggestions,
+    suggestions: finalSuggestions,
     latitude: lat,
     longitude: lon,
     country_code: countryCode,
     country_name: address.country,
     nominatim_display_name: nominatim?.display_name,
+    debug: locationDebug,
     source,
   }, lat, lon)
 }
 
 export function buildNominatimSuggestions(address = {}, displayName = '') {
-  const local = _firstString(address.amenity, address.road)
-  const neighbourhood = _firstString(
-    address.neighbourhood,
-    address.suburb,
-  )
-  const localParts = _dedupeStrings([local, neighbourhood])
-  return localParts.length ? localParts : _dedupeStrings([displayName])
-}
-
-export function buildDawaSuggestion(dawa = {}) {
-  return _dedupeStrings([
-    dawa?.vejstykke?.navn,
-    dawa?.postnummer?.navn,
-    dawa?.kommune?.navn,
-    dawa?.region?.navn,
-    'Danmark',
-  ]).join(', ')
+  return buildLocationSuggestionsFromNominatim({
+    address,
+    display_name: displayName,
+  }).suggestions
 }
 
 async function fetchJson(url, options = {}) {
@@ -228,28 +250,6 @@ async function fetchJson(url, options = {}) {
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
-}
-
-function _firstString(...values) {
-  for (const value of values) {
-    const text = _stringOrNull(value)
-    if (text) return text
-  }
-  return ''
-}
-
-function _dedupeStrings(values) {
-  const seen = new Set()
-  const result = []
-  for (const value of values) {
-    const text = _stringOrNull(value)
-    if (!text) continue
-    const key = text.toLocaleLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    result.push(text)
-  }
-  return result
 }
 
 function _stringOrNull(value) {

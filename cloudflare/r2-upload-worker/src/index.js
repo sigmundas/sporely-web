@@ -1,3 +1,9 @@
+import {
+  MAX_LOCATION_SUGGESTIONS,
+  buildDawaSuggestion,
+  buildLocationSuggestionsFromNominatim,
+} from '../../../src/location-suggestion-builder.js'
+
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
 const DEFAULT_ALLOWED_METHODS = 'GET, PUT, POST, DELETE, OPTIONS'
@@ -112,7 +118,7 @@ async function handleReverseLocation(request, env, url) {
   const countryCode = stringOrNull(address.country_code)?.toLowerCase() || null
   const countryName = stringOrNull(address.country)
   const displayName = stringOrNull(nominatim?.display_name)
-  const nominatimSuggestions = nominatimSuggestionList(nominatim)
+  const nominatimDetails = buildLocationSuggestionsFromNominatim(nominatim)
   const suggestions = []
   let source = 'nominatim'
 
@@ -126,17 +132,24 @@ async function handleReverseLocation(request, env, url) {
     }
   }
 
-  suggestions.push(...nominatimSuggestions)
-  const maxSuggestions = countryCode === 'no' ? 3 : 2
+  suggestions.push(...nominatimDetails.suggestions)
+  const finalSuggestions = dedupeText(suggestions).slice(0, MAX_LOCATION_SUGGESTIONS)
+  const debug = {
+    raw_nominatim_display_name: nominatimDetails.nominatim_display_name,
+    structured_address_fields_used: nominatimDetails.structured_address_fields_used,
+    display_name_parts_used: nominatimDetails.display_name_parts_used,
+    final_suggestions: finalSuggestions,
+  }
 
   return jsonResponse(
     {
-      suggestions: dedupeText(suggestions).slice(0, maxSuggestions),
+      suggestions: finalSuggestions,
       latitude: lat,
       longitude: lon,
       country_code: countryCode,
       country_name: countryName,
       nominatim_display_name: displayName,
+      debug,
       source,
     },
     200,
@@ -219,22 +232,7 @@ async function fetchDawaSuggestion(lat, lon) {
   })
   if (!response.ok) return ''
   const data = await safeJsonObject(response)
-  return dedupeText([
-    data?.vejstykke?.navn,
-    data?.postnummer?.navn,
-    data?.kommune?.navn,
-    data?.region?.navn,
-    'Danmark',
-  ]).join(', ')
-}
-
-function nominatimSuggestionList(data) {
-  const address = data?.address || {}
-  const localParts = dedupeText([
-    address.amenity || address.road,
-    address.neighbourhood || address.suburb,
-  ])
-  return localParts.length ? localParts : dedupeText([data?.display_name])
+  return buildDawaSuggestion(data)
 }
 
 async function handleUpload(request, env, ctx, url) {

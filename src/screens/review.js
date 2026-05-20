@@ -47,6 +47,11 @@ const reviewAiState = {
   running: false,
   hasRun: false,
   activeService: null,
+  selectedService: null,
+  selectedPrediction: null,
+  selectedPredictionByService: {},
+  selectedProbabilityByService: {},
+  selectedTaxonSource: null,
   requestedFingerprint: '',
   currentFingerprint: '',
   availabilityFingerprint: '',
@@ -333,6 +338,11 @@ export function resetReviewAiState() {
   reviewAiState.running = false
   reviewAiState.hasRun = false
   reviewAiState.activeService = null
+  reviewAiState.selectedService = null
+  reviewAiState.selectedPrediction = null
+  reviewAiState.selectedPredictionByService = {}
+  reviewAiState.selectedProbabilityByService = {}
+  reviewAiState.selectedTaxonSource = null
   reviewAiState.requestedFingerprint = ''
   reviewAiState.currentFingerprint = ''
   reviewAiState.availabilityFingerprint = ''
@@ -424,6 +434,62 @@ function _mergeReviewServiceState(service, result = {}) {
       reason: result.reason || availability.reason || '',
     },
   }
+}
+
+function _reviewAiHasProbability(value) {
+  return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+}
+
+function _reviewAiPredictionProbability(prediction = null, fallback = null) {
+  if (!prediction) return _reviewAiHasProbability(fallback) ? Number(fallback) : null
+  const value = Number(prediction?.probability ?? fallback)
+  return Number.isFinite(value) ? value : null
+}
+
+function _reviewAiPredictionsEquivalent(left = null, right = null) {
+  if (!left || !right) return false
+  const leftTaxonId = String(left?.taxonId || '').trim().toLowerCase()
+  const rightTaxonId = String(right?.taxonId || '').trim().toLowerCase()
+  const leftScientificName = String(left?.scientificName || '').trim().toLowerCase()
+  const rightScientificName = String(right?.scientificName || '').trim().toLowerCase()
+  return (
+    (leftTaxonId && rightTaxonId && leftTaxonId === rightTaxonId)
+    || (leftScientificName && rightScientificName && leftScientificName === rightScientificName)
+  )
+}
+
+function _reviewAiSelectedPredictionForService(service) {
+  const normalizedService = normalizeIdentifyService(service)
+  return reviewAiState.selectedPredictionByService?.[normalizedService] || null
+}
+
+export function getReviewServiceDisplayProbability(service) {
+  const normalizedService = normalizeIdentifyService(service)
+  const selectedProbability = reviewAiState.selectedProbabilityByService?.[normalizedService]
+  if (_reviewAiHasProbability(selectedProbability)) {
+    return Number(selectedProbability)
+  }
+  const selectedPrediction = _reviewAiSelectedPredictionForService(normalizedService)
+  if (_reviewAiHasProbability(selectedPrediction?.probability)) {
+    return Number(selectedPrediction.probability)
+  }
+
+  const result = reviewAiState.resultsByService?.[normalizedService] || null
+  if (_reviewAiHasProbability(result?.topProbability)) {
+    return Number(result.topProbability)
+  }
+  if (_reviewAiHasProbability(result?.topPrediction?.probability)) {
+    return Number(result.topPrediction.probability)
+  }
+
+  const firstPrediction = Array.isArray(result?.predictions)
+    ? result.predictions.find(prediction => _reviewAiHasProbability(prediction?.probability))
+    : null
+  if (firstPrediction) {
+    return Number(firstPrediction.probability)
+  }
+
+  return null
 }
 
 // ── Grid build ────────────────────────────────────────────────────────────────
@@ -725,8 +791,14 @@ function wireCardEvents() {
       const currentTaxon = state.capturedPhotos.find(photo => photo.taxon)?.taxon || null
       if (!value) {
         setSharedTaxon(null, { syncInputs: false, hideMenus: false })
+        reviewAiState.selectedTaxonSource = 'manual'
+        reviewAiState.selectedService = null
+        reviewAiState.selectedPrediction = null
       } else if ((currentTaxon?.displayName || '').trim() !== value) {
         setSharedTaxon(createManualTaxon(value), { syncInputs: false, hideMenus: false })
+        reviewAiState.selectedTaxonSource = 'manual'
+        reviewAiState.selectedService = null
+        reviewAiState.selectedPrediction = null
       }
       clearTimeout(debounce)
       debounce = setTimeout(() => handleTaxonInput(input), 280)
@@ -814,8 +886,15 @@ function setSharedTaxon(taxon, options = {}) {
   _syncReviewSpeciesLabel(taxon)
 }
 
-function applyTaxon(i, taxon) {
+function applyTaxon(i, taxon, options = {}) {
   setSharedTaxon(taxon, { syncInputs: true, hideMenus: true })
+  if (options.source === 'ai') {
+    reviewAiState.selectedTaxonSource = 'ai'
+  } else {
+    reviewAiState.selectedTaxonSource = 'manual'
+    reviewAiState.selectedService = null
+    reviewAiState.selectedPrediction = null
+  }
 }
 
 // ── Identification AI ────────────────────────────────────────────────────────
@@ -893,8 +972,52 @@ function _reviewCaptureImages() {
     .filter(item => isBlob(item.blob))
 }
 
+function _buildReviewAiIdentificationRuns(photos = state.capturedPhotos) {
+  const images = (photos || []).map((photo, index) => ({
+    id: `review-${index}`,
+    blob: isBlob(photo.aiBlob) ? photo.aiBlob : isBlob(photo.blob) ? photo.blob : null,
+    originalBlob: isBlob(photo.blob) ? photo.blob : null,
+    cropRect: photo.aiCropRect || null,
+    cropSourceW: photo.aiCropSourceW ?? null,
+    cropSourceH: photo.aiCropSourceH ?? null,
+    aiCropIsCustom: photo.aiCropIsCustom === true,
+    sourceType: isBlob(photo?.aiBlob) ? 'photo.aiBlob' : 'photo.blob',
+  }))
+  const language = getTaxonomyLanguage()
+  const runs = []
+  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
+    const result = reviewAiState.resultsByService?.[service] || null
+    if (!result || !['success', 'no_match', 'error', 'unavailable', 'stale'].includes(result.status)) {
+      continue
+    }
+    const fingerprint = buildIdentifyFingerprint({
+      service,
+      language,
+      images,
+    })
+    runs.push({
+      service,
+      requestFingerprint: fingerprint.requestFingerprint,
+      imageFingerprint: fingerprint.imageFingerprint,
+      cropFingerprint: fingerprint.cropFingerprint,
+      language,
+      results: Array.isArray(result.predictions) ? result.predictions : [],
+      status: result.status,
+      errorMessage: result.errorMessage || null,
+      topPrediction: result.topPrediction || null,
+    })
+  }
+  return runs
+}
+
 function _reviewAiTabState(service, statusOverride = null) {
   const result = reviewAiState.resultsByService[service] || null
+  const selectedPrediction = _reviewAiSelectedPredictionForService(service)
+  const selectedProbability = reviewAiState.selectedProbabilityByService?.[service] ?? null
+  const displayProbability = getReviewServiceDisplayProbability(service)
+  const hasStored = ['success', 'no_match', 'error', 'stale', 'unavailable'].includes(result?.status)
+    || (Array.isArray(result?.predictions) && result.predictions.length > 0)
+  const hasRunResult = ['success', 'no_match', 'error', 'unavailable', 'stale'].includes(result?.status)
   return {
     service,
     active: reviewAiState.activeService === service,
@@ -904,6 +1027,11 @@ function _reviewAiTabState(service, statusOverride = null) {
     errorMessage: result?.errorMessage || '',
     topProbability: result?.topProbability ?? null,
     topPrediction: result?.topPrediction || null,
+    selectedPrediction,
+    selectedProbability,
+    displayProbability,
+    hasStored,
+    hasRunResult,
   }
 }
 
@@ -980,8 +1108,8 @@ function _renderReviewAiTabs() {
     }
     const score = tab.querySelector('.ai-id-service-tab-score')
     if (score) {
-      score.textContent = (state.status === 'success' || state.status === 'stale')
-        ? (state.topPrediction?.confidenceText || `${Math.round(Number(state.topProbability || 0) * 100)}%`)
+      score.textContent = _reviewAiHasProbability(state.displayProbability)
+        ? `${Math.round(Number(state.displayProbability) * 100)}%`
         : ''
       score.style.display = score.textContent ? '' : 'none'
     }
@@ -992,12 +1120,17 @@ function _renderReviewAiResults() {
   const resultsEl = document.querySelector('[data-identify-results]')
   if (!resultsEl) return
   resultsEl.innerHTML = _reviewAiResultsHtml()
+  const activeService = normalizeIdentifyService(reviewAiState.activeService || _resolveReviewPhotoIdServices(reviewAiState.availability).primary)
+  const selectedPrediction = _reviewAiSelectedPredictionForService(activeService)
   resultsEl.querySelectorAll('[data-identify-result]').forEach(result => {
     if (result._wired) return
     result._wired = true
+    const prediction = JSON.parse(result.dataset.identifyResult)
+    result.classList.toggle('is-selected', Boolean(_reviewAiPredictionsEquivalent(prediction, selectedPrediction)))
     result.addEventListener('click', event => {
       event.preventDefault()
       const pred = JSON.parse(result.dataset.identifyResult)
+      const service = normalizeIdentifyService(pred.service)
       const parts = (pred.scientificName || '').split(/\s+/)
       const taxon = {
         genus: parts[0] || '',
@@ -1006,11 +1139,19 @@ function _renderReviewAiResults() {
         scientificName: pred.scientificName || null,
         displayName: pred.displayName,
       }
-      applyTaxon(0, taxon)
-      reviewAiState.resultsByService[normalizeIdentifyService(pred.service)] = {
-        ...(reviewAiState.resultsByService[normalizeIdentifyService(pred.service)] || {}),
-        selectedTaxon: taxon,
+      reviewAiState.activeService = service
+      reviewAiState.selectedTaxonSource = 'ai'
+      reviewAiState.selectedService = service
+      reviewAiState.selectedPrediction = pred
+      reviewAiState.selectedPredictionByService = {
+        ...(reviewAiState.selectedPredictionByService || {}),
+        [service]: pred,
       }
+      reviewAiState.selectedProbabilityByService = {
+        ...(reviewAiState.selectedProbabilityByService || {}),
+        [service]: _reviewAiPredictionProbability(pred),
+      }
+      applyTaxon(0, taxon, { source: 'ai' })
       reviewAiState.stale = reviewAiState.requestedFingerprint !== reviewAiState.currentFingerprint
       _renderReviewAiBlock()
     })
@@ -1105,6 +1246,11 @@ async function _runReviewComparison(serviceOverride = null) {
   reviewAiState.stale = Boolean(reviewAiState.hasRun && reviewAiState.requestedFingerprint && reviewAiState.requestedFingerprint !== fingerprint.requestFingerprint)
   reviewAiState.running = true
   reviewAiState.requestedFingerprint = fingerprint.requestFingerprint
+  reviewAiState.selectedService = null
+  reviewAiState.selectedPrediction = null
+  reviewAiState.selectedPredictionByService = {}
+  reviewAiState.selectedProbabilityByService = {}
+  reviewAiState.selectedTaxonSource = null
 
   const inaturalistSession = await loadInaturalistSession()
   const availability = await getAvailableIdentifyServices({
@@ -1245,6 +1391,11 @@ function cancelReview() {
   reviewAiState.running = false
   reviewAiState.activeService = null
   reviewAiState.hasRun = false
+  reviewAiState.selectedService = null
+  reviewAiState.selectedPrediction = null
+  reviewAiState.selectedPredictionByService = {}
+  reviewAiState.selectedProbabilityByService = {}
+  reviewAiState.selectedTaxonSource = null
   reviewAiState.requestedFingerprint = ''
   reviewAiState.currentFingerprint = ''
   reviewAiState.availabilityFingerprint = ''
@@ -1287,6 +1438,17 @@ async function saveObservationBatch() {
       || normalizeObservationGps(leadPhotoWithGps?.gps)
     const leadPhoto = photos[0] || {}
     const taxon = photos.find(photo => photo.taxon)?.taxon || {}
+    const aiIdentificationRuns = _buildReviewAiIdentificationRuns(photos)
+    const selectedPrediction = reviewAiState.selectedTaxonSource === 'ai'
+      ? (reviewAiState.selectedPrediction || (
+          reviewAiState.selectedService
+            ? reviewAiState.selectedPredictionByService?.[reviewAiState.selectedService] || null
+            : null
+        ))
+      : null
+    const selectedService = reviewAiState.selectedTaxonSource === 'ai' && (reviewAiState.selectedService || selectedPrediction?.service)
+      ? normalizeIdentifyService(reviewAiState.selectedService || selectedPrediction?.service || '')
+      : null
     const obsPayload = createDefaultObservationPayload({
       user_id: state.user.id,
       date: _localDate(leadPhoto.ts || new Date()),
@@ -1306,6 +1468,14 @@ async function saveObservationBatch() {
       visibility: toCloudVisibility(visibility),
       is_draft: state.captureDraft.is_draft !== false,
       location_precision: state.captureDraft.location_precision || 'exact',
+      ai_selected_service: selectedService || null,
+      ai_selected_taxon_id: selectedPrediction?.taxonId || null,
+      ai_selected_scientific_name: selectedPrediction?.scientificName || null,
+      ai_selected_probability: selectedService
+        ? reviewAiState.selectedProbabilityByService?.[selectedService] ?? selectedPrediction?.probability ?? null
+        : null,
+      ai_selected_at: selectedService ? new Date().toISOString() : null,
+      aiIdentificationRuns,
     })
 
     const imageEntries = photos

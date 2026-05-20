@@ -43,6 +43,18 @@ test('review ai flow keeps the setting-selected primary service and refreshes av
   assert.doesNotMatch(source, /buildReviewGrid\(\)\s*\/\/.*availability/)
 })
 
+test('review keeps ai result state separate from manual taxon selection and queued saves', () => {
+  const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
+
+  assert.match(source, /getReviewServiceDisplayProbability/)
+  assert.match(source, /selectedPredictionByService/)
+  assert.match(source, /selectedProbabilityByService/)
+  assert.match(source, /aiIdentificationRuns/)
+  assert.match(source, /score\.textContent = _reviewAiHasProbability\(state\.displayProbability\)/)
+  assert.doesNotMatch(source, /selectedTaxon:\s*taxon/)
+  assert.doesNotMatch(source, /reviewAiState\.resultsByService\[normalizeIdentifyService\(pred\.service\)\]\s*=\s*{\s*\.\.\./)
+})
+
 test('review init tolerates missing review shell nodes without throwing', () => {
   const previousDocument = globalThis.document
   globalThis.document = {

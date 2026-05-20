@@ -833,18 +833,18 @@ export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
     serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'has-results' : '',
     serviceState.status === 'error' ? 'has-error' : '',
   ].filter(Boolean).join(' ')
+  const explicitDisplayProbability = _hasFiniteScore(serviceState.displayProbability)
+    ? Number(serviceState.displayProbability)
+    : null
   const rawTopProbability = serviceState.topProbability ?? serviceState.topScore ?? null
   const topProbability = _hasFiniteScore(rawTopProbability) ? Number(rawTopProbability) : null
-  const badgeProbability = topProbability ?? (_hasFiniteScore(serviceState.topPrediction?.probability)
+  const badgeProbability = explicitDisplayProbability ?? topProbability ?? (_hasFiniteScore(serviceState.topPrediction?.probability)
     ? Number(serviceState.topPrediction.probability)
     : null)
   const confidence = getIdentifyConfidenceState(badgeProbability ?? 0, { checkThreshold: 0.65 })
-  const stateLabel = (serviceState.status === 'success' || serviceState.status === 'stale')
-    ? (serviceState.topPrediction?.confidenceText
-      ? serviceState.topPrediction?.confidenceText
-      : (_hasFiniteScore(topProbability)
-        ? `${Math.round(Number(topProbability) * 100)}%`
-        : ''))
+  const shouldShowScore = explicitDisplayProbability !== null || serviceState.status === 'success' || serviceState.status === 'stale'
+  const stateLabel = shouldShowScore && badgeProbability !== null
+    ? `${Math.round(Number(badgeProbability) * 100)}%`
     : ''
   return `
     <button
@@ -873,18 +873,18 @@ export function renderIdentifyServiceStateSummary(serviceState = {}, options = {
     serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'has-results' : '',
     serviceState.status === 'error' ? 'has-error' : '',
   ].filter(Boolean).join(' ')
+  const explicitDisplayProbability = _hasFiniteScore(serviceState.displayProbability)
+    ? Number(serviceState.displayProbability)
+    : null
   const rawTopProbability = serviceState.topProbability ?? serviceState.topScore ?? null
   const topProbability = _hasFiniteScore(rawTopProbability) ? Number(rawTopProbability) : null
-  const badgeProbability = topProbability ?? (_hasFiniteScore(serviceState.topPrediction?.probability)
+  const badgeProbability = explicitDisplayProbability ?? topProbability ?? (_hasFiniteScore(serviceState.topPrediction?.probability)
     ? Number(serviceState.topPrediction.probability)
     : null)
   const confidence = getIdentifyConfidenceState(badgeProbability ?? 0, { checkThreshold: 0.65 })
-  const stateLabel = (serviceState.status === 'success' || serviceState.status === 'stale')
-    ? (serviceState.topPrediction?.confidenceText
-      ? serviceState.topPrediction?.confidenceText
-      : (_hasFiniteScore(topProbability)
-        ? `${Math.round(Number(topProbability) * 100)}%`
-        : ''))
+  const shouldShowScore = explicitDisplayProbability !== null || serviceState.status === 'success' || serviceState.status === 'stale'
+  const stateLabel = shouldShowScore && badgeProbability !== null
+    ? `${Math.round(Number(badgeProbability) * 100)}%`
     : ''
   return `
     <span
