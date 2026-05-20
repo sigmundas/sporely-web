@@ -10,7 +10,7 @@ import { getSharedAuthSession } from './auth-session.js'
 import { t } from './i18n.js'
 import { getBlobImageDimensions, normalizeAiCropRect, prepareImageBlobForUpload } from './image_crop.js'
 import { isBlob } from './observation-shapes.js'
-import { recordDebugJsonResponse, revokeDebugObjectUrl } from './debug-activity.js'
+import { isDebugScreenEnabled, recordDebugJsonResponse, revokeDebugObjectUrl } from './debug-activity.js'
 import {
   getArtsorakelMaxEdge,
   ID_SERVICE_ARTSORAKEL,
@@ -50,11 +50,7 @@ function _buildNetworkErrorMessage(error) {
 }
 
 function _isArtsorakelDebugEnabled() {
-  try {
-    return globalThis.localStorage?.getItem('sporely-debug-artsorakel') === 'true'
-  } catch (_) {
-    return false
-  }
+  return isDebugScreenEnabled()
 }
 
 function _getArtsorakelDebugStore() {

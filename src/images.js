@@ -555,7 +555,35 @@ function _isMissingColumnError(error, columnName) {
     && (text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find'))
 }
 
-function _shouldWarnAiCropFallback() {
+function _isFetchableImageUrl(url) {
+  const text = String(url || '').trim()
+  if (!text) return false
+  if (text.startsWith('blob:') || text.startsWith('data:')) return true
+
+  try {
+    const parsed = new URL(text, globalThis.location?.href || 'https://example.invalid')
+    if (globalThis.location?.origin && parsed.origin === globalThis.location.origin) return true
+    return parsed.pathname.includes('/storage/v1/object/sign/')
+  } catch (_) {
+    return false
+  }
+}
+
+async function _fetchImageBlobFromUrl(url) {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`Image fetch failed: ${response.status}`)
+  }
+  const contentType = String(response.headers.get('content-type') || '').trim().toLowerCase()
+  if (contentType && !contentType.startsWith('image/')) {
+    throw new Error(`Non-image response (${contentType})`)
+  }
+  const blob = await response.blob()
+  if (!isBlob(blob)) throw new Error('Image fetch returned invalid data')
+  return blob
+}
+
+function _isAiCropWriteDebugEnabled() {
   try {
     return Boolean(import.meta.env?.DEV)
       || globalThis.localStorage?.getItem('sporely-debug-dashboard') === 'true'
@@ -568,15 +596,35 @@ function _shouldWarnAiCropFallback() {
   }
 }
 
+function _shouldWarnAiCropFallback() {
+  return _isAiCropWriteDebugEnabled()
+}
+
+function _formatSupabaseError(error) {
+  return {
+    code: error?.code || null,
+    message: error?.message || '',
+    details: error?.details || '',
+    hint: error?.hint || '',
+    status: error?.status || error?.statusCode || null,
+  }
+}
+
+function _logAiCropWriteError(action, payload, error, details = {}) {
+  if (!_isAiCropWriteDebugEnabled()) return
+  console.warn(`[${action}] Supabase crop write failed`, {
+    ...details,
+    payload,
+    error: _formatSupabaseError(error),
+  })
+}
+
 function _warnMissingAiCropCustomFallback(action, error, details = {}) {
   if (!_shouldWarnAiCropFallback()) return
   console.warn(`[${action}] observation_images.ai_crop_is_custom missing; saving crop without custom flag`, {
     ...details,
     error: {
-      code: error?.code || null,
-      message: error?.message || '',
-      details: error?.details || '',
-      hint: error?.hint || '',
+      ..._formatSupabaseError(error),
     },
   })
 }
@@ -613,13 +661,25 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
   })
 
   const variant = options.variant || 'medium'
+  const allowWorkerDownload = options.allowWorkerDownload !== false
   const candidatePaths = variant === 'original'
     ? [originalPath]
     : [getVariantPath(originalPath, variant), originalPath]
+  const signedUrls = await _getSignedUrlMap(candidatePaths)
 
   let lastError = null
   for (const path of [...new Set(candidatePaths.filter(Boolean))]) {
-    if (MEDIA_UPLOAD_BASE_URL) {
+    const signedUrl = signedUrls[path]
+    if (_isFetchableImageUrl(signedUrl)) {
+      try {
+        const data = await _fetchImageBlobFromUrl(signedUrl)
+        if (isBlob(data)) return data
+      } catch (err) {
+        lastError = err
+      }
+    }
+
+    if (allowWorkerDownload && MEDIA_UPLOAD_BASE_URL) {
       try {
         const data = await _downloadViaWorker(path)
         if (isBlob(data)) return data
@@ -628,11 +688,15 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
       }
     }
 
-    const { data, error } = await supabase.storage
-      .from('observation-images')
-      .download(path)
-    if (!error && isBlob(data)) return data
-    lastError = error
+    try {
+      const { data, error } = await supabase.storage
+        .from('observation-images')
+        .download(path)
+      if (!error && isBlob(data)) return data
+      lastError = error
+    } catch (err) {
+      lastError = err
+    }
   }
 
   throw new Error(`Image download failed: ${lastError?.message || originalPath}`)
@@ -671,6 +735,13 @@ export async function insertObservationImage(observationImage) {
     stored_bytes: observationImage?.stored_bytes ?? null,
   }
 
+  if (_isAiCropWriteDebugEnabled()) {
+    console.debug('[insertObservationImage] payload', {
+      observationId: basePayload.observation_id ?? null,
+      payload: payloadWithUploadMeta,
+    })
+  }
+
   const { error } = await supabase
     .from('observation_images')
     .insert(payloadWithUploadMeta)
@@ -697,6 +768,7 @@ export async function insertObservationImage(observationImage) {
       _warnMissingAiCropCustomFallback('insertObservationImage', retryError, {
         observationId: basePayload.observation_id ?? null,
         storagePath: basePayload.storage_path || '',
+        payload: payloadWithCrop,
       })
       const payloadWithoutCustom = { ...payloadWithCrop }
       delete payloadWithoutCustom.ai_crop_is_custom
@@ -704,16 +776,44 @@ export async function insertObservationImage(observationImage) {
         .from('observation_images')
         .insert(payloadWithoutCustom)
       if (!cropRetryError) return false
+      _logAiCropWriteError('insertObservationImage', payloadWithoutCustom, cropRetryError, {
+        observationId: basePayload.observation_id ?? null,
+        storagePath: basePayload.storage_path || '',
+        phase: 'retry-without-custom',
+      })
       if (!cropFieldNames.filter(field => field !== 'ai_crop_is_custom').some(field => _isMissingColumnError(cropRetryError, field))) {
         throw cropRetryError
       }
+      _logAiCropWriteError('insertObservationImage', payloadWithoutCustom, cropRetryError, {
+        observationId: basePayload.observation_id ?? null,
+        storagePath: basePayload.storage_path || '',
+        phase: 'base-fallback',
+      })
     } else if (!cropFieldNames.filter(field => field !== 'ai_crop_is_custom').some(field => _isMissingColumnError(retryError, field))) {
+      _logAiCropWriteError('insertObservationImage', payloadWithCrop, retryError, {
+        observationId: basePayload.observation_id ?? null,
+        storagePath: basePayload.storage_path || '',
+        phase: 'retry-with-crop',
+      })
       throw retryError
+    } else {
+      _logAiCropWriteError('insertObservationImage', payloadWithCrop, retryError, {
+        observationId: basePayload.observation_id ?? null,
+        storagePath: basePayload.storage_path || '',
+        phase: 'base-fallback',
+      })
     }
     const { error: fallbackError } = await supabase
       .from('observation_images')
       .insert(basePayload)
-    if (fallbackError) throw fallbackError
+    if (fallbackError) {
+      _logAiCropWriteError('insertObservationImage', basePayload, fallbackError, {
+        observationId: basePayload.observation_id ?? null,
+        storagePath: basePayload.storage_path || '',
+        phase: 'base-fallback',
+      })
+      throw fallbackError
+    }
     return false
   }
 
@@ -721,6 +821,7 @@ export async function insertObservationImage(observationImage) {
     _warnMissingAiCropCustomFallback('insertObservationImage', error, {
       observationId: basePayload.observation_id ?? null,
       storagePath: basePayload.storage_path || '',
+      payload: payloadWithCrop,
     })
     const payloadWithoutCustom = { ...payloadWithCrop }
     delete payloadWithoutCustom.ai_crop_is_custom
@@ -728,25 +829,54 @@ export async function insertObservationImage(observationImage) {
       .from('observation_images')
       .insert(payloadWithoutCustom)
     if (!retryError) return false
+    _logAiCropWriteError('insertObservationImage', payloadWithoutCustom, retryError, {
+      observationId: basePayload.observation_id ?? null,
+      storagePath: basePayload.storage_path || '',
+      phase: 'retry-without-custom',
+    })
     if (!cropFieldNames.filter(field => field !== 'ai_crop_is_custom').some(field => _isMissingColumnError(retryError, field))) {
       throw retryError
     }
     const { error: fallbackError } = await supabase
       .from('observation_images')
       .insert(basePayload)
-    if (fallbackError) throw fallbackError
+    if (fallbackError) {
+      _logAiCropWriteError('insertObservationImage', basePayload, fallbackError, {
+        observationId: basePayload.observation_id ?? null,
+        storagePath: basePayload.storage_path || '',
+        phase: 'base-fallback',
+      })
+      throw fallbackError
+    }
     return false
   }
 
   if (!cropFieldNames.filter(field => field !== 'ai_crop_is_custom').some(field => _isMissingColumnError(error, field))) {
+    _logAiCropWriteError('insertObservationImage', payloadWithUploadMeta, error, {
+      observationId: basePayload.observation_id ?? null,
+      storagePath: basePayload.storage_path || '',
+      phase: 'initial',
+    })
     throw error
   }
+  _logAiCropWriteError('insertObservationImage', payloadWithUploadMeta, error, {
+    observationId: basePayload.observation_id ?? null,
+    storagePath: basePayload.storage_path || '',
+    phase: 'base-fallback',
+  })
 
   const { error: fallbackError } = await supabase
     .from('observation_images')
     .insert(basePayload)
 
-  if (fallbackError) throw fallbackError
+  if (fallbackError) {
+    _logAiCropWriteError('insertObservationImage', basePayload, fallbackError, {
+      observationId: basePayload.observation_id ?? null,
+      storagePath: basePayload.storage_path || '',
+      phase: 'base-fallback',
+    })
+    throw fallbackError
+  }
   return false
 }
 
@@ -763,6 +893,9 @@ export async function updateObservationImageCrop(imageId, cropData) {
     ai_crop_source_h: cropData?.aiCropSourceH ?? null,
     ai_crop_is_custom: aiCropIsCustom,
   }
+  if (_isAiCropWriteDebugEnabled()) {
+    console.debug('[updateObservationImageCrop] payload', { imageId, payload })
+  }
   const { error } = await supabase
     .from('observation_images')
     .update(payload)
@@ -771,6 +904,7 @@ export async function updateObservationImageCrop(imageId, cropData) {
   if (_isMissingColumnError(error, 'ai_crop_is_custom')) {
     _warnMissingAiCropCustomFallback('updateObservationImageCrop', error, {
       imageId,
+      payload,
     })
     const retryPayload = {
       ai_crop_x1: cropRect?.x1 ?? null,
@@ -785,28 +919,17 @@ export async function updateObservationImageCrop(imageId, cropData) {
       .update(retryPayload)
       .eq('id', imageId)
     if (!retryError) return true
-    console.warn('updateObservationImageCrop fallback failed:', {
+    _logAiCropWriteError('updateObservationImageCrop', retryPayload, retryError, {
       imageId,
-      error: {
-        code: retryError?.code || null,
-        message: retryError?.message || '',
-        details: retryError?.details || '',
-        hint: retryError?.hint || '',
-      },
+      phase: 'retry-without-custom',
     })
     throw retryError
   }
-  if (error && !_isMissingColumnError(error, 'ai_crop_x1')) {
-    console.warn('updateObservationImageCrop failed:', {
-      imageId,
-      error: {
-        code: error?.code || null,
-        message: error?.message || '',
-        details: error?.details || '',
-        hint: error?.hint || '',
-      },
-    })
-  }
+
+  _logAiCropWriteError('updateObservationImageCrop', payload, error, {
+    imageId,
+    phase: 'initial',
+  })
   throw error
 }
 
@@ -867,18 +990,20 @@ async function _getSignedUrlMap(paths, expiresIn = SIGNED_URL_TTL_SECONDS) {
   })
 
   if (missing.length) {
-    const { data } = await supabase.storage
-      .from('observation-images')
-      .createSignedUrls(missing, expiresIn)
-
-    ;(data || []).forEach(item => {
-      if (!item?.path || !item?.signedUrl) return
-      urls[item.path] = item.signedUrl
-      SIGNED_URL_CACHE.set(item.path, {
-        url: item.signedUrl,
-        expiresAt: now + Math.max(1, expiresIn - 30) * 1000,
-      })
-    })
+    const storage = supabase.storage?.from?.('observation-images')
+    if (typeof storage?.createSignedUrls === 'function') {
+      try {
+        const { data } = await storage.createSignedUrls(missing, expiresIn)
+        ;(data || []).forEach(item => {
+          if (!item?.path || !item?.signedUrl) return
+          urls[item.path] = item.signedUrl
+          SIGNED_URL_CACHE.set(item.path, {
+            url: item.signedUrl,
+            expiresAt: now + Math.max(1, expiresIn - 30) * 1000,
+          })
+        })
+      } catch (_) {}
+    }
   }
 
   return urls

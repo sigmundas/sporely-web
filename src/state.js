@@ -19,6 +19,7 @@ export const state = {
   findsSporesOnly: false,
   findsDraftOnly: false,
   findsTargetUserId: null,
+  findsTargetSummaryLoaded: false,
   findsTargetUsername: null,
   findsTargetAvatarUrl: null,
   findsTargetDisplayName: null,

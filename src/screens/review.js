@@ -635,10 +635,6 @@ function loadThumbnails(photos) {
 
         if (shouldShowAiCropOverlay(p.aiCropRect, p.aiCropIsCustom)) {
           _renderReviewThumbCropFrame(item, img, p.aiCropRect)
-          const badge = document.createElement('div')
-          badge.className = 'ai-crop-thumb-badge'
-          badge.textContent = 'AI crop'
-          item.appendChild(badge)
         }
 
         gallery.appendChild(item)

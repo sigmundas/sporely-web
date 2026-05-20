@@ -78,6 +78,7 @@ export async function loadPeople(options = {}) {
           finds: card.dataset.finds,
           species: card.dataset.species,
           spores: card.dataset.spores,
+          summaryLoaded: true,
           resetSearch: true,
           resetFilters: true,
           groupBySpecies: action === 'species',

@@ -1,5 +1,5 @@
 import { loadInaturalistSession, loadInatPendingState } from './inaturalist.js'
-import { clearDebugNamespace, ensureDebugNamespace, isDebugDashboardEnabled, revokeDebugObjectUrl } from './debug-activity.js'
+import { clearDebugNamespace, ensureDebugNamespace, isDebugScreenEnabled, revokeDebugObjectUrl } from './debug-activity.js'
 
 export { isDebugDashboardEnabled } from './debug-activity.js'
 
@@ -18,7 +18,7 @@ let _rendering = false
 let _rerenderRequested = false
 
 function _isEnabled() {
-  return isDebugDashboardEnabled()
+  return isDebugScreenEnabled()
 }
 
 function _teardownDashboardUi() {
@@ -299,7 +299,7 @@ function _snapshotMetaText(snapshot) {
     delete compact.debugPreviewUrl
     delete compact.previewUrl
     delete compact.sourceUrl
-    return JSON.stringify(compact, null, 2)
+    return JSON.stringify(compact, null, 1)
   } catch (_) {
     return '{}'
   }
@@ -321,7 +321,7 @@ function _shortJson(value, limit = 2400) {
   try {
     const text = typeof value === 'string'
       ? value
-      : JSON.stringify(value, null, 2)
+      : JSON.stringify(value, null, 1)
     if (!text) return ''
     return text.length > limit ? `${text.slice(0, limit - 1)}…` : text
   } catch (_) {

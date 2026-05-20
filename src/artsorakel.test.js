@@ -653,3 +653,33 @@ test('detail identify helper exposes the storage-path fallback path for debuggin
     assert.equal(inputs[0].debug.height, 500)
   })
 })
+
+test('detail identify inputs prefer the authorized storage blob over public media URLs', async () => {
+  await withHarness(async harness => {
+    const storedBlob = new Blob(['stored'], { type: 'image/webp' })
+    harness.setBlobDimensions(storedBlob, 1500, 1500)
+    harness.setStorageDownloadImpl(async () => ({
+      data: storedBlob,
+      error: null,
+    }))
+
+    const fetchCalls = []
+    harness.setFetch(async url => {
+      fetchCalls.push(String(url))
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+
+    const inputs = await prepareDetailIdentifyInputs([{
+      dataset: {
+        storagePath: 'user/1/2/image.webp',
+        aiFallback: 'https://media.sporely.no/medium.webp',
+        aiSrc: 'https://media.sporely.no/original.webp',
+      },
+      src: 'https://media.sporely.no/original.webp',
+    }], 'medium')
+
+    assert.equal(fetchCalls.length, 0)
+    assert.equal(inputs[0].sourceMode, 'blob')
+    assert.equal(inputs[0].usedFallbackUrl, false)
+  })
+})

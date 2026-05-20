@@ -142,7 +142,7 @@ function _syncDetailThumbCropOverlay(item, row) {
   const img = item.querySelector('.detail-gallery-img')
   if (!img) return
 
-  item.querySelectorAll('.ai-crop-frame--thumb, .ai-crop-thumb-badge').forEach(node => node.remove())
+  item.querySelectorAll('.ai-crop-frame--thumb').forEach(node => node.remove())
   detailThumbCropFrameUpdates.delete(item)
   delete item.__detailThumbCropUpdate
 
@@ -155,10 +155,6 @@ function _syncDetailThumbCropOverlay(item, row) {
   if (!shouldShowAiCropOverlay(rect, row.ai_crop_is_custom === true)) return
 
   _renderDetailThumbCropFrame(item, img, rect)
-  const badge = document.createElement('div')
-  badge.className = 'ai-crop-thumb-badge'
-  badge.textContent = 'AI crop'
-  item.appendChild(badge)
   requestAnimationFrame(() => item.__detailThumbCropUpdate?.())
 }
 
@@ -177,15 +173,15 @@ function _tf(key, fallback) {
 }
 
 function _canViewDetailAiResult(service, result = null) {
-  const normalizedService = normalizeIdentifyService(service)
+  void service
   return _hasStoredAiResult(result)
-    || detailAiState.activeService === normalizedService
     || result?.status === 'running'
 }
 
 function _canRunDetailAiService(service, result = null) {
   const normalizedService = normalizeIdentifyService(service)
-  return Boolean(detailAiState.availability?.[normalizedService]?.available)
+  return currentObsIsOwner
+    && Boolean(detailAiState.availability?.[normalizedService]?.available)
     && !detailAiState.running
     && !detailAiState.runningByService?.[normalizedService]
     && shouldRunServiceFromTab(result)
@@ -271,50 +267,32 @@ function _detailAiHasProbability(value) {
 }
 
 function _detailAiSelectionStateFromResults(resultsByService = {}, obs = currentObs) {
-  const probabilityByService = {}
   const explicitSelectedService = obs?.ai_selected_service
     ? normalizeIdentifyService(obs.ai_selected_service)
     : null
   const explicitSelectedProbability = Number(obs?.ai_selected_probability)
-
-  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
-    const result = resultsByService?.[service] || null
-    const predictions = Array.isArray(result?.predictions) ? result.predictions : []
-    if (Number.isFinite(Number(result?.topProbability))) {
-      probabilityByService[service] = Number(result.topProbability)
-    }
-  }
-
-  if (explicitSelectedService && resultsByService?.[explicitSelectedService]) {
-    const selectedResult = resultsByService[explicitSelectedService]
-    const explicitPrediction = (Array.isArray(selectedResult?.predictions) ? selectedResult.predictions : [])
+  const selectedResult = explicitSelectedService
+    ? resultsByService?.[explicitSelectedService] || null
+    : null
+  const explicitPrediction = selectedResult
+    ? (Array.isArray(selectedResult?.predictions) ? selectedResult.predictions : [])
       .find(prediction => _detailAiPredictionMatchesObservation(prediction, obs))
-    return {
-      selectedService: explicitSelectedService,
-      selectedPrediction: explicitPrediction || null,
-      selectedPredictionByService: explicitPrediction
-        ? { [explicitSelectedService]: explicitPrediction }
-        : {},
-      selectedProbabilityByService: {
-        ...probabilityByService,
-        ...(Number.isFinite(explicitSelectedProbability)
-          ? { [explicitSelectedService]: explicitSelectedProbability }
-          : {}),
-      },
-    }
-  }
-
+    : null
   return {
-    selectedService: null,
-    selectedPrediction: null,
-    selectedPredictionByService: {},
-    selectedProbabilityByService: probabilityByService,
+    selectedService: explicitSelectedService,
+    selectedPrediction: explicitPrediction || null,
+    selectedPredictionByService: explicitPrediction && explicitSelectedService
+      ? { [explicitSelectedService]: explicitPrediction }
+      : {},
+    selectedProbabilityByService: explicitSelectedService && Number.isFinite(explicitSelectedProbability)
+      ? { [explicitSelectedService]: explicitSelectedProbability }
+      : {},
   }
 }
 
 const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
 const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
-const DETAIL_VIEW_SELECT = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
+const DETAIL_VIEW_SELECT = 'id, user_id, date, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
 const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
 const DETAIL_AI_SELECTION_FIELDS = [
   'ai_selected_service',
@@ -323,6 +301,32 @@ const DETAIL_AI_SELECTION_FIELDS = [
   'ai_selected_probability',
   'ai_selected_at',
 ]
+const DETAIL_IMAGE_SELECT_WITH_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom'
+const DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h'
+const DETAIL_IMAGE_SELECT_BASE = 'id, storage_path, sort_order'
+
+function _isMissingDetailImageColumnError(error, columnNames = []) {
+  const text = String(error?.message || error?.details || error?.hint || '').toLowerCase()
+  if (!text) return false
+  if (!(text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find'))) {
+    return false
+  }
+  return (Array.isArray(columnNames) ? columnNames : [columnNames]).some(column => text.includes(String(column || '').toLowerCase()))
+}
+
+function _normalizeDetailImageRows(rows = []) {
+  return (rows || []).map(row => ({
+    ...row,
+    image_type: row.image_type || 'field',
+    ai_crop_x1: row.ai_crop_x1 ?? null,
+    ai_crop_y1: row.ai_crop_y1 ?? null,
+    ai_crop_x2: row.ai_crop_x2 ?? null,
+    ai_crop_y2: row.ai_crop_y2 ?? null,
+    ai_crop_source_w: row.ai_crop_source_w ?? null,
+    ai_crop_source_h: row.ai_crop_source_h ?? null,
+    ai_crop_is_custom: row.ai_crop_is_custom === true,
+  }))
+}
 
 function _isPhase7ColumnError(error) {
   const message = String(error?.message || '').toLowerCase()
@@ -369,6 +373,74 @@ async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
     return makeQuery(legacyColumns)
   }
   return result
+}
+
+async function _loadDetailObservationImages(obsId) {
+  const makeQuery = (selectFields) => supabase
+    .from('observation_images')
+    .select(selectFields)
+    .eq('observation_id', obsId)
+    .order('sort_order', { ascending: true })
+
+  let result = await makeQuery(DETAIL_IMAGE_SELECT_WITH_CUSTOM)
+  if (!result.error) return _normalizeDetailImageRows(result.data || [])
+
+  if (_isMissingDetailImageColumnError(result.error, 'ai_crop_is_custom')) {
+    console.warn('observation_images.ai_crop_is_custom is missing; retrying without the custom crop flag', {
+      observationId: obsId,
+      error: {
+        code: result.error?.code || null,
+        message: result.error?.message || '',
+        details: result.error?.details || '',
+        hint: result.error?.hint || '',
+      },
+    })
+    result = await makeQuery(DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM)
+    if (!result.error) {
+      return _normalizeDetailImageRows(result.data || []).map(row => ({
+        ...row,
+        ai_crop_is_custom: false,
+      }))
+    }
+  }
+
+  if (_isMissingDetailImageColumnError(result.error, [
+    'ai_crop_x1',
+    'ai_crop_y1',
+    'ai_crop_x2',
+    'ai_crop_y2',
+    'ai_crop_source_w',
+    'ai_crop_source_h',
+  ])) {
+    const baseResult = await makeQuery(DETAIL_IMAGE_SELECT_BASE)
+    if (!baseResult.error) {
+      return _normalizeDetailImageRows(baseResult.data || []).map(row => ({
+        ...row,
+        image_type: 'field',
+        ai_crop_x1: null,
+        ai_crop_y1: null,
+        ai_crop_x2: null,
+        ai_crop_y2: null,
+        ai_crop_source_w: null,
+        ai_crop_source_h: null,
+        ai_crop_is_custom: false,
+      }))
+    }
+  }
+
+  if (result.error) {
+    console.warn('Failed to load observation images for detail view:', {
+      observationId: obsId,
+      error: {
+        code: result.error?.code || null,
+        message: result.error?.message || '',
+        details: result.error?.details || '',
+        hint: result.error?.hint || '',
+      },
+    })
+  }
+
+  return []
 }
 
 function _buildDetailAiSelectionPatch(selectionState = {}) {
@@ -493,10 +565,8 @@ export function initFindDetail() {
     tab.addEventListener('click', () => {
       const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
       const serviceState = detailAiState.resultsByService?.[service] || null
-      const canView = _hasStoredAiResult(serviceState)
-        || detailAiState.activeService === service
-        || serviceState?.status === 'running'
-      if (!canView) return
+      const canView = _hasStoredAiResult(serviceState) || serviceState?.status === 'running'
+      if (tab.disabled || !canView) return
       _setDetailAiActiveService(service)
     })
   })
@@ -530,10 +600,12 @@ export function initFindDetail() {
 
   const commentInput = document.getElementById('comment-input')
   document.getElementById('comment-send-btn').addEventListener('click', _sendComment)
+  commentInput.addEventListener('input', _syncDetailCommentComposer)
   commentInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') _sendComment()
   })
   _initMentions(commentInput)
+  _syncDetailCommentComposer()
 }
 
 export async function openFindDetail(obsId, options = {}) {
@@ -669,32 +741,7 @@ export async function openFindDetail(obsId, options = {}) {
   _renderPrivacySlotNote()
   _loadPrivacySlotCount()
 
-  // Try to load with crop columns; fall back if the migration hasn't been applied yet
-  let imgData = null
-  const { data: imgWithCrop, error: imgErr } = await supabase
-    .from('observation_images')
-    .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom')
-    .eq('observation_id', obsId)
-    .order('sort_order', { ascending: true })
-  if (imgErr) {
-    const { data: imgWithoutCustom, error: imgWithoutCustomErr } = await supabase
-      .from('observation_images')
-      .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h')
-      .eq('observation_id', obsId)
-      .order('sort_order', { ascending: true })
-    if (!imgWithoutCustomErr) {
-      imgData = (imgWithoutCustom || []).map(r => ({ ...r, ai_crop_is_custom: false }))
-    } else {
-      const { data: imgBase } = await supabase
-        .from('observation_images')
-        .select('id, storage_path, sort_order')
-        .eq('observation_id', obsId)
-        .order('sort_order', { ascending: true })
-      imgData = (imgBase || []).map(r => ({ ...r, image_type: 'field', ai_crop_x1: null, ai_crop_y1: null, ai_crop_x2: null, ai_crop_y2: null, ai_crop_source_w: null, ai_crop_source_h: null, ai_crop_is_custom: false }))
-    }
-  } else {
-    imgData = imgWithCrop || []
-  }
+  const imgData = await _loadDetailObservationImages(obsId)
 
   const gallery = document.getElementById('detail-gallery')
   _clearDetailThumbCropObserver()
@@ -887,6 +934,14 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
           onChange: (idx, meta) => {
             const r = detailImageRows[idx]
             if (!r) return
+            if (import.meta.env?.DEV) {
+              console.debug('[detail-crop] onChange meta', {
+                imageId: r.id,
+                aiCropIsCustom: meta.aiCropIsCustom,
+                rect: meta.aiCropRect,
+                source: [meta.aiCropSourceW, meta.aiCropSourceH],
+              })
+            }
             const nextRect = normalizeAiCropRect(meta.aiCropRect)
             r.ai_crop_x1 = nextRect?.x1 ?? null
             r.ai_crop_y1 = nextRect?.y1 ?? null
@@ -984,6 +1039,41 @@ function _storagePathExtension(storagePath) {
   return idx >= 0 ? name.slice(idx + 1).toLowerCase() : ''
 }
 
+const detailImageReadWarnings = new Set()
+
+function _isFetchableDetailImageUrl(url) {
+  const text = String(url || '').trim()
+  if (!text) return false
+  if (text.startsWith('blob:') || text.startsWith('data:')) return true
+
+  try {
+    const parsed = new URL(text, globalThis.location?.href || 'https://example.invalid')
+    if (globalThis.location?.origin && parsed.origin === globalThis.location.origin) return true
+    return parsed.pathname.includes('/storage/v1/object/sign/')
+  } catch (_) {
+    return false
+  }
+}
+
+function _detailIdentifyFallbackUrls(img) {
+  return [
+    img?.dataset?.aiFallback || '',
+    img?.dataset?.aiSrc || '',
+    img?.dataset?.fullSrc || '',
+    img?.src || '',
+  ].filter(_isFetchableDetailImageUrl)
+}
+
+function _warnDetailImageReadFailure(details = {}) {
+  const key = [
+    details.observationId || '',
+    details.storagePath || '',
+  ].join('|')
+  if (detailImageReadWarnings.has(key)) return
+  detailImageReadWarnings.add(key)
+  console.warn('Detail image read failed:', details)
+}
+
 function _isDetailAiDebugFlagEnabled(flag) {
   try {
     return globalThis.localStorage?.getItem(flag) === 'true'
@@ -1047,45 +1137,68 @@ function _readDetailAiCropMeta(source = {}, index = null) {
 
 async function _loadDetailIdentifyBlob(img, variant = 'medium') {
   const storagePath = img?.dataset?.storagePath || ''
-  const fallbackUrls = [
-    img?.dataset?.aiFallback || '',
-    img?.dataset?.aiSrc || '',
-    img?.src || '',
-  ].filter(Boolean)
+  const fallbackUrls = _detailIdentifyFallbackUrls(img)
+  const viewerMode = currentObs?.user_id === state.user?.id ? 'owner' : 'viewer'
 
+  let lastError = null
   try {
-    const blob = await downloadObservationImageBlob(storagePath, { variant })
-    return {
-      blob,
-      usedFallbackUrl: false,
-      sourceMode: 'blob',
-      storagePathExtension: _storagePathExtension(storagePath),
-      requestedVariant: variant,
-    }
-  } catch (storageError) {
-    let lastError = storageError
-    for (const url of fallbackUrls) {
-      try {
-        const resp = await fetch(url)
-        if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
-        const contentType = String(resp.headers.get('content-type') || '').trim().toLowerCase()
-        if (contentType && !contentType.startsWith('image/')) {
-          throw new Error(`Non-image response (${contentType})`)
-        }
-        const blob = await resp.blob()
+    if (storagePath) {
+      const blob = await downloadObservationImageBlob(storagePath, {
+        variant,
+        allowWorkerDownload: viewerMode === 'owner',
+      })
+      if (isBlob(blob)) {
         return {
           blob,
-          usedFallbackUrl: true,
-          sourceMode: 'fallback-url',
+          usedFallbackUrl: false,
+          sourceMode: 'blob',
           storagePathExtension: _storagePathExtension(storagePath),
           requestedVariant: variant,
         }
-      } catch (error) {
-        lastError = error
       }
+      throw new Error('Image download returned invalid data')
     }
-    throw new Error(`Could not read this image for identification${lastError?.message ? `: ${lastError.message}` : ''}`)
+  } catch (storageError) {
+    lastError = storageError
   }
+
+  for (const url of [...new Set(fallbackUrls)]) {
+    try {
+      const resp = await fetch(url)
+      if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`)
+      const contentType = String(resp.headers.get('content-type') || '').trim().toLowerCase()
+      if (contentType && !contentType.startsWith('image/')) {
+        throw new Error(`Non-image response (${contentType})`)
+      }
+      const blob = await resp.blob()
+      if (!isBlob(blob)) throw new Error('Image fetch returned invalid data')
+      return {
+        blob,
+        usedFallbackUrl: true,
+        sourceMode: 'fallback-url',
+        storagePathExtension: _storagePathExtension(storagePath),
+        requestedVariant: variant,
+      }
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  _warnDetailImageReadFailure({
+    observationId: currentObs?.id || null,
+    storagePath,
+    variant,
+    viewerMode,
+    sourceType: fallbackUrls.length ? 'fallback-url' : 'storage',
+    fallbackUrlCount: fallbackUrls.length,
+    error: {
+      code: lastError?.code || null,
+      message: lastError?.message || '',
+      details: lastError?.details || '',
+      hint: lastError?.hint || '',
+    },
+  })
+  throw new Error(`Could not read this image for identification${lastError?.message ? `: ${lastError.message}` : ''}`)
 }
 
 function _isArtsorakelBlobFallbackError(error) {
@@ -1393,7 +1506,7 @@ function _renderDetailAiTabs() {
     tab.classList.toggle('is-running', state.status === 'running')
     tab.classList.toggle('has-results', state.status === 'success' || state.status === 'no_match' || state.status === 'stale')
     tab.classList.toggle('has-error', state.status === 'error')
-    tab.disabled = false
+    tab.disabled = state.isDisabled
     tab.setAttribute('aria-disabled', String(state.isDisabled))
     const icon = tab.querySelector('.ai-id-service-tab-icon, .ai-id-dot')
     if (icon) {
@@ -1436,8 +1549,10 @@ function _renderDetailAiResults() {
     resultsEl.style.display = 'block'
     return
   }
+  const nonOwnerEmptyMessage = _tf('detail.noStoredAiResults', 'No stored AI results are available for this observation.')
   if (!result || result?.status === 'idle') {
-    resultsEl.innerHTML = `<div class="ai-results-empty">${_tf('review.runAiIdPrompt', 'Run AI Photo ID to get suggestions.')}</div>`
+    const isReadOnlyViewer = Boolean(currentObs?.id) && !currentObsIsOwner
+    resultsEl.innerHTML = `<div class="ai-results-empty">${isReadOnlyViewer ? nonOwnerEmptyMessage : _tf('review.runAiIdPrompt', 'Run AI Photo ID to get suggestions.')}</div>`
     resultsEl.style.display = 'block'
     return
   }
@@ -1474,12 +1589,14 @@ function _renderDetailAiResults() {
     const prediction = JSON.parse(el.dataset.identifyResult)
     const isSelected = Boolean(_detailAiPredictionsEquivalent(prediction, selectedPrediction))
     el.classList.toggle('is-selected', isSelected)
+    el.classList.toggle('is-readonly', Boolean(currentObs?.id) && !currentObsIsOwner)
     if (isSelected) {
       el.setAttribute('aria-current', 'true')
     } else {
       el.removeAttribute('aria-current')
     }
     el.addEventListener('click', () => {
+      if (Boolean(currentObs?.id) && !currentObsIsOwner) return
       const clickedPrediction = JSON.parse(el.dataset.identifyResult)
       const parts = String(clickedPrediction.scientificName || '').trim().split(/\s+/)
       selectedTaxon = {
@@ -1572,7 +1689,7 @@ async function _loadDetailAiCache() {
 
   const configuredPrimaryService = _resolveDetailPhotoIdServices({}).primary
   const firstStoredService = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]
-    .find(service => detailAiState.resultsByService?.[service]?.predictions?.length > 0)
+    .find(service => _hasStoredAiResult(detailAiState.resultsByService?.[service]))
     || null
   detailAiState.activeService = detailAiState.selectedService
     || firstStoredService
@@ -1594,25 +1711,23 @@ async function _loadDetailAiCache() {
   _renderDetailAiResults()
 
   try {
-    const sources = getDetailIdentifySources()
-    const identifyInputs = await prepareDetailIdentifyInputs(sources.galleryImgs, { variant: 'original', maxEdge: getArtsorakelMaxEdge() })
-    const usableBlobs = identifyInputs.filter(item => isBlob(item?.blob))
-    const hasInatBlob = usableBlobs.length > 0
+    const mediaKeys = detailImageRows.map(row => row.storage_path || '').filter(Boolean)
+    const hasDetailImages = detailImageRows.length > 0
     const inaturalistSession = await loadInaturalistSession()
     const availabilityList = await getAvailableIdentifyServices({
-      mediaKeys: detailImageRows.map(row => row.storage_path).filter(Boolean),
+      mediaKeys,
       inaturalistSession,
     })
     const inatLoggedIn = Boolean(inaturalistSession?.connected && (inaturalistSession?.api_token || inaturalistSession?.apiToken))
     const inatReason = inatLoggedIn
-      ? (hasInatBlob ? '' : _tf('detail.noPhotoToIdentify', 'No usable photo available for iNaturalist.'))
+      ? (hasDetailImages ? '' : _tf('detail.noPhotoToIdentify', 'No usable photo available for iNaturalist.'))
       : _tf('settings.inaturalistLoginMissing', 'Please log in to iNaturalist first.')
     detailAiState.availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
     detailAiState.availability[ID_SERVICE_INATURALIST] = {
       ...(detailAiState.availability[ID_SERVICE_INATURALIST] || {}),
       service: ID_SERVICE_INATURALIST,
-      available: Boolean(inatLoggedIn && hasInatBlob),
-      disabled: !Boolean(inatLoggedIn && hasInatBlob),
+      available: Boolean(inatLoggedIn && hasDetailImages),
+      disabled: !Boolean(inatLoggedIn && hasDetailImages),
       reason: inatReason,
     }
   } catch (error) {
@@ -1942,6 +2057,7 @@ function _resetForm() {
   if (commentsList) commentsList.innerHTML = ''
   const commentInput = document.getElementById('comment-input')
   if (commentInput) commentInput.value = ''
+  _syncDetailCommentComposer()
   _applyOwnershipMode(true)
 }
 
@@ -2060,28 +2176,47 @@ function _profileInitial(profile, fallback = '?') {
   return String(source).replace(/^@/, '').trim().charAt(0).toUpperCase() || '?'
 }
 
-async function _loadDetailAuthorAndSocial() {
-  detailAuthorProfile = null
-  detailFriendship = null
-  detailFollowState = { user: false, observation: false, taxon: false, genus: false }
-  if (!currentObs?.user_id) return
+function _detailAuthorFallbackLabel(userId = '') {
+  const shortId = String(userId || '').trim().replace(/-/g, '').slice(0, 8)
+  return shortId ? `User ${shortId}` : 'User'
+}
+
+async function _loadDetailAuthorAndSocial(options = {}) {
+  const preserveAuthorProfile = options.preserveAuthorProfile === true
+  const preserveFriendship = options.preserveFriendship === true
+  const preserveFollowState = options.preserveFollowState === true
+  const previousAuthorProfile = detailAuthorProfile
+  const previousFriendship = detailFriendship
+  const previousFollowState = { ...detailFollowState }
+
+  if (!preserveAuthorProfile) detailAuthorProfile = null
+  if (!preserveFriendship) detailFriendship = null
+  if (!preserveFollowState) detailFollowState = { user: false, observation: false, taxon: false, genus: false }
+
+  if (!currentObs?.user_id) {
+    _renderDetailAuthorAndSocial()
+    _syncDetailCommentComposer()
+    return
+  }
 
   const isOwner = currentObs.user_id === state.user?.id
+  const canQuerySocial = Boolean(state.user?.id)
   const profilePromise = supabase
     .from('profiles')
     .select('id, username, display_name, avatar_url')
     .eq('id', currentObs.user_id)
     .maybeSingle()
 
-  const friendshipPromise = isOwner ? Promise.resolve({ data: [] }) : supabase
+  const friendshipPromise = isOwner || !canQuerySocial ? Promise.resolve({ data: [] }) : supabase
     .from('friendships')
     .select('id, requester_id, addressee_id, status')
     .or(`and(requester_id.eq.${state.user.id},addressee_id.eq.${currentObs.user_id}),and(requester_id.eq.${currentObs.user_id},addressee_id.eq.${state.user.id})`)
     .limit(1)
 
   const taxonFollow = _taxonFollowTarget(currentObs)
-  const followTargets = [currentObs.user_id, currentObs.id, taxonFollow?.targetId, currentObs.genus].filter(Boolean)
-  const followsPromise = isOwner ? Promise.resolve({ data: [] }) : supabase
+  const genusTarget = _hasRealTaxonValue(currentObs.genus) ? String(currentObs.genus || '').trim() : ''
+  const followTargets = [currentObs.user_id, currentObs.id, taxonFollow?.targetId, genusTarget].filter(Boolean)
+  const followsPromise = isOwner || !canQuerySocial ? Promise.resolve({ data: [] }) : supabase
     .from('follows')
     .select('target_type, target_id')
     .eq('user_id', state.user.id)
@@ -2089,16 +2224,34 @@ async function _loadDetailAuthorAndSocial() {
     .in('target_id', followTargets)
 
   const [profileRes, friendshipRes, followsRes] = await Promise.all([profilePromise, friendshipPromise, followsPromise])
-  if (!profileRes.error) detailAuthorProfile = profileRes.data || null
-  if (!friendshipRes.error) detailFriendship = friendshipRes.data?.[0] || null
-  if (!followsRes.error) {
-    for (const row of followsRes.data || []) {
-      if (row.target_type === 'user' && String(row.target_id) === String(currentObs.user_id)) detailFollowState.user = true
-      if (row.target_type === 'observation' && String(row.target_id) === String(currentObs.id)) detailFollowState.observation = true
-      if (taxonFollow && row.target_type === taxonFollow.targetType && String(row.target_id).toLowerCase() === String(taxonFollow.targetId).toLowerCase()) detailFollowState.taxon = true
-      if (row.target_type === 'genus' && String(row.target_id).toLowerCase() === String(currentObs.genus || '').toLowerCase()) detailFollowState.genus = true
-    }
+
+  if (!profileRes.error) {
+    detailAuthorProfile = profileRes.data || null
+  } else if (preserveAuthorProfile && previousAuthorProfile) {
+    detailAuthorProfile = previousAuthorProfile
   }
+
+  if (!friendshipRes.error) {
+    detailFriendship = friendshipRes.data?.[0] || null
+  } else if (preserveFriendship) {
+    detailFriendship = previousFriendship
+  }
+
+  if (!followsRes.error) {
+    const nextFollowState = { user: false, observation: false, taxon: false, genus: false }
+    for (const row of followsRes.data || []) {
+      if (row.target_type === 'user' && String(row.target_id) === String(currentObs.user_id)) nextFollowState.user = true
+      if (row.target_type === 'observation' && String(row.target_id) === String(currentObs.id)) nextFollowState.observation = true
+      if (taxonFollow && row.target_type === taxonFollow.targetType && String(row.target_id).toLowerCase() === String(taxonFollow.targetId).toLowerCase()) nextFollowState.taxon = true
+      if (genusTarget && row.target_type === 'genus' && String(row.target_id).toLowerCase() === genusTarget.toLowerCase()) nextFollowState.genus = true
+    }
+    detailFollowState = nextFollowState
+  } else if (preserveFollowState) {
+    detailFollowState = previousFollowState
+  }
+
+  _renderDetailAuthorAndSocial()
+  _syncDetailCommentComposer()
 }
 
 function _renderDetailAuthorAndSocial() {
@@ -2108,10 +2261,13 @@ function _renderDetailAuthorAndSocial() {
   const socialRow = document.getElementById('detail-social-row')
   const isOwner = currentObs?.user_id === state.user?.id
   const taxonFollow = _taxonFollowTarget(currentObs)
+  const genusAvailable = _hasRealTaxonValue(currentObs?.genus)
+  const speciesAvailable = taxonFollow && taxonFollow.targetType === 'species'
   const topRow = document.getElementById('detail-top-row')
 
   if (authorBtn && currentObs?.user_id) {
-    const handle = isOwner ? t('common.you') : `@${detailAuthorProfile?.username || ''}`
+    const authorFallback = _detailAuthorFallbackLabel(currentObs.user_id)
+    const handle = isOwner ? t('common.you') : _profileLabel(detailAuthorProfile, authorFallback)
     const fullName = isOwner ? '' : (detailAuthorProfile?.display_name || '')
     const showName = fullName && fullName !== detailAuthorProfile?.username
     authorBtn.style.display = 'flex'
@@ -2148,12 +2304,21 @@ function _renderDetailAuthorAndSocial() {
       let followText = '';
       let followAction = '';
       let isFollowActive = false;
-      
-      if (detailFollowState.taxon && taxonFollow && taxonFollow.targetType === 'species') {
+
+      const genusFollowActive = detailFollowState.genus || (detailFollowState.taxon && taxonFollow && taxonFollow.targetType === 'genus')
+      if (detailFollowState.user) {
+         followText = 'Following User';
+         followAction = 'user';
+         isFollowActive = true;
+      } else if (detailFollowState.observation) {
+         followText = 'Following Observation';
+         followAction = 'observation';
+         isFollowActive = true;
+      } else if (detailFollowState.taxon && speciesAvailable) {
          followText = 'Following Species';
          followAction = 'taxon';
          isFollowActive = true;
-      } else if (detailFollowState.genus || (detailFollowState.taxon && taxonFollow && taxonFollow.targetType === 'genus')) {
+      } else if (genusFollowActive && genusAvailable) {
          followText = 'Following Genus';
          followAction = 'genus';
          isFollowActive = true;
@@ -2176,14 +2341,24 @@ function _renderDetailAuthorAndSocial() {
               <svg class="follow-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
             </button>
             <div class="follow-menu" id="follow-menu" style="display: none;">
-              ${taxonFollow && taxonFollow.targetType === 'species' ? `
+              <button class="follow-menu-item" data-action="user">
+                <span class="follow-menu-title">Follow User</span>
+                <span class="follow-menu-sub">${_esc(_profileLabel(detailAuthorProfile, _detailAuthorFallbackLabel(currentObs.user_id)))}</span>
+              </button>
+              <div class="follow-menu-div"></div>
+              <button class="follow-menu-item" data-action="observation">
+                <span class="follow-menu-title">Follow Observation</span>
+                <span class="follow-menu-sub">#${_esc(String(currentObs.id || '').trim())}</span>
+              </button>
+              ${speciesAvailable || genusAvailable ? '<div class="follow-menu-div"></div>' : ''}
+              ${speciesAvailable ? `
               <button class="follow-menu-item" data-action="taxon">
                 <span class="follow-menu-title">Follow Species</span>
                 <span class="follow-menu-sub">${_esc(taxonFollow.targetId)}</span>
               </button>
-              ${currentObs.genus ? '<div class="follow-menu-div"></div>' : ''}
+              ${genusAvailable ? '<div class="follow-menu-div"></div>' : ''}
               ` : ''}
-              ${currentObs.genus ? `
+              ${genusAvailable ? `
               <button class="follow-menu-item" data-action="genus">
                 <span class="follow-menu-title">Follow Genus</span>
                 <span class="follow-menu-sub">${_esc(currentObs.genus)}</span>
@@ -2249,8 +2424,8 @@ function _renderDetailAuthorAndSocial() {
 function _taxonFollowTarget(obs) {
   const genus = String(obs?.genus || '').trim()
   const species = String(obs?.species || '').trim()
-  if (genus && species) return { targetType: 'species', targetId: `${genus} ${species}` }
-  if (genus) return { targetType: 'genus', targetId: genus }
+  if (_hasRealTaxonValue(genus) && _hasRealTaxonValue(species)) return { targetType: 'species', targetId: `${genus} ${species}` }
+  if (_hasRealTaxonValue(genus)) return { targetType: 'genus', targetId: genus }
   return null
 }
 
@@ -2258,79 +2433,168 @@ function _openAuthorFinds() {
   if (!currentObs?.user_id || currentObs.user_id === state.user?.id) return
   openFinds('user', {
     userId: currentObs.user_id,
-    username: _profileLabel(detailAuthorProfile),
+    username: detailAuthorProfile?.username || null,
+    displayName: detailAuthorProfile?.display_name || null,
     avatarUrl: detailAuthorProfile?.avatar_url || '',
+    bio: detailAuthorProfile?.bio || null,
+    summaryLoaded: false,
     resetSearch: true,
     resetFilters: true,
   })
 }
 
+function _isUnknownTaxonValue(value) {
+  const normalized = String(value || '').trim().replace(/\s+/g, ' ').toLowerCase()
+  if (!normalized) return true
+
+  const unknownLabels = new Set([
+    '?',
+    'unknown',
+    'unknown species',
+    'unknown genus',
+    'unknown taxon',
+    'unknown organism',
+    'sp',
+    'sp.',
+    'spp',
+    'spp.',
+  ])
+  const translatedUnknown = String(t('detail.unknownSpecies') || '').trim().replace(/\s+/g, ' ').toLowerCase()
+  if (translatedUnknown) unknownLabels.add(translatedUnknown)
+
+  return normalized.startsWith('?')
+    || normalized.startsWith('unknown ')
+    || unknownLabels.has(normalized)
+}
+
+function _hasRealTaxonValue(value) {
+  return ! _isUnknownTaxonValue(value)
+}
+
+function _isDuplicateSocialWriteError(error) {
+  const code = String(error?.code || '')
+  const status = Number(error?.status || error?.statusCode || 0)
+  const message = String(error?.message || error?.details || error?.hint || '').toLowerCase()
+  return code === '23505'
+    || status === 409
+    || message.includes('duplicate')
+    || message.includes('conflict')
+}
+
 async function _sendFriendRequestFromDetail() {
-  if (!currentObs?.user_id || currentObs.user_id === state.user?.id) return
+  if (!currentObs?.user_id || !state.user?.id || currentObs.user_id === state.user.id) return
   const btn = document.getElementById('new-friend-btn') || document.getElementById('detail-friend-btn')
   if (btn) btn.disabled = true
-  const { data, error } = await supabase
-    .from('friendships')
-    .insert({ requester_id: state.user.id, addressee_id: currentObs.user_id, status: 'pending' })
-    .select('id, requester_id, addressee_id, status')
-    .single()
+  try {
+    const { data, error } = await supabase
+      .from('friendships')
+      .insert({ requester_id: state.user.id, addressee_id: currentObs.user_id, status: 'pending' })
+      .select('id, requester_id, addressee_id, status')
+      .single()
 
-  if (error && error.code !== '23505') {
+    if (error && !_isDuplicateSocialWriteError(error)) {
+      console.warn('Friend request failed:', error)
+      showToast(t('social.friendFailed'))
+      return
+    }
+
+    if (error) {
+      console.warn('Friend request already exists; treating as success:', error)
+    }
+
+    showToast(t('social.friendRequestSent') || 'Friend request sent')
+    detailFriendship = data || detailFriendship || { status: 'pending' }
+    await _loadDetailAuthorAndSocial({ preserveAuthorProfile: true, preserveFriendship: true, preserveFollowState: true })
+  } catch (error) {
+    console.warn('Friend request failed:', error)
     showToast(t('social.friendFailed'))
+  } finally {
     if (btn) btn.disabled = false
-    return
+    _syncDetailCommentComposer()
   }
-
-  showToast(t('social.friendRequestSent') || 'Friend request sent')
-  detailFriendship = data || { status: 'pending' }
-  _renderDetailAuthorAndSocial()
 }
 
 async function _toggleFollowSpecific(kind) {
-  if (!currentObs || currentObs.user_id === state.user?.id) return
-  let targetType, targetId, key;
-  
+  if (!currentObs || !state.user?.id || currentObs.user_id === state.user.id) return
+  let targetType
+  let targetId
+  let key
+
   if (kind === 'genus') {
-    targetType = 'genus';
-    targetId = currentObs.genus;
-    key = 'genus';
+    if (!_hasRealTaxonValue(currentObs.genus)) return
+    targetType = 'genus'
+    targetId = String(currentObs.genus || '').trim()
+    key = 'genus'
   } else if (kind === 'taxon') {
-    const tf = _taxonFollowTarget(currentObs);
-    if (!tf) return;
-    targetType = tf.targetType;
-    targetId = tf.targetId;
-    key = 'taxon';
+    const tf = _taxonFollowTarget(currentObs)
+    if (!tf) return
+    targetType = tf.targetType
+    targetId = tf.targetId
+    key = 'taxon'
   } else if (kind === 'user') {
-    targetType = 'user';
-    targetId = currentObs.user_id;
-    key = 'user';
+    targetType = 'user'
+    targetId = currentObs.user_id
+    key = 'user'
   } else if (kind === 'observation') {
-    targetType = 'observation';
-    targetId = currentObs.id;
-    key = 'observation';
+    targetType = 'observation'
+    targetId = currentObs.id
+    key = 'observation'
   } else {
-    return;
+    return
   }
-  
+
   if (!targetId) return;
 
   const currentlyFollowing = !!detailFollowState[key];
   const btn = document.getElementById('new-follow-btn');
   if (btn) btn.disabled = true
 
-  const result = currentlyFollowing
-    ? await supabase.from('follows').delete().eq('user_id', state.user.id).eq('target_type', targetType).eq('target_id', targetId)
-    : await supabase.from('follows').insert({ user_id: state.user.id, target_type: targetType, target_id: targetId })
+  try {
+    if (currentlyFollowing) {
+      const { error } = await supabase
+        .from('follows')
+        .delete()
+        .eq('user_id', state.user.id)
+        .eq('target_type', targetType)
+        .eq('target_id', targetId)
+      if (error) throw error
+    } else {
+      const { error } = await supabase
+        .from('follows')
+        .upsert({
+          user_id: state.user.id,
+          target_type: targetType,
+          target_id: targetId,
+        }, {
+          onConflict: 'user_id,target_type,target_id',
+        })
+      if (error && !_isDuplicateSocialWriteError(error)) throw error
+      if (error) {
+        console.warn('Follow already existed; treating as success:', error)
+      }
+    }
 
-  if (result.error && result.error.code !== '23505') {
+    await _loadDetailAuthorAndSocial({
+      preserveAuthorProfile: true,
+      preserveFriendship: true,
+      preserveFollowState: true,
+    })
+  } catch (error) {
+    console.warn('Follow toggle failed:', {
+      kind,
+      targetType,
+      targetId,
+      error: {
+        code: error?.code || null,
+        message: error?.message || '',
+        details: error?.details || '',
+        hint: error?.hint || '',
+      },
+    })
     showToast(t('social.followFailed'))
+  } finally {
     if (btn) btn.disabled = false
-    return
   }
-
-  detailFollowState[key] = !currentlyFollowing
-  if (btn) btn.disabled = false
-  _renderDetailAuthorAndSocial()
 }
 
 function _applyOwnershipMode(isOwner) {
@@ -2826,44 +3090,139 @@ async function _searchMentions(query, dropdown, input, mentionStart) {
   })
 }
 
-async function _sendComment() {
-  const input = document.getElementById('comment-input')
-  const body = input.value.trim()
-  if (!body || !currentObs) return
-  const btn = document.getElementById('comment-send-btn')
-  btn.disabled = true
+function _detailCommentCanPost(obs = currentObs) {
+  if (!state.user?.id || !obs?.id) return false
+  if (obs.user_id === state.user.id) return true
+  const visibility = normalizeVisibility(obs.visibility, 'public')
+  if (visibility === 'public') return true
+  if (visibility === 'friends') return detailFriendship?.status === 'accepted'
+  return false
+}
 
-  // Extract @mentions and look up user IDs
-  const mentionedUsernames = [...body.matchAll(/@(\w+)/g)].map(m => m[1])
-  let mentionedUserIds = []
-  if (mentionedUsernames.length) {
-    const { data: profiles } = await supabase
-      .from('profiles')
-      .select('id, username')
-      .in('username', mentionedUsernames)
-    mentionedUserIds = (profiles || []).map(p => p.id)
+function _detailCommentPermissionMessage(obs = currentObs) {
+  const visibility = normalizeVisibility(obs?.visibility, 'public')
+  if (!state.user?.id) return 'Sign in to comment.'
+  if (obs?.user_id === state.user.id) return ''
+  if (visibility === 'friends') {
+    return 'Only accepted friends can comment on friends-only observations.'
+  }
+  if (visibility === 'private') {
+    return 'Comments are disabled for private observations.'
+  }
+  return 'Comments are not available for this observation.'
+}
+
+function _syncDetailCommentComposer() {
+  const input = document.getElementById('comment-input')
+  const btn = document.getElementById('comment-send-btn')
+  const row = input?.closest('.comment-input-row')
+  if (!input || !btn || !row) return
+
+  const note = document.getElementById('comment-permission-note')
+  if (!currentObs?.id) {
+    input.disabled = true
+    btn.disabled = true
+    btn.title = ''
+    input.title = ''
+    if (note) note.remove()
+    return
   }
 
-  let { error } = await supabase.from('comments').insert({
-    observation_id: currentObs.id,
-    user_id: state.user.id,
-    body,
-    mentioned_user_ids: mentionedUserIds.length ? mentionedUserIds : null,
-  })
-  // Fallback: column may not exist yet — retry without it
-  if (error?.message?.includes('mentioned_user_ids')) {
-    ;({ error } = await supabase.from('comments').insert({
+  const canComment = _detailCommentCanPost()
+  const hasText = Boolean(String(input.value || '').trim())
+  input.disabled = !canComment
+  btn.disabled = !canComment || !hasText
+  btn.title = canComment ? '' : _detailCommentPermissionMessage()
+  input.title = canComment ? '' : _detailCommentPermissionMessage()
+
+  let noteEl = note
+  const permissionMessage = _detailCommentPermissionMessage()
+  if (canComment) {
+    if (noteEl) noteEl.remove()
+    return
+  }
+
+  if (!noteEl) {
+    noteEl = document.createElement('div')
+    noteEl.id = 'comment-permission-note'
+    noteEl.style.marginTop = '6px'
+    noteEl.style.fontSize = '12px'
+    noteEl.style.lineHeight = '1.4'
+    noteEl.style.color = 'var(--text-dim)'
+    row.insertAdjacentElement('afterend', noteEl)
+  }
+  noteEl.textContent = permissionMessage
+}
+
+async function _sendComment() {
+  const input = document.getElementById('comment-input')
+  const body = String(input?.value || '').trim()
+  const btn = document.getElementById('comment-send-btn')
+  if (!body || !currentObs || !_detailCommentCanPost()) return
+  if (btn) btn.disabled = true
+
+  try {
+    // Extract @mentions and look up user IDs
+    const mentionedUsernames = [...body.matchAll(/@(\w+)/g)].map(m => m[1])
+    let mentionedUserIds = []
+    if (mentionedUsernames.length) {
+      const { data: profiles } = await supabase
+        .from('profiles')
+        .select('id, username')
+        .in('username', mentionedUsernames)
+      mentionedUserIds = (profiles || []).map(p => p.id)
+    }
+
+    let { error } = await supabase.from('comments').insert({
       observation_id: currentObs.id,
       user_id: state.user.id,
       body,
-    }))
+      mentioned_user_ids: mentionedUserIds.length ? mentionedUserIds : null,
+    })
+    if (error && _isMissingObservationColumnError(error, ['mentioned_user_ids'])) {
+      ;({ error } = await supabase.from('comments').insert({
+        observation_id: currentObs.id,
+        user_id: state.user.id,
+        body,
+      }))
+    }
+    if (error) {
+      const message = String(error?.message || error || 'Unknown error')
+      console.warn('Comment insert failed:', {
+        observationId: currentObs.id,
+        visibility: currentObs.visibility || '',
+        viewerMode: currentObs.user_id === state.user?.id ? 'owner' : 'viewer',
+        error: {
+          code: error?.code || null,
+          message: error?.message || '',
+          details: error?.details || '',
+          hint: error?.hint || '',
+        },
+      })
+      showToast(t('comments.postFailed', { message }))
+      return
+    }
+    input.value = ''
+    showToast(t('comments.posted'))
+    _syncDetailCommentComposer()
+    _loadComments(currentObs.id)
+  } catch (error) {
+    const message = String(error?.message || error || 'Unknown error')
+    console.warn('Comment insert failed:', {
+      observationId: currentObs.id,
+      visibility: currentObs.visibility || '',
+      viewerMode: currentObs.user_id === state.user?.id ? 'owner' : 'viewer',
+      error: {
+        code: error?.code || null,
+        message: error?.message || '',
+        details: error?.details || '',
+        hint: error?.hint || '',
+      },
+    })
+    showToast(t('comments.postFailed', { message }))
+  } finally {
+    if (btn) btn.disabled = false
   }
-  btn.disabled = false
-  if (error) { showToast(t('comments.postFailed', { message: error.message })); return }
-  input.value = ''
-  showToast(t('comments.posted'))
-  _loadComments(currentObs.id)
-
 }
 
 async function _openCameraForDetail() {

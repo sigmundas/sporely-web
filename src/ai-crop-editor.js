@@ -62,6 +62,15 @@ function _applyImageTransform() {
   imageEl.style.top = `${top}px`
 }
 
+function _setNavButtonVisible(button, visible) {
+  if (!button) return
+  button.style.display = 'flex'
+  button.style.visibility = visible ? 'visible' : 'hidden'
+  button.style.pointerEvents = visible ? 'auto' : 'none'
+  button.disabled = !visible
+  button.setAttribute('aria-hidden', visible ? 'false' : 'true')
+}
+
 function _constrainOffsets() {
   const next = constrainCropOffset({
     imageWidth,
@@ -114,8 +123,8 @@ function _syncChrome() {
 
   titleEl.textContent = session.title || t('crop.title') || 'AI crop'
   counterEl.textContent = session.images.length > 1 ? `${currentIndex + 1} / ${session.images.length}` : ''
-  prevBtn.style.display = currentIndex > 0 ? 'flex' : 'none'
-  nextBtn.style.display = currentIndex < session.images.length - 1 ? 'flex' : 'none'
+  _setNavButtonVisible(prevBtn, currentIndex > 0)
+  _setNavButtonVisible(nextBtn, currentIndex < session.images.length - 1)
 }
 
 function _resetCurrentCrop() {

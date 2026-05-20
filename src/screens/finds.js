@@ -26,6 +26,9 @@ let _pullDistance = 0
 let _isRefreshing = false
 let _queuedRefreshTimer = null
 let _loadFindsSeq = 0
+let _findsTargetCardLoadedUserId = null
+let _findsTargetCardLoadingUserId = null
+let _findsTargetCardLoadPromise = null
 
 const MINE_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, is_draft, location_precision, spore_statistics'
 const MINE_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, spore_statistics'
@@ -40,6 +43,168 @@ function _normalizeScope(scope) {
 
 function _currentScope() {
   return state.findsTargetUserId ? 'user' : _normalizeScope(state.observationScope)
+}
+
+function _normalizeFindsTargetUsername(value, userId = '') {
+  const raw = String(value || '').trim().replace(/^@+/, '')
+  if (!raw) return null
+
+  const shortId = String(userId || '').trim().replace(/-/g, '').slice(0, 8).toLowerCase()
+  const normalized = raw.toLowerCase()
+  if (normalized === 'user') return null
+  if (shortId && normalized === `user ${shortId}`) return null
+
+  return raw
+}
+
+function _normalizeFindsTargetDisplayName(value, userId = '', username = '') {
+  const raw = String(value || '').trim()
+  if (!raw) return null
+
+  const shortId = String(userId || '').trim().replace(/-/g, '').slice(0, 8).toLowerCase()
+  const normalized = raw.replace(/^@+/, '').trim().toLowerCase()
+  if (normalized === 'user') return null
+  if (shortId && normalized === `user ${shortId}`) return null
+
+  const normalizedUsername = String(username || '').trim().replace(/^@+/, '').toLowerCase()
+  if (normalizedUsername && normalized === normalizedUsername) return null
+
+  return raw
+}
+
+function _normalizeFindsTargetBio(value) {
+  const raw = String(value || '').trim()
+  return raw || null
+}
+
+function _normalizeFindsTargetAvatarUrl(value) {
+  const raw = String(value || '').trim()
+  return /^https?:\/\//i.test(raw) ? raw : ''
+}
+
+function _composeFindsTargetPerson(source = {}) {
+  const userId = String(source.userId || state.findsTargetUserId || '').trim()
+  if (!userId) return null
+
+  const username = _normalizeFindsTargetUsername(
+    source.username !== undefined ? source.username : state.findsTargetUsername,
+    userId
+  )
+  const displayName = _normalizeFindsTargetDisplayName(
+    source.displayName !== undefined ? source.displayName : state.findsTargetDisplayName,
+    userId,
+    username
+  )
+  const avatarUrl = _normalizeFindsTargetAvatarUrl(
+    source.avatarUrl !== undefined ? source.avatarUrl : state.findsTargetAvatarUrl
+  )
+  const bio = _normalizeFindsTargetBio(
+    source.bio !== undefined ? source.bio : state.findsTargetBio
+  )
+  const finds = Number(source.finds !== undefined ? source.finds : state.findsTargetFinds)
+  const species = Number(source.species !== undefined ? source.species : state.findsTargetSpecies)
+  const spores = Number(source.spores !== undefined ? source.spores : state.findsTargetSpores)
+
+  return {
+    user_id: userId,
+    username,
+    display_name: displayName,
+    avatar_url: avatarUrl,
+    bio,
+    finds: Number.isFinite(finds) ? finds : 0,
+    species: Number.isFinite(species) ? species : 0,
+    spores: Number.isFinite(spores) ? spores : 0,
+  }
+}
+
+function _findsTargetPreviewData() {
+  if (!state.findsTargetSummaryLoaded) return null
+  return _composeFindsTargetPerson()
+}
+
+function _renderFindsTargetCard(root, person) {
+  if (!root) return
+  root.innerHTML = person
+    ? buildPeopleCard(person)
+    : `<div class="people-empty" style="padding: 8px 0;">${_esc(t('common.loading'))}</div>`
+  if (person) wireAvatarFallback(root)
+}
+
+async function _loadFindsTargetCard(userId) {
+  const targetUserId = String(userId || '').trim()
+  const root = document.getElementById('finds-user-card-root')
+  if (!targetUserId || !root) return
+  if (state.findsTargetSummaryLoaded && _findsTargetCardLoadedUserId === targetUserId) return
+  if (_findsTargetCardLoadingUserId === targetUserId && _findsTargetCardLoadPromise) return _findsTargetCardLoadPromise
+
+  _findsTargetCardLoadingUserId = targetUserId
+  const loadPromise = (async () => {
+    const [profileRes, statsRes] = await Promise.all([
+      supabase
+        .from('profiles')
+        .select('id, username, display_name, avatar_url, bio')
+        .eq('id', targetUserId)
+        .maybeSingle(),
+      supabase.rpc('get_person_stats', { p_user_id: targetUserId }),
+    ])
+
+    if (_currentScope() !== 'user' || String(state.findsTargetUserId || '') !== targetUserId) return
+
+    const profile = profileRes?.data || null
+    const statsRow = Array.isArray(statsRes?.data) ? (statsRes.data[0] || null) : (statsRes?.data || null)
+    const signedAvatarUrl = profile?.avatar_url && /^https?:\/\//i.test(String(profile.avatar_url))
+      ? String(profile.avatar_url)
+      : ''
+    const signedStateAvatarUrl = state.findsTargetAvatarUrl && /^https?:\/\//i.test(String(state.findsTargetAvatarUrl))
+      ? String(state.findsTargetAvatarUrl)
+      : ''
+    const avatarUrl = signedAvatarUrl || signedStateAvatarUrl || ''
+
+    let person = _composeFindsTargetPerson({
+      userId: targetUserId,
+      username: profile?.username !== undefined ? profile.username : state.findsTargetUsername,
+      displayName: profile?.display_name !== undefined ? profile.display_name : state.findsTargetDisplayName,
+      avatarUrl,
+      bio: profile?.bio !== undefined ? profile.bio : state.findsTargetBio,
+      finds: statsRow?.public_find_count !== undefined ? Number(statsRow.public_find_count) : state.findsTargetFinds,
+      species: statsRow?.public_species_count !== undefined ? Number(statsRow.public_species_count) : state.findsTargetSpecies,
+      spores: statsRow?.public_spore_count !== undefined ? Number(statsRow.public_spore_count) : state.findsTargetSpores,
+    })
+
+    if (!person) {
+      person = _composeFindsTargetPerson()
+    }
+
+    if (!person) return
+
+    state.findsTargetUsername = person.username
+    state.findsTargetDisplayName = person.display_name
+    state.findsTargetAvatarUrl = person.avatar_url
+    state.findsTargetBio = person.bio
+    state.findsTargetFinds = person.finds
+    state.findsTargetSpecies = person.species
+    state.findsTargetSpores = person.spores
+    state.findsTargetSummaryLoaded = true
+    _findsTargetCardLoadedUserId = targetUserId
+    _renderFindsTargetCard(root, person)
+  })().catch(error => {
+    if (import.meta.env?.DEV) {
+      console.warn('[finds-user-card] could not hydrate target user', {
+        userId: targetUserId,
+        error,
+      })
+    }
+    const fallback = _composeFindsTargetPerson()
+    if (fallback && _currentScope() === 'user' && String(state.findsTargetUserId || '') === targetUserId) {
+      _renderFindsTargetCard(root, fallback)
+    }
+  }).finally(() => {
+    if (_findsTargetCardLoadingUserId === targetUserId) _findsTargetCardLoadingUserId = null
+    if (_findsTargetCardLoadPromise === loadPromise) _findsTargetCardLoadPromise = null
+  })
+
+  _findsTargetCardLoadPromise = loadPromise
+  return loadPromise
 }
 
 function _isPhase7ColumnError(error) {
@@ -317,42 +482,14 @@ function _syncScopeTabs() {
       })
 
       if (uid) {
-        if (state.findsTargetUsername !== undefined || state.findsTargetDisplayName !== undefined) {
-          const personFormatted = {
-            user_id: uid,
-            avatar_url: state.findsTargetAvatarUrl,
-            display_name: state.findsTargetDisplayName,
-            username: state.findsTargetUsername,
-            bio: state.findsTargetBio,
-            finds: state.findsTargetFinds || 0,
-            species: state.findsTargetSpecies || 0,
-            spores: state.findsTargetSpores || 0
-          };
-          const root = document.getElementById('finds-user-card-root');
-          if (root) {
-            root.innerHTML = buildPeopleCard(personFormatted);
-            wireAvatarFallback(root);
-          }
+        const root = document.getElementById('finds-user-card-root')
+        const preview = _findsTargetPreviewData()
+        if (preview) {
+          _findsTargetCardLoadedUserId = uid
+          _renderFindsTargetCard(root, preview)
         } else {
-          supabase.from('profiles').select('*').eq('id', uid).maybeSingle().then(({data: person}) => {
-            if (!person) return;
-            const root = document.getElementById('finds-user-card-root');
-            if (!root) return; // Might have navigated away
-            
-            const personFormatted = {
-              user_id: person.id,
-              avatar_url: person.avatar_url,
-              display_name: person.display_name,
-              username: person.username,
-              bio: person.bio,
-              finds: 0,
-              species: 0,
-              spores: 0
-            };
-            
-            root.innerHTML = buildPeopleCard(personFormatted);
-            wireAvatarFallback(root);
-          });
+          _renderFindsTargetCard(root, null)
+          void _loadFindsTargetCard(uid)
         }
       }
     }
@@ -398,6 +535,7 @@ function _setScope(scope, options = {}) {
 
   if (scope === 'user') {
     state.findsTargetUserId = options.userId
+    state.findsTargetSummaryLoaded = options.summaryLoaded === true
     state.findsTargetUsername = options.username
     state.findsTargetAvatarUrl = options.avatarUrl
     state.findsTargetDisplayName = options.displayName
@@ -405,9 +543,15 @@ function _setScope(scope, options = {}) {
     state.findsTargetFinds = options.finds
     state.findsTargetSpecies = options.species
     state.findsTargetSpores = options.spores
+    if (state.findsTargetSummaryLoaded) {
+      _findsTargetCardLoadedUserId = String(options.userId || '').trim() || null
+    } else {
+      _findsTargetCardLoadedUserId = null
+    }
   } else {
     state.observationScope = nextScope
     state.findsTargetUserId = null
+    state.findsTargetSummaryLoaded = false
     state.findsTargetUsername = null
     state.findsTargetAvatarUrl = null
     state.findsTargetDisplayName = null
@@ -415,6 +559,7 @@ function _setScope(scope, options = {}) {
     state.findsTargetFinds = 0
     state.findsTargetSpecies = 0
     state.findsTargetSpores = 0
+    _findsTargetCardLoadedUserId = null
   }
 
   if (options.resetSearch) {

@@ -1121,9 +1121,9 @@ CREATE INDEX "observation_identifications_service_idx" ON "public"."observation_
 ALTER TABLE "public"."observation_identifications" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "Users can read own observation identifications" ON "public"."observation_identifications" FOR SELECT USING ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+CREATE POLICY "Users can read observation identifications for visible observations" ON "public"."observation_identifications" FOR SELECT USING ((EXISTS ( SELECT 1
    FROM "public"."observations" "o"
-  WHERE (("o"."id" = "observation_identifications"."observation_id") AND ("o"."user_id" = "auth"."uid"()))))));
+  WHERE (("o"."id" = "observation_identifications"."observation_id") AND "public"."can_read_observation"("o"."user_id", "o"."visibility")))));
 
 
 CREATE POLICY "Users can insert own observation identifications" ON "public"."observation_identifications" FOR INSERT WITH CHECK ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
@@ -1179,6 +1179,11 @@ CREATE OR REPLACE VIEW "public"."observations_community_view" AS
     "genus",
     "species",
     "common_name",
+    "ai_selected_service",
+    "ai_selected_taxon_id",
+    "ai_selected_scientific_name",
+    "ai_selected_probability",
+    "ai_selected_at",
     "author",
     "location",
     "habitat",
@@ -2452,7 +2457,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
 
 
 

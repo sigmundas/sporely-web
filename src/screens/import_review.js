@@ -8,7 +8,6 @@ import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
-import { shouldShowAiCropOverlay } from '../image_crop.js';
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js';
 import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js';
 import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
@@ -1583,7 +1582,6 @@ function buildCardHTML(session) {
   const stripItems = session.blobUrls.map((url, i) =>
     `<div class="import-strip-item" data-sid="${sid}" data-idx="${i}">
       <img src="${escHtml(url)}" class="import-strip-thumb" loading="lazy">
-      ${shouldShowAiCropOverlay(imageMeta[i]?.aiCropRect, imageMeta[i]?.aiCropIsCustom) ? '<div class="ai-crop-thumb-badge">AI crop</div>' : ''}
       <button class="import-strip-delete" data-sid="${sid}" data-idx="${i}">×</button>
     </div>`
   ).join('') + `

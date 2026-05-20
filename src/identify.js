@@ -2,7 +2,7 @@ import { t } from './i18n.js'
 import { loadInaturalistSession } from './inaturalist.js'
 import { getBlobImageDimensions, prepareImageBlobForUpload } from './image_crop.js'
 import { isBlob } from './observation-shapes.js'
-import { recordDebugJsonResponse, revokeDebugObjectUrl } from './debug-activity.js'
+import { isDebugScreenEnabled, recordDebugJsonResponse, revokeDebugObjectUrl } from './debug-activity.js'
 import {
   getDefaultIdService,
   ID_SERVICE_ARTSORAKEL,
@@ -15,14 +15,7 @@ const INAT_MAX_EDGE = 299
 const INAT_DEBUG_REQUESTS_KEY = 'sporely-debug-inaturalist'
 
 function _isDebugAiIdEnabled() {
-  try {
-    return globalThis.localStorage?.getItem('sporely-debug-ai-id') === 'true'
-      || globalThis.localStorage?.getItem('sporely-debug-inat-oauth') === 'true'
-      || globalThis.sessionStorage?.getItem('sporely-debug-ai-id') === 'true'
-      || globalThis.location?.search?.includes('debug_ai_id=1')
-  } catch (_) {
-    return false
-  }
+  return isDebugScreenEnabled()
 }
 
 function _isDebugInaturalistRequestsEnabled() {

@@ -5,6 +5,7 @@ import {
   _buildDetailAiCachedResults,
   _hasAiRunResult,
   _hasStoredAiResult,
+  _canRunDetailAiService,
   _renderDetailAiResults,
   _renderDetailAiTabs,
   _setDetailAiActiveService,
@@ -157,6 +158,30 @@ test('idle find detail AI state stays neutral before any run or cached result', 
   }
 })
 
+test('non-owner detail tabs stay disabled until there is a stored result to view', () => {
+  resetDetailState()
+  const tabs = [
+    makeTab('artsorakel', true),
+    makeTab('inat'),
+  ]
+  const restore = withDocument({ tabs })
+
+  try {
+    detailAiState.availability = {
+      artsorakel: { available: true, reason: '' },
+      inat: { available: true, reason: '' },
+    }
+
+    _renderDetailAiTabs()
+
+    assert.equal(_canRunDetailAiService('artsorakel', { status: 'idle' }), false)
+    assert.equal(tabs[0].disabled, true)
+    assert.equal(tabs[1].disabled, true)
+  } finally {
+    restore()
+  }
+})
+
 test('cached rows select the matching fingerprint and mark older rows stale', () => {
   const rows = [
     {
@@ -270,6 +295,43 @@ test('selected AI service keeps its own probability and source highlight', () =>
     assert.equal(tabs[1].classList.contains('is-used'), false)
     assert.equal(tabs[0].querySelector('.ai-id-service-tab-score').textContent, '53%')
     assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '41%')
+  } finally {
+    restore()
+  }
+})
+
+test('stored result tab scores fall back to top probability when no explicit selection is stored', () => {
+  resetDetailState()
+  const tabs = [
+    makeTab('artsorakel', true),
+    makeTab('inat'),
+  ]
+  const restore = withDocument({ tabs })
+
+  try {
+    detailAiState.availability = {
+      artsorakel: { available: true, reason: '' },
+      inat: { available: true, reason: '' },
+    }
+    detailAiState.resultsByService = {
+      artsorakel: {
+        service: 'artsorakel',
+        status: 'success',
+        topProbability: 0.91,
+        predictions: [{ scientificName: 'Amanita muscaria', probability: 0.53 }],
+      },
+      inat: {
+        service: 'inat',
+        status: 'success',
+        topProbability: 0.74,
+        predictions: [{ scientificName: 'Amanita muscaria', probability: 0.41 }],
+      },
+    }
+
+    _renderDetailAiTabs()
+
+    assert.equal(tabs[0].querySelector('.ai-id-service-tab-score').textContent, '91%')
+    assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '74%')
   } finally {
     restore()
   }

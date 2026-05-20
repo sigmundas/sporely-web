@@ -10,10 +10,9 @@ export function isDebugDashboardEnabled() {
   }
 }
 
-export function shouldCaptureDebugPreviewUrls() {
+function _isLegacyDebugScreenEnabled() {
   try {
-    return globalThis.localStorage?.getItem(DASHBOARD_FLAG_KEY) === 'true'
-      || globalThis.localStorage?.getItem('sporely-debug-artsorakel') === 'true'
+    return globalThis.localStorage?.getItem('sporely-debug-artsorakel') === 'true'
       || globalThis.localStorage?.getItem('sporely-debug-ai-id') === 'true'
       || globalThis.sessionStorage?.getItem('sporely-debug-ai-id') === 'true'
       || globalThis.localStorage?.getItem('sporely-debug-inat-oauth') === 'true'
@@ -22,6 +21,14 @@ export function shouldCaptureDebugPreviewUrls() {
   } catch (_) {
     return false
   }
+}
+
+export function isDebugScreenEnabled() {
+  return isDebugDashboardEnabled() || _isLegacyDebugScreenEnabled()
+}
+
+export function shouldCaptureDebugPreviewUrls() {
+  return isDebugScreenEnabled()
 }
 
 export function revokeDebugObjectUrl(url) {
@@ -75,7 +82,7 @@ function _pushLatest(store, entry, limit = DEFAULT_LIMIT) {
 }
 
 export function recordDebugImageEvent(message, details = {}) {
-  if (!isDebugDashboardEnabled()) return null
+  if (!isDebugScreenEnabled()) return null
   const ns = ensureDebugNamespace()
   return _pushLatest(ns.images, {
     timestamp: new Date().toISOString(),
@@ -85,7 +92,7 @@ export function recordDebugImageEvent(message, details = {}) {
 }
 
 export function recordDebugJsonResponse(entry = {}) {
-  if (!isDebugDashboardEnabled()) return null
+  if (!isDebugScreenEnabled()) return null
   const ns = ensureDebugNamespace()
   return _pushLatest(ns.jsonResponses, {
     timestamp: new Date().toISOString(),
