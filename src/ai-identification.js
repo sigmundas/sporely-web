@@ -58,6 +58,35 @@ function _hasFiniteScore(value) {
   return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
 }
 
+function _highestPredictionProbability(predictions = []) {
+  let highest = null
+  for (const prediction of Array.isArray(predictions) ? predictions : []) {
+    const value = Number(prediction?.probability)
+    if (!Number.isFinite(value)) continue
+    if (highest === null || value > highest) {
+      highest = value
+    }
+  }
+  return highest
+}
+
+export function getIdentifyTopProbability(result = null) {
+  if (_hasFiniteScore(result?.topProbability)) {
+    return Number(result.topProbability)
+  }
+  if (_hasFiniteScore(result?.topPrediction?.probability)) {
+    return Number(result.topPrediction.probability)
+  }
+  if (_hasFiniteScore(result?.topScore)) {
+    return Number(result.topScore)
+  }
+  const predictionProbability = _highestPredictionProbability(result?.predictions)
+  if (predictionProbability !== null) {
+    return predictionProbability
+  }
+  return _highestPredictionProbability(result?.results)
+}
+
 function _selectIdentifySourceBlob(item = null) {
   if (isBlob(item?.originalBlob)) return item.originalBlob
   if (isBlob(item?.sourceBlob)) return item.sourceBlob
@@ -265,12 +294,23 @@ export function formatAiSuggestionDisplay(prediction = {}) {
 
 export function _renderServiceIcon(serviceState = {}) {
   const status = serviceState.status || 'idle'
+  const showCheckmark = serviceState.showCheckmark ?? (status === 'success' || status === 'stale')
+  const probability = _hasFiniteScore(serviceState.displayProbability)
+    ? Number(serviceState.displayProbability)
+    : getIdentifyTopProbability(serviceState)
+  const confidence = probability !== null
+    ? getIdentifyConfidenceState(probability)
+    : null
+  const toneClass = confidence?.tone ? ` ${confidence.tone}` : ''
   if (status === 'running') {
     return _renderPieSpinnerIcon()
   }
   if (status === 'success' || status === 'stale') {
+    if (!showCheckmark) {
+      return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot${toneClass}" aria-hidden="true"></span>`
+    }
     return `
-      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-check" aria-hidden="true">
+      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-check${toneClass}" aria-hidden="true">
         <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
           <path d="M4 8 L7 11 L13 4" />
         </svg>
@@ -289,7 +329,7 @@ export function _renderServiceIcon(serviceState = {}) {
   if (serviceState.available === false) {
     return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot is-unavailable" aria-hidden="true"></span>`
   }
-  return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot" aria-hidden="true"></span>`
+  return `<span class="ai-id-service-tab-icon ai-id-service-tab-icon-dot${toneClass}" aria-hidden="true"></span>`
 }
 
 export function getIdentifyConfidenceState(score, options = {}) {
@@ -463,7 +503,7 @@ export function chooseIdentifyComparisonActiveService(resultsByService = {}, def
   let bestService = normalizedDefault
   let bestProbability = -1
   for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
-    const probability = Number(resultsByService[service]?.topProbability ?? -1)
+    const probability = Number(getIdentifyTopProbability(resultsByService[service]) ?? -1)
     if (probability > bestProbability) {
       bestProbability = probability
       bestService = service
@@ -838,16 +878,17 @@ export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
   const explicitDisplayProbability = _hasFiniteScore(serviceState.displayProbability)
     ? Number(serviceState.displayProbability)
     : null
-  const rawTopProbability = serviceState.topProbability ?? serviceState.topScore ?? null
-  const topProbability = _hasFiniteScore(rawTopProbability) ? Number(rawTopProbability) : null
-  const badgeProbability = explicitDisplayProbability ?? topProbability ?? (_hasFiniteScore(serviceState.topPrediction?.probability)
-    ? Number(serviceState.topPrediction.probability)
-    : null)
+  const topProbability = getIdentifyTopProbability(serviceState)
+  const badgeProbability = explicitDisplayProbability ?? topProbability
   const confidence = getIdentifyConfidenceState(badgeProbability ?? 0, { checkThreshold: 0.65 })
   const shouldShowScore = explicitDisplayProbability !== null || serviceState.status === 'success' || serviceState.status === 'stale'
   const stateLabel = shouldShowScore && badgeProbability !== null
     ? `${Math.round(Number(badgeProbability) * 100)}%`
     : ''
+  const scoreMarkup = stateLabel && badgeProbability !== null
+    ? renderIdentifyConfidenceBadge(badgeProbability, { checkThreshold: 0.65 })
+    : ''
+  const scoreToneClass = stateLabel && confidence.tone ? ` ${confidence.tone}` : ''
   return `
     <button
       type="button"
@@ -859,7 +900,7 @@ export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
     >
       ${_renderServiceIcon(serviceState)}
       <span class="ai-id-service-tab-label">${_esc(label)}</span>
-      ${stateLabel && badgeProbability !== null ? `<span class="ai-id-service-tab-score ${confidence.tone}">${renderIdentifyConfidenceBadge(badgeProbability, { checkThreshold: 0.65 })}</span>` : ''}
+      <span class="ai-id-service-tab-score${scoreToneClass}"${stateLabel ? '' : ' style="display:none"'}>${scoreMarkup}</span>
     </button>
   `
 }
@@ -878,11 +919,8 @@ export function renderIdentifyServiceStateSummary(serviceState = {}, options = {
   const explicitDisplayProbability = _hasFiniteScore(serviceState.displayProbability)
     ? Number(serviceState.displayProbability)
     : null
-  const rawTopProbability = serviceState.topProbability ?? serviceState.topScore ?? null
-  const topProbability = _hasFiniteScore(rawTopProbability) ? Number(rawTopProbability) : null
-  const badgeProbability = explicitDisplayProbability ?? topProbability ?? (_hasFiniteScore(serviceState.topPrediction?.probability)
-    ? Number(serviceState.topPrediction.probability)
-    : null)
+  const topProbability = getIdentifyTopProbability(serviceState)
+  const badgeProbability = explicitDisplayProbability ?? topProbability
   const confidence = getIdentifyConfidenceState(badgeProbability ?? 0, { checkThreshold: 0.65 })
   const shouldShowScore = explicitDisplayProbability !== null || serviceState.status === 'success' || serviceState.status === 'stale'
   const stateLabel = shouldShowScore && badgeProbability !== null

@@ -2563,6 +2563,15 @@ html, body {
 .ai-id-service-tab-icon-check {
   color: var(--green-bright);
 }
+.ai-id-service-tab-icon-check.is-good {
+  color: var(--green-bright);
+}
+.ai-id-service-tab-icon-check.is-warn {
+  color: #f0c24d;
+}
+.ai-id-service-tab-icon-check.is-low {
+  color: var(--red);
+}
 .ai-pie-spinner {
   display: inline-flex;
   align-items: center;
@@ -3727,6 +3736,9 @@ html.light .ai-id-service-tab.is-active.is-used {
 html.light .ai-confidence-badge.is-good { color: var(--green-deep); }
 html.light .ai-confidence-badge.is-warn { color: #b88412; }
 html.light .ai-confidence-badge.is-low { color: var(--red); }
+html.light .ai-id-service-tab-icon-check.is-good { color: var(--green-deep); }
+html.light .ai-id-service-tab-icon-check.is-warn { color: #b88412; }
+html.light .ai-id-service-tab-icon-check.is-low { color: var(--red); }
 html.light .ai-id-service-tab.has-error .ai-id-service-tab-score { color: var(--red); }
 html.light .ai-result.is-selected,
 html.light .ai-result-row.is-selected {

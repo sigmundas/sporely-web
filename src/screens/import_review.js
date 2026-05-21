@@ -30,6 +30,7 @@ import {
   buildIdentifyFingerprint,
   chooseIdentifyComparisonActiveService,
   debugPhotoId,
+  getIdentifyTopProbability,
   getAvailableIdentifyServices,
   _renderPieSpinnerIcon,
   isTerminalAiServiceState,
@@ -118,16 +119,13 @@ function _storeSessionAiServiceResult(session, service, result = {}, fingerprint
   const svc = normalizeIdentifyService(service)
   const predictions = Array.isArray(result.predictions) ? result.predictions : []
   const status = result.status || (predictions.length ? 'success' : 'no_match')
+  const topProbability = getIdentifyTopProbability(result)
   const nextState = {
     ..._emptyServiceState(),
     ...(normalized.aiServiceState?.[svc] || {}),
     status,
-    topScore: Number.isFinite(Number(result.topProbability))
-      ? Number(result.topProbability)
-      : (Number.isFinite(Number(predictions[0]?.probability)) ? Number(predictions[0].probability) : null),
-    topProbability: Number.isFinite(Number(result.topProbability))
-      ? Number(result.topProbability)
-      : (Number.isFinite(Number(predictions[0]?.probability)) ? Number(predictions[0].probability) : null),
+    topScore: topProbability,
+    topProbability,
     errorMessage: result.errorMessage || '',
     requestFingerprint: fingerprint?.requestFingerprint || result.requestFingerprint || '',
     imageFingerprint: fingerprint?.imageFingerprint || result.imageFingerprint || '',
@@ -220,9 +218,10 @@ function _ensureSessionAiState(session) {
     if (!session.aiServiceState[service].status || session.aiServiceState[service].status === 'idle') {
       session.aiServiceState[service].status = predictions.length ? 'success' : 'idle'
     }
-    if (predictions.length && !session.aiServiceState[service].topScore && Number.isFinite(Number(predictions[0]?.probability))) {
-      session.aiServiceState[service].topScore = Number(predictions[0].probability)
-      session.aiServiceState[service].topProbability = Number(predictions[0].probability)
+    const derivedTopProbability = getIdentifyTopProbability({ predictions })
+    if (predictions.length && session.aiServiceState[service].topScore == null && derivedTopProbability !== null) {
+      session.aiServiceState[service].topScore = derivedTopProbability
+      session.aiServiceState[service].topProbability = derivedTopProbability
     }
   }
 
@@ -350,9 +349,10 @@ function _sessionAiResultState(session, service) {
   const status = stale
     ? 'stale'
     : (serviceState.status || (predictions.length ? 'success' : 'idle'))
-  const topProbability = Number.isFinite(Number(serviceState.topScore))
-    ? Number(serviceState.topScore)
-    : (predictions[0]?.probability ?? null)
+  const topProbability = getIdentifyTopProbability({
+    ...serviceState,
+    predictions,
+  })
   return {
     service: svc,
     active: normalized?.aiActiveService === svc,
@@ -362,6 +362,7 @@ function _sessionAiResultState(session, service) {
     topPrediction: predictions[0] || null,
     topProbability,
     errorMessage: serviceState.errorMessage || '',
+    showCheckmark: ['success', 'stale'].includes(status),
     stale,
   }
 }

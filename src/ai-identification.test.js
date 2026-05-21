@@ -4,6 +4,7 @@ import fs from 'node:fs'
 
 import {
   buildIdentifyFingerprint,
+  getIdentifyTopProbability,
   loadObservationIdentifications,
   markIdentificationStaleIfFingerprintChanged,
   markRequestedServicesRunning,
@@ -248,7 +249,7 @@ test('service tabs render no-match, running, and success states with the right i
     available: true,
     topProbability: 0.87,
   })
-  assert.match(success, /ai-id-service-tab-icon-check/)
+  assert.match(success, /ai-id-service-tab-icon-check is-good/)
   assert.match(success, /87%/)
 
   const lowConfidence = renderIdentifyServiceTab({
@@ -257,10 +258,21 @@ test('service tabs render no-match, running, and success states with the right i
     available: true,
     topProbability: 0.27,
   })
-  assert.match(lowConfidence, /ai-id-service-tab-icon-check/)
+  assert.match(lowConfidence, /ai-id-service-tab-icon-check is-low/)
   assert.match(lowConfidence, /ai-id-service-tab-score is-low/)
   assert.match(lowConfidence, /ai-confidence-badge is-low/)
   assert.match(lowConfidence, /27%/)
+})
+
+test('service tabs keep a hidden score slot before results arrive', () => {
+  const html = renderIdentifyServiceTab({
+    service: 'artsorakel',
+    status: 'idle',
+    available: true,
+  })
+
+  assert.match(html, /ai-id-service-tab-score/)
+  assert.match(html, /style="display:none"/)
 })
 
 test('service tabs prefer explicit display probability over stored top probability', () => {
@@ -320,8 +332,18 @@ test('collapsed AI status chips render the active service and confidence percent
   assert.match(html, /ai-id-service-state/)
   assert.match(html, /iNaturalist/)
   assert.match(html, /87%/)
-  assert.match(html, /ai-id-service-tab-icon-check/)
+  assert.match(html, /ai-id-service-tab-icon-check is-good/)
   assert.doesNotMatch(html, /ai-confidence-badge/)
+})
+
+test('top probability falls back to the highest prediction when explicit top fields are missing', () => {
+  assert.equal(getIdentifyTopProbability({
+    predictions: [
+      { probability: 0.22 },
+      { probability: 0.91 },
+      { probability: 0.54 },
+    ],
+  }), 0.91)
 })
 
 test('confidence score spans do not use filled backgrounds', () => {

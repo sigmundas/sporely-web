@@ -7,6 +7,7 @@ import {
   buildIdentifyFingerprint,
   debugPhotoId,
   getAvailableIdentifyServices,
+  getIdentifyTopProbability,
   _renderServiceIcon,
   renderIdentifyResultRows,
   renderIdentifyServiceTab,
@@ -465,28 +466,20 @@ function _reviewAiSelectedPredictionForService(service) {
 
 export function getReviewServiceDisplayProbability(service) {
   const normalizedService = normalizeIdentifyService(service)
+  const result = reviewAiState.resultsByService?.[normalizedService] || null
+  const topProbability = getIdentifyTopProbability(result)
+  if (_reviewAiHasProbability(topProbability)) {
+    return Number(topProbability)
+  }
+
   const selectedProbability = reviewAiState.selectedProbabilityByService?.[normalizedService]
   if (_reviewAiHasProbability(selectedProbability)) {
     return Number(selectedProbability)
   }
+
   const selectedPrediction = _reviewAiSelectedPredictionForService(normalizedService)
   if (_reviewAiHasProbability(selectedPrediction?.probability)) {
     return Number(selectedPrediction.probability)
-  }
-
-  const result = reviewAiState.resultsByService?.[normalizedService] || null
-  if (_reviewAiHasProbability(result?.topProbability)) {
-    return Number(result.topProbability)
-  }
-  if (_reviewAiHasProbability(result?.topPrediction?.probability)) {
-    return Number(result.topPrediction.probability)
-  }
-
-  const firstPrediction = Array.isArray(result?.predictions)
-    ? result.predictions.find(prediction => _reviewAiHasProbability(prediction?.probability))
-    : null
-  if (firstPrediction) {
-    return Number(firstPrediction.probability)
   }
 
   return null
@@ -879,9 +872,6 @@ function setSharedTaxon(taxon, options = {}) {
       dropdown.style.display = 'none'
       dropdown.innerHTML = ''
     })
-    document.querySelectorAll('[data-identify-results]').forEach(result => {
-      result.style.display = 'none'
-    })
   }
   _syncReviewSpeciesLabel(taxon)
 }
@@ -1025,11 +1015,12 @@ function _reviewAiTabState(service, statusOverride = null) {
     reason: reviewAiState.availability?.[service]?.reason || '',
     status: statusOverride || result?.status || 'idle',
     errorMessage: result?.errorMessage || '',
-    topProbability: result?.topProbability ?? null,
+    topProbability: getIdentifyTopProbability(result),
     topPrediction: result?.topPrediction || null,
     selectedPrediction,
     selectedProbability,
     displayProbability,
+    showCheckmark: ['success', 'stale'].includes(statusOverride || result?.status || 'idle'),
     hasStored,
     hasRunResult,
   }
@@ -1120,6 +1111,7 @@ function _renderReviewAiResults() {
   const resultsEl = document.querySelector('[data-identify-results]')
   if (!resultsEl) return
   resultsEl.innerHTML = _reviewAiResultsHtml()
+  resultsEl.style.display = ''
   const activeService = normalizeIdentifyService(reviewAiState.activeService || _resolveReviewPhotoIdServices(reviewAiState.availability).primary)
   const selectedPrediction = _reviewAiSelectedPredictionForService(activeService)
   resultsEl.querySelectorAll('[data-identify-result]').forEach(result => {

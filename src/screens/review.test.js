@@ -55,6 +55,30 @@ test('review keeps ai result state separate from manual taxon selection and queu
   assert.doesNotMatch(source, /reviewAiState\.resultsByService\[normalizeIdentifyService\(pred\.service\)\]\s*=\s*{\s*\.\.\./)
 })
 
+test('review keeps ai results visible after taxon selection and scores follow the top probability first', () => {
+  const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
+
+  const sharedTaxonStart = source.indexOf('function setSharedTaxon(')
+  const sharedTaxonEnd = source.indexOf('function applyTaxon(')
+  assert.ok(sharedTaxonStart >= 0)
+  assert.ok(sharedTaxonEnd > sharedTaxonStart)
+  const sharedTaxonBlock = source.slice(sharedTaxonStart, sharedTaxonEnd)
+
+  assert.match(sharedTaxonBlock, /taxon-dropdown/)
+  assert.doesNotMatch(sharedTaxonBlock, /data-identify-results/)
+  assert.match(source, /resultsEl\.style\.display = ''/)
+
+  const probabilityStart = source.indexOf('export function getReviewServiceDisplayProbability')
+  const probabilityEnd = source.indexOf('// ── Grid build ────────────────────────────────────────────────────────────────')
+  assert.ok(probabilityStart >= 0)
+  assert.ok(probabilityEnd > probabilityStart)
+  const probabilityBlock = source.slice(probabilityStart, probabilityEnd)
+
+  assert.match(probabilityBlock, /getIdentifyTopProbability/)
+  assert.match(probabilityBlock, /selectedProbabilityByService/)
+  assert.match(probabilityBlock, /selectedPrediction/)
+})
+
 test('review init tolerates missing review shell nodes without throwing', () => {
   const previousDocument = globalThis.document
   globalThis.document = {

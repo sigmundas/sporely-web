@@ -8,6 +8,7 @@ import {
   buildIdentifyFingerprint,
   debugPhotoId,
   getAvailableIdentifyServices,
+  getIdentifyTopProbability,
   _renderServiceIcon,
   loadObservationIdentifications,
   renderIdentifyResultRows,
@@ -1572,15 +1573,14 @@ function _detailAiTabState(service) {
   const canRun = _canRunDetailAiService(service, result)
   const selectedPrediction = detailAiState.selectedPredictionByService?.[service] || null
   const selectedProbability = detailAiState.selectedProbabilityByService?.[service]
-  const displayProbability = _detailAiHasProbability(selectedProbability)
-    ? Number(selectedProbability)
-    : _detailAiHasProbability(selectedPrediction?.probability)
-      ? Number(selectedPrediction.probability)
-      : _detailAiHasProbability(result?.topProbability)
-        ? Number(result.topProbability)
-        : _detailAiHasProbability(result?.topPrediction?.probability)
-          ? Number(result.topPrediction.probability)
-          : null
+  const topProbability = getIdentifyTopProbability(result)
+  const displayProbability = _detailAiHasProbability(topProbability)
+    ? Number(topProbability)
+    : _detailAiHasProbability(selectedProbability)
+      ? Number(selectedProbability)
+      : _detailAiHasProbability(selectedPrediction?.probability)
+        ? Number(selectedPrediction.probability)
+        : null
   return {
     service,
     active: detailAiState.activeService === service,
@@ -1589,11 +1589,12 @@ function _detailAiTabState(service) {
     reason: availability?.reason || '',
     status: running ? 'running' : (result?.status || 'idle'),
     errorMessage: result?.errorMessage || '',
-    topProbability: result?.topProbability ?? null,
+    topProbability,
     topPrediction: result?.topPrediction || null,
     selectedPrediction,
     selectedProbability,
     displayProbability,
+    showCheckmark: detailAiState.selectedService === service && ['success', 'stale'].includes(result?.status || 'idle'),
     hasStored: _hasStoredAiResult(result),
     hasRunResult: _hasAiRunResult(result),
     canView,
@@ -1627,15 +1628,20 @@ function _buildDetailAiCachedResult(row, currentFingerprint = {}) {
   const service = normalizeIdentifyService(row.service)
   const current = _detailAiFingerprintFromValue(currentFingerprint)
   const rowFingerprint = _detailAiFingerprintText(row.request_fingerprint || row.requestFingerprint || '')
+  const topProbability = getIdentifyTopProbability({
+    topProbability: row.top_probability ?? null,
+    topPrediction: row.results?.[0] || null,
+    predictions: row.results || [],
+  })
   const result = {
     service,
     status: _detailAiCachedResultStatus(row, current),
     predictions: Array.isArray(row.results) ? row.results : [],
     topPrediction: row.results?.[0] ? {
       ...row.results[0],
-      confidenceText: `${Math.round(Number(row.top_probability ?? row.results[0]?.probability ?? 0) * 100)}%`,
+      confidenceText: `${Math.round(Number(topProbability ?? 0) * 100)}%`,
     } : null,
-    topProbability: row.top_probability ?? row.results?.[0]?.probability ?? null,
+    topProbability,
     topScientificName: row.top_scientific_name || row.results?.[0]?.scientificName || null,
     topVernacularName: row.top_vernacular_name || row.results?.[0]?.vernacularName || null,
     topTaxonId: row.top_taxon_id || row.results?.[0]?.taxonId || null,
@@ -1771,7 +1777,9 @@ function _renderDetailAiResults() {
 
   resultsEl.innerHTML = renderIdentifyResultRows(activeService, result.predictions)
   resultsEl.style.display = 'block'
-  const selectedPrediction = detailAiState.selectedPrediction
+  const selectedPrediction = detailAiState.selectedService === activeService
+    ? (detailAiState.selectedPredictionByService?.[activeService] || detailAiState.selectedPrediction || null)
+    : null
   resultsEl.querySelectorAll('[data-identify-result]').forEach(el => {
     const prediction = JSON.parse(el.dataset.identifyResult)
     const isSelected = Boolean(_detailAiPredictionsEquivalent(prediction, selectedPrediction))

@@ -512,8 +512,10 @@ test('selected AI service keeps its own probability and source highlight', () =>
 
     assert.equal(tabs[0].classList.contains('is-used'), true)
     assert.equal(tabs[1].classList.contains('is-used'), false)
-    assert.equal(tabs[0].querySelector('.ai-id-service-tab-score').textContent, '53%')
-    assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '41%')
+    assert.equal(tabs[0].querySelector('.ai-id-service-tab-score').textContent, '91%')
+    assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '74%')
+    assert.match(tabs[0].querySelector('.ai-id-service-tab-icon, .ai-id-dot').outerHTML, /ai-id-service-tab-icon-check/)
+    assert.match(tabs[1].querySelector('.ai-id-service-tab-icon, .ai-id-dot').outerHTML, /ai-id-service-tab-icon-dot/)
   } finally {
     restore()
   }
@@ -606,7 +608,7 @@ test('detail AI results only highlight an explicit selected species', () => {
   }
 })
 
-test('missing cached probabilities do not render as 0%', () => {
+test('missing cached probabilities fall back to the highest stored prediction', () => {
   resetDetailState()
   const tabs = [
     makeTab('artsorakel', true),
@@ -638,8 +640,10 @@ test('missing cached probabilities do not render as 0%', () => {
 
     _renderDetailAiTabs()
 
-    assert.equal(tabs[0].querySelector('.ai-id-service-tab-score').textContent, '')
-    assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '')
+    assert.equal(tabs[0].querySelector('.ai-id-service-tab-score').textContent, '91%')
+    assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '74%')
+    assert.match(tabs[0].querySelector('.ai-id-service-tab-icon, .ai-id-dot').outerHTML, /ai-id-service-tab-icon-dot/)
+    assert.match(tabs[1].querySelector('.ai-id-service-tab-icon, .ai-id-dot').outerHTML, /ai-id-service-tab-icon-dot/)
   } finally {
     restore()
   }

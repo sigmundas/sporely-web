@@ -47,13 +47,17 @@ test('import sessions keep service predictions and state separate', () => {
   _storeSessionAiServiceResult(session, 'artsorakel', {
     status: 'success',
     predictions: [{
+      scientificName: 'Amanita pantherina',
+      vernacularName: 'Panther cap',
+      probability: 0.53,
+    }, {
       scientificName: 'Amanita muscaria',
       vernacularName: 'Fly agaric',
       probability: 0.91,
     }],
   }, fingerprint)
 
-  assert.equal(session.aiPredictionsByService.artsorakel.length, 1)
+  assert.equal(session.aiPredictionsByService.artsorakel.length, 2)
   assert.equal(session.aiServiceState.artsorakel.status, 'success')
   assert.equal(session.aiPredictionsByService.inat.length, 0)
   assert.equal(session.aiServiceState.inat.status, 'idle')
@@ -62,6 +66,7 @@ test('import sessions keep service predictions and state separate', () => {
   const inatState = _sessionAiResultState(session, 'inat')
   assert.equal(artsState.status, 'success')
   assert.equal(artsState.topProbability, 0.91)
+  assert.equal(artsState.showCheckmark, true)
   assert.equal(inatState.status, 'idle')
 })
 
