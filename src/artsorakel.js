@@ -251,6 +251,40 @@ function pickUrl(pred, taxon) {
   return 'https://artsdatabanken.no'
 }
 
+function _normalizeArtsorakelPrediction(pred, langNorm, rank) {
+  const taxon = pred?.taxon || {}
+  const scientificName = (taxon.scientificName || taxon.scientific_name || taxon.name || '').trim() || null
+  const vernacularName = pickVernacular(taxon, langNorm)
+  const displayName = vernacularName && scientificName && vernacularName.toLowerCase() !== scientificName.toLowerCase()
+    ? `${vernacularName} (${scientificName})`
+    : vernacularName || scientificName || t('common.unknown')
+  const taxonId = taxon.taxonId || taxon.id || taxon.scientific_name_id || null
+  const speciesUrl = pickUrl(pred, taxon)
+  const redlistCategory = taxon.redListCategory || taxon.redListCategories?.NO || null
+
+  return {
+    rank,
+    taxonId,
+    taxon_id: taxonId,
+    probability: Number(pred?.probability || 0),
+    scientificName,
+    scientific_name: scientificName,
+    vernacularName,
+    vernacular_name: vernacularName,
+    displayName,
+    adbUrl: speciesUrl,
+    species_url: speciesUrl,
+    speciesUrl,
+    redlist_category: redlistCategory,
+    redlistCategory,
+    redlist_status: null,
+    redlistStatus: null,
+    redlist_source: 'Artsdatabanken',
+    redlistSource: 'Artsdatabanken',
+    raw: pred,
+  }
+}
+
 function _buildArtsorakelFilename(blob) {
   const type = String(blob?.type || '').toLowerCase()
   if (type === 'image/jpeg' || type === 'image/jpg') return 'photo.jpg'
@@ -301,7 +335,7 @@ async function _prepareArtsorakelImageBlob(blob, options = {}) {
 }
 
 /**
- * POST a Blob to Artsdata AI and return up to 5 normalized predictions.
+ * POST a Blob to Artsdata AI and return normalized predictions.
  * Returns null if blob is not a real Blob (demo mode).
  * Throws on network/API error.
  */
@@ -489,21 +523,7 @@ function _extractPredictions(data) {
 function _normalizePredictions(data, langNorm) {
   return _extractPredictions(data)
     .filter(p => p?.taxon?.vernacularName !== '*** Utdatert versjon ***')
-    .slice(0, 5)
-    .map(pred => {
-      const taxon = pred.taxon || {}
-      const sci   = (taxon.scientificName || taxon.scientific_name || taxon.name || '').trim()
-      const vern  = pickVernacular(taxon, langNorm)
-      return {
-        taxonId:        taxon.taxonId || taxon.id || null,
-        probability:    Number(pred.probability || 0),
-        scientificName: sci || null,
-        vernacularName: vern || null,
-        displayName:    vern && sci && vern.toLowerCase() !== sci.toLowerCase()
-                          ? `${vern} (${sci})` : vern || sci || t('common.unknown'),
-        adbUrl:         pickUrl(pred, taxon),
-      }
-    })
+    .map((pred, index) => _normalizeArtsorakelPrediction(pred, langNorm, index + 1))
 }
 
 function _combinePredictionResponses(responses, totalBlobs) {
@@ -528,9 +548,20 @@ function _combinePredictionResponses(responses, totalBlobs) {
         existing.hitCount += 1
         existing.probability = existing.probabilitySum / totalBlobs
         if (!existing.scientificName && prediction.scientificName) existing.scientificName = prediction.scientificName
+        if (!existing.scientific_name && prediction.scientific_name) existing.scientific_name = prediction.scientific_name
         if (!existing.vernacularName && prediction.vernacularName) existing.vernacularName = prediction.vernacularName
+        if (!existing.vernacular_name && prediction.vernacular_name) existing.vernacular_name = prediction.vernacular_name
         if (!existing.displayName && prediction.displayName) existing.displayName = prediction.displayName
         if (!existing.adbUrl && prediction.adbUrl) existing.adbUrl = prediction.adbUrl
+        if (!existing.species_url && prediction.species_url) existing.species_url = prediction.species_url
+        if (!existing.speciesUrl && prediction.speciesUrl) existing.speciesUrl = prediction.speciesUrl
+        if (!existing.redlist_category && prediction.redlist_category) existing.redlist_category = prediction.redlist_category
+        if (!existing.redlistCategory && prediction.redlistCategory) existing.redlistCategory = prediction.redlistCategory
+        if (existing.redlist_status === undefined && prediction.redlist_status !== undefined) existing.redlist_status = prediction.redlist_status
+        if (existing.redlistStatus === undefined && prediction.redlistStatus !== undefined) existing.redlistStatus = prediction.redlistStatus
+        if (!existing.redlist_source && prediction.redlist_source) existing.redlist_source = prediction.redlist_source
+        if (!existing.redlistSource && prediction.redlistSource) existing.redlistSource = prediction.redlistSource
+        if (!existing.raw && prediction.raw) existing.raw = prediction.raw
         combined.set(key, existing)
       })
     })
@@ -541,6 +572,7 @@ function _combinePredictionResponses(responses, totalBlobs) {
       || b.hitCount - a.hitCount
       || b.probability - a.probability
     )
+    // Keep a compact top-5 combined result list for multi-image summaries.
     .slice(0, 5)
     .map(({ probabilitySum, hitCount, ...prediction }) => prediction)
 }

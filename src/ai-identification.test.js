@@ -452,17 +452,41 @@ test('cached identification rows are reused and stale rows are marked when the f
     language: 'en',
     results: [
       {
-        scientificName: 'Amanita muscaria',
-        vernacularName: 'Fly agaric',
-        taxonId: '123',
-        probability: 0.91,
+        rank: 1,
+        scientific_name: 'Gloeophyllum odoratum',
+        vernacular_name: 'Lukttjæresopp',
+        taxon_id: 'NBIC:56449',
+        species_url: 'https://artsdatabanken.no/Pages/361402',
+        redlist_category: 'LC',
+        redlist_source: 'Artsdatabanken',
+        probability: 0.97,
+      },
+      {
+        scientificName: 'Morchella esculenta',
+        vernacularName: 'Morel',
+        taxonId: '456',
+        speciesUrl: 'https://artsdatabanken.no/Pages/456',
+        redlistCategory: 'NT',
+        probability: 0.77,
       },
     ],
     supabaseClient: client,
   })
 
   assert.equal(first.status, 'success')
-  assert.equal(first.top_scientific_name, 'Amanita muscaria')
+  assert.equal(first.results.length, 2)
+  assert.equal(first.results[0].scientific_name, 'Gloeophyllum odoratum')
+  assert.equal(first.results[0].scientificName, 'Gloeophyllum odoratum')
+  assert.equal(first.results[1].scientific_name, 'Morchella esculenta')
+  assert.equal(first.results[1].species_url, 'https://artsdatabanken.no/Pages/456')
+  assert.equal(first.results[1].redlist_category, 'NT')
+  assert.equal(first.top_scientific_name, 'Gloeophyllum odoratum')
+  assert.equal(first.top_vernacular_name, 'Lukttjæresopp')
+  assert.equal(first.top_taxon_id, 'NBIC:56449')
+  assert.equal(first.top_probability, 0.97)
+  assert.equal(first.top_species_url, 'https://artsdatabanken.no/Pages/361402')
+  assert.equal(first.top_redlist_category, 'LC')
+  assert.equal(first.top_redlist_source, 'Artsdatabanken')
 
   const cached = await maybeLoadCachedIdentification({
     observationId: 'obs-1',
@@ -473,7 +497,10 @@ test('cached identification rows are reused and stale rows are marked when the f
   assert.equal(cached.request_fingerprint, 'req-1')
   assert.equal(cached.image_fingerprint, 'img-1')
   assert.equal(cached.crop_fingerprint, 'crop-1')
-  assert.equal(cached.top_probability, 0.91)
+  assert.equal(cached.results.length, 2)
+  assert.equal(cached.top_probability, 0.97)
+  assert.equal(cached.top_species_url, 'https://artsdatabanken.no/Pages/361402')
+  assert.equal(cached.top_redlist_category, 'LC')
 
   await new Promise(resolve => setTimeout(resolve, 2))
 
@@ -501,6 +528,7 @@ test('cached identification rows are reused and stale rows are marked when the f
   assert.equal(rows[0].request_fingerprint, 'req-2')
   assert.equal(rows[0].image_fingerprint, 'img-2')
   assert.equal(rows[0].crop_fingerprint, 'crop-2')
+  assert.equal(rows[0].results.length, 1)
   assert.equal(rows[1].status, 'stale')
   assert.equal(rows[1].image_fingerprint, 'img-1')
   assert.equal(rows[1].crop_fingerprint, 'crop-1')

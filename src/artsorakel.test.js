@@ -329,6 +329,74 @@ test('runArtsorakel uses a filename that matches the prepared blob type', async 
   })
 })
 
+test('runArtsorakel keeps all real predictions and normalizes storage-friendly fields', async () => {
+  await withHarness(async harness => {
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 800, 600)
+    harness.setFetch(async () => makeResponse({
+      jsonBody: {
+        predictions: [
+          {
+            probability: 0.01,
+            taxon: {
+              vernacularName: '*** Utdatert versjon ***',
+            },
+          },
+          {
+            probability: 0.97,
+            taxon: {
+              scientificName: 'Gloeophyllum odoratum',
+              vernacularName: 'Lukttjæresopp',
+              taxonId: 'NBIC:56449',
+              scientific_name_id: 'NBIC:56449',
+              scientific_name_id_shared: 'NBIC:56449',
+              infoUrl: 'https://artsdatabanken.no/Pages/361402',
+              redListCategory: 'LC',
+              redListCategories: { NO: 'LC' },
+              picture: 'https://example.invalid/gloeophyllum.jpg',
+            },
+          },
+          {
+            probability: 0.74,
+            taxon: {
+              scientificName: 'Trametes versicolor',
+              vernacularName: 'Muslingkjuke',
+              taxonId: 'NBIC:12345',
+              infoUrl: 'https://artsdatabanken.no/Pages/123456',
+              redListCategory: 'LC',
+            },
+          },
+          {
+            probability: 0.51,
+            taxon: {
+              scientificName: 'Fomitopsis betulina',
+              vernacularName: 'Bjørkebladkjuke',
+              taxonId: 'NBIC:54321',
+              infoUrl: 'https://artsdatabanken.no/Pages/654321',
+              redListCategories: { NO: 'NT' },
+            },
+          },
+        ],
+      },
+    }))
+
+    const results = await runArtsorakel(blob, 'no')
+
+    assert.equal(results.length, 3)
+    assert.deepEqual(results.map(result => result.rank), [1, 2, 3])
+    assert.equal(results[0].scientificName, 'Gloeophyllum odoratum')
+    assert.equal(results[0].scientific_name, 'Gloeophyllum odoratum')
+    assert.equal(results[0].taxon_id, 'NBIC:56449')
+    assert.equal(results[0].species_url, 'https://artsdatabanken.no/Pages/361402')
+    assert.equal(results[0].redlist_category, 'LC')
+    assert.equal(results[0].redlist_source, 'Artsdatabanken')
+    assert.equal(results[0].raw.taxon.scientific_name_id, 'NBIC:56449')
+    assert.equal(results[0].taxonId, 'NBIC:56449')
+    assert.equal(results[0].vernacularName, 'Lukttjæresopp')
+    assert.equal(results[0].adbUrl, 'https://artsdatabanken.no/Pages/361402')
+  })
+})
+
 test('retries multipart field "file" after "image" fails', async () => {
   await withHarness(async harness => {
     const calls = []

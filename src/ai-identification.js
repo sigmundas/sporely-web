@@ -43,6 +43,11 @@ function _normalizeText(value) {
   return String(value ?? '').trim()
 }
 
+function _normalizeNullableText(value) {
+  const text = _normalizeText(value)
+  return text ? text : null
+}
+
 function _normalizeProbability(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return 0
@@ -243,7 +248,60 @@ function _getPredictionName(prediction = {}) {
   }
 }
 
-export function normalizeIdentifyPrediction(service, prediction = {}) {
+function _getPredictionRank(prediction = {}, fallbackRank = null) {
+  const value = Number(prediction?.rank)
+  if (Number.isFinite(value) && value > 0) return Math.floor(value)
+  const fallbackValue = Number(fallbackRank)
+  if (Number.isFinite(fallbackValue) && fallbackValue > 0) return Math.floor(fallbackValue)
+  return null
+}
+
+function _getPredictionTaxonId(prediction = {}) {
+  return prediction.taxon_id
+    ?? prediction.taxonId
+    ?? prediction.taxon?.scientific_name_id
+    ?? prediction.taxon?.scientific_name_id_shared
+    ?? prediction.taxon?.id
+    ?? prediction.id
+    ?? null
+}
+
+function _getPredictionSpeciesUrl(service, prediction = {}, taxonId = null) {
+  if (normalizeIdentifyService(service) === ID_SERVICE_INATURALIST && taxonId) {
+    return `https://www.inaturalist.org/taxa/${taxonId}`
+  }
+  return _normalizeNullableText(
+    prediction.species_url
+    ?? prediction.speciesUrl
+    ?? prediction.adbUrl
+    ?? prediction.url
+    ?? prediction.href
+    ?? prediction.taxon?.infoUrl
+    ?? prediction.taxon?.infoURL
+    ?? prediction.taxon?.info_url
+  )
+}
+
+function _getPredictionRedlistMetadata(prediction = {}) {
+  return {
+    redlistCategory: _normalizeNullableText(
+      prediction.redlist_category
+      ?? prediction.redlistCategory
+      ?? prediction.taxon?.redListCategory
+      ?? prediction.taxon?.redListCategories?.NO
+    ),
+    redlistStatus: _normalizeNullableText(
+      prediction.redlist_status
+      ?? prediction.redlistStatus
+    ),
+    redlistSource: _normalizeNullableText(
+      prediction.redlist_source
+      ?? prediction.redlistSource
+    ),
+  }
+}
+
+export function normalizeIdentifyPrediction(service, prediction = {}, rank = null) {
   const normalizedService = normalizeIdentifyService(service)
   const probability = _normalizeProbability(
     prediction.probability
@@ -251,21 +309,51 @@ export function normalizeIdentifyPrediction(service, prediction = {}) {
     ?? prediction.vision_score
     ?? prediction.score
   )
-  const taxonId = prediction.taxonId ?? prediction.taxon_id ?? prediction.taxon?.id ?? prediction.id ?? null
+  const taxonId = _getPredictionTaxonId(prediction)
   const nameInfo = _getPredictionName(prediction)
+  const speciesUrl = _getPredictionSpeciesUrl(normalizedService, prediction, taxonId)
+  const redlistMetadata = _getPredictionRedlistMetadata(prediction)
 
   return {
     service: normalizedService,
+    rank: _getPredictionRank(prediction, rank),
     taxonId: taxonId ?? null,
+    taxon_id: taxonId ?? null,
     probability,
     confidenceText: `${Math.round(probability * 100)}%`,
     scientificName: nameInfo.scientificName,
+    scientific_name: nameInfo.scientificName,
     vernacularName: nameInfo.vernacularName,
+    vernacular_name: nameInfo.vernacularName,
     displayName: nameInfo.displayName,
-    adbUrl: prediction.adbUrl || prediction.url || prediction.href || null,
+    adbUrl: prediction.adbUrl || prediction.url || prediction.href || speciesUrl || null,
+    species_url: speciesUrl,
+    speciesUrl,
+    redlist_category: redlistMetadata.redlistCategory,
+    redlistCategory: redlistMetadata.redlistCategory,
+    redlist_status: redlistMetadata.redlistStatus,
+    redlistStatus: redlistMetadata.redlistStatus,
+    redlist_source: redlistMetadata.redlistSource,
+    redlistSource: redlistMetadata.redlistSource,
     taxon: prediction.taxon || null,
+    raw: prediction.raw ?? prediction,
     rawScore: prediction.rawScore ?? prediction.score ?? prediction.combined_score ?? prediction.vision_score ?? null,
   }
+}
+
+function _getTopIdentifyPrediction(predictions = []) {
+  let top = null
+  let topRank = null
+  for (let index = 0; index < (Array.isArray(predictions) ? predictions.length : 0); index += 1) {
+    const prediction = predictions[index]
+    if (!prediction) continue
+    const rank = _getPredictionRank(prediction, index + 1)
+    if (top === null || (rank !== null && (topRank === null || rank < topRank))) {
+      top = prediction
+      topRank = rank
+    }
+  }
+  return top
 }
 
 export function formatAiSuggestionDisplay(prediction = {}) {
@@ -375,10 +463,10 @@ export function renderIdentifyConfidenceBadge(score, options = {}) {
 export function normalizeIdentifyRunResult(service, predictions = [], metadata = {}) {
   const normalizedService = normalizeIdentifyService(service)
   const normalizedPredictions = (Array.isArray(predictions) ? predictions : [])
-    .map(prediction => normalizeIdentifyPrediction(normalizedService, prediction))
+    .map((prediction, index) => normalizeIdentifyPrediction(normalizedService, prediction, index + 1))
     .filter(prediction => prediction.displayName)
 
-  const top = normalizedPredictions[0] || null
+  const top = _getTopIdentifyPrediction(normalizedPredictions)
   const status = metadata.status
     || (metadata.errorMessage ? 'error' : (normalizedPredictions.length ? 'success' : 'no_match'))
 
@@ -392,6 +480,10 @@ export function normalizeIdentifyRunResult(service, predictions = [], metadata =
     topScientificName: top?.scientificName ?? null,
     topVernacularName: top?.vernacularName ?? null,
     topTaxonId: top?.taxonId ?? null,
+    topSpeciesUrl: top?.species_url ?? top?.speciesUrl ?? null,
+    topRedlistCategory: top?.redlist_category ?? top?.redlistCategory ?? null,
+    topRedlistStatus: top?.redlist_status ?? top?.redlistStatus ?? null,
+    topRedlistSource: top?.redlist_source ?? top?.redlistSource ?? null,
     errorMessage: metadata.errorMessage || null,
     unavailableReason: metadata.unavailableReason || null,
     language: metadata.language || null,
@@ -803,10 +895,14 @@ export async function saveIdentificationRun({
       language: language || null,
       model_version: modelVersion || null,
       results: normalizedResult.results,
-      top_scientific_name: topPrediction?.scientificName || normalizedResult.topScientificName || null,
-      top_vernacular_name: topPrediction?.vernacularName || normalizedResult.topVernacularName || null,
-      top_taxon_id: topPrediction?.taxonId || normalizedResult.topTaxonId || null,
-      top_probability: topPrediction?.probability ?? normalizedResult.topProbability ?? null,
+      top_scientific_name: normalizedResult.topScientificName || null,
+      top_vernacular_name: normalizedResult.topVernacularName || null,
+      top_taxon_id: normalizedResult.topTaxonId || null,
+      top_probability: normalizedResult.topProbability ?? null,
+      top_species_url: normalizedResult.topSpeciesUrl || null,
+      top_redlist_category: normalizedResult.topRedlistCategory || null,
+      top_redlist_status: normalizedResult.topRedlistStatus || null,
+      top_redlist_source: normalizedResult.topRedlistSource || null,
       error_message: errorMessage || null,
       updated_at: new Date().toISOString(),
     }

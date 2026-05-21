@@ -1094,6 +1094,10 @@ CREATE TABLE IF NOT EXISTS "public"."observation_identifications" (
     "top_vernacular_name" "text",
     "top_taxon_id" "text",
     "top_probability" numeric,
+    "top_species_url" "text",
+    "top_redlist_category" "text",
+    "top_redlist_status" "text",
+    "top_redlist_source" "text",
     "error_message" "text",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
@@ -2457,7 +2461,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
 
 
 
