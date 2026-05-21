@@ -4,6 +4,8 @@ import fs from 'node:fs'
 
 import {
   _buildDetailAiCachedResults,
+  _detailAiCropInputMapChanged,
+  _detailAiCropMetaMapChanged,
   _hasAiRunResult,
   _hasStoredAiResult,
   _canRunDetailAiService,
@@ -119,6 +121,7 @@ function resetDetailState() {
   detailAiState.requestedFingerprint = ''
   detailAiState.currentFingerprintByService = {}
   detailAiState.requestedFingerprintByService = {}
+  detailAiState.localInputsChanged = false
   detailAiState.stale = false
 }
 
@@ -183,33 +186,238 @@ test('non-owner detail tabs stay disabled until there is a stored result to view
   }
 })
 
-test('cached rows select the matching fingerprint and mark older rows stale', () => {
+test('cached rows prefer the exact request fingerprint over newer same-input rows', () => {
   const rows = [
     {
       service: 'artsorakel',
       status: 'success',
-      request_fingerprint: 'req-1',
-      top_probability: 0.91,
-      results: [{ scientificName: 'Amanita muscaria', probability: 0.91 }],
+      request_fingerprint: 'req-newer',
+      image_fingerprint: 'img-1',
+      crop_fingerprint: 'crop-1',
+      created_at: '2026-05-20T12:00:00Z',
+      top_scientific_name: 'Newer match',
+      results: [{ scientificName: 'Newer match', probability: 0.84 }],
     },
     {
-      service: 'inat',
-      status: 'no_match',
-      request_fingerprint: 'old-inat',
-      results: [],
+      service: 'artsorakel',
+      status: 'success',
+      request_fingerprint: 'req-exact',
+      image_fingerprint: 'img-1',
+      crop_fingerprint: 'crop-1',
+      created_at: '2026-05-19T12:00:00Z',
+      top_scientific_name: 'Exact match',
+      results: [{ scientificName: 'Exact match', probability: 0.91 }],
     },
   ]
 
   const results = _buildDetailAiCachedResults(rows, {
-    artsorakel: 'req-1',
-    inat: 'new-inat',
+    artsorakel: {
+      requestFingerprint: 'req-exact',
+      imageFingerprint: 'img-1',
+      cropFingerprint: 'crop-1',
+    },
+  })
+
+  assert.equal(results.artsorakel.status, 'success')
+  assert.equal(results.artsorakel.topScientificName, 'Exact match')
+  assert.equal(results.artsorakel.request_fingerprint, 'req-exact')
+  assert.equal(results.artsorakel.image_fingerprint, 'img-1')
+  assert.equal(results.artsorakel.crop_fingerprint, 'crop-1')
+})
+
+test('cached rows do not become stale when only request fingerprint changes', () => {
+  const rows = [
+    {
+      service: 'artsorakel',
+      status: 'success',
+      request_fingerprint: 'req-old',
+      image_fingerprint: 'img-1',
+      crop_fingerprint: 'crop-1',
+      top_probability: 0.91,
+      results: [{ scientificName: 'Amanita muscaria', probability: 0.91 }],
+    },
+  ]
+
+  const results = _buildDetailAiCachedResults(rows, {
+    artsorakel: {
+      requestFingerprint: 'req-new',
+      imageFingerprint: 'img-1',
+      cropFingerprint: 'crop-1',
+    },
   })
 
   assert.equal(results.artsorakel.status, 'success')
   assert.equal(results.artsorakel.predictions[0].scientificName, 'Amanita muscaria')
-  assert.equal(results.inat.status, 'stale')
-  assert.equal(results.inat.predictions.length, 0)
-  assert.deepEqual(_buildDetailAiCachedResults([], { artsorakel: 'req-1' }), {})
+  assert.equal(results.artsorakel.request_fingerprint, 'req-old')
+  assert.equal(results.artsorakel.image_fingerprint, 'img-1')
+  assert.equal(results.artsorakel.crop_fingerprint, 'crop-1')
+})
+
+test('cached rows become stale when crop fingerprint changes', () => {
+  const rows = [
+    {
+      service: 'artsorakel',
+      status: 'success',
+      request_fingerprint: 'req-old',
+      image_fingerprint: 'img-1',
+      crop_fingerprint: 'crop-old',
+      results: [{ scientificName: 'Amanita muscaria', probability: 0.91 }],
+    },
+  ]
+
+  const results = _buildDetailAiCachedResults(rows, {
+    artsorakel: {
+      requestFingerprint: 'req-new',
+      imageFingerprint: 'img-1',
+      cropFingerprint: 'crop-new',
+    },
+  })
+
+  assert.equal(results.artsorakel.status, 'stale')
+  assert.equal(results.artsorakel.predictions[0].scientificName, 'Amanita muscaria')
+})
+
+test('cached rows become stale when image fingerprint changes', () => {
+  const rows = [
+    {
+      service: 'artsorakel',
+      status: 'success',
+      request_fingerprint: 'req-old',
+      image_fingerprint: 'img-old',
+      crop_fingerprint: 'crop-1',
+      results: [{ scientificName: 'Amanita muscaria', probability: 0.91 }],
+    },
+  ]
+
+  const results = _buildDetailAiCachedResults(rows, {
+    artsorakel: {
+      requestFingerprint: 'req-new',
+      imageFingerprint: 'img-new',
+      cropFingerprint: 'crop-1',
+    },
+  })
+
+  assert.equal(results.artsorakel.status, 'stale')
+  assert.equal(results.artsorakel.predictions[0].scientificName, 'Amanita muscaria')
+})
+
+test('legacy cached rows without input fingerprints do not become stale on request drift', () => {
+  const rows = [
+    {
+      service: 'artsorakel',
+      status: 'stale',
+      request_fingerprint: 'req-old',
+      results: [{ scientificName: 'Amanita muscaria', probability: 0.91 }],
+    },
+  ]
+
+  const results = _buildDetailAiCachedResults(rows, {
+    artsorakel: {
+      requestFingerprint: 'req-new',
+      imageFingerprint: 'img-new',
+      cropFingerprint: 'crop-new',
+    },
+  })
+
+  assert.equal(results.artsorakel.status, 'success')
+  assert.equal(results.artsorakel.predictions[0].scientificName, 'Amanita muscaria')
+})
+
+test('cached rows fall back to the newest row when no request or input fingerprints match', () => {
+  const rows = [
+    {
+      service: 'artsorakel',
+      status: 'success',
+      request_fingerprint: 'req-old',
+      image_fingerprint: 'img-old',
+      crop_fingerprint: 'crop-old',
+      created_at: '2026-05-19T12:00:00Z',
+      top_scientific_name: 'Older row',
+      results: [{ scientificName: 'Older row', probability: 0.84 }],
+    },
+    {
+      service: 'artsorakel',
+      status: 'success',
+      request_fingerprint: 'req-new',
+      image_fingerprint: 'img-new',
+      crop_fingerprint: 'crop-new',
+      created_at: '2026-05-20T12:00:00Z',
+      top_scientific_name: 'Newest row',
+      results: [{ scientificName: 'Newest row', probability: 0.93 }],
+    },
+  ]
+
+  const results = _buildDetailAiCachedResults(rows, {
+    artsorakel: {
+      requestFingerprint: 'req-current',
+      imageFingerprint: 'img-current',
+      cropFingerprint: 'crop-current',
+    },
+  })
+
+  assert.equal(results.artsorakel.topScientificName, 'Newest row')
+  assert.equal(results.artsorakel.status, 'stale')
+})
+
+test('detail crop comparisons ignore no-op saves but detect real crop changes', () => {
+  const original = new Map([
+    ['img-1', {
+      aiCropRect: { x1: 0.1, y1: 0.2, x2: 0.9, y2: 0.8 },
+      aiCropSourceW: 1200,
+      aiCropSourceH: 900,
+      aiCropIsCustom: true,
+    }],
+  ])
+
+  const unchangedRows = [
+    {
+      id: 'img-1',
+      ai_crop_x1: 0.1,
+      ai_crop_y1: 0.2,
+      ai_crop_x2: 0.9,
+      ai_crop_y2: 0.8,
+      ai_crop_source_w: 1200,
+      ai_crop_source_h: 900,
+      ai_crop_is_custom: true,
+    },
+  ]
+
+  const changedRows = [
+    {
+      id: 'img-1',
+      ai_crop_x1: 0.15,
+      ai_crop_y1: 0.2,
+      ai_crop_x2: 0.9,
+      ai_crop_y2: 0.8,
+      ai_crop_source_w: 1200,
+      ai_crop_source_h: 900,
+      ai_crop_is_custom: true,
+    },
+  ]
+
+  assert.equal(_detailAiCropMetaMapChanged(original, unchangedRows), false)
+  assert.equal(_detailAiCropMetaMapChanged(original, changedRows), true)
+  assert.equal(_detailAiCropInputMapChanged(original, [
+    {
+      id: 'img-1',
+      ai_crop_x1: 0.1,
+      ai_crop_y1: 0.2,
+      ai_crop_x2: 0.9,
+      ai_crop_y2: 0.8,
+      ai_crop_source_w: 1200,
+      ai_crop_source_h: 900,
+      ai_crop_is_custom: false,
+    },
+  ]), false)
+
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+  const onCloseStart = source.indexOf('onClose: async committed => {')
+  const delBtnStart = source.indexOf('const delBtn = document.createElement', onCloseStart)
+  assert.ok(onCloseStart >= 0)
+  assert.ok(delBtnStart > onCloseStart)
+  const onCloseBlock = source.slice(onCloseStart, delBtnStart)
+  assert.ok(onCloseBlock.indexOf('const aiCropChanged = _detailAiCropInputMapChanged(originalCropMetaById)') < onCloseBlock.indexOf('_markDetailAiStale()'))
+  assert.ok(onCloseBlock.indexOf('_markDetailAiStale()') < onCloseBlock.indexOf('const cropError = await _persistDetailImageCrops()'))
 })
 
 test('stored results remain clickable even when the current availability says unavailable', () => {
@@ -463,6 +671,63 @@ test('no-match and error states still render their stored messages', () => {
     }
     _renderDetailAiResults()
     assert.match(resultsEl.innerHTML, /Boom/)
+  } finally {
+    restore()
+  }
+})
+
+test('cached stale results do not show outdated warnings on reopen', () => {
+  resetDetailState()
+  const resultsEl = makeResultsEl()
+  const staleNote = { style: {} }
+  const restore = withDocument({ resultsEl, staleNote })
+
+  try {
+    detailAiState.activeService = 'artsorakel'
+    detailAiState.resultsByService = {
+      artsorakel: {
+        service: 'artsorakel',
+        status: 'stale',
+        predictions: [],
+        errorMessage: '',
+      },
+    }
+    detailAiState.localInputsChanged = false
+    detailAiState.stale = false
+
+    _renderDetailAiResults()
+
+    assert.equal(staleNote.style.display, 'none')
+    assert.match(resultsEl.innerHTML, /returned no suggestion/i)
+    assert.doesNotMatch(resultsEl.innerHTML, /Results outdated/i)
+  } finally {
+    restore()
+  }
+})
+
+test('current-session dirty stale results show the outdated warning', () => {
+  resetDetailState()
+  const resultsEl = makeResultsEl()
+  const staleNote = { style: {} }
+  const restore = withDocument({ resultsEl, staleNote })
+
+  try {
+    detailAiState.activeService = 'artsorakel'
+    detailAiState.resultsByService = {
+      artsorakel: {
+        service: 'artsorakel',
+        status: 'stale',
+        predictions: [],
+        errorMessage: '',
+      },
+    }
+    detailAiState.localInputsChanged = true
+    detailAiState.stale = false
+
+    _renderDetailAiResults()
+
+    assert.equal(staleNote.style.display, '')
+    assert.match(resultsEl.innerHTML, /Results outdated/i)
   } finally {
     restore()
   }

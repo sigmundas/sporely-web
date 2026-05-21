@@ -70,6 +70,7 @@ const detailAiState = {
   requestedFingerprint: '',
   currentFingerprintByService: {},
   requestedFingerprintByService: {},
+  localInputsChanged: false,
   stale: false,
 }
 
@@ -268,6 +269,172 @@ function _detailAiPredictionProbability(prediction = null, fallback = null) {
 
 function _detailAiHasProbability(value) {
   return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+}
+
+function _detailAiCropMetaFromRow(row = {}) {
+  const normalizeNumber = value => {
+    const number = Number(value)
+    return Number.isFinite(number) ? number : null
+  }
+  return {
+    aiCropRect: normalizeAiCropRect({
+      x1: row.ai_crop_x1,
+      y1: row.ai_crop_y1,
+      x2: row.ai_crop_x2,
+      y2: row.ai_crop_y2,
+    }),
+    aiCropSourceW: normalizeNumber(row.ai_crop_source_w),
+    aiCropSourceH: normalizeNumber(row.ai_crop_source_h),
+    aiCropIsCustom: row.ai_crop_is_custom === true,
+  }
+}
+
+function _detailAiCropMetaFromEdit(meta = {}) {
+  const normalizeNumber = value => {
+    const number = Number(value)
+    return Number.isFinite(number) ? number : null
+  }
+  return {
+    aiCropRect: normalizeAiCropRect(meta.aiCropRect),
+    aiCropSourceW: normalizeNumber(meta.aiCropSourceW),
+    aiCropSourceH: normalizeNumber(meta.aiCropSourceH),
+    aiCropIsCustom: meta.aiCropIsCustom === true,
+  }
+}
+
+function _detailAiCropMetaEquals(left = null, right = null) {
+  const leftRect = normalizeAiCropRect(left?.aiCropRect)
+  const rightRect = normalizeAiCropRect(right?.aiCropRect)
+  return (
+    leftRect?.x1 === rightRect?.x1
+    && leftRect?.y1 === rightRect?.y1
+    && leftRect?.x2 === rightRect?.x2
+    && leftRect?.y2 === rightRect?.y2
+    && (left?.aiCropSourceW ?? null) === (right?.aiCropSourceW ?? null)
+    && (left?.aiCropSourceH ?? null) === (right?.aiCropSourceH ?? null)
+    && (left?.aiCropIsCustom === true) === (right?.aiCropIsCustom === true)
+  )
+}
+
+function _detailAiCropInputEquals(left = null, right = null) {
+  const leftRect = normalizeAiCropRect(left?.aiCropRect)
+  const rightRect = normalizeAiCropRect(right?.aiCropRect)
+  return (
+    leftRect?.x1 === rightRect?.x1
+    && leftRect?.y1 === rightRect?.y1
+    && leftRect?.x2 === rightRect?.x2
+    && leftRect?.y2 === rightRect?.y2
+    && (left?.aiCropSourceW ?? null) === (right?.aiCropSourceW ?? null)
+    && (left?.aiCropSourceH ?? null) === (right?.aiCropSourceH ?? null)
+  )
+}
+
+function _detailAiCropMetaMap(rows = detailImageRows) {
+  return new Map((Array.isArray(rows) ? rows : []).map(row => [String(row?.id || ''), _detailAiCropMetaFromRow(row)]))
+}
+
+function _detailAiCropMetaMapChanged(originalMap = new Map(), rows = detailImageRows) {
+  const currentMap = _detailAiCropMetaMap(rows)
+  if (originalMap.size !== currentMap.size) return true
+  for (const [id, originalMeta] of originalMap.entries()) {
+    const currentMeta = currentMap.get(id)
+    if (!currentMeta || !_detailAiCropMetaEquals(originalMeta, currentMeta)) {
+      return true
+    }
+  }
+  return false
+}
+
+function _detailAiCropInputMapChanged(originalMap = new Map(), rows = detailImageRows) {
+  const currentMap = _detailAiCropMetaMap(rows)
+  if (originalMap.size !== currentMap.size) return true
+  for (const [id, originalMeta] of originalMap.entries()) {
+    const currentMeta = currentMap.get(id)
+    if (!currentMeta || !_detailAiCropInputEquals(originalMeta, currentMeta)) {
+      return true
+    }
+  }
+  return false
+}
+
+function _detailAiFingerprintText(value = '') {
+  return String(value ?? '').trim()
+}
+
+function _detailAiFingerprintFromValue(value = {}) {
+  if (typeof value === 'string') {
+    return {
+      requestFingerprint: _detailAiFingerprintText(value),
+      imageFingerprint: '',
+      cropFingerprint: '',
+    }
+  }
+  return {
+    requestFingerprint: _detailAiFingerprintText(value?.requestFingerprint ?? value?.request_fingerprint ?? ''),
+    imageFingerprint: _detailAiFingerprintText(value?.imageFingerprint ?? value?.image_fingerprint ?? ''),
+    cropFingerprint: _detailAiFingerprintText(value?.cropFingerprint ?? value?.crop_fingerprint ?? ''),
+  }
+}
+
+function _detailAiCachedRowTimestamp(row = {}) {
+  const rawTimestamp = row?.created_at || row?.updated_at || row?.createdAt || row?.updatedAt || ''
+  const parsedTimestamp = Date.parse(rawTimestamp)
+  return Number.isFinite(parsedTimestamp) ? parsedTimestamp : 0
+}
+
+function _detailAiSortRowsNewestFirst(rows = []) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter(Boolean)
+    .slice()
+    .sort((left, right) => {
+      const timeDelta = _detailAiCachedRowTimestamp(right) - _detailAiCachedRowTimestamp(left)
+      if (timeDelta !== 0) return timeDelta
+      return String(right?.id || '').localeCompare(String(left?.id || ''))
+    })
+}
+
+function _detailAiCachedRowMatchesInputs(row = {}, currentFingerprint = {}) {
+  const current = _detailAiFingerprintFromValue(currentFingerprint)
+  const rowImageFingerprint = _detailAiFingerprintText(row?.image_fingerprint || '')
+  const rowCropFingerprint = _detailAiFingerprintText(row?.crop_fingerprint || '')
+  if (!current.imageFingerprint || !current.cropFingerprint || !rowImageFingerprint || !rowCropFingerprint) {
+    return false
+  }
+  return rowImageFingerprint === current.imageFingerprint
+    && rowCropFingerprint === current.cropFingerprint
+}
+
+function _detailAiCachedRowHasInputChange(row = {}, currentFingerprint = {}) {
+  const current = _detailAiFingerprintFromValue(currentFingerprint)
+  const rowImageFingerprint = _detailAiFingerprintText(row?.image_fingerprint || '')
+  const rowCropFingerprint = _detailAiFingerprintText(row?.crop_fingerprint || '')
+  const imageChanged = Boolean(rowImageFingerprint && current.imageFingerprint && rowImageFingerprint !== current.imageFingerprint)
+  const cropChanged = Boolean(rowCropFingerprint && current.cropFingerprint && rowCropFingerprint !== current.cropFingerprint)
+  return imageChanged || cropChanged
+}
+
+function _detailAiCachedResultStatus(row = {}, currentFingerprint = {}) {
+  const results = Array.isArray(row?.results) ? row.results : []
+  const baseStatus = row?.status || (results.length ? 'success' : 'no_match')
+  if (_detailAiCachedRowHasInputChange(row, currentFingerprint)) {
+    return 'stale'
+  }
+  if (baseStatus !== 'stale') return baseStatus
+  if (row?.error_message) return 'error'
+  if (results.length) return 'success'
+  return 'no_match'
+}
+
+function _detailAiSelectCachedRowForService(rows = [], currentFingerprint = {}) {
+  const sortedRows = _detailAiSortRowsNewestFirst(rows)
+  const current = _detailAiFingerprintFromValue(currentFingerprint)
+  if (current.requestFingerprint) {
+    const exactMatch = sortedRows.find(item => _detailAiFingerprintFromValue(item).requestFingerprint === current.requestFingerprint)
+    if (exactMatch) return exactMatch
+  }
+  const inputMatch = sortedRows.find(item => _detailAiCachedRowMatchesInputs(item, current))
+  if (inputMatch) return inputMatch
+  return sortedRows[0] || null
 }
 
 function _detailAiSelectionStateFromResults(resultsByService = {}, obs = currentObs) {
@@ -631,6 +798,7 @@ export async function openFindDetail(obsId, options = {}) {
   detailAiState.requestedFingerprint = ''
   detailAiState.currentFingerprintByService = {}
   detailAiState.requestedFingerprintByService = {}
+  detailAiState.localInputsChanged = false
   detailAiState.stale = false
   detailImageCropDirty = false
   detailLocationLookup = null
@@ -922,6 +1090,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
       cropBtn.addEventListener('click', (e) => {
         e.stopPropagation()
         const startIndex = detailImageRows.findIndex(r => String(r.id) === String(row.id))
+        const originalCropMetaById = _detailAiCropMetaMap()
         openAiCropEditor({
           title: t('crop.editorTitle'),
           startIndex: Math.max(0, startIndex),
@@ -938,23 +1107,18 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
           onChange: (idx, meta) => {
             const r = detailImageRows[idx]
             if (!r) return
-            if (import.meta.env?.DEV) {
-              console.debug('[detail-crop] onChange meta', {
-                imageId: r.id,
-                aiCropIsCustom: meta.aiCropIsCustom,
-                rect: meta.aiCropRect,
-                source: [meta.aiCropSourceW, meta.aiCropSourceH],
-              })
-            }
-            const nextRect = normalizeAiCropRect(meta.aiCropRect)
-            r.ai_crop_x1 = nextRect?.x1 ?? null
-            r.ai_crop_y1 = nextRect?.y1 ?? null
-            r.ai_crop_x2 = nextRect?.x2 ?? null
-            r.ai_crop_y2 = nextRect?.y2 ?? null
-            r.ai_crop_source_w = meta.aiCropSourceW ?? null
-            r.ai_crop_source_h = meta.aiCropSourceH ?? null
-            r.ai_crop_is_custom = meta.aiCropIsCustom === true
-            detailImageCropDirty = true
+            const nextMeta = _detailAiCropMetaFromEdit(meta)
+            const currentMeta = _detailAiCropMetaFromRow(r)
+            if (_detailAiCropMetaEquals(currentMeta, nextMeta)) return
+
+            r.ai_crop_x1 = nextMeta.aiCropRect?.x1 ?? null
+            r.ai_crop_y1 = nextMeta.aiCropRect?.y1 ?? null
+            r.ai_crop_x2 = nextMeta.aiCropRect?.x2 ?? null
+            r.ai_crop_y2 = nextMeta.aiCropRect?.y2 ?? null
+            r.ai_crop_source_w = nextMeta.aiCropSourceW ?? null
+            r.ai_crop_source_h = nextMeta.aiCropSourceH ?? null
+            r.ai_crop_is_custom = nextMeta.aiCropIsCustom === true
+            detailImageCropDirty = _detailAiCropMetaMapChanged(originalCropMetaById)
             const item = _findDetailGalleryItemByImageId(r.id)
             if (item) {
               const img = item.querySelector('.detail-gallery-img')
@@ -969,14 +1133,21 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
               }
               _syncDetailThumbCropOverlay(item, r)
             }
-            _markDetailAiStale()
           },
           onClose: async committed => {
             if (!committed) return
-            _markDetailAiStale()
+            if (!_detailAiCropMetaMapChanged(originalCropMetaById)) {
+              detailImageCropDirty = false
+              return
+            }
+            const aiCropChanged = _detailAiCropInputMapChanged(originalCropMetaById)
+            if (aiCropChanged) {
+              _markDetailAiStale()
+            }
             const cropError = await _persistDetailImageCrops()
             if (cropError) {
               showToast(t('detail.saveFailed', { message: String(cropError?.message || cropError || 'Unknown error') }))
+              return
             }
           },
         })
@@ -1451,14 +1622,14 @@ function _detailAiServiceIconHtml(state) {
   return _renderServiceIcon(state)
 }
 
-function _buildDetailAiCachedResult(row, currentFingerprint = '') {
+function _buildDetailAiCachedResult(row, currentFingerprint = {}) {
   if (!row) return null
   const service = normalizeIdentifyService(row.service)
-  const current = String(currentFingerprint || '')
-  const rowFingerprint = String(row.request_fingerprint || '')
+  const current = _detailAiFingerprintFromValue(currentFingerprint)
+  const rowFingerprint = _detailAiFingerprintText(row.request_fingerprint || row.requestFingerprint || '')
   const result = {
     service,
-    status: row.status || 'success',
+    status: _detailAiCachedResultStatus(row, current),
     predictions: Array.isArray(row.results) ? row.results : [],
     topPrediction: row.results?.[0] ? {
       ...row.results[0],
@@ -1470,9 +1641,8 @@ function _buildDetailAiCachedResult(row, currentFingerprint = '') {
     topTaxonId: row.top_taxon_id || row.results?.[0]?.taxonId || null,
     errorMessage: row.error_message || '',
     request_fingerprint: rowFingerprint,
-  }
-  if (rowFingerprint !== current && result.status !== 'stale') {
-    result.status = 'stale'
+    image_fingerprint: _detailAiFingerprintText(row.image_fingerprint || row.imageFingerprint || ''),
+    crop_fingerprint: _detailAiFingerprintText(row.crop_fingerprint || row.cropFingerprint || ''),
   }
   return result
 }
@@ -1482,8 +1652,7 @@ function _buildDetailAiCachedResults(rows = [], currentFingerprintByService = {}
   for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
     const serviceRows = (Array.isArray(rows) ? rows : [])
       .filter(item => normalizeIdentifyService(item.service) === service)
-    const row = serviceRows.find(item => item.request_fingerprint === currentFingerprintByService[service])
-      || serviceRows[0]
+    const row = _detailAiSelectCachedRowForService(serviceRows, currentFingerprintByService[service])
     const result = _buildDetailAiCachedResult(row, currentFingerprintByService[service])
     if (result) byService[service] = result
   }
@@ -1550,9 +1719,10 @@ function _renderDetailAiResults() {
   if (!resultsEl) return
   const activeService = normalizeIdentifyService(detailAiState.activeService)
   const result = detailAiState.resultsByService[activeService] || null
+  const showLocalStaleWarning = Boolean(detailAiState.localInputsChanged || detailAiState.stale)
   resultsEl.dataset.identifyService = activeService
   const staleNote = document.querySelector('[data-identify-stale-note]')
-  if (staleNote) staleNote.style.display = detailAiState.stale ? '' : 'none'
+  if (staleNote) staleNote.style.display = showLocalStaleWarning ? '' : 'none'
   if (detailAiState.runningByService?.[activeService]) {
     resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
     resultsEl.style.display = 'block'
@@ -1570,18 +1740,18 @@ function _renderDetailAiResults() {
     resultsEl.style.display = 'block'
     return
   }
-  if (result?.status === 'stale' && !result?.predictions?.length) {
-    resultsEl.innerHTML = `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
-    resultsEl.style.display = 'block'
-    return
-  }
   if (!result?.predictions?.length) {
+    if (showLocalStaleWarning && result?.status === 'stale') {
+      resultsEl.innerHTML = `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
+      resultsEl.style.display = 'block'
+      return
+    }
     if (result?.status === 'unavailable') {
       resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
       resultsEl.style.display = 'block'
       return
     }
-    if (result?.status === 'error') {
+    if (result?.status === 'error' || (result?.status === 'stale' && result.errorMessage)) {
       resultsEl.innerHTML = `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
       resultsEl.style.display = 'block'
       return
@@ -1591,7 +1761,10 @@ function _renderDetailAiResults() {
       resultsEl.style.display = 'block'
       return
     }
-    resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.stale ? (t('review.resultsOutdated') || 'Results outdated') : (t('review.noMatch') || 'No match')}</div>`
+    const emptyMessage = currentObs?.id && !currentObsIsOwner
+      ? nonOwnerEmptyMessage
+      : (t('review.noMatch') || 'No match')
+    resultsEl.innerHTML = `<div class="ai-results-empty">${emptyMessage}</div>`
     resultsEl.style.display = 'block'
     return
   }
@@ -1674,6 +1847,7 @@ function _setDetailAiActiveService(service) {
 
 function _markDetailAiStale() {
   detailAiState.stale = true
+  detailAiState.localInputsChanged = true
   _renderDetailAiTabs()
   _renderDetailAiResults()
 }
@@ -1684,10 +1858,10 @@ async function _loadDetailAiCache() {
     [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
     [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
   }
-  detailAiState.currentFingerprintByService = Object.fromEntries(
-    Object.entries(fingerprints).map(([service, fp]) => [service, fp.requestFingerprint]),
-  )
-  detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL] || ''
+  detailAiState.currentFingerprintByService = fingerprints
+  detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL]?.requestFingerprint || ''
+  detailAiState.requestedFingerprintByService = { ...fingerprints }
+  detailAiState.requestedFingerprint = detailAiState.currentFingerprint
   const rows = await loadObservationIdentifications(currentObs.id).catch(error => {
     console.warn('Failed to load cached AI rows:', error)
     return []
@@ -1699,7 +1873,8 @@ async function _loadDetailAiCache() {
   detailAiState.selectedPrediction = selectionState.selectedPrediction
   detailAiState.selectedPredictionByService = selectionState.selectedPredictionByService
   detailAiState.selectedProbabilityByService = selectionState.selectedProbabilityByService
-  detailAiState.stale = Object.values(detailAiState.resultsByService).some(result => result?.status === 'stale')
+  detailAiState.stale = false
+  detailAiState.localInputsChanged = false
 
   const configuredPrimaryService = _resolveDetailPhotoIdServices({}).primary
   const firstStoredService = [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]
@@ -1842,12 +2017,10 @@ async function _runDetailAiComparison(serviceOverride = null) {
       Boolean(availability[service]?.available && requestedServices.includes(service)),
     ]),
   )
-    detailAiState.resultsByService = markRequestedServicesRunning(detailAiState.resultsByService, availability, requestedServices)
-    detailAiState.activeService = primaryService
-    detailAiState.selectedPrediction = null
-    detailAiState.selectedPredictionByService = {}
-    _renderDetailAiTabs()
-    _renderDetailAiResults()
+  detailAiState.resultsByService = markRequestedServicesRunning(detailAiState.resultsByService, availability, requestedServices)
+  detailAiState.activeService = primaryService
+  detailAiState.selectedPrediction = null
+  detailAiState.selectedPredictionByService = {}
 
   if (!requestedServices.length) {
     detailAiState.running = false
@@ -1857,17 +2030,19 @@ async function _runDetailAiComparison(serviceOverride = null) {
     return
   }
 
+  detailAiState.localInputsChanged = false
+  _renderDetailAiTabs()
+  _renderDetailAiResults()
+
   try {
     await _persistDetailImageCrops()
     const serviceFingerprints = {
       [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
       [ID_SERVICE_INATURALIST]: _detailImageFingerprint(ID_SERVICE_INATURALIST),
     }
-    detailAiState.currentFingerprintByService = Object.fromEntries(
-      Object.entries(serviceFingerprints).map(([service, fp]) => [service, fp.requestFingerprint]),
-    )
-    detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL] || ''
-    detailAiState.requestedFingerprintByService = { ...detailAiState.currentFingerprintByService }
+    detailAiState.currentFingerprintByService = serviceFingerprints
+    detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL]?.requestFingerprint || ''
+    detailAiState.requestedFingerprintByService = { ...serviceFingerprints }
     detailAiState.requestedFingerprint = detailAiState.currentFingerprint
     const tasks = requestedServices.map(service => {
       const serviceAvailability = availability[service]
@@ -2066,6 +2241,7 @@ function _resetForm() {
   detailAiState.selectedProbabilityByService = {}
   detailAiState.currentFingerprint = ''
   detailAiState.requestedFingerprint = ''
+  detailAiState.localInputsChanged = false
   detailAiState.stale = false
   detailImageCropDirty = false
 
@@ -3499,6 +3675,8 @@ export {
   _buildDetailAiCachedResults,
   _hasAiRunResult,
   _hasStoredAiResult,
+  _detailAiCropInputMapChanged,
+  _detailAiCropMetaMapChanged,
   detailAiState,
   _setDetailAiActiveService,
   _renderDetailAiTabs,

@@ -128,6 +128,8 @@ function _normalizeObservationIdentificationRow(row = {}) {
     top_scientific_name: row.top_scientific_name || results[0]?.scientificName || null,
     top_vernacular_name: row.top_vernacular_name || results[0]?.vernacularName || null,
     top_taxon_id: row.top_taxon_id || results[0]?.taxonId || null,
+    image_fingerprint: row.image_fingerprint || '',
+    crop_fingerprint: row.crop_fingerprint || '',
     request_fingerprint: row.request_fingerprint || '',
     error_message: row.error_message || '',
   }

@@ -4182,23 +4182,25 @@ html.light .ai-id-dot.is-complete::before {
   --corner-color: #f3ff32ec;
   --corner-len: 10%;
   --border-thickness: 2px;
-  --corner-thickness: var(--border-thickness);
+  --corner-thickness: 3px;
   position: absolute;
   left: 50%;
   top: 50%;
   width: var(--ai-crop-frame-w);
   height: var(--ai-crop-frame-h);
   transform: translate(-50%, -50%);
-  border: var(--border-thickness) solid var(--border-color);
+  border: 0;
   box-sizing: border-box;
   pointer-events: none;
   mix-blend-mode: overlay;
 }
 .ai-crop-frame--editor {
   --border-thickness: 2px;
+  --corner-thickness: 3px;
 }
 .ai-crop-frame--thumb {
   --border-thickness: 1px;
+  --corner-thickness: 2px;
   mix-blend-mode: overlay;
   transform: none;
   left: 0;
@@ -4212,15 +4214,17 @@ html.light .ai-id-dot.is-complete::before {
 .ai-crop-frame::after {
   content: '';
   position: absolute;
-  inset: 0;
+  box-sizing: border-box;
   pointer-events: none;
   mix-blend-mode: normal;
 }
 .ai-crop-frame::before {
+  inset: calc(var(--border-thickness) / -2);
+  border: var(--border-thickness) solid var(--border-color);
   box-shadow: 0 0 0 9999px rgba(0,0,0,0.6);
 }
 .ai-crop-frame::after {
-  inset: calc((var(--border-thickness) - var(--corner-thickness)) / 2);
+  inset: calc(var(--corner-thickness) / -2);
   background:
     linear-gradient(to right, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) left top / 100% var(--corner-thickness) no-repeat,
     linear-gradient(to left, var(--corner-color) 0 var(--corner-len), transparent var(--corner-len)) right top / 100% var(--corner-thickness) no-repeat,

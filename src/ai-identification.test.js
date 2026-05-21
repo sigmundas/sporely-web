@@ -449,6 +449,8 @@ test('cached identification rows are reused and stale rows are marked when the f
     supabaseClient: client,
   })
   assert.equal(cached.request_fingerprint, 'req-1')
+  assert.equal(cached.image_fingerprint, 'img-1')
+  assert.equal(cached.crop_fingerprint, 'crop-1')
   assert.equal(cached.top_probability, 0.91)
 
   await new Promise(resolve => setTimeout(resolve, 2))
@@ -475,7 +477,11 @@ test('cached identification rows are reused and stale rows are marked when the f
   const rows = await loadObservationIdentifications('obs-1', { supabaseClient: client })
   assert.equal(rows.length, 2)
   assert.equal(rows[0].request_fingerprint, 'req-2')
+  assert.equal(rows[0].image_fingerprint, 'img-2')
+  assert.equal(rows[0].crop_fingerprint, 'crop-2')
   assert.equal(rows[1].status, 'stale')
+  assert.equal(rows[1].image_fingerprint, 'img-1')
+  assert.equal(rows[1].crop_fingerprint, 'crop-1')
 
   const stale = markIdentificationStaleIfFingerprintChanged(rows, 'req-2')
   assert.equal(stale[0].status, 'success')
