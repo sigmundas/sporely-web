@@ -397,6 +397,106 @@ test('runArtsorakel keeps all real predictions and normalizes storage-friendly f
   })
 })
 
+test('runArtsorakel preserves taxon.picture as picture_url and pictureUrl', async () => {
+  await withHarness(async harness => {
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 800, 600)
+    harness.setFetch(async () => makeResponse({
+      jsonBody: {
+        predictions: [
+          {
+            probability: 0.91,
+            taxon: {
+              scientificName: 'Fomitopsis pinicola',
+              vernacularName: 'Rødrandkjuke',
+              taxonId: 'NBIC:11111',
+              scientific_name_id: 'NBIC:11111',
+              infoUrl: 'https://artsdatabanken.no/Pages/361402',
+              picture: 'https://artsdatabanken.no/Media/F49546?mode=128x128',
+              redListCategory: 'LC',
+            },
+          },
+        ],
+      },
+    }))
+
+    const results = await runArtsorakel(blob, 'no')
+
+    assert.equal(results.length, 1)
+    assert.equal(results[0].scientificName, 'Fomitopsis pinicola')
+    assert.equal(results[0].taxonId, 'NBIC:11111')
+    assert.equal(results[0].probability, 0.91)
+    assert.equal(results[0].picture_url, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
+    assert.equal(results[0].pictureUrl, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
+    assert.equal(results[0].taxon.picture, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
+    assert.equal(results[0].raw.taxon.picture, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
+  })
+})
+
+test('runArtsorakelForBlobs keeps picture metadata when combining multi-image predictions', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const firstBlob = new Blob(['first'], { type: 'image/jpeg' })
+    const secondBlob = new Blob(['second'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(firstBlob, 800, 600)
+    harness.setBlobDimensions(secondBlob, 800, 600)
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      if (calls.length === 1) {
+        return makeResponse({
+          jsonBody: {
+            predictions: [
+              {
+                probability: 0.62,
+                taxon: {
+                  scientificName: 'Fomitopsis pinicola',
+                  vernacularName: 'Rødrandkjuke',
+                  taxonId: 'NBIC:11111',
+                  scientific_name_id: 'NBIC:11111',
+                  infoUrl: 'https://artsdatabanken.no/Pages/361402',
+                  redListCategory: 'LC',
+                },
+              },
+            ],
+          },
+        })
+      }
+      return makeResponse({
+        jsonBody: {
+          predictions: [
+            {
+              probability: 0.91,
+              taxon: {
+                scientificName: 'Fomitopsis pinicola',
+                vernacularName: 'Rødrandkjuke',
+                taxonId: 'NBIC:11111',
+                scientific_name_id: 'NBIC:11111',
+                infoUrl: 'https://artsdatabanken.no/Pages/361402',
+                picture: 'https://artsdatabanken.no/Media/F49546?mode=128x128',
+                redListCategory: 'LC',
+              },
+            },
+          ],
+        },
+      })
+    })
+
+    const results = await runArtsorakelForBlobs([firstBlob, secondBlob], 'no')
+
+    assert.equal(calls.length, 2)
+    assert.equal(results.length, 1)
+    assert.equal(results[0].scientificName, 'Fomitopsis pinicola')
+    assert.equal(results[0].taxonId, 'NBIC:11111')
+    assert.equal(results[0].species_url, 'https://artsdatabanken.no/Pages/361402')
+    assert.equal(results[0].redlist_category, 'LC')
+    assert.equal(results[0].picture_url, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
+    assert.equal(results[0].pictureUrl, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
+    assert.equal(results[0].taxon.picture, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
+    assert.equal(results[0].raw.taxon.picture, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
+    assert.equal(results[0].probability, (0.62 + 0.91) / 2)
+  })
+})
+
 test('retries multipart field "file" after "image" fails', async () => {
   await withHarness(async harness => {
     const calls = []

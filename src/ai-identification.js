@@ -63,6 +63,47 @@ function _hasFiniteScore(value) {
   return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
 }
 
+function _getPredictionSourceObjects(prediction = {}) {
+  return [
+    prediction,
+    prediction.raw,
+    prediction.external_ids,
+    prediction.raw?.external_ids,
+    prediction.taxon,
+    prediction.raw?.taxon,
+  ].filter(source => source && typeof source === 'object')
+}
+
+function _findPredictionTextValue(prediction = {}, keys = []) {
+  for (const source of _getPredictionSourceObjects(prediction)) {
+    for (const key of keys) {
+      const text = _normalizeNullableText(source?.[key])
+      if (text) return text
+    }
+  }
+  return null
+}
+
+function _getPredictionTaxon(prediction = {}) {
+  return prediction.taxon || prediction.raw?.taxon || null
+}
+
+function _getPredictionPictureUrl(prediction = {}) {
+  return _findPredictionTextValue(prediction, [
+    'picture_url',
+    'pictureUrl',
+    'picture',
+    'photo_url',
+    'photoUrl',
+    'image_url',
+    'imageUrl',
+    'thumbnail_url',
+    'thumbnailUrl',
+    'media_url',
+    'mediaUrl',
+  ])
+}
+
 function _highestPredictionProbability(predictions = []) {
   let highest = null
   for (const prediction of Array.isArray(predictions) ? predictions : []) {
@@ -152,16 +193,23 @@ function _identifyServiceLabel(service) {
 
 function _normalizeObservationIdentificationRow(row = {}) {
   const service = normalizeIdentifyService(row.service)
-  const results = Array.isArray(row.results) ? row.results : []
+  const results = (Array.isArray(row.results) ? row.results : [])
+    .map((result, index) => normalizeStoredIdentificationCandidate(result, service, index))
+    .filter(result => result.displayName)
+  const top = _getTopIdentifyPrediction(results)
   return {
     ...row,
     service,
     status: row.status || (results.length ? 'success' : 'no_match'),
     results,
-    top_probability: row.top_probability ?? results[0]?.probability ?? null,
-    top_scientific_name: row.top_scientific_name || results[0]?.scientificName || null,
-    top_vernacular_name: row.top_vernacular_name || results[0]?.vernacularName || null,
-    top_taxon_id: row.top_taxon_id || results[0]?.taxonId || null,
+    top_probability: row.top_probability ?? top?.probability ?? null,
+    top_scientific_name: row.top_scientific_name || top?.scientific_name || top?.scientificName || null,
+    top_vernacular_name: row.top_vernacular_name || top?.vernacular_name || top?.vernacularName || null,
+    top_taxon_id: row.top_taxon_id || top?.taxon_id || top?.taxonId || null,
+    top_species_url: row.top_species_url || top?.species_url || top?.speciesUrl || null,
+    top_redlist_category: row.top_redlist_category || top?.redlist_category || top?.redlistCategory || null,
+    top_redlist_status: row.top_redlist_status || top?.redlist_status || top?.redlistStatus || null,
+    top_redlist_source: row.top_redlist_source || top?.redlist_source || top?.redlistSource || null,
     image_fingerprint: row.image_fingerprint || '',
     crop_fingerprint: row.crop_fingerprint || '',
     request_fingerprint: row.request_fingerprint || '',
@@ -238,9 +286,21 @@ export function _renderPieSpinnerDot(tone = '') {
 }
 
 function _getPredictionName(prediction = {}) {
-  const scientificName = _normalizeText(prediction.scientificName || prediction.scientific_name || prediction.name || '')
-  const vernacularName = _normalizeText(prediction.vernacularName || prediction.vernacular_name || prediction.commonName || '')
-  const displayName = _normalizeText(prediction.displayName || prediction.display_name || '')
+  const scientificName = _normalizeText(_findPredictionTextValue(prediction, [
+    'scientificName',
+    'scientific_name',
+    'name',
+  ]) || '')
+  const vernacularName = _normalizeText(_findPredictionTextValue(prediction, [
+    'vernacularName',
+    'vernacular_name',
+    'commonName',
+    'common_name',
+  ]) || '')
+  const displayName = _normalizeText(_findPredictionTextValue(prediction, [
+    'displayName',
+    'display_name',
+  ]) || '')
   return {
     scientificName: scientificName || null,
     vernacularName: vernacularName || null,
@@ -257,46 +317,57 @@ function _getPredictionRank(prediction = {}, fallbackRank = null) {
 }
 
 function _getPredictionTaxonId(prediction = {}) {
-  return prediction.taxon_id
-    ?? prediction.taxonId
-    ?? prediction.taxon?.scientific_name_id
-    ?? prediction.taxon?.scientific_name_id_shared
-    ?? prediction.taxon?.id
-    ?? prediction.id
-    ?? null
+  return _findPredictionTextValue(prediction, [
+    'taxon_id',
+    'taxonId',
+    'scientific_name_id',
+    'scientific_name_id_shared',
+    'id',
+  ])
 }
 
 function _getPredictionSpeciesUrl(service, prediction = {}, taxonId = null) {
   if (normalizeIdentifyService(service) === ID_SERVICE_INATURALIST && taxonId) {
     return `https://www.inaturalist.org/taxa/${taxonId}`
   }
-  return _normalizeNullableText(
-    prediction.species_url
-    ?? prediction.speciesUrl
-    ?? prediction.adbUrl
-    ?? prediction.url
-    ?? prediction.href
-    ?? prediction.taxon?.infoUrl
-    ?? prediction.taxon?.infoURL
-    ?? prediction.taxon?.info_url
-  )
+  return _normalizeNullableText(_findPredictionTextValue(prediction, [
+    'species_url',
+    'speciesUrl',
+    'adbUrl',
+    'url',
+    'href',
+    'link',
+    'uri',
+    'infoUrl',
+    'infoURL',
+    'info_url',
+  ]))
 }
 
 function _getPredictionRedlistMetadata(prediction = {}) {
+  const taxon = _getPredictionTaxon(prediction)
   return {
     redlistCategory: _normalizeNullableText(
-      prediction.redlist_category
-      ?? prediction.redlistCategory
-      ?? prediction.taxon?.redListCategory
-      ?? prediction.taxon?.redListCategories?.NO
+      _findPredictionTextValue(prediction, [
+        'redlist_category',
+        'redlistCategory',
+        'redListCategory',
+      ])
+      || taxon?.redListCategories?.NO
     ),
     redlistStatus: _normalizeNullableText(
-      prediction.redlist_status
-      ?? prediction.redlistStatus
+      _findPredictionTextValue(prediction, [
+        'redlist_status',
+        'redlistStatus',
+        'redListStatus',
+      ])
     ),
     redlistSource: _normalizeNullableText(
-      prediction.redlist_source
-      ?? prediction.redlistSource
+      _findPredictionTextValue(prediction, [
+        'redlist_source',
+        'redlistSource',
+        'redListSource',
+      ])
     ),
   }
 }
@@ -834,7 +905,7 @@ export async function maybeLoadCachedIdentification({
       }
       throw error
     }
-    return data || null
+    return data ? _normalizeObservationIdentificationRow(data) : null
   } catch (error) {
     if (_isMissingObservationIdentificationsTableError(error)) {
       _markObservationIdentificationsTableMissing()
@@ -852,6 +923,109 @@ export function markIdentificationStaleIfFingerprintChanged(rows = [], currentFi
     if (row.status === 'stale') return row
     return { ...row, status: 'stale' }
   })
+}
+
+function _stripIdentifierNamespace(value, namespace) {
+  const text = _normalizeText(value)
+  if (!text) return null
+  const prefix = `${_normalizeText(namespace)}:`
+  if (!prefix || text.length <= prefix.length) return text
+  return text.toLowerCase().startsWith(prefix.toLowerCase())
+    ? _normalizeText(text.slice(prefix.length))
+    : text
+}
+
+function _normalizeExternalIdentifierValue(value, namespace, taxonId) {
+  const text = _normalizeNullableText(value)
+  if (!text) return null
+  const normalizedValue = namespace ? _stripIdentifierNamespace(text, namespace) : text
+  if (!normalizedValue) return null
+  const normalizedTaxonId = _normalizeText(taxonId).toLowerCase()
+  if (normalizedTaxonId && normalizedValue.toLowerCase() === normalizedTaxonId) return null
+  return normalizedValue
+}
+
+function _normalizeGbifExternalIdentifierValue(value, taxonId) {
+  const normalizedValue = _normalizeExternalIdentifierValue(value, 'gbif', taxonId)
+  return normalizedValue && /^\d+$/.test(normalizedValue) ? normalizedValue : null
+}
+
+function _buildStoredIdentificationExternalIds(candidate = {}, service = null, taxonId = null) {
+  const normalizedService = normalizeIdentifyService(service || candidate.service)
+  const externalIds = {}
+  const setExternalId = (key, value, namespace = key) => {
+    const normalizedValue = _normalizeExternalIdentifierValue(value, namespace, taxonId)
+    if (normalizedValue) externalIds[key] = normalizedValue
+  }
+
+  const gbifValue = _normalizeGbifExternalIdentifierValue(_findPredictionTextValue(candidate, [
+    'gbif',
+    'gbif_id',
+    'gbifId',
+    'scientific_name_id_shared',
+  ]), taxonId)
+  if (gbifValue) externalIds.gbif = gbifValue
+
+  if (normalizedService !== ID_SERVICE_INATURALIST) {
+    setExternalId('inat', _findPredictionTextValue(candidate, [
+      'inat',
+      'inat_id',
+      'inatId',
+      'inaturalist_taxon_id',
+      'inaturalistTaxonId',
+    ]), 'inat')
+  }
+
+  if (!_normalizeText(taxonId).toLowerCase().startsWith('nbic:')) {
+    setExternalId('nbic', _findPredictionTextValue(candidate, [
+      'nbic',
+      'nbic_id',
+      'nbicId',
+      'scientific_name_id',
+    ]), 'nbic')
+  }
+
+  return externalIds
+}
+
+function normalizeStoredIdentificationCandidate(candidate = {}, service = null, index = 0) {
+  return normalizeIdentifyPrediction(
+    normalizeIdentifyService(service || candidate.service),
+    candidate,
+    index + 1,
+  )
+}
+
+function compactIdentificationCandidate(candidate = {}, service = null, index = 0) {
+  const normalized = normalizeStoredIdentificationCandidate(candidate, service, index)
+  const taxonId = _normalizeNullableText(normalized.taxon_id ?? normalized.taxonId)
+  const scientificName = _normalizeNullableText(normalized.scientific_name ?? normalized.scientificName)
+  const vernacularName = _normalizeNullableText(normalized.vernacular_name ?? normalized.vernacularName)
+  const speciesUrl = _normalizeNullableText(normalized.species_url ?? normalized.speciesUrl)
+  const redlistCategory = _normalizeNullableText(normalized.redlist_category ?? normalized.redlistCategory)
+  const redlistStatus = _normalizeNullableText(normalized.redlist_status ?? normalized.redlistStatus)
+  const redlistSource = _normalizeNullableText(normalized.redlist_source ?? normalized.redlistSource)
+  const pictureUrl = _getPredictionPictureUrl(candidate)
+  const probability = Number(normalized.probability)
+  const compacted = {
+    rank: Number.isFinite(Number(normalized.rank)) ? Number(normalized.rank) : index + 1,
+    service: normalized.service,
+  }
+
+  if (taxonId) compacted.taxon_id = taxonId
+  if (scientificName) compacted.scientific_name = scientificName
+  if (vernacularName) compacted.vernacular_name = vernacularName
+  if (Number.isFinite(probability)) compacted.probability = probability
+  if (speciesUrl) compacted.species_url = speciesUrl
+  if (redlistCategory) compacted.redlist_category = redlistCategory
+  if (redlistStatus) compacted.redlist_status = redlistStatus
+  if (redlistSource) compacted.redlist_source = redlistSource
+  if (pictureUrl) compacted.picture_url = pictureUrl
+
+  const externalIds = _buildStoredIdentificationExternalIds(candidate, normalized.service, taxonId)
+  if (Object.keys(externalIds).length) compacted.external_ids = externalIds
+
+  return compacted
 }
 
 export async function saveIdentificationRun({
@@ -883,6 +1057,10 @@ export async function saveIdentificationRun({
       cropFingerprint,
       requestFingerprint,
     })
+    const compactedResults = normalizedResult.results.map((result, index) =>
+      compactIdentificationCandidate(result, normalizedService, index),
+    )
+    const topResult = _getTopIdentifyPrediction(compactedResults)
     const payload = {
       observation_id: observationId,
       user_id: userId,
@@ -894,15 +1072,15 @@ export async function saveIdentificationRun({
       request_fingerprint: requestFingerprint,
       language: language || null,
       model_version: modelVersion || null,
-      results: normalizedResult.results,
-      top_scientific_name: normalizedResult.topScientificName || null,
-      top_vernacular_name: normalizedResult.topVernacularName || null,
-      top_taxon_id: normalizedResult.topTaxonId || null,
-      top_probability: normalizedResult.topProbability ?? null,
-      top_species_url: normalizedResult.topSpeciesUrl || null,
-      top_redlist_category: normalizedResult.topRedlistCategory || null,
-      top_redlist_status: normalizedResult.topRedlistStatus || null,
-      top_redlist_source: normalizedResult.topRedlistSource || null,
+      results: compactedResults,
+      top_scientific_name: topResult?.scientific_name || null,
+      top_vernacular_name: topResult?.vernacular_name || null,
+      top_taxon_id: topResult?.taxon_id || null,
+      top_probability: topResult?.probability ?? null,
+      top_species_url: topResult?.species_url || null,
+      top_redlist_category: topResult?.redlist_category || null,
+      top_redlist_status: topResult?.redlist_status || null,
+      top_redlist_source: topResult?.redlist_source || null,
       error_message: errorMessage || null,
       updated_at: new Date().toISOString(),
     }

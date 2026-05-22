@@ -251,6 +251,16 @@ function pickUrl(pred, taxon) {
   return 'https://artsdatabanken.no'
 }
 
+function pickPictureUrl(pred, taxon) {
+  for (const obj of [pred, taxon]) {
+    if (!obj) continue
+    for (const key of ['picture_url', 'pictureUrl', 'picture']) {
+      if (typeof obj[key] === 'string' && obj[key].trim()) return obj[key].trim()
+    }
+  }
+  return null
+}
+
 function _normalizeArtsorakelPrediction(pred, langNorm, rank) {
   const taxon = pred?.taxon || {}
   const scientificName = (taxon.scientificName || taxon.scientific_name || taxon.name || '').trim() || null
@@ -261,6 +271,7 @@ function _normalizeArtsorakelPrediction(pred, langNorm, rank) {
   const taxonId = taxon.taxonId || taxon.id || taxon.scientific_name_id || null
   const speciesUrl = pickUrl(pred, taxon)
   const redlistCategory = taxon.redListCategory || taxon.redListCategories?.NO || null
+  const pictureUrl = pickPictureUrl(pred, taxon)
 
   return {
     rank,
@@ -281,6 +292,9 @@ function _normalizeArtsorakelPrediction(pred, langNorm, rank) {
     redlistStatus: null,
     redlist_source: 'Artsdatabanken',
     redlistSource: 'Artsdatabanken',
+    picture_url: pictureUrl,
+    pictureUrl,
+    taxon: pred?.taxon || null,
     raw: pred,
   }
 }
@@ -561,7 +575,25 @@ function _combinePredictionResponses(responses, totalBlobs) {
         if (existing.redlistStatus === undefined && prediction.redlistStatus !== undefined) existing.redlistStatus = prediction.redlistStatus
         if (!existing.redlist_source && prediction.redlist_source) existing.redlist_source = prediction.redlist_source
         if (!existing.redlistSource && prediction.redlistSource) existing.redlistSource = prediction.redlistSource
+        if (!existing.picture_url && prediction.picture_url) existing.picture_url = prediction.picture_url
+        if (!existing.pictureUrl && prediction.pictureUrl) existing.pictureUrl = prediction.pictureUrl
+        if (!existing.taxon && prediction.taxon) existing.taxon = prediction.taxon
+        else if (existing.taxon && prediction.taxon && !existing.taxon.picture && prediction.taxon.picture) {
+          existing.taxon = {
+            ...existing.taxon,
+            picture: prediction.taxon.picture,
+          }
+        }
         if (!existing.raw && prediction.raw) existing.raw = prediction.raw
+        else if (existing.raw && prediction.raw && !existing.raw?.taxon?.picture && prediction.raw?.taxon?.picture) {
+          existing.raw = {
+            ...existing.raw,
+            taxon: {
+              ...(existing.raw.taxon || {}),
+              picture: prediction.raw.taxon.picture,
+            },
+          }
+        }
         combined.set(key, existing)
       })
     })

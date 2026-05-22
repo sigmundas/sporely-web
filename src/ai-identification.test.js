@@ -203,6 +203,171 @@ test('observation identification cache helpers tolerate a missing production tab
   }), null)
 })
 
+test('saveIdentificationRun preserves Artsorakel taxon.picture and omits invalid GBIF external ids', async () => {
+  resetObservationIdentificationsTableAvailabilityForTests()
+  const client = createSupabaseStub()
+
+  const artsorakel = await saveIdentificationRun({
+    observationId: 'obs-compact-arts-nia',
+    userId: 'user-1',
+    service: 'artsorakel',
+    requestFingerprint: 'req-arts-nia',
+    imageFingerprint: 'img-arts-nia',
+    cropFingerprint: 'crop-arts-nia',
+    language: 'en',
+    results: [
+      {
+        rank: 1,
+        scientificName: 'Top species',
+        vernacularName: 'Top common',
+        probability: 0.97,
+        taxon: {
+          scientific_name: 'Top species',
+          scientific_name_id: 'NBIC:185988',
+          scientific_name_id_shared: 'NIA:d7a2ee18ff94f4dd8b8e2a0ef9efda0aea75d993eec9e66af72182ff',
+          infoUrl: 'https://artsdatabanken.no/Taxon/203764',
+          picture: 'https://artsdatabanken.no/Media/F47031?mode=128x128',
+          redListCategory: 'LC',
+          redListSource: 'Artsdatabanken',
+        },
+      },
+    ],
+    supabaseClient: client,
+  })
+
+  assert.equal(artsorakel.results.length, 1)
+  assert.equal(artsorakel.top_scientific_name, 'Top species')
+  assert.equal(artsorakel.top_taxon_id, 'NBIC:185988')
+  assert.equal(artsorakel.top_species_url, 'https://artsdatabanken.no/Taxon/203764')
+  assert.equal(artsorakel.top_redlist_category, 'LC')
+
+  const storedArtsorakel = client.rows[0].results[0]
+  assert.equal(storedArtsorakel.scientific_name, 'Top species')
+  assert.equal(storedArtsorakel.vernacular_name, 'Top common')
+  assert.equal(storedArtsorakel.taxon_id, 'NBIC:185988')
+  assert.equal(storedArtsorakel.species_url, 'https://artsdatabanken.no/Taxon/203764')
+  assert.equal(storedArtsorakel.picture_url, 'https://artsdatabanken.no/Media/F47031?mode=128x128')
+  assert.equal(storedArtsorakel.redlist_category, 'LC')
+  assert.equal(storedArtsorakel.redlist_source, 'Artsdatabanken')
+  assert.equal(Object.prototype.hasOwnProperty.call(storedArtsorakel, 'external_ids'), false)
+})
+
+test('saveIdentificationRun stores compact candidates and keeps top fields from the highest-ranked one', async () => {
+  resetObservationIdentificationsTableAvailabilityForTests()
+  const client = createSupabaseStub()
+
+  const artsorakel = await saveIdentificationRun({
+    observationId: 'obs-compact-arts',
+    userId: 'user-1',
+    service: 'artsorakel',
+    requestFingerprint: 'req-arts',
+    imageFingerprint: 'img-arts',
+    cropFingerprint: 'crop-arts',
+    language: 'en',
+    results: [
+      {
+        rank: 2,
+        scientificName: 'Second species',
+        vernacularName: 'Second common',
+        taxonId: 'NBIC:200000',
+        speciesUrl: 'https://artsdatabanken.no/Taxon/200000',
+        redlistCategory: 'NT',
+        probability: 0.42,
+        raw: {
+          taxon: {
+            scientific_name_id_shared: 'GBIF:2000000',
+          },
+        },
+      },
+      {
+        rank: 1,
+        scientificName: 'Top species',
+        vernacularName: 'Top common',
+        probability: 0.97,
+        pictureUrl: 'https://artsdatabanken.no/Media/F47031?mode=128x128',
+        taxon: {
+          scientific_name_id: 'NBIC:185988',
+          scientific_name_id_shared: 'GBIF:6092830',
+          infoUrl: 'https://artsdatabanken.no/Taxon/203764',
+          redListCategory: 'LC',
+          redListSource: 'Artsdatabanken',
+        },
+      },
+    ],
+    supabaseClient: client,
+  })
+
+  assert.equal(artsorakel.results.length, 2)
+  assert.equal(artsorakel.top_scientific_name, 'Top species')
+  assert.equal(artsorakel.top_vernacular_name, 'Top common')
+  assert.equal(artsorakel.top_taxon_id, 'NBIC:185988')
+  assert.equal(artsorakel.top_probability, 0.97)
+  assert.equal(artsorakel.top_species_url, 'https://artsdatabanken.no/Taxon/203764')
+  assert.equal(artsorakel.top_redlist_category, 'LC')
+  assert.equal(artsorakel.top_redlist_source, 'Artsdatabanken')
+
+  const storedArtsorakel = client.rows[0].results
+  assert.equal(storedArtsorakel.length, 2)
+  assert.equal(storedArtsorakel[0].rank, 2)
+  assert.equal(storedArtsorakel[1].rank, 1)
+  for (const candidate of storedArtsorakel) {
+    assert.equal(Object.prototype.hasOwnProperty.call(candidate, 'raw'), false)
+    for (const field of ['scientificName', 'vernacularName', 'taxonId', 'speciesUrl', 'redlistCategory']) {
+      assert.equal(Object.prototype.hasOwnProperty.call(candidate, field), false)
+    }
+    assert.equal(Object.prototype.hasOwnProperty.call(candidate, 'scientific_name'), true)
+    assert.equal(Object.prototype.hasOwnProperty.call(candidate, 'vernacular_name'), true)
+    assert.equal(Object.prototype.hasOwnProperty.call(candidate, 'taxon_id'), true)
+  }
+  assert.equal(storedArtsorakel[0].scientific_name, 'Second species')
+  assert.equal(storedArtsorakel[0].vernacular_name, 'Second common')
+  assert.equal(storedArtsorakel[0].taxon_id, 'NBIC:200000')
+  assert.equal(storedArtsorakel[0].species_url, 'https://artsdatabanken.no/Taxon/200000')
+  assert.equal(storedArtsorakel[0].redlist_category, 'NT')
+  assert.equal(storedArtsorakel[0].external_ids.gbif, '2000000')
+  assert.equal(storedArtsorakel[0].external_ids.nbic, undefined)
+  assert.equal(storedArtsorakel[1].scientific_name, 'Top species')
+  assert.equal(storedArtsorakel[1].vernacular_name, 'Top common')
+  assert.equal(storedArtsorakel[1].taxon_id, 'NBIC:185988')
+  assert.equal(storedArtsorakel[1].species_url, 'https://artsdatabanken.no/Taxon/203764')
+  assert.equal(storedArtsorakel[1].redlist_category, 'LC')
+  assert.equal(storedArtsorakel[1].picture_url, 'https://artsdatabanken.no/Media/F47031?mode=128x128')
+  assert.equal(storedArtsorakel[1].external_ids.gbif, '6092830')
+  assert.equal(storedArtsorakel[1].external_ids.nbic, undefined)
+
+  const inat = await saveIdentificationRun({
+    observationId: 'obs-compact-inat',
+    userId: 'user-1',
+    service: 'inat',
+    requestFingerprint: 'req-inat',
+    imageFingerprint: 'img-inat',
+    cropFingerprint: 'crop-inat',
+    language: 'en',
+    results: [
+      {
+        rank: 1,
+        scientificName: 'Amanita muscaria',
+        vernacularName: 'Fly agaric',
+        taxonId: '12345',
+        probability: 0.91,
+        raw: {
+          taxon: {
+            gbif_id: 'GBIF:6092830',
+          },
+        },
+      },
+    ],
+    supabaseClient: client,
+  })
+
+  const storedInat = client.rows[1].results[0]
+  assert.equal(inat.results.length, 1)
+  assert.equal(storedInat.taxon_id, '12345')
+  assert.equal(storedInat.species_url, 'https://www.inaturalist.org/taxa/12345')
+  assert.equal(storedInat.external_ids.gbif, '6092830')
+  assert.equal(storedInat.external_ids.inat, undefined)
+})
+
 test('formatting AI suggestions keeps vernacular and scientific names on separate lines', () => {
   const display = formatAiSuggestionDisplay({
     vernacularName: 'knivkjuke',
@@ -476,7 +641,6 @@ test('cached identification rows are reused and stale rows are marked when the f
   assert.equal(first.status, 'success')
   assert.equal(first.results.length, 2)
   assert.equal(first.results[0].scientific_name, 'Gloeophyllum odoratum')
-  assert.equal(first.results[0].scientificName, 'Gloeophyllum odoratum')
   assert.equal(first.results[1].scientific_name, 'Morchella esculenta')
   assert.equal(first.results[1].species_url, 'https://artsdatabanken.no/Pages/456')
   assert.equal(first.results[1].redlist_category, 'NT')
@@ -536,4 +700,63 @@ test('cached identification rows are reused and stale rows are marked when the f
   const stale = markIdentificationStaleIfFingerprintChanged(rows, 'req-2')
   assert.equal(stale[0].status, 'success')
   assert.equal(stale[1].status, 'stale')
+})
+
+test('old bloated identification rows still normalize on read', async () => {
+  resetObservationIdentificationsTableAvailabilityForTests()
+  const client = createSupabaseStub()
+  client.rows.push({
+    id: 'old-row-1',
+    observation_id: 'obs-old',
+    user_id: 'user-1',
+    service: 'artsorakel',
+    source: 'ai',
+    status: 'success',
+    request_fingerprint: 'req-old',
+    image_fingerprint: 'img-old',
+    crop_fingerprint: 'crop-old',
+    results: [
+      {
+        rank: 1,
+        scientificName: 'Old species',
+        vernacularName: 'Old common',
+        taxonId: 'NBIC:555555',
+        speciesUrl: 'https://artsdatabanken.no/Taxon/555555',
+        redlistCategory: 'VU',
+        raw: {
+          taxon: {
+            scientificName: 'Old species',
+            vernacularName: 'Old common',
+            scientific_name_id: 'NBIC:555555',
+            infoUrl: 'https://artsdatabanken.no/Taxon/555555',
+            redListCategory: 'VU',
+            redListSource: 'Artsdatabanken',
+          },
+        },
+      },
+    ],
+    created_at: '2024-01-01T00:00:00.000Z',
+    updated_at: '2024-01-01T00:00:00.000Z',
+  })
+
+  const cached = await maybeLoadCachedIdentification({
+    observationId: 'obs-old',
+    service: 'artsorakel',
+    requestFingerprint: 'req-old',
+    supabaseClient: client,
+  })
+
+  assert.equal(cached.request_fingerprint, 'req-old')
+  assert.equal(cached.results.length, 1)
+  assert.equal(cached.results[0].scientific_name, 'Old species')
+  assert.equal(cached.results[0].scientificName, 'Old species')
+  assert.equal(cached.results[0].vernacular_name, 'Old common')
+  assert.equal(cached.results[0].taxon_id, 'NBIC:555555')
+  assert.equal(cached.results[0].species_url, 'https://artsdatabanken.no/Taxon/555555')
+  assert.equal(cached.results[0].redlist_category, 'VU')
+  assert.equal(cached.top_scientific_name, 'Old species')
+  assert.equal(cached.top_vernacular_name, 'Old common')
+  assert.equal(cached.top_taxon_id, 'NBIC:555555')
+  assert.equal(cached.top_species_url, 'https://artsdatabanken.no/Taxon/555555')
+  assert.equal(cached.top_redlist_category, 'VU')
 })
