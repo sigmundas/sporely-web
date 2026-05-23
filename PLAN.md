@@ -8,7 +8,343 @@ It should contain current tasks, near-term backlog, and long-term roadmap items.
 
 Historical image/upload notes are archived in `HISTORY.md`. Current image-pipeline notes are in `docs/image-pipeline-phase1.md`.
 
-## Current priority: Image pipeline refactor, conservative Phase 2
+# Android release plan
+
+Goal: keep `sporely-web` as the single source repository while supporting three practical distribution targets:
+
+- Web/PWA for iOS users via Cloudflare Pages.
+- Google Play Android release as a signed `.aab`.
+- Self-hosted F-Droid-compatible Android release as a signed `.apk` published through a separate generated repo/index.
+
+Official F-Droid submission is a later investigation track. It must not block the first Play/self-hosted release path.
+
+### Non-negotiable rules
+
+- Cloudflare owns the web/PWA deployment. Do not add GitHub Actions workflows that deploy the web app.
+- The Android CI must run the Capacitor sequence in the correct order:
+  - `npm ci`
+  - `npm run build`
+  - `npx cap sync android`
+  - Gradle APK/AAB build
+- Do not assume the Vite output directory. Verify `webDir` in `capacitor.config.*`.
+- Use the repository’s Node requirement. Current repo expects Node `>=22`.
+- Keystores, passwords, generated APKs/AABs, repo signing keys, and local signing files must never be committed.
+- Official F-Droid and self-hosted F-Droid-compatible distribution are separate tracks.
+
+---
+
+### Phase 0 — Audit current release state
+
+Status: not started
+
+Purpose: inspect before changing anything.
+
+Tasks:
+
+- Inspect:
+  - `package.json`
+  - `package-lock.json`
+  - `capacitor.config.*`
+  - `android/app/build.gradle` or `android/app/build.gradle.kts`
+  - `android/gradle.properties`
+  - root `.gitignore`
+  - `android/.gitignore`
+  - `.github/workflows/`
+  - existing metadata/fastlane directories
+- Confirm:
+  - Android applicationId/package name
+  - current `versionName`
+  - current `versionCode`
+  - current Node requirement
+  - current Java/Gradle requirements
+  - actual Capacitor `webDir`
+  - whether signing config already exists
+  - whether product flavors already exist
+- Produce a short audit note before implementation.
+
+Test/check commands:
+
+```bash
+node --version
+npm ci
+npm run build
+npx cap sync android
+cd android && ./gradlew :app:assembleDebug
+```
+
+Definition of done:
+
+* Current build path is understood.
+* No release files or workflows have been changed yet.
+* Risks/conflicts are listed before Phase 1.
+
+---
+
+### Phase 1 — Local release hygiene
+
+Status: not started
+
+Purpose: make local release/version handling predictable before CI signing is added.
+
+Tasks:
+
+* Add `.nvmrc` if missing, matching the repo’s Node requirement.
+* Reuse existing version scripts if possible.
+* If needed, add `scripts/bump-version.mjs`.
+* Version bump logic must keep these aligned:
+
+  * `package.json` version
+  * Android `versionName`
+  * Android `versionCode`
+* Add a short release checklist to README or docs.
+* Verify `.gitignore` protects:
+
+  * keystores
+  * `*.apk`
+  * `*.aab`
+  * Android build outputs
+  * local signing config
+
+Do not:
+
+* Add signing secrets.
+* Add Play deployment.
+* Add F-Droid repo publishing.
+* Refactor unrelated build files.
+
+Test/check commands:
+
+```
+npm ci
+npm run build
+npx cap sync android
+cd android && ./gradlew :app:assembleDebug
+git diff --stat
+git status
+```
+
+Definition of done:
+
+* Local build still works.
+* Version bump path is documented.
+* No secrets or generated binaries are staged.
+
+---
+
+### Phase 2 — GitHub Actions signed Android artifacts
+
+Status: not started
+
+Purpose: produce release artifacts from tags, without publishing them anywhere yet.
+
+Tasks:
+
+* Add `.github/workflows/release-android.yml`.
+* Trigger on tags matching `v*`.
+* Optional: allow safe `workflow_dispatch`.
+* CI order:
+
+  * checkout
+  * setup Node 22 or `.nvmrc`
+  * setup Java 17 unless repo requires otherwise
+  * `npm ci`
+  * `npm run build`
+  * `npx cap sync android`
+  * decode Android release keystore from GitHub Secrets into runner temp storage
+  * build signed release APK
+  * build signed release AAB
+  * upload both as workflow artifacts
+* Use GitHub Actions Secrets:
+
+  * `ANDROID_KEYSTORE_BASE64`
+  * `ANDROID_KEYSTORE_PASSWORD`
+  * `ANDROID_KEY_ALIAS`
+  * `ANDROID_KEY_PASSWORD`
+
+Do not:
+
+* Commit a keystore.
+* Print secrets.
+* Deploy to Play Store.
+* Push to the self-hosted F-Droid repo.
+* Add official F-Droid metadata.
+
+Test/check commands:
+
+```bash
+npm ci
+npm run build
+npx cap sync android
+cd android && ./gradlew :app:assembleRelease :app:bundleRelease
+```
+
+Definition of done:
+
+* A tag build produces one `.apk` and one `.aab`.
+* Artifacts are downloadable from GitHub Actions.
+* No publication happens automatically yet.
+* Signing material exists only in GitHub Secrets / runner temp files.
+
+---
+
+### Phase 3 — Cloudflare Pages build isolation
+
+Status: not started
+
+Purpose: avoid unnecessary web builds for Android-only changes.
+
+Tasks:
+
+* Do not add a web deployment workflow.
+* Document Cloudflare Pages Build watch paths.
+* Recommended starting point:
+
+  * Include paths: `*`
+  * Exclude paths: `android/*`
+* Consider excluding release-only paths after testing:
+
+  * `.github/*`
+  * docs-only files
+  * generated F-Droid repo docs, if any
+* Make sure mixed commits still behave correctly:
+
+  * `android/*` only: web build should be skipped
+  * `src/*` only: web build should run
+  * `android/*` + `src/*`: web build should run
+
+Definition of done:
+
+* Cloudflare deployment remains dashboard/Git integration owned.
+* Android-only commits no longer waste Cloudflare builds.
+* Web-relevant commits still trigger Cloudflare builds.
+
+---
+
+### Phase 4 — Store metadata scaffold
+
+Status: not started
+
+Purpose: keep store listing text in source control without automating publication yet.
+
+Tasks:
+
+* Add Google Play / Fastlane-style metadata:
+
+```text
+android/fastlane/metadata/android/en-US/title.txt
+android/fastlane/metadata/android/en-US/short_description.txt
+android/fastlane/metadata/android/en-US/full_description.txt
+```
+
+* Use factual placeholder text if final text is not ready.
+* Keep screenshots and graphics out of this phase unless already prepared.
+
+Do not:
+
+* Add Fastlane Play deployment.
+* Add service account JSON.
+* Claim unsupported features.
+
+Definition of done:
+
+* Metadata paths exist.
+* Files contain editable text only.
+* No binary store assets are added accidentally.
+
+---
+
+### Phase 5 — Self-hosted F-Droid-compatible repository
+
+Status: later
+
+Purpose: publish a signed APK through a user-addable F-Droid-compatible repo.
+
+Important distinction:
+
+* This is not official F-Droid publication.
+* This is a self-hosted APK repository compatible with F-Droid-style clients.
+
+Tasks:
+
+* Use the signed APK artifact from Phase 2.
+* Create or use a separate generated repository, e.g. `sporely-fdroid-repo`.
+* Generate repository metadata/index using `fdroidserver`.
+* Sign the repository index with a separate F-Droid repo signing key.
+* Publish the generated repo through GitHub Pages.
+* Document how users add the repo URL in F-Droid-compatible clients.
+* Document the trust model:
+
+  * Android APK signing key
+  * F-Droid repo index signing key
+  * GitHub Pages hosting
+
+Secrets for this phase should be separate from Android APK signing secrets:
+
+```text
+FDROID_REPO_KEYSTORE_BASE64
+FDROID_REPO_KEYSTORE_PASSWORD
+FDROID_REPO_KEY_ALIAS
+FDROID_REPO_KEY_PASSWORD
+```
+
+Test/check steps:
+
+* Install the APK manually on Android.
+* Add the repo URL in an F-Droid-compatible client.
+* Confirm the app appears.
+* Publish a higher `versionCode`.
+* Confirm update detection works.
+* Confirm no keys, generated APKs, or index secrets are committed to `sporely-web`.
+
+Definition of done:
+
+* Users can add the repo manually.
+* App installs and updates from the self-hosted repo.
+* Repo output is generated/published separately from source code.
+
+---
+
+### Phase 6 — Official F-Droid investigation
+
+Status: later / research only
+
+Purpose: evaluate whether Sporely can be submitted to the official F-Droid repository.
+
+This is separate from the self-hosted repo. Official F-Droid should build from source using fdroiddata/fdroidserver metadata.
+
+Tasks:
+
+* Create `docs/fdroid-official-investigation.md`.
+* Check whether all dependencies are FOSS-compatible.
+* Check whether Capacitor plugins introduce proprietary or binary dependencies.
+* Check whether npm/Vite/Capacitor build steps can satisfy F-Droid source-build expectations.
+* Test whether `npm ci`, `npm run build`, and `npx cap sync android` belong in `prebuild` or `build`.
+* Investigate whether `scandelete: node_modules/` or targeted deletion of npm binary artifacts is required.
+* Look at existing fdroiddata recipes for Capacitor/Ionic apps as examples, not templates to copy blindly.
+* Draft metadata only after package name and build path are confirmed.
+
+Possible output:
+
+```text
+metadata/no.sporely.yml
+docs/fdroid-official-investigation.md
+```
+
+Do not:
+
+* Block Play Store release on this.
+* Block self-hosted F-Droid-compatible repo on this.
+* Use the GitHub Actions-built APK as the official F-Droid artifact.
+* Claim official F-Droid support before a source-build recipe works.
+
+Definition of done:
+
+* A local fdroidserver build attempt has been documented.
+* Blockers are listed.
+* A realistic decision can be made: submit, defer, or abandon official F-Droid.
+
+
+## Image pipeline refactor, conservative Phase 2
 
 ### Current state
 
@@ -20,156 +356,7 @@ Historical image/upload notes are archived in `HISTORY.md`. Current image-pipeli
 - The next step must be small and low-risk.
 - Do not introduce a new `image-intake.js` module yet.
 
-### Next small step
 
-Implement only helper extraction and shape documentation:
-
-- [x] Add a shared `isBlob` / blob-like helper and replace duplicated local checks.
-- [x] Add a neutral coordinate helper for shared coordinate validation/coercion.
-- [x] Add a default draft / default observation factory used by capture/review/import paths.
-- [x] Add simple image shape comments or JSDoc for the existing image objects passed between capture, review, import review, queue, and upload code.
-
-### Explicitly not now
-
-Do not do these in the next pass:
-
-- No `image-intake.js`.
-- No rewrite of the full image intake flow.
-- No streaming import architecture yet.
-- No moving EXIF extraction into `image-worker.js` yet.
-- No removal of schema fallbacks too early.
-- No broad cleanup of `images.js` or `sync-queue.js` unless required by the helper extraction.
-- No behavioral changes to upload, queue, AI crop, or image encoding.
-
-### Regression checks for this step
-
-After helper extraction, manually verify:
-
-- Camera capture still saves and uploads.
-- Gallery import still saves and uploads.
-- Android HEIC/HEIF native import still produces image + GPS metadata where available.
-- JPEG import still treats missing GPS as missing GPS, not `0,0`.
-- AI ID still receives the expected crop/image blob.
-- Offline queue still persists image bytes and retries after app suspension.
-- Existing uploaded observations still show thumbnails.
-- No object URL or pending metadata promise resurrects removed import sessions.
-
-## Current priority: Image pipeline refactor
-
-The app currently works. This refactor must stay conservative. Each phase should be small enough to review in one agent chat and one follow-up audit.
-
-### Global guardrails
-
-- Do not rewrite the full image intake flow.
-- Do not introduce `image-intake.js` until earlier phases are accepted.
-- Do not change upload, queue, AI crop, or image encoding behavior unless the phase explicitly says so.
-- Do not remove schema fallbacks early.
-- Do not do opportunistic broad cleanup.
-- After each phase, run the relevant regression checklist.
-
-### Phase 1 — Documentation and debug visibility
-
-Status: [x] Accepted
-
-Scope:
-- Add `docs/image-pipeline-phase1.md`.
-- Add opt-in image pipeline debug logging.
-
-Acceptance:
-- No behavior changes.
-- Debug logging is opt-in.
-- Existing capture/import/upload paths still work.
-
-### Phase 2 — Shared helper extraction
-
-Status: [i] Implemented, awaiting review
-
-Scope:
-- Add shared blob/blob-like guard.
-- Add shared coordinate validation/coercion helper.
-- Add default draft / observation payload helpers.
-- Add JSDoc for current image object shapes.
-
-Guardrails:
-- No `image-intake.js`.
-- No upload behavior changes.
-- No queue behavior changes.
-- No AI crop behavior changes.
-- No broad cleanup of `images.js` or `sync-queue.js`.
-
-Review findings to resolve before acceptance:
-- [ ] Remove server-managed null placeholders such as `created_at: null` from default insert payloads.
-- [ ] Tighten `isBlob()` so blob-like objects must support `arrayBuffer()`.
-- [ ] Normalize GPS at final save/enqueue boundaries.
-- [ ] Decide whether `observation-shapes.js` may import settings, or split defaults into `observation-defaults.js`.
-- [ ] Expand JSDoc so it documents the real capture/review/import/queue/AI shapes.
-- [ ] Remove confirmed dead duplicate import/EXIF helper code only after checking references.
-
-Acceptance checks:
-- [ ] Camera capture saves and uploads.
-- [ ] Gallery import saves and uploads.
-- [ ] Android HEIC/HEIF native import preserves image + GPS where available.
-- [ ] JPEG without GPS remains missing GPS, not `0,0`.
-- [ ] AI ID receives expected crop/image blob.
-- [ ] Offline queue persists image bytes and retries after app suspension.
-- [ ] Existing uploaded observations show thumbnails.
-- [ ] Removed import sessions are not resurrected by object URLs or metadata promises.
-
-### Acceptance blocker: restore stronger EXIF/GPS fallback behavior
-
-Status: [x]  fixed
-
-The import screen now delegates EXIF/GPS handling to `src/screens/import-helpers.js`, but the deleted local helper block had stronger HEIC/HEIF and GPS fallback behavior than the shared helper.
-
-Before accepting this phase:
-
-- [ ] Move the stronger file-first EXIF/GPS fallback logic into `src/screens/import-helpers.js`.
-- [ ] Preserve the shared-helper structure; do not reintroduce screen-local duplicate helpers.
-- [ ] For HEIC/HEIF, preserve `chunked: false` where needed.
-- [ ] Try original-file EXIF/GPS parsing before falling back to limited buffer parsing.
-- [ ] Keep raw GPS fallback parsing.
-- [ ] Verify JPEG without GPS remains null/missing, never `0,0`.
-- [ ] Verify Android HEIC/HEIF with GPS preserves coordinates after import, review, save, and detail reopen.
-
-### Phase 3 — Import/review state boundary audit
-
-Status: [ ] Not started
-
-Scope:
-- Map current data shapes between import, review, queue, upload, and AI ID.
-- Document which fields are live, legacy, derived, or temporary.
-- Do not move code yet.
-
-Output:
-- Update `docs/image-pipeline-shapes.md` or equivalent.
-- Propose the smallest safe code move for the next phase.
-
-### Phase 4 — Small import memory cleanup
-
-Status: [ ] Not started
-
-Scope:
-- Reduce obvious memory pressure without changing architecture.
-- Avoid parallel full-resolution blob reads.
-- Improve disposal of object URLs and removed sessions.
-
-Guardrails:
-- No streaming architecture yet.
-- No worker migration yet.
-- No new intake module yet.
-
-### Phase 5 — Decide whether `image-intake.js` is justified
-
-Status: [ ] Not started
-
-Scope:
-- Only after Phases 2–4 are accepted.
-- Propose exact module boundary before implementation.
-- List functions to move and functions to leave alone.
-
-Decision:
-- [ ] Proceed with small module extraction.
-- [ ] Defer because current code is stable enough.
 
 ## Near-term active tasks
 
