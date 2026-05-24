@@ -1054,6 +1054,7 @@ export async function fetchFirstImages(obsIds, options = {}) {
     .from('observation_images')
     .select('observation_id, storage_path')
     .in('observation_id', obsIds)
+    .is('deleted_at', null)
     .order('sort_order', { ascending: true })
 
   if (error || !data?.length) return {}
@@ -1099,6 +1100,7 @@ export async function fetchCardImages(obsIds, options = {}) {
     .from('observation_images')
     .select('observation_id, storage_path')
     .in('observation_id', obsIds)
+    .is('deleted_at', null)
     .order('sort_order', { ascending: true })
 
   if (error || !data?.length) return {}

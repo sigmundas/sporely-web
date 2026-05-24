@@ -552,6 +552,7 @@ async function _loadDetailObservationImages(obsId) {
     .from('observation_images')
     .select(selectFields)
     .eq('observation_id', obsId)
+    .is('deleted_at', null)
     .order('sort_order', { ascending: true })
 
   let result = await makeQuery(DETAIL_IMAGE_SELECT_WITH_CUSTOM)
@@ -1165,8 +1166,10 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
 
       delBtn.disabled = true
       try {
-        await deleteObservationMedia([row.storage_path])
-        await supabase.from('observation_images').delete().eq('id', row.id)
+        await supabase
+          .from('observation_images')
+          .update({ deleted_at: new Date().toISOString() })
+          .eq('id', row.id)
         const rowIndex = detailImageRows.findIndex(r => String(r.id) === String(row.id))
         if (rowIndex >= 0) {
           detailImageRows.splice(rowIndex, 1)
@@ -1178,6 +1181,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
           .from('observation_images')
           .select('storage_path')
           .eq('observation_id', currentObs.id)
+          .is('deleted_at', null)
           .order('sort_order', { ascending: true })
           .limit(1)
         if (remaining && remaining.length > 0) {
@@ -3577,6 +3581,7 @@ async function _addPhotosToObservation(files) {
       .from('observation_images')
       .select('sort_order')
       .eq('observation_id', obsId)
+      .is('deleted_at', null)
       .order('sort_order', { ascending: false })
       .limit(1)
 
@@ -3631,6 +3636,7 @@ async function _addPhotosToObservation(files) {
         .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom')
         .eq('observation_id', obsId)
         .eq('sort_order', sortOrder)
+        .is('deleted_at', null)
         .order('id', { ascending: false })
         .limit(1)
       const insertedRow = insertedRows?.[0] || {

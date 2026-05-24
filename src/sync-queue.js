@@ -459,6 +459,7 @@ async function _fetchRemoteObservationState(observationId) {
       .from('observation_images')
       .select('id, sort_order, storage_path')
       .eq('observation_id', observationId)
+      .is('deleted_at', null)
       .order('sort_order', { ascending: true }),
   ])
 
