@@ -89,6 +89,19 @@ If you change Capacitor plugins or plugin configuration, run:
 npx cap sync android
 ```
 
+### Release Checklist
+
+- Use Node 22 or newer. This repo also pins that expectation in `.nvmrc`.
+- Install dependencies with `npm ci`.
+- Build the web assets with `npm run build`.
+- Sync Capacitor with `npx cap sync android` before any Android build so `dist/` is copied into the wrapper.
+- Build a local debug APK with `cd android && ./gradlew :app:assembleDebug`.
+- To bump the package version and Android `versionCode`, use the existing scripts:
+  - `npm run sync:version:bump-code`
+  - `npm run android:install:bump`
+- Release signing is not set up in CI yet.
+- Do not commit keystores, `keystore.properties`, or any other signing files.
+
 ## Environment Variables
 
 Client-side Vite variables:
