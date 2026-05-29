@@ -54,12 +54,12 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          cat > "$ANDROID_KEYSTORE_PROPERTIES" <<EOF
-storeFile=$ANDROID_KEYSTORE_PATH
-storePassword=$ANDROID_KEYSTORE_PASSWORD
-keyAlias=$ANDROID_KEY_ALIAS
-keyPassword=$ANDROID_KEY_PASSWORD
-EOF
+          {
+            printf 'storeFile=%s\n' "$ANDROID_KEYSTORE_PATH"
+            printf 'storePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$ANDROID_KEY_PASSWORD"
+          } > "$ANDROID_KEYSTORE_PROPERTIES"
 
       - name: Build release APK
         working-directory: android
