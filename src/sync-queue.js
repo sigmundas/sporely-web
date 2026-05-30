@@ -876,6 +876,9 @@ async function _runSyncQueue() {
         uploadPolicy = await fetchCloudPlanProfile(queueUserId)
         _cloudPlanCache.set(queueUserId, uploadPolicy)
       }
+      // This queue item is the device-local pending-upload fallback.
+      // Keep it on-device and retry later if the worker or R2 upload fails;
+      // do not mark the cloud media as synced until the upload is verified.
       for (let i = 0; i < queuedImages.length; i++) {
         if (completedImageIndexes.has(i)) continue
 

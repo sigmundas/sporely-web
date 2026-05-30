@@ -1056,8 +1056,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   img.dataset.storagePath = row.storage_path || ''
   img.dataset.fullSrc = _mediaSourceUrl(originalSource) || displayUrl
   img.dataset.aiSrc = _mediaSourceUrl(aiSource) || displayUrl
-  img.dataset.supabaseFallback = source.supabaseFallbackUrl || ''
-  img.dataset.aiFallback = _mediaSourceUrl(originalSource) || _mediaSourceUrl(source) || source.supabaseFallbackUrl || displayUrl
+  img.dataset.aiFallback = _mediaSourceUrl(originalSource) || _mediaSourceUrl(source) || displayUrl
   img.dataset.aiCropX1 = row.ai_crop_x1 ?? ''
   img.dataset.aiCropY1 = row.ai_crop_y1 ?? ''
   img.dataset.aiCropX2 = row.ai_crop_x2 ?? ''
@@ -1067,7 +1066,6 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   img.dataset.aiCropIsCustom = row.ai_crop_is_custom === true ? 'true' : ''
   const fallbackSources = [...new Set([
     source.fallbackUrl,
-    source.supabaseFallbackUrl,
   ].filter(url => url && url !== source.primaryUrl))]
   if (fallbackSources.length) {
     const onError = () => {
@@ -1250,7 +1248,6 @@ function _detailIdentifyFallbackUrls(img) {
     img?.dataset?.aiFallback || '',
     img?.dataset?.aiSrc || '',
     img?.dataset?.fullSrc || '',
-    img?.dataset?.supabaseFallback || '',
     img?.src || '',
   ].filter(_isFetchableDetailImageUrl)
 }

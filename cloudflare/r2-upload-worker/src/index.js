@@ -11,7 +11,7 @@ import {
 
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
-const DEFAULT_ALLOWED_METHODS = 'GET, PUT, POST, DELETE, OPTIONS'
+const DEFAULT_ALLOWED_METHODS = 'GET, PUT, DELETE, OPTIONS, POST'
 const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
   'Content-Type',
@@ -28,6 +28,10 @@ const DEFAULT_ALLOWED_HEADERS = [
   'X-Sporely-Stored-Height',
   'X-Sporely-Upload-Origin',
 ].join(', ')
+const DEFAULT_ALLOWED_HEADER_NAMES = DEFAULT_ALLOWED_HEADERS
+  .split(',')
+  .map(value => value.trim())
+  .filter(Boolean)
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
 const ARTS_MAX_DIST = 0.006
 const NOMINATIM_INTERVAL_MS = 1000
@@ -1041,9 +1045,25 @@ function corsHeaders(request, env, resolvedOrigin = null) {
     headers.set('Vary', 'Origin')
   }
   headers.set('Access-Control-Allow-Methods', DEFAULT_ALLOWED_METHODS)
-  headers.set('Access-Control-Allow-Headers', DEFAULT_ALLOWED_HEADERS)
+  headers.set('Access-Control-Allow-Headers', resolveAllowedHeaders(request))
   headers.set('Access-Control-Max-Age', '86400')
   return headers
+}
+
+function resolveAllowedHeaders(request) {
+  const requestedHeaders = String(request?.headers?.get('Access-Control-Request-Headers') || '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean)
+  const combined = []
+  const seen = new Set()
+  for (const header of [...DEFAULT_ALLOWED_HEADER_NAMES, ...requestedHeaders]) {
+    const normalized = header.toLowerCase()
+    if (seen.has(normalized)) continue
+    seen.add(normalized)
+    combined.push(header)
+  }
+  return combined.join(', ')
 }
 
 function jsonResponse(payload, status, request, env, resolvedOrigin = null) {

@@ -12,8 +12,6 @@ import {
 import { debugImagePipeline } from './image-pipeline-debug.js'
 import { isBlob } from './observation-shapes.js'
 
-const SIGNED_URL_TTL_SECONDS = 3600
-const SIGNED_URL_CACHE = new Map()
 const DEFAULT_MEDIA_BASE_URL = 'https://media.sporely.no'
 const UPLOAD_METADATA_FIELDS = [
   'upload_mode',
@@ -38,6 +36,12 @@ function _envFlag(key) {
   return ['1', 'true', 'yes', 'on'].includes(_envText(key).toLowerCase())
 }
 
+function _isTestModeEnabled() {
+  const mode = _envText('MODE', '').toLowerCase()
+  const testFlag = String(globalThis.__SPORLEY_TEST_ENV__?.TEST ?? import.meta.env?.TEST ?? '').trim().toLowerCase()
+  return mode === 'test' || ['1', 'true', 'yes', 'on'].includes(testFlag)
+}
+
 function getMediaBaseUrl() {
   return _envText('VITE_MEDIA_BASE_URL', DEFAULT_MEDIA_BASE_URL).replace(/\/+$/, '')
 }
@@ -55,8 +59,8 @@ function _isDebugMediaUploadEnabled() {
   }
 }
 
-export function canUseDirectSupabaseStorageFallback() {
-  return _envFlag('VITE_ALLOW_SUPABASE_STORAGE_FALLBACK')
+export function canUseLegacySupabaseStorageFallbackForTestsOnly() {
+  return _envFlag('VITE_ALLOW_SUPABASE_STORAGE_FALLBACK_FOR_TESTS_ONLY') && _isTestModeEnabled()
 }
 
 export function buildWorkerUploadHeaders({
@@ -222,7 +226,8 @@ export function getPublicMediaUrl(storagePath, variant = 'original') {
 }
 
 export function clearMediaUrlCache() {
-  SIGNED_URL_CACHE.clear()
+  // Observation media no longer uses a signed-URL cache. Keep this as a
+  // compatibility no-op for the settings "clear cache" action.
 }
 
 function _encodeObjectKey(storagePath) {
@@ -329,7 +334,7 @@ async function _uploadToStorage(path, blob, options = {}) {
     await _uploadViaWorker(path, blob, options)
     return
   }
-  if (!canUseDirectSupabaseStorageFallback()) {
+  if (!canUseLegacySupabaseStorageFallbackForTestsOnly()) {
     throw _mediaStorageFallbackDisabledError()
   }
   const { error } = await supabase.storage
@@ -811,7 +816,7 @@ export async function deleteObservationMedia(paths) {
     await Promise.all(withVariants.map(path => _deleteViaWorker(path)))
     return
   }
-  if (!canUseDirectSupabaseStorageFallback()) {
+  if (!canUseLegacySupabaseStorageFallbackForTestsOnly()) {
     throw _mediaStorageFallbackDisabledError()
   }
 
@@ -834,14 +839,10 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
   const sourceList = await resolveMediaSources([originalPath], { variant })
   const source = sourceList[0] || null
   const mediaUploadBaseUrl = getMediaUploadBaseUrl()
-  const allowSupabaseFallback = canUseDirectSupabaseStorageFallback()
   const candidateUrls = []
   if (source?.primaryUrl) candidateUrls.push(source.primaryUrl)
   if (source?.fallbackUrl && !_isFetchableImageUrl(source.fallbackUrl)) {
     candidateUrls.push(source.fallbackUrl)
-  }
-  if (allowSupabaseFallback && source?.supabaseFallbackUrl && !_isFetchableImageUrl(source.supabaseFallbackUrl)) {
-    candidateUrls.push(source.supabaseFallbackUrl)
   }
 
   let lastError = null
@@ -866,17 +867,6 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
         lastError = err
       }
     }
-  }
-
-  if (allowSupabaseFallback && source?.supabaseFallbackUrl && _isFetchableImageUrl(source.supabaseFallbackUrl)) {
-    try {
-      const data = await _fetchImageBlobFromUrl(source.supabaseFallbackUrl)
-      if (isBlob(data)) return data
-    } catch (err) {
-      lastError = err
-    }
-  } else if (!mediaUploadBaseUrl) {
-    lastError = lastError || _mediaStorageFallbackDisabledError()
   }
 
   throw new Error(`Image download failed: ${lastError?.message || originalPath}`)
@@ -1152,52 +1142,9 @@ export async function syncObservationMediaKeys(observationId, storagePath, optio
   return true
 }
 
-async function _getSignedUrlMap(paths, expiresIn = SIGNED_URL_TTL_SECONDS) {
-  const uniquePaths = [...new Set((paths || []).map(normalizeMediaKey).filter(Boolean))]
-  if (!uniquePaths.length) return {}
-  if (!canUseDirectSupabaseStorageFallback()) return {}
-
-  const now = Date.now()
-  const urls = {}
-  const missing = []
-
-  uniquePaths.forEach(path => {
-    const cached = SIGNED_URL_CACHE.get(path)
-    if (cached && cached.expiresAt > now) {
-      urls[path] = cached.url
-    } else {
-      missing.push(path)
-    }
-  })
-
-  if (missing.length) {
-    const storage = supabase.storage?.from?.('observation-images')
-    if (typeof storage?.createSignedUrls === 'function') {
-      try {
-        const { data } = await storage.createSignedUrls(missing, expiresIn)
-        ;(data || []).forEach(item => {
-          if (!item?.path || !item?.signedUrl) return
-          urls[item.path] = item.signedUrl
-          SIGNED_URL_CACHE.set(item.path, {
-            url: item.signedUrl,
-            expiresAt: now + Math.max(1, expiresIn - 30) * 1000,
-          })
-        })
-      } catch (_) {}
-    }
-  }
-
-  return urls
-}
-
 export async function resolveMediaSources(paths, options = {}) {
   const variant = options.variant || 'original'
   const normalizedPaths = (paths || []).map(normalizeMediaKey)
-  const requestedPaths = variant === 'original'
-    ? normalizedPaths
-    : normalizedPaths.flatMap(path => [getVariantPath(path, variant), path])
-  const signed = await _getSignedUrlMap(requestedPaths)
-  const allowSupabaseFallback = canUseDirectSupabaseStorageFallback()
 
   return normalizedPaths.map(originalPath => {
     if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
@@ -1210,20 +1157,13 @@ export async function resolveMediaSources(paths, options = {}) {
         key: originalPath,
         primaryUrl: originalUrl,
         fallbackUrl: null,
-        supabaseFallbackUrl: allowSupabaseFallback ? (signed[originalPath] || null) : null,
       }
     }
-
-    const signedVariantUrl = signed[variantPath] || null
-    const signedOriginalUrl = signed[originalPath] || null
-    const fallbackUrl = originalUrl !== variantUrl
-      ? originalUrl
-      : (allowSupabaseFallback ? (signedVariantUrl || signedOriginalUrl || null) : null)
+    const fallbackUrl = originalUrl !== variantUrl ? originalUrl : null
     return {
       key: originalPath,
       primaryUrl: variantUrl,
       fallbackUrl,
-      supabaseFallbackUrl: allowSupabaseFallback ? (signedVariantUrl || signedOriginalUrl || null) : null,
     }
   })
 }

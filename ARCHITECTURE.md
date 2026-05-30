@@ -198,7 +198,8 @@ Server-owned account state also lives here:
 - A database trigger keeps the server-owned fields above immutable for normal authenticated writes; service-role code can still update them.
 
 Avatar initials are derived on the client, and avatar rendering prefers the stored URL
-with a signed-URL fallback if the direct image fetch fails.
+with a signed-URL fallback if the direct image fetch fails. That fallback is avatar-only
+and does not apply to observation media.
 The profile screen also exposes a self-service account deletion action, which calls the
 `delete-account` Supabase Edge Function.
 It now also shows an Account status block with image resolution, sync history, storage usage, and image count.

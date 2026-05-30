@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 
 import {
   IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
@@ -67,4 +68,15 @@ test('isImageTooLargeForPlanError matches the plan-size server payload', () => {
     false,
   )
   assert.match(IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE, /image is too large for your plan/i)
+})
+
+test('sync queue writes observation image metadata only after the R2 uploads complete', () => {
+  const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
+  const uploadIndex = source.indexOf('await uploadPreparedObservationImageVariants(preparedImage, path, {')
+  const insertIndex = source.indexOf('await insertObservationImage({', uploadIndex)
+  const syncKeysIndex = source.indexOf('await syncObservationMediaKeys(obsId, path, { sortOrder: i })', insertIndex)
+
+  assert.ok(uploadIndex >= 0)
+  assert.ok(insertIndex > uploadIndex)
+  assert.ok(syncKeysIndex > insertIndex)
 })
