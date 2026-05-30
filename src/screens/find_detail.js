@@ -2353,7 +2353,7 @@ function _renderPrivacySlotNote() {
   const isDraft = document.getElementById('detail-draft')?.checked !== false
   if (draftPill) draftPill.textContent = isDraft ? t('detail.draft') : t('detail.ready')
 
-  const isPro = state.cloudPlan?.cloudPlan === 'pro' || !!state.cloudPlan?.fullResStorageEnabled
+  const isPro = state.cloudPlan?.qualityProfile === 'high' || state.cloudPlan?.cloudPlan === 'pro'
   const currentText = _currentDetailUsesPrivacySlot()
     ? t('privacySlots.currentUses')
     : t('privacySlots.currentFree')

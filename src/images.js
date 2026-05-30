@@ -2,6 +2,13 @@ import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
 import { normalizeAiCropRect } from './image_crop.js'
 import { getEffectiveCloudUploadPolicy } from './cloud-plan.js'
+import {
+  CLOUD_THUMB_JPEG_QUALITY,
+  CLOUD_THUMB_WEBP_QUALITY,
+  IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
+  buildFullImageWebpQualityAttempts,
+  scaleDimensionsToMaxPixels,
+} from './cloud-media-policy.js'
 import { debugImagePipeline } from './image-pipeline-debug.js'
 import { isBlob } from './observation-shapes.js'
 
@@ -31,6 +38,58 @@ function _isDebugMediaUploadEnabled() {
   } catch (_) {
     return false
   }
+}
+
+export function canUseDirectSupabaseStorageFallback() {
+  return Boolean(import.meta.env?.DEV)
+}
+
+export function buildWorkerUploadHeaders({
+  blob,
+  options = {},
+  uploadMeta = {},
+  accessToken = '',
+} = {}) {
+  const headers = {
+    Authorization: `Bearer ${String(accessToken || '').trim()}`,
+    'Content-Type': blob?.type || 'image/jpeg',
+    'Cache-Control': 'public, max-age=31536000, immutable',
+  }
+
+  const uploadVariant = String(options?.uploadVariant || uploadMeta?.upload_variant || 'full').trim().toLowerCase() || 'full'
+  const sourceWidth = Number.isFinite(Number(uploadMeta?.source_width)) ? Number(uploadMeta.source_width) : null
+  const sourceHeight = Number.isFinite(Number(uploadMeta?.source_height)) ? Number(uploadMeta.source_height) : null
+  const storedWidth = Number.isFinite(Number(uploadMeta?.stored_width)) ? Number(uploadMeta.stored_width) : null
+  const storedHeight = Number.isFinite(Number(uploadMeta?.stored_height)) ? Number(uploadMeta.stored_height) : null
+  const encodingQuality = Number.isFinite(Number(uploadMeta?.encoding_quality)) ? Number(uploadMeta.encoding_quality) : null
+  const encodingFormat = String(options?.encodingFormat || uploadMeta?.encoding_format || blob?.type || '').trim()
+
+  headers['X-Sporely-Upload-Mode'] = String(options?.uploadMode || uploadMeta?.upload_mode || 'reduced')
+  headers['X-Sporely-Upload-Variant'] = uploadVariant
+  headers['X-Sporely-Cloud-Plan'] = String(options?.cloudPlan || uploadMeta?.cloud_plan || 'free')
+  headers['X-Sporely-Quality-Profile'] = String(options?.qualityProfile || uploadMeta?.quality_profile || 'standard')
+  if (encodingQuality !== null) headers['X-Sporely-Encoding-Quality'] = String(encodingQuality)
+  if (encodingFormat) headers['X-Sporely-Encoding-Format'] = encodingFormat
+  if (sourceWidth !== null) headers['X-Sporely-Source-Width'] = String(sourceWidth)
+  if (sourceHeight !== null) headers['X-Sporely-Source-Height'] = String(sourceHeight)
+  if (storedWidth !== null) headers['X-Sporely-Stored-Width'] = String(storedWidth)
+  if (storedHeight !== null) headers['X-Sporely-Stored-Height'] = String(storedHeight)
+
+  return headers
+}
+
+function _buildUploadMediaError(message, details = {}) {
+  const error = new Error(String(message || IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE))
+  if (details && typeof details === 'object') {
+    error.details = { ...details }
+  }
+  return error
+}
+
+function _isImageTooLargeForPlanError(error) {
+  const text = String(error?.message || error || '').toLowerCase()
+  return text.includes('image too large for plan')
+    || text.includes('too large for your plan')
 }
 
 export function normalizeMediaKey(value) {
@@ -161,11 +220,12 @@ async function _uploadViaWorker(path, blob, options = {}) {
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for media upload')
 
-  const headers = {
-    Authorization: `Bearer ${accessToken}`,
-    'Content-Type': blob?.type || 'image/jpeg',
-    'Cache-Control': 'public, max-age=31536000, immutable',
-  }
+  const headers = buildWorkerUploadHeaders({
+    blob,
+    options,
+    uploadMeta: options?.uploadMeta || {},
+    accessToken,
+  })
 
   const arrayBuffer = await blob.arrayBuffer()
 
@@ -244,6 +304,9 @@ async function _uploadToStorage(path, blob, options = {}) {
     await _uploadViaWorker(path, blob, options)
     return
   }
+  if (!canUseDirectSupabaseStorageFallback()) {
+    throw new Error('Media upload worker is not configured for this environment.')
+  }
   const { error } = await supabase.storage
     .from('observation-images')
     .upload(path, blob, { contentType: blob?.type || 'image/jpeg', upsert: true })
@@ -276,21 +339,32 @@ function _targetSizeForPolicy(width, height, uploadPolicy) {
   const sourceWidth = Math.max(1, Number(width) || 0)
   const sourceHeight = Math.max(1, Number(height) || 0)
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
-  let maxEdge = 1600
-  if (policy.uploadMode === 'full') {
-    const pixels = sourceWidth * sourceHeight
-    maxEdge = pixels > 13_000_000 ? 4000 : Math.max(sourceWidth, sourceHeight)
-  }
-  const scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight))
+  const scaled = scaleDimensionsToMaxPixels(sourceWidth, sourceHeight, policy.maxPixels || 0)
   return {
-    targetWidth: Math.max(1, Math.round(sourceWidth * scale)),
-    targetHeight: Math.max(1, Math.round(sourceHeight * scale)),
+    targetWidth: scaled.width,
+    targetHeight: scaled.height,
   }
 }
 
-const ENCODE_CANDIDATES = [
-  { type: 'image/webp', quality: 0.65 },
-  { type: 'image/jpeg', quality: 0.75 },
+function _fullImageEncodeCandidates(uploadPolicy) {
+  const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+  const qualities = Array.isArray(policy.fullImageWebpQualityAttempts) && policy.fullImageWebpQualityAttempts.length
+    ? policy.fullImageWebpQualityAttempts
+    : buildFullImageWebpQualityAttempts(policy.qualityProfile)
+  const candidates = qualities.map(quality => ({
+    type: 'image/webp',
+    quality,
+  }))
+  candidates.push({
+    type: 'image/jpeg',
+    quality: policy.fullImageWebpQuality || qualities[0] || 0.65,
+  })
+  return candidates
+}
+
+const THUMBNAIL_ENCODE_CANDIDATES = [
+  { type: 'image/webp', quality: CLOUD_THUMB_WEBP_QUALITY },
+  { type: 'image/jpeg', quality: CLOUD_THUMB_JPEG_QUALITY },
 ]
 let _imageWorker = null
 let _imageWorkerSeq = 0
@@ -320,12 +394,26 @@ function _getImageWorker() {
   return _imageWorker
 }
 
-async function _canvasToEncodedBlob(canvas, candidates = ENCODE_CANDIDATES) {
+async function _canvasToEncodedBlob(canvas, candidates = THUMBNAIL_ENCODE_CANDIDATES, options = {}) {
+  const byteCap = Number.isFinite(Number(options.byteCap)) ? Number(options.byteCap) : null
+  let sawEncodedBlob = false
   for (const candidate of candidates) {
     const blob = await new Promise(resolve => {
       canvas.toBlob(nextBlob => resolve(nextBlob), candidate.type, candidate.quality)
     })
-    if (blob?.type === candidate.type && blob.size > 0) return blob
+    if (blob?.type !== candidate.type || blob.size <= 0) continue
+    sawEncodedBlob = true
+    if (byteCap && blob.size > byteCap) continue
+    return {
+      blob,
+      quality: candidate.quality,
+      type: candidate.type,
+    }
+  }
+  if (byteCap && sawEncodedBlob) {
+    throw _buildUploadMediaError(IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE, {
+      byteCap,
+    })
   }
   throw new Error('Image encoding failed')
 }
@@ -393,11 +481,26 @@ async function _prepareUploadBlobInWorker(blob, policy) {
   const thumbBlob = result.thumbBytes && result.thumbType
     ? new Blob([result.thumbBytes], { type: result.thumbType })
     : null
+  const thumbMeta = thumbBlob ? {
+    upload_mode: policy.uploadMode || 'reduced',
+    quality_profile: policy.qualityProfile || 'standard',
+    encoding_quality: result.thumbEncodingQuality ?? null,
+    encoding_format: result.thumbEncodingFormat || thumbBlob.type || null,
+    source_width: result.sourceWidth,
+    source_height: result.sourceHeight,
+    stored_width: result.thumbWidth ?? null,
+    stored_height: result.thumbHeight ?? null,
+    stored_bytes: thumbBlob.size || result.thumbSize || 0,
+  } : null
   return {
     uploadBlob,
     variants: thumbBlob ? { thumb: thumbBlob } : {},
+    variantMeta: thumbMeta ? { thumb: thumbMeta } : null,
     uploadMeta: {
       upload_mode: policy.uploadMode || 'reduced',
+      quality_profile: policy.qualityProfile || 'standard',
+      encoding_quality: result.encodingQuality ?? policy.fullImageWebpQuality ?? null,
+      encoding_format: result.fullType || uploadBlob.type || null,
       source_width: result.sourceWidth,
       source_height: result.sourceHeight,
       stored_width: result.targetWidth,
@@ -416,6 +519,7 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     const prepared = await _prepareUploadBlobInWorker(blob, policy)
     if (prepared) return prepared
   } catch (err) {
+    if (_isImageTooLargeForPlanError(err)) throw err
     console.warn('Image worker processing failed; falling back to main thread:', err)
   }
   
@@ -427,8 +531,12 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     return {
       uploadBlob: blob,
       variants: {},
+      variantMeta: null,
       uploadMeta: {
-        upload_mode: 'full',
+        upload_mode: policy.uploadMode || 'reduced',
+        quality_profile: policy.qualityProfile || 'standard',
+        encoding_quality: null,
+        encoding_format: blob.type || 'image/jpeg',
         source_width: null,
         source_height: null,
         stored_width: null,
@@ -445,8 +553,12 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     return {
       uploadBlob: blob,
       variants: {},
+      variantMeta: null,
       uploadMeta: {
-        upload_mode: 'full',
+        upload_mode: policy.uploadMode || 'reduced',
+        quality_profile: policy.qualityProfile || 'standard',
+        encoding_quality: null,
+        encoding_format: blob.type || 'image/jpeg',
         source_width: null,
         source_height: null,
         stored_width: null,
@@ -465,7 +577,12 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     canvas.height = targetHeight
     _drawHighQuality(img, sourceWidth, sourceHeight, canvas, targetWidth, targetHeight)
 
-    const fullBlob = await _canvasToEncodedBlob(canvas)
+    const fullEncoding = await _canvasToEncodedBlob(
+      canvas,
+      _fullImageEncodeCandidates(policy),
+      { byteCap: policy.fullImageByteCap },
+    )
+    const fullBlob = fullEncoding.blob
     await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
 
     const thumbScale = Math.min(1, 400 / Math.max(targetWidth, targetHeight))
@@ -474,17 +591,31 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     thumbCanvas.width = thumbWidth
     thumbCanvas.height = thumbHeight
     _drawHighQuality(canvas, targetWidth, targetHeight, thumbCanvas, thumbWidth, thumbHeight)
-    const thumbBlob = await _canvasToEncodedBlob(thumbCanvas, [
-      { type: 'image/webp', quality: 0.65 },
-      { type: 'image/jpeg', quality: 0.75 },
-    ])
+    const thumbEncoding = await _canvasToEncodedBlob(thumbCanvas, THUMBNAIL_ENCODE_CANDIDATES)
+    const thumbBlob = thumbEncoding.blob
     await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
 
     return {
       uploadBlob: fullBlob,
       variants: thumbBlob ? { thumb: thumbBlob } : {},
+      variantMeta: thumbBlob ? {
+        thumb: {
+          upload_mode: policy.uploadMode || 'reduced',
+          quality_profile: policy.qualityProfile || 'standard',
+          encoding_quality: thumbEncoding.quality ?? null,
+          encoding_format: thumbEncoding.type || thumbBlob.type || null,
+          source_width: sourceWidth,
+          source_height: sourceHeight,
+          stored_width: thumbWidth,
+          stored_height: thumbHeight,
+          stored_bytes: thumbBlob.size || 0,
+        },
+      } : null,
       uploadMeta: {
         upload_mode: policy.uploadMode || 'reduced',
+        quality_profile: policy.qualityProfile || 'standard',
+        encoding_quality: fullEncoding.quality ?? policy.fullImageWebpQuality ?? null,
+        encoding_format: fullEncoding.type || fullBlob.type || null,
         source_width: sourceWidth,
         source_height: sourceHeight,
         stored_width: targetWidth,
@@ -508,9 +639,9 @@ export async function prepareImageVariants(blob, uploadPolicy) {
     blobSize: blob?.size || 0,
     uploadMode: policy.uploadMode || 'reduced',
   })
-  const { uploadBlob, uploadMeta, variants } = await _prepareUploadBlob(blob, policy)
+  const { uploadBlob, uploadMeta, variants, variantMeta } = await _prepareUploadBlob(blob, policy)
 
-  return { uploadBlob, uploadMeta, variants }
+  return { uploadBlob, uploadMeta, variants, variantMeta }
 }
 
 export async function uploadPreparedObservationImageVariants(preparedImage, storagePath, options = {}) {
@@ -521,18 +652,27 @@ export async function uploadPreparedObservationImageVariants(preparedImage, stor
   })
   debugImagePipeline('upload prepared observation image variants', {
     uploadMode: preparedImage.uploadMeta?.upload_mode || uploadPolicy.uploadMode || 'reduced',
+    qualityProfile: preparedImage.uploadMeta?.quality_profile || uploadPolicy.qualityProfile || 'standard',
     hasThumb: !!preparedImage.variants?.thumb,
   })
+  const thumbMeta = preparedImage.variantMeta?.thumb || null
   const uploadOptions = {
     uploadMode: preparedImage.uploadMeta?.upload_mode || uploadPolicy.uploadMode,
     cloudPlan: uploadPolicy.cloudPlan,
+    qualityProfile: preparedImage.uploadMeta?.quality_profile || uploadPolicy.qualityProfile || 'standard',
+    uploadMeta: preparedImage.uploadMeta || null,
+    uploadVariant: 'full',
     uploadOrigin: options?.uploadOrigin || 'web',
   }
 
   await _uploadToStorage(normalizedPath, preparedImage.uploadBlob, uploadOptions)
   if (preparedImage.variants?.thumb) {
     const thumbPath = getVariantPath(normalizedPath, 'thumb')
-    await _uploadToStorage(thumbPath, preparedImage.variants.thumb, uploadOptions)
+    await _uploadToStorage(thumbPath, preparedImage.variants.thumb, {
+      ...uploadOptions,
+      uploadVariant: 'thumb',
+      uploadMeta: thumbMeta || preparedImage.uploadMeta || null,
+    })
   }
   return preparedImage.uploadMeta
 }
@@ -645,6 +785,9 @@ export async function deleteObservationMedia(paths) {
     await Promise.all(withVariants.map(path => _deleteViaWorker(path)))
     return
   }
+  if (!canUseDirectSupabaseStorageFallback()) {
+    throw new Error('Media storage worker is not configured for this environment.')
+  }
 
   const { error } = await supabase.storage
     .from('observation-images')
@@ -686,6 +829,11 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
       } catch (err) {
         lastError = err
       }
+    }
+
+    if (!canUseDirectSupabaseStorageFallback()) {
+      lastError = lastError || new Error('Media storage worker is not configured for this environment.')
+      continue
     }
 
     try {

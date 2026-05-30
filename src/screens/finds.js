@@ -7,9 +7,11 @@ import { fetchFirstImages, fetchCardImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
 import {
   QUEUE_EVENT,
+  IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
   PRIVACY_SLOT_LIMIT_USER_MESSAGE,
   deleteQueuedObservation,
   getQueuedObservations,
+  isImageTooLargeForPlanError,
   isPrivacySlotLimitError,
   triggerSync,
 } from '../sync-queue.js'
@@ -892,6 +894,7 @@ function _pendingStatusText(obs) {
     case 'blocked':
       if (obs._blockedReason) return obs._blockedReason
       if (isPrivacySlotLimitError(obs._syncErrorMessage)) return PRIVACY_SLOT_LIMIT_USER_MESSAGE
+      if (isImageTooLargeForPlanError(obs._syncErrorMessage)) return IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE
       return obs._syncErrorMessage ? `Upload blocked: ${obs._syncErrorMessage}` : 'Upload blocked'
     default:
       return t('finds.pendingUpload')

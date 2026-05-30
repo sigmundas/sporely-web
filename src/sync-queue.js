@@ -18,6 +18,7 @@ const RETRY_DELAY_MS = 30_000
 const BLOCKED_QUEUE_REASON = 'queued item belongs to a different auth user'
 const BLOCKED_QUEUE_STAGE = 'blocked'
 export const PRIVACY_SLOT_LIMIT_USER_MESSAGE = 'Free accounts can have up to 20 private or fuzzed-location cloud observations. Make one public, delete one, or upgrade to Pro.'
+export const IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE = 'Image is too large for your plan. Make it smaller or upgrade to Pro.'
 const QUEUE_NAMESPACE_PREFIX = 'sporely-upload-queue'
 const _queuedPreviewUrls = new Map()
 let _retryTimer = null
@@ -122,6 +123,19 @@ export function isPrivacySlotLimitError(error) {
     || haystack.includes('check_violation')
   )
   return hasPhrase && hasCode
+}
+
+export function isImageTooLargeForPlanError(error) {
+  const { code, texts } = _collectSyncErrorDetails(error)
+  const haystack = [...new Set(texts)].join(' ').toLowerCase()
+  const hasPhrase = [
+    'image too large for plan',
+    'too large for your plan',
+  ].some(phrase => haystack.includes(phrase))
+  const hasCode = String(code || '').trim().toLowerCase() === 'image_too_large_for_plan'
+    || haystack.includes('image_too_large_for_plan')
+    || haystack.includes('payload_too_large')
+  return hasPhrase || hasCode
 }
 
 async function _markQueueItemBlocked(itemId, reason, extras = {}) {
@@ -326,6 +340,7 @@ function _normalizeQueuedImages(imageEntries) {
         uploadBlob: null,
         uploadMeta: null,
         variants: null,
+        variantMeta: null,
       }
     }
     const realBlob = isBlob(entry?.blob)
@@ -348,6 +363,7 @@ function _normalizeQueuedImages(imageEntries) {
       uploadBlob,
       uploadMeta: entry?.uploadMeta || null,
       variants: thumbBlob ? { thumb: thumbBlob } : (entry?.variants || null),
+      variantMeta: entry?.variantMeta || null,
     }
   }).filter(entry => isBlob(entry.blob) || isBlob(entry.uploadBlob))
 }
@@ -379,6 +395,7 @@ async function _serializeQueuedImageForStorage(image) {
     variantBytes: thumb ? { thumb: thumb.bytes } : null,
     variantTypes: thumb ? { thumb: thumb.type } : null,
     variantSizes: thumb ? { thumb: thumb.size } : null,
+    variantMeta: image?.variantMeta || null,
   }
 }
 
@@ -869,7 +886,12 @@ async function _runSyncQueue() {
         })
         let preparedImage = image
         const preparedUploadMode = image.uploadMeta?.upload_mode || null
-        if (isBlob(image.blob) && (!image.uploadBlob || preparedUploadMode !== uploadPolicy.uploadMode)) {
+        const preparedQualityProfile = image.uploadMeta?.quality_profile || null
+        if (isBlob(image.blob) && (
+          !image.uploadBlob
+          || preparedUploadMode !== uploadPolicy.uploadMode
+          || preparedQualityProfile !== uploadPolicy.qualityProfile
+        )) {
           const prepared = await prepareImageVariants(image.blob, uploadPolicy)
           preparedImage = {
             ...image,
@@ -941,6 +963,14 @@ async function _runSyncQueue() {
           blockedByUserId: authUserId,
           blockedQueueUserId: queueUserId,
         })
+      } else if (isImageTooLargeForPlanError(err)) {
+        await _markQueueItemBlocked(item.id, IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE, {
+          syncErrorMessage: message,
+          blockedReason: IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
+          syncErrorCode: 'image_too_large_for_plan',
+          blockedByUserId: authUserId,
+          blockedQueueUserId: queueUserId,
+        })
       } else if (unrecoverable) {
         console.warn('Background sync skipped for queue item', item.id, message)
         await _markQueueItemBlocked(item.id, message, {
@@ -952,7 +982,7 @@ async function _runSyncQueue() {
       } else {
         console.error('Background sync failed for queue item', item.id, err)
       }
-      if (!unrecoverable && !isPrivacySlotLimitError(err)) {
+      if (!unrecoverable && !isPrivacySlotLimitError(err) && !isImageTooLargeForPlanError(err)) {
         await _setQueueSyncStatus(item.id, 'retrying', {
           syncErrorMessage: message,
         })

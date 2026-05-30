@@ -3,6 +3,11 @@ import {
   buildDawaSuggestion,
   buildLocationSuggestionsFromNominatim,
 } from '../../../src/location-suggestion-builder.js'
+import {
+  IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
+  buildCloudUploadPolicy,
+  normalizeCloudPlanProfile,
+} from '../../../src/cloud-media-policy.js'
 
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
@@ -13,6 +18,14 @@ const DEFAULT_ALLOWED_HEADERS = [
   'Cache-Control',
   'X-Sporely-Upload-Mode',
   'X-Sporely-Cloud-Plan',
+  'X-Sporely-Upload-Variant',
+  'X-Sporely-Quality-Profile',
+  'X-Sporely-Encoding-Quality',
+  'X-Sporely-Encoding-Format',
+  'X-Sporely-Source-Width',
+  'X-Sporely-Source-Height',
+  'X-Sporely-Stored-Width',
+  'X-Sporely-Stored-Height',
   'X-Sporely-Upload-Origin',
 ].join(', ')
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
@@ -280,11 +293,36 @@ async function handleUpload(request, env, ctx, url) {
   const existingObject = await env.MEDIA_BUCKET.head(key)
   const existingBytes = mediaObjectSize(existingObject)
   const storageDelta = Math.max(0, bodyBytes - existingBytes)
-  const profile = await fetchStorageProfile(env, claims.sub)
-  if (profile?.is_banned === true) {
+  const rawProfile = await fetchStorageProfile(env, claims.sub)
+  if (rawProfile?.is_banned === true) {
     throw httpError(403, 'user_banned', 'User is banned from uploading media')
   }
+  const profile = normalizeCloudPlanProfile(rawProfile)
   assertStorageQuotaAllowsUpload(profile, storageDelta, env)
+
+  const uploadModeHeader = String(request.headers.get('X-Sporely-Upload-Mode') || '').trim().toLowerCase()
+  const uploadMode = uploadModeHeader === 'full' ? 'full' : 'reduced'
+  const uploadVariant = String(request.headers.get('X-Sporely-Upload-Variant') || 'full').trim().toLowerCase() || 'full'
+  const uploadPolicy = buildCloudUploadPolicy(profile, { uploadMode })
+  const encodingQualityHeader = Number.parseFloat(String(request.headers.get('X-Sporely-Encoding-Quality') || ''))
+  const encodingFormatHeader = String(request.headers.get('X-Sporely-Encoding-Format') || '').trim().toLowerCase()
+  const sourceWidth = parseIntegerHeader(request.headers.get('X-Sporely-Source-Width'))
+  const sourceHeight = parseIntegerHeader(request.headers.get('X-Sporely-Source-Height'))
+  const storedWidth = parseIntegerHeader(request.headers.get('X-Sporely-Stored-Width'))
+  const storedHeight = parseIntegerHeader(request.headers.get('X-Sporely-Stored-Height'))
+
+  if (uploadVariant !== 'thumb') {
+    const planByteCap = Math.max(1, Number(uploadPolicy.fullImageByteCap || 0) || 0)
+    if (bodyBytes > planByteCap) {
+      throw httpError(413, 'image_too_large_for_plan', IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE)
+    }
+    if (Number.isFinite(storedWidth) && Number.isFinite(storedHeight)) {
+      const storedPixels = Math.max(1, storedWidth) * Math.max(1, storedHeight)
+      if (storedPixels > Math.max(1, Number(uploadPolicy.maxPixels || 0))) {
+        throw httpError(413, 'image_too_large_for_plan', IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE)
+      }
+    }
+  }
 
   const cacheControl = String(request.headers.get('Cache-Control') || 'public, max-age=31536000, immutable').trim()
   const object = await env.MEDIA_BUCKET.put(key, bodyBuffer, {
@@ -296,6 +334,17 @@ async function handleUpload(request, env, ctx, url) {
       user_id: String(claims.sub),
       uploaded_at: new Date().toISOString(),
       uploaded_by: String(claims.email || ''),
+      upload_mode: String(uploadMode),
+      upload_variant: String(uploadVariant),
+      cloud_plan: String(profile?.cloudPlan || 'free'),
+      quality_profile: String(uploadPolicy?.qualityProfile || profile?.qualityProfile || 'standard'),
+      encoding_quality: Number.isFinite(encodingQualityHeader) ? String(encodingQualityHeader) : '',
+      encoding_format: encodingFormatHeader || String(contentType || '').toLowerCase(),
+      source_width: Number.isFinite(sourceWidth) ? String(sourceWidth) : '',
+      source_height: Number.isFinite(sourceHeight) ? String(sourceHeight) : '',
+      stored_width: Number.isFinite(storedWidth) ? String(storedWidth) : '',
+      stored_height: Number.isFinite(storedHeight) ? String(storedHeight) : '',
+      stored_bytes: String(bodyBytes),
     },
   })
   const imageDelta = isOriginalImageKey(key) && !existingObject ? 1 : 0
@@ -424,13 +473,12 @@ async function fetchStorageProfile(env, userId) {
 function assertStorageQuotaAllowsUpload(profile, storageDelta, env) {
   if (!profile || storageDelta <= 0) return
 
-  const cloudPlan = String(profile.cloud_plan || '').trim().toLowerCase()
-  if (cloudPlan === 'pro' || profile.is_pro === true) return
+  if (profile.cloudPlan === 'pro' || profile.hasProAccess === true) return
 
-  const quota = parseNonNegativeInt(profile.storage_quota_bytes, parseNonNegativeInt(env.FREE_STORAGE_QUOTA_BYTES, DEFAULT_FREE_STORAGE_QUOTA_BYTES))
+  const quota = parseNonNegativeInt(profile.storageQuotaBytes, parseNonNegativeInt(env.FREE_STORAGE_QUOTA_BYTES, DEFAULT_FREE_STORAGE_QUOTA_BYTES))
   if (!quota) return
 
-  const used = parseNonNegativeInt(profile.total_storage_bytes ?? profile.storage_used_bytes, 0)
+  const used = parseNonNegativeInt(profile.storageUsedBytes, 0)
   if (used + storageDelta > quota) {
     throw httpError(413, 'storage_quota_exceeded', 'This account has reached its storage limit')
   }

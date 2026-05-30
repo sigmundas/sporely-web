@@ -333,7 +333,7 @@ function _syncSettingsUI() {
   if (localeSelect) localeSelect.value = getLocale()
 
   const resolutionSection = document.getElementById('settings-image-resolution-section')
-  const isPro = state.cloudPlan?.cloudPlan === 'pro' || !!state.cloudPlan?.fullResStorageEnabled
+  const isPro = state.cloudPlan?.qualityProfile === 'high' || state.cloudPlan?.cloudPlan === 'pro'
   if (resolutionSection) resolutionSection.style.display = isPro ? '' : 'none'
 
   const selectedResolution = state.cloudPlan?.imageResolutionMode || getStoredImageResolutionMode()

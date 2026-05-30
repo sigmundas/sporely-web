@@ -186,7 +186,7 @@ function _updateReviewObscureHint() {
     }
   }
   if (obscureHint) {
-    const isPro = state.cloudPlan?.cloudPlan === 'pro' || !!state.cloudPlan?.fullResStorageEnabled
+    const isPro = state.cloudPlan?.qualityProfile === 'high' || state.cloudPlan?.cloudPlan === 'pro'
     obscureHint.style.display = (!isPro && state.captureDraft.location_precision === 'fuzzed' && state.captureDraft.visibility === 'public') ? 'flex' : 'none'
   }
 }

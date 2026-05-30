@@ -1,15 +1,11 @@
 import { supabase } from './supabase.js'
+import {
+  buildCloudUploadPolicy,
+  normalizeCloudPlanProfile,
+} from './cloud-media-policy.js'
 
-export const FREE_CLOUD_MAX_PIXELS = 2_000_000
-export const PRO_CLOUD_MAX_PIXELS = 12_000_000
-export const PRO_CLOUD_RESIZE_THRESHOLD_PIXELS = 14_000_000
 export const CLOUD_UPLOAD_POLICY_CHANGED_EVENT = 'sporely-cloud-upload-policy-changed'
 const IMAGE_RESOLUTION_MODE_KEY = 'sporely-image-resolution-mode'
-
-function _parseNullableInt(value) {
-  const parsed = Number.parseInt(value, 10)
-  return Number.isFinite(parsed) ? parsed : null
-}
 
 function _isMissingColumnError(error, columnName) {
   const text = String(error?.message || error?.details || error?.hint || '').toLowerCase()
@@ -19,23 +15,7 @@ function _isMissingColumnError(error, columnName) {
     && (text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find'))
 }
 
-export function normalizeCloudPlanProfile(profile) {
-  const rawPlan = String(profile?.cloud_plan ?? profile?.cloudPlan ?? '').trim().toLowerCase()
-  const hasProAccess = rawPlan === 'pro' || !!(profile?.is_pro ?? profile?.isPro)
-  const cloudPlan = hasProAccess ? 'pro' : 'free'
-  const fullResStorageEnabled = hasProAccess || !!(profile?.full_res_storage_enabled ?? profile?.fullResStorageEnabled)
-  return {
-    cloudPlan,
-    fullResStorageEnabled,
-    storageQuotaBytes: _parseNullableInt(profile?.storage_quota_bytes ?? profile?.storageQuotaBytes),
-    storageUsedBytes: Math.max(0, _parseNullableInt(
-      profile?.total_storage_bytes
-      ?? profile?.storage_used_bytes
-      ?? profile?.storageUsedBytes
-    ) ?? 0),
-    imageCount: Math.max(0, _parseNullableInt(profile?.image_count ?? profile?.imageCount) ?? 0),
-  }
-}
+export { normalizeCloudPlanProfile } from './cloud-media-policy.js'
 
 export function normalizeImageResolutionMode(value) {
   return String(value || '').trim().toLowerCase() === 'reduced' ? 'reduced' : 'max'
@@ -61,15 +41,10 @@ export function setStoredImageResolutionMode(value) {
 export function getEffectiveCloudUploadPolicy(profile) {
   const normalized = normalizeCloudPlanProfile(profile)
   const imageResolutionMode = getStoredImageResolutionMode()
-  const canUseMaxResolution = normalized.cloudPlan === 'pro' || normalized.fullResStorageEnabled
-  const uploadMode = canUseMaxResolution && imageResolutionMode === 'max' ? 'full' : 'reduced'
-  const maxPixels = uploadMode === 'full' ? PRO_CLOUD_MAX_PIXELS : FREE_CLOUD_MAX_PIXELS
+  const uploadPolicy = buildCloudUploadPolicy(normalized, { uploadMode: 'full' })
   return {
-    ...normalized,
-    imageResolutionMode: uploadMode === 'full' ? 'max' : 'reduced',
-    uploadMode,
-    maxPixels,
-    resizeThresholdPixels: uploadMode === 'full' ? PRO_CLOUD_RESIZE_THRESHOLD_PIXELS : maxPixels,
+    ...uploadPolicy,
+    imageResolutionMode,
   }
 }
 
