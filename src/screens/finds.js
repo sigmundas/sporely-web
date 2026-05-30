@@ -5,7 +5,14 @@ import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { fetchFirstImages, fetchCardImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
-import { QUEUE_EVENT, getQueuedObservations, deleteQueuedObservation, triggerSync } from '../sync-queue.js'
+import {
+  QUEUE_EVENT,
+  PRIVACY_SLOT_LIMIT_USER_MESSAGE,
+  deleteQueuedObservation,
+  getQueuedObservations,
+  isPrivacySlotLimitError,
+  triggerSync,
+} from '../sync-queue.js'
 import { openFindDetail } from './find_detail.js'
 import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openPreferredCamera } from '../camera-actions.js'
@@ -882,6 +889,10 @@ function _pendingStatusText(obs) {
         : t('finds.pendingUpload')
     case 'retrying':
       return obs._syncErrorMessage ? `${t('finds.pendingRetrying')}: ${obs._syncErrorMessage}` : t('finds.pendingRetrying')
+    case 'blocked':
+      if (obs._blockedReason) return obs._blockedReason
+      if (isPrivacySlotLimitError(obs._syncErrorMessage)) return PRIVACY_SLOT_LIMIT_USER_MESSAGE
+      return obs._syncErrorMessage ? `Upload blocked: ${obs._syncErrorMessage}` : 'Upload blocked'
     default:
       return t('finds.pendingUpload')
   }

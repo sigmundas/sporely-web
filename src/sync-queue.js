@@ -17,6 +17,7 @@ const SYNC_SUCCESS_EVENT = 'sporely-sync-upload-complete'
 const RETRY_DELAY_MS = 30_000
 const BLOCKED_QUEUE_REASON = 'queued item belongs to a different auth user'
 const BLOCKED_QUEUE_STAGE = 'blocked'
+export const PRIVACY_SLOT_LIMIT_USER_MESSAGE = 'Free accounts can have up to 20 private or fuzzed-location cloud observations. Make one public, delete one, or upgrade to Pro.'
 const QUEUE_NAMESPACE_PREFIX = 'sporely-upload-queue'
 const _queuedPreviewUrls = new Map()
 let _retryTimer = null
@@ -55,15 +56,84 @@ function _isBlockedQueueItem(item) {
   return String(item?.syncStage || '').trim() === BLOCKED_QUEUE_STAGE
 }
 
+function _collectSyncErrorDetails(value, seen = new Set()) {
+  const code = ''
+  const texts = []
+  if (value === null || value === undefined) return { code, texts }
+
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (!text) return { code, texts }
+    texts.push(text)
+    if (/^[\[{]/.test(text)) {
+      try {
+        const parsed = JSON.parse(text)
+        const nested = _collectSyncErrorDetails(parsed, seen)
+        return {
+          code: nested.code || code,
+          texts: texts.concat(nested.texts || []),
+        }
+      } catch (_) {
+        return { code, texts }
+      }
+    }
+    return { code, texts }
+  }
+
+  if (typeof value === 'object') {
+    if (seen.has(value)) return { code, texts }
+    seen.add(value)
+    let nextCode = ''
+    for (const key of ['code', 'sqlstate', 'status_code', 'statusCode', 'status']) {
+      const raw = value?.[key]
+      if (raw !== null && raw !== undefined && String(raw).trim()) {
+        nextCode = String(raw).trim()
+        break
+      }
+    }
+    for (const key of ['message', 'details', 'hint', 'error', 'body', 'text', 'reason', 'response']) {
+      if (!(key in value)) continue
+      const nested = _collectSyncErrorDetails(value[key], seen)
+      if (!nextCode && nested.code) nextCode = nested.code
+      texts.push(...(nested.texts || []))
+    }
+    return {
+      code: nextCode,
+      texts: texts.concat(String(value).trim() ? [String(value).trim()] : []),
+    }
+  }
+
+  const text = String(value).trim()
+  return {
+    code,
+    texts: text ? [text] : [],
+  }
+}
+
+export function isPrivacySlotLimitError(error) {
+  const { code, texts } = _collectSyncErrorDetails(error)
+  const haystack = [...new Set(texts)].join(' ').toLowerCase()
+  const hasPhrase = ['free sporely accounts', '20 privacy slot', 'privacy slot observations']
+    .some(phrase => haystack.includes(phrase))
+  const hasCode = (
+    String(code || '').trim() === '23514'
+    || String(code || '').trim().toLowerCase() === 'check_violation'
+    || haystack.includes('23514')
+    || haystack.includes('check_violation')
+  )
+  return hasPhrase && hasCode
+}
+
 async function _markQueueItemBlocked(itemId, reason, extras = {}) {
   await _updateQueueItem(itemId, current => current ? {
     ...current,
     syncStage: BLOCKED_QUEUE_STAGE,
-    syncErrorMessage: reason,
-    blockedReason: reason,
+    syncErrorMessage: extras.syncErrorMessage ?? reason,
+    blockedReason: extras.blockedReason ?? reason,
     blockedAt: Date.now(),
     blockedByUserId: extras.blockedByUserId || null,
     blockedQueueUserId: extras.blockedQueueUserId || null,
+    syncErrorCode: extras.syncErrorCode ?? current.syncErrorCode ?? null,
     syncImageIndex: extras.syncImageIndex ?? current.syncImageIndex ?? null,
     syncImageCount: extras.syncImageCount ?? current.syncImageCount ?? null,
     lastAttemptAt: Date.now(),
@@ -404,6 +474,8 @@ export async function getQueuedObservations(userId) {
       _remoteObservationId: item.remoteObservationId || null,
       _syncStage: item.syncStage || null,
       _syncErrorMessage: item.syncErrorMessage || null,
+      _blockedReason: item.blockedReason || null,
+      _blockedAt: item.blockedAt || null,
       _syncImageIndex: item.syncImageIndex ?? null,
       _syncImageCount: item.syncImageCount ?? null,
       _queueKey: item.queueKey || _queueKeyForUser(item.userId),
@@ -862,15 +934,28 @@ async function _runSyncQueue() {
     } catch (err) {
       const message = String(err?.message || err || 'Upload failed')
       const unrecoverable = /authenticated user id|missing authenticated user|different signed-in user|missing an auth user id|owner does not match|violates row-level security/i.test(message)
-      if (unrecoverable) {
+      if (isPrivacySlotLimitError(err)) {
+        await _markQueueItemBlocked(item.id, PRIVACY_SLOT_LIMIT_USER_MESSAGE, {
+          syncErrorMessage: message,
+          blockedReason: PRIVACY_SLOT_LIMIT_USER_MESSAGE,
+          blockedByUserId: authUserId,
+          blockedQueueUserId: queueUserId,
+        })
+      } else if (unrecoverable) {
         console.warn('Background sync skipped for queue item', item.id, message)
+        await _markQueueItemBlocked(item.id, message, {
+          syncErrorMessage: message,
+          blockedReason: message,
+          blockedByUserId: authUserId,
+          blockedQueueUserId: queueUserId,
+        })
       } else {
         console.error('Background sync failed for queue item', item.id, err)
       }
-      await _setQueueSyncStatus(item.id, unrecoverable ? BLOCKED_QUEUE_STAGE : 'retrying', {
-        syncErrorMessage: message,
-      })
-      if (!unrecoverable) {
+      if (!unrecoverable && !isPrivacySlotLimitError(err)) {
+        await _setQueueSyncStatus(item.id, 'retrying', {
+          syncErrorMessage: message,
+        })
         _scheduleSyncRetry()
         break // Network or RLS failure — halt processing to avoid looping errors
       }
