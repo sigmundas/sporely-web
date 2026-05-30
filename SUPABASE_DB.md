@@ -30,7 +30,7 @@ See also:
   - Additional cloud-only columns:
     - `user_id` (FK to `auth.users`, enforced by RLS)
     - `desktop_id` (desktop SQLite `id`, used for dedup and sync)
-    - `location_public` (controls whether GPS is visible outside private mode)
+    - `location_public` (legacy compatibility flag; new privacy behavior is driven by `visibility` and `location_precision`)
     - `visibility` (text, default `'private'` — visibility scope: `'private'`, `'friends'`, `'public'`)
 - `observation_images`
   - Metadata rows for images uploaded to Storage
@@ -59,7 +59,9 @@ See also:
 ### Profiles / social graph
 - `profiles`
   - Auto-created by a Postgres trigger on `auth.users` insert
-  - Columns: `username` (unique), `display_name`, `avatar_url`, `bio`, `is_admin` (bool), `is_banned` (bool)
+  - User-editable columns: `username` (unique), `display_name`, `avatar_url`, `bio`
+  - Server-owned columns: `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `total_storage_bytes`, `image_count`, `is_admin`, `is_banned`
+  - A `BEFORE UPDATE` trigger keeps the server-owned columns immutable for normal authenticated writes; service-role code can still update them
   - `bio` is used by the web Profile editor and the People screen cards
   - Avatar initials derived from `username` or `email` on the client
 - `friendships`
@@ -108,8 +110,9 @@ See also:
 - `observations_friend_view`
   - Used by the web app to show observations that friends can see
   - GPS handling:
-    - GPS coordinates are nulled out in the view when `location_public = false`
-    - location access can be explicitly granted via `observation_shares`
+    - GPS coordinates are rounded when `location_precision = 'fuzzed'`
+    - `location_public` is retained as a legacy compatibility flag, not the authoritative privacy switch
+    - location access can still be explicitly granted via `observation_shares`
   - Block filtering: Omits observations where the user is blocked by or has blocked the viewer.
   - Ban filtering: Omits observations where the author `is_banned = true`.
 - `observations_community_view`
@@ -165,6 +168,9 @@ All tables have RLS enabled and default "owner-only" access unless overridden by
 - Client writes are constrained to rows owned by the authenticated user (`user_id`)
 - Images: allowed only when the Storage object path prefix matches the authenticated user UUID
 - Banned Users: A Postgres trigger prevents `INSERT` and `UPDATE` on `observations`, `observation_images`, and `comments` if `profiles.is_banned = true`.
+- Profile entitlement and quota fields are server-owned; authenticated users can update ordinary profile fields, but not `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `total_storage_bytes`, or `image_count`.
+- The R2 worker updates storage tallies through the service-role RPC `apply_profile_storage_delta`; normal authenticated users cannot call that RPC directly.
+- Free accounts are limited to 20 cloud observations that are private or fuzzed (`visibility != 'public' OR location_precision = 'fuzzed'`), and the database trigger serializes per-user writes so concurrent inserts cannot race past the cap.
 - Client code must never rely on setting `user_id` from the client as a trust boundary; RLS is the enforcement
 - Account deletion is not performed directly from the client; it goes through the `delete-account`
   Edge Function because deleting `auth.users` requires elevated privileges
@@ -224,9 +230,10 @@ For `avatars`:
 7. **Regression tests for sharing / visibility**
    - Owner can see own observations and images
    - Accepted friends can see what's intended
-   - `location_public = false` friends see null GPS unless sharing explicitly grants access
+   - `location_precision = 'fuzzed'` friends see rounded GPS unless sharing explicitly grants exact access
    - `visibility = 'private'` observations do not appear in friend or community views
    - `visibility = 'public'` observations appear in `observations_community_view`
+   - Free accounts can create at most 20 private/fuzzed cloud observations; the 21st fails server-side
 
 8. **Verify UGC Moderation**
    - `user_blocks` and `reports` tables exist and have RLS policies.

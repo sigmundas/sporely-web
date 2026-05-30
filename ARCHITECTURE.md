@@ -111,7 +111,7 @@ All media is stored in Cloudflare R2, not Supabase Storage.
 - **JWT verification:** Worker fetches the JWKS from Supabase (`/auth/v1/.well-known/jwks.json`) and verifies the ES256 signature using Web Crypto. The JWKS is cached in-memory for 10 minutes.
 - **Key rule:** Upload path must start with the JWT `sub` (user ID) — enforced by the worker.
 - **Current client policy:** Free accounts upload reduced 2 MP images. Pro/full-res accounts can choose `Reduced (2MP)` or `Max (12MP)` in Settings. Max keeps near-12 MP originals when friendly to quality and only resizes images from 14 MP and up down to 12 MP.
-- **Storage tally/quota:** After successful R2 writes/deletes, the worker updates `profiles.total_storage_bytes`, compatibility `profiles.storage_used_bytes`, and original-image `profiles.image_count` through the Supabase RPC in `supabase/profile-storage-usage.sql`. Free-tier storage can be limited per profile via `storage_quota_bytes` or globally via worker `FREE_STORAGE_QUOTA_BYTES`.
+- **Storage tally/quota:** After successful R2 writes/deletes, the worker updates `profiles.total_storage_bytes`, compatibility `profiles.storage_used_bytes`, and original-image `profiles.image_count` through the service-role Supabase RPC `apply_profile_storage_delta`. Free-tier storage can be limited per profile via `storage_quota_bytes` or globally via worker `FREE_STORAGE_QUOTA_BYTES`; the entitlement and quota fields on `profiles` are server-owned and protected by the database.
 - **Source:** `cloudflare/r2-upload-worker/src/index.js`
 - **Config:** `cloudflare/r2-upload-worker/wrangler.toml`
 
@@ -152,7 +152,7 @@ Extra cloud-only columns:
 - `image_key text` — relative R2 key of the cover image
 - `thumb_key text` — relative R2 key of the cover thumbnail
 
-Privacy slots are enforced by a Postgres trigger: a free account uses one of its 20 slots when an observation is not fully transparent (`visibility != 'public' OR location_precision != 'exact'`). Pro accounts are unlimited.
+Privacy slots are enforced by a Postgres trigger: a free account uses one of its 20 slots when an observation is private or fuzzed (`visibility != 'public' OR location_precision = 'fuzzed'`). The trigger takes a per-user transaction lock so concurrent writes cannot race past the cap. Pro accounts are unlimited.
 
 ### `follows`
 Stores the web social trail subscriptions used by the `Feed 🧭` tab:
@@ -185,13 +185,16 @@ AI crop metadata is stored per image and only affects Artsorakel requests. Galle
 ### `profiles`
 Auto-created by a Postgres trigger on `auth.users` insert.
 Profile UI reads and writes `username`, `display_name`, `bio`, and `avatar_url`. The desktop **Profile & Cloud** page mirrors these same fields so the account identity is shared across web/mobile and desktop.
-The subscription/storage foundation also now lives here:
+Server-owned account state also lives here:
 - `cloud_plan` — `free` or `pro`; controls account status and full-res entitlement.
+- `is_pro` — legacy entitlement mirror used by server access checks.
 - `full_res_storage_enabled` — compatibility flag for manually granting full-res access.
 - `storage_quota_bytes` — optional per-user storage cap; free plans can be limited here.
 - `total_storage_bytes` / `storage_used_bytes` — worker-maintained byte tally. `storage_used_bytes` remains for compatibility.
 - `image_count` — worker-maintained count of original uploaded images; thumbnail variants are not counted as images.
-- `billing_status`, `billing_provider` — reserved for later billing sync
+- `billing_status`, `billing_provider` — reserved for later billing sync.
+- `is_admin`, `is_banned` — server-controlled moderation/admin flags.
+- A database trigger keeps the server-owned fields above immutable for normal authenticated writes; service-role code can still update them.
 
 Avatar initials are derived on the client, and avatar rendering prefers the stored URL
 with a signed-URL fallback if the direct image fetch fails.
@@ -222,7 +225,7 @@ All tables have RLS enabled. Default policy: **owner only**.
 `private_comment` is never read by the web app.
 Community and follow views expose exact coordinates by default for public observations.
 Coordinates are rounded only when `location_precision = 'fuzzed'`; `location_public`
-is retained as a legacy compatibility flag.
+is retained as a legacy compatibility flag and is not the authoritative privacy switch.
 
 Note: Supabase Storage bucket `observation-images` still exists but is no longer used
 for new uploads. Media access control is now handled by the R2 upload worker (JWT path

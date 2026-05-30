@@ -24,7 +24,7 @@ COMMENT ON SCHEMA "public" IS 'standard public schema';
 
 
 CREATE OR REPLACE FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid", "p_storage_delta" bigint, "p_image_delta" integer) RETURNS TABLE("total_storage_bytes" bigint, "storage_used_bytes" bigint, "image_count" integer)
-    LANGUAGE "plpgsql" SECURITY DEFINER
+    LANGUAGE "plpgsql" SECURITY INVOKER
     SET "search_path" TO 'public'
     AS $$
 begin
@@ -41,6 +41,34 @@ $$;
 
 
 ALTER FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid", "p_storage_delta" bigint, "p_image_delta" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."protect_profile_privileged_fields"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  IF current_user IN ('postgres', 'service_role') THEN
+    RETURN NEW;
+  END IF;
+
+  NEW.cloud_plan = OLD.cloud_plan;
+  NEW.full_res_storage_enabled = OLD.full_res_storage_enabled;
+  NEW.storage_quota_bytes = OLD.storage_quota_bytes;
+  NEW.storage_used_bytes = OLD.storage_used_bytes;
+  NEW.billing_status = OLD.billing_status;
+  NEW.billing_provider = OLD.billing_provider;
+  NEW.total_storage_bytes = OLD.total_storage_bytes;
+  NEW.image_count = OLD.image_count;
+  NEW.is_admin = OLD.is_admin;
+  NEW.is_banned = OLD.is_banned;
+  NEW.is_pro = OLD.is_pro;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."protect_profile_privileged_fields"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") RETURNS boolean
@@ -246,6 +274,8 @@ BEGIN
   IF public.profile_has_pro_access(NEW.user_id) THEN
     RETURN NEW;
   END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(NEW.user_id::text, 0));
 
   SELECT count(*)::integer
   INTO current_count
@@ -1737,6 +1767,9 @@ CREATE OR REPLACE TRIGGER "enforce_non_public_observation_limit_trigger" BEFORE 
 
 
 
+CREATE OR REPLACE TRIGGER "trg_profiles_protect_privileged_fields" BEFORE UPDATE ON "public"."profiles" FOR EACH ROW EXECUTE FUNCTION "public"."protect_profile_privileged_fields"();
+
+
 CREATE OR REPLACE TRIGGER "trg_friendships_updated_at" BEFORE UPDATE ON "public"."friendships" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
@@ -2141,8 +2174,9 @@ GRANT USAGE ON SCHEMA "public" TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid", "p_storage_delta" bigint, "p_image_delta" integer) TO "anon";
-GRANT ALL ON FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid", "p_storage_delta" bigint, "p_image_delta" integer) TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid", "p_storage_delta" bigint, "p_image_delta" integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid", "p_storage_delta" bigint, "p_image_delta" integer) FROM "anon";
+REVOKE ALL ON FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid", "p_storage_delta" bigint, "p_image_delta" integer) FROM "authenticated";
 GRANT ALL ON FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid", "p_storage_delta" bigint, "p_image_delta" integer) TO "service_role";
 
 
@@ -2461,6 +2495,3 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
-
-
