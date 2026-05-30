@@ -28,8 +28,9 @@ handling from the device photo library.
 | Media serving | Public CDN at `https://media.sporely.no` |
 | Account/storage foundation | Supabase profile plan flags + worker-enforced storage tally/quota |
 
-Supabase Storage (`observation-images` bucket) is no longer used for new uploads.
-All media now goes through the Cloudflare R2 pipeline.
+Supabase Storage (`observation-images`) is legacy-only and must not be used for
+new uploads or as a media fallback. All canonical media now goes through the
+Cloudflare R2 pipeline.
 
 ---
 
@@ -227,9 +228,10 @@ Community and follow views expose exact coordinates by default for public observ
 Coordinates are rounded only when `location_precision = 'fuzzed'`; `location_public`
 is retained as a legacy compatibility flag and is not the authoritative privacy switch.
 
-Note: Supabase Storage bucket `observation-images` still exists but is no longer used
-for new uploads. Media access control is now handled by the R2 upload worker (JWT path
-enforcement) and Cloudflare's public CDN for serving.
+Note: Supabase Storage bucket `observation-images` still exists for historical rows
+and cleanup only. Do not route new media through it or treat it as a fallback.
+Media access control is now handled by the R2 upload worker (JWT path enforcement)
+and Cloudflare's public CDN for serving.
 
 ---
 

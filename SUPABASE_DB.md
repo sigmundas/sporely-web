@@ -5,7 +5,7 @@ This document is the source of truth for the Supabase/Postgres side of Sporely W
 - schema inventory (tables, views, functions/RPCs)
 - ownership rules ("who can read/write")
 - RLS behavior (descriptions only; **no policy SQL**)
-- Storage bucket conventions (folder/path rules)
+- media path conventions (R2 canonical; legacy Supabase Storage only for avatars and cleanup)
 - operational checklist for maintaining the cloud DB
 
 See also:
@@ -17,7 +17,8 @@ See also:
 ## Supabase project
 - Project URL: `https://zkpjklzfwzefhjluvhfw.supabase.co`
 - Client access from the web app uses the **publishable anon key**.
-- All client data access is enforced by **RLS** and Storage policies.
+- All table data access is enforced by **RLS**; legacy Storage policies only apply to
+  avatars and historical `observation-images` cleanup.
 
 ---
 
@@ -130,9 +131,9 @@ See also:
 
 ### Buckets
 - `observation-images`
-  - Stores image binaries for observations
-  - Cloud metadata for those images lives on `public.observation_images`, including the optional `ai_crop_*` fields
-  - The web app uploads field capture images; desktop sync uploads microscope images when applicable
+  - Historical bucket from the old Supabase Storage media path
+  - Canonical media now uploads through the Cloudflare R2 worker, not this bucket
+  - Existing rows may still reference legacy files during cleanup, but new uploads must not use Supabase Storage or a storage fallback
 - `avatars`
   - Stores profile avatar images
   - Public bucket — avatars are readable without authentication
@@ -140,12 +141,12 @@ See also:
 
 ### Image path / folder convention
 Upload paths follow:
-- Observations: `${uid}/{obs_id}/{img_cloud_id}_${url_encoded_filename}`
+- Observations: `${uid}/{obs_id}/{img_cloud_id}_${url_encoded_filename}` (R2 worker key convention)
 - Avatars: `${uid}/avatar.jpg`
 
-*Note: The filename segment of the storage path must be URL-encoded (e.g. `urllib.parse.quote`) prior to upload to prevent spaces or special characters from breaking the HTTP path parameters, which can falsely trigger 403 RLS unauthorized errors.*
+*Note: The filename segment of the media path must be URL-encoded (e.g. `urllib.parse.quote`) prior to upload to prevent spaces or special characters from breaking the HTTP path parameters.*
 
-Storage folder-prefix policies rely on the first folder segment matching `auth.uid()::text` via `storage.foldername(name)[1]`.
+Legacy Supabase Storage folder-prefix policies relied on the first folder segment matching `auth.uid()::text` via `storage.foldername(name)[1]`, but the active canonical media path is now enforced by the R2 upload worker.
 
 ---
 
@@ -166,7 +167,7 @@ All tables have RLS enabled and default "owner-only" access unless overridden by
 
 ### RLS: who can write what (high level)
 - Client writes are constrained to rows owned by the authenticated user (`user_id`)
-- Images: allowed only when the Storage object path prefix matches the authenticated user UUID
+- Images: canonical media writes are enforced by the R2 upload worker; Supabase Storage `observation-images` is legacy-only and should not receive new uploads
 - Banned Users: A Postgres trigger prevents `INSERT` and `UPDATE` on `observations`, `observation_images`, and `comments` if `profiles.is_banned = true`.
 - Profile entitlement and quota fields are server-owned; authenticated users can update ordinary profile fields, but not `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `total_storage_bytes`, or `image_count`.
 - The R2 worker updates storage tallies through the service-role RPC `apply_profile_storage_delta`; normal authenticated users cannot call that RPC directly.
@@ -175,10 +176,10 @@ All tables have RLS enabled and default "owner-only" access unless overridden by
 - Account deletion is not performed directly from the client; it goes through the `delete-account`
   Edge Function because deleting `auth.users` requires elevated privileges
 
-### Storage policy behavior (high level)
-For `observation-images`:
-- Upload/Delete: allowed only if the object's folder prefix matches `auth.uid()::text`
-- Read: allowed when the requesting user has friend access to the underlying observation(s)
+### Storage policy behavior (historical only)
+For legacy `observation-images` rows:
+- Upload/Delete: historical Supabase Storage policy only; do not use for new media or fallback behavior
+- Read: historical friend-access behavior only; canonical media is now served from Cloudflare R2
 
 For `avatars`:
 - Single `FOR ALL` policy (`avatars_owner`): all operations (SELECT, INSERT, UPDATE, DELETE) allowed only if the first path segment matches `auth.uid()::text`
@@ -202,7 +203,7 @@ For `avatars`:
 - Desktop pull/import is seamless: there is no separate cloud inbox view in the desktop table
 
 ### What the mobile app uploads
-- Field photos: inserted as `observations` + `observation_images`, uploaded to Storage under the user UUID folder convention
+- Field photos: inserted as `observations` + `observation_images`, uploaded through the R2 worker under the user UUID path convention
 - AI crop metadata is stored on each `observation_images` row, not as a separate cropped asset
 - Microscope photos: typically skipped by default in mobile capture; populated primarily by desktop sync
 
@@ -214,17 +215,19 @@ For `avatars`:
    - File: `sporely-web/supabase/migrations/supabase_unique_constraints.sql`
    - Purpose: add/ensure `UNIQUE (desktop_id, user_id)` (or equivalent)
    - Status: ✅ Applied
-2. **Verify Storage bucket existence**
-   - `observation-images` ✅ exists
+2. **Verify media paths**
+   - `sporely-media` R2 bucket ✅ canonical
+   - `upload.sporely.no` worker ✅ canonical upload path
+   - `observation-images` bucket ✅ legacy only; do not use for new uploads
    - `avatars` ✅ exists (public bucket, created 2026-04)
 3. **Verify Storage policies**
-   - `observation-images`: folder-prefix INSERT/DELETE + friend-access SELECT
+   - `observation-images`: legacy only; do not rely on it for current media flow
    - `avatars`: single `avatars_owner` FOR ALL policy, folder-prefix = `auth.uid()::text` ✅
 4. **Verify RLS enabled**
    - Ensure tables/views referenced by the web app still have RLS enabled
 5. **Verify RPC availability**
-  - Ensure `search_taxa` remains deployed and callable by the web app
-  - Ensure `search_people_directory` is deployed if the web app exposes the People screen
+   - Ensure `search_taxa` remains deployed and callable by the web app
+   - Ensure `search_people_directory` is deployed if the web app exposes the People screen
 6. **Verify Edge Function availability**
    - Ensure `delete-account` is deployed if the web app exposes the Profile → Delete account action
 7. **Regression tests for sharing / visibility**

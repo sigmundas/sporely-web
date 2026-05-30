@@ -14,8 +14,7 @@ import { isBlob } from './observation-shapes.js'
 
 const SIGNED_URL_TTL_SECONDS = 3600
 const SIGNED_URL_CACHE = new Map()
-const MEDIA_BASE_URL = String(import.meta.env?.VITE_MEDIA_BASE_URL || 'https://media.sporely.no').replace(/\/+$/, '')
-const MEDIA_UPLOAD_BASE_URL = String(import.meta.env?.VITE_MEDIA_UPLOAD_BASE_URL || '').replace(/\/+$/, '')
+const DEFAULT_MEDIA_BASE_URL = 'https://media.sporely.no'
 const UPLOAD_METADATA_FIELDS = [
   'upload_mode',
   'source_width',
@@ -31,6 +30,22 @@ const SUPABASE_STORAGE_PATH_PATTERNS = [
   /\/storage\/v1\/object\/observation-images\/(.+)$/i,
 ]
 
+function _envText(key, fallback = '') {
+  return String(globalThis.__SPORLEY_TEST_ENV__?.[key] ?? import.meta.env?.[key] ?? fallback ?? '').trim()
+}
+
+function _envFlag(key) {
+  return ['1', 'true', 'yes', 'on'].includes(_envText(key).toLowerCase())
+}
+
+function getMediaBaseUrl() {
+  return _envText('VITE_MEDIA_BASE_URL', DEFAULT_MEDIA_BASE_URL).replace(/\/+$/, '')
+}
+
+function getMediaUploadBaseUrl() {
+  return _envText('VITE_MEDIA_UPLOAD_BASE_URL', '').replace(/\/+$/, '')
+}
+
 function _isDebugMediaUploadEnabled() {
   try {
     return import.meta.env?.DEV
@@ -41,7 +56,7 @@ function _isDebugMediaUploadEnabled() {
 }
 
 export function canUseDirectSupabaseStorageFallback() {
-  return Boolean(import.meta.env?.DEV)
+  return _envFlag('VITE_ALLOW_SUPABASE_STORAGE_FALLBACK')
 }
 
 export function buildWorkerUploadHeaders({
@@ -92,6 +107,10 @@ function _isImageTooLargeForPlanError(error) {
     || text.includes('too large for your plan')
 }
 
+function _mediaStorageFallbackDisabledError() {
+  return new Error('Media upload worker is not configured; refusing Supabase Storage fallback because R2 is canonical.')
+}
+
 export function normalizeMediaKey(value) {
   const text = String(value || '').trim()
   if (!text) return ''
@@ -99,10 +118,11 @@ export function normalizeMediaKey(value) {
   if (/^https?:\/\//i.test(text)) {
     try {
       const url = new URL(text)
-      const normalizedBase = MEDIA_BASE_URL.toLowerCase()
+      const mediaBaseUrl = getMediaBaseUrl()
+      const normalizedBase = mediaBaseUrl.toLowerCase()
       const normalizedText = text.toLowerCase()
       if (normalizedText.startsWith(`${normalizedBase}/`)) {
-        return text.slice(MEDIA_BASE_URL.length + 1).replace(/^\/+/, '')
+        return text.slice(mediaBaseUrl.length + 1).replace(/^\/+/, '')
       }
       const rawPath = url.pathname.replace(/^\/+/, '')
       for (const pattern of SUPABASE_STORAGE_PATH_PATTERNS) {
@@ -192,12 +212,13 @@ export function getVariantPath(storagePath, variant = 'original') {
 export function getPublicMediaUrl(storagePath, variant = 'original') {
   const key = normalizeMediaKey(storagePath)
   if (!key) return ''
+  const mediaBaseUrl = getMediaBaseUrl()
   
   if (variant !== 'original') {
     const variantKey = getVariantPath(storagePath, variant)
-    return `${MEDIA_BASE_URL}/${variantKey}`
+    return `${mediaBaseUrl}/${variantKey}`
   }
-  return `${MEDIA_BASE_URL}/${key}`
+  return `${mediaBaseUrl}/${key}`
 }
 
 export function clearMediaUrlCache() {
@@ -220,6 +241,7 @@ async function _uploadViaWorker(path, blob, options = {}) {
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for media upload')
 
+  const mediaUploadBaseUrl = getMediaUploadBaseUrl()
   const headers = buildWorkerUploadHeaders({
     blob,
     options,
@@ -229,7 +251,7 @@ async function _uploadViaWorker(path, blob, options = {}) {
 
   const arrayBuffer = await blob.arrayBuffer()
 
-  const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
+  const response = await fetch(`${mediaUploadBaseUrl}/upload/${_encodeObjectKey(normalizedPath)}`, {
     method: 'PUT',
     headers,
     body: arrayBuffer,
@@ -253,7 +275,8 @@ async function _deleteViaWorker(path) {
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for media delete')
 
-  const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
+  const mediaUploadBaseUrl = getMediaUploadBaseUrl()
+  const response = await fetch(`${mediaUploadBaseUrl}/upload/${_encodeObjectKey(normalizedPath)}`, {
     method: 'DELETE',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -278,7 +301,8 @@ async function _downloadViaWorker(path) {
   const accessToken = session?.access_token
   if (!accessToken) throw new Error('Missing authenticated session for media download')
 
-  const response = await fetch(`${MEDIA_UPLOAD_BASE_URL}/upload/${_encodeObjectKey(normalizedPath)}`, {
+  const mediaUploadBaseUrl = getMediaUploadBaseUrl()
+  const response = await fetch(`${mediaUploadBaseUrl}/upload/${_encodeObjectKey(normalizedPath)}`, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -300,12 +324,13 @@ async function _downloadViaWorker(path) {
 }
 
 async function _uploadToStorage(path, blob, options = {}) {
-  if (MEDIA_UPLOAD_BASE_URL) {
+  const mediaUploadBaseUrl = getMediaUploadBaseUrl()
+  if (mediaUploadBaseUrl) {
     await _uploadViaWorker(path, blob, options)
     return
   }
   if (!canUseDirectSupabaseStorageFallback()) {
-    throw new Error('Media upload worker is not configured for this environment.')
+    throw _mediaStorageFallbackDisabledError()
   }
   const { error } = await supabase.storage
     .from('observation-images')
@@ -781,12 +806,13 @@ export async function deleteObservationMedia(paths) {
     getVariantPath(path, 'thumb'),
   ]))]
 
-  if (MEDIA_UPLOAD_BASE_URL) {
+  const mediaUploadBaseUrl = getMediaUploadBaseUrl()
+  if (mediaUploadBaseUrl) {
     await Promise.all(withVariants.map(path => _deleteViaWorker(path)))
     return
   }
   if (!canUseDirectSupabaseStorageFallback()) {
-    throw new Error('Media storage worker is not configured for this environment.')
+    throw _mediaStorageFallbackDisabledError()
   }
 
   const { error } = await supabase.storage
@@ -805,24 +831,34 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
 
   const variant = options.variant || 'medium'
   const allowWorkerDownload = options.allowWorkerDownload !== false
-  const candidatePaths = variant === 'original'
-    ? [originalPath]
-    : [getVariantPath(originalPath, variant), originalPath]
-  const signedUrls = await _getSignedUrlMap(candidatePaths)
+  const sourceList = await resolveMediaSources([originalPath], { variant })
+  const source = sourceList[0] || null
+  const mediaUploadBaseUrl = getMediaUploadBaseUrl()
+  const allowSupabaseFallback = canUseDirectSupabaseStorageFallback()
+  const candidateUrls = []
+  if (source?.primaryUrl) candidateUrls.push(source.primaryUrl)
+  if (source?.fallbackUrl && !_isFetchableImageUrl(source.fallbackUrl)) {
+    candidateUrls.push(source.fallbackUrl)
+  }
+  if (allowSupabaseFallback && source?.supabaseFallbackUrl && !_isFetchableImageUrl(source.supabaseFallbackUrl)) {
+    candidateUrls.push(source.supabaseFallbackUrl)
+  }
 
   let lastError = null
-  for (const path of [...new Set(candidatePaths.filter(Boolean))]) {
-    const signedUrl = signedUrls[path]
-    if (_isFetchableImageUrl(signedUrl)) {
-      try {
-        const data = await _fetchImageBlobFromUrl(signedUrl)
-        if (isBlob(data)) return data
-      } catch (err) {
-        lastError = err
-      }
+  for (const url of [...new Set(candidateUrls.filter(Boolean))]) {
+    try {
+      const data = await _fetchImageBlobFromUrl(url)
+      if (isBlob(data)) return data
+    } catch (err) {
+      lastError = err
     }
+  }
 
-    if (allowWorkerDownload && MEDIA_UPLOAD_BASE_URL) {
+  if (allowWorkerDownload && mediaUploadBaseUrl) {
+    const candidatePaths = variant === 'original'
+      ? [originalPath]
+      : [getVariantPath(originalPath, variant), originalPath]
+    for (const path of [...new Set(candidatePaths.filter(Boolean))]) {
       try {
         const data = await _downloadViaWorker(path)
         if (isBlob(data)) return data
@@ -830,21 +866,17 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
         lastError = err
       }
     }
+  }
 
-    if (!canUseDirectSupabaseStorageFallback()) {
-      lastError = lastError || new Error('Media storage worker is not configured for this environment.')
-      continue
-    }
-
+  if (allowSupabaseFallback && source?.supabaseFallbackUrl && _isFetchableImageUrl(source.supabaseFallbackUrl)) {
     try {
-      const { data, error } = await supabase.storage
-        .from('observation-images')
-        .download(path)
-      if (!error && isBlob(data)) return data
-      lastError = error
+      const data = await _fetchImageBlobFromUrl(source.supabaseFallbackUrl)
+      if (isBlob(data)) return data
     } catch (err) {
       lastError = err
     }
+  } else if (!mediaUploadBaseUrl) {
+    lastError = lastError || _mediaStorageFallbackDisabledError()
   }
 
   throw new Error(`Image download failed: ${lastError?.message || originalPath}`)
@@ -1123,6 +1155,7 @@ export async function syncObservationMediaKeys(observationId, storagePath, optio
 async function _getSignedUrlMap(paths, expiresIn = SIGNED_URL_TTL_SECONDS) {
   const uniquePaths = [...new Set((paths || []).map(normalizeMediaKey).filter(Boolean))]
   if (!uniquePaths.length) return {}
+  if (!canUseDirectSupabaseStorageFallback()) return {}
 
   const now = Date.now()
   const urls = {}
@@ -1164,28 +1197,33 @@ export async function resolveMediaSources(paths, options = {}) {
     ? normalizedPaths
     : normalizedPaths.flatMap(path => [getVariantPath(path, variant), path])
   const signed = await _getSignedUrlMap(requestedPaths)
+  const allowSupabaseFallback = canUseDirectSupabaseStorageFallback()
 
   return normalizedPaths.map(originalPath => {
     if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
     const variantPath = getVariantPath(originalPath, variant)
     const originalUrl = getPublicMediaUrl(originalPath, 'original')
+    const variantUrl = getPublicMediaUrl(originalPath, variant)
 
     if (variant === 'original') {
       return {
         key: originalPath,
-        primaryUrl: signed[originalPath] || originalUrl,
+        primaryUrl: originalUrl,
         fallbackUrl: null,
+        supabaseFallbackUrl: allowSupabaseFallback ? (signed[originalPath] || null) : null,
       }
     }
 
     const signedVariantUrl = signed[variantPath] || null
     const signedOriginalUrl = signed[originalPath] || null
-    const primaryUrl = signedVariantUrl || signedOriginalUrl || originalUrl
-    const fallbackUrl = signedOriginalUrl || originalUrl
+    const fallbackUrl = originalUrl !== variantUrl
+      ? originalUrl
+      : (allowSupabaseFallback ? (signedVariantUrl || signedOriginalUrl || null) : null)
     return {
       key: originalPath,
-      primaryUrl,
+      primaryUrl: variantUrl,
       fallbackUrl,
+      supabaseFallbackUrl: allowSupabaseFallback ? (signedVariantUrl || signedOriginalUrl || null) : null,
     }
   })
 }
