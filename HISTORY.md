@@ -8,6 +8,12 @@ It should not be used as the current task plan. Current tasks belong in `PLAN.md
 
 ## Planning History
 
+### 2026-05-30 — Android release distribution updated
+
+- `PLAN.md` no longer tracks F-Droid distribution branches.
+- The supported Android release path is GitHub Releases APK distribution, with Google Play still pending as the separate store release track.
+- The signed Android artifact workflow is already in place in `.github/workflows/release-android.yml` and publishes the APK to GitHub Releases.
+
 ### 2026-05-19 — PLAN.md cleanup and recovered-file triage
 
 - `PLAN.md` was recovered after an agent damaged it.

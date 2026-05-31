@@ -13,10 +13,8 @@ Historical image/upload notes are archived in `HISTORY.md`. Current image-pipeli
 Goal: keep `sporely-web` as the single source repository while supporting three practical distribution targets:
 
 - Web/PWA for iOS users via Cloudflare Pages.
-- Google Play Android release as a signed `.aab`.
-- Self-hosted F-Droid-compatible Android release as a signed `.apk` published through a separate generated repo/index.
-
-Official F-Droid submission is a later investigation track. It must not block the first Play/self-hosted release path.
+- GitHub Releases Android APK as a signed `.apk`.
+- Google Play Android release as a signed `.aab` once the store path is ready.
 
 ### Non-negotiable rules
 
@@ -28,8 +26,7 @@ Official F-Droid submission is a later investigation track. It must not block th
   - Gradle APK/AAB build
 - Do not assume the Vite output directory. Verify `webDir` in `capacitor.config.*`.
 - Use the repository’s Node requirement. Current repo expects Node `>=22`.
-- Keystores, passwords, generated APKs/AABs, repo signing keys, and local signing files must never be committed.
-- Official F-Droid and self-hosted F-Droid-compatible distribution are separate tracks.
+- Keystores, passwords, generated APKs/AABs, and local signing files must never be committed.
 
 ---
 
@@ -109,7 +106,6 @@ Do not:
 
 * Add signing secrets.
 * Add Play deployment.
-* Add F-Droid repo publishing.
 * Refactor unrelated build files.
 
 Test/check commands:
@@ -131,62 +127,6 @@ Definition of done:
 
 ---
 
-### Phase 2 — GitHub Actions signed Android artifacts
-
-Status: not started
-
-Purpose: produce release artifacts from tags, without publishing them anywhere yet.
-
-Tasks:
-
-* Add `.github/workflows/release-android.yml`.
-* Trigger on tags matching `v*`.
-* Optional: allow safe `workflow_dispatch`.
-* CI order:
-
-  * checkout
-  * setup Node 22 or `.nvmrc`
-  * setup Java 17 unless repo requires otherwise
-  * `npm ci`
-  * `npm run build`
-  * `npx cap sync android`
-  * decode Android release keystore from GitHub Secrets into runner temp storage
-  * build signed release APK
-  * build signed release AAB
-  * upload both as workflow artifacts
-* Use GitHub Actions Secrets:
-
-  * `ANDROID_KEYSTORE_BASE64`
-  * `ANDROID_KEYSTORE_PASSWORD`
-  * `ANDROID_KEY_ALIAS`
-  * `ANDROID_KEY_PASSWORD`
-
-Do not:
-
-* Commit a keystore.
-* Print secrets.
-* Deploy to Play Store.
-* Push to the self-hosted F-Droid repo.
-* Add official F-Droid metadata.
-
-Test/check commands:
-
-```bash
-npm ci
-npm run build
-npx cap sync android
-cd android && ./gradlew :app:assembleRelease :app:bundleRelease
-```
-
-Definition of done:
-
-* A tag build produces one `.apk` and one `.aab`.
-* Artifacts are downloadable from GitHub Actions.
-* No publication happens automatically yet.
-* Signing material exists only in GitHub Secrets / runner temp files.
-
----
-
 ### Phase 3 — Cloudflare Pages build isolation
 
 Status: not started
@@ -205,7 +145,6 @@ Tasks:
 
   * `.github/*`
   * docs-only files
-  * generated F-Droid repo docs, if any
 * Make sure mixed commits still behave correctly:
 
   * `android/*` only: web build should be skipped
@@ -252,97 +191,6 @@ Definition of done:
 * No binary store assets are added accidentally.
 
 ---
-
-### Phase 5 — Self-hosted F-Droid-compatible repository
-
-Status: later
-
-Purpose: publish a signed APK through a user-addable F-Droid-compatible repo.
-
-Important distinction:
-
-* This is not official F-Droid publication.
-* This is a self-hosted APK repository compatible with F-Droid-style clients.
-
-Tasks:
-
-* Use the signed APK artifact from Phase 2.
-* Create or use a separate generated repository, e.g. `sporely-fdroid-repo`.
-* Generate repository metadata/index using `fdroidserver`.
-* Sign the repository index with a separate F-Droid repo signing key.
-* Publish the generated repo through GitHub Pages.
-* Document how users add the repo URL in F-Droid-compatible clients.
-* Document the trust model:
-
-  * Android APK signing key
-  * F-Droid repo index signing key
-  * GitHub Pages hosting
-
-Secrets for this phase should be separate from Android APK signing secrets:
-
-```text
-FDROID_REPO_KEYSTORE_BASE64
-FDROID_REPO_KEYSTORE_PASSWORD
-FDROID_REPO_KEY_ALIAS
-FDROID_REPO_KEY_PASSWORD
-```
-
-Test/check steps:
-
-* Install the APK manually on Android.
-* Add the repo URL in an F-Droid-compatible client.
-* Confirm the app appears.
-* Publish a higher `versionCode`.
-* Confirm update detection works.
-* Confirm no keys, generated APKs, or index secrets are committed to `sporely-web`.
-
-Definition of done:
-
-* Users can add the repo manually.
-* App installs and updates from the self-hosted repo.
-* Repo output is generated/published separately from source code.
-
----
-
-### Phase 6 — Official F-Droid investigation
-
-Status: later / research only
-
-Purpose: evaluate whether Sporely can be submitted to the official F-Droid repository.
-
-This is separate from the self-hosted repo. Official F-Droid should build from source using fdroiddata/fdroidserver metadata.
-
-Tasks:
-
-* Create `docs/fdroid-official-investigation.md`.
-* Check whether all dependencies are FOSS-compatible.
-* Check whether Capacitor plugins introduce proprietary or binary dependencies.
-* Check whether npm/Vite/Capacitor build steps can satisfy F-Droid source-build expectations.
-* Test whether `npm ci`, `npm run build`, and `npx cap sync android` belong in `prebuild` or `build`.
-* Investigate whether `scandelete: node_modules/` or targeted deletion of npm binary artifacts is required.
-* Look at existing fdroiddata recipes for Capacitor/Ionic apps as examples, not templates to copy blindly.
-* Draft metadata only after package name and build path are confirmed.
-
-Possible output:
-
-```text
-metadata/no.sporely.yml
-docs/fdroid-official-investigation.md
-```
-
-Do not:
-
-* Block Play Store release on this.
-* Block self-hosted F-Droid-compatible repo on this.
-* Use the GitHub Actions-built APK as the official F-Droid artifact.
-* Claim official F-Droid support before a source-build recipe works.
-
-Definition of done:
-
-* A local fdroidserver build attempt has been documented.
-* Blockers are listed.
-* A realistic decision can be made: submit, defer, or abandon official F-Droid.
-
 
 ## Image pipeline refactor, conservative Phase 2
 

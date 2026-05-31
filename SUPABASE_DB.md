@@ -174,7 +174,9 @@ All tables have RLS enabled and default "owner-only" access unless overridden by
 - Free accounts are limited to 20 cloud observations that are private or fuzzed (`visibility != 'public' OR location_precision = 'fuzzed'`), and the database trigger serializes per-user writes so concurrent inserts cannot race past the cap.
 - Client code must never rely on setting `user_id` from the client as a trust boundary; RLS is the enforcement
 - Account deletion is not performed directly from the client; it goes through the `delete-account`
-  Edge Function because deleting `auth.users` requires elevated privileges
+  Edge Function because deleting `auth.users` requires elevated privileges. The function deletes
+  canonical observation media through the Cloudflare upload worker, then sweeps legacy Supabase
+  Storage leftovers and avatar files.
 
 ### Storage policy behavior (historical only)
 For legacy `observation-images` rows:

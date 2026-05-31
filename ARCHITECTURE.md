@@ -201,7 +201,9 @@ Avatar initials are derived on the client, and avatar rendering prefers the stor
 with a signed-URL fallback if the direct image fetch fails. That fallback is avatar-only
 and does not apply to observation media.
 The profile screen also exposes a self-service account deletion action, which calls the
-`delete-account` Supabase Edge Function.
+`delete-account` Supabase Edge Function. That function removes canonical observation media
+through the Cloudflare upload worker and only uses Supabase Storage for avatars and legacy
+leftovers.
 It now also shows an Account status block with image resolution, sync history, storage usage, and image count.
 
 Desktop local databases bind to a single Supabase auth user via `linked_cloud_user_id`. If a user wants to move a desktop database to another Sporely Cloud account, they must explicitly reset/migrate the desktop cloud link; simply logging in with another account is blocked before credentials are saved. Deleting the web account does not by itself migrate a desktop database, and the migration flow must avoid both duplicate cloud rows and accidental loss of useful spore data.
