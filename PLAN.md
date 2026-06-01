@@ -312,13 +312,19 @@ These are real issues, but they are not the next image-pipeline step.
 ### Monetization and storage tiers
 
 - [ ] Backfill historical R2 usage into `profiles.total_storage_bytes`, `storage_used_bytes`, and `image_count`.
-- [ ] Integrate RevenueCat in the Capacitor wrapper.
-- [ ] Configure Pro entitlement and sync it into Supabase profile fields.
+- [ ] Integrate Stripe-based Pro billing on sporely.no and sync the resulting entitlement into Supabase profile fields.
 - [ ] Implement paywall/account UI comparing:
-  - Free: 2 MP images, community access, quota-limited storage.
-  - Pro: selectable 2 MP or 12 MP backups, higher quota, high-res research export.
+  - Free: 20 MP images, standard 0.65 compression, 1 MB full-image byte cap, 20 private/fuzzed observations, quota-limited storage.
+  - Pro: 20 MP images, high 0.80 compression, 5 MB full-image byte cap, higher quota, high-res research export.
+  - Android and desktop should show Pro status plus a link to sporely.no for account management, not an embedded checkout.
 - [ ] Set up entitlement webhook syncing.
-- [ ] Add clear UI messaging around free 2 MP uploads, Pro 12 MP uploads, and account storage quota.
+- [ ] Add clear UI messaging around free/pro compression, byte caps, 20 MP uploads, and account storage quota.
+
+### Cloud media lifecycle
+
+- [ ] Recycle bin / undo window: 48h or 7 days.
+- [ ] R2 media physical deletion: after the recycle window expires.
+- [ ] Sync tombstone metadata: retain for 30–90 days.
 
 ### UGC moderation and Play Store compliance
 

@@ -4,7 +4,7 @@
 - `src/main.js`: Boot & Auth.
 - `src/state.js`: Central State.
 - `src/sync-queue.js`: IndexedDB Offline Queue (Durable Boundary).
-- `src/images.js`: Client-side compression (12MP/2MP) & R2 Uploads.
+- `src/images.js`: Client-side compression (20MP cloud policy with free/pro quality tiers) & R2 Uploads.
 - `src/image-worker.js`: Off-thread Resize/Encode (OffscreenCanvas).
 
 ## Data Flow: Capture to Cloud
@@ -30,7 +30,7 @@
 - **Formats:** WebP (0.65) or JPEG (0.75) fallback.
 - **Structure:** `{user_id}/{obs_id}/{filename}` + `thumb_{filename}` (400px).
 - **R2 Worker:** Proxies uploads; enforces ES256 JWT auth; updates storage quotas.
-- **Preparation:** Uses `OffscreenCanvas` via `src/image-worker.js`. Enforces strict memory management (`canvas.width = 0`). Resizes to ~2MP for free accounts and ~12MP for Pro accounts.
+- **Preparation:** Uses `OffscreenCanvas` via `src/image-worker.js`. Enforces strict memory management (`canvas.width = 0`). Resizes to the current cloud-policy cap and applies the free/pro quality and byte-cap tiers.
 - **Thumbnail:** A single 400px `thumb_{filename}` variant is generated.
 - **Background Sync:** Managed by `src/sync-queue.js`. Data is written as `ArrayBuffer` in IndexedDB. Partial uploads are resolved using `sort_order`. Background tasks attempt to drain the queue when the app is minimized.
 - **HEIC Fallback:** If the browser cannot natively decode an image into a Canvas (e.g., HEIC on web), the resize step gracefully fails and uploads the original file with `upload_mode: 'original'`.
@@ -40,7 +40,7 @@
 - **Edge cases:** Handles unconfirmed accounts, already registered, and expired OTPs natively by offering "Check inbox" + resend links.
 
 ## Camera Behaviors
-- **Native (Android / CameraX):** Active only when running the installed Android app via Capacitor. Uses native CameraX capture paths, the best available lens when possible, and true original-resolution photos around 12 MP. Retains EXIF orientation and GPS securely without canvas stripping. Supports legacy OEM HDR extensions and Android 14+ Ultra HDR (`JPEG_R`).
+- **Native (Android / CameraX):** Active only when running the installed Android app via Capacitor. Uses native CameraX capture paths, the best available lens when possible, and true original-resolution photos from the device. Retains EXIF orientation and GPS securely without canvas stripping. Supports legacy OEM HDR extensions and Android 14+ Ultra HDR (`JPEG_R`).
 - **Web (`getUserMedia` / PWA):** Used in mobile browsers and installed PWAs. Streams video into HTML `<canvas>`, which is typically constrained by browser capture limits and yields lower image quality than native capture. Browsers strip EXIF/GPS from canvas blobs, so the app compensates with `navigator.geolocation` during capture. The UI warns Android web users to install the native app when camera quality or metadata fidelity matters.
 
 ## Location Lookup

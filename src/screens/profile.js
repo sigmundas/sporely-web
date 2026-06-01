@@ -514,6 +514,7 @@ function _renderCloudPlan(cloudPlan) {
   const usageEl = document.getElementById('profile-cloud-usage')
   const storageEl = document.getElementById('profile-storage-usage')
   const imageCountEl = document.getElementById('profile-image-count')
+  const noteEl = document.getElementById('profile-cloud-plan-note')
 
   if (uploadEl) {
     uploadEl.textContent = t(isMaxResolution ? 'profile.imageResolutionPro' : 'profile.imageResolutionDefault')
@@ -538,6 +539,10 @@ function _renderCloudPlan(cloudPlan) {
       normalized.imageCount === 1 ? 'profile.imageCountValue.one' : 'profile.imageCountValue.other',
       { count: normalized.imageCount || 0 },
     )
+  }
+  if (noteEl) {
+    noteEl.textContent = t('profile.storagePlanWebsiteNote')
+    noteEl.style.display = _isNativeApp() ? 'block' : 'none'
   }
 }
 

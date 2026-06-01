@@ -111,7 +111,7 @@ All media is stored in Cloudflare R2, not Supabase Storage.
 - **Auth:** Supabase JWT sent as `Authorization: Bearer {token}`
 - **JWT verification:** Worker fetches the JWKS from Supabase (`/auth/v1/.well-known/jwks.json`) and verifies the ES256 signature using Web Crypto. The JWKS is cached in-memory for 10 minutes.
 - **Key rule:** Upload path must start with the JWT `sub` (user ID) — enforced by the worker.
-- **Current client policy:** Free accounts upload reduced 2 MP images. Pro/full-res accounts can choose `Reduced (2MP)` or `Max (12MP)` in Settings. Max keeps near-12 MP originals when friendly to quality and only resizes images from 14 MP and up down to 12 MP.
+- **Current client policy:** Free accounts upload 20 MP images with standard 0.65 compression and a 1 MB full-image byte cap. Pro/full-res accounts upload 20 MP images with high 0.80 compression and a 5 MB full-image byte cap. The profile/settings UI reflects these free/pro quality tiers instead of the old 2 MP / 12 MP wording.
 - **Storage tally/quota:** After successful R2 writes/deletes, the worker updates `profiles.total_storage_bytes`, compatibility `profiles.storage_used_bytes`, and original-image `profiles.image_count` through the service-role Supabase RPC `apply_profile_storage_delta`. Free-tier storage can be limited per profile via `storage_quota_bytes` or globally via worker `FREE_STORAGE_QUOTA_BYTES`; the entitlement and quota fields on `profiles` are server-owned and protected by the database.
 - **Source:** `cloudflare/r2-upload-worker/src/index.js`
 - **Config:** `cloudflare/r2-upload-worker/wrangler.toml`
@@ -193,9 +193,11 @@ Server-owned account state also lives here:
 - `storage_quota_bytes` — optional per-user storage cap; free plans can be limited here.
 - `total_storage_bytes` / `storage_used_bytes` — worker-maintained byte tally. `storage_used_bytes` remains for compatibility.
 - `image_count` — worker-maintained count of original uploaded images; thumbnail variants are not counted as images.
-- `billing_status`, `billing_provider` — reserved for later billing sync.
+- `billing_status`, `billing_provider` — reserved for website-led billing sync, likely from `sporely.no`/Stripe rather than an in-app checkout.
 - `is_admin`, `is_banned` — server-controlled moderation/admin flags.
 - A database trigger keeps the server-owned fields above immutable for normal authenticated writes; service-role code can still update them.
+
+Billing UX is website-led: `sporely.no` can advertise Pro, take payment, and manage subscription/cancellation. Android/desktop clients should only read the resulting entitlement from `profiles` and link users out to the website for account management; they should not embed their own checkout flow.
 
 Avatar initials are derived on the client, and avatar rendering prefers the stored URL
 with a signed-URL fallback if the direct image fetch fails. That fallback is avatar-only
