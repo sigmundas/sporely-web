@@ -1,58 +1,45 @@
 {
   "name": "sporely-web",
   "private": true,
-  "version": "0.5.11",
+  "version": "0.5.12",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
   },
-
   "scriptsInfo": {
     "check:node": "Fails early if the active Node version is older than 22.",
     "predev": "Runs automatically before npm run dev; checks Node version.",
     "prebuild": "Runs automatically before npm run build; checks Node version.",
     "prepreview:host": "Runs automatically before npm run preview:host; checks Node version.",
-
     "dev": "Starts the Vite development server with live reload, reachable from other devices on the network.",
     "build": "Builds the production web app into dist/.",
     "preview:host": "Builds the production app, then serves it on the local network for browser/iPhone/PWA testing.",
-
     "android:sync": "Builds production web assets and syncs them into the Capacitor Android project.",
     "android:install": "Builds production web assets, syncs Capacitor Android, then installs an inspectable debug app on a connected Android device.",
     "android:build:debug": "Builds a local debug APK without installing it.",
     "android:build:release": "Builds local signed release APK/AAB if local Android signing is configured. GitHub Actions remains the canonical release builder.",
-
     "sync:version:bump-code": "Updates native app version metadata and bumps Android versionCode.",
     "release:version:patch": "Bumps package patch version and Android versionCode without creating a git tag.",
-
     "test": "Runs the Node test files such as *.test.js."
   },
   "scripts": {
     "check:node": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (major < 22) { console.error('\\nNode 22+ is required for sporely-web. Current: ' + process.version + '\\nUse nvm install 22 && nvm use 22\\n'); process.exit(1); }\"",
-
     "predev": "npm run check:node",
     "prebuild": "npm run check:node",
     "prepreview:host": "npm run check:node",
-
     "dev": "vite --host",
     "build": "vite build",
     "preview:host": "npm run build && vite preview --host",
-
     "android:sync": "npm run build && npx cap sync android",
     "android:install": "npm run android:sync && cd android && ./gradlew :app:installDebug",
     "android:build:debug": "npm run android:sync && cd android && ./gradlew :app:assembleDebug",
     "android:build:release": "npm run android:sync && cd android && ./gradlew :app:assembleRelease :app:bundleRelease",
-
     "sync:version:bump-code": "node scripts/sync-version.mjs --bump-code",
     "release:version:patch": "npm version patch --no-git-tag-version && npm run sync:version:bump-code",
-
     "test": "node --test",
-
     "release:version:minor": "npm version minor --no-git-tag-version && npm run sync:version:bump-code",
     "release:version:major": "npm version major --no-git-tag-version && npm run sync:version:bump-code"
-  }
-
-,
+  },
   "dependencies": {
     "@capacitor/android": "^8.3.0",
     "@capacitor/app": "^8.1.0",
