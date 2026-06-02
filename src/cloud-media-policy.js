@@ -3,6 +3,10 @@ export const CLOUD_QUALITY_PROFILE_HIGH = 'high'
 
 export const CLOUD_REDUCED_MAX_PIXELS = 2_000_000
 export const CLOUD_FULL_MAX_PIXELS = 20_000_000
+// Public messaging still says "20 MP", but the actual resize gate is a bit
+// higher so borderline full-frame captures are left untouched.
+export const CLOUD_FULL_RESIZE_MAX_PIXELS = 21_000_000
+export const CLOUD_FULL_RESIZE_MAX_EDGE = 5300
 export const CLOUD_THUMB_MAX_EDGE = 400
 
 export const CLOUD_STANDARD_FULL_WEBP_QUALITY = 0.65
@@ -49,12 +53,15 @@ export function normalizeCloudUploadMode(value) {
   return String(value || '').trim().toLowerCase() === 'full' ? 'full' : 'reduced'
 }
 
-export function scaleDimensionsToMaxPixels(width, height, maxPixels) {
+export function scaleDimensionsToMaxPixels(width, height, maxPixels, maxEdge = null) {
   const sourceWidth = Math.max(1, Number(width) || 0)
   const sourceHeight = Math.max(1, Number(height) || 0)
   const pixels = sourceWidth * sourceHeight
   const cap = Math.max(1, Number(maxPixels) || 0)
-  if (pixels <= cap) {
+  const longestEdge = Math.max(sourceWidth, sourceHeight)
+  const parsedEdgeCap = Number(maxEdge)
+  const edgeCap = Number.isFinite(parsedEdgeCap) && parsedEdgeCap > 0 ? Math.max(1, parsedEdgeCap) : null
+  if (pixels <= cap && (edgeCap === null || longestEdge <= edgeCap)) {
     return {
       width: sourceWidth,
       height: sourceHeight,
@@ -62,10 +69,13 @@ export function scaleDimensionsToMaxPixels(width, height, maxPixels) {
     }
   }
 
-  const scale = Math.sqrt(cap / pixels)
+  const scales = []
+  if (pixels > cap) scales.push(Math.sqrt(cap / pixels))
+  if (edgeCap !== null && longestEdge > edgeCap) scales.push(edgeCap / longestEdge)
+  const scale = scales.length ? Math.min(...scales) : 1
   return {
-    width: Math.max(1, Math.round(sourceWidth * scale)),
-    height: Math.max(1, Math.round(sourceHeight * scale)),
+    width: Math.max(1, Math.floor(sourceWidth * scale)),
+    height: Math.max(1, Math.floor(sourceHeight * scale)),
     resized: true,
   }
 }
@@ -82,12 +92,16 @@ export function buildCloudUploadPolicy(profile, options = {}) {
     : normalizeCloudPlanProfile(profile)
   const uploadMode = normalizeCloudUploadMode(options?.uploadMode || 'reduced')
   const qualityProfile = normalized.qualityProfile || CLOUD_QUALITY_PROFILE_STANDARD
+  const resizeMaxPixels = uploadMode === 'full' ? CLOUD_FULL_RESIZE_MAX_PIXELS : CLOUD_REDUCED_MAX_PIXELS
+  const resizeMaxEdge = uploadMode === 'full' ? CLOUD_FULL_RESIZE_MAX_EDGE : null
 
   return {
     ...normalized,
     uploadMode,
     imageResolutionMode: uploadMode === 'full' ? 'max' : 'reduced',
     maxPixels: uploadMode === 'full' ? CLOUD_FULL_MAX_PIXELS : CLOUD_REDUCED_MAX_PIXELS,
+    resizeMaxPixels,
+    resizeMaxEdge,
     fullImageWebpQuality: qualityProfile === CLOUD_QUALITY_PROFILE_HIGH
       ? CLOUD_HIGH_FULL_WEBP_QUALITY
       : CLOUD_STANDARD_FULL_WEBP_QUALITY,

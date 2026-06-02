@@ -9,7 +9,12 @@ import {
 function _targetSize(sourceWidth, sourceHeight, policy = {}) {
   const width = Math.max(1, Number(sourceWidth) || 0)
   const height = Math.max(1, Number(sourceHeight) || 0)
-  const scaled = scaleDimensionsToMaxPixels(width, height, policy.maxPixels || 0)
+  const scaled = scaleDimensionsToMaxPixels(
+    width,
+    height,
+    policy.resizeMaxPixels || policy.resize_max_pixels || policy.maxPixels || 0,
+    policy.resizeMaxEdge || policy.resize_max_edge,
+  )
   return scaled
 }
 

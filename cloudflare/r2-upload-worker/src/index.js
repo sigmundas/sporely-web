@@ -321,8 +321,22 @@ async function handleUpload(request, env, ctx, url) {
       throw httpError(413, 'image_too_large_for_plan', IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE)
     }
     if (Number.isFinite(storedWidth) && Number.isFinite(storedHeight)) {
-      const storedPixels = Math.max(1, storedWidth) * Math.max(1, storedHeight)
-      if (storedPixels > Math.max(1, Number(uploadPolicy.maxPixels || 0))) {
+      const normalizedWidth = Math.max(1, storedWidth)
+      const normalizedHeight = Math.max(1, storedHeight)
+      const storedPixels = normalizedWidth * normalizedHeight
+      const storedLongestEdge = Math.max(normalizedWidth, normalizedHeight)
+      const storedPixelCap = Math.max(
+        1,
+        Number(
+          uploadPolicy.resizeMaxPixels
+          || uploadPolicy.resize_max_pixels
+          || uploadPolicy.maxPixels
+          || 0,
+        ) || 0,
+      )
+      const parsedEdgeCap = Number(uploadPolicy.resizeMaxEdge || uploadPolicy.resize_max_edge || 0)
+      const storedEdgeCap = Number.isFinite(parsedEdgeCap) && parsedEdgeCap > 0 ? Math.max(1, parsedEdgeCap) : null
+      if (storedPixels > storedPixelCap || (storedEdgeCap !== null && storedLongestEdge > storedEdgeCap)) {
         throw httpError(413, 'image_too_large_for_plan', IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE)
       }
     }

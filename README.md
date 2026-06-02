@@ -122,7 +122,7 @@ Server-side / Supabase function secrets are not read from Vite env files. Set th
 
 ## Cloud Storage Hosting
 
-This repository contains the open-source Sporely web client and Android Capacitor shell. The hosted sync service is separate infrastructure: Supabase handles auth/database records, and Cloudflare R2 stores uploaded media through the `upload.sporely.no` Worker. Free accounts use 20 MP uploads with standard 0.65 compression, a 1 MB full-image byte cap, and 20 private/fuzzed observations; Pro/full-res accounts use 20 MP uploads with 0.80 compression and a 5 MB full-image byte cap. Pro purchase, subscription changes, and cancellation live on `sporely.no`; the app only reflects the resulting entitlement.
+This repository contains the open-source Sporely web client and Android Capacitor shell. The hosted sync service is separate infrastructure: Supabase handles auth/database records, and Cloudflare R2 stores uploaded media through the `upload.sporely.no` Worker. Publicly we describe the image tier as 20 MP for both Free and Pro/full-res accounts. In practice, the clients only downscale when a source image exceeds the internal safety gate (`>21 MP` or `>5300 px` on the longest edge), so borderline 20 MP frames are left untouched; Free accounts use standard 0.65 compression and a 1 MB full-image byte cap, while Pro/full-res accounts use 0.80 compression and a 5 MB full-image byte cap. Pro purchase, subscription changes, and cancellation live on `sporely.no`; the app only reflects the resulting entitlement.
 
 ## Stack
 

@@ -369,7 +369,12 @@ function _targetSizeForPolicy(width, height, uploadPolicy) {
   const sourceWidth = Math.max(1, Number(width) || 0)
   const sourceHeight = Math.max(1, Number(height) || 0)
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
-  const scaled = scaleDimensionsToMaxPixels(sourceWidth, sourceHeight, policy.maxPixels || 0)
+  const scaled = scaleDimensionsToMaxPixels(
+    sourceWidth,
+    sourceHeight,
+    policy.resizeMaxPixels || policy.resize_max_pixels || policy.maxPixels || 0,
+    policy.resizeMaxEdge || policy.resize_max_edge,
+  )
   return {
     targetWidth: scaled.width,
     targetHeight: scaled.height,

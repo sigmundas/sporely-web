@@ -111,7 +111,7 @@ All media is stored in Cloudflare R2, not Supabase Storage.
 - **Auth:** Supabase JWT sent as `Authorization: Bearer {token}`
 - **JWT verification:** Worker fetches the JWKS from Supabase (`/auth/v1/.well-known/jwks.json`) and verifies the ES256 signature using Web Crypto. The JWKS is cached in-memory for 10 minutes.
 - **Key rule:** Upload path must start with the JWT `sub` (user ID) — enforced by the worker.
-- **Current client policy:** Free accounts upload 20 MP images with standard 0.65 compression and a 1 MB full-image byte cap. Pro/full-res accounts upload 20 MP images with high 0.80 compression and a 5 MB full-image byte cap. The profile/settings UI reflects these free/pro quality tiers instead of the old 2 MP / 12 MP wording.
+- **Current client policy:** Free and Pro/full-res accounts are both presented as 20 MP image tiers. The desktop/web clients only downscale when the source image exceeds the internal safety gate (`>21 MP` or `>5300 px` longest edge), which keeps borderline 20 MP frames intact. Free accounts use standard 0.65 compression and a 1 MB full-image byte cap; Pro/full-res accounts use high 0.80 compression and a 5 MB full-image byte cap. The profile/settings UI reflects these free/pro quality tiers instead of the old 2 MP / 12 MP wording.
 - **Storage tally/quota:** After successful R2 writes/deletes, the worker updates `profiles.total_storage_bytes`, compatibility `profiles.storage_used_bytes`, and original-image `profiles.image_count` through the service-role Supabase RPC `apply_profile_storage_delta`. Free-tier storage can be limited per profile via `storage_quota_bytes` or globally via worker `FREE_STORAGE_QUOTA_BYTES`; the entitlement and quota fields on `profiles` are server-owned and protected by the database.
 - **Source:** `cloudflare/r2-upload-worker/src/index.js`
 - **Config:** `cloudflare/r2-upload-worker/wrangler.toml`
@@ -363,7 +363,7 @@ so regressions are easy to locate.
 Implemented in `sporely/utils/cloud_sync.py` using the Supabase REST API directly (`requests`).
 Media uploads use `sporely/utils/r2_storage.py` — a minimal S3-compatible client using
 SigV4 signing directly against the R2 S3 endpoint (bypasses the upload worker, uses
-service-level R2 API credentials from `python.env`).
+service-level R2 API credentials from `sporely-admin.env`).
 
 **Account binding safety:**
 - Desktop stores `linked_cloud_user_id` in its local `app_settings.json` after first successful sync and verifies the active Supabase user before each later push/pull.

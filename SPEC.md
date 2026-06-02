@@ -4,7 +4,7 @@
 - `src/main.js`: Boot & Auth.
 - `src/state.js`: Central State.
 - `src/sync-queue.js`: IndexedDB Offline Queue (Durable Boundary).
-- `src/images.js`: Client-side compression (20MP cloud policy with free/pro quality tiers) & R2 Uploads.
+- `src/images.js`: Client-side compression (public 20MP cloud policy with an internal `>21MP` / `>5300px` resize gate, plus free/pro quality tiers) & R2 uploads.
 - `src/image-worker.js`: Off-thread Resize/Encode (OffscreenCanvas).
 
 ## Data Flow: Capture to Cloud
