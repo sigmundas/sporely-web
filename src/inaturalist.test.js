@@ -30,6 +30,14 @@ import {
   INAT_USERNAME_KEY,
 } from './inaturalist.js'
 
+function bytesToBase64(bytes) {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  return globalThis.btoa(binary)
+}
+
 function createMemoryStorage() {
   const data = new Map()
   return {
@@ -127,7 +135,7 @@ function jsonResponse(body, ok = true) {
 async function pkceChallenge(verifier) {
   const data = new TextEncoder().encode(verifier)
   const hash = await crypto.subtle.digest('SHA-256', data)
-  return Buffer.from(new Uint8Array(hash)).toString('base64')
+  return bytesToBase64(new Uint8Array(hash))
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '')
@@ -631,7 +639,7 @@ test('native connect path does not persist a partial session if api token lookup
     },
   }
 
-  const fetchImpl = async (url, options = {}) => {
+  const fetchImpl = async (url, _options = {}) => {
     if (url.endsWith('/v1/users/me')) {
       throw new Error('profile should not be fetched when api token lookup fails')
     }

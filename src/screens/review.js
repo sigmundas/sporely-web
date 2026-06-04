@@ -572,7 +572,7 @@ export function buildReviewGrid() {
 
   const grid = document.getElementById('observation-grid')
   grid.classList.add('review-session-grid')
-  let html = ''
+  let html
 
   if (count === 0) {
     html = `<div class="capture-session-empty" style="opacity:0.4;pointer-events:none">${t('review.noCaptures')}</div>`

@@ -18,10 +18,22 @@ This folder is the authoritative home for the Sporely Supabase schema.
 ## Account entitlement / privacy enforcement
 
 - `public.profiles` contains both user-editable profile fields and server-owned entitlement/quota state.
-- Server-owned fields include `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `total_storage_bytes`, `image_count`, `is_admin`, and `is_banned`.
+- Server-owned fields include `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `billing_customer_id`, `billing_payment_id`, `billing_checkout_session_id`, `billing_updated_at`, `total_storage_bytes`, `image_count`, `is_admin`, and `is_banned`.
 - Normal authenticated writes cannot change those server-owned fields; the `trg_profiles_protect_privileged_fields` trigger preserves them.
 - Free accounts can keep at most 20 cloud observations that are private or fuzzed (`visibility != 'public' OR location_precision = 'fuzzed'`); the enforcement trigger takes a per-user lock so concurrent inserts cannot race past the cap.
 - The R2 upload worker updates storage tallies through the service-role RPC `apply_profile_storage_delta`, which is not callable by normal authenticated users.
+
+## Edge Functions
+
+- `delete-account`
+  - Authenticated self-service account deletion endpoint
+  - Verifies the caller with the request JWT, then uses the service role to clean up media, observations, profile state, and the underlying auth user
+- `create-pro-checkout`
+  - Authenticated Stripe Checkout session creator for the one-time Sporely Pro purchase
+  - Requires `STRIPE_SECRET_KEY` and `STRIPE_PRO_PRICE_ID`
+- `stripe-webhook`
+  - Public Stripe webhook endpoint
+  - Verifies the Stripe signature, marks paid checkout sessions as Pro, and revokes Pro on matching refunds
 
 ## Notes
 

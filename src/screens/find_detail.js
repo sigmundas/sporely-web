@@ -35,7 +35,7 @@ import { buildGpsMetaHtml } from './review.js'
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js'
 import { fetchCloudPlanProfile } from '../cloud-plan.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
-import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
+import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile } from './import-helpers.js'
 import { setCaptureCompleteHandler } from './capture.js'
 import { prepareImageBlobForUpload } from '../image_crop.js'
 import { isBlob } from '../observation-shapes.js'
@@ -746,7 +746,7 @@ export function initFindDetail() {
   document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
   document.getElementById('detail-friend-btn')?.addEventListener('click', _sendFriendRequestFromDetail)
   document.querySelectorAll('input[name="detail-vis"], input[name="detail-location-precision"], #detail-draft').forEach(input => {
-    input.addEventListener('change', event => {
+    input.addEventListener('change', () => {
       if (input.name === 'detail-vis' && input.checked) {
         const group = input.closest('.scope-tabs')
         if (group) {
@@ -2485,7 +2485,6 @@ function _renderDetailAuthorAndSocial() {
   const authorBtn = document.getElementById('detail-author')
   const authorName = document.getElementById('detail-author-name')
   const authorAvatar = document.getElementById('detail-author-avatar')
-  const socialRow = document.getElementById('detail-social-row')
   const isOwner = currentObs?.user_id === state.user?.id
   const taxonFollow = _taxonFollowTarget(currentObs)
   const genusAvailable = _hasRealTaxonValue(currentObs?.genus)
@@ -2526,8 +2525,6 @@ function _renderDetailAuthorAndSocial() {
       const pending = status === 'pending'
       
       let friendText = accepted ? 'Friends' : (pending ? 'Pending' : 'Add Friend');
-      let friendIconClass = accepted ? 'friend-btn-icon active' : 'friend-btn-icon';
-      
       let followText = '';
       let followAction = '';
       let isFollowActive = false;
@@ -2551,7 +2548,7 @@ function _renderDetailAuthorAndSocial() {
          isFollowActive = true;
       }
       
-      let followHtml = '';
+      let followHtml
       if (isFollowActive) {
         followHtml = `
           <button id="new-follow-btn" class="action-btn active" data-action="${followAction}">
@@ -2609,7 +2606,7 @@ function _renderDetailAuthorAndSocial() {
       const followBtn = document.getElementById('new-follow-btn');
       
       if (isFollowActive) {
-        followBtn.addEventListener('click', (e) => {
+        followBtn.addEventListener('click', () => {
           _toggleFollowSpecific(followBtn.dataset.action);
         });
       } else {
@@ -3001,8 +2998,6 @@ async function _save() {
     currentObs.species || '',
     currentObs.common_name || '',
   ).trim()
-  const currentTaxonInput = _detailAiNormalizeText(taxonInputValue)
-  const currentDisplayTaxon = _detailAiNormalizeText(currentDisplayName)
   const selectedPrediction = detailAiState.selectedPrediction || detailAiState.selectedPredictionByService?.[detailAiState.selectedService] || null
 
   if (selectedTaxon) {
@@ -3606,6 +3601,7 @@ async function _addPhotosToObservation(files) {
       const sortOrder = nextSortOrder + i
 
       const preparedImage = await prepareImageVariants(file, uploadPolicy)
+      let cropMeta
       const storagePath = buildObservationImageStoragePath({
         userId,
         observationId: obsId,
@@ -3620,7 +3616,7 @@ async function _addPhotosToObservation(files) {
       })
       
       try {
-        const cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })
+        cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })
         await insertObservationImage({
           observation_id: obsId,
           user_id: userId,
@@ -3652,13 +3648,13 @@ async function _addPhotosToObservation(files) {
         storage_path: storagePath,
         sort_order: sortOrder,
         image_type: 'field',
-        ai_crop_x1: cropMeta.aiCropRect?.x1 ?? null,
-        ai_crop_y1: cropMeta.aiCropRect?.y1 ?? null,
-        ai_crop_x2: cropMeta.aiCropRect?.x2 ?? null,
-        ai_crop_y2: cropMeta.aiCropRect?.y2 ?? null,
-        ai_crop_source_w: cropMeta.aiCropSourceW ?? null,
-        ai_crop_source_h: cropMeta.aiCropSourceH ?? null,
-        ai_crop_is_custom: cropMeta.aiCropIsCustom === true,
+        ai_crop_x1: cropMeta?.aiCropRect?.x1 ?? null,
+        ai_crop_y1: cropMeta?.aiCropRect?.y1 ?? null,
+        ai_crop_x2: cropMeta?.aiCropRect?.x2 ?? null,
+        ai_crop_y2: cropMeta?.aiCropRect?.y2 ?? null,
+        ai_crop_source_w: cropMeta?.aiCropSourceW ?? null,
+        ai_crop_source_h: cropMeta?.aiCropSourceH ?? null,
+        ai_crop_is_custom: cropMeta?.aiCropIsCustom === true,
       }
       const [originalSource] = await resolveMediaSources([storagePath], { variant: 'original' })
       const [displaySource] = await resolveMediaSources([storagePath], { variant: 'medium' })

@@ -57,9 +57,6 @@ function _getCrypto() {
 }
 
 function _bytesToBase64(bytes) {
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(bytes).toString('base64')
-  }
   let binary = ''
   for (let i = 0; i < bytes.length; i += 1) {
     binary += String.fromCharCode(bytes[i])
@@ -933,23 +930,20 @@ export async function loadInaturalistSession(storageImpl, options = {}) {
 export async function completeInaturalistOAuthCallback(input, stateOrOptions, maybeOptions) {
   let code = null
   let state = null
-  let options = {}
+  const options = typeof input === 'string' && typeof stateOrOptions === 'string'
+    ? maybeOptions || {}
+    : stateOrOptions || {}
 
   if (typeof input === 'string' && typeof stateOrOptions === 'string') {
     code = input
     state = stateOrOptions
-    options = maybeOptions || {}
   } else if (typeof input === 'string') {
     const urlObj = new URL(input)
     code = urlObj.searchParams.get('code')
     state = urlObj.searchParams.get('state')
-    options = stateOrOptions || {}
   } else if (input && typeof input === 'object') {
     code = input.code || null
     state = input.state || null
-    options = stateOrOptions || {}
-  } else {
-    options = stateOrOptions || {}
   }
 
   code = _cleanString(code)

@@ -61,7 +61,7 @@ See also:
 - `profiles`
   - Auto-created by a Postgres trigger on `auth.users` insert
   - User-editable columns: `username` (unique), `display_name`, `avatar_url`, `bio`
-  - Server-owned columns: `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `total_storage_bytes`, `image_count`, `is_admin`, `is_banned`
+  - Server-owned columns: `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `billing_customer_id`, `billing_payment_id`, `billing_checkout_session_id`, `billing_updated_at`, `total_storage_bytes`, `image_count`, `is_admin`, `is_banned`
   - A `BEFORE UPDATE` trigger keeps the server-owned columns immutable for normal authenticated writes; service-role code can still update them
   - `bio` is used by the web Profile editor and the People screen cards
   - Avatar initials derived from `username` or `email` on the client
@@ -104,6 +104,13 @@ See also:
     - delete friendships, comments, profile row, and owned observations/image rows
     - delete the underlying `auth.users` account
   - Required by the Profile screen's `Delete account` button
+- `create-pro-checkout`
+  - Authenticated Stripe Checkout session creator for the one-time Sporely Pro purchase
+  - Uses the public Supabase anon key plus `STRIPE_SECRET_KEY` and `STRIPE_PRO_PRICE_ID`
+- `stripe-webhook`
+  - Public Stripe webhook endpoint
+  - Verifies the Stripe signature with `STRIPE_WEBHOOK_SECRET`
+  - Updates `profiles` with Pro entitlement fields after a paid checkout and revokes Pro on matching refunds
 
 ---
 
@@ -169,7 +176,7 @@ All tables have RLS enabled and default "owner-only" access unless overridden by
 - Client writes are constrained to rows owned by the authenticated user (`user_id`)
 - Images: canonical media writes are enforced by the R2 upload worker; Supabase Storage `observation-images` is legacy-only and should not receive new uploads
 - Banned Users: A Postgres trigger prevents `INSERT` and `UPDATE` on `observations`, `observation_images`, and `comments` if `profiles.is_banned = true`.
-- Profile entitlement and quota fields are server-owned; authenticated users can update ordinary profile fields, but not `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `total_storage_bytes`, or `image_count`.
+- Profile entitlement and quota fields are server-owned; authenticated users can update ordinary profile fields, but not `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `billing_customer_id`, `billing_payment_id`, `billing_checkout_session_id`, `billing_updated_at`, `total_storage_bytes`, or `image_count`.
 - The R2 worker updates storage tallies through the service-role RPC `apply_profile_storage_delta`; normal authenticated users cannot call that RPC directly.
 - Free accounts are limited to 20 cloud observations that are private or fuzzed (`visibility != 'public' OR location_precision = 'fuzzed'`), and the database trigger serializes per-user writes so concurrent inserts cannot race past the cap.
 - Client code must never rely on setting `user_id` from the client as a trust boundary; RLS is the enforcement

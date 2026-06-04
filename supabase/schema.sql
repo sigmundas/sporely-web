@@ -57,6 +57,10 @@ BEGIN
   NEW.storage_used_bytes = OLD.storage_used_bytes;
   NEW.billing_status = OLD.billing_status;
   NEW.billing_provider = OLD.billing_provider;
+  NEW.billing_customer_id = OLD.billing_customer_id;
+  NEW.billing_payment_id = OLD.billing_payment_id;
+  NEW.billing_checkout_session_id = OLD.billing_checkout_session_id;
+  NEW.billing_updated_at = OLD.billing_updated_at;
   NEW.total_storage_bytes = OLD.total_storage_bytes;
   NEW.image_count = OLD.image_count;
   NEW.is_admin = OLD.is_admin;
@@ -1193,6 +1197,10 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
     "storage_used_bytes" bigint DEFAULT 0 NOT NULL,
     "billing_status" "text",
     "billing_provider" "text",
+    "billing_customer_id" "text",
+    "billing_payment_id" "text",
+    "billing_checkout_session_id" "text",
+    "billing_updated_at" timestamp with time zone,
     "total_storage_bytes" bigint DEFAULT 0 NOT NULL,
     "image_count" integer DEFAULT 0 NOT NULL,
     "is_admin" boolean DEFAULT false NOT NULL,

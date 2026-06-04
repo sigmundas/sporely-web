@@ -200,14 +200,6 @@ function readAll(store) {
   })
 }
 
-function readOne(store, key) {
-  return new Promise((resolve, reject) => {
-    const req = store.get(key)
-    req.onsuccess = () => resolve(req.result || null)
-    req.onerror = () => reject(req.error)
-  })
-}
-
 function notifyQueueChanged() {
   window.dispatchEvent(new CustomEvent(QUEUE_EVENT))
 }
@@ -680,10 +672,10 @@ async function _runSyncQueue() {
 
   for (const item of items) {
     if (!navigator.onLine) break
+    const queueUserId = _queueUserFromItem(item)
 
     try {
       const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
-      const queueUserId = _queueUserFromItem(item)
       const queueKey = String(item?.queueKey || '').trim() || _queueKeyForUser(queueUserId)
       const observationPayload = item?.obsPayload || {}
       const queuedAiIdentificationRuns = Array.isArray(observationPayload.aiIdentificationRuns)

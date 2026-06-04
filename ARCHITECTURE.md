@@ -193,11 +193,11 @@ Server-owned account state also lives here:
 - `storage_quota_bytes` — optional per-user storage cap; free plans can be limited here.
 - `total_storage_bytes` / `storage_used_bytes` — worker-maintained byte tally. `storage_used_bytes` remains for compatibility.
 - `image_count` — worker-maintained count of original uploaded images; thumbnail variants are not counted as images.
-- `billing_status`, `billing_provider` — reserved for website-led billing sync, likely from `sporely.no`/Stripe rather than an in-app checkout.
+- `billing_status`, `billing_provider`, `billing_customer_id`, `billing_payment_id`, `billing_checkout_session_id`, `billing_updated_at` — reserved for website-led billing sync, likely from `sporely.no`/Stripe rather than an in-app checkout.
 - `is_admin`, `is_banned` — server-controlled moderation/admin flags.
 - A database trigger keeps the server-owned fields above immutable for normal authenticated writes; service-role code can still update them.
 
-Billing UX is website-led: `sporely.no` can advertise Pro, take payment, and manage subscription/cancellation. Android/desktop clients should only read the resulting entitlement from `profiles` and link users out to the website for account management; they should not embed their own checkout flow.
+Billing UX is website-led: `sporely.no` can advertise Pro, take a one-time payment, and reflect the resulting entitlement state. Android/desktop clients should only read the resulting entitlement from `profiles` and link users out to the website for account management; they should not embed their own checkout flow.
 
 Avatar initials are derived on the client, and avatar rendering prefers the stored URL
 with a signed-URL fallback if the direct image fetch fails. That fallback is avatar-only
@@ -379,7 +379,7 @@ service-level R2 API credentials from `sporely-admin.env`).
 - Uses a lightweight local media signature so unchanged images/media can be skipped on later syncs
 - Media-signature comparison now ignores low-signal local-only churn such as file mtime drift, gallery layout state, order-only image changes, and older signature payloads that predate the shared AI crop fields
 - Upload size is controlled by the desktop **Sync image size** setting (`Reduced (2 MP)` or `Full size`)
-- Desktop now pushes the same upload metadata as web (`upload_mode`, source/stored dimensions, stored bytes), so future subscription logic can reason about already-uploaded media on both platforms
+- Desktop now pushes the same upload metadata as web (`upload_mode`, source/stored dimensions, stored bytes), so future billing and entitlement logic can reason about already-uploaded media on both platforms
 
 **Pull (cloud → desktop):**
 - Fetches `observations WHERE desktop_id IS NULL` (created on mobile)
