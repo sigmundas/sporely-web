@@ -5,6 +5,10 @@ import {
 } from '../../../src/location-suggestion-builder.js'
 import {
   IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
+  CLOUD_FULL_RESIZE_MAX_EDGE,
+  CLOUD_FULL_RESIZE_MAX_PIXELS,
+  CLOUD_HIGH_FULL_BYTE_CAP,
+  CLOUD_STANDARD_FULL_BYTE_CAP,
   buildCloudUploadPolicy,
   normalizeCloudPlanProfile,
 } from '../../../src/cloud-media-policy.js'
@@ -35,6 +39,7 @@ const DEFAULT_ALLOWED_HEADER_NAMES = DEFAULT_ALLOWED_HEADERS
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
 const ARTS_MAX_DIST = 0.006
 const NOMINATIM_INTERVAL_MS = 1000
+const WORKER_VERSION_MARKER = 'sporely-r2-upload-worker@source'
 
 let cachedJwks = null
 let cachedJwksAt = 0
@@ -48,12 +53,14 @@ export default {
     } catch (error) {
       const status = Number(error?.status || 500)
       const message = status >= 500 ? 'Internal server error' : String(error?.message || 'Request failed')
-      return jsonResponse(
-        { error: error?.code || 'request_failed', message },
-        status,
-        request,
-        env,
-      )
+      const payload = {
+        error: error?.code || 'request_failed',
+        message,
+      }
+      if (error && typeof error.details === 'object' && error.details) {
+        payload.details = error.details
+      }
+      return jsonResponse(payload, status, request, env)
     }
   },
 }
@@ -66,7 +73,22 @@ async function handleRequest(request, env, ctx) {
   }
 
   if (url.pathname === '/healthz') {
-    return jsonResponse({ ok: true, service: 'sporely-r2-upload-worker' }, 200, request, env)
+    return jsonResponse(
+      {
+        ok: true,
+        service: 'sporely-r2-upload-worker',
+        workerVersion: WORKER_VERSION_MARKER,
+        mediaPolicy: {
+          fullResizeMaxPixels: CLOUD_FULL_RESIZE_MAX_PIXELS,
+          fullResizeMaxEdge: CLOUD_FULL_RESIZE_MAX_EDGE,
+          standardFullByteCap: CLOUD_STANDARD_FULL_BYTE_CAP,
+          highFullByteCap: CLOUD_HIGH_FULL_BYTE_CAP,
+        },
+      },
+      200,
+      request,
+      env,
+    )
   }
 
   if (request.method === 'GET' && url.pathname === '/reverse-location') {
@@ -314,30 +336,68 @@ async function handleUpload(request, env, ctx, url) {
   const sourceHeight = parseIntegerHeader(request.headers.get('X-Sporely-Source-Height'))
   const storedWidth = parseIntegerHeader(request.headers.get('X-Sporely-Stored-Width'))
   const storedHeight = parseIntegerHeader(request.headers.get('X-Sporely-Stored-Height'))
+  const encodingFormat = encodingFormatHeader || String(contentType || '').toLowerCase()
+  const normalizedStoredWidth = Number.isFinite(storedWidth) ? Math.max(1, storedWidth) : null
+  const normalizedStoredHeight = Number.isFinite(storedHeight) ? Math.max(1, storedHeight) : null
+  const storedPixels = normalizedStoredWidth !== null && normalizedStoredHeight !== null
+    ? normalizedStoredWidth * normalizedStoredHeight
+    : null
+  const storedLongestEdge = normalizedStoredWidth !== null && normalizedStoredHeight !== null
+    ? Math.max(normalizedStoredWidth, normalizedStoredHeight)
+    : null
+  const storedPixelCap = Math.max(
+    1,
+    Number(
+      uploadPolicy.resizeMaxPixels
+      || uploadPolicy.resize_max_pixels
+      || uploadPolicy.maxPixels
+      || 0,
+    ) || 0,
+  )
+  const resizeMaxEdgeValue = Number(uploadPolicy.resizeMaxEdge || uploadPolicy.resize_max_edge || 0)
+  const storedEdgeCap = Number.isFinite(resizeMaxEdgeValue) && resizeMaxEdgeValue > 0 ? Math.max(1, resizeMaxEdgeValue) : null
+  const buildImageTooLargeDetails = (reason, planByteCap) => ({
+    reason,
+    bodyBytes,
+    planByteCap,
+    cloudPlan: String(profile?.cloudPlan || 'free'),
+    qualityProfile: String(uploadPolicy?.qualityProfile || profile?.qualityProfile || 'standard'),
+    sourceWidth: Number.isFinite(sourceWidth) ? sourceWidth : null,
+    sourceHeight: Number.isFinite(sourceHeight) ? sourceHeight : null,
+    storedWidth: normalizedStoredWidth,
+    storedHeight: normalizedStoredHeight,
+    storedPixels,
+    storedPixelCap,
+    resizeMaxEdge: storedEdgeCap,
+    uploadMode,
+    uploadVariant,
+    encodingFormat,
+    contentType,
+  })
 
   if (uploadVariant !== 'thumb') {
     const planByteCap = Math.max(1, Number(uploadPolicy.fullImageByteCap || 0) || 0)
     if (bodyBytes > planByteCap) {
-      throw httpError(413, 'image_too_large_for_plan', IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE)
-    }
-    if (Number.isFinite(storedWidth) && Number.isFinite(storedHeight)) {
-      const normalizedWidth = Math.max(1, storedWidth)
-      const normalizedHeight = Math.max(1, storedHeight)
-      const storedPixels = normalizedWidth * normalizedHeight
-      const storedLongestEdge = Math.max(normalizedWidth, normalizedHeight)
-      const storedPixelCap = Math.max(
-        1,
-        Number(
-          uploadPolicy.resizeMaxPixels
-          || uploadPolicy.resize_max_pixels
-          || uploadPolicy.maxPixels
-          || 0,
-        ) || 0,
+      throw httpError(
+        413,
+        'image_too_large_for_plan',
+        IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
+        buildImageTooLargeDetails('byte_cap', planByteCap),
       )
-      const parsedEdgeCap = Number(uploadPolicy.resizeMaxEdge || uploadPolicy.resize_max_edge || 0)
-      const storedEdgeCap = Number.isFinite(parsedEdgeCap) && parsedEdgeCap > 0 ? Math.max(1, parsedEdgeCap) : null
-      if (storedPixels > storedPixelCap || (storedEdgeCap !== null && storedLongestEdge > storedEdgeCap)) {
-        throw httpError(413, 'image_too_large_for_plan', IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE)
+    }
+    if (normalizedStoredWidth !== null && normalizedStoredHeight !== null) {
+      const reason = storedPixels > storedPixelCap
+        ? 'pixel_cap'
+        : (storedEdgeCap !== null && storedLongestEdge > storedEdgeCap)
+          ? 'edge_cap'
+          : 'unknown'
+      if (reason !== 'unknown') {
+        throw httpError(
+          413,
+          'image_too_large_for_plan',
+          IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
+          buildImageTooLargeDetails(reason, planByteCap),
+        )
       }
     }
   }
@@ -357,11 +417,11 @@ async function handleUpload(request, env, ctx, url) {
       cloud_plan: String(profile?.cloudPlan || 'free'),
       quality_profile: String(uploadPolicy?.qualityProfile || profile?.qualityProfile || 'standard'),
       encoding_quality: Number.isFinite(encodingQualityHeader) ? String(encodingQualityHeader) : '',
-      encoding_format: encodingFormatHeader || String(contentType || '').toLowerCase(),
+      encoding_format: encodingFormat,
       source_width: Number.isFinite(sourceWidth) ? String(sourceWidth) : '',
       source_height: Number.isFinite(sourceHeight) ? String(sourceHeight) : '',
-      stored_width: Number.isFinite(storedWidth) ? String(storedWidth) : '',
-      stored_height: Number.isFinite(storedHeight) ? String(storedHeight) : '',
+      stored_width: normalizedStoredWidth !== null ? String(normalizedStoredWidth) : '',
+      stored_height: normalizedStoredHeight !== null ? String(normalizedStoredHeight) : '',
       stored_bytes: String(bodyBytes),
     },
   })
@@ -1086,10 +1146,13 @@ function jsonResponse(payload, status, request, env, resolvedOrigin = null) {
   return new Response(JSON.stringify(payload, null, 2), { status, headers })
 }
 
-function httpError(status, code, message) {
+function httpError(status, code, message, details = null) {
   const error = new Error(message)
   error.status = status
   error.code = code
+  if (details && typeof details === 'object') {
+    error.details = details
+  }
   return error
 }
 
