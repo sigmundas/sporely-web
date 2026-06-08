@@ -844,23 +844,12 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
   const sourceList = await resolveMediaSources([originalPath], { variant })
   const source = sourceList[0] || null
   const mediaUploadBaseUrl = getMediaUploadBaseUrl()
-  const candidateUrls = []
-  if (source?.primaryUrl) candidateUrls.push(source.primaryUrl)
-  if (source?.fallbackUrl && !_isFetchableImageUrl(source.fallbackUrl)) {
-    candidateUrls.push(source.fallbackUrl)
-  }
-
   let lastError = null
-  for (const url of [...new Set(candidateUrls.filter(Boolean))]) {
-    try {
-      const data = await _fetchImageBlobFromUrl(url)
-      if (isBlob(data)) return data
-    } catch (err) {
-      lastError = err
-    }
-  }
 
   if (allowWorkerDownload && mediaUploadBaseUrl) {
+    // Prefer the authenticated worker for blob reads. Public media URLs are
+    // fine for <img> tags, but cross-origin fetches there can trip CORB and are
+    // not reliable for blob decoding.
     const candidatePaths = variant === 'original'
       ? [originalPath]
       : [getVariantPath(originalPath, variant), originalPath]
@@ -872,6 +861,27 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
         lastError = err
       }
     }
+  }
+
+  const candidateUrls = []
+  if (source?.primaryUrl && _isFetchableImageUrl(source.primaryUrl)) {
+    candidateUrls.push(source.primaryUrl)
+  }
+  if (source?.fallbackUrl && _isFetchableImageUrl(source.fallbackUrl)) {
+    candidateUrls.push(source.fallbackUrl)
+  }
+
+  for (const url of [...new Set(candidateUrls.filter(Boolean))]) {
+    try {
+      const data = await _fetchImageBlobFromUrl(url)
+      if (isBlob(data)) return data
+    } catch (err) {
+      lastError = err
+    }
+  }
+
+  if (!lastError) {
+    lastError = new Error('Cross-origin media blobs require the authenticated media worker or same-origin media URLs.')
   }
 
   throw new Error(`Image download failed: ${lastError?.message || originalPath}`)

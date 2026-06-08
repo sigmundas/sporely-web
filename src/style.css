@@ -93,6 +93,37 @@ html, body {
   overflow-y: auto;
 }
 
+/* Shared warning dialogs */
+#exif-warning-overlay,
+#android-web-camera-warning-overlay {
+  color: var(--text-primary);
+}
+#exif-warning-overlay > div,
+#android-web-camera-warning-overlay > div {
+  background: var(--card) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text-primary) !important;
+  border-radius: 20px;
+  width: 100%;
+  max-width: 400px;
+  padding: 24px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+}
+#exif-warning-overlay > div > div:first-child,
+#android-web-camera-warning-overlay > div > div:first-child {
+  color: var(--text-primary) !important;
+}
+#exif-warning-desc,
+#android-web-camera-warning-desc,
+#exif-warning-dont-show-label,
+#android-web-camera-warning-dont-show-label {
+  color: var(--text-secondary) !important;
+}
+#exif-warning-overlay label,
+#android-web-camera-warning-overlay label {
+  color: var(--text-secondary);
+}
+
 .auth-card {
   width: 100%; max-width: 360px;
 }
