@@ -4,7 +4,7 @@ import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { isNativeApp } from '../platform.js'
-import { debugImagePipeline } from '../image-pipeline-debug.js'
+import { debugImagePipeline, isImagePipelineDebugEnabled } from '../image-pipeline-debug.js'
 import { resetReviewAiState } from './review.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
 import { isBlob } from '../observation-shapes.js'
@@ -14,6 +14,7 @@ let primaryMainCameraPromise = null
 
 const CAMERA_VIDEO_WIDTH_IDEAL = 4000
 const CAMERA_VIDEO_HEIGHT_IDEAL = 3000
+const CAMERA_CAPTURE_MIN_LONG_EDGE = 1000
 let pendingCaptureCount = 0
 let finishCaptureWhenPendingComplete = false
 let captureCompleteHandler = null
@@ -23,7 +24,11 @@ export function setCaptureCompleteHandler(handler) {
 }
 
 export function initCapture() {
-  document.getElementById('shutter-btn').addEventListener('click', capturePhoto)
+  document.getElementById('shutter-btn').addEventListener('click', () => {
+    void capturePhoto().catch(error => {
+      console.error('Capture photo failed:', error)
+    })
+  })
   document.getElementById('done-btn').addEventListener('click', finishCapture)
   document.getElementById('capture-cancel-btn')?.addEventListener('click', cancelCapture)
   document.getElementById('camera-retry-btn').addEventListener('click', () => {
@@ -39,6 +44,12 @@ function _stopMediaStream(stream) {
 
 function _isPermissionDeniedError(err) {
   return err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError'
+}
+
+export function isTinyCameraCaptureDimensions(width, height, minLongestEdge = CAMERA_CAPTURE_MIN_LONG_EDGE) {
+  const longestEdge = Math.max(Number(width) || 0, Number(height) || 0)
+  const threshold = Math.max(1, Number(minLongestEdge) || CAMERA_CAPTURE_MIN_LONG_EDGE)
+  return longestEdge > 0 && longestEdge < threshold
 }
 
 function _isClearlyFrontCamera(device) {
@@ -287,6 +298,11 @@ async function _captureVideoFrame(video) {
   return blob
 }
 
+async function _restartCameraStreamAfterDegradation() {
+  showToast('Camera stream restarted; try again')
+  await startCamera({ preserveBatch: true })
+}
+
 function _syncCaptureControls() {
   const doneBtn = document.getElementById('done-btn')
   if (doneBtn) {
@@ -312,8 +328,26 @@ async function _captureCameraBlob(video) {
   } catch (err) {
     if (import.meta.env.DEV) console.warn('ImageCapture still photo failed; falling back to video frame:', err)
   }
-  if (!isBlob(blob)) blob = await _captureVideoFrame(video)
-  return blob
+  if (isBlob(blob)) {
+    return {
+      blob,
+      captureMethod: 'ImageCapture.takePhoto()',
+    }
+  }
+  const fallbackBlob = await _captureVideoFrame(video)
+  return {
+    blob: fallbackBlob,
+    captureMethod: 'canvas video-frame fallback',
+  }
+}
+
+function _logCaptureDiagnostics(message, details = {}, warn = false) {
+  if (!isImagePipelineDebugEnabled()) return
+  if (warn) {
+    console.warn(`[image-pipeline] ${message}`, details)
+    return
+  }
+  debugImagePipeline(message, details)
 }
 
 export async function startCamera(options = {}) {
@@ -387,12 +421,20 @@ export function stopCamera() {
   }
 }
 
-function capturePhoto() {
+async function capturePhoto() {
   const video  = document.getElementById('camera-video')
-  debugImagePipeline('capture photo requested', {
-    hasCameraStream: !!video?.srcObject,
-    batchCount: state.batchCount,
-  })
+  const debugEnabled = isImagePipelineDebugEnabled()
+  const track = video?.srcObject?.getVideoTracks?.()[0] || null
+  if (debugEnabled) {
+    _logCaptureDiagnostics('capture shutter requested', {
+      hasCameraStream: !!video?.srcObject,
+      batchCount: state.batchCount,
+      captureMethod: video?.srcObject ? 'camera' : 'demo canvas',
+      videoWidth: video?.videoWidth || null,
+      videoHeight: video?.videoHeight || null,
+      trackSettings: typeof track?.getSettings === 'function' ? track.getSettings() : null,
+    })
+  }
 
   if (!video.srcObject) {
     // Demo mode — no real camera
@@ -411,6 +453,21 @@ function capturePhoto() {
     _setPendingCaptureDelta(1)
     const blobPromise = new Promise((resolve) => {
       canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.9)
+    }).then(async blob => {
+      if (debugEnabled) {
+        const dimensions = await _getImageBlobDimensions(blob)
+        _logCaptureDiagnostics('capture output', {
+          captureMethod: 'demo canvas',
+          blobType: blob?.type || null,
+          blobSize: blob?.size || 0,
+          decodedWidth: dimensions.width,
+          decodedHeight: dimensions.height,
+          videoWidth: null,
+          videoHeight: null,
+          trackSettings: null,
+        })
+      }
+      return blob
     }).finally(() => _setPendingCaptureDelta(-1))
     blobPromise.catch(() => {})
 
@@ -425,6 +482,19 @@ function capturePhoto() {
       aiCropSourceH: 600,
       aiCropIsCustom: false,
     })
+
+    state.batchCount++
+    document.getElementById('batch-count').textContent = String(state.batchCount)
+    document.getElementById('batch-area').style.display = 'flex'
+
+    const vf = document.querySelector('.capture-viewfinder')
+    if (vf) {
+      vf.style.transition = ''
+      vf.style.opacity    = '0.3'
+      setTimeout(() => { vf.style.transition = 'opacity 0.15s'; vf.style.opacity = '1' }, 60)
+    }
+
+    showToast(t('capture.photoCaptured', { count: state.batchCount }))
   } else {
     const previewW = video.videoWidth
     const previewH = video.videoHeight
@@ -433,50 +503,80 @@ function capturePhoto() {
       return
     }
 
-    const photo = {
-      blob: null,
-      blobPromise: null,
-      gps: state.gps,
-      ts: new Date(),
-      emoji: '📸',
-      aiCropRect: getDefaultAiCropRect(previewW, previewH),
-      aiCropSourceW: previewW,
-      aiCropSourceH: previewH,
-      aiCropIsCustom: false,
+    if (isTinyCameraCaptureDimensions(previewW, previewH)) {
+      console.warn('camera stream degraded before capture', {
+        videoWidth: previewW,
+        videoHeight: previewH,
+        trackSettings: typeof track?.getSettings === 'function' ? track.getSettings() : null,
+      })
+      await _restartCameraStreamAfterDegradation()
+      return
     }
 
     _setPendingCaptureDelta(1)
-    const blobPromise = _captureCameraBlob(video).then(async blob => {
+    try {
+      const captureResult = await _captureCameraBlob(video)
+      const blob = captureResult?.blob || null
+      const captureMethod = captureResult?.captureMethod || 'camera'
+      if (!blob) return
+
       const dimensions = await _getImageBlobDimensions(blob)
-      if (dimensions.width && dimensions.height) {
-        photo.aiCropRect = getDefaultAiCropRect(dimensions.width, dimensions.height)
-        photo.aiCropSourceW = dimensions.width
-        photo.aiCropSourceH = dimensions.height
-        photo.aiCropIsCustom = false
+      if (debugEnabled) {
+        _logCaptureDiagnostics('capture output', {
+          captureMethod,
+          blobType: blob.type || null,
+          blobSize: blob.size || 0,
+          decodedWidth: dimensions.width,
+          decodedHeight: dimensions.height,
+          videoWidth: previewW,
+          videoHeight: previewH,
+          trackSettings: typeof track?.getSettings === 'function' ? track.getSettings() : null,
+        })
       }
-      return blob
-    }).finally(() => _setPendingCaptureDelta(-1))
 
-    // Add a dummy catch to prevent UnhandledPromiseRejection if it's not awaited immediately
-    blobPromise.catch(() => {})
+      if (dimensions.width && dimensions.height && isTinyCameraCaptureDimensions(dimensions.width, dimensions.height)) {
+        console.warn('camera stream degraded before capture', {
+          captureMethod,
+          decodedWidth: dimensions.width,
+          decodedHeight: dimensions.height,
+          videoWidth: previewW,
+          videoHeight: previewH,
+          trackSettings: typeof track?.getSettings === 'function' ? track.getSettings() : null,
+        })
+        await _restartCameraStreamAfterDegradation()
+        return
+      }
 
-    photo.blobPromise = blobPromise
-    state.capturedPhotos.push(photo)
+      const acceptedWidth = dimensions.width || previewW
+      const acceptedHeight = dimensions.height || previewH
+      state.capturedPhotos.push({
+        blob,
+        blobPromise: Promise.resolve(blob),
+        gps: state.gps,
+        ts: new Date(),
+        emoji: '📸',
+        aiCropRect: getDefaultAiCropRect(acceptedWidth, acceptedHeight),
+        aiCropSourceW: acceptedWidth,
+        aiCropSourceH: acceptedHeight,
+        aiCropIsCustom: false,
+      })
+
+      state.batchCount++
+      document.getElementById('batch-count').textContent = String(state.batchCount)
+      document.getElementById('batch-area').style.display = 'flex'
+
+      const vf = document.querySelector('.capture-viewfinder')
+      if (vf) {
+        vf.style.transition = ''
+        vf.style.opacity    = '0.3'
+        setTimeout(() => { vf.style.transition = 'opacity 0.15s'; vf.style.opacity = '1' }, 60)
+      }
+
+      showToast(t('capture.photoCaptured', { count: state.batchCount }))
+    } finally {
+      _setPendingCaptureDelta(-1)
+    }
   }
-
-  state.batchCount++
-  document.getElementById('batch-count').textContent = state.batchCount
-  document.getElementById('batch-area').style.display = 'flex'
-
-  // Flash animation
-  const vf = document.querySelector('.capture-viewfinder')
-  if (vf) {
-    vf.style.transition = ''
-    vf.style.opacity    = '0.3'
-    setTimeout(() => { vf.style.transition = 'opacity 0.15s'; vf.style.opacity = '1' }, 60)
-  }
-
-  showToast(t('capture.photoCaptured', { count: state.batchCount }))
 }
 
 function finishCapture() {
