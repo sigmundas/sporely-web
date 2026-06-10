@@ -3502,23 +3502,27 @@ async function _openCameraForDetail() {
       _hideProgress()
     }
   } else {
+    const detailObsId = currentObs?.id
     setCaptureCompleteHandler(async photos => {
-      const files = []
-      for (let i = 0; i < photos.length; i++) {
-        const photo = photos[i]
-        const blob = photo?.blob || await photo?.blobPromise
-        if (!blob) continue
-        files.push(new File(
-          [blob],
-          `sporely-capture-${i + 1}.${imageExtensionForBlob(blob)}`,
-          { type: blob.type || 'image/jpeg', lastModified: photo?.ts?.getTime?.() || Date.now() }
-        ))
+      navigate('find-detail')
+      try {
+        const files = []
+        for (let i = 0; i < photos.length; i++) {
+          const photo = photos[i]
+          const blob = photo?.blob || await photo?.blobPromise
+          if (!blob) continue
+          files.push(new File(
+            [blob],
+            `sporely-capture-${i + 1}.${imageExtensionForBlob(blob)}`,
+            { type: blob.type || 'image/jpeg', lastModified: photo?.ts?.getTime?.() || Date.now() }
+          ))
+        }
+        if (files.length) {
+          await _addPhotosToObservation(files)
+        }
+      } finally {
+        if (detailObsId) await openFindDetail(detailObsId)
       }
-      if (!files.length) {
-        if (currentObs?.id) await openFindDetail(currentObs.id)
-        return
-      }
-      await _addPhotosToObservation(files)
     })
     navigate('capture')
   }
