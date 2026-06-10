@@ -4,7 +4,7 @@
 - `src/main.js`: Boot & Auth.
 - `src/state.js`: Central State.
 - `src/sync-queue.js`: IndexedDB Offline Queue (Durable Boundary).
-- `src/images.js`: Client-side compression (public 20MP cloud policy with an internal `>21MP` / `>5300px` resize gate, plus free/pro quality tiers) & R2 uploads.
+- `src/images.js`: Client-side compression (public 20MP cloud policy with an internal `>21MP` / `>5300px` resize gate on normal WebP-capable runtimes, plus a reduced 6 MP JPEG path for iOS WebKit when WebP canvas export is unavailable, plus free/pro quality tiers) & R2 uploads.
 - `src/image-worker.js`: Off-thread Resize/Encode (OffscreenCanvas).
 
 ## Data Flow: Capture to Cloud
@@ -27,7 +27,7 @@
 - **Conflict Resolution:** Desktop stores a last-seen snapshot. If changes overlap, desktop pauses and asks the user to pick Cloud or Desktop, except for safe, non-colliding media-metadata auto-merges.
 
 ## Media Pipeline
-- **Formats:** WebP (0.65) or JPEG (0.75) fallback.
+- **Formats:** WebP when canvas export actually returns WebP, or JPEG fallback. Free full-image uploads use a 1.5 MB cap; Pro/full-res uses 5 MB. On iOS WebKit, the browser path intentionally falls back to a 6 MP JPEG policy before byte-cap attempts.
 - **Structure:** `{user_id}/{obs_id}/{filename}` + `thumb_{filename}` (400px).
 - **R2 Worker:** Proxies uploads; enforces ES256 JWT auth; updates storage quotas.
 - **Preparation:** Uses `OffscreenCanvas` via `src/image-worker.js`. Enforces strict memory management (`canvas.width = 0`). Resizes to the current cloud-policy cap and applies the free/pro quality and byte-cap tiers.
@@ -41,7 +41,7 @@
 
 ## Camera Behaviors
 - **Native (Android / CameraX):** Active only when running the installed Android app via Capacitor. Uses native CameraX capture paths, the best available lens when possible, and true original-resolution photos from the device. Retains EXIF orientation and GPS securely without canvas stripping. Supports legacy OEM HDR extensions and Android 14+ Ultra HDR (`JPEG_R`).
-- **Web (`getUserMedia` / PWA):** Used in mobile browsers and installed PWAs. Streams video into HTML `<canvas>`, which is typically constrained by browser capture limits and yields lower image quality than native capture. Browsers strip EXIF/GPS from canvas blobs, so the app compensates with `navigator.geolocation` during capture. The UI warns Android web users to install the native app when camera quality or metadata fidelity matters.
+- **Web (`getUserMedia` / PWA):** Used in mobile browsers and installed PWAs. Streams video into HTML `<canvas>`, which is typically constrained by browser capture limits and yields lower image quality than native capture. Browsers strip EXIF/GPS from canvas blobs, so the app compensates with `navigator.geolocation` during capture. iOS WebKit is treated as a reduced-support path when it cannot reliably encode WebP from canvas, so the app intentionally uses a 6 MP JPEG policy there. The UI warns Android web users to install the native app when camera quality or metadata fidelity matters.
 
 ## Location Lookup
 Sporely resolves place names through Nominatim first so it can reliably capture `country_code`, `country_name`, and the raw `display_name` for fallback use. That lookup drives the local suggestion list and keeps the full address string available when there are no shorter address parts to show.

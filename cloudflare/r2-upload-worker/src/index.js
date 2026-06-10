@@ -299,7 +299,11 @@ async function handleUpload(request, env, ctx, url) {
   const contentLength = parseIntegerHeader(request.headers.get('Content-Length'))
   const maxUploadBytes = parsePositiveInt(env.MAX_UPLOAD_BYTES, DEFAULT_MAX_UPLOAD_BYTES)
   if (contentLength !== null && contentLength > maxUploadBytes) {
-    throw httpError(413, 'payload_too_large', `Upload exceeds ${maxUploadBytes} bytes`)
+    throw httpError(413, 'payload_too_large', `Upload exceeds ${maxUploadBytes} bytes`, {
+      storagePath: key,
+      contentLength,
+      configuredMaxUploadBytes: maxUploadBytes,
+    })
   }
   if (!request.body) {
     throw httpError(400, 'missing_body', 'Request body is required')
@@ -313,7 +317,11 @@ async function handleUpload(request, env, ctx, url) {
   const bodyBuffer = await request.arrayBuffer()
   const bodyBytes = bodyBuffer.byteLength
   if (bodyBytes > maxUploadBytes) {
-    throw httpError(413, 'payload_too_large', `Upload exceeds ${maxUploadBytes} bytes`)
+    throw httpError(413, 'payload_too_large', `Upload exceeds ${maxUploadBytes} bytes`, {
+      storagePath: key,
+      bodyBytes,
+      configuredMaxUploadBytes: maxUploadBytes,
+    })
   }
 
   const existingObject = await env.MEDIA_BUCKET.head(key)
@@ -360,6 +368,7 @@ async function handleUpload(request, env, ctx, url) {
     reason,
     bodyBytes,
     planByteCap,
+    configuredByteCap: planByteCap,
     cloudPlan: String(profile?.cloudPlan || 'free'),
     qualityProfile: String(uploadPolicy?.qualityProfile || profile?.qualityProfile || 'standard'),
     sourceWidth: Number.isFinite(sourceWidth) ? sourceWidth : null,
@@ -373,16 +382,19 @@ async function handleUpload(request, env, ctx, url) {
     uploadVariant,
     encodingFormat,
     contentType,
+    storagePath: key,
   })
 
   if (uploadVariant !== 'thumb') {
     const planByteCap = Math.max(1, Number(uploadPolicy.fullImageByteCap || 0) || 0)
     if (bodyBytes > planByteCap) {
+      const details = buildImageTooLargeDetails('byte_cap', planByteCap)
+      console.error('[r2-upload-worker] rejecting upload by byte cap', details)
       throw httpError(
         413,
         'image_too_large_for_plan',
         IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
-        buildImageTooLargeDetails('byte_cap', planByteCap),
+        details,
       )
     }
     if (normalizedStoredWidth !== null && normalizedStoredHeight !== null) {
@@ -392,11 +404,13 @@ async function handleUpload(request, env, ctx, url) {
           ? 'edge_cap'
           : 'unknown'
       if (reason !== 'unknown') {
+        const details = buildImageTooLargeDetails(reason, planByteCap)
+        console.error('[r2-upload-worker] rejecting upload by resized dimension cap', details)
         throw httpError(
           413,
           'image_too_large_for_plan',
           IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
-          buildImageTooLargeDetails(reason, planByteCap),
+          details,
         )
       }
     }

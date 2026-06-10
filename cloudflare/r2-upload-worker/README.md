@@ -70,3 +70,17 @@ curl -X POST "https://upload.sporely.no/artsorakel/media" \
 - The Worker validates JWT signatures against Supabase JWKS by default.
 - The upload key must begin with the JWT `sub` claim.
 - The Worker updates storage tallies for original images and generated thumbnails. `image_count` counts original images only.
+
+## Cloudflare Images Prototype
+
+Stage 3 for the web client is intentionally left as a design note rather than a live code path here.
+
+- Default flag: `USE_CLOUDFLARE_IMAGES_PROCESSING=false`
+- Intended behavior when enabled:
+  - accept the original upload bytes at the Worker
+  - resize and encode full-size and thumbnail derivatives through Cloudflare Images
+  - store only transformed outputs in R2
+  - account quota/storage against stored transformed bytes, not the incoming original bytes
+- Not implemented here because the binding and account-side Cloudflare Images configuration are not available in this local repository.
+
+If we later add the binding, the Worker should keep JWT/path-prefix enforcement unchanged and gate the new branch behind the flag so the current R2-only path remains canonical by default.

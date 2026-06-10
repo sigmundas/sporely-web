@@ -107,12 +107,14 @@ function assertTooLargeDetails(payload, expectedReason, {
   qualityProfile = 'high',
   uploadMode = 'full',
   uploadVariant = 'full',
+  storagePath = null,
 } = {}) {
   assert.equal(payload.error, 'image_too_large_for_plan')
   assert.equal(payload.message, 'Image too large for plan')
   assert.equal(payload.details.reason, expectedReason)
   assert.ok(Number.isInteger(payload.details.bodyBytes))
   assert.ok(Number.isInteger(payload.details.planByteCap))
+  assert.equal(payload.details.configuredByteCap, payload.details.planByteCap)
   assert.ok(Number.isInteger(payload.details.storedWidth))
   assert.ok(Number.isInteger(payload.details.storedHeight))
   assert.ok(Number.isInteger(payload.details.storedPixels))
@@ -124,6 +126,8 @@ function assertTooLargeDetails(payload, expectedReason, {
   assert.equal(payload.details.contentType, 'image/webp')
   assert.equal(payload.details.cloudPlan, cloudPlan)
   assert.equal(payload.details.qualityProfile, qualityProfile)
+  assert.ok(typeof payload.details.storagePath === 'string' && payload.details.storagePath.length > 0)
+  if (storagePath !== null) assert.equal(payload.details.storagePath, storagePath)
 }
 
 test('OPTIONS preflight allows the Android upload metadata headers', async () => {
@@ -216,7 +220,7 @@ test('healthz exposes media policy values', async () => {
   assert.deepEqual(payload.mediaPolicy, {
     fullResizeMaxPixels: 21_000_000,
     fullResizeMaxEdge: 5_300,
-    standardFullByteCap: 1_000_000,
+    standardFullByteCap: 1_500_000,
     highFullByteCap: 5_000_000,
   })
 })
@@ -275,7 +279,7 @@ test('full pro high webp uploads at 5184x3888 succeed under the plan caps', asyn
   }
 })
 
-test('full free standard uploads over 1 MB fail with a byte cap reason', async () => {
+test('full free standard uploads over 1.5 MB fail with a byte cap reason', async () => {
   const { jwtSecret, token } = createWorkerAuthToken()
   const restoreFetch = installProfileFetchMock({
     is_pro: false,
@@ -291,7 +295,7 @@ test('full free standard uploads over 1 MB fail with a byte cap reason', async (
     const response = await worker.fetch(
       buildUploadRequest({
         token,
-        bodyBytes: 1_100_001,
+        bodyBytes: 1_600_001,
         uploadMode: 'full',
         uploadVariant: 'full',
         cloudPlan: 'free',
@@ -316,8 +320,9 @@ test('full free standard uploads over 1 MB fail with a byte cap reason', async (
     assertTooLargeDetails(payload, 'byte_cap', {
       cloudPlan: 'free',
       qualityProfile: 'standard',
+      storagePath: 'user-123/obs-123/0_000000.webp',
     })
-    assert.equal(payload.details.planByteCap, 1_000_000)
+    assert.equal(payload.details.planByteCap, 1_500_000)
   } finally {
     restoreFetch()
   }

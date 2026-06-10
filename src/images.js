@@ -3,13 +3,13 @@ import { getSharedAuthSession } from './auth-session.js'
 import { normalizeAiCropRect } from './image_crop.js'
 import { getEffectiveCloudUploadPolicy } from './cloud-plan.js'
 import {
-  CLOUD_THUMB_JPEG_QUALITY,
-  CLOUD_THUMB_WEBP_QUALITY,
   IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
-  buildFullImageWebpQualityAttempts,
+  buildFullImagePreparationPolicy,
+  buildThumbnailEncodeCandidates,
+  looksLikeIosWebKitRuntime,
   scaleDimensionsToMaxPixels,
 } from './cloud-media-policy.js'
-import { debugImagePipeline } from './image-pipeline-debug.js'
+import { debugImagePipeline, isImagePipelineDebugEnabled } from './image-pipeline-debug.js'
 import { isBlob } from './observation-shapes.js'
 
 const DEFAULT_MEDIA_BASE_URL = 'https://media.sporely.no'
@@ -27,6 +27,8 @@ const SUPABASE_STORAGE_PATH_PATTERNS = [
   /\/storage\/v1\/object\/public\/observation-images\/(.+)$/i,
   /\/storage\/v1\/object\/observation-images\/(.+)$/i,
 ]
+
+const _canvasExportSupportCache = new Map()
 
 function _envText(key, fallback = '') {
   return String(globalThis.__SPORLEY_TEST_ENV__?.[key] ?? import.meta.env?.[key] ?? fallback ?? '').trim()
@@ -56,6 +58,67 @@ function _isDebugMediaUploadEnabled() {
       || globalThis.localStorage?.getItem('sporely-debug-upload-keys') === 'true'
   } catch (_) {
     return false
+  }
+}
+
+function _normalizeCanvasExportMimeType(type) {
+  return String(type || '').split(';')[0].trim().toLowerCase()
+}
+
+function _markCanvasExportSupport(type, supported) {
+  const normalizedType = _normalizeCanvasExportMimeType(type)
+  if (!normalizedType) return
+  _canvasExportSupportCache.set(normalizedType, Promise.resolve(!!supported))
+}
+
+async function _probeCanvasExportSupport(type) {
+  const normalizedType = _normalizeCanvasExportMimeType(type)
+  if (!normalizedType) return false
+  const cached = _canvasExportSupportCache.get(normalizedType)
+  if (cached) return cached
+  if (typeof document === 'undefined' || typeof HTMLCanvasElement === 'undefined') return false
+
+  const probe = (async () => {
+    const canvas = document.createElement('canvas')
+    canvas.width = 1
+    canvas.height = 1
+    try {
+      const blob = await new Promise(resolve => {
+        canvas.toBlob(nextBlob => resolve(nextBlob), normalizedType, 0.92)
+      })
+      return !!blob && blob.size > 0 && _normalizeCanvasExportMimeType(blob.type) === normalizedType
+    } catch (_) {
+      return false
+    } finally {
+      canvas.width = 0
+      canvas.height = 0
+    }
+  })()
+
+  _canvasExportSupportCache.set(normalizedType, probe)
+  const supported = await probe
+  _markCanvasExportSupport(normalizedType, supported)
+  return supported
+}
+
+async function _getCanvasExportSupport() {
+  const [webp, jpeg] = await Promise.all([
+    _probeCanvasExportSupport('image/webp'),
+    _probeCanvasExportSupport('image/jpeg'),
+  ])
+  return { webp, jpeg }
+}
+
+function _getRuntimeCanvasPolicyContext() {
+  try {
+    return {
+      userAgent: globalThis.navigator?.userAgent || '',
+      platform: globalThis.navigator?.platform || '',
+      vendor: globalThis.navigator?.vendor || '',
+      maxTouchPoints: globalThis.navigator?.maxTouchPoints || 0,
+    }
+  } catch (_) {
+    return {}
   }
 }
 
@@ -263,12 +326,23 @@ async function _uploadViaWorker(path, blob, options = {}) {
   })
 
   if (!response.ok) {
-    let detail = response.statusText || 'Upload failed'
+    let responseBodyText = ''
     try {
-      const payload = await response.json()
-      if (payload?.message) detail = payload.message
+      responseBodyText = await response.clone().text()
     } catch (_) {}
-    throw new Error(`Worker upload failed: ${detail}`)
+    const uploadDetails = {
+      status: response.status,
+      statusText: response.statusText || '',
+      bodyText: responseBodyText ? responseBodyText.slice(0, 1000) : null,
+      blobSize: Number(blob?.size || 0),
+      uploadVariant: String(options?.uploadVariant || options?.uploadMeta?.upload_variant || 'full').trim().toLowerCase() || 'full',
+      uploadMode: String(options?.uploadMode || options?.uploadMeta?.upload_mode || 'reduced').trim().toLowerCase() || 'reduced',
+      cloudPlan: String(options?.cloudPlan || options?.uploadMeta?.cloud_plan || 'free').trim().toLowerCase() || 'free',
+      storagePath: normalizedPath,
+    }
+    console.error('[media-upload] worker upload failed', uploadDetails)
+    const detail = uploadDetails.bodyText || uploadDetails.statusText || 'Upload failed'
+    throw new Error(`Worker upload failed (${uploadDetails.status}): ${detail}`)
   }
 }
 
@@ -365,10 +439,10 @@ function _releaseImage(img) {
   if (img) img.src = ''
 }
 
-function _targetSizeForPolicy(width, height, uploadPolicy) {
+function _targetSizeForPolicy(width, height, uploadPolicy, fullImagePlan = null) {
   const sourceWidth = Math.max(1, Number(width) || 0)
   const sourceHeight = Math.max(1, Number(height) || 0)
-  const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+  const policy = fullImagePlan || uploadPolicy || getEffectiveCloudUploadPolicy()
   const scaled = scaleDimensionsToMaxPixels(
     sourceWidth,
     sourceHeight,
@@ -381,26 +455,17 @@ function _targetSizeForPolicy(width, height, uploadPolicy) {
   }
 }
 
-function _fullImageEncodeCandidates(uploadPolicy) {
-  const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
-  const qualities = Array.isArray(policy.fullImageWebpQualityAttempts) && policy.fullImageWebpQualityAttempts.length
-    ? policy.fullImageWebpQualityAttempts
-    : buildFullImageWebpQualityAttempts(policy.qualityProfile)
-  const candidates = qualities.map(quality => ({
-    type: 'image/webp',
-    quality,
-  }))
-  candidates.push({
-    type: 'image/jpeg',
-    quality: policy.fullImageWebpQuality || qualities[0] || 0.65,
-  })
-  return candidates
+async function _thumbnailEncodeCandidates() {
+  const support = await _getCanvasExportSupport()
+  return buildThumbnailEncodeCandidates(support)
 }
 
-const THUMBNAIL_ENCODE_CANDIDATES = [
-  { type: 'image/webp', quality: CLOUD_THUMB_WEBP_QUALITY },
-  { type: 'image/jpeg', quality: CLOUD_THUMB_JPEG_QUALITY },
-]
+async function _buildFullImagePreparationPlan(uploadPolicy) {
+  const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
+  const exportSupport = await _getCanvasExportSupport()
+  return buildFullImagePreparationPolicy(policy, _getRuntimeCanvasPolicyContext(), exportSupport)
+}
+
 let _imageWorker = null
 let _imageWorkerSeq = 0
 const _imageWorkerRequests = new Map()
@@ -408,6 +473,7 @@ const _imageWorkerRequests = new Map()
 function _getImageWorker() {
   if (_imageWorker) return _imageWorker
   if (typeof Worker === 'undefined' || typeof createImageBitmap !== 'function' || typeof OffscreenCanvas === 'undefined') {
+    debugImagePipeline('get image worker: worker not supported or unavailable')
     return null
   }
   _imageWorker = new Worker(new URL('./image-worker.js', import.meta.url), { type: 'module' })
@@ -429,15 +495,55 @@ function _getImageWorker() {
   return _imageWorker
 }
 
-async function _canvasToEncodedBlob(canvas, candidates = THUMBNAIL_ENCODE_CANDIDATES, options = {}) {
+async function _canvasToEncodedBlob(canvas, candidates = [], options = {}) {
   const byteCap = Number.isFinite(Number(options.byteCap)) ? Number(options.byteCap) : null
+  const verbose = options.verbose === true
+  const blockedTypes = new Set()
   let sawEncodedBlob = false
   for (const candidate of candidates) {
+    const candidateType = _normalizeCanvasExportMimeType(candidate.type)
+    if (!candidateType || blockedTypes.has(candidateType)) continue
     const blob = await new Promise(resolve => {
       canvas.toBlob(nextBlob => resolve(nextBlob), candidate.type, candidate.quality)
     })
-    if (blob?.type !== candidate.type || blob.size <= 0) continue
+    if (!blob || blob.size <= 0) {
+      if (verbose) {
+        debugImagePipeline('Encoding candidate produced no blob', {
+          requestedType: candidate.type,
+          quality: candidate.quality,
+        })
+      }
+      continue
+    }
+    if (blob.type !== candidate.type) {
+      if (candidateType === 'image/webp') {
+        _markCanvasExportSupport(candidate.type, false)
+      }
+      blockedTypes.add(candidateType)
+      if (verbose) {
+        debugImagePipeline('Encoding candidate returned different type', {
+          requestedType: candidate.type,
+          actualType: blob.type,
+          quality: candidate.quality,
+          sizeMb: (blob.size / (1024 * 1024)).toFixed(2),
+        })
+      }
+      continue
+    }
     sawEncodedBlob = true
+
+    const sizeMb = (blob.size / (1024 * 1024)).toFixed(2)
+    const limitMb = byteCap ? (byteCap / (1024 * 1024)).toFixed(2) : 'none'
+    if (verbose) {
+      debugImagePipeline('Encoding iteration', {
+        format: candidate.type,
+        quality: candidate.quality,
+        sizeMb: `${sizeMb} MB`,
+        limitMb: `${limitMb} MB`,
+        status: byteCap && blob.size > byteCap ? 'REJECTED (too large)' : 'ACCEPTED'
+      })
+    }
+
     if (byteCap && blob.size > byteCap) continue
     return {
       blob,
@@ -446,11 +552,77 @@ async function _canvasToEncodedBlob(canvas, candidates = THUMBNAIL_ENCODE_CANDID
     }
   }
   if (byteCap && sawEncodedBlob) {
+    if (verbose) debugImagePipeline('All encoding attempts failed byte cap', { limit: byteCap })
     throw _buildUploadMediaError(IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE, {
       byteCap,
     })
   }
   throw new Error('Image encoding failed')
+}
+
+async function _encodeCanvasWithFitByteCapFallback({
+  source,
+  sourceWidth,
+  sourceHeight,
+  targetWidth,
+  targetHeight,
+  candidates,
+  byteCap,
+  verbose = false,
+}) {
+  const attemptedSizes = new Set([`${targetWidth}x${targetHeight}`])
+  const tryEncode = async (width, height) => {
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    try {
+      _drawHighQuality(source, sourceWidth, sourceHeight, canvas, width, height)
+      return await _canvasToEncodedBlob(canvas, candidates, { byteCap, verbose })
+    } finally {
+      canvas.width = 0
+      canvas.height = 0
+    }
+  }
+
+  try {
+    const encoded = await tryEncode(targetWidth, targetHeight)
+    return {
+      ...encoded,
+      storedWidth: targetWidth,
+      storedHeight: targetHeight,
+    }
+  } catch (error) {
+    if (String(error?.message || error || '').toLowerCase().indexOf(IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE.toLowerCase()) === -1) {
+      throw error
+    }
+  }
+
+  for (const attempt of buildFullImageFitByteCapAttempts(targetWidth, targetHeight)) {
+    const fitWidth = attempt.width
+    const fitHeight = attempt.height
+    const key = `${fitWidth}x${fitHeight}`
+    if (attemptedSizes.has(key)) continue
+    attemptedSizes.add(key)
+    debugImagePipeline('prepare upload blob: retrying with reduced dimensions', {
+      targetWidth: fitWidth,
+      targetHeight: fitHeight,
+      byteCap,
+    })
+    try {
+      const encoded = await tryEncode(fitWidth, fitHeight)
+      return {
+        ...encoded,
+        storedWidth: fitWidth,
+        storedHeight: fitHeight,
+      }
+    } catch (error) {
+      if (String(error?.message || error || '').toLowerCase().indexOf(IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE.toLowerCase()) === -1) {
+        throw error
+      }
+    }
+  }
+
+  throw _buildUploadMediaError(IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE, { byteCap })
 }
 
 function _configureCanvasContext(ctx) {
@@ -498,12 +670,27 @@ async function _prepareUploadBlobInWorker(blob, policy) {
   const normalizedType = String(blob?.type || '').split(';')[0].trim().toLowerCase()
   if (normalizedType === 'image/heic' || normalizedType === 'image/heif') return null
   if (normalizedType && !normalizedType.startsWith('image/')) return null
+  const isDebugEnabled = isImagePipelineDebugEnabled()
+  debugImagePipeline('prepare upload blob in worker: creating image bitmap', { blobType: blob.type, blobSize: blob.size }, isDebugEnabled)
   const bitmap = await createImageBitmap(blob)
+  debugImagePipeline('prepare upload blob in worker: image bitmap created', { width: bitmap.width, height: bitmap.height }, isDebugEnabled)
+  const runtimeContext = _getRuntimeCanvasPolicyContext()
+  const fullImagePlan = await _buildFullImagePreparationPlan(policy)
+  debugImagePipeline('resolved full image policy', {
+    runtimePath: fullImagePlan.runtimePath,
+    sourceWidth: bitmap.width,
+    sourceHeight: bitmap.height,
+    resizeMaxPixels: fullImagePlan.resizeMaxPixels,
+    byteCap: fullImagePlan.byteCap,
+    webpEncodeSupported: fullImagePlan.candidates.some(candidate => candidate.type === 'image/webp'),
+    isIosWebKit: looksLikeIosWebKitRuntime(runtimeContext),
+  }, isDebugEnabled)
   const id = `image-${++_imageWorkerSeq}`
   const result = await new Promise((resolve, reject) => {
     _imageWorkerRequests.set(id, { resolve, reject })
     try {
-      worker.postMessage({ id, bitmap, policy }, [bitmap])
+      debugImagePipeline('prepare upload blob in worker: posting message to worker', { id, isDebugEnabled }, isDebugEnabled)
+      worker.postMessage({ id, bitmap, policy: fullImagePlan, isDebugEnabled }, [bitmap])
     } catch (error) {
       _imageWorkerRequests.delete(id)
       bitmap?.close?.()
@@ -511,6 +698,16 @@ async function _prepareUploadBlobInWorker(blob, policy) {
     }
   })
   if (!result?.fullBytes || !result?.fullType) return null
+  debugImagePipeline('prepare upload blob in worker: worker returned complete result', { id, result }, isDebugEnabled)
+  const sizeMb = (result.fullBytes.byteLength / (1024 * 1024)).toFixed(2)
+  debugImagePipeline('Worker encoding result', {
+    format: result.fullType,
+    quality: result.encodingQuality,
+    sizeMb: `${sizeMb} MB`,
+    sourceRes: `${result.sourceWidth}x${result.sourceHeight}`,
+    targetRes: `${result.targetWidth}x${result.targetHeight}`,
+    storedRes: `${result.storedWidth || result.targetWidth}x${result.storedHeight || result.targetHeight}`,
+  })
 
   const uploadBlob = new Blob([result.fullBytes], { type: result.fullType })
   const thumbBlob = result.thumbBytes && result.thumbType
@@ -538,8 +735,8 @@ async function _prepareUploadBlobInWorker(blob, policy) {
       encoding_format: result.fullType || uploadBlob.type || null,
       source_width: result.sourceWidth,
       source_height: result.sourceHeight,
-      stored_width: result.targetWidth,
-      stored_height: result.targetHeight,
+      stored_width: result.storedWidth ?? result.targetWidth,
+      stored_height: result.storedHeight ?? result.targetHeight,
       stored_bytes: uploadBlob.size || result.fullSize || 0,
     },
   }
@@ -551,18 +748,28 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
   const policy = uploadPolicy || getEffectiveCloudUploadPolicy()
 
   try {
-    const prepared = await _prepareUploadBlobInWorker(blob, policy)
-    if (prepared) return prepared
+    const prepared = await _prepareUploadBlobInWorker(blob, policy) // This will now pass the debug flag
+    if (prepared) {
+      return prepared
+    } else {
+      debugImagePipeline('prepare upload blob: worker returned null, falling back to main thread', { blobType: blob.type })
+    }
   } catch (err) {
     if (_isImageTooLargeForPlanError(err)) throw err
     console.warn('Image worker processing failed; falling back to main thread:', err)
+    debugImagePipeline('prepare upload blob: worker processing failed, falling back to main thread', { error: err.message })
   }
   
   let img
   try {
+    debugImagePipeline('prepare upload blob: attempting main thread _loadImage', { blobType: blob.type })
     img = await _loadImage(blob)
   } catch (err) {
     // Browser cannot decode the image (e.g. HEIC fallback). Just upload original.
+    debugImagePipeline('HEIC/Original fallback (browser cannot decode)', {
+      type: blob.type,
+      sizeMb: (blob.size / (1024 * 1024)).toFixed(2)
+    })
     return {
       uploadBlob: blob,
       variants: {},
@@ -585,6 +792,10 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
   const sourceHeight = img.naturalHeight || img.height
   if (!sourceWidth || !sourceHeight) {
     _releaseImage(img)
+    debugImagePipeline('HEIC/Original fallback (browser cannot decode)', {
+      type: blob.type,
+      sizeMb: (blob.size / (1024 * 1024)).toFixed(2)
+    })
     return {
       uploadBlob: blob,
       variants: {},
@@ -603,22 +814,50 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     }
   }
 
-  const { targetWidth, targetHeight } = _targetSizeForPolicy(sourceWidth, sourceHeight, policy)
+  debugImagePipeline('prepare upload blob: main thread _loadImage successful', { sourceWidth: sourceWidth, sourceHeight: sourceHeight })
+  const fullImagePlan = await _buildFullImagePreparationPlan(policy)
+  const { targetWidth, targetHeight } = _targetSizeForPolicy(sourceWidth, sourceHeight, policy, fullImagePlan)
 
   const canvas = document.createElement('canvas')
   const thumbCanvas = document.createElement('canvas')
   try {
     canvas.width = targetWidth
     canvas.height = targetHeight
+    debugImagePipeline('prepare upload blob: drawing full image to canvas', { targetWidth, targetHeight })
     _drawHighQuality(img, sourceWidth, sourceHeight, canvas, targetWidth, targetHeight)
 
-    const fullEncoding = await _canvasToEncodedBlob(
-      canvas,
-      _fullImageEncodeCandidates(policy),
-      { byteCap: policy.fullImageByteCap },
-    )
+    debugImagePipeline('prepare upload blob: encoding full image', {
+      runtimePath: fullImagePlan.runtimePath,
+      sourceWidth,
+      sourceHeight,
+      targetWidth,
+      targetHeight,
+      byteCap: fullImagePlan.byteCap,
+      candidates: fullImagePlan.candidates.map(candidate => `${candidate.type}@${candidate.quality}`),
+    })
+    const fullEncoding = await _encodeCanvasWithFitByteCapFallback({
+      source: img,
+      sourceWidth,
+      sourceHeight,
+      targetWidth,
+      targetHeight,
+      candidates: fullImagePlan.candidates,
+      byteCap: fullImagePlan.byteCap,
+      verbose: isImagePipelineDebugEnabled(),
+    })
     const fullBlob = fullEncoding.blob
     await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
+    debugImagePipeline('prepare upload blob: full image accepted', {
+      runtimePath: fullImagePlan.runtimePath,
+      sourceWidth,
+      sourceHeight,
+      targetWidth: fullEncoding.storedWidth ?? targetWidth,
+      targetHeight: fullEncoding.storedHeight ?? targetHeight,
+      byteCap: fullImagePlan.byteCap,
+      acceptedFormat: fullEncoding.type || fullBlob.type || null,
+      acceptedQuality: fullEncoding.quality ?? null,
+      acceptedBytes: fullBlob.size || 0,
+    })
 
     const thumbScale = Math.min(1, 400 / Math.max(targetWidth, targetHeight))
     const thumbWidth = Math.max(1, Math.round(targetWidth * thumbScale))
@@ -626,9 +865,26 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     thumbCanvas.width = thumbWidth
     thumbCanvas.height = thumbHeight
     _drawHighQuality(canvas, targetWidth, targetHeight, thumbCanvas, thumbWidth, thumbHeight)
-    const thumbEncoding = await _canvasToEncodedBlob(thumbCanvas, THUMBNAIL_ENCODE_CANDIDATES)
+    const thumbEncoding = await _canvasToEncodedBlob(
+      thumbCanvas,
+      await _thumbnailEncodeCandidates(),
+      {
+        verbose: isImagePipelineDebugEnabled(),
+      },
+    )
     const thumbBlob = thumbEncoding.blob
     await new Promise(r => setTimeout(r, 20)) // Yield to UI thread
+    if (isImagePipelineDebugEnabled()) {
+      debugImagePipeline('prepare upload blob: thumbnail accepted', {
+        sourceWidth,
+        sourceHeight,
+        targetWidth: thumbWidth,
+        targetHeight: thumbHeight,
+        acceptedFormat: thumbEncoding.type || thumbBlob.type || null,
+        acceptedQuality: thumbEncoding.quality ?? null,
+        acceptedBytes: thumbBlob.size || 0,
+      })
+    }
 
     return {
       uploadBlob: fullBlob,
@@ -653,8 +909,8 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
         encoding_format: fullEncoding.type || fullBlob.type || null,
         source_width: sourceWidth,
         source_height: sourceHeight,
-        stored_width: targetWidth,
-        stored_height: targetHeight,
+        stored_width: fullEncoding.storedWidth ?? targetWidth,
+        stored_height: fullEncoding.storedHeight ?? targetHeight,
         stored_bytes: fullBlob.size || 0,
       },
     }

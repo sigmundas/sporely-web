@@ -14,13 +14,16 @@ export const CLOUD_HIGH_FULL_WEBP_QUALITY = 0.80
 export const CLOUD_THUMB_WEBP_QUALITY = 0.65
 export const CLOUD_THUMB_JPEG_QUALITY = 0.75
 
-export const CLOUD_STANDARD_FULL_BYTE_CAP = 1_000_000
+export const CLOUD_STANDARD_FULL_BYTE_CAP = 1_500_000
 export const CLOUD_HIGH_FULL_BYTE_CAP = 5_000_000
+export const CLOUD_IOS_WEB_FULL_MAX_PIXELS = 6_000_000
 
 export const IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE = 'Image too large for plan'
 
 const CLOUD_STANDARD_FULL_WEBP_QUALITIES = [0.65, 0.55, 0.45, 0.35, 0.25]
 const CLOUD_HIGH_FULL_WEBP_QUALITIES = [0.80, 0.70, 0.60, 0.50, 0.40]
+const CLOUD_IOS_WEB_FULL_JPEG_QUALITIES = [0.65, 0.60, 0.55, 0.50, 0.45]
+const FULL_IMAGE_FIT_BYTE_CAP_SCALES = [0.9, 0.8, 0.72, 0.64, 0.56, 0.5]
 
 function _parseNullableInt(value) {
   const parsed = Number.parseInt(value, 10)
@@ -84,6 +87,110 @@ export function buildFullImageWebpQualityAttempts(qualityProfile) {
   return qualityProfile === CLOUD_QUALITY_PROFILE_HIGH
     ? [...CLOUD_HIGH_FULL_WEBP_QUALITIES]
     : [...CLOUD_STANDARD_FULL_WEBP_QUALITIES]
+}
+
+export function buildFullImageEncodeCandidates(qualityProfile, exportSupport = {}) {
+  const qualities = buildFullImageWebpQualityAttempts(qualityProfile)
+  const webpSupported = exportSupport?.webp !== false
+  const jpegSupported = exportSupport?.jpeg !== false
+  const iOSReduced = exportSupport?.iosWebReduced === true
+  const candidates = []
+
+  if (iOSReduced) {
+    if (jpegSupported) {
+      candidates.push(...CLOUD_IOS_WEB_FULL_JPEG_QUALITIES.map(quality => ({
+        type: 'image/jpeg',
+        quality,
+      })))
+    }
+    return candidates
+  }
+
+  if (webpSupported) {
+    candidates.push(...qualities.map(quality => ({
+      type: 'image/webp',
+      quality,
+    })))
+  }
+
+  if (jpegSupported) {
+    candidates.push(...qualities.map(quality => ({
+      type: 'image/jpeg',
+      quality,
+    })))
+  }
+
+  return candidates
+}
+
+export function buildThumbnailEncodeCandidates(exportSupport = {}) {
+  const candidates = []
+  if (exportSupport?.webp !== false) {
+    candidates.push({ type: 'image/webp', quality: CLOUD_THUMB_WEBP_QUALITY })
+  }
+  if (exportSupport?.jpeg !== false) {
+    candidates.push({ type: 'image/jpeg', quality: CLOUD_THUMB_JPEG_QUALITY })
+  }
+  return candidates
+}
+
+export function looksLikeIosWebKitRuntime(runtime = {}) {
+  const userAgent = String(runtime.userAgent || '').toLowerCase()
+  const platform = String(runtime.platform || '').toLowerCase()
+  const vendor = String(runtime.vendor || '').toLowerCase()
+  const maxTouchPoints = Number(runtime.maxTouchPoints || 0)
+  const hasIosTokens = /iphone|ipad|ipod/.test(userAgent) || /iphone|ipad|ipod/.test(platform)
+  const looksWebKit = vendor.includes('apple') || userAgent.includes('applewebkit')
+  return hasIosTokens && looksWebKit && maxTouchPoints >= 1
+}
+
+export function shouldUseIosWebReducedFullImagePath(runtime = {}, exportSupport = {}) {
+  return looksLikeIosWebKitRuntime(runtime) && exportSupport?.webp === false
+}
+
+export function buildFullImagePreparationPolicy(uploadPolicy, runtime = {}, exportSupport = {}) {
+  const policy = uploadPolicy || {}
+  const iOSReduced = shouldUseIosWebReducedFullImagePath(runtime, exportSupport)
+  const resizeMaxPixels = iOSReduced
+    ? CLOUD_IOS_WEB_FULL_MAX_PIXELS
+    : (policy.resizeMaxPixels || policy.resize_max_pixels || policy.maxPixels || 0)
+  const resizeMaxEdge = iOSReduced
+    ? null
+    : (policy.resizeMaxEdge || policy.resize_max_edge || null)
+
+  return {
+    runtimePath: iOSReduced ? 'ios-web-reduced' : 'normal',
+    resizeMaxPixels,
+    resizeMaxEdge,
+    targetMaxPixels: resizeMaxPixels,
+    targetMaxEdge: resizeMaxEdge,
+    candidates: buildFullImageEncodeCandidates(policy.qualityProfile, {
+      ...exportSupport,
+      iosWebReduced: iOSReduced,
+    }),
+    byteCap: Number(policy.fullImageByteCap) || null,
+  }
+}
+
+export function buildFullImageFitByteCapAttempts(targetWidth, targetHeight, scales = FULL_IMAGE_FIT_BYTE_CAP_SCALES) {
+  const width = Math.max(1, Number(targetWidth) || 0)
+  const height = Math.max(1, Number(targetHeight) || 0)
+  const attempts = []
+  const seen = new Set()
+
+  for (const scale of Array.isArray(scales) ? scales : FULL_IMAGE_FIT_BYTE_CAP_SCALES) {
+    const fitWidth = Math.max(1, Math.floor(width * Number(scale)))
+    const fitHeight = Math.max(1, Math.floor(height * Number(scale)))
+    const key = `${fitWidth}x${fitHeight}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    attempts.push({
+      width: fitWidth,
+      height: fitHeight,
+    })
+  }
+
+  return attempts
 }
 
 export function buildCloudUploadPolicy(profile, options = {}) {
