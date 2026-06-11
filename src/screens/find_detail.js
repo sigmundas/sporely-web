@@ -3485,8 +3485,25 @@ async function _openCameraForDetail() {
         : null
       const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
       if (gps) options.gps = gps
+      debugImagePipeline('android native camera capture requested', {
+        screenPath,
+        captureSource,
+        gps,
+      })
       const result = await NativeCamera.capturePhotos(options)
       const photos = Array.isArray(result?.photos) ? result.photos : []
+      debugImagePipeline('android native camera capture returned', {
+        screenPath,
+        captureSource,
+        photoCount: photos.length,
+        nativeResult: result?.debug || result?.metadata || null,
+        photoMeta: photos.map(photo => ({
+          name: photo?.name || null,
+          mimeType: photo?.mimeType || null,
+          format: photo?.format || null,
+          size: photo?.size || null,
+        })),
+      })
       if (!photos.length) return
 
       _setProgress(0, photos.length, t('import.readingFiles'))
@@ -3495,6 +3512,12 @@ async function _openCameraForDetail() {
         _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
         files.push(await nativePickedPhotoToFile(photos[i], i, { captureSource, screenPath }))
       }
+      debugImagePipeline('android native files ready for observation upload', {
+        screenPath,
+        captureSource,
+        fileCount: files.length,
+        fileSizes: files.map(file => file?.size || 0),
+      })
       await _addPhotosToObservation(files)
     } catch (err) {
       if (isPickerCancel(err)) return
@@ -3536,12 +3559,29 @@ async function _openPickerForDetail() {
       const result = await pickImagesWithNativePhotoPicker()
       const photos = Array.isArray(result?.photos) ? result.photos : []
       if (!photos.length) return
+      debugImagePipeline('android native picker returned', {
+        screenPath,
+        captureSource,
+        photoCount: photos.length,
+        photoMeta: photos.map(photo => ({
+          name: photo?.name || null,
+          mimeType: photo?.mimeType || null,
+          format: photo?.format || null,
+          size: photo?.size || null,
+        })),
+      })
       _setProgress(0, photos.length, t('import.readingFiles'))
       const files = []
       for (let i = 0; i < photos.length; i++) {
         _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
         files.push(await nativePickedPhotoToFile(photos[i], i, { captureSource, screenPath }))
       }
+      debugImagePipeline('android native files ready for observation upload', {
+        screenPath,
+        captureSource,
+        fileCount: files.length,
+        fileSizes: files.map(file => file?.size || 0),
+      })
       await _addPhotosToObservation(files)
       return
     } catch (err) {
