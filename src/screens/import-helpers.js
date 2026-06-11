@@ -77,6 +77,13 @@ export async function nativePickedPhotoToFile(photo, index, options = {}) {
       nativeDebug: photo?.debug || null,
       nativePhoto: summarizeNativePhoto(photo, options),
     })
+    debugImagePipeline('android native photo file ready', {
+      captureSource: options.captureSource || null,
+      screenPath: options.screenPath || null,
+      fileName: file.name,
+      fileType: file.type || null,
+      fileSize: file.size || 0,
+    })
   }
   return file
 }

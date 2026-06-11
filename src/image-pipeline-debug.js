@@ -15,5 +15,5 @@ export function isImagePipelineDebugEnabled() {
 export function debugImagePipeline(message, details = {}, forceEnabled = false) {
   recordDebugImageEvent(message, details)
   if (!forceEnabled && !isImagePipelineDebugEnabled()) return
-  console.debug(`[image-pipeline] ${message}`, details)
+  console.log(`[image-pipeline] ${message}`, details)
 }

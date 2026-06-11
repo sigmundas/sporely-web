@@ -1163,7 +1163,26 @@ export async function openNativeCamera() {
 
     const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
     if (gps) options.gps = gps;
-    await _handleNativePhotoResult(await NativeCamera.capturePhotos(options))
+    debugImagePipeline('android native camera capture requested', {
+      screenPath: 'import_review:add-photo',
+      captureSource: 'Sporely native camera',
+      gps,
+    })
+    const result = await NativeCamera.capturePhotos(options)
+    const photos = Array.isArray(result?.photos) ? result.photos : [];
+    debugImagePipeline('android native camera capture returned', {
+      screenPath: 'import_review:add-photo',
+      captureSource: 'Sporely native camera',
+      photoCount: photos.length,
+      nativeResult: result?.debug || result?.metadata || null,
+      photoMeta: photos.map(photo => ({
+        name: photo?.name || null,
+        mimeType: photo?.mimeType || null,
+        format: photo?.format || null,
+        size: photo?.size || null,
+      })),
+    })
+    await _handleNativePhotoResult(result)
   } catch (err) {
     if (isPickerCancel(err)) return
     console.warn('Sporely camera failed:', err)
@@ -1185,6 +1204,10 @@ async function _handleNativePhotoResult(result) {
     _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
     files.push(await nativePickedPhotoToFile(photos[i], i));
   }
+  debugImagePipeline('android native files ready for session import', {
+    fileCount: files.length,
+    fileSizes: files.map(file => file?.size || 0),
+  })
   await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos });
 }
 
@@ -2081,8 +2104,25 @@ async function _openCameraForSession(sid) {
 
       const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
       if (gps) options.gps = gps;
+      debugImagePipeline('android native camera capture requested', {
+        screenPath: `import_review:${sid}:add-photo`,
+        captureSource: 'Sporely native camera',
+        gps,
+      })
       const result = await NativeCamera.capturePhotos(options);
       const photos = Array.isArray(result?.photos) ? result.photos : [];
+      debugImagePipeline('android native camera capture returned', {
+        screenPath: `import_review:${sid}:add-photo`,
+        captureSource: 'Sporely native camera',
+        photoCount: photos.length,
+        nativeResult: result?.debug || result?.metadata || null,
+        photoMeta: photos.map(photo => ({
+          name: photo?.name || null,
+          mimeType: photo?.mimeType || null,
+          format: photo?.format || null,
+          size: photo?.size || null,
+        })),
+      })
       if (!photos.length) return;
       
       _setProgress(0, photos.length, t('import.readingFiles'));
@@ -2091,6 +2131,10 @@ async function _openCameraForSession(sid) {
         _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
         files.push(await nativePickedPhotoToFile(photos[i], i));
       }
+      debugImagePipeline('android native files ready for session import', {
+        fileCount: files.length,
+        fileSizes: files.map(file => file?.size || 0),
+      })
       await _addFilesToSession(sid, files, { nativePhotos: photos });
     } catch (err) {
       if (isPickerCancel(err)) return;
@@ -2117,12 +2161,27 @@ async function _openPickerForSession(sid) {
       const result = await pickImagesWithNativePhotoPicker();
       const photos = Array.isArray(result?.photos) ? result.photos : [];
       if (!photos.length) return;
+      debugImagePipeline('android native picker returned', {
+        screenPath: `import_review:${sid}:add-photo`,
+        captureSource: 'native picker/import',
+        photoCount: photos.length,
+        photoMeta: photos.map(photo => ({
+          name: photo?.name || null,
+          mimeType: photo?.mimeType || null,
+          format: photo?.format || null,
+          size: photo?.size || null,
+        })),
+      })
       _setProgress(0, photos.length, t('import.readingFiles'));
       const files = [];
       for (let i = 0; i < photos.length; i++) {
         _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
         files.push(await nativePickedPhotoToFile(photos[i], i));
       }
+      debugImagePipeline('android native files ready for session import', {
+        fileCount: files.length,
+        fileSizes: files.map(file => file?.size || 0),
+      })
       await _addFilesToSession(sid, files, { nativePhotos: photos });
       return;
     } catch (err) {
