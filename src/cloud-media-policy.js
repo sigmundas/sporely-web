@@ -24,6 +24,19 @@ const CLOUD_STANDARD_FULL_WEBP_QUALITIES = [0.65, 0.55, 0.45, 0.35, 0.25]
 const CLOUD_HIGH_FULL_WEBP_QUALITIES = [0.80, 0.70, 0.60, 0.50, 0.40]
 const CLOUD_IOS_WEB_FULL_JPEG_QUALITIES = [0.65, 0.60, 0.55, 0.50, 0.45]
 const FULL_IMAGE_FIT_BYTE_CAP_SCALES = [0.9, 0.8, 0.72, 0.64, 0.56, 0.5]
+const IOS_WEB_REDUCED_JPEG_JUMP_MILD_QUALITY = 0.55
+const IOS_WEB_REDUCED_JPEG_JUMP_AGGRESSIVE_QUALITY = 0.45
+const IOS_WEB_REDUCED_JPEG_JUMP_MILD_RATIO = 1.25
+const IOS_WEB_REDUCED_JPEG_JUMP_AGGRESSIVE_RATIO = 1.5
+
+function _normalizeQuality(value) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function _normalizeMimeType(value) {
+  return String(value || '').split(';')[0].trim().toLowerCase()
+}
 
 function _parseNullableInt(value) {
   const parsed = Number.parseInt(value, 10)
@@ -169,6 +182,50 @@ export function buildFullImagePreparationPolicy(uploadPolicy, runtime = {}, expo
       iosWebReduced: iOSReduced,
     }),
     byteCap: Number(policy.fullImageByteCap) || null,
+  }
+}
+
+export function getIosWebReducedJpegJumpQuality(overshootRatio) {
+  const ratio = Number(overshootRatio)
+  if (!Number.isFinite(ratio) || ratio < IOS_WEB_REDUCED_JPEG_JUMP_MILD_RATIO) return null
+  return ratio >= IOS_WEB_REDUCED_JPEG_JUMP_AGGRESSIVE_RATIO
+    ? IOS_WEB_REDUCED_JPEG_JUMP_AGGRESSIVE_QUALITY
+    : IOS_WEB_REDUCED_JPEG_JUMP_MILD_QUALITY
+}
+
+export function getFullImageEncodeRetryJump({
+  runtimePath = '',
+  candidates = [],
+  currentIndex = 0,
+  rejectedBytes = null,
+  byteCap = null,
+} = {}) {
+  if (runtimePath !== 'ios-web-reduced') return null
+  if (!Array.isArray(candidates) || currentIndex !== 0) return null
+
+  const currentCandidate = candidates[currentIndex]
+  if (!currentCandidate || _normalizeMimeType(currentCandidate.type) !== 'image/jpeg') return null
+
+  const cap = Number(byteCap)
+  const bytes = Number(rejectedBytes)
+  if (!Number.isFinite(cap) || cap <= 0 || !Number.isFinite(bytes) || bytes <= cap) return null
+
+  const overshootRatio = bytes / cap
+  const targetQuality = getIosWebReducedJpegJumpQuality(overshootRatio)
+  if (targetQuality === null) return null
+
+  const nextIndex = candidates.findIndex((candidate, index) => {
+    if (index <= currentIndex) return false
+    if (_normalizeMimeType(candidate.type) !== 'image/jpeg') return false
+    const quality = _normalizeQuality(candidate.quality)
+    return quality !== null && quality <= targetQuality
+  })
+  if (nextIndex < 0) return null
+
+  return {
+    nextIndex,
+    nextQuality: _normalizeQuality(candidates[nextIndex]?.quality),
+    overshootRatio,
   }
 }
 

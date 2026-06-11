@@ -16,6 +16,7 @@ import {
   buildFullImageFitByteCapAttempts,
   buildFullImagePreparationPolicy,
   buildCloudUploadPolicy,
+  getFullImageEncodeRetryJump,
   buildFullImageWebpQualityAttempts,
   buildThumbnailEncodeCandidates,
   looksLikeIosWebKitRuntime,
@@ -99,6 +100,24 @@ test('buildFullImageEncodeCandidates skips unsupported WebP and keeps all JPEG q
   )
 })
 
+test('buildFullImageEncodeCandidates keeps normal WebP-first order when both formats are available', () => {
+  assert.deepEqual(
+    buildFullImageEncodeCandidates(CLOUD_QUALITY_PROFILE_STANDARD, { webp: true, jpeg: true }),
+    [
+      { type: 'image/webp', quality: 0.65 },
+      { type: 'image/webp', quality: 0.55 },
+      { type: 'image/webp', quality: 0.45 },
+      { type: 'image/webp', quality: 0.35 },
+      { type: 'image/webp', quality: 0.25 },
+      { type: 'image/jpeg', quality: 0.65 },
+      { type: 'image/jpeg', quality: 0.55 },
+      { type: 'image/jpeg', quality: 0.45 },
+      { type: 'image/jpeg', quality: 0.35 },
+      { type: 'image/jpeg', quality: 0.25 },
+    ],
+  )
+})
+
 test('buildFullImagePreparationPolicy uses the normal gate when WebP works', () => {
   const plan = buildFullImagePreparationPolicy(
     buildCloudUploadPolicy(normalizeCloudPlanProfile({ cloud_plan: 'free' }), { uploadMode: 'full' }),
@@ -133,6 +152,48 @@ test('buildFullImagePreparationPolicy uses the iOS reduced JPEG path when WebP i
     { type: 'image/jpeg', quality: 0.50 },
     { type: 'image/jpeg', quality: 0.45 },
   ])
+})
+
+test('getFullImageEncodeRetryJump skips directly on large iOS reduced overshoots', () => {
+  const candidates = buildFullImageEncodeCandidates(
+    CLOUD_QUALITY_PROFILE_STANDARD,
+    { webp: false, jpeg: true, iosWebReduced: true },
+  )
+
+  const aggressiveJump = getFullImageEncodeRetryJump({
+    runtimePath: 'ios-web-reduced',
+    candidates,
+    currentIndex: 0,
+    rejectedBytes: 2_300_000,
+    byteCap: 1_500_000,
+  })
+
+  assert.deepEqual(aggressiveJump, {
+    nextIndex: 4,
+    nextQuality: 0.45,
+    overshootRatio: 2_300_000 / 1_500_000,
+  })
+})
+
+test('getFullImageEncodeRetryJump uses a milder jump for moderate iOS reduced overshoots', () => {
+  const candidates = buildFullImageEncodeCandidates(
+    CLOUD_QUALITY_PROFILE_STANDARD,
+    { webp: false, jpeg: true, iosWebReduced: true },
+  )
+
+  const mildJump = getFullImageEncodeRetryJump({
+    runtimePath: 'ios-web-reduced',
+    candidates,
+    currentIndex: 0,
+    rejectedBytes: 1_830_000,
+    byteCap: 1_500_000,
+  })
+
+  assert.deepEqual(mildJump, {
+    nextIndex: 2,
+    nextQuality: 0.55,
+    overshootRatio: 1_830_000 / 1_500_000,
+  })
 })
 
 test('looksLikeIosWebKitRuntime only matches iOS WebKit runtimes', () => {

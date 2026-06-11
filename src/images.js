@@ -6,6 +6,7 @@ import {
   IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
   buildFullImagePreparationPolicy,
   buildThumbnailEncodeCandidates,
+  getFullImageEncodeRetryJump,
   looksLikeIosWebKitRuntime,
   scaleDimensionsToMaxPixels,
 } from './cloud-media-policy.js'
@@ -502,9 +503,11 @@ function _getImageWorker() {
 async function _canvasToEncodedBlob(canvas, candidates = [], options = {}) {
   const byteCap = Number.isFinite(Number(options.byteCap)) ? Number(options.byteCap) : null
   const verbose = options.verbose === true
+  const runtimePath = String(options.runtimePath || '').trim()
   const blockedTypes = new Set()
   let sawEncodedBlob = false
-  for (const candidate of candidates) {
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index]
     const candidateType = _normalizeCanvasExportMimeType(candidate.type)
     if (!candidateType || blockedTypes.has(candidateType)) continue
     const blob = await new Promise(resolve => {
@@ -548,7 +551,29 @@ async function _canvasToEncodedBlob(canvas, candidates = [], options = {}) {
       })
     }
 
-    if (byteCap && blob.size > byteCap) continue
+    if (byteCap && blob.size > byteCap) {
+      const jump = getFullImageEncodeRetryJump({
+        runtimePath,
+        candidates,
+        currentIndex: index,
+        rejectedBytes: blob.size,
+        byteCap,
+      })
+      if (jump && verbose) {
+        debugImagePipeline('Encoding iteration jump', {
+          runtimePath,
+          rejectedQuality: candidate.quality,
+          rejectedBytes: blob.size,
+          byteCap,
+          overshootRatio: Number(jump.overshootRatio.toFixed(3)),
+          nextQuality: jump.nextQuality,
+        })
+      }
+      if (jump) {
+        index = Math.max(index, jump.nextIndex - 1)
+      }
+      continue
+    }
     return {
       blob,
       quality: candidate.quality,
@@ -573,6 +598,7 @@ async function _encodeCanvasWithFitByteCapFallback({
   candidates,
   byteCap,
   verbose = false,
+  runtimePath = '',
 }) {
   const attemptedSizes = new Set([`${targetWidth}x${targetHeight}`])
   const tryEncode = async (width, height) => {
@@ -581,7 +607,7 @@ async function _encodeCanvasWithFitByteCapFallback({
     canvas.height = height
     try {
       _drawHighQuality(source, sourceWidth, sourceHeight, canvas, width, height)
-      return await _canvasToEncodedBlob(canvas, candidates, { byteCap, verbose })
+      return await _canvasToEncodedBlob(canvas, candidates, { byteCap, verbose, runtimePath })
     } finally {
       canvas.width = 0
       canvas.height = 0
@@ -848,6 +874,7 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
       candidates: fullImagePlan.candidates,
       byteCap: fullImagePlan.byteCap,
       verbose: isImagePipelineDebugEnabled(),
+      runtimePath: fullImagePlan.runtimePath,
     })
     const fullBlob = fullEncoding.blob
     await new Promise(r => setTimeout(r, 20)) // Yield to UI thread

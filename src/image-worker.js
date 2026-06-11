@@ -1,6 +1,7 @@
 import {
   IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
   buildFullImageFitByteCapAttempts,
+  getFullImageEncodeRetryJump,
   buildThumbnailEncodeCandidates,
   scaleDimensionsToMaxPixels,
 } from './cloud-media-policy.js'
@@ -111,9 +112,11 @@ async function _thumbnailEncodeCandidates() {
 async function _encodeCanvas(canvas, candidates, options = {}) {
   const byteCap = Number.isFinite(Number(options.byteCap)) ? Number(options.byteCap) : null
   const verbose = options.verbose === true
+  const runtimePath = String(options.runtimePath || '').trim()
   const blockedTypes = new Set()
   let sawEncodedBlob = false
-  for (const candidate of candidates) {
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index]
     const candidateType = _normalizeCanvasExportMimeType(candidate.type)
     if (!candidateType || blockedTypes.has(candidateType)) continue
     const blob = await canvas.convertToBlob({
@@ -146,9 +149,35 @@ async function _encodeCanvas(canvas, candidates, options = {}) {
     }
     sawEncodedBlob = true
     if (byteCap && blob.size > byteCap) {
-    if (verbose) {
-      _debugWorker('Encoding iteration', { format: candidate.type, quality: candidate.quality, sizeMb: (blob.size / (1024 * 1024)).toFixed(2), limitMb: (byteCap / (1024 * 1024)).toFixed(2), status: 'REJECTED (too large)' }, options.isDebugEnabled)
-    }
+      const jump = getFullImageEncodeRetryJump({
+        runtimePath,
+        candidates,
+        currentIndex: index,
+        rejectedBytes: blob.size,
+        byteCap,
+      })
+      if (verbose) {
+        _debugWorker('Encoding iteration', {
+          format: candidate.type,
+          quality: candidate.quality,
+          sizeMb: (blob.size / (1024 * 1024)).toFixed(2),
+          limitMb: (byteCap / (1024 * 1024)).toFixed(2),
+          status: 'REJECTED (too large)',
+        }, options.isDebugEnabled)
+      }
+      if (jump) {
+        if (verbose) {
+          _debugWorker('Encoding iteration jump', {
+            runtimePath,
+            rejectedQuality: candidate.quality,
+            rejectedBytes: blob.size,
+            byteCap,
+            overshootRatio: Number(jump.overshootRatio.toFixed(3)),
+            nextQuality: jump.nextQuality,
+          }, options.isDebugEnabled)
+        }
+        index = Math.max(index, jump.nextIndex - 1)
+      }
       continue
     }
     if (verbose) {
@@ -177,6 +206,7 @@ async function _encodeCanvasWithFitByteCapFallback({
   byteCap,
   verbose = false,
   isDebugEnabled = false,
+  runtimePath = '',
 }) {
   const attemptedSizes = new Set()
 
@@ -188,6 +218,7 @@ async function _encodeCanvasWithFitByteCapFallback({
         byteCap,
         verbose,
         isDebugEnabled,
+        runtimePath,
       })
     } finally {
       canvas.width = 0
@@ -306,6 +337,7 @@ self.onmessage = async event => {
       byteCap: fullImagePlan.byteCap,
       verbose: isDebugEnabled,
       isDebugEnabled,
+      runtimePath: fullImagePlan.runtimePath,
     })
     const fullBlob = fullEncoding.blob
     _debugWorker('prepare upload blob: full image accepted', {
