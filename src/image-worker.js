@@ -36,7 +36,7 @@ function _markCanvasExportSupport(type, supported) {
   _canvasExportSupportCache.set(normalizedType, Promise.resolve(!!supported))
 }
 
-async function _probeCanvasExportSupport(type) {
+async function _probeCanvasExportSupport(type, isDebugEnabled = false) {
   const normalizedType = _normalizeCanvasExportMimeType(type)
   if (!normalizedType) return false
   const cached = _canvasExportSupportCache.get(normalizedType)
@@ -46,12 +46,41 @@ async function _probeCanvasExportSupport(type) {
   const probe = (async () => {
     const canvas = new OffscreenCanvas(1, 1)
     try {
+      const ctx = canvas.getContext('2d', { alpha: false })
+      if (!ctx) {
+        if (isDebugEnabled) {
+          _debugWorker('canvas export support probe failed', {
+            requestedType: normalizedType,
+            exceptionName: 'NoRenderingContext',
+            exceptionMessage: 'OffscreenCanvas has no 2D rendering context',
+          }, true)
+        }
+        return false
+      }
+      ctx.fillStyle = '#000'
+      ctx.fillRect(0, 0, 1, 1)
       const blob = await canvas.convertToBlob({
         type: normalizedType,
         quality: 0.92,
       })
-      return !!blob && blob.size > 0 && _normalizeCanvasExportMimeType(blob.type) === normalizedType
-    } catch (_) {
+      const supported = !!blob && blob.size > 0 && _normalizeCanvasExportMimeType(blob.type) === normalizedType
+      if (isDebugEnabled) {
+        _debugWorker('canvas export support probe', {
+          requestedType: normalizedType,
+          actualType: blob?.type || null,
+          blobSize: blob?.size || 0,
+          supported,
+        }, true)
+      }
+      return supported
+    } catch (error) {
+      if (isDebugEnabled) {
+        _debugWorker('canvas export support probe failed', {
+          requestedType: normalizedType,
+          exceptionName: error?.name || null,
+          exceptionMessage: error?.message || String(error || ''),
+        }, true)
+      }
       return false
     } finally {
       canvas.width = 0
@@ -65,10 +94,10 @@ async function _probeCanvasExportSupport(type) {
   return supported
 }
 
-async function _getCanvasExportSupport() {
+async function _getCanvasExportSupport(isDebugEnabled = false) {
   const [webp, jpeg] = await Promise.all([
-    _probeCanvasExportSupport('image/webp'),
-    _probeCanvasExportSupport('image/jpeg'),
+    _probeCanvasExportSupport('image/webp', isDebugEnabled),
+    _probeCanvasExportSupport('image/jpeg', isDebugEnabled),
   ])
   return { webp, jpeg }
 }
@@ -260,6 +289,7 @@ self.onmessage = async event => {
   try {
     const sourceWidth = bitmap.width
     const sourceHeight = bitmap.height
+    const exportSupport = await _getCanvasExportSupport(isDebugEnabled)
     const fullImagePlan = policy && typeof policy === 'object' ? policy : {}
     const target = _targetSize(sourceWidth, sourceHeight, fullImagePlan)
 
@@ -297,7 +327,7 @@ self.onmessage = async event => {
     _drawHighQuality(canvas, target.width, target.height, thumbCanvas, thumbWidth, thumbHeight)
     const thumbEncoding = await _encodeCanvas(
       thumbCanvas,
-      await _thumbnailEncodeCandidates(),
+      buildThumbnailEncodeCandidates(exportSupport),
       {
         isDebugEnabled,
         verbose: false,

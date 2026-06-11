@@ -83,6 +83,10 @@ async function _probeCanvasExportSupport(type) {
     canvas.width = 1
     canvas.height = 1
     try {
+      const ctx = canvas.getContext('2d', { alpha: false })
+      if (!ctx) return false
+      ctx.fillStyle = '#000'
+      ctx.fillRect(0, 0, 1, 1)
       const blob = await new Promise(resolve => {
         canvas.toBlob(nextBlob => resolve(nextBlob), normalizedType, 0.92)
       })
