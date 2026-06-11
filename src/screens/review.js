@@ -30,6 +30,7 @@ import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-ac
 import { getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
+import { playIrisShutter } from '../iris-shutter.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 import { getLocationLookup } from '../location.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
@@ -1525,6 +1526,7 @@ async function _openCameraForReview() {
         captureSource,
         gps,
       })
+      playIrisShutter({ mode: 'quick' })
       const result = await NativeCamera.capturePhotos(gps ? { gps } : {})
       const photos = Array.isArray(result?.photos) ? result.photos : []
       debugImagePipeline('android native camera capture returned', {

@@ -13,6 +13,7 @@ import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhoto
 import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
+import { playIrisShutter } from '../iris-shutter.js';
 import { loadInaturalistSession } from '../inaturalist.js';
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
 import { debugImagePipeline } from '../image-pipeline-debug.js';
@@ -1147,6 +1148,7 @@ export async function openNativeCamera() {
 
   try {
     if (getUseSystemCamera()) {
+      playIrisShutter({ mode: 'quick' })
       const result = await NativeCamera.openSystemCamera();
       await _handleNativePhotoResult(result);
       return;
@@ -1168,6 +1170,7 @@ export async function openNativeCamera() {
       captureSource: 'Sporely native camera',
       gps,
     })
+    playIrisShutter({ mode: 'quick' })
     const result = await NativeCamera.capturePhotos(options)
     const photos = Array.isArray(result?.photos) ? result.photos : [];
     debugImagePipeline('android native camera capture returned', {

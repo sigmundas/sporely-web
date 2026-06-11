@@ -5,6 +5,7 @@ import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { isNativeApp } from '../platform.js'
 import { debugImagePipeline, isImagePipelineDebugEnabled } from '../image-pipeline-debug.js'
+import { clearIrisShutter, playIrisShutter } from '../iris-shutter.js'
 import { resetReviewAiState } from './review.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
 import { isBlob } from '../observation-shapes.js'
@@ -305,9 +306,14 @@ async function _restartCameraStreamAfterDegradation() {
 
 function _syncCaptureControls() {
   const doneBtn = document.getElementById('done-btn')
+  const shutterBtn = document.getElementById('shutter-btn')
   if (doneBtn) {
     doneBtn.disabled = false
     doneBtn.setAttribute('aria-busy', pendingCaptureCount > 0 ? 'true' : 'false')
+  }
+  if (shutterBtn) {
+    shutterBtn.disabled = pendingCaptureCount > 0
+    shutterBtn.setAttribute('aria-busy', pendingCaptureCount > 0 ? 'true' : 'false')
   }
 }
 
@@ -438,6 +444,19 @@ async function capturePhoto() {
 
   if (!video.srcObject) {
     // Demo mode — no real camera
+    const captureStartAt = performance.now()
+    playIrisShutter({ mode: 'pending' })
+    _setPendingCaptureDelta(1)
+    if (debugEnabled) {
+      _logCaptureDiagnostics('shutter animation started', {
+        mode: 'pending',
+        captureMethod: 'demo canvas',
+      })
+      _logCaptureDiagnostics('capture pending UI shown', {
+        mode: 'pending',
+        captureMethod: 'demo canvas',
+      })
+    }
     const emoji = ['🍄', '🟡', '🤎', '🍂', '🌿'][state.batchCount % 5]
     const canvas = document.createElement('canvas')
     canvas.width = 800
@@ -450,13 +469,13 @@ async function capturePhoto() {
     ctx.textBaseline = 'middle'
     ctx.fillText(emoji, 400, 300)
 
-    _setPendingCaptureDelta(1)
     const blobPromise = new Promise((resolve) => {
       canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.9)
     }).then(async blob => {
       if (debugEnabled) {
         const dimensions = await _getImageBlobDimensions(blob)
-        _logCaptureDiagnostics('capture output', {
+        _logCaptureDiagnostics('capture output afterMs', {
+          afterMs: Math.round(performance.now() - captureStartAt),
           captureMethod: 'demo canvas',
           blobType: blob?.type || null,
           blobSize: blob?.size || 0,
@@ -468,7 +487,17 @@ async function capturePhoto() {
         })
       }
       return blob
-    }).finally(() => _setPendingCaptureDelta(-1))
+    }).finally(() => {
+      clearIrisShutter()
+      if (debugEnabled) {
+        _logCaptureDiagnostics('capture pending UI cleared', {
+          afterMs: Math.round(performance.now() - captureStartAt),
+          mode: 'pending',
+          captureMethod: 'demo canvas',
+        })
+      }
+      _setPendingCaptureDelta(-1)
+    })
     blobPromise.catch(() => {})
 
     state.capturedPhotos.push({
@@ -513,6 +542,25 @@ async function capturePhoto() {
       return
     }
 
+    const captureStartAt = performance.now()
+    playIrisShutter({ mode: 'pending' })
+    if (debugEnabled) {
+      _logCaptureDiagnostics('shutter animation started', {
+        mode: 'pending',
+        captureMethod: 'camera',
+        hasCameraStream: true,
+        videoWidth: previewW,
+        videoHeight: previewH,
+      })
+      _logCaptureDiagnostics('capture pending UI shown', {
+        mode: 'pending',
+        captureMethod: 'camera',
+        hasCameraStream: true,
+        videoWidth: previewW,
+        videoHeight: previewH,
+      })
+    }
+
     _setPendingCaptureDelta(1)
     try {
       const captureResult = await _captureCameraBlob(video)
@@ -522,7 +570,8 @@ async function capturePhoto() {
 
       const dimensions = await _getImageBlobDimensions(blob)
       if (debugEnabled) {
-        _logCaptureDiagnostics('capture output', {
+        _logCaptureDiagnostics('capture output afterMs', {
+          afterMs: Math.round(performance.now() - captureStartAt),
           captureMethod,
           blobType: blob.type || null,
           blobSize: blob.size || 0,
@@ -574,6 +623,14 @@ async function capturePhoto() {
 
       showToast(t('capture.photoCaptured', { count: state.batchCount }))
     } finally {
+      clearIrisShutter()
+      if (debugEnabled) {
+        _logCaptureDiagnostics('capture pending UI cleared', {
+          afterMs: Math.round(performance.now() - captureStartAt),
+          mode: 'pending',
+          captureMethod: 'camera',
+        })
+      }
       _setPendingCaptureDelta(-1)
     }
   }

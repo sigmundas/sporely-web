@@ -38,6 +38,7 @@ import { clearMediaUrlCache } from './images.js'
 import { initDebugDashboard, isDebugDashboardEnabled } from './debug-dashboard.js'
 import { hideSettingsOverlay, showSettingsOverlay } from './settings-overlay.js'
 import { isWebInatOAuthConfigured } from './inaturalist.js'
+import { installIrisShutterDebugControls } from './iris-shutter.js'
 import {
   connectInaturalist,
   forgetInaturalistSession,
@@ -65,6 +66,7 @@ import { getPlatform, isAndroidApp } from './platform.js'
 
 initI18n()
 setNativeCameraOpener(openNativeCamera)
+if (import.meta.env.DEV) installIrisShutterDebugControls()
 
 let _syncFeedbackBound = false
 let _appBootstrapped = false

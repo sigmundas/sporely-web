@@ -35,6 +35,7 @@ import { buildGpsMetaHtml } from './review.js'
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js'
 import { fetchCloudPlanProfile } from '../cloud-plan.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
+import { playIrisShutter } from '../iris-shutter.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile } from './import-helpers.js'
 import { setCaptureCompleteHandler } from './capture.js'
 import { prepareImageBlobForUpload } from '../image_crop.js'
@@ -3465,6 +3466,7 @@ async function _openCameraForDetail() {
       const screenPath = 'find_detail:add-photo'
       if (getUseSystemCamera()) {
         const captureSource = 'system camera'
+        playIrisShutter({ mode: 'quick' })
         const result = await NativeCamera.openSystemCamera()
         const photos = Array.isArray(result?.photos) ? result.photos : []
         if (!photos.length) return
@@ -3490,6 +3492,7 @@ async function _openCameraForDetail() {
         captureSource,
         gps,
       })
+      playIrisShutter({ mode: 'quick' })
       const result = await NativeCamera.capturePhotos(options)
       const photos = Array.isArray(result?.photos) ? result.photos : []
       debugImagePipeline('android native camera capture returned', {
