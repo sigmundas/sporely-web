@@ -4,7 +4,9 @@ Sporely Web is the mobile companion of Sporely.
 
 It is a small field-friendly app for capturing observations, importing photos from your phone, running Artsorakel lookups, keeping GPS and photo metadata together, and syncing everything to the  Sporely cloud.
 
-It is built as a web app that works on any platform: Just go to [app.sporely.no](https://app.sporely.no) and install it on iOS or Android as a web app. It is also availabe as an Android app that allows importing photos from your Android phone with GPS coordinates. GPS coordinates are stripped when using the web app, but you can still use the app's camera and record coordinates at the time of shooting. 
+It is built as a web app that works on any platform: Just go to [app.sporely.no](https://app.sporely.no) and install it on iOS or Android as a web app. It is also availabe as an Android app that allows importing photos from your Android phone with GPS coordinates. GPS coordinates are stripped when using the web app on Android, but you can still use the app's camera and record coordinates at the time of shooting. 
+
+Sporely Cloud uses Free and Pro plans. Pro adds more private sync capacity and higher-quality cloud images. Payment and plan details are on [sporely.no](https://sporely.no).
 
 ## How it works with the desktop app
 
@@ -131,7 +133,7 @@ Function mapping:
 
 ## Cloud Storage Hosting
 
-This repository contains the open-source Sporely web client and Android Capacitor shell. The hosted sync service is separate infrastructure: Supabase handles auth/database records, and Cloudflare R2 stores uploaded media through the `upload.sporely.no` Worker. Publicly we describe the image tier as 20 MP for both Free and Pro/full-res accounts. In practice, the clients only downscale when a source image exceeds the internal safety gate (`>21 MP` or `>5300 px` on the longest edge), so borderline 20 MP frames are left untouched on normal WebP-capable runtimes; Free accounts use standard 0.65 compression and a 1.5 MB full-image byte cap, while Pro/full-res accounts use 0.80 compression and a 5 MB full-image byte cap. On iOS WebKit, if canvas WebP export is not working, the web client intentionally switches to a reduced 6 MP JPEG path before byte-cap attempts. Pro purchase and account management live on `sporely.no`; the app only reflects the resulting entitlement.
+This repository contains the open-source Sporely web client and Android Capacitor shell. The hosted sync service is separate infrastructure: Supabase handles auth/database records, and Cloudflare R2 stores uploaded media through the `upload.sporely.no` Worker. The image resolution limit is 21MP; Free accounts use standard 0.65 compression and a 1.5 MB full-image byte cap, while Pro/full-res accounts use 0.80 compression and a 5 MB full-image byte cap. On iOS webp export is currently not supported by WebKit: The web client switches to a reduced 6 MP JPEG path before byte-cap attempts. Pro purchase and account management live on `sporely.no`; the app only reflects the resulting entitlement.
 
 ## Stack
 
