@@ -309,16 +309,7 @@ These are real issues, but they are not the next image-pipeline step.
 - [ ] Add literature overlays on user plots.
 - [ ] Add outlier verification UI linked to R2 thumbnails.
 
-### Monetization and storage tiers
 
-- [ ] Backfill historical R2 usage into `profiles.total_storage_bytes`, `storage_used_bytes`, and `image_count`.
-- [ ] Integrate Stripe-based Pro billing on sporely.no and sync the resulting entitlement into Supabase profile fields.
-- [ ] Implement paywall/account UI comparing:
-  - Free: 20 MP images, standard 0.65 compression, 1 MB full-image byte cap, 20 private/fuzzed observations, quota-limited storage. The client only downscales when an image exceeds `21 MP` or `5300 px` on the longest edge, so borderline 20 MP frames are preserved.
-  - Pro: 20 MP images, high 0.80 compression, 5 MB full-image byte cap, higher quota, high-res research export. The same internal `>21 MP` / `>5300 px` resize gate applies.
-  - Android and desktop should show Pro status plus a link to sporely.no for account management, not an embedded checkout.
-- [ ] Set up entitlement webhook syncing.
-- [ ] Add clear UI messaging around free/pro compression, byte caps, public 20 MP uploads, the internal `>21 MP` / `>5300 px` resize gate, and account storage quota.
 
 ### Cloud media lifecycle
 

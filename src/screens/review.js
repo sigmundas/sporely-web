@@ -14,6 +14,7 @@ import {
   markRequestedServicesRunning,
   runIdentifyComparisonForBlobs,
   shouldRunServiceFromTab,
+  wireIdentifyRunButtonPressFeedback,
   ID_SERVICE_ARTSORAKEL,
   ID_SERVICE_INATURALIST,
   normalizeIdentifyService,
@@ -742,6 +743,7 @@ function wireCardEvents() {
   const runBtn = document.querySelector('[data-identify-run-button]')
   if (runBtn && !runBtn._wired) {
     runBtn._wired = true
+    wireIdentifyRunButtonPressFeedback(runBtn)
     runBtn.addEventListener('click', () => _runReviewComparison())
   }
 
@@ -1116,10 +1118,13 @@ function _renderReviewAiResults() {
   const activeService = normalizeIdentifyService(reviewAiState.activeService || _resolveReviewPhotoIdServices(reviewAiState.availability).primary)
   const selectedPrediction = _reviewAiSelectedPredictionForService(activeService)
   resultsEl.querySelectorAll('[data-identify-result]').forEach(result => {
+    const row = result.closest?.('.ai-result-row') || result.parentElement?.closest?.('.ai-result-row') || null
     if (result._wired) return
     result._wired = true
     const prediction = JSON.parse(result.dataset.identifyResult)
-    result.classList.toggle('is-selected', Boolean(_reviewAiPredictionsEquivalent(prediction, selectedPrediction)))
+    const isSelected = Boolean(_reviewAiPredictionsEquivalent(prediction, selectedPrediction))
+    result.classList.toggle('is-selected', isSelected)
+    row?.classList.toggle('is-selected', isSelected)
     result.addEventListener('click', event => {
       event.preventDefault()
       const pred = JSON.parse(result.dataset.identifyResult)

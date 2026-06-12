@@ -383,12 +383,25 @@ test('formatting AI suggestions keeps vernacular and scientific names on separat
   const html = renderIdentifyResultRows('artsorakel', [{
     vernacularName: 'knivkjuke',
     scientificName: 'Piptoporus betulinus',
+    taxonId: '47274',
+    speciesUrl: 'https://artsdatabanken.no/Pages/298179',
     probability: 0.91,
   }])
 
   assert.match(html, /knivkjuke/)
   assert.match(html, /Piptoporus betulinus/)
   assert.doesNotMatch(html, /knivkjuke \(Piptoporus betulinus\)/)
+  assert.match(html, /ai-result-row-link/)
+  assert.match(html, /artsdatabanken\.no\/Pages\/298179/)
+
+  const inatHtml = renderIdentifyResultRows('inat', [{
+    vernacularName: 'Fly agaric',
+    scientificName: 'Amanita muscaria',
+    taxonId: '12345',
+    probability: 0.91,
+  }])
+  assert.match(inatHtml, /ai-result-row-link/)
+  assert.match(inatHtml, /inaturalist\.org\/taxa\/12345/)
 })
 
 test('service tabs render no-match, running, and success states with the right icon semantics', () => {

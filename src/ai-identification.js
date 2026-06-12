@@ -451,6 +451,60 @@ export function formatAiSuggestionDisplay(prediction = {}) {
   }
 }
 
+function _getPredictionSpeciesLinkUrl(prediction = {}) {
+  const service = normalizeIdentifyService(prediction.service)
+  const speciesUrl = _normalizeNullableText(
+    prediction.speciesUrl
+    ?? prediction.species_url
+    ?? prediction.adbUrl
+    ?? prediction.url
+    ?? prediction.href
+  )
+  if (service === ID_SERVICE_ARTSORAKEL && speciesUrl) {
+    return speciesUrl
+  }
+
+  if (service === ID_SERVICE_INATURALIST && speciesUrl) {
+    return speciesUrl
+  }
+
+  const taxonId = _normalizeNullableText(prediction.taxonId ?? prediction.taxon_id)
+  if (!taxonId) return null
+  if (service === ID_SERVICE_INATURALIST) {
+    return `https://www.inaturalist.org/taxa/${encodeURIComponent(taxonId)}`
+  }
+  return null
+}
+
+function _getPredictionSpeciesLinkLabel(prediction = {}) {
+  const service = normalizeIdentifyService(prediction.service)
+  return service === ID_SERVICE_INATURALIST
+    ? 'Open iNaturalist taxon'
+    : 'Open Artsobservasjoner taxon'
+}
+
+function renderIdentifyResultSpeciesLink(prediction = {}) {
+  const url = _getPredictionSpeciesLinkUrl(prediction)
+  if (!url) return ''
+  const label = _getPredictionSpeciesLinkLabel(prediction)
+  return `
+    <a
+      class="ai-result-row-link"
+      href="${_esc(url)}"
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label="${_esc(label)}"
+      title="${_esc(label)}"
+    >
+      <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+        <path d="M5 3H3v10h10V9" />
+        <path d="M8 8l6-6" />
+        <path d="M10 2h4v4" />
+      </svg>
+    </a>
+  `
+}
+
 export function _renderServiceIcon(serviceState = {}) {
   const status = serviceState.status || 'idle'
   const showCheckmark = serviceState.showCheckmark ?? (status === 'success' || status === 'stale')
@@ -1217,20 +1271,73 @@ export function renderIdentifyResultRows(service, predictions = []) {
   return (Array.isArray(predictions) ? predictions : [])
     .map(prediction => normalizeIdentifyPrediction(normalizedService, prediction))
     .map(prediction => `
-      <button type="button" class="ai-result-row" data-identify-result='${JSON.stringify(prediction).replace(/'/g, '&#39;')}'>
-        <span class="ai-result-row-main">
-          ${(() => {
-            const display = formatAiSuggestionDisplay(prediction)
-            return `
-              <span class="ai-result-row-name">${_esc(display.title)}</span>
-              ${display.subtitle ? `<span class="ai-result-row-sci">${_esc(display.subtitle)}</span>` : ''}
-            `
-          })()}
+      <div class="ai-result-row">
+        <button type="button" class="ai-result-row-button" data-identify-result='${JSON.stringify(prediction).replace(/'/g, '&#39;')}'>
+          <span class="ai-result-row-main">
+            ${(() => {
+              const display = formatAiSuggestionDisplay(prediction)
+              return `
+                <span class="ai-result-row-name">${_esc(display.title)}</span>
+                ${display.subtitle ? `<span class="ai-result-row-sci">${_esc(display.subtitle)}</span>` : ''}
+              `
+            })()}
+          </span>
+        </button>
+        <span class="ai-result-row-meta">
+          ${renderIdentifyResultSpeciesLink(prediction)}
+          <span class="ai-result-row-score">${renderIdentifyConfidenceBadge(prediction.probability, { checkThreshold: 0.65 })}</span>
         </span>
-        <span class="ai-result-row-score">${renderIdentifyConfidenceBadge(prediction.probability, { checkThreshold: 0.65 })}</span>
-      </button>
+      </div>
     `)
     .join('')
+}
+
+export function wireIdentifyRunButtonPressFeedback(button) {
+  if (!button || button._identifyRunPressWired) return
+  button._identifyRunPressWired = true
+
+  let releaseTimer = null
+
+  const clearTimer = () => {
+    if (releaseTimer !== null) {
+      clearTimeout(releaseTimer)
+      releaseTimer = null
+    }
+  }
+
+  const clearPressed = () => {
+    clearTimer()
+    button.classList.remove('is-pressed')
+  }
+
+  const markPressed = () => {
+    if (button.disabled || button.getAttribute('aria-disabled') === 'true') return
+    clearTimer()
+    button.classList.add('is-pressed')
+  }
+
+  const scheduleRelease = () => {
+    clearTimer()
+    releaseTimer = setTimeout(() => {
+      releaseTimer = null
+      if (button.classList.contains('is-running')) return
+      button.classList.remove('is-pressed')
+    }, 160)
+  }
+
+  button.addEventListener('pointerdown', markPressed)
+  button.addEventListener('pointerup', scheduleRelease)
+  button.addEventListener('pointercancel', clearPressed)
+  button.addEventListener('blur', clearPressed)
+  button.addEventListener('keydown', event => {
+    if (event.repeat) return
+    if (event.key !== ' ' && event.key !== 'Enter') return
+    markPressed()
+  })
+  button.addEventListener('keyup', event => {
+    if (event.key !== ' ' && event.key !== 'Enter') return
+    scheduleRelease()
+  })
 }
 
 export {

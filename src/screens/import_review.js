@@ -40,6 +40,7 @@ import {
   renderIdentifyServiceStateSummary,
   markRequestedServicesRunning,
   shouldRunServiceFromTab,
+  wireIdentifyRunButtonPressFeedback,
   ID_SERVICE_ARTSORAKEL,
   normalizeIdentifyService,
 } from '../ai-identification.js';
@@ -1852,6 +1853,7 @@ function _wireCard(sid) {
   const aiResults = card.querySelector(`[data-identify-results][data-sid="${sid}"]`)
   if (aiRunBtn && !aiRunBtn._wired) {
     aiRunBtn._wired = true
+    wireIdentifyRunButtonPressFeedback(aiRunBtn)
     aiRunBtn.addEventListener('click', () => _runSessionAiComparison(sid))
   }
 

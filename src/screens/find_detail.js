@@ -15,6 +15,7 @@ import {
   saveIdentificationRun,
   markRequestedServicesRunning,
   shouldRunServiceFromTab,
+  wireIdentifyRunButtonPressFeedback,
   ID_SERVICE_ARTSORAKEL,
   ID_SERVICE_INATURALIST,
   normalizeIdentifyService,
@@ -734,7 +735,11 @@ export function initFindDetail() {
     })
   }
 
-  document.querySelector('[data-identify-run-button]')?.addEventListener('click', () => _runDetailAiComparison())
+  const runBtn = document.querySelector('[data-identify-run-button]')
+  if (runBtn) {
+    wireIdentifyRunButtonPressFeedback(runBtn)
+    runBtn.addEventListener('click', () => _runDetailAiComparison())
+  }
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
     tab.addEventListener('click', () => {
       const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
@@ -1686,6 +1691,9 @@ function _renderDetailAiTabs() {
     runBtn.disabled = runDisabled
     runBtn.setAttribute('aria-disabled', String(runDisabled))
     runBtn.classList.toggle('is-running', detailAiState.running)
+    if (detailAiState.running) {
+      runBtn.classList.remove('is-pressed')
+    }
     const runLabel = runBtn.querySelector('[data-identify-run-label]')
     if (runLabel) {
       runLabel.textContent = detailAiState.running ? 'Loading...' : _tf('review.aiId', 'AI Photo ID')
@@ -1794,10 +1802,12 @@ function _renderDetailAiResults() {
     ? (detailAiState.selectedPredictionByService?.[activeService] || detailAiState.selectedPrediction || null)
     : null
   resultsEl.querySelectorAll('[data-identify-result]').forEach(el => {
+    const row = el.closest?.('.ai-result-row') || el.parentElement?.closest?.('.ai-result-row') || null
     const prediction = JSON.parse(el.dataset.identifyResult)
     const isSelected = Boolean(_detailAiPredictionsEquivalent(prediction, selectedPrediction))
     el.classList.toggle('is-selected', isSelected)
     el.classList.toggle('is-readonly', Boolean(currentObs?.id) && !currentObsIsOwner)
+    row?.classList.toggle('is-selected', isSelected)
     if (isSelected) {
       el.setAttribute('aria-current', 'true')
     } else {
