@@ -300,9 +300,15 @@ async function _refreshFindsFeed() {
   _isRefreshing = true
   _setRefreshIndicator(56, 'refreshing')
   try {
-    await triggerSync()
-    await loadFinds()
+    try {
+      await loadFinds()
+    } catch (error) {
+      console.warn('Finds refresh load failed:', error)
+    }
   } finally {
+    void triggerSync().catch(error => {
+      console.warn('Background sync during finds refresh failed:', error)
+    })
     _isRefreshing = false
     _pullDistance = 0
     _setRefreshIndicator(0, 'idle')
@@ -892,9 +898,10 @@ function _pendingStatusText(obs) {
     case 'retrying':
       return obs._syncErrorMessage ? `${t('finds.pendingRetrying')}: ${obs._syncErrorMessage}` : t('finds.pendingRetrying')
     case 'blocked':
+      if (obs._syncBlockedReason) return obs._syncBlockedReason
       if (obs._blockedReason) return obs._blockedReason
-      if (isPrivacySlotLimitError(obs._syncErrorMessage)) return PRIVACY_SLOT_LIMIT_USER_MESSAGE
-      if (isImageTooLargeForPlanError(obs._syncErrorMessage)) return IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE
+      if (obs._syncErrorCode === 'privacy_slot_limit' || isPrivacySlotLimitError(obs._syncErrorMessage)) return PRIVACY_SLOT_LIMIT_USER_MESSAGE
+      if (obs._syncErrorCode === 'image_too_large_for_plan' || isImageTooLargeForPlanError(obs._syncErrorMessage)) return IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE
       return obs._syncErrorMessage ? `Upload blocked: ${obs._syncErrorMessage}` : 'Upload blocked'
     default:
       return t('finds.pendingUpload')

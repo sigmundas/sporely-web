@@ -5,7 +5,7 @@ import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { isNativeApp } from '../platform.js'
 import { debugImagePipeline, isImagePipelineDebugEnabled } from '../image-pipeline-debug.js'
-import { clearIrisShutter, playIrisShutter } from '../iris-shutter.js'
+import { clearIrisShutter, startPendingIrisShutter } from '../iris-shutter.js'
 import { resetReviewAiState } from './review.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
 import { isBlob } from '../observation-shapes.js'
@@ -16,9 +16,13 @@ let primaryMainCameraPromise = null
 const CAMERA_VIDEO_WIDTH_IDEAL = 4000
 const CAMERA_VIDEO_HEIGHT_IDEAL = 3000
 const CAMERA_CAPTURE_MIN_LONG_EDGE = 1000
+const PENDING_SHUTTER_CLOSE_MS = 250
+const PENDING_SHUTTER_MIN_HOLD_MS = 300
+const PENDING_SHUTTER_OPEN_MS = 150
 let pendingCaptureCount = 0
 let finishCaptureWhenPendingComplete = false
 let captureCompleteHandler = null
+const stillCaptureCache = new WeakMap()
 
 export function setCaptureCompleteHandler(handler) {
   captureCompleteHandler = typeof handler === 'function' ? handler : null
@@ -161,6 +165,51 @@ async function _applyPrimaryLensPreferences(stream) {
   }
 }
 
+function _getStillCaptureCache(track) {
+  if (!track || typeof window.ImageCapture !== 'function') return null
+  let entry = stillCaptureCache.get(track)
+  if (!entry) {
+    entry = {
+      imageCapture: new window.ImageCapture(track),
+      photoCapabilitiesPromise: null,
+      photoSettingsPromise: null,
+    }
+    stillCaptureCache.set(track, entry)
+  }
+  return entry
+}
+
+async function _getCachedPhotoCapabilities(track) {
+  const entry = _getStillCaptureCache(track)
+  if (!entry) return null
+  if (!entry.photoCapabilitiesPromise) {
+    entry.photoCapabilitiesPromise = typeof entry.imageCapture.getPhotoCapabilities === 'function'
+      ? entry.imageCapture.getPhotoCapabilities().catch(error => {
+        if (import.meta.env.DEV) console.warn('Photo capabilities cache failed:', error)
+        return null
+      })
+      : Promise.resolve(null)
+  }
+  return entry.photoCapabilitiesPromise
+}
+
+async function _buildStillPhotoSettings(track) {
+  const capabilities = await _getCachedPhotoCapabilities(track)
+  const photoSettings = {}
+  const imageWidth = _finiteMaxRangeValue(capabilities?.imageWidth)
+  const imageHeight = _finiteMaxRangeValue(capabilities?.imageHeight)
+  if (imageWidth) photoSettings.imageWidth = Math.min(imageWidth, CAMERA_VIDEO_WIDTH_IDEAL)
+  if (imageHeight) photoSettings.imageHeight = Math.min(imageHeight, CAMERA_VIDEO_HEIGHT_IDEAL)
+  if (capabilities?.fillLightMode?.includes?.('off')) photoSettings.fillLightMode = 'off'
+  return photoSettings
+}
+
+async function _prefetchStillCaptureData(stream) {
+  const track = stream?.getVideoTracks?.()[0]
+  if (!track) return
+  await _getCachedPhotoCapabilities(track)
+}
+
 async function tryGetUserMedia() {
   // Step 1: Run the torch heuristic to find the primary main lens
   const mainDeviceId = await _getPrimaryMainCameraId()
@@ -244,26 +293,17 @@ async function _getImageBlobDimensions(blob) {
 async function _takeStillPhoto(video) {
   const stream = video?.srcObject
   const track = stream?.getVideoTracks?.()[0]
-  if (!track || typeof window.ImageCapture !== 'function') return null
+  const entry = _getStillCaptureCache(track)
+  if (!track || !entry || typeof entry.imageCapture.takePhoto !== 'function') return null
 
-  const imageCapture = new window.ImageCapture(track)
-  if (typeof imageCapture.takePhoto !== 'function') return null
-
-  const photoSettings = {}
+  let photoSettings = {}
   try {
-    if (typeof imageCapture.getPhotoCapabilities === 'function') {
-      const capabilities = await imageCapture.getPhotoCapabilities()
-      const imageWidth = _finiteMaxRangeValue(capabilities?.imageWidth)
-      const imageHeight = _finiteMaxRangeValue(capabilities?.imageHeight)
-      if (imageWidth) photoSettings.imageWidth = Math.min(imageWidth, CAMERA_VIDEO_WIDTH_IDEAL)
-      if (imageHeight) photoSettings.imageHeight = Math.min(imageHeight, CAMERA_VIDEO_HEIGHT_IDEAL)
-      if (capabilities?.fillLightMode?.includes?.('off')) photoSettings.fillLightMode = 'off'
-    }
+    photoSettings = await _buildStillPhotoSettings(track)
   } catch (err) {
     if (import.meta.env.DEV) console.warn('Photo capabilities unavailable; taking still with defaults:', err)
   }
 
-  const blob = await imageCapture.takePhoto(photoSettings)
+  const blob = await entry.imageCapture.takePhoto(photoSettings)
   if (!isBlob(blob)) throw new Error('Still photo capture returned no image')
   if (import.meta.env.DEV) console.log('Captured still photo via ImageCapture:', {
     bytes: blob.size,
@@ -369,6 +409,7 @@ export async function startCamera(options = {}) {
       try { await video.play() } catch (_) {}
       _syncPreviewFit(video)
     }
+    void _prefetchStillCaptureData(stream).catch(() => {})
 
     if (!preserveBatch) {
       state.sessionStart = new Date()
@@ -445,7 +486,11 @@ async function capturePhoto() {
   if (!video.srcObject) {
     // Demo mode — no real camera
     const captureStartAt = performance.now()
-    playIrisShutter({ mode: 'pending' })
+    const shutter = startPendingIrisShutter({
+      closeMs: PENDING_SHUTTER_CLOSE_MS,
+      minHoldMs: PENDING_SHUTTER_MIN_HOLD_MS,
+      openMs: PENDING_SHUTTER_OPEN_MS,
+    })
     _setPendingCaptureDelta(1)
     if (debugEnabled) {
       _logCaptureDiagnostics('shutter animation started', {
@@ -469,13 +514,20 @@ async function capturePhoto() {
     ctx.textBaseline = 'middle'
     ctx.fillText(emoji, 400, 300)
 
-    const blobPromise = new Promise((resolve) => {
-      canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.9)
-    }).then(async blob => {
+    let finalizeIris = Promise.resolve()
+    try {
+      const blob = await new Promise(resolve => {
+        canvas.toBlob(nextBlob => resolve(nextBlob), 'image/jpeg', 0.9)
+      })
+      if (!blob) {
+        finalizeIris = shutter.cancel()
+        throw new Error('Image capture failed')
+      }
+      const captureResolvedAt = performance.now()
       if (debugEnabled) {
         const dimensions = await _getImageBlobDimensions(blob)
         _logCaptureDiagnostics('capture output afterMs', {
-          afterMs: Math.round(performance.now() - captureStartAt),
+          afterMs: Math.round(captureResolvedAt - captureStartAt),
           captureMethod: 'demo canvas',
           blobType: blob?.type || null,
           blobSize: blob?.size || 0,
@@ -486,44 +538,51 @@ async function capturePhoto() {
           trackSettings: null,
         })
       }
-      return blob
-    }).finally(() => {
-      clearIrisShutter()
-      if (debugEnabled) {
-        _logCaptureDiagnostics('capture pending UI cleared', {
-          afterMs: Math.round(performance.now() - captureStartAt),
-          mode: 'pending',
-          captureMethod: 'demo canvas',
-        })
+
+      finalizeIris = shutter.release({
+        captureAfterMs: captureResolvedAt - captureStartAt,
+        captureResolvedAt,
+      })
+
+      const blobPromise = Promise.resolve(blob)
+      state.capturedPhotos.push({
+        blob: null,
+        blobPromise,
+        gps: state.gps,
+        ts: new Date(),
+        emoji,
+        aiCropRect: null,
+        aiCropSourceW: 800,
+        aiCropSourceH: 600,
+        aiCropIsCustom: false,
+      })
+
+      state.batchCount++
+      document.getElementById('batch-count').textContent = String(state.batchCount)
+      document.getElementById('batch-area').style.display = 'flex'
+
+      const vf = document.querySelector('.capture-viewfinder')
+      if (vf) {
+        vf.style.transition = ''
+        vf.style.opacity    = '0.3'
+        setTimeout(() => { vf.style.transition = 'opacity 0.15s'; vf.style.opacity = '1' }, 60)
       }
-      _setPendingCaptureDelta(-1)
-    })
-    blobPromise.catch(() => {})
 
-    state.capturedPhotos.push({
-      blob: null,
-      blobPromise,
-      gps: state.gps,
-      ts: new Date(),
-      emoji,
-      aiCropRect: null,
-      aiCropSourceW: 800,
-      aiCropSourceH: 600,
-      aiCropIsCustom: false,
-    })
-
-    state.batchCount++
-    document.getElementById('batch-count').textContent = String(state.batchCount)
-    document.getElementById('batch-area').style.display = 'flex'
-
-    const vf = document.querySelector('.capture-viewfinder')
-    if (vf) {
-      vf.style.transition = ''
-      vf.style.opacity    = '0.3'
-      setTimeout(() => { vf.style.transition = 'opacity 0.15s'; vf.style.opacity = '1' }, 60)
+      showToast(t('capture.photoCaptured', { count: state.batchCount }))
+    } finally {
+      try {
+        await finalizeIris
+      } finally {
+        if (debugEnabled) {
+          _logCaptureDiagnostics('capture pending UI cleared', {
+            afterMs: Math.round(performance.now() - captureStartAt),
+            mode: 'pending',
+            captureMethod: 'demo canvas',
+          })
+        }
+        _setPendingCaptureDelta(-1)
+      }
     }
-
-    showToast(t('capture.photoCaptured', { count: state.batchCount }))
   } else {
     const previewW = video.videoWidth
     const previewH = video.videoHeight
@@ -543,7 +602,11 @@ async function capturePhoto() {
     }
 
     const captureStartAt = performance.now()
-    playIrisShutter({ mode: 'pending' })
+    const shutter = startPendingIrisShutter({
+      closeMs: PENDING_SHUTTER_CLOSE_MS,
+      minHoldMs: PENDING_SHUTTER_MIN_HOLD_MS,
+      openMs: PENDING_SHUTTER_OPEN_MS,
+    })
     if (debugEnabled) {
       _logCaptureDiagnostics('shutter animation started', {
         mode: 'pending',
@@ -562,16 +625,21 @@ async function capturePhoto() {
     }
 
     _setPendingCaptureDelta(1)
+    let finalizeIris = Promise.resolve()
     try {
       const captureResult = await _captureCameraBlob(video)
+      const captureResolvedAt = performance.now()
       const blob = captureResult?.blob || null
       const captureMethod = captureResult?.captureMethod || 'camera'
-      if (!blob) return
+      if (!blob) {
+        finalizeIris = shutter.cancel()
+        throw new Error('Image capture failed')
+      }
 
       const dimensions = await _getImageBlobDimensions(blob)
       if (debugEnabled) {
         _logCaptureDiagnostics('capture output afterMs', {
-          afterMs: Math.round(performance.now() - captureStartAt),
+          afterMs: Math.round(captureResolvedAt - captureStartAt),
           captureMethod,
           blobType: blob.type || null,
           blobSize: blob.size || 0,
@@ -592,9 +660,15 @@ async function capturePhoto() {
           videoHeight: previewH,
           trackSettings: typeof track?.getSettings === 'function' ? track.getSettings() : null,
         })
+        finalizeIris = shutter.cancel()
         await _restartCameraStreamAfterDegradation()
         return
       }
+
+      finalizeIris = shutter.release({
+        captureAfterMs: captureResolvedAt - captureStartAt,
+        captureResolvedAt,
+      })
 
       const acceptedWidth = dimensions.width || previewW
       const acceptedHeight = dimensions.height || previewH
@@ -623,15 +697,19 @@ async function capturePhoto() {
 
       showToast(t('capture.photoCaptured', { count: state.batchCount }))
     } finally {
-      clearIrisShutter()
-      if (debugEnabled) {
-        _logCaptureDiagnostics('capture pending UI cleared', {
-          afterMs: Math.round(performance.now() - captureStartAt),
-          mode: 'pending',
-          captureMethod: 'camera',
-        })
+      try {
+        await finalizeIris
+      } finally {
+        clearIrisShutter()
+        if (debugEnabled) {
+          _logCaptureDiagnostics('capture pending UI cleared', {
+            afterMs: Math.round(performance.now() - captureStartAt),
+            mode: 'pending',
+            captureMethod: 'camera',
+          })
+        }
+        _setPendingCaptureDelta(-1)
       }
-      _setPendingCaptureDelta(-1)
     }
   }
 }

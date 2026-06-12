@@ -17,7 +17,8 @@ const SYNC_SUCCESS_EVENT = 'sporely-sync-upload-complete'
 const RETRY_DELAY_MS = 30_000
 const BLOCKED_QUEUE_REASON = 'queued item belongs to a different auth user'
 const BLOCKED_QUEUE_STAGE = 'blocked'
-export const PRIVACY_SLOT_LIMIT_USER_MESSAGE = 'Free accounts can have up to 20 private or fuzzed-location cloud observations. Make one public, delete one, or upgrade to Pro.'
+export const PRIVACY_SLOT_LIMIT_SYNC_ERROR_CODE = 'privacy_slot_limit'
+export const PRIVACY_SLOT_LIMIT_USER_MESSAGE = 'Free accounts can keep up to 20 private/fuzzed observations. Publish this observation or use exact public location to sync.'
 export const IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE = 'Image is too large for your plan. Make it smaller or upgrade to Pro.'
 const QUEUE_NAMESPACE_PREFIX = 'sporely-upload-queue'
 const _queuedPreviewUrls = new Map()
@@ -114,7 +115,13 @@ function _collectSyncErrorDetails(value, seen = new Set()) {
 export function isPrivacySlotLimitError(error) {
   const { code, texts } = _collectSyncErrorDetails(error)
   const haystack = [...new Set(texts)].join(' ').toLowerCase()
-  const hasPhrase = ['free sporely accounts', '20 privacy slot', 'privacy slot observations']
+  const hasPhrase = [
+    'free sporely accounts',
+    '20 privacy slot',
+    'privacy slot observations',
+    'private/fuzzed observations',
+    'private or fuzzed-location cloud observations',
+  ]
     .some(phrase => haystack.includes(phrase))
   const hasCode = (
     String(code || '').trim() === '23514'
@@ -122,7 +129,55 @@ export function isPrivacySlotLimitError(error) {
     || haystack.includes('23514')
     || haystack.includes('check_violation')
   )
-  return hasPhrase && hasCode
+  return hasPhrase || (hasCode && haystack.includes('privacy slot'))
+}
+
+export function classifyQueueSyncError(error) {
+  if (isPrivacySlotLimitError(error)) {
+    return {
+      syncErrorCode: PRIVACY_SLOT_LIMIT_SYNC_ERROR_CODE,
+      blockedReason: PRIVACY_SLOT_LIMIT_USER_MESSAGE,
+      syncErrorMessage: String(_collectSyncErrorDetails(error).texts.join(' ') || '').trim() || PRIVACY_SLOT_LIMIT_USER_MESSAGE,
+      isBlocked: true,
+      isRetryable: false,
+    }
+  }
+
+  if (isImageTooLargeForPlanError(error)) {
+    return {
+      syncErrorCode: 'image_too_large_for_plan',
+      blockedReason: IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
+      syncErrorMessage: String(_collectSyncErrorDetails(error).texts.join(' ') || '').trim() || IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
+      isBlocked: true,
+      isRetryable: false,
+    }
+  }
+
+  return {
+    syncErrorCode: null,
+    blockedReason: null,
+    syncErrorMessage: String(_collectSyncErrorDetails(error).texts.join(' ') || '').trim() || String(error?.message || error || 'Upload failed'),
+    isBlocked: false,
+    isRetryable: true,
+  }
+}
+
+export function buildQueueStatusUpdate(current, stage, extras = {}) {
+  const isBlockedStage = String(stage || '').trim() === BLOCKED_QUEUE_STAGE
+  return current ? {
+    ...current,
+    syncStage: stage,
+    syncErrorMessage: extras.syncErrorMessage ?? null,
+    syncErrorCode: extras.syncErrorCode ?? (isBlockedStage ? current.syncErrorCode ?? null : null),
+    syncBlockedReason: extras.syncBlockedReason ?? (isBlockedStage ? current.syncBlockedReason ?? current.blockedReason ?? null : null),
+    blockedReason: extras.blockedReason ?? (isBlockedStage ? current.blockedReason ?? current.syncBlockedReason ?? null : null),
+    blockedAt: extras.blockedAt ?? (isBlockedStage ? current.blockedAt ?? Date.now() : null),
+    blockedByUserId: extras.blockedByUserId ?? (isBlockedStage ? current.blockedByUserId ?? null : null),
+    blockedQueueUserId: extras.blockedQueueUserId ?? (isBlockedStage ? current.blockedQueueUserId ?? null : null),
+    syncImageIndex: extras.syncImageIndex ?? current.syncImageIndex ?? null,
+    syncImageCount: extras.syncImageCount ?? current.syncImageCount ?? null,
+    lastAttemptAt: Date.now(),
+  } : current
 }
 
 export function isImageTooLargeForPlanError(error) {
@@ -139,19 +194,16 @@ export function isImageTooLargeForPlanError(error) {
 }
 
 async function _markQueueItemBlocked(itemId, reason, extras = {}) {
-  await _updateQueueItem(itemId, current => current ? {
-    ...current,
-    syncStage: BLOCKED_QUEUE_STAGE,
-    syncErrorMessage: extras.syncErrorMessage ?? reason,
-    blockedReason: extras.blockedReason ?? reason,
-    blockedAt: Date.now(),
-    blockedByUserId: extras.blockedByUserId || null,
-    blockedQueueUserId: extras.blockedQueueUserId || null,
-    syncErrorCode: extras.syncErrorCode ?? current.syncErrorCode ?? null,
-    syncImageIndex: extras.syncImageIndex ?? current.syncImageIndex ?? null,
-    syncImageCount: extras.syncImageCount ?? current.syncImageCount ?? null,
-    lastAttemptAt: Date.now(),
-  } : current)
+  try {
+    await _updateQueueItem(itemId, current => buildQueueStatusUpdate(current, BLOCKED_QUEUE_STAGE, {
+      ...extras,
+      syncErrorMessage: extras.syncErrorMessage ?? reason,
+      blockedReason: extras.blockedReason ?? reason,
+      syncBlockedReason: extras.syncBlockedReason ?? extras.blockedReason ?? reason,
+    }))
+  } catch (error) {
+    console.warn('Failed to mark queue item blocked', itemId, error)
+  }
 }
 
 function _warnBlockedQueueItemOnce(itemId, details) {
@@ -292,14 +344,7 @@ async function _deleteQueueItem(itemId) {
 
 async function _setQueueSyncStatus(itemId, stage, extras = {}) {
   try {
-    await _updateQueueItem(itemId, current => current ? {
-      ...current,
-      syncStage: stage,
-      syncErrorMessage: extras.syncErrorMessage ?? null,
-      syncImageIndex: extras.syncImageIndex ?? current.syncImageIndex ?? null,
-      syncImageCount: extras.syncImageCount ?? current.syncImageCount ?? null,
-      lastAttemptAt: Date.now(),
-    } : current)
+    await _updateQueueItem(itemId, current => buildQueueStatusUpdate(current, stage, extras))
   } catch (error) {
     console.warn('Failed to update queue sync status', itemId, error)
   }
@@ -482,8 +527,11 @@ export async function getQueuedObservations(userId) {
       _pendingPhotoCount: _normalizeQueuedImages(item.imageEntries || item.imageBlobs).length,
       _remoteObservationId: item.remoteObservationId || null,
       _syncStage: item.syncStage || null,
+      _syncStatus: item.syncStage || null,
       _syncErrorMessage: item.syncErrorMessage || null,
+      _syncErrorCode: item.syncErrorCode || null,
       _blockedReason: item.blockedReason || null,
+      _syncBlockedReason: item.syncBlockedReason || item.blockedReason || null,
       _blockedAt: item.blockedAt || null,
       _syncImageIndex: item.syncImageIndex ?? null,
       _syncImageCount: item.syncImageCount ?? null,
@@ -710,18 +758,22 @@ async function _runSyncQueue() {
       if (!queueUserId) {
         const reason = 'queued item is missing an auth user id'
         await _markQueueItemBlocked(item.id, reason, {
+          syncErrorCode: 'missing_auth_user',
           blockedByUserId: authUserId,
           blockedQueueUserId: null,
         })
+        notifyQueueChanged()
         _warnBlockedQueueItemOnce(item.id, { itemId: item.id, authUserId, queueUserId, reason })
         continue
       }
 
       if (queueUserId !== authUserId) {
         await _markQueueItemBlocked(item.id, BLOCKED_QUEUE_REASON, {
+          syncErrorCode: 'auth_user_mismatch',
           blockedByUserId: authUserId,
           blockedQueueUserId: queueUserId,
         })
+        notifyQueueChanged()
         _warnBlockedQueueItemOnce(item.id, {
           itemId: item.id,
           authUserId,
@@ -733,9 +785,11 @@ async function _runSyncQueue() {
       if (normalizedObservationOwnerValue && normalizedObservationOwnerValue !== authUserId) {
         const reason = 'queued observation owner does not match the current auth user'
         await _markQueueItemBlocked(item.id, reason, {
+          syncErrorCode: 'auth_user_mismatch',
           blockedByUserId: authUserId,
           blockedQueueUserId: queueUserId,
         })
+        notifyQueueChanged()
         console.warn('Skipping queued upload with mismatched observation owner:', {
           itemId: item.id,
           authUserId,
@@ -951,33 +1005,31 @@ async function _runSyncQueue() {
     } catch (err) {
       const message = String(err?.message || err || 'Upload failed')
       const unrecoverable = /authenticated user id|missing authenticated user|different signed-in user|missing an auth user id|owner does not match|violates row-level security/i.test(message)
-      if (isPrivacySlotLimitError(err)) {
-        await _markQueueItemBlocked(item.id, PRIVACY_SLOT_LIMIT_USER_MESSAGE, {
-          syncErrorMessage: message,
-          blockedReason: PRIVACY_SLOT_LIMIT_USER_MESSAGE,
+      const classified = classifyQueueSyncError(err)
+      if (classified.isBlocked) {
+        await _markQueueItemBlocked(item.id, classified.blockedReason || message, {
+          syncErrorMessage: classified.syncErrorMessage || message,
+          blockedReason: classified.blockedReason || message,
+          syncBlockedReason: classified.blockedReason || message,
+          syncErrorCode: classified.syncErrorCode || null,
           blockedByUserId: authUserId,
           blockedQueueUserId: queueUserId,
         })
-      } else if (isImageTooLargeForPlanError(err)) {
-        await _markQueueItemBlocked(item.id, IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE, {
-          syncErrorMessage: message,
-          blockedReason: IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
-          syncErrorCode: 'image_too_large_for_plan',
-          blockedByUserId: authUserId,
-          blockedQueueUserId: queueUserId,
-        })
+        notifyQueueChanged()
       } else if (unrecoverable) {
         console.warn('Background sync skipped for queue item', item.id, message)
         await _markQueueItemBlocked(item.id, message, {
           syncErrorMessage: message,
           blockedReason: message,
+          syncBlockedReason: message,
           blockedByUserId: authUserId,
           blockedQueueUserId: queueUserId,
         })
+        notifyQueueChanged()
       } else {
         console.error('Background sync failed for queue item', item.id, err)
       }
-      if (!unrecoverable && !isPrivacySlotLimitError(err) && !isImageTooLargeForPlanError(err)) {
+      if (classified.isRetryable && !unrecoverable) {
         await _setQueueSyncStatus(item.id, 'retrying', {
           syncErrorMessage: message,
         })

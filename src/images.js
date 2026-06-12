@@ -257,6 +257,11 @@ function _splitPath(storagePath) {
   return { dir: parts.join('/'), fileName }
 }
 
+function _stripLegacyVariantPrefixes(fileName) {
+  return String(fileName || '')
+    .replace(/^(?:thumb_|medium_|small_|cards_)+/i, '')
+}
+
 export function imageExtensionForMimeType(type) {
   const normalized = String(type || '').split(';')[0].trim().toLowerCase()
   if (normalized === 'image/webp') return 'webp'
@@ -276,7 +281,7 @@ export function getVariantPath(storagePath, variant = 'original') {
   if (!key || variant === 'original') return key
   const { dir, fileName } = _splitPath(storagePath)
   const variantName = ['thumb', 'small', 'medium', 'cards'].includes(String(variant || '').toLowerCase())
-    ? `thumb_${fileName}`
+    ? `thumb_${_stripLegacyVariantPrefixes(fileName)}`
     : `${variant}_${fileName}`
   return dir ? `${dir}/${variantName}` : variantName
 }
@@ -1450,20 +1455,26 @@ export async function resolveMediaSources(paths, options = {}) {
 
   return normalizedPaths.map(originalPath => {
     if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
-    const variantPath = getVariantPath(originalPath, variant)
-    const originalUrl = getPublicMediaUrl(originalPath, 'original')
-    const variantUrl = getPublicMediaUrl(originalPath, variant)
+    const canonicalOriginalPath = (() => {
+      const { dir, fileName } = _splitPath(originalPath)
+      const stripped = _stripLegacyVariantPrefixes(fileName)
+      return stripped && stripped !== fileName
+        ? (dir ? `${dir}/${stripped}` : stripped)
+        : originalPath
+    })()
+    const originalUrl = getPublicMediaUrl(canonicalOriginalPath, 'original')
+    const variantUrl = getPublicMediaUrl(canonicalOriginalPath, variant)
 
     if (variant === 'original') {
       return {
-        key: originalPath,
+        key: canonicalOriginalPath,
         primaryUrl: originalUrl,
         fallbackUrl: null,
       }
     }
     const fallbackUrl = originalUrl !== variantUrl ? originalUrl : null
     return {
-      key: originalPath,
+      key: canonicalOriginalPath,
       primaryUrl: variantUrl,
       fallbackUrl,
     }

@@ -1,3 +1,5 @@
+import { debugImagePipeline } from './image-pipeline-debug.js'
+
 const LIVE_FLASH_DURATION_MS = {
   pending: 1000,
   quick: 100,
@@ -10,11 +12,11 @@ const LIVE_FLASH_REDUCED_DURATION_MS = {
 
 const DEFAULT_DEBUG_OPTIONS = {
   opacity: 1,
-  openAngle: 60,
+  durationMs: 250,
+  openAngle: 50,
   closedAngle: 13,
-  durationMs: 1800,
   hold: false,
-  irisScale: 5,
+  irisScale: 6,
   curveExponent: 2.35,
   curveStrength: 18,
   bladeLength: 120,
@@ -24,6 +26,14 @@ const DEFAULT_DEBUG_OPTIONS = {
   bladeBackOverhang: 5.5,
 }
 
+const DEFAULT_PENDING_SHUTTER_TIMING = {
+  closeMs: 250,
+  minHoldMs: 300,
+  openMs: 150,
+}
+
+export const IRIS_BLADE_PATH_D = 'M -79.050967,-36.693239 C -197.91366,56.591496 -94.056754,137.06665 22.020885,98.809356 31.337039,95.73891 25.736889,79.983604 28.329989,67.293163 33.531408,41.837808 40.507132,10.973915 72.390971,-11.010864 95.098917,-26.909528 111.66924,-38.688794 135.20597,-48.762471 126.17785,-63.049848 99.181976,-102.1146 23.072759,-82.989494 c -35.033969,8.803513 -67.409698,20.355718 -102.123726,46.296255 z'
+
 const BLADE_COUNT = 6
 const VIEWBOX_SIZE = 240
 const VIEWBOX_HALF = VIEWBOX_SIZE / 2
@@ -31,11 +41,14 @@ const VIEWBOX_MIN = -VIEWBOX_HALF
 
 let liveFlashTimer = null
 let liveCapturePending = false
+let liveCapturePhase = 'idle'
+let livePendingIrisState = null
 
 let debugOverlayRoot = null
 let debugOverlayScene = null
 let debugOverlayTimer = null
 let debugOverlayToken = 0
+let debugPendingIrisState = null
 let debugOptions = { ...DEFAULT_DEBUG_OPTIONS }
 
 function _prefersReducedMotion() {
@@ -59,10 +72,6 @@ function _round(value, digits = 3) {
   return Math.round(Number(value) * scale) / scale
 }
 
-function _formatNumber(value) {
-  return Number.isFinite(value) ? String(_round(value, 3)) : '0'
-}
-
 function _formatDegrees(value) {
   return `${_round(value, 2)}deg`
 }
@@ -76,6 +85,28 @@ function _setLiveCaptureState(active) {
   const vf = _getCaptureViewfinder()
   if (!vf) return
   vf.classList.toggle('is-iris-pending', liveCapturePending)
+}
+
+function _setLiveCapturePhase(phase = 'idle') {
+  liveCapturePhase = phase
+  const vf = _getCaptureViewfinder()
+  if (!vf) return
+
+  const normalized = String(phase || 'idle').trim()
+  const isIdle = normalized === 'idle'
+  const isClosing = normalized === 'closing'
+  const isHeld = normalized === 'held'
+  const isOpening = normalized === 'opening'
+
+  vf.classList.toggle('is-iris-pending', isClosing || isHeld)
+  vf.classList.toggle('is-iris-closing', isClosing)
+  vf.classList.toggle('is-iris-opening', isOpening)
+  vf.dataset.irisPhase = isIdle ? '' : normalized
+  if (isIdle) {
+    delete vf.dataset.irisPhase
+  }
+
+  liveCapturePending = isClosing || isHeld
 }
 
 function _startSimpleFlash(mode, durationMs) {
@@ -94,6 +125,346 @@ function _startSimpleFlash(mode, durationMs) {
   }, durationMs)
 }
 
+function _normalizePendingShutterTiming(options = {}) {
+  return {
+    closeMs: Math.max(20, Number(options.closeMs) || DEFAULT_PENDING_SHUTTER_TIMING.closeMs),
+    minHoldMs: Math.max(0, Number(options.minHoldMs) || DEFAULT_PENDING_SHUTTER_TIMING.minHoldMs),
+    openMs: Math.max(20, Number(options.openMs) || DEFAULT_PENDING_SHUTTER_TIMING.openMs),
+  }
+}
+
+function _cancelPendingIrisTimers(state) {
+  if (!state) return
+  if (state.closeTimer) {
+    clearTimeout(state.closeTimer)
+    state.closeTimer = null
+  }
+  if (state.openTimer) {
+    clearTimeout(state.openTimer)
+    state.openTimer = null
+  }
+  if (state.cleanupTimer) {
+    clearTimeout(state.cleanupTimer)
+    state.cleanupTimer = null
+  }
+}
+
+function _clearPendingIrisState(state, { immediate = false } = {}) {
+  if (!state || state.cleanedUp) return
+  state.cleanedUp = true
+  _cancelPendingIrisTimers(state)
+  if (state.openPromiseResolve) {
+    const resolve = state.openPromiseResolve
+    state.openPromiseResolve = null
+    resolve()
+  }
+  _setLiveCapturePhase('idle')
+  if (immediate) {
+    _setLiveCaptureState(false)
+  } else {
+    _setLiveCaptureState(false)
+  }
+  if (livePendingIrisState === state) {
+    livePendingIrisState = null
+  }
+}
+
+function _clearPendingDebugState(state) {
+  if (!state || state.cleanedUp) return
+  state.cleanedUp = true
+  if (state.closeTimer) {
+    clearTimeout(state.closeTimer)
+    state.closeTimer = null
+  }
+  if (state.openTimer) {
+    clearTimeout(state.openTimer)
+    state.openTimer = null
+  }
+  if (state.cleanupTimer) {
+    clearTimeout(state.cleanupTimer)
+    state.cleanupTimer = null
+  }
+  if (debugPendingIrisState === state) {
+    debugPendingIrisState = null
+  }
+  if (debugOverlayRoot) {
+    debugOverlayRoot.classList.remove('is-visible', 'is-playing', 'is-holding', 'mode-pending', 'mode-quick', 'is-closing', 'is-opening')
+    debugOverlayRoot.hidden = true
+    if (debugOverlayScene) debugOverlayScene.innerHTML = ''
+  }
+}
+
+function _logPendingIris(message, details = {}) {
+  debugImagePipeline(message, details)
+}
+
+function _setPendingDebugPhase(overlay, phase) {
+  if (!overlay) return
+  const normalized = String(phase || 'idle').trim()
+  overlay.classList.toggle('is-closing', normalized === 'closing')
+  overlay.classList.toggle('is-holding', normalized === 'held')
+  overlay.classList.toggle('is-opening', normalized === 'opening')
+}
+
+function _createPendingDebugShutterController(options = {}) {
+  const timing = _normalizePendingShutterTiming(options)
+  const overlay = _renderDebugOverlay({
+    ...DEFAULT_DEBUG_OPTIONS,
+    ...debugOptions,
+    ...options,
+    durationMs: timing.closeMs,
+    mode: 'pending',
+    hold: false,
+  })
+  if (!overlay) {
+    return {
+      release: () => Promise.resolve(),
+      cancel: () => Promise.resolve(),
+    }
+  }
+
+  const state = {
+    overlay,
+    timing,
+    startAt: performance.now(),
+    closedAt: null,
+    captureResolvedAt: null,
+    released: false,
+    cleanedUp: false,
+    closeTimer: null,
+    openTimer: null,
+    cleanupTimer: null,
+  }
+
+  if (debugPendingIrisState && debugPendingIrisState !== state) {
+    _clearPendingDebugState(debugPendingIrisState)
+  }
+  debugPendingIrisState = state
+
+  overlay.hidden = false
+  overlay.classList.remove('is-playing', 'is-holding', 'is-visible', 'mode-quick')
+  overlay.classList.add('is-visible', 'mode-pending', 'is-closing')
+  overlay.style.setProperty('--iris-debug-close-duration', `${timing.closeMs}ms`)
+  overlay.style.setProperty('--iris-debug-open-duration', `${timing.openMs}ms`)
+  void overlay.getBoundingClientRect()
+  _setPendingDebugPhase(overlay, 'closing')
+
+  state.closeTimer = setTimeout(() => {
+    if (debugPendingIrisState !== state || state.cleanedUp) return
+    state.closeTimer = null
+    state.closedAt = performance.now()
+    _setPendingDebugPhase(overlay, 'held')
+  }, timing.closeMs)
+
+  const scheduleOpen = () => {
+    if (state.cleanedUp || state.released) return Promise.resolve()
+    state.released = true
+    const openPromise = new Promise(resolve => {
+      const finish = () => {
+        if (debugPendingIrisState !== state || state.cleanedUp) {
+          resolve()
+          return
+        }
+        _setPendingDebugPhase(overlay, 'opening')
+        state.cleanupTimer = setTimeout(() => {
+          if (debugPendingIrisState !== state || state.cleanedUp) {
+            resolve()
+            return
+          }
+          _clearPendingDebugState(state)
+          resolve()
+        }, timing.openMs)
+      }
+
+      const now = performance.now()
+      const openAt = Math.max(
+        (state.closedAt || state.startAt + timing.closeMs) + timing.minHoldMs,
+        state.captureResolvedAt || now,
+      )
+      const waitMs = Math.max(0, openAt - now)
+
+      if (state.openTimer) {
+        clearTimeout(state.openTimer)
+        state.openTimer = null
+      }
+
+      if (waitMs > 0) {
+        state.openTimer = setTimeout(() => {
+          state.openTimer = null
+          finish()
+        }, waitMs)
+        return
+      }
+
+      finish()
+    })
+
+    return openPromise
+  }
+
+  return {
+    release: ({ captureAfterMs = null, captureResolvedAt = null } = {}) => {
+      if (Number.isFinite(captureAfterMs)) {
+        state.captureAfterMs = Number(captureAfterMs)
+      }
+      state.captureResolvedAt = Number.isFinite(captureResolvedAt) ? Number(captureResolvedAt) : performance.now()
+      return scheduleOpen()
+    },
+    cancel: () => {
+      _clearPendingDebugState(state)
+      return Promise.resolve()
+    },
+  }
+}
+
+function _createPendingIrisController(options = {}) {
+  const timing = _normalizePendingShutterTiming(options)
+  const state = {
+    timing,
+    startAt: performance.now(),
+    closedAt: null,
+    releaseRequestedAt: null,
+    captureResolvedAt: null,
+    closeTimer: null,
+    openTimer: null,
+    cleanupTimer: null,
+    released: false,
+    cancelled: false,
+    cleanedUp: false,
+    openPromise: null,
+    openPromiseResolve: null,
+  }
+
+  if (livePendingIrisState && livePendingIrisState !== state) {
+    _clearPendingIrisState(livePendingIrisState, { immediate: true })
+  }
+  livePendingIrisState = state
+
+  const vf = _getCaptureViewfinder()
+  if (vf) {
+    vf.style.setProperty('--iris-live-close-duration', `${timing.closeMs}ms`)
+    vf.style.setProperty('--iris-live-open-duration', `${timing.openMs}ms`)
+  }
+
+  _setLiveCapturePhase('closing')
+  _logPendingIris('shutter close started', {
+    closeMs: timing.closeMs,
+    minHoldMs: timing.minHoldMs,
+    openMs: timing.openMs,
+  })
+
+  state.closeTimer = setTimeout(() => {
+    if (livePendingIrisState !== state || state.cancelled || state.cleanedUp) return
+    state.closeTimer = null
+    state.closedAt = performance.now()
+    _setLiveCapturePhase('held')
+    _logPendingIris('shutter closed', {
+      closeMs: timing.closeMs,
+      minHoldMs: timing.minHoldMs,
+      openMs: timing.openMs,
+    })
+    if (state.released) scheduleOpenIfReady()
+  }, timing.closeMs)
+
+  const ensureOpenPromise = () => {
+    if (state.openPromise) return state.openPromise
+    state.openPromise = new Promise(resolve => {
+      state.openPromiseResolve = resolve
+    })
+    return state.openPromise
+  }
+
+  const resolveOpenPromise = () => {
+    if (!state.openPromiseResolve) return
+    const resolve = state.openPromiseResolve
+    state.openPromiseResolve = null
+    resolve()
+  }
+
+  const finishOpen = () => {
+    if (state.cancelled || state.cleanedUp) return
+    _setLiveCapturePhase('opening')
+    state.cleanupTimer = setTimeout(() => {
+      if (livePendingIrisState !== state || state.cancelled || state.cleanedUp) return
+      _clearPendingIrisState(state, { immediate: false })
+      _logPendingIris('shutter opened', {
+        captureAfterMs: Number.isFinite(state.captureAfterMs) ? Math.round(state.captureAfterMs) : null,
+        closedHoldMs: Number.isFinite(state.closedHoldMs) ? Math.round(state.closedHoldMs) : null,
+        waitedForCapture: !!state.waitedForCapture,
+        waitedForMinHold: !!state.waitedForMinHold,
+      })
+      resolveOpenPromise()
+    }, timing.openMs)
+  }
+
+  const scheduleOpenIfReady = () => {
+    if (state.cancelled || state.cleanedUp) return
+    if (!state.released || !state.closedAt || state.captureResolvedAt === null) return
+
+    const now = performance.now()
+    const openAt = Math.max(
+      state.closedAt + timing.minHoldMs,
+      state.captureResolvedAt,
+    )
+    const waitMs = Math.max(0, openAt - now)
+
+    state.closedHoldMs = Math.max(0, openAt - state.closedAt)
+    state.waitedForCapture = state.captureResolvedAt > state.closedAt + timing.minHoldMs
+    state.waitedForMinHold = now < state.closedAt + timing.minHoldMs
+
+    if (state.openTimer) {
+      clearTimeout(state.openTimer)
+      state.openTimer = null
+    }
+
+    if (waitMs > 0) {
+      state.openTimer = setTimeout(() => {
+        state.openTimer = null
+        finishOpen()
+      }, waitMs)
+      return
+    }
+
+    finishOpen()
+  }
+
+  const scheduleOpen = () => {
+    if (state.cancelled || state.cleanedUp || state.released) return ensureOpenPromise()
+    state.released = true
+    state.releaseRequestedAt = performance.now()
+    state.captureAfterMs = Number.isFinite(state.captureAfterMs) ? state.captureAfterMs : null
+    const openPromise = ensureOpenPromise()
+    scheduleOpenIfReady()
+    _logPendingIris('shutter release requested', {
+      captureAfterMs: Number.isFinite(state.captureAfterMs) ? Math.round(state.captureAfterMs) : null,
+      closedHoldMs: Number.isFinite(state.closedHoldMs) ? Math.round(state.closedHoldMs) : null,
+      waitedForCapture: !!state.waitedForCapture,
+      waitedForMinHold: !!state.waitedForMinHold,
+    })
+    return openPromise
+  }
+
+  const cancel = () => {
+    if (state.cancelled || state.cleanedUp) return Promise.resolve()
+    state.cancelled = true
+    _logPendingIris('shutter cancel requested', {
+      captureAfterMs: Number.isFinite(state.captureAfterMs) ? Math.round(state.captureAfterMs) : null,
+    })
+    _clearPendingIrisState(state, { immediate: true })
+    resolveOpenPromise()
+    return Promise.resolve()
+  }
+
+  return {
+    release: ({ captureAfterMs = null, captureResolvedAt = null } = {}) => {
+      if (Number.isFinite(captureAfterMs)) state.captureAfterMs = Number(captureAfterMs)
+      state.captureResolvedAt = Number.isFinite(captureResolvedAt) ? Number(captureResolvedAt) : performance.now()
+      return scheduleOpen()
+    },
+    cancel,
+  }
+}
+
 function _playIrisOverlay(options) {
   const overlay = _renderDebugOverlay(options)
   if (!overlay) return null
@@ -101,7 +472,34 @@ function _playIrisOverlay(options) {
   return overlay
 }
 
-export function playIrisShutter({ mode = 'pending' } = {}) {
+export function startPendingIrisShutter(options = {}) {
+  const liveController = _createPendingIrisController({
+    ...DEFAULT_PENDING_SHUTTER_TIMING,
+    ...options,
+    mode: 'pending',
+  })
+  if (!_isDebugEnabled()) return liveController
+
+  const debugController = _createPendingDebugShutterController({
+    ...DEFAULT_PENDING_SHUTTER_TIMING,
+    ...options,
+  })
+
+  return {
+    release: releaseOptions => {
+      const liveRelease = liveController.release(releaseOptions)
+      void debugController.release(releaseOptions).catch(() => {})
+      return liveRelease
+    },
+    cancel: () => {
+      void liveController.cancel()
+      void debugController.cancel()
+      return Promise.resolve()
+    },
+  }
+}
+
+export function playIrisShutter({ mode = 'pending', ...options } = {}) {
   const reduced = _prefersReducedMotion()
   const durationMs = reduced
     ? LIVE_FLASH_REDUCED_DURATION_MS[mode] || LIVE_FLASH_REDUCED_DURATION_MS.pending
@@ -113,89 +511,56 @@ export function playIrisShutter({ mode = 'pending' } = {}) {
 
   if (reduced) {
     _startSimpleFlash(mode, durationMs)
-    return
+    return {
+      release: () => Promise.resolve(),
+      cancel: () => Promise.resolve(),
+    }
+  }
+
+  if (mode === 'pending') {
+    return startPendingIrisShutter({
+      ...options,
+      closeMs: options.closeMs ?? DEFAULT_PENDING_SHUTTER_TIMING.closeMs,
+      minHoldMs: options.minHoldMs ?? DEFAULT_PENDING_SHUTTER_TIMING.minHoldMs,
+      openMs: options.openMs ?? DEFAULT_PENDING_SHUTTER_TIMING.openMs,
+    })
   }
 
   _playIrisOverlay({
     ...DEFAULT_DEBUG_OPTIONS,
+    ...options,
     mode,
     durationMs,
     hold: mode === 'pending',
   })
+  return {
+    release: () => Promise.resolve(),
+    cancel: () => Promise.resolve(),
+  }
 }
 
 export function clearIrisShutter() {
+  if (livePendingIrisState) {
+    livePendingIrisState.cancelled = true
+    _clearPendingIrisState(livePendingIrisState, { immediate: true })
+  }
   if (liveFlashTimer) {
     clearTimeout(liveFlashTimer)
     liveFlashTimer = null
   }
   const vf = _getCaptureViewfinder()
   if (vf) {
-    vf.classList.remove('is-iris-flash', 'is-iris-flash-armed', 'is-iris-pending')
+    vf.classList.remove('is-iris-flash', 'is-iris-flash-armed', 'is-iris-pending', 'is-iris-closing', 'is-iris-opening')
     delete vf.dataset.irisFlashMode
+    delete vf.dataset.irisPhase
   }
 
   _setLiveCaptureState(false)
   clearIrisDebug()
 }
 
-function _buildBladePath({
-  curveExponent,
-  curveStrength,
-  bladeLength,
-  bladeWidth,
-  bladeSamples,
-  bladeBackOverhang,
-}) {
-  const baseY = 0
-  const tipY = bladeLength
-  const back = Math.max(0, Number(bladeBackOverhang) || 0)
-  const outerBaseX = -bladeWidth * (0.56 + back * 0.88)
-  const outerTipX = -bladeWidth * (0.22 + back * 0.52)
-  const innerBaseX = bladeWidth * 0.12
-  const innerTipX = bladeWidth * 0.58
-
-  const innerEdge = []
-  for (let i = 0; i <= bladeSamples; i += 1) {
-    const t = i / bladeSamples
-    const eased = Math.pow(t, curveExponent)
-    const y = baseY + bladeLength * t
-    const taper = bladeWidth * (0.08 + 0.24 * (1 - t))
-    const x = innerBaseX + taper + curveStrength * eased
-    innerEdge.push([x, y])
-  }
-
-  const d = []
-  d.push(`M ${_formatNumber(outerBaseX)} ${_formatNumber(baseY)}`)
-  d.push(`C ${_formatNumber(outerBaseX - 7)} ${_formatNumber(baseY + bladeLength * 0.16)}, ${_formatNumber(outerTipX - 10)} ${_formatNumber(tipY - bladeLength * 0.14)}, ${_formatNumber(outerTipX)} ${_formatNumber(tipY)}`)
-  d.push(`Q ${_formatNumber(-bladeWidth * 0.05)} ${_formatNumber(tipY + 8)}, ${_formatNumber(innerTipX)} ${_formatNumber(tipY)}`)
-  for (let i = innerEdge.length - 1; i >= 0; i -= 1) {
-    const [x, y] = innerEdge[i]
-    d.push(`L ${_formatNumber(x)} ${_formatNumber(y)}`)
-  }
-  d.push(`Q ${_formatNumber(innerBaseX)} ${_formatNumber(baseY + bladeLength * 0.08)}, ${_formatNumber(outerBaseX)} ${_formatNumber(baseY)}`)
-  d.push('Z')
-  return d.join(' ')
-}
-
-export function buildIrisBladePathData(params = {}) {
-  return _buildBladePath({
-    curveExponent: Number.isFinite(params.curveExponent) ? params.curveExponent
-      : Number.isFinite(params.bladeCurveExponent) ? params.bladeCurveExponent
-        : DEFAULT_DEBUG_OPTIONS.curveExponent,
-    curveStrength: Number.isFinite(params.curveStrength) ? params.curveStrength
-      : Number.isFinite(params.bladeCurveStrength) ? params.bladeCurveStrength
-        : DEFAULT_DEBUG_OPTIONS.curveStrength,
-    bladeLength: Number.isFinite(params.bladeLength) ? params.bladeLength : DEFAULT_DEBUG_OPTIONS.bladeLength,
-    bladeWidth: Number.isFinite(params.bladeWidth) ? params.bladeWidth : DEFAULT_DEBUG_OPTIONS.bladeWidth,
-    bladeSamples: Number.isFinite(params.bladeSamples) ? params.bladeSamples : DEFAULT_DEBUG_OPTIONS.bladeSamples,
-    bladeBackOverhang: Number.isFinite(params.bladeBackOverhang) ? params.bladeBackOverhang : DEFAULT_DEBUG_OPTIONS.bladeBackOverhang,
-  })
-}
-
 function _buildDebugBladeMarkup(index, options) {
   const baseAngle = index * (360 / BLADE_COUNT)
-  const bladePath = buildIrisBladePathData(options)
   return `
     <div class="iris-debug-blade" style="
       --iris-base-angle: ${_formatDegrees(baseAngle)};
@@ -207,7 +572,7 @@ function _buildDebugBladeMarkup(index, options) {
       --iris-scale: ${_round(options.irisScale, 3)};
     ">
       <svg class="iris-debug-blade-svg" viewBox="${VIEWBOX_MIN} ${VIEWBOX_MIN} ${VIEWBOX_SIZE} ${VIEWBOX_SIZE}" aria-hidden="true" focusable="false">
-        <path class="iris-debug-blade-path" d="${bladePath}"></path>
+        <path class="iris-debug-blade-path" d="${IRIS_BLADE_PATH_D}"></path>
       </svg>
     </div>
   `
@@ -247,7 +612,7 @@ function _applyDebugOverlayOptions(options) {
   overlay.style.setProperty('--iris-debug-curve-exponent', String(options.curveExponent))
   overlay.style.setProperty('--iris-debug-curve-strength', String(options.curveStrength))
   overlay.style.setProperty('--iris-debug-scale', String(options.irisScale))
-  overlay.style.setProperty('--iris-debug-back-overhang', String(options.bladeBackOverhang))
+  // Static blade path ignores overhang; keep this option as a no-op for compatibility.
   return overlay
 }
 
@@ -350,6 +715,7 @@ export function playIrisDebug(options = {}) {
   currentOptions.irisScale = Number.isFinite(options.irisScale)
     ? Math.max(0.1, Number(options.irisScale))
     : Math.max(0.1, Number(currentOptions.irisScale) || DEFAULT_DEBUG_OPTIONS.irisScale)
+  // Compatibility-only: the static blade path ignores back overhang.
   currentOptions.bladeBackOverhang = Number.isFinite(options.bladeBackOverhang)
     ? Math.max(0, Number(options.bladeBackOverhang))
     : Math.max(0, Number(currentOptions.bladeBackOverhang) || DEFAULT_DEBUG_OPTIONS.bladeBackOverhang)
@@ -365,6 +731,16 @@ export function clearIrisDebug() {
   if (debugOverlayTimer) {
     clearTimeout(debugOverlayTimer)
     debugOverlayTimer = null
+  }
+  if (debugPendingIrisState) {
+    debugPendingIrisState.cleanedUp = true
+    if (debugPendingIrisState.closeTimer) clearTimeout(debugPendingIrisState.closeTimer)
+    if (debugPendingIrisState.openTimer) clearTimeout(debugPendingIrisState.openTimer)
+    if (debugPendingIrisState.cleanupTimer) clearTimeout(debugPendingIrisState.cleanupTimer)
+    debugPendingIrisState.closeTimer = null
+    debugPendingIrisState.openTimer = null
+    debugPendingIrisState.cleanupTimer = null
+    debugPendingIrisState = null
   }
 
   if (!debugOverlayRoot) return
