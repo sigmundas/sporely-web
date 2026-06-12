@@ -44,14 +44,105 @@ const MINE_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, s
 const FEED_SELECT = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, is_draft, location_precision'
 const FEED_SELECT_LEGACY = 'id, user_id, date, created_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude'
 const OBSERVATION_SCOPES = new Set(['mine', 'feed', 'friends', 'public'])
+const FINDS_PRIMARY_SCOPES = new Set(['mine', 'feed'])
+const FINDS_MINE_SCOPES = new Set(['private', 'friends', 'public'])
+const FINDS_FEED_SCOPES = new Set(['species', 'friends', 'public'])
 
 function _normalizeScope(scope) {
   if (scope === 'community') return 'public'
   return OBSERVATION_SCOPES.has(scope) ? scope : 'mine'
 }
 
+function _normalizeFindsPrimaryScope(scope) {
+  const raw = String(scope || '').trim().toLowerCase()
+  return FINDS_PRIMARY_SCOPES.has(raw) ? raw : 'mine'
+}
+
+function _normalizeFindsMineScope(scope) {
+  const raw = String(scope || '').trim().toLowerCase()
+  return FINDS_MINE_SCOPES.has(raw) ? raw : 'private'
+}
+
+function _normalizeFindsFeedScope(scope) {
+  const raw = String(scope || '').trim().toLowerCase()
+  return FINDS_FEED_SCOPES.has(raw) ? raw : 'species'
+}
+
+function _findsPrimaryScope() {
+  return _normalizeFindsPrimaryScope(state.findsScopePrimary)
+}
+
+function _findsSecondaryScope(primary = _findsPrimaryScope()) {
+  return primary === 'feed'
+    ? _normalizeFindsFeedScope(state.findsFeedScope)
+    : _normalizeFindsMineScope(state.findsMineScope)
+}
+
+function _findsVisibleScope() {
+  const primary = _findsPrimaryScope()
+  const secondary = _findsSecondaryScope(primary)
+  if (primary === 'mine') return 'mine'
+  return secondary === 'species' ? 'feed' : secondary
+}
+
 function _currentScope() {
-  return state.findsTargetUserId ? 'user' : _normalizeScope(state.observationScope)
+  return state.findsTargetUserId ? 'user' : _findsVisibleScope()
+}
+
+function _findsSecondaryLabel(primary = _findsPrimaryScope()) {
+  return primary === 'feed'
+    ? (t('detail.species') || 'Species')
+    : (t('visibility.private') || 'Private')
+}
+
+function _findsSecondaryScopeLabel(scope, primary = _findsPrimaryScope()) {
+  const normalized = String(scope || '').trim().toLowerCase()
+  if (normalized === 'friends') return t('scope.friends')
+  if (normalized === 'public') return t('scope.community')
+  if (primary === 'feed') return _findsSecondaryLabel(primary)
+  return t('visibility.private')
+}
+
+function _setFindsPrimaryScope(primary, options = {}) {
+  const nextPrimary = _normalizeFindsPrimaryScope(primary)
+  state.findsScopePrimary = nextPrimary
+  if (nextPrimary === 'feed') {
+    state.findsFeedScope = _normalizeFindsFeedScope(options.secondaryScope || state.findsFeedScope || 'species')
+  } else {
+    state.findsMineScope = _normalizeFindsMineScope(options.secondaryScope || state.findsMineScope || 'private')
+  }
+}
+
+function _setFindsSecondaryScope(scope, options = {}) {
+  const primary = _findsPrimaryScope()
+  const normalized = String(scope || '').trim().toLowerCase()
+  if (primary === 'feed') {
+    if (normalized === 'species' || normalized === 'friends' || normalized === 'public') {
+      state.findsFeedScope = _normalizeFindsFeedScope(normalized)
+    }
+  } else {
+    if (normalized === 'private' || normalized === 'friends' || normalized === 'public') {
+      state.findsMineScope = _normalizeFindsMineScope(normalized)
+    }
+  }
+  if (options.notify !== false) _showFindsScopeHint()
+}
+
+function _showFindsScopeHint() {
+  const primary = _findsPrimaryScope()
+  const secondary = _findsSecondaryScope(primary)
+  const hint = primary === 'feed'
+    ? (secondary === 'species'
+      ? 'Species you follow'
+      : secondary === 'friends'
+        ? 'Your friends\' finds'
+        : 'Public finds')
+    : (secondary === 'private'
+      ? 'Your private finds'
+      : secondary === 'friends'
+        ? 'Finds shared with friends'
+        : 'Your public finds')
+  showToast(hint)
 }
 
 function _normalizeFindsTargetUsername(value, userId = '') {
@@ -452,9 +543,15 @@ export function initFinds() {
   })
 
   // Scope tabs
-  document.querySelectorAll('#finds-scope-tabs .scope-tab').forEach(btn => {
+  document.querySelectorAll('#finds-scope-primary-tabs .scope-tab, #finds-scope-secondary-tabs .scope-tab').forEach(btn => {
     btn.addEventListener('click', () => {
-      _setScope(btn.dataset.scope)
+      if (btn.closest('#finds-scope-primary-tabs')) {
+        _setFindsPrimaryScope(btn.dataset.scope)
+        _showFindsScopeHint()
+      } else {
+        _setFindsSecondaryScope(btn.dataset.scope)
+      }
+      _syncScopeTabs()
       loadFinds()
     })
   })
@@ -467,12 +564,16 @@ export function initFinds() {
 }
 
 function _syncScopeTabs() {
-  const scopeTabs = document.getElementById('finds-scope-tabs')
+  const primaryTabs = document.getElementById('finds-scope-primary-tabs')
+  const secondaryTabs = document.getElementById('finds-scope-secondary-tabs')
   const userBar = document.getElementById('finds-user-bar')
   const currentScope = _currentScope()
+  const primaryScope = _findsPrimaryScope()
+  const secondaryScope = _findsSecondaryScope(primaryScope)
 
   if (currentScope === 'user') {
-    if (scopeTabs) scopeTabs.style.display = 'none'
+    if (primaryTabs) primaryTabs.style.display = 'none'
+    if (secondaryTabs) secondaryTabs.style.display = 'none'
     if (userBar) {
       userBar.style.display = 'flex'
       userBar.style.flexDirection = 'column'
@@ -509,7 +610,8 @@ function _syncScopeTabs() {
       }
     }
   } else {
-    if (scopeTabs) scopeTabs.style.display = 'flex'
+    if (primaryTabs) primaryTabs.style.display = 'inline-flex'
+    if (secondaryTabs) secondaryTabs.style.display = 'inline-flex'
     if (userBar) {
       userBar.style.display = 'none'
       userBar.style.flexDirection = ''
@@ -517,9 +619,26 @@ function _syncScopeTabs() {
       userBar.style.padding = '12px 0 0 18px'
       userBar.style.gap = '8px'
     }
-    document.querySelectorAll('#finds-scope-tabs .scope-tab').forEach(btn => {
-      if (btn.dataset.scope === 'mine') btn.textContent = t('scope.mine')
-      btn.classList.toggle('active', _normalizeScope(btn.dataset.scope) === currentScope)
+    const primaryMineBtn = document.getElementById('finds-scope-mine')
+    const primaryFeedBtn = document.getElementById('finds-scope-feed')
+    if (primaryMineBtn) primaryMineBtn.textContent = t('scope.mine')
+    if (primaryFeedBtn) primaryFeedBtn.textContent = t('scope.feed')
+
+    const secondaryMainBtn = document.getElementById('finds-scope-secondary-main')
+    const secondaryFriendsBtn = document.getElementById('finds-scope-secondary-friends')
+    const secondaryPublicBtn = document.getElementById('finds-scope-secondary-public')
+    if (secondaryMainBtn) {
+      secondaryMainBtn.textContent = _findsSecondaryLabel(primaryScope)
+      secondaryMainBtn.dataset.scope = primaryScope === 'feed' ? 'species' : 'private'
+    }
+    if (secondaryFriendsBtn) secondaryFriendsBtn.textContent = t('scope.friends')
+    if (secondaryPublicBtn) secondaryPublicBtn.textContent = t('scope.community')
+
+    document.querySelectorAll('#finds-scope-primary-tabs .scope-tab').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.scope === primaryScope)
+    })
+    document.querySelectorAll('#finds-scope-secondary-tabs .scope-tab').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.scope === secondaryScope)
     })
   }
 }
@@ -546,9 +665,9 @@ function _syncDraftToggle() {
 }
 
 function _setScope(scope, options = {}) {
-  const nextScope = scope === 'user' ? 'user' : _normalizeScope(scope || state.observationScope)
+  const normalized = String(scope || '').trim().toLowerCase()
 
-  if (scope === 'user') {
+  if (normalized === 'user') {
     state.findsTargetUserId = options.userId
     state.findsTargetSummaryLoaded = options.summaryLoaded === true
     state.findsTargetUsername = options.username
@@ -564,7 +683,14 @@ function _setScope(scope, options = {}) {
       _findsTargetCardLoadedUserId = null
     }
   } else {
-    state.observationScope = nextScope
+    if (normalized === 'mine' || normalized === 'feed') {
+      _setFindsPrimaryScope(normalized, { secondaryScope: options.secondaryScope })
+    } else if (normalized === 'private' || normalized === 'friends' || normalized === 'public' || normalized === 'species') {
+      _setFindsSecondaryScope(normalized, { notify: false })
+    } else {
+      _setFindsPrimaryScope('mine', { secondaryScope: options.secondaryScope })
+    }
+
     state.findsTargetUserId = null
     state.findsTargetSummaryLoaded = false
     state.findsTargetUsername = null
@@ -589,6 +715,9 @@ function _setScope(scope, options = {}) {
     state.findsGroupBySpecies = false
     state.findsSporesOnly = false
     state.findsDraftOnly = false
+    _setFindsPrimaryScope(_findsPrimaryScope(), {
+      secondaryScope: _findsPrimaryScope() === 'feed' ? 'species' : 'private',
+    })
   }
 
   if (options.groupBySpecies !== undefined) {
@@ -646,30 +775,28 @@ export async function loadFinds() {
   const list = document.getElementById('finds-list')
   if (!state.user) return
   const loadSeq = ++_loadFindsSeq
+  const primaryScope = _findsPrimaryScope()
+  const secondaryScope = _findsSecondaryScope(primaryScope)
   const currentScope = _currentScope()
-
-  const speciesBtn = document.getElementById('finds-group-species')
-  if (speciesBtn) {
-    speciesBtn.textContent = t('detail.species') || 'Species'
-  }
 
   _syncScopeTabs()
   _syncSpeciesToggle()
   _syncSporesToggle()
   _syncDraftToggle()
 
-  if (currentScope === 'mine') {
+  if (primaryScope === 'mine') {
     await _fetchMine()
   } else if (currentScope === 'user') {
     await _fetchUser(state.findsTargetUserId)
-  } else if (currentScope === 'feed') {
+  } else if (secondaryScope === 'species') {
     await _fetchFollowFeed()
-  } else if (currentScope === 'friends') {
+  } else if (secondaryScope === 'friends') {
     await _fetchFriends()
-  } else if (currentScope === 'public') {
+  } else if (secondaryScope === 'public') {
     await _fetchCommunity()
   } else {
-    state.observationScope = 'mine'
+    state.findsScopePrimary = 'mine'
+    state.findsMineScope = 'private'
     await _fetchMine()
   }
 
@@ -737,8 +864,9 @@ async function _fetchCommunity() {
     _cache['public'] = [];
     return
   }
-  await _attachSporeFlags(data)
-  _cache['public'] = data || []
+  const items = (data || []).filter(obs => String(obs.user_id || '') !== String(state.user?.id || ''))
+  await _attachSporeFlags(items)
+  _cache['public'] = items
 }
 
 async function _fetchFollowFeed() {
@@ -849,11 +977,25 @@ function _sortTs(obs) {
 
 function _applyFilter() {
   const list     = document.getElementById('finds-list')
+  const primaryScope = _findsPrimaryScope()
+  const secondaryScope = _findsSecondaryScope(primaryScope)
   const currentScope = _currentScope()
-  const raw  = _cache[currentScope] || []
+  const raw  = primaryScope === 'mine'
+    ? (_cache['mine'] || [])
+    : (_cache[currentScope] || [])
   const q    = (state.searchQuery || '').toLowerCase().trim()
   
   let filtered = raw
+  if (primaryScope === 'mine') {
+    filtered = filtered.filter(obs => {
+      if (String(obs.user_id || '') !== String(state.user?.id || '')) return false
+      const visibility = normalizeObservationVisibility(obs.visibility)
+      if (secondaryScope === 'private') return visibility === 'private'
+      return visibility === secondaryScope
+    })
+  } else if (secondaryScope === 'public') {
+    filtered = filtered.filter(obs => String(obs.user_id || '') !== String(state.user?.id || ''))
+  }
   if (state.findsSporesOnly) filtered = filtered.filter(obs => !!obs.has_spores || !!obs.spore_short || !!obs.spore_statistics)
   if (state.findsDraftOnly) filtered = filtered.filter(obs => obs?.is_draft === true)
   

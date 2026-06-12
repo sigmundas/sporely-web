@@ -1743,7 +1743,11 @@ export function applyStaticTranslations() {
   setText('#android-web-camera-warning-cancel', 'common.cancel')
   setText('#android-web-camera-warning-continue', 'import.continueAnyway')
 
-  setAllText('#screen-finds .scope-tab', [t('scope.mine'), t('scope.feed'), t('scope.friends'), t('scope.community')])
+  setText('#finds-scope-mine', 'scope.mine')
+  setText('#finds-scope-feed', 'scope.feed')
+  setText('#finds-scope-secondary-main', 'visibility.private')
+  setText('#finds-scope-secondary-friends', 'scope.friends')
+  setText('#finds-scope-secondary-public', 'scope.community')
   setText('#finds-refresh-label', 'finds.pullToRefresh')
   setText('#finds-filter-spores-label', 'stats.spores')
   setText('#finds-filter-draft-label', 'finds.drafts')

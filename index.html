@@ -319,12 +319,17 @@
         </div>
       </div>
 
-      <div style="display:flex; align-items:center; justify-content:center; padding: 8px 18px 4px;">
-        <div class="scope-tabs" id="finds-scope-tabs">
-          <button class="scope-tab active" data-scope="mine">Mine</button>
-          <button class="scope-tab" data-scope="feed">Feed</button>
-          <button class="scope-tab" data-scope="friends">Friends</button>
-          <button class="scope-tab" data-scope="public">Public</button>
+      <div style="display:flex; align-items:center; justify-content:center; padding: 8px 12px 4px;">
+        <div class="finds-scope-stack">
+          <div class="scope-tabs" id="finds-scope-primary-tabs">
+            <button class="scope-tab active" id="finds-scope-mine" data-scope="mine">Mine</button>
+            <button class="scope-tab" id="finds-scope-feed" data-scope="feed">Feed</button>
+          </div>
+          <div class="scope-tabs" id="finds-scope-secondary-tabs">
+            <button class="scope-tab active" id="finds-scope-secondary-main" data-scope="private">Private</button>
+            <button class="scope-tab" id="finds-scope-secondary-friends" data-scope="friends">Friends</button>
+            <button class="scope-tab" id="finds-scope-secondary-public" data-scope="public">Public</button>
+          </div>
         </div>
         <div id="finds-user-bar" style="display:none; align-items:center; gap:8px; padding: 12px 0 0 18px; flex:1;">
           <button class="detail-back-btn" id="finds-user-back" type="button" style="padding:0; margin-right:4px;" aria-label="Back">
