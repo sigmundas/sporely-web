@@ -463,6 +463,8 @@ test('detail ai run path stays disabled for non-owners and starts from a safe re
   assert.match(source, /detail\.onlyOwnerRunAiId/)
   assert.match(source, /Only the owner can run AI Photo ID/)
   assert.doesNotMatch(source, /tab\.disabled = !isOwner \|\| tab\.classList\.contains\('is-disabled'\)/)
+  assert.doesNotMatch(source, /photoIdServices\.run\.length/)
+  assert.match(source, /showToast\(noRunReason\)/)
 })
 
 test('selected AI service keeps its own probability and source highlight', () => {
@@ -553,6 +555,40 @@ test('stored result tab scores fall back to top probability when no explicit sel
 
     assert.equal(tabs[0].querySelector('.ai-id-service-tab-score').textContent, '91%')
     assert.equal(tabs[1].querySelector('.ai-id-service-tab-score').textContent, '74%')
+  } finally {
+    restore()
+  }
+})
+
+test('detail ai run button reflects the running state while a request is in flight', () => {
+  resetDetailState()
+  const runBtn = {
+    disabled: false,
+    attributes: {},
+    classList: new MockClassList(),
+    setAttribute(name, value) {
+      this.attributes[name] = String(value)
+    },
+    removeAttribute(name) {
+      delete this.attributes[name]
+    },
+    querySelector(selector) {
+      if (selector === '[data-identify-run-label]') {
+        return { textContent: '' }
+      }
+      return null
+    },
+  }
+  const restore = withDocument({ runBtn })
+
+  try {
+    detailAiState.running = true
+
+    _renderDetailAiTabs()
+
+    assert.equal(runBtn.disabled, true)
+    assert.equal(runBtn.classList.contains('is-running'), true)
+    assert.equal(runBtn.attributes['aria-disabled'], 'true')
   } finally {
     restore()
   }

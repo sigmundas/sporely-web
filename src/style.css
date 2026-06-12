@@ -2464,6 +2464,14 @@ html, body {
   transition: background 0.15s;
 }
 .ai-id-btn:active { background: var(--btn-active); }
+.ai-id-btn.is-running {
+  background: var(--btn-active);
+  border-color: var(--green-mid);
+  box-shadow: 0 10px 24px rgba(45,75,50,0.14);
+}
+.ai-id-btn.is-running:active {
+  background: var(--btn-active);
+}
 .ai-id-dot,
 .ai-id-service-tab-icon-dot {
   width: 13px !important;
@@ -3760,6 +3768,12 @@ html.light .detail-author-avatar { color: #ffffff; }
 /* Primary button — restore dark green bg in light mode */
 html.light .btn-primary { background: var(--green-deep); border-color: var(--green-mid); color: #ffffff; }
 html.light .btn-primary:active { background: var(--green-mid); }
+html.light .ai-id-btn.is-running {
+  background: var(--green-mid);
+  border-color: var(--green-bright);
+  color: #ffffff;
+  box-shadow: 0 10px 24px rgba(45,75,50,0.12);
+}
 
 /* Auth button — restore dark green bg in light mode */
 html.light .auth-btn { background: var(--green-bright); color: #ffffff; }

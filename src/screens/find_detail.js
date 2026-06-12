@@ -1682,10 +1682,10 @@ function _renderDetailAiTabs() {
   const photoIdServices = _resolveDetailPhotoIdServices(detailAiState.availability)
   const runBtn = document.querySelector('[data-identify-run-button]')
   if (runBtn) {
-    const availabilityKnown = Object.keys(detailAiState.availability || {}).length > 0
-    const runDisabled = detailAiState.running || !currentObsIsOwner || (availabilityKnown && !photoIdServices.run.length)
+    const runDisabled = detailAiState.running || !currentObsIsOwner
     runBtn.disabled = runDisabled
     runBtn.setAttribute('aria-disabled', String(runDisabled))
+    runBtn.classList.toggle('is-running', detailAiState.running)
     const runLabel = runBtn.querySelector('[data-identify-run-label]')
     if (runLabel) {
       runLabel.textContent = detailAiState.running ? 'Loading...' : _tf('review.aiId', 'AI Photo ID')
@@ -2044,6 +2044,8 @@ async function _runDetailAiComparison(serviceOverride = null) {
   detailAiState.selectedPredictionByService = {}
 
   if (!requestedServices.length) {
+    const noRunReason = availability?.[primaryService]?.reason || _tf('detail.noPhotoToIdentify', 'No photo is available for identification.')
+    showToast(noRunReason)
     detailAiState.running = false
     detailAiState.runningByService = {}
     _renderDetailAiTabs()
