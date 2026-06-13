@@ -33,9 +33,9 @@ import { initProfile, loadProfile, refreshHeaderProfileButtons } from './screens
 import { initPeople, loadPeople } from './screens/people.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
-import { fetchCloudPlanProfile, getStoredImageResolutionMode, setStoredImageResolutionMode } from './cloud-plan.js'
+import { fetchCloudPlanProfile } from './cloud-plan.js'
 import { clearMediaUrlCache } from './images.js'
-import { initDebugDashboard, isDebugDashboardEnabled } from './debug-dashboard.js'
+import { initDebugDashboard } from './debug-dashboard.js'
 import { hideSettingsOverlay, showSettingsOverlay } from './settings-overlay.js'
 import { isWebInatOAuthConfigured } from './inaturalist.js'
 import { installIrisShutterDebugControls } from './iris-shutter.js'
@@ -47,7 +47,7 @@ import {
   maybeHandleInaturalistOAuthReturn,
 } from './inaturalist.js'
 import { syncIdentifyButtonLabels } from './identify.js'
-import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
+import { SYNC_SUCCESS_EVENT } from './sync-queue.js'
 import {
   getArtsorakelMaxEdge,
   getDefaultVisibility,
@@ -262,14 +262,6 @@ function initSettings() {
     setLocale(localeSelect.value)
   })
 
-  document.querySelectorAll('.settings-resolution-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      setStoredImageResolutionMode(btn.dataset.imageResolutionMode)
-      await _refreshSettingsCloudPlan()
-      if (state.currentScreen === 'profile') loadProfile()
-    })
-  })
-
   const cameraAppRow = document.getElementById('settings-camera-app-row')
   if (cameraAppRow) cameraAppRow.style.display = isAndroidApp() ? 'flex' : 'none'
   document.querySelectorAll('.settings-camera-app-btn').forEach(btn => {
@@ -333,15 +325,6 @@ function _syncSettingsUI() {
   if (artsorakelMaxEdgeInput) artsorakelMaxEdgeInput.value = String(getArtsorakelMaxEdge())
   const localeSelect = document.getElementById('settings-language-select')
   if (localeSelect) localeSelect.value = getLocale()
-
-  const resolutionSection = document.getElementById('settings-image-resolution-section')
-  const isPro = state.cloudPlan?.qualityProfile === 'high' || state.cloudPlan?.cloudPlan === 'pro'
-  if (resolutionSection) resolutionSection.style.display = isPro ? '' : 'none'
-
-  const selectedResolution = state.cloudPlan?.imageResolutionMode || getStoredImageResolutionMode()
-  document.querySelectorAll('.settings-resolution-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.imageResolutionMode === selectedResolution)
-  })
 
   const defaultVisibility = getDefaultVisibility()
   document.querySelectorAll('.settings-default-visibility-btn').forEach(btn => {
@@ -410,7 +393,7 @@ function initNav() {
   document.getElementById('map-fab')?.addEventListener('click', openPreferredCamera)
   document.getElementById('nav-people').addEventListener('click', () => {
     navigate('people')
-    loadPeople()
+    loadPeople({ query: document.getElementById('people-search-input')?.value.trim() || '' })
   })
   ;['home-profile-btn', 'finds-profile-btn', 'map-profile-btn', 'people-profile-btn'].forEach(id => {
     document.getElementById(id)?.addEventListener('click', () => {
@@ -540,7 +523,7 @@ onLocaleChange(() => {
   if (state.currentScreen === 'review') buildReviewGrid()
   if (state.currentScreen === 'import-review') renderSessions()
   if (state.currentScreen === 'map') void loadMapScreen()
-  if (state.currentScreen === 'people') loadPeople()
+  if (state.currentScreen === 'people') loadPeople({ query: document.getElementById('people-search-input')?.value.trim() || '' })
   if (state.currentScreen === 'profile') loadProfile()
   _syncInaturalistUi() // Sync iNaturalist UI on locale change
   syncIdentifyButtonLabels()

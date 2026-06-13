@@ -221,6 +221,14 @@
         </div>
 
         <div class="section-header home-section-gap">
+          <div class="section-title" id="home-friend-requests-title">Friend requests</div>
+        </div>
+
+        <div id="home-friend-requests-list">
+          <!-- populated by home.js -->
+        </div>
+
+        <div class="section-header home-section-gap">
           <div class="section-title" id="home-recent-comments-title">Recent Comments</div>
         </div>
 
@@ -788,12 +796,11 @@
         </div>
 
         <div class="profile-section">
-          <div class="profile-section-title" id="profile-cloud-plan-title">Account status</div>
           <div class="field-meta-section" style="margin-bottom:0">
             <div class="field-meta-header" id="profile-cloud-plan-header">Account</div>
             <div class="field-meta-row">
-              <div class="field-meta-key" id="profile-cloud-upload-key">Image resolution</div>
-              <div class="field-meta-val" id="profile-cloud-upload-mode">2MP</div>
+              <div class="field-meta-key"><span id="profile-cloud-upload-key">Image quality</span><sup class="profile-footnote-star">*</sup></div>
+              <div class="field-meta-val" id="profile-cloud-upload-mode">—</div>
             </div>
             <div class="field-meta-row">
               <div class="field-meta-key" id="profile-cloud-usage-key">Sync history</div>
@@ -808,7 +815,7 @@
               <div class="field-meta-val" id="profile-image-count">—</div>
             </div>
           </div>
-          <p id="profile-cloud-plan-note" style="display:none; font-size:12px; color:var(--text-dim); margin:8px 2px 0; line-height:1.4; text-align:center;"></p>
+          <p id="profile-cloud-plan-note" style="font-size:12px; color:var(--text-dim); margin:8px 2px 0; line-height:1.4; text-align:left;"></p>
         </div>
 
         <div class="profile-section">
@@ -969,15 +976,6 @@
             <button type="button" class="btn-primary inat-connect-btn" id="settings-inat-connect-btn">Log in with iNaturalist</button>
             <button type="button" class="sign-out-btn inat-forget-btn" id="settings-inat-forget-btn">Forget login</button>
             <p class="inat-web-login-hint" id="settings-inat-web-login-hint" style="display:none; font-size:12px; color:var(--text-dim); margin-top:8px; text-align:center;"></p>
-          </div>
-        </div>
-
-
-        <div id="settings-image-resolution-section" style="display:none">
-          <div class="settings-section-label" id="settings-image-resolution-label" style="margin-top:22px">Image resolution</div>
-          <div class="theme-segment settings-resolution-segment">
-            <button class="theme-seg-btn settings-resolution-btn" id="settings-resolution-reduced" data-image-resolution-mode="reduced">Default (2MP)</button>
-            <button class="theme-seg-btn settings-resolution-btn" id="settings-resolution-max" data-image-resolution-mode="max">Max (12MP)</button>
           </div>
         </div>
 

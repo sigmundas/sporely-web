@@ -14,7 +14,7 @@ export const state = {
   searchQuery: '',
   observationScope: 'mine',
   findsScopePrimary: 'mine',
-  findsMineScope: 'private',
+  findsMineScope: 'public',
   findsFeedScope: 'species',
   mapTimeScope: 'month',
   findsView: 'cards',

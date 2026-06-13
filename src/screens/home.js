@@ -1,7 +1,6 @@
 import { supabase } from '../supabase.js'
 import { formatDate, t } from '../i18n.js'
 import { state } from '../state.js'
-import { navigate } from '../router.js'
 import { getEffectiveCameraLabel, openPreferredCamera } from '../camera-actions.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { fetchFirstImages } from '../images.js'
@@ -22,6 +21,7 @@ function _isDebugCommentQueryEnabled() {
 
 const MENTION_PREVIEW_CACHE_KEY = 'sporely-mention-preview-unavailable'
 let _mentionPreviewAvailable = null
+let _friendRequestMenuListenerBound = false
 
 function _debugCommentQuery(message, details = {}) {
   if (!_isDebugCommentQueryEnabled()) return
@@ -67,7 +67,9 @@ export async function initHome() {
   document.getElementById('home-fab').addEventListener('click', openPreferredCamera)
   document.getElementById('ac-camera')?.addEventListener('click', openPreferredCamera)
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
-  document.getElementById('recent-history-link').addEventListener('click', () => navigate('finds'))
+  document.getElementById('recent-history-link').addEventListener('click', () => {
+    openFinds('feed', { resetSearch: true, resetFilters: true, secondaryScope: 'public' })
+  })
   _syncCameraAction()
 
   document.getElementById('hstat-obs-btn').addEventListener('click', () => openFinds('mine', { resetSearch: true, resetFilters: true }))
@@ -100,7 +102,7 @@ function _syncCameraAction() {
 
 export async function refreshHome() {
   _syncCameraAction()
-  await Promise.all([loadRecentFinds(), loadRecentComments(), loadStats(), checkSyncStatus(), refreshHeaderProfileButtons()])
+  await Promise.all([loadRecentFinds(), loadFriendRequests(), loadRecentComments(), loadStats(), checkSyncStatus(), refreshHeaderProfileButtons()])
 }
 
 // ── Mixed feed ────────────────────────────────────────────────────────────────
@@ -176,6 +178,260 @@ async function loadRecentFinds() {
     row.addEventListener('click', () => openFindDetail(row.dataset.id))
   })
   _wireImageFallback(list)
+}
+
+async function loadFriendRequests() {
+  const list = document.getElementById('home-friend-requests-list')
+  const section = document.getElementById('home-friend-requests-title')?.closest('.section-header')
+  if (!list || !section) return
+  if (!state.user) {
+    list.innerHTML = ''
+    section.style.display = 'none'
+    return
+  }
+
+  const { data: requests, error } = await supabase
+    .from('friendships')
+    .select('id, requester_id, addressee_id, status, created_at, updated_at')
+    .eq('addressee_id', state.user.id)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+
+  const { data: acceptedRows, error: acceptedError } = await supabase
+    .from('friendships')
+    .select('id, requester_id, addressee_id, status, created_at, updated_at')
+    .eq('requester_id', state.user.id)
+    .eq('status', 'accepted')
+    .order('updated_at', { ascending: false })
+
+  if (error) {
+    console.warn('Friend requests load failed:', error.message)
+    list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">${t('common.errorPrefix', { message: error.message })}</p>`
+    return
+  }
+  if (acceptedError) {
+    console.warn('Accepted friend notifications load failed:', acceptedError.message)
+  }
+
+  const pending = requests || []
+  const accepted = _filterUnseenAcceptedFriendNotifications(acceptedRows || [])
+  if (!pending.length && !accepted.length) {
+    list.innerHTML = ''
+    section.style.display = 'none'
+    return
+  }
+
+  section.style.display = ''
+  const requesterIds = [...new Set([
+    ...pending.map(req => req.requester_id),
+    ...accepted.map(req => req.addressee_id),
+  ])]
+  const { data: profiles } = await supabase
+    .from('profiles')
+    .select('id, username, display_name, avatar_url')
+    .in('id', requesterIds)
+  const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p]))
+  list.innerHTML = [
+    ...pending.map(req => _renderFriendRequestRow(req, profileMap)),
+    ...accepted.map(req => _renderFriendAcceptedRow(req, profileMap)),
+  ].join('')
+
+  _bindFriendRequestMenuInteractions(list, profileMap)
+  _bindFriendAcceptedRows(list, profileMap)
+}
+
+function _renderFriendRequestRow(req, profileMap) {
+  const profile = profileMap[req.requester_id] || {}
+  const displayName = profile.display_name || profile.username || t('common.unknown')
+  const username = profile.username ? `@${profile.username}` : ''
+  const initials = _esc(_initials(profile.display_name || profile.username || '?'))
+  const avatar = profile.avatar_url && /^https?:\/\//i.test(String(profile.avatar_url))
+    ? `<img class="home-friend-request-avatar" src="${_esc(profile.avatar_url)}" alt="" loading="lazy" decoding="async">`
+    : `<div class="home-friend-request-avatar home-friend-request-avatar--fallback">${initials}</div>`
+  const requestDate = req.created_at ? formatDate(req.created_at, { day: 'numeric', month: 'short' }) : ''
+  return `
+    <div class="home-comment-row home-friend-request-row" data-request-id="${_esc(req.id)}" data-user-id="${_esc(req.requester_id)}" data-kind="pending">
+      <div class="comment-obs-thumb-wrap">${avatar}</div>
+      <div class="home-comment-body">
+        <div class="home-comment-meta">
+          <span class="home-comment-author">${_esc(displayName)}</span>
+          ${username ? `<span class="home-comment-date">${_esc(username)}</span>` : ''}
+          ${requestDate ? `<span class="home-comment-date">${_esc(requestDate)}</span>` : ''}
+        </div>
+        <div class="home-comment-text">${_esc(t('home.friendRequestNote'))}</div>
+      </div>
+      <div class="home-friend-request-actions">
+        <button class="home-friend-request-menu-btn" type="button" aria-label="${_esc(t('home.friendRequestActions'))}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+        </button>
+        <div class="home-friend-request-menu" style="display:none">
+          <button class="home-friend-request-menu-item" data-action="accept" type="button">${_esc(t('profile.accept'))}</button>
+          <button class="home-friend-request-menu-item" data-action="decline" type="button">${_esc(t('profile.decline'))}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function _renderFriendAcceptedRow(req, profileMap) {
+  const profile = profileMap[req.addressee_id] || {}
+  const displayName = profile.display_name || profile.username || t('common.unknown')
+  const username = profile.username ? `@${profile.username}` : ''
+  const initials = _esc(_initials(profile.display_name || profile.username || '?'))
+  const avatar = profile.avatar_url && /^https?:\/\//i.test(String(profile.avatar_url))
+    ? `<img class="home-friend-request-avatar" src="${_esc(profile.avatar_url)}" alt="" loading="lazy" decoding="async">`
+    : `<div class="home-friend-request-avatar home-friend-request-avatar--fallback">${initials}</div>`
+  const acceptedDate = req.updated_at ? formatDate(req.updated_at, { day: 'numeric', month: 'short' }) : ''
+  return `
+    <div class="home-comment-row home-friend-request-row home-friend-request-row--accepted" data-kind="accepted" data-request-id="${_esc(req.id)}" data-user-id="${_esc(req.addressee_id)}">
+      <div class="comment-obs-thumb-wrap">${avatar}</div>
+      <div class="home-comment-body">
+        <div class="home-comment-meta">
+          <span class="home-comment-author">${_esc(displayName)}</span>
+          ${username ? `<span class="home-comment-date">${_esc(username)}</span>` : ''}
+          ${acceptedDate ? `<span class="home-comment-date">${_esc(acceptedDate)}</span>` : ''}
+        </div>
+        <div class="home-comment-text">${_esc(t('home.friendAccepted'))}</div>
+      </div>
+      <div class="home-friend-request-status">
+        <svg class="home-friend-request-heart" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+        </svg>
+      </div>
+    </div>
+  `
+}
+
+function _acceptedFriendSeenKey() {
+  return `sporely-seen-friend-accepted:${state.user?.id || ''}`
+}
+
+function _loadSeenAcceptedFriendIds() {
+  try {
+    const raw = globalThis.localStorage?.getItem(_acceptedFriendSeenKey())
+    const parsed = raw ? JSON.parse(raw) : []
+    return new Set(Array.isArray(parsed) ? parsed.map(id => String(id || '').trim()).filter(Boolean) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function _saveSeenAcceptedFriendIds(ids) {
+  try {
+    globalThis.localStorage?.setItem(_acceptedFriendSeenKey(), JSON.stringify([...ids]))
+  } catch {}
+}
+
+function _filterUnseenAcceptedFriendNotifications(rows) {
+  const seen = _loadSeenAcceptedFriendIds()
+  const unseen = []
+  let changed = false
+  for (const row of rows || []) {
+    const rowId = String(row?.id || '').trim()
+    if (!rowId) continue
+    if (seen.has(rowId)) continue
+    unseen.push(row)
+    seen.add(rowId)
+    changed = true
+  }
+  if (changed) _saveSeenAcceptedFriendIds(seen)
+  return unseen
+}
+
+function _bindFriendRequestMenuInteractions(list, profileMap) {
+  if (!list) return
+  if (!_friendRequestMenuListenerBound) {
+    _friendRequestMenuListenerBound = true
+    document.addEventListener('click', event => {
+      if (event.target.closest('.home-friend-request-row')) return
+      document.querySelectorAll('.home-friend-request-menu').forEach(node => { node.style.display = 'none' })
+    })
+  }
+
+  list.querySelectorAll('.home-friend-request-row').forEach(row => {
+    if (row.dataset.kind !== 'pending') return
+    row.addEventListener('click', event => {
+      if (event.target.closest('.home-friend-request-actions')) return
+      const userId = row.dataset.userId
+      const profile = profileMap[userId] || {}
+      openFinds('user', {
+        userId,
+        username: profile.username || null,
+        displayName: profile.display_name || null,
+        avatarUrl: profile.avatar_url || '',
+        summaryLoaded: false,
+        resetSearch: true,
+        resetFilters: true,
+      })
+    })
+
+    const menuBtn = row.querySelector('.home-friend-request-menu-btn')
+    const menu = row.querySelector('.home-friend-request-menu')
+    menuBtn?.addEventListener('click', event => {
+      event.stopPropagation()
+      const isOpening = menu.style.display === 'none' || !menu.style.display
+      document.querySelectorAll('.home-friend-request-menu').forEach(node => { node.style.display = 'none' })
+      if (!isOpening) return
+      menu.style.display = 'block'
+    })
+
+    row.querySelectorAll('.home-friend-request-menu-item').forEach(btn => {
+      btn.addEventListener('click', async event => {
+        event.stopPropagation()
+        menu.style.display = 'none'
+        await _handleFriendRequestAction(row.dataset.requestId, row.dataset.userId, btn.dataset.action)
+      })
+    })
+  })
+}
+
+function _bindFriendAcceptedRows(list, profileMap) {
+  if (!list) return
+  list.querySelectorAll('.home-friend-request-row[data-kind="accepted"]').forEach(row => {
+    row.addEventListener('click', () => {
+      const userId = row.dataset.userId
+      const profile = profileMap[userId] || {}
+      openFinds('user', {
+        userId,
+        username: profile.username || null,
+        displayName: profile.display_name || null,
+        avatarUrl: profile.avatar_url || '',
+        summaryLoaded: false,
+        resetSearch: true,
+        resetFilters: true,
+      })
+    })
+  })
+}
+
+async function _handleFriendRequestAction(requestId, userId, action) {
+  const normalizedRequestId = String(requestId || '').trim()
+  const normalizedUserId = String(userId || '').trim()
+  if (!normalizedRequestId || !normalizedUserId || !state.user?.id) return
+
+  try {
+    if (action === 'accept') {
+      const { error } = await supabase
+        .from('friendships')
+        .update({ status: 'accepted' })
+        .eq('id', normalizedRequestId)
+      if (error) throw error
+      showToast(t('profile.friendAccepted'))
+    } else if (action === 'decline') {
+      const { error } = await supabase
+        .from('friendships')
+        .delete()
+        .eq('id', normalizedRequestId)
+      if (error) throw error
+      showToast(t('profile.friendRemoved'))
+    } else {
+      return
+    }
+    await loadFriendRequests()
+  } catch (error) {
+    console.warn('Friend request action failed:', error)
+    showToast(t('common.errorPrefix', { message: error?.message || t('common.error') }))
+  }
 }
 
 async function loadRecentComments() {
@@ -345,6 +601,17 @@ async function checkSyncStatus() {
 
 function _esc(str) {
   return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function _initials(value) {
+  if (!value) return '?'
+  return String(value)
+    .replace(/^@/, '')
+    .split(/[\s@.]/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(part => part[0].toUpperCase())
+    .join('') || '?'
 }
 
 async function _loadProfileMap(observations) {

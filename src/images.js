@@ -14,6 +14,7 @@ import { debugImagePipeline, isImagePipelineDebugEnabled } from './image-pipelin
 import { isBlob } from './observation-shapes.js'
 
 const DEFAULT_MEDIA_BASE_URL = 'https://media.sporely.no'
+const OBSERVATION_IMAGES_COMMUNITY_VIEW = 'observation_images_community_view'
 const UPLOAD_METADATA_FIELDS = [
   'upload_mode',
   'source_width',
@@ -1481,6 +1482,32 @@ export async function resolveMediaSources(paths, options = {}) {
   })
 }
 
+async function _fetchObservationImageRowsFrom(table, obsIds, selectFields) {
+  return supabase
+    .from(table)
+    .select(selectFields)
+    .in('observation_id', obsIds)
+    .is('deleted_at', null)
+    .order('sort_order', { ascending: true })
+}
+
+export async function fetchObservationImageRows(obsIds, options = {}) {
+  if (!obsIds.length) return []
+  const selectFields = options.selectFields || 'id, observation_id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom, deleted_at'
+
+  const communityRes = await _fetchObservationImageRowsFrom(OBSERVATION_IMAGES_COMMUNITY_VIEW, obsIds, selectFields)
+  if (!communityRes.error) {
+    return communityRes.data || []
+  }
+
+  const fallbackRes = await _fetchObservationImageRowsFrom('observation_images', obsIds, selectFields)
+  if (!fallbackRes.error) {
+    return fallbackRes.data || []
+  }
+
+  return []
+}
+
 /**
  * Given an array of observation IDs, returns a map of
  * { obsId -> { primaryUrl, fallbackUrl } } for the first image.
@@ -1488,15 +1515,10 @@ export async function resolveMediaSources(paths, options = {}) {
 export async function fetchFirstImages(obsIds, options = {}) {
   if (!obsIds.length) return {}
   const variant = options.variant || 'medium'
-
-  const { data, error } = await supabase
-    .from('observation_images')
-    .select('observation_id, storage_path')
-    .in('observation_id', obsIds)
-    .is('deleted_at', null)
-    .order('sort_order', { ascending: true })
-
-  if (error || !data?.length) return {}
+  const data = await fetchObservationImageRows(obsIds, {
+    selectFields: 'observation_id, storage_path, sort_order, deleted_at',
+  })
+  if (!data.length) return {}
 
   const firstPaths = {}
   for (const img of data) {
@@ -1534,15 +1556,10 @@ export async function fetchFirstImages(obsIds, options = {}) {
 export async function fetchCardImages(obsIds, options = {}) {
   if (!obsIds.length) return {}
   const variant = options.variant || 'medium'
-
-  const { data, error } = await supabase
-    .from('observation_images')
-    .select('observation_id, storage_path')
-    .in('observation_id', obsIds)
-    .is('deleted_at', null)
-    .order('sort_order', { ascending: true })
-
-  if (error || !data?.length) return {}
+  const data = await fetchObservationImageRows(obsIds, {
+    selectFields: 'observation_id, storage_path, sort_order, deleted_at',
+  })
+  if (!data.length) return {}
 
   // Collect first two paths + count per observation
   const firstTwo = {}

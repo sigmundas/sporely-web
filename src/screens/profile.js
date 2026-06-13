@@ -541,8 +541,8 @@ function _renderCloudPlan(cloudPlan) {
     )
   }
   if (noteEl) {
-    noteEl.textContent = t('profile.storagePlanWebsiteNote')
-    noteEl.style.display = _isNativeApp() ? 'block' : 'none'
+    noteEl.textContent = t('profile.cloudPlanInfo')
+    noteEl.style.display = 'block'
   }
 }
 

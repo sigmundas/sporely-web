@@ -639,14 +639,15 @@ $$;
 ALTER FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer) OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."search_people_directory"("p_query" "text" DEFAULT NULL::"text", "p_limit" integer DEFAULT 24) RETURNS TABLE("user_id" "uuid", "username" "text", "display_name" "text", "bio" "text", "avatar_url" "text", "public_find_count" bigint, "public_species_count" bigint, "public_spore_count" bigint, "latest_public_observation_at" timestamp with time zone)
+CREATE OR REPLACE FUNCTION "public"."search_people_directory"("p_limit" integer DEFAULT 24, "p_offset" integer DEFAULT 0, "p_query" "text" DEFAULT NULL::"text") RETURNS TABLE("user_id" "uuid", "username" "text", "display_name" "text", "bio" "text", "avatar_url" "text", "public_find_count" bigint, "public_species_count" bigint, "public_spore_count" bigint)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
   WITH normalized AS (
     SELECT
       nullif(btrim(coalesce(p_query, '')), '') AS q,
-      greatest(1, least(coalesce(p_limit, 24), 100)) AS lim
+      greatest(1, least(coalesce(p_limit, 24), 100)) AS lim,
+      greatest(coalesce(p_offset, 0), 0) AS off
   ),
   visible_profiles AS (
     SELECT
@@ -670,83 +671,50 @@ CREATE OR REPLACE FUNCTION "public"."search_people_directory"("p_query" "text" D
         OR coalesce(p.display_name, '') ILIKE '%' || n.q || '%'
       )
   ),
-  public_observations AS (
+  visible_profiles_with_stats AS (
     SELECT
-      o.id,
-      o.user_id,
-      o.created_at,
-      o.genus,
-      o.species,
-      o.spore_data_visibility
-    FROM public.observations_community_view o
-  ),
-  public_observation_stats AS (
-    SELECT
-      po.user_id,
-      count(distinct po.id) AS public_find_count,
-      count(
-        distinct CASE
-          WHEN nullif(trim(coalesce(po.genus, '')), '') IS NOT NULL
-            OR nullif(trim(coalesce(po.species, '')), '') IS NOT NULL
-          THEN lower(trim(coalesce(po.genus, ''))) || '|' || lower(trim(coalesce(po.species, '')))
-          ELSE NULL
-        END
-      ) AS public_species_count,
-      max(po.created_at) AS latest_public_observation_at
-    FROM public_observations po
-    GROUP BY po.user_id
-  ),
-  public_spore_stats AS (
-    SELECT
-      po.user_id,
-      count(*) AS public_spore_count
-    FROM public_observations po
-    JOIN public.observation_images i
-      ON i.observation_id = po.id
-    JOIN public.spore_measurements m
-      ON m.image_id = i.id
-    WHERE coalesce(po.spore_data_visibility, 'public') = 'public'
-      AND (
-        m.measurement_type IS NULL
-        OR m.measurement_type = ''
-        OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
-      )
-    GROUP BY po.user_id
+      vp.id,
+      vp.username,
+      vp.display_name,
+      vp.bio,
+      vp.avatar_url,
+      coalesce(s.public_find_count, 0) AS public_find_count,
+      coalesce(s.public_species_count, 0) AS public_species_count,
+      coalesce(s.public_spore_count, 0) AS public_spore_count
+    FROM visible_profiles vp
+    LEFT JOIN LATERAL public.get_person_stats(vp.id) s ON true
   )
   SELECT
-    vp.id AS user_id,
-    vp.username,
-    vp.display_name,
-    vp.bio,
-    vp.avatar_url,
-    coalesce(pos.public_find_count, 0) AS public_find_count,
-    coalesce(pos.public_species_count, 0) AS public_species_count,
-    coalesce(ps.public_spore_count, 0) AS public_spore_count,
-    pos.latest_public_observation_at
-  FROM visible_profiles vp
-  LEFT JOIN public_observation_stats pos
-    ON pos.user_id = vp.id
-  LEFT JOIN public_spore_stats ps
-    ON ps.user_id = vp.id
+    vps.id AS user_id,
+    vps.username,
+    vps.display_name,
+    vps.bio,
+    vps.avatar_url,
+    vps.public_find_count,
+    vps.public_species_count,
+    vps.public_spore_count
+  FROM visible_profiles_with_stats vps
   CROSS JOIN normalized n
-  WHERE n.q IS NOT NULL
-     OR pos.latest_public_observation_at IS NOT NULL
   ORDER BY
     CASE
       WHEN n.q IS NULL THEN 0
-      WHEN lower(coalesce(vp.username, '')) = lower(n.q) THEN 0
-      WHEN lower(coalesce(vp.display_name, '')) = lower(n.q) THEN 1
-      WHEN lower(coalesce(vp.username, '')) LIKE lower(n.q) || '%' THEN 2
-      WHEN lower(coalesce(vp.display_name, '')) LIKE lower(n.q) || '%' THEN 3
+      WHEN lower(coalesce(vps.username, '')) = lower(n.q) THEN 0
+      WHEN lower(coalesce(vps.display_name, '')) = lower(n.q) THEN 1
+      WHEN lower(coalesce(vps.username, '')) LIKE lower(n.q) || '%' THEN 2
+      WHEN lower(coalesce(vps.display_name, '')) LIKE lower(n.q) || '%' THEN 3
       ELSE 4
     END,
-    pos.latest_public_observation_at DESC NULLS LAST,
-    coalesce(vp.display_name, vp.username, '') ASC
-  LIMIT (SELECT lim FROM normalized);
+    CASE WHEN n.q IS NULL THEN vps.public_find_count END DESC,
+    CASE WHEN n.q IS NULL THEN coalesce(vps.display_name, vps.username, '') END ASC,
+    CASE WHEN n.q IS NOT NULL THEN vps.public_find_count END DESC,
+    coalesce(vps.display_name, vps.username, '') ASC,
+    vps.id ASC
+  LIMIT (SELECT lim FROM normalized)
+  OFFSET (SELECT off FROM normalized);
 $$;
 
 
-ALTER FUNCTION "public"."search_people_directory"("p_query" "text", "p_limit" integer) OWNER TO "postgres";
+ALTER FUNCTION "public"."search_people_directory"("p_limit" integer, "p_offset" integer, "p_query" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."search_public_reference_values"("p_genus" "text", "p_species" "text", "p_limit" integer DEFAULT 50) RETURNS TABLE("reference_id" bigint, "genus" "text", "species" "text", "source" "text", "mount_medium" "text", "stain" "text", "length_min" double precision, "length_p05" double precision, "length_p50" double precision, "length_p95" double precision, "length_max" double precision, "width_min" double precision, "width_p05" double precision, "width_p50" double precision, "width_p95" double precision, "width_max" double precision, "q_min" double precision, "q_p50" double precision, "q_max" double precision, "updated_at" timestamp with time zone)
@@ -1223,11 +1191,6 @@ CREATE OR REPLACE VIEW "public"."observations_community_view" AS
     "genus",
     "species",
     "common_name",
-    "ai_selected_service",
-    "ai_selected_taxon_id",
-    "ai_selected_scientific_name",
-    "ai_selected_probability",
-    "ai_selected_at",
     "author",
     "location",
     "habitat",
@@ -1248,7 +1211,16 @@ CREATE OR REPLACE VIEW "public"."observations_community_view" AS
     "image_key",
     "thumb_key",
     "is_draft",
-    "location_precision"
+    "location_precision",
+    "ai_selected_service",
+    "ai_selected_taxon_id",
+    "ai_selected_scientific_name",
+    "ai_selected_probability",
+    "ai_selected_at",
+        CASE
+            WHEN (COALESCE("spore_data_visibility", 'public'::"text") = 'public'::"text") THEN "spore_statistics"
+            ELSE NULL::"jsonb"
+        END AS "spore_statistics"
    FROM "public"."observations" "o"
   WHERE ((COALESCE("visibility", 'public'::"text") = 'public'::"text") AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
@@ -1256,6 +1228,22 @@ CREATE OR REPLACE VIEW "public"."observations_community_view" AS
 
 
 ALTER VIEW "public"."observations_community_view" OWNER TO "postgres";
+
+
+CREATE OR REPLACE VIEW "public"."observation_images_community_view" AS
+ SELECT "oi".*,
+    "o"."user_id" AS "observation_user_id",
+    "o"."visibility" AS "observation_visibility",
+    "o"."is_draft" AS "observation_is_draft",
+    "o"."spore_data_visibility" AS "observation_spore_data_visibility"
+   FROM ("public"."observation_images" "oi"
+     JOIN "public"."observations" "o" ON (("o"."id" = "oi"."observation_id")))
+  WHERE ("public"."can_read_observation"("o"."user_id", "o"."visibility") AND (NOT (EXISTS ( SELECT 1
+           FROM "public"."profiles" "p"
+          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
+
+
+ALTER VIEW "public"."observation_images_community_view" OWNER TO "postgres";
 
 
 CREATE OR REPLACE VIEW "public"."observations_follow_view" AS
@@ -2288,10 +2276,10 @@ GRANT ALL ON FUNCTION "public"."search_community_spore_datasets"("p_genus" "text
 
 
 
-REVOKE ALL ON FUNCTION "public"."search_people_directory"("p_query" "text", "p_limit" integer) FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."search_people_directory"("p_query" "text", "p_limit" integer) TO "anon";
-GRANT ALL ON FUNCTION "public"."search_people_directory"("p_query" "text", "p_limit" integer) TO "authenticated";
-GRANT ALL ON FUNCTION "public"."search_people_directory"("p_query" "text", "p_limit" integer) TO "service_role";
+REVOKE ALL ON FUNCTION "public"."search_people_directory"("p_limit" integer, "p_offset" integer, "p_query" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."search_people_directory"("p_limit" integer, "p_offset" integer, "p_query" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."search_people_directory"("p_limit" integer, "p_offset" integer, "p_query" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."search_people_directory"("p_limit" integer, "p_offset" integer, "p_query" "text") TO "service_role";
 
 
 
@@ -2394,6 +2382,11 @@ GRANT ALL ON TABLE "public"."profiles" TO "service_role";
 GRANT ALL ON TABLE "public"."observations_community_view" TO "anon";
 GRANT ALL ON TABLE "public"."observations_community_view" TO "authenticated";
 GRANT ALL ON TABLE "public"."observations_community_view" TO "service_role";
+
+
+GRANT ALL ON TABLE "public"."observation_images_community_view" TO "anon";
+GRANT ALL ON TABLE "public"."observation_images_community_view" TO "authenticated";
+GRANT ALL ON TABLE "public"."observation_images_community_view" TO "service_role";
 
 
 

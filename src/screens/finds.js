@@ -19,12 +19,14 @@ import { openFindDetail } from './find_detail.js'
 import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openPreferredCamera } from '../camera-actions.js'
 import { normalizeObservationVisibility } from '../visibility.js'
-import { buildPeopleCard, wireAvatarFallback } from './people.js'
+import { buildPeopleCard, loadPeopleSocialState, wireAvatarFallback, wirePeopleCardActions } from './people.js'
 
 
 const _cache = {}   // scope → array of observations
 let _profileMap = {}
 let _pendingScrollRestore = null
+const FINDS_PAGE_SIZE = 20
+const FINDS_LOAD_MORE_THRESHOLD = 240
 const PULL_REFRESH_THRESHOLD = 72
 const PULL_REFRESH_MAX = 112
 const PULL_REFRESH_TOUCH_SLOP = 10
@@ -38,6 +40,13 @@ let _loadFindsSeq = 0
 let _findsTargetCardLoadedUserId = null
 let _findsTargetCardLoadingUserId = null
 let _findsTargetCardLoadPromise = null
+const _findsPaging = {
+  mine: _createPagingState(),
+  feed: _createPagingState(),
+  friends: _createPagingState(),
+  public: _createPagingState(),
+  user: _createPagingState(),
+}
 
 const MINE_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, is_draft, location_precision, spore_statistics'
 const MINE_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, notes, uncertain, visibility, gps_latitude, gps_longitude, source_type, spore_statistics'
@@ -47,6 +56,68 @@ const OBSERVATION_SCOPES = new Set(['mine', 'feed', 'friends', 'public'])
 const FINDS_PRIMARY_SCOPES = new Set(['mine', 'feed'])
 const FINDS_MINE_SCOPES = new Set(['private', 'friends', 'public'])
 const FINDS_FEED_SCOPES = new Set(['species', 'friends', 'public'])
+
+function _createPagingState() {
+  return {
+    nextOffset: 0,
+    hasMore: true,
+    loadingMore: false,
+    initialized: false,
+  }
+}
+
+function _pagingScopeKey(scope) {
+  const normalized = String(scope || '').trim().toLowerCase()
+  return Object.prototype.hasOwnProperty.call(_findsPaging, normalized) ? normalized : 'mine'
+}
+
+function _getPagingState(scope) {
+  const key = _pagingScopeKey(scope)
+  if (!_findsPaging[key]) _findsPaging[key] = _createPagingState()
+  return _findsPaging[key]
+}
+
+function _resetPagingState(scope) {
+  const key = _pagingScopeKey(scope)
+  _findsPaging[key] = _createPagingState()
+  return _findsPaging[key]
+}
+
+function _pageRange(offset) {
+  const from = Math.max(0, Number(offset) || 0)
+  return { from, to: from + FINDS_PAGE_SIZE - 1 }
+}
+
+function _mergeFindsItems(scope, existingItems, incomingItems) {
+  const merged = [...(existingItems || [])]
+  const seenIds = new Set(merged.map(item => String(item?.id || '').trim()).filter(Boolean))
+  for (const item of incomingItems || []) {
+    if (!item) continue
+    const itemId = String(item.id || '').trim()
+    if (itemId && seenIds.has(itemId)) continue
+    if (scope === 'mine' && merged.some(existing => _observationsLikelySame(existing, item))) continue
+    merged.push(item)
+    if (itemId) seenIds.add(itemId)
+  }
+  merged.sort((a, b) => _sortTs(b) - _sortTs(a))
+  return merged
+}
+
+function _setFindsCache(scope, items) {
+  _cache[_pagingScopeKey(scope)] = Array.isArray(items) ? items : []
+}
+
+function _findsFooterHtml(scope) {
+  const paging = _getPagingState(scope)
+  if (!paging.initialized) return ''
+  if (paging.loadingMore) {
+    return `<div class="finds-bottom-sentinel finds-bottom-sentinel--loading">${_esc(t('common.loading'))}</div>`
+  }
+  if (!paging.hasMore && (_cache[_pagingScopeKey(scope)] || []).length) {
+    return `<div class="finds-bottom-sentinel finds-bottom-sentinel--done">No more finds</div>`
+  }
+  return ''
+}
 
 function _normalizeScope(scope) {
   if (scope === 'community') return 'public'
@@ -60,7 +131,7 @@ function _normalizeFindsPrimaryScope(scope) {
 
 function _normalizeFindsMineScope(scope) {
   const raw = String(scope || '').trim().toLowerCase()
-  return FINDS_MINE_SCOPES.has(raw) ? raw : 'private'
+  return FINDS_MINE_SCOPES.has(raw) ? raw : 'public'
 }
 
 function _normalizeFindsFeedScope(scope) {
@@ -109,7 +180,7 @@ function _setFindsPrimaryScope(primary, options = {}) {
   if (nextPrimary === 'feed') {
     state.findsFeedScope = _normalizeFindsFeedScope(options.secondaryScope || state.findsFeedScope || 'species')
   } else {
-    state.findsMineScope = _normalizeFindsMineScope(options.secondaryScope || state.findsMineScope || 'private')
+    state.findsMineScope = _normalizeFindsMineScope(options.secondaryScope || state.findsMineScope || 'public')
   }
 }
 
@@ -182,6 +253,12 @@ function _normalizeFindsTargetAvatarUrl(value) {
   return /^https?:\/\//i.test(raw) ? raw : ''
 }
 
+export function isPublicVisibleObservation(obs, viewerId = state.user?.id) {
+  const visibility = normalizeObservationVisibility(obs?.visibility)
+  if (visibility !== 'public') return false
+  return String(obs?.user_id || '') !== String(viewerId || '')
+}
+
 function _composeFindsTargetPerson(source = {}) {
   const userId = String(source.userId || state.findsTargetUserId || '').trim()
   if (!userId) return null
@@ -227,7 +304,10 @@ function _renderFindsTargetCard(root, person) {
   root.innerHTML = person
     ? buildPeopleCard(person)
     : `<div class="people-empty" style="padding: 8px 0;">${_esc(t('common.loading'))}</div>`
-  if (person) wireAvatarFallback(root)
+  if (person) {
+    wireAvatarFallback(root)
+    wirePeopleCardActions(root)
+  }
 }
 
 async function _loadFindsTargetCard(userId) {
@@ -239,13 +319,14 @@ async function _loadFindsTargetCard(userId) {
 
   _findsTargetCardLoadingUserId = targetUserId
   const loadPromise = (async () => {
-    const [profileRes, statsRes] = await Promise.all([
+    const [profileRes, statsRes, relationshipMap] = await Promise.all([
       supabase
         .from('profiles')
         .select('id, username, display_name, avatar_url, bio')
         .eq('id', targetUserId)
         .maybeSingle(),
       supabase.rpc('get_person_stats', { p_user_id: targetUserId }),
+      loadPeopleSocialState([targetUserId]),
     ])
 
     if (_currentScope() !== 'user' || String(state.findsTargetUserId || '') !== targetUserId) return
@@ -276,6 +357,7 @@ async function _loadFindsTargetCard(userId) {
     }
 
     if (!person) return
+    person.relationship = relationshipMap?.[targetUserId] || { friendStatus: null, following: false }
 
     state.findsTargetUsername = person.username
     state.findsTargetDisplayName = person.display_name
@@ -471,6 +553,24 @@ function _bindPullToRefresh() {
   screen.addEventListener('touchcancel', _finishPull)
 }
 
+function _bindInfiniteScroll() {
+  const screen = document.getElementById('screen-finds')
+  if (!screen || screen.dataset.infiniteScrollBound === 'true') return
+  screen.dataset.infiniteScrollBound = 'true'
+
+  let scheduled = false
+  const checkBottom = () => {
+    scheduled = false
+    void _maybeLoadMoreFinds()
+  }
+
+  screen.addEventListener('scroll', () => {
+    if (scheduled) return
+    scheduled = true
+    window.requestAnimationFrame(checkBottom)
+  }, { passive: true })
+}
+
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
 export function initFinds() {
@@ -478,6 +578,7 @@ export function initFinds() {
     screen.orientation.lock('portrait').catch(() => {});
   }
   _bindPullToRefresh()
+  _bindInfiniteScroll()
   document.getElementById('finds-fab')
     .addEventListener('click', openPreferredCamera)
 
@@ -716,7 +817,7 @@ function _setScope(scope, options = {}) {
     state.findsSporesOnly = false
     state.findsDraftOnly = false
     _setFindsPrimaryScope(_findsPrimaryScope(), {
-      secondaryScope: _findsPrimaryScope() === 'feed' ? 'species' : 'private',
+      secondaryScope: _findsPrimaryScope() === 'feed' ? 'species' : 'public',
     })
   }
 
@@ -778,143 +879,42 @@ export async function loadFinds() {
   const primaryScope = _findsPrimaryScope()
   const secondaryScope = _findsSecondaryScope(primaryScope)
   const currentScope = _currentScope()
+  _resetPagingState(currentScope)
+
+  _setFindsCache(currentScope, [])
+  if (list) {
+    list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
+  }
+  const screen = document.getElementById('screen-finds')
+  if (screen && _pendingScrollRestore === null) {
+    screen.scrollTop = 0
+  }
 
   _syncScopeTabs()
   _syncSpeciesToggle()
   _syncSporesToggle()
   _syncDraftToggle()
 
-  if (primaryScope === 'mine') {
-    await _fetchMine()
-  } else if (currentScope === 'user') {
-    await _fetchUser(state.findsTargetUserId)
+  if (currentScope === 'user') {
+    await _loadUserPage(state.findsTargetUserId, { loadSeq, reset: true })
+  } else if (primaryScope === 'mine') {
+    await _loadMinePage({ loadSeq, reset: true })
   } else if (secondaryScope === 'species') {
-    await _fetchFollowFeed()
+    await _loadFollowPage({ loadSeq, reset: true })
   } else if (secondaryScope === 'friends') {
-    await _fetchFriends()
+    await _loadFriendsPage({ loadSeq, reset: true })
   } else if (secondaryScope === 'public') {
-    await _fetchCommunity()
+    await _loadCommunityPage({ loadSeq, reset: true })
   } else {
     state.findsScopePrimary = 'mine'
-    state.findsMineScope = 'private'
-    await _fetchMine()
+    state.findsMineScope = 'public'
+    await _loadMinePage({ loadSeq, reset: true })
   }
 
-  await _loadProfilesForScope(_cache[currentScope] || [])
+  await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
   if (loadSeq !== _loadFindsSeq) return
   _applyFilter()
-}
-
-async function _fetchMine() {
-  const { data, error } = await _withPhase7Fallback(
-    columns => supabase
-      .from('observations')
-      .select(columns)
-      .eq('user_id', state.user.id)
-      .order('date', { ascending: false })
-      .limit(100),
-    MINE_SELECT,
-    MINE_SELECT_LEGACY,
-  )
-
-  if (error) { showToast(t('finds.couldNotLoad')); _cache['mine'] = []; return }
-
-  const queued = await getQueuedObservations(state.user.id)
-  const synced = (data || []).filter(obs => !queued.some(queuedObs => _observationsLikelySame(queuedObs, obs)))
-  const items = [...queued, ...synced]
-  await _attachSporeFlags(items)
-  items.sort((a, b) => _sortTs(b) - _sortTs(a))
-  _cache['mine'] = items
-}
-
-async function _fetchFriends() {
-  const { data, error } = await _withPhase7Fallback(
-    columns => supabase
-      .from('observations_friend_view')
-      .select(columns)
-      .neq('user_id', state.user.id)
-      .order('date', { ascending: false })
-      .limit(100),
-    FEED_SELECT,
-    FEED_SELECT_LEGACY,
-  )
-
-  if (error) {
-    console.error('Failed to fetch friends feed:', error)
-    _cache['friends'] = []
-    return
-  }
-  await _attachSporeFlags(data)
-  _cache['friends'] = data || []
-}
-
-async function _fetchCommunity() {
-  const { data, error } = await _withPhase7Fallback(
-    columns => supabase
-      .from('observations_community_view')
-      .select(columns)
-      .order('date', { ascending: false })
-      .limit(100),
-    FEED_SELECT,
-    FEED_SELECT_LEGACY,
-  )
-
-  if (error) {
-    console.error('Failed to fetch community feed:', error)
-    _cache['public'] = [];
-    return
-  }
-  const items = (data || []).filter(obs => String(obs.user_id || '') !== String(state.user?.id || ''))
-  await _attachSporeFlags(items)
-  _cache['public'] = items
-}
-
-async function _fetchFollowFeed() {
-  const { data, error } = await _withPhase7Fallback(
-    columns => supabase
-      .from('observations_follow_view')
-      .select(columns)
-      .order('date', { ascending: false })
-      .limit(100),
-    FEED_SELECT,
-    FEED_SELECT_LEGACY,
-  )
-
-  if (error) {
-    console.warn('Failed to fetch followed feed:', error.message)
-    _cache['feed'] = []
-    return
-  }
-  await _attachSporeFlags(data)
-  _cache['feed'] = data || []
-}
-
-async function _fetchUser(userId) {
-  if (!userId) return
-  const [friendRes, publicRes] = await Promise.all([
-    _withPhase7Fallback(
-      columns => supabase.from('observations').select(columns).eq('user_id', userId).order('date', { ascending: false }).limit(100),
-      MINE_SELECT,
-      MINE_SELECT_LEGACY,
-    ),
-    _withPhase7Fallback(
-      columns => supabase.from('observations_community_view').select(columns).eq('user_id', userId).order('date', { ascending: false }).limit(100),
-      FEED_SELECT,
-      FEED_SELECT_LEGACY,
-    )
-  ])
-  
-  const seen = new Set()
-  const combined = []
-  for (const obs of [...(friendRes.data || []), ...(publicRes.data || [])]) {
-    if (!seen.has(obs.id)) {
-      seen.add(obs.id)
-      combined.push(obs)
-    }
-  }
-  await _attachSporeFlags(combined)
-  combined.sort((a, b) => _sortTs(b) - _sortTs(a))
-  _cache['user'] = combined
+  void _maybeLoadMoreFinds()
 }
 
 async function _attachSporeFlags(observations) {
@@ -926,14 +926,16 @@ async function _attachSporeFlags(observations) {
   })
 }
 
-async function _loadProfilesForScope(data) {
+async function _loadProfilesForScope(data, loadSeq = _loadFindsSeq) {
+  if (loadSeq !== _loadFindsSeq) return false
   const userIds = [...new Set((data || [])
     .map(obs => obs.user_id)
     .filter(uid => uid && uid !== state.user?.id))]
 
   if (!userIds.length) {
+    if (loadSeq !== _loadFindsSeq) return false
     _profileMap = {}
-    return
+    return true
   }
 
   const { data: profiles, error } = await supabase
@@ -941,14 +943,17 @@ async function _loadProfilesForScope(data) {
     .select('id, username, display_name, avatar_url')
     .in('id', userIds)
 
+  if (loadSeq !== _loadFindsSeq) return false
+
   if (error) {
     console.warn('Could not load observation profiles:', error.message)
     _profileMap = {}
-    return
+    return false
   }
   
   const paths = userIds.map(uid => `${uid}/avatar.jpg`)
   const { data: signedData } = await supabase.storage.from('avatars').createSignedUrls(paths, 3600)
+  if (loadSeq !== _loadFindsSeq) return false
   const signedMap = {}
   if (signedData) {
     signedData.forEach(item => {
@@ -956,10 +961,269 @@ async function _loadProfilesForScope(data) {
     })
   }
 
+  if (loadSeq !== _loadFindsSeq) return false
   _profileMap = Object.fromEntries((profiles || []).map(profile => {
     if (signedMap[profile.id]) profile.avatar_url = signedMap[profile.id]
     return [profile.id, profile]
   }))
+  return true
+}
+
+function _orderedFindsQuery(query) {
+  return query
+    .order('date', { ascending: false })
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+}
+
+async function _runPagedFindsQuery(makeQuery, columns, legacyColumns, offset) {
+  const { from, to } = _pageRange(offset)
+  return _withPhase7Fallback(
+    selectedColumns => _orderedFindsQuery(makeQuery(selectedColumns)).range(from, to),
+    columns,
+    legacyColumns,
+  )
+}
+
+async function _loadMinePage({ loadSeq, reset = false } = {}) {
+  if (!state.user?.id) return false
+  const paging = _getPagingState('mine')
+  if (paging.loadingMore) return false
+  paging.loadingMore = true
+
+  const currentItems = reset ? [] : (_cache['mine'] || [])
+  const queuedPromise = reset ? getQueuedObservations(state.user.id) : Promise.resolve([])
+  const pagePromise = _runPagedFindsQuery(
+    columns => supabase.from('observations').select(columns).eq('user_id', state.user.id),
+    MINE_SELECT,
+    MINE_SELECT_LEGACY,
+    paging.nextOffset,
+  )
+
+  try {
+    const [queued, pageRes] = await Promise.all([queuedPromise, pagePromise])
+    if (loadSeq !== _loadFindsSeq) return false
+
+    const data = pageRes?.data || []
+    const error = pageRes?.error || null
+    if (error) {
+      showToast(t('finds.couldNotLoad'))
+      if (reset) _setFindsCache('mine', [])
+      paging.hasMore = false
+      paging.initialized = true
+      return false
+    }
+
+    const merged = _mergeFindsItems('mine', currentItems.length ? currentItems : queued, data)
+    await _attachSporeFlags(merged)
+    _setFindsCache('mine', merged)
+    paging.nextOffset += data.length
+    paging.hasMore = data.length === FINDS_PAGE_SIZE
+    paging.initialized = true
+    return true
+  } finally {
+    paging.loadingMore = false
+  }
+}
+
+async function _loadFriendsPage({ loadSeq, reset = false } = {}) {
+  const paging = _getPagingState('friends')
+  if (paging.loadingMore) return false
+  paging.loadingMore = true
+  const pagePromise = _runPagedFindsQuery(
+    columns => supabase
+      .from('observations_friend_view')
+      .select(columns)
+      .neq('user_id', state.user.id),
+    FEED_SELECT,
+    FEED_SELECT_LEGACY,
+    paging.nextOffset,
+  )
+
+  try {
+    const pageRes = await pagePromise
+    if (loadSeq !== _loadFindsSeq) return false
+    const data = pageRes?.data || []
+    const error = pageRes?.error || null
+    if (error) {
+      console.error('Failed to fetch friends feed:', error)
+      if (reset) _setFindsCache('friends', [])
+      paging.hasMore = false
+      paging.initialized = true
+      return false
+    }
+
+    const merged = _mergeFindsItems('friends', reset ? [] : (_cache['friends'] || []), data)
+    await _attachSporeFlags(merged)
+    _setFindsCache('friends', merged)
+    paging.nextOffset += data.length
+    paging.hasMore = data.length === FINDS_PAGE_SIZE
+    paging.initialized = true
+    return true
+  } finally {
+    paging.loadingMore = false
+  }
+}
+
+async function _loadCommunityPage({ loadSeq, reset = false } = {}) {
+  const paging = _getPagingState('public')
+  if (paging.loadingMore) return false
+  paging.loadingMore = true
+  const pagePromise = _runPagedFindsQuery(
+    columns => supabase
+      .from('observations_community_view')
+      .select(columns),
+    FEED_SELECT,
+    FEED_SELECT_LEGACY,
+    paging.nextOffset,
+  )
+
+  try {
+    const pageRes = await pagePromise
+    if (loadSeq !== _loadFindsSeq) return false
+    const rawData = pageRes?.data || []
+    const data = rawData.filter(obs => isPublicVisibleObservation(obs))
+    const error = pageRes?.error || null
+    if (error) {
+      console.error('Failed to fetch community feed:', error)
+      if (reset) _setFindsCache('public', [])
+      paging.hasMore = false
+      paging.initialized = true
+      return false
+    }
+
+    const merged = _mergeFindsItems('public', reset ? [] : (_cache['public'] || []), data)
+    await _attachSporeFlags(merged)
+    _setFindsCache('public', merged)
+    paging.nextOffset += rawData.length
+    paging.hasMore = rawData.length === FINDS_PAGE_SIZE
+    paging.initialized = true
+    return true
+  } finally {
+    paging.loadingMore = false
+  }
+}
+
+async function _loadFollowPage({ loadSeq, reset = false } = {}) {
+  const paging = _getPagingState('feed')
+  if (paging.loadingMore) return false
+  paging.loadingMore = true
+  const pagePromise = _runPagedFindsQuery(
+    columns => supabase
+      .from('observations_follow_view')
+      .select(columns),
+    FEED_SELECT,
+    FEED_SELECT_LEGACY,
+    paging.nextOffset,
+  )
+
+  try {
+    const pageRes = await pagePromise
+    if (loadSeq !== _loadFindsSeq) return false
+    const data = pageRes?.data || []
+    const error = pageRes?.error || null
+    if (error) {
+      console.warn('Failed to fetch followed feed:', error.message)
+      if (reset) _setFindsCache('feed', [])
+      paging.hasMore = false
+      paging.initialized = true
+      return false
+    }
+
+    const merged = _mergeFindsItems('feed', reset ? [] : (_cache['feed'] || []), data)
+    await _attachSporeFlags(merged)
+    _setFindsCache('feed', merged)
+    paging.nextOffset += data.length
+    paging.hasMore = data.length === FINDS_PAGE_SIZE
+    paging.initialized = true
+    return true
+  } finally {
+    paging.loadingMore = false
+  }
+}
+
+async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
+  if (!userId) return false
+  const paging = _getPagingState('user')
+  if (paging.loadingMore) return false
+  paging.loadingMore = true
+  const isOwner = String(userId || '') === String(state.user?.id || '')
+  const pagePromise = _runPagedFindsQuery(
+    columns => (isOwner
+      ? supabase
+        .from('observations')
+        .select(columns)
+        .eq('user_id', userId)
+      : supabase
+        .from('observations_community_view')
+        .select(columns)
+        .eq('user_id', userId)),
+    MINE_SELECT,
+    MINE_SELECT_LEGACY,
+    paging.nextOffset,
+  )
+
+  try {
+    const pageRes = await pagePromise
+    if (loadSeq !== _loadFindsSeq) return false
+    const data = (pageRes?.data || []).filter(obs => {
+      if (!obs) return false
+      if (String(userId || '') === String(state.user?.id || '')) return true
+      return String(obs.user_id || '') === String(userId || '') && isPublicVisibleObservation(obs, state.user?.id)
+    })
+    const error = pageRes?.error || null
+    if (error) {
+      showToast(t('finds.couldNotLoad'))
+      if (reset) _setFindsCache('user', [])
+      paging.hasMore = false
+      paging.initialized = true
+      return false
+    }
+
+    const merged = _mergeFindsItems('user', reset ? [] : (_cache['user'] || []), data)
+    await _attachSporeFlags(merged)
+    _setFindsCache('user', merged)
+    paging.nextOffset += data.length
+    paging.hasMore = data.length === FINDS_PAGE_SIZE
+    paging.initialized = true
+    return true
+  } finally {
+    paging.loadingMore = false
+  }
+}
+
+async function _loadCurrentFindsPage({ reset = false } = {}) {
+  const currentScope = _currentScope()
+  const loadSeq = _loadFindsSeq
+  if (currentScope === 'mine') return _loadMinePage({ loadSeq, reset })
+  if (currentScope === 'user') return _loadUserPage(state.findsTargetUserId, { loadSeq, reset })
+  if (_findsSecondaryScope(_findsPrimaryScope()) === 'species') return _loadFollowPage({ loadSeq, reset })
+  if (_findsSecondaryScope(_findsPrimaryScope()) === 'friends') return _loadFriendsPage({ loadSeq, reset })
+  return _loadCommunityPage({ loadSeq, reset })
+}
+
+async function _maybeLoadMoreFinds() {
+  if (state.currentScreen !== 'finds' || _isRefreshing) return
+
+  const currentScope = _currentScope()
+  const paging = _getPagingState(currentScope)
+  if (!paging.initialized || paging.loadingMore || !paging.hasMore) return
+
+  const scroller = document.getElementById('screen-finds')
+  if (!scroller) return
+
+  const distanceFromBottom = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight)
+  if (distanceFromBottom > FINDS_LOAD_MORE_THRESHOLD) return
+
+  const loadSeq = _loadFindsSeq
+  const loaded = await _loadCurrentFindsPage({ reset: false })
+  if (loadSeq !== _loadFindsSeq) return
+  if (loaded) {
+    await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
+    if (loadSeq !== _loadFindsSeq) return
+    _applyFilter()
+    void _maybeLoadMoreFinds()
+  }
 }
 
 // ── Filter + dispatch ─────────────────────────────────────────────────────────
@@ -980,13 +1244,21 @@ function _applyFilter() {
   const primaryScope = _findsPrimaryScope()
   const secondaryScope = _findsSecondaryScope(primaryScope)
   const currentScope = _currentScope()
-  const raw  = primaryScope === 'mine'
-    ? (_cache['mine'] || [])
-    : (_cache[currentScope] || [])
+  const raw = currentScope === 'user'
+    ? (_cache['user'] || [])
+    : primaryScope === 'mine'
+      ? (_cache['mine'] || [])
+      : (_cache[currentScope] || [])
   const q    = (state.searchQuery || '').toLowerCase().trim()
   
   let filtered = raw
-  if (primaryScope === 'mine') {
+  if (currentScope === 'user') {
+    filtered = filtered.filter(obs => {
+      if (String(obs.user_id || '') !== String(state.findsTargetUserId || '')) return false
+      if (String(state.findsTargetUserId || '') === String(state.user?.id || '')) return true
+      return isPublicVisibleObservation(obs, state.user?.id)
+    })
+  } else if (primaryScope === 'mine') {
     filtered = filtered.filter(obs => {
       if (String(obs.user_id || '') !== String(state.user?.id || '')) return false
       const visibility = normalizeObservationVisibility(obs.visibility)
@@ -994,11 +1266,13 @@ function _applyFilter() {
       return visibility === secondaryScope
     })
   } else if (secondaryScope === 'public') {
-    filtered = filtered.filter(obs => String(obs.user_id || '') !== String(state.user?.id || ''))
+    filtered = filtered.filter(obs => isPublicVisibleObservation(obs))
   }
   if (state.findsSporesOnly) filtered = filtered.filter(obs => !!obs.has_spores || !!obs.spore_short || !!obs.spore_statistics)
   if (state.findsDraftOnly) filtered = filtered.filter(obs => obs?.is_draft === true)
-  
+
+  // Search still runs client-side against the loaded pages only. True global
+  // search needs server-side filtering and is out of scope for this pass.
   const data = q ? filtered.filter(obs => _matches(obs, q)) : filtered
 
   if (state.findsGroupBySpecies) {
@@ -1151,6 +1425,7 @@ function _uncertainPrefix(obs) {
 function _renderBySpecies(list, data, options = {}) {
   const variant = options.variant || 'cards'
   const q = (state.searchQuery || '').trim()
+  const currentScope = _currentScope()
   if (!data.length) {
     const emptyText = _emptyFindsText(q)
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
@@ -1172,8 +1447,6 @@ function _renderBySpecies(list, data, options = {}) {
       if (kb === '\x00unidentified') return -1
       return a.label.localeCompare(b.label)
     })
-
-  const speciesCount = groups.filter(([k]) => k !== '\x00unidentified').length
 
   const allObs = groups.flatMap(([, g]) => g.items).filter(o => !o._pendingSync)
   const imageVariant = variant === 'cards' ? 'medium' : 'small'
@@ -1297,6 +1570,7 @@ function _renderBySpecies(list, data, options = {}) {
     }
 
     html += '</div>'
+    html += _findsFooterHtml(currentScope)
     list.innerHTML = html
     _restoreScroll()
 
@@ -1317,6 +1591,7 @@ function _renderBySpecies(list, data, options = {}) {
 
 function _renderTiles(list, data) {
   const q = (state.searchQuery || '').trim()
+  const currentScope = _currentScope()
   if (!data.length) {
     const emptyText = _emptyFindsText(q)
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
@@ -1341,6 +1616,7 @@ function _renderTiles(list, data) {
       </div>`
     })
     html += '</div>'
+    html += _findsFooterHtml(currentScope)
     list.innerHTML = html
 
     list.querySelectorAll('.find-tile[data-id]').forEach(tile => {
@@ -1363,6 +1639,7 @@ function _renderCards(list, data, options) {
   const variant = options?.variant || 'cards'
   const isFriends = !!options?.isFriends
   const q = (state.searchQuery || '').trim()
+  const currentScope = _currentScope()
   if (!data.length) {
     const emptyText = _emptyFindsText(q, { isFriends, capture: true })
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
@@ -1520,6 +1797,7 @@ function _renderCards(list, data, options) {
       html += '</div>'
     })
     html += '</div>'
+    html += _findsFooterHtml(currentScope)
     list.innerHTML = html
     _restoreScroll()
 

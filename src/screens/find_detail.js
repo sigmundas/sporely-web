@@ -21,7 +21,7 @@ import {
   normalizeIdentifyService,
 } from '../ai-identification.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
-import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath } from '../images.js'
+import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath, fetchObservationImageRows } from '../images.js'
 import { loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
@@ -466,8 +466,8 @@ function _detailAiSelectionStateFromResults(resultsByService = {}, obs = current
 
 const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
 const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
-const DETAIL_VIEW_SELECT = 'id, user_id, date, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
-const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
+const DETAIL_VIEW_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
+const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
 const DETAIL_AI_SELECTION_FIELDS = [
   'ai_selected_service',
   'ai_selected_taxon_id',
@@ -478,14 +478,56 @@ const DETAIL_AI_SELECTION_FIELDS = [
 const DETAIL_IMAGE_SELECT_WITH_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom'
 const DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h'
 const DETAIL_IMAGE_SELECT_BASE = 'id, storage_path, sort_order'
+const DETAIL_UNAVAILABLE_SECTION_IDS = [
+  'detail-author',
+  'detail-social-row',
+  'detail-gallery',
+  'detail-form',
+  'comments-section',
+  'detail-footer',
+  'detail-readonly-note',
+]
 
-function _isMissingDetailImageColumnError(error, columnNames = []) {
-  const text = String(error?.message || error?.details || error?.hint || '').toLowerCase()
-  if (!text) return false
-  if (!(text.includes('does not exist') || text.includes('schema cache') || text.includes('could not find'))) {
-    return false
+function _setDetailUnavailableSectionVisibility(visible) {
+  const nextDisplay = visible ? '' : 'none'
+  for (const id of DETAIL_UNAVAILABLE_SECTION_IDS) {
+    const el = document.getElementById(id)
+    if (!el) continue
+    el.style.display = nextDisplay
   }
-  return (Array.isArray(columnNames) ? columnNames : [columnNames]).some(column => text.includes(String(column || '').toLowerCase()))
+}
+
+function _renderDetailUnavailableState(message = 'Observation not found or not visible.', detail = 'This observation may be private, deleted, or no longer shared with you.') {
+  _setDetailUnavailableSectionVisibility(false)
+
+  const commonEl = document.getElementById('detail-title-common')
+  const latinEl = document.getElementById('detail-title-latin')
+  const noteEl = document.getElementById('detail-readonly-note')
+  if (commonEl) commonEl.textContent = message
+  if (latinEl) {
+    latinEl.textContent = detail
+    latinEl.style.display = detail ? 'block' : 'none'
+  }
+  if (noteEl) {
+    noteEl.textContent = detail
+    noteEl.style.display = detail ? 'block' : 'none'
+  }
+
+  const dateEl = document.getElementById('detail-date')
+  const timeEl = document.getElementById('detail-time')
+  const timeVal = document.getElementById('detail-time-val')
+  if (dateEl) dateEl.textContent = '—'
+  if (timeEl) timeEl.style.display = 'none'
+  if (timeVal) timeVal.textContent = ''
+}
+
+function _clearDetailUnavailableState() {
+  _setDetailUnavailableSectionVisibility(true)
+  const noteEl = document.getElementById('detail-readonly-note')
+  if (noteEl) {
+    noteEl.textContent = ''
+    noteEl.style.display = 'none'
+  }
 }
 
 function _normalizeDetailImageRows(rows = []) {
@@ -549,70 +591,87 @@ async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
   return result
 }
 
+export async function loadDetailObservation(obsId, options = {}) {
+  const client = options.client || supabase
+  const detailSelect = options.detailSelect || DETAIL_SELECT
+  const detailLegacySelect = options.detailLegacySelect || DETAIL_SELECT_LEGACY
+  const detailViewSelect = options.detailViewSelect || DETAIL_VIEW_SELECT
+  const detailViewLegacySelect = options.detailViewLegacySelect || DETAIL_VIEW_SELECT_LEGACY
+
+  const loadObservation = (table, selectColumns, legacyColumns) => _withPhase7Fallback(
+    columns => client
+      .from(table)
+      .select(columns)
+      .eq('id', obsId)
+      .maybeSingle(),
+    selectColumns,
+    legacyColumns,
+  )
+
+  try {
+    const baseRes = await loadObservation('observations', detailSelect, detailLegacySelect)
+    if (baseRes.data) {
+      return {
+        observation: baseRes.data,
+        source: 'observations',
+        error: baseRes.error || null,
+      }
+    }
+
+    const communityRes = await loadObservation('observations_community_view', detailViewSelect, detailViewLegacySelect)
+    if (communityRes.data) {
+      return {
+        observation: communityRes.data,
+        source: 'observations_community_view',
+        error: baseRes.error || communityRes.error || null,
+      }
+    }
+
+    return {
+      observation: null,
+      source: null,
+      error: communityRes.error || baseRes.error || null,
+    }
+  } catch (error) {
+    return {
+      observation: null,
+      source: null,
+      error,
+    }
+  }
+}
+
 async function _loadDetailObservationImages(obsId) {
-  const makeQuery = (selectFields) => supabase
-    .from('observation_images')
-    .select(selectFields)
-    .eq('observation_id', obsId)
-    .is('deleted_at', null)
-    .order('sort_order', { ascending: true })
+  const rows = await fetchObservationImageRows([obsId], {
+    selectFields: DETAIL_IMAGE_SELECT_WITH_CUSTOM,
+  })
+  if (rows.length) return _normalizeDetailImageRows(rows)
 
-  let result = await makeQuery(DETAIL_IMAGE_SELECT_WITH_CUSTOM)
-  if (!result.error) return _normalizeDetailImageRows(result.data || [])
-
-  if (_isMissingDetailImageColumnError(result.error, 'ai_crop_is_custom')) {
-    console.warn('observation_images.ai_crop_is_custom is missing; retrying without the custom crop flag', {
-      observationId: obsId,
-      error: {
-        code: result.error?.code || null,
-        message: result.error?.message || '',
-        details: result.error?.details || '',
-        hint: result.error?.hint || '',
-      },
-    })
-    result = await makeQuery(DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM)
-    if (!result.error) {
-      return _normalizeDetailImageRows(result.data || []).map(row => ({
-        ...row,
-        ai_crop_is_custom: false,
-      }))
-    }
+  const withoutCustomRows = await fetchObservationImageRows([obsId], {
+    selectFields: DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM,
+  })
+  if (withoutCustomRows.length) {
+    return _normalizeDetailImageRows(withoutCustomRows).map(row => ({
+      ...row,
+      ai_crop_is_custom: false,
+    }))
   }
 
-  if (_isMissingDetailImageColumnError(result.error, [
-    'ai_crop_x1',
-    'ai_crop_y1',
-    'ai_crop_x2',
-    'ai_crop_y2',
-    'ai_crop_source_w',
-    'ai_crop_source_h',
-  ])) {
-    const baseResult = await makeQuery(DETAIL_IMAGE_SELECT_BASE)
-    if (!baseResult.error) {
-      return _normalizeDetailImageRows(baseResult.data || []).map(row => ({
-        ...row,
-        image_type: 'field',
-        ai_crop_x1: null,
-        ai_crop_y1: null,
-        ai_crop_x2: null,
-        ai_crop_y2: null,
-        ai_crop_source_w: null,
-        ai_crop_source_h: null,
-        ai_crop_is_custom: false,
-      }))
-    }
-  }
-
-  if (result.error) {
-    console.warn('Failed to load observation images for detail view:', {
-      observationId: obsId,
-      error: {
-        code: result.error?.code || null,
-        message: result.error?.message || '',
-        details: result.error?.details || '',
-        hint: result.error?.hint || '',
-      },
-    })
+  const baseRows = await fetchObservationImageRows([obsId], {
+    selectFields: DETAIL_IMAGE_SELECT_BASE,
+  })
+  if (baseRows.length) {
+    return _normalizeDetailImageRows(baseRows).map(row => ({
+      ...row,
+      image_type: 'field',
+      ai_crop_x1: null,
+      ai_crop_y1: null,
+      ai_crop_x2: null,
+      ai_crop_y2: null,
+      ai_crop_source_w: null,
+      ai_crop_source_h: null,
+      ai_crop_is_custom: false,
+    }))
   }
 
   return []
@@ -821,37 +880,29 @@ export async function openFindDetail(obsId, options = {}) {
   if (backLabel) backLabel.textContent = prevLabel
 
   _resetForm()
+  _clearDetailUnavailableState()
   const cancelBtn = document.getElementById('detail-cancel-btn')
   if (cancelBtn) cancelBtn.style.display = hideCancelOverride ? 'none' : ''
   navigate('find-detail')
 
-  let { data: obs, error } = await _withPhase7Fallback(
-    columns => supabase
-      .from('observations')
-      .select(columns)
-      .eq('id', obsId)
-      .single(),
-    DETAIL_SELECT,
-    DETAIL_SELECT_LEGACY,
-  )
+  const { observation: obs, error } = await loadDetailObservation(obsId, {
+    client: supabase,
+  })
 
-  if (error || !obs) {
-    const communityRes = await _withPhase7Fallback(
-      columns => supabase
-        .from('observations_community_view')
-        .select(columns)
-        .eq('id', obsId)
-        .single(),
-      DETAIL_VIEW_SELECT,
-      DETAIL_VIEW_SELECT_LEGACY,
-    )
-    obs = communityRes.data || null
-    error = communityRes.error
-  }
-
-  if (error || !obs) {
+  if (!obs) {
+    if (error) {
+      console.warn('Failed to load observation detail:', {
+        observationId: obsId,
+        error: {
+          code: error?.code || null,
+          message: error?.message || '',
+          details: error?.details || '',
+          hint: error?.hint || '',
+        },
+      })
+    }
     showToast(t('detail.couldNotLoadObservation'))
-    navigate('finds')
+    _renderDetailUnavailableState()
     return
   }
 
@@ -2231,6 +2282,7 @@ async function _goBack(event) {
 }
 
 function _resetForm() {
+  _clearDetailUnavailableState()
   currentObsIsOwner = false
   document.getElementById('detail-taxon-input').value = ''
   document.getElementById('detail-taxon-dropdown').style.display = 'none'

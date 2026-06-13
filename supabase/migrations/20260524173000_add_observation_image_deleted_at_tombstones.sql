@@ -510,8 +510,9 @@ AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION public.search_people_directory(
-  p_query text DEFAULT NULL::text,
-  p_limit integer DEFAULT 24
+  p_limit integer DEFAULT 24,
+  p_offset integer DEFAULT 0,
+  p_query text DEFAULT NULL::text
 )
 RETURNS TABLE(
   user_id uuid,
@@ -530,7 +531,8 @@ AS $$
   WITH normalized AS (
     SELECT
       nullif(btrim(coalesce(p_query, '')), '') AS q,
-      greatest(1, least(coalesce(p_limit, 24), 100)) AS lim
+      greatest(1, least(coalesce(p_limit, 24), 100)) AS lim,
+      greatest(coalesce(p_offset, 0), 0) AS off
   ),
   visible_profiles AS (
     SELECT
@@ -622,10 +624,11 @@ AS $$
       WHEN lower(coalesce(vp.username, '')) = lower(n.q) THEN 0
       WHEN lower(coalesce(vp.display_name, '')) = lower(n.q) THEN 1
       WHEN lower(coalesce(vp.username, '')) LIKE lower(n.q) || '%' THEN 2
-      WHEN lower(coalesce(vp.display_name, '')) LIKE lower(n.q) || '%' THEN 3
+    WHEN lower(coalesce(vp.display_name, '')) LIKE lower(n.q) || '%' THEN 3
       ELSE 4
     END,
     pos.latest_public_observation_at DESC NULLS LAST,
     coalesce(vp.display_name, vp.username, '') ASC
-  LIMIT (SELECT lim FROM normalized);
+  LIMIT (SELECT lim FROM normalized)
+  OFFSET (SELECT off FROM normalized);
 $$;

@@ -536,6 +536,103 @@ html, body {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.home-friend-request-row {
+  position: relative;
+  align-items: center;
+  padding-right: 44px;
+}
+.home-friend-request-row .home-comment-body {
+  cursor: pointer;
+}
+.home-friend-request-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid var(--green-mid);
+  background: var(--green-deep);
+}
+.home-friend-request-avatar--fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--green-accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+.home-friend-request-actions {
+  position: absolute;
+  top: 8px;
+  right: 0;
+  flex-shrink: 0;
+}
+.home-friend-request-row--accepted {
+  cursor: pointer;
+}
+.home-friend-request-status {
+  position: absolute;
+  top: 8px;
+  right: 2px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--red);
+}
+.home-friend-request-heart {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  stroke: currentColor;
+}
+.home-friend-request-menu-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+.home-friend-request-menu-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+.home-friend-request-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  width: 160px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.2);
+  padding: 6px 0;
+  z-index: 30;
+}
+.home-friend-request-menu-item {
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.home-friend-request-menu-item:hover {
+  background: var(--card-raised);
+}
 
 .sync-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green-accent); animation: pulse 2s infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
@@ -926,6 +1023,23 @@ html, body {
   border-color: color-mix(in srgb, var(--green-accent) 35%, var(--border));
 }
 
+.finds-loading-state,
+.finds-bottom-sentinel {
+  padding: 16px 14px 18px;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+  font-family: 'DM Mono', monospace;
+}
+
+.finds-bottom-sentinel--loading {
+  color: var(--green-accent);
+}
+
+.finds-bottom-sentinel--done {
+  opacity: 0.9;
+}
+
 .finds-topbar {
   display: flex; align-items: center; justify-content: space-between;
   gap: 6px;
@@ -1042,6 +1156,19 @@ html, body {
   color: var(--text-dim);
   font-size: 13px;
 }
+.people-bottom-sentinel {
+  padding: 16px 14px 18px;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+  font-family: 'DM Mono', monospace;
+}
+.people-bottom-sentinel--loading {
+  color: var(--green-accent);
+}
+.people-bottom-sentinel--done {
+  opacity: 0.9;
+}
 .people-card {
   background: var(--card-raised);
   border: 1px solid var(--border);
@@ -1086,6 +1213,105 @@ html, body {
   min-width: 0;
   flex: 1;
 }
+.people-social-wrap {
+  position: relative;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.people-social-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  min-height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+}
+.people-social-btn:hover {
+  background: var(--card-raised);
+  color: var(--text-primary);
+}
+.people-social-btn.is-following {
+  background: var(--green-deep);
+  border-color: var(--green-mid);
+  color: var(--green-accent);
+}
+.people-social-btn.is-pending {
+  opacity: 0.88;
+}
+.people-social-btn.is-friend {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border) 45%);
+}
+.people-social-btn:disabled {
+  cursor: wait;
+  opacity: 0.75;
+}
+.people-social-btn-label {
+  line-height: 1;
+}
+.people-social-heart,
+.people-social-chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.people-social-heart {
+  fill: var(--red);
+  stroke: var(--red);
+}
+.people-social-chevron {
+  stroke: currentColor;
+  fill: none;
+  transition: transform 0.15s ease;
+}
+.people-social-btn.menu-open .people-social-chevron {
+  transform: rotate(180deg);
+}
+.people-social-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 192px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.2);
+  padding: 8px 0;
+  z-index: 30;
+}
+.people-social-menu-item {
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.people-social-menu-item:hover:not(:disabled) {
+  background: var(--card-raised);
+}
+.people-social-menu-item:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.people-social-menu-title {
+  display: block;
+}
+.people-social-menu-divider {
+  height: 1px;
+  background: var(--border-dim);
+  margin: 4px 0;
+}
 .people-card-name {
   font-size: 18px;
   font-weight: 700;
@@ -1101,14 +1327,11 @@ html, body {
 }
 .people-card-bio {
   margin-top: 12px;
-  min-height: 38px;
   font-size: 13px;
   line-height: 1.5;
   color: var(--text-secondary);
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .people-card-counts {
   display: grid;
@@ -3184,6 +3407,12 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   border-bottom-right-radius: 11px;
 }
 .field-meta-key { font-size: 11px; color: var(--text-secondary); letter-spacing: 0.04em; }
+.profile-footnote-star {
+  font-size: 0.7em;
+  vertical-align: super;
+  line-height: 0;
+  margin-left: 1px;
+}
 .field-meta-val { font-family: 'DM Mono', monospace; font-size: 12px; color: var(--text-data); font-weight: 500; }
 .field-meta-val.green { color: var(--green-accent); }
 .field-meta-val.amber { color: #d9b15f; }
