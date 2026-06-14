@@ -773,3 +773,44 @@ test('old bloated identification rows still normalize on read', async () => {
   assert.equal(cached.top_species_url, 'https://artsdatabanken.no/Taxon/555555')
   assert.equal(cached.top_redlist_category, 'VU')
 })
+
+test('loadObservationIdentifications prefers the community view for visible observations', async () => {
+  resetObservationIdentificationsTableAvailabilityForTests()
+  const calls = []
+  const rows = [
+    {
+      id: 'community-row-1',
+      observation_id: 'obs-visible',
+      service: 'artsorakel',
+      status: 'success',
+      request_fingerprint: 'req-visible',
+      results: [
+        { scientificName: 'Amanita muscaria', vernacularName: 'Fly agaric', probability: 0.91 },
+      ],
+      created_at: '2026-06-13T12:00:00.000Z',
+    },
+  ]
+
+  const client = {
+    from(table) {
+      calls.push(table)
+      return {
+        select() { return this },
+        eq() { return this },
+        order() {
+          if (table === 'observation_identifications_community_view') {
+            return Promise.resolve({ data: rows, error: null })
+          }
+          return Promise.resolve({ data: [], error: { message: 'raw table should not be used first' } })
+        },
+      }
+    },
+  }
+
+  const loaded = await loadObservationIdentifications('obs-visible', { supabaseClient: client })
+
+  assert.equal(calls[0], 'observation_identifications_community_view')
+  assert.equal(loaded.length, 1)
+  assert.equal(loaded[0].service, 'artsorakel')
+  assert.equal(loaded[0].top_scientific_name, 'Amanita muscaria')
+})

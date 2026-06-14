@@ -178,6 +178,12 @@ Desktop does not expose social follow controls; this is a web/mobile feature.
 AI crop metadata is stored per image and only affects Artsorakel requests. Gallery rendering still uses the full stored image.
 - Full microscope metadata columns present but only populated by desktop sync
 
+### `observation_identifications`
+- Cached AI result sets for Artsorakel and iNaturalist.
+- Owners can insert, update, and delete their own rows.
+- Non-owners can read stored result lists only through `observation_identifications_community_view`, which joins through `observations` and only exposes rows for observations the viewer is already allowed to see.
+- The detail screen uses the community view for read-only browsing and the base table for owner writes and reruns.
+
 ### Moderation / UGC Compliance
 - `user_blocks` — Enforces one-way user blocking for feed filtering (`blocker_id`, `blocked_id`).
 - `reports` — Tracks user-reported objectionable content (`observation_id`, `comment_id`, `reason`).
@@ -224,6 +230,7 @@ All tables have RLS enabled. Default policy: **owner only**.
 |---|---|
 | `observations` | Accepted friends (via `friendships` join) |
 | `observation_images` | Accepted friends (via observation ownership) |
+| `observation_identifications` | Read-only via `observation_identifications_community_view` for visible observations |
 | `profiles` | Accepted friends |
 | `reference_values` | All authenticated users |
 | `observation_shares` | The specific `shared_with_id` user |

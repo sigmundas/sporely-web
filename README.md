@@ -30,6 +30,7 @@ At the moment, `sporely-web` is mainly focused on:
 - importing photos from the mobile device into the Sporely cloud
 - grouping imported photos into observations based on capture time
 - running Artsorakel suggestions in the active UI language where supported
+- viewing stored AI result lists read-only on observations that are already visible to you
 - storing location and photo metadata
 - syncing observations to the shared Supabase-backed backend
 - browsing observations, map views, comments, and social features

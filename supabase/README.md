@@ -11,7 +11,8 @@ This folder is the authoritative home for the Sporely Supabase schema.
 
 ## AI identification tables
 
-- `public.observation_identifications` stores cached AI service result sets for a given observation and user, and visible observations can be read by viewers.
+- `public.observation_identifications` stores cached AI service result sets for a given observation and user.
+- `public.observation_identifications_community_view` exposes read-only cached AI result rows for observations the viewer can see.
 - `public.observations.ai_selected_*` stores the single suggestion the user selected from a result set.
 - The current AI-related migrations live in `migrations/20260516170001_add_observation_identifications.sql`, `migrations/20260517122000_add_observation_ai_selection.sql`, and `migrations/20260520123000_detail_ai_visibility.sql`.
 
