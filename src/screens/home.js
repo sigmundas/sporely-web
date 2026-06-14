@@ -68,7 +68,7 @@ export async function initHome() {
   document.getElementById('ac-camera')?.addEventListener('click', openPreferredCamera)
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
   document.getElementById('recent-history-link').addEventListener('click', () => {
-    openFinds('feed', { resetSearch: true, resetFilters: true, secondaryScope: 'public' })
+    openFinds('feed', { resetSearch: true, secondaryScope: 'public' })
   })
   _syncCameraAction()
 

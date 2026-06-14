@@ -30,6 +30,7 @@ const FINDS_LOAD_MORE_THRESHOLD = 240
 const PULL_REFRESH_THRESHOLD = 72
 const PULL_REFRESH_MAX = 112
 const PULL_REFRESH_TOUCH_SLOP = 10
+const FINDS_DRAFT_ONLY_STORAGE_KEY = 'sporely-finds-draft-only'
 let _pullTracking = false
 let _pullStartX = 0
 let _pullStartY = 0
@@ -251,6 +252,22 @@ function _normalizeFindsTargetBio(value) {
 function _normalizeFindsTargetAvatarUrl(value) {
   const raw = String(value || '').trim()
   return /^https?:\/\//i.test(raw) ? raw : ''
+}
+
+function _loadDraftFilterPreference() {
+  try {
+    const raw = globalThis.localStorage?.getItem(FINDS_DRAFT_ONLY_STORAGE_KEY)
+    if (raw === null) return true
+    return raw === 'true'
+  } catch (_) {
+    return true
+  }
+}
+
+function _saveDraftFilterPreference(enabled) {
+  try {
+    globalThis.localStorage?.setItem(FINDS_DRAFT_ONLY_STORAGE_KEY, enabled ? 'true' : 'false')
+  } catch (_) {}
 }
 
 export function isPublicVisibleObservation(obs, viewerId = state.user?.id) {
@@ -574,6 +591,7 @@ function _bindInfiniteScroll() {
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
 export function initFinds() {
+  state.findsDraftOnly = _loadDraftFilterPreference()
   if (screen.orientation && screen.orientation.lock) {
     screen.orientation.lock('portrait').catch(() => {});
   }
@@ -635,6 +653,7 @@ export function initFinds() {
   })
   document.getElementById('finds-filter-draft')?.addEventListener('click', () => {
     state.findsDraftOnly = !state.findsDraftOnly
+    _saveDraftFilterPreference(state.findsDraftOnly)
     _syncDraftToggle()
     _applyFilter()
   })
@@ -815,7 +834,6 @@ function _setScope(scope, options = {}) {
   if (options.resetFilters) {
     state.findsGroupBySpecies = false
     state.findsSporesOnly = false
-    state.findsDraftOnly = false
     _setFindsPrimaryScope(_findsPrimaryScope(), {
       secondaryScope: _findsPrimaryScope() === 'feed' ? 'species' : 'public',
     })
@@ -1269,7 +1287,7 @@ function _applyFilter() {
     filtered = filtered.filter(obs => isPublicVisibleObservation(obs))
   }
   if (state.findsSporesOnly) filtered = filtered.filter(obs => !!obs.has_spores || !!obs.spore_short || !!obs.spore_statistics)
-  if (state.findsDraftOnly) filtered = filtered.filter(obs => obs?.is_draft === true)
+  if (!state.findsDraftOnly) filtered = filtered.filter(obs => obs?.is_draft !== true)
 
   // Search still runs client-side against the loaded pages only. True global
   // search needs server-side filtering and is out of scope for this pass.
@@ -1397,6 +1415,7 @@ function _draftBadge(obs) {
 function _emptyFindsText(q, options = {}) {
   const currentScope = _currentScope()
   if (q) return t('finds.noResults', { query: q })
+  if (state.findsSporesOnly) return t('finds.noSporeMetrics')
   if (currentScope === 'feed') return t('finds.noFollowed')
   if (options.isFriends || currentScope === 'friends') return t('finds.noFriends')
   return options.capture ? t('finds.noObservationsCapture') : t('finds.noObservations')

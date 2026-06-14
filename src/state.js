@@ -20,7 +20,7 @@ export const state = {
   findsView: 'cards',
   findsGroupBySpecies: false,
   findsSporesOnly: false,
-  findsDraftOnly: false,
+  findsDraftOnly: true,
   findsTargetUserId: null,
   findsTargetSummaryLoaded: false,
   findsTargetUsername: null,

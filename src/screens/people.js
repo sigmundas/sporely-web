@@ -82,26 +82,18 @@ export function wirePeopleCardActions(root) {
   list.dataset.peopleActionsBound = 'true'
 
   list.addEventListener('click', async event => {
+    const card = event.target.closest('.people-card')
+    if (!card || !list.contains(card)) return
+
+    const profileTarget = event.target.closest('.people-card-avatar, .people-card-title-wrap')
+    if (profileTarget) {
+      _openPeopleFinds(card, 'finds')
+      return
+    }
+
     const countBtn = event.target.closest('.people-card-count[data-action]')
     if (countBtn && list.contains(countBtn)) {
-      const action = countBtn.dataset.action
-      const card = countBtn.closest('.people-card')
-      if (!card) return
-      openFinds('user', {
-        userId: card.dataset.userId,
-        username: card.dataset.username,
-        avatarUrl: card.dataset.avatarUrl,
-        displayName: card.dataset.displayName,
-        bio: card.dataset.bio,
-        finds: card.dataset.finds,
-        species: card.dataset.species,
-        spores: card.dataset.spores,
-        summaryLoaded: true,
-        resetSearch: true,
-        resetFilters: true,
-        groupBySpecies: action === 'species',
-        sporesOnly: action === 'spores',
-      })
+      _openPeopleFinds(card, countBtn.dataset.action)
       return
     }
 
@@ -130,6 +122,25 @@ export function wirePeopleCardActions(root) {
       _closePeopleSocialMenus()
     })
   }
+}
+
+function _openPeopleFinds(card, action = 'finds') {
+  if (!card) return
+  openFinds('user', {
+    userId: card.dataset.userId,
+    username: card.dataset.username,
+    avatarUrl: card.dataset.avatarUrl,
+    displayName: card.dataset.displayName,
+    bio: card.dataset.bio,
+    finds: card.dataset.finds,
+    species: card.dataset.species,
+    spores: card.dataset.spores,
+    summaryLoaded: true,
+    resetSearch: true,
+    resetFilters: true,
+    groupBySpecies: action === 'species',
+    sporesOnly: action === 'spores',
+  })
 }
 
 function _bindPeopleInfiniteScroll() {
