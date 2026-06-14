@@ -6,6 +6,7 @@ import { showAuthOverlay, switchToLogin } from './auth.js'
 import { navigate } from '../router.js'
 import { fetchCloudPlanProfile, formatStorageBytes } from '../cloud-plan.js'
 import { getLastSyncAt } from '../settings.js'
+import { hideProfileOverlay, showProfileOverlay } from '../profile-overlay.js'
 import { Capacitor } from '@capacitor/core'
 import { FilePicker } from '@capawesome/capacitor-file-picker'
 
@@ -15,6 +16,15 @@ function _isNativeApp() {
   return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.());
 }
 
+let _profileOpener = null
+let _profilePreviousScreen = 'home'
+let _profileDragStartY = 0
+let _profileDragStartX = 0
+let _profileDragCurrentY = 0
+let _profileDragStarted = false
+let _profileDragTracking = false
+let _profileResetDrag = () => {}
+
 export function initProfile() {
   document.getElementById('profile-avatar-img').addEventListener('error', _showInitialsAvatar)
   document.getElementById('sign-out-btn').addEventListener('click', async () => {
@@ -22,6 +32,7 @@ export function initProfile() {
     const originalLabel = btn.textContent
     btn.disabled = true
     btn.textContent = t('common.pleaseWait')
+    closeProfileOverlay()
     try { await supabase.auth.signOut() } catch (e) { console.warn('Sign out error:', e) }
     state.user = null
     showAuthOverlay()
@@ -31,10 +42,6 @@ export function initProfile() {
     btn.textContent = originalLabel
   })
   document.getElementById('delete-account-btn').addEventListener('click', _deleteAccount)
-  document.getElementById('friend-search-btn').addEventListener('click', _searchFriend)
-  document.getElementById('friend-search-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') _searchFriend()
-  })
   document.getElementById('profile-save-btn').addEventListener('click', _saveProfile)
   document.getElementById('profile-avatar-btn').addEventListener('click', _openAvatarSourcePicker)
   document.getElementById('profile-avatar-circle').addEventListener('click', _openAvatarSourcePicker)
@@ -60,10 +67,122 @@ export function initProfile() {
     if (file) void _showCrop(file)
     e.target.value = ''
   })
+  document.getElementById('profile-close-btn')?.addEventListener('click', closeProfileOverlay)
+  document.getElementById('profile-overlay')?.addEventListener('click', e => {
+    if (e.target?.id === 'profile-overlay') closeProfileOverlay()
+  })
+  _initProfileDragEvents()
   _initCropEvents()
 
   document.getElementById('profile-tos-btn')?.addEventListener('click', () => {
     window.open('https://sporely.no/terms', '_blank')
+  })
+}
+
+export async function openProfileOverlay({ opener = null } = {}) {
+  const overlay = document.getElementById('profile-overlay')
+  if (!overlay) return
+
+  _profileOpener = opener || document.activeElement || null
+  _profilePreviousScreen = state.currentScreen || 'home'
+  state.currentScreen = 'profile'
+
+  _profileResetDrag()
+  showProfileOverlay({ overlay })
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    overlay.classList.add('open')
+  }))
+  await loadProfile()
+}
+
+export function closeProfileOverlay() {
+  const overlay = document.getElementById('profile-overlay')
+  if (!overlay) return
+
+  _profileResetDrag()
+  hideProfileOverlay({ overlay, profileOpener: _profileOpener })
+  state.currentScreen = _profilePreviousScreen || 'home'
+  _profileOpener = null
+}
+
+function _initProfileDragEvents() {
+  const sheet = document.getElementById('profile-sheet')
+  if (!sheet || sheet.dataset.dragBound === 'true') return
+  sheet.dataset.dragBound = 'true'
+
+  function _resetProfileDrag() {
+    _profileDragStartY = 0
+    _profileDragStartX = 0
+    _profileDragCurrentY = 0
+    _profileDragStarted = false
+    _profileDragTracking = false
+    sheet.style.transition = ''
+    sheet.style.transform = ''
+  }
+  _profileResetDrag = _resetProfileDrag
+
+  function _beginProfileDrag(point, target) {
+    if (target?.closest?.('button, input, select, textarea, a, label')) return
+    _profileDragStartY = point.clientY
+    _profileDragStartX = point.clientX
+    _profileDragCurrentY = _profileDragStartY
+    _profileDragStarted = false
+    _profileDragTracking = true
+  }
+
+  function _moveProfileDrag(point, event) {
+    if (!_profileDragTracking) return
+    _profileDragCurrentY = point.clientY
+    const deltaY = _profileDragCurrentY - _profileDragStartY
+    const deltaX = point.clientX - _profileDragStartX
+
+    if (!_profileDragStarted) {
+      if (deltaY <= 8 || Math.abs(deltaY) <= Math.abs(deltaX)) return
+      if (sheet.scrollTop > 0) {
+        _resetProfileDrag()
+        return
+      }
+      _profileDragStarted = true
+      sheet.style.transition = 'none'
+    }
+
+    event?.preventDefault?.()
+    sheet.style.transform = `translateY(${Math.max(0, deltaY)}px)`
+  }
+
+  function _finishProfileDrag() {
+    if (!_profileDragTracking) return
+    const deltaY = _profileDragCurrentY - _profileDragStartY
+    const shouldClose = _profileDragStarted && deltaY > 86
+    _resetProfileDrag()
+    if (shouldClose) closeProfileOverlay()
+  }
+
+  sheet.addEventListener('touchstart', event => {
+    if (event.touches.length !== 1) return
+    _beginProfileDrag(event.touches[0], event.target)
+  }, { passive: true })
+  sheet.addEventListener('touchmove', event => {
+    if (event.touches.length !== 1) return
+    _moveProfileDrag(event.touches[0], event)
+  }, { passive: false })
+  sheet.addEventListener('touchend', _finishProfileDrag)
+  sheet.addEventListener('touchcancel', _resetProfileDrag)
+  sheet.addEventListener('pointerdown', event => {
+    if (event.pointerType === 'touch') return
+    _beginProfileDrag(event, event.target)
+  })
+  sheet.addEventListener('pointermove', event => {
+    if (event.pointerType === 'touch') return
+    _moveProfileDrag(event, event)
+  })
+  sheet.addEventListener('pointerup', event => {
+    if (event.pointerType === 'touch') return
+    _finishProfileDrag()
+  })
+  sheet.addEventListener('pointercancel', event => {
+    if (event.pointerType === 'touch') return
+    _resetProfileDrag()
   })
 }
 
@@ -508,7 +627,10 @@ function _renderCloudPlan(cloudPlan) {
     storageUsedBytes: 0,
     uploadMode: 'reduced',
   }
-  const isMaxResolution = normalized.uploadMode === 'full'
+  const isProAccount =
+    normalized.hasProAccess === true ||
+    normalized.cloudPlan === 'pro' ||
+    normalized.qualityProfile === 'high'
 
   const uploadEl = document.getElementById('profile-cloud-upload-mode')
   const usageEl = document.getElementById('profile-cloud-usage')
@@ -517,7 +639,7 @@ function _renderCloudPlan(cloudPlan) {
   const noteEl = document.getElementById('profile-cloud-plan-note')
 
   if (uploadEl) {
-    uploadEl.textContent = t(isMaxResolution ? 'profile.imageResolutionPro' : 'profile.imageResolutionDefault')
+    uploadEl.textContent = t(isProAccount ? 'profile.imageResolutionPro' : 'profile.imageResolutionDefault')
   }
   if (usageEl) {
     usageEl.textContent = _formatSyncHistory(getLastSyncAt())
@@ -635,85 +757,6 @@ async function _loadPending() {
     b.addEventListener('click', () => _acceptRequest(b.dataset.id)))
   list.querySelectorAll('.friend-decline-btn').forEach(b =>
     b.addEventListener('click', () => _declineRequest(b.dataset.id)))
-}
-
-// ── Friend search ─────────────────────────────────────────────────────────────
-
-async function _searchFriend() {
-  const input   = document.getElementById('friend-search-input')
-  const results = document.getElementById('friend-search-results')
-  const q = input.value.trim()
-  if (!q) return
-
-  results.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('profile.searching')}</div>`
-
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id, username, display_name')
-    .or(`username.ilike.%${q}%,display_name.ilike.%${q}%`)
-    .neq('id', state.user.id)
-    .limit(5)
-
-  if (error || !data?.length) {
-    results.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('profile.noUsersFound')}</div>`
-    return
-  }
-
-  const searchIds = data.map(p => p.id)
-  const { data: existingFriendships, error: friendshipError } = await supabase
-    .from('friendships')
-    .select('requester_id, addressee_id, status')
-    .or(`requester_id.eq.${state.user.id},addressee_id.eq.${state.user.id}`)
-  if (friendshipError) {
-    console.warn('Friend relationship lookup failed:', friendshipError.message)
-  }
-
-  const relationshipByUserId = new Map()
-  ;(existingFriendships || []).forEach(friendship => {
-    const otherId = friendship.requester_id === state.user.id ? friendship.addressee_id : friendship.requester_id
-    if (searchIds.includes(otherId)) relationshipByUserId.set(otherId, friendship.status)
-  })
-
-  results.innerHTML = data.map(p => {
-    const name    = p.display_name || p.username || '?'
-    const handle  = p.username ? `@${p.username}` : (p.email || '')
-    const initial = name[0]?.toUpperCase() || '?'
-    const relationshipStatus = relationshipByUserId.get(p.id)
-    const disabledAttr = relationshipStatus ? ' disabled' : ''
-    const buttonLabel = relationshipStatus === 'accepted'
-      ? t('profile.friends')
-      : relationshipStatus === 'pending'
-        ? t('profile.sent')
-        : t('profile.add')
-    return `
-    <div class="friend-row">
-      <div class="friend-avatar">${initial}</div>
-      <div class="friend-info">
-        <div class="friend-name">${_esc(name)}</div>
-        ${handle ? `<div class="friend-handle">${_esc(handle)}</div>` : ''}
-      </div>
-      <button class="btn-primary send-request-btn" data-id="${p.id}" style="padding:5px 10px;font-size:12px;flex-shrink:0"${disabledAttr} aria-disabled="${relationshipStatus ? 'true' : 'false'}">${buttonLabel}</button>
-    </div>`
-  }).join('')
-
-  results.querySelectorAll('.send-request-btn').forEach(btn => {
-    btn.addEventListener('click', () => _sendRequest(btn.dataset.id, btn))
-  })
-}
-
-async function _sendRequest(friendId, btn) {
-  btn.disabled = true
-  const { error } = await supabase
-    .from('friendships')
-    .insert({ requester_id: state.user.id, addressee_id: friendId, status: 'pending' })
-
-  if (error) {
-    showToast(error.code === '23505' ? t('profile.requestAlreadySent') : t('common.errorPrefix', { message: error.message }))
-    btn.disabled = false
-  } else {
-    showToast(t('profile.requestSent'))
-    btn.textContent = t('profile.sent')
-  }
 }
 
 async function _acceptRequest(friendshipId) {

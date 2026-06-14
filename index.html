@@ -755,98 +755,6 @@
       </div>
     </div>
 
-    <!-- ═══════════════════════════ PROFILE ═══════════════════════════ -->
-    <div class="screen" id="screen-profile">
-      <div class="app-header">
-        <div class="header-brand">
-          <div class="brand-icon">🍄</div>
-          <span id="profile-header-label">Profile</span>
-        </div>
-      </div>
-      <div class="profile-body">
-
-        <div class="profile-identity">
-          <div class="profile-avatar-wrap">
-            <div class="profile-avatar-circle" id="profile-avatar-circle">
-              <span id="profile-avatar-initials">?</span>
-              <img id="profile-avatar-img" alt="" style="display:none">
-            </div>
-            <button class="profile-avatar-btn" id="profile-avatar-btn" aria-label="Change photo">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            </button>
-            <input type="file" id="profile-avatar-input" class="hidden-file-input" accept="image/*">
-            <input type="file" id="profile-avatar-camera-input" class="hidden-file-input" accept="image/*" capture="user">
-          </div>
-          <div class="profile-identity-fields">
-            <input id="profile-username" class="profile-field-input" type="text" placeholder="@username" autocomplete="off" spellcheck="false">
-            <input id="profile-fullname" class="profile-field-input" type="text" placeholder="Full name (optional)">
-            <textarea id="profile-bio" class="profile-field-input profile-bio-input" placeholder="Bio" rows="3"></textarea>
-            <div class="profile-email-display" id="profile-email-display"></div>
-            <button id="profile-save-btn" class="btn-primary" style="width:100%;margin-top:6px;padding:9px">Save profile</button>
-            <div class="profile-inat-card" id="profile-inat-section" style="display:none">
-              <div class="profile-inat-title">iNaturalist</div>
-              <div class="profile-inat-status" id="profile-inat-status">Not logged in</div>
-              <div class="profile-inat-actions">
-                <button type="button" class="btn-primary inat-connect-btn" id="profile-inat-connect-btn">Log in with iNaturalist</button>
-                <button type="button" class="sign-out-btn inat-forget-btn" id="profile-inat-forget-btn">Forget login</button>
-                <p class="inat-web-login-hint" id="profile-inat-web-login-hint" style="display:none; font-size:12px; color:var(--text-dim); margin-top:8px; text-align:center;"></p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="profile-section">
-          <div class="field-meta-section" style="margin-bottom:0">
-            <div class="field-meta-header" id="profile-cloud-plan-header">Account</div>
-            <div class="field-meta-row">
-              <div class="field-meta-key"><span id="profile-cloud-upload-key">Image quality</span><sup class="profile-footnote-star">*</sup></div>
-              <div class="field-meta-val" id="profile-cloud-upload-mode">—</div>
-            </div>
-            <div class="field-meta-row">
-              <div class="field-meta-key" id="profile-cloud-usage-key">Sync history</div>
-              <div class="field-meta-val" id="profile-cloud-usage">No syncs yet</div>
-            </div>
-            <div class="field-meta-row">
-              <div class="field-meta-key" id="profile-storage-key">Storage</div>
-              <div class="field-meta-val" id="profile-storage-usage">—</div>
-            </div>
-            <div class="field-meta-row">
-              <div class="field-meta-key" id="profile-image-count-key">Images</div>
-              <div class="field-meta-val" id="profile-image-count">—</div>
-            </div>
-          </div>
-          <p id="profile-cloud-plan-note" style="font-size:12px; color:var(--text-dim); margin:8px 2px 0; line-height:1.4; text-align:left;"></p>
-        </div>
-
-        <div class="profile-section">
-          <div class="profile-section-title" id="profile-add-friend-title">Add Friend</div>
-          <div class="friend-search-row">
-            <input id="friend-search-input" class="friend-search-input" type="text" placeholder="Email, name or @username…" autocomplete="off">
-            <button id="friend-search-btn" class="btn-primary" style="padding:8px 14px;flex-shrink:0">Search</button>
-          </div>
-          <div id="friend-search-results"></div>
-        </div>
-
-        <div class="profile-section">
-          <div class="profile-section-title" id="profile-friends-title">Friends</div>
-          <div id="friends-list"><div style="color:var(--text-dim);font-size:13px">No friends yet.</div></div>
-        </div>
-
-        <div class="profile-section" id="pending-section" style="display:none">
-          <div class="profile-section-title" id="profile-pending-title">Pending Requests</div>
-          <div id="pending-list"></div>
-        </div>
-
-        <div class="profile-danger-zone">
-          <button class="sign-out-btn" id="sign-out-btn">Sign out</button>
-          <div style="margin-top: 48px; display: flex; flex-direction: column; gap: 16px;">
-            <button class="sign-out-btn" id="profile-tos-btn">Terms of Service</button>
-            <button class="sign-out-btn sign-out-btn-danger" id="delete-account-btn">Delete account</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <div id="avatar-source-overlay" class="avatar-source-overlay" style="display:none">
       <div class="avatar-source-sheet">
         <div class="avatar-source-title">Update photo</div>
@@ -923,6 +831,90 @@
         <div class="import-progress-label" id="import-progress-label">Processing…</div>
         <div class="import-progress-track">
           <div class="import-progress-fill" id="import-progress-fill"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════ PROFILE SHEET ═══════════════════════════ -->
+    <div id="profile-overlay" aria-hidden="true">
+      <div id="profile-sheet" role="dialog" aria-modal="true" aria-labelledby="profile-title">
+        <div class="settings-handle"></div>
+        <div class="profile-title-row">
+          <div class="profile-title" id="profile-title">Profile</div>
+          <button type="button" class="settings-close-btn" id="profile-close-btn" aria-label="Close">×</button>
+        </div>
+
+        <div class="profile-body">
+          <div class="profile-identity">
+            <div class="profile-avatar-wrap">
+              <div class="profile-avatar-circle" id="profile-avatar-circle">
+                <span id="profile-avatar-initials">?</span>
+                <img id="profile-avatar-img" alt="" style="display:none">
+              </div>
+              <button class="profile-avatar-btn" id="profile-avatar-btn" aria-label="Change photo">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+              </button>
+              <input type="file" id="profile-avatar-input" class="hidden-file-input" accept="image/*">
+              <input type="file" id="profile-avatar-camera-input" class="hidden-file-input" accept="image/*" capture="user">
+            </div>
+            <div class="profile-identity-fields">
+              <input id="profile-username" class="profile-field-input" type="text" placeholder="@username" autocomplete="off" spellcheck="false">
+              <input id="profile-fullname" class="profile-field-input" type="text" placeholder="Full name (optional)">
+              <textarea id="profile-bio" class="profile-field-input profile-bio-input" placeholder="Bio" rows="3"></textarea>
+              <div class="profile-email-display" id="profile-email-display"></div>
+              <button id="profile-save-btn" class="btn-primary" style="width:100%;margin-top:6px;padding:9px">Save profile</button>
+              <div class="profile-inat-card" id="profile-inat-section" style="display:none">
+                <div class="profile-inat-title">iNaturalist</div>
+                <div class="profile-inat-status" id="profile-inat-status">Not logged in</div>
+                <div class="profile-inat-actions">
+                  <button type="button" class="btn-primary inat-connect-btn" id="profile-inat-connect-btn">Log in with iNaturalist</button>
+                  <button type="button" class="sign-out-btn inat-forget-btn" id="profile-inat-forget-btn">Forget login</button>
+                  <p class="inat-web-login-hint" id="profile-inat-web-login-hint" style="display:none; font-size:12px; color:var(--text-dim); margin-top:8px; text-align:center;"></p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="profile-section">
+            <div class="field-meta-section" style="margin-bottom:0">
+              <div class="field-meta-header" id="profile-cloud-plan-header">Account</div>
+              <div class="field-meta-row">
+                <div class="field-meta-key"><span id="profile-cloud-upload-key">Image quality</span><sup class="profile-footnote-star">*</sup></div>
+                <div class="field-meta-val" id="profile-cloud-upload-mode">—</div>
+              </div>
+              <div class="field-meta-row">
+                <div class="field-meta-key" id="profile-cloud-usage-key">Sync history</div>
+                <div class="field-meta-val" id="profile-cloud-usage">No syncs yet</div>
+              </div>
+              <div class="field-meta-row">
+                <div class="field-meta-key" id="profile-storage-key">Storage</div>
+                <div class="field-meta-val" id="profile-storage-usage">—</div>
+              </div>
+              <div class="field-meta-row">
+                <div class="field-meta-key" id="profile-image-count-key">Images</div>
+                <div class="field-meta-val" id="profile-image-count">—</div>
+              </div>
+            </div>
+            <p id="profile-cloud-plan-note" style="font-size:12px; color:var(--text-dim); margin:8px 2px 0; line-height:1.4; text-align:left;"></p>
+          </div>
+
+          <div class="profile-section">
+            <div class="profile-section-title" id="profile-friends-title">Friends</div>
+            <div id="friends-list"><div style="color:var(--text-dim);font-size:13px">No friends yet.</div></div>
+          </div>
+
+          <div class="profile-section" id="pending-section" style="display:none">
+            <div class="profile-section-title" id="profile-pending-title">Pending Requests</div>
+            <div id="pending-list"></div>
+          </div>
+
+          <div class="profile-danger-zone">
+            <button class="sign-out-btn" id="sign-out-btn">Sign out</button>
+            <div style="margin-top: 48px; display: flex; flex-direction: column; gap: 16px;">
+              <button class="sign-out-btn" id="profile-tos-btn">Terms of Service</button>
+              <button class="sign-out-btn sign-out-btn-danger" id="delete-account-btn">Delete account</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

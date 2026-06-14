@@ -286,7 +286,7 @@ const messages = {
     'profile.storageUsedOnly': '{used} used',
     'profile.storageUsedOfQuota': '{used} / {total}',
     'profile.storagePlanWebsiteNote': 'To upgrade or manage your storage plan, please log in to your account dashboard on our website.',
-    'profile.cloudPlanInfo': '*) There is a 1.5 MB image size limit for standard accounts and a 5 MB limit for Pro accounts. Image compression will adapt to keep below the limit. Images above 21MP will be resized.',
+    'profile.cloudPlanInfo': '*) Standard accounts: 1.5 MB limit. Pro accounts: 5 MB limit. Images above 21 MP are resized to 20 MP.',
     'profile.termsOfService': 'Terms of Service',
     'avatar.cropPhoto': 'Crop Photo',
     'avatar.hint': 'Pinch to zoom · Drag to reposition',
@@ -673,7 +673,7 @@ const messages = {
     'profile.storageUsedOnly': '{used} brukt',
     'profile.storageUsedOfQuota': '{used} / {total}',
     'profile.storagePlanWebsiteNote': 'To upgrade or manage your storage plan, please log in to your account dashboard on our website.',
-    'profile.cloudPlanInfo': '*) Det er en bildestørrelsesgrense på 1,5 MB for standardkontoer og en grense på 5 MB for Pro-kontoer. Bildekomprimering vil tilpasses for å holde seg under grensen. Bilder over 21 MP vil bli skalert ned.',
+    'profile.cloudPlanInfo': '*) Standardkontoer: 1,5 MB grense. Pro-kontoer: 5 MB grense. Bilder over 21 MP skaleres ned til 20 MP.',
     'profile.termsOfService': 'Vilkår for bruk',
     'avatar.cropPhoto': 'Beskjær bilde',
     'avatar.hint': 'Klyp for å zoome · Dra for å flytte',
@@ -1060,7 +1060,7 @@ const messages = {
     'profile.storageUsedOnly': '{used} använt',
     'profile.storageUsedOfQuota': '{used} / {total}',
     'profile.storagePlanWebsiteNote': 'To upgrade or manage your storage plan, please log in to your account dashboard on our website.',
-    'profile.cloudPlanInfo': '*) Det finns en bildstorleksgräns på 1,5 MB för standardkonton och en gräns på 5 MB för Pro-konton. Bildkomprimeringen anpassas för att hålla sig under gränsen. Bilder över 21 MP kommer att skalas ned.',
+    'profile.cloudPlanInfo': '*) Standardkonton: 1,5 MB gräns. Pro-konton: 5 MB gräns. Bilder över 21 MP skalas ned till 20 MP.',
     'profile.termsOfService': 'Användarvillkor',
     'avatar.cropPhoto': 'Beskär bild',
     'avatar.hint': 'Nyp för att zooma · Dra för att flytta',
@@ -1447,7 +1447,7 @@ const messages = {
     'profile.storageUsedOnly': '{used} genutzt',
     'profile.storageUsedOfQuota': '{used} / {total}',
     'profile.storagePlanWebsiteNote': 'To upgrade or manage your storage plan, please log in to your account dashboard on our website.',
-    'profile.cloudPlanInfo': '*) Es gibt ein Limit von 1,5 MB für Bilder bei Standardkonten und ein Limit von 5 MB für Pro-Konten. Die Bildkomprimierung passt sich an, um unter dem Limit zu bleiben. Bilder über 21 MP werden verkleinert.',
+    'profile.cloudPlanInfo': '*) Standardkonten: 1,5 MB Limit. Pro-Konten: 5 MB Limit. Bilder über 21 MP werden auf 20 MP verkleinert.',
     'profile.termsOfService': 'Nutzungsbedingungen',
     'avatar.cropPhoto': 'Foto zuschneiden',
     'avatar.hint': 'Zum Zoomen zusammenziehen · Zum Verschieben ziehen',
@@ -1735,7 +1735,6 @@ export function applyStaticTranslations() {
   setPlaceholder('#comment-input', 'comments.add')
   setPlaceholder('#map-search-input', 'map.filter')
   setPlaceholder('#profile-fullname', 'profile.fullNameOptional')
-  setPlaceholder('#friend-search-input', 'profile.friendSearch')
 
   setText('#header-sync-tag span', 'common.sync')
   setText('#home-recent-finds-title', 'home.recentFinds')
@@ -1832,9 +1831,8 @@ export function applyStaticTranslations() {
   setText('#finds-filter-spores-label', 'stats.spores')
   setText('#finds-filter-draft-label', 'finds.drafts')
 
-  setText('#profile-header-label', 'profile.title')
+  setText('#profile-title', 'profile.title')
   setText('#profile-save-btn', 'profile.saveProfile')
-  setText('#profile-add-friend-title', 'profile.addFriend')
   setText('#profile-pending-title', 'profile.pendingRequests')
   setText('#profile-friends-title', 'profile.friends')
   setText('#profile-cloud-plan-header', 'profile.cloudStorage')
@@ -1846,6 +1844,7 @@ export function applyStaticTranslations() {
   setText('#sign-out-btn', 'profile.signOut')
   setText('#delete-account-btn', 'profile.deleteAccount')
   setText('#profile-tos-btn', 'profile.termsOfService')
+  setAria('#profile-close-btn', 'common.close')
   const friendsEmpty = document.querySelector('#friends-list > div')
   if (friendsEmpty) friendsEmpty.textContent = t('profile.noFriends')
 

@@ -1370,21 +1370,13 @@ html, body {
 .find-owner-dot.friend { background: #5b9bd5; }
 
 /* ── PROFILE SCREEN ── */
-.profile-body { padding: 16px 18px 32px; }
+.profile-body { padding: 4px 0 0; }
 .profile-section { margin-bottom: 20px; }
 .profile-section-title {
   font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
   text-transform: uppercase; color: var(--text-dim);
   margin-bottom: 10px;
 }
-.friend-search-row { display: flex; gap: 8px; margin-bottom: 8px; }
-.friend-search-input {
-  flex: 1; background: var(--card); border: 1px solid var(--border);
-  border-radius: 8px; padding: 9px 12px;
-  color: var(--text-primary); font-size: 14px; font-family: 'Outfit', sans-serif;
-  outline: none;
-}
-.friend-search-input:focus { border-color: var(--green-accent); }
 .friend-row {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 0; border-bottom: 1px solid var(--border-dim);
@@ -4397,7 +4389,8 @@ html.light .ai-id-dot.is-complete::before {
 }
 
 /* ── SETTINGS PANEL (bottom sheet) ── */
-#settings-overlay {
+#settings-overlay,
+#profile-overlay {
   position: absolute; inset: 0;
   background: rgba(0,0,0,0.45);
   z-index: 1300;
@@ -4406,9 +4399,11 @@ html.light .ai-id-dot.is-complete::before {
   pointer-events: none;
   transition: opacity 0.2s;
 }
-#settings-overlay.open { opacity: 1; pointer-events: auto; }
+#settings-overlay.open,
+#profile-overlay.open { opacity: 1; pointer-events: auto; }
 
-#settings-sheet {
+#settings-sheet,
+#profile-sheet {
   position: absolute; bottom: 0; left: 0; right: 0;
   background: var(--surface);
   border-radius: 20px 20px 0 0;
@@ -4421,7 +4416,8 @@ html.light .ai-id-dot.is-complete::before {
   border-top: 1px solid var(--border);
   outline: none;
 }
-#settings-overlay.open #settings-sheet { transform: translateY(0); }
+#settings-overlay.open #settings-sheet,
+#profile-overlay.open #profile-sheet { transform: translateY(0); }
 
 .settings-handle {
   width: 36px; height: 4px; border-radius: 2px;
@@ -4436,6 +4432,18 @@ html.light .ai-id-dot.is-complete::before {
 }
 .settings-title {
   font-size: 16px; font-weight: 700; color: var(--text-primary);
+}
+.profile-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.profile-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
 }
 .settings-close-btn {
   width: 34px;

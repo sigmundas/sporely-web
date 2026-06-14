@@ -29,7 +29,7 @@ import { initFindDetail } from './screens/find_detail.js'
 import { initPhotoViewer } from './photo-viewer.js'
 import { initImportReview, openNativeCamera, renderSessions, restoreImportSessions } from './screens/import_review.js'
 import { clearImportSessions, loadImportSessions } from './import-store.js'
-import { initProfile, loadProfile, refreshHeaderProfileButtons } from './screens/profile.js'
+import { initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons } from './screens/profile.js'
 import { initPeople, loadPeople } from './screens/people.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
@@ -396,9 +396,8 @@ function initNav() {
     loadPeople({ query: document.getElementById('people-search-input')?.value.trim() || '' })
   })
   ;['home-profile-btn', 'finds-profile-btn', 'map-profile-btn', 'people-profile-btn'].forEach(id => {
-    document.getElementById(id)?.addEventListener('click', () => {
-      navigate('profile')
-      loadProfile()
+    document.getElementById(id)?.addEventListener('click', event => {
+      openProfileOverlay({ opener: event.currentTarget })
     })
   })
 }
