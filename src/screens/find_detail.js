@@ -32,6 +32,7 @@ import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { getIdentifyNoMatchMessage, runIdentifyForBlobs, runIdentifyForMediaKeys } from '../identify.js'
 import { loadInaturalistSession } from '../inaturalist.js'
 import { refreshHome } from './home.js'
+import { loadPeopleSocialState } from './people.js'
 import { buildGpsMetaHtml } from './review.js'
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js'
 import { fetchCloudPlanProfile } from '../cloud-plan.js'
@@ -808,7 +809,9 @@ export function initFindDetail() {
       _setDetailAiActiveService(service)
     })
   })
-  document.getElementById('detail-author')?.addEventListener('click', _openAuthorFinds)
+  document.getElementById('detail-author')?.addEventListener('click', () => {
+    void _openAuthorFinds()
+  })
   document.getElementById('detail-friend-btn')?.addEventListener('click', _sendFriendRequestFromDetail)
   document.querySelectorAll('input[name="detail-vis"], input[name="detail-location-precision"], #detail-draft').forEach(input => {
     input.addEventListener('change', () => {
@@ -2718,15 +2721,38 @@ function _taxonFollowTarget(obs) {
   return null
 }
 
-function _openAuthorFinds() {
+async function _openAuthorFinds() {
   if (!currentObs?.user_id || currentObs.user_id === state.user?.id) return
-  openFinds('user', {
-    userId: currentObs.user_id,
-    username: detailAuthorProfile?.username || null,
-    displayName: detailAuthorProfile?.display_name || null,
-    avatarUrl: detailAuthorProfile?.avatar_url || '',
-    bio: detailAuthorProfile?.bio || null,
-    summaryLoaded: false,
+  const userId = currentObs.user_id
+  const [profileRes, statsRes, relationshipMap] = await Promise.all([
+    detailAuthorProfile
+      ? Promise.resolve({ data: detailAuthorProfile })
+      : supabase
+        .from('profiles')
+        .select('id, username, display_name, avatar_url, bio')
+        .eq('id', userId)
+        .maybeSingle(),
+    supabase.rpc('get_person_stats', { p_user_id: userId }),
+    loadPeopleSocialState([userId]),
+  ])
+
+  const profile = profileRes?.data || detailAuthorProfile || null
+  const statsRow = Array.isArray(statsRes?.data) ? (statsRes.data[0] || null) : (statsRes?.data || null)
+  await openFinds('user', {
+    userId,
+    username: profile?.username || null,
+    displayName: profile?.display_name || null,
+    avatarUrl: profile?.avatar_url || '',
+    bio: profile?.bio || null,
+    finds: statsRow?.public_find_count !== undefined ? Number(statsRow.public_find_count) : currentObs?.finds,
+    species: statsRow?.public_species_count !== undefined ? Number(statsRow.public_species_count) : currentObs?.species,
+    spores: statsRow?.public_spore_count !== undefined ? Number(statsRow.public_spore_count) : currentObs?.spores,
+    relationship: relationshipMap?.[userId] || {
+      friendStatus: detailFriendship?.status || null,
+      following: detailFollowState.user === true,
+    },
+    summaryLoaded: true,
+    summaryComplete: true,
     resetSearch: true,
     resetFilters: true,
   })

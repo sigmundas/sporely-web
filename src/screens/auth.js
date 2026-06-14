@@ -254,6 +254,13 @@ function _validatePasswordRequirements(password) {
   return ''
 }
 
+function _usernameFromEmail(email) {
+  const raw = String(email || '').trim()
+  if (!raw) return ''
+  const [localPart] = raw.split('@')
+  return localPart.trim()
+}
+
 function _getPasswordResetRedirectUrl() {
   const origin = window.location.origin
   const hostname = window.location.hostname
@@ -540,6 +547,16 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
       // Check whether we actually got a session.
       const session = await _waitForSession()
       if (session?.user) {
+        const username = _usernameFromEmail(session.user.email || email)
+        if (username) {
+          const { error: profileError } = await supabase
+            .from('profiles')
+            .update({ username })
+            .eq('id', session.user.id)
+          if (profileError) {
+            console.warn('Could not seed username from signup email:', profileError.message)
+          }
+        }
         _clearAuthDraft()
         onAuthenticated(session)
         return

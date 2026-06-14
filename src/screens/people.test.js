@@ -76,8 +76,9 @@ test('buildPeopleCard renders relationship actions', () => {
     },
   })
 
-  assert.match(html, /people-social-btn/)
-  assert.match(html, /people-social-heart/)
+  assert.match(html, /people-social-btn is-following is-friend/)
+  assert.match(html, /Friends/)
   assert.match(html, /Unfriend/)
   assert.match(html, /Unfollow/)
+  assert.doesNotMatch(html, /people-social-heart/)
 })

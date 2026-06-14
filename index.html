@@ -858,9 +858,18 @@
               <input type="file" id="profile-avatar-camera-input" class="hidden-file-input" accept="image/*" capture="user">
             </div>
             <div class="profile-identity-fields">
-              <input id="profile-username" class="profile-field-input" type="text" placeholder="@username" autocomplete="off" spellcheck="false">
-              <input id="profile-fullname" class="profile-field-input" type="text" placeholder="Full name (optional)">
-              <textarea id="profile-bio" class="profile-field-input profile-bio-input" placeholder="Bio" rows="3"></textarea>
+              <label class="profile-field-group" for="profile-username">
+                <span class="profile-field-label">Username</span>
+                <input id="profile-username" class="profile-field-input" type="text" placeholder="@username" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="profile-field-group" for="profile-fullname">
+                <span class="profile-field-label">Name</span>
+                <input id="profile-fullname" class="profile-field-input" type="text" placeholder="Full name (optional)">
+              </label>
+              <label class="profile-field-group" for="profile-bio">
+                <span class="profile-field-label">Bio</span>
+                <textarea id="profile-bio" class="profile-field-input profile-bio-input" placeholder="Bio" rows="3"></textarea>
+              </label>
               <div class="profile-email-display" id="profile-email-display"></div>
               <button id="profile-save-btn" class="btn-primary" style="width:100%;margin-top:6px;padding:9px">Save profile</button>
               <div class="profile-inat-card" id="profile-inat-section" style="display:none">

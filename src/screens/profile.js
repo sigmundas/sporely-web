@@ -206,7 +206,11 @@ export async function refreshHeaderProfileButtons(profile = null) {
     summary = data || {}
   }
 
-  const initials = _initials(summary?.username || state.user?.email || '')
+  const normalizedUsername = _normalizeUsername(summary?.username, state.user?.email || '')
+  if (summary && typeof summary === 'object') {
+    summary.username = normalizedUsername
+  }
+  const initials = _initials(normalizedUsername || state.user?.email || '')
   const signedAvatarUrl = await _getSignedAvatarUrl(uid, true)
   let avatarUrl = ''
   let isValid = false
@@ -262,14 +266,14 @@ async function _loadProfileData() {
     return
   }
 
-
-  document.getElementById('profile-username').value  = data.username     || ''
-  document.getElementById('profile-fullname').value  = data.display_name || ''
+  const normalizedUsername = _normalizeUsername(data.username, state.user?.email || '')
+  document.getElementById('profile-username').value  = normalizedUsername || ''
+  document.getElementById('profile-fullname').value  = _normalizeDisplayName(data.display_name, state.user?.email || '') || ''
   document.getElementById('profile-bio').value = data.bio || ''
   document.getElementById('profile-email-display').textContent = state.user?.email || ''
-  const initials = _initials(data.username || state.user?.email || '')
+  const initials = _initials(normalizedUsername || state.user?.email || '')
   document.getElementById('profile-avatar-initials').textContent = initials
-  await refreshHeaderProfileButtons(data)
+  await refreshHeaderProfileButtons({ ...data, username: normalizedUsername })
   if (data.avatar_url) {
     const shown = await _setProfileAvatarSource({ uid, preferredUrl: data.avatar_url })
     if (shown) {
@@ -284,8 +288,8 @@ async function _loadProfileData() {
 async function _saveProfile() {
   const btn = document.getElementById('profile-save-btn')
   btn.disabled = true
-  const username     = document.getElementById('profile-username').value.trim().replace(/^@/, '') || null
-  const display_name = document.getElementById('profile-fullname').value.trim() || null
+  const username     = _normalizeUsername(document.getElementById('profile-username').value, state.user?.email || '')
+  const display_name = _normalizeDisplayName(document.getElementById('profile-fullname').value, state.user?.email || '')
   const bio = document.getElementById('profile-bio').value.trim() || null
   const { error } = await supabase.from('profiles').update({ username, display_name, bio }).eq('id', state.user.id)
   btn.disabled = false
@@ -293,6 +297,7 @@ async function _saveProfile() {
     showToast(error.code === '23505' ? t('profile.usernameTaken') : t('common.errorPrefix', { message: error.message }))
     return
   }
+  document.getElementById('profile-username').value = username || ''
   await refreshHeaderProfileButtons({ username, display_name, avatar_url: document.getElementById('profile-avatar-img')?.getAttribute('src') || '' })
   showToast(t('profile.saved'))
 }
@@ -515,12 +520,39 @@ async function _uploadAvatar(blob) {
     cacheBust: true,
     keepCurrentOnFailure: true,
   })
-  await refreshHeaderProfileButtons({ username: document.getElementById('profile-username')?.value.trim(), avatar_url: publicUrl })
+  await refreshHeaderProfileButtons({
+    username: _normalizeUsername(document.getElementById('profile-username')?.value, state.user?.email || ''),
+    avatar_url: publicUrl,
+  })
   showToast(t('profile.photoUpdated'))
 }
 
 function _initials(str) {
   return str.split(/[\s@.]/).filter(Boolean).slice(0, 2).map(p => p[0].toUpperCase()).join('') || '?'
+}
+
+function _normalizeUsername(value, fallbackEmail = '') {
+  const raw = String(value || '').trim().replace(/^@+/, '')
+  if (raw) {
+    const [localPart] = raw.split('@')
+    return localPart.trim() || null
+  }
+  const email = String(fallbackEmail || state.user?.email || '').trim()
+  if (!email) return null
+  const [localPart] = email.split('@')
+  return localPart.trim() || null
+}
+
+function _normalizeDisplayName(value, fallbackEmail = '') {
+  const raw = String(value || '').trim()
+  if (raw) {
+    const [localPart] = raw.split('@')
+    return localPart.trim() || null
+  }
+  const email = String(fallbackEmail || state.user?.email || '').trim()
+  if (!email) return null
+  const [localPart] = email.split('@')
+  return localPart.trim() || null
 }
 
 function _showInitialsAvatar() {

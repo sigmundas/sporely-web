@@ -150,6 +150,20 @@ function _findsSecondaryScope(primary = _findsPrimaryScope()) {
     : _normalizeFindsMineScope(state.findsMineScope)
 }
 
+function _normalizeSecondaryScopeForPrimary(primary, scope, fallback = '') {
+  const normalized = String(scope || '').trim().toLowerCase()
+  if (primary === 'feed') {
+    if (normalized === 'species' || normalized === 'friends' || normalized === 'public') {
+      return _normalizeFindsFeedScope(normalized)
+    }
+    return _normalizeFindsFeedScope(fallback || 'species')
+  }
+  if (normalized === 'private' || normalized === 'friends' || normalized === 'public') {
+    return _normalizeFindsMineScope(normalized)
+  }
+  return _normalizeFindsMineScope(fallback || 'public')
+}
+
 function _findsVisibleScope() {
   const primary = _findsPrimaryScope()
   const secondary = _findsSecondaryScope(primary)
@@ -177,11 +191,16 @@ function _findsSecondaryScopeLabel(scope, primary = _findsPrimaryScope()) {
 
 function _setFindsPrimaryScope(primary, options = {}) {
   const nextPrimary = _normalizeFindsPrimaryScope(primary)
+  const previousPrimary = _findsPrimaryScope()
+  const previousSecondary = _findsSecondaryScope(previousPrimary)
   state.findsScopePrimary = nextPrimary
+  const preservedSecondary = options.secondaryScope !== undefined
+    ? options.secondaryScope
+    : previousSecondary
   if (nextPrimary === 'feed') {
-    state.findsFeedScope = _normalizeFindsFeedScope(options.secondaryScope || state.findsFeedScope || 'species')
+    state.findsFeedScope = _normalizeSecondaryScopeForPrimary('feed', preservedSecondary, state.findsFeedScope || 'species')
   } else {
-    state.findsMineScope = _normalizeFindsMineScope(options.secondaryScope || state.findsMineScope || 'public')
+    state.findsMineScope = _normalizeSecondaryScopeForPrimary('mine', preservedSecondary, state.findsMineScope || 'public')
   }
 }
 
@@ -298,6 +317,15 @@ function _composeFindsTargetPerson(source = {}) {
   const finds = Number(source.finds !== undefined ? source.finds : state.findsTargetFinds)
   const species = Number(source.species !== undefined ? source.species : state.findsTargetSpecies)
   const spores = Number(source.spores !== undefined ? source.spores : state.findsTargetSpores)
+  const relationshipSource = source.relationship !== undefined
+    ? source.relationship
+    : state.findsTargetRelationship
+  const relationship = relationshipSource && typeof relationshipSource === 'object'
+    ? {
+        friendStatus: relationshipSource.friendStatus || null,
+        following: relationshipSource.following === true,
+      }
+    : null
 
   return {
     user_id: userId,
@@ -308,6 +336,7 @@ function _composeFindsTargetPerson(source = {}) {
     finds: Number.isFinite(finds) ? finds : 0,
     species: Number.isFinite(species) ? species : 0,
     spores: Number.isFinite(spores) ? spores : 0,
+    relationship,
   }
 }
 
@@ -331,7 +360,7 @@ async function _loadFindsTargetCard(userId) {
   const targetUserId = String(userId || '').trim()
   const root = document.getElementById('finds-user-card-root')
   if (!targetUserId || !root) return
-  if (state.findsTargetSummaryLoaded && _findsTargetCardLoadedUserId === targetUserId) return
+  if (state.findsTargetSummaryComplete && _findsTargetCardLoadedUserId === targetUserId) return
   if (_findsTargetCardLoadingUserId === targetUserId && _findsTargetCardLoadPromise) return _findsTargetCardLoadPromise
 
   _findsTargetCardLoadingUserId = targetUserId
@@ -367,6 +396,7 @@ async function _loadFindsTargetCard(userId) {
       finds: statsRow?.public_find_count !== undefined ? Number(statsRow.public_find_count) : state.findsTargetFinds,
       species: statsRow?.public_species_count !== undefined ? Number(statsRow.public_species_count) : state.findsTargetSpecies,
       spores: statsRow?.public_spore_count !== undefined ? Number(statsRow.public_spore_count) : state.findsTargetSpores,
+      relationship: state.findsTargetRelationship,
     })
 
     if (!person) {
@@ -384,6 +414,7 @@ async function _loadFindsTargetCard(userId) {
     state.findsTargetSpecies = person.species
     state.findsTargetSpores = person.spores
     state.findsTargetSummaryLoaded = true
+    state.findsTargetSummaryComplete = true
     _findsTargetCardLoadedUserId = targetUserId
     _renderFindsTargetCard(root, person)
   })().catch(error => {
@@ -790,10 +821,12 @@ function _setScope(scope, options = {}) {
   if (normalized === 'user') {
     state.findsTargetUserId = options.userId
     state.findsTargetSummaryLoaded = options.summaryLoaded === true
+    state.findsTargetSummaryComplete = options.summaryComplete === true
     state.findsTargetUsername = options.username
     state.findsTargetAvatarUrl = options.avatarUrl
     state.findsTargetDisplayName = options.displayName
     state.findsTargetBio = options.bio
+    state.findsTargetRelationship = options.relationship || null
     state.findsTargetFinds = options.finds
     state.findsTargetSpecies = options.species
     state.findsTargetSpores = options.spores
@@ -817,9 +850,11 @@ function _setScope(scope, options = {}) {
     state.findsTargetAvatarUrl = null
     state.findsTargetDisplayName = null
     state.findsTargetBio = null
+    state.findsTargetRelationship = null
     state.findsTargetFinds = 0
     state.findsTargetSpecies = 0
     state.findsTargetSpores = 0
+    state.findsTargetSummaryComplete = false
     _findsTargetCardLoadedUserId = null
   }
 
@@ -956,13 +991,17 @@ async function _loadProfilesForScope(data, loadSeq = _loadFindsSeq) {
     return true
   }
 
-  const { data: profiles, error } = await supabase
-    .from('profiles')
-    .select('id, username, display_name, avatar_url')
-    .in('id', userIds)
+  const [profilesRes, relationships] = await Promise.all([
+    supabase
+      .from('profiles')
+      .select('id, username, display_name, avatar_url')
+      .in('id', userIds),
+    loadPeopleSocialState(userIds),
+  ])
 
   if (loadSeq !== _loadFindsSeq) return false
 
+  const { data: profiles, error } = profilesRes
   if (error) {
     console.warn('Could not load observation profiles:', error.message)
     _profileMap = {}
@@ -982,7 +1021,10 @@ async function _loadProfilesForScope(data, loadSeq = _loadFindsSeq) {
   if (loadSeq !== _loadFindsSeq) return false
   _profileMap = Object.fromEntries((profiles || []).map(profile => {
     if (signedMap[profile.id]) profile.avatar_url = signedMap[profile.id]
-    return [profile.id, profile]
+    return [profile.id, {
+      ...profile,
+      relationship: relationships?.[profile.id] || { friendStatus: null, following: false },
+    }]
   }))
   return true
 }
@@ -1396,13 +1438,32 @@ function _authorChip(obs, options = {}) {
   if (obs.user_id === state.user?.id) return ''
   const profile = _authorProfile(obs)
   const sizeClass = options.sizeClass || ''
+  const isFriend = profile?.relationship?.friendStatus === 'accepted'
+  const badge = isFriend
+    ? `<span class="relationship-heart-badge" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+        </svg>
+      </span>`
+    : ''
+  const wrapperClass = [
+    'observation-author-chip-wrap',
+    sizeClass,
+    isFriend ? 'is-friend' : '',
+  ].filter(Boolean).join(' ')
   if (profile?.avatar_url) {
-    return `<div class="observation-author-chip ${sizeClass}" title="${_esc(_authorHandle(obs))}">
-      <img src="${_esc(profile.avatar_url)}" alt="${_esc(_authorHandle(obs))}" loading="lazy" decoding="async">
+    return `<div class="${wrapperClass}" title="${_esc(_authorHandle(obs))}">
+      <div class="observation-author-chip ${isFriend ? 'is-friend' : ''}">
+        <img src="${_esc(profile.avatar_url)}" alt="${_esc(_authorHandle(obs))}" loading="lazy" decoding="async">
+      </div>
+      ${badge}
     </div>`
   }
-  return `<div class="observation-author-chip observation-author-chip--initial ${sizeClass}" title="${_esc(_authorHandle(obs))}">
-    ${_esc(_authorInitial(obs))}
+  return `<div class="${wrapperClass}" title="${_esc(_authorHandle(obs))}">
+    <div class="observation-author-chip observation-author-chip--initial ${isFriend ? 'is-friend' : ''}">
+      ${_esc(_authorInitial(obs))}
+    </div>
+    ${badge}
   </div>`
 }
 

@@ -135,12 +135,25 @@ function _openPeopleFinds(card, action = 'finds') {
     finds: card.dataset.finds,
     species: card.dataset.species,
     spores: card.dataset.spores,
+    relationship: {
+      friendStatus: card.dataset.friendStatus || null,
+      following: card.dataset.following === 'true',
+    },
     summaryLoaded: true,
+    summaryComplete: true,
     resetSearch: true,
     resetFilters: true,
     groupBySpecies: action === 'species',
     sporesOnly: action === 'spores',
   })
+}
+
+function _friendBadgeHtml() {
+  return `<span class="relationship-heart-badge" aria-hidden="true">
+    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+    </svg>
+  </span>`
 }
 
 function _bindPeopleInfiniteScroll() {
@@ -584,6 +597,12 @@ export function buildPeopleCard(person) {
   const avatarHtml = avatarUrl
     ? `<img class="people-card-avatar-img" src="${_esc(avatarUrl)}" alt="" data-fallback-initials="${initials}" data-guessed-url="">`
     : `<div class="people-card-avatar-fallback">${initials}</div>`
+  const avatarBadge = isFriend ? _friendBadgeHtml() : ''
+  const buttonLabel = isFriend
+    ? t('social.friendAccepted')
+    : following
+      ? t('social.followed')
+      : t('social.followButton')
   const followMenuFriendLabel = isFriend
     ? t('social.unfriendUser')
     : isPending
@@ -597,21 +616,23 @@ export function buildPeopleCard(person) {
   const followBtnClasses = [
     'people-social-btn',
     following ? 'is-following' : '',
-    isFriend ? 'is-friend' : '',
     isPending ? 'is-pending' : '',
+    isFriend ? 'is-friend' : '',
   ].filter(Boolean).join(' ')
 
-  return `<article class="people-card" data-user-id="${_esc(person.user_id)}" data-username="${_esc(username || '')}" data-avatar-url="${_esc(avatarUrl)}" data-display-name="${_esc(person.display_name || '')}" data-bio="${_esc(person.bio || '')}" data-finds="${Number(person.finds) || 0}" data-species="${Number(person.species) || 0}" data-spores="${Number(person.spores) || 0}">
+  return `<article class="people-card" data-user-id="${_esc(person.user_id)}" data-username="${_esc(username || '')}" data-avatar-url="${_esc(avatarUrl)}" data-display-name="${_esc(person.display_name || '')}" data-bio="${_esc(person.bio || '')}" data-finds="${Number(person.finds) || 0}" data-species="${Number(person.species) || 0}" data-spores="${Number(person.spores) || 0}" data-friend-status="${_esc(friendStatus || '')}" data-following="${following ? 'true' : 'false'}">
       <div class="people-card-head">
-        <div class="people-card-avatar">${avatarHtml}</div>
+        <div class="people-card-avatar-wrap${isFriend ? ' is-friend' : ''}">
+          <div class="people-card-avatar">${avatarHtml}</div>
+          ${avatarBadge}
+        </div>
         <div class="people-card-title-wrap">
           <div class="people-card-name">${_esc(primaryName)}</div>
           ${username ? `<div class="people-card-handle">@${_esc(username)}</div>` : ''}
         </div>
         <div class="people-social-wrap">
           <button class="${followBtnClasses}" aria-haspopup="true" aria-expanded="false" type="button">
-            <span class="people-social-btn-label">${_esc(t('social.followButton'))}</span>
-            ${isFriend ? '<svg class="people-social-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>' : ''}
+            <span class="people-social-btn-label">${_esc(buttonLabel)}</span>
             <svg class="people-social-chevron" viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
           </button>
           <div class="people-social-menu" style="display:none;">

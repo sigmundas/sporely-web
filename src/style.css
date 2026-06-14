@@ -274,9 +274,11 @@ html, body {
 .screen {
   position: absolute; inset: 0;
   bottom: calc(var(--nav-h) + var(--safe-bottom));
-  overflow-y: auto;
+  overflow-y: scroll;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -496,7 +498,64 @@ html, body {
   font-size: 20px;
 }
 .find-meta { flex: 1; min-width: 0; }
+.find-meta-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
 .find-latin { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--green-bright); margin-bottom: 2px; }
+.find-latin--empty {
+  min-height: 1em;
+}
+.find-owner-name {
+  flex-shrink: 0;
+  max-width: 56%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.find-owner-name-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 0 2px 6px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.find-owner-name-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  object-fit: cover;
+  background: var(--card);
+  border: 1px solid var(--border);
+}
+.find-owner-name-avatar--fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--green-accent);
+  font-size: 9px;
+  font-weight: 700;
+}
+.find-owner-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: right;
+}
 .find-common { font-size: 14px; font-weight: 500; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .find-location { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); margin-top: 2px; font-family: 'DM Mono', monospace; }
 
@@ -1191,6 +1250,14 @@ html, body {
   flex-shrink: 0;
   border: 1px solid var(--border);
 }
+.people-card-avatar-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.people-card-avatar-wrap.is-friend .relationship-heart-badge {
+  top: -5px;
+  left: -5px;
+}
 .people-card-avatar-img,
 .people-card-avatar-fallback {
   width: 100%;
@@ -1256,15 +1323,10 @@ html, body {
 .people-social-btn-label {
   line-height: 1;
 }
-.people-social-heart,
 .people-social-chevron {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
-}
-.people-social-heart {
-  fill: var(--red);
-  stroke: var(--red);
 }
 .people-social-chevron {
   stroke: currentColor;
@@ -1724,10 +1786,9 @@ html, body {
 
 .observation-author-chip {
   position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 30px;
-  height: 30px;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   border-radius: 999px;
   border: 2px solid rgba(13,17,9,0.9);
   background: var(--green-deep);
@@ -1737,6 +1798,27 @@ html, body {
   align-items: center;
   justify-content: center;
   z-index: 2;
+}
+.observation-author-chip-wrap {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 34px;
+  height: 34px;
+  overflow: visible;
+  z-index: 2;
+}
+.observation-author-chip-wrap.observation-author-chip--compact {
+  width: 28px;
+  height: 28px;
+  top: 6px;
+  right: 6px;
+}
+.observation-author-chip-wrap.observation-author-chip--tile {
+  width: 24px;
+  height: 24px;
+  top: 5px;
+  right: 5px;
 }
 .observation-author-chip img {
   width: 100%;
@@ -1749,25 +1831,45 @@ html, body {
   font-size: 11px;
   font-weight: 700;
 }
-.observation-author-chip--compact {
-  width: 24px;
-  height: 24px;
-  top: 6px;
-  right: 6px;
+.observation-author-chip-wrap.is-friend .relationship-heart-badge {
+  top: -5px;
+  left: -5px;
 }
-.observation-author-chip--tile {
-  width: 22px;
-  height: 22px;
-  top: 5px;
-  right: 5px;
+.observation-author-chip-wrap.observation-author-chip--tile .observation-author-chip {
   border-width: 1.5px;
 }
 .observation-author-chip--home {
-  width: 18px;
-  height: 18px;
+  inset: auto;
+  width: 12px;
+  height: 12px;
+  top: -3px;
+  right: -3px;
+  border-width: 1px;
+}
+.relationship-heart-badge {
+  position: absolute;
   top: -4px;
-  right: -4px;
-  border-width: 1.5px;
+  left: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 0;
+  border: none;
+  background: transparent;
+  color: var(--red);
+  box-shadow: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 3;
+}
+.relationship-heart-badge svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  stroke: color-mix(in srgb, var(--red) 55%, #1a0906 45%);
+  stroke-width: 1.4;
+  paint-order: stroke fill;
 }
 
 .badge {
@@ -1806,6 +1908,8 @@ html, body {
   width: auto;
   justify-content: flex-end;
   flex-wrap: wrap;
+  align-self: start;
+  justify-self: end;
 }
 
 .detail-status-tag {
@@ -1961,9 +2065,10 @@ html, body {
   grid-column: 1 / -1;
 }
 .detail-top-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 12px;
   padding-top: 8px;
   margin-bottom: 12px;
   width: 100%;
@@ -1977,12 +2082,16 @@ html, body {
   cursor: pointer;
   text-align: left;
   padding: 0;
+  min-width: 0;
+  width: 100%;
 }
 .detail-author-name {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   justify-content: center;
+  min-width: 0;
+  flex: 1;
 }
 .detail-author-name .author-handle {
   font-weight: 600;
@@ -3654,7 +3763,24 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
+}
+.profile-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-primary);
+}
+.profile-field-label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+.profile-field-help {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-dim);
 }
 .profile-field-input {
   width: 100%;
@@ -3681,7 +3807,7 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
 .profile-email-display {
   font-size: 12px;
   color: var(--text-dim);
-  padding: 2px 2px;
+  padding: 0 2px;
 }
 
 /* ── Visibility radio pills ───────────────────────────────────────────────── */

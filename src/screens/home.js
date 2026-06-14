@@ -159,13 +159,16 @@ async function loadRecentFinds() {
       '<div class="find-thumb-placeholder">🍄</div>',
     )
     const dot = `<div class="find-owner-dot ${obs._owner}"></div>`
-    const authorChip = _homeAuthorChip(obs, profileMap)
+    const authorLabel = _homeAuthorLabel(obs, profileMap)
 
     return `<div class="find-row" data-id="${obs.id}" style="cursor:pointer">
-      <div class="find-thumb-wrap">${thumb}${authorChip}</div>
+      <div class="find-thumb-wrap">${thumb}</div>
       <div class="find-meta">
         <div class="find-common${isIdentified ? '' : ' unidentified'}" style="display:flex;align-items:center;gap:5px">${dot}${displayName}</div>
-        ${subtitle ? `<div class="find-latin">${subtitle}</div>` : ''}
+        <div class="find-meta-line">
+          ${subtitle ? `<div class="find-latin">${subtitle}</div>` : '<div class="find-latin find-latin--empty"></div>'}
+          ${authorLabel ? `<div class="find-owner-name">${authorLabel}</div>` : ''}
+        </div>
         <div class="find-location">
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
           ${loc}
@@ -641,24 +644,45 @@ async function _loadProfileMap(observations) {
   }
 
   return Object.fromEntries((data || []).map(profile => {
-    if (signedMap[profile.id]) profile.avatar_url = signedMap[profile.id]
-    return [profile.id, profile]
+    const normalizedUsername = _normalizeHomeUsername(profile.username)
+    const normalizedProfile = {
+      ...profile,
+      username: normalizedUsername || profile.username || '',
+      display_name: _normalizeHomeUsername(profile.display_name) || profile.display_name || '',
+    }
+    if (signedMap[profile.id]) normalizedProfile.avatar_url = signedMap[profile.id]
+    return [profile.id, normalizedProfile]
   }))
 }
 
-function _homeAuthorChip(obs, profileMap) {
-  if (obs._owner === 'mine' || obs.user_id === state.user?.id) return '';
+function _homeAuthorLabel(obs, profileMap) {
+  if (obs._owner === 'mine' || obs.user_id === state.user?.id) return ''
   const profile = profileMap[obs.user_id] || {};
-  const label = profile.username ? `@${profile.username}` : (profile.display_name || t('common.unknown'));
-  const initial = String(profile.username || profile.display_name || '?').replace(/^@/, '').trim().charAt(0).toUpperCase() || '?';
-  let url = profile.avatar_url;
-  if (url && !url.startsWith("http")) {
-    url = supabase.storage.from("avatars").getPublicUrl(url).data.publicUrl;
-  } else if (!url && profile.id) {
-    url = supabase.storage.from("avatars").getPublicUrl(`${profile.id}/avatar.jpg`).data.publicUrl;
+  const username = _normalizeHomeUsername(profile.username)
+  if (username) {
+    return _homeAuthorPill(profile, username)
   }
-  if (url) {
-    return `<div class="observation-author-chip observation-author-chip--home" title="${_esc(label)}"><img src="${_esc(url)}" alt="${_esc(label)}" loading="lazy" decoding="async" onerror="const p=this.parentElement; this.outerHTML='${_esc(initial)}'; p.classList.add('observation-author-chip--initial');"></div>`;
+  const label = _normalizeHomeUsername(profile.display_name) || t('common.unknown')
+  return _homeAuthorPill(profile, label, true)
+}
+
+function _normalizeHomeUsername(value) {
+  const raw = String(value || '').trim().replace(/^@+/, '')
+  if (!raw) return ''
+  return raw.split('@')[0].trim()
+}
+
+function _homeAuthorPill(profile, label, useDisplayName = false) {
+  const avatar = _homeAuthorAvatarHtml(profile, label)
+  const text = _esc(useDisplayName ? label : label)
+  return `<span class="find-owner-name-pill">${avatar}<span class="find-owner-name-text">${text}</span></span>`
+}
+
+function _homeAuthorAvatarHtml(profile, label) {
+  const initials = _esc(_initials(profile.username || profile.display_name || label || '?'))
+  const avatarUrl = String(profile.avatar_url || '').trim()
+  if (avatarUrl) {
+    return `<img class="find-owner-name-avatar" src="${_esc(avatarUrl)}" alt="" loading="lazy" decoding="async">`
   }
-  return `<div class="observation-author-chip observation-author-chip--initial observation-author-chip--home" title="${_esc(label)}">${_esc(initial)}</div>`;
+  return `<span class="find-owner-name-avatar find-owner-name-avatar--fallback">${initials}</span>`
 }

@@ -27,7 +27,9 @@ export const state = {
   findsTargetAvatarUrl: null,
   findsTargetDisplayName: null,
   findsTargetBio: null,
+  findsTargetRelationship: null,
   findsTargetFinds: 0,
   findsTargetSpecies: 0,
   findsTargetSpores: 0,
+  findsTargetSummaryComplete: false,
 }
