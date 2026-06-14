@@ -1,5 +1,7 @@
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import 'leaflet.markercluster'
+import 'leaflet.markercluster/dist/MarkerCluster.css'
 import { supabase } from '../supabase.js'
 import { formatDate, t, tp } from '../i18n.js'
 import { state } from '../state.js'
@@ -10,6 +12,7 @@ import { esc as _esc } from '../esc.js'
 
 let map          = null
 let markerLayer  = null
+let fuzzedCircleLayer = null
 let locationLayer = null
 const _mapData   = { mine: [], friends: [], feed: [], public: [] }   // cached for re-filtering
 const OBSERVATION_SCOPES = new Set(['mine', 'feed', 'friends', 'public'])
@@ -108,6 +111,16 @@ function _centerOnCurrentLocation() {
   map.fitBounds(bounds, { padding: [24, 24], maxZoom: 15 })
 }
 
+function _syncFuzzedCircleVisibility() {
+  if (!map || !fuzzedCircleLayer) return
+  const shouldShow = map.getZoom() >= 13
+  if (shouldShow && !map.hasLayer(fuzzedCircleLayer)) {
+    fuzzedCircleLayer.addTo(map)
+  } else if (!shouldShow && map.hasLayer(fuzzedCircleLayer)) {
+    map.removeLayer(fuzzedCircleLayer)
+  }
+}
+
 function _renderCurrentLocation() {
   if (!locationLayer) return
   locationLayer.clearLayers()
@@ -163,9 +176,32 @@ export function initMap() {
     maxZoom: 19,
   }).addTo(map)
 
-  markerLayer = L.layerGroup().addTo(map)
+  markerLayer = L.markerClusterGroup({
+    showCoverageOnHover: false,
+    zoomToBoundsOnClick: true,
+    spiderfyOnMaxZoom: true,
+    disableClusteringAtZoom: 15,
+    maxClusterRadius: zoom => zoom < 8 ? 70 : zoom < 12 ? 50 : 35,
+    iconCreateFunction(cluster) {
+      const count = cluster.getChildCount()
+      const sizeClass =
+        count < 10 ? 'map-cluster--small'
+        : count < 100 ? 'map-cluster--medium'
+        : 'map-cluster--large'
+
+      return L.divIcon({
+        className: '',
+        html: `<div class="map-cluster ${sizeClass}">${count}</div>`,
+        iconSize: [44, 44],
+        iconAnchor: [22, 22],
+      })
+    },
+  }).addTo(map)
+  fuzzedCircleLayer = L.layerGroup().addTo(map)
   locationLayer = L.layerGroup().addTo(map)
   map.setView([62.5, 15], 5)
+  map.on('zoomend', _syncFuzzedCircleVisibility)
+  _syncFuzzedCircleVisibility()
 
   document.getElementById('map-locate-btn')?.addEventListener('click', _centerOnCurrentLocation)
   window.addEventListener('sporely:gps-updated', _renderCurrentLocation)
@@ -355,6 +391,7 @@ function _matchesMap(obs, q) {
 
 function _applyMapFilter() {
   markerLayer.clearLayers()
+  fuzzedCircleLayer?.clearLayers()
   const q = (state.searchQuery || '').toLowerCase().trim()
   const currentScope = _currentScope()
 
@@ -362,23 +399,27 @@ function _applyMapFilter() {
   const filtered = q ? data.filter(o => _matchesMap(o, q)) : data
   _addMarkers(filtered)
   _renderCurrentLocation()
+  _syncFuzzedCircleVisibility()
 
   // Fit bounds
-  const allLayers = []
-  markerLayer.eachLayer(l => allLayers.push(l))
-  if (!allLayers.length) {
+  const latlngs = filtered
+    .map(o => [o.gps_latitude, o.gps_longitude])
+    .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon))
+
+  if (!latlngs.length) {
     const bounds = _currentLocationBounds()
     if (bounds) {
       map.fitBounds(bounds, { padding: [24, 24], maxZoom: 15 })
     }
+    _syncFuzzedCircleVisibility()
     return
   }
-  const latlngs = allLayers.map(l => l.getLatLng())
   if (latlngs.length === 1) {
     map.setView(latlngs[0], 14)
   } else {
     map.fitBounds(L.latLngBounds(latlngs), { padding: [50, 50], maxZoom: 15 })
   }
+  _syncFuzzedCircleVisibility()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -431,7 +472,8 @@ function _addMarkers(observations) {
         fillOpacity: 0.12,
         opacity: 0.45,
         weight: 1.5,
-      }).addTo(markerLayer)
+        interactive: false,
+      }).addTo(fuzzedCircleLayer)
     }
   })
 }

@@ -1547,6 +1547,36 @@ html, body {
   background: #5b9bd5;
   box-shadow: 0 0 0 2px #5b9bd5, 0 2px 6px rgba(0,0,0,0.6);
 }
+.map-cluster {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(36, 103, 43, 0.82);
+  border: 3px solid rgba(155, 220, 150, 0.95);
+  color: #eaffea;
+  font-weight: 800;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.map-cluster--small {
+  width: 36px;
+  height: 36px;
+  font-size: 14px;
+}
+
+.map-cluster--medium {
+  width: 44px;
+  height: 44px;
+  font-size: 15px;
+}
+
+.map-cluster--large {
+  width: 54px;
+  height: 54px;
+  font-size: 16px;
+}
+
 .map-fuzzed-circle {
   color: var(--green-bright);
 }
