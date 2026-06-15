@@ -6,5 +6,8 @@ verify_jwt = true
 [functions.create-pro-checkout]
 verify_jwt = true
 
+[functions.admin-ops]
+verify_jwt = false
+
 [functions.stripe-webhook]
 verify_jwt = false
