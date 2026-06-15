@@ -103,6 +103,7 @@ Deno.serve(async req => {
     const enrichedReports = recentReports.map(row =>
       enrichReportRow(row, profilesById, emailsById),
     )
+    const mediaIssueSummary = await buildMediaIssueSummary(adminClient, counts, warnings)
 
     return json({
       generated_at: new Date().toISOString(),
@@ -114,6 +115,10 @@ Deno.serve(async req => {
         tombstones_not_purged: counts.tombstoned_observation_images,
         tombstones_expired_if_restore_until_exists: null,
         purge_errors_if_column_exists: null,
+        media_issue_total: mediaIssueSummary.total,
+        media_issue_critical: mediaIssueSummary.critical,
+        media_issue_warning: mediaIssueSummary.warning,
+        media_issue_info: mediaIssueSummary.info,
       },
       top_storage_users: enrichedTopStorageUsers,
       storage_by_user: enrichedTopStorageUsers,
@@ -152,7 +157,7 @@ async function buildCounts(adminClient, warnings) {
     countExact(adminClient, 'reports', query => query.eq('status', 'pending'), warnings, 'reports_open'),
     countExact(adminClient, 'profiles', query => query.eq('is_banned', true), warnings, 'banned_profiles'),
     countExact(adminClient, 'profiles', query => query.eq('is_admin', true), warnings, 'admin_profiles'),
-    countExact(adminClient, 'observation_images', query => query.is('storage_path', null), warnings, 'rows_missing_storage_path'),
+    countExact(adminClient, 'observation_images', query => query.is('deleted_at', null).is('storage_path', null), warnings, 'rows_missing_storage_path'),
   ])
 
   const [
@@ -210,6 +215,51 @@ async function buildTopStorageUsers(adminClient, warnings) {
   }))
 }
 
+async function buildMediaIssueSummary(adminClient, counts, warnings) {
+  const [warningActiveRows, infoRows] = await Promise.all([
+    countExact(
+      adminClient,
+      'observation_images',
+      query =>
+        query
+          .is('deleted_at', null)
+          .not('storage_path', 'is', null)
+          .or(
+            'source_width.is.null,source_height.is.null,stored_width.is.null,stored_height.is.null,stored_bytes.is.null',
+          ),
+      warnings,
+      'media_issue_warning_active',
+    ),
+    countExact(
+      adminClient,
+      'observation_images',
+      query =>
+        query
+          .is('deleted_at', null)
+          .not('storage_path', 'is', null)
+          .is('original_storage_path', null)
+          .not('source_width', 'is', null)
+          .not('source_height', 'is', null)
+          .not('stored_width', 'is', null)
+          .not('stored_height', 'is', null)
+          .not('stored_bytes', 'is', null),
+      warnings,
+      'media_issue_info',
+    ),
+  ])
+
+  const critical = counts.rows_missing_storage_path ?? null
+  const warning = sumNullableCounts(counts.tombstoned_observation_images, warningActiveRows)
+  const total = sumNullableCounts(critical, warning, infoRows)
+
+  return {
+    total,
+    critical,
+    warning,
+    info: infoRows,
+  }
+}
+
 async function buildTombstonedImages(adminClient, warnings) {
   const { data, error } = await adminClient
     .from('observation_images')
@@ -248,6 +298,7 @@ async function buildTombstonedImages(adminClient, warnings) {
       image_status: 'deleted',
       issue_flags: issueFlags,
       issue_summary: buildIssueSummary(issueFlags),
+      issue_severity: buildMediaIssueSeverity(row, true),
       derived_thumb_path: deriveThumbPath(row.storage_path ?? row.original_storage_path),
     }
   })
@@ -291,6 +342,7 @@ async function buildMediaIssueRows(adminClient, warnings) {
         image_status: row.deleted_at ? 'deleted' : 'active',
         issue_flags: issueFlags,
         issue_summary: buildIssueSummary(issueFlags),
+        issue_severity: buildMediaIssueSeverity(row, false),
         derived_thumb_path: deriveThumbPath(row.storage_path ?? row.original_storage_path),
       }
     })
@@ -357,6 +409,7 @@ function enrichImageRow(row, profilesById, emailsById, forceDeleted) {
     image_status: forceDeleted ? 'deleted' : row.deleted_at ? 'deleted' : 'active',
     issue_flags: issueFlags,
     issue_summary: buildIssueSummary(issueFlags),
+    issue_severity: buildMediaIssueSeverity(row, forceDeleted),
     derived_thumb_path: deriveThumbPath(row.storage_path ?? row.original_storage_path),
   }
 }
@@ -515,6 +568,32 @@ function buildImageIssueFlags(row, forceDeleted) {
   return [...new Set(flags)]
 }
 
+function buildMediaIssueSeverity(row, forceDeleted) {
+  if (forceDeleted || row?.deleted_at) {
+    return 'warning'
+  }
+
+  if (isBlank(row?.storage_path)) {
+    return 'critical'
+  }
+
+  if (
+    isBlank(row?.source_width) ||
+    isBlank(row?.source_height) ||
+    isBlank(row?.stored_width) ||
+    isBlank(row?.stored_height) ||
+    isBlank(row?.stored_bytes)
+  ) {
+    return 'warning'
+  }
+
+  if (isBlank(row?.original_storage_path)) {
+    return 'info'
+  }
+
+  return null
+}
+
 function buildIssueSummary(flags) {
   if (!flags.length) return '—'
 
@@ -522,7 +601,7 @@ function buildIssueSummary(flags) {
     .map(flag => {
       switch (flag) {
         case 'deleted':
-          return 'deleted'
+          return 'tombstoned'
         case 'missing_storage_path':
           return 'missing storage path'
         case 'missing_original_storage_path':
@@ -541,6 +620,10 @@ function buildIssueSummary(flags) {
 }
 
 function compareImageIssueRows(left, right) {
+  const leftSeverity = issueSeverityRank(left.issue_severity)
+  const rightSeverity = issueSeverityRank(right.issue_severity)
+  if (leftSeverity !== rightSeverity) return leftSeverity - rightSeverity
+
   const leftTime = toTimestamp(left.deleted_at ?? left.created_at)
   const rightTime = toTimestamp(right.deleted_at ?? right.created_at)
   if (leftTime !== rightTime) return rightTime - leftTime
@@ -548,6 +631,19 @@ function compareImageIssueRows(left, right) {
   const leftId = String(left.id ?? '')
   const rightId = String(right.id ?? '')
   return leftId.localeCompare(rightId)
+}
+
+function issueSeverityRank(severity) {
+  switch (severity) {
+    case 'critical':
+      return 0
+    case 'warning':
+      return 1
+    case 'info':
+      return 2
+    default:
+      return 3
+  }
 }
 
 function buildUserLabel(id, username, displayName, email) {
@@ -573,6 +669,14 @@ function deriveThumbPath(storagePath) {
 
   const thumbName = fileName.startsWith('thumb_') ? fileName : `thumb_${fileName}`
   return [...segments, thumbName].join('/')
+}
+
+function sumNullableCounts(...counts) {
+  if (counts.some(count => count === null || count === undefined)) {
+    return null
+  }
+
+  return counts.reduce((total, count) => total + count, 0)
 }
 
 function normalizeStoragePath(storagePath) {
