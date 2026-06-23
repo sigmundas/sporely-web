@@ -71,12 +71,13 @@ Deno.serve(async req => {
     const adminClient = getAdminClient()
     const warnings: string[] = []
 
-    const [counts, topStorageUsers, tombstonedImages, mediaIssueRows, recentReports] = await Promise.all([
+    const [counts, topStorageUsers, tombstonedImages, mediaIssueRows, recentReports, databaseHealth] = await Promise.all([
       buildCounts(adminClient, warnings),
       buildTopStorageUsers(adminClient, warnings),
       buildTombstonedImages(adminClient, warnings),
       buildMediaIssueRows(adminClient, warnings),
       buildRecentReports(adminClient, warnings),
+      buildDatabaseHealth(adminClient, warnings),
     ])
 
     const userIds = collectUserIds([
@@ -126,6 +127,7 @@ Deno.serve(async req => {
       recent_deleted_images: enrichedTombstonedImages,
       media_issue_rows: enrichedMediaIssueRows,
       recent_reports: enrichedReports,
+      database_health: databaseHealth,
       warnings: [
         'observation_images has no thumb_key column in the current schema; derived thumb paths are computed from storage_path.',
         ...warnings,
@@ -383,6 +385,33 @@ async function buildRecentReports(adminClient, warnings) {
     status: row.status ?? null,
     created_at: row.created_at ?? null,
   }))
+}
+
+async function buildDatabaseHealth(adminClient, warnings) {
+  try {
+    const { data, error } = await adminClient.rpc('admin_database_health')
+
+    if (error) {
+      console.error('database_health rpc failed:', error)
+      warnings.push('database_health unavailable')
+      return null
+    }
+
+    return coerceDatabaseHealthPayload(data)
+  } catch (error) {
+    console.error('database_health rpc failed:', error)
+    warnings.push('database_health unavailable')
+    return null
+  }
+}
+
+function coerceDatabaseHealthPayload(data) {
+  const payload = Array.isArray(data) ? data[0] : data
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+
+  return payload
 }
 
 function enrichStorageUserRow(row, emailsById) {
