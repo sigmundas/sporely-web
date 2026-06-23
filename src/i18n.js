@@ -15,6 +15,8 @@ const messages = {
     'auth.noAccount': 'No account?',
     'auth.createOne': 'Create one',
     'auth.alreadyHaveOne': 'Already have one?',
+    'auth.continueWithGoogle': 'Continue with Google',
+    'auth.or': 'or',
     'auth.checkInbox': 'Check your inbox to confirm your account.',
     'auth.resendEmail': 'Resend email',
     'auth.emailAlreadyConfirmed': 'Your email is already confirmed. Try signing in.',
@@ -403,6 +405,8 @@ const messages = {
     'auth.noAccount': 'Ingen konto?',
     'auth.createOne': 'Opprett en',
     'auth.alreadyHaveOne': 'Har du allerede en?',
+    'auth.continueWithGoogle': 'Fortsett med Google',
+    'auth.or': 'eller',
     'auth.checkInbox': 'Sjekk innboksen for å bekrefte kontoen din.',
     'auth.resendEmail': 'Send e-post på nytt',
     'auth.emailAlreadyConfirmed': 'E-posten din er allerede bekreftet. Prøv å logge inn.',
@@ -791,6 +795,8 @@ const messages = {
     'auth.noAccount': 'Inget konto?',
     'auth.createOne': 'Skapa ett',
     'auth.alreadyHaveOne': 'Har du redan ett?',
+    'auth.continueWithGoogle': 'Fortsätt med Google',
+    'auth.or': 'eller',
     'auth.checkInbox': 'Kontrollera inkorgen för att bekräfta kontot.',
     'auth.resendEmail': 'Skicka igen',
     'auth.emailAlreadyConfirmed': 'Din e-post är redan bekräftad. Försök logga in.',
@@ -1179,6 +1185,8 @@ const messages = {
     'auth.noAccount': 'Kein Konto?',
     'auth.createOne': 'Eins erstellen',
     'auth.alreadyHaveOne': 'Hast du schon eins?',
+    'auth.continueWithGoogle': 'Mit Google fortfahren',
+    'auth.or': 'oder',
     'auth.checkInbox': 'Prüfe deinen Posteingang, um dein Konto zu bestätigen.',
     'auth.resendEmail': 'E-Mail erneut senden',
     'auth.emailAlreadyConfirmed': 'Deine E-Mail ist bereits bestätigt. Versuche dich anzumelden.',
@@ -1698,6 +1706,8 @@ export function applyStaticTranslations() {
   if (loginBtn) loginBtn.dataset.label = t('auth.signIn')
   setText('#login-switch-prefix', 'auth.noAccount')
   setText('#show-signup', 'auth.createOne')
+  setText('#google-login-btn-label', 'auth.continueWithGoogle')
+  setText('#auth-social-divider-label', 'auth.or')
 
   setText('#signup-form .auth-title', 'auth.createAccount')
   setText('#signup-email-label', 'auth.email')

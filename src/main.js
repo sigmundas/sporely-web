@@ -14,6 +14,7 @@ import {
   getInitialAuthState,
   hasPasswordRecoveryHint,
   initAuth,
+  maybeHandleSupabaseOAuthCallback,
   showAuthError,
   showAuthOverlay,
   hideAuthOverlay,
@@ -559,7 +560,8 @@ async function init() {
   }
 
   clearSharedAuthSessionCache()
-  const initialSession = await getSharedAuthSession({ refresh: true })
+  const oauthCallbackResult = await maybeHandleSupabaseOAuthCallback(window.location.href)
+  const initialSession = (await getSharedAuthSession({ refresh: true })) || oauthCallbackResult?.session || null
 
   const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
     if (event === 'PASSWORD_RECOVERY') {
@@ -604,6 +606,9 @@ async function init() {
     ensureAuthUiInitialized(hasHashError || recoveryModeActive)
     if (recoveryModeActive) {
       switchToResetPassword()
+    } else if (oauthCallbackResult?.status === 'error') {
+      switchToLogin()
+      showAuthError(oauthCallbackResult.errorMessage || oauthCallbackResult.error?.message || t('auth.genericError'))
     }
   }
 

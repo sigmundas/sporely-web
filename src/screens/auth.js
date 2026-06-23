@@ -1,9 +1,11 @@
 import { supabase } from '../supabase.js'
-import { getSharedAuthSession } from '../auth-session.js'
+import { getSharedAuthSession, seedSharedAuthSession } from '../auth-session.js'
 import { getLocale, setLocale, t } from '../i18n.js'
 import { isNativeApp } from '../platform.js'
 
 const TURNSTILE_SITE_KEY = import.meta.env?.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAC0h9RON_lYu5ib_'
+const SUPABASE_OAUTH_CALLBACK_PATH = '/auth/callback'
+const SUPABASE_OAUTH_FALLBACK_ORIGIN = 'https://app.sporely.no'
 let _captchaToken      = null
 let _turnstileWidgetId = null
 
@@ -74,6 +76,104 @@ async function _withTimeout(promise, timeoutMs, label) {
     return await Promise.race([promise, timeout])
   } finally {
     clearTimeout(timeoutId)
+  }
+}
+
+function _replaceAuthCallbackUrl(path = '/') {
+  if (!globalThis.history?.replaceState) return
+  try {
+    history.replaceState(history.state, '', path)
+  } catch (error) {
+    console.warn('Failed to clean auth callback URL:', error)
+  }
+}
+
+function _cleanString(value) {
+  return String(value || '').trim()
+}
+
+function _friendlySupabaseOAuthError(errorCode, errorDescription) {
+  const code = String(errorCode || '').trim().toLowerCase()
+  if (code === 'access_denied') {
+    return errorDescription || t('auth.accessDenied')
+  }
+  return errorDescription || t('auth.genericError')
+}
+
+function _setSocialLoginVisibility(visible) {
+  const section = document.getElementById('auth-social-login')
+  if (section) section.style.display = visible ? 'flex' : 'none'
+}
+
+export function getSupabaseOAuthRedirectUrl(origin = globalThis.location?.origin || SUPABASE_OAUTH_FALLBACK_ORIGIN) {
+  return new URL(SUPABASE_OAUTH_CALLBACK_PATH, `${origin}`).toString()
+}
+
+export async function maybeHandleSupabaseOAuthCallback(input, options = {}) {
+  const locationHref = globalThis.location?.href || `${SUPABASE_OAUTH_FALLBACK_ORIGIN}/`
+  const url = new URL(input, locationHref)
+  if (url.pathname !== SUPABASE_OAUTH_CALLBACK_PATH) {
+    return { handled: false, scrubUrl: false, status: 'ignored' }
+  }
+
+  const code = _cleanString(url.searchParams.get('code'))
+  const error = _cleanString(url.searchParams.get('error'))
+  const errorDescription = _cleanString(url.searchParams.get('error_description'))
+
+  if (!code && !error && !errorDescription) {
+    return { handled: false, scrubUrl: false, status: 'ignored' }
+  }
+
+  const scrubUrl = () => _replaceAuthCallbackUrl('/')
+
+  if (error || errorDescription) {
+    const errorMessage = _friendlySupabaseOAuthError(error, errorDescription)
+    scrubUrl()
+    return {
+      handled: true,
+      scrubUrl: true,
+      status: 'error',
+      error: new Error(errorMessage),
+      errorMessage,
+    }
+  }
+
+  const authClient = options.supabaseClient || supabase
+
+  try {
+    const { data, error: exchangeError } = await authClient.auth.exchangeCodeForSession(code)
+    scrubUrl()
+
+    if (exchangeError) {
+      return {
+        handled: true,
+        scrubUrl: true,
+        status: 'error',
+        error: exchangeError,
+        errorMessage: exchangeError.message || t('auth.genericError'),
+      }
+    }
+
+    const session = data?.session || null
+    if (session) {
+      seedSharedAuthSession(session)
+    }
+
+    return {
+      handled: true,
+      scrubUrl: true,
+      status: 'success',
+      session,
+    }
+  } catch (error) {
+    scrubUrl()
+    return {
+      handled: true,
+      scrubUrl: true,
+      status: 'error',
+      error,
+      errorMessage: error?.message || t('auth.genericError'),
+    }
   }
 }
 
@@ -294,6 +394,7 @@ export function switchToLogin(prefillEmail = '', resetMessage = false) {
   document.getElementById('forgot-password-form').style.display = 'none'
   document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('login-form').style.display  = 'block'
+  _setSocialLoginVisibility(!isNativeApp())
   // Hide Turnstile on the login view — captcha is signup-only
   const tc = document.getElementById('turnstile-container')
   if (tc) tc.style.display = 'none'
@@ -310,6 +411,7 @@ function switchToSignup(prefillEmail = '') {
   document.getElementById('forgot-password-form').style.display = 'none'
   document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('signup-form').style.display = 'block'
+  _setSocialLoginVisibility(!isNativeApp())
   // Show and init Turnstile when entering signup view
   const tc = document.getElementById('turnstile-container')
   if (tc) tc.style.display = 'flex'
@@ -324,6 +426,7 @@ export function switchToForgotPassword(prefillEmail = '') {
   document.getElementById('signup-form').style.display = 'none'
   document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('forgot-password-form').style.display = 'block'
+  _setSocialLoginVisibility(false)
   const tc = document.getElementById('turnstile-container')
   if (tc) tc.style.display = 'none'
   if (prefillEmail) document.getElementById('forgot-email').value = prefillEmail
@@ -335,6 +438,7 @@ export function switchToResetPassword() {
   document.getElementById('signup-form').style.display = 'none'
   document.getElementById('forgot-password-form').style.display = 'none'
   document.getElementById('reset-password-form').style.display = 'block'
+  _setSocialLoginVisibility(false)
   const tc = document.getElementById('turnstile-container')
   if (tc) tc.style.display = 'none'
   document.getElementById('new-password').value = ''
@@ -385,6 +489,9 @@ function friendlyHashError(code, description) {
 }
 
 export function handleUrlHashError() {
+  if (window.location.pathname === SUPABASE_OAUTH_CALLBACK_PATH) {
+    return false
+  }
   const { params } = getInitialAuthState()
   const values = Object.fromEntries(params)
   if (!values.error) return false
@@ -422,12 +529,15 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
   const signupBtn  = document.getElementById('signup-btn')
   const forgotBtn  = document.getElementById('forgot-btn')
   const resetBtn   = document.getElementById('reset-password-btn')
+  const socialLoginSection = document.getElementById('auth-social-login')
+  const googleLoginBtn = document.getElementById('google-login-btn')
   const languageSelect = document.getElementById('auth-language-select')
 
   loginBtn.dataset.label  = t('auth.signIn')
   signupBtn.dataset.label = t('auth.createAccount')
   forgotBtn.dataset.label = t('auth.sendResetLink')
   resetBtn.dataset.label  = t('auth.updatePassword')
+  _setSocialLoginVisibility(!isNativeApp())
   if (languageSelect) {
     languageSelect.value = getLocale()
     languageSelect.addEventListener('change', () => {
@@ -440,6 +550,34 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
   }
   _persistAuthInputs()
   // Turnstile is initialised lazily when the user switches to the signup view
+
+  if (socialLoginSection) {
+    socialLoginSection.style.display = isNativeApp() ? 'none' : 'flex'
+  }
+  if (googleLoginBtn) {
+    googleLoginBtn.addEventListener('click', async () => {
+      if (isNativeApp()) return
+      showError('')
+      googleLoginBtn.disabled = true
+      try {
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo: getSupabaseOAuthRedirectUrl(),
+          },
+        })
+
+        if (error) {
+          showError(error.message || t('auth.genericError'))
+          googleLoginBtn.disabled = false
+        }
+      } catch (error) {
+        console.error('Google sign-in failed unexpectedly:', error)
+        showError(error?.message || t('auth.genericError'))
+        googleLoginBtn.disabled = false
+      }
+    })
+  }
 
   document.getElementById('show-signup').addEventListener('click', e => {
     e.preventDefault()
