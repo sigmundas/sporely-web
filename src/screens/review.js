@@ -63,6 +63,133 @@ const reviewAiState = {
   resultsByService: {},
 }
 
+function _pickImportedReviewActiveService(resultsByService = {}, defaultService = ID_SERVICE_ARTSORAKEL) {
+  const normalizedDefault = normalizeIdentifyService(defaultService)
+  const defaultResult = resultsByService[normalizedDefault]
+  if (defaultResult?.predictions?.length) return normalizedDefault
+
+  let bestService = normalizedDefault
+  let bestProbability = -1
+  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
+    const probability = Number(getIdentifyTopProbability(resultsByService[service]) ?? -1)
+    if (probability > bestProbability) {
+      bestProbability = probability
+      bestService = service
+    }
+  }
+  return bestService
+}
+
+export function _buildImportedReviewAiState(session = null) {
+  const requestedFingerprint = String(session?.aiRequestedFingerprint || '').trim()
+  const currentFingerprint = String(session?.aiCurrentFingerprint || '').trim()
+  const availabilityFingerprint = String(session?.aiAvailabilityFingerprint || '').trim()
+  const aiState = {
+    running: false,
+    hasRun: false,
+    activeService: null,
+    selectedService: null,
+    selectedPrediction: null,
+    selectedPredictionByService: {},
+    selectedProbabilityByService: {},
+    selectedTaxonSource: null,
+    requestedFingerprint,
+    currentFingerprint,
+    availabilityFingerprint,
+    stale: Boolean(
+      session?.aiStale
+      || (requestedFingerprint && currentFingerprint && requestedFingerprint !== currentFingerprint),
+    ),
+    availability: {},
+    resultsByService: {},
+  }
+
+  if (!session) return aiState
+
+  const predictionSources = new Set([
+    ...Object.keys(session.aiPredictionsByService || {}),
+    ...Object.keys(session.aiServiceState || {}),
+    ...Object.keys(session.aiAvailability || {}),
+    ID_SERVICE_ARTSORAKEL,
+    ID_SERVICE_INATURALIST,
+  ])
+
+  for (const serviceKey of predictionSources) {
+    const service = normalizeIdentifyService(serviceKey)
+    const predictions = Array.isArray(session.aiPredictionsByService?.[service]) ? session.aiPredictionsByService[service] : []
+    const serviceState = session.aiServiceState?.[service] || {}
+    const availability = session.aiAvailability?.[service] || {}
+    const topPrediction = serviceState.topPrediction || predictions[0] || null
+    const result = {
+      service,
+      status: serviceState.status || (predictions.length ? 'success' : 'idle'),
+      predictions,
+      topPrediction,
+      topProbability: getIdentifyTopProbability({ ...serviceState, predictions }),
+      errorMessage: serviceState.errorMessage || '',
+      available: availability.available ?? serviceState.available ?? (serviceState.status !== 'unavailable'),
+      reason: availability.reason || serviceState.reason || '',
+      imageFingerprint: serviceState.imageFingerprint || '',
+      cropFingerprint: serviceState.cropFingerprint || '',
+      requestFingerprint: serviceState.requestFingerprint || '',
+    }
+    aiState.resultsByService[service] = result
+    aiState.availability[service] = {
+      service,
+      available: result.available,
+      reason: result.reason,
+    }
+    if (['success', 'no_match', 'error', 'stale', 'unavailable'].includes(result.status)) {
+      aiState.hasRun = true
+    }
+  }
+
+  const aiSelectionSource = session.aiSelectedTaxonSource || (Object.values(aiState.resultsByService || {}).some(result => Array.isArray(result.predictions) && result.predictions.length > 0) ? 'ai' : null)
+  aiState.selectedTaxonSource = aiSelectionSource
+
+  const explicitService = aiSelectionSource === 'ai'
+    ? (session.aiSelectedService || session.aiActiveService || session.aiService || null)
+    : null
+  const defaultService = explicitService || session.aiActiveService || session.aiService || _pickImportedReviewActiveService(aiState.resultsByService, ID_SERVICE_ARTSORAKEL)
+  aiState.activeService = _pickImportedReviewActiveService(aiState.resultsByService, defaultService)
+
+  if (aiSelectionSource === 'ai') {
+    const selectedService = normalizeIdentifyService(
+      session.aiSelectedService
+      || aiState.activeService
+      || session.aiActiveService
+      || session.aiService
+      || ID_SERVICE_ARTSORAKEL,
+    )
+    const selectedPrediction = session.aiSelectedPrediction
+      || session.aiSelectedPredictionByService?.[selectedService]
+      || aiState.resultsByService?.[selectedService]?.topPrediction
+      || null
+    aiState.selectedService = selectedService
+    aiState.selectedPrediction = selectedPrediction
+    aiState.selectedPredictionByService = {
+      ...(session.aiSelectedPredictionByService || {}),
+    }
+    if (selectedPrediction) {
+      aiState.selectedPredictionByService[selectedService] = selectedPrediction
+    }
+    aiState.selectedProbabilityByService = {
+      ...(session.aiSelectedProbabilityByService || {}),
+    }
+    if (selectedService && !Object.prototype.hasOwnProperty.call(aiState.selectedProbabilityByService, selectedService)) {
+      aiState.selectedProbabilityByService[selectedService] = selectedPrediction?.probability ?? aiState.resultsByService?.[selectedService]?.topProbability ?? null
+    }
+  }
+
+  if (!aiState.hasRun) {
+    aiState.hasRun = Object.values(aiState.resultsByService || {}).some(result =>
+      Array.isArray(result.predictions) && result.predictions.length > 0,
+    )
+  }
+
+  return aiState
+}
+
 let reviewThumbCropObserver = null
 let reviewThumbCropFrameUpdates = new WeakMap()
 
@@ -246,6 +373,7 @@ export function initReview() {
 export function openImportedReview(session) {
   resetLocationState()
   resetReviewAiState()
+  Object.assign(reviewAiState, _buildImportedReviewAiState(session))
   const gpsAltitude = _firstFiniteNumber(
     session?.gpsAltitude,
     ...(session?.photoGps || []).map(gps => gps?.altitude),
@@ -983,6 +1111,9 @@ function _buildReviewAiIdentificationRuns(photos = state.capturedPhotos) {
     if (!result || !['success', 'no_match', 'error', 'unavailable', 'stale'].includes(result.status)) {
       continue
     }
+    const status = result.status === 'stale' || (reviewAiState.stale && ['success', 'no_match', 'error', 'unavailable'].includes(result.status))
+      ? 'stale'
+      : result.status
     const fingerprint = buildIdentifyFingerprint({
       service,
       language,
@@ -995,7 +1126,7 @@ function _buildReviewAiIdentificationRuns(photos = state.capturedPhotos) {
       cropFingerprint: fingerprint.cropFingerprint,
       language,
       results: Array.isArray(result.predictions) ? result.predictions : [],
-      status: result.status,
+      status,
       errorMessage: result.errorMessage || null,
       topPrediction: result.topPrediction || null,
     })

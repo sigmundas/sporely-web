@@ -97,9 +97,12 @@ function _firstFiniteNumber(...values) {
   return null;
 }
 
-function _applySessionAiPrediction(session, prediction) {
+function _applySessionAiPrediction(session, prediction, options = {}) {
   if (!session || !prediction) return false;
   const parts = String(prediction.scientificName || '').trim().split(/\s+/);
+  const service = normalizeIdentifyService(
+    options.service || prediction.service || session.aiSelectedService || session.aiActiveService || session.aiService || getDefaultIdService(),
+  );
   session.taxon = {
     genus: parts[0] || null,
     specificEpithet: parts[1] || null,
@@ -107,12 +110,33 @@ function _applySessionAiPrediction(session, prediction) {
     scientificName: prediction.scientificName || null,
     displayName: prediction.displayName,
   };
+  session.aiSelectedTaxonSource = 'ai';
+  session.aiSelectedService = service;
+  session.aiSelectedPrediction = { ...prediction };
+  if (!session.aiSelectedPredictionByService || typeof session.aiSelectedPredictionByService !== 'object') {
+    session.aiSelectedPredictionByService = {};
+  }
+  if (!session.aiSelectedProbabilityByService || typeof session.aiSelectedProbabilityByService !== 'object') {
+    session.aiSelectedProbabilityByService = {};
+  }
+  session.aiSelectedPredictionByService[service] = { ...prediction };
+  const probability = Number(prediction.probability);
+  session.aiSelectedProbabilityByService[service] = Number.isFinite(probability) ? probability : null;
   return true;
 }
 
-function _applySessionAiTopPrediction(session, predictions = []) {
+function _applySessionAiTopPrediction(session, predictions = [], options = {}) {
   if (!Array.isArray(predictions) || !predictions.length) return false;
-  return _applySessionAiPrediction(session, predictions[0]);
+  return _applySessionAiPrediction(session, predictions[0], options);
+}
+
+function _clearSessionAiSelection(session) {
+  if (!session) return;
+  session.aiSelectedTaxonSource = 'manual';
+  session.aiSelectedService = null;
+  session.aiSelectedPrediction = null;
+  session.aiSelectedPredictionByService = {};
+  session.aiSelectedProbabilityByService = {};
 }
 
 function _storeSessionAiServiceResult(session, service, result = {}, fingerprint = null) {
@@ -200,6 +224,17 @@ function _ensureSessionAiState(session) {
   if (!session.aiPredictionsByService || typeof session.aiPredictionsByService !== 'object') session.aiPredictionsByService = {};
   if (!session.aiServiceState || typeof session.aiServiceState !== 'object') session.aiServiceState = {};
   if (!session.aiAvailability) session.aiAvailability = {};
+  if (session.aiSelectedTaxonSource !== 'ai' && session.aiSelectedTaxonSource !== 'manual') {
+    session.aiSelectedTaxonSource = null;
+  }
+  if (session.aiSelectedService !== null && session.aiSelectedService !== undefined) {
+    session.aiSelectedService = normalizeIdentifyService(session.aiSelectedService);
+  } else {
+    session.aiSelectedService = null;
+  }
+  if (!session.aiSelectedPrediction || typeof session.aiSelectedPrediction !== 'object') session.aiSelectedPrediction = null;
+  if (!session.aiSelectedPredictionByService || typeof session.aiSelectedPredictionByService !== 'object') session.aiSelectedPredictionByService = {};
+  if (!session.aiSelectedProbabilityByService || typeof session.aiSelectedProbabilityByService !== 'object') session.aiSelectedProbabilityByService = {};
   if (!session.aiActiveService) {
     session.aiActiveService = session.aiService ? normalizeIdentifyService(session.aiService) : null;
   }
@@ -235,6 +270,52 @@ function _ensureSessionAiState(session) {
   return session;
 }
 
+function _cloneSessionAiState(session) {
+  const normalized = _ensureSessionAiState(session);
+  if (!normalized) return {};
+  const cloned = {
+    aiPredictionsByService: {},
+    aiServiceState: {},
+    aiAvailability: {},
+    aiActiveService: normalized.aiActiveService,
+    aiService: normalized.aiService,
+    aiCurrentFingerprint: normalized.aiCurrentFingerprint || '',
+    aiRequestedFingerprint: normalized.aiRequestedFingerprint || '',
+    aiAvailabilityFingerprint: normalized.aiAvailabilityFingerprint || '',
+    aiRunning: normalized.aiRunning === true,
+    aiStale: normalized.aiStale === true,
+    aiSelectedTaxonSource: normalized.aiSelectedTaxonSource || null,
+    aiSelectedService: normalized.aiSelectedService || null,
+    aiSelectedPrediction: normalized.aiSelectedPrediction ? { ...normalized.aiSelectedPrediction } : null,
+    aiSelectedPredictionByService: {},
+    aiSelectedProbabilityByService: {},
+    aiPredictions: Array.isArray(normalized.aiPredictions)
+      ? normalized.aiPredictions.map(prediction => ({ ...prediction }))
+      : [],
+  };
+
+  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
+    cloned.aiPredictionsByService[service] = Array.isArray(normalized.aiPredictionsByService?.[service])
+      ? normalized.aiPredictionsByService[service].map(prediction => ({ ...prediction }))
+      : [];
+    cloned.aiServiceState[service] = {
+      ...(_emptyServiceState()),
+      ...(normalized.aiServiceState?.[service] || {}),
+    };
+    if (normalized.aiAvailability?.[service]) {
+      cloned.aiAvailability[service] = { ...normalized.aiAvailability[service] };
+    }
+    if (normalized.aiSelectedPredictionByService?.[service]) {
+      cloned.aiSelectedPredictionByService[service] = { ...normalized.aiSelectedPredictionByService[service] };
+    }
+    if (Object.prototype.hasOwnProperty.call(normalized.aiSelectedProbabilityByService || {}, service)) {
+      cloned.aiSelectedProbabilityByService[service] = normalized.aiSelectedProbabilityByService[service];
+    }
+  }
+
+  return cloned;
+}
+
 function _sessionAiInputs(session) {
   return (session?.files || []).map((blob, index) => ({
     id: `session-${session.id}-${index}`,
@@ -264,6 +345,174 @@ function _sessionAiFingerprint(session) {
     language: getTaxonomyLanguage(),
     images: _sessionAiInputs(session),
   })
+}
+
+function _sessionBestAiService(session) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) return null
+  const explicitService = normalized.aiSelectedTaxonSource === 'ai'
+    ? (normalized.aiSelectedService || normalized.aiActiveService || normalized.aiService || null)
+    : null
+  const defaultService = explicitService || normalized.aiActiveService || normalized.aiService || getDefaultIdService()
+  return chooseIdentifyComparisonActiveService(normalized.aiServiceState || {}, defaultService)
+}
+
+function _sessionAiSelectionState(session) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) {
+    return {
+      source: null,
+      service: null,
+      prediction: null,
+      probability: null,
+    }
+  }
+
+  const hasAiResults = Object.values(normalized.aiServiceState || {}).some(serviceState =>
+    serviceState?.status && serviceState.status !== 'idle' && serviceState.status !== 'running'
+  ) || Object.values(normalized.aiPredictionsByService || {}).some(predictions =>
+    Array.isArray(predictions) && predictions.length > 0
+  )
+
+  const source = normalized.aiSelectedTaxonSource || (hasAiResults ? 'ai' : null)
+  if (source !== 'ai') {
+    return {
+      source,
+      service: null,
+      prediction: null,
+      probability: null,
+    }
+  }
+
+  const selectedService = normalizeIdentifyService(
+    normalized.aiSelectedService
+    || _sessionBestAiService(normalized)
+    || normalized.aiActiveService
+    || normalized.aiService
+    || getDefaultIdService(),
+  )
+  const resultState = _sessionAiResultState(normalized, selectedService)
+  const selectedPrediction = normalized.aiSelectedPrediction
+    || normalized.aiSelectedPredictionByService?.[selectedService]
+    || resultState.topPrediction
+    || null
+  const selectedProbability = normalized.aiSelectedProbabilityByService?.[selectedService]
+    ?? selectedPrediction?.probability
+    ?? resultState.topProbability
+    ?? null
+
+  return {
+    source: 'ai',
+    service: selectedService,
+    prediction: selectedPrediction,
+    probability: Number.isFinite(Number(selectedProbability)) ? Number(selectedProbability) : null,
+  }
+}
+
+function _buildSessionAiIdentificationRuns(session) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) return []
+  const images = _sessionAiInputs(normalized)
+  const language = getTaxonomyLanguage()
+  const runs = []
+
+  for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
+    const result = _sessionAiResultState(normalized, service)
+    const predictions = Array.isArray(normalized.aiPredictionsByService?.[service])
+      ? normalized.aiPredictionsByService[service]
+      : []
+    if (!result || !['success', 'no_match', 'error', 'unavailable', 'stale'].includes(result.status)) {
+      continue
+    }
+
+    const fingerprint = buildIdentifyFingerprint({
+      service,
+      language,
+      images,
+    })
+
+    runs.push({
+      service,
+      requestFingerprint: fingerprint.requestFingerprint,
+      imageFingerprint: fingerprint.imageFingerprint,
+      cropFingerprint: fingerprint.cropFingerprint,
+      language,
+      results: predictions,
+      status: result.status,
+      errorMessage: result.errorMessage || null,
+      topPrediction: result.topPrediction || null,
+    })
+  }
+
+  return runs
+}
+
+function _buildImportObservationPayload(session, options = {}) {
+  const normalized = _ensureSessionAiState(session)
+  if (!normalized) {
+    return {
+      obsPayload: null,
+      imageEntries: [],
+    }
+  }
+
+  _ensureSessionImageMeta(normalized)
+  const selected = _sessionAiSelectionState(normalized)
+  const aiIdentificationRuns = _buildSessionAiIdentificationRuns(normalized)
+  const userId = options.userId || state.user?.id || null
+  const leadGps = normalizeObservationGps({
+    lat: normalized.gpsLat,
+    lon: normalized.gpsLon,
+    altitude: normalized.gpsAltitude,
+    accuracy: normalized.gpsAccuracy,
+  })
+  const leadPhoto = {
+    ts: normalized.ts || new Date(),
+  }
+  const taxon = normalized.taxon || {}
+  const visibility = normalizeVisibility(normalized.visibility, getDefaultVisibility())
+
+  const obsPayload = createDefaultObservationPayload({
+    user_id: userId,
+    date: _localDate(leadPhoto.ts || new Date()),
+    captured_at: (leadPhoto.ts || new Date()).toISOString(),
+    gps_latitude: leadGps?.lat ?? null,
+    gps_longitude: leadGps?.lon ?? null,
+    gps_altitude: leadGps?.altitude ?? null,
+    gps_accuracy: leadGps?.accuracy ?? null,
+    location: normalized.locationName || null,
+    source_type: 'personal',
+    genus: taxon.genus || null,
+    species: taxon.specificEpithet || null,
+    common_name: taxon.vernacularName || null,
+    visibility: toCloudVisibility(visibility),
+    is_draft: normalized.is_draft !== false,
+    location_precision: normalized.location_precision || 'exact',
+    uncertain: !!normalized.uncertain,
+    ai_selected_service: selected.service || null,
+    ai_selected_taxon_id: selected.prediction?.taxonId || null,
+    ai_selected_scientific_name: selected.prediction?.scientificName || null,
+    ai_selected_probability: selected.service
+      ? selected.probability
+      : null,
+    ai_selected_at: selected.service ? new Date().toISOString() : null,
+    aiIdentificationRuns,
+  })
+
+  const imageEntries = normalized.files
+    .filter(blob => isBlob(blob))
+    .map((blob, index) => ({
+      blob,
+      aiCropRect: normalized.imageMeta[index]?.aiCropRect || null,
+      aiCropSourceW: normalized.imageMeta[index]?.aiCropSourceW ?? null,
+      aiCropSourceH: normalized.imageMeta[index]?.aiCropSourceH ?? null,
+      aiCropIsCustom: normalized.imageMeta[index]?.aiCropIsCustom === true,
+    }))
+
+  return {
+    obsPayload,
+    imageEntries,
+  }
 }
 
 async function _syncSessionAiAvailability(session) {
@@ -745,7 +994,7 @@ async function _runAiIdAll() {
         sessionState.aiActiveService = chooseIdentifyComparisonActiveService(sessionState.aiServiceState || {}, resolution.primary)
         sessionState.aiService = sessionState.aiActiveService
         const activePredictions = sessionState.aiPredictionsByService?.[sessionState.aiActiveService] || []
-        if (_applySessionAiTopPrediction(session, activePredictions)) {
+        if (_applySessionAiTopPrediction(session, activePredictions, { service: sessionState.aiActiveService })) {
           _persistSessions();
           renderSessions();
         }
@@ -888,6 +1137,7 @@ function _buildSessionsFromSourceItems() {
       locationLookupKey: previous?.locationLookupKey || '',
       locationAutoApplied: previous?.locationAutoApplied || '',
       taxon: previous?.taxon || null,
+      ..._cloneSessionAiState(previous),
       visibility: normalizeCaptureVisibility(previous?.visibility, getDefaultVisibility()),
       is_draft: previous?.is_draft !== false,
       location_precision: previous?.location_precision || 'exact',
@@ -1781,6 +2031,7 @@ function _wireCard(sid) {
     const session = sessionById(sid);
     if (session) {
       session.taxon = createManualTaxon(q);
+      _clearSessionAiSelection(session);
       _persistSessions();
     }
     if (!q) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
@@ -1808,6 +2059,7 @@ function _wireCard(sid) {
                 vernacularName: r.vernacularName || null,
                 displayName: display,
               };
+              _clearSessionAiSelection(session);
               _persistSessions();
             }
             input.value = display;
@@ -1883,8 +2135,8 @@ function _wireCard(sid) {
         const prediction = JSON.parse(el.dataset.identifyResult)
         const session = sessionById(sid)
         if (!session) return
-        if (!_applySessionAiPrediction(session, prediction)) return
-        const serviceKey = normalizeIdentifyService(prediction.service || session.aiActiveService || getDefaultIdService())
+        const serviceKey = normalizeIdentifyService(prediction.service || session.aiActiveService || session.aiService || getDefaultIdService())
+        if (!_applySessionAiPrediction(session, prediction, { service: serviceKey })) return
         session.aiActiveService = serviceKey
         session.aiService = serviceKey
         session.aiPredictionsByService ||= {}
@@ -1964,39 +2216,12 @@ async function saveAll() {
       if ((session.gpsLat === null || session.gpsLon === null || session.gpsAltitude === null) && session.metadataPromise) {
         await session.metadataPromise;
       }
-      const leadGps = normalizeObservationGps({
-        lat: session.gpsLat,
-        lon: session.gpsLon,
-        altitude: session.gpsAltitude,
-        accuracy: session.gpsAccuracy,
+      const { obsPayload, imageEntries } = _buildImportObservationPayload(session, {
+        userId: state.user.id,
       })
-      const obsPayload = createDefaultObservationPayload({
-        user_id: state.user.id,
-        date: _localDate(session.ts),
-        captured_at: session.ts.toISOString(),
-        gps_latitude: leadGps?.lat ?? null,
-        gps_longitude: leadGps?.lon ?? null,
-        gps_altitude: leadGps?.altitude ?? null,
-        gps_accuracy: leadGps?.accuracy ?? null,
-        location: session.locationName || null,
-        source_type: 'personal',
-        genus: session.taxon?.genus || null,
-        species: session.taxon?.specificEpithet || null,
-        common_name: session.taxon?.vernacularName || null,
-        visibility: toCloudVisibility(normalizeVisibility(session.visibility, getDefaultVisibility())),
-        is_draft: session.is_draft !== false,
-        location_precision: session.location_precision || 'exact',
-        uncertain: !!session.uncertain,
-      });
+      if (!obsPayload) continue
 
-      _ensureSessionImageMeta(session);
-      await enqueueObservation(obsPayload, session.files.map((blob, index) => ({
-        blob,
-        aiCropRect: session.imageMeta[index]?.aiCropRect || null,
-        aiCropSourceW: session.imageMeta[index]?.aiCropSourceW ?? null,
-        aiCropSourceH: session.imageMeta[index]?.aiCropSourceH ?? null,
-        aiCropIsCustom: session.imageMeta[index]?.aiCropIsCustom === true,
-      })));
+      await enqueueObservation(obsPayload, imageEntries);
       savedCount++;
       _setProgress(i + 1, activeSessions.length, t('import.processing'));
     } catch (err) {
@@ -2285,7 +2510,10 @@ function escHtml(str) {
 
 export {
   _ensureSessionAiState,
+  _cloneSessionAiState,
   _sessionAiResultState,
+  _buildSessionAiIdentificationRuns,
+  _buildImportObservationPayload,
   _storeSessionAiServiceResult,
   _sessionServiceNeedsRerun,
   _applySessionAiPrediction,

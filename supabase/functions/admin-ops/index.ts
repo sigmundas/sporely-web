@@ -3,10 +3,12 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { corsHeaders } from 'npm:@supabase/supabase-js/cors'
+import { buildMediaRowContext, getTombstonePurgeStats, handleAdminAction } from './adminActions.ts'
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
 const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
 const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+const mediaPublicBaseUrl = normalizeText(Deno.env.get('MEDIA_PUBLIC_BASE_URL') ?? Deno.env.get('VITE_MEDIA_BASE_URL')).replace(/\/+$/, '')
 
 const STORAGE_USER_LIMIT = 50
 const TOMBSTONED_IMAGE_LIMIT = 100
@@ -69,6 +71,36 @@ Deno.serve(async req => {
     }
 
     const adminClient = getAdminClient()
+    let requestBody = null
+    try {
+      requestBody = await readOptionalJsonBody(req)
+    } catch (error) {
+      const status = Number.isInteger((error as { status?: unknown })?.status) ? Number((error as { status?: number }).status) : 400
+      const message = error instanceof Error ? error.message : 'Invalid JSON body'
+      return json({
+        ok: false,
+        error: {
+          code: 'invalid_json',
+          message,
+        },
+      }, status)
+    }
+
+    if (requestBody && typeof requestBody === 'object' && normalizeText(requestBody.action)) {
+      const actionResult = await handleAdminAction({
+        adminClient,
+        adminUser: {
+          id: user.id,
+          email: user.email ?? null,
+        },
+        authHeader,
+        requestBody,
+        env: Deno.env.toObject(),
+      })
+
+      return json(actionResult.body, actionResult.status)
+    }
+
     const warnings: string[] = []
 
     const [counts, topStorageUsers, tombstonedImages, mediaIssueRows, recentReports, databaseHealth] = await Promise.all([
@@ -79,6 +111,7 @@ Deno.serve(async req => {
       buildRecentReports(adminClient, warnings),
       buildDatabaseHealth(adminClient, warnings),
     ])
+    const tombstonePurgeStats = await getTombstonePurgeStats(adminClient, Deno.env.toObject())
 
     const userIds = collectUserIds([
       topStorageUsers,
@@ -112,10 +145,13 @@ Deno.serve(async req => {
       counts,
       media_health: {
         rows_missing_storage_path: counts.rows_missing_storage_path,
-        rows_missing_thumb_key: enrichedMediaIssueRows.filter(row => !row.derived_thumb_path).length,
-        tombstones_not_purged: counts.tombstoned_observation_images,
-        tombstones_expired_if_restore_until_exists: null,
-        purge_errors_if_column_exists: null,
+        rows_missing_thumb_path: enrichedMediaIssueRows.filter(row => !row.thumbnail_path).length,
+        rows_missing_thumb_key: enrichedMediaIssueRows.filter(row => !row.thumbnail_path).length,
+        tombstones_not_purged: tombstonePurgeStats.tombstones_not_purged,
+        tombstones_expired_if_restore_until_exists: tombstonePurgeStats.tombstones_expired_if_restore_until_exists,
+        purge_errors_if_column_exists: tombstonePurgeStats.purge_errors_if_column_exists,
+        restore_window_days: tombstonePurgeStats.restore_window_days,
+        restore_cutoff_at: tombstonePurgeStats.restore_cutoff_at,
         media_issue_total: mediaIssueSummary.total,
         media_issue_critical: mediaIssueSummary.critical,
         media_issue_warning: mediaIssueSummary.warning,
@@ -129,13 +165,18 @@ Deno.serve(async req => {
       recent_reports: enrichedReports,
       database_health: databaseHealth,
       warnings: [
-        'observation_images has no thumb_key column in the current schema; derived thumb paths are computed from storage_path.',
         ...warnings,
       ],
     })
   } catch (error) {
     console.error('admin-ops failed:', error)
-    return json({ error: error instanceof Error ? error.message : 'Unexpected error' }, 500)
+    return json({
+      ok: false,
+      error: {
+        code: 'admin_ops_failed',
+        message: 'Unexpected error',
+      },
+    }, 500)
   }
 })
 
@@ -156,6 +197,7 @@ async function buildCounts(adminClient, warnings) {
     countExact(adminClient, 'observation_images', null, warnings, 'observation_images'),
     countExact(adminClient, 'observation_images', query => query.is('deleted_at', null), warnings, 'active_observation_images'),
     countExact(adminClient, 'observation_images', query => query.not('deleted_at', 'is', null), warnings, 'tombstoned_observation_images'),
+    countExact(adminClient, 'observation_images', query => query.not('deleted_at', 'is', null).not('purged_at', 'is', null), warnings, 'purged_observation_images'),
     countExact(adminClient, 'reports', query => query.eq('status', 'pending'), warnings, 'reports_open'),
     countExact(adminClient, 'profiles', query => query.eq('is_banned', true), warnings, 'banned_profiles'),
     countExact(adminClient, 'profiles', query => query.eq('is_admin', true), warnings, 'admin_profiles'),
@@ -168,6 +210,7 @@ async function buildCounts(adminClient, warnings) {
     observationImages,
     activeObservationImages,
     tombstonedObservationImages,
+    purgedObservationImages,
     reportsOpen,
     bannedProfiles,
     adminProfiles,
@@ -180,6 +223,7 @@ async function buildCounts(adminClient, warnings) {
     observation_images: observationImages,
     active_observation_images: activeObservationImages,
     tombstoned_observation_images: tombstonedObservationImages,
+    purged_observation_images: purgedObservationImages,
     reports_open: reportsOpen,
     banned_profiles: bannedProfiles,
     admin_profiles: adminProfiles,
@@ -266,7 +310,7 @@ async function buildTombstonedImages(adminClient, warnings) {
   const { data, error } = await adminClient
     .from('observation_images')
     .select(
-      'id, observation_id, user_id, storage_path, original_storage_path, original_filename, deleted_at, created_at, source_width, source_height, stored_width, stored_height, stored_bytes, image_type, upload_mode, sort_order',
+      'id, observation_id, user_id, storage_path, original_storage_path, original_filename, deleted_at, purged_at, purge_attempted_at, purge_error, created_at, source_width, source_height, stored_width, stored_height, stored_bytes, image_type, micro_category, upload_mode, sort_order, observation:observations!observation_images_observation_id_fkey(id, date, genus, species, common_name, species_guess, author, ai_selected_scientific_name, ai_selected_taxon_id, ai_selected_probability, created_at), owner:profiles!observation_images_user_id_fkey(id, username, display_name)',
     )
     .not('deleted_at', 'is', null)
     .order('deleted_at', { ascending: false })
@@ -277,40 +321,21 @@ async function buildTombstonedImages(adminClient, warnings) {
     return []
   }
 
-  return (data ?? []).map(row => {
-    const issueFlags = buildImageIssueFlags(row, true)
-
-    return {
-      id: row.id,
-      observation_id: row.observation_id ?? null,
-      user_id: row.user_id ?? null,
-      storage_path: row.storage_path ?? null,
-      original_storage_path: row.original_storage_path ?? null,
-      original_filename: row.original_filename ?? null,
-      deleted_at: row.deleted_at ?? null,
-      created_at: row.created_at ?? null,
-      source_width: row.source_width ?? null,
-      source_height: row.source_height ?? null,
-      stored_width: row.stored_width ?? null,
-      stored_height: row.stored_height ?? null,
-      stored_bytes: row.stored_bytes ?? null,
-      image_type: row.image_type ?? null,
-      upload_mode: row.upload_mode ?? null,
-      sort_order: row.sort_order ?? null,
-      image_status: 'deleted',
-      issue_flags: issueFlags,
-      issue_summary: buildIssueSummary(issueFlags),
-      issue_severity: buildMediaIssueSeverity(row, true),
-      derived_thumb_path: deriveThumbPath(row.storage_path ?? row.original_storage_path),
-    }
-  })
+  return (data ?? []).map(row =>
+    buildMediaRowContext(row, {
+      forceDeleted: true,
+      mediaPublicBaseUrl,
+      observation: row.observation ?? null,
+      ownerProfile: row.owner ?? null,
+    }),
+  )
 }
 
 async function buildMediaIssueRows(adminClient, warnings) {
   const { data, error } = await adminClient
     .from('observation_images')
     .select(
-      'id, observation_id, user_id, storage_path, original_storage_path, original_filename, deleted_at, created_at, source_width, source_height, stored_width, stored_height, stored_bytes, image_type, upload_mode, sort_order',
+      'id, observation_id, user_id, storage_path, original_storage_path, original_filename, deleted_at, purged_at, purge_attempted_at, purge_error, created_at, source_width, source_height, stored_width, stored_height, stored_bytes, image_type, micro_category, upload_mode, sort_order, observation:observations!observation_images_observation_id_fkey(id, date, genus, species, common_name, species_guess, author, ai_selected_scientific_name, ai_selected_taxon_id, ai_selected_probability, created_at), owner:profiles!observation_images_user_id_fkey(id, username, display_name)',
     )
     .order('created_at', { ascending: false })
     .limit(MEDIA_ISSUE_CANDIDATE_LIMIT)
@@ -321,33 +346,14 @@ async function buildMediaIssueRows(adminClient, warnings) {
   }
 
   const issueRows = (data ?? [])
-    .map(row => {
-      const issueFlags = buildImageIssueFlags(row, false)
-
-      return {
-        id: row.id,
-        observation_id: row.observation_id ?? null,
-        user_id: row.user_id ?? null,
-        storage_path: row.storage_path ?? null,
-        original_storage_path: row.original_storage_path ?? null,
-        original_filename: row.original_filename ?? null,
-        deleted_at: row.deleted_at ?? null,
-        created_at: row.created_at ?? null,
-        source_width: row.source_width ?? null,
-        source_height: row.source_height ?? null,
-        stored_width: row.stored_width ?? null,
-        stored_height: row.stored_height ?? null,
-        stored_bytes: row.stored_bytes ?? null,
-        image_type: row.image_type ?? null,
-        upload_mode: row.upload_mode ?? null,
-        sort_order: row.sort_order ?? null,
-        image_status: row.deleted_at ? 'deleted' : 'active',
-        issue_flags: issueFlags,
-        issue_summary: buildIssueSummary(issueFlags),
-        issue_severity: buildMediaIssueSeverity(row, false),
-        derived_thumb_path: deriveThumbPath(row.storage_path ?? row.original_storage_path),
-      }
-    })
+    .map(row =>
+      buildMediaRowContext(row, {
+        forceDeleted: false,
+        mediaPublicBaseUrl,
+        observation: row.observation ?? null,
+        ownerProfile: row.owner ?? null,
+      }),
+    )
     .filter(row => row.issue_flags.length > 0)
     .sort((left, right) => compareImageIssueRows(left, right))
     .slice(0, MEDIA_ISSUE_LIMIT)
@@ -358,7 +364,7 @@ async function buildMediaIssueRows(adminClient, warnings) {
 async function buildRecentReports(adminClient, warnings) {
   const { data, error } = await adminClient
     .from('reports')
-    .select('id, reporter_id, reported_user_id, observation_id, comment_id, reason, status, created_at')
+    .select('id, reporter_id, reported_user_id, observation_id, comment_id, reason, status, resolution, resolved_at, resolved_by, dismissed_at, dismissed_by, created_at')
     .order('created_at', { ascending: false })
     .limit(REPORT_LIMIT)
 
@@ -383,6 +389,11 @@ async function buildRecentReports(adminClient, warnings) {
     comment_id: row.comment_id ?? null,
     reason: row.reason ?? null,
     status: row.status ?? null,
+    resolution: row.resolution ?? null,
+    resolved_at: row.resolved_at ?? null,
+    resolved_by: row.resolved_by ?? null,
+    dismissed_at: row.dismissed_at ?? null,
+    dismissed_by: row.dismissed_by ?? null,
     created_at: row.created_at ?? null,
   }))
 }
@@ -426,16 +437,23 @@ function enrichStorageUserRow(row, emailsById) {
 function enrichImageRow(row, profilesById, emailsById, forceDeleted) {
   const userId = String(row.user_id ?? '').trim()
   const profile = profilesById.get(userId) ?? null
-  const email = emailsById.get(userId) ?? null
+  const email = emailsById.get(userId) ?? row.owner_email ?? null
+  const username = profile?.username ?? row.owner_username ?? null
+  const displayName = profile?.display_name ?? row.owner_display_name ?? null
   const issueFlags = buildImageIssueFlags(row, forceDeleted)
+  const ownerLabel = buildUserLabel(userId, username, displayName, email)
 
   return {
     ...row,
     user_email: email,
-    user_username: profile?.username ?? null,
-    user_display_name: profile?.display_name ?? null,
-    user_label: buildUserLabel(userId, profile?.username ?? null, profile?.display_name ?? null, email),
-    image_status: forceDeleted ? 'deleted' : row.deleted_at ? 'deleted' : 'active',
+    user_username: username,
+    user_display_name: displayName,
+    user_label: ownerLabel,
+    owner_email: email,
+    owner_username: username,
+    owner_display_name: displayName,
+    owner_label: ownerLabel,
+    image_status: row.purged_at ? 'purged' : (forceDeleted || row.deleted_at ? 'deleted' : 'active'),
     issue_flags: issueFlags,
     issue_summary: buildIssueSummary(issueFlags),
     issue_severity: buildMediaIssueSeverity(row, forceDeleted),
@@ -574,6 +592,14 @@ function buildImageIssueFlags(row, forceDeleted) {
     flags.push('deleted')
   }
 
+  if (row?.purged_at) {
+    flags.push('purged')
+  }
+
+  if (!isBlank(row?.purge_error)) {
+    flags.push('purge_error')
+  }
+
   if (isBlank(row?.storage_path)) {
     flags.push('missing_storage_path')
   }
@@ -598,6 +624,10 @@ function buildImageIssueFlags(row, forceDeleted) {
 }
 
 function buildMediaIssueSeverity(row, forceDeleted) {
+  if (row?.purged_at) {
+    return 'info'
+  }
+
   if (forceDeleted || row?.deleted_at) {
     return 'warning'
   }
@@ -631,6 +661,10 @@ function buildIssueSummary(flags) {
       switch (flag) {
         case 'deleted':
           return 'tombstoned'
+        case 'purged':
+          return 'purged from r2'
+        case 'purge_error':
+          return 'purge error'
         case 'missing_storage_path':
           return 'missing storage path'
         case 'missing_original_storage_path':
@@ -712,12 +746,12 @@ function normalizeStoragePath(storagePath) {
   return normalizeText(storagePath).replace(/^\/+/, '')
 }
 
-function normalizeText(value) {
-  return String(value ?? '').trim()
-}
-
 function isBlank(value) {
   return value === null || value === undefined || String(value).trim() === ''
+}
+
+function normalizeText(value) {
+  return String(value ?? '').trim()
 }
 
 function uniqueIdsFromValues(values) {
@@ -751,6 +785,23 @@ async function countExact(adminClient, table, applyFilter, warnings, label) {
   }
 
   return count ?? 0
+}
+
+async function readOptionalJsonBody(req) {
+  const text = await req.text()
+  if (!text.trim()) return null
+
+  try {
+    return JSON.parse(text)
+  } catch (error) {
+    const invalidJsonError = new Error(`Invalid JSON body: ${error instanceof Error ? error.message : 'parse error'}`) as Error & {
+      status?: number
+      code?: string
+    }
+    invalidJsonError.status = 400
+    invalidJsonError.code = 'invalid_json'
+    throw invalidJsonError
+  }
 }
 
 function json(body, status = 200) {
