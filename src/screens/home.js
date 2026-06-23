@@ -442,14 +442,14 @@ async function loadRecentComments() {
   if (!list) return
   if (!state.user) { list.innerHTML = ''; return }
 
-  _debugCommentQuery('latest comments query', {
+  _debugCommentQuery('latest comments view query', {
     userId: state.user.id,
     limit: 5,
     intent: 'load latest visible comments',
   })
 
   const { data, error } = await supabase
-    .from('comments')
+    .from('comments_community_view')
     .select('id, body, created_at, user_id, observation_id')
     .order('created_at', { ascending: false })
     .limit(5)
@@ -462,7 +462,7 @@ async function loadRecentComments() {
 
   let mentionData = []
   if (_canLoadMentionPreview()) {
-    _debugCommentQuery('mention preview query', {
+    _debugCommentQuery('mention preview view query', {
       userId: state.user.id,
       limit: 3,
       intent: 'load comments that mention the current user',
@@ -471,8 +471,8 @@ async function loadRecentComments() {
 
     try {
       const { data: mentionedRows, error: mentionError } = await supabase
-        .from('comments')
-        .select('id, body, created_at, user_id, observation_id')
+        .from('comments_community_view')
+        .select('id, body, created_at, user_id, observation_id, mentioned_user_ids')
         .contains('mentioned_user_ids', [state.user.id])
         .order('created_at', { ascending: false })
         .limit(3)
@@ -491,12 +491,6 @@ async function loadRecentComments() {
     }
   }
 
-  const { data: blocks } = await supabase
-    .from('user_blocks')
-    .select('blocked_id')
-    .eq('blocker_id', state.user.id)
-  const blockedIds = new Set((blocks || []).map(b => b.blocked_id))
-
   // Merge and deduplicate by id, sort by created_at desc, limit 5
   const seen = new Set((data || []).map(c => c.id))
   const merged = [...(data || [])]
@@ -504,7 +498,7 @@ async function loadRecentComments() {
     if (!seen.has(c.id)) { seen.add(c.id); merged.push(c) }
   }
   merged.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-  const combined = merged.filter(c => !blockedIds.has(c.user_id)).slice(0, 5)
+  const combined = merged.slice(0, 5)
 
   if (!combined.length) {
     list.innerHTML = `<p style="color:var(--text-dim);font-size:13px;padding:12px 0">${t('comments.none')}</p>`

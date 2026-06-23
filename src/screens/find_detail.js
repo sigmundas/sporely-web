@@ -3267,10 +3267,11 @@ async function _loadComments(obsId) {
   if (!list) return
   list.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('common.loading')}</div>`
 
-  const [{ data, error }, { data: blocks }] = await Promise.all([
-    supabase.from('comments').select('id, body, created_at, user_id').eq('observation_id', obsId).order('created_at', { ascending: true }),
-    supabase.from('user_blocks').select('blocked_id').eq('blocker_id', state.user?.id)
-  ])
+  const { data, error } = await supabase
+    .from('comments_community_view')
+    .select('id, body, created_at, user_id')
+    .eq('observation_id', obsId)
+    .order('created_at', { ascending: true })
 
   if (error) {
     console.warn('Comment load failed:', error.message)
@@ -3278,8 +3279,7 @@ async function _loadComments(obsId) {
     return
   }
 
-  const blockedIds = new Set((blocks || []).map(b => b.blocked_id))
-  const visibleComments = (data || []).filter(c => !blockedIds.has(c.user_id))
+  const visibleComments = data || []
 
   if (!visibleComments?.length) {
     list.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:8px 0">${t('comments.none')}</div>`
