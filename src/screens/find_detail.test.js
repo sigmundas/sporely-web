@@ -9,6 +9,7 @@ import {
   _hasAiRunResult,
   _hasStoredAiResult,
   _canRunDetailAiService,
+  getDetailDraftExplanationLines,
   _renderDetailAiResults,
   _renderDetailAiTabs,
   _setDetailAiActiveService,
@@ -472,6 +473,38 @@ test('detail privacy note treats drafts as free and labels published rows explic
 
   assert.match(source, /observationUsesPrivacySlot/)
   assert.match(source, /detail\.published/)
+})
+
+test('draft explanation lines stay short and match visibility state', () => {
+  const now = Date.parse('2026-06-24T12:00:00Z')
+
+  assert.deepEqual(
+    getDetailDraftExplanationLines({
+      is_draft: true,
+      visibility: 'public',
+      created_at: '2026-06-10T12:00:00Z',
+      date: '2025-01-01T12:00:00Z',
+    }, now),
+    ['Only visible to you.', 'Will be public when published.'],
+  )
+
+  assert.deepEqual(
+    getDetailDraftExplanationLines({
+      is_draft: true,
+      visibility: 'friends',
+      created_at: '2026-03-01T12:00:00Z',
+    }, now),
+    ['Only visible to you.', 'Will be visible to friends when published.', 'Old draft — review when ready.'],
+  )
+
+  assert.deepEqual(
+    getDetailDraftExplanationLines({
+      is_draft: true,
+      visibility: 'private',
+      created_at: '2025-11-01T12:00:00Z',
+    }, now),
+    ['Only visible to you.', 'Private when published.', 'Stale draft — publish, keep as draft, or delete when ready.'],
+  )
 })
 
 test('selected AI service keeps its own probability and source highlight', () => {

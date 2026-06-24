@@ -157,6 +157,12 @@ const messages = {
     'detail.saved': 'Saved ✓',
     'detail.deleteFailed': 'Delete failed: {message}',
     'detail.onlyOwnerDelete': 'Only the owner can delete this observation',
+    'detail.draftOnlyVisible': 'Only visible to you.',
+    'detail.draftWillBePublic': 'Will be public when published.',
+    'detail.draftWillBeFriends': 'Will be visible to friends when published.',
+    'detail.draftWillBePrivate': 'Private when published.',
+    'detail.oldDraft': 'Old draft — review when ready.',
+    'detail.staleDraft': 'Stale draft — publish, keep as draft, or delete when ready.',
     'detail.confirmDeleteImage': 'Delete this image? This cannot be undone.',
     'detail.deleteConfirm': 'Delete this observation? This cannot be undone.',
     'detail.deleted': 'Observation deleted',
@@ -200,6 +206,31 @@ const messages = {
     'finds.drafts': 'Draft',
     'finds.status': 'Status',
     'finds.published': 'Published',
+    'finds.scope': 'Scope',
+    'finds.sort': 'Sort',
+    'finds.sortDate': 'Date',
+    'finds.sortSpecies': 'Species',
+    'finds.oldDraftBadge': 'Old draft',
+    'finds.staleDraftBadge': 'Stale draft',
+    'finds.noFeedFinds': 'No feed finds yet.',
+    'finds.noPrivateFinds': 'No private finds yet.',
+    'finds.noPublicFinds': 'No public finds yet.',
+    'scope.followed': 'Followed',
+    'finds.toast.statusAll': 'Showing drafts and published finds',
+    'finds.toast.statusDrafts': 'Showing drafts only',
+    'finds.toast.statusPublished': 'Showing published finds only',
+    'finds.toast.sporesOn': 'Showing finds with spore data',
+    'finds.toast.sporesOff': 'Showing all finds',
+    'finds.toast.sortDate': 'Sorted by date',
+    'finds.toast.sortSpecies': 'Sorted by species',
+    'finds.toast.mineAll': 'Showing all your finds',
+    'finds.toast.minePrivate': 'Showing your private finds',
+    'finds.toast.mineFriends': 'Showing finds shared with friends',
+    'finds.toast.minePublic': 'Showing your public finds',
+    'finds.toast.feedAll': 'Showing all feed sources',
+    'finds.toast.feedFollowed': 'Showing followed species',
+    'finds.toast.feedFriends': 'Showing friends',
+    'finds.toast.feedPublic': 'Showing public finds',
     'finds.noObservations': 'No observations yet.',
     'finds.noObservationsCapture': 'No observations yet — go capture some!',
     'finds.noResults': 'No results for "{query}".',
@@ -1848,17 +1879,11 @@ export function applyStaticTranslations() {
   setText('#android-web-camera-warning-cancel', 'common.cancel')
   setText('#android-web-camera-warning-continue', 'import.continueAnyway')
 
-  setText('#finds-scope-mine', 'scope.mine')
-  setText('#finds-scope-feed', 'scope.feed')
-  setText('#finds-scope-secondary-main', 'visibility.private')
-  setText('#finds-scope-secondary-friends', 'scope.friends')
-  setText('#finds-scope-secondary-public', 'scope.community')
   setText('#finds-refresh-label', 'finds.pullToRefresh')
   setText('#finds-filter-spores-label', 'stats.spores')
-  setText('#finds-status-label', 'finds.status')
-  setText('#finds-status-all', 'scope.all')
-  setText('#finds-status-drafts', 'finds.drafts')
-  setText('#finds-status-published', 'finds.published')
+  setText('#finds-scope-button-prefix', 'finds.scope')
+  setText('#finds-status-button-prefix', 'finds.status')
+  setText('#finds-sort-button-prefix', 'finds.sort')
 
   setText('#profile-title', 'profile.title')
   setText('#profile-save-btn', 'profile.saveProfile')
@@ -1928,7 +1953,6 @@ export function applyStaticTranslations() {
   setAria('#settings-close-btn', 'common.close')
   setAria('#finds-search-btn', 'finds.searchAria')
   setAria('#finds-search-clear', 'finds.clearSearch')
-  setAria('#finds-status-select', 'finds.status')
   setAria('#home-fab', 'finds.newObservationAria')
   setAria('#finds-fab', 'finds.newObservationAria')
   setAria('#map-fab', 'finds.newObservationAria')
@@ -1949,6 +1973,7 @@ export function applyStaticTranslations() {
 
   const versionEl = document.getElementById('settings-version')
   if (versionEl) versionEl.textContent = `v${__APP_VERSION__}`
+  globalThis.__syncFindsDropdownControls?.()
 }
 
 export function initI18n() {

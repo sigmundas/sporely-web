@@ -22,7 +22,7 @@ import {
 } from '../ai-identification.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath, fetchObservationImageRows } from '../images.js'
-import { loadFinds, openFinds } from './finds.js'
+import { classifyDraftAge, loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
@@ -465,10 +465,33 @@ function _detailAiSelectionStateFromResults(resultsByService = {}, obs = current
   }
 }
 
-const DETAIL_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
-const DETAIL_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
-const DETAIL_VIEW_SELECT = 'id, user_id, date, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
-const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
+export function getDetailDraftExplanationLines(obs = currentObs, now = Date.now()) {
+  if (obs?.is_draft !== true) return []
+
+  const lines = [t('detail.draftOnlyVisible') || 'Only visible to you.']
+  const visibility = normalizeVisibility(obs.visibility, 'public')
+  if (visibility === 'friends') {
+    lines.push(t('detail.draftWillBeFriends') || 'Will be visible to friends when published.')
+  } else if (visibility === 'private') {
+    lines.push(t('detail.draftWillBePrivate') || 'Private when published.')
+  } else {
+    lines.push(t('detail.draftWillBePublic') || 'Will be public when published.')
+  }
+
+  const ageState = classifyDraftAge(obs, now)
+  if (ageState === 'old') {
+    lines.push(t('detail.oldDraft') || 'Old draft - review when ready.')
+  } else if (ageState === 'stale') {
+    lines.push(t('detail.staleDraft') || 'Stale draft - publish, keep as draft, or delete when ready.')
+  }
+
+  return lines
+}
+
+const DETAIL_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
+const DETAIL_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
+const DETAIL_VIEW_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
+const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
 const DETAIL_AI_SELECTION_FIELDS = [
   'ai_selected_service',
   'ai_selected_taxon_id',
@@ -1020,11 +1043,33 @@ export async function openFindDetail(obsId, options = {}) {
   let showBanner = false;
 
   if (obs.is_draft) {
-    const tag = document.createElement('span');
-    tag.className = 'detail-status-tag tag-draft';
-    tag.textContent = t('detail.draft') || 'Draft';
-    bannerEl.appendChild(tag);
-    showBanner = true;
+    const draftStack = document.createElement('div')
+    draftStack.className = 'detail-draft-stack'
+
+    const tag = document.createElement('span')
+    tag.className = 'detail-status-tag tag-draft'
+    tag.textContent = t('detail.draft') || 'Draft'
+    draftStack.appendChild(tag)
+
+    const draftCopy = document.createElement('div')
+    draftCopy.className = 'detail-draft-copy'
+    const ageState = classifyDraftAge(obs)
+    const detailLines = getDetailDraftExplanationLines(obs)
+    detailLines.forEach((line, index) => {
+      const lineEl = document.createElement('span')
+      lineEl.textContent = line
+      lineEl.className = 'detail-draft-copy-line'
+      if (index === 2 && ageState === 'old') {
+        lineEl.classList.add('detail-draft-copy-line--old')
+      } else if (index === 2 && ageState === 'stale') {
+        lineEl.classList.add('detail-draft-copy-line--stale')
+      }
+      draftCopy.appendChild(lineEl)
+    })
+
+    draftStack.appendChild(draftCopy)
+    bannerEl.appendChild(draftStack)
+    showBanner = true
   }
   if (obs.location_precision === 'fuzzed') {
     const tag = document.createElement('span');

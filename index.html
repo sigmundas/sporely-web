@@ -343,10 +343,13 @@
             <button class="scope-tab active" id="finds-scope-mine" data-scope="mine">Mine</button>
             <button class="scope-tab" id="finds-scope-feed" data-scope="feed">Feed</button>
           </div>
-          <div class="scope-tabs" id="finds-scope-secondary-tabs">
-            <button class="scope-tab active" id="finds-scope-secondary-main" data-scope="private">Private</button>
-            <button class="scope-tab" id="finds-scope-secondary-friends" data-scope="friends">Friends</button>
-            <button class="scope-tab" id="finds-scope-secondary-public" data-scope="public">Public</button>
+          <div class="finds-status-control" id="finds-status-control">
+            <button type="button" class="finds-dropdown-button" id="finds-status-button" aria-haspopup="menu" aria-controls="finds-status-menu" aria-expanded="false" aria-labelledby="finds-status-button-prefix finds-status-button-value">
+              <span class="finds-dropdown-button-prefix" id="finds-status-button-prefix">Status</span>
+              <span class="finds-dropdown-button-value" id="finds-status-button-value">All</span>
+              <svg class="finds-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="finds-dropdown-menu finds-dropdown-menu--status" id="finds-status-menu" role="menu" aria-labelledby="finds-status-button" hidden></div>
           </div>
         </div>
         <div id="finds-user-bar" style="display:none; align-items:center; gap:8px; padding: 12px 0 0 18px; flex:1;">
@@ -360,15 +363,22 @@
 
       <div class="finds-topbar">
         <button class="finds-view-btn finds-view-btn-text finds-toggle-btn" id="finds-filter-spores"><span id="finds-filter-spores-label">Spores</span></button>
-        <button class="finds-view-btn finds-view-btn-text finds-toggle-btn" id="finds-group-species" title="Group by species" aria-label="Group by species">Species</button>
-        <label class="finds-status-control" for="finds-status-select">
-          <span class="finds-status-label" id="finds-status-label">Status</span>
-          <select id="finds-status-select" class="finds-status-select" aria-label="Status">
-            <option value="all" id="finds-status-all">All</option>
-            <option value="drafts" id="finds-status-drafts">Drafts</option>
-            <option value="published" id="finds-status-published">Published</option>
-          </select>
-        </label>
+        <div class="finds-status-control finds-scope-control" id="finds-scope-control">
+          <button type="button" class="finds-dropdown-button" id="finds-scope-button" aria-haspopup="menu" aria-controls="finds-scope-menu" aria-expanded="false" aria-labelledby="finds-scope-button-prefix finds-scope-button-value">
+            <span class="finds-dropdown-button-prefix" id="finds-scope-button-prefix">Scope</span>
+            <span class="finds-dropdown-button-value" id="finds-scope-button-value">All</span>
+            <svg class="finds-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          </button>
+          <div class="finds-dropdown-menu" id="finds-scope-menu" role="menu" aria-labelledby="finds-scope-button" hidden></div>
+        </div>
+        <div class="finds-status-control finds-sort-control" id="finds-sort-control">
+          <button type="button" class="finds-dropdown-button" id="finds-sort-button" aria-haspopup="menu" aria-controls="finds-sort-menu" aria-expanded="false" aria-labelledby="finds-sort-button-prefix finds-sort-button-value">
+            <span class="finds-dropdown-button-prefix" id="finds-sort-button-prefix">Sort</span>
+            <span class="finds-dropdown-button-value" id="finds-sort-button-value">Date</span>
+            <svg class="finds-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          </button>
+          <div class="finds-dropdown-menu finds-dropdown-menu--sort" id="finds-sort-menu" role="menu" aria-labelledby="finds-sort-button" hidden></div>
+        </div>
         <div class="finds-view-btns" role="radiogroup" aria-label="Card layout">
           <button class="finds-view-btn active" id="finds-view-cards" title="Detailed view" aria-label="Detailed view">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="4" rx="1.5"/><rect x="3" y="20" width="18" height="1" rx="0.5" opacity="0.4"/></svg>
