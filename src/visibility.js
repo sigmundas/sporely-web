@@ -34,3 +34,12 @@ export function fromCloudVisibility(value, fallback = VISIBILITY_PRIVATE) {
 export function normalizeObservationVisibility(value, fallback = VISIBILITY_PRIVATE) {
   return fromCloudVisibility(value, fallback)
 }
+
+export function observationUsesPrivacySlot(observation = {}) {
+  if (observation?.is_draft === true) return false
+
+  const visibility = normalizeObservationVisibility(observation?.visibility, VISIBILITY_PUBLIC)
+  if (visibility !== VISIBILITY_PUBLIC) return true
+
+  return String(observation?.location_precision || 'exact').trim().toLowerCase() === 'fuzzed'
+}

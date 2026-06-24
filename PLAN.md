@@ -4,8 +4,6 @@
 
 `PLAN.md` is the active working plan for `sporely-web`.
 
-It should contain current tasks, near-term backlog, and long-term roadmap items. It should not contain dated debugging logs, completed implementation notes, long agent prompts, or historical failure analysis. Those belong in `HISTORY.md` or separate docs.
-
 Historical image/upload notes are archived in `HISTORY.md`. Current image-pipeline notes are in `docs/image-pipeline-phase1.md`.
 
 # Android release plan
@@ -16,8 +14,6 @@ Goal: keep `sporely-web` as the single source repository while supporting three 
 - GitHub Releases Android APK as a signed `.apk`.
 - Google Play Android release as a signed `.aab` once the store path is ready.
 
-### Non-negotiable rules
-
 - Cloudflare owns the web/PWA deployment. Do not add GitHub Actions workflows that deploy the web app.
 - The Android CI must run the Capacitor sequence in the correct order:
   - `npm ci`
@@ -27,103 +23,6 @@ Goal: keep `sporely-web` as the single source repository while supporting three 
 - Do not assume the Vite output directory. Verify `webDir` in `capacitor.config.*`.
 - Use the repository’s Node requirement. Current repo expects Node `>=22`.
 - Keystores, passwords, generated APKs/AABs, and local signing files must never be committed.
-
----
-
-### Phase 0 — Audit current release state
-
-Status: not started
-
-Purpose: inspect before changing anything.
-
-Tasks:
-
-- Inspect:
-  - `package.json`
-  - `package-lock.json`
-  - `capacitor.config.*`
-  - `android/app/build.gradle` or `android/app/build.gradle.kts`
-  - `android/gradle.properties`
-  - root `.gitignore`
-  - `android/.gitignore`
-  - `.github/workflows/`
-  - existing metadata/fastlane directories
-- Confirm:
-  - Android applicationId/package name
-  - current `versionName`
-  - current `versionCode`
-  - current Node requirement
-  - current Java/Gradle requirements
-  - actual Capacitor `webDir`
-  - whether signing config already exists
-  - whether product flavors already exist
-- Produce a short audit note before implementation.
-
-Test/check commands:
-
-```bash
-node --version
-npm ci
-npm run build
-npx cap sync android
-cd android && ./gradlew :app:assembleDebug
-```
-
-Definition of done:
-
-* Current build path is understood.
-* No release files or workflows have been changed yet.
-* Risks/conflicts are listed before Phase 1.
-
----
-
-### Phase 1 — Local release hygiene
-
-Status: not started
-
-Purpose: make local release/version handling predictable before CI signing is added.
-
-Tasks:
-
-* Add `.nvmrc` if missing, matching the repo’s Node requirement.
-* Reuse existing version scripts if possible.
-* If needed, add `scripts/bump-version.mjs`.
-* Version bump logic must keep these aligned:
-
-  * `package.json` version
-  * Android `versionName`
-  * Android `versionCode`
-* Add a short release checklist to README or docs.
-* Verify `.gitignore` protects:
-
-  * keystores
-  * `*.apk`
-  * `*.aab`
-  * Android build outputs
-  * local signing config
-
-Do not:
-
-* Add signing secrets.
-* Add Play deployment.
-* Refactor unrelated build files.
-
-Test/check commands:
-
-```
-npm ci
-npm run build
-npx cap sync android
-cd android && ./gradlew :app:assembleDebug
-git diff --stat
-git status
-```
-
-Definition of done:
-
-* Local build still works.
-* Version bump path is documented.
-* No secrets or generated binaries are staged.
 
 ---
 
@@ -192,28 +91,8 @@ Definition of done:
 
 ---
 
-## Image pipeline refactor, conservative Phase 2
-
-### Current state
-
-- The app currently works.
-- Phase 1 of the image pipeline refactor is complete.
-- Phase 1 was documentation/debug-only:
-  - `docs/image-pipeline-phase1.md`
-  - opt-in debug logging behind `sporely-debug-image-pipeline`
-- The next step must be small and low-risk.
-- Do not introduce a new `image-intake.js` module yet.
-
-
 
 ## Near-term active tasks
-
-### UI fixes
-
-- [ ] Make a distinct draft/obscured/private banner that is as wide as the screen.
-  - Place it just above the thumbnail view in edit-observations.
-  - If an observation is obscured, draft, or private, show one tag for each true condition.
-  - Remove the smaller Draft/obscured tags currently shown in the upper-left corner.
 
 ### Map
 
@@ -227,15 +106,6 @@ Definition of done:
   - web edit → desktop pull
   - desktop edit → cloud/web pull
 
-### Privacy, RLS, and social trails
-
-- [ ] Verify disposable-account RLS paths for:
-  - owner
-  - accepted friend
-  - stranger
-  - blocked user
-  - banned profile
-  - privacy slot limit
 
 ### Database and operations
 

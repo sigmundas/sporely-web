@@ -198,6 +198,8 @@ const messages = {
     'finds.noSporeMetrics': 'No finds with spore metrics.',
     'finds.draftBadge': 'Draft',
     'finds.drafts': 'Draft',
+    'finds.status': 'Status',
+    'finds.published': 'Published',
     'finds.noObservations': 'No observations yet.',
     'finds.noObservationsCapture': 'No observations yet — go capture some!',
     'finds.noResults': 'No results for "{query}".',
@@ -383,6 +385,7 @@ const messages = {
     'detail.workflow': 'Workflow',
     'detail.draft': 'Draft',
     'detail.ready': 'Ready',
+    'detail.published': 'Published',
     'privacySlots.used': '{used}/{limit} privacy slots used.',
     'privacySlots.usedUnknown': 'Privacy slot use unavailable.',
     'privacySlots.currentUses': 'Current find uses 1 privacy slot.',
@@ -588,6 +591,8 @@ const messages = {
     'finds.noSporeMetrics': 'Ingen funn med sporedata.',
     'finds.draftBadge': 'Utkast',
     'finds.drafts': 'Utkast',
+    'finds.status': 'Status',
+    'finds.published': 'Publisert',
     'finds.noObservations': 'Ingen observasjoner ennå.',
     'finds.noObservationsCapture': 'Ingen observasjoner ennå — gå og ta noen!',
     'finds.noResults': 'Ingen treff for "{query}".',
@@ -773,6 +778,7 @@ const messages = {
     'detail.workflow': 'Arbeidsflyt',
     'detail.draft': 'Utkast',
     'detail.ready': 'Klar',
+    'detail.published': 'Publisert',
     'privacySlots.used': '{used}/{limit} personvernplasser brukt.',
     'privacySlots.usedUnknown': 'Bruk av personvernplasser er utilgjengelig.',
     'privacySlots.currentUses': 'Dette funnet bruker 1 personvernplass.',
@@ -978,6 +984,8 @@ const messages = {
     'finds.noSporeMetrics': 'Inga fynd med spordata.',
     'finds.draftBadge': 'Utkast',
     'finds.drafts': 'Utkast',
+    'finds.status': 'Status',
+    'finds.published': 'Publicerad',
     'finds.noObservations': 'Inga observationer ännu.',
     'finds.noObservationsCapture': 'Inga observationer ännu — gå ut och ta några!',
     'finds.noResults': 'Inga träffar för "{query}".',
@@ -1163,6 +1171,7 @@ const messages = {
     'detail.workflow': 'Arbetsflöde',
     'detail.draft': 'Utkast',
     'detail.ready': 'Klar',
+    'detail.published': 'Publicerad',
     'privacySlots.used': '{used}/{limit} integritetsplatser använda.',
     'privacySlots.usedUnknown': 'Användning av integritetsplatser är inte tillgänglig.',
     'privacySlots.currentUses': 'Detta fynd använder 1 integritetsplats.',
@@ -1368,6 +1377,8 @@ const messages = {
     'finds.noSporeMetrics': 'Keine Funde mit Sporenmetriken.',
     'finds.draftBadge': 'Entwurf',
     'finds.drafts': 'Entwurf',
+    'finds.status': 'Status',
+    'finds.published': 'Veröffentlicht',
     'finds.noObservations': 'Noch keine Beobachtungen.',
     'finds.noObservationsCapture': 'Noch keine Beobachtungen — geh raus und erfasse welche!',
     'finds.noResults': 'Keine Treffer für "{query}".',
@@ -1553,6 +1564,7 @@ const messages = {
     'detail.workflow': 'Workflow',
     'detail.draft': 'Entwurf',
     'detail.ready': 'Bereit',
+    'detail.published': 'Veröffentlicht',
     'privacySlots.used': '{used}/{limit} Datenschutzplätze verwendet.',
     'privacySlots.usedUnknown': 'Datenschutzplatz-Nutzung nicht verfügbar.',
     'privacySlots.currentUses': 'Dieser Fund nutzt 1 Datenschutzplatz.',
@@ -1843,7 +1855,10 @@ export function applyStaticTranslations() {
   setText('#finds-scope-secondary-public', 'scope.community')
   setText('#finds-refresh-label', 'finds.pullToRefresh')
   setText('#finds-filter-spores-label', 'stats.spores')
-  setText('#finds-filter-draft-label', 'finds.drafts')
+  setText('#finds-status-label', 'finds.status')
+  setText('#finds-status-all', 'scope.all')
+  setText('#finds-status-drafts', 'finds.drafts')
+  setText('#finds-status-published', 'finds.published')
 
   setText('#profile-title', 'profile.title')
   setText('#profile-save-btn', 'profile.saveProfile')
@@ -1913,7 +1928,7 @@ export function applyStaticTranslations() {
   setAria('#settings-close-btn', 'common.close')
   setAria('#finds-search-btn', 'finds.searchAria')
   setAria('#finds-search-clear', 'finds.clearSearch')
-  setAria('#finds-filter-draft', 'finds.drafts')
+  setAria('#finds-status-select', 'finds.status')
   setAria('#home-fab', 'finds.newObservationAria')
   setAria('#finds-fab', 'finds.newObservationAria')
   setAria('#map-fab', 'finds.newObservationAria')
@@ -1930,7 +1945,6 @@ export function applyStaticTranslations() {
   setTitle('#finds-view-cards', 'finds.singleColumn')
   setTitle('#finds-view-two', 'finds.twoColumns')
   setTitle('#finds-view-three', 'finds.threeColumns')
-  setTitle('#finds-filter-draft', 'finds.drafts')
   setTitle('#finds-view-tiles', 'finds.tinyGrid')
 
   const versionEl = document.getElementById('settings-version')

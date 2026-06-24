@@ -467,6 +467,13 @@ test('detail ai run path stays disabled for non-owners and starts from a safe re
   assert.match(source, /showToast\(noRunReason\)/)
 })
 
+test('detail privacy note treats drafts as free and labels published rows explicitly', () => {
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+
+  assert.match(source, /observationUsesPrivacySlot/)
+  assert.match(source, /detail\.published/)
+})
+
 test('selected AI service keeps its own probability and source highlight', () => {
   resetDetailState()
   const tabs = [

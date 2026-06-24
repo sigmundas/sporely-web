@@ -30,7 +30,9 @@ const FINDS_LOAD_MORE_THRESHOLD = 240
 const PULL_REFRESH_THRESHOLD = 72
 const PULL_REFRESH_MAX = 112
 const PULL_REFRESH_TOUCH_SLOP = 10
-const FINDS_DRAFT_ONLY_STORAGE_KEY = 'sporely-finds-draft-only'
+const FINDS_STATUS_STORAGE_KEY = 'sporely-finds-status'
+const LEGACY_FINDS_DRAFT_ONLY_STORAGE_KEY = 'sporely-finds-draft-only'
+const FINDS_STATUS_VALUES = new Set(['all', 'drafts', 'published'])
 let _pullTracking = false
 let _pullStartX = 0
 let _pullStartY = 0
@@ -273,26 +275,44 @@ function _normalizeFindsTargetAvatarUrl(value) {
   return /^https?:\/\//i.test(raw) ? raw : ''
 }
 
-function _loadDraftFilterPreference() {
+function _normalizeFindsStatusFilter(value) {
+  const raw = String(value || '').trim().toLowerCase()
+  return FINDS_STATUS_VALUES.has(raw) ? raw : 'all'
+}
+
+function _loadStatusFilterPreference() {
   try {
-    const raw = globalThis.localStorage?.getItem(FINDS_DRAFT_ONLY_STORAGE_KEY)
-    if (raw === null) return true
-    return raw === 'true'
+    const raw = globalThis.localStorage?.getItem(FINDS_STATUS_STORAGE_KEY)
+    const normalized = _normalizeFindsStatusFilter(raw)
+    if (normalized !== 'all' || raw === 'all') return normalized
+
+    const legacy = globalThis.localStorage?.getItem(LEGACY_FINDS_DRAFT_ONLY_STORAGE_KEY)
+    if (legacy === 'true') return 'drafts'
+    if (legacy === 'false') return 'all'
+    return 'all'
   } catch (_) {
-    return true
+    return 'all'
   }
 }
 
-function _saveDraftFilterPreference(enabled) {
+function _saveStatusFilterPreference(status) {
   try {
-    globalThis.localStorage?.setItem(FINDS_DRAFT_ONLY_STORAGE_KEY, enabled ? 'true' : 'false')
+    globalThis.localStorage?.setItem(FINDS_STATUS_STORAGE_KEY, _normalizeFindsStatusFilter(status))
   } catch (_) {}
 }
 
 export function isPublicVisibleObservation(obs, viewerId = state.user?.id) {
   const visibility = normalizeObservationVisibility(obs?.visibility)
+  if (obs?.is_draft === true) return false
   if (visibility !== 'public') return false
   return String(obs?.user_id || '') !== String(viewerId || '')
+}
+
+export function matchesFindsStatus(obs, status = 'all') {
+  const normalized = _normalizeFindsStatusFilter(status)
+  if (normalized === 'drafts') return obs?.is_draft === true
+  if (normalized === 'published') return obs?.is_draft !== true
+  return true
 }
 
 function _composeFindsTargetPerson(source = {}) {
@@ -622,7 +642,8 @@ function _bindInfiniteScroll() {
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
 export function initFinds() {
-  state.findsDraftOnly = _loadDraftFilterPreference()
+  state.findsStatusFilter = _loadStatusFilterPreference()
+  _syncStatusSelect()
   if (screen.orientation && screen.orientation.lock) {
     screen.orientation.lock('portrait').catch(() => {});
   }
@@ -682,10 +703,8 @@ export function initFinds() {
     _syncSporesToggle()
     _applyFilter()
   })
-  document.getElementById('finds-filter-draft')?.addEventListener('click', () => {
-    state.findsDraftOnly = !state.findsDraftOnly
-    _saveDraftFilterPreference(state.findsDraftOnly)
-    _syncDraftToggle()
+  document.getElementById('finds-status-select')?.addEventListener('change', event => {
+    _setFindsStatusFilter(event.target.value, { persist: true })
     _applyFilter()
   })
 
@@ -808,11 +827,19 @@ function _syncSporesToggle() {
   btn.setAttribute('aria-pressed', state.findsSporesOnly ? 'true' : 'false')
 }
 
-function _syncDraftToggle() {
-  const btn = document.getElementById('finds-filter-draft')
-  if (!btn) return
-  btn.classList.toggle('active', !!state.findsDraftOnly)
-  btn.setAttribute('aria-pressed', state.findsDraftOnly ? 'true' : 'false')
+function _syncStatusSelect() {
+  const select = document.getElementById('finds-status-select')
+  if (!select) return
+  select.value = _normalizeFindsStatusFilter(state.findsStatusFilter)
+}
+
+function _setFindsStatusFilter(status, options = {}) {
+  const normalized = _normalizeFindsStatusFilter(status)
+  state.findsStatusFilter = normalized
+  if (options.persist !== false) {
+    _saveStatusFilterPreference(normalized)
+  }
+  _syncStatusSelect()
 }
 
 function _setScope(scope, options = {}) {
@@ -869,6 +896,7 @@ function _setScope(scope, options = {}) {
   if (options.resetFilters) {
     state.findsGroupBySpecies = false
     state.findsSporesOnly = false
+    _setFindsStatusFilter('all', { persist: true })
     _setFindsPrimaryScope(_findsPrimaryScope(), {
       secondaryScope: _findsPrimaryScope() === 'feed' ? 'species' : 'public',
     })
@@ -882,14 +910,14 @@ function _setScope(scope, options = {}) {
     state.findsSporesOnly = !!options.sporesOnly
   }
 
-  if (options.draftOnly !== undefined) {
-    state.findsDraftOnly = !!options.draftOnly
+  if (options.statusFilter !== undefined) {
+    _setFindsStatusFilter(options.statusFilter, { persist: false })
   }
 
   _syncScopeTabs()
   _syncSpeciesToggle()
   _syncSporesToggle()
-  _syncDraftToggle()
+  _syncStatusSelect()
 }
 
 export async function openFinds(scope = _currentScope(), options = {}) {
@@ -946,7 +974,7 @@ export async function loadFinds() {
   _syncScopeTabs()
   _syncSpeciesToggle()
   _syncSporesToggle()
-  _syncDraftToggle()
+  _syncStatusSelect()
 
   if (currentScope === 'user') {
     await _loadUserPage(state.findsTargetUserId, { loadSeq, reset: true })
@@ -1304,6 +1332,7 @@ function _applyFilter() {
   const primaryScope = _findsPrimaryScope()
   const secondaryScope = _findsSecondaryScope(primaryScope)
   const currentScope = _currentScope()
+  const statusFilter = _normalizeFindsStatusFilter(state.findsStatusFilter)
   const raw = currentScope === 'user'
     ? (_cache['user'] || [])
     : primaryScope === 'mine'
@@ -1329,7 +1358,7 @@ function _applyFilter() {
     filtered = filtered.filter(obs => isPublicVisibleObservation(obs))
   }
   if (state.findsSporesOnly) filtered = filtered.filter(obs => !!obs.has_spores || !!obs.spore_short || !!obs.spore_statistics)
-  if (!state.findsDraftOnly) filtered = filtered.filter(obs => obs?.is_draft !== true)
+  filtered = filtered.filter(obs => matchesFindsStatus(obs, statusFilter))
 
   // Search still runs client-side against the loaded pages only. True global
   // search needs server-side filtering and is out of scope for this pass.

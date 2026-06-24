@@ -28,7 +28,7 @@ import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
 import { getArtsorakelMaxEdge, getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
-import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
+import { normalizeVisibility, observationUsesPrivacySlot, toCloudVisibility } from '../visibility.js'
 import { getIdentifyNoMatchMessage, runIdentifyForBlobs, runIdentifyForMediaKeys } from '../identify.js'
 import { loadInaturalistSession } from '../inaturalist.js'
 import { refreshHome } from './home.js'
@@ -2418,7 +2418,12 @@ function _renderDetailLocationDropdown(show) {
 function _currentDetailUsesPrivacySlot() {
   const visibility = document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'
   const precision = document.getElementById('detail-obscured')?.checked ? 'fuzzed' : 'exact'
-  return visibility !== 'public' || precision === 'fuzzed'
+  const isDraft = document.getElementById('detail-draft')?.checked !== false
+  return observationUsesPrivacySlot({
+    is_draft: isDraft,
+    visibility,
+    location_precision: precision,
+  })
 }
 
 function _renderPrivacySlotNote() {
@@ -2427,7 +2432,7 @@ function _renderPrivacySlotNote() {
 
   const draftPill = document.getElementById('detail-draft-pill')
   const isDraft = document.getElementById('detail-draft')?.checked !== false
-  if (draftPill) draftPill.textContent = isDraft ? t('detail.draft') : t('detail.ready')
+  if (draftPill) draftPill.textContent = isDraft ? t('detail.draft') : (t('detail.published') || t('detail.ready'))
 
   const isPro = state.cloudPlan?.qualityProfile === 'high' || state.cloudPlan?.cloudPlan === 'pro'
   const currentText = _currentDetailUsesPrivacySlot()
