@@ -1,7 +1,7 @@
 import { supabase } from '../supabase.js'
 import { getSharedAuthSession, seedSharedAuthSession } from '../auth-session.js'
 import { getLocale, setLocale, t } from '../i18n.js'
-import { isNativeApp } from '../platform.js'
+import { isAndroidApp, isNativeApp } from '../platform.js'
 
 const TURNSTILE_SITE_KEY = import.meta.env?.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAC0h9RON_lYu5ib_'
 const SUPABASE_OAUTH_CALLBACK_PATH = '/auth/callback'
@@ -103,6 +103,10 @@ function _friendlySupabaseOAuthError(errorCode, errorDescription) {
 function _setSocialLoginVisibility(visible) {
   const section = document.getElementById('auth-social-login')
   if (section) section.style.display = visible ? 'flex' : 'none'
+}
+
+function _shouldShowSocialLogin() {
+  return !isNativeApp() || isAndroidApp()
 }
 
 export function getSupabaseOAuthRedirectUrl(origin = globalThis.location?.origin || SUPABASE_OAUTH_FALLBACK_ORIGIN) {
@@ -394,7 +398,7 @@ export function switchToLogin(prefillEmail = '', resetMessage = false) {
   document.getElementById('forgot-password-form').style.display = 'none'
   document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('login-form').style.display  = 'block'
-  _setSocialLoginVisibility(!isNativeApp())
+  _setSocialLoginVisibility(_shouldShowSocialLogin())
   // Hide Turnstile on the login view — captcha is signup-only
   const tc = document.getElementById('turnstile-container')
   if (tc) tc.style.display = 'none'
@@ -411,7 +415,7 @@ function switchToSignup(prefillEmail = '') {
   document.getElementById('forgot-password-form').style.display = 'none'
   document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('signup-form').style.display = 'block'
-  _setSocialLoginVisibility(!isNativeApp())
+  _setSocialLoginVisibility(_shouldShowSocialLogin())
   // Show and init Turnstile when entering signup view
   const tc = document.getElementById('turnstile-container')
   if (tc) tc.style.display = 'flex'
@@ -537,7 +541,7 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
   signupBtn.dataset.label = t('auth.createAccount')
   forgotBtn.dataset.label = t('auth.sendResetLink')
   resetBtn.dataset.label  = t('auth.updatePassword')
-  _setSocialLoginVisibility(!isNativeApp())
+  _setSocialLoginVisibility(_shouldShowSocialLogin())
   if (languageSelect) {
     languageSelect.value = getLocale()
     languageSelect.addEventListener('change', () => {
@@ -552,11 +556,11 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
   // Turnstile is initialised lazily when the user switches to the signup view
 
   if (socialLoginSection) {
-    socialLoginSection.style.display = isNativeApp() ? 'none' : 'flex'
+    socialLoginSection.style.display = _shouldShowSocialLogin() ? 'flex' : 'none'
   }
   if (googleLoginBtn) {
     googleLoginBtn.addEventListener('click', async () => {
-      if (isNativeApp()) return
+      if (!_shouldShowSocialLogin()) return
       showError('')
       googleLoginBtn.disabled = true
       try {

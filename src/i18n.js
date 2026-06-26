@@ -1741,7 +1741,7 @@ export function applyStaticTranslations() {
   const authLocaleSelect = document.getElementById('auth-language-select')
   if (authLocaleSelect) authLocaleSelect.value = currentLocale
 
-  setText('#login-form .auth-title', 'auth.signIn')
+  setText('#login-title', 'auth.signIn')
   setText('#login-email-label', 'auth.email')
   setText('#login-password-label', 'auth.password')
   setText('#login-btn', 'auth.signIn')

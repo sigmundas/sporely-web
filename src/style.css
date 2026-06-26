@@ -92,6 +92,17 @@ html, body {
   z-index: 200;
   overflow-y: auto;
 }
+@media (max-width: 431px) {
+  #auth-overlay {
+    align-items: flex-start;
+    padding: calc(env(safe-area-inset-top, 0px) + 12px) 16px 20px;
+  }
+  .auth-card {
+    width: 100%;
+    max-width: 360px;
+    margin-top: 4px;
+  }
+}
 
 /* Shared warning dialogs */
 #exif-warning-overlay,
@@ -161,7 +172,7 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin: 2px 0 18px;
+  margin: 4px 0 18px;
 }
 
 .auth-social-btn {
@@ -242,7 +253,7 @@ html, body {
 
 .auth-title {
   font-size: 22px; font-weight: 700; color: var(--white);
-  margin-bottom: 22px;
+  margin-bottom: 18px;
 }
 
 .auth-form {
