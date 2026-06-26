@@ -1,0 +1,24 @@
+# Public Explorer Schema Follow-Up
+
+- Added migration: `supabase/migrations/20260624124000_normalize_legacy_hidden_locations.sql`
+- Forward remote-safe migration: `supabase/migrations/20260626110000_public_explorer_geography_foundation.sql`
+- Follow-up migration: `supabase/migrations/20260626120000_add_public_observation_read_surface.sql`
+- Closed gaps:
+  - `observations.country_code` is now present for ISO-style public filtering.
+  - `observations.region_id` is now present and references `public.public_regions`.
+  - `observations.location_precision` now allows `exact`, `fuzzed`, `region`, and `hidden`.
+  - A normalized `public.public_regions` lookup table now exists for public explorer geography.
+  - Public/community reads no longer expose exact GPS for `region` or `hidden` rows.
+  - Privacy-slot enforcement now treats `region` and `hidden` as protected precision states.
+  - A public-safe observation RPC now covers `id`, `speciesSlug`, `speciesName`, `speciesCommonName`, `observerDisplayName`, `observedOn`, `country`, `regionId`, `locationPrecision`, `locationLabel`, `hasMicroscopy`, `sporeMeasurementCount`, `contrastMethod`, `mountReagent`, and `sampleType`.
+  - The public observation RPC now uses strict public visibility, strict public spore-data visibility, hidden as the missing precision fallback, anonymous-safe block checks, and excludes deleted or purged microscopy images from public microscopy/spore signals.
+  - `supabase/tests/public_observation_rpc_validation.sql` validates the first public observation RPC contract with rolled-back local fixture data.
+- Remaining gaps:
+  - No frontend wiring yet.
+  - No image URLs, storage paths, raw coordinates, or individual spore points are exposed yet.
+  - The region table is intentionally empty for now and still needs seed/reference data.
+  - The client still normalizes lookup country codes locally; persistence-side normalization can follow later.
+  - `location_public` remains as legacy compatibility state.
+- Legacy mapping:
+  - Existing rows with `location_public = false` and `location_precision = 'exact'` are normalized to `hidden`.
+  - Existing rows with `location_public = false` and `location_precision = 'fuzzed'` intentionally stay `fuzzed` for compatibility so their current public preview behavior is preserved.

@@ -225,29 +225,9 @@ CREATE OR REPLACE VIEW public.observation_images_community_view AS
     AND NOT public.is_blocked_between(auth.uid(), o.user_id);
 
 CREATE OR REPLACE VIEW public.observation_identifications_community_view AS
- SELECT oi.id,
-    oi.observation_id,
-    oi.user_id,
-    oi.service,
-    oi.source,
-    oi.status,
-    oi.image_fingerprint,
-    oi.crop_fingerprint,
-    oi.request_fingerprint,
-    oi.language,
-    oi.model_version,
-    oi.results,
-    oi.top_scientific_name,
-    oi.top_vernacular_name,
-    oi.top_taxon_id,
-    oi.top_probability,
-    oi.error_message,
-    oi.created_at,
-    oi.updated_at,
-    oi.top_species_url,
-    oi.top_redlist_category,
-    oi.top_redlist_status,
-    oi.top_redlist_source
+ -- Preserve the existing view signature so replaying this migration does not
+ -- trip over a column-order mismatch on a fresh reset.
+ SELECT oi.*
    FROM public.observation_identifications oi
    JOIN public.observations o ON o.id = oi.observation_id
   WHERE (
