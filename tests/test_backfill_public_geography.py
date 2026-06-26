@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "backfill_public_geography.py"
@@ -50,6 +51,26 @@ class BackfillPublicGeographyTests(unittest.TestCase):
     def test_parse_review_update_rejects_lowercase_country_code(self) -> None:
         with self.assertRaises(ValueError):
             MODULE.parse_review_update({"id": "1", "suggested_country_code": "no"}, 2)
+
+    def test_query_rows_accepts_list_results(self) -> None:
+        with mock.patch.object(MODULE, "run_supabase_query", return_value=[{"id": 7}]):
+            self.assertEqual(MODULE.query_rows("db", "select 1"), [{"id": 7}])
+
+    def test_query_rows_accepts_dict_rows_and_data_results(self) -> None:
+        cases = (
+            ({"rows": [{"id": 8}]}, [{"id": 8}]),
+            ({"data": [{"id": 9}]}, [{"id": 9}]),
+        )
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                with mock.patch.object(MODULE, "run_supabase_query", return_value=payload):
+                    self.assertEqual(MODULE.query_rows("db", "select 1"), expected)
+
+    def test_query_rows_raises_on_unexpected_shape(self) -> None:
+        with mock.patch.object(MODULE, "run_supabase_query", return_value={"unexpected": True}):
+            with self.assertRaises(RuntimeError) as ctx:
+                MODULE.query_rows("db", "select 1")
+        self.assertIn("Unexpected Supabase query result shape", str(ctx.exception))
 
 
 if __name__ == "__main__":

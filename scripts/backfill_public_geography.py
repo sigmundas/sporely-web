@@ -121,7 +121,7 @@ def db_url_from_args(args: argparse.Namespace) -> str:
     )
 
 
-def run_supabase_query(db_url: str, sql: str) -> dict:
+def run_supabase_query(db_url: str, sql: str) -> object:
     with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as handle:
         handle.write(sql)
         sql_path = Path(handle.name)
@@ -164,12 +164,19 @@ def run_supabase_query(db_url: str, sql: str) -> dict:
 
 def query_rows(db_url: str, sql: str) -> list[dict]:
     result = run_supabase_query(db_url, sql)
-    rows = result.get("rows")
-    if rows is None:
-        return []
-    if not isinstance(rows, list):
-        raise SystemExit("Unexpected Supabase query result shape: rows is not a list")
-    return rows
+    if isinstance(result, list):
+        return result
+
+    if isinstance(result, dict):
+        if "rows" in result and isinstance(result["rows"], list):
+            return result["rows"]
+        if "data" in result and isinstance(result["data"], list):
+            return result["data"]
+        preview = repr(result)[:200]
+        raise RuntimeError(f"Unexpected Supabase query result shape: {preview}")
+
+    preview = repr(result)[:200]
+    raise RuntimeError(f"Unexpected Supabase query result type: {preview}")
 
 
 def export_headers(include_gps: bool) -> list[str]:
