@@ -52,6 +52,112 @@ class BackfillPublicGeographyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MODULE.parse_review_update({"id": "1", "suggested_country_code": "no"}, 2)
 
+    def test_norway_region_normalization_maps_common_county_names(self) -> None:
+        self.assertEqual(MODULE.normalize_norway_region_name("Trøndelag"), "trondelag")
+        self.assertEqual(MODULE.resolve_norway_region_id("Trøndelag"), "no-trondelag")
+        self.assertEqual(MODULE.resolve_norway_region_id("Møre og Romsdal County"), "no-more-og-romsdal")
+        self.assertEqual(MODULE.resolve_norway_region_id("Innlandet"), "no-innlandet")
+
+    def test_build_coordinate_backfill_plan_uses_mocked_geocode_payloads(self) -> None:
+        rows = [
+            {
+                "id": 101,
+                "observed_on": "2026-06-26",
+                "genus": "Russula",
+                "species": "testa",
+                "species_name": "Russula testa",
+                "current_country_code": None,
+                "current_region_id": None,
+                "gps_latitude": 63.4305,
+                "gps_longitude": 10.3951,
+                "location_precision": "exact",
+            },
+            {
+                "id": 102,
+                "observed_on": "2026-06-25",
+                "genus": "Russula",
+                "species": "uncertaina",
+                "species_name": "Russula uncertaina",
+                "current_country_code": None,
+                "current_region_id": None,
+                "gps_latitude": 61.0,
+                "gps_longitude": 8.0,
+                "location_precision": "exact",
+            },
+        ]
+
+        def geocode_lookup(lat, lon):
+            if round(lat, 4) == 63.4305:
+                return {
+                    "address": {
+                        "country_code": "no",
+                        "country": "Norge",
+                        "county": "Trøndelag",
+                    }
+                }
+            return {
+                "address": {
+                    "country_code": "no",
+                    "country": "Norge",
+                    "county": "Vestfold og Telemark",
+                }
+            }
+
+        proposals, skipped, invalid = MODULE.build_coordinate_backfill_plan(
+            rows,
+            geocode_lookup,
+            {"no-trondelag", "no-innlandet"},
+        )
+
+        self.assertEqual(len(proposals), 2)
+        self.assertEqual(proposals[0].observation_id, 101)
+        self.assertEqual(proposals[0].suggested_country_code, "NO")
+        self.assertEqual(proposals[0].suggested_region_id, "no-trondelag")
+        self.assertEqual(proposals[1].observation_id, 102)
+        self.assertEqual(proposals[1].suggested_country_code, "NO")
+        self.assertIsNone(proposals[1].suggested_region_id)
+        self.assertIsNotNone(proposals[1].note)
+        self.assertIn("uncertain", proposals[1].note.lower())
+        self.assertEqual(invalid, [])
+
+    def test_build_coordinate_backfill_plan_leaves_uncertain_norway_region_blank(self) -> None:
+        rows = [
+            {
+                "id": 201,
+                "observed_on": "2026-06-24",
+                "genus": "Russula",
+                "species": "testb",
+                "species_name": "Russula testb",
+                "current_country_code": None,
+                "current_region_id": None,
+                "gps_latitude": 60.0,
+                "gps_longitude": 11.0,
+                "location_precision": "exact",
+            },
+        ]
+
+        def geocode_lookup(lat, lon):
+            return {
+                "address": {
+                    "country_code": "no",
+                    "country": "Norge",
+                    "county": "Vestfold og Telemark",
+                }
+            }
+
+        proposals, skipped, invalid = MODULE.build_coordinate_backfill_plan(
+            rows,
+            geocode_lookup,
+            {"no-trondelag", "no-innlandet"},
+        )
+
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].suggested_country_code, "NO")
+        self.assertIsNone(proposals[0].suggested_region_id)
+        self.assertIsNotNone(proposals[0].note)
+        self.assertIn("uncertain", proposals[0].note.lower())
+        self.assertEqual(invalid, [])
+
     def test_query_rows_accepts_list_results(self) -> None:
         with mock.patch.object(MODULE, "run_supabase_query", return_value=[{"id": 7}]):
             self.assertEqual(MODULE.query_rows("db", "select 1"), [{"id": 7}])

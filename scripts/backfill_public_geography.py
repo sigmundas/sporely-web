@@ -5,8 +5,9 @@ Safe defaults:
 - `seed-regions` is dry-run only unless `--apply` is passed.
 - `export-missing` only writes a local CSV export.
 - `apply-csv` is dry-run only unless `--apply` is passed.
+- `suggest-from-coordinates` is dry-run only unless `--apply` is passed.
 - no automatic location precision changes
-- no network or geocoding calls
+- no network or geocoding calls unless the coordinate suggestion mode is used
 
 The script expects a direct Postgres connection string via `--db-url` or one of:
 `SUPABASE_DB_URL`, `DATABASE_URL`.
@@ -22,6 +23,11 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,8 +36,25 @@ from typing import Iterable
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_EXPORT_DIR = ROOT_DIR / "exports"
+GEOCODE_CACHE_PATH = DEFAULT_EXPORT_DIR / "geocode-cache.json"
 
 COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
+NORMALIZED_KEY_RE = re.compile(r"[^a-z0-9]+")
+NORWAY_REGION_SUFFIX_RE = re.compile(r"\b(county|fylke|region|province|state)\b$")
+SCANDINAVIAN_TRANSLITERATION = str.maketrans(
+    {
+        "æ": "ae",
+        "Æ": "ae",
+        "ø": "o",
+        "Ø": "o",
+        "å": "a",
+        "Å": "a",
+    }
+)
+NOMINATIM_MIN_INTERVAL_SECONDS = 1.1
+NOMINATIM_TIMEOUT_SECONDS = 20
+DEFAULT_NOMINATIM_USER_AGENT = "sporely-web-geography-backfill/1.0 (admin-only)"
+NORWAY_REGION_ADDRESS_FIELDS = ("county", "state", "region", "state_district", "province")
 
 
 @dataclass(frozen=True)
@@ -50,6 +73,23 @@ class ReviewUpdate:
     observation_id: int
     country_code: str | None
     region_id: str | None
+
+
+@dataclass(frozen=True)
+class CoordinateBackfillProposal:
+    observation_id: int
+    observed_on: object | None
+    species_name: str | None
+    current_country_code: str | None
+    current_region_id: str | None
+    suggested_country_code: str | None
+    suggested_region_id: str | None
+    geocode_country_name: str | None
+    geocode_region_name: str | None
+    source: str
+    confidence: str
+    note: str | None = None
+    cache_key: str | None = None
 
 
 NORWAY_REGION_SEEDS: tuple[RegionSeed, ...] = (
@@ -107,6 +147,77 @@ def normalize_region_id(value: object | None) -> str | None:
     return normalize_text(value)
 
 
+def build_species_name(genus: object | None, species: object | None) -> str | None:
+    genus_text = normalize_text(genus)
+    species_text = normalize_text(species)
+    parts = [part for part in (genus_text, species_text) if part]
+    return " ".join(parts) or None
+
+
+def normalize_name_key(value: object | None) -> str | None:
+    text = normalize_text(value)
+    if text is None:
+        return None
+    text = text.translate(SCANDINAVIAN_TRANSLITERATION)
+    normalized = unicodedata.normalize("NFKD", text)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    key = NORMALIZED_KEY_RE.sub(" ", ascii_text.lower()).strip()
+    return key or None
+
+
+def normalize_norway_region_name(value: object | None) -> str | None:
+    key = normalize_name_key(value)
+    if key is None:
+        return None
+    key = NORWAY_REGION_SUFFIX_RE.sub("", key).strip()
+    return key or None
+
+
+NORWAY_REGION_ID_BY_NAME = {
+    # Labels already reflect the current region vocabulary.
+    # The helper below normalizes diacritics and suffixes before lookup.
+    normalize_norway_region_name(seed.label): seed.id
+    for seed in NORWAY_REGION_SEEDS
+}
+
+
+def resolve_norway_region_id(value: object | None) -> str | None:
+    key = normalize_norway_region_name(value)
+    if key is None:
+        return None
+    return NORWAY_REGION_ID_BY_NAME.get(key)
+
+
+def is_usable_coordinate(lat: object | None, lon: object | None) -> bool:
+    try:
+        latitude = float(lat)
+        longitude = float(lon)
+    except (TypeError, ValueError):
+        return False
+
+    return (
+        latitude >= -90
+        and latitude <= 90
+        and longitude >= -180
+        and longitude <= 180
+        and not (abs(latitude) < 0.000001 and abs(longitude) < 0.000001)
+    )
+
+
+def lookup_coordinate_key(lat: object | None, lon: object | None, digits: int = 5) -> str:
+    if not is_usable_coordinate(lat, lon):
+        return ""
+    return f"{float(lat):.{digits}f},{float(lon):.{digits}f}"
+
+
+def parse_coordinate(value: object | None) -> float | None:
+    try:
+        coordinate = float(value)
+    except (TypeError, ValueError):
+        return None
+    return coordinate if coordinate == coordinate else None
+
+
 def db_url_from_args(args: argparse.Namespace) -> str:
     if args.db_url:
         return args.db_url
@@ -117,7 +228,7 @@ def db_url_from_args(args: argparse.Namespace) -> str:
             return value
 
     raise SystemExit(
-        "A database URL is required. Pass --db-url or set SUPABASE_DB_URL/DATABASE_URL/PGDATABASE."
+        "A database URL is required. Pass --db-url or set SUPABASE_DB_URL/DATABASE_URL."
     )
 
 
@@ -177,6 +288,172 @@ def query_rows(db_url: str, sql: str) -> list[dict]:
 
     preview = repr(result)[:200]
     raise RuntimeError(f"Unexpected Supabase query result type: {preview}")
+
+
+def load_geocode_cache(path: Path = GEOCODE_CACHE_PATH) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid geocode cache JSON in {path}: {exc}") from exc
+
+    if isinstance(payload, dict):
+        entries = payload.get("entries")
+        if isinstance(entries, dict):
+            return {
+                str(key): value
+                for key, value in entries.items()
+                if isinstance(value, dict)
+            }
+
+        return {
+            str(key): value
+            for key, value in payload.items()
+            if key not in {"version", "updated_at"} and isinstance(value, dict)
+        }
+
+    raise RuntimeError(f"Unexpected geocode cache shape in {path}: {repr(payload)[:200]}")
+
+
+def save_geocode_cache(entries: dict[str, dict], path: Path = GEOCODE_CACHE_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "entries": entries,
+    }
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def get_nominatim_user_agent() -> str:
+    return os.environ.get("NOMINATIM_USER_AGENT") or DEFAULT_NOMINATIM_USER_AGENT
+
+
+def fetch_nominatim_reverse(lat: float, lon: float) -> dict:
+    url = urllib.parse.urlparse("https://nominatim.openstreetmap.org/reverse")
+    query = urllib.parse.urlencode(
+        {
+            "lat": f"{lat}",
+            "lon": f"{lon}",
+            "format": "jsonv2",
+            "addressdetails": "1",
+        }
+    )
+    request_url = urllib.parse.urlunparse(url._replace(query=query))
+    request = urllib.request.Request(
+        request_url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": get_nominatim_user_agent(),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=NOMINATIM_TIMEOUT_SECONDS) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Nominatim reverse lookup failed for {lat:.5f},{lon:.5f}: {exc}") from exc
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Nominatim returned invalid JSON for {lat:.5f},{lon:.5f}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Nominatim returned unexpected payload for {lat:.5f},{lon:.5f}")
+
+    return payload
+
+
+def resolve_nominatim_payload(payload: object, valid_region_ids: set[str] | None = None) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        return {
+            "status": "no_confident_result",
+            "country_code": None,
+            "country_name": None,
+            "region_id": None,
+            "region_name": None,
+            "confidence": "none",
+            "note": "nominatim payload missing",
+        }
+
+    address = payload.get("address")
+    if not isinstance(address, dict):
+        address = {}
+
+    country_code_raw = normalize_text(address.get("country_code"))
+    if country_code_raw is None:
+        return {
+            "status": "no_confident_result",
+            "country_code": None,
+            "country_name": normalize_text(address.get("country")),
+            "region_id": None,
+            "region_name": None,
+            "confidence": "none",
+            "note": "nominatim response missing country_code",
+        }
+
+    country_code = country_code_raw.upper()
+    if not COUNTRY_CODE_RE.fullmatch(country_code):
+        return {
+            "status": "no_confident_result",
+            "country_code": None,
+            "country_name": normalize_text(address.get("country")),
+            "region_id": None,
+            "region_name": None,
+            "confidence": "none",
+            "note": f"invalid country_code {country_code_raw!r}",
+        }
+
+    country_name = normalize_text(address.get("country"))
+    region_name = None
+    region_id = None
+    region_note = None
+
+    if country_code == "NO":
+        for field in NORWAY_REGION_ADDRESS_FIELDS:
+            candidate = normalize_text(address.get(field))
+            if candidate is None:
+                continue
+            resolved_region_id = resolve_norway_region_id(candidate)
+            if resolved_region_id is None:
+                continue
+            if valid_region_ids is not None and resolved_region_id not in valid_region_ids:
+                return {
+                    "status": "invalid_region",
+                    "country_code": country_code,
+                    "country_name": country_name,
+                    "region_id": resolved_region_id,
+                    "region_name": candidate,
+                    "confidence": "country-only",
+                    "note": f"region id {resolved_region_id!r} is not present in public.public_regions",
+                }
+            region_name = candidate
+            region_id = resolved_region_id
+            break
+
+        if region_id is None:
+            region_note = "Norway region mapping uncertain"
+    else:
+        region_note = f"country_code {country_code} does not use Norway region mapping"
+
+    confidence = "country+region" if region_id else "country-only"
+    note = region_note
+    if note is None and payload.get("display_name"):
+        note = "country resolved from Nominatim reverse lookup"
+
+    return {
+        "status": "ok",
+        "country_code": country_code,
+        "country_name": country_name,
+        "region_id": region_id,
+        "region_name": region_name,
+        "confidence": confidence,
+        "note": note,
+    }
 
 
 def export_headers(include_gps: bool) -> list[str]:
@@ -417,6 +694,132 @@ ORDER BY i.row_num, i.id;
     return query_rows(db_url, sql)
 
 
+def query_public_region_ids(db_url: str) -> set[str]:
+    rows = query_rows(
+        db_url,
+        """
+SELECT id
+FROM public.public_regions
+ORDER BY id;
+""".strip(),
+    )
+    return {normalize_text(row.get("id")) for row in rows if normalize_text(row.get("id"))}
+
+
+def query_coordinate_candidates(db_url: str, limit: int, only_public: bool) -> list[dict]:
+    limit = max(1, min(int(limit), 1000))
+    privacy_filter = """
+  AND o.visibility = 'public'::text
+  AND NOT coalesce(o.is_draft, false)
+  AND NOT EXISTS (
+    SELECT 1
+    FROM public.profiles p
+    WHERE p.id = o.user_id
+      AND p.is_banned = true
+  )
+""".rstrip()
+    if not only_public:
+        privacy_filter = ""
+
+    sql = f"""
+SELECT
+  o.id,
+  o.date AS observed_on,
+  nullif(btrim(coalesce(o.genus, '')), '') AS genus,
+  nullif(btrim(coalesce(o.species, '')), '') AS species,
+  nullif(btrim(concat_ws(' ', o.genus, o.species)), '') AS species_name,
+  nullif(btrim(coalesce(o.country_code, '')), '') AS current_country_code,
+  nullif(btrim(coalesce(o.region_id, '')), '') AS current_region_id,
+  o.gps_latitude,
+  o.gps_longitude,
+  coalesce(o.location_precision, 'hidden'::text) AS location_precision
+FROM public.observations o
+WHERE (
+  nullif(btrim(coalesce(o.country_code, '')), '') IS NULL
+  OR nullif(btrim(coalesce(o.region_id, '')), '') IS NULL
+)
+  AND o.gps_latitude IS NOT NULL
+  AND o.gps_longitude IS NOT NULL
+{privacy_filter}
+ORDER BY o.date DESC NULLS LAST, o.id DESC
+LIMIT {limit};
+""".strip()
+    return query_rows(db_url, sql)
+
+
+def build_coordinate_backfill_plan(
+    rows: list[dict],
+    geocode_lookup,
+    valid_region_ids: set[str],
+) -> tuple[list[CoordinateBackfillProposal], list[str], list[str]]:
+    proposals: list[CoordinateBackfillProposal] = []
+    skipped: list[str] = []
+    invalid: list[str] = []
+
+    for row in rows:
+        observation_id = int(row["id"])
+        lat = parse_coordinate(row.get("gps_latitude"))
+        lon = parse_coordinate(row.get("gps_longitude"))
+        species_name = normalize_text(row.get("species_name")) or build_species_name(row.get("genus"), row.get("species"))
+        observed_on = row.get("observed_on")
+        current_country_code = normalize_text(row.get("current_country_code") or row.get("country_code"))
+        current_region_id = normalize_text(row.get("current_region_id") or row.get("region_id"))
+        location_precision = normalize_text(row.get("location_precision"))
+
+        if not is_usable_coordinate(lat, lon):
+            skipped.append(
+                f"id {observation_id}: skipped because coordinates are missing or invalid"
+            )
+            continue
+
+        cache_key = lookup_coordinate_key(lat, lon)
+        try:
+            payload = geocode_lookup(lat, lon)
+        except Exception as exc:
+            skipped.append(f"id {observation_id}: skipped because Nominatim lookup failed: {exc}")
+            continue
+        if payload is None:
+            skipped.append(f"id {observation_id}: skipped because Nominatim returned no confident result")
+            continue
+
+        resolution = resolve_nominatim_payload(payload, valid_region_ids)
+        if resolution["status"] == "no_confident_result":
+            skipped.append(f"id {observation_id}: skipped because {resolution['note']}")
+            continue
+        if resolution["status"] == "invalid_region":
+            invalid.append(f"id {observation_id}: {resolution['note']}")
+            continue
+
+        suggested_country_code = None if current_country_code else resolution["country_code"]
+        suggested_region_id = None if current_region_id else resolution["region_id"]
+
+        if suggested_country_code is None and suggested_region_id is None:
+            skipped.append(
+                f"id {observation_id}: skipped because country_code and region_id are already set"
+            )
+            continue
+
+        proposals.append(
+            CoordinateBackfillProposal(
+                observation_id=observation_id,
+                observed_on=observed_on,
+                species_name=species_name,
+                current_country_code=current_country_code,
+                current_region_id=current_region_id,
+                suggested_country_code=suggested_country_code,
+                suggested_region_id=suggested_region_id,
+                geocode_country_name=normalize_text(resolution["country_name"]),
+                geocode_region_name=normalize_text(resolution["region_name"]),
+                source="nominatim",
+                confidence=str(resolution["confidence"]),
+                note=f"{resolution['note']}; precision={location_precision}" if resolution.get("note") else f"precision={location_precision}",
+                cache_key=cache_key or None,
+            )
+        )
+
+    return proposals, skipped, invalid
+
+
 def cmd_seed_regions(db_url: str, apply: bool) -> int:
     region_ids_sql = ", ".join(sql_literal(row.id) for row in NORWAY_REGION_SEEDS)
     existing_rows = query_rows(
@@ -644,6 +1047,144 @@ FROM public_obs;
     return 0
 
 
+def build_coordinate_update_sql(proposals: list[CoordinateBackfillProposal]) -> str:
+    values_sql = ",\n    ".join(
+        "(" + ", ".join(
+            sql_literal(value)
+            for value in (proposal.observation_id, proposal.suggested_country_code, proposal.suggested_region_id)
+        ) + ")"
+        for proposal in proposals
+    )
+    return f"""
+WITH input(id, country_code, region_id) AS (
+  VALUES
+    {values_sql}
+),
+validated AS (
+  SELECT
+    i.id,
+    i.country_code,
+    i.region_id
+  FROM input i
+  JOIN public.observations o
+    ON o.id = i.id
+  LEFT JOIN public.public_regions r
+    ON r.id = i.region_id
+  WHERE (i.country_code IS NULL OR i.country_code ~ '^[A-Z]{{2}}$')
+    AND (i.region_id IS NULL OR r.id IS NOT NULL)
+)
+UPDATE public.observations o
+SET country_code = CASE
+      WHEN nullif(btrim(coalesce(o.country_code, '')), '') IS NULL THEN validated.country_code
+      ELSE o.country_code
+    END,
+    region_id = CASE
+      WHEN nullif(btrim(coalesce(o.region_id, '')), '') IS NULL THEN validated.region_id
+      ELSE o.region_id
+    END
+FROM validated
+WHERE o.id = validated.id
+RETURNING o.id, o.country_code, o.region_id;
+""".strip()
+
+
+def format_coordinate_proposal(proposal: CoordinateBackfillProposal) -> str:
+    change_parts: list[str] = []
+    if proposal.suggested_country_code is not None:
+        change_parts.append(
+            f"country_code {format_display_value(proposal.current_country_code)} -> {proposal.suggested_country_code}"
+        )
+    if proposal.suggested_region_id is not None:
+        region_note = f" ({proposal.geocode_region_name})" if proposal.geocode_region_name else ""
+        change_parts.append(
+            f"region_id {format_display_value(proposal.current_region_id)} -> {proposal.suggested_region_id}{region_note}"
+        )
+    details = [
+        f"id {proposal.observation_id}",
+        f"species={proposal.species_name or 'unknown'}",
+        f"observed_on={proposal.observed_on or 'unknown'}",
+        f"confidence={proposal.confidence}",
+    ]
+    if proposal.note:
+        details.append(f"note={proposal.note}")
+    return "  - " + ", ".join(details + change_parts)
+
+
+def cmd_suggest_from_coordinates(db_url: str, limit: int, only_public: bool, apply: bool) -> int:
+    region_ids = query_public_region_ids(db_url)
+    if not region_ids:
+        print("Warning: public.public_regions is empty; region suggestions will be skipped.")
+
+    candidates = query_coordinate_candidates(db_url, limit, only_public)
+    cache = load_geocode_cache()
+    stats = {
+        "candidates": len(candidates),
+        "cache_hits": 0,
+        "network_requests": 0,
+        "proposals": 0,
+        "skipped": 0,
+        "invalid": 0,
+    }
+
+    def geocode_lookup(lat: float, lon: float) -> dict | None:
+        cache_key = lookup_coordinate_key(lat, lon)
+        if cache_key in cache:
+            stats["cache_hits"] += 1
+            entry = cache[cache_key]
+            if isinstance(entry, dict) and "payload" in entry:
+                return entry["payload"]
+            return entry if isinstance(entry, dict) else None
+
+        if stats["network_requests"] > 0:
+            time.sleep(NOMINATIM_MIN_INTERVAL_SECONDS)
+
+        payload = fetch_nominatim_reverse(lat, lon)
+        stats["network_requests"] += 1
+        cache[cache_key] = {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "payload": payload,
+        }
+        save_geocode_cache(cache)
+        return payload
+
+    proposals, skipped, invalid = build_coordinate_backfill_plan(candidates, geocode_lookup, region_ids)
+    stats["proposals"] = len(proposals)
+    stats["skipped"] = len(skipped)
+    stats["invalid"] = len(invalid)
+
+    print(f"Candidates: {stats['candidates']}")
+    print(f"Cache hits: {stats['cache_hits']}")
+    print(f"Nominatim requests: {stats['network_requests']}")
+    print(f"Proposed updates: {stats['proposals']}")
+    print(f"Skipped rows: {stats['skipped']}")
+    print(f"Invalid rows: {stats['invalid']}")
+
+    for proposal in proposals:
+        print(format_coordinate_proposal(proposal))
+    for message in skipped:
+        print(f"  ! {message}")
+    for message in invalid:
+        print(f"  ! {message}")
+
+    if invalid:
+        raise SystemExit(1)
+
+    if not apply:
+        if proposals:
+            print("Dry-run only. Re-run with --apply to write the coordinate suggestions.")
+        else:
+            print("No coordinate suggestions need changes.")
+        return 0
+
+    if not proposals:
+        print("No coordinate suggestions need changes.")
+        return 0
+
+    result = query_rows(db_url, build_coordinate_update_sql(proposals))
+    print(f"Applied {len(result)} observation row update(s).")
+    return 0
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
@@ -687,6 +1228,32 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     apply_parser.add_argument("input_csv", type=Path, help="Reviewed CSV exported by export-missing.")
 
+    suggest_parser = subparsers.add_parser(
+        "suggest-from-coordinates",
+        parents=[common],
+        help="Use stored coordinates and Nominatim to suggest missing country_code and region_id values.",
+    )
+    suggest_parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum number of observations to inspect. Defaults to 50.",
+    )
+    scope_group = suggest_parser.add_mutually_exclusive_group()
+    scope_group.add_argument(
+        "--only-public",
+        dest="only_public",
+        action="store_true",
+        help="Restrict suggestions to public, non-draft observations with non-banned owners. This is the default.",
+    )
+    scope_group.add_argument(
+        "--all-observations",
+        dest="only_public",
+        action="store_false",
+        help="Broaden the scan to all observations that have coordinates and are missing geography.",
+    )
+    suggest_parser.set_defaults(only_public=True)
+
     subparsers.add_parser("audit", parents=[common], help="Print coverage and privacy audits for public observations.")
 
     return parser.parse_args(argv)
@@ -702,6 +1269,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_export_missing(db_url, args.include_gps, args.output)
     if args.command == "apply-csv":
         return cmd_apply_csv(db_url, args.input_csv, args.apply)
+    if args.command == "suggest-from-coordinates":
+        return cmd_suggest_from_coordinates(db_url, args.limit, args.only_public, args.apply)
     if args.command == "audit":
         return cmd_audit(db_url)
 
