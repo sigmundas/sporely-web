@@ -736,7 +736,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" 
     e.spore_measurement_count AS "sporeMeasurementCount",
     e.contrast_method AS "contrastMethod",
     e.mount_reagent AS "mountReagent",
-    e.sample_type AS "sampleType"
+    nullif(lower(btrim(coalesce(e.sample_type, ''))), '') AS "sampleType"
   FROM enriched e
   LIMIT 1
 $_$;
@@ -1185,7 +1185,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
     e.spore_measurement_count AS "sporeMeasurementCount",
     e.contrast_method AS "contrastMethod",
     e.mount_reagent AS "mountReagent",
-    e.sample_type AS "sampleType"
+    nullif(lower(btrim(coalesce(e.sample_type, ''))), '') AS "sampleType"
   FROM enriched e
   CROSS JOIN normalized n
   WHERE (n.has_microscopy IS NULL OR e.has_microscopy = n.has_microscopy)

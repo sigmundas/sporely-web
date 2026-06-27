@@ -87,7 +87,7 @@ BEGIN
     'microscope',
     'brightfield',
     'water',
-    'spore-print'
+    'Fresh'
   )
   RETURNING id INTO image_id;
 
@@ -194,7 +194,7 @@ BEGIN
      OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 2
      OR rpc_row."contrastMethod" IS DISTINCT FROM 'brightfield'
      OR rpc_row."mountReagent" IS DISTINCT FROM 'water'
-     OR rpc_row."sampleType" IS DISTINCT FROM 'spore-print' THEN
+     OR rpc_row."sampleType" IS DISTINCT FROM 'fresh' THEN
     RAISE EXCEPTION 'Public detail projection did not match expected safe fields';
   END IF;
 
