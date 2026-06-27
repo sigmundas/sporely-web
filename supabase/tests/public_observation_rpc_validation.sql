@@ -133,9 +133,9 @@ BEGIN
   VALUES (
     visible_user_id,
     '2026-06-02',
-    'Amanita',
-    'muscaria',
-    'Fly agaric',
+    'Hiddenus',
+    'occultus',
+    'Hidden mushroom',
     'private',
     false,
     'public',
@@ -165,9 +165,9 @@ BEGIN
   VALUES (
     visible_user_id,
     '2026-06-03',
-    'Amanita',
-    'muscaria',
-    'Fly agaric',
+    'Hiddenus',
+    'occultus',
+    'Hidden mushroom',
     'public',
     true,
     'public',
@@ -197,9 +197,9 @@ BEGIN
   VALUES (
     banned_user_id,
     '2026-06-04',
-    'Amanita',
-    'muscaria',
-    'Fly agaric',
+    'Hiddenus',
+    'occultus',
+    'Hidden mushroom',
     'public',
     false,
     'public',
@@ -225,9 +225,9 @@ BEGIN
   VALUES (
     visible_user_id,
     '2026-06-05',
-    'Amanita',
-    'muscaria',
-    'Fly agaric',
+    'Hiddenus',
+    'occultus',
+    'Hidden mushroom',
     NULL,
     false,
     'public',
@@ -661,6 +661,141 @@ BEGIN
   IF rpc_row."hasMicroscopy" IS DISTINCT FROM false
      OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 0 THEN
     RAISE EXCEPTION 'Purged microscopy contributed to public microscopy or spore signals';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.search_public_species() s
+    WHERE s."speciesSlug" = 'amanita-muscaria'
+      AND s.genus = 'Amanita'
+      AND s.species = 'muscaria'
+      AND s."speciesName" = 'Amanita muscaria'
+      AND s."commonName" = 'Fly agaric'
+      AND s."observationCount" = 1
+      AND s."microscopyObservationCount" = 1
+      AND s."sporeMeasurementCount" = 2
+      AND s."firstObservedOn" = DATE '2026-06-01'
+      AND s."lastObservedOn" = DATE '2026-06-01'
+      AND s."representativeThumbUrl" = 'https://media.sporely.no/rpc/thumb_public-exact.webp'
+  ) THEN
+    RAISE EXCEPTION 'Expected public species summary for Amanita muscaria';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.search_public_species() s
+    WHERE s."speciesSlug" = 'nullspore-counted'
+      AND s."observationCount" = 1
+      AND s."microscopyObservationCount" = 1
+      AND s."sporeMeasurementCount" = 0
+  ) THEN
+    RAISE EXCEPTION 'Expected null spore visibility to suppress species spore counts';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.search_public_species() s
+    WHERE s."speciesSlug" = 'deleted-image'
+      AND s."observationCount" = 1
+      AND s."microscopyObservationCount" = 0
+      AND s."representativeThumbUrl" IS NULL
+  ) THEN
+    RAISE EXCEPTION 'Expected deleted microscope images to be excluded from representative thumbnails';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.search_public_species() s
+    WHERE s."speciesSlug" = 'purged-microscopy'
+      AND s."observationCount" = 1
+      AND s."microscopyObservationCount" = 0
+      AND s."representativeThumbUrl" IS NULL
+  ) THEN
+    RAISE EXCEPTION 'Expected purged microscope images to be excluded from representative thumbnails';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.search_public_species()
+    WHERE "speciesSlug" = 'hiddenus-occultus'
+  ) THEN
+    RAISE EXCEPTION 'Hidden-only species leaked into public species search';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.search_public_species() s
+    CROSS JOIN LATERAL jsonb_to_recordset(coalesce(s.countries, '[]'::jsonb)) AS c(
+      value text,
+      label text,
+      "count" bigint
+    )
+    WHERE s."speciesSlug" = 'amanita-muscaria'
+      AND c.value = 'NO'
+      AND c.label = 'Norway'
+      AND c."count" = 1
+  ) THEN
+    RAISE EXCEPTION 'Expected Amanita muscaria country summary to include Norway';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.search_public_species() s
+    CROSS JOIN LATERAL jsonb_to_recordset(coalesce(s.regions, '[]'::jsonb)) AS r(
+      value text,
+      label text,
+      "countryCode" text,
+      "count" bigint
+    )
+    WHERE s."speciesSlug" = 'amanita-muscaria'
+      AND r.value = 'rpc-test-region'
+      AND r.label = 'Test Region'
+      AND r."countryCode" = 'NO'
+      AND r."count" = 1
+  ) THEN
+    RAISE EXCEPTION 'Expected Amanita muscaria region summary to include rpc-test-region';
+  END IF;
+
+  SELECT * INTO rpc_row FROM public.get_public_species('amanita-muscaria');
+  IF rpc_row."speciesSlug" IS DISTINCT FROM 'amanita-muscaria'
+     OR rpc_row."observationCount" IS DISTINCT FROM 1
+     OR rpc_row."microscopyObservationCount" IS DISTINCT FROM 1
+     OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 2
+     OR rpc_row."firstObservedOn" IS DISTINCT FROM DATE '2026-06-01'
+     OR rpc_row."lastObservedOn" IS DISTINCT FROM DATE '2026-06-01'
+     OR rpc_row."representativeThumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp'
+     OR rpc_row."recentObservationIds" IS DISTINCT FROM ARRAY[public_exact_id]::bigint[] THEN
+    RAISE EXCEPTION 'Public species detail projection did not match expected safe fields';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM jsonb_to_recordset(coalesce(rpc_row.countries, '[]'::jsonb)) AS c(
+      value text,
+      label text,
+      "count" bigint
+    )
+    WHERE value = 'NO'
+      AND label = 'Norway'
+      AND "count" = 1
+  ) THEN
+    RAISE EXCEPTION 'Public species detail did not include the expected country summary';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM jsonb_to_recordset(coalesce(rpc_row.regions, '[]'::jsonb)) AS r(
+      value text,
+      label text,
+      "countryCode" text,
+      "count" bigint
+    )
+    WHERE value = 'rpc-test-region'
+      AND label = 'Test Region'
+      AND "countryCode" = 'NO'
+      AND "count" = 1
+  ) THEN
+    RAISE EXCEPTION 'Public species detail did not include the expected region summary';
   END IF;
 
   DELETE FROM auth.users
