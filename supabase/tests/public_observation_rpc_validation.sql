@@ -19,8 +19,14 @@ DECLARE
   hidden_location_id bigint;
   region_location_id bigint;
   null_precision_id bigint;
+  deleted_microscopy_id bigint;
   purged_microscopy_id bigint;
-  image_id bigint;
+  public_image_id bigint;
+  private_image_id bigint;
+  draft_image_id bigint;
+  null_spore_image_id bigint;
+  deleted_image_id bigint;
+  purged_image_id bigint;
   rpc_row record;
 BEGIN
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN visibility DROP NOT NULL';
@@ -76,6 +82,11 @@ BEGIN
     user_id,
     storage_path,
     image_type,
+    sort_order,
+    source_width,
+    source_height,
+    stored_width,
+    stored_height,
     contrast,
     mount_medium,
     sample_type
@@ -85,24 +96,37 @@ BEGIN
     visible_user_id,
     'rpc/public-exact.webp',
     'microscope',
+    0,
+    4000,
+    3000,
+    800,
+    600,
     'brightfield',
     'water',
     'Fresh'
   )
-  RETURNING id INTO image_id;
+  RETURNING id INTO public_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
   VALUES
-    (image_id, visible_user_id, 10.1, 5.1, 'manual'),
-    (image_id, visible_user_id, 11.2, 5.4, 'spore');
+    (public_image_id, visible_user_id, 10.1, 5.1, 'manual'),
+    (public_image_id, visible_user_id, 11.2, 5.4, 'spore');
 
   INSERT INTO public.observations (user_id, date, genus, species, visibility, is_draft, spore_data_visibility, location_precision)
   VALUES (visible_user_id, '2026-06-02', 'Private', 'hidden', 'private', false, 'public', 'exact')
   RETURNING id INTO private_id;
 
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
+  VALUES (private_id, visible_user_id, 'rpc/private.webp', 'field')
+  RETURNING id INTO private_image_id;
+
   INSERT INTO public.observations (user_id, date, genus, species, visibility, is_draft, spore_data_visibility, location_precision)
   VALUES (visible_user_id, '2026-06-03', 'Draft', 'hidden', 'public', true, 'public', 'exact')
   RETURNING id INTO draft_id;
+
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
+  VALUES (draft_id, visible_user_id, 'rpc/draft.webp', 'field')
+  RETURNING id INTO draft_image_id;
 
   INSERT INTO public.observations (user_id, date, genus, species, visibility, is_draft, spore_data_visibility, location_precision)
   VALUES (banned_user_id, '2026-06-04', 'Banned', 'hidden', 'public', false, 'public', 'exact')
@@ -118,10 +142,10 @@ BEGIN
 
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
   VALUES (null_spore_visibility_id, visible_user_id, 'rpc/null-spore.webp', 'microscope')
-  RETURNING id INTO image_id;
+  RETURNING id INTO null_spore_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
-  VALUES (image_id, visible_user_id, 12.0, 6.0, 'manual');
+  VALUES (null_spore_image_id, visible_user_id, 12.0, 6.0, 'manual');
 
   INSERT INTO public.observations (
     user_id,
@@ -169,16 +193,45 @@ BEGIN
   VALUES (visible_user_id, '2026-06-09', 'Nullprecision', 'hidden', 'public', false, 'public', NULL, 'Null Precision Site')
   RETURNING id INTO null_precision_id;
 
+  INSERT INTO public.observations (
+    user_id,
+    date,
+    genus,
+    species,
+    visibility,
+    is_draft,
+    spore_data_visibility,
+    location_precision
+  )
+  VALUES (visible_user_id, '2026-06-09', 'Deleted', 'image', 'public', false, 'public', 'exact')
+  RETURNING id INTO deleted_microscopy_id;
+
+  INSERT INTO public.observation_images (
+    observation_id,
+    user_id,
+    storage_path,
+    image_type,
+    deleted_at
+  )
+  VALUES (
+    deleted_microscopy_id,
+    visible_user_id,
+    'rpc/deleted.webp',
+    'microscope',
+    now()
+  )
+  RETURNING id INTO deleted_image_id;
+
   INSERT INTO public.observations (user_id, date, genus, species, visibility, is_draft, spore_data_visibility, location_precision)
   VALUES (visible_user_id, '2026-06-10', 'Purged', 'microscopy', 'public', false, 'public', 'exact')
   RETURNING id INTO purged_microscopy_id;
 
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type, purged_at)
   VALUES (purged_microscopy_id, visible_user_id, 'rpc/purged.webp', 'microscope', now())
-  RETURNING id INTO image_id;
+  RETURNING id INTO purged_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
-  VALUES (image_id, visible_user_id, 9.0, 4.0, 'manual');
+  VALUES (purged_image_id, visible_user_id, 9.0, 4.0, 'manual');
 
   IF NOT EXISTS (SELECT 1 FROM public.search_public_observations() WHERE id = public_exact_id) THEN
     RAISE EXCEPTION 'Expected public observation % to appear', public_exact_id;
@@ -186,6 +239,21 @@ BEGIN
 
   IF EXISTS (SELECT 1 FROM public.search_public_observations() WHERE id IN (private_id, draft_id, banned_id, null_visibility_id)) THEN
     RAISE EXCEPTION 'Private, draft, banned, or null-visibility observations leaked into public search';
+  END IF;
+
+  IF (SELECT count(*) FROM public.get_public_observation_images(public_exact_id)) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'Expected exactly one public image for observation %', public_exact_id;
+  END IF;
+
+  IF (SELECT count(*) FROM public.search_public_observation_images(ARRAY[public_exact_id, private_id, draft_id, deleted_microscopy_id, purged_microscopy_id])) IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'Public image search leaked private, draft, deleted, or purged images';
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM public.get_public_observation_images(private_id))
+     OR EXISTS (SELECT 1 FROM public.get_public_observation_images(draft_id))
+     OR EXISTS (SELECT 1 FROM public.get_public_observation_images(deleted_microscopy_id))
+     OR EXISTS (SELECT 1 FROM public.get_public_observation_images(purged_microscopy_id)) THEN
+    RAISE EXCEPTION 'Private, draft, deleted, or purged observation images leaked into public read surface';
   END IF;
 
   SELECT * INTO rpc_row FROM public.get_public_observation(public_exact_id);
@@ -196,6 +264,26 @@ BEGIN
      OR rpc_row."mountReagent" IS DISTINCT FROM 'water'
      OR rpc_row."sampleType" IS DISTINCT FROM 'fresh' THEN
     RAISE EXCEPTION 'Public detail projection did not match expected safe fields';
+  END IF;
+
+  SELECT * INTO rpc_row FROM public.get_public_observation_images(public_exact_id) LIMIT 1;
+  IF rpc_row."observationId" IS DISTINCT FROM public_exact_id
+     OR rpc_row."imageId" IS DISTINCT FROM public_image_id
+     OR rpc_row."sortOrder" IS DISTINCT FROM 0
+     OR rpc_row."imageType" IS DISTINCT FROM 'microscope'
+     OR rpc_row."width" IS DISTINCT FROM 800
+     OR rpc_row."height" IS DISTINCT FROM 600
+     OR rpc_row."thumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp'
+     OR rpc_row."previewUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp' THEN
+    RAISE EXCEPTION 'Public image projection did not match expected safe fields';
+  END IF;
+
+  IF to_jsonb(rpc_row) ? 'storage_path'
+     OR to_jsonb(rpc_row) ? 'original_storage_path'
+     OR to_jsonb(rpc_row) ? 'desktop_id'
+     OR to_jsonb(rpc_row) ? 'source_width'
+     OR to_jsonb(rpc_row) ? 'stored_width' THEN
+    RAISE EXCEPTION 'Public image projection leaked raw storage or internal fields';
   END IF;
 
   SELECT * INTO rpc_row FROM public.get_public_observation(null_spore_visibility_id);
