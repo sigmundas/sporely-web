@@ -32,6 +32,11 @@ DECLARE
   purged_image_id bigint;
   rpc_row record;
   facets jsonb;
+  amanita_private_spore_id bigint;
+  amanita_private_image_id bigint;
+  amanita_se_id bigint;
+  amanita_se_image_id bigint;
+  spore_rpc record;
 BEGIN
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN visibility DROP NOT NULL';
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN location_precision DROP NOT NULL';
@@ -466,6 +471,43 @@ BEGIN
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
   VALUES (purged_image_id, visible_user_id, 9.0, 4.0, 'manual');
 
+  -- Amanita muscaria, private spore visibility — counts in observationCount but excluded
+  -- from spore aggregate and from the observations array.
+  INSERT INTO public.observations (
+    user_id, date, genus, species, visibility, is_draft, spore_data_visibility,
+    location_precision, country_code, region_id
+  )
+  VALUES (
+    visible_user_id, '2026-06-15', 'Amanita', 'muscaria',
+    'public', false, 'private', 'exact', 'NO', 'rpc-test-region'
+  )
+  RETURNING id INTO amanita_private_spore_id;
+
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
+  VALUES (amanita_private_spore_id, visible_user_id, 'rpc/amanita-priv.webp', 'microscope')
+  RETURNING id INTO amanita_private_image_id;
+
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
+  VALUES (amanita_private_image_id, visible_user_id, 8.0, 4.0, 'manual');
+
+  -- Amanita muscaria in Sweden, public spore data — second spore observation, distinct country.
+  INSERT INTO public.observations (
+    user_id, date, genus, species, visibility, is_draft, spore_data_visibility,
+    location_precision, country_code
+  )
+  VALUES (
+    visible_user_id, '2026-06-20', 'Amanita', 'muscaria',
+    'public', false, 'public', 'exact', 'SE'
+  )
+  RETURNING id INTO amanita_se_id;
+
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
+  VALUES (amanita_se_id, visible_user_id, 'rpc/amanita-se.webp', 'microscope')
+  RETURNING id INTO amanita_se_image_id;
+
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
+  VALUES (amanita_se_image_id, visible_user_id, 9.0, 4.5, 'manual');
+
   IF NOT EXISTS (SELECT 1 FROM public.search_public_observations() WHERE id = public_exact_id) THEN
     RAISE EXCEPTION 'Expected public observation % to appear', public_exact_id;
   END IF;
@@ -559,9 +601,9 @@ BEGIN
     )
     WHERE value = 'Amanita'
       AND label = 'Amanita'
-      AND "count" = 1
+      AND "count" = 3
   ) THEN
-    RAISE EXCEPTION 'Expected Amanita genus facet with count 1';
+    RAISE EXCEPTION 'Expected Amanita genus facet with count 3';
   END IF;
 
   IF NOT EXISTS (
@@ -595,7 +637,7 @@ BEGIN
       AND species = 'muscaria'
       AND "speciesName" = 'Amanita muscaria'
       AND "commonName" = 'Fly agaric'
-      AND "count" = 1
+      AND "count" = 3
   ) THEN
     RAISE EXCEPTION 'Expected Amanita muscaria species facet with safe common name';
   END IF;
@@ -631,9 +673,9 @@ BEGIN
     )
     WHERE value = 'NO'
       AND label = 'Norway'
-      AND "count" = 4
+      AND "count" = 5
   ) THEN
-    RAISE EXCEPTION 'Expected Norway country facet with count 4';
+    RAISE EXCEPTION 'Expected Norway country facet with count 5';
   END IF;
 
   IF NOT EXISTS (
@@ -647,9 +689,9 @@ BEGIN
     WHERE value = 'rpc-test-region'
       AND label = 'Test Region'
       AND "countryCode" = 'NO'
-      AND "count" = 4
+      AND "count" = 5
   ) THEN
-    RAISE EXCEPTION 'Expected rpc-test-region facet with count 4';
+    RAISE EXCEPTION 'Expected rpc-test-region facet with count 5';
   END IF;
 
   IF NOT EXISTS (
@@ -820,12 +862,12 @@ BEGIN
       AND s.species = 'muscaria'
       AND s."speciesName" = 'Amanita muscaria'
       AND s."commonName" = 'Fly agaric'
-      AND s."observationCount" = 1
-      AND s."microscopyObservationCount" = 1
-      AND s."sporeMeasurementCount" = 2
+      AND s."observationCount" = 3
+      AND s."microscopyObservationCount" = 3
+      AND s."sporeMeasurementCount" = 3
       AND s."firstObservedOn" = DATE '2026-06-01'
-      AND s."lastObservedOn" = DATE '2026-06-01'
-      AND s."representativeThumbUrl" = 'https://media.sporely.no/rpc/thumb_public-exact.webp'
+      AND s."lastObservedOn" = DATE '2026-06-20'
+      AND s."representativeThumbUrl" = 'https://media.sporely.no/rpc/thumb_amanita-se.webp'
   ) THEN
     RAISE EXCEPTION 'Expected public species summary for Amanita muscaria';
   END IF;
@@ -882,9 +924,9 @@ BEGIN
     WHERE s."speciesSlug" = 'amanita-muscaria'
       AND c.value = 'NO'
       AND c.label = 'Norway'
-      AND c."count" = 1
+      AND c."count" = 2
   ) THEN
-    RAISE EXCEPTION 'Expected Amanita muscaria country summary to include Norway';
+    RAISE EXCEPTION 'Expected Amanita muscaria country summary to include Norway with count 2';
   END IF;
 
   IF NOT EXISTS (
@@ -900,20 +942,22 @@ BEGIN
       AND r.value = 'rpc-test-region'
       AND r.label = 'Test Region'
       AND r."countryCode" = 'NO'
-      AND r."count" = 1
+      AND r."count" = 2
   ) THEN
-    RAISE EXCEPTION 'Expected Amanita muscaria region summary to include rpc-test-region';
+    RAISE EXCEPTION 'Expected Amanita muscaria region summary to include rpc-test-region with count 2';
   END IF;
 
   SELECT * INTO rpc_row FROM public.get_public_species('amanita-muscaria');
+  -- observationCount now 3: public_exact_id + amanita_private_spore_id + amanita_se_id.
+  -- sporeMeasurementCount now 5: 2 (public_exact_id) + 1 (amanita_private_spore_id) + 1 (amanita_se_id) + 1 (purged, but purged images are excluded) = actually:
+  -- public_exact_id=2 (public), amanita_private_spore_id=1 (private → 0 counted), amanita_se_id=1 (public) = 3.
   IF rpc_row."speciesSlug" IS DISTINCT FROM 'amanita-muscaria'
-     OR rpc_row."observationCount" IS DISTINCT FROM 1
-     OR rpc_row."microscopyObservationCount" IS DISTINCT FROM 1
-     OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 2
+     OR rpc_row."observationCount" IS DISTINCT FROM 3
+     OR rpc_row."microscopyObservationCount" IS DISTINCT FROM 3
+     OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 3
      OR rpc_row."firstObservedOn" IS DISTINCT FROM DATE '2026-06-01'
-     OR rpc_row."lastObservedOn" IS DISTINCT FROM DATE '2026-06-01'
-     OR rpc_row."representativeThumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp'
-     OR rpc_row."recentObservationIds" IS DISTINCT FROM ARRAY[public_exact_id]::bigint[] THEN
+     OR rpc_row."lastObservedOn" IS DISTINCT FROM DATE '2026-06-20'
+     OR rpc_row."representativeThumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_amanita-se.webp' THEN
     RAISE EXCEPTION 'Public species detail projection did not match expected safe fields';
   END IF;
 
@@ -926,7 +970,7 @@ BEGIN
     )
     WHERE value = 'NO'
       AND label = 'Norway'
-      AND "count" = 1
+      AND "count" = 2
   ) THEN
     RAISE EXCEPTION 'Public species detail did not include the expected country summary';
   END IF;
@@ -942,9 +986,148 @@ BEGIN
     WHERE value = 'rpc-test-region'
       AND label = 'Test Region'
       AND "countryCode" = 'NO'
-      AND "count" = 1
+      AND "count" = 2
   ) THEN
     RAISE EXCEPTION 'Public species detail did not include the expected region summary';
+  END IF;
+
+  -- ── get_public_species_spore_summary ──────────────────────────────────────
+
+  -- Unfiltered: all three Amanita muscaria observations (NO×2, SE×1).
+  SELECT * INTO spore_rpc FROM public.get_public_species_spore_summary('amanita-muscaria');
+
+  IF spore_rpc."speciesSlug" IS DISTINCT FROM 'amanita-muscaria' THEN
+    RAISE EXCEPTION 'speciesSlug mismatch in spore summary';
+  END IF;
+
+  -- observationCount includes all 3 visible Amanita observations.
+  IF spore_rpc."observationCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'Expected observationCount=3, got %', spore_rpc."observationCount";
+  END IF;
+
+  -- sporeObservationCount excludes the private-spore observation.
+  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Expected sporeObservationCount=2 (private excluded), got %', spore_rpc."sporeObservationCount";
+  END IF;
+
+  -- sporeMeasurementCount: 2 (public_exact_id) + 1 (amanita_se_id) = 3.
+  IF spore_rpc."sporeMeasurementCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'Expected sporeMeasurementCount=3, got %', spore_rpc."sporeMeasurementCount";
+  END IF;
+
+  -- Aggregate min/max from raw measurements (amanita_private_spore excluded).
+  IF (spore_rpc."sporeSummary"->>'length_min_um')::double precision IS DISTINCT FROM 9.0
+     OR (spore_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 11.2 THEN
+    RAISE EXCEPTION 'Expected length 9.0–11.2 µm from raw measurements, got %–%',
+      spore_rpc."sporeSummary"->>'length_min_um',
+      spore_rpc."sporeSummary"->>'length_max_um';
+  END IF;
+
+  IF (spore_rpc."sporeSummary"->>'width_min_um')::double precision IS DISTINCT FROM 4.5
+     OR (spore_rpc."sporeSummary"->>'width_max_um')::double precision IS DISTINCT FROM 5.4 THEN
+    RAISE EXCEPTION 'Expected width 4.5–5.4 µm, got %–%',
+      spore_rpc."sporeSummary"->>'width_min_um',
+      spore_rpc."sporeSummary"->>'width_max_um';
+  END IF;
+
+  -- n = 3 raw measurements (2 from NO public obs + 1 from SE).
+  IF (spore_rpc."sporeSummary"->>'n')::bigint IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'Expected aggregate n=3, got %', spore_rpc."sporeSummary"->>'n';
+  END IF;
+
+  -- observations array: 2 entries (private-spore obs excluded).
+  IF jsonb_array_length(spore_rpc."observations") IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Expected 2 observation rows, got %', jsonb_array_length(spore_rpc."observations");
+  END IF;
+
+  -- Private-spore observation must not appear in the observations array.
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(spore_rpc."observations") AS obs
+    WHERE (obs->>'observationId')::bigint = amanita_private_spore_id
+  ) THEN
+    RAISE EXCEPTION 'Private spore observation leaked into observations array';
+  END IF;
+
+  -- Each observation row must have lengthMeanUm.
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(spore_rpc."observations") AS obs
+    WHERE obs->>'lengthMeanUm' IS NULL
+  ) THEN
+    RAISE EXCEPTION 'observation row missing lengthMeanUm';
+  END IF;
+
+  -- Country filter NO: 2 observations (public_exact_id + amanita_private_spore_id).
+  SELECT * INTO spore_rpc FROM public.get_public_species_spore_summary('amanita-muscaria', 'NO');
+
+  IF spore_rpc."observationCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Expected observationCount=2 for NO, got %', spore_rpc."observationCount";
+  END IF;
+
+  -- Only public_exact_id has public spore data in NO.
+  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'Expected sporeObservationCount=1 for NO, got %', spore_rpc."sporeObservationCount";
+  END IF;
+
+  -- NO aggregate uses only public_exact_id measurements: length 10.1–11.2.
+  IF (spore_rpc."sporeSummary"->>'length_min_um')::double precision IS DISTINCT FROM 10.1
+     OR (spore_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 11.2 THEN
+    RAISE EXCEPTION 'Expected NO-filtered length 10.1–11.2 (private obs excluded), got %–%',
+      spore_rpc."sporeSummary"->>'length_min_um',
+      spore_rpc."sporeSummary"->>'length_max_um';
+  END IF;
+
+  -- Country filter SE: 1 observation (amanita_se_id, spore_data_visibility=public).
+  SELECT * INTO spore_rpc FROM public.get_public_species_spore_summary('amanita-muscaria', 'SE');
+
+  IF spore_rpc."observationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'Expected observationCount=1 for SE, got %', spore_rpc."observationCount";
+  END IF;
+  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'Expected sporeObservationCount=1 for SE, got %', spore_rpc."sporeObservationCount";
+  END IF;
+  IF (spore_rpc."sporeSummary"->>'n')::bigint IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'Expected n=1 for SE filter, got %', spore_rpc."sporeSummary"->>'n';
+  END IF;
+  IF (spore_rpc."sporeSummary"->>'length_min_um')::double precision IS DISTINCT FROM 9.0 THEN
+    RAISE EXCEPTION 'Expected SE length_min=9.0, got %', spore_rpc."sporeSummary"->>'length_min_um';
+  END IF;
+
+  -- Region filter rpc-test-region: 2 obs (public_exact_id + amanita_private_spore_id), 1 spore obs.
+  SELECT * INTO spore_rpc FROM public.get_public_species_spore_summary('amanita-muscaria', NULL, 'rpc-test-region');
+
+  IF spore_rpc."observationCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Expected observationCount=2 for rpc-test-region, got %', spore_rpc."observationCount";
+  END IF;
+  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'Expected sporeObservationCount=1 for rpc-test-region, got %', spore_rpc."sporeObservationCount";
+  END IF;
+
+  -- Date filter excludes public_exact_id (2026-06-01 < date_from 2026-06-02).
+  SELECT * INTO spore_rpc FROM public.get_public_species_spore_summary(
+    'amanita-muscaria', NULL, NULL, '2026-06-02'::date, NULL
+  );
+
+  IF spore_rpc."observationCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Expected observationCount=2 after date_from filter, got %', spore_rpc."observationCount";
+  END IF;
+  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    -- Only amanita_se_id (2026-06-20) has public spores after date_from.
+    RAISE EXCEPTION 'Expected sporeObservationCount=1 after date_from filter, got %', spore_rpc."sporeObservationCount";
+  END IF;
+
+  -- Non-existent species returns no rows.
+  IF EXISTS (SELECT 1 FROM public.get_public_species_spore_summary('nonexistent-xyz-abc')) THEN
+    RAISE EXCEPTION 'Expected no rows for nonexistent species';
+  END IF;
+
+  -- sporeSummary is NULL when all matching spore data is private.
+  SELECT * INTO spore_rpc FROM public.get_public_species_spore_summary('amanita-muscaria', 'NO', 'rpc-test-region');
+  -- NO + rpc-test-region: public_exact_id (public) + amanita_private_spore_id (private).
+  -- public_exact_id is in rpc-test-region and has public spore data → sporeSummary not null.
+  IF spore_rpc."sporeSummary" IS NULL THEN
+    RAISE EXCEPTION 'Expected non-null sporeSummary for NO+rpc-test-region (public_exact_id has public spores)';
   END IF;
 
   DELETE FROM auth.users
