@@ -19,6 +19,7 @@ DECLARE
   hidden_location_id bigint;
   region_location_id bigint;
   null_precision_id bigint;
+  fuzzed_id bigint;
   deleted_microscopy_id bigint;
   purged_microscopy_id bigint;
   public_image_id bigint;
@@ -65,7 +66,9 @@ BEGIN
     location_precision,
     location,
     country_code,
-    region_id
+    region_id,
+    gps_latitude,
+    gps_longitude
   )
   VALUES (
     visible_user_id,
@@ -89,7 +92,9 @@ BEGIN
     'exact',
     'Exact Test Site',
     'NO',
-    'rpc-test-region'
+    'rpc-test-region',
+    59.9273,
+    10.7779
   )
   RETURNING id INTO public_exact_id;
 
@@ -354,9 +359,39 @@ BEGIN
     is_draft,
     spore_data_visibility,
     location_precision,
+    country_code,
+    region_id,
+    gps_latitude,
+    gps_longitude
+  )
+  VALUES (
+    visible_user_id,
+    '2026-06-07',
+    'Fuzzed',
+    'location',
+    'public',
+    false,
+    'public',
+    'fuzzed',
+    'NO',
+    'rpc-test-region',
+    59.1234,
+    10.5678
+  )
+  RETURNING id INTO fuzzed_id;
+
+  INSERT INTO public.observations (
+    user_id,
+    date,
+    genus,
+    species,
+    visibility,
+    is_draft,
+    spore_data_visibility,
+    location_precision,
     location
   )
-  VALUES (visible_user_id, '2026-06-07', 'Hidden', 'location', 'public', false, 'public', 'hidden', 'Private Hidden Site')
+  VALUES (visible_user_id, '2026-06-08', 'Hidden', 'location', 'public', false, 'public', 'hidden', 'Private Hidden Site')
   RETURNING id INTO hidden_location_id;
 
   INSERT INTO public.observations (
@@ -596,9 +631,9 @@ BEGIN
     )
     WHERE value = 'NO'
       AND label = 'Norway'
-      AND "count" = 3
+      AND "count" = 4
   ) THEN
-    RAISE EXCEPTION 'Expected Norway country facet with count 3';
+    RAISE EXCEPTION 'Expected Norway country facet with count 4';
   END IF;
 
   IF NOT EXISTS (
@@ -612,9 +647,9 @@ BEGIN
     WHERE value = 'rpc-test-region'
       AND label = 'Test Region'
       AND "countryCode" = 'NO'
-      AND "count" = 3
+      AND "count" = 4
   ) THEN
-    RAISE EXCEPTION 'Expected rpc-test-region facet with count 3';
+    RAISE EXCEPTION 'Expected rpc-test-region facet with count 4';
   END IF;
 
   IF NOT EXISTS (
@@ -730,6 +765,51 @@ BEGIN
   IF rpc_row."hasMicroscopy" IS DISTINCT FROM false
      OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 0 THEN
     RAISE EXCEPTION 'Purged microscopy contributed to public microscopy or spore signals';
+  END IF;
+
+  -- Map point: exact precision returns raw GPS coordinates.
+  SELECT * INTO rpc_row FROM public.get_public_observation(public_exact_id);
+  IF rpc_row."mapLat" IS DISTINCT FROM 59.9273
+     OR rpc_row."mapLon" IS DISTINCT FROM 10.7779 THEN
+    RAISE EXCEPTION 'Exact observation did not return raw GPS coordinates in mapLat/mapLon';
+  END IF;
+
+  -- Map point: fuzzed precision returns coordinates rounded to 2 decimal places.
+  SELECT * INTO rpc_row FROM public.get_public_observation(fuzzed_id);
+  IF rpc_row."mapLat" IS DISTINCT FROM round(59.1234::numeric, 2)::double precision
+     OR rpc_row."mapLon" IS DISTINCT FROM round(10.5678::numeric, 2)::double precision THEN
+    RAISE EXCEPTION 'Fuzzed observation did not return rounded coordinates in mapLat/mapLon (got % / %)',
+      rpc_row."mapLat", rpc_row."mapLon";
+  END IF;
+  IF rpc_row."mapLat" IS NULL OR rpc_row."mapLon" IS NULL THEN
+    RAISE EXCEPTION 'Fuzzed observation returned null mapLat/mapLon';
+  END IF;
+
+  -- Map point: hidden precision must return null coordinates.
+  SELECT * INTO rpc_row FROM public.get_public_observation(hidden_location_id);
+  IF rpc_row."mapLat" IS NOT NULL OR rpc_row."mapLon" IS NOT NULL THEN
+    RAISE EXCEPTION 'Hidden-precision observation leaked coordinates through mapLat/mapLon';
+  END IF;
+
+  -- Map point: region precision must return null coordinates.
+  SELECT * INTO rpc_row FROM public.get_public_observation(region_location_id);
+  IF rpc_row."mapLat" IS NOT NULL OR rpc_row."mapLon" IS NOT NULL THEN
+    RAISE EXCEPTION 'Region-precision observation leaked coordinates through mapLat/mapLon';
+  END IF;
+
+  -- Spore summary still works after RPC shape change.
+  SELECT * INTO rpc_row FROM public.get_public_observation(public_exact_id);
+  IF rpc_row."sporeSummary" IS DISTINCT FROM jsonb_build_object(
+    'n', 2,
+    'length_min_um', 10.1,
+    'length_max_um', 11.2,
+    'width_min_um', 5.1,
+    'width_max_um', 5.4,
+    'q_min', 1.98,
+    'q_max', 2.2,
+    'q_mean', 2.09
+  ) THEN
+    RAISE EXCEPTION 'Spore summary broken after RPC shape change';
   END IF;
 
   IF NOT EXISTS (
