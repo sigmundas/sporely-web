@@ -61,6 +61,7 @@ BEGIN
     visibility,
     is_draft,
     spore_data_visibility,
+    spore_statistics,
     location_precision,
     location,
     country_code,
@@ -75,6 +76,16 @@ BEGIN
     'public',
     false,
     'public',
+    jsonb_build_object(
+      'n', 2,
+      'length_min_um', 10.1,
+      'length_max_um', 11.2,
+      'width_min_um', 5.1,
+      'width_max_um', 5.4,
+      'q_min', 1.98,
+      'q_max', 2.2,
+      'q_mean', 2.09
+    ),
     'exact',
     'Exact Test Site',
     'NO',
@@ -267,8 +278,34 @@ BEGIN
   )
   RETURNING id INTO facets_public_id;
 
-  INSERT INTO public.observations (user_id, date, genus, species, visibility, is_draft, spore_data_visibility, location_precision)
-  VALUES (visible_user_id, '2026-06-06', 'Nullspore', 'counted', 'public', false, NULL, 'exact')
+  INSERT INTO public.observations (
+    user_id,
+    date,
+    genus,
+    species,
+    visibility,
+    is_draft,
+    spore_data_visibility,
+    spore_statistics,
+    location_precision
+  )
+  VALUES (
+    visible_user_id,
+    '2026-06-06',
+    'Nullspore',
+    'counted',
+    'public',
+    false,
+    NULL,
+    jsonb_build_object(
+      'n', 1,
+      'length_min_um', 9.0,
+      'length_max_um', 9.8,
+      'width_min_um', 4.1,
+      'width_max_um', 4.4
+    ),
+    'exact'
+  )
   RETURNING id INTO null_spore_visibility_id;
 
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
@@ -402,6 +439,25 @@ BEGIN
     RAISE EXCEPTION 'Private, draft, banned, or null-visibility observations leaked into public search';
   END IF;
 
+  SELECT * INTO rpc_row FROM public.search_public_observations() WHERE id = public_exact_id;
+  IF rpc_row."sporeSummary" IS DISTINCT FROM jsonb_build_object(
+    'n', 2,
+    'length_min_um', 10.1,
+    'length_max_um', 11.2,
+    'width_min_um', 5.1,
+    'width_max_um', 5.4,
+    'q_min', 1.98,
+    'q_max', 2.2,
+    'q_mean', 2.09
+  ) THEN
+    RAISE EXCEPTION 'Public search did not expose the observation spore summary';
+  END IF;
+
+  SELECT * INTO rpc_row FROM public.search_public_observations() WHERE id = null_spore_visibility_id;
+  IF rpc_row."sporeSummary" IS NOT NULL THEN
+    RAISE EXCEPTION 'Null spore_data_visibility leaked a private summary through search';
+  END IF;
+
   IF (SELECT count(*) FROM public.get_public_observation_images(public_exact_id)) IS DISTINCT FROM 1 THEN
     RAISE EXCEPTION 'Expected exactly one public image for observation %', public_exact_id;
   END IF;
@@ -421,6 +477,16 @@ BEGIN
   IF rpc_row.id IS DISTINCT FROM public_exact_id
      OR rpc_row."locationLabel" IS DISTINCT FROM 'Exact Test Site'
      OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 2
+     OR rpc_row."sporeSummary" IS DISTINCT FROM jsonb_build_object(
+       'n', 2,
+       'length_min_um', 10.1,
+       'length_max_um', 11.2,
+       'width_min_um', 5.1,
+       'width_max_um', 5.4,
+       'q_min', 1.98,
+       'q_max', 2.2,
+       'q_mean', 2.09
+     )
      OR rpc_row."contrastMethod" IS DISTINCT FROM 'brightfield'
      OR rpc_row."mountReagent" IS DISTINCT FROM 'water'
      OR rpc_row."sampleType" IS DISTINCT FROM 'fresh' THEN
@@ -638,6 +704,9 @@ BEGIN
   SELECT * INTO rpc_row FROM public.get_public_observation(null_spore_visibility_id);
   IF rpc_row."sporeMeasurementCount" IS DISTINCT FROM 0 THEN
     RAISE EXCEPTION 'Null spore_data_visibility leaked a private spore count';
+  END IF;
+  IF rpc_row."sporeSummary" IS NOT NULL THEN
+    RAISE EXCEPTION 'Null spore_data_visibility leaked a private spore summary';
   END IF;
 
   SELECT * INTO rpc_row FROM public.get_public_observation(hidden_location_id);
