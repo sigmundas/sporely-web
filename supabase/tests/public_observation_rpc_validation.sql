@@ -37,6 +37,12 @@ DECLARE
   amanita_se_id bigint;
   amanita_se_image_id bigint;
   spore_rpc record;
+  amanita_koh_id bigint;
+  amanita_koh_image_id bigint;
+  comp_rpc record;
+  mixed_prep_id bigint;
+  mixed_fresh_image_id bigint;
+  mixed_sp_image_id bigint;
 BEGIN
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN visibility DROP NOT NULL';
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN location_precision DROP NOT NULL';
@@ -508,6 +514,72 @@ BEGIN
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
   VALUES (amanita_se_image_id, visible_user_id, 9.0, 4.5, 'manual');
 
+  -- Amanita muscaria in Norway, DIC/KOH/fresh — for get_public_spore_comparison_set tests.
+  INSERT INTO public.observations (
+    user_id, date, genus, species, common_name, visibility, is_draft, spore_data_visibility,
+    location_precision, country_code, region_id
+  )
+  VALUES (
+    visible_user_id, '2026-06-25', 'Amanita', 'muscaria', 'Fly agaric',
+    'public', false, 'public', 'exact', 'NO', 'rpc-test-region'
+  )
+  RETURNING id INTO amanita_koh_id;
+
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, contrast, mount_medium, sample_type
+  )
+  VALUES (
+    amanita_koh_id, visible_user_id, 'rpc/amanita-koh.webp', 'microscope', 'DIC', 'KOH', 'fresh'
+  )
+  RETURNING id INTO amanita_koh_image_id;
+
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
+  VALUES (amanita_koh_image_id, visible_user_id, 12.0, 6.0, 'manual');
+
+  -- Leucopholiota americana in Sweden: two microscopy images with different
+  -- preparations (fresh + spore_print). Image B (spore_print) is inserted last
+  -- so it has a higher id — the "latest image" heuristic would pick spore_print.
+  -- This observation is in country SE with no region, so it does not interfere
+  -- with existing Amanita Norway/region facet assertions.
+  INSERT INTO public.observations (
+    user_id, date, genus, species, visibility, is_draft, spore_data_visibility,
+    location_precision, country_code
+  )
+  VALUES (
+    visible_user_id, '2026-06-27', 'Leucopholiota', 'americana',
+    'public', false, 'public', 'exact', 'SE'
+  )
+  RETURNING id INTO mixed_prep_id;
+
+  -- Image A: fresh preparation (inserted first → lower id).
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, sample_type
+  )
+  VALUES (
+    mixed_prep_id, visible_user_id, 'rpc/mixed-fresh.webp', 'microscope', 'fresh'
+  )
+  RETURNING id INTO mixed_fresh_image_id;
+
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
+  VALUES
+    (mixed_fresh_image_id, visible_user_id, 10.0, 5.0, 'manual'),
+    (mixed_fresh_image_id, visible_user_id, 11.0, 5.5, 'manual');
+
+  -- Image B: spore_print preparation (inserted second → higher id, "latest").
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, sample_type
+  )
+  VALUES (
+    mixed_prep_id, visible_user_id, 'rpc/mixed-sp.webp', 'microscope', 'spore_print'
+  )
+  RETURNING id INTO mixed_sp_image_id;
+
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
+  VALUES
+    (mixed_sp_image_id, visible_user_id, 12.0, 6.0, 'manual'),
+    (mixed_sp_image_id, visible_user_id, 13.0, 6.5, 'manual'),
+    (mixed_sp_image_id, visible_user_id, 14.0, 7.0, 'manual');
+
   IF NOT EXISTS (SELECT 1 FROM public.search_public_observations() WHERE id = public_exact_id) THEN
     RAISE EXCEPTION 'Expected public observation % to appear', public_exact_id;
   END IF;
@@ -601,9 +673,9 @@ BEGIN
     )
     WHERE value = 'Amanita'
       AND label = 'Amanita'
-      AND "count" = 3
+      AND "count" = 4
   ) THEN
-    RAISE EXCEPTION 'Expected Amanita genus facet with count 3';
+    RAISE EXCEPTION 'Expected Amanita genus facet with count 4';
   END IF;
 
   IF NOT EXISTS (
@@ -637,7 +709,7 @@ BEGIN
       AND species = 'muscaria'
       AND "speciesName" = 'Amanita muscaria'
       AND "commonName" = 'Fly agaric'
-      AND "count" = 3
+      AND "count" = 4
   ) THEN
     RAISE EXCEPTION 'Expected Amanita muscaria species facet with safe common name';
   END IF;
@@ -673,9 +745,9 @@ BEGIN
     )
     WHERE value = 'NO'
       AND label = 'Norway'
-      AND "count" = 5
+      AND "count" = 6
   ) THEN
-    RAISE EXCEPTION 'Expected Norway country facet with count 5';
+    RAISE EXCEPTION 'Expected Norway country facet with count 6';
   END IF;
 
   IF NOT EXISTS (
@@ -689,9 +761,9 @@ BEGIN
     WHERE value = 'rpc-test-region'
       AND label = 'Test Region'
       AND "countryCode" = 'NO'
-      AND "count" = 5
+      AND "count" = 6
   ) THEN
-    RAISE EXCEPTION 'Expected rpc-test-region facet with count 5';
+    RAISE EXCEPTION 'Expected rpc-test-region facet with count 6';
   END IF;
 
   IF NOT EXISTS (
@@ -703,7 +775,7 @@ BEGIN
     )
     WHERE value = 'fresh'
       AND label = 'Fresh'
-      AND "count" = 1
+      AND "count" = 2
   ) THEN
     RAISE EXCEPTION 'Expected normalized fresh sampleType facet';
   END IF;
@@ -745,7 +817,7 @@ BEGIN
     )
     WHERE value = 'DIC'
       AND label = 'DIC'
-      AND "count" = 1
+      AND "count" = 2
   ) THEN
     RAISE EXCEPTION 'Expected DIC contrast facet';
   END IF;
@@ -773,7 +845,7 @@ BEGIN
     )
     WHERE value = 'KOH'
       AND label = 'KOH'
-      AND "count" = 1
+      AND "count" = 2
   ) THEN
     RAISE EXCEPTION 'Expected KOH mount facet';
   END IF;
@@ -862,12 +934,12 @@ BEGIN
       AND s.species = 'muscaria'
       AND s."speciesName" = 'Amanita muscaria'
       AND s."commonName" = 'Fly agaric'
-      AND s."observationCount" = 3
-      AND s."microscopyObservationCount" = 3
-      AND s."sporeMeasurementCount" = 3
+      AND s."observationCount" = 4
+      AND s."microscopyObservationCount" = 4
+      AND s."sporeMeasurementCount" = 4
       AND s."firstObservedOn" = DATE '2026-06-01'
-      AND s."lastObservedOn" = DATE '2026-06-20'
-      AND s."representativeThumbUrl" = 'https://media.sporely.no/rpc/thumb_amanita-se.webp'
+      AND s."lastObservedOn" = DATE '2026-06-25'
+      AND s."representativeThumbUrl" = 'https://media.sporely.no/rpc/thumb_amanita-koh.webp'
   ) THEN
     RAISE EXCEPTION 'Expected public species summary for Amanita muscaria';
   END IF;
@@ -924,9 +996,9 @@ BEGIN
     WHERE s."speciesSlug" = 'amanita-muscaria'
       AND c.value = 'NO'
       AND c.label = 'Norway'
-      AND c."count" = 2
+      AND c."count" = 3
   ) THEN
-    RAISE EXCEPTION 'Expected Amanita muscaria country summary to include Norway with count 2';
+    RAISE EXCEPTION 'Expected Amanita muscaria country summary to include Norway with count 3';
   END IF;
 
   IF NOT EXISTS (
@@ -942,9 +1014,9 @@ BEGIN
       AND r.value = 'rpc-test-region'
       AND r.label = 'Test Region'
       AND r."countryCode" = 'NO'
-      AND r."count" = 2
+      AND r."count" = 3
   ) THEN
-    RAISE EXCEPTION 'Expected Amanita muscaria region summary to include rpc-test-region with count 2';
+    RAISE EXCEPTION 'Expected Amanita muscaria region summary to include rpc-test-region with count 3';
   END IF;
 
   SELECT * INTO rpc_row FROM public.get_public_species('amanita-muscaria');
@@ -952,12 +1024,12 @@ BEGIN
   -- sporeMeasurementCount now 5: 2 (public_exact_id) + 1 (amanita_private_spore_id) + 1 (amanita_se_id) + 1 (purged, but purged images are excluded) = actually:
   -- public_exact_id=2 (public), amanita_private_spore_id=1 (private → 0 counted), amanita_se_id=1 (public) = 3.
   IF rpc_row."speciesSlug" IS DISTINCT FROM 'amanita-muscaria'
-     OR rpc_row."observationCount" IS DISTINCT FROM 3
-     OR rpc_row."microscopyObservationCount" IS DISTINCT FROM 3
-     OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 3
+     OR rpc_row."observationCount" IS DISTINCT FROM 4
+     OR rpc_row."microscopyObservationCount" IS DISTINCT FROM 4
+     OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 4
      OR rpc_row."firstObservedOn" IS DISTINCT FROM DATE '2026-06-01'
-     OR rpc_row."lastObservedOn" IS DISTINCT FROM DATE '2026-06-20'
-     OR rpc_row."representativeThumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_amanita-se.webp' THEN
+     OR rpc_row."lastObservedOn" IS DISTINCT FROM DATE '2026-06-25'
+     OR rpc_row."representativeThumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_amanita-koh.webp' THEN
     RAISE EXCEPTION 'Public species detail projection did not match expected safe fields';
   END IF;
 
@@ -970,7 +1042,7 @@ BEGIN
     )
     WHERE value = 'NO'
       AND label = 'Norway'
-      AND "count" = 2
+      AND "count" = 3
   ) THEN
     RAISE EXCEPTION 'Public species detail did not include the expected country summary';
   END IF;
@@ -986,7 +1058,7 @@ BEGIN
     WHERE value = 'rpc-test-region'
       AND label = 'Test Region'
       AND "countryCode" = 'NO'
-      AND "count" = 2
+      AND "count" = 3
   ) THEN
     RAISE EXCEPTION 'Public species detail did not include the expected region summary';
   END IF;
@@ -1000,44 +1072,44 @@ BEGIN
     RAISE EXCEPTION 'speciesSlug mismatch in spore summary';
   END IF;
 
-  -- observationCount includes all 3 visible Amanita observations.
-  IF spore_rpc."observationCount" IS DISTINCT FROM 3 THEN
-    RAISE EXCEPTION 'Expected observationCount=3, got %', spore_rpc."observationCount";
+  -- observationCount includes all 4 visible Amanita observations.
+  IF spore_rpc."observationCount" IS DISTINCT FROM 4 THEN
+    RAISE EXCEPTION 'Expected observationCount=4, got %', spore_rpc."observationCount";
   END IF;
 
   -- sporeObservationCount excludes the private-spore observation.
-  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 2 THEN
-    RAISE EXCEPTION 'Expected sporeObservationCount=2 (private excluded), got %', spore_rpc."sporeObservationCount";
+  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'Expected sporeObservationCount=3 (private excluded), got %', spore_rpc."sporeObservationCount";
   END IF;
 
-  -- sporeMeasurementCount: 2 (public_exact_id) + 1 (amanita_se_id) = 3.
-  IF spore_rpc."sporeMeasurementCount" IS DISTINCT FROM 3 THEN
-    RAISE EXCEPTION 'Expected sporeMeasurementCount=3, got %', spore_rpc."sporeMeasurementCount";
+  -- sporeMeasurementCount: 2 (public_exact_id) + 1 (amanita_se_id) + 1 (amanita_koh_id) = 4.
+  IF spore_rpc."sporeMeasurementCount" IS DISTINCT FROM 4 THEN
+    RAISE EXCEPTION 'Expected sporeMeasurementCount=4, got %', spore_rpc."sporeMeasurementCount";
   END IF;
 
   -- Aggregate min/max from raw measurements (amanita_private_spore excluded).
   IF (spore_rpc."sporeSummary"->>'length_min_um')::double precision IS DISTINCT FROM 9.0
-     OR (spore_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 11.2 THEN
-    RAISE EXCEPTION 'Expected length 9.0–11.2 µm from raw measurements, got %–%',
+     OR (spore_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 12.0 THEN
+    RAISE EXCEPTION 'Expected length 9.0–12.0 µm from raw measurements, got %–%',
       spore_rpc."sporeSummary"->>'length_min_um',
       spore_rpc."sporeSummary"->>'length_max_um';
   END IF;
 
   IF (spore_rpc."sporeSummary"->>'width_min_um')::double precision IS DISTINCT FROM 4.5
-     OR (spore_rpc."sporeSummary"->>'width_max_um')::double precision IS DISTINCT FROM 5.4 THEN
-    RAISE EXCEPTION 'Expected width 4.5–5.4 µm, got %–%',
+     OR (spore_rpc."sporeSummary"->>'width_max_um')::double precision IS DISTINCT FROM 6.0 THEN
+    RAISE EXCEPTION 'Expected width 4.5–6.0 µm, got %–%',
       spore_rpc."sporeSummary"->>'width_min_um',
       spore_rpc."sporeSummary"->>'width_max_um';
   END IF;
 
-  -- n = 3 raw measurements (2 from NO public obs + 1 from SE).
-  IF (spore_rpc."sporeSummary"->>'n')::bigint IS DISTINCT FROM 3 THEN
-    RAISE EXCEPTION 'Expected aggregate n=3, got %', spore_rpc."sporeSummary"->>'n';
+  -- n = 4 raw measurements (2 from NO public obs + 1 from SE + 1 from amanita_koh_id).
+  IF (spore_rpc."sporeSummary"->>'n')::bigint IS DISTINCT FROM 4 THEN
+    RAISE EXCEPTION 'Expected aggregate n=4, got %', spore_rpc."sporeSummary"->>'n';
   END IF;
 
-  -- observations array: 2 entries (private-spore obs excluded).
-  IF jsonb_array_length(spore_rpc."observations") IS DISTINCT FROM 2 THEN
-    RAISE EXCEPTION 'Expected 2 observation rows, got %', jsonb_array_length(spore_rpc."observations");
+  -- observations array: 3 entries (private-spore obs excluded).
+  IF jsonb_array_length(spore_rpc."observations") IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'Expected 3 observation rows, got %', jsonb_array_length(spore_rpc."observations");
   END IF;
 
   -- Private-spore observation must not appear in the observations array.
@@ -1058,22 +1130,22 @@ BEGIN
     RAISE EXCEPTION 'observation row missing lengthMeanUm';
   END IF;
 
-  -- Country filter NO: 2 observations (public_exact_id + amanita_private_spore_id).
+  -- Country filter NO: 3 observations (public_exact_id + amanita_private_spore_id + amanita_koh_id).
   SELECT * INTO spore_rpc FROM public.get_public_species_spore_summary('amanita-muscaria', 'NO');
 
-  IF spore_rpc."observationCount" IS DISTINCT FROM 2 THEN
-    RAISE EXCEPTION 'Expected observationCount=2 for NO, got %', spore_rpc."observationCount";
+  IF spore_rpc."observationCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'Expected observationCount=3 for NO, got %', spore_rpc."observationCount";
   END IF;
 
-  -- Only public_exact_id has public spore data in NO.
-  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
-    RAISE EXCEPTION 'Expected sporeObservationCount=1 for NO, got %', spore_rpc."sporeObservationCount";
+  -- public_exact_id and amanita_koh_id have public spore data in NO (private excluded).
+  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Expected sporeObservationCount=2 for NO, got %', spore_rpc."sporeObservationCount";
   END IF;
 
-  -- NO aggregate uses only public_exact_id measurements: length 10.1–11.2.
+  -- NO aggregate uses public_exact_id + amanita_koh_id: length 10.1–12.0.
   IF (spore_rpc."sporeSummary"->>'length_min_um')::double precision IS DISTINCT FROM 10.1
-     OR (spore_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 11.2 THEN
-    RAISE EXCEPTION 'Expected NO-filtered length 10.1–11.2 (private obs excluded), got %–%',
+     OR (spore_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 12.0 THEN
+    RAISE EXCEPTION 'Expected NO-filtered length 10.1–12.0 (private obs excluded), got %–%',
       spore_rpc."sporeSummary"->>'length_min_um',
       spore_rpc."sporeSummary"->>'length_max_um';
   END IF;
@@ -1094,14 +1166,14 @@ BEGIN
     RAISE EXCEPTION 'Expected SE length_min=9.0, got %', spore_rpc."sporeSummary"->>'length_min_um';
   END IF;
 
-  -- Region filter rpc-test-region: 2 obs (public_exact_id + amanita_private_spore_id), 1 spore obs.
+  -- Region filter rpc-test-region: 3 obs (public_exact_id + amanita_private_spore_id + amanita_koh_id), 2 spore obs.
   SELECT * INTO spore_rpc FROM public.get_public_species_spore_summary('amanita-muscaria', NULL, 'rpc-test-region');
 
-  IF spore_rpc."observationCount" IS DISTINCT FROM 2 THEN
-    RAISE EXCEPTION 'Expected observationCount=2 for rpc-test-region, got %', spore_rpc."observationCount";
+  IF spore_rpc."observationCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'Expected observationCount=3 for rpc-test-region, got %', spore_rpc."observationCount";
   END IF;
-  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
-    RAISE EXCEPTION 'Expected sporeObservationCount=1 for rpc-test-region, got %', spore_rpc."sporeObservationCount";
+  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Expected sporeObservationCount=2 for rpc-test-region, got %', spore_rpc."sporeObservationCount";
   END IF;
 
   -- Date filter excludes public_exact_id (2026-06-01 < date_from 2026-06-02).
@@ -1109,12 +1181,12 @@ BEGIN
     'amanita-muscaria', NULL, NULL, '2026-06-02'::date, NULL
   );
 
-  IF spore_rpc."observationCount" IS DISTINCT FROM 2 THEN
-    RAISE EXCEPTION 'Expected observationCount=2 after date_from filter, got %', spore_rpc."observationCount";
+  IF spore_rpc."observationCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'Expected observationCount=3 after date_from filter, got %', spore_rpc."observationCount";
   END IF;
-  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
-    -- Only amanita_se_id (2026-06-20) has public spores after date_from.
-    RAISE EXCEPTION 'Expected sporeObservationCount=1 after date_from filter, got %', spore_rpc."sporeObservationCount";
+  IF spore_rpc."sporeObservationCount" IS DISTINCT FROM 2 THEN
+    -- amanita_se_id (2026-06-20) + amanita_koh_id (2026-06-25) have public spores after date_from.
+    RAISE EXCEPTION 'Expected sporeObservationCount=2 after date_from filter, got %', spore_rpc."sporeObservationCount";
   END IF;
 
   -- Non-existent species returns no rows.
@@ -1128,6 +1200,275 @@ BEGIN
   -- public_exact_id is in rpc-test-region and has public spore data → sporeSummary not null.
   IF spore_rpc."sporeSummary" IS NULL THEN
     RAISE EXCEPTION 'Expected non-null sporeSummary for NO+rpc-test-region (public_exact_id has public spores)';
+  END IF;
+
+  -- ── get_public_spore_comparison_set ──────────────────────────────────────
+
+  -- Test 1: Species comparison set, no extra filters.
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set('amanita-muscaria');
+
+  IF comp_rpc."sourceType" IS DISTINCT FROM 'taxon_filter' THEN
+    RAISE EXCEPTION 'Expected sourceType=taxon_filter, got %', comp_rpc."sourceType";
+  END IF;
+
+  IF comp_rpc."taxonRank" IS DISTINCT FROM 'species' THEN
+    RAISE EXCEPTION 'Expected taxonRank=species, got %', comp_rpc."taxonRank";
+  END IF;
+
+  IF comp_rpc."observationCount" IS DISTINCT FROM 4 THEN
+    RAISE EXCEPTION 'comp_rpc Test 1: Expected observationCount=4, got %', comp_rpc."observationCount";
+  END IF;
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'comp_rpc Test 1: Expected sporeObservationCount=3, got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  IF comp_rpc."sporeMeasurementCount" IS DISTINCT FROM 4 THEN
+    RAISE EXCEPTION 'comp_rpc Test 1: Expected sporeMeasurementCount=4, got %', comp_rpc."sporeMeasurementCount";
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'n')::bigint IS DISTINCT FROM 4 THEN
+    RAISE EXCEPTION 'comp_rpc Test 1: Expected sporeSummary.n=4, got %', comp_rpc."sporeSummary"->>'n';
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'length_min_um')::double precision IS DISTINCT FROM 9.0 THEN
+    RAISE EXCEPTION 'comp_rpc Test 1: Expected length_min_um=9.0, got %', comp_rpc."sporeSummary"->>'length_min_um';
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 12.0 THEN
+    RAISE EXCEPTION 'comp_rpc Test 1: Expected length_max_um=12.0, got %', comp_rpc."sporeSummary"->>'length_max_um';
+  END IF;
+
+  IF jsonb_array_length(comp_rpc."observations") IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'comp_rpc Test 1: Expected 3 observation rows, got %', jsonb_array_length(comp_rpc."observations");
+  END IF;
+
+  -- Test 2: Genus comparison set.
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set(NULL, 'Amanita');
+
+  IF comp_rpc."taxonRank" IS DISTINCT FROM 'genus' THEN
+    RAISE EXCEPTION 'comp_rpc Test 2: Expected taxonRank=genus, got %', comp_rpc."taxonRank";
+  END IF;
+
+  IF comp_rpc."observationCount" IS DISTINCT FROM 4 THEN
+    RAISE EXCEPTION 'comp_rpc Test 2: Expected observationCount=4, got %', comp_rpc."observationCount";
+  END IF;
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'comp_rpc Test 2: Expected sporeObservationCount=3, got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  -- Test 3: Country filter (NO).
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set('amanita-muscaria', NULL, 'NO');
+
+  IF comp_rpc."observationCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'comp_rpc Test 3: Expected observationCount=3 for NO, got %', comp_rpc."observationCount";
+  END IF;
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'comp_rpc Test 3: Expected sporeObservationCount=2 for NO, got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  IF comp_rpc."sporeMeasurementCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'comp_rpc Test 3: Expected sporeMeasurementCount=3 for NO, got %', comp_rpc."sporeMeasurementCount";
+  END IF;
+
+  -- Test 4: Sample type filter (fresh).
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set('amanita-muscaria', NULL, NULL, NULL, NULL, NULL, 'fresh');
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'comp_rpc Test 4: Expected sporeObservationCount=2 for sample_type=fresh, got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  IF comp_rpc."sporeMeasurementCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'comp_rpc Test 4: Expected sporeMeasurementCount=3 for sample_type=fresh, got %', comp_rpc."sporeMeasurementCount";
+  END IF;
+
+  -- Test 5: Mount reagent filter (KOH).
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set('amanita-muscaria', NULL, NULL, NULL, NULL, NULL, NULL, 'KOH');
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'comp_rpc Test 5: Expected sporeObservationCount=1 for mount_reagent=KOH, got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  IF comp_rpc."sporeMeasurementCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'comp_rpc Test 5: Expected sporeMeasurementCount=1 for mount_reagent=KOH, got %', comp_rpc."sporeMeasurementCount";
+  END IF;
+
+  -- Test 6: Contrast method filter (DIC).
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set('amanita-muscaria', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'DIC');
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'comp_rpc Test 6: Expected sporeObservationCount=1 for contrast_method=DIC, got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  IF comp_rpc."sporeMeasurementCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'comp_rpc Test 6: Expected sporeMeasurementCount=1 for contrast_method=DIC, got %', comp_rpc."sporeMeasurementCount";
+  END IF;
+
+  -- Test 7: Private spore observation must not appear in observations array.
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set('amanita-muscaria');
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(comp_rpc."observations") AS obs
+    WHERE (obs->>'observationId')::bigint = amanita_private_spore_id
+  ) THEN
+    RAISE EXCEPTION 'comp_rpc Test 7: Private spore observation leaked into observations array';
+  END IF;
+
+  -- Test 8: No GPS coordinates in observation rows.
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(comp_rpc."observations") AS obs
+    WHERE obs ? 'mapLat' OR obs ? 'mapLon'
+  ) THEN
+    RAISE EXCEPTION 'comp_rpc Test 8: GPS coordinates leaked into observations array';
+  END IF;
+
+  -- Test 9: Observation rows have required structure keys.
+  IF NOT (
+    (comp_rpc."observations"->0) ? 'observationId'
+    AND (comp_rpc."observations"->0) ? 'sporeN'
+    AND (comp_rpc."observations"->0) ? 'lengthMeanUm'
+  ) THEN
+    RAISE EXCEPTION 'comp_rpc Test 9: Observation row missing required keys (observationId, sporeN, lengthMeanUm)';
+  END IF;
+
+  -- Test 10: Aggregate sporeMeasurementCount matches sum of sporeN in observations array.
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set('amanita-muscaria');
+
+  IF comp_rpc."sporeMeasurementCount" IS DISTINCT FROM (
+    SELECT coalesce(sum((obs->>'sporeN')::bigint), 0)
+    FROM jsonb_array_elements(comp_rpc."observations") AS obs
+  ) THEN
+    RAISE EXCEPTION 'comp_rpc Test 10: sporeMeasurementCount does not match sum of sporeN in observations array';
+  END IF;
+
+  -- Test 11: No rows returned when both slug and genus are null.
+  IF EXISTS (SELECT 1 FROM public.get_public_spore_comparison_set()) THEN
+    RAISE EXCEPTION 'comp_rpc Test 11: Expected no rows when both slug and genus are null';
+  END IF;
+
+  -- Test 12: Date range filter (date_from='2026-06-24', only amanita_koh_id qualifies).
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set('amanita-muscaria', NULL, NULL, NULL, '2026-06-24', NULL);
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'comp_rpc Test 12: Expected sporeObservationCount=1 for date_from=2026-06-24, got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  -- ── Leucopholiota americana mixed-prep tests ─────────────────────────────
+  -- These tests verify that prep-level filters work correctly for an observation
+  -- that has two microscope images with different sample_type values (fresh +
+  -- spore_print). Image B (spore_print) has a higher id so the old "latest
+  -- image" approach would have picked spore_print as the representative image.
+
+  -- Test A: No prep filter — all 5 measurements (2 fresh + 3 spore_print) included.
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set(NULL, 'Leucopholiota');
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'comp_rpc Test A: Expected sporeObservationCount=1 for Leucopholiota (no filter), got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  IF comp_rpc."sporeMeasurementCount" IS DISTINCT FROM 5 THEN
+    RAISE EXCEPTION 'comp_rpc Test A: Expected sporeMeasurementCount=5 for Leucopholiota (no filter), got %', comp_rpc."sporeMeasurementCount";
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'n')::bigint IS DISTINCT FROM 5 THEN
+    RAISE EXCEPTION 'comp_rpc Test A: Expected sporeSummary.n=5 for Leucopholiota (no filter), got %', comp_rpc."sporeSummary"->>'n';
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'length_min_um')::double precision IS DISTINCT FROM 10.0 THEN
+    RAISE EXCEPTION 'comp_rpc Test A: Expected length_min_um=10.0 for Leucopholiota (no filter), got %', comp_rpc."sporeSummary"->>'length_min_um';
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 14.0 THEN
+    RAISE EXCEPTION 'comp_rpc Test A: Expected length_max_um=14.0 for Leucopholiota (no filter), got %', comp_rpc."sporeSummary"->>'length_max_um';
+  END IF;
+
+  IF jsonb_array_length(comp_rpc."observations") IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'comp_rpc Test A: Expected 1 observation row for Leucopholiota (no filter), got %', jsonb_array_length(comp_rpc."observations");
+  END IF;
+
+  IF ((comp_rpc."observations"->0)->>'sporeN')::bigint IS DISTINCT FROM 5 THEN
+    RAISE EXCEPTION 'comp_rpc Test A: Expected sporeN=5 in observation row (no filter), got %', (comp_rpc."observations"->0)->>'sporeN';
+  END IF;
+
+  -- Test B: fresh filter — only 2 fresh measurements from Image A.
+  -- Observation must still be selected because it HAS a fresh image.
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set(NULL, 'Leucopholiota', NULL, NULL, NULL, NULL, 'fresh');
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'comp_rpc Test B: Expected sporeObservationCount=1 for Leucopholiota (fresh filter), got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  IF comp_rpc."sporeMeasurementCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'comp_rpc Test B: Expected sporeMeasurementCount=2 for Leucopholiota (fresh filter), got %', comp_rpc."sporeMeasurementCount";
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'n')::bigint IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'comp_rpc Test B: Expected sporeSummary.n=2 for Leucopholiota (fresh filter), got %', comp_rpc."sporeSummary"->>'n';
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'length_min_um')::double precision IS DISTINCT FROM 10.0 THEN
+    RAISE EXCEPTION 'comp_rpc Test B: Expected length_min_um=10.0 for fresh filter, got %', comp_rpc."sporeSummary"->>'length_min_um';
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 11.0 THEN
+    RAISE EXCEPTION 'comp_rpc Test B: Expected length_max_um=11.0 for fresh filter, got %', comp_rpc."sporeSummary"->>'length_max_um';
+  END IF;
+
+  IF ((comp_rpc."observations"->0)->>'sporeN')::bigint IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'comp_rpc Test B: Expected sporeN=2 in observation row (fresh filter), got %', (comp_rpc."observations"->0)->>'sporeN';
+  END IF;
+
+  IF abs(((comp_rpc."observations"->0)->>'lengthMeanUm')::double precision - 10.5) >= 0.01 THEN
+    RAISE EXCEPTION 'comp_rpc Test B: Expected lengthMeanUm≈10.5 for fresh filter, got %', (comp_rpc."observations"->0)->>'lengthMeanUm';
+  END IF;
+
+  -- Test C: spore_print filter — only 3 spore_print measurements from Image B.
+  -- Observation must still be selected because it HAS a spore_print image.
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set(NULL, 'Leucopholiota', NULL, NULL, NULL, NULL, 'spore_print');
+
+  IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'comp_rpc Test C: Expected sporeObservationCount=1 for Leucopholiota (spore_print filter), got %', comp_rpc."sporeObservationCount";
+  END IF;
+
+  IF comp_rpc."sporeMeasurementCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'comp_rpc Test C: Expected sporeMeasurementCount=3 for Leucopholiota (spore_print filter), got %', comp_rpc."sporeMeasurementCount";
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'n')::bigint IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'comp_rpc Test C: Expected sporeSummary.n=3 for Leucopholiota (spore_print filter), got %', comp_rpc."sporeSummary"->>'n';
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'length_min_um')::double precision IS DISTINCT FROM 12.0 THEN
+    RAISE EXCEPTION 'comp_rpc Test C: Expected length_min_um=12.0 for spore_print filter, got %', comp_rpc."sporeSummary"->>'length_min_um';
+  END IF;
+
+  IF (comp_rpc."sporeSummary"->>'length_max_um')::double precision IS DISTINCT FROM 14.0 THEN
+    RAISE EXCEPTION 'comp_rpc Test C: Expected length_max_um=14.0 for spore_print filter, got %', comp_rpc."sporeSummary"->>'length_max_um';
+  END IF;
+
+  IF ((comp_rpc."observations"->0)->>'sporeN')::bigint IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'comp_rpc Test C: Expected sporeN=3 in observation row (spore_print filter), got %', (comp_rpc."observations"->0)->>'sporeN';
+  END IF;
+
+  IF abs(((comp_rpc."observations"->0)->>'lengthMeanUm')::double precision - 13.0) >= 0.01 THEN
+    RAISE EXCEPTION 'comp_rpc Test C: Expected lengthMeanUm≈13.0 for spore_print filter, got %', (comp_rpc."observations"->0)->>'lengthMeanUm';
+  END IF;
+
+  -- Test E: Observation not selected for a prep filter it does not have.
+  -- Leucopholiota americana has no 'dried' image, so zero observations expected.
+  IF EXISTS (SELECT 1 FROM public.get_public_spore_comparison_set(NULL, 'Leucopholiota', NULL, NULL, NULL, NULL, 'dried')) THEN
+    RAISE EXCEPTION 'comp_rpc Test E: Expected no rows for Leucopholiota with dried filter (no dried images exist)';
+  END IF;
+
+  -- Test F: sampleType in observation row is populated when the filter is active.
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set(NULL, 'Leucopholiota', NULL, NULL, NULL, NULL, 'fresh');
+
+  IF (comp_rpc."observations"->0)->>'sampleType' IS DISTINCT FROM 'fresh' THEN
+    RAISE EXCEPTION 'comp_rpc Test F: Expected sampleType=fresh in observation row, got %', (comp_rpc."observations"->0)->>'sampleType';
   END IF;
 
   DELETE FROM auth.users
