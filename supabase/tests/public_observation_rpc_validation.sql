@@ -43,6 +43,7 @@ DECLARE
   mixed_prep_id bigint;
   mixed_fresh_image_id bigint;
   mixed_sp_image_id bigint;
+  dist_rpc record;
 BEGIN
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN visibility DROP NOT NULL';
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN location_precision DROP NOT NULL';
@@ -1469,6 +1470,206 @@ BEGIN
 
   IF (comp_rpc."observations"->0)->>'sampleType' IS DISTINCT FROM 'fresh' THEN
     RAISE EXCEPTION 'comp_rpc Test F: Expected sampleType=fresh in observation row, got %', (comp_rpc."observations"->0)->>'sampleType';
+  END IF;
+
+  -- ── get_public_species_distribution_summary ──────────────────────────────
+
+  -- Test 1: Basic call for Amanita muscaria, no filters.
+  -- Fixture state: 4 Amanita muscaria observations, all with microscopy.
+  -- Public spore measurements: 2 (public_exact_id) + 1 (amanita_se_id) + 1 (amanita_koh_id) = 4.
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary('amanita-muscaria');
+
+  IF dist_rpc."observationCount" IS NULL OR dist_rpc."observationCount" < 4 THEN
+    RAISE EXCEPTION 'dist_rpc Test 1: Expected observationCount >= 4, got %', dist_rpc."observationCount";
+  END IF;
+
+  IF dist_rpc."microscopyObservationCount" < 4 THEN
+    RAISE EXCEPTION 'dist_rpc Test 1: Expected microscopyObservationCount >= 4, got %', dist_rpc."microscopyObservationCount";
+  END IF;
+
+  IF dist_rpc."sporeMeasurementCount" < 4 THEN
+    RAISE EXCEPTION 'dist_rpc Test 1: Expected sporeMeasurementCount >= 4, got %', dist_rpc."sporeMeasurementCount";
+  END IF;
+
+  IF dist_rpc."firstObservedOn" IS NULL THEN
+    RAISE EXCEPTION 'dist_rpc Test 1: Expected firstObservedOn to be non-null';
+  END IF;
+
+  IF dist_rpc."lastObservedOn" IS NULL THEN
+    RAISE EXCEPTION 'dist_rpc Test 1: Expected lastObservedOn to be non-null';
+  END IF;
+
+  IF jsonb_array_length(dist_rpc."monthCounts") < 1 THEN
+    RAISE EXCEPTION 'dist_rpc Test 1: Expected at least one month in monthCounts, got %', jsonb_array_length(dist_rpc."monthCounts");
+  END IF;
+
+  IF dist_rpc."sampleTypeFacets" IS NULL THEN
+    RAISE EXCEPTION 'dist_rpc Test 1: Expected sampleTypeFacets to be non-null';
+  END IF;
+
+  -- Test 2: Country filter reduces count compared to unfiltered.
+  -- amanita_se_id is in SE; unfiltered is 4.
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary('amanita-muscaria', 'SE');
+
+  IF dist_rpc."observationCount" < 1 THEN
+    RAISE EXCEPTION 'dist_rpc Test 2: Expected observationCount >= 1 for SE, got %', dist_rpc."observationCount";
+  END IF;
+
+  IF dist_rpc."observationCount" >= (
+    SELECT "observationCount"
+    FROM public.get_public_species_distribution_summary('amanita-muscaria')
+  ) THEN
+    RAISE EXCEPTION 'dist_rpc Test 2: Expected SE-filtered count to be less than unfiltered count';
+  END IF;
+
+  -- Test 3: Sample type filter (fresh) uses EXISTS — public_exact_id has Fresh
+  -- (stored as fresh after lower-case normalization) and amanita_koh_id has fresh.
+  -- Both are public Amanita muscaria observations.
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary(
+    'amanita-muscaria', NULL, NULL, NULL, NULL, 'fresh'
+  );
+
+  IF dist_rpc."observationCount" < 2 THEN
+    RAISE EXCEPTION 'dist_rpc Test 3: Expected observationCount >= 2 for sample_type=fresh, got %', dist_rpc."observationCount";
+  END IF;
+
+  -- Test 4: p_has_microscopy=true — all returned observations must have microscopy.
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary(
+    'amanita-muscaria', NULL, NULL, NULL, NULL, NULL, NULL, NULL, true
+  );
+
+  IF dist_rpc."observationCount" IS DISTINCT FROM dist_rpc."microscopyObservationCount" THEN
+    RAISE EXCEPTION 'dist_rpc Test 4: Expected observationCount=microscopyObservationCount when has_microscopy=true, got % vs %',
+      dist_rpc."observationCount", dist_rpc."microscopyObservationCount";
+  END IF;
+
+  -- Test 5: mapPoints returned for observations with GPS coordinates.
+  -- public_exact_id has gps_latitude=59.9273.
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary('amanita-muscaria');
+
+  IF jsonb_array_length(dist_rpc."mapPoints") < 1 THEN
+    RAISE EXCEPTION 'dist_rpc Test 5: Expected at least one map point (public_exact_id has GPS), got %',
+      jsonb_array_length(dist_rpc."mapPoints");
+  END IF;
+
+  -- Each map point must have the required structure keys.
+  IF NOT (
+    (dist_rpc."mapPoints"->0) ? 'observationId'
+    AND (dist_rpc."mapPoints"->0) ? 'locationPrecision'
+    AND (dist_rpc."mapPoints"->0) ? 'observedOn'
+  ) THEN
+    RAISE EXCEPTION 'dist_rpc Test 5: Map point is missing required keys (observationId, locationPrecision, observedOn)';
+  END IF;
+
+  -- Test 6: public_exact_id has exact precision and GPS set — its map point must
+  -- have a non-null mapLat.
+  IF NOT EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(dist_rpc."mapPoints") pt
+    WHERE (pt->>'observationId')::bigint = public_exact_id
+      AND (pt->>'mapLat') IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'dist_rpc Test 6: Expected public_exact_id map point to have non-null mapLat';
+  END IF;
+
+  -- Privacy check: region/hidden-precision observations may appear in mapPoints
+  -- only if they have a recorded GPS, but their coordinates must be null.
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(dist_rpc."mapPoints") pt
+    WHERE (pt->>'locationPrecision') NOT IN ('exact', 'fuzzed')
+      AND (pt->>'mapLat') IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'dist_rpc Test 6: region/hidden observation leaked non-null coordinates through mapPoints';
+  END IF;
+
+  -- Test 7: Month counts are within valid range 1–12.
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary('amanita-muscaria');
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(dist_rpc."monthCounts") mc
+    WHERE (mc->>'month')::int < 1 OR (mc->>'month')::int > 12
+  ) THEN
+    RAISE EXCEPTION 'dist_rpc Test 7: monthCounts contains a month value outside 1-12';
+  END IF;
+
+  -- Test 8: Facets are non-empty — brightfield is present from public_exact_id.
+  IF NOT EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(dist_rpc."contrastMethodFacets") f
+    WHERE f->>'value' = 'brightfield'
+  ) THEN
+    RAISE EXCEPTION 'dist_rpc Test 8: Expected brightfield in contrastMethodFacets (from public_exact_id)';
+  END IF;
+
+  -- Test 9: Non-existent species returns no rows.
+  IF EXISTS (SELECT 1 FROM public.get_public_species_distribution_summary('nonexistent-xyz-99')) THEN
+    RAISE EXCEPTION 'dist_rpc Test 9: Expected no rows for nonexistent species';
+  END IF;
+
+  -- ── Mixed-preparation tests (leucopholiota-americana) ────────────────────────
+  -- mixed_prep_id has two microscopy images:
+  --   Image A (fresh): 2 measurements (L=10.0, 11.0)
+  --   Image B (spore_print, inserted later → higher id = "latest"): 3 measurements (L=12.0, 13.0, 14.0)
+  --
+  -- These tests verify:
+  --   A) facets include ALL prep values, not only the latest image
+  --   B) sporeMeasurementCount is filtered at the image/measurement level
+
+  -- Test MP-1: unfiltered — both sample type values appear in facets.
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary('leucopholiota-americana');
+  IF NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(dist_rpc."sampleTypeFacets") f
+    WHERE f->>'value' = 'fresh'
+  ) THEN
+    RAISE EXCEPTION 'dist_rpc MP-1: sampleTypeFacets missing fresh (only latest-image was used)';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(dist_rpc."sampleTypeFacets") f
+    WHERE f->>'value' = 'spore_print'
+  ) THEN
+    RAISE EXCEPTION 'dist_rpc MP-1: sampleTypeFacets missing spore_print (only latest-image was used)';
+  END IF;
+  -- Unfiltered spore count = all 5 measurements
+  IF dist_rpc."sporeMeasurementCount" IS DISTINCT FROM 5 THEN
+    RAISE EXCEPTION 'dist_rpc MP-1: Expected sporeMeasurementCount=5 unfiltered, got %', dist_rpc."sporeMeasurementCount";
+  END IF;
+
+  -- Test MP-2: fresh filter — only 2 fresh measurements, observation still selected.
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary(
+    'leucopholiota-americana', NULL, NULL, NULL, NULL, 'fresh'
+  );
+  IF dist_rpc."observationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'dist_rpc MP-2: Expected observationCount=1 for fresh filter, got %', dist_rpc."observationCount";
+  END IF;
+  IF dist_rpc."sporeMeasurementCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'dist_rpc MP-2: Expected sporeMeasurementCount=2 for fresh filter (image-level), got %', dist_rpc."sporeMeasurementCount";
+  END IF;
+
+  -- Test MP-3: spore_print filter — only 3 spore_print measurements.
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary(
+    'leucopholiota-americana', NULL, NULL, NULL, NULL, 'spore_print'
+  );
+  IF dist_rpc."observationCount" IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'dist_rpc MP-3: Expected observationCount=1 for spore_print filter, got %', dist_rpc."observationCount";
+  END IF;
+  IF dist_rpc."sporeMeasurementCount" IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'dist_rpc MP-3: Expected sporeMeasurementCount=3 for spore_print filter, got %', dist_rpc."sporeMeasurementCount";
+  END IF;
+
+  -- Test MP-4: fresh and spore_print counts differ (proves image-level split).
+  -- Already verified by MP-2 (2) and MP-3 (3).
+
+  -- Test MP-5: no-match prep filter returns zero-count row (slug exists, no obs match).
+  SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary(
+    'leucopholiota-americana', NULL, NULL, NULL, NULL, 'dried'
+  );
+  IF dist_rpc."observationCount" IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'dist_rpc MP-5: Expected observationCount=0 for dried filter, got %', dist_rpc."observationCount";
+  END IF;
+  IF dist_rpc."sporeMeasurementCount" IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'dist_rpc MP-5: Expected sporeMeasurementCount=0 for dried filter, got %', dist_rpc."sporeMeasurementCount";
   END IF;
 
   DELETE FROM auth.users
