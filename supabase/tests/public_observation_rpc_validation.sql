@@ -44,6 +44,7 @@ DECLARE
   mixed_fresh_image_id bigint;
   mixed_sp_image_id bigint;
   dist_rpc record;
+  map_rpc record;
 BEGIN
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN visibility DROP NOT NULL';
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN location_precision DROP NOT NULL';
@@ -1670,6 +1671,91 @@ BEGIN
   END IF;
   IF dist_rpc."sporeMeasurementCount" IS DISTINCT FROM 0 THEN
     RAISE EXCEPTION 'dist_rpc MP-5: Expected sporeMeasurementCount=0 for dried filter, got %', dist_rpc."sporeMeasurementCount";
+  END IF;
+
+  -- ── get_public_map_points ─────────────────────────────────────────────────
+
+  -- Test MP1: Unfiltered call returns at least 1 row (public_exact_id has GPS).
+  SELECT * INTO map_rpc FROM public.get_public_map_points() LIMIT 1;
+  IF map_rpc."observationId" IS NULL THEN
+    RAISE EXCEPTION 'get_public_map_points returned no rows unfiltered';
+  END IF;
+
+  -- Test MP2: Hidden/region observations do not expose coordinates.
+  IF EXISTS (
+    SELECT 1 FROM public.get_public_map_points()
+    WHERE "observationId" IN (hidden_location_id, region_location_id)
+      AND "mapLat" IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'Hidden/region observations leaked coordinates in map points';
+  END IF;
+
+  -- Test MP3: Exact GPS observation returns non-null mapLat.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.get_public_map_points()
+    WHERE "observationId" = public_exact_id AND "mapLat" IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'Exact observation missing mapLat in map points';
+  END IF;
+
+  -- Test MP4: Species slug filter works.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.get_public_map_points(p_species_slug := 'amanita-muscaria')
+    WHERE "observationId" = public_exact_id
+  ) THEN
+    RAISE EXCEPTION 'Species filter did not include Amanita muscaria observation';
+  END IF;
+
+  -- Test MP5: Private/draft/banned excluded (no rows for those ids).
+  IF EXISTS (
+    SELECT 1 FROM public.get_public_map_points()
+    WHERE "observationId" IN (private_id, draft_id, banned_id)
+  ) THEN
+    RAISE EXCEPTION 'Private/draft/banned observations leaked into map points';
+  END IF;
+
+  -- Test MP6: Mixed-prep EXISTS semantics — fresh filter includes mixed_prep_id
+  -- (which has a fresh image even though spore_print is the latest).
+  IF NOT EXISTS (
+    SELECT 1 FROM public.get_public_map_points(p_sample_type := 'fresh')
+    WHERE "observationId" = mixed_prep_id
+  ) THEN
+    RAISE EXCEPTION 'Map points fresh filter did not include mixed-prep observation (EXISTS semantics broken)';
+  END IF;
+
+  -- Test MP7: spore_print filter also includes mixed_prep_id.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.get_public_map_points(p_sample_type := 'spore_print')
+    WHERE "observationId" = mixed_prep_id
+  ) THEN
+    RAISE EXCEPTION 'Map points spore_print filter did not include mixed-prep observation';
+  END IF;
+
+  -- Test MP8: Limit is respected.
+  IF (SELECT count(*) FROM public.get_public_map_points(p_limit := 2)) > 2 THEN
+    RAISE EXCEPTION 'get_public_map_points limit not respected';
+  END IF;
+
+  -- Test MP9: hasMicroscopy filter.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.get_public_map_points(p_has_microscopy := true)
+    WHERE "observationId" = public_exact_id AND "hasMicroscopy" = true
+  ) THEN
+    RAISE EXCEPTION 'hasMicroscopy filter returned no microscopy observations';
+  END IF;
+
+  -- Test MP10: search_public_observations EXISTS fix — mixed_prep_id with fresh filter.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.search_public_observations(p_sample := 'fresh')
+    WHERE id = mixed_prep_id
+  ) THEN
+    RAISE EXCEPTION 'search_public_observations fresh filter (EXISTS fix) did not include mixed-prep observation';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.search_public_observations(p_sample := 'spore_print')
+    WHERE id = mixed_prep_id
+  ) THEN
+    RAISE EXCEPTION 'search_public_observations spore_print filter (EXISTS fix) did not include mixed-prep observation';
   END IF;
 
   DELETE FROM auth.users
