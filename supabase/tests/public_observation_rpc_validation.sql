@@ -928,6 +928,87 @@ BEGIN
     RAISE EXCEPTION 'Spore summary broken after RPC shape change';
   END IF;
 
+  -- ── sporePoints regression tests (fix_public_observation_spore_point_q) ──────
+
+  -- Public observation with public spore data returns sporePoints.
+  SELECT * INTO rpc_row FROM public.get_public_observation(public_exact_id);
+
+  IF rpc_row."sporePoints" IS NULL THEN
+    RAISE EXCEPTION 'sporePoints: expected non-null for public observation with public spore data';
+  END IF;
+
+  -- Fixture has 2 measurements for public_exact_id.
+  IF jsonb_array_length(rpc_row."sporePoints") IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'sporePoints: expected 2 points, got %', jsonb_array_length(rpc_row."sporePoints");
+  END IF;
+
+  -- Each point must contain all required keys.
+  IF NOT (
+    (rpc_row."sporePoints"->0) ? 'id'
+    AND (rpc_row."sporePoints"->0) ? 'observationId'
+    AND (rpc_row."sporePoints"->0) ? 'imageId'
+    AND (rpc_row."sporePoints"->0) ? 'lengthUm'
+    AND (rpc_row."sporePoints"->0) ? 'widthUm'
+    AND (rpc_row."sporePoints"->0) ? 'q'
+  ) THEN
+    RAISE EXCEPTION 'sporePoints: point missing required keys (id, observationId, imageId, lengthUm, widthUm, q)';
+  END IF;
+
+  -- observationId must equal the observation.
+  IF (rpc_row."sporePoints"->0)->>'observationId' IS DISTINCT FROM public_exact_id::text THEN
+    RAISE EXCEPTION 'sporePoints: observationId mismatch, expected % got %',
+      public_exact_id, (rpc_row."sporePoints"->0)->>'observationId';
+  END IF;
+
+  -- imageId must equal the microscope image inserted for public_exact_id.
+  IF (rpc_row."sporePoints"->0)->>'imageId' IS DISTINCT FROM public_image_id::text THEN
+    RAISE EXCEPTION 'sporePoints: imageId mismatch, expected % got %',
+      public_image_id, (rpc_row."sporePoints"->0)->>'imageId';
+  END IF;
+
+  -- q = lengthUm / widthUm (rounded to 4 dp), and must be > 1 for normal spores.
+  -- Fixture points: (10.1, 5.1) and (11.2, 5.4); both have length > width so q > 1.
+  IF NOT (
+    SELECT bool_and(
+      abs(
+        (pt->>'q')::double precision
+        - round(((pt->>'lengthUm')::double precision / (pt->>'widthUm')::double precision)::numeric, 4)::double precision
+      ) < 0.0002
+      AND (pt->>'q')::double precision > 1
+    )
+    FROM jsonb_array_elements(rpc_row."sporePoints") pt
+    WHERE (pt->>'widthUm')::double precision > 0
+  ) THEN
+    RAISE EXCEPTION 'sporePoints: q is not length/width (rounded to 4dp) or not > 1 for all points';
+  END IF;
+
+  -- Null spore_data_visibility must not expose sporePoints.
+  SELECT * INTO rpc_row FROM public.get_public_observation(null_spore_visibility_id);
+  IF rpc_row."sporePoints" IS NOT NULL THEN
+    RAISE EXCEPTION 'sporePoints: null spore_data_visibility leaked sporePoints';
+  END IF;
+
+  -- Private spore_data_visibility must not expose sporePoints.
+  SELECT * INTO rpc_row FROM public.get_public_observation(amanita_private_spore_id);
+  IF rpc_row."sporePoints" IS NOT NULL THEN
+    RAISE EXCEPTION 'sporePoints: private spore_data_visibility leaked sporePoints';
+  END IF;
+
+  -- Deleted microscope images must not contribute points.
+  SELECT * INTO rpc_row FROM public.get_public_observation(deleted_microscopy_id);
+  IF rpc_row."sporePoints" IS NOT NULL THEN
+    RAISE EXCEPTION 'sporePoints: deleted microscope image contributed points';
+  END IF;
+
+  -- Purged microscope images must not contribute points.
+  -- (purged_microscopy_id has a real measurement on its purged image)
+  SELECT * INTO rpc_row FROM public.get_public_observation(purged_microscopy_id);
+  IF rpc_row."sporePoints" IS NOT NULL THEN
+    RAISE EXCEPTION 'sporePoints: purged microscope image contributed points';
+  END IF;
+
+  -- ─────────────────────────────────────────────────────────────────────────────
+
   IF NOT EXISTS (
     SELECT 1
     FROM public.search_public_species() s
