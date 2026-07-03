@@ -204,6 +204,31 @@ function _detailAiObservationScientificName(obs = currentObs) {
   return _detailAiNormalizeText([obs?.genus, obs?.species].filter(Boolean).join(' '))
 }
 
+function _buildShareFilenameStem(obs) {
+  const sci = [obs?.genus, obs?.species].filter(Boolean).join(' ').trim()
+    || obs?.ai_selected_scientific_name
+    || obs?.common_name
+    || ''
+  const date = _shareObservationDate(obs)
+  const name = _shareFilenameSlug(sci) || 'sporely'
+  return date ? `${name}-${date}` : name
+}
+
+function _shareObservationDate(obs) {
+  const raw = obs?.date || obs?.captured_at || obs?.created_at
+  if (!raw) return ''
+  const dt = new Date(raw)
+  if (!Number.isNaN(dt.getTime())) return dt.toISOString().slice(0, 10)
+  return String(raw).slice(0, 10)
+}
+
+function _shareFilenameSlug(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^A-Za-z0-9._-]/g, '')
+}
+
 function _detailAiObservationCommonName(obs = currentObs) {
   return _detailAiNormalizeText(obs?.common_name || '')
 }
@@ -1189,9 +1214,12 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   img.addEventListener('click', () => {
     const galleryImgs = Array.from(gallery.querySelectorAll('.detail-gallery-img'))
     const currentIndex = galleryImgs.indexOf(img)
-    openPhotoViewer(galleryImgs.map(i => ({
+    const stem = _buildShareFilenameStem(currentObs)
+    openPhotoViewer(galleryImgs.map((i, idx) => ({
       src: i.dataset.fullSrc || i.src,
-      fallbackSrc: i.src
+      fallbackSrc: i.src,
+      storagePath: i.dataset.storagePath || '',
+      filenameStem: galleryImgs.length > 1 ? `${stem}-${idx + 1}` : stem,
     })), Math.max(0, currentIndex))
   })
   container.appendChild(img)

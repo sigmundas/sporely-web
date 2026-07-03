@@ -262,7 +262,9 @@ function pickPictureUrl(pred, taxon) {
 }
 
 function _normalizeArtsorakelPrediction(pred, langNorm, rank) {
-  const taxon = pred?.taxon || {}
+  const taxon = pred?.taxon && typeof pred.taxon === 'object'
+    ? pred.taxon
+    : (pred && typeof pred === 'object' ? pred : {})
   const scientificName = (taxon.scientificName || taxon.scientific_name || taxon.name || '').trim() || null
   const vernacularName = pickVernacular(taxon, langNorm)
   const displayName = vernacularName && scientificName && vernacularName.toLowerCase() !== scientificName.toLowerCase()
@@ -294,7 +296,7 @@ function _normalizeArtsorakelPrediction(pred, langNorm, rank) {
     redlistSource: 'Artsdatabanken',
     picture_url: pictureUrl,
     pictureUrl,
-    taxon: pred?.taxon || null,
+    taxon,
     raw: pred,
   }
 }
@@ -308,6 +310,17 @@ function _buildArtsorakelFilename(blob) {
   if (type === 'image/heic') return 'photo.heic'
   if (type === 'image/heif') return 'photo.heif'
   return 'photo.jpg'
+}
+
+function _buildArtsorakelFormData(preparedItems = [], fieldName = 'image') {
+  const form = new FormData()
+  for (const item of preparedItems) {
+    const blob = item?.blob
+    if (!isBlob(blob)) continue
+    form.append(fieldName, blob, _buildArtsorakelFilename(blob))
+  }
+  form.append('application', SPORELY_APP_NAME)
+  return form
 }
 
 function _shortText(value, limit = 240) {
@@ -340,12 +353,211 @@ function _endpointMeta(kind, url) {
   }
 }
 
+function _flattenArtsorakelPredictions(data) {
+  if (!data || typeof data !== 'object') return []
+
+  const flattened = []
+  const rawPredictions = Array.isArray(data.predictions) ? data.predictions : []
+
+  for (const prediction of rawPredictions) {
+    if (!prediction || typeof prediction !== 'object') continue
+
+    const taxa = prediction.taxa && typeof prediction.taxa === 'object' ? prediction.taxa : null
+    const items = Array.isArray(taxa?.items) ? taxa.items : null
+    if (items?.length) {
+      for (const item of items) {
+        if (!item || typeof item !== 'object') continue
+        const scientificId = String(
+          item.scientific_name_id
+          || item.scientificNameId
+          || item.taxonId
+          || item.taxon_id
+          || '',
+        ).trim()
+        if (!scientificId) continue
+        if (Number(item.probability || 0) <= 0) continue
+        flattened.push({ ...item })
+      }
+      continue
+    }
+
+    const fallback = { ...prediction }
+    const fallbackTaxon = fallback.taxon && typeof fallback.taxon === 'object' ? fallback.taxon : null
+    const scientificName = String(
+      fallbackTaxon?.scientificName
+      || fallbackTaxon?.scientific_name
+      || fallbackTaxon?.name
+      || fallback.scientificName
+      || fallback.scientific_name
+      || fallback.name
+      || '',
+    ).trim()
+    const scientificId = String(
+      fallbackTaxon?.scientific_name_id
+      || fallbackTaxon?.scientificNameId
+      || fallbackTaxon?.taxonId
+      || fallbackTaxon?.taxon_id
+      || fallback.scientific_name_id
+      || fallback.scientificNameId
+      || fallback.taxonId
+      || fallback.taxon_id
+      || '',
+    ).trim()
+    if (!scientificName && !scientificId) continue
+    if (Number(fallback.probability || 0) <= 0) continue
+    flattened.push(fallback)
+  }
+
+  const score = item => {
+    for (const key of ['probability', 'combined_score', 'vision_score', 'score', 'frequency_score']) {
+      const value = item?.[key]
+      if (value !== undefined && value !== null) {
+        const parsed = Number(value)
+        if (Number.isFinite(parsed)) return parsed
+      }
+    }
+    return 0
+  }
+
+  return flattened
+    .sort((a, b) => score(b) - score(a))
+    .slice(0, 5)
+}
+
 async function _prepareArtsorakelImageBlob(blob, options = {}) {
   const prepared = await prepareImageBlobForUpload(blob, {
     ...options,
     maxEdge: Math.max(1, Number(options.maxEdge || getArtsorakelMaxEdge()) || 1),
   })
   return prepared
+}
+
+async function _postArtsorakelRequest(url, preparedItems, headers = null, fieldName = 'image', kind = 'direct', options = {}) {
+  const request = {
+    method: 'POST',
+    body: _buildArtsorakelFormData(preparedItems, fieldName),
+    headers: _buildArtsorakelRequestHeaders(headers),
+    signal: options.signal,
+  }
+
+  for (const [index, item] of preparedItems.entries()) {
+    await _logArtsorakelRequestIfEnabled({
+      aiBlob: item?.blob,
+      preparedMeta: item?.preparedMeta,
+      options,
+      url,
+      fieldName,
+      imageIndex: Number(item?.imageIndex ?? index ?? 0),
+      imageCount: Number(item?.imageCount || preparedItems.length || 1),
+    })
+  }
+
+  const response = await fetch(url, request)
+  if (response.ok) return response
+
+  let payload = null
+  try {
+    const text = typeof response.text === 'function' ? await response.text() : ''
+    try {
+      payload = text ? JSON.parse(text) : null
+    } catch (_) {
+      payload = text
+    }
+  } catch (_) {}
+
+  const meta = _endpointMeta(kind, url)
+  recordDebugJsonResponse({
+    source: 'artsorakel',
+    label: `${meta.kind} ${meta.origin}${meta.path}`,
+    endpoint: url,
+    status: response.status,
+    ok: false,
+    body: payload,
+    fieldName,
+    imageIndex: Number(preparedItems[0]?.imageIndex || 0),
+    imageCount: Number(preparedItems[0]?.imageCount || preparedItems.length || 1),
+  })
+
+  const firstBlob = preparedItems.find(item => isBlob(item?.blob))?.blob || preparedItems[0]?.blob || null
+  const error = new Error(
+    `${meta.kind} endpoint ${meta.origin}${meta.path} field=${fieldName} status=${response.status}${response.statusText ? ` ${response.statusText}` : ''}${_responseBodyExcerpt(payload) ? ` body=${_responseBodyExcerpt(payload)}` : ''} blob=${firstBlob?.type || 'unknown'}:${firstBlob?.size || 0}`
+  )
+  error.status = response.status
+  error.statusText = response.statusText
+  error.endpointKind = meta.kind
+  error.endpointOrigin = meta.origin
+  error.endpointPath = meta.path
+  error.fieldName = fieldName
+  error.responseBody = payload
+  error.blobType = firstBlob?.type || ''
+  error.blobSize = firstBlob?.size || 0
+  throw error
+}
+
+async function _requestArtsorakelResponse(preparedItems, options = {}) {
+  const proxyBaseUrl = _getArtsorakelProxyBaseUrl()
+  let proxyHeaders = null
+
+  if (proxyBaseUrl) {
+    const session = await getSharedAuthSession()
+    if (session?.access_token) {
+      proxyHeaders = { Authorization: `Bearer ${session.access_token}` }
+    }
+  }
+
+  let response = null
+  let lastError = null
+  let endpointUrl = ARTSDATA_AI_URL
+  let endpointKind = 'direct'
+
+  async function runEndpoint(url, headers = null, kind = 'direct') {
+    const attempts = []
+    let lastAttemptError = null
+    for (const fieldName of ['image', 'file']) {
+      try {
+        return await _postArtsorakelRequest(url, preparedItems, headers, fieldName, kind, options)
+      } catch (error) {
+        lastAttemptError = error
+        attempts.push(error)
+      }
+    }
+    const endpoint = _endpointMeta(kind, url)
+    const details = attempts.length ? ` ${attempts.map(err => err.message).join(' | ')}` : ''
+    const error = new Error(`Artsdata AI ${endpoint.kind} failed:${details}`.trim())
+    error.cause = lastAttemptError || null
+    error.attempts = attempts
+    throw error
+  }
+
+  if (proxyBaseUrl) {
+    try {
+      endpointUrl = `${proxyBaseUrl}/artsorakel`
+      endpointKind = 'proxy'
+      response = await runEndpoint(endpointUrl, proxyHeaders, endpointKind)
+    } catch (error) {
+      lastError = error
+      console.warn('Artsorakel proxy failed, falling back to direct endpoint:', error)
+    }
+  }
+
+  if (!response) {
+    try {
+      endpointUrl = ARTSDATA_AI_URL
+      endpointKind = 'direct'
+      response = await runEndpoint(endpointUrl, null, endpointKind)
+    } catch (error) {
+      const combined = lastError
+        ? new Error(`${lastError.message}; direct fallback failed: ${error.message}`)
+        : error
+      if (combined === error) throw error
+      combined.cause = error
+      combined.proxyError = lastError
+      combined.directError = error
+      throw combined
+    }
+  }
+
+  return { response, endpointUrl, endpointKind }
 }
 
 /**
@@ -384,158 +596,35 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
   const langNorm = normalizeLang(lang)
   const onImageSent = typeof options?.onImageSent === 'function' ? options.onImageSent : null
   const onIdReceived = typeof options?.onIdReceived === 'function' ? options.onIdReceived : null
-  const signal = options?.signal
+  const preparedItems = [{
+    blob: aiBlob,
+    preparedMeta: prepared,
+    imageIndex: Number(options.imageIndex || 0),
+    imageCount: Number(options.totalImages || 1),
+  }]
 
-  async function tryPost(url, fieldName, headers = null, kind = 'direct') {
-    const form = new FormData()
-    form.append(fieldName, aiBlob, _buildArtsorakelFilename(aiBlob))
-    const request = {
-      method: 'POST',
-      body: form,
-      headers: _buildArtsorakelRequestHeaders(headers),
-      signal,
-    }
-    await _logArtsorakelRequestIfEnabled({
-      aiBlob,
-      preparedMeta: prepared,
-      options,
-      url,
-      fieldName,
-      imageIndex: Number(options.imageIndex || 0),
-      imageCount: Number(options.totalImages || 1),
-    })
-    const response = await fetch(url, request)
-    if (!response.ok) {
-      let payload = null
-      try {
-        const text = typeof response.text === 'function' ? await response.text() : ''
-        try {
-          payload = text ? JSON.parse(text) : null
-        } catch (_) {
-          payload = text
-        }
-      } catch (_) {}
-      const meta = _endpointMeta(kind, url)
-      recordDebugJsonResponse({
-        source: 'artsorakel',
-        label: `${meta.kind} ${meta.origin}${meta.path}`,
-        endpoint: url,
-        status: response.status,
-        ok: false,
-        body: payload,
-        fieldName,
-        imageIndex: Number(options.imageIndex || 0),
-        imageCount: Number(options.totalImages || 1),
-      })
-      const error = new Error(
-        `${meta.kind} endpoint ${meta.origin}${meta.path} field=${fieldName} status=${response.status}${response.statusText ? ` ${response.statusText}` : ''}${_responseBodyExcerpt(payload) ? ` body=${_responseBodyExcerpt(payload)}` : ''} blob=${aiBlob.type || 'unknown'}:${aiBlob.size || 0}`
-      )
-      error.status = response.status
-      error.statusText = response.statusText
-      error.endpointKind = meta.kind
-      error.endpointOrigin = meta.origin
-      error.endpointPath = meta.path
-      error.fieldName = fieldName
-      error.responseBody = payload
-      error.blobType = aiBlob.type || ''
-      error.blobSize = aiBlob.size || 0
-      throw error
-    }
-    return response
-  }
-
-  async function runAgainstEndpoint(url, headers = null, kind = 'direct') {
-    const attempts = []
-    let lastError = null
-    for (const fieldName of ['image', 'file']) {
-      try {
-        const response = await tryPost(url, fieldName, headers, kind)
-        return response
-      } catch (error) {
-        lastError = error
-        attempts.push(error)
-      }
-    }
-    const endpoint = _endpointMeta(kind, url)
-    const details = attempts.length ? ` ${attempts.map(err => err.message).join(' | ')}` : ''
-    const error = new Error(`Artsdata AI ${endpoint.kind} failed:${details}`.trim())
-    error.cause = lastError || null
-    error.attempts = attempts
-    throw error
-  }
-
-  const proxyBaseUrl = _getArtsorakelProxyBaseUrl()
-  let proxyHeaders = null
-
-  if (proxyBaseUrl) {
-    const session = await getSharedAuthSession()
-    if (session?.access_token) {
-      proxyHeaders = { Authorization: `Bearer ${session.access_token}` }
-    }
-  }
-
-  let res = null
-  let lastError = null
   onImageSent?.()
-
-  if (proxyBaseUrl) {
-    try {
-      res = await runAgainstEndpoint(`${proxyBaseUrl}/artsorakel`, proxyHeaders, 'proxy')
-    } catch (error) {
-      lastError = error
-      console.warn('Artsorakel proxy failed, falling back to direct endpoint:', error)
-    }
-  }
-
-  if (!res) {
-    try {
-      res = await runAgainstEndpoint(ARTSDATA_AI_URL, null, 'direct')
-    } catch (error) {
-      const combined = lastError
-        ? new Error(`${lastError.message}; direct fallback failed: ${error.message}`)
-        : error
-      if (combined === error) throw error
-      combined.cause = error
-      combined.proxyError = lastError
-      combined.directError = error
-      throw combined
-    }
-  }
-
-  const data = await res.json()
+  const { response, endpointUrl, endpointKind } = await _requestArtsorakelResponse(preparedItems, options)
+  const data = await response.json()
   recordDebugJsonResponse({
     source: 'artsorakel',
-    label: `direct ${ARTSDATA_AI_URL}`,
-    endpoint: ARTSDATA_AI_URL,
-    status: res.status,
-    ok: res.ok,
+    label: `${endpointKind} ${endpointUrl}`,
+    endpoint: endpointUrl,
+    status: response.status,
+    ok: response.ok,
     body: data,
     fieldName: 'image',
     imageIndex: Number(options.imageIndex || 0),
     imageCount: Number(options.totalImages || 1),
   })
-  const predictions = _extractPredictions(data)
+  const predictions = _normalizePredictions(data, langNorm)
   onIdReceived?.(predictions)
 
-  return _normalizePredictions(predictions, langNorm)
-}
-
-function _extractPredictions(data) {
-  if (Array.isArray(data)) return data
-  if (!data || typeof data !== 'object') return []
-
-  for (const key of ['predictions', 'results', 'matches', 'items', 'data']) {
-    if (Array.isArray(data[key])) return data[key]
-  }
-
-  if (Array.isArray(data?.data?.predictions)) return data.data.predictions
-  if (Array.isArray(data?.result?.predictions)) return data.result.predictions
-  if (data?.taxon || data?.scientificName || data?.probability) return [data]
-  return []
+  return predictions
 }
 
 function _normalizePredictions(data, langNorm) {
-  return _extractPredictions(data)
+  return _flattenArtsorakelPredictions(data)
     .filter(p => p?.taxon?.vernacularName !== '*** Utdatert versjon ***')
     .map((pred, index) => _normalizeArtsorakelPrediction(pred, langNorm, index + 1))
 }
@@ -652,32 +741,60 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
     })
   }
 
-  const tolerateFailures = options?.tolerateFailures === true
-  const responses = tolerateFailures
-    ? await Promise.allSettled(preparedBlobs.map((item, index) => runArtsorakel(item.blob, lang, {
-        ...options,
-        prepared: true,
-        preparedBlob: item.blob,
-        preparedMeta: item.preparedMeta,
-        totalImages: preparedBlobs.length,
-        imageIndex: index,
-      })))
-        .then(results => {
-          const fulfilled = results
-            .filter(result => result.status === 'fulfilled')
-            .map(result => result.value)
-          if (fulfilled.length) return fulfilled
-          const firstError = results.find(result => result.status === 'rejected')?.reason
-          throw firstError || new Error('Artsorakel failed for all images')
-        })
-    : await Promise.all(preparedBlobs.map((item, index) => runArtsorakel(item.blob, lang, {
-        ...options,
-        prepared: true,
-        preparedBlob: item.blob,
-        preparedMeta: item.preparedMeta,
-        totalImages: preparedBlobs.length,
-        imageIndex: index,
-      })))
+  const onImageSent = typeof options?.onImageSent === 'function' ? options.onImageSent : null
+  const onIdReceived = typeof options?.onIdReceived === 'function' ? options.onIdReceived : null
+  const langNorm = normalizeLang(lang)
+
+  for (let index = 0; index < preparedBlobs.length; index += 1) {
+    onImageSent?.()
+  }
+
+  try {
+    const { response, endpointUrl, endpointKind } = await _requestArtsorakelResponse(preparedBlobs, options)
+    const data = await response.json()
+    recordDebugJsonResponse({
+      source: 'artsorakel',
+      label: `${endpointKind} ${endpointUrl}`,
+      endpoint: endpointUrl,
+      status: response.status,
+      ok: response.ok,
+      body: data,
+      fieldName: 'image',
+      imageIndex: 0,
+      imageCount: preparedBlobs.length,
+    })
+    const predictions = _normalizePredictions(data, langNorm)
+    for (let index = 0; index < preparedBlobs.length; index += 1) {
+      onIdReceived?.(predictions)
+    }
+    return predictions
+  } catch (batchError) {
+    if (!options?.tolerateFailures) throw batchError
+    console.warn('Artsorakel batch request failed, falling back to per-image requests:', batchError)
+  }
+
+  const fallbackResponses = await Promise.allSettled(preparedBlobs.map((item, index) => runArtsorakel(item.blob, lang, {
+    ...options,
+    onImageSent: undefined,
+    onIdReceived: undefined,
+    prepared: true,
+    preparedBlob: item.blob,
+    preparedMeta: item.preparedMeta,
+    totalImages: preparedBlobs.length,
+    imageIndex: index,
+  })))
+
+  const responses = fallbackResponses
+    .filter(result => result.status === 'fulfilled')
+    .map(result => result.value)
+  if (!responses.length) {
+    const firstError = fallbackResponses.find(result => result.status === 'rejected')?.reason
+    throw firstError || new Error('Artsorakel failed for all images')
+  }
+
+  for (let index = 0; index < responses.length; index += 1) {
+    onIdReceived?.(responses[index])
+  }
   return _combinePredictionResponses(responses, preparedBlobs.length)
 }
 

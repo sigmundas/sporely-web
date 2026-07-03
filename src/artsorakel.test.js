@@ -223,6 +223,7 @@ test('converts a small WebP blob to JPEG before posting', async () => {
     const sent = form.get('image')
     const headers = new Headers(calls[0].init.headers)
     assert.equal(calls[0].url, 'https://ai.artsdatabanken.no')
+    assert.equal(form.get('application'), 'Sporely')
     assert.equal(sent.type, 'image/jpeg')
     assert.equal(form.entries[0].filename, 'photo.jpg')
     assert.equal(headers.get('X-App-Name'), 'Sporely')
@@ -433,7 +434,7 @@ test('runArtsorakel preserves taxon.picture as picture_url and pictureUrl', asyn
   })
 })
 
-test('runArtsorakelForBlobs keeps picture metadata when combining multi-image predictions', async () => {
+test('runArtsorakelForBlobs batches multiple images and flattens the combined response', async () => {
   await withHarness(async harness => {
     const calls = []
     const firstBlob = new Blob(['first'], { type: 'image/jpeg' })
@@ -442,38 +443,28 @@ test('runArtsorakelForBlobs keeps picture metadata when combining multi-image pr
     harness.setBlobDimensions(secondBlob, 800, 600)
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
-      if (calls.length === 1) {
-        return makeResponse({
-          jsonBody: {
-            predictions: [
-              {
-                probability: 0.62,
-                taxon: {
-                  scientificName: 'Fomitopsis pinicola',
-                  vernacularName: 'Rødrandkjuke',
-                  taxonId: 'NBIC:11111',
-                  scientific_name_id: 'NBIC:11111',
-                  infoUrl: 'https://artsdatabanken.no/Pages/361402',
-                  redListCategory: 'LC',
-                },
-              },
-            ],
-          },
-        })
-      }
       return makeResponse({
         jsonBody: {
           predictions: [
             {
-              probability: 0.91,
+              probability: 1,
               taxon: {
-                scientificName: 'Fomitopsis pinicola',
-                vernacularName: 'Rødrandkjuke',
-                taxonId: 'NBIC:11111',
-                scientific_name_id: 'NBIC:11111',
-                infoUrl: 'https://artsdatabanken.no/Pages/361402',
-                picture: 'https://artsdatabanken.no/Media/F49546?mode=128x128',
-                redListCategory: 'LC',
+                vernacularName: '*** Utdatert versjon ***',
+                name: 'Vennligst oppdater Artsorakel via app store, eller Ctrl-Shift-R på pc',
+              },
+              taxa: {
+                items: [
+                  {
+                    probability: 0.91,
+                    scientificName: 'Fomitopsis pinicola',
+                    vernacularName: 'Rødrandkjuke',
+                    taxonId: 'NBIC:11111',
+                    scientific_name_id: 'NBIC:11111',
+                    infoUrl: 'https://artsdatabanken.no/Pages/361402',
+                    picture: 'https://artsdatabanken.no/Media/F49546?mode=128x128',
+                    redListCategory: 'LC',
+                  },
+                ],
               },
             },
           ],
@@ -483,8 +474,10 @@ test('runArtsorakelForBlobs keeps picture metadata when combining multi-image pr
 
     const results = await runArtsorakelForBlobs([firstBlob, secondBlob], 'no')
 
-    assert.equal(calls.length, 2)
+    assert.equal(calls.length, 1)
     assert.equal(results.length, 1)
+    assert.equal(calls[0].init.body.get('application'), 'Sporely')
+    assert.equal(calls[0].init.body.entries.filter(entry => entry.name === 'image').length, 2)
     assert.equal(results[0].scientificName, 'Fomitopsis pinicola')
     assert.equal(results[0].taxonId, 'NBIC:11111')
     assert.equal(results[0].species_url, 'https://artsdatabanken.no/Pages/361402')
@@ -492,8 +485,8 @@ test('runArtsorakelForBlobs keeps picture metadata when combining multi-image pr
     assert.equal(results[0].picture_url, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
     assert.equal(results[0].pictureUrl, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
     assert.equal(results[0].taxon.picture, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
-    assert.equal(results[0].raw.taxon.picture, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
-    assert.equal(results[0].probability, (0.62 + 0.91) / 2)
+    assert.equal(results[0].raw.picture, 'https://artsdatabanken.no/Media/F49546?mode=128x128')
+    assert.equal(results[0].probability, 0.91)
   })
 })
 

@@ -5092,6 +5092,32 @@ html.light .ai-id-dot.is-complete::before {
   font-size: 22px; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
 }
+#photo-viewer-share {
+  position: absolute; top: 16px; left: 16px; z-index: 10;
+  width: 40px; height: 40px; border-radius: 50%;
+  background: rgba(0,0,0,0.6); border: none; color: #fff;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+#photo-viewer-share-menu {
+  position: absolute; top: 64px; left: 16px; z-index: 11;
+  background: rgba(30,30,30,0.96);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  display: flex; flex-direction: column; gap: 2px;
+  min-width: 160px;
+}
+#photo-viewer-share-menu button {
+  background: transparent; border: none; color: #fff;
+  padding: 10px 14px; border-radius: 6px;
+  font-size: 14px; font-family: inherit; text-align: left;
+  cursor: pointer;
+}
+#photo-viewer-share-menu button:hover,
+#photo-viewer-share-menu button:active {
+  background: rgba(255,255,255,0.12);
+}
 .photo-nav-btn {
   position: absolute; top: 50%; transform: translateY(-50%);
   width: 44px; height: 44px; border-radius: 50%;

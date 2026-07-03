@@ -1,5 +1,9 @@
 // Full-screen photo viewer with pinch-to-zoom, pan, and swipe navigation
 
+import { showToast } from './toast.js'
+import { downloadObservationImageBlob } from './images.js'
+import { isNativeApp } from './platform.js'
+
 let _photos = []
 let _current = 0
 let _scale = 1
@@ -11,7 +15,7 @@ let _startPanX = 0
 let _startPanY = 0
 let _lastTap = 0
 
-let _overlay, _img, _counter, _prevBtn, _nextBtn
+let _overlay, _img, _counter, _prevBtn, _nextBtn, _shareBtn, _shareMenu
 
 export function initPhotoViewer() {
   _overlay = document.getElementById('photo-viewer')
@@ -19,11 +23,32 @@ export function initPhotoViewer() {
   _counter = document.getElementById('photo-viewer-counter')
   _prevBtn = document.getElementById('photo-viewer-prev')
   _nextBtn = document.getElementById('photo-viewer-next')
+  _shareBtn = document.getElementById('photo-viewer-share')
+  _shareMenu = document.getElementById('photo-viewer-share-menu')
 
   document.getElementById('photo-viewer-close').addEventListener('click', closePhotoViewer)
-  _overlay.addEventListener('click', e => { if (e.target === _overlay) closePhotoViewer() })
+  _overlay.addEventListener('click', e => {
+    if (e.target === _overlay) closePhotoViewer()
+    else if (!e.target.closest('#photo-viewer-share') && !e.target.closest('#photo-viewer-share-menu')) {
+      _hideShareMenu()
+    }
+  })
   _prevBtn.addEventListener('click', () => _navigate(-1))
   _nextBtn.addEventListener('click', () => _navigate(1))
+
+  _shareBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    _toggleShareMenu()
+  })
+  _shareMenu.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-share-action]')
+    if (!btn) return
+    e.stopPropagation()
+    _hideShareMenu()
+    if (btn.dataset.shareAction === 'share') _shareCurrent({ reduced: false })
+    else if (btn.dataset.shareAction === 'share-small') _shareCurrent({ reduced: true })
+    else if (btn.dataset.shareAction === 'save') _saveCurrent()
+  })
 
   _img.addEventListener('touchstart', _onTouchStart, { passive: false })
   _img.addEventListener('touchmove', _onTouchMove, { passive: false })
@@ -55,12 +80,234 @@ export function openPhotoViewer(photos, startIndex = 0) {
 export function closePhotoViewer() {
   _overlay.style.display = 'none'
   document.body.style.overflow = ''
+  _hideShareMenu()
   _resetTransform()
   _photos = []
 }
 
+function _toggleShareMenu() {
+  if (!_shareMenu) return
+  _shareMenu.style.display = _shareMenu.style.display === 'none' ? 'flex' : 'none'
+}
+
+function _hideShareMenu() {
+  if (_shareMenu) _shareMenu.style.display = 'none'
+}
+
+function _currentPhoto() {
+  return _photos[_current] || null
+}
+
+function _currentSrc() {
+  const photo = _currentPhoto()
+  if (!photo) return ''
+  return typeof photo === 'string' ? photo : (photo?.src || '')
+}
+
+function _currentStoragePath() {
+  const photo = _currentPhoto()
+  return (photo && typeof photo === 'object' && photo.storagePath) || ''
+}
+
+async function _fetchCurrentBlob() {
+  const storagePath = _currentStoragePath()
+  if (storagePath) {
+    try {
+      const blob = await downloadObservationImageBlob(storagePath, { variant: 'original' })
+      if (blob) return blob
+    } catch (_) { /* fall through to direct fetch */ }
+  }
+  const src = _currentSrc()
+  if (!src) throw new Error('no-image')
+  const res = await fetch(src)
+  if (!res.ok) throw new Error(`fetch failed (${res.status})`)
+  return res.blob()
+}
+
+function _currentFilenameStem() {
+  const photo = _currentPhoto()
+  return (photo && typeof photo === 'object' && photo.filenameStem) || ''
+}
+
+function _filenameFor(blob) {
+  const ext = _extForBlob(blob)
+  const stem = _currentFilenameStem()
+  if (stem) return `${stem}.${ext}`
+  const candidates = [_currentStoragePath(), _currentSrc()].filter(Boolean)
+  for (const candidate of candidates) {
+    try {
+      const url = new URL(candidate, globalThis.location?.href)
+      const last = url.pathname.split('/').pop() || ''
+      if (last && /\.[a-z0-9]{2,5}$/i.test(last)) return last
+    } catch (_) { /* ignore */ }
+    const last = candidate.split('/').pop()
+    if (last && /\.[a-z0-9]{2,5}$/i.test(last)) return last
+  }
+  return `sporely-${Date.now()}.${ext}`
+}
+
+function _extForBlob(blob) {
+  const type = blob?.type || ''
+  if (type.includes('png')) return 'png'
+  if (type.includes('webp')) return 'webp'
+  if (type.includes('gif')) return 'gif'
+  if (type.includes('heic')) return 'heic'
+  return 'jpg'
+}
+
+const REDUCED_SHARE_MAX_EDGE = 1200
+const REDUCED_SHARE_QUALITY = 0.85
+
+async function _shareCurrent({ reduced = false } = {}) {
+  let blob = null
+  let name = ''
+  try {
+    const original = await _fetchCurrentBlob()
+    if (reduced) {
+      blob = await _resizeBlobToJpeg(original, REDUCED_SHARE_MAX_EDGE, REDUCED_SHARE_QUALITY)
+      const stem = _currentFilenameStem() || `sporely-${Date.now()}`
+      name = `${stem}-small.jpg`
+    } else {
+      blob = original
+      name = _filenameFor(original)
+    }
+
+    if (isNativeApp()) {
+      await _shareBlobNative(blob, name)
+      return
+    }
+    const file = new File([blob], name, { type: blob.type || 'image/jpeg' })
+    if (navigator.canShare?.({ files: [file] }) && navigator.share) {
+      await navigator.share({ files: [file], title: name })
+      return
+    }
+    throw new Error('Web Share API unavailable')
+  } catch (err) {
+    if (err?.name === 'AbortError') return
+    if (blob && name) {
+      try {
+        await _persistBlob(blob, name)
+        showToast(`Share unavailable — saved as ${name}`)
+        return
+      } catch (_) { /* fall through */ }
+    }
+    showToast(`Share failed: ${err?.message || err}`)
+  }
+}
+
+async function _shareBlobNative(blob, filename) {
+  const [{ Filesystem, Directory }, { Share }] = await Promise.all([
+    import('@capacitor/filesystem'),
+    import('@capacitor/share'),
+  ])
+  const base64 = await _blobToBase64(blob)
+  const written = await Filesystem.writeFile({
+    path: `share/${filename}`,
+    data: base64,
+    directory: Directory.Cache,
+    recursive: true,
+  })
+  const uri = written?.uri
+  if (!uri) throw new Error('Failed to stage file for share')
+  await Share.share({
+    title: filename,
+    url: uri,
+    dialogTitle: 'Share image',
+  })
+}
+
+async function _resizeBlobToJpeg(blob, maxEdge, quality) {
+  const bitmap = await _decodeBlob(blob)
+  const srcW = bitmap.width || 0
+  const srcH = bitmap.height || 0
+  const longest = Math.max(srcW, srcH)
+  const scale = longest > maxEdge ? maxEdge / longest : 1
+  const outW = Math.max(1, Math.round(srcW * scale))
+  const outH = Math.max(1, Math.round(srcH * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = outW
+  canvas.height = outH
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('canvas 2d context unavailable')
+  ctx.drawImage(bitmap, 0, 0, outW, outH)
+  bitmap.close?.()
+  const out = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality))
+  if (!out) throw new Error('Failed to encode reduced image')
+  return out
+}
+
+async function _decodeBlob(blob) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      return await createImageBitmap(blob)
+    } catch (_) { /* fall through to <img> decode */ }
+  }
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img) }
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image decode failed')) }
+    img.src = url
+  })
+}
+
+async function _saveCurrent() {
+  try {
+    const blob = await _fetchCurrentBlob()
+    const name = _filenameFor(blob)
+    await _persistBlob(blob, name)
+    showToast(`Saved ${name}`)
+  } catch (err) {
+    showToast(`Save failed: ${err?.message || err}`)
+  }
+}
+
+async function _persistBlob(blob, filename) {
+  if (isNativeApp()) {
+    await _saveBlobToNativeFilesystem(blob, filename)
+    return
+  }
+  _saveBlobViaAnchor(blob, filename)
+}
+
+function _saveBlobViaAnchor(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+async function _saveBlobToNativeFilesystem(blob, filename) {
+  const { Filesystem, Directory } = await import('@capacitor/filesystem')
+  const base64 = await _blobToBase64(blob)
+  await Filesystem.writeFile({
+    path: `Sporely/${filename}`,
+    data: base64,
+    directory: Directory.Documents,
+    recursive: true,
+  })
+}
+
+function _blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error || new Error('read failed'))
+    reader.onload = () => {
+      const result = String(reader.result || '')
+      const comma = result.indexOf(',')
+      resolve(comma >= 0 ? result.slice(comma + 1) : result)
+    }
+    reader.readAsDataURL(blob)
+  })
+}
+
 function _showCurrent() {
   _resetTransform()
+  _hideShareMenu()
   const photo = _photos[_current]
   _img.src = typeof photo === 'string' ? photo : (photo?.src || '')
   if (typeof photo === 'object' && photo.fallbackSrc) {
