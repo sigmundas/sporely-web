@@ -10,6 +10,7 @@ import {
   getIdentifyTopProbability,
   _renderServiceIcon,
   renderIdentifyResultRows,
+  renderIdentifyRedlistSummary,
   renderIdentifyServiceTab,
   markRequestedServicesRunning,
   runIdentifyComparisonForBlobs,
@@ -594,6 +595,30 @@ function _reviewAiSelectedPredictionForService(service) {
   return reviewAiState.selectedPredictionByService?.[normalizedService] || null
 }
 
+function _reviewAiSelectedRedlistPrediction() {
+  if (reviewAiState.selectedTaxonSource !== 'ai') return null
+  const selectedService = normalizeIdentifyService(
+    reviewAiState.selectedService || reviewAiState.activeService || '',
+  )
+  if (!selectedService) {
+    return reviewAiState.selectedPrediction || null
+  }
+  return (
+    reviewAiState.selectedPredictionByService?.[selectedService]
+    || reviewAiState.selectedPrediction
+    || reviewAiState.resultsByService?.[selectedService]?.topPrediction
+    || null
+  )
+}
+
+function _syncReviewRedlistSummary() {
+  const host = document.getElementById('review-redlist-summary')
+  if (!host) return
+  const html = renderIdentifyRedlistSummary(_reviewAiSelectedRedlistPrediction())
+  host.innerHTML = html
+  host.style.display = html ? '' : 'none'
+}
+
 export function getReviewServiceDisplayProbability(service) {
   const normalizedService = normalizeIdentifyService(service)
   const result = reviewAiState.resultsByService?.[normalizedService] || null
@@ -770,6 +795,7 @@ export function buildReviewGrid() {
             />
             <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
           </div>
+          <div id="review-redlist-summary" style="display:none"></div>
           ${hasBlob ? _renderReviewAiControls() : ''}
           <div class="detail-uncertain-row" style="display:flex;align-items:center;justify-content:space-between;width:100%;">
             <span class="field-meta-key">${t('detail.idNeeded') || 'Uncertain ID'}</span>
@@ -790,6 +816,7 @@ export function buildReviewGrid() {
   }
 
   grid.innerHTML = html
+  _syncReviewRedlistSummary()
 
   // Re-run the idempotent location wiring after the review body/card content
   // has been rebuilt.
@@ -924,6 +951,7 @@ function wireCardEvents() {
         reviewAiState.selectedService = null
         reviewAiState.selectedPrediction = null
       }
+      _syncReviewRedlistSummary()
       clearTimeout(debounce)
       debounce = setTimeout(() => handleTaxonInput(input), 280)
     })
@@ -1016,6 +1044,7 @@ function applyTaxon(i, taxon, options = {}) {
     reviewAiState.selectedService = null
     reviewAiState.selectedPrediction = null
   }
+  _syncReviewRedlistSummary()
 }
 
 // ── Identification AI ────────────────────────────────────────────────────────
@@ -1290,6 +1319,7 @@ function _renderReviewAiResults() {
 function _renderReviewAiBlock() {
   _renderReviewAiTabs()
   _renderReviewAiResults()
+  _syncReviewRedlistSummary()
 }
 
 function _renderReviewAiControls() {

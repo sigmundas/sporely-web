@@ -65,13 +65,14 @@ function _hasFiniteScore(value) {
 }
 
 function _getPredictionSourceObjects(prediction = {}) {
+  const source = prediction && typeof prediction === 'object' ? prediction : {}
   return [
-    prediction,
-    prediction.raw,
-    prediction.external_ids,
-    prediction.raw?.external_ids,
-    prediction.taxon,
-    prediction.raw?.taxon,
+    source,
+    source.raw,
+    source.external_ids,
+    source.raw?.external_ids,
+    source.taxon,
+    source.raw?.taxon,
   ].filter(source => source && typeof source === 'object')
 }
 
@@ -85,8 +86,13 @@ function _findPredictionTextValue(prediction = {}, keys = []) {
   return null
 }
 
+function _normalizePredictionObject(prediction) {
+  return prediction && typeof prediction === 'object' ? prediction : {}
+}
+
 function _getPredictionTaxon(prediction = {}) {
-  return prediction.taxon || prediction.raw?.taxon || null
+  const source = _normalizePredictionObject(prediction)
+  return source.taxon || source.raw?.taxon || null
 }
 
 function _getPredictionPictureUrl(prediction = {}) {
@@ -346,16 +352,8 @@ function _getPredictionSpeciesUrl(service, prediction = {}, taxonId = null) {
 }
 
 function _getPredictionRedlistMetadata(prediction = {}) {
-  const taxon = _getPredictionTaxon(prediction)
   return {
-    redlistCategory: _normalizeNullableText(
-      _findPredictionTextValue(prediction, [
-        'redlist_category',
-        'redlistCategory',
-        'redListCategory',
-      ])
-      || taxon?.redListCategories?.NO
-    ),
+    redlistCategory: _normalizeNullableText(_getPredictionRedlistCategory(prediction)),
     redlistStatus: _normalizeNullableText(
       _findPredictionTextValue(prediction, [
         'redlist_status',
@@ -450,6 +448,107 @@ export function formatAiSuggestionDisplay(prediction = {}) {
     title: scientificName || _normalizeText(prediction.displayName || prediction.display_name || '') || t('common.unknown'),
     subtitle: '',
   }
+}
+
+const REDLIST_LABELS = {
+  RE: 'regionalt utdødd',
+  CR: 'kritisk truet',
+  EN: 'sterkt truet',
+  VU: 'sårbar',
+  NT: 'nær truet',
+  DD: 'datamangel',
+  LC: 'livskraftig',
+  NA: 'ikke egnet',
+  NE: 'ikke vurdert',
+}
+
+const REDLIST_COLORS = {
+  RE: '#2D3133',
+  CR: '#D40015',
+  EN: '#F04438',
+  VU: '#E67E22',
+  NT: '#DCB632',
+  DD: '#63666A',
+  LC: '#569D62',
+  NA: '#cccccc',
+  NE: '#aaaaaa',
+}
+
+function _normalizeRedlistCode(value) {
+  const code = _normalizeText(value).toUpperCase()
+  return REDLIST_LABELS[code] ? code : ''
+}
+
+function _redlistLabel(code, { includeCode = true } = {}) {
+  const clean = _normalizeRedlistCode(code)
+  if (!clean) return ''
+  const label = REDLIST_LABELS[clean]
+  if (!label) return clean
+  return includeCode ? `${clean} - ${label}` : label
+}
+
+function _getPredictionRedlistCategory(prediction = {}) {
+  const taxon = _getPredictionTaxon(prediction)
+  return _normalizeRedlistCode(
+    _findPredictionTextValue(prediction, [
+      'redlist_category',
+      'redlistCategory',
+      'redListCategory',
+    ])
+    || taxon?.redListCategory
+    || taxon?.redlistCategory
+    || taxon?.redListCategories?.NO
+    || prediction?.redListCategories?.NO
+  )
+}
+
+function _getPredictionRedlistSource(prediction = {}) {
+  return _normalizeNullableText(
+    _findPredictionTextValue(prediction, [
+      'redlist_source',
+      'redlistSource',
+      'redListSource',
+    ])
+  )
+}
+
+function renderIdentifyRedlistBadge(prediction = {}) {
+  const code = _getPredictionRedlistCategory(prediction)
+  if (!code) return ''
+  const label = _redlistLabel(code)
+  const color = REDLIST_COLORS[code] || '#63666A'
+  const source = _getPredictionRedlistSource(prediction)
+  const tooltip = source ? `${label} · ${source}` : label
+
+  return `
+    <span
+      class="ai-result-row-redlist"
+      style="--redlist-color: ${_esc(color)};"
+      title="${_esc(tooltip)}"
+      aria-label="${_esc(tooltip)}"
+    >${_esc(code)}</span>
+  `
+}
+
+export function renderIdentifyRedlistSummary(prediction = {}) {
+  const code = _getPredictionRedlistCategory(prediction)
+  if (!code) return ''
+  const label = _redlistLabel(code)
+  const source = _getPredictionRedlistSource(prediction)
+  const tooltip = source ? `${label} · ${source}` : label
+
+  return `
+    <div
+      class="ai-redlist-summary"
+      role="status"
+      aria-live="polite"
+      title="${_esc(tooltip)}"
+      aria-label="${_esc(tooltip)}"
+    >
+      ${renderIdentifyRedlistBadge(prediction)}
+      <span class="ai-redlist-summary-text">${_esc(tooltip)}</span>
+    </div>
+  `
 }
 
 function _getPredictionSpeciesLinkUrl(prediction = {}) {
@@ -1298,6 +1397,7 @@ export function renderIdentifyResultRows(service, predictions = []) {
           </span>
         </button>
         <span class="ai-result-row-meta">
+          ${renderIdentifyRedlistBadge(prediction)}
           ${renderIdentifyResultSpeciesLink(prediction)}
           <span class="ai-result-row-score">${renderIdentifyConfidenceBadge(prediction.probability, { checkThreshold: 0.65 })}</span>
         </span>

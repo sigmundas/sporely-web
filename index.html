@@ -558,13 +558,14 @@
         <div class="detail-form">
           <div class="detail-field">
             <div class="detail-field-label">Species</div>
-            <div class="taxon-field-wrap">
-              <input id="detail-taxon-input" class="taxon-input detail-taxon-input" type="text"
-                placeholder="Unknown species" autocomplete="off" spellcheck="false">
-              <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
-            </div>
-            <div class="detail-ai-stack" data-identify-comparison-state>
-              <div class="detail-ai-controls">
+          <div class="taxon-field-wrap">
+            <input id="detail-taxon-input" class="taxon-input detail-taxon-input" type="text"
+              placeholder="Unknown species" autocomplete="off" spellcheck="false">
+            <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
+          </div>
+          <div id="detail-redlist-summary" style="display:none"></div>
+          <div class="detail-ai-stack" data-identify-comparison-state>
+            <div class="detail-ai-controls">
                 <button class="ai-id-btn ai-id-run-btn" id="detail-ai-run-btn" type="button" data-identify-run-button>
                   <span data-identify-run-label>AI Photo ID</span>
                 </button>

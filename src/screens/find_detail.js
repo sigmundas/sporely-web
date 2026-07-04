@@ -12,6 +12,7 @@ import {
   _renderServiceIcon,
   loadObservationIdentifications,
   renderIdentifyResultRows,
+  renderIdentifyRedlistSummary,
   saveIdentificationRun,
   markRequestedServicesRunning,
   shouldRunServiceFromTab,
@@ -1748,6 +1749,26 @@ function _detailAiTabState(service) {
   }
 }
 
+function _detailAiSelectedRedlistPrediction() {
+  const selectedService = normalizeIdentifyService(detailAiState.selectedService || detailAiState.activeService || '')
+  if (!selectedService) {
+    return detailAiState.selectedPrediction || null
+  }
+  return (
+    detailAiState.selectedPredictionByService?.[selectedService]
+    || detailAiState.selectedPrediction
+    || null
+  )
+}
+
+function _syncDetailRedlistSummary() {
+  const host = document.getElementById('detail-redlist-summary')
+  if (!host) return
+  const html = renderIdentifyRedlistSummary(_detailAiSelectedRedlistPrediction())
+  host.innerHTML = html
+  host.style.display = html ? '' : 'none'
+}
+
 function _detailPhotoIdLookup() {
   return detailLocationLookup || null
 }
@@ -1870,108 +1891,112 @@ function _renderDetailAiTabs() {
 
 function _renderDetailAiResults() {
   const resultsEl = document.getElementById('detail-ai-results')
-  if (!resultsEl) return
-  const activeService = normalizeIdentifyService(detailAiState.activeService)
-  const result = detailAiState.resultsByService[activeService] || null
-  const showLocalStaleWarning = Boolean(detailAiState.localInputsChanged || detailAiState.stale)
-  resultsEl.dataset.identifyService = activeService
-  const staleNote = document.querySelector('[data-identify-stale-note]')
-  if (staleNote) staleNote.style.display = showLocalStaleWarning ? '' : 'none'
-  if (detailAiState.runningByService?.[activeService]) {
-    resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
-    resultsEl.style.display = 'block'
-    return
-  }
-  if (result?.status === 'running') {
-    resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
-    resultsEl.style.display = 'block'
-    return
-  }
-  const nonOwnerEmptyMessage = _tf('detail.noStoredAiResults', 'No stored AI results are available for this observation.')
-  if (!result || result?.status === 'idle') {
-    const isReadOnlyViewer = Boolean(currentObs?.id) && !currentObsIsOwner
-    resultsEl.innerHTML = `<div class="ai-results-empty">${isReadOnlyViewer ? nonOwnerEmptyMessage : _tf('review.runAiIdPrompt', 'Run AI Photo ID to get suggestions.')}</div>`
-    resultsEl.style.display = 'block'
-    return
-  }
-  if (!result?.predictions?.length) {
-    if (showLocalStaleWarning && result?.status === 'stale') {
-      resultsEl.innerHTML = `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
+  try {
+    if (!resultsEl) return
+    const activeService = normalizeIdentifyService(detailAiState.activeService)
+    const result = detailAiState.resultsByService[activeService] || null
+    const showLocalStaleWarning = Boolean(detailAiState.localInputsChanged || detailAiState.stale)
+    resultsEl.dataset.identifyService = activeService
+    const staleNote = document.querySelector('[data-identify-stale-note]')
+    if (staleNote) staleNote.style.display = showLocalStaleWarning ? '' : 'none'
+    if (detailAiState.runningByService?.[activeService]) {
+      resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
       resultsEl.style.display = 'block'
       return
     }
-    if (result?.status === 'unavailable') {
-      resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+    if (result?.status === 'running') {
+      resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
       resultsEl.style.display = 'block'
       return
     }
-    if (result?.status === 'error' || (result?.status === 'stale' && result.errorMessage)) {
-      resultsEl.innerHTML = `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
+    const nonOwnerEmptyMessage = _tf('detail.noStoredAiResults', 'No stored AI results are available for this observation.')
+    if (!result || result?.status === 'idle') {
+      const isReadOnlyViewer = Boolean(currentObs?.id) && !currentObsIsOwner
+      resultsEl.innerHTML = `<div class="ai-results-empty">${isReadOnlyViewer ? nonOwnerEmptyMessage : _tf('review.runAiIdPrompt', 'Run AI Photo ID to get suggestions.')}</div>`
       resultsEl.style.display = 'block'
       return
     }
-    if (result?.status === 'no_match') {
-      resultsEl.innerHTML = `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`
+    if (!result?.predictions?.length) {
+      if (showLocalStaleWarning && result?.status === 'stale') {
+        resultsEl.innerHTML = `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
+        resultsEl.style.display = 'block'
+        return
+      }
+      if (result?.status === 'unavailable') {
+        resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+        resultsEl.style.display = 'block'
+        return
+      }
+      if (result?.status === 'error' || (result?.status === 'stale' && result.errorMessage)) {
+        resultsEl.innerHTML = `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
+        resultsEl.style.display = 'block'
+        return
+      }
+      if (result?.status === 'no_match') {
+        resultsEl.innerHTML = `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`
+        resultsEl.style.display = 'block'
+        return
+      }
+      const emptyMessage = currentObs?.id && !currentObsIsOwner
+        ? nonOwnerEmptyMessage
+        : (t('review.noMatch') || 'No match')
+      resultsEl.innerHTML = `<div class="ai-results-empty">${emptyMessage}</div>`
       resultsEl.style.display = 'block'
       return
     }
-    const emptyMessage = currentObs?.id && !currentObsIsOwner
-      ? nonOwnerEmptyMessage
-      : (t('review.noMatch') || 'No match')
-    resultsEl.innerHTML = `<div class="ai-results-empty">${emptyMessage}</div>`
-    resultsEl.style.display = 'block'
-    return
-  }
 
-  resultsEl.innerHTML = renderIdentifyResultRows(activeService, result.predictions)
-  resultsEl.style.display = 'block'
-  const selectedPrediction = detailAiState.selectedService === activeService
-    ? (detailAiState.selectedPredictionByService?.[activeService] || detailAiState.selectedPrediction || null)
-    : null
-  resultsEl.querySelectorAll('[data-identify-result]').forEach(el => {
-    const row = el.closest?.('.ai-result-row') || el.parentElement?.closest?.('.ai-result-row') || null
-    const prediction = JSON.parse(el.dataset.identifyResult)
-    const isSelected = Boolean(_detailAiPredictionsEquivalent(prediction, selectedPrediction))
-    el.classList.toggle('is-selected', isSelected)
-    el.classList.toggle('is-readonly', Boolean(currentObs?.id) && !currentObsIsOwner)
-    row?.classList.toggle('is-selected', isSelected)
-    if (isSelected) {
-      el.setAttribute('aria-current', 'true')
-    } else {
-      el.removeAttribute('aria-current')
-    }
-    el.addEventListener('click', () => {
-      if (Boolean(currentObs?.id) && !currentObsIsOwner) return
-      const clickedPrediction = JSON.parse(el.dataset.identifyResult)
-      const parts = String(clickedPrediction.scientificName || '').trim().split(/\s+/)
-      selectedTaxon = {
-        genus: parts[0] || null,
-        specificEpithet: parts[1] || null,
-        vernacularName: clickedPrediction.vernacularName || null,
-        displayName: clickedPrediction.displayName,
+    resultsEl.innerHTML = renderIdentifyResultRows(activeService, result.predictions)
+    resultsEl.style.display = 'block'
+    const selectedPrediction = detailAiState.selectedService === activeService
+      ? (detailAiState.selectedPredictionByService?.[activeService] || detailAiState.selectedPrediction || null)
+      : null
+    resultsEl.querySelectorAll('[data-identify-result]').forEach(el => {
+      const row = el.closest?.('.ai-result-row') || el.parentElement?.closest?.('.ai-result-row') || null
+      const prediction = JSON.parse(el.dataset.identifyResult)
+      const isSelected = Boolean(_detailAiPredictionsEquivalent(prediction, selectedPrediction))
+      el.classList.toggle('is-selected', isSelected)
+      el.classList.toggle('is-readonly', Boolean(currentObs?.id) && !currentObsIsOwner)
+      row?.classList.toggle('is-selected', isSelected)
+      if (isSelected) {
+        el.setAttribute('aria-current', 'true')
+      } else {
+        el.removeAttribute('aria-current')
       }
-      detailAiState.selectedService = activeService
-      detailAiState.selectedPrediction = clickedPrediction
-      detailAiState.selectedPredictionByService = {
-        ...(detailAiState.selectedPredictionByService || {}),
-        [activeService]: clickedPrediction,
-      }
-      detailAiState.selectedProbabilityByService = {
-        ...(detailAiState.selectedProbabilityByService || {}),
-        [activeService]: _detailAiPredictionProbability(clickedPrediction),
-      }
-      document.getElementById('detail-taxon-input').value = clickedPrediction.displayName
-      _setDetailHeader({
-        commonName: selectedTaxon.vernacularName || '',
-        genus: selectedTaxon.genus || '',
-        species: selectedTaxon.specificEpithet || '',
-        fallbackName: clickedPrediction.displayName || t('detail.unknownSpecies'),
-        uncertain: document.getElementById('detail-uncertain')?.checked,
+      el.addEventListener('click', () => {
+        if (Boolean(currentObs?.id) && !currentObsIsOwner) return
+        const clickedPrediction = JSON.parse(el.dataset.identifyResult)
+        const parts = String(clickedPrediction.scientificName || '').trim().split(/\s+/)
+        selectedTaxon = {
+          genus: parts[0] || null,
+          specificEpithet: parts[1] || null,
+          vernacularName: clickedPrediction.vernacularName || null,
+          displayName: clickedPrediction.displayName,
+        }
+        detailAiState.selectedService = activeService
+        detailAiState.selectedPrediction = clickedPrediction
+        detailAiState.selectedPredictionByService = {
+          ...(detailAiState.selectedPredictionByService || {}),
+          [activeService]: clickedPrediction,
+        }
+        detailAiState.selectedProbabilityByService = {
+          ...(detailAiState.selectedProbabilityByService || {}),
+          [activeService]: _detailAiPredictionProbability(clickedPrediction),
+        }
+        document.getElementById('detail-taxon-input').value = clickedPrediction.displayName
+        _setDetailHeader({
+          commonName: selectedTaxon.vernacularName || '',
+          genus: selectedTaxon.genus || '',
+          species: selectedTaxon.specificEpithet || '',
+          fallbackName: clickedPrediction.displayName || t('detail.unknownSpecies'),
+          uncertain: document.getElementById('detail-uncertain')?.checked,
+        })
+        _renderDetailAiTabs()
+        _renderDetailAiResults()
       })
-      _renderDetailAiTabs()
-      _renderDetailAiResults()
     })
-  })
+  } finally {
+    _syncDetailRedlistSummary()
+  }
 }
 
 function _applyDetailAiServiceResult(service, result = {}) {

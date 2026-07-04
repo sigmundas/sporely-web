@@ -36,6 +36,7 @@ import {
   _renderPieSpinnerIcon,
   isTerminalAiServiceState,
   renderIdentifyResultRows,
+  renderIdentifyRedlistSummary,
   renderIdentifyServiceTab,
   renderIdentifyServiceStateSummary,
   markRequestedServicesRunning,
@@ -407,6 +408,26 @@ function _sessionAiSelectionState(session) {
     prediction: selectedPrediction,
     probability: Number.isFinite(Number(selectedProbability)) ? Number(selectedProbability) : null,
   }
+}
+
+function _importAiSelectedRedlistPrediction(session) {
+  const selection = _sessionAiSelectionState(session)
+  return selection.source === 'ai' ? selection.prediction : null
+}
+
+function _syncImportRedlistSummary(sid) {
+  const host = document.querySelector(`.import-card[data-sid=${JSON.stringify(String(sid))}] [data-redlist-summary]`)
+  if (!host) return
+  const session = sessionById(sid)
+  const html = renderIdentifyRedlistSummary(_importAiSelectedRedlistPrediction(session))
+  host.innerHTML = html
+  host.style.display = html ? '' : 'none'
+}
+
+function _syncImportRedlistSummaries() {
+  sessions.forEach(session => {
+    _syncImportRedlistSummary(session.id)
+  })
 }
 
 function _buildSessionAiIdentificationRuns(session) {
@@ -1828,6 +1849,7 @@ export function renderSessions() {
     if (isOpen) _wireCard(sid);
   });
 
+  _syncImportRedlistSummaries();
   _updateImportFooterUi();
   void _syncImportAiDefaultAvailability();
 }
@@ -1912,7 +1934,7 @@ function buildCardHTML(session) {
       ${stripItems}
     </div>
     <div class="import-location-hint import-card-crop-hint">${t('crop.noCropHint')}</div>
-    <div class="detail-field" style="margin-top:12px">
+      <div class="detail-field" style="margin-top:12px">
       <div class="detail-field-label">${t('detail.species')}</div>
       <div class="taxon-field-wrap">
         <input class="taxon-input import-taxon-input" type="text" placeholder="${t('detail.unknownSpecies')}"
@@ -1920,6 +1942,7 @@ function buildCardHTML(session) {
           value="${taxonVal}">
         <ul class="taxon-dropdown import-taxon-dropdown" data-sid="${sid}" style="display:none"></ul>
       </div>
+      <div data-redlist-summary data-sid="${sid}" style="display:none"></div>
       ${session.files.length ? _renderSessionAiControls(session) : ''}
     </div>
     <div class="detail-field" style="margin-top:4px">
@@ -2033,6 +2056,7 @@ function _wireCard(sid) {
       session.taxon = createManualTaxon(q);
       _clearSessionAiSelection(session);
       _persistSessions();
+      _syncImportRedlistSummary(sid);
     }
     if (!q) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
     debounceTimer = setTimeout(async () => {

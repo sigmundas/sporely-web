@@ -11,6 +11,7 @@ import {
   maybeLoadCachedIdentification,
   formatAiSuggestionDisplay,
   renderIdentifyResultRows,
+  renderIdentifyRedlistSummary,
   renderIdentifyServiceTab,
   renderIdentifyServiceStateSummary,
   resetObservationIdentificationsTableAvailabilityForTests,
@@ -385,14 +386,33 @@ test('formatting AI suggestions keeps vernacular and scientific names on separat
     scientificName: 'Piptoporus betulinus',
     taxonId: '47274',
     speciesUrl: 'https://artsdatabanken.no/Pages/298179',
+    redlistSource: 'Artsdatabanken',
+    taxon: {
+      scientificName: 'Piptoporus betulinus',
+      redListCategories: { NO: 'LC' },
+    },
     probability: 0.91,
   }])
 
   assert.match(html, /knivkjuke/)
   assert.match(html, /Piptoporus betulinus/)
   assert.doesNotMatch(html, /knivkjuke \(Piptoporus betulinus\)/)
+  assert.match(html, /ai-result-row-redlist/)
+  assert.match(html, /title="LC - livskraftig/)
   assert.match(html, /ai-result-row-link/)
   assert.match(html, /artsdatabanken\.no\/Pages\/298179/)
+
+  const redlistSummary = renderIdentifyRedlistSummary({
+    taxon: {
+      redListCategories: { NO: 'LC' },
+    },
+    redlistSource: 'Artsdatabanken',
+  })
+  assert.match(redlistSummary, /ai-redlist-summary/)
+  assert.match(redlistSummary, /LC - livskraftig/)
+  assert.match(redlistSummary, /Artsdatabanken/)
+
+  assert.equal(renderIdentifyRedlistSummary(null), '')
 
   const inatHtml = renderIdentifyResultRows('inat', [{
     vernacularName: 'Fly agaric',
