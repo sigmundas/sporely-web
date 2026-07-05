@@ -45,6 +45,10 @@ DECLARE
   mixed_sp_image_id bigint;
   dist_rpc record;
   map_rpc record;
+  public_exact_measurement_a bigint;
+  public_exact_measurement_b bigint;
+  public_exact_mosaic_id bigint;
+  amanita_se_measurement_id bigint;
 BEGIN
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN visibility DROP NOT NULL';
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN location_precision DROP NOT NULL';
@@ -142,9 +146,12 @@ BEGIN
   RETURNING id INTO public_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
-  VALUES
-    (public_image_id, visible_user_id, 10.1, 5.1, 'manual'),
-    (public_image_id, visible_user_id, 11.2, 5.4, 'spore');
+  VALUES (public_image_id, visible_user_id, 10.1, 5.1, 'manual')
+  RETURNING id INTO public_exact_measurement_a;
+
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
+  VALUES (public_image_id, visible_user_id, 11.2, 5.4, 'spore')
+  RETURNING id INTO public_exact_measurement_b;
 
   INSERT INTO public.observations (
     user_id,
@@ -514,7 +521,8 @@ BEGIN
   RETURNING id INTO amanita_se_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
-  VALUES (amanita_se_image_id, visible_user_id, 9.0, 4.5, 'manual');
+  VALUES (amanita_se_image_id, visible_user_id, 9.0, 4.5, 'manual')
+  RETURNING id INTO amanita_se_measurement_id;
 
   -- Amanita muscaria in Norway, DIC/KOH/fresh — for get_public_spore_comparison_set tests.
   INSERT INTO public.observations (
@@ -581,6 +589,32 @@ BEGIN
     (mixed_sp_image_id, visible_user_id, 12.0, 6.0, 'manual'),
     (mixed_sp_image_id, visible_user_id, 13.0, 6.5, 'manual'),
     (mixed_sp_image_id, visible_user_id, 14.0, 7.0, 'manual');
+
+  -- Mosaic fixture for public_exact_id. Tile A carries an overlay; tile B does not.
+  -- Other public observations (amanita_se_id, mixed_prep_id, null_spore_visibility_id,
+  -- amanita_private_spore_id) intentionally have no mosaic row so we can assert that
+  -- sporeMosaic is null while sporePoints still returns normally.
+  INSERT INTO public.spore_measurement_mosaics (
+    observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version
+  )
+  VALUES (
+    public_exact_id, visible_user_id, 'mosaic/public-exact-v1.webp', 256, 128, 128, 1
+  )
+  RETURNING id INTO public_exact_mosaic_id;
+
+  INSERT INTO public.spore_measurement_mosaic_tiles (
+    measurement_id, mosaic_id, x_px, y_px, w_px, h_px, overlay_json
+  )
+  VALUES
+    (
+      public_exact_measurement_a, public_exact_mosaic_id, 0, 0, 128, 128,
+      jsonb_build_object(
+        'line', jsonb_build_object('x1', 10, 'y1', 20, 'x2', 100, 'y2', 90)
+      )
+    ),
+    (
+      public_exact_measurement_b, public_exact_mosaic_id, 128, 0, 128, 128, NULL
+    );
 
   IF NOT EXISTS (SELECT 1 FROM public.search_public_observations() WHERE id = public_exact_id) THEN
     RAISE EXCEPTION 'Expected public observation % to appear', public_exact_id;
@@ -1005,6 +1039,110 @@ BEGIN
   SELECT * INTO rpc_row FROM public.get_public_observation(purged_microscopy_id);
   IF rpc_row."sporePoints" IS NOT NULL THEN
     RAISE EXCEPTION 'sporePoints: purged microscope image contributed points';
+  END IF;
+
+  -- ── sporeMosaic tests ────────────────────────────────────────────────────────
+
+  -- Public observation with a mosaic row returns sporeMosaic metadata.
+  SELECT * INTO rpc_row FROM public.get_public_observation(public_exact_id);
+  IF rpc_row."sporeMosaic" IS NULL THEN
+    RAISE EXCEPTION 'sporeMosaic: expected metadata for public observation with mosaic row';
+  END IF;
+  IF (rpc_row."sporeMosaic"->>'url') IS DISTINCT FROM 'https://media.sporely.no/mosaic/public-exact-v1.webp' THEN
+    RAISE EXCEPTION 'sporeMosaic: url mismatch, got %', rpc_row."sporeMosaic"->>'url';
+  END IF;
+  IF (rpc_row."sporeMosaic"->>'width')::int    IS DISTINCT FROM 256
+     OR (rpc_row."sporeMosaic"->>'height')::int   IS DISTINCT FROM 128
+     OR (rpc_row."sporeMosaic"->>'tileSize')::int IS DISTINCT FROM 128
+     OR (rpc_row."sporeMosaic"->>'version')::int  IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'sporeMosaic: dimension/version fields did not match fixture';
+  END IF;
+
+  -- Each spore point carries mosaicX/mosaicY/mosaicW/mosaicH when a tile row exists.
+  IF NOT (
+    (rpc_row."sporePoints"->0) ? 'mosaicX'
+    AND (rpc_row."sporePoints"->0) ? 'mosaicY'
+    AND (rpc_row."sporePoints"->0) ? 'mosaicW'
+    AND (rpc_row."sporePoints"->0) ? 'mosaicH'
+  ) THEN
+    RAISE EXCEPTION 'sporeMosaic: sporePoints[0] missing mosaic tile coordinates';
+  END IF;
+
+  -- Tile A (public_exact_measurement_a) was inserted with an overlay line.
+  IF NOT (
+    (SELECT bool_and(
+       ((pt->>'id')::bigint <> public_exact_measurement_a)
+       OR (
+         (pt->'overlay'->'line'->>'x1')::int = 10
+         AND (pt->'overlay'->'line'->>'y1')::int = 20
+         AND (pt->'overlay'->'line'->>'x2')::int = 100
+         AND (pt->'overlay'->'line'->>'y2')::int = 90
+       )
+     )
+     FROM jsonb_array_elements(rpc_row."sporePoints") pt)
+  ) THEN
+    RAISE EXCEPTION 'sporeMosaic: overlay line coordinates for tile A did not match fixture';
+  END IF;
+
+  -- Tile B was inserted without overlay_json — its point must not carry an overlay key.
+  IF NOT (
+    (SELECT bool_and(
+       ((pt->>'id')::bigint <> public_exact_measurement_b)
+       OR (NOT (pt ? 'overlay'))
+     )
+     FROM jsonb_array_elements(rpc_row."sporePoints") pt)
+  ) THEN
+    RAISE EXCEPTION 'sporeMosaic: tile B leaked an overlay key despite null overlay_json';
+  END IF;
+
+  -- Private spore_data_visibility observation must not leak sporeMosaic.
+  SELECT * INTO rpc_row FROM public.get_public_observation(amanita_private_spore_id);
+  IF rpc_row."sporeMosaic" IS NOT NULL THEN
+    RAISE EXCEPTION 'sporeMosaic: private spore_data_visibility leaked mosaic metadata';
+  END IF;
+
+  -- Null spore_data_visibility observation must not leak sporeMosaic.
+  SELECT * INTO rpc_row FROM public.get_public_observation(null_spore_visibility_id);
+  IF rpc_row."sporeMosaic" IS NOT NULL THEN
+    RAISE EXCEPTION 'sporeMosaic: null spore_data_visibility leaked mosaic metadata';
+  END IF;
+
+  -- Public observation WITHOUT a mosaic row still returns sporePoints, sporeMosaic is null.
+  -- amanita_se_id has one public measurement and no mosaic fixture.
+  SELECT * INTO rpc_row FROM public.get_public_observation(amanita_se_id);
+  IF rpc_row."sporeMosaic" IS NOT NULL THEN
+    RAISE EXCEPTION 'sporeMosaic: observation without mosaic returned non-null sporeMosaic';
+  END IF;
+  IF rpc_row."sporePoints" IS NULL
+     OR jsonb_array_length(rpc_row."sporePoints") IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'sporeMosaic: sporePoints must still return without a mosaic (got %)',
+      rpc_row."sporePoints";
+  END IF;
+  -- And no mosaic tile fields leak through when the mosaic is absent.
+  IF (rpc_row."sporePoints"->0) ? 'mosaicX'
+     OR (rpc_row."sporePoints"->0) ? 'mosaicY'
+     OR (rpc_row."sporePoints"->0) ? 'mosaicW'
+     OR (rpc_row."sporePoints"->0) ? 'mosaicH'
+     OR (rpc_row."sporePoints"->0) ? 'overlay' THEN
+    RAISE EXCEPTION 'sporeMosaic: mosaicless sporePoint leaked mosaic tile fields';
+  END IF;
+
+  -- Deleting the mosaic row must cascade the tiles (FK ON DELETE CASCADE).
+  DELETE FROM public.spore_measurement_mosaics WHERE id = public_exact_mosaic_id;
+  IF EXISTS (
+    SELECT 1 FROM public.spore_measurement_mosaic_tiles
+    WHERE mosaic_id = public_exact_mosaic_id
+  ) THEN
+    RAISE EXCEPTION 'sporeMosaic: deleting mosaic did not cascade to tiles';
+  END IF;
+  -- After delete, sporeMosaic drops back to null but sporePoints remain.
+  SELECT * INTO rpc_row FROM public.get_public_observation(public_exact_id);
+  IF rpc_row."sporeMosaic" IS NOT NULL THEN
+    RAISE EXCEPTION 'sporeMosaic: still populated after mosaic row was deleted';
+  END IF;
+  IF rpc_row."sporePoints" IS NULL
+     OR jsonb_array_length(rpc_row."sporePoints") IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'sporeMosaic: sporePoints regressed after mosaic delete';
   END IF;
 
   -- ─────────────────────────────────────────────────────────────────────────────
