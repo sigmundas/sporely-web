@@ -6,6 +6,7 @@ import {
   buildIdentifyFingerprint,
   getIdentifyTopProbability,
   loadObservationIdentifications,
+  loadObservationRedlistSummaries,
   markIdentificationStaleIfFingerprintChanged,
   markRequestedServicesRunning,
   maybeLoadCachedIdentification,
@@ -32,6 +33,10 @@ function createSupabaseStub() {
     return filters.every(filter => {
       if (filter.op === 'eq') return row?.[filter.field] === filter.value
       if (filter.op === 'neq') return row?.[filter.field] !== filter.value
+      if (filter.op === 'in') {
+        const values = Array.isArray(filter.values) ? filter.values : []
+        return values.some(value => String(value) === String(row?.[filter.field]))
+      }
       return true
     })
   }
@@ -63,6 +68,7 @@ function createSupabaseStub() {
     select() { return this }
     eq(field, value) { this.filters.push({ op: 'eq', field, value }); return this }
     neq(field, value) { this.filters.push({ op: 'neq', field, value }); return this }
+    in(field, values) { this.filters.push({ op: 'in', field, values }); return this }
     order(field, options = {}) { this.orderBy = { field, ascending: options.ascending !== false }; return this }
     maybeSingle() { return Promise.resolve(this._executeMaybeSingle()) }
     then(resolve, reject) {
@@ -400,6 +406,10 @@ test('formatting AI suggestions keeps vernacular and scientific names on separat
   assert.match(html, /ai-result-row-redlist/)
   assert.match(html, /title="LC - livskraftig/)
   assert.match(html, /ai-result-row-link/)
+  assert.match(html, /ai-result-row-link[\s\S]*ai-result-row-redlist[\s\S]*ai-confidence-badge/)
+  assert.match(html, /ai-result-row-link[\s\S]*91%/)
+  assert.doesNotMatch(html, /ai-confidence-badge-icon-check/)
+  assert.doesNotMatch(html, /ai-result-row-link[\s\S]*<svg/)
   assert.match(html, /artsdatabanken\.no\/Pages\/298179/)
 
   const redlistSummary = renderIdentifyRedlistSummary({
@@ -409,7 +419,9 @@ test('formatting AI suggestions keeps vernacular and scientific names on separat
     redlistSource: 'Artsdatabanken',
   })
   assert.match(redlistSummary, /ai-redlist-summary/)
-  assert.match(redlistSummary, /LC - livskraftig/)
+  assert.match(redlistSummary, /livskraftig/)
+  assert.match(redlistSummary, /ai-redlist-summary-text">livskraftig/)
+  assert.doesNotMatch(redlistSummary, /ai-redlist-summary-text">LC/)
   assert.match(redlistSummary, /Artsdatabanken/)
 
   assert.equal(renderIdentifyRedlistSummary(null), '')
@@ -421,6 +433,8 @@ test('formatting AI suggestions keeps vernacular and scientific names on separat
     probability: 0.91,
   }])
   assert.match(inatHtml, /ai-result-row-link/)
+  assert.match(inatHtml, /ai-result-row-link[\s\S]*ai-confidence-badge/)
+  assert.doesNotMatch(inatHtml, /ai-result-row-link[\s\S]*<svg/)
   assert.match(inatHtml, /inaturalist\.org\/taxa\/12345/)
 })
 
@@ -833,4 +847,50 @@ test('loadObservationIdentifications prefers the community view for visible obse
   assert.equal(loaded.length, 1)
   assert.equal(loaded[0].service, 'artsorakel')
   assert.equal(loaded[0].top_scientific_name, 'Amanita muscaria')
+})
+
+test('loadObservationRedlistSummaries keeps the newest redlist-bearing row per observation', async () => {
+  resetObservationIdentificationsTableAvailabilityForTests()
+  const client = createSupabaseStub()
+  client.rows.push(
+    {
+      id: 'community-row-1',
+      observation_id: 'obs-1',
+      service: 'inat',
+      status: 'success',
+      results: [
+        { scientificName: 'Amanita muscaria', vernacularName: 'Fly agaric', probability: 0.91 },
+      ],
+      created_at: '2026-06-14T12:00:00.000Z',
+      updated_at: '2026-06-14T12:00:00.000Z',
+    },
+    {
+      id: 'community-row-2',
+      observation_id: 'obs-1',
+      service: 'artsorakel',
+      status: 'success',
+      results: [
+        { scientificName: 'Bjerkandera adusta', vernacularName: 'Smoky bracket', redlistCategory: 'LC', probability: 0.88 },
+      ],
+      created_at: '2026-06-13T12:00:00.000Z',
+      updated_at: '2026-06-13T12:00:00.000Z',
+    },
+    {
+      id: 'community-row-3',
+      observation_id: 'obs-2',
+      service: 'artsorakel',
+      status: 'success',
+      top_redlist_category: 'NT',
+      results: [
+        { scientificName: 'Xylaria polymorpha', vernacularName: 'Dead man\'s fingers', probability: 0.77 },
+      ],
+      created_at: '2026-06-15T12:00:00.000Z',
+      updated_at: '2026-06-15T12:00:00.000Z',
+    }
+  )
+
+  const summaries = await loadObservationRedlistSummaries(['obs-1', 'obs-2'], { supabaseClient: client })
+
+  assert.equal(summaries.get('obs-1').topRedlistCategory, 'LC')
+  assert.equal(summaries.get('obs-2').topRedlistCategory, 'NT')
 })

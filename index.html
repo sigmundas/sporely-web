@@ -540,12 +540,12 @@
             <span class="detail-author-name" id="detail-author-name"></span>
             <span class="detail-author-avatar" id="detail-author-avatar">?</span>
           </button>
-        <div class="detail-date-time" style="display:flex; justify-content:space-between; align-items:flex-end;">
+        <div class="detail-date-time" style="display:flex; justify-content:space-between; align-items:flex-start;">
           <div>
             <span id="detail-date">—</span>
             <span id="detail-time" style="display:none">· <span id="detail-time-val"></span></span>
           </div>
-          <span id="detail-draft-badge" class="find-card-draft-badge" style="display:none; margin-bottom: 2px;">Draft</span>
+          <span id="detail-draft-badge" class="find-card-draft-badge" style="display:none;">Draft</span>
           </div>
           <div class="detail-observation-badge" id="detail-readonly-note" style="display:none"></div>
         </div>
@@ -553,6 +553,7 @@
           <button class="detail-social-btn" id="detail-friend-btn" type="button">🤍</button>
           <button class="detail-social-btn" id="detail-follow-user-btn" type="button">🧭</button>
         </div>
+        <div id="detail-redlist-summary" style="display:none"></div>
         <div class="detail-gallery" id="detail-gallery"></div>
 
         <div class="detail-form">
@@ -563,7 +564,6 @@
               placeholder="Unknown species" autocomplete="off" spellcheck="false">
             <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
           </div>
-          <div id="detail-redlist-summary" style="display:none"></div>
           <div class="detail-ai-stack" data-identify-comparison-state>
             <div class="detail-ai-controls">
                 <button class="ai-id-btn ai-id-run-btn" id="detail-ai-run-btn" type="button" data-identify-run-button>

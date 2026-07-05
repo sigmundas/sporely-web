@@ -795,7 +795,6 @@ export function buildReviewGrid() {
             />
             <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
           </div>
-          <div id="review-redlist-summary" style="display:none"></div>
           ${hasBlob ? _renderReviewAiControls() : ''}
           <div class="detail-uncertain-row" style="display:flex;align-items:center;justify-content:space-between;width:100%;">
             <span class="field-meta-key">${t('detail.idNeeded') || 'Uncertain ID'}</span>
@@ -1333,6 +1332,7 @@ function _renderReviewAiControls() {
   const buttonLabel = t('review.aiId') || 'AI Photo ID'
   return `
     <div class="detail-ai-stack${staleClass}" data-identify-comparison-state>
+      <div id="review-redlist-summary" style="display:none"></div>
       <div class="detail-ai-controls">
         <button
           type="button"
@@ -1496,6 +1496,7 @@ async function _runReviewComparison(serviceOverride = null) {
     showToast(t('common.errorPrefix', { message: String(error?.message || error || 'Unknown error') }))
   } finally {
     reviewAiState.running = false
+    reviewAiState.stale = false
     reviewAiState.requestedFingerprint = reviewAiState.currentFingerprint
     reviewAiState.activeService = primaryService
     _renderReviewAiBlock()

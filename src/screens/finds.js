@@ -6,6 +6,10 @@ import { showToast } from '../toast.js'
 import { fetchFirstImages, fetchCardImages } from '../images.js'
 import { formatScientificName } from '../artsorakel.js'
 import {
+  loadObservationRedlistSummaries,
+  renderIdentifyRedlistBadge,
+} from '../ai-identification.js'
+import {
   QUEUE_EVENT,
   IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
   PRIVACY_SLOT_LIMIT_USER_MESSAGE,
@@ -1396,6 +1400,7 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
 
     const merged = _mergeFindsItems('mine', currentItems.length ? currentItems : queued, data)
     await _attachSporeFlags(merged)
+    await _attachFindsRedlistTags(merged, loadSeq)
     _setFindsCache('mine', merged)
     paging.nextOffset += data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
@@ -1485,6 +1490,7 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
     if (updateCache) {
       const merged = _mergeFindsItems(cacheKey, currentItems, data)
       await _attachSporeFlags(merged)
+      await _attachFindsRedlistTags(merged, loadSeq)
       _setFindsCache(cacheKey, merged)
     }
     paging.lastData = data
@@ -1529,6 +1535,7 @@ async function _loadFeedSelectionPage({ loadSeq, reset = false } = {}) {
       const rawData = sourceResults.flatMap(result => Array.isArray(result?.data) ? result.data : [])
       const merged = _mergeFindsItems('feed', reset ? [] : (_cache['feed'] || []), rawData)
       await _attachSporeFlags(merged)
+      await _attachFindsRedlistTags(merged, loadSeq)
       _setFindsCache('feed', merged)
       paging.hasMore = FEED_SOURCE_MODES.some(source => sourcePaging[source]?.hasMore)
       paging.initialized = true
@@ -1601,6 +1608,7 @@ async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
 
     const merged = _mergeFindsItems('user', reset ? [] : (_cache['user'] || []), data)
     await _attachSporeFlags(merged)
+    await _attachFindsRedlistTags(merged, loadSeq)
     _setFindsCache('user', merged)
     paging.nextOffset += data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
@@ -1888,6 +1896,68 @@ function _uncertainPrefix(obs) {
   return obs?.uncertain ? '<span class="find-card-uncertain" aria-label="Uncertain ID">?</span> ' : ''
 }
 
+function _findsRedlistSummary(obs = {}) {
+  const category = String(
+    obs.top_redlist_category
+    ?? obs.topRedlistCategory
+    ?? obs.redlist_category
+    ?? obs.redlistCategory
+    ?? obs.redListCategory
+    ?? ''
+  ).trim().toUpperCase()
+  if (!category) return null
+  const source = String(
+    obs.top_redlist_source
+    ?? obs.topRedlistSource
+    ?? obs.redlist_source
+    ?? obs.redlistSource
+    ?? obs.redListSource
+    ?? ''
+  ).trim()
+  return {
+    redlistCategory: category,
+    redlistSource: source || null,
+  }
+}
+
+export function renderFindsRedlistTag(obs = {}) {
+  const summary = _findsRedlistSummary(obs)
+  return summary ? renderIdentifyRedlistBadge(summary) : ''
+}
+
+async function _attachFindsRedlistTags(observations, loadSeq = _loadFindsSeq) {
+  if (loadSeq !== _loadFindsSeq) return
+  const items = Array.isArray(observations) ? observations.filter(Boolean) : []
+  if (!items.length) return
+
+  const missingIds = []
+  const seenIds = new Set()
+  for (const obs of items) {
+    const id = String(obs?.id || '').trim()
+    if (!id || seenIds.has(id)) continue
+    seenIds.add(id)
+    if (_findsRedlistSummary(obs)) continue
+    missingIds.push(id)
+  }
+
+  if (!missingIds.length) return
+
+  const summaries = await loadObservationRedlistSummaries(missingIds)
+  if (loadSeq !== _loadFindsSeq) return
+
+  for (const obs of items) {
+    const id = String(obs?.id || '').trim()
+    const summary = summaries.get(id)
+    if (!summary) continue
+    obs.top_redlist_category = summary.topRedlistCategory
+    obs.topRedlistCategory = summary.topRedlistCategory
+    if (summary.topRedlistSource) {
+      obs.top_redlist_source = summary.topRedlistSource
+      obs.topRedlistSource = summary.topRedlistSource
+    }
+  }
+}
+
 function _renderBySpecies(list, data, options = {}) {
   const variant = options.variant || 'cards'
   const q = (state.searchQuery || '').trim()
@@ -1975,7 +2045,7 @@ function _renderBySpecies(list, data, options = {}) {
           )
           html += `<div class="find-card-wrap find-card-wrap--two">
             <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
                 <div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>
@@ -1993,7 +2063,7 @@ function _renderBySpecies(list, data, options = {}) {
           )
           html += `<div class="find-card-wrap find-card-wrap--three">
             <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
               <div class="find-card-body find-card-body--three">
                 ${compactNameHtml}
                 ${obs._pendingSync ? `<div class="find-card-loc">${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
@@ -2023,7 +2093,7 @@ function _renderBySpecies(list, data, options = {}) {
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-            <div class="find-card-photo-wrap">${photoWrapInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+            <div class="find-card-photo-wrap">${photoWrapInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
             <div class="find-card-body">
               <div class="find-card-name-row">${nameHtml}${countBadge}</div>
               <div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>
@@ -2077,7 +2147,7 @@ function _renderTiles(list, data) {
         'find-tile-empty'
       )
       html += `<div class="find-tile" data-id="${obs.id}">
-        <div class="find-tile-photo">${photo}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
+        <div class="find-tile-photo">${photo}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
         <div class="find-tile-name">${obs.uncertain ? '? ' : ''}${name}</div>
       </div>`
     })
@@ -2194,7 +2264,7 @@ function _renderCards(list, data, options) {
           )
           html += `<div class="find-card-wrap find-card-wrap--two">
             <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
                 ${authorMeta}
@@ -2216,7 +2286,7 @@ function _renderCards(list, data, options) {
           )
           html += `<div class="find-card-wrap find-card-wrap--three">
             <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
+              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
               <div class="find-card-body find-card-body--three">
                 ${compactNameHtml}
                 ${obs._pendingSync ? `<div class="find-card-loc">${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
@@ -2247,7 +2317,7 @@ function _renderCards(list, data, options) {
 
         html += `<div class="find-card-wrap">
           <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-            <div class="find-card-photo-wrap">${photoWrapInner}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+            <div class="find-card-photo-wrap">${photoWrapInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
             <div class="find-card-body">
               <div class="find-card-name-row">${nameHtml}${countBadge}</div>
               ${authorMeta}

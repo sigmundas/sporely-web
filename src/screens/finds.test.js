@@ -12,6 +12,7 @@ import {
   matchesFindsStatus,
   normalizeFindsSort,
   isFindsStatusControlDisabled,
+  renderFindsRedlistTag,
   shouldHideFindsStatusControl,
   _selectFindsDropdownValue,
 } from './finds.js'
@@ -167,6 +168,17 @@ test('finds sort helper keeps date as default and accepts species', () => {
     getFindsSortOptions().map(option => option.value),
     ['date', 'species'],
   )
+})
+
+test('finds redlist tag helper renders only the tag in a thumbnail-friendly badge', () => {
+  const html = renderFindsRedlistTag({
+    top_redlist_category: 'LC',
+    top_redlist_source: 'Artsdatabanken',
+  })
+
+  assert.match(html, /ai-result-row-redlist/)
+  assert.match(html, />LC<\/span>/)
+  assert.doesNotMatch(html, /ai-redlist-summary-text/)
 })
 
 test('finds dropdown pills update after selection', () => {

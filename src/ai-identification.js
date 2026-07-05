@@ -512,7 +512,7 @@ function _getPredictionRedlistSource(prediction = {}) {
   )
 }
 
-function renderIdentifyRedlistBadge(prediction = {}) {
+export function renderIdentifyRedlistBadge(prediction = {}) {
   const code = _getPredictionRedlistCategory(prediction)
   if (!code) return ''
   const label = _redlistLabel(code)
@@ -533,7 +533,7 @@ function renderIdentifyRedlistBadge(prediction = {}) {
 export function renderIdentifyRedlistSummary(prediction = {}) {
   const code = _getPredictionRedlistCategory(prediction)
   if (!code) return ''
-  const label = _redlistLabel(code)
+  const label = _redlistLabel(code, { includeCode: false })
   const source = _getPredictionRedlistSource(prediction)
   const tooltip = source ? `${label} · ${source}` : label
 
@@ -587,20 +587,21 @@ function renderIdentifyResultSpeciesLink(prediction = {}) {
   const url = _getPredictionSpeciesLinkUrl(prediction)
   if (!url) return ''
   const label = _getPredictionSpeciesLinkLabel(prediction)
+  const confidence = renderIdentifyConfidenceBadge(prediction.probability, {
+    checkThreshold: 0.65,
+    showIcon: false,
+  })
   return `
     <a
-      class="ai-result-row-link"
+      class="ai-result-row-link ai-result-row-link--expanded"
       href="${_esc(url)}"
       target="_blank"
       rel="noopener noreferrer"
       aria-label="${_esc(label)}"
       title="${_esc(label)}"
     >
-      <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-        <path d="M5 3H3v10h10V9" />
-        <path d="M8 8l6-6" />
-        <path d="M10 2h4v4" />
-      </svg>
+      ${renderIdentifyRedlistBadge(prediction)}
+      <span class="ai-result-row-link-score">${confidence}</span>
     </a>
   `
 }
@@ -666,7 +667,8 @@ export function getIdentifyConfidenceState(score, options = {}) {
 export function renderIdentifyConfidenceBadge(score, options = {}) {
   const confidence = getIdentifyConfidenceState(score, options)
   const percent = `${Math.round(confidence.value * 100)}%`
-  if (confidence.icon === 'check') {
+  const showIcon = options.showIcon !== false
+  if (showIcon && confidence.icon === 'check') {
     return `
       <span class="ai-confidence-badge ${confidence.tone}" aria-hidden="true">
         <span class="ai-confidence-badge-icon ai-confidence-badge-icon-check">
@@ -1041,6 +1043,71 @@ export async function loadObservationIdentifications(observationId, options = {}
   }
 }
 
+function _getObservationIdentificationTimestamp(row = {}) {
+  const value = row?.updated_at || row?.created_at || ''
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+export async function loadObservationRedlistSummaries(observationIds, options = {}) {
+  const ids = Array.from(new Set(
+    (Array.isArray(observationIds) ? observationIds : [])
+      .map(id => _normalizeText(id))
+      .filter(Boolean)
+  ))
+  if (!ids.length) return new Map()
+  if (_isObservationIdentificationsTableUnavailable()) return new Map()
+
+  const client = options.supabaseClient || defaultSupabase
+  try {
+    const readRows = table => client
+      .from(table)
+      .select('observation_id, results, top_redlist_category, top_redlist_source, created_at, updated_at')
+      .in('observation_id', ids)
+
+    const communityRes = await readRows(OBSERVATION_IDENTIFICATIONS_COMMUNITY_VIEW)
+    let rows = null
+    if (!communityRes.error) {
+      rows = communityRes.data
+    } else {
+      const fallbackRes = await readRows('observation_identifications')
+      if (fallbackRes.error) {
+        if (_isMissingObservationIdentificationsTableError(fallbackRes.error)) {
+          _markObservationIdentificationsTableMissing()
+          return new Map()
+        }
+        throw fallbackRes.error
+      }
+      rows = fallbackRes.data
+    }
+
+    const summaries = new Map()
+    const orderedRows = (Array.isArray(rows) ? rows : [])
+      .map(row => _normalizeObservationIdentificationRow(row))
+      .sort((left, right) => _getObservationIdentificationTimestamp(right) - _getObservationIdentificationTimestamp(left))
+
+    for (const row of orderedRows) {
+      const observationId = _normalizeNullableText(row.observation_id)
+      if (!observationId || summaries.has(observationId)) continue
+      const category = _normalizeNullableText(row.top_redlist_category)
+      if (!category) continue
+      summaries.set(observationId, {
+        observationId,
+        topRedlistCategory: category,
+        topRedlistSource: _normalizeNullableText(row.top_redlist_source),
+      })
+    }
+
+    return summaries
+  } catch (error) {
+    if (_isMissingObservationIdentificationsTableError(error)) {
+      _markObservationIdentificationsTableMissing()
+      return new Map()
+    }
+    throw error
+  }
+}
+
 export async function maybeLoadCachedIdentification({
   observationId,
   service,
@@ -1397,9 +1464,10 @@ export function renderIdentifyResultRows(service, predictions = []) {
           </span>
         </button>
         <span class="ai-result-row-meta">
-          ${renderIdentifyRedlistBadge(prediction)}
-          ${renderIdentifyResultSpeciesLink(prediction)}
-          <span class="ai-result-row-score">${renderIdentifyConfidenceBadge(prediction.probability, { checkThreshold: 0.65 })}</span>
+          ${renderIdentifyResultSpeciesLink(prediction) || `
+            ${renderIdentifyRedlistBadge(prediction)}
+            <span class="ai-result-row-score">${renderIdentifyConfidenceBadge(prediction.probability, { checkThreshold: 0.65, showIcon: false })}</span>
+          `}
         </span>
       </div>
     `)

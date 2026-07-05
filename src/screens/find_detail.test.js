@@ -163,6 +163,20 @@ test('idle find detail AI state stays neutral before any run or cached result', 
   }
 })
 
+test('find detail redlist summary sits between the date block and the gallery', () => {
+  const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
+
+  const summaryIdx = html.indexOf('id="detail-redlist-summary"')
+  const socialRowIdx = html.indexOf('id="detail-social-row"')
+  const galleryIdx = html.indexOf('id="detail-gallery"')
+
+  assert.ok(summaryIdx >= 0)
+  assert.ok(socialRowIdx >= 0)
+  assert.ok(galleryIdx > summaryIdx)
+  assert.ok(galleryIdx > socialRowIdx)
+  assert.match(html, /id="detail-social-row"[\s\S]*id="detail-redlist-summary"[\s\S]*id="detail-gallery"/)
+})
+
 test('non-owner detail tabs stay disabled until there is a stored result to view', () => {
   resetDetailState()
   const tabs = [

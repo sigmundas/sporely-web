@@ -841,6 +841,7 @@ async function _runSessionAiService(sid, service, options = {}) {
     _syncSessionAiRunningState(normalized)
     normalized.aiService = normalized.aiActiveService
     normalized.aiPredictions = normalized.aiPredictionsByService?.[svc] || []
+    normalized.aiStale = false
     _persistSessions()
     renderSessions()
   }

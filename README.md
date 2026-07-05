@@ -58,6 +58,12 @@ npm install
 npm run dev
 ```
 
+If Edge or another browser blocks the HTTPS dev certificate, use plain HTTP instead:
+
+```bash
+npm run dev:http
+```
+
 For a production build:
 
 ```bash

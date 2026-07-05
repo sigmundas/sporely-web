@@ -2337,6 +2337,8 @@ async function _runDetailAiComparison(serviceOverride = null) {
   } finally {
     detailAiState.running = false
     detailAiState.runningByService = {}
+    detailAiState.stale = false
+    detailAiState.localInputsChanged = false
     _renderDetailAiTabs()
     _renderDetailAiResults()
   }
@@ -2686,7 +2688,9 @@ function _renderDetailAuthorAndSocial() {
 
   let actionBar = document.getElementById('detail-action-bar');
   if (actionBar) {
-    if (isOwner || !currentObs?.user_id) {
+    const hideActionBar = isOwner || !currentObs?.user_id
+    actionBar.classList.toggle('is-hidden', hideActionBar)
+    if (hideActionBar) {
       actionBar.style.display = 'none';
     } else {
       actionBar.style.display = 'flex';
