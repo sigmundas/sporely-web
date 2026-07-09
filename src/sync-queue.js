@@ -6,6 +6,7 @@ import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './clou
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
 import { BackgroundTask } from '@capawesome/capacitor-background-task'
 import { isNativeApp } from './platform.js'
+import { startUploadForegroundService, updateUploadForegroundService, stopUploadForegroundService } from './upload-foreground-service.js'
 import { normalizeObservationVisibility, toCloudVisibility } from './visibility.js'
 import { debugImagePipeline } from './image-pipeline-debug.js'
 import { isBlob } from './observation-shapes.js'
@@ -15,6 +16,9 @@ const STORE_NAME = 'offline_queue'
 const QUEUE_EVENT = 'sporely-sync-queue-changed'
 const SYNC_SUCCESS_EVENT = 'sporely-sync-upload-complete'
 const RETRY_DELAY_MS = 30_000
+// With the app backgrounded the foreground service is the only thing keeping
+// retries alive, so cap how many failed passes it may bridge before giving up.
+const KEEPALIVE_MAX_RETRY_CYCLES = 3
 const BLOCKED_QUEUE_REASON = 'queued item belongs to a different auth user'
 const BLOCKED_QUEUE_STAGE = 'blocked'
 export const PRIVACY_SLOT_LIMIT_SYNC_ERROR_CODE = 'privacy_slot_limit'
@@ -24,6 +28,7 @@ const QUEUE_NAMESPACE_PREFIX = 'sporely-upload-queue'
 const _queuedPreviewUrls = new Map()
 let _retryTimer = null
 let _currentSyncPromise = null
+let _keepaliveRetryCycles = 0
 const _activeQueueOperations = new Set()
 let _backgroundTaskRegistered = false
 const _devWarnedBlockedQueueItems = new Set()
@@ -718,6 +723,16 @@ async function _runSyncQueue() {
   const items = await _readQueueItems()
   if (!items || !items.length) return
 
+  const pendingCount = items.filter(item => !_isBlockedQueueItem(item)).length
+  if (pendingCount) {
+    // Fire-and-forget: don't let a pending notification-permission dialog
+    // block the sync pass. The service pins the process so the pass survives
+    // the screen turning off; a start failure just means foreground-only sync.
+    startUploadForegroundService(
+      pendingCount === 1 ? 'Uploading observation…' : `Uploading ${pendingCount} observations…`
+    )
+  }
+
   for (const item of items) {
     if (!navigator.onLine) break
     const queueUserId = _queueUserFromItem(item)
@@ -827,6 +842,7 @@ async function _runSyncQueue() {
         await _setQueueSyncStatus(item.id, 'saving-observation', {
           syncImageCount: queuedImages.length,
         })
+        updateUploadForegroundService('Saving observation…')
 
         repairedPayload = {
           ...observationPayload,
@@ -933,6 +949,7 @@ async function _runSyncQueue() {
           syncImageIndex: i + 1,
           syncImageCount: queuedImages.length,
         })
+        updateUploadForegroundService(`Uploading image ${i + 1} of ${queuedImages.length}…`)
         let preparedImage = image
         const preparedUploadMode = image.uploadMeta?.upload_mode || null
         const preparedQualityProfile = image.uploadMeta?.quality_profile || null
@@ -1049,8 +1066,23 @@ export async function triggerSync() {
     .finally(() => {
       isSyncing = false
       _currentSyncPromise = null
+      _settleUploadKeepalive()
     })
   return _currentSyncPromise
+}
+
+function _settleUploadKeepalive() {
+  // A scheduled retry means the pass ended on a retryable error. Keep the
+  // foreground service alive so the retry can fire with the screen off, but
+  // only for a bounded number of cycles — after that, syncing resumes the
+  // next time the app is foregrounded.
+  if (_retryTimer && navigator.onLine && _keepaliveRetryCycles < KEEPALIVE_MAX_RETRY_CYCLES) {
+    _keepaliveRetryCycles += 1
+    updateUploadForegroundService('Waiting to retry upload…')
+    return
+  }
+  _keepaliveRetryCycles = 0
+  stopUploadForegroundService()
 }
 
 async function _drainQueueForBackgroundTask() {

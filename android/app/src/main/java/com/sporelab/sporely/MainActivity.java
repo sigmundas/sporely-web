@@ -8,6 +8,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(NativePhotoPickerPlugin.class);
         registerPlugin(NativeCameraPlugin.class);
+        registerPlugin(UploadSyncServicePlugin.class);
         super.onCreate(savedInstanceState);
     }
 }
