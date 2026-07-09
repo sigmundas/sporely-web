@@ -41,6 +41,7 @@ import { isAndroidNativeApp } from '../camera-actions.js'
 import { playIrisShutter } from '../iris-shutter.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile } from './import-helpers.js'
 import { setCaptureCompleteHandler } from './capture.js'
+import { debugImagePipeline } from '../image-pipeline-debug.js'
 import { prepareImageBlobForUpload } from '../image_crop.js'
 import { isBlob } from '../observation-shapes.js'
 
@@ -3786,6 +3787,8 @@ async function _openPickerForDetail() {
       return
     } catch (err) {
       if (isPickerCancel(err)) return
+      console.warn('Native image picker failed:', err)
+      showToast(`Upload images: ${err?.message || err}`)
       _hideProgress()
     }
   }

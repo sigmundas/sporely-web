@@ -855,7 +855,7 @@ test('loadObservationRedlistSummaries keeps the newest redlist-bearing row per o
   client.rows.push(
     {
       id: 'community-row-1',
-      observation_id: 'obs-1',
+      observation_id: 101,
       service: 'inat',
       status: 'success',
       results: [
@@ -866,7 +866,7 @@ test('loadObservationRedlistSummaries keeps the newest redlist-bearing row per o
     },
     {
       id: 'community-row-2',
-      observation_id: 'obs-1',
+      observation_id: 101,
       service: 'artsorakel',
       status: 'success',
       results: [
@@ -877,7 +877,7 @@ test('loadObservationRedlistSummaries keeps the newest redlist-bearing row per o
     },
     {
       id: 'community-row-3',
-      observation_id: 'obs-2',
+      observation_id: 102,
       service: 'artsorakel',
       status: 'success',
       top_redlist_category: 'NT',
@@ -889,8 +889,46 @@ test('loadObservationRedlistSummaries keeps the newest redlist-bearing row per o
     }
   )
 
-  const summaries = await loadObservationRedlistSummaries(['obs-1', 'obs-2'], { supabaseClient: client })
+  const summaries = await loadObservationRedlistSummaries([101, '102'], { supabaseClient: client })
 
-  assert.equal(summaries.get('obs-1').topRedlistCategory, 'LC')
-  assert.equal(summaries.get('obs-2').topRedlistCategory, 'NT')
+  assert.equal(summaries.get('101').topRedlistCategory, 'LC')
+  assert.equal(summaries.get('102').topRedlistCategory, 'NT')
+})
+
+test('loadObservationRedlistSummaries skips queued placeholder observation ids', async () => {
+  resetObservationIdentificationsTableAvailabilityForTests()
+  const calls = []
+  const client = {
+    from(table) {
+      return {
+        select() { return this },
+        in(field, values) {
+          calls.push({ table, field, values })
+          return Promise.resolve({ data: [], error: null })
+        },
+      }
+    },
+  }
+
+  await loadObservationRedlistSummaries([
+    797,
+    'queued-17',
+    ' 796 ',
+    'queued-16',
+    '',
+    null,
+    0,
+    -1,
+    '12.5',
+  ], { supabaseClient: client })
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].table, 'observation_identifications_community_view')
+  assert.equal(calls[0].field, 'observation_id')
+  assert.deepEqual(calls[0].values, ['797', '796'])
+
+  calls.length = 0
+  const empty = await loadObservationRedlistSummaries(['queued-18', 'draft'], { supabaseClient: client })
+  assert.equal(empty.size, 0)
+  assert.equal(calls.length, 0)
 })

@@ -1934,7 +1934,7 @@ async function _attachFindsRedlistTags(observations, loadSeq = _loadFindsSeq) {
   const seenIds = new Set()
   for (const obs of items) {
     const id = String(obs?.id || '').trim()
-    if (!id || seenIds.has(id)) continue
+    if (!id || obs?._pendingSync || seenIds.has(id)) continue
     seenIds.add(id)
     if (_findsRedlistSummary(obs)) continue
     missingIds.push(id)

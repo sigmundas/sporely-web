@@ -49,6 +49,11 @@ function _normalizeNullableText(value) {
   return text ? text : null
 }
 
+function _normalizeObservationIdForQuery(value) {
+  const text = _normalizeText(value)
+  return /^[1-9]\d*$/.test(text) ? text : null
+}
+
 function _normalizeProbability(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return 0
@@ -1052,7 +1057,7 @@ function _getObservationIdentificationTimestamp(row = {}) {
 export async function loadObservationRedlistSummaries(observationIds, options = {}) {
   const ids = Array.from(new Set(
     (Array.isArray(observationIds) ? observationIds : [])
-      .map(id => _normalizeText(id))
+      .map(id => _normalizeObservationIdForQuery(id))
       .filter(Boolean)
   ))
   if (!ids.length) return new Map()

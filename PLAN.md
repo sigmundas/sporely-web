@@ -187,6 +187,93 @@ These are real issues, but they are not the next image-pipeline step.
 - [ ] R2 media physical deletion: after the recycle window expires.
 - [ ] Sync tombstone metadata: retain for 30–90 days.
 
+### Anonymized public spore data (paired with sporely-py Stage L)
+
+Goal: let a user contribute spore measurements to the community
+dataset without exposing the observation itself. The schema already
+separates `spore_data_visibility` from `visibility`; the missing
+piece is a public RPC that surfaces the anonymized subset.
+
+Tasks:
+
+- [ ] New public RPC (working name
+      `search_public_anonymous_spore_points`) reading observations
+      where `spore_data_visibility = 'public'` regardless of
+      `observations.visibility`. Projection strips observation id,
+      observer, GPS, and exact date. Keeps: `genus`, `species`,
+      `length_um`, `width_um`, `q`, `country_code`, optionally
+      `year_month` when the (species, country, month) cohort has at
+      least N points (starting suggestion N = 5), else year only.
+- [ ] Companion mosaic-tile RPC (or extension of an existing one)
+      that returns the tile URL + tile rect + polygon overlay
+      *without* the `observationId`, so anonymized points can still
+      render their thumbnail on the public site but the tile cannot
+      be linked back to the underlying observation page.
+- [ ] Direct table reads on `observations`,
+      `observation_images`, `spore_measurements`,
+      `spore_measurement_mosaics`, `spore_measurement_mosaic_tiles`
+      must continue to reject anonymous / stranger access when the
+      observation is not `visibility='public'`. New visibility only
+      goes through the RPCs.
+- [ ] Landing must skip the observation-detail deep link for
+      anonymized points; clicks land on the species aggregate view
+      instead.
+- [ ] Extend `supabase/tests/public_observation_rpc_validation.sql`
+      with:
+      - private observation + `spore_data_visibility='public'` → RPC
+        returns anonymized point.
+      - same observation is NOT returned by
+        `search_public_observations` /
+        `get_public_observation`.
+      - rare-taxa cohort under N returns year only, not month.
+
+Open questions:
+
+- Whether to expose the anonymized point count in
+  `search_public_species` (probably yes as a separate
+  `anonymousSporePointCount` field so operators can see uptake
+  without conflating it with public observations).
+- Retention semantics if a user later flips
+  `spore_data_visibility='private'`: their anonymized points must
+  disappear from the RPC on the next call (RLS + RPC filter should
+  handle this automatically, but verify).
+
+### Draft observation expiry policy (paired with sporely-py Stage M)
+
+Goal: keep the free tier honest without hard-deleting anyone's work.
+Free tier gets 20 private slots plus draft slots that expire if
+they're never picked up again; paid tier has no expiry cap.
+
+Tasks:
+
+- [ ] Add nullable `observations.expires_at timestamptz`.
+- [ ] Edge Function / scheduled job that flags candidate drafts
+      (`is_draft = true` AND no edits / no measurements added for D
+      months; D = 6 for free tier, D = 12 for paid) by setting
+      `expires_at = now() + 30 days`. Exempt observations whose
+      `spore_data_visibility='public'` — those are contributing
+      anonymized data (see above) and must survive the sweep.
+- [ ] On `expires_at` reaching now, set the existing observation
+      tombstone (`deleted_at`) — do NOT hard delete. Media garbage
+      collection (already tracked in `Cloud media lifecycle`) does
+      the eventual R2 purge.
+- [ ] User-facing notification: one email + in-app banner during the
+      grace window. "Keep this draft" one-click action clears
+      `expires_at`.
+- [ ] Landing/desktop-side surfaces for the banner + keep action.
+- [ ] RLS: owners must still be able to read / update / undelete
+      their expiring drafts.
+- [ ] Ship the sweep in dry-run first (log candidates, do not set
+      `expires_at`) and audit for at least one full sweep cycle
+      before enabling live expiry.
+
+Non-goals:
+
+- No hard delete at expiry — always route through the existing
+  tombstone + recycle bin flow.
+- No expiry for `is_draft = false` observations.
+- No expiry for drafts with public spore data opted in.
+
 ### UGC moderation and Play Store compliance
 
 - [ ] Moderation dashboard V1:

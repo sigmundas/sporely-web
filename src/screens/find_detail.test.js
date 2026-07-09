@@ -482,6 +482,15 @@ test('detail ai run path stays disabled for non-owners and starts from a safe re
   assert.match(source, /showToast\(noRunReason\)/)
 })
 
+test('detail add-photo native paths have image pipeline debug available', () => {
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+
+  assert.match(source, /import \{ debugImagePipeline \} from '\.\.\/image-pipeline-debug\.js'/)
+  assert.match(source, /debugImagePipeline\('android native camera capture requested'/)
+  assert.match(source, /debugImagePipeline\('android native picker returned'/)
+  assert.match(source, /console\.warn\('Native image picker failed:', err\)/)
+})
+
 test('detail privacy note treats drafts as free and labels published rows explicitly', () => {
   const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
 
