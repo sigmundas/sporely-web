@@ -176,6 +176,77 @@ export function formatScientificName(genus, specificEpithet) {
     .join(' ')
 }
 
+const _INFRASPECIFIC_MARKERS = new Set(['cf', 'cf.', 'aff', 'aff.', 'sp', 'sp.', 'spp', 'spp.'])
+const _GROUP_QUALIFIER_TOKENS = new Set(['coll.', 'agg.', 'gr.', 'group', 's.l.', 's.lat.', 's.str.', 's.s.'])
+const _GROUP_QUALIFIER_PHRASES = [
+  ['sensu', 'lato'],
+  ['sensu', 'stricto'],
+  ['s.', 'lat.'],
+  ['s.', 'lato'],
+  ['s.', 'str.'],
+  ['s.', 'stricto'],
+  ['s.', 'l.'],
+  ['s.', 's.'],
+]
+
+function _consumeGroupQualifier(tokens) {
+  if (!tokens.length) return ''
+  const lowered = tokens.map(tok => tok.toLowerCase())
+  for (const phrase of _GROUP_QUALIFIER_PHRASES) {
+    if (lowered.length < phrase.length) continue
+    let matches = true
+    for (let i = 0; i < phrase.length; i++) {
+      if (lowered[i] !== phrase[i]) { matches = false; break }
+    }
+    if (matches) {
+      let qualifier = tokens.slice(0, phrase.length).join(' ')
+      const remainder = tokens.slice(phrase.length)
+      if (remainder.length && /^\d+$/.test(remainder[0])) {
+        qualifier = `${qualifier} ${remainder[0]}`
+      }
+      return qualifier
+    }
+  }
+  if (_GROUP_QUALIFIER_TOKENS.has(lowered[0])) {
+    let qualifier = tokens[0]
+    if (tokens.length > 1 && /^\d+$/.test(tokens[1])) {
+      qualifier = `${qualifier} ${tokens[1]}`
+    }
+    return qualifier
+  }
+  return ''
+}
+
+/**
+ * Split a scientific-name string into `[genus, specificEpithet]`.
+ *
+ * Preserves trailing group qualifiers (`coll.`, `agg.`, `s. lat.`,
+ * `sensu lato`, etc.) as part of the species token so that DB lookups
+ * against records like `Hygrocybe conica coll.` match correctly.
+ * Returns `[null, null]` when the input cannot be parsed as a binomial.
+ */
+export function splitScientificName(text) {
+  const value = String(text || '').trim()
+  if (!value) return [null, null]
+  const parts = value.split(/\s+/).filter(Boolean)
+  if (parts.length < 2) return [null, null]
+
+  const genus = parts[0]
+  let species = parts[1]
+  let consumed = 2
+  if (_INFRASPECIFIC_MARKERS.has(species.toLowerCase())) {
+    if (parts.length < 3) return [null, null]
+    species = parts[2]
+    consumed = 3
+  }
+
+  const qualifier = _consumeGroupQualifier(parts.slice(consumed))
+  if (qualifier) species = `${species} ${qualifier}`
+
+  if (!genus || !species) return [null, null]
+  return [genus, species]
+}
+
 export function formatDisplayName(genus, specificEpithet, vernacularName) {
   const sci  = formatScientificName(genus, specificEpithet)
   const vern = vernacularName?.trim()

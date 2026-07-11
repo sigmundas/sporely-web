@@ -23,6 +23,7 @@ DECLARE
   deleted_microscopy_id bigint;
   purged_microscopy_id bigint;
   public_image_id bigint;
+  public_unsafe_image_id bigint;
   facets_public_id bigint;
   facets_image_id bigint;
   private_image_id bigint;
@@ -127,7 +128,15 @@ BEGIN
     stored_height,
     contrast,
     mount_medium,
-    sample_type
+    sample_type,
+    ai_crop_x1,
+    ai_crop_y1,
+    ai_crop_x2,
+    ai_crop_y2,
+    ai_crop_source_w,
+    ai_crop_source_h,
+    ai_crop_is_custom,
+    storage_exif_safe
   )
   VALUES (
     public_exact_id,
@@ -141,9 +150,63 @@ BEGIN
     600,
     'brightfield',
     'water',
-    'Fresh'
+    'Fresh',
+    0.12,
+    0.15,
+    0.62,
+    0.65,
+    4000,
+    3000,
+    true,
+    true
   )
   RETURNING id INTO public_image_id;
+
+  INSERT INTO public.observation_images (
+    observation_id,
+    user_id,
+    storage_path,
+    image_type,
+    sort_order,
+    source_width,
+    source_height,
+    stored_width,
+    stored_height,
+    contrast,
+    mount_medium,
+    sample_type,
+    ai_crop_x1,
+    ai_crop_y1,
+    ai_crop_x2,
+    ai_crop_y2,
+    ai_crop_source_w,
+    ai_crop_source_h,
+    ai_crop_is_custom,
+    storage_exif_safe
+  )
+  VALUES (
+    public_exact_id,
+    visible_user_id,
+    'rpc/public-unsafe.webp',
+    'microscope',
+    1,
+    4000,
+    3000,
+    800,
+    600,
+    'brightfield',
+    'water',
+    'Fresh',
+    0.22,
+    0.23,
+    0.72,
+    0.73,
+    4000,
+    3000,
+    false,
+    false
+  )
+  RETURNING id INTO public_unsafe_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
   VALUES (public_image_id, visible_user_id, 10.1, 5.1, 'manual')
@@ -643,11 +706,11 @@ BEGIN
     RAISE EXCEPTION 'Null spore_data_visibility leaked a private summary through search';
   END IF;
 
-  IF (SELECT count(*) FROM public.get_public_observation_images(public_exact_id)) IS DISTINCT FROM 1 THEN
-    RAISE EXCEPTION 'Expected exactly one public image for observation %', public_exact_id;
+  IF (SELECT count(*) FROM public.get_public_observation_images(public_exact_id)) IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Expected exactly two public images for observation %', public_exact_id;
   END IF;
 
-  IF (SELECT count(*) FROM public.search_public_observation_images(ARRAY[public_exact_id, private_id, draft_id, deleted_microscopy_id, purged_microscopy_id])) IS DISTINCT FROM 1 THEN
+  IF (SELECT count(*) FROM public.search_public_observation_images(ARRAY[public_exact_id, private_id, draft_id, deleted_microscopy_id, purged_microscopy_id])) IS DISTINCT FROM 2 THEN
     RAISE EXCEPTION 'Public image search leaked private, draft, deleted, or purged images';
   END IF;
 
@@ -678,7 +741,10 @@ BEGIN
     RAISE EXCEPTION 'Public detail projection did not match expected safe fields';
   END IF;
 
-  SELECT * INTO rpc_row FROM public.get_public_observation_images(public_exact_id) LIMIT 1;
+  SELECT * INTO rpc_row
+  FROM public.get_public_observation_images(public_exact_id)
+  WHERE "sortOrder" = 0
+  LIMIT 1;
   IF rpc_row."observationId" IS DISTINCT FROM public_exact_id
      OR rpc_row."imageId" IS DISTINCT FROM public_image_id
      OR rpc_row."sortOrder" IS DISTINCT FROM 0
@@ -686,8 +752,39 @@ BEGIN
      OR rpc_row."width" IS DISTINCT FROM 800
      OR rpc_row."height" IS DISTINCT FROM 600
      OR rpc_row."thumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp'
-     OR rpc_row."previewUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp' THEN
+     OR rpc_row."previewUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp'
+     OR rpc_row."fullUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/public-exact.webp'
+     OR rpc_row."aiCropX1" IS DISTINCT FROM 0.12::double precision
+     OR rpc_row."aiCropY1" IS DISTINCT FROM 0.15::double precision
+     OR rpc_row."aiCropX2" IS DISTINCT FROM 0.62::double precision
+     OR rpc_row."aiCropY2" IS DISTINCT FROM 0.65::double precision
+     OR rpc_row."aiCropSourceW" IS DISTINCT FROM 4000
+     OR rpc_row."aiCropSourceH" IS DISTINCT FROM 3000
+     OR rpc_row."aiCropIsCustom" IS DISTINCT FROM true THEN
     RAISE EXCEPTION 'Public image projection did not match expected safe fields';
+  END IF;
+
+  SELECT * INTO rpc_row
+  FROM public.get_public_observation_images(public_exact_id)
+  WHERE "sortOrder" = 1
+  LIMIT 1;
+  IF rpc_row."observationId" IS DISTINCT FROM public_exact_id
+     OR rpc_row."imageId" IS DISTINCT FROM public_unsafe_image_id
+     OR rpc_row."sortOrder" IS DISTINCT FROM 1
+     OR rpc_row."imageType" IS DISTINCT FROM 'microscope'
+     OR rpc_row."width" IS DISTINCT FROM 800
+     OR rpc_row."height" IS DISTINCT FROM 600
+     OR rpc_row."thumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-unsafe.webp'
+     OR rpc_row."previewUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-unsafe.webp'
+     OR rpc_row."fullUrl" IS NOT NULL
+     OR rpc_row."aiCropX1" IS DISTINCT FROM 0.22::double precision
+     OR rpc_row."aiCropY1" IS DISTINCT FROM 0.23::double precision
+     OR rpc_row."aiCropX2" IS DISTINCT FROM 0.72::double precision
+     OR rpc_row."aiCropY2" IS DISTINCT FROM 0.73::double precision
+     OR rpc_row."aiCropSourceW" IS DISTINCT FROM 4000
+     OR rpc_row."aiCropSourceH" IS DISTINCT FROM 3000
+     OR rpc_row."aiCropIsCustom" IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'Public unsafe image projection did not match expected gated fields';
   END IF;
 
   IF to_jsonb(rpc_row) ? 'storage_path'

@@ -1,6 +1,6 @@
 import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
-import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, imageExtensionForMimeType, buildObservationImageStoragePath } from './images.js'
+import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, imageExtensionForMimeType, buildObservationImageStoragePath, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
 import { saveIdentificationRun } from './ai-identification.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
@@ -137,6 +137,15 @@ export function isPrivacySlotLimitError(error) {
   return hasPhrase || (hasCode && haystack.includes('privacy slot'))
 }
 
+function isUndecodableImageError(error) {
+  const { code, texts } = _collectSyncErrorDetails(error)
+  const haystack = [...new Set(texts)].join(' ').toLowerCase()
+  const undecodableMessage = String(UNDECODABLE_IMAGE_USER_MESSAGE || '').trim().toLowerCase()
+  return String(code || '').trim().toLowerCase() === 'image_undecodable'
+    || (undecodableMessage && haystack.includes(undecodableMessage))
+    || haystack.includes('could not decode this image format')
+}
+
 export function classifyQueueSyncError(error) {
   if (isPrivacySlotLimitError(error)) {
     return {
@@ -153,6 +162,16 @@ export function classifyQueueSyncError(error) {
       syncErrorCode: 'image_too_large_for_plan',
       blockedReason: IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
       syncErrorMessage: String(_collectSyncErrorDetails(error).texts.join(' ') || '').trim() || IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
+      isBlocked: true,
+      isRetryable: false,
+    }
+  }
+
+  if (isUndecodableImageError(error)) {
+    return {
+      syncErrorCode: 'image_undecodable',
+      blockedReason: UNDECODABLE_IMAGE_USER_MESSAGE,
+      syncErrorMessage: UNDECODABLE_IMAGE_USER_MESSAGE,
       isBlocked: true,
       isRetryable: false,
     }
@@ -995,6 +1014,7 @@ async function _runSyncQueue() {
           aiCropSourceH: image.aiCropSourceH,
           aiCropIsCustom: image.aiCropIsCustom === true,
           ...uploadMeta,
+          storage_exif_safe: uploadMeta?.storage_exif_safe === true,
         })
         await syncObservationMediaKeys(obsId, path, { sortOrder: i })
 

@@ -15,6 +15,7 @@ import {
   runArtsorakel,
   runArtsorakelForBlobs,
   runArtsorakelForMediaKeys,
+  splitScientificName,
 } from './artsorakel.js'
 
 const TEST_APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'
@@ -843,4 +844,49 @@ test('detail identify inputs prefer the authorized storage blob over public medi
     assert.equal(inputs[0].sourceMode, 'blob')
     assert.equal(inputs[0].usedFallbackUrl, false)
   })
+})
+
+test('splitScientificName parses a plain binomial', () => {
+  assert.deepEqual(splitScientificName('Cantharellus cibarius'), ['Cantharellus', 'cibarius'])
+})
+
+test('splitScientificName preserves trailing coll. group qualifier', () => {
+  assert.deepEqual(splitScientificName('Hygrocybe conica coll.'), ['Hygrocybe', 'conica coll.'])
+})
+
+test('splitScientificName preserves coll. with variant number', () => {
+  assert.deepEqual(splitScientificName('Cortinarius flavoides coll. 1'), ['Cortinarius', 'flavoides coll. 1'])
+})
+
+test('splitScientificName preserves agg. group qualifier', () => {
+  assert.deepEqual(splitScientificName('Boletus edulis agg.'), ['Boletus', 'edulis agg.'])
+})
+
+test('splitScientificName preserves sensu lato group qualifier', () => {
+  assert.deepEqual(splitScientificName('Russula sardonia sensu lato'), ['Russula', 'sardonia sensu lato'])
+})
+
+test('splitScientificName preserves s.l. group qualifier', () => {
+  assert.deepEqual(splitScientificName('Russula sardonia s.l.'), ['Russula', 'sardonia s.l.'])
+})
+
+test('splitScientificName preserves s. l. spaced qualifier', () => {
+  assert.deepEqual(splitScientificName('Russula sardonia s. l.'), ['Russula', 'sardonia s. l.'])
+})
+
+test('splitScientificName skips cf. infraspecific marker between genus and species', () => {
+  assert.deepEqual(splitScientificName('Amanita cf. muscaria'), ['Amanita', 'muscaria'])
+})
+
+test('splitScientificName combines cf. marker and trailing coll. qualifier', () => {
+  assert.deepEqual(splitScientificName('Russula cf. lepida coll.'), ['Russula', 'lepida coll.'])
+})
+
+test('splitScientificName returns [null, null] for genus-only input', () => {
+  assert.deepEqual(splitScientificName('Boletus'), [null, null])
+})
+
+test('splitScientificName returns [null, null] for empty input', () => {
+  assert.deepEqual(splitScientificName(''), [null, null])
+  assert.deepEqual(splitScientificName(null), [null, null])
 })

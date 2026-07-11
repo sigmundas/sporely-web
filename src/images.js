@@ -22,7 +22,10 @@ const UPLOAD_METADATA_FIELDS = [
   'stored_width',
   'stored_height',
   'stored_bytes',
+  'storage_exif_safe',
 ]
+
+export const UNDECODABLE_IMAGE_USER_MESSAGE = 'This browser could not decode this image format. Please convert the image to JPEG/WebP first, or upload from a device/browser that supports HEIC conversion.'
 
 const SUPABASE_STORAGE_PATH_PATTERNS = [
   /\/storage\/v1\/object\/authenticated\/observation-images\/(.+)$/i,
@@ -182,6 +185,16 @@ function _isImageTooLargeForPlanError(error) {
 
 function _mediaStorageFallbackDisabledError() {
   return new Error('Media upload worker is not configured; refusing Supabase Storage fallback because R2 is canonical.')
+}
+
+function _buildUndecodableImageError(details = {}) {
+  const error = new Error(UNDECODABLE_IMAGE_USER_MESSAGE)
+  error.name = 'ImageUndecodableError'
+  error.code = 'image_undecodable'
+  if (details && typeof details === 'object') {
+    error.details = { ...details }
+  }
+  return error
 }
 
 export function normalizeMediaKey(value) {
@@ -411,6 +424,19 @@ async function _downloadViaWorker(path) {
   const blob = await response.blob()
   if (!isBlob(blob)) throw new Error('Worker download returned invalid data')
   return blob
+}
+
+async function _downloadViaSupabaseStorage(path) {
+  const normalizedPath = normalizeMediaKey(path)
+  if (!normalizedPath) throw new Error('Missing storage path')
+
+  const { data, error } = await supabase.storage
+    .from('observation-images')
+    .download(normalizedPath)
+
+  if (error) throw new Error(`Storage download failed: ${error.message}`)
+  if (!isBlob(data)) throw new Error('Storage download returned invalid data')
+  return data
 }
 
 async function _uploadToStorage(path, blob, options = {}) {
@@ -774,6 +800,7 @@ async function _prepareUploadBlobInWorker(blob, policy) {
       stored_width: result.storedWidth ?? result.targetWidth,
       stored_height: result.storedHeight ?? result.targetHeight,
       stored_bytes: uploadBlob.size || result.fullSize || 0,
+      storage_exif_safe: true,
     },
   }
 }
@@ -795,59 +822,37 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
     console.warn('Image worker processing failed; falling back to main thread:', err)
     debugImagePipeline('prepare upload blob: worker processing failed, falling back to main thread', { error: err.message })
   }
-  
+
   let img
   try {
     debugImagePipeline('prepare upload blob: attempting main thread _loadImage', { blobType: blob.type })
     img = await _loadImage(blob)
   } catch (err) {
-    // Browser cannot decode the image (e.g. HEIC fallback). Just upload original.
-    debugImagePipeline('HEIC/Original fallback (browser cannot decode)', {
+    debugImagePipeline('prepare upload blob: browser could not decode image; failing closed', {
       type: blob.type,
       sizeMb: (blob.size / (1024 * 1024)).toFixed(2)
     })
-    return {
-      uploadBlob: blob,
-      variants: {},
-      variantMeta: null,
-      uploadMeta: {
-        upload_mode: policy.uploadMode || 'reduced',
-        quality_profile: policy.qualityProfile || 'standard',
-        encoding_quality: null,
-        encoding_format: blob.type || 'image/jpeg',
-        source_width: null,
-        source_height: null,
-        stored_width: null,
-        stored_height: null,
-        stored_bytes: blob.size || 0,
-      },
-    }
+    throw _buildUndecodableImageError({
+      blobType: blob.type || null,
+      blobSize: blob.size || 0,
+      stage: 'load-image',
+      originalError: String(err?.message || err || '') || null,
+    })
   }
 
   const sourceWidth = img.naturalWidth || img.width
   const sourceHeight = img.naturalHeight || img.height
   if (!sourceWidth || !sourceHeight) {
     _releaseImage(img)
-    debugImagePipeline('HEIC/Original fallback (browser cannot decode)', {
+    debugImagePipeline('prepare upload blob: decoded image had no dimensions; failing closed', {
       type: blob.type,
       sizeMb: (blob.size / (1024 * 1024)).toFixed(2)
     })
-    return {
-      uploadBlob: blob,
-      variants: {},
-      variantMeta: null,
-      uploadMeta: {
-        upload_mode: policy.uploadMode || 'reduced',
-        quality_profile: policy.qualityProfile || 'standard',
-        encoding_quality: null,
-        encoding_format: blob.type || 'image/jpeg',
-        source_width: null,
-        source_height: null,
-        stored_width: null,
-        stored_height: null,
-        stored_bytes: blob.size || 0,
-      },
-    }
+    throw _buildUndecodableImageError({
+      blobType: blob.type || null,
+      blobSize: blob.size || 0,
+      stage: 'missing-dimensions',
+    })
   }
 
   debugImagePipeline('prepare upload blob: main thread _loadImage successful', { sourceWidth: sourceWidth, sourceHeight: sourceHeight })
@@ -949,6 +954,7 @@ async function _prepareUploadBlob(blob, uploadPolicy) {
         stored_width: fullEncoding.storedWidth ?? targetWidth,
         stored_height: fullEncoding.storedHeight ?? targetHeight,
         stored_bytes: fullBlob.size || 0,
+        storage_exif_safe: true,
       },
     }
   } finally {
@@ -1156,6 +1162,20 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
     }
   }
 
+  if (allowWorkerDownload) {
+    const candidatePaths = variant === 'original'
+      ? [originalPath]
+      : [getVariantPath(originalPath, variant), originalPath]
+    for (const path of [...new Set(candidatePaths.filter(Boolean))]) {
+      try {
+        const data = await _downloadViaSupabaseStorage(path)
+        if (isBlob(data)) return data
+      } catch (err) {
+        lastError = err
+      }
+    }
+  }
+
   const candidateUrls = []
   if (source?.primaryUrl && _isFetchableImageUrl(source.primaryUrl)) {
     candidateUrls.push(source.primaryUrl)
@@ -1211,6 +1231,7 @@ export async function insertObservationImage(observationImage) {
     stored_width: observationImage?.stored_width ?? null,
     stored_height: observationImage?.stored_height ?? null,
     stored_bytes: observationImage?.stored_bytes ?? null,
+    storage_exif_safe: observationImage?.storage_exif_safe === true,
   }
 
   if (_isAiCropWriteDebugEnabled()) {

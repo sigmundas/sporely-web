@@ -3,7 +3,7 @@ import { formatDate, formatTime, getLocale, getTaxonomyLanguage, t } from '../i1
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, formatDisplayName } from '../artsorakel.js'
+import { searchTaxa, formatDisplayName, splitScientificName } from '../artsorakel.js'
 import {
   buildIdentifyFingerprint,
   debugPhotoId,
@@ -13,6 +13,8 @@ import {
   loadObservationIdentifications,
   renderIdentifyResultRows,
   renderIdentifyRedlistSummary,
+  getPredictionRedlistCategory,
+  getPredictionRedlistCategoriesMap,
   saveIdentificationRun,
   markRequestedServicesRunning,
   shouldRunServiceFromTab,
@@ -517,7 +519,7 @@ export function getDetailDraftExplanationLines(obs = currentObs, now = Date.now(
 
 const DETAIL_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
 const DETAIL_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
-const DETAIL_VIEW_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
+const DETAIL_VIEW_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, red_list_category, red_list_categories_json, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
 const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
 const DETAIL_AI_SELECTION_FIELDS = [
   'ai_selected_service',
@@ -525,6 +527,15 @@ const DETAIL_AI_SELECTION_FIELDS = [
   'ai_selected_scientific_name',
   'ai_selected_probability',
   'ai_selected_at',
+]
+const DETAIL_AI_SELECTION_TAXON_FIELDS = [
+  'genus',
+  'species',
+  'common_name',
+]
+const DETAIL_AI_SELECTION_REDLIST_FIELDS = [
+  'red_list_category',
+  'red_list_categories_json',
 ]
 const DETAIL_IMAGE_SELECT_WITH_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom'
 const DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h'
@@ -736,12 +747,22 @@ function _buildDetailAiSelectionPatch(selectionState = {}) {
 
   if (!selectedPrediction || !selectedService) return null
 
+  const [genus, species] = splitScientificName(selectedPrediction?.scientificName || '')
+  const commonName = selectedPrediction?.vernacularName || null
+  const redListCategory = getPredictionRedlistCategory(selectedPrediction) || null
+  const redListCategoriesMap = getPredictionRedlistCategoriesMap(selectedPrediction)
+
   return {
     ai_selected_service: selectedService,
     ai_selected_taxon_id: selectedPrediction?.taxonId || null,
     ai_selected_scientific_name: selectedPrediction?.scientificName || null,
     ai_selected_probability: _detailAiPredictionProbability(selectedPrediction),
     ai_selected_at: new Date().toISOString(),
+    genus,
+    species,
+    common_name: commonName,
+    red_list_category: redListCategory,
+    red_list_categories_json: redListCategoriesMap,
   }
 }
 
@@ -757,6 +778,19 @@ async function _persistDetailAiSelection(selectionState = {}) {
     .update(updatePatch)
     .eq('id', currentObs.id)
     .eq('user_id', state.user.id)
+
+  if (error) {
+    const redlistFallback = _removeMissingObservationColumnsFromPatch(updatePatch, error, DETAIL_AI_SELECTION_REDLIST_FIELDS)
+    if (redlistFallback.removed) {
+      updatePatch = redlistFallback.patch
+      if (!Object.keys(updatePatch).length) return null
+      ;({ error } = await supabase
+        .from('observations')
+        .update(updatePatch)
+        .eq('id', currentObs.id)
+        .eq('user_id', state.user.id))
+    }
+  }
 
   if (error) {
     const aiFallback = _removeMissingObservationColumnsFromPatch(updatePatch, error, DETAIL_AI_SELECTION_FIELDS)
@@ -1966,10 +2000,10 @@ function _renderDetailAiResults() {
       el.addEventListener('click', () => {
         if (Boolean(currentObs?.id) && !currentObsIsOwner) return
         const clickedPrediction = JSON.parse(el.dataset.identifyResult)
-        const parts = String(clickedPrediction.scientificName || '').trim().split(/\s+/)
+        const [genus, specificEpithet] = splitScientificName(clickedPrediction.scientificName)
         selectedTaxon = {
-          genus: parts[0] || null,
-          specificEpithet: parts[1] || null,
+          genus,
+          specificEpithet,
           vernacularName: clickedPrediction.vernacularName || null,
           displayName: clickedPrediction.displayName,
         }
@@ -3189,6 +3223,8 @@ async function _save() {
     ai_selected_scientific_name: currentObs.ai_selected_scientific_name || null,
     ai_selected_probability: currentObs.ai_selected_probability ?? null,
     ai_selected_at: currentObs.ai_selected_at || null,
+    red_list_category: currentObs.red_list_category ?? null,
+    red_list_categories_json: currentObs.red_list_categories_json ?? null,
   }
 
   const taxonInputValue = document.getElementById('detail-taxon-input').value.trim()
@@ -3210,6 +3246,10 @@ async function _save() {
       ? detailAiState.selectedProbabilityByService?.[detailAiState.selectedService] ?? selectedPrediction?.probability ?? null
       : selectedPrediction?.probability ?? null
     patch.ai_selected_at = new Date().toISOString()
+    if (selectedPrediction) {
+      patch.red_list_category = getPredictionRedlistCategory(selectedPrediction) || null
+      patch.red_list_categories_json = getPredictionRedlistCategoriesMap(selectedPrediction)
+    }
   } else if (taxonInputValue !== currentDisplayName) {
     patch.genus       = null
     patch.species     = taxonInputValue || null
@@ -3219,6 +3259,8 @@ async function _save() {
     patch.ai_selected_scientific_name = null
     patch.ai_selected_probability = null
     patch.ai_selected_at = null
+    patch.red_list_category = null
+    patch.red_list_categories_json = null
   }
 
   let updatePatch = { ...patch }
@@ -3227,6 +3269,18 @@ async function _save() {
     .update(updatePatch)
     .eq('id', currentObs.id)
     .eq('user_id', state.user.id)
+
+  if (error) {
+    const redlistFallback = _removeMissingObservationColumnsFromPatch(updatePatch, error, DETAIL_AI_SELECTION_REDLIST_FIELDS)
+    if (redlistFallback.removed) {
+      updatePatch = redlistFallback.patch
+      ;({ error } = await supabase
+        .from('observations')
+        .update(updatePatch)
+        .eq('id', currentObs.id)
+        .eq('user_id', state.user.id))
+    }
+  }
 
   if (error) {
     const aiFallback = _removeMissingObservationColumnsFromPatch(updatePatch, error, [
@@ -3788,7 +3842,7 @@ async function _openPickerForDetail() {
     } catch (err) {
       if (isPickerCancel(err)) return
       console.warn('Native image picker failed:', err)
-      showToast(`Upload images: ${err?.message || err}`)
+      showToast(t('profile.uploadFailed', { message: String(err?.message || err || 'Unknown error') }))
       _hideProgress()
     }
   }
@@ -3861,7 +3915,7 @@ async function _addPhotosToObservation(files) {
         userId,
         observationId: obsId,
       })
-      
+
       try {
         cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })
         await insertObservationImage({
@@ -3871,6 +3925,7 @@ async function _addPhotosToObservation(files) {
           image_type: 'field',
           sort_order: sortOrder,
           ...preparedImage.uploadMeta,
+          storage_exif_safe: preparedImage.uploadMeta?.storage_exif_safe === true,
           ...cropMeta,
         })
       } catch (err) {
@@ -3912,7 +3967,7 @@ async function _addPhotosToObservation(files) {
     _markDetailAiStale()
   } catch (err) {
     console.error('Failed to add photos to observation:', err)
-    showToast(`Error adding photos: ${err.message}`)
+    showToast(t('profile.uploadFailed', { message: String(err?.message || err || 'Unknown error') }))
   } finally {
     _hideProgress()
     if (saveBtn) saveBtn.disabled = false

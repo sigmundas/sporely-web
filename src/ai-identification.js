@@ -507,6 +507,22 @@ function _getPredictionRedlistCategory(prediction = {}) {
   )
 }
 
+export function getPredictionRedlistCategory(prediction = {}) {
+  return _getPredictionRedlistCategory(prediction)
+}
+
+export function getPredictionRedlistCategoriesMap(prediction = {}) {
+  const taxon = _getPredictionTaxon(prediction)
+  const raw = taxon?.redListCategories ?? prediction?.redListCategories ?? null
+  if (!raw || typeof raw !== 'object') return null
+  const map = {}
+  for (const [key, value] of Object.entries(raw)) {
+    const code = _normalizeRedlistCode(value)
+    if (code) map[String(key).toUpperCase()] = code
+  }
+  return Object.keys(map).length ? map : null
+}
+
 function _getPredictionRedlistSource(prediction = {}) {
   return _normalizeNullableText(
     _findPredictionTextValue(prediction, [

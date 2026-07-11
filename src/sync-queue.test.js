@@ -11,7 +11,7 @@ import {
   isImageTooLargeForPlanError,
   isPrivacySlotLimitError,
 } from './sync-queue.js'
-import { resolveMediaSources } from './images.js'
+import { resolveMediaSources, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
 
 test('isPrivacySlotLimitError matches the privacy-cap server payload', () => {
   assert.equal(
@@ -116,6 +116,19 @@ test('isImageTooLargeForPlanError matches the plan-size server payload', () => {
   assert.match(IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE, /image is too large for your plan/i)
 })
 
+test('undecodable image errors are classified as blocked and non-retryable', () => {
+  const classified = classifyQueueSyncError({
+    code: 'image_undecodable',
+    message: UNDECODABLE_IMAGE_USER_MESSAGE,
+  })
+
+  assert.equal(classified.syncErrorCode, 'image_undecodable')
+  assert.equal(classified.blockedReason, UNDECODABLE_IMAGE_USER_MESSAGE)
+  assert.equal(classified.syncErrorMessage, UNDECODABLE_IMAGE_USER_MESSAGE)
+  assert.equal(classified.isBlocked, true)
+  assert.equal(classified.isRetryable, false)
+})
+
 test('legacy thumbnail-style media keys normalize to the canonical thumb path', async () => {
   const [source] = await resolveMediaSources(
     ['8c471394-b274-4933-b830-59805820d93c/617/thumb_medium_0_1780071867059.webp'],
@@ -148,5 +161,6 @@ test('sync queue writes observation image metadata only after the R2 uploads com
 
   assert.ok(uploadIndex >= 0)
   assert.ok(insertIndex > uploadIndex)
+  assert.match(source.slice(insertIndex, syncKeysIndex), /storage_exif_safe:\s*uploadMeta\?\.storage_exif_safe === true/)
   assert.ok(syncKeysIndex > insertIndex)
 })

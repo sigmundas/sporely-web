@@ -1026,7 +1026,7 @@ $_$;
 ALTER FUNCTION "public"."get_public_observation_facets"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text")
+CREATE OR REPLACE FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" text, "width" integer, "height" integer, "thumbUrl" text, "previewUrl" text, "fullUrl" text, "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
@@ -1585,7 +1585,7 @@ $$;
 ALTER FUNCTION "public"."search_people_directory"("p_limit" integer, "p_offset" integer, "p_query" "text") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[] DEFAULT NULL::bigint[]) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text")
+CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[] DEFAULT NULL::bigint[]) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text", "fullUrl" "text", "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $_$
@@ -1621,6 +1621,14 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
         btrim(i.storage_path, '/')
       ) AS storage_dir,
       regexp_replace(btrim(i.storage_path, '/'), '^.*/', '') AS file_name,
+      i.ai_crop_x1,
+      i.ai_crop_y1,
+      i.ai_crop_x2,
+      i.ai_crop_y2,
+      i.ai_crop_source_w,
+      i.ai_crop_source_h,
+      coalesce(i.ai_crop_is_custom, false) AS ai_crop_is_custom,
+      coalesce(i.storage_exif_safe, false) AS storage_exif_safe,
       i.created_at
     FROM visible_observations o
     JOIN public.observation_images i
@@ -1636,6 +1644,14 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
       vi.image_type,
       vi.width,
       vi.height,
+      vi.ai_crop_x1,
+      vi.ai_crop_y1,
+      vi.ai_crop_x2,
+      vi.ai_crop_y2,
+      vi.ai_crop_source_w,
+      vi.ai_crop_source_h,
+      vi.ai_crop_is_custom,
+      vi.storage_exif_safe,
       vi.created_at,
       concat(
         CASE WHEN vi.storage_dir IS NULL THEN '' ELSE vi.storage_dir || '/' END,
@@ -1652,7 +1668,19 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
     p.width AS "width",
     p.height AS "height",
     concat('https://media.sporely.no/', p.thumb_path) AS "thumbUrl",
-    concat('https://media.sporely.no/', p.thumb_path) AS "previewUrl"
+    concat('https://media.sporely.no/', p.thumb_path) AS "previewUrl",
+    CASE
+      WHEN p.storage_exif_safe
+        THEN concat('https://media.sporely.no/', p.full_path)
+      ELSE NULL
+    END AS "fullUrl",
+    p.ai_crop_x1 AS "aiCropX1",
+    p.ai_crop_y1 AS "aiCropY1",
+    p.ai_crop_x2 AS "aiCropX2",
+    p.ai_crop_y2 AS "aiCropY2",
+    p.ai_crop_source_w AS "aiCropSourceW",
+    p.ai_crop_source_h AS "aiCropSourceH",
+    p.ai_crop_is_custom AS "aiCropIsCustom"
   FROM prepared p
   ORDER BY p.observation_id, p.sort_order NULLS LAST, p.created_at DESC NULLS LAST, p.image_id DESC
 $_$;
@@ -2319,6 +2347,8 @@ CREATE TABLE IF NOT EXISTS "public"."observations" (
     "ai_selected_scientific_name" "text",
     "ai_selected_probability" numeric,
     "ai_selected_at" timestamp with time zone,
+    "red_list_category" "text",
+    "red_list_categories_json" "jsonb",
     "country_code" "text",
     "region_id" "text",
     CONSTRAINT "observations_country_code_check" CHECK ((("country_code" IS NULL) OR ("country_code" ~ '^[A-Z]{2}$'::"text"))),
@@ -2557,6 +2587,7 @@ CREATE TABLE IF NOT EXISTS "public"."observation_images" (
     "stored_width" integer,
     "stored_height" integer,
     "stored_bytes" bigint,
+    "storage_exif_safe" boolean DEFAULT false NOT NULL,
     "ai_crop_is_custom" boolean DEFAULT false NOT NULL,
     "deleted_at" timestamp with time zone,
     "calibration_uuid" "uuid",
@@ -4227,10 +4258,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
-
-
-
 
 
 

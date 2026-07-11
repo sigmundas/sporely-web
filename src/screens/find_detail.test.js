@@ -489,6 +489,8 @@ test('detail add-photo native paths have image pipeline debug available', () => 
   assert.match(source, /debugImagePipeline\('android native camera capture requested'/)
   assert.match(source, /debugImagePipeline\('android native picker returned'/)
   assert.match(source, /console\.warn\('Native image picker failed:', err\)/)
+  assert.match(source, /showToast\(t\('profile\.uploadFailed'/)
+  assert.match(source, /storage_exif_safe:\s*preparedImage\.uploadMeta\?\.storage_exif_safe === true/)
 })
 
 test('detail privacy note treats drafts as free and labels published rows explicitly', () => {
