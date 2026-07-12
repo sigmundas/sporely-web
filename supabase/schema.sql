@@ -2694,6 +2694,81 @@ ALTER TABLE "public"."observation_shares" ALTER COLUMN "id" ADD GENERATED ALWAYS
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."observation_spore_summaries" (
+    "id" bigint NOT NULL,
+    "observation_id" bigint NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "context_hash" "text" NOT NULL,
+    "context_json" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
+    "measurement_type" "text" DEFAULT 'spore'::"text" NOT NULL,
+    "sample_type" "text",
+    "mount_reagent" "text",
+    "stain_reagent" "text",
+    "contrast_method" "text",
+    "n_spores" integer DEFAULT 0 NOT NULL,
+    "n_paired" integer DEFAULT 0 NOT NULL,
+    "n_length" integer DEFAULT 0 NOT NULL,
+    "n_width" integer DEFAULT 0 NOT NULL,
+    "length_min_um" double precision,
+    "length_p05_um" double precision,
+    "length_mean_um" double precision,
+    "length_median_um" double precision,
+    "length_p95_um" double precision,
+    "length_max_um" double precision,
+    "length_sd_um" double precision,
+    "width_min_um" double precision,
+    "width_p05_um" double precision,
+    "width_mean_um" double precision,
+    "width_median_um" double precision,
+    "width_p95_um" double precision,
+    "width_max_um" double precision,
+    "width_sd_um" double precision,
+    "q_min" double precision,
+    "q_p05" double precision,
+    "q_mean" double precision,
+    "q_median" double precision,
+    "q_p95" double precision,
+    "q_max" double precision,
+    "q_sd" double precision,
+    "stats_version" integer DEFAULT 1 NOT NULL,
+    "computed_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "source_app" "text",
+    "source_app_version" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "observation_spore_summaries_context_hash_nonempty_chk" CHECK (("btrim"("context_hash") <> ''::"text")),
+    CONSTRAINT "observation_spore_summaries_context_json_object_chk" CHECK (("jsonb_typeof"("context_json") = 'object'::"text")),
+    CONSTRAINT "observation_spore_summaries_n_length_chk" CHECK (("n_length" >= 0)),
+    CONSTRAINT "observation_spore_summaries_n_paired_chk" CHECK (("n_paired" >= 0)),
+    CONSTRAINT "observation_spore_summaries_n_spores_chk" CHECK (("n_spores" >= 0)),
+    CONSTRAINT "observation_spore_summaries_n_width_chk"  CHECK (("n_width"  >= 0)),
+    CONSTRAINT "observation_spore_summaries_stats_version_chk" CHECK (("stats_version" >= 1))
+);
+
+
+ALTER TABLE "public"."observation_spore_summaries" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."observation_spore_summaries" IS 'Structured per-observation spore statistics keyed by measurement context. Species-level canonical means MUST be unweighted arithmetic means of the per-observation *_mean_um / q_mean values; never weight by n_spores or n_paired.';
+
+
+COMMENT ON COLUMN "public"."observation_spore_summaries"."length_mean_um" IS 'Arithmetic mean of length_um values for this observation/context. Species profiles should average this value unweighted across observation summaries.';
+
+
+COMMENT ON COLUMN "public"."observation_spore_summaries"."width_mean_um" IS 'Arithmetic mean of width_um values for this observation/context. Species profiles should average this value unweighted across observation summaries.';
+
+
+ALTER TABLE "public"."observation_spore_summaries" ALTER COLUMN "id" ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME "public"."observation_spore_summaries_id_seq"
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+
 CREATE OR REPLACE VIEW "public"."observations_community_view" AS
  SELECT "id",
     "user_id",
@@ -3144,6 +3219,16 @@ ALTER TABLE ONLY "public"."observation_shares"
 
 
 
+ALTER TABLE ONLY "public"."observation_spore_summaries"
+    ADD CONSTRAINT "observation_spore_summaries_obs_context_uk" UNIQUE ("observation_id", "context_hash");
+
+
+
+ALTER TABLE ONLY "public"."observation_spore_summaries"
+    ADD CONSTRAINT "observation_spore_summaries_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."observations"
     ADD CONSTRAINT "observations_desktop_id_user_unique" UNIQUE ("desktop_id", "user_id");
 
@@ -3333,6 +3418,22 @@ CREATE INDEX "observation_images_user_id_idx" ON "public"."observation_images" U
 
 
 
+CREATE INDEX "observation_spore_summaries_context_idx" ON "public"."observation_spore_summaries" USING "btree" ("context_hash");
+
+
+
+CREATE INDEX "observation_spore_summaries_measurement_context_idx" ON "public"."observation_spore_summaries" USING "btree" ("measurement_type", "sample_type", "mount_reagent", "stain_reagent", "contrast_method");
+
+
+
+CREATE INDEX "observation_spore_summaries_observation_idx" ON "public"."observation_spore_summaries" USING "btree" ("observation_id");
+
+
+
+CREATE INDEX "observation_spore_summaries_user_idx" ON "public"."observation_spore_summaries" USING "btree" ("user_id");
+
+
+
 CREATE INDEX "observations_date_idx" ON "public"."observations" USING "btree" ("date" DESC);
 
 
@@ -3362,6 +3463,10 @@ CREATE OR REPLACE TRIGGER "trg_friendships_updated_at" BEFORE UPDATE ON "public"
 
 
 CREATE OR REPLACE TRIGGER "trg_observations_updated_at" BEFORE UPDATE ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_observation_spore_summaries_updated_at" BEFORE UPDATE ON "public"."observation_spore_summaries" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
 
@@ -3440,6 +3545,16 @@ ALTER TABLE ONLY "public"."observation_shares"
 
 ALTER TABLE ONLY "public"."observation_shares"
     ADD CONSTRAINT "observation_shares_shared_with_id_fkey" FOREIGN KEY ("shared_with_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."observation_spore_summaries"
+    ADD CONSTRAINT "observation_spore_summaries_observation_id_fkey" FOREIGN KEY ("observation_id") REFERENCES "public"."observations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."observation_spore_summaries"
+    ADD CONSTRAINT "observation_spore_summaries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -3668,6 +3783,18 @@ CREATE POLICY "observation_shares: owner full" ON "public"."observation_shares" 
 
 
 CREATE POLICY "observation_shares: recipient read" ON "public"."observation_shares" FOR SELECT USING (("auth"."uid"() = "shared_with_id"));
+
+
+
+ALTER TABLE "public"."observation_spore_summaries" ENABLE ROW LEVEL SECURITY;
+
+
+
+CREATE POLICY "observation_spore_summaries: owner full" ON "public"."observation_spore_summaries" USING ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+   FROM "public"."observations" "o"
+  WHERE (("o"."id" = "observation_spore_summaries"."observation_id") AND ("o"."user_id" = "auth"."uid"())))))) WITH CHECK ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+   FROM "public"."observations" "o"
+  WHERE (("o"."id" = "observation_spore_summaries"."observation_id") AND ("o"."user_id" = "auth"."uid"()))))));
 
 
 
@@ -4135,6 +4262,17 @@ GRANT ALL ON TABLE "public"."observation_shares" TO "service_role";
 GRANT ALL ON SEQUENCE "public"."observation_shares_id_seq" TO "anon";
 GRANT ALL ON SEQUENCE "public"."observation_shares_id_seq" TO "authenticated";
 GRANT ALL ON SEQUENCE "public"."observation_shares_id_seq" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE "public"."observation_spore_summaries" TO "authenticated";
+GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE "public"."observation_spore_summaries" TO "service_role";
+
+
+
+GRANT ALL ON SEQUENCE "public"."observation_spore_summaries_id_seq" TO "anon";
+GRANT ALL ON SEQUENCE "public"."observation_spore_summaries_id_seq" TO "authenticated";
+GRANT ALL ON SEQUENCE "public"."observation_spore_summaries_id_seq" TO "service_role";
 
 
 
