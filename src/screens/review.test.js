@@ -29,6 +29,17 @@ test('review crop hint switches to adjust copy and disappears once a custom crop
   assert.doesNotMatch(source, /Tap a photo to add AI crop/)
 })
 
+test('review warns when location is missing before save', () => {
+  const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
+
+  assert.match(source, /review-location-warning/)
+  assert.match(source, /hasObservationLocation\(obsPayload\)/)
+  assert.match(source, /common\.locationMissingWarning/)
+  assert.match(source, /review-gps-display/)
+  assert.match(source, /window\.confirm\(/)
+  assert.match(source, /common\.saveWithoutLocationConfirm/)
+})
+
 test('review ai flow keeps the setting-selected primary service and refreshes availability without rebuilding the grid', () => {
   const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
 

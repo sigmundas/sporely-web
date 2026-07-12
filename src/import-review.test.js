@@ -230,6 +230,16 @@ test('import-review save payload keeps the selected AI run and payload fields', 
   assert.match(obsPayload.ai_selected_at, /^\d{4}-\d{2}-\d{2}T/)
 })
 
+test('import-review warns when queued sessions are missing location data', () => {
+  const source = fs.readFileSync(new URL('./screens/import_review.js', import.meta.url), 'utf8')
+
+  assert.match(source, /import-location-hint--warning/)
+  assert.match(source, /hasObservationLocation\(session\)/)
+  assert.match(source, /common\.locationMissingWarning/)
+  assert.match(source, /window\.confirm\(/)
+  assert.match(source, /common\.saveWithoutLocationConfirm/)
+})
+
 test('import-review save payload preserves both service runs and chooses the best active service', () => {
   const session = _ensureSessionAiState(makeSession())
   const artsFingerprint = buildIdentifyFingerprint({

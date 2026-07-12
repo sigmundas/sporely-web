@@ -604,6 +604,40 @@ export function matchesFindsStatus(obs, status = 'all') {
   return true
 }
 
+function _formatFindsDateTime(value) {
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return `${String(date.getDate()).padStart(2, '0')}-${String(date.getMonth() + 1).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+export function formatFindsDateTimeLabel(obs = {}) {
+  for (const value of [obs?.captured_at, obs?.created_at]) {
+    const label = _formatFindsDateTime(value)
+    if (label) return label
+  }
+  return null
+}
+
+function _findsCardMetaLeadHtml(obs = {}, loc = '') {
+  if (obs._pendingSync) {
+    return `<span class="find-card-loc-text">${_esc(_pendingStatusText(obs))}</span>`
+  }
+
+  const locationLabel = String(loc || '').trim()
+  const dateTimeLabel = formatFindsDateTimeLabel(obs)
+  const segments = []
+
+  if (locationLabel) {
+    segments.push(`<span class="find-card-meta-item"><svg class="find-card-meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg><span class="find-card-loc-text">${_esc(locationLabel)}</span></span>`)
+  }
+
+  if (dateTimeLabel) {
+    segments.push(`<span class="find-card-meta-item"><svg class="find-card-meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span class="find-card-loc-text">${_esc(dateTimeLabel)}</span></span>`)
+  }
+
+  return segments.length ? `<span class="find-card-meta">${segments.join('')}</span>` : ''
+}
+
 function _composeFindsTargetPerson(source = {}) {
   const userId = String(source.userId || state.findsTargetUserId || '').trim()
   if (!userId) return null
@@ -2021,21 +2055,13 @@ function _renderBySpecies(list, data, options = {}) {
         const loc = obs.location || (obs.gps_latitude && obs.gps_longitude
           ? `${obs.gps_latitude.toFixed(3)}° N, ${obs.gps_longitude.toFixed(3)}° E`
           : null)
-        const dateLabel = obs.date
-          ? formatDate(new Date(obs.date + 'T12:00:00'), { day: 'numeric', month: 'short' })
-          : '—'
         const statusIcon = obs._pendingSync
           ? `<svg class="find-card-vis-icon find-card-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
           : ''
         const sporesIcon = obs.has_spores
           ? `<svg class="find-card-vis-icon" style="stroke: var(--amber);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>`
           : ''
-        const metaLead = obs._pendingSync
-          ? `<span class="find-card-loc-text">${_esc(_pendingStatusText(obs))}</span>`
-          : loc
-            ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-              <span class="find-card-loc-text">${_esc(loc)}</span>`
-            : `<span class="find-card-loc-text">${dateLabel}</span>`
+        const metaLead = _findsCardMetaLeadHtml(obs, loc)
 
         if (variant === 'two') {
           const photoInner = imageHtml(
@@ -2048,7 +2074,7 @@ function _renderBySpecies(list, data, options = {}) {
               <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
-                <div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>
+                ${metaLead || statusIcon || sporesIcon ? `<div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
               </div>
             </div>
           </div>`
@@ -2247,14 +2273,7 @@ function _renderCards(list, data, options) {
         const sporesIcon = obs.has_spores
           ? `<svg class="find-card-vis-icon" style="stroke: var(--amber);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>`
           : ''
-        const locText = obs._pendingSync ? _pendingStatusText(obs) : loc
-
-        const metaLead = obs._pendingSync
-          ? `<span class="find-card-loc-text">${_esc(_pendingStatusText(obs))}</span>`
-          : loc
-            ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-            <span class="find-card-loc-text">${loc}</span>`
-            : '<span></span>'
+        const metaLead = _findsCardMetaLeadHtml(obs, loc)
 
         if (variant === 'two') {
           const photoInner = imageHtml(
@@ -2268,7 +2287,7 @@ function _renderCards(list, data, options) {
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
                 ${authorMeta}
-                ${locText || statusIcon || sporesIcon ? `<div class="find-card-loc">
+                ${metaLead || statusIcon || sporesIcon ? `<div class="find-card-loc">
                   ${metaLead}
                   ${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}
                 </div>` : ''}
@@ -2321,7 +2340,7 @@ function _renderCards(list, data, options) {
             <div class="find-card-body">
               <div class="find-card-name-row">${nameHtml}${countBadge}</div>
               ${authorMeta}
-              ${locText || statusIcon || sporesIcon ? `<div class="find-card-loc">
+              ${metaLead || statusIcon || sporesIcon ? `<div class="find-card-loc">
                 ${metaLead}
                 ${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}
               </div>` : ''}

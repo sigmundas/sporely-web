@@ -412,6 +412,12 @@
           <button class="camera-denied-retry" id="camera-retry-btn">Try again</button>
         </div>
 
+        <div class="gps-pill capture-gps-pill" data-gps-state="searching">
+          <span class="gps-dot"></span>
+          <span class="gps-label">GPS</span>
+          <span class="gps-text gps-display" id="gps-display" aria-live="polite">Acquiring…</span>
+        </div>
+
         <div class="capture-controls" id="capture-controls">
           <div class="capture-controls-row" style="position:absolute; bottom:calc(100% - 32px); left:0; right:0; padding:0 24px 16px; display:flex; justify-content:space-between; align-items:flex-end; pointer-events:none;">
             <div id="zoom-controls" class="zoom-controls" style="pointer-events:auto;"></div>
@@ -469,6 +475,7 @@
               <button id="location-apply-btn" class="location-apply-btn" style="display:none">Current location</button>
             </div>
           </div>
+          <div class="location-warning-hint" id="review-location-warning" hidden></div>
           <div class="field-meta-row">
             <div class="field-meta-key">Lat/Lon</div>
             <div class="field-meta-val green" id="meta-coordinates">—</div>
@@ -517,7 +524,13 @@
           <button class="btn-secondary" id="review-cancel-btn">Cancel</button>
           <button class="btn-primary" id="review-save-btn">Save</button>
         </div>
-        <div class="sync-footer-text">Creates one observation in Sporely Cloud</div>
+        <div class="review-gps-status">
+          <div class="gps-pill review-gps-pill" data-gps-state="searching">
+            <span class="gps-dot"></span>
+            <span class="gps-label">GPS</span>
+            <span class="gps-text" id="review-gps-display" aria-live="polite">No GPS captured</span>
+          </div>
+        </div>
       </div>
     </div>
 

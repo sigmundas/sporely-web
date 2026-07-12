@@ -21,6 +21,7 @@ import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyFo
 import {
   isBlob,
   isUsableCoordinate,
+  hasObservationLocation,
   normalizeObservationGps,
 } from '../observation-shapes.js';
 import {
@@ -1692,8 +1693,16 @@ function _syncLocationInput(session) {
   if (!session?.id) return;
   const input = document.querySelector(`.import-loc-input[data-sid="${session.id}"]`);
   const locEl = document.querySelector(`.import-card[data-sid="${session.id}"] .import-card-loc`);
+  const warnEl = document.querySelector(`.import-card[data-sid="${session.id}"] .import-location-hint--warning`);
   if (input) input.value = session.locationName || '';
   if (locEl) locEl.textContent = session.locationName || '—';
+  if (warnEl) {
+    const hasLocation = hasObservationLocation(session);
+    warnEl.hidden = hasLocation;
+    warnEl.textContent = hasLocation
+      ? ''
+      : (t('common.locationMissingWarning') || 'No location captured yet.');
+  }
   _renderImportLocationDropdown(session.id, false);
 }
 
@@ -1908,6 +1917,7 @@ function buildCardHTML(session) {
   const missingGpsHint = heicWithoutGps
     ? `<div class="import-location-hint">${t('import.noHeicGps')}</div>`
     : '';
+  const missingLocationHint = `<div class="import-location-hint import-location-hint--warning"${hasObservationLocation(session) ? ' hidden' : ''}>${t('common.locationMissingWarning') || 'No location captured yet.'}</div>`;
 
   return `<div class="import-card" data-sid="${sid}">
   <div class="import-card-main" data-sid="${sid}">
@@ -1946,7 +1956,7 @@ function buildCardHTML(session) {
       <div data-redlist-summary data-sid="${sid}" style="display:none"></div>
       ${session.files.length ? _renderSessionAiControls(session) : ''}
     </div>
-    <div class="detail-field" style="margin-top:4px">
+      <div class="detail-field" style="margin-top:4px">
       <div class="detail-field-label">${t('detail.location')}</div>
       <div class="location-suggest-wrap import-location-wrap">
         <input class="detail-text-input import-loc-input" type="text"
@@ -1955,6 +1965,7 @@ function buildCardHTML(session) {
         <ul class="location-suggestion-dropdown import-location-dropdown" data-sid="${sid}" style="display:none"></ul>
       </div>
       ${missingGpsHint}
+      ${missingLocationHint}
     </div>
     <div class="detail-field" style="margin-top:8px">
       <div class="vis-radio-group" style="flex-wrap: wrap; gap: 8px;">
@@ -1989,7 +2000,15 @@ function _wireImportLocationInput(sid, card) {
     if (!session) return;
     session.locationName = input.value.trim();
     const locEl = card.querySelector('.import-card-loc');
+    const warnEl = card.querySelector('.import-location-hint--warning');
     if (locEl) locEl.textContent = session.locationName || '—';
+    if (warnEl) {
+      const hasLocation = hasObservationLocation(session);
+      warnEl.hidden = hasLocation;
+      warnEl.textContent = hasLocation
+        ? ''
+        : (t('common.locationMissingWarning') || 'No location captured yet.');
+    }
     _persistSessions();
     _renderImportLocationDropdown(sid, document.activeElement === input);
   });
@@ -2231,6 +2250,8 @@ async function saveAll() {
 
   const allBlobUrls = sessions.flatMap(s => s.blobUrls);
   let savedCount = 0;
+  const queuedSessions = [];
+  let missingLocation = false;
 
   _setProgress(0, activeSessions.length, t('import.processing'));
   await new Promise(r => setTimeout(r, 100)); // Yield to let button un-press
@@ -2246,13 +2267,33 @@ async function saveAll() {
       })
       if (!obsPayload) continue
 
-      await enqueueObservation(obsPayload, imageEntries);
-      savedCount++;
-      _setProgress(i + 1, activeSessions.length, t('import.processing'));
+      queuedSessions.push({ session, obsPayload, imageEntries })
+      if (!hasObservationLocation(obsPayload)) missingLocation = true
     } catch (err) {
       console.error('Failed to save session', session.id, err);
       showToast(t('import.failedOneGroup'));
     }
+  }
+
+  if (missingLocation) {
+    const confirmed = window.confirm(
+      t('common.saveWithoutLocationConfirm')
+        || 'No location was captured. Save anyway? It will be queued locally without location and sync later.'
+    )
+    if (!confirmed) {
+      allBlobUrls.forEach(url => URL.revokeObjectURL(url));
+      _disposeSessionBlobUrls()
+      _hideProgress();
+      saveBtn.disabled = false;
+      return;
+    }
+  }
+
+  for (let i = 0; i < queuedSessions.length; i++) {
+    const { obsPayload, imageEntries } = queuedSessions[i];
+    await enqueueObservation(obsPayload, imageEntries);
+    savedCount++;
+    _setProgress(i + 1, queuedSessions.length, t('import.processing'));
   }
 
   allBlobUrls.forEach(url => URL.revokeObjectURL(url));

@@ -10,6 +10,7 @@ import {
   isFeedPublicObservation,
   isPublicVisibleObservation,
   matchesFindsStatus,
+  formatFindsDateTimeLabel,
   normalizeFindsSort,
   isFindsStatusControlDisabled,
   renderFindsRedlistTag,
@@ -179,6 +180,26 @@ test('finds redlist tag helper renders only the tag in a thumbnail-friendly badg
   assert.match(html, /ai-result-row-redlist/)
   assert.match(html, />LC<\/span>/)
   assert.doesNotMatch(html, /ai-redlist-summary-text/)
+})
+
+test('finds card date-time helper formats dd-mm hh:mm and prefers captured_at', () => {
+  const capturedAt = new Date(2026, 5, 24, 12, 34, 0).toISOString()
+  const createdAt = new Date(2026, 5, 25, 8, 9, 0).toISOString()
+
+  assert.equal(
+    formatFindsDateTimeLabel({
+      captured_at: capturedAt,
+      created_at: createdAt,
+    }),
+    '24-06 12:34',
+  )
+
+  assert.equal(
+    formatFindsDateTimeLabel({
+      created_at: createdAt,
+    }),
+    '25-06 08:09',
+  )
 })
 
 test('finds dropdown pills update after selection', () => {

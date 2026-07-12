@@ -49,6 +49,10 @@ const messages = {
     'common.unknown': 'Unknown',
     'common.you': 'You',
     'common.errorPrefix': 'Error: {message}',
+    'common.gpsCaptured': 'GPS captured',
+    'common.noGpsCaptured': 'No GPS captured',
+    'common.locationMissingWarning': 'No location was captured yet. Keep the page open until GPS gets a fix if you want a location. Saving now will queue the observation without location.',
+    'common.saveWithoutLocationConfirm': 'No location was captured. Save anyway? It will be queued locally without location and sync later.',
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Close',
     'home.sporelyCam': 'Sporely Cam',
@@ -77,6 +81,7 @@ const messages = {
     'people.couldNotLoad': 'Could not load people',
     'people.noMore': 'No more people',
     'capture.acquiring': 'Acquiring…',
+    'capture.gpsUnavailable': 'GPS unavailable',
     'capture.batchActive': 'Batch Active',
     'capture.done': 'DONE',
     'capture.cameraAccessNeeded': 'Camera access needed',
@@ -473,6 +478,10 @@ const messages = {
     'common.unknown': 'Ukjent',
     'common.you': 'Du',
     'common.errorPrefix': 'Feil: {message}',
+    'common.gpsCaptured': 'GPS registrert',
+    'common.noGpsCaptured': 'Ingen GPS registrert',
+    'common.locationMissingWarning': 'Ingen posisjon ble registrert ennå. Vent på GPS-fiks hvis du vil ha posisjon. Lagring nå vil legge observasjonen i kø uten posisjon.',
+    'common.saveWithoutLocationConfirm': 'Ingen posisjon ble registrert. Lagre likevel? Den blir lagt i lokal kø uten posisjon og synkroniseres senere.',
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Lukk',
     'home.sporelyCam': 'Sporely Cam',
@@ -501,6 +510,7 @@ const messages = {
     'people.couldNotLoad': 'Kunne ikke laste personer',
     'people.noMore': 'Ingen flere personer',
     'capture.acquiring': 'Henter posisjon…',
+    'capture.gpsUnavailable': 'GPS utilgjengelig',
     'capture.batchActive': 'Serie aktiv',
     'capture.done': 'FERDIG',
     'capture.cameraAccessNeeded': 'Kameratilgang kreves',
@@ -866,6 +876,10 @@ const messages = {
     'common.unknown': 'Okänd',
     'common.you': 'Du',
     'common.errorPrefix': 'Fel: {message}',
+    'common.gpsCaptured': 'GPS registrerad',
+    'common.noGpsCaptured': 'Ingen GPS registrerad',
+    'common.locationMissingWarning': 'Ingen plats registrerades ännu. Vänta på GPS-fix om du vill ha en plats. Sparar du nu köas observationen utan plats.',
+    'common.saveWithoutLocationConfirm': 'Ingen plats registrerades. Spara ändå? Den köas lokalt utan plats och synkas senare.',
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Stäng',
     'home.sporelyCam': 'Sporely Cam',
@@ -894,6 +908,7 @@ const messages = {
     'people.couldNotLoad': 'Kunde inte ladda personer',
     'people.noMore': 'Inga fler personer',
     'capture.acquiring': 'Hämtar position…',
+    'capture.gpsUnavailable': 'GPS otillgänglig',
     'capture.batchActive': 'Serie aktiv',
     'capture.done': 'KLAR',
     'capture.cameraAccessNeeded': 'Kameråtkomst krävs',
@@ -1259,6 +1274,10 @@ const messages = {
     'common.unknown': 'Unbekannt',
     'common.you': 'Du',
     'common.errorPrefix': 'Fehler: {message}',
+    'common.gpsCaptured': 'GPS erfasst',
+    'common.noGpsCaptured': 'Keine GPS-Daten erfasst',
+    'common.locationMissingWarning': 'Noch kein Standort wurde erfasst. Warte auf einen GPS-Fix, wenn du einen Standort möchtest. Beim Speichern wird die Beobachtung ohne Standort in die Warteschlange gestellt.',
+    'common.saveWithoutLocationConfirm': 'Kein Standort wurde erfasst. Trotzdem speichern? Die Beobachtung wird lokal ohne Standort in die Warteschlange gestellt und später synchronisiert.',
     'common.artsorakelError': 'Artsorakel: {message}',
     'common.close': 'Schließen',
     'home.sporelyCam': 'Sporely Cam',
@@ -1287,6 +1306,7 @@ const messages = {
     'people.couldNotLoad': 'Personen konnten nicht geladen werden',
     'people.noMore': 'Keine weiteren Personen',
     'capture.acquiring': 'Standort wird ermittelt…',
+    'capture.gpsUnavailable': 'GPS nicht verfügbar',
     'capture.batchActive': 'Serie aktiv',
     'capture.done': 'FERTIG',
     'capture.cameraAccessNeeded': 'Kamerazugriff erforderlich',
@@ -1805,6 +1825,7 @@ export function applyStaticTranslations() {
   setText('#ac-import .action-card-label', 'home.importPhotos')
 
   setText('#gps-display', 'capture.acquiring')
+  setText('#review-gps-display', 'common.noGpsCaptured')
   setText('.batch-active-label', 'capture.batchActive')
   setText('#capture-cancel-btn', 'common.cancel')
   setText('#done-btn', 'capture.done')
@@ -1829,7 +1850,6 @@ export function applyStaticTranslations() {
   setText('#location-apply-btn', 'review.currentLocation')
   setText('#review-cancel-btn', 'common.cancel')
   setText('#review-save-btn', 'common.save')
-  setText('#screen-review .sync-footer-text', 'review.createsOne')
   setAllText('#review-visibility .scope-tab span', [
     t('visibility.private'),
     t('visibility.friends'),

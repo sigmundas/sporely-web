@@ -39,6 +39,7 @@ import { debugImagePipeline } from '../image-pipeline-debug.js'
 import {
   isBlob,
   isUsableCoordinate as sharedIsUsableCoordinate,
+  hasObservationLocation,
   normalizeCoordinatePair,
   normalizeObservationGps,
 } from '../observation-shapes.js'
@@ -540,6 +541,48 @@ function _reviewLocationLookup() {
   return state.reviewContext?.locationLookup || getLocationLookup() || null
 }
 
+function _currentReviewGps() {
+  const reviewContext = state.reviewContext || null
+  const leadPhotoWithGps = state.capturedPhotos.find(photo => photo.gps && sharedIsUsableCoordinate(photo.gps.lat, photo.gps.lon))
+  const captureGps = leadPhotoWithGps?.gps || state.capturedPhotos[0]?.gps || null
+  return reviewContext?.source === 'import'
+    ? normalizeObservationGps(reviewContext.gps)
+    : normalizeObservationGps(captureGps)
+}
+
+function _syncReviewLocationWarning() {
+  const locationWarningEl = document.getElementById('review-location-warning')
+  if (!locationWarningEl) return
+
+  const locationInput = document.getElementById('location-name-input')
+  const reviewContext = state.reviewContext || null
+  const reviewGps = _currentReviewGps()
+  const hasLocation = hasObservationLocation({
+    location: locationInput?.value || reviewContext?.locationName || '',
+    gps_latitude: reviewGps?.lat ?? null,
+    gps_longitude: reviewGps?.lon ?? null,
+  })
+
+  locationWarningEl.hidden = hasLocation
+  locationWarningEl.textContent = hasLocation
+    ? ''
+    : (t('common.locationMissingWarning') || 'No location captured yet.')
+}
+
+function _syncReviewGpsStatus() {
+  const gpsStatusEl = document.getElementById('review-gps-display')
+  if (!gpsStatusEl) return
+
+  const reviewGps = _currentReviewGps()
+  const hasGps = !!reviewGps
+  gpsStatusEl.textContent = hasGps
+    ? (t('common.gpsCaptured') || 'GPS captured')
+    : (t('common.noGpsCaptured') || 'No GPS captured')
+
+  const pill = gpsStatusEl.closest('.gps-pill')
+  if (pill) pill.dataset.gpsState = hasGps ? 'fix' : 'searching'
+}
+
 function _resolveReviewPhotoIdServices(availability = {}, options = {}) {
   const lookup = _reviewLocationLookup()
   return resolvePhotoIdServices({
@@ -718,7 +761,13 @@ export function buildReviewGrid() {
     locationInput.value = reviewContext?.source === 'import'
       ? (locationInput.value || reviewContext.locationName || '')
       : (reviewContext?.locationName || locationInput.value || '')
+    if (!locationInput._reviewLocationWarningWired) {
+      locationInput._reviewLocationWarningWired = true
+      locationInput.addEventListener('input', _syncReviewLocationWarning)
+    }
   }
+  _syncReviewLocationWarning()
+  _syncReviewGpsStatus()
   const reviewObscured = document.getElementById('review-obscured')
   if (reviewObscured) reviewObscured.checked = state.captureDraft.location_precision === 'fuzzed'
   _updateReviewObscureHint()
@@ -1637,6 +1686,13 @@ async function saveObservationBatch() {
       ai_selected_at: selectedService ? new Date().toISOString() : null,
       aiIdentificationRuns,
     })
+    if (!hasObservationLocation(obsPayload)) {
+      const confirmed = window.confirm(
+        t('common.saveWithoutLocationConfirm')
+          || 'No location was captured. Save anyway? It will be queued locally without location and sync later.'
+      )
+      if (!confirmed) return
+    }
 
     const imageEntries = photos
       .filter(photo => isBlob(photo.blob))

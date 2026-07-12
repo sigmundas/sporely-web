@@ -121,3 +121,17 @@ export function normalizeObservationGps(value) {
     accuracy: Number.isFinite(accuracy) ? accuracy : null,
   }
 }
+
+/**
+ * Check whether an observation has either a human-readable location or usable GPS coordinates.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function hasObservationLocation(value) {
+  if (!value || typeof value !== 'object') return false
+  const location = String(value.location ?? value.locationName ?? '').trim()
+  if (location) return true
+  const lat = Number(value.lat ?? value.latitude ?? value.gps_latitude ?? value.gpsLat)
+  const lon = Number(value.lon ?? value.longitude ?? value.gps_longitude ?? value.gpsLon)
+  return isUsableCoordinate(lat, lon)
+}

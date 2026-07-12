@@ -1,7 +1,19 @@
+import { t } from './i18n.js'
 import { state } from './state.js'
 
+function _syncGpsDisplays(text, gpsState) {
+  document.querySelectorAll('.gps-display').forEach(el => {
+    el.textContent = text
+    const pill = el.closest('.gps-pill')
+    if (pill) pill.dataset.gpsState = gpsState
+  })
+}
+
 export function startGeo() {
-  if (!navigator.geolocation) return
+  if (!navigator.geolocation) {
+    _syncGpsDisplays(t('capture.gpsUnavailable') || 'GPS unavailable', 'unavailable')
+    return
+  }
 
   navigator.geolocation.watchPosition(
     pos => {
@@ -15,8 +27,7 @@ export function startGeo() {
       const lat = pos.coords.latitude.toFixed(5)
       const lon = pos.coords.longitude.toFixed(5)
 
-      const gpsDisplay = document.getElementById('gps-display')
-      if (gpsDisplay) gpsDisplay.textContent = `${lat}° N, ${lon}° E`
+      _syncGpsDisplays(`${lat}° N, ${lon}° E`, 'fix')
 
       window.dispatchEvent(new CustomEvent('sporely:gps-updated', { detail: state.gps }))
 
@@ -36,8 +47,13 @@ export function startGeo() {
       }
     },
     () => {
-      const gpsDisplay = document.getElementById('gps-display')
-      if (gpsDisplay) gpsDisplay.textContent = 'GPS unavailable'
+      if (state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)) {
+        const lat = state.gps.lat.toFixed(5)
+        const lon = state.gps.lon.toFixed(5)
+        _syncGpsDisplays(`${lat}° N, ${lon}° E`, 'fix')
+        return
+      }
+      _syncGpsDisplays(t('capture.gpsUnavailable') || 'GPS unavailable', 'unavailable')
     },
     { enableHighAccuracy: true }
   )

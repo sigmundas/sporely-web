@@ -97,6 +97,7 @@ function _applyLookupResult(result, key) {
   if (first && (!input.value.trim() || input.value.trim() === lastApplied)) {
     input.value = first
     lastApplied = first
+    input.dispatchEvent(new Event('input', { bubbles: true }))
   }
 
   const reviewLocation = document.getElementById('review-location')
