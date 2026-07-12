@@ -2401,7 +2401,9 @@ html, body {
   grid-template-columns: 1fr auto;
   align-items: start;
   gap: 2px;
-  margin-bottom: 0;
+  margin-bottom: 10px;
+  position: relative;
+  z-index: 1;
 }
 .detail-title {
   min-width: 0;
@@ -2439,9 +2441,11 @@ html, body {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   column-gap: 12px;
-  padding-top: 0;
-  margin-bottom: 0;
+  padding-top: 8px;
+  margin-bottom: 12px;
   width: 100%;
+  position: relative;
+  z-index: 1;
 }
 .detail-author {
   display: flex;
@@ -2507,7 +2511,9 @@ html, body {
   display: none !important;
 }
 #detail-redlist-summary {
-  margin: 0;
+  margin: 0 0 8px;
+  position: relative;
+  z-index: 1;
 }
 #detail-redlist-summary .ai-redlist-summary {
   gap: 4px;
@@ -2516,7 +2522,7 @@ html, body {
   line-height: 1.05;
 }
 #detail-action-bar.is-hidden + #detail-gallery {
-  margin-top: -28px;
+  margin-top: 0;
 }
 .detail-action-bar {
   display: flex;
@@ -2630,7 +2636,13 @@ html, body {
   font-family: 'DM Mono', monospace; font-size: 11px;
   color: var(--text-dim); margin-bottom: 8px;
 }
-.detail-form { display: flex; flex-direction: column; gap: 4px; }
+.detail-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+  z-index: 1;
+}
 .detail-field {
   background: var(--card); border: 1px solid var(--border);
   border-radius: 10px; padding: 12px 14px;
@@ -4945,7 +4957,7 @@ html.light .ai-id-dot.is-complete::before {
   flex: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding-top: 4px;
+  padding-top: 10px;
   padding-bottom: 16px;
 }
 .detail-footer {
