@@ -2862,6 +2862,11 @@ html, body {
   color: var(--green-accent);
   border-color: rgba(94,180,90,0.4);
 }
+.gps-pill[data-gps-state="disabled"],
+.gps-pill[data-gps-state="idle"] {
+  color: var(--text-dim);
+  border-color: color-mix(in srgb, var(--text-dim) 30%, transparent);
+}
 .capture-gps-pill {
   position: absolute;
   top: 14px;

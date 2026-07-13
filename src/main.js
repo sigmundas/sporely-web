@@ -5,7 +5,6 @@ import { supabase } from './supabase.js'
 import { getLocale, initI18n, onLocaleChange, setLocale, t } from './i18n.js'
 import { state } from './state.js'
 import { clearSharedAuthSessionCache, getSharedAuthSession, seedSharedAuthSession } from './auth-session.js'
-import { startGeo } from './geo.js'
 import { navigate } from './router.js'
 import { applyTheme } from './theme.js'
 import { showToast } from './toast.js'
@@ -492,7 +491,6 @@ async function bootApp(user) {
     });
   })
   runBootStep('header-profile-buttons', () => refreshHeaderProfileButtons())
-  runBootStep('geolocation', () => startGeo())
   runBootStep('inaturalist-ui', () => _syncInaturalistUi()) // Initial sync of iNaturalist UI
   runBootStep('identify-labels', () => syncIdentifyButtonLabels())
 

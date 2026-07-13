@@ -7,8 +7,28 @@ import {
   PHOTO_ID_MODE_AUTO,
   PHOTO_ID_MODE_BOTH,
   PHOTO_ID_MODE_INATURALIST,
+  getLocationPreference,
   resolvePhotoIdServices,
+  setLocationPreference,
 } from './settings.js'
+
+function createLocalStorageStub() {
+  const store = new Map()
+  return {
+    getItem(key) {
+      return store.has(key) ? store.get(key) : null
+    },
+    setItem(key, value) {
+      store.set(String(key), String(value))
+    },
+    removeItem(key) {
+      store.delete(String(key))
+    },
+    clear() {
+      store.clear()
+    },
+  }
+}
 
 test('resolvePhotoIdServices respects inaturalist-only mode with and without login', () => {
   const loggedIn = resolvePhotoIdServices({
@@ -59,4 +79,22 @@ test('resolvePhotoIdServices picks Artsorakel for Nordic auto and iNaturalist el
   })
   assert.equal(elsewhere.primary, ID_SERVICE_INATURALIST)
   assert.deepEqual(elsewhere.run, [ID_SERVICE_INATURALIST])
+})
+
+test('location preference is persisted independently of geolocation permission', () => {
+  const originalLocalStorage = globalThis.localStorage
+  globalThis.localStorage = createLocalStorageStub()
+
+  try {
+    assert.equal(getLocationPreference(), 'ask')
+    assert.equal(setLocationPreference('enabled'), 'enabled')
+    assert.equal(globalThis.localStorage.getItem('sporely-location-preference'), 'enabled')
+    assert.equal(getLocationPreference(), 'enabled')
+    assert.equal(setLocationPreference('disabled'), 'disabled')
+    assert.equal(globalThis.localStorage.getItem('sporely-location-preference'), 'disabled')
+    assert.equal(setLocationPreference('something-else'), 'ask')
+    assert.equal(getLocationPreference(), 'ask')
+  } finally {
+    globalThis.localStorage = originalLocalStorage
+  }
 })

@@ -90,6 +90,23 @@ See also:
   - `search_community_spore_datasets`
   - `get_community_spore_dataset`
   - `community_spore_taxon_summary`
+
+### Structured observation-level spore summaries
+- `observation_spore_summaries`
+  - Cloud table added by `20260712120000_add_observation_spore_summaries.sql`.
+  - One row per `(observation_id, context_hash)`. `context_hash` is a deterministic SHA-256 over the normalized preparation-context object (`measurement_type`, `sample_type`, `mount_reagent`, `stain_reagent`, `contrast_method`).
+  - Numeric summary columns: `n_spores`, `n_paired`, `n_length`, `n_width`; `length_min_um..sd_um`, `width_min_um..sd_um`, `q_min..sd` (min / p05 / mean / median / p95 / max / sample SD ddof=1).
+  - Provenance columns: `stats_version`, `computed_at`, `source_app` (e.g. `'sporely-py'`), `source_app_version`.
+  - Written by sporely-py on each cloud sync via [utils/spore_summary_sync.py](../sporely-py/utils/spore_summary_sync.py); backfill happens automatically.
+  - **Owner-only RLS** — anon reads exclusively via `get_public_observation_spore_summaries` below. Constraint checks: `n_* >= 0`, `stats_version >= 1`, `btrim(context_hash) <> ''`, `jsonb_typeof(context_json) = 'object'`. `updated_at` maintained by `trg_observation_spore_summaries_updated_at` (reuses `public.set_updated_at`).
+- `get_public_observation_spore_summaries(p_observation_ids bigint[], p_sample_type text DEFAULT NULL, p_mount_reagent text DEFAULT NULL, p_stain_reagent text DEFAULT NULL, p_contrast_method text DEFAULT NULL)` (RPC)
+  - Returns structured measured summary rows for the requested observations, gated by `NOT is_draft` + `can_read_observation(user_id, visibility)` + `can_access_spore_data(user_id, spore_data_visibility)`.
+  - Every returned row carries `mean_source = 'measured'` — the RPC never parses `observations.spore_statistics` and never invents means from p05/p95 midpoints.
+  - Context filters are trimmed + lowercased on both sides; empty/whitespace filters mean "no restriction". Every non-empty filter must match the SAME summary row on the server (cross-row satisfaction is not possible).
+  - `SECURITY DEFINER`, `search_path = 'public'`, granted to `anon` / `authenticated` / `service_role`. `contributor_label` comes from `community_contributor_label(user_id, author)` — the raw UUID is never exposed.
+  - Backward-compatible: older callers can invoke `get_public_observation_spore_summaries(ARRAY[...])` with only the first argument; the four filter args default to NULL.
+
+Full staged design and progress notes: [sporely-py/docs/spore-statistics-species-profiles.md](../sporely-py/docs/spore-statistics-species-profiles.md).
 - `search_people_directory(p_query text DEFAULT NULL, p_limit int DEFAULT 24)`
   - Used by the web People screen
   - Returns profile fields plus public `finds / species / spores` contributor counts

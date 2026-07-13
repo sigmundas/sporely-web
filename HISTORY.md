@@ -8,6 +8,15 @@ It should not be used as the current task plan. Current tasks belong in `PLAN.md
 
 ## Planning History
 
+### 2026-07-12 — Structured spore summaries + observation-balanced species profiles
+
+- Added `public.observation_spore_summaries` (migration `20260712120000`) as the cloud contract for per-observation / per-context measured summary rows. Owner-only RLS; anon reads only via RPC.
+- Added public RPC `get_public_observation_spore_summaries` (migration `20260713120000`) and extended it with optional preparation-context filters (migration `20260714120000`). Same visibility gates as the other public spore RPCs (`can_read_observation`, `can_access_spore_data`, `NOT is_draft`). Multi-filter contract: every non-empty filter must match the SAME summary row on the server.
+- Fixed a pre-existing metadata-only microscope image leak in `search_public_observation_images` / `get_public_observation_images` (migration `20260714130000`). Metadata-only microscope anchors continue to contribute measurements, summaries, and mosaic tiles, but no longer surface as displayable gallery images.
+- Removed spore-count-weighted canonical means on the landing side. `poolSporeSummaries` is now envelope-only; canonical Lm/Wm/Qm come from the observation-balanced `poolObservationSporeSummaries` (unweighted arithmetic mean across eligible observation means).
+- Full staged design and progress notes for A–K live in [`../sporely-py/docs/spore-statistics-species-profiles.md`](../sporely-py/docs/spore-statistics-species-profiles.md). SUPABASE_DB.md schema inventory now lists the new table and RPC.
+- Parmasto-style matcher (Stage I) is explicitly deferred to a later stage.
+
 ### 2026-05-30 — Android release distribution updated
 
 - `PLAN.md` no longer tracks F-Droid distribution branches.

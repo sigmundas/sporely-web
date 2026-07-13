@@ -1704,6 +1704,8 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
       ON i.observation_id = o.id
     WHERE i.deleted_at IS NULL
       AND i.purged_at IS NULL
+      AND i.storage_path IS NOT NULL
+      AND btrim(i.storage_path) <> ''
   ),
   prepared AS (
     SELECT

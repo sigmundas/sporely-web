@@ -409,6 +409,7 @@ export function openImportedReview(session) {
   }))
   state.batchCount = state.capturedPhotos.length
   state.sessionStart = session?.ts || new Date()
+  state.captureSessionLocation.sessionStartAt = state.sessionStart
   state.captureDraft = createDefaultObservationDraft({
     visibility: normalizeVisibility(session?.visibility, getDefaultVisibility()),
     is_draft: session?.is_draft !== false,
@@ -422,6 +423,8 @@ export function openImportedReview(session) {
     locationLookup: session?.locationLookup || null,
     metadataPromise: session?.metadataPromise || null,
   }
+  state.captureSessionLocation.fix = reviewGps ? { ...reviewGps } : null
+  state.captureSessionLocation.requestingFreshFix = false
   _hydrateImportedReviewMetadata(session)
   navigate('review')
 }
@@ -462,6 +465,7 @@ function _applyImportedReviewGps(reviewGps) {
   if (state.reviewContext?.source === 'import') {
     state.reviewContext.gps = reviewGps
   }
+  state.captureSessionLocation.fix = { ...reviewGps }
   buildReviewGrid()
   return true
 }
@@ -507,6 +511,9 @@ function _mergeHydratedGps(reviewGps) {
         photo.gps = { ...reviewGps };
       }
     })
+    if (state.reviewContext?.source === 'import') {
+      state.captureSessionLocation.fix = { ...reviewGps }
+    }
     buildReviewGrid()
   }
   return changed
@@ -695,6 +702,12 @@ export function buildReviewGrid() {
   const reviewGps = reviewContext?.source === 'import'
     ? (reviewContext.gps || null)
     : captureGps
+  if (!state.captureSessionLocation.sessionStartAt) {
+    state.captureSessionLocation.sessionStartAt = state.sessionStart || new Date()
+  }
+  if (!state.captureSessionLocation.fix && reviewGps) {
+    state.captureSessionLocation.fix = { ...reviewGps }
+  }
   const reviewCount = document.getElementById('review-count')
   const sharedTaxon = photos.find(photo => photo.taxon)?.taxon || null
   const speciesLabel = sharedTaxon?.displayName
@@ -1597,6 +1610,9 @@ function cancelReview() {
   state.reviewContext = null
   state.batchCount = 0
   state.captureDraft = createDefaultObservationDraft()
+  state.captureSessionLocation.sessionStartAt = null
+  state.captureSessionLocation.fix = null
+  state.captureSessionLocation.requestingFreshFix = false
   reviewAiState.running = false
   reviewAiState.activeService = null
   reviewAiState.hasRun = false
@@ -1723,6 +1739,9 @@ async function saveObservationBatch() {
     state.reviewContext = null
     state.batchCount = 0
     state.captureDraft = createDefaultObservationDraft()
+    state.captureSessionLocation.sessionStartAt = null
+    state.captureSessionLocation.fix = null
+    state.captureSessionLocation.requestingFreshFix = false
     resetLocationState()
     await refreshHome()
     await openFinds('mine', { resetSearch: true })

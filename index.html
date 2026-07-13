@@ -412,9 +412,26 @@
           <button class="camera-denied-retry" id="camera-retry-btn">Try again</button>
         </div>
 
+        <div id="capture-location-overlay" class="sheet-overlay" style="display:none">
+          <button type="button" class="sheet-backdrop" id="capture-location-backdrop" aria-hidden="true" tabindex="-1"></button>
+          <div class="sheet-card" id="capture-location-sheet" role="dialog" aria-modal="true" aria-labelledby="capture-location-title">
+            <div class="sheet-handle"></div>
+            <div class="sheet-title" id="capture-location-title"></div>
+            <div class="sheet-subtitle" id="capture-location-body"></div>
+            <button type="button" class="sheet-option" id="capture-location-primary-btn">
+              <span class="sheet-option-title" id="capture-location-primary-title"></span>
+              <span class="sheet-option-copy" id="capture-location-primary-copy" style="display:none"></span>
+            </button>
+            <button type="button" class="sheet-option" id="capture-location-secondary-btn">
+              <span class="sheet-option-title" id="capture-location-secondary-title"></span>
+              <span class="sheet-option-copy" id="capture-location-secondary-copy" style="display:none"></span>
+            </button>
+          </div>
+        </div>
+
         <div class="gps-pill capture-gps-pill" data-gps-state="searching">
           <span class="gps-dot"></span>
-          <span class="gps-label">GPS</span>
+          <span class="gps-label">Location</span>
           <span class="gps-text gps-display" id="gps-display" aria-live="polite">Acquiring…</span>
         </div>
 

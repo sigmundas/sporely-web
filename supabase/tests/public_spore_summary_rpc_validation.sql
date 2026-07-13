@@ -20,6 +20,11 @@ DECLARE
   multi_context_obs_id bigint;
   cross_context_obs_id bigint;
   stain_obs_id bigint;
+  taxon_move_obs_id bigint;
+  taxon_move_summary_id bigint;
+  taxon_move_summary_id_after bigint;
+  taxon_move_hash text;
+  taxon_move_computed_at timestamptz;
 
   ctx_null      jsonb := jsonb_build_object(
     'measurement_type', 'spore',
@@ -165,6 +170,16 @@ BEGIN
   VALUES (owner_user_id,  '2026-06-09', 'Amanita', 'muscaria', 'public',  'public',  false)
   RETURNING id INTO stain_obs_id;
 
+  -- Taxonomy-move fixture (T1..T5): an observation that starts as
+  -- Boletus edulis and later has its taxonomy corrected to Boletus
+  -- pinophilus without any change to its measurements or image
+  -- preparation context. Verifies that the same
+  -- observation_spore_summaries rows follow the observation to the new
+  -- species without recomputation.
+  INSERT INTO public.observations (user_id, date, genus, species, visibility, spore_data_visibility, is_draft)
+  VALUES (owner_user_id, '2026-06-10', 'Boletus', 'edulis', 'public', 'public', false)
+  RETURNING id INTO taxon_move_obs_id;
+
   -- ── summary rows ────────────────────────────────────────────────────
   --
   -- Values are deliberately non-null-mean and non-midpoint so we can pin
@@ -245,6 +260,16 @@ BEGIN
      3, 3, 3, 3,
      18.0, 18.0, 18.5, 18.5, 19.0, 19.0, 0.5,
      9.0,  9.0,  9.25, 9.25, 9.5,  9.5,  0.25,
+     2.0,  2.0,  2.0,  2.0,  2.0,  2.0,  0.0,
+     1, now(), 'sporely-py', '0.9.6'),
+    -- Taxonomy-move fixture: null-context summary attached to
+    -- taxon_move_obs_id. Uses the same context_hash as public_obs_id
+    -- (both are null-context), which is fine because context_hash is
+    -- unique WITHIN an observation, not across the table.
+    (taxon_move_obs_id,     owner_user_id, hash_null,      ctx_null,      'spore', NULL, NULL, NULL, NULL,
+     4, 4, 4, 4,
+     13.0, 13.0, 13.5, 13.5, 14.0, 14.0, 0.5,
+     6.0,  6.0,  6.5,  6.5,  7.0,  7.0,  0.5,
      2.0,  2.0,  2.0,  2.0,  2.0,  2.0,  0.0,
      1, now(), 'sporely-py', '0.9.6');
 
@@ -543,18 +568,129 @@ BEGIN
     RAISE EXCEPTION 'H9: Stage H unexpectedly introduced an anon/public read RLS policy';
   END IF;
 
+  -- ── Taxonomy-move assertions ───────────────────────────────────────
+  --
+  -- Contract: when an observation's genus/species change but its
+  -- measurements and image preparation context do not, the same
+  -- observation_spore_summaries rows must follow the observation to
+  -- the new species without recomputation. The species→observation
+  -- resolution happens at read time via observations.genus/species —
+  -- the summary table itself carries neither field.
+
+  -- T1: schema-level proof — observation_spore_summaries has no
+  --     genus/species/species_slug columns. Nothing to migrate when
+  --     taxonomy changes.
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name   = 'observation_spore_summaries'
+      AND column_name IN ('genus', 'species', 'species_slug', 'taxon_id')
+  ) THEN
+    RAISE EXCEPTION
+      'T1: observation_spore_summaries unexpectedly carries a taxonomy column — a taxonomy change would require row rewrites';
+  END IF;
+
+  -- T2: baseline — the RPC surfaces the summary for the observation as
+  --     Boletus edulis, and we capture its id + context_hash for later
+  --     equality checks.
+  SELECT id, context_hash, computed_at
+    INTO taxon_move_summary_id, taxon_move_hash, taxon_move_computed_at
+    FROM public.observation_spore_summaries
+    WHERE observation_id = taxon_move_obs_id;
+  IF taxon_move_summary_id IS NULL THEN
+    RAISE EXCEPTION 'T2: taxonomy-move fixture missing its summary row';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.get_public_observation_spore_summaries(ARRAY[taxon_move_obs_id])
+    WHERE observation_id = taxon_move_obs_id
+      AND context_hash   = taxon_move_hash
+  ) THEN
+    RAISE EXCEPTION 'T2: RPC did not surface the taxonomy-move fixture pre-move';
+  END IF;
+
+  -- T3: baseline — search_public_observations under species=edulis
+  --     includes the observation; under pinophilus does not.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.search_public_observations(p_genus := 'Boletus', p_species := 'edulis')
+    WHERE id = taxon_move_obs_id
+  ) THEN
+    RAISE EXCEPTION 'T3: search_public_observations missed the pre-move species';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.search_public_observations(p_genus := 'Boletus', p_species := 'pinophilus')
+    WHERE id = taxon_move_obs_id
+  ) THEN
+    RAISE EXCEPTION 'T3: search_public_observations returned the observation under the wrong species pre-move';
+  END IF;
+
+  -- T4: simulate a taxonomy-only sync — update genus/species on the
+  --     observation row, leaving observation_spore_summaries and every
+  --     source (spore_measurements, observation_images) untouched. The
+  --     summary row's id and context_hash must be unchanged.
+  UPDATE public.observations
+    SET genus = 'Boletus', species = 'pinophilus'
+    WHERE id = taxon_move_obs_id;
+
+  SELECT id INTO taxon_move_summary_id_after
+    FROM public.observation_spore_summaries
+    WHERE observation_id = taxon_move_obs_id;
+  IF taxon_move_summary_id_after IS DISTINCT FROM taxon_move_summary_id THEN
+    RAISE EXCEPTION
+      'T4: observation_spore_summaries.id changed after taxonomy-only update (was %, now %)',
+      taxon_move_summary_id, taxon_move_summary_id_after;
+  END IF;
+  IF (
+    SELECT context_hash FROM public.observation_spore_summaries WHERE id = taxon_move_summary_id_after
+  ) IS DISTINCT FROM taxon_move_hash THEN
+    RAISE EXCEPTION 'T4: context_hash changed after taxonomy-only update';
+  END IF;
+  IF (
+    SELECT computed_at FROM public.observation_spore_summaries WHERE id = taxon_move_summary_id_after
+  ) IS DISTINCT FROM taxon_move_computed_at THEN
+    RAISE EXCEPTION
+      'T4: computed_at moved after taxonomy-only update — implies unnecessary recomputation';
+  END IF;
+
+  -- T5: post-move — the observation is now discoverable under the new
+  --     species; the same summary row is returned by the RPC; the old
+  --     species no longer includes the observation.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.search_public_observations(p_genus := 'Boletus', p_species := 'pinophilus')
+    WHERE id = taxon_move_obs_id
+  ) THEN
+    RAISE EXCEPTION 'T5: search_public_observations missed the post-move species (pinophilus)';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.search_public_observations(p_genus := 'Boletus', p_species := 'edulis')
+    WHERE id = taxon_move_obs_id
+  ) THEN
+    RAISE EXCEPTION
+      'T5: observation still surfaces under the old species (edulis) after taxonomy update';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.get_public_observation_spore_summaries(ARRAY[taxon_move_obs_id])
+    WHERE observation_id = taxon_move_obs_id
+      AND context_hash   = taxon_move_hash
+  ) THEN
+    RAISE EXCEPTION
+      'T5: post-move RPC lost the summary row (context_hash changed or observation excluded)';
+  END IF;
+
   -- ── Cleanup ─────────────────────────────────────────────────────────
   DELETE FROM public.observation_spore_summaries
     WHERE observation_id IN (
       public_obs_id, private_obs_id, draft_obs_id, friends_obs_id,
       spore_private_obs_id, banned_obs_id, multi_context_obs_id,
-      cross_context_obs_id, stain_obs_id
+      cross_context_obs_id, stain_obs_id, taxon_move_obs_id
     );
   DELETE FROM public.observations
     WHERE id IN (
       public_obs_id, private_obs_id, draft_obs_id, friends_obs_id,
       spore_private_obs_id, banned_obs_id, multi_context_obs_id,
-      cross_context_obs_id, stain_obs_id
+      cross_context_obs_id, stain_obs_id, taxon_move_obs_id
     );
   DELETE FROM public.profiles
     WHERE id IN (owner_user_id, banned_user_id);
@@ -564,6 +700,6 @@ BEGIN
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN visibility SET NOT NULL';
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN location_precision SET NOT NULL';
 
-  RAISE NOTICE 'public_spore_summary_rpc_validation: all E1..E12 and H1..H9 assertions passed';
+  RAISE NOTICE 'public_spore_summary_rpc_validation: all E1..E12, H1..H9 and T1..T5 assertions passed';
 END
 $$;

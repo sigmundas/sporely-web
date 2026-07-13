@@ -4,6 +4,7 @@ const DEFAULT_VISIBILITY_KEY = 'sporely-default-visibility'
 const DEFAULT_ID_SERVICE_KEY = 'sporely-default-id-service'
 const PHOTO_ID_MODE_KEY = 'sporely-photo-id-mode'
 const USE_SYSTEM_CAMERA_KEY = 'sporely-use-system-camera'
+const LOCATION_PREFERENCE_KEY = 'sporely-location-preference'
 const LAST_SYNC_AT_KEY = 'sporely-last-sync-at'
 const ARTSORAKEL_MAX_EDGE_KEY = 'sporely-artsorakel-max-edge'
 const PHOTO_GAP_MINUTES_KEY = 'sporely-photo-gap'
@@ -265,6 +266,27 @@ export function setUseSystemCamera(enabled) {
   try {
     localStorage.setItem(USE_SYSTEM_CAMERA_KEY, enabled ? '1' : '0')
   } catch (_) {}
+}
+
+export function normalizeLocationPreference(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'enabled' || normalized === 'disabled' ? normalized : 'ask'
+}
+
+export function getLocationPreference() {
+  try {
+    return normalizeLocationPreference(localStorage.getItem(LOCATION_PREFERENCE_KEY))
+  } catch (_) {
+    return 'ask'
+  }
+}
+
+export function setLocationPreference(value) {
+  const normalized = normalizeLocationPreference(value)
+  try {
+    localStorage.setItem(LOCATION_PREFERENCE_KEY, normalized)
+  } catch (_) {}
+  return normalized
 }
 
 export function getLastSyncAt() {
