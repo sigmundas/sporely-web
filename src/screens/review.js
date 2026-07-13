@@ -22,7 +22,7 @@ import {
 } from '../ai-identification.js'
 import { getIdentifyNoMatchMessage } from '../identify.js'
 import { loadInaturalistSession } from '../inaturalist.js'
-import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
+import { initLocationField, openLocationSuggestions, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
@@ -35,11 +35,18 @@ import { isAndroidNativeApp } from '../camera-actions.js'
 import { playIrisShutter } from '../iris-shutter.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 import { getLocationLookup } from '../location.js'
+import { lookupCoordinateKey } from '../location-lookup.js'
+import {
+  endCaptureLocationSession,
+  LOCATION_STATE_CHANGED_EVENT,
+  requestFreshLocation,
+  setLocationPreference,
+  startLocationWatch,
+} from '../geo.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
 import {
   isBlob,
   isUsableCoordinate as sharedIsUsableCoordinate,
-  hasObservationLocation,
   normalizeCoordinatePair,
   normalizeObservationGps,
 } from '../observation-shapes.js'
@@ -63,6 +70,36 @@ const reviewAiState = {
   stale: false,
   availability: {},
   resultsByService: {},
+}
+
+let reviewLocationStateListenerWindow = null
+let reviewLocationStateListener = null
+let reviewLocationWarningDismissedSessionKey = null
+let reviewLocationLastLookupKey = ''
+let reviewSaveLocationSheetResolver = null
+let reviewSaveLocationSessionBypassKey = null
+let reviewSaveInFlight = false
+
+const reviewDefaultDependencies = {
+  enqueueObservation,
+  refreshHome,
+  openFinds,
+  requestFreshLocation,
+  openLocationSuggestions,
+}
+
+let reviewTestDependencies = null
+
+export function __setReviewTestHooks(overrides = null) {
+  reviewTestDependencies = overrides && typeof overrides === 'object' ? { ...overrides } : null
+  if (!reviewTestDependencies) {
+    reviewSaveInFlight = false
+    _hideReviewSaveLocationSheet(null)
+  }
+}
+
+function _reviewDependency(name) {
+  return reviewTestDependencies?.[name] ?? reviewDefaultDependencies[name]
 }
 
 function _pickImportedReviewActiveService(resultsByService = {}, defaultService = ID_SERVICE_ARTSORAKEL) {
@@ -323,9 +360,24 @@ function _updateReviewObscureHint() {
 }
 
 export function initReview() {
+  const currentWindow = globalThis.window
+  if (currentWindow && reviewLocationStateListenerWindow !== currentWindow) {
+    if (reviewLocationStateListenerWindow?.removeEventListener && reviewLocationStateListener) {
+      reviewLocationStateListenerWindow.removeEventListener(LOCATION_STATE_CHANGED_EVENT, reviewLocationStateListener)
+    }
+    reviewLocationStateListenerWindow = currentWindow
+    reviewLocationStateListener = () => {
+      if (state.currentScreen !== 'review') return
+      buildReviewGrid()
+    }
+    currentWindow.addEventListener(LOCATION_STATE_CHANGED_EVENT, reviewLocationStateListener)
+  }
+
   document.getElementById('review-close')?.addEventListener('click', cancelReview)
   document.getElementById('review-cancel-btn')?.addEventListener('click', cancelReview)
   document.getElementById('review-save-btn')?.addEventListener('click', saveObservationBatch)
+  _hideReviewSaveLocationSheet(null)
+  _wireReviewSaveLocationSheet()
   document.getElementById('review-habitat')?.addEventListener('input', event => {
     state.captureDraft.habitat = event.target.value
   })
@@ -375,6 +427,8 @@ export function initReview() {
 export function openImportedReview(session) {
   resetLocationState()
   resetReviewAiState()
+  _clearReviewLocationWarningSuppression()
+  reviewLocationLastLookupKey = ''
   Object.assign(reviewAiState, _buildImportedReviewAiState(session))
   const gpsAltitude = _firstFiniteNumber(
     session?.gpsAltitude,
@@ -549,31 +603,332 @@ function _reviewLocationLookup() {
 }
 
 function _currentReviewGps() {
-  const reviewContext = state.reviewContext || null
-  const leadPhotoWithGps = state.capturedPhotos.find(photo => photo.gps && sharedIsUsableCoordinate(photo.gps.lat, photo.gps.lon))
-  const captureGps = leadPhotoWithGps?.gps || state.capturedPhotos[0]?.gps || null
-  return reviewContext?.source === 'import'
-    ? normalizeObservationGps(reviewContext.gps)
-    : normalizeObservationGps(captureGps)
+  return _cloneReviewGps(_isImportedReview() ? state.reviewContext?.gps : state.captureSessionLocation.fix)
+}
+
+function _currentReviewNativeCameraGps() {
+  return _currentReviewGps()
+}
+
+function _cloneReviewGps(gps) {
+  const normalized = normalizeObservationGps(gps)
+  if (!normalized) return null
+  const timestamp = Number(gps?.timestamp)
+  return {
+    ...normalized,
+    timestamp: Number.isFinite(timestamp) ? timestamp : null,
+  }
+}
+
+function _isImportedReview() {
+  return state.reviewContext?.source === 'import'
+}
+
+function _currentReviewSessionKey() {
+  if (_isImportedReview()) {
+    const importSessionMs = state.sessionStart instanceof Date
+      ? state.sessionStart.getTime()
+      : Number(state.sessionStart)
+    return Number.isFinite(importSessionMs) ? `import:${importSessionMs}` : 'import'
+  }
+
+  const sessionStartAt = state.captureSessionLocation.sessionStartAt instanceof Date
+    ? state.captureSessionLocation.sessionStartAt.getTime()
+    : Number(state.captureSessionLocation.sessionStartAt)
+  return Number.isFinite(sessionStartAt) ? `live:${sessionStartAt}` : null
+}
+
+function _isReviewLocationWarningSuppressed() {
+  const sessionKey = _currentReviewSessionKey()
+  return !!sessionKey && reviewLocationWarningDismissedSessionKey === sessionKey
+}
+
+function _dismissReviewLocationWarningForSession() {
+  const sessionKey = _currentReviewSessionKey()
+  if (sessionKey) reviewLocationWarningDismissedSessionKey = sessionKey
+}
+
+function _clearReviewLocationWarningSuppression() {
+  reviewLocationWarningDismissedSessionKey = null
+}
+
+function _currentReviewSaveSessionKey() {
+  return _currentReviewSessionKey()
+}
+
+function _isReviewSaveLocationSuppressed() {
+  const sessionKey = _currentReviewSaveSessionKey()
+  return !!sessionKey && reviewSaveLocationSessionBypassKey === sessionKey
+}
+
+function _setReviewSaveLocationSuppressed() {
+  const sessionKey = _currentReviewSaveSessionKey()
+  if (sessionKey) reviewSaveLocationSessionBypassKey = sessionKey
+}
+
+function _clearReviewSaveLocationSuppression() {
+  reviewSaveLocationSessionBypassKey = null
+}
+
+function _focusReviewLocationInput() {
+  const locationInput = document.getElementById('location-name-input')
+  if (!locationInput) return
+  try {
+    locationInput.focus({ preventScroll: true })
+  } catch {
+    locationInput.focus()
+  }
+  _reviewDependency('openLocationSuggestions')()
+}
+
+function _syncReviewSaveLocationSheetContent() {
+  const overlay = document.getElementById('review-save-location-overlay')
+  if (!overlay) return false
+
+  const title = document.getElementById('review-save-location-title')
+  const body = document.getElementById('review-save-location-body')
+  const retryBtn = document.getElementById('review-save-location-try-again')
+  const manualBtn = document.getElementById('review-save-location-manual')
+  const saveWithoutBtn = document.getElementById('review-save-location-save-without')
+
+  if (title) title.textContent = 'Location is not ready'
+  if (body) body.textContent = 'Sporely could not determine your position.'
+  if (retryBtn) retryBtn.textContent = 'Try again'
+  if (manualBtn) manualBtn.textContent = 'Enter place manually'
+  if (saveWithoutBtn) saveWithoutBtn.textContent = 'Save without coordinates'
+  return true
+}
+
+function _showReviewSaveLocationSheet() {
+  const overlay = document.getElementById('review-save-location-overlay')
+  if (!overlay || !_syncReviewSaveLocationSheetContent()) {
+    return Promise.resolve('save-without')
+  }
+
+  overlay.style.display = 'flex'
+  return new Promise(resolve => {
+    reviewSaveLocationSheetResolver = resolve
+  })
+}
+
+function _hideReviewSaveLocationSheet(result = null) {
+  const overlay = document.getElementById('review-save-location-overlay')
+  if (overlay) overlay.style.display = 'none'
+  const resolve = reviewSaveLocationSheetResolver
+  reviewSaveLocationSheetResolver = null
+  if (typeof resolve === 'function') resolve(result)
+}
+
+function _resolveReviewSaveLocationSheet(result = null) {
+  _hideReviewSaveLocationSheet(result)
+}
+
+function _wireReviewSaveLocationSheet() {
+  const overlay = document.getElementById('review-save-location-overlay')
+  if (!overlay || overlay._wired) return
+  overlay._wired = true
+
+  document.getElementById('review-save-location-try-again')?.addEventListener('click', event => {
+    event.preventDefault()
+    _resolveReviewSaveLocationSheet('retry')
+  })
+  document.getElementById('review-save-location-manual')?.addEventListener('click', event => {
+    event.preventDefault()
+    _resolveReviewSaveLocationSheet('manual')
+  })
+  document.getElementById('review-save-location-save-without')?.addEventListener('click', event => {
+    event.preventDefault()
+    _resolveReviewSaveLocationSheet('save-without')
+  })
+}
+
+function _canAcquireReviewSaveLocation() {
+  if (_isImportedReview()) return false
+  if (_isReviewSaveLocationSuppressed()) return false
+  if (state.location.preference !== 'enabled') return false
+  if (state.location.capability === 'unsupported' || state.location.error?.kind === 'unsupported') return false
+  if (state.location.permission === 'denied' || state.location.error?.kind === 'permission-denied') return false
+  return true
+}
+
+function _canonicalReviewSaveGps() {
+  return _cloneReviewGps(_isImportedReview() ? state.reviewContext?.gps : state.captureSessionLocation.fix)
+}
+
+function _canRequestReviewSaveFreshLocation(sessionToken) {
+  if (state.currentScreen !== 'review') return false
+  if (_isImportedReview()) return false
+  if (_isReviewSaveLocationSuppressed()) return false
+  if (state.location.preference !== 'enabled') return false
+  return _currentReviewSaveSessionKey() === sessionToken
+}
+
+async function _requestReviewSaveLocation() {
+  const sessionToken = _currentReviewSaveSessionKey()
+  if (!_canRequestReviewSaveFreshLocation(sessionToken)) return null
+  await _reviewDependency('requestFreshLocation')({
+    maxAgeMs: 30_000,
+    timeoutMs: 10_000,
+    enableHighAccuracy: true,
+    internalOverride: true,
+    captureSessionRequestToken: sessionToken,
+  })
+  if (state.currentScreen !== 'review') return null
+  return _canonicalReviewSaveGps()
+}
+
+async function _resolveReviewSaveLocation() {
+  while (true) {
+    if (state.currentScreen !== 'review') {
+      return { action: 'abort' }
+    }
+    if (_isImportedReview()) {
+      return { action: 'proceed', gps: _canonicalReviewSaveGps() }
+    }
+    if (state.location.preference === 'disabled') {
+      return { action: 'proceed', gps: null }
+    }
+    const currentGps = _canonicalReviewSaveGps()
+    if (currentGps) return { action: 'proceed', gps: currentGps }
+    if (_isReviewSaveLocationSuppressed()) {
+      return { action: 'proceed', gps: null }
+    }
+    if (_canAcquireReviewSaveLocation()) {
+      const freshGps = await _requestReviewSaveLocation()
+      if (freshGps) return { action: 'proceed', gps: freshGps }
+    }
+    const decision = await _showReviewSaveLocationSheet()
+    if (decision === 'manual') {
+      _focusReviewLocationInput()
+      return { action: 'manual' }
+    }
+    if (decision === 'save-without') {
+      _setReviewSaveLocationSuppressed()
+      return { action: 'proceed', gps: _canonicalReviewSaveGps() }
+    }
+    if (decision !== 'retry') return { action: 'abort' }
+  }
+}
+
+function _supportsOpenLocationSettings() {
+  const app = globalThis.Capacitor?.Plugins?.App || globalThis.Capacitor?.App || null
+  return typeof app?.openSettings === 'function' ? app : null
+}
+
+async function _openReviewLocationSettings() {
+  const app = _supportsOpenLocationSettings()
+  if (!app) return false
+  try {
+    await app.openSettings.call(app)
+    return true
+  } catch (error) {
+    console.warn('Unable to open location settings:', error)
+    return false
+  }
+}
+
+async function _requestReviewLocationRetry() {
+  const sessionToken = _currentReviewSessionKey()
+  if (!_canRequestReviewSaveFreshLocation(sessionToken)) return
+  await requestFreshLocation({
+    maxAgeMs: 0,
+    timeoutMs: 10_000,
+    enableHighAccuracy: true,
+    internalOverride: true,
+    captureSessionRequestToken: sessionToken,
+  })
+  if (state.currentScreen !== 'review' || _isImportedReview()) return
+  if (state.location.preference !== 'enabled') return
+  await startLocationWatch({
+    requestFreshFix: false,
+    maxAgeMs: 0,
+    enableHighAccuracy: true,
+    internalOverride: true,
+  })
 }
 
 function _syncReviewLocationWarning() {
   const locationWarningEl = document.getElementById('review-location-warning')
   if (!locationWarningEl) return
 
-  const locationInput = document.getElementById('location-name-input')
-  const reviewContext = state.reviewContext || null
-  const reviewGps = _currentReviewGps()
-  const hasLocation = hasObservationLocation({
-    location: locationInput?.value || reviewContext?.locationName || '',
-    gps_latitude: reviewGps?.lat ?? null,
-    gps_longitude: reviewGps?.lon ?? null,
-  })
+  const warning = _reviewLocationWarningState()
 
-  locationWarningEl.hidden = hasLocation
-  locationWarningEl.textContent = hasLocation
-    ? ''
-    : (t('common.locationMissingWarning') || 'No location captured yet.')
+  if (!warning) {
+    locationWarningEl.hidden = true
+    locationWarningEl.innerHTML = ''
+    delete locationWarningEl.dataset.locationState
+    return
+  }
+
+  if (warning.kind === 'disabled') {
+    locationWarningEl.hidden = false
+    locationWarningEl.dataset.locationState = 'disabled'
+    locationWarningEl.innerHTML = `
+      <div class="review-location-warning-title">${warning.title}</div>
+      <div class="review-location-warning-actions">
+        <button type="button" class="btn-secondary" data-review-location-action="enable">Enable</button>
+      </div>
+    `
+  } else {
+    const openSettings = _supportsOpenLocationSettings()
+    const settingsButton = openSettings
+      ? '<button type="button" class="btn-secondary" data-review-location-action="open-settings">Open settings</button>'
+      : ''
+    const tryAgainButton = warning.showTryAgain
+      ? '<button type="button" class="btn-secondary" data-review-location-action="try-again">Try again</button>'
+      : ''
+    locationWarningEl.hidden = false
+    locationWarningEl.dataset.locationState = warning.kind
+    locationWarningEl.innerHTML = `
+      <div class="review-location-warning-header">
+        <div class="review-location-warning-title">${warning.title}</div>
+        <button type="button" class="review-location-warning-dismiss" aria-label="Dismiss" data-review-location-action="dismiss">×</button>
+      </div>
+      <div class="review-location-warning-body">${warning.body}</div>
+      <div class="review-location-warning-actions">
+        ${tryAgainButton}
+        ${settingsButton}
+        <button type="button" class="btn-secondary" data-review-location-action="continue-without-location">Continue without location</button>
+        <button type="button" class="btn-secondary" data-review-location-action="dont-use-location">Don’t use location for future finds</button>
+      </div>
+    `
+  }
+
+  locationWarningEl.querySelectorAll('[data-review-location-action]').forEach(button => {
+    if (button._reviewLocationActionWired) return
+    button._reviewLocationActionWired = true
+    button.addEventListener('click', async event => {
+      event.preventDefault()
+      const action = button.dataset.reviewLocationAction
+      if (action === 'dismiss' || action === 'continue-without-location') {
+        _dismissReviewLocationWarningForSession()
+        _syncReviewLocationWarning()
+        return
+      }
+      if (action === 'dont-use-location') {
+        _dismissReviewLocationWarningForSession()
+        setLocationPreference('disabled')
+        _syncReviewLocationWarning()
+        return
+      }
+      if (action === 'enable') {
+        _clearReviewLocationWarningSuppression()
+        setLocationPreference('enabled')
+        await _requestReviewLocationRetry()
+        buildReviewGrid()
+        return
+      }
+      if (action === 'open-settings') {
+        await _openReviewLocationSettings()
+        return
+      }
+      if (action === 'try-again') {
+        _clearReviewLocationWarningSuppression()
+        await _requestReviewLocationRetry()
+        buildReviewGrid()
+      }
+    })
+  })
 }
 
 function _syncReviewGpsStatus() {
@@ -581,13 +936,89 @@ function _syncReviewGpsStatus() {
   if (!gpsStatusEl) return
 
   const reviewGps = _currentReviewGps()
-  const hasGps = !!reviewGps
-  gpsStatusEl.textContent = hasGps
-    ? (t('common.gpsCaptured') || 'GPS captured')
-    : (t('common.noGpsCaptured') || 'No GPS captured')
+  let text = 'No location captured'
+  let stateName = 'idle'
+
+  if (_isImportedReview()) {
+    if (reviewGps) {
+      text = Number.isFinite(reviewGps.accuracy)
+        ? `Location ready · ±${Math.round(reviewGps.accuracy)} m`
+        : 'Location ready'
+      stateName = 'fix'
+    }
+  } else if (state.location.preference === 'disabled') {
+    text = 'Location not included'
+    stateName = 'disabled'
+  } else if (state.location.capability === 'unsupported' || state.location.error?.kind === 'unsupported') {
+    text = 'Automatic location unavailable'
+    stateName = 'unavailable'
+  } else if (state.location.permission === 'denied' || state.location.error?.kind === 'permission-denied') {
+    text = 'Location access is off'
+    stateName = 'unavailable'
+  } else if (state.location.status === 'timeout' || state.location.error?.kind === 'timeout'
+    || state.location.status === 'unavailable' || state.location.error?.kind === 'position-unavailable'
+    || state.location.status === 'error') {
+    text = 'Couldn’t determine location · Try again'
+    stateName = 'unavailable'
+  } else if (reviewGps) {
+    text = Number.isFinite(reviewGps.accuracy)
+      ? `Location ready · ±${Math.round(reviewGps.accuracy)} m`
+      : 'Location ready'
+    stateName = 'fix'
+  } else if (state.location.status === 'locating' || state.captureSessionLocation.requestingFreshFix) {
+    text = 'Finding location…'
+    stateName = 'searching'
+  } else {
+    text = 'Couldn’t determine location · Try again'
+    stateName = 'unavailable'
+  }
 
   const pill = gpsStatusEl.closest('.gps-pill')
-  if (pill) pill.dataset.gpsState = hasGps ? 'fix' : 'searching'
+  gpsStatusEl.textContent = text
+  if (pill) pill.dataset.gpsState = stateName
+}
+
+function _reviewLocationWarningState() {
+  const locationState = state.location || {}
+  if (locationState.preference === 'disabled') {
+    return {
+      kind: 'disabled',
+      title: 'Location not included',
+    }
+  }
+
+  if (_isReviewLocationWarningSuppressed()) return null
+
+  if (locationState.capability === 'unsupported' || locationState.error?.kind === 'unsupported') {
+    return {
+      kind: 'unsupported',
+      title: 'Automatic location unavailable',
+      body: 'This platform cannot provide an automatic location. You can enter a place name or continue without location.',
+      showTryAgain: false,
+    }
+  }
+
+  if (locationState.permission === 'denied' || locationState.error?.kind === 'permission-denied') {
+    return {
+      kind: 'denied',
+      title: 'Location not available',
+      body: 'Location access is turned off for Sporely. This find will still be saved if you continue, but without location.',
+      showTryAgain: true,
+    }
+  }
+
+  if (locationState.status === 'timeout' || locationState.error?.kind === 'timeout'
+    || locationState.status === 'unavailable' || locationState.error?.kind === 'position-unavailable'
+    || locationState.status === 'error') {
+    return {
+      kind: 'unavailable',
+      title: 'Location not available',
+      body: 'Sporely could not determine your location. This find will still be saved if you continue, but without location.',
+      showTryAgain: true,
+    }
+  }
+
+  return null
 }
 
 function _resolveReviewPhotoIdServices(availability = {}, options = {}) {
@@ -696,17 +1127,10 @@ export function buildReviewGrid() {
   const photos = state.capturedPhotos
   const count  = photos.length
   const reviewContext = state.reviewContext || null
-  const leadPhotoWithGps = photos.find(p => p.gps && isUsableCoordinate(p.gps.lat, p.gps.lon))
-  const captureGps = leadPhotoWithGps?.gps || photos[0]?.gps || null
+  const reviewGps = _currentReviewGps()
 
-  const reviewGps = reviewContext?.source === 'import'
-    ? (reviewContext.gps || null)
-    : captureGps
-  if (!state.captureSessionLocation.sessionStartAt) {
+  if (!_isImportedReview() && count > 0 && !state.captureSessionLocation.sessionStartAt) {
     state.captureSessionLocation.sessionStartAt = state.sessionStart || new Date()
-  }
-  if (!state.captureSessionLocation.fix && reviewGps) {
-    state.captureSessionLocation.fix = { ...reviewGps }
   }
   const reviewCount = document.getElementById('review-count')
   const sharedTaxon = photos.find(photo => photo.taxon)?.taxon || null
@@ -732,6 +1156,7 @@ export function buildReviewGrid() {
       })
   }
 
+  const reviewLocationEl = document.getElementById('review-location')
   if (reviewGps) {
     document.getElementById('review-coords-text').textContent =
       formatLatLon(reviewGps, 4)
@@ -745,8 +1170,12 @@ export function buildReviewGrid() {
         `${Math.round(reviewGps.altitude)} m ASL`
     else
       document.getElementById('meta-altitude').textContent = '— ASL'
-    document.getElementById('review-location').textContent =
-      formatLatLon(reviewGps, 3)
+    const lookupKey = lookupCoordinateKey(reviewGps.lat, reviewGps.lon)
+    if (reviewLocationEl && reviewLocationLastLookupKey !== lookupKey) {
+      reviewLocationEl.textContent = ''
+      reviewLocationEl.title = ''
+      reviewLocationLastLookupKey = lookupKey
+    }
     startLocationLookup(reviewGps.lat, reviewGps.lon)
   } else {
     document.getElementById('review-coords-text').textContent = ''
@@ -754,7 +1183,11 @@ export function buildReviewGrid() {
     if (metaCoordinates) metaCoordinates.textContent = '—'
     document.getElementById('meta-accuracy').textContent = '—'
     document.getElementById('meta-altitude').textContent = '— ASL'
-    document.getElementById('review-location').textContent = ''
+    if (reviewLocationEl) {
+      reviewLocationEl.textContent = ''
+      reviewLocationEl.title = ''
+    }
+    reviewLocationLastLookupKey = ''
   }
 
   document.getElementById('review-habitat').value = state.captureDraft.habitat || ''
@@ -1610,9 +2043,6 @@ function cancelReview() {
   state.reviewContext = null
   state.batchCount = 0
   state.captureDraft = createDefaultObservationDraft()
-  state.captureSessionLocation.sessionStartAt = null
-  state.captureSessionLocation.fix = null
-  state.captureSessionLocation.requestingFreshFix = false
   reviewAiState.running = false
   reviewAiState.activeService = null
   reviewAiState.hasRun = false
@@ -1627,6 +2057,11 @@ function cancelReview() {
   reviewAiState.stale = false
   reviewAiState.availability = {}
   reviewAiState.resultsByService = {}
+  endCaptureLocationSession()
+  _clearReviewLocationWarningSuppression()
+  _clearReviewSaveLocationSuppression()
+  _hideReviewSaveLocationSheet(null)
+  reviewLocationLastLookupKey = ''
   resetLocationState()
   navigate('home')
 }
@@ -1638,6 +2073,7 @@ function _localDate(ts) {
 async function saveObservationBatch() {
   if (!state.user) { showToast(t('review.notSignedIn')); return }
   if (!state.capturedPhotos.length) { showToast(t('review.noPhotosToSync')); return }
+  if (reviewSaveInFlight) return
 
   debugImagePipeline('save review batch requested', {
     photoCount: state.capturedPhotos.length,
@@ -1645,7 +2081,8 @@ async function saveObservationBatch() {
 
   const btn = document.getElementById('review-save-btn')
   if (btn) btn.disabled = true
-  
+  reviewSaveInFlight = true
+
   _setProgress(0, 1, 'Preparing observation...')
 
   try {
@@ -1658,9 +2095,6 @@ async function saveObservationBatch() {
     )
 
     const visibility = normalizeVisibility(state.captureDraft.visibility, getDefaultVisibility())
-    const leadPhotoWithGps = photos.find(photo => normalizeObservationGps(photo.gps))
-    const leadGps = normalizeObservationGps(state.reviewContext?.gps)
-      || normalizeObservationGps(leadPhotoWithGps?.gps)
     const leadPhoto = photos[0] || {}
     const taxon = photos.find(photo => photo.taxon)?.taxon || {}
     const aiIdentificationRuns = _buildReviewAiIdentificationRuns(photos)
@@ -1678,10 +2112,10 @@ async function saveObservationBatch() {
       user_id: state.user.id,
       date: _localDate(leadPhoto.ts || new Date()),
       captured_at: (leadPhoto.ts || new Date()).toISOString(),
-      gps_latitude: leadGps?.lat ?? null,
-      gps_longitude: leadGps?.lon ?? null,
-      gps_altitude: leadGps?.altitude ?? null,
-      gps_accuracy: leadGps?.accuracy ?? null,
+      gps_latitude: null,
+      gps_longitude: null,
+      gps_altitude: null,
+      gps_accuracy: null,
       location: getLocationName() || null,
       habitat: state.captureDraft.habitat.trim() || null,
       notes: state.captureDraft.notes.trim() || null,
@@ -1702,13 +2136,14 @@ async function saveObservationBatch() {
       ai_selected_at: selectedService ? new Date().toISOString() : null,
       aiIdentificationRuns,
     })
-    if (!hasObservationLocation(obsPayload)) {
-      const confirmed = window.confirm(
-        t('common.saveWithoutLocationConfirm')
-          || 'No location was captured. Save anyway? It will be queued locally without location and sync later.'
-      )
-      if (!confirmed) return
-    }
+
+    const locationResult = await _resolveReviewSaveLocation()
+    if (state.currentScreen !== 'review' || !locationResult || locationResult.action === 'manual' || locationResult.action === 'abort') return
+    const finalGps = _canonicalReviewSaveGps()
+    obsPayload.gps_latitude = finalGps?.lat ?? null
+    obsPayload.gps_longitude = finalGps?.lon ?? null
+    obsPayload.gps_altitude = finalGps?.altitude ?? null
+    obsPayload.gps_accuracy = finalGps?.accuracy ?? null
 
     const imageEntries = photos
       .filter(photo => isBlob(photo.blob))
@@ -1727,7 +2162,7 @@ async function saveObservationBatch() {
       
     _setProgress(0, 1, 'Encoding images for storage...')
     await new Promise(r => setTimeout(r, 100)) // Yield to let button un-press
-    await enqueueObservation(obsPayload, imageEntries)
+    await _reviewDependency('enqueueObservation')(obsPayload, imageEntries)
 
     showToast(t('review.synced', { count: tp('counts.photo', photos.length) }))
     debugImagePipeline('review batch enqueued successfully', {
@@ -1739,18 +2174,21 @@ async function saveObservationBatch() {
     state.reviewContext = null
     state.batchCount = 0
     state.captureDraft = createDefaultObservationDraft()
-    state.captureSessionLocation.sessionStartAt = null
-    state.captureSessionLocation.fix = null
-    state.captureSessionLocation.requestingFreshFix = false
+    endCaptureLocationSession()
+    _clearReviewLocationWarningSuppression()
+    _clearReviewSaveLocationSuppression()
+    _hideReviewSaveLocationSheet(null)
+    reviewLocationLastLookupKey = ''
     resetLocationState()
-    await refreshHome()
-    await openFinds('mine', { resetSearch: true })
+    await _reviewDependency('refreshHome')()
+    await _reviewDependency('openFinds')('mine', { resetSearch: true })
   } catch (err) {
     showToast(t('review.syncFailed', { message: err.message }))
     console.error('Sync error:', err)
   } finally {
     _disposeReviewDebugPreviewUrls()
     _hideProgress()
+    reviewSaveInFlight = false
     if (btn) btn.disabled = false
   }
 }
@@ -1760,8 +2198,14 @@ async function _openCameraForReview() {
     try {
       const screenPath = 'review:add-photo'
       const captureSource = 'Sporely native camera'
-      const gps = state.gps && isUsableCoordinate(state.gps.lat, state.gps.lon)
-        ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
+      const reviewGps = _currentReviewNativeCameraGps()
+      const gps = reviewGps && isUsableCoordinate(reviewGps.lat, reviewGps.lon)
+        ? {
+            latitude: reviewGps.lat,
+            longitude: reviewGps.lon,
+            altitude: reviewGps.altitude,
+            accuracy: reviewGps.accuracy,
+          }
         : null
       debugImagePipeline('android native camera capture requested', {
         screenPath,

@@ -10,6 +10,8 @@ import { resetReviewAiState } from './review.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
 import { isBlob } from '../observation-shapes.js'
 import {
+  beginCaptureLocationSession,
+  endCaptureLocationSession,
   LOCATION_STATE_CHANGED_EVENT,
   checkLocationCapabilityAndPermission,
   setLocationPreference,
@@ -202,13 +204,6 @@ function _isCaptureStartupActive(token) {
   return token === captureStartupSeq
 }
 
-function _beginCaptureSessionLocation({ useLocation }) {
-  state.sessionStart = new Date()
-  state.captureSessionLocation.sessionStartAt = state.sessionStart
-  state.captureSessionLocation.fix = useLocation && state.location.fix ? { ...state.location.fix } : null
-  state.captureSessionLocation.requestingFreshFix = false
-}
-
 async function _prepareCaptureLocationForStart({ preserveBatch, token }) {
   if (preserveBatch) return { shouldContinue: true, useLocation: false }
 
@@ -218,7 +213,7 @@ async function _prepareCaptureLocationForStart({ preserveBatch, token }) {
     if (!_isCaptureStartupActive(token) || choice == null) return { shouldContinue: false, useLocation: false }
     if (choice === 'continue') {
       setLocationPreference('disabled')
-      _beginCaptureSessionLocation({ useLocation: false })
+      beginCaptureLocationSession()
       return { shouldContinue: true, useLocation: false }
     }
     setLocationPreference('enabled')
@@ -226,11 +221,11 @@ async function _prepareCaptureLocationForStart({ preserveBatch, token }) {
   }
 
   if (preference === 'disabled') {
-    _beginCaptureSessionLocation({ useLocation: false })
+    beginCaptureLocationSession()
     return { shouldContinue: true, useLocation: false }
   }
 
-  _beginCaptureSessionLocation({ useLocation: true })
+  beginCaptureLocationSession()
   const snapshot = await checkLocationCapabilityAndPermission()
   if (!_isCaptureStartupActive(token)) return { shouldContinue: false, useLocation: false }
 
@@ -239,7 +234,7 @@ async function _prepareCaptureLocationForStart({ preserveBatch, token }) {
     if (!_isCaptureStartupActive(token) || choice == null) return { shouldContinue: false, useLocation: false }
     if (choice === 'continue') {
       setLocationPreference('disabled')
-      _beginCaptureSessionLocation({ useLocation: false })
+      beginCaptureLocationSession()
       return { shouldContinue: true, useLocation: false }
     }
     return { shouldContinue: false, useLocation: false }
@@ -250,7 +245,7 @@ async function _prepareCaptureLocationForStart({ preserveBatch, token }) {
     if (!_isCaptureStartupActive(token) || choice == null) return { shouldContinue: false, useLocation: false }
     if (choice === 'continue') {
       setLocationPreference('disabled')
-      _beginCaptureSessionLocation({ useLocation: false })
+      beginCaptureLocationSession()
       return { shouldContinue: true, useLocation: false }
     }
     return _prepareCaptureLocationForStart({ preserveBatch: false, token })
@@ -818,7 +813,7 @@ async function capturePhoto() {
       state.capturedPhotos.push({
         blob: null,
         blobPromise,
-        gps: state.gps,
+        gps: state.captureSessionLocation.fix,
         ts: new Date(),
         emoji,
         aiCropRect: null,
@@ -945,7 +940,7 @@ async function capturePhoto() {
       state.capturedPhotos.push({
         blob,
         blobPromise: Promise.resolve(blob),
-        gps: state.gps,
+        gps: state.captureSessionLocation.fix,
         ts: new Date(),
         emoji: '📸',
         aiCropRect: getDefaultAiCropRect(acceptedWidth, acceptedHeight),
@@ -1003,6 +998,7 @@ function finishCapture() {
     state.capturedPhotos = []
     state.batchCount = 0
     state.reviewContext = null
+    endCaptureLocationSession()
     document.getElementById('batch-count').textContent = '0'
     document.getElementById('batch-area').style.display = 'none'
     _syncCaptureControls()
@@ -1019,15 +1015,12 @@ function cancelCapture() {
   debugImagePipeline('cancel capture')
   captureCompleteHandler = null
   stopCamera()
+  endCaptureLocationSession()
   state.capturedPhotos = []
   state.reviewContext = null
   state.batchCount = 0
   pendingCaptureCount = 0
   finishCaptureWhenPendingComplete = false
-  state.sessionStart = null
-  state.captureSessionLocation.sessionStartAt = null
-  state.captureSessionLocation.fix = null
-  state.captureSessionLocation.requestingFreshFix = false
   state.captureDraft = createDefaultObservationDraft()
   resetReviewAiState()
   document.getElementById('batch-count').textContent = '0'

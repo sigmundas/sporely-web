@@ -67,7 +67,7 @@ sporely-web/
     ├── router.js           navigate(screen) — swaps .active class, starts/stops camera
     ├── map-loader.js       Lazy loads the map screen so Leaflet stays off the startup path
     ├── toast.js            showToast(msg) — timed overlay message
-    ├── geo.js              GPS watchPosition, writes into state.gps
+    ├── geo.js              Location service/state, watchPosition, session tokens, location-state events
     ├── cloud-plan.js       Cloud plan lookup + effective upload policy helpers
     ├── settings.js         Local Settings preferences: camera, image resolution, sync history
     ├── images.js           Worker-backed image preparation, uploads + thumbnail variants, media URL helpers
@@ -260,6 +260,19 @@ and Cloudflare's public CDN for serving.
 - Captures by painting a `<video>` stream to an HTML `<canvas>`, inherently limiting resolution to the browser's WebRTC stream (often ~2 MP).
 - Mobile browsers aggressively strip EXIF/GPS from web captures for privacy. The app compensates by reading device geolocation via JS `navigator.geolocation` during capture.
 - Android web users see warnings advising them to install the native app for better quality and metadata handling.
+
+## Location State
+
+The web app separates current-device location from per-observation coordinates.
+
+- `state.location.fix` holds the latest current-device fix for location-aware UI.
+- `state.captureSessionLocation.fix` holds the canonical live-capture coordinates for the current field observation.
+- `state.reviewContext.gps` holds the canonical imported-review coordinates.
+- `LOCATION_STATE_CHANGED_EVENT` is the single location update event screens subscribe to.
+- Session tokens and `sessionStartAt` guard against stale asynchronous callbacks.
+- Best-fix selection in a live session prefers the first usable fix, then finite accuracy over missing accuracy, then lower accuracy, then newer timestamp on ties.
+- Save-time review requests use `requestFreshLocation()` with a bounded timeout instead of an open-ended watch.
+- Persistent opt-out and session-only dismissal are separate: disabled preference suppresses location until the user re-enables it, while session-only dismissal only hides the warning for the current live observation.
 
 ## Capture → save flow
 

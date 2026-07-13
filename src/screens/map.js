@@ -8,6 +8,7 @@ import { state } from '../state.js'
 import { formatDisplayName, formatScientificName } from '../artsorakel.js'
 import { navigate } from '../router.js'
 import { openFindDetail } from './find_detail.js'
+import { LOCATION_STATE_CHANGED_EVENT } from '../geo.js'
 import { esc as _esc } from '../esc.js'
 
 let map          = null
@@ -80,7 +81,7 @@ function _dateOnlyString(date) {
 }
 
 function _hasValidLocation() {
-  return Number.isFinite(state.gps?.lat) && Number.isFinite(state.gps?.lon)
+  return Number.isFinite(state.location.fix?.lat) && Number.isFinite(state.location.fix?.lon)
 }
 
 function _syncLocationBtn() {
@@ -95,8 +96,8 @@ function _syncLocationBtn() {
 function _currentLocationBounds() {
   if (!_hasValidLocation()) return null
 
-  const lat = state.gps.lat
-  const lon = state.gps.lon
+  const lat = state.location.fix.lat
+  const lon = state.location.fix.lon
   const latDelta = 1_000 / 111_320
   const lonDelta = 1_000 / (111_320 * Math.max(0.2, Math.cos(lat * Math.PI / 180)))
   return L.latLngBounds(
@@ -127,7 +128,7 @@ function _renderCurrentLocation() {
   _syncLocationBtn()
   if (!_hasValidLocation()) return
 
-  const { lat, lon, accuracy } = state.gps
+  const { lat, lon, accuracy } = state.location.fix
   const icon = L.divIcon({
     className: '',
     html: `
@@ -204,7 +205,7 @@ export function initMap() {
   _syncFuzzedCircleVisibility()
 
   document.getElementById('map-locate-btn')?.addEventListener('click', _centerOnCurrentLocation)
-  window.addEventListener('sporely:gps-updated', _renderCurrentLocation)
+  window.addEventListener(LOCATION_STATE_CHANGED_EVENT, _renderCurrentLocation)
 
   // Scope toggle
   document.querySelectorAll('.map-scope-btn').forEach(btn => {

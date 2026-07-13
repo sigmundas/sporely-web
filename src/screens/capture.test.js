@@ -4,7 +4,14 @@ import fs from 'node:fs'
 
 import { createDefaultObservationDraft } from '../observation-defaults.js'
 import { state } from '../state.js'
-import { LOCATION_STATE_CHANGED_EVENT, setLocationPreference, stopLocationWatch } from '../geo.js'
+import { navigate } from '../router.js'
+import {
+  LOCATION_STATE_CHANGED_EVENT,
+  beginCaptureLocationSession,
+  endCaptureLocationSession,
+  setLocationPreference,
+  stopLocationWatch,
+} from '../geo.js'
 import { initCapture, startCamera, stopCamera } from './capture.js'
 import { isTinyCameraCaptureDimensions } from './capture.js'
 
@@ -59,6 +66,7 @@ function _makeClassList() {
 
 function _makeElement(id, tagName = 'div') {
   const listeners = {}
+  const children = new Map()
   return {
     id,
     tagName: tagName.toUpperCase(),
@@ -105,8 +113,11 @@ function _makeElement(id, tagName = 'div') {
     },
     focus() {},
     blur() {},
-    querySelector() {
-      return null
+    querySelector(selector) {
+      if (!children.has(selector)) {
+        children.set(selector, _makeElement(`${id} ${selector}`))
+      }
+      return children.get(selector) || null
     },
     querySelectorAll() {
       return []
@@ -158,6 +169,7 @@ function _makeRuntime({
 } = {}) {
   const elements = new Map()
   const listeners = new Map()
+  const documentListeners = new Map()
   const events = []
   const cameraCalls = {
     getUserMedia: 0,
@@ -177,6 +189,14 @@ function _makeRuntime({
   ensure('batch-count')
   ensure('batch-area')
   ensure('bottom-nav')
+  ensure('screen-home')
+  ensure('screen-capture')
+  ensure('screen-review')
+  ensure('screen-import-review')
+  ensure('nav-home')
+  ensure('nav-capture')
+  ensure('nav-review')
+  ensure('nav-import-review')
   ensure('camera-denied')
   ensure('camera-denied-body')
   ensure('camera-retry-btn', 'button')
@@ -200,8 +220,31 @@ function _makeRuntime({
   elements.get('camera-denied').style.display = 'none'
 
   const document = {
+    hidden: false,
+    visibilityState: 'visible',
     getElementById(id) {
+      if (!elements.has(id)) {
+        elements.set(id, _makeElement(id))
+      }
       return elements.get(id) || null
+    },
+    createElement(tagName) {
+      return _makeElement(`auto-${tagName}-${elements.size}`, tagName)
+    },
+    addEventListener(type, handler) {
+      const list = documentListeners.get(type) || []
+      list.push(handler)
+      documentListeners.set(type, list)
+    },
+    removeEventListener(type, handler) {
+      const list = documentListeners.get(type) || []
+      documentListeners.set(type, list.filter(entry => entry !== handler))
+    },
+    dispatchEvent(event) {
+      for (const handler of documentListeners.get(event.type) || []) {
+        handler(event)
+      }
+      return true
     },
     querySelector(selector) {
       if (selector === '.capture-viewfinder') return elements.get('capture-viewfinder') || null
@@ -336,6 +379,9 @@ function _makeRuntime({
     getElement(id) {
       return elements.get(id)
     },
+    getDocumentListeners(type) {
+      return documentListeners.get(type) || []
+    },
     async cleanup() {
       try {
         stopCamera()
@@ -398,6 +444,25 @@ test('first live-capture entry shows the location prompt', async () => {
 
   stopCamera()
   await startPromise
+})
+
+test('capture session starts with a fresh location session and installs one visibility listener', async () => {
+  const runtime = _makeRuntime({
+    geolocation: {
+      watchId: 77,
+    },
+  })
+  initCapture()
+
+  assert.equal(runtime.getDocumentListeners('visibilitychange').length, 0)
+
+  const startPromise = startCamera()
+  runtime.getElement('capture-location-primary-btn').click()
+  await startPromise
+
+  assert.equal(runtime.getDocumentListeners('visibilitychange').length, 1)
+  assert.equal(state.captureSessionLocation.sessionStartAt instanceof Date, true)
+  assert.equal(state.captureSessionLocation.fix, null)
 })
 
 test('Use my location starts acquisition', async () => {
@@ -511,7 +576,143 @@ test('location-state events update the compact capture status', () => {
   runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
   assert.equal(runtime.getElement('gps-display').textContent, 'Location access is off')
   assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'disabled')
+})
 
+test('capture to review preserves the live location session and watch', async () => {
+  let watchId = 401
+  const runtime = _makeRuntime({
+    geolocation: {
+      watchId: 401,
+      watchPosition() {
+        return watchId
+      },
+    },
+  })
+  initCapture()
+  setLocationPreference('enabled')
+
+  const startPromise = startCamera()
+  await startPromise
+
+  assert.equal(state.location.watchId, 401)
+  assert.equal(state.captureSessionLocation.sessionStartAt instanceof Date, true)
+
+  state.currentScreen = 'capture'
+  runtime.getElement('done-btn').click()
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.equal(state.currentScreen, 'review')
+  assert.equal(state.captureSessionLocation.sessionStartAt instanceof Date, true)
+  assert.equal(state.location.watchId, 401)
+  assert.deepEqual(runtime.cameraCalls.clearWatch, [])
+})
+
+test('cancel capture stops and clears the live session', async () => {
+  const clearCalls = []
+  const runtime = _makeRuntime({
+    geolocation: {
+      watchId: 609,
+      watchPosition() {
+        return 609
+      },
+      clearWatch(id) {
+        clearCalls.push(id)
+      },
+    },
+  })
+  initCapture()
+  setLocationPreference('enabled')
+
+  const startPromise = startCamera()
+  await startPromise
+
+  runtime.getElement('capture-cancel-btn').click()
+
+  assert.equal(state.captureSessionLocation.sessionStartAt, null)
+  assert.equal(state.captureSessionLocation.fix, null)
+  assert.equal(state.location.watchId, null)
+  assert.deepEqual(clearCalls, [609])
+})
+
+test('unrelated navigation stops and clears the live session', async () => {
+  const clearCalls = []
+  const runtime = _makeRuntime({
+    geolocation: {
+      watchId: 707,
+      watchPosition() {
+        return 707
+      },
+      clearWatch(id) {
+        clearCalls.push(id)
+      },
+    },
+  })
+  initCapture()
+  setLocationPreference('enabled')
+
+  const startPromise = startCamera()
+  await startPromise
+
+  state.currentScreen = 'capture'
+  navigate('home')
+  await startPromise
+
+  assert.equal(state.currentScreen, 'home')
+  assert.equal(state.captureSessionLocation.sessionStartAt, null)
+  assert.equal(state.captureSessionLocation.fix, null)
+  assert.equal(state.location.watchId, null)
+  assert.deepEqual(clearCalls, [707])
+})
+
+test('session ending during resume ignores the late result', async () => {
+  let getCurrentPositionResolve
+  let watchCallCount = 0
+  const clearCalls = []
+  const runtime = _makeRuntime({
+    geolocation: {
+      watchId: 702,
+      watchPosition() {
+        watchCallCount += 1
+        return 702
+      },
+      getCurrentPosition(success) {
+        getCurrentPositionResolve = success
+      },
+      clearWatch(id) {
+        clearCalls.push(id)
+      },
+    },
+  })
+  initCapture()
+  setLocationPreference('enabled')
+
+  const startPromise = startCamera()
+  await startPromise
+
+  runtime.document.visibilityState = 'hidden'
+  runtime.document.hidden = true
+  runtime.document.dispatchEvent({ type: 'visibilitychange' })
+
+  runtime.document.visibilityState = 'visible'
+  runtime.document.hidden = false
+  runtime.document.dispatchEvent({ type: 'visibilitychange' })
+
+  endCaptureLocationSession()
+  getCurrentPositionResolve?.({
+    coords: {
+      latitude: 63.9,
+      longitude: 10.9,
+      accuracy: 3,
+      altitude: 9,
+    },
+    timestamp: Date.now(),
+  })
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.equal(state.captureSessionLocation.fix, null)
+  assert.equal(state.location.watchId, null)
+  assert.equal(watchCallCount, 1)
+  assert.deepEqual(clearCalls, [702])
 })
 
 test('capture and review expose a shared gps status pill', () => {

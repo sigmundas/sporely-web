@@ -2,6 +2,7 @@ import { state } from './state.js'
 import { startCamera, stopCamera } from './screens/capture.js'
 import { buildReviewGrid } from './screens/review.js'
 import { loadMapScreen } from './map-loader.js'
+import { endCaptureLocationSession } from './geo.js'
 
 // Navigation history stack
 const navStack = []
@@ -19,6 +20,12 @@ function _show(screen) {
   if (navEl) navEl.classList.add('active')
 
   state.currentScreen = screen
+
+  const wasLiveLocationScreen = prevScreen === 'capture' || prevScreen === 'review'
+  const isLiveLocationScreen = screen === 'capture' || screen === 'review'
+  if (wasLiveLocationScreen && !isLiveLocationScreen) {
+    endCaptureLocationSession()
+  }
 
   if (screen === 'capture') startCamera({ preserveBatch: prevScreen === 'review' && state.capturedPhotos.length > 0 })
   else stopCamera()

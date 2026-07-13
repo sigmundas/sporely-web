@@ -3,14 +3,23 @@ import { setLocationPreference as persistLocationPreference } from './settings.j
 
 export const LOCATION_FIX_MAX_AGE_MS = 5 * 60 * 1000
 export const LOCATION_CLOCK_SKEW_MS = 10 * 1000
+const LOCATION_RESUME_TIMEOUT_MS = 10_000
 export const LOCATION_STATE_CHANGED_EVENT = 'sporely:location-state-changed'
-export const LEGACY_GPS_UPDATED_EVENT = 'sporely:gps-updated'
 
 const LOCATION_PREFERENCES = new Set(['ask', 'enabled', 'disabled'])
 const GEOLOCATION_ERROR_CODES = {
   permissionDenied: 1,
   positionUnavailable: 2,
   timeout: 3,
+}
+
+const liveCaptureSession = {
+  active: false,
+  suspendedByVisibility: false,
+  resumeInFlight: false,
+  requestToken: 0,
+  visibilityHandler: null,
+  visibilityListenerDocument: null,
 }
 
 function _normalizePreference(value) {
@@ -70,6 +79,10 @@ function _cloneCaptureSessionLocation() {
   }
 }
 
+function _captureSessionRequestIsCurrent(token) {
+  return token == null || (liveCaptureSession.active && token === liveCaptureSession.requestToken)
+}
+
 function _emitLocationStateChanged() {
   _dispatchEvent(LOCATION_STATE_CHANGED_EVENT, {
     location: _cloneLocationState(),
@@ -79,7 +92,6 @@ function _emitLocationStateChanged() {
 
 function _emitAcceptedFix(fix) {
   _emitLocationStateChanged()
-  _dispatchEvent(LEGACY_GPS_UPDATED_EVENT, _cloneFix(fix))
 }
 
 function _supportsGeolocation() {
@@ -105,6 +117,41 @@ function _isFreshFix(fix, maxAgeMs = LOCATION_FIX_MAX_AGE_MS) {
   if (!Number.isFinite(ageMs)) return false
   if (ageMs < -LOCATION_CLOCK_SKEW_MS) return false
   return ageMs <= normalizedMaxAge
+}
+
+function _isBetterSessionFix(candidate, existing) {
+  if (!candidate) return false
+  if (!existing) return true
+
+  const candidateAccuracy = _finiteNumber(candidate.accuracy)
+  const existingAccuracy = _finiteNumber(existing.accuracy)
+  const candidateHasAccuracy = Number.isFinite(candidateAccuracy)
+  const existingHasAccuracy = Number.isFinite(existingAccuracy)
+
+  if (candidateHasAccuracy && !existingHasAccuracy) return true
+  if (!candidateHasAccuracy && existingHasAccuracy) return false
+  if (candidateHasAccuracy && existingHasAccuracy) {
+    if (candidateAccuracy < existingAccuracy) return true
+    if (candidateAccuracy > existingAccuracy) return false
+  }
+
+  const candidateTimestamp = _finiteNumber(candidate.timestamp)
+  const existingTimestamp = _finiteNumber(existing.timestamp)
+  if (Number.isFinite(candidateTimestamp) && Number.isFinite(existingTimestamp)) {
+    return candidateTimestamp > existingTimestamp
+  }
+
+  return false
+}
+
+function _isInternalOverrideAllowed(options = {}) {
+  // Internal overrides still require a live session token and explicit user consent.
+  // Today the only UI-backed consent path is persistent preference === 'enabled'.
+  if (options.internalOverride !== true) return true
+  if (state.location.preference !== 'enabled') return false
+  const requestToken = options.captureSessionRequestToken
+  if (requestToken == null) return false
+  return _captureSessionRequestIsCurrent(requestToken)
 }
 
 function _isAcceptableFixTimestamp(timestamp, maxAgeMs = LOCATION_FIX_MAX_AGE_MS) {
@@ -138,9 +185,18 @@ function _sessionFixIsCurrent(fix) {
 }
 
 function _updateCaptureSessionFixFromAcceptedFix(fix) {
-  if (!(state.captureSessionLocation.requestingFreshFix || state.captureSessionLocation.sessionStartAt)) return
+  if (!state.captureSessionLocation.sessionStartAt) return false
+  const fixTimestamp = _finiteNumber(fix?.timestamp)
+  const sessionStartMs = _currentSessionStartMs()
+  if (!Number.isFinite(fixTimestamp) || !Number.isFinite(sessionStartMs) || fixTimestamp < sessionStartMs) {
+    return false
+  }
+  if (!_isBetterSessionFix(fix, state.captureSessionLocation.fix)) {
+    return false
+  }
   state.captureSessionLocation.fix = _cloneFix(fix)
   state.captureSessionLocation.requestingFreshFix = false
+  return true
 }
 
 function _acceptFix(position, options = {}) {
@@ -291,6 +347,34 @@ function _markWatchState(status, error = null) {
   _emitLocationStateChanged()
 }
 
+function _ensureCaptureLocationVisibilityListener() {
+  const doc = globalThis.document
+  if (!doc?.addEventListener) return
+
+  if (!liveCaptureSession.visibilityHandler) {
+    liveCaptureSession.visibilityHandler = () => {
+      const hidden = doc.hidden === true || doc.visibilityState === 'hidden'
+      const visible = doc.hidden === false || doc.visibilityState === 'visible' || doc.visibilityState == null
+      if (hidden) {
+        void suspendCaptureLocationSession()
+        return
+      }
+      if (visible) {
+        void resumeCaptureLocationSession()
+      }
+    }
+  }
+
+  if (liveCaptureSession.visibilityListenerDocument === doc) return
+
+  if (liveCaptureSession.visibilityListenerDocument?.removeEventListener && liveCaptureSession.visibilityHandler) {
+    liveCaptureSession.visibilityListenerDocument.removeEventListener('visibilitychange', liveCaptureSession.visibilityHandler)
+  }
+
+  liveCaptureSession.visibilityListenerDocument = doc
+  doc.addEventListener('visibilitychange', liveCaptureSession.visibilityHandler)
+}
+
 function _clearGlobalFixAndSessionFix({
   clearSessionFix = false,
   preserveCurrentSessionFix = false,
@@ -318,6 +402,9 @@ function _applyUnsupportedPolicy() {
 }
 
 function _canAcquireLocation(options = {}) {
+  if (!_isInternalOverrideAllowed(options)) {
+    return false
+  }
   const internalOverride = options.internalOverride === true
   if (state.location.preference === 'disabled' && !internalOverride) {
     return false
@@ -398,7 +485,7 @@ function _setTerminalWatchError(error) {
   return _setWatchErrorState(error)
 }
 
-function _callWatchPosition(onSuccess, onError, options = {}) {
+function _callWatchPosition(options = {}) {
   const watchPosition = globalThis.navigator?.geolocation?.watchPosition
   if (typeof watchPosition !== 'function') {
     return { supported: false, watchId: null, terminalError: _createUnsupportedError() }
@@ -408,6 +495,7 @@ function _callWatchPosition(onSuccess, onError, options = {}) {
   let settled = false
   let terminalError = null
   let clearWhenReady = false
+  const requestToken = options.captureSessionRequestToken ?? null
 
   const safeClear = () => {
     if (watchId == null) {
@@ -419,6 +507,11 @@ function _callWatchPosition(onSuccess, onError, options = {}) {
 
   const success = position => {
     if (settled) return
+    if (!_captureSessionRequestIsCurrent(requestToken)) {
+      settled = true
+      safeClear()
+      return
+    }
     const fix = _acceptFix(position, options)
     if (!fix) {
       settled = true
@@ -430,6 +523,11 @@ function _callWatchPosition(onSuccess, onError, options = {}) {
 
   const error = geolocationError => {
     if (settled) return
+    if (!_captureSessionRequestIsCurrent(requestToken)) {
+      settled = true
+      safeClear()
+      return
+    }
     settled = true
     terminalError = geolocationError
     safeClear()
@@ -438,11 +536,11 @@ function _callWatchPosition(onSuccess, onError, options = {}) {
 
   try {
     const returnedWatchId = watchPosition.call(
-      globalThis.navigator.geolocation,
-      success,
-      error,
-      options.positionOptions || {},
-    )
+    globalThis.navigator.geolocation,
+    success,
+    error,
+    options.positionOptions || {},
+  )
     watchId = returnedWatchId
     if (clearWhenReady && watchId != null) {
       _clearWatchId(watchId)
@@ -469,6 +567,7 @@ function _requestCurrentPositionOnce(options = {}) {
   let settled = false
   let resolvePromise = null
   let timeoutHandle = null
+  const requestToken = options.captureSessionRequestToken ?? null
 
   const promise = new Promise(resolve => {
     resolvePromise = resolve
@@ -483,6 +582,10 @@ function _requestCurrentPositionOnce(options = {}) {
 
   const success = position => {
     if (settled) return
+    if (!_captureSessionRequestIsCurrent(requestToken)) {
+      finish(_cloneLocationState())
+      return
+    }
     const fix = _acceptFix(position, options)
     if (!fix) {
       finish(_setWatchErrorState(_createInvalidFixError()))
@@ -493,12 +596,21 @@ function _requestCurrentPositionOnce(options = {}) {
 
   const error = geolocationError => {
     if (settled) return
+    if (!_captureSessionRequestIsCurrent(requestToken)) {
+      finish(_cloneLocationState())
+      return
+    }
     finish(_setWatchErrorState(geolocationError))
   }
 
   const timeoutMs = _normalizeTimeoutMs(options.timeoutMs)
   timeoutHandle = timeoutMs >= 0
     ? setTimeout(() => {
+        if (settled) return
+        if (!_captureSessionRequestIsCurrent(requestToken)) {
+          finish(_cloneLocationState())
+          return
+        }
         finish(_setWatchErrorState(_createTimeoutError()))
       }, timeoutMs)
     : null
@@ -532,6 +644,7 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
   let timeoutHandle = null
   let watchId = null
   let clearWhenReady = false
+  const requestToken = options.captureSessionRequestToken ?? null
 
   const promise = new Promise(resolve => {
     resolvePromise = resolve
@@ -554,6 +667,11 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
 
   const success = position => {
     if (settled) return
+    if (!_captureSessionRequestIsCurrent(requestToken)) {
+      clearWatchSafely()
+      finish(_cloneLocationState())
+      return
+    }
     const fix = _acceptFix(position, options)
     if (!fix) {
       clearWatchSafely()
@@ -566,6 +684,11 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
 
   const error = geolocationError => {
     if (settled) return
+    if (!_captureSessionRequestIsCurrent(requestToken)) {
+      clearWatchSafely()
+      finish(_cloneLocationState())
+      return
+    }
     clearWatchSafely()
     finish(_setWatchErrorState(geolocationError))
   }
@@ -595,6 +718,12 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
   const timeoutMs = _normalizeTimeoutMs(options.timeoutMs)
   timeoutHandle = timeoutMs >= 0
     ? setTimeout(() => {
+        if (settled) return
+        if (!_captureSessionRequestIsCurrent(requestToken)) {
+          clearWatchSafely()
+          finish(_cloneLocationState())
+          return
+        }
         clearWatchSafely()
         finish(_setWatchErrorState(_createTimeoutError()))
       }, timeoutMs)
@@ -652,26 +781,14 @@ export async function startLocationWatch(options = {}) {
   state.captureSessionLocation.requestingFreshFix = !!options.requestFreshFix
   _emitLocationStateChanged()
 
-  const watchStart = _callWatchPosition(
-    position => {
-      const fix = _acceptFix(position, {
-        maxAgeMs: options.maxAgeMs,
-      })
-      if (!fix) {
-        _setTerminalWatchError(_createInvalidFixError())
-      }
+  const watchStart = _callWatchPosition({
+    maxAgeMs: options.maxAgeMs,
+    captureSessionRequestToken: options.captureSessionRequestToken ?? null,
+    positionOptions: {
+      enableHighAccuracy: options.enableHighAccuracy !== false,
+      maximumAge: options.maximumAgeMs !== undefined ? _normalizeMaxAgeMs(options.maximumAgeMs) : 0,
     },
-    error => {
-      _setTerminalWatchError(error)
-    },
-    {
-      maxAgeMs: options.maxAgeMs,
-      positionOptions: {
-        enableHighAccuracy: options.enableHighAccuracy !== false,
-        maximumAge: options.maximumAgeMs !== undefined ? _normalizeMaxAgeMs(options.maximumAgeMs) : 0,
-      },
-    },
-  )
+  })
 
   if (watchStart.terminalError && state.location.watchId == null) {
     return _cloneLocationState()
@@ -707,6 +824,7 @@ export async function requestFreshLocation(options = {}) {
     maxAgeMs: options.maxAgeMs,
     timeoutMs: options.timeoutMs,
     enableHighAccuracy: options.enableHighAccuracy,
+    captureSessionRequestToken: options.captureSessionRequestToken ?? null,
   })
 
   if (currentPositionRequest) return currentPositionRequest
@@ -715,6 +833,7 @@ export async function requestFreshLocation(options = {}) {
     maxAgeMs: options.maxAgeMs,
     timeoutMs: options.timeoutMs,
     enableHighAccuracy: options.enableHighAccuracy,
+    captureSessionRequestToken: options.captureSessionRequestToken ?? null,
   })
 }
 
@@ -725,6 +844,100 @@ export function stopLocationWatch() {
   state.location.error = null
   _emitLocationStateChanged()
   return _cloneLocationState()
+}
+
+export function beginCaptureLocationSession(options = {}) {
+  _ensureCaptureLocationVisibilityListener()
+  liveCaptureSession.active = true
+  liveCaptureSession.suspendedByVisibility = false
+  liveCaptureSession.requestToken += 1
+  const sessionStart = options.sessionStartAt instanceof Date
+    ? options.sessionStartAt
+    : new Date()
+  if (!state.captureSessionLocation.sessionStartAt) {
+    state.sessionStart = sessionStart
+    state.captureSessionLocation.sessionStartAt = sessionStart
+  }
+  state.captureSessionLocation.fix = null
+  state.captureSessionLocation.requestingFreshFix = false
+  _emitLocationStateChanged()
+  return _cloneCaptureSessionLocation()
+}
+
+export function suspendCaptureLocationSession() {
+  if (!liveCaptureSession.active) return _cloneCaptureSessionLocation()
+  liveCaptureSession.suspendedByVisibility = true
+  stopLocationWatch()
+  return _cloneCaptureSessionLocation()
+}
+
+export async function resumeCaptureLocationSession(options = {}) {
+  if (!liveCaptureSession.active || !liveCaptureSession.suspendedByVisibility) {
+    return _cloneCaptureSessionLocation()
+  }
+  if (liveCaptureSession.resumeInFlight) {
+    return _cloneCaptureSessionLocation()
+  }
+  if (state.location.preference !== 'enabled') {
+    return _cloneCaptureSessionLocation()
+  }
+  if (state.location.watchId != null) {
+    liveCaptureSession.suspendedByVisibility = false
+    return _cloneCaptureSessionLocation()
+  }
+
+  const resumeToken = liveCaptureSession.requestToken
+  liveCaptureSession.resumeInFlight = true
+
+  try {
+    const snapshot = await checkLocationCapabilityAndPermission()
+    if (!_captureSessionRequestIsCurrent(resumeToken)) return snapshot
+    if (state.location.preference !== 'enabled') return snapshot
+    if (snapshot.capability === 'unsupported' || snapshot.permission === 'denied') return snapshot
+
+    await requestFreshLocation({
+      maxAgeMs: 0,
+      timeoutMs: options.timeoutMs ?? LOCATION_RESUME_TIMEOUT_MS,
+      enableHighAccuracy: options.enableHighAccuracy !== false,
+      captureSessionRequestToken: resumeToken,
+    })
+
+    if (!_captureSessionRequestIsCurrent(resumeToken)) return _cloneCaptureSessionLocation()
+    if (state.location.preference !== 'enabled') return _cloneCaptureSessionLocation()
+    if (state.location.capability === 'unsupported' || state.location.permission === 'denied') {
+      return _cloneCaptureSessionLocation()
+    }
+
+    const watchStart = await startLocationWatch({
+      requestFreshFix: false,
+      maxAgeMs: 0,
+      enableHighAccuracy: options.enableHighAccuracy !== false,
+      internalOverride: true,
+      captureSessionRequestToken: resumeToken,
+    })
+    if (_captureSessionRequestIsCurrent(resumeToken) && watchStart.watchId != null) {
+      liveCaptureSession.suspendedByVisibility = false
+    }
+    return watchStart
+  } finally {
+    if (resumeToken === liveCaptureSession.requestToken) {
+      liveCaptureSession.resumeInFlight = false
+    }
+  }
+}
+
+export function endCaptureLocationSession() {
+  liveCaptureSession.active = false
+  liveCaptureSession.suspendedByVisibility = false
+  liveCaptureSession.resumeInFlight = false
+  liveCaptureSession.requestToken += 1
+  stopLocationWatch()
+  state.sessionStart = null
+  state.captureSessionLocation.sessionStartAt = null
+  state.captureSessionLocation.fix = null
+  state.captureSessionLocation.requestingFreshFix = false
+  _emitLocationStateChanged()
+  return _cloneCaptureSessionLocation()
 }
 
 export function setLocationPreference(preference) {
@@ -741,6 +954,7 @@ export function setLocationPreference(preference) {
   return _cloneLocationState()
 }
 
-export function startGeo(options = {}) {
-  return startLocationWatch(options)
+export function __getCaptureLocationSessionRequestTokenForTests() {
+  // Test-only hook for race coverage. Do not use from production code.
+  return liveCaptureSession.requestToken
 }

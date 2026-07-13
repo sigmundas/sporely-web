@@ -493,6 +493,22 @@
             </div>
           </div>
           <div class="location-warning-hint" id="review-location-warning" hidden></div>
+          <div id="review-save-location-overlay" class="sheet-overlay" style="display:none">
+            <div class="sheet-card" id="review-save-location-sheet" role="dialog" aria-modal="true" aria-labelledby="review-save-location-title">
+              <div class="sheet-handle"></div>
+              <div class="sheet-title" id="review-save-location-title">Location is not ready</div>
+              <div class="sheet-subtitle" id="review-save-location-body">Sporely could not determine your position.</div>
+              <button type="button" class="sheet-option" id="review-save-location-try-again">
+                <span class="sheet-option-title">Try again</span>
+              </button>
+              <button type="button" class="sheet-option" id="review-save-location-manual">
+                <span class="sheet-option-title">Enter place manually</span>
+              </button>
+              <button type="button" class="sheet-option" id="review-save-location-save-without">
+                <span class="sheet-option-title">Save without coordinates</span>
+              </button>
+            </div>
+          </div>
           <div class="field-meta-row">
             <div class="field-meta-key">Lat/Lon</div>
             <div class="field-meta-val green" id="meta-coordinates">—</div>
@@ -544,8 +560,8 @@
         <div class="review-gps-status">
           <div class="gps-pill review-gps-pill" data-gps-state="searching">
             <span class="gps-dot"></span>
-            <span class="gps-label">GPS</span>
-            <span class="gps-text" id="review-gps-display" aria-live="polite">No GPS captured</span>
+            <span class="gps-label">Location</span>
+            <span class="gps-text" id="review-gps-display" aria-live="polite">No location captured</span>
           </div>
         </div>
       </div>

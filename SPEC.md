@@ -3,6 +3,7 @@
 ## File Map (Core)
 - `src/main.js`: Boot & Auth.
 - `src/state.js`: Central State.
+- `src/geo.js`: Location service/state, session lifecycle, location-state events.
 - `src/sync-queue.js`: IndexedDB Offline Queue (Durable Boundary).
 - `src/images.js`: Client-side compression (public 20MP cloud policy with an internal `>21MP` / `>5300px` resize gate on normal WebP-capable runtimes, plus a reduced 6 MP JPEG path for iOS WebKit when WebP canvas export is unavailable, plus free/pro quality tiers) & R2 uploads.
 - `src/image-worker.js`: Off-thread Resize/Encode (OffscreenCanvas).
@@ -49,15 +50,25 @@ Sporely resolves place names through Nominatim first so it can reliably capture 
 
 For Norway and Denmark, the lookup flow adds a country-specific local source ahead of the Nominatim suggestions. Norway prefers Artsdatabanken when the returned point is close enough; Denmark prefers DAWA-style address labels. The UI keeps the first suggestion as the auto-fill value, exposes the full suggestion list on focus, and stores the resolved lookup alongside the observation or import session so the same place name can be reused for multi-photo observations.
 
+## Location State
+- `state.location.fix` is the latest current-device fix for location-aware UI such as the map and current-location status.
+- `state.captureSessionLocation.fix` is the canonical live-capture observation coordinate for the current field session.
+- `state.reviewContext.gps` is the canonical coordinate source for imported review.
+- `LOCATION_STATE_CHANGED_EVENT` is the location-state update event that screens listen to for UI refreshes.
+- Session tokens plus `sessionStartAt` protect against stale asynchronous callbacks, including late one-shot responses and late watch callbacks.
+- Live-session fix selection prefers the first usable fix, then finite accuracy over missing accuracy, then lower accuracy, then newer timestamp on ties.
+- Save-time review requests use a bounded fresh location request rather than an open-ended watch.
+- Persistent opt-out is separate from session-only dismissal: disabled preference suppresses location until the user re-enables it in settings, while session-only dismissal only suppresses the warning for the current live observation.
+
 ## Map Current Location
-The map shows the device's current GPS position as a dedicated Leaflet pin with an accuracy ring. A locate button recenters the map to an approximate 2x2 km view around `state.gps`, and the pin updates whenever `startGeo()` emits a GPS update.
+The map shows the device's current location as a dedicated Leaflet pin with an accuracy ring. A locate button recenters the map to an approximate 2x2 km view around `state.location.fix`, and the pin updates whenever `LOCATION_STATE_CHANGED_EVENT` fires.
 
 ## Map Time Filter
 The map scope now has a second row of buttons for `All`, `Past 24h`, `Past week`, and `Past month`. It filters observations by the observation `date` field on the server before rendering the pins, and `Past month` is the default selection.
 
 ## Capture & Import Flow
-- **Capture:** `capturePhoto()` returns `{ blobPromise, gps, ts, aiCropRect }`. `saveObservationBatch()` waits for all blob promises before enqueueing to IndexedDB.
-- **Import:** Uses NativePhotoPicker (Android EXIF/GPS via temp files) or browser native picker. Sorts and groups images by capture time. Generates reduced AI blobs up front. Location metadata is separated from blobs.
+- **Capture:** `capturePhoto()` returns `{ blobPromise, gps, ts, aiCropRect }` for per-photo compatibility snapshots. Live observation coordinates are tracked separately in `state.captureSessionLocation.fix`, and `saveObservationBatch()` waits for all blob promises before enqueueing to IndexedDB.
+- **Import:** Uses NativePhotoPicker (Android EXIF/GPS via temp files) or browser native picker. Sorts and groups images by capture time. Generates reduced AI blobs up front. Imported review keeps its own `state.reviewContext.gps`, and location metadata is separated from blobs.
 - **Identification:** The `uncertain` field indicates low confidence, shown as "Uncertain ID" or prefixed with `?`.
 
 ## Artsorakel Proxy

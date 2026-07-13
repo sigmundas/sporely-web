@@ -1,12 +1,18 @@
 import test, { afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 
 import { state } from './state.js'
 import {
   LOCATION_CLOCK_SKEW_MS,
   LOCATION_FIX_MAX_AGE_MS,
+  beginCaptureLocationSession,
   checkLocationCapabilityAndPermission,
+  __getCaptureLocationSessionRequestTokenForTests,
+  endCaptureLocationSession,
   requestFreshLocation,
+  resumeCaptureLocationSession,
+  suspendCaptureLocationSession,
   setLocationPreference,
   startLocationWatch,
   stopLocationWatch,
@@ -30,6 +36,7 @@ const defaultCaptureSessionLocationState = () => ({
 
 let restoreStack = []
 let emittedEvents = []
+let documentListeners = new Map()
 
 function _restoreGlobals() {
   while (restoreStack.length) {
@@ -61,25 +68,42 @@ function _installEnvironment({
   permissionState = 'granted',
 } = {}) {
   emittedEvents = []
+  documentListeners = new Map()
   const permissions = permissionState == null
     ? undefined
     : {
         query: async () => ({ state: permissionState }),
       }
+  const document = {
+    hidden: false,
+    visibilityState: 'visible',
+    addEventListener(type, handler) {
+      const list = documentListeners.get(type) || []
+      list.push(handler)
+      documentListeners.set(type, list)
+    },
+    removeEventListener(type, handler) {
+      const list = documentListeners.get(type) || []
+      documentListeners.set(type, list.filter(entry => entry !== handler))
+    },
+    dispatchEvent(event) {
+      for (const handler of documentListeners.get(event.type) || []) {
+        handler(event)
+      }
+      return true
+    },
+  }
   _setGlobalProperty('window', {
     dispatchEvent(event) {
       emittedEvents.push(event)
       return true
     },
   })
+  _setGlobalProperty('document', document)
   _setGlobalProperty('navigator', {
     geolocation,
     permissions,
   })
-}
-
-function _legacyEvents() {
-  return emittedEvents.filter(event => event?.type === 'sporely:gps-updated')
 }
 
 function _stateEvents() {
@@ -102,6 +126,12 @@ function _setCurrentSessionFix({ timestamp = Date.now(), lat = 63, lon = 10 } = 
   }
 }
 
+function _dispatchVisibilityChange(hidden) {
+  globalThis.document.hidden = hidden
+  globalThis.document.visibilityState = hidden ? 'hidden' : 'visible'
+  globalThis.document.dispatchEvent({ type: 'visibilitychange' })
+}
+
 afterEach(() => {
   try {
     stopLocationWatch()
@@ -110,7 +140,7 @@ afterEach(() => {
   _restoreGlobals()
 })
 
-test('disabled preference clears fixes and blocks acquisition unless overridden', async () => {
+test('disabled preference clears fixes and blocks acquisition', async () => {
   let watchCalls = 0
   let currentPositionCalls = 0
   const clearCalls = []
@@ -131,6 +161,7 @@ test('disabled preference clears fixes and blocks acquisition unless overridden'
     permissionState: 'granted',
   })
 
+  beginCaptureLocationSession()
   state.location.watchId = 9
   state.location.fix = {
     lat: 63.1,
@@ -145,19 +176,81 @@ test('disabled preference clears fixes and blocks acquisition unless overridden'
 
   assert.equal(state.location.preference, 'disabled')
   assert.equal(state.location.fix, null)
-  assert.equal(state.gps, null)
   assert.equal(state.captureSessionLocation.fix, null)
   assert.equal(state.captureSessionLocation.requestingFreshFix, false)
   assert.deepEqual(clearCalls, [9])
-  assert.equal(_legacyEvents().length, 0)
+  assert.equal(_stateEvents().length > 0, true)
 
   await startLocationWatch()
   await requestFreshLocation()
   assert.equal(watchCalls, 0)
   assert.equal(currentPositionCalls, 0)
 
-  await startLocationWatch({ internalOverride: true })
-  assert.equal(watchCalls, 1)
+  await startLocationWatch({ internalOverride: true, captureSessionRequestToken: __getCaptureLocationSessionRequestTokenForTests() })
+  assert.equal(watchCalls, 0)
+})
+
+test('enabled preference allows acquisition only with the current session token', async () => {
+  let currentPositionCalls = 0
+  _installEnvironment({
+    geolocation: {
+      getCurrentPosition(success) {
+        currentPositionCalls += 1
+        success({
+          coords: {
+            latitude: 63.6,
+            longitude: 10.6,
+            accuracy: 4,
+            altitude: 5,
+          },
+          timestamp: Date.now(),
+        })
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  setLocationPreference('enabled')
+  const currentToken = __getCaptureLocationSessionRequestTokenForTests()
+  const staleToken = currentToken
+  beginCaptureLocationSession()
+  const freshToken = __getCaptureLocationSessionRequestTokenForTests()
+
+  const blocked = await requestFreshLocation({
+    internalOverride: true,
+    captureSessionRequestToken: staleToken,
+    timeoutMs: 50,
+  })
+  const allowed = await requestFreshLocation({
+    internalOverride: true,
+    captureSessionRequestToken: freshToken,
+    timeoutMs: 50,
+  })
+
+  assert.equal(currentPositionCalls, 1)
+  assert.equal(blocked.status, 'idle')
+  assert.equal(allowed.status, 'fix')
+  assert.equal(state.location.fix.lat, 63.6)
+})
+
+test('new session clears previous-session fix', () => {
+  _installEnvironment()
+
+  state.captureSessionLocation.sessionStartAt = new Date(Date.now() - 10_000)
+  state.captureSessionLocation.fix = {
+    lat: 63.1,
+    lon: 10.1,
+    accuracy: 8,
+    altitude: 4,
+    timestamp: Date.now() - 9_000,
+  }
+
+  beginCaptureLocationSession()
+
+  assert.equal(state.captureSessionLocation.fix, null)
+  assert.equal(state.captureSessionLocation.sessionStartAt instanceof Date, true)
 })
 
 test('permission denied clears a previous global fix and stale session fix', async () => {
@@ -194,7 +287,6 @@ test('permission denied clears a previous global fix and stale session fix', asy
   await checkLocationCapabilityAndPermission()
 
   assert.equal(state.location.fix, null)
-  assert.equal(state.gps, null)
   assert.equal(state.captureSessionLocation.fix, null)
   assert.deepEqual(clearCalls, [17])
 })
@@ -230,7 +322,6 @@ test('permission denied can preserve a fix captured during the current session',
   await checkLocationCapabilityAndPermission()
 
   assert.equal(state.location.fix, null)
-  assert.equal(state.gps, null)
   assert.deepEqual(state.captureSessionLocation.fix, {
     lat: 63.2,
     lon: 10.2,
@@ -238,6 +329,143 @@ test('permission denied can preserve a fix captured during the current session',
     altitude: 7,
     timestamp: sessionStart + 500,
   })
+})
+
+test('fix before sessionStartAt is rejected for the session', async () => {
+  _installEnvironment({
+    geolocation: {
+      watchPosition(success) {
+        success({
+          coords: {
+            latitude: 63.7,
+            longitude: 10.7,
+            accuracy: 3,
+            altitude: 11,
+          },
+          timestamp: Date.now() - 10_000,
+        })
+        return 83
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  state.captureSessionLocation.sessionStartAt = new Date(Date.now() - 1_000)
+
+  await startLocationWatch()
+
+  assert.equal(state.captureSessionLocation.fix, null)
+  assert.equal(state.location.fix.lat, 63.7)
+})
+
+test('more accurate session fix replaces coarse fix and later coarse fixes do not', async () => {
+  let successCallback = null
+  _installEnvironment({
+    geolocation: {
+      watchPosition(success) {
+        successCallback = success
+        return 91
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  state.captureSessionLocation.sessionStartAt = new Date(Date.now() - 5_000)
+
+  await startLocationWatch({ requestFreshFix: true })
+  successCallback({
+    coords: {
+      latitude: 63.2,
+      longitude: 10.2,
+      accuracy: 40,
+      altitude: 7,
+    },
+    timestamp: Date.now() - 1_000,
+  })
+  successCallback({
+    coords: {
+      latitude: 63.3,
+      longitude: 10.3,
+      accuracy: 9,
+      altitude: 7,
+    },
+    timestamp: Date.now(),
+  })
+  successCallback({
+    coords: {
+      latitude: 63.4,
+      longitude: 10.4,
+      accuracy: 25,
+      altitude: 7,
+    },
+    timestamp: Date.now() + 1,
+  })
+
+  assert.equal(state.captureSessionLocation.fix.accuracy, 9)
+  assert.equal(state.location.fix.accuracy, 25)
+})
+
+test('session suspension and late resume results after end are ignored', async () => {
+  let watchCalls = 0
+  let getCurrentPositionSuccess
+  const clearCalls = []
+  _installEnvironment({
+    geolocation: {
+      watchPosition() {
+        watchCalls += 1
+        return 44
+      },
+      getCurrentPosition(success) {
+        getCurrentPositionSuccess = success
+      },
+      clearWatch(id) {
+        clearCalls.push(id)
+      },
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  state.location.preference = 'enabled'
+  await startLocationWatch()
+  suspendCaptureLocationSession()
+  assert.equal(clearCalls.includes(44), true)
+
+  const resumePromise = resumeCaptureLocationSession({ timeoutMs: 20 })
+  endCaptureLocationSession()
+  getCurrentPositionSuccess?.({
+    coords: {
+      latitude: 63.8,
+      longitude: 10.8,
+      accuracy: 5,
+      altitude: 3,
+    },
+    timestamp: Date.now(),
+  })
+  await resumePromise
+
+  assert.equal(watchCalls, 1)
+  assert.equal(state.captureSessionLocation.fix, null)
+  assert.equal(state.location.watchId, null)
+})
+
+test('visibility listener is installed once per document', async () => {
+  _installEnvironment({
+    geolocation: {
+      watchPosition() {
+        return 55
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  beginCaptureLocationSession()
+
+  assert.equal(documentListeners.get('visibilitychange')?.length, 1)
 })
 
 test('maxAgeMs 0 never reuses the cached fix', async () => {
@@ -313,7 +541,7 @@ test('bounded one-shot success updates the location state', async () => {
   })
   assert.equal(state.location.fix.altitude, 0)
   assert.equal(state.captureSessionLocation.fix.altitude, 0)
-  assert.equal(_legacyEvents().length, 1)
+  assert.equal(_stateEvents().length > 0, true)
   assert.equal(state.location.watchId, null)
 })
 
@@ -334,7 +562,7 @@ test('bounded one-shot timeout resolves on timeout', async () => {
   assert.equal(result.status, 'timeout')
   assert.equal(state.location.status, 'timeout')
   assert.equal(state.location.error?.kind, 'timeout')
-  assert.equal(_legacyEvents().length, 0)
+  assert.equal(_stateEvents().length > 0, true)
   assert.equal(state.location.watchId, null)
 })
 
@@ -367,7 +595,7 @@ test('late one-shot success callback after timeout is ignored', async () => {
   assert.equal(result.status, 'timeout')
   assert.equal(state.location.status, 'timeout')
   assert.equal(state.location.fix, null)
-  assert.equal(_legacyEvents().length, 0)
+  assert.equal(_stateEvents().length > 0, true)
 })
 
 test('one-shot permission denial clears a previous global fix', async () => {
@@ -392,13 +620,12 @@ test('one-shot permission denial clears a previous global fix', async () => {
 
   assert.equal(result.permission, 'denied')
   assert.equal(state.location.fix, null)
-  assert.equal(state.gps, null)
   assert.equal(state.location.status, 'error')
   assert.equal(state.location.error?.kind, 'permission-denied')
-  assert.equal(_legacyEvents().length, 0)
+  assert.equal(_stateEvents().length > 0, true)
 })
 
-test('legacy gps-updated only fires for accepted fixes', async () => {
+test('location-state-changed only reflects accepted fixes', async () => {
   let getCurrentPositionCalls = 0
   _installEnvironment({
     geolocation: {
@@ -424,12 +651,11 @@ test('legacy gps-updated only fires for accepted fixes', async () => {
 
   await setLocationPreference('enabled')
   await requestFreshLocation({ timeoutMs: 100, maxAgeMs: 0 })
-  const afterSuccess = _legacyEvents().length
-  assert.equal(afterSuccess, 1)
+  const afterSuccess = _stateEvents().length
 
   await requestFreshLocation({ timeoutMs: 10, maxAgeMs: 0 })
 
-  assert.equal(_legacyEvents().length, 1)
+  assert.ok(_stateEvents().length > afterSuccess)
 })
 
 test('synchronous watch error does not leave a watchId stored', async () => {
@@ -453,7 +679,7 @@ test('synchronous watch error does not leave a watchId stored', async () => {
   assert.equal(result.status, 'unavailable')
   assert.equal(state.location.watchId, null)
   assert.deepEqual(clearCalls, [42])
-  assert.equal(_legacyEvents().length, 0)
+  assert.equal(_stateEvents().length > 0, true)
 })
 
 test('future timestamps beyond the tolerated skew are rejected', async () => {
@@ -479,5 +705,137 @@ test('future timestamps beyond the tolerated skew are rejected', async () => {
   assert.equal(result.status, 'error')
   assert.equal(state.location.fix, null)
   assert.equal(state.location.error?.kind, 'invalid-fix')
-  assert.equal(_legacyEvents().length, 0)
+  assert.equal(_stateEvents().length > 0, true)
+})
+
+test('disabled preference cannot be bypassed with internalOverride', async () => {
+  let getCurrentPositionCalls = 0
+  let watchCalls = 0
+  _installEnvironment({
+    geolocation: {
+      getCurrentPosition() {
+        getCurrentPositionCalls += 1
+      },
+      watchPosition() {
+        watchCalls += 1
+        return 77
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  const sessionToken = __getCaptureLocationSessionRequestTokenForTests()
+  setLocationPreference('disabled')
+
+  const oneShot = await requestFreshLocation({
+    internalOverride: true,
+    captureSessionRequestToken: sessionToken,
+    timeoutMs: 50,
+  })
+  const watchState = await startLocationWatch({
+    internalOverride: true,
+    captureSessionRequestToken: sessionToken,
+  })
+
+  assert.equal(getCurrentPositionCalls, 0)
+  assert.equal(watchCalls, 0)
+  assert.equal(oneShot.status, 'idle')
+  assert.equal(watchState.status, 'idle')
+  assert.equal(state.location.fix, null)
+})
+
+test('old-session one-shot result is ignored after the session ends', async () => {
+  let successCallback = null
+  _installEnvironment({
+    geolocation: {
+      getCurrentPosition(success) {
+        successCallback = success
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  setLocationPreference('enabled')
+  const sessionToken = __getCaptureLocationSessionRequestTokenForTests()
+
+  const request = requestFreshLocation({
+    timeoutMs: 100,
+    maxAgeMs: 0,
+    captureSessionRequestToken: sessionToken,
+  })
+  for (let i = 0; i < 10 && state.location.status !== 'locating'; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal(state.location.status, 'locating')
+  endCaptureLocationSession()
+  successCallback?.({
+    coords: {
+      latitude: 63.75,
+      longitude: 10.75,
+      accuracy: 6,
+      altitude: 4,
+    },
+    timestamp: Date.now(),
+  })
+
+  const result = await request
+
+  assert.equal(result.status, 'idle')
+  assert.equal(state.location.fix, null)
+  assert.equal(state.captureSessionLocation.fix, null)
+})
+
+test('old-session watch result is ignored after the session ends', async () => {
+  let watchSuccess = null
+  _installEnvironment({
+    geolocation: {
+      watchPosition(success) {
+        watchSuccess = success
+        return 88
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  setLocationPreference('enabled')
+  await startLocationWatch({ captureSessionRequestToken: __getCaptureLocationSessionRequestTokenForTests() })
+  endCaptureLocationSession()
+  watchSuccess?.({
+    coords: {
+      latitude: 63.85,
+      longitude: 10.85,
+      accuracy: 5,
+      altitude: 9,
+    },
+    timestamp: Date.now(),
+  })
+
+  assert.equal(state.location.fix, null)
+  assert.equal(state.captureSessionLocation.fix, null)
+  assert.equal(state.location.watchId, null)
+})
+
+test('runtime location consumers no longer reference the legacy gps alias or event', () => {
+  const runtimeFiles = [
+    new URL('./screens/capture.js', import.meta.url),
+    new URL('./screens/review.js', import.meta.url),
+    new URL('./screens/import_review.js', import.meta.url),
+    new URL('./screens/find_detail.js', import.meta.url),
+    new URL('./screens/map.js', import.meta.url),
+    new URL('./geo.js', import.meta.url),
+    new URL('./state.js', import.meta.url),
+  ]
+
+  for (const file of runtimeFiles) {
+    const source = fs.readFileSync(file, 'utf8')
+    assert.doesNotMatch(source, /\bstate\.gps\b/)
+    assert.doesNotMatch(source, /\bstartGeo\b/)
+    assert.doesNotMatch(source, /sporely:gps-updated/)
+  }
 })

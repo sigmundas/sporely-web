@@ -3734,8 +3734,8 @@ async function _openCameraForDetail() {
       }
 
       const captureSource = 'Sporely native camera'
-      const gps = state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)
-        ? { latitude: state.gps.lat, longitude: state.gps.lon, altitude: state.gps.altitude, accuracy: state.gps.accuracy }
+      const gps = state.location.fix && Number.isFinite(state.location.fix.lat) && Number.isFinite(state.location.fix.lon)
+        ? { latitude: state.location.fix.lat, longitude: state.location.fix.lon, altitude: state.location.fix.altitude, accuracy: state.location.fix.accuracy }
         : null
       const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
       if (gps) options.gps = gps
