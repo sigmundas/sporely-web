@@ -368,7 +368,7 @@ export function initReview() {
     reviewLocationStateListenerWindow = currentWindow
     reviewLocationStateListener = () => {
       if (state.currentScreen !== 'review') return
-      buildReviewGrid()
+      _syncReviewLocationStateUi()
     }
     currentWindow.addEventListener(LOCATION_STATE_CHANGED_EVENT, reviewLocationStateListener)
   }
@@ -939,16 +939,20 @@ function _syncReviewGpsStatus() {
   let text = 'No location captured'
   let stateName = 'idle'
 
-  if (_isImportedReview()) {
-    if (reviewGps) {
-      text = Number.isFinite(reviewGps.accuracy)
-        ? `Location ready · ±${Math.round(reviewGps.accuracy)} m`
-        : 'Location ready'
-      stateName = 'fix'
-    }
+  if (reviewGps) {
+    text = Number.isFinite(reviewGps.accuracy)
+      ? `Location ready · ±${Math.round(reviewGps.accuracy)} m`
+      : 'Location ready'
+    stateName = 'fix'
+  } else if (_isImportedReview()) {
+    text = 'No location captured'
+    stateName = 'idle'
   } else if (state.location.preference === 'disabled') {
     text = 'Location not included'
     stateName = 'disabled'
+  } else if (state.location.status === 'locating' || state.captureSessionLocation.requestingFreshFix) {
+    text = 'Finding location…'
+    stateName = 'searching'
   } else if (state.location.capability === 'unsupported' || state.location.error?.kind === 'unsupported') {
     text = 'Automatic location unavailable'
     stateName = 'unavailable'
@@ -960,14 +964,6 @@ function _syncReviewGpsStatus() {
     || state.location.status === 'error') {
     text = 'Couldn’t determine location · Try again'
     stateName = 'unavailable'
-  } else if (reviewGps) {
-    text = Number.isFinite(reviewGps.accuracy)
-      ? `Location ready · ±${Math.round(reviewGps.accuracy)} m`
-      : 'Location ready'
-    stateName = 'fix'
-  } else if (state.location.status === 'locating' || state.captureSessionLocation.requestingFreshFix) {
-    text = 'Finding location…'
-    stateName = 'searching'
   } else {
     text = 'Couldn’t determine location · Try again'
     stateName = 'unavailable'
@@ -978,8 +974,59 @@ function _syncReviewGpsStatus() {
   if (pill) pill.dataset.gpsState = stateName
 }
 
+function _syncReviewLocationStateUi() {
+  const reviewGps = _currentReviewGps()
+  const reviewLocationEl = document.getElementById('review-location')
+
+  if (reviewGps) {
+    const coordsText = document.getElementById('review-coords-text')
+    if (coordsText) coordsText.textContent = formatLatLon(reviewGps, 4)
+    const metaCoordinates = document.getElementById('meta-coordinates')
+    if (metaCoordinates) metaCoordinates.textContent = formatLatLon(reviewGps, 5)
+    const metaAccuracy = document.getElementById('meta-accuracy')
+    if (metaAccuracy) {
+      metaAccuracy.textContent = Number.isFinite(reviewGps.accuracy)
+        ? `± ${Math.round(reviewGps.accuracy)} m`
+        : '—'
+    }
+    const metaAltitude = document.getElementById('meta-altitude')
+    if (metaAltitude) {
+      metaAltitude.textContent = Number.isFinite(reviewGps.altitude)
+        ? `${Math.round(reviewGps.altitude)} m ASL`
+        : '— ASL'
+    }
+
+    const lookupKey = lookupCoordinateKey(reviewGps.lat, reviewGps.lon)
+    if (reviewLocationEl && reviewLocationLastLookupKey !== lookupKey) {
+      reviewLocationEl.textContent = ''
+      reviewLocationEl.title = ''
+      reviewLocationLastLookupKey = lookupKey
+    }
+    startLocationLookup(reviewGps.lat, reviewGps.lon)
+  } else {
+    const coordsText = document.getElementById('review-coords-text')
+    if (coordsText) coordsText.textContent = ''
+    const metaCoordinates = document.getElementById('meta-coordinates')
+    if (metaCoordinates) metaCoordinates.textContent = '—'
+    const metaAccuracy = document.getElementById('meta-accuracy')
+    if (metaAccuracy) metaAccuracy.textContent = '—'
+    const metaAltitude = document.getElementById('meta-altitude')
+    if (metaAltitude) metaAltitude.textContent = '— ASL'
+    if (reviewLocationEl) {
+      reviewLocationEl.textContent = ''
+      reviewLocationEl.title = ''
+    }
+    reviewLocationLastLookupKey = ''
+  }
+
+  _syncReviewLocationWarning()
+  _syncReviewGpsStatus()
+}
+
 function _reviewLocationWarningState() {
   const locationState = state.location || {}
+  if (_currentReviewGps()) return null
+
   if (locationState.preference === 'disabled') {
     return {
       kind: 'disabled',
@@ -988,6 +1035,8 @@ function _reviewLocationWarningState() {
   }
 
   if (_isReviewLocationWarningSuppressed()) return null
+
+  if (locationState.status === 'locating' || state.captureSessionLocation.requestingFreshFix) return null
 
   if (locationState.capability === 'unsupported' || locationState.error?.kind === 'unsupported') {
     return {
@@ -1156,39 +1205,7 @@ export function buildReviewGrid() {
       })
   }
 
-  const reviewLocationEl = document.getElementById('review-location')
-  if (reviewGps) {
-    document.getElementById('review-coords-text').textContent =
-      formatLatLon(reviewGps, 4)
-    const metaCoordinates = document.getElementById('meta-coordinates')
-    if (metaCoordinates) metaCoordinates.textContent = formatLatLon(reviewGps, 5)
-    document.getElementById('meta-accuracy').textContent = Number.isFinite(reviewGps.accuracy)
-      ? `± ${Math.round(reviewGps.accuracy)} m`
-      : '—'
-    if (Number.isFinite(reviewGps.altitude))
-      document.getElementById('meta-altitude').textContent =
-        `${Math.round(reviewGps.altitude)} m ASL`
-    else
-      document.getElementById('meta-altitude').textContent = '— ASL'
-    const lookupKey = lookupCoordinateKey(reviewGps.lat, reviewGps.lon)
-    if (reviewLocationEl && reviewLocationLastLookupKey !== lookupKey) {
-      reviewLocationEl.textContent = ''
-      reviewLocationEl.title = ''
-      reviewLocationLastLookupKey = lookupKey
-    }
-    startLocationLookup(reviewGps.lat, reviewGps.lon)
-  } else {
-    document.getElementById('review-coords-text').textContent = ''
-    const metaCoordinates = document.getElementById('meta-coordinates')
-    if (metaCoordinates) metaCoordinates.textContent = '—'
-    document.getElementById('meta-accuracy').textContent = '—'
-    document.getElementById('meta-altitude').textContent = '— ASL'
-    if (reviewLocationEl) {
-      reviewLocationEl.textContent = ''
-      reviewLocationEl.title = ''
-    }
-    reviewLocationLastLookupKey = ''
-  }
+  _syncReviewLocationStateUi()
 
   document.getElementById('review-habitat').value = state.captureDraft.habitat || ''
   document.getElementById('review-notes').value = state.captureDraft.notes || ''
@@ -1212,8 +1229,6 @@ export function buildReviewGrid() {
       locationInput.addEventListener('input', _syncReviewLocationWarning)
     }
   }
-  _syncReviewLocationWarning()
-  _syncReviewGpsStatus()
   const reviewObscured = document.getElementById('review-obscured')
   if (reviewObscured) reviewObscured.checked = state.captureDraft.location_precision === 'fuzzed'
   _updateReviewObscureHint()

@@ -15,7 +15,39 @@ import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.j
 import { isAndroidNativeApp } from '../camera-actions.js';
 import { playIrisShutter } from '../iris-shutter.js';
 import { loadInaturalistSession } from '../inaturalist.js';
-import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
+import { NativeCamera as _DefaultNativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
+import {
+  LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS,
+  endCaptureLocationSession,
+  requestFreshLocation,
+} from '../geo.js';
+import { resetReviewAiState } from './review.js';
+import {
+  isPreflightCurrent,
+  nextPreflightToken,
+  prepareNewFindLocation,
+  startNewFindLocationAcquisition,
+} from '../capture-location-preflight.js';
+
+let _NativeCameraOverride = null;
+let _nativePhotoToFileOverride = null;
+let _processFileOverride = null;
+export function __setNativeCameraForTests(mock) {
+  _NativeCameraOverride = mock || null;
+}
+export function __setNativePhotoPipelineForTests({ nativePickedPhotoToFile: nptf, processFile: pf } = {}) {
+  _nativePhotoToFileOverride = typeof nptf === 'function' ? nptf : null;
+  _processFileOverride = typeof pf === 'function' ? pf : null;
+}
+function _nativeCamera() {
+  return _NativeCameraOverride || _DefaultNativeCamera;
+}
+function _nativePickedPhotoToFile(...args) {
+  return (_nativePhotoToFileOverride || nativePickedPhotoToFile)(...args);
+}
+function _processFileForCapture(...args) {
+  return (_processFileOverride || processFile)(...args);
+}
 import { debugImagePipeline } from '../image-pipeline-debug.js';
 import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, runIdentifyForBlobs, ID_SERVICE_INATURALIST } from '../identify.js';
 import {
@@ -1420,52 +1452,145 @@ export async function openNativeCamera() {
     return
   }
 
+  const preflightToken = nextPreflightToken()
+  const locationStart = await prepareNewFindLocation({ preserveBatch: false, token: preflightToken })
+  if (!isPreflightCurrent(preflightToken) || !locationStart.shouldContinue) {
+    endCaptureLocationSession()
+    return
+  }
+  const acquisitionReady = await startNewFindLocationAcquisition({
+    useLocation: locationStart.useLocation,
+    token: preflightToken,
+  })
+  if (!isPreflightCurrent(preflightToken) || !acquisitionReady) {
+    endCaptureLocationSession()
+    return
+  }
+
+  if (locationStart.useLocation) {
+    await _requestInitialNativeCameraLocation()
+    if (!isPreflightCurrent(preflightToken)) {
+      endCaptureLocationSession()
+      return
+    }
+  }
+
+  const sessionFix = state.captureSessionLocation.fix
+  const gps = sessionFix && Number.isFinite(sessionFix.lat) && Number.isFinite(sessionFix.lon)
+    ? {
+        latitude: sessionFix.lat,
+        longitude: sessionFix.lon,
+        altitude: Number.isFinite(sessionFix.altitude) ? sessionFix.altitude : null,
+        accuracy: Number.isFinite(sessionFix.accuracy) ? sessionFix.accuracy : null,
+      }
+    : null
+
   try {
+    let result
     if (getUseSystemCamera()) {
       playIrisShutter({ mode: 'quick' })
-      const result = await NativeCamera.openSystemCamera();
-      await _handleNativePhotoResult(result);
-      return;
+      result = await _nativeCamera().openSystemCamera()
+    } else {
+      const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
+      if (gps) options.gps = gps
+      debugImagePipeline('android native camera capture requested', {
+        screenPath: 'new-find:native-camera',
+        captureSource: 'Sporely native camera',
+        gps,
+      })
+      playIrisShutter({ mode: 'quick' })
+      result = await _nativeCamera().capturePhotos(options)
+      const photos = Array.isArray(result?.photos) ? result.photos : []
+      debugImagePipeline('android native camera capture returned', {
+        screenPath: 'new-find:native-camera',
+        captureSource: 'Sporely native camera',
+        photoCount: photos.length,
+        nativeResult: result?.debug || result?.metadata || null,
+        photoMeta: photos.map(photo => ({
+          name: photo?.name || null,
+          mimeType: photo?.mimeType || null,
+          format: photo?.format || null,
+          size: photo?.size || null,
+        })),
+      })
     }
-
-    const gps = state.location.fix && Number.isFinite(state.location.fix.lat) && Number.isFinite(state.location.fix.lon)
-      ? {
-          latitude: state.location.fix.lat,
-          longitude: state.location.fix.lon,
-          altitude: Number.isFinite(state.location.fix.altitude) ? state.location.fix.altitude : null,
-          accuracy: Number.isFinite(state.location.fix.accuracy) ? state.location.fix.accuracy : null,
-        }
-      : null
-
-    const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY };
-    if (gps) options.gps = gps;
-    debugImagePipeline('android native camera capture requested', {
-      screenPath: 'import_review:add-photo',
-      captureSource: 'Sporely native camera',
-      gps,
-    })
-    playIrisShutter({ mode: 'quick' })
-    const result = await NativeCamera.capturePhotos(options)
-    const photos = Array.isArray(result?.photos) ? result.photos : [];
-    debugImagePipeline('android native camera capture returned', {
-      screenPath: 'import_review:add-photo',
-      captureSource: 'Sporely native camera',
-      photoCount: photos.length,
-      nativeResult: result?.debug || result?.metadata || null,
-      photoMeta: photos.map(photo => ({
-        name: photo?.name || null,
-        mimeType: photo?.mimeType || null,
-        format: photo?.format || null,
-        size: photo?.size || null,
-      })),
-    })
-    await _handleNativePhotoResult(result)
+    if (locationStart.useLocation && !state.captureSessionLocation.fix) {
+      void _requestInitialNativeCameraLocation()
+    }
+    await _handleNativePhotoResultAsLive(result)
   } catch (err) {
-    if (isPickerCancel(err)) return
+    if (isPickerCancel(err)) {
+      endCaptureLocationSession()
+      return
+    }
+    endCaptureLocationSession()
     console.warn('Sporely camera failed:', err)
     showToast(`Sporely Cam: ${err?.message || err}`)
     _hideProgress()
   }
+}
+
+async function _requestInitialNativeCameraLocation() {
+  try {
+    await requestFreshLocation({
+      maximumAgeMs: 0,
+      acceptedFixMaxAgeMs: LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS,
+      timeoutMs: 6_500,
+      enableHighAccuracy: true,
+    })
+  } catch (error) {
+    console.warn('Initial native camera location request failed:', error)
+  }
+}
+
+async function _handleNativePhotoResultAsLive(result) {
+  const photos = Array.isArray(result?.photos) ? result.photos
+    : Array.isArray(result?.files) ? result.files
+      : []
+  if (!photos.length) {
+    endCaptureLocationSession()
+    return
+  }
+
+  _setProgress(0, photos.length, t('import.readingFiles'))
+
+  const files = []
+  for (let i = 0; i < photos.length; i++) {
+    _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+    files.push(await _nativePickedPhotoToFile(photos[i], i, {
+      captureSource: 'Sporely native camera',
+      screenPath: 'new-find:native-camera',
+    }))
+  }
+
+  const processed = []
+  for (let i = 0; i < files.length; i++) {
+    _setProgress(i, files.length, t('import.convertingFile', { current: i + 1, total: files.length }))
+    processed.push(await _processFileForCapture(files[i], { nativePhoto: photos[i] }))
+  }
+
+  _hideProgress()
+
+  const sessionFix = state.captureSessionLocation.fix
+  const capturedAt = new Date()
+  state.capturedPhotos = processed.map((entry, index) => ({
+    blob: entry.blob,
+    aiBlob: entry.aiBlob || entry.blob,
+    blobPromise: Promise.resolve(entry.blob),
+    gps: sessionFix ? { ...sessionFix } : null,
+    ts: capturedAt,
+    emoji: '📸',
+    aiCropRect: entry.meta?.aiCropRect || null,
+    aiCropSourceW: entry.meta?.aiCropSourceW ?? null,
+    aiCropSourceH: entry.meta?.aiCropSourceH ?? null,
+    aiCropIsCustom: entry.meta?.aiCropIsCustom === true,
+    _nativePhotoIndex: index,
+  }))
+  state.batchCount = state.capturedPhotos.length
+  state.captureDraft = createDefaultObservationDraft()
+  state.reviewContext = null
+  resetReviewAiState()
+  navigate('review')
 }
 
 async function _handleNativePhotoResult(result) {
@@ -2381,7 +2506,7 @@ async function _openCameraForSession(sid) {
   if (isAndroidNativeApp()) {
     try {
       if (getUseSystemCamera()) {
-        const result = await NativeCamera.openSystemCamera();
+        const result = await _nativeCamera().openSystemCamera();
         const photos = Array.isArray(result?.photos) ? result.photos : [];
         if (!photos.length) return;
         _setProgress(0, photos.length, t('import.readingFiles'));
@@ -2405,7 +2530,7 @@ async function _openCameraForSession(sid) {
         captureSource: 'Sporely native camera',
         gps,
       })
-      const result = await NativeCamera.capturePhotos(options);
+      const result = await _nativeCamera().capturePhotos(options);
       const photos = Array.isArray(result?.photos) ? result.photos : [];
       debugImagePipeline('android native camera capture returned', {
         screenPath: `import_review:${sid}:add-photo`,

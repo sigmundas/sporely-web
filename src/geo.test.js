@@ -4,6 +4,7 @@ import fs from 'node:fs'
 
 import { state } from './state.js'
 import {
+  LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS,
   LOCATION_CLOCK_SKEW_MS,
   LOCATION_FIX_MAX_AGE_MS,
   beginCaptureLocationSession,
@@ -331,7 +332,7 @@ test('permission denied can preserve a fix captured during the current session',
   })
 })
 
-test('fix before sessionStartAt is rejected for the session', async () => {
+test('stale fix before sessionStartAt is rejected for the session', async () => {
   _installEnvironment({
     geolocation: {
       watchPosition(success) {
@@ -342,7 +343,7 @@ test('fix before sessionStartAt is rejected for the session', async () => {
             accuracy: 3,
             altitude: 11,
           },
-          timestamp: Date.now() - 10_000,
+          timestamp: Date.now() - 40_000,
         })
         return 83
       },
@@ -356,7 +357,7 @@ test('fix before sessionStartAt is rejected for the session', async () => {
   await startLocationWatch()
 
   assert.equal(state.captureSessionLocation.fix, null)
-  assert.equal(state.location.fix.lat, 63.7)
+  assert.equal(state.location.fix, null)
 })
 
 test('more accurate session fix replaces coarse fix and later coarse fixes do not', async () => {
@@ -502,6 +503,71 @@ test('maxAgeMs 0 never reuses the cached fix', async () => {
   assert.equal(result.status, 'fix')
   assert.equal(state.location.fix.lat, 64.5)
   assert.equal(state.location.fix.lon, 11.5)
+})
+
+test('fresh request accepts a realistic slightly old timestamp', async () => {
+  let getCurrentPositionCalls = 0
+  _installEnvironment({
+    geolocation: {
+      getCurrentPosition(success) {
+        getCurrentPositionCalls += 1
+        success({
+          coords: {
+            latitude: 64.25,
+            longitude: 11.25,
+            accuracy: 4,
+            altitude: 15,
+          },
+          timestamp: Date.now() - 1_000,
+        })
+      },
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  const result = await requestFreshLocation({
+    maximumAgeMs: 0,
+    acceptedFixMaxAgeMs: LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS,
+    timeoutMs: 100,
+  })
+
+  assert.equal(getCurrentPositionCalls, 1)
+  assert.equal(result.status, 'fix')
+  assert.equal(state.location.fix.lat, 64.25)
+  assert.equal(state.captureSessionLocation.fix.lat, 64.25)
+})
+
+test('maximumAgeMs 0 does not imply zero timestamp tolerance', async () => {
+  let receivedOptions = null
+  _installEnvironment({
+    geolocation: {
+      getCurrentPosition(success, error, options) {
+        void error
+        receivedOptions = options
+        success({
+          coords: {
+            latitude: 64.75,
+            longitude: 11.75,
+            accuracy: 3,
+            altitude: 16,
+          },
+          timestamp: Date.now() - 1_000,
+        })
+      },
+    },
+    permissionState: 'granted',
+  })
+
+  const result = await requestFreshLocation({
+    maximumAgeMs: 0,
+    acceptedFixMaxAgeMs: 30_000,
+    timeoutMs: 100,
+  })
+
+  assert.equal(receivedOptions.maximumAge, 0)
+  assert.equal(result.status, 'fix')
+  assert.equal(state.location.fix.lat, 64.75)
 })
 
 test('bounded one-shot success updates the location state', async () => {
@@ -680,6 +746,74 @@ test('synchronous watch error does not leave a watchId stored', async () => {
   assert.equal(state.location.watchId, null)
   assert.deepEqual(clearCalls, [42])
   assert.equal(_stateEvents().length > 0, true)
+})
+
+test('fresh watch accepts a realistic slightly old timestamp', async () => {
+  _installEnvironment({
+    geolocation: {
+      watchPosition(success) {
+        success({
+          coords: {
+            latitude: 63.55,
+            longitude: 10.55,
+            accuracy: 6,
+            altitude: 21,
+          },
+          timestamp: Date.now() - 1_000,
+        })
+        return 51
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  setLocationPreference('enabled')
+  const result = await startLocationWatch({
+    maximumAgeMs: 0,
+    acceptedFixMaxAgeMs: 30_000,
+    requestFreshFix: true,
+  })
+
+  assert.equal(result.status, 'fix')
+  assert.equal(state.location.fix.lat, 63.55)
+  assert.equal(state.captureSessionLocation.fix.lat, 63.55)
+})
+
+test('watch timeout after a valid current-session fix is nonfatal', async () => {
+  let watchError = null
+  _installEnvironment({
+    geolocation: {
+      watchPosition(success, error) {
+        success({
+          coords: {
+            latitude: 63.25,
+            longitude: 10.25,
+            accuracy: 7,
+            altitude: 30,
+          },
+          timestamp: Date.now(),
+        })
+        watchError = error
+        return 52
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  setLocationPreference('enabled')
+  await startLocationWatch({ captureSessionRequestToken: __getCaptureLocationSessionRequestTokenForTests() })
+
+  assert.equal(state.captureSessionLocation.fix?.lat, 63.25)
+
+  watchError?.({ code: 3, message: 'timeout' })
+
+  assert.equal(state.captureSessionLocation.fix?.lat, 63.25)
+  assert.equal(state.location.status, 'fix')
+  assert.equal(state.location.error, null)
 })
 
 test('future timestamps beyond the tolerated skew are rejected', async () => {

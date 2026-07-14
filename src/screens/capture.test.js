@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
 import { createDefaultObservationDraft } from '../observation-defaults.js'
+import { getLocationPreference } from '../settings.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import {
@@ -214,6 +215,7 @@ function _makeRuntime({
   ensure('capture-location-secondary-title')
   ensure('gps-display')
   ensure('gps-pill')
+  ensure('capture-gps-enable-btn', 'button')
   ensure('capture-viewfinder')
 
   elements.get('capture-location-overlay').style.display = 'none'
@@ -426,24 +428,57 @@ test('capture prompt is hidden at boot and only shown when live capture starts',
   assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
 })
 
-test('first live-capture entry shows the location prompt', async () => {
+test('preference ask with OS permission granted skips the custom prompt and persists enabled', async () => {
   const runtime = _makeRuntime({
     geolocation: {
-      watchPosition() {
-        throw new Error('watchPosition should not be called before the user chooses')
-      },
+      watchId: 144,
     },
+    permissionState: 'granted',
   })
   initCapture()
 
   const startPromise = startCamera()
-  assert.equal(runtime.getElement('capture-location-overlay').style.display, 'flex')
-  assert.equal(runtime.getElement('capture-location-title').textContent, 'Add a location to this find?')
-  assert.equal(runtime.getElement('capture-location-primary-title').textContent, 'Use my location')
-  assert.equal(runtime.getElement('capture-location-secondary-title').textContent, 'Continue without location')
-
-  stopCamera()
   await startPromise
+
+  assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
+  assert.equal(runtime.cameraCalls.watchPosition, 1)
+  assert.equal(state.location.preference, 'enabled')
+  assert.equal(getLocationPreference(), 'enabled')
+})
+
+test('preference ask with an unknown OS permission starts acquisition without a second custom prompt', async () => {
+  let watchSuccess = null
+  const runtime = _makeRuntime({
+    geolocation: {
+      watchId: 145,
+      watchPosition(success) {
+        watchSuccess = success
+      },
+    },
+    permissionState: 'prompt',
+  })
+  initCapture()
+
+  const startPromise = startCamera()
+  await startPromise
+
+  assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
+  assert.equal(runtime.cameraCalls.watchPosition, 1)
+  assert.equal(getLocationPreference(), 'enabled')
+
+  watchSuccess?.({
+    coords: {
+      latitude: 63.4,
+      longitude: 10.4,
+      accuracy: 8,
+      altitude: 12,
+    },
+    timestamp: Date.now(),
+  })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
+  assert.equal(state.location.permission, 'granted')
 })
 
 test('capture session starts with a fresh location session and installs one visibility listener', async () => {
@@ -482,16 +517,37 @@ test('Use my location starts acquisition', async () => {
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
 })
 
-test('Continue without location does not start acquisition', async () => {
-  const runtime = _makeRuntime()
+test('Not now does not start acquisition and keeps the preference as ask', async () => {
+  const runtime = _makeRuntime({ permissionState: 'blocked' })
   initCapture()
 
   const startPromise = startCamera()
+  await new Promise(resolve => setImmediate(resolve))
   runtime.getElement('capture-location-secondary-btn').click()
   await startPromise
 
   assert.equal(runtime.cameraCalls.watchPosition, 0)
+  assert.equal(getLocationPreference(), 'ask')
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
+})
+
+test('Not now is session-only and the next new find prompts again', async () => {
+  const runtime = _makeRuntime({ permissionState: 'blocked' })
+  initCapture()
+
+  const firstStart = startCamera()
+  await new Promise(resolve => setImmediate(resolve))
+  runtime.getElement('capture-location-secondary-btn').click()
+  await firstStart
+
+  stopCamera()
+  const secondStart = startCamera()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(runtime.getElement('capture-location-overlay').style.display, 'flex')
+  runtime.getElement('capture-location-secondary-btn').click()
+  await secondStart
+
+  assert.equal(getLocationPreference(), 'ask')
 })
 
 test('persisted enabled preference skips the explanatory prompt', async () => {
@@ -510,8 +566,8 @@ test('persisted enabled preference skips the explanatory prompt', async () => {
   assert.equal(runtime.cameraCalls.watchPosition, 1)
 })
 
-test('persisted disabled preference skips acquisition', async () => {
-  const runtime = _makeRuntime()
+test('persisted disabled preference skips acquisition even when OS permission is granted', async () => {
+  const runtime = _makeRuntime({ permissionState: 'granted' })
   setLocationPreference('disabled')
   initCapture()
 
@@ -520,6 +576,41 @@ test('persisted disabled preference skips acquisition', async () => {
 
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
   assert.equal(runtime.cameraCalls.watchPosition, 0)
+  assert.equal(runtime.getElement('capture-gps-enable-btn').hidden, false)
+  assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
+})
+
+test('disabled preference enable starts acquisition for the current session', async () => {
+  let permissionState = 'denied'
+  const runtime = _makeRuntime({
+    geolocation: {
+      watchId: 812,
+      watchPosition() {
+        return 812
+      },
+    },
+  })
+  globalThis.navigator.permissions.query = async () => ({ state: permissionState })
+
+  setLocationPreference('disabled')
+  initCapture()
+
+  const startPromise = startCamera()
+  await startPromise
+
+  assert.equal(runtime.getElement('capture-gps-enable-btn').hidden, false)
+  assert.equal(runtime.getElement('capture-gps-enable-btn').disabled, false)
+  assert.equal(runtime.cameraCalls.watchPosition, 0)
+  assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
+
+  permissionState = 'granted'
+  runtime.getElement('capture-gps-enable-btn').click()
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(getLocationPreference(), 'enabled')
+  assert.equal(runtime.cameraCalls.watchPosition, 1)
+  assert.equal(state.location.watchId, 812)
+  assert.equal(state.location.status, 'locating')
 })
 
 test('denied and unsupported states render the correct actions', async () => {
@@ -548,6 +639,27 @@ test('denied and unsupported states render the correct actions', async () => {
   await unsupportedPromise
 })
 
+test('OS permission denial alone never changes the Sporely preference to disabled', async () => {
+  const runtime = _makeRuntime({
+    geolocation: {
+      watchPosition(success, error) {
+        error?.({ code: 1, message: 'denied' })
+        return 901
+      },
+    },
+    permissionState: 'denied',
+  })
+  initCapture()
+
+  const startPromise = startCamera()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  runtime.getElement('capture-location-secondary-btn').click()
+  await startPromise
+
+  assert.equal(state.location.preference, 'ask')
+  assert.equal(getLocationPreference(), 'ask')
+})
+
 test('location-state events update the compact capture status', () => {
   const runtime = _makeRuntime()
   initCapture()
@@ -574,7 +686,7 @@ test('location-state events update the compact capture status', () => {
 
   state.location.preference = 'disabled'
   runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
-  assert.equal(runtime.getElement('gps-display').textContent, 'Location access is off')
+  assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
   assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'disabled')
 })
 

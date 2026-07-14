@@ -3,6 +3,7 @@ import { setLocationPreference as persistLocationPreference } from './settings.j
 
 export const LOCATION_FIX_MAX_AGE_MS = 5 * 60 * 1000
 export const LOCATION_CLOCK_SKEW_MS = 10 * 1000
+export const LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS = 30_000
 const LOCATION_RESUME_TIMEOUT_MS = 10_000
 export const LOCATION_STATE_CHANGED_EVENT = 'sporely:location-state-changed'
 
@@ -40,6 +41,11 @@ function _normalizeMaxAgeMs(value) {
 function _normalizeTimeoutMs(value) {
   const timeout = Number(value)
   return Number.isFinite(timeout) ? Math.max(0, timeout) : 10_000
+}
+
+function _normalizeAcceptedFixMaxAgeMs(value) {
+  const maxAge = Number(value)
+  return Number.isFinite(maxAge) ? Math.max(0, maxAge) : LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS
 }
 
 function _createCustomEvent(name, detail) {
@@ -154,10 +160,10 @@ function _isInternalOverrideAllowed(options = {}) {
   return _captureSessionRequestIsCurrent(requestToken)
 }
 
-function _isAcceptableFixTimestamp(timestamp, maxAgeMs = LOCATION_FIX_MAX_AGE_MS) {
+function _isAcceptableFixTimestamp(timestamp, options = {}) {
   const ts = Number(timestamp)
   if (!Number.isFinite(ts)) return false
-  const normalizedMaxAge = _normalizeMaxAgeMs(maxAgeMs)
+  const normalizedMaxAge = _normalizeAcceptedFixMaxAgeMs(options.acceptedFixMaxAgeMs)
   const ageMs = Date.now() - ts
   if (!Number.isFinite(ageMs)) return false
   if (ageMs < -LOCATION_CLOCK_SKEW_MS) return false
@@ -181,14 +187,27 @@ function _sessionFixIsCurrent(fix) {
   if (!fix) return false
   const sessionStartMs = _currentSessionStartMs()
   const fixTimestamp = Number(fix.timestamp)
-  return Number.isFinite(sessionStartMs) && Number.isFinite(fixTimestamp) && fixTimestamp >= sessionStartMs
+  if (!Number.isFinite(sessionStartMs) || !Number.isFinite(fixTimestamp)) return false
+  if (fixTimestamp >= sessionStartMs) return true
+  return fix === state.captureSessionLocation.fix
+    && fixTimestamp >= sessionStartMs - LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS
 }
 
-function _updateCaptureSessionFixFromAcceptedFix(fix) {
+function _captureSessionAcceptsFixTimestamp(fixTimestamp, options = {}) {
+  const sessionStartMs = _currentSessionStartMs()
+  if (!Number.isFinite(fixTimestamp) || !Number.isFinite(sessionStartMs)) return false
+  if (fixTimestamp >= sessionStartMs) return true
+
+  const requestStartedAt = _finiteNumber(options.requestStartedAt)
+  if (!Number.isFinite(requestStartedAt) || requestStartedAt < sessionStartMs) return false
+  const acceptedFixMaxAgeMs = _normalizeAcceptedFixMaxAgeMs(options.acceptedFixMaxAgeMs)
+  return fixTimestamp >= requestStartedAt - acceptedFixMaxAgeMs
+}
+
+function _updateCaptureSessionFixFromAcceptedFix(fix, options = {}) {
   if (!state.captureSessionLocation.sessionStartAt) return false
   const fixTimestamp = _finiteNumber(fix?.timestamp)
-  const sessionStartMs = _currentSessionStartMs()
-  if (!Number.isFinite(fixTimestamp) || !Number.isFinite(sessionStartMs) || fixTimestamp < sessionStartMs) {
+  if (!_captureSessionAcceptsFixTimestamp(fixTimestamp, options)) {
     return false
   }
   if (!_isBetterSessionFix(fix, state.captureSessionLocation.fix)) {
@@ -206,7 +225,7 @@ function _acceptFix(position, options = {}) {
   if (!_isValidCoordinate(lat, lon)) return null
 
   const timestamp = _finiteNumber(position?.timestamp)
-  if (!_isAcceptableFixTimestamp(timestamp, options.maxAgeMs)) return null
+  if (!_isAcceptableFixTimestamp(timestamp, options)) return null
 
   const fix = {
     lat,
@@ -221,7 +240,7 @@ function _acceptFix(position, options = {}) {
   state.location.error = null
   state.location.permission = 'granted'
 
-  _updateCaptureSessionFixFromAcceptedFix(fix)
+  _updateCaptureSessionFixFromAcceptedFix(fix, options)
   _emitAcceptedFix(fix)
   return fix
 }
@@ -472,6 +491,16 @@ function _setWatchErrorState(error) {
   const classified = _classifyGeolocationError(error)
   if (classified.kind === 'permission-denied') return _setDeniedState(classified)
 
+  if (_sessionFixIsCurrent(state.captureSessionLocation.fix)) {
+    state.location.status = 'fix'
+    state.location.error = null
+    state.location.fix = _cloneFix(state.captureSessionLocation.fix)
+    state.location.permission = state.location.permission === 'denied' ? 'unknown' : state.location.permission
+    state.captureSessionLocation.requestingFreshFix = false
+    _emitLocationStateChanged()
+    return _cloneLocationState()
+  }
+
   state.location.status = classified.status
   state.location.error = classified
   state.captureSessionLocation.requestingFreshFix = false
@@ -496,6 +525,7 @@ function _callWatchPosition(options = {}) {
   let terminalError = null
   let clearWhenReady = false
   const requestToken = options.captureSessionRequestToken ?? null
+  const requestStartedAt = _finiteNumber(options.requestStartedAt) ?? Date.now()
 
   const safeClear = () => {
     if (watchId == null) {
@@ -512,7 +542,7 @@ function _callWatchPosition(options = {}) {
       safeClear()
       return
     }
-    const fix = _acceptFix(position, options)
+    const fix = _acceptFix(position, { ...options, requestStartedAt })
     if (!fix) {
       settled = true
       terminalError = _createInvalidFixError()
@@ -568,6 +598,7 @@ function _requestCurrentPositionOnce(options = {}) {
   let resolvePromise = null
   let timeoutHandle = null
   const requestToken = options.captureSessionRequestToken ?? null
+  const requestStartedAt = Date.now()
 
   const promise = new Promise(resolve => {
     resolvePromise = resolve
@@ -586,7 +617,7 @@ function _requestCurrentPositionOnce(options = {}) {
       finish(_cloneLocationState())
       return
     }
-    const fix = _acceptFix(position, options)
+    const fix = _acceptFix(position, { ...options, requestStartedAt })
     if (!fix) {
       finish(_setWatchErrorState(_createInvalidFixError()))
       return
@@ -622,7 +653,7 @@ function _requestCurrentPositionOnce(options = {}) {
       error,
       {
         enableHighAccuracy: options.enableHighAccuracy !== false,
-        maximumAge: _normalizeMaxAgeMs(options.maxAgeMs),
+        maximumAge: _normalizeMaxAgeMs(options.maximumAgeMs ?? options.maxAgeMs ?? 0),
         timeout: timeoutMs,
       },
     )
@@ -645,6 +676,7 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
   let watchId = null
   let clearWhenReady = false
   const requestToken = options.captureSessionRequestToken ?? null
+  const requestStartedAt = Date.now()
 
   const promise = new Promise(resolve => {
     resolvePromise = resolve
@@ -672,7 +704,7 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
       finish(_cloneLocationState())
       return
     }
-    const fix = _acceptFix(position, options)
+    const fix = _acceptFix(position, { ...options, requestStartedAt })
     if (!fix) {
       clearWatchSafely()
       finish(_setWatchErrorState(_createInvalidFixError()))
@@ -700,7 +732,7 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
       error,
       {
         enableHighAccuracy: options.enableHighAccuracy !== false,
-        maximumAge: _normalizeMaxAgeMs(options.maxAgeMs),
+        maximumAge: _normalizeMaxAgeMs(options.maximumAgeMs ?? options.maxAgeMs ?? 0),
         timeout: _normalizeTimeoutMs(options.timeoutMs),
       },
     )
@@ -782,7 +814,7 @@ export async function startLocationWatch(options = {}) {
   _emitLocationStateChanged()
 
   const watchStart = _callWatchPosition({
-    maxAgeMs: options.maxAgeMs,
+    acceptedFixMaxAgeMs: options.acceptedFixMaxAgeMs,
     captureSessionRequestToken: options.captureSessionRequestToken ?? null,
     positionOptions: {
       enableHighAccuracy: options.enableHighAccuracy !== false,
@@ -821,7 +853,8 @@ export async function requestFreshLocation(options = {}) {
   _emitLocationStateChanged()
 
   const currentPositionRequest = _requestCurrentPositionOnce({
-    maxAgeMs: options.maxAgeMs,
+    maximumAgeMs: options.maximumAgeMs ?? options.maxAgeMs ?? 0,
+    acceptedFixMaxAgeMs: options.acceptedFixMaxAgeMs,
     timeoutMs: options.timeoutMs,
     enableHighAccuracy: options.enableHighAccuracy,
     captureSessionRequestToken: options.captureSessionRequestToken ?? null,
@@ -830,7 +863,8 @@ export async function requestFreshLocation(options = {}) {
   if (currentPositionRequest) return currentPositionRequest
 
   return _requestCurrentPositionWithWatchFallback({
-    maxAgeMs: options.maxAgeMs,
+    maximumAgeMs: options.maximumAgeMs ?? options.maxAgeMs ?? 0,
+    acceptedFixMaxAgeMs: options.acceptedFixMaxAgeMs,
     timeoutMs: options.timeoutMs,
     enableHighAccuracy: options.enableHighAccuracy,
     captureSessionRequestToken: options.captureSessionRequestToken ?? null,
@@ -896,7 +930,8 @@ export async function resumeCaptureLocationSession(options = {}) {
     if (snapshot.capability === 'unsupported' || snapshot.permission === 'denied') return snapshot
 
     await requestFreshLocation({
-      maxAgeMs: 0,
+      maximumAgeMs: 0,
+      acceptedFixMaxAgeMs: LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS,
       timeoutMs: options.timeoutMs ?? LOCATION_RESUME_TIMEOUT_MS,
       enableHighAccuracy: options.enableHighAccuracy !== false,
       captureSessionRequestToken: resumeToken,
@@ -910,7 +945,8 @@ export async function resumeCaptureLocationSession(options = {}) {
 
     const watchStart = await startLocationWatch({
       requestFreshFix: false,
-      maxAgeMs: 0,
+      maximumAgeMs: 0,
+      acceptedFixMaxAgeMs: LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS,
       enableHighAccuracy: options.enableHighAccuracy !== false,
       internalOverride: true,
       captureSessionRequestToken: resumeToken,

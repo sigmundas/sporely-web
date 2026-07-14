@@ -340,6 +340,19 @@ test('review crop hint switches to adjust copy and disappears once a custom crop
   assert.doesNotMatch(source, /Tap a photo to add AI crop/)
 })
 
+test('review location events update metadata without rebuilding thumbnails', () => {
+  const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
+  const listenerStart = source.indexOf('reviewLocationStateListener = () => {')
+  const listenerEnd = source.indexOf('currentWindow.addEventListener(LOCATION_STATE_CHANGED_EVENT', listenerStart)
+  assert.ok(listenerStart >= 0)
+  assert.ok(listenerEnd > listenerStart)
+
+  const listenerBlock = source.slice(listenerStart, listenerEnd)
+  assert.match(listenerBlock, /_syncReviewLocationStateUi\(\)/)
+  assert.doesNotMatch(listenerBlock, /buildReviewGrid\(\)/)
+  assert.doesNotMatch(listenerBlock, /loadThumbnails\(/)
+})
+
 test('live review uses the capture-session fix', async () => {
   const snapshot = _snapshotReviewState()
   const env = _installReviewGlobals()
@@ -366,6 +379,68 @@ test('live review uses the capture-session fix', async () => {
     assert.equal(env.document.getElementById('meta-accuracy').textContent, '± 12 m')
     assert.equal(env.document.getElementById('meta-altitude').textContent, '432 m ASL')
     assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location ready · ±12 m')
+  } finally {
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('valid session fix plus later timeout still shows location ready', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+
+  try {
+    const liveFix = { lat: 61.12345, lon: 10.54321, accuracy: 12.4, altitude: 432.1, timestamp: 1710000000000 }
+    _seedReviewState({
+      liveFix,
+      user: { id: 'user-1' },
+      location: {
+        preference: 'enabled',
+        capability: 'supported',
+        permission: 'granted',
+        status: 'timeout',
+        error: { kind: 'timeout', message: 'Location request timed out' },
+      },
+    })
+
+    initReview()
+    buildReviewGrid()
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.equal(env.document.getElementById('meta-coordinates').textContent, formatLatLon(liveFix, 5))
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location ready · ±12 m')
+    assert.equal(env.document.getElementById('review-location-warning').hidden, true)
+  } finally {
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('valid session fix plus later unavailable error shows no warning', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+
+  try {
+    const liveFix = { lat: 60.98765, lon: 9.54321, accuracy: 6.1, altitude: 44, timestamp: 1710000000000 }
+    _seedReviewState({
+      liveFix,
+      user: { id: 'user-1' },
+      location: {
+        preference: 'enabled',
+        capability: 'supported',
+        permission: 'granted',
+        status: 'unavailable',
+        error: { kind: 'position-unavailable', message: 'Position unavailable' },
+      },
+    })
+
+    initReview()
+    buildReviewGrid()
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.equal(env.document.getElementById('meta-coordinates').textContent, formatLatLon(liveFix, 5))
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location ready · ±6 m')
+    assert.equal(env.document.getElementById('review-location-warning').hidden, true)
   } finally {
     _restoreReviewState(snapshot)
     env.restore()
@@ -575,6 +650,10 @@ test('review shows state-specific location copy for denied, timeout, unavailable
       assert.equal(warning.hidden, false, item.label)
       assert.match(warning.textContent, new RegExp(item.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
       assert.match(warning.textContent, new RegExp(item.body.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+      if (item.label === 'timeout') {
+        assert.equal(env.document.getElementById('meta-coordinates').textContent, '—')
+        assert.equal(env.document.getElementById('review-gps-display').textContent, 'Couldn’t determine location · Try again')
+      }
       if (item.label === 'unsupported') {
         assert.doesNotMatch(warning.textContent, /Open settings/)
       }
@@ -643,14 +722,61 @@ test('intentional opt-out is neutral and the x dismisses only the current sessio
   }
 })
 
-test('permanent opt-out clears the current session fix', async () => {
+test('review never displays coordinates while claiming they will not be saved', async () => {
   const snapshot = _snapshotReviewState()
   const env = _installReviewGlobals()
 
   try {
-    const liveFix = { lat: 60.7777, lon: 11.4444, accuracy: 5.5, altitude: 200, timestamp: 1710000000500 }
+    const liveFix = { lat: 61.22222, lon: 10.33333, accuracy: 9.4, altitude: 88, timestamp: 1710000000000 }
+    const cases = [
+      {
+        label: 'timeout',
+        status: 'timeout',
+        error: { kind: 'timeout', message: 'Location request timed out' },
+      },
+      {
+        label: 'unavailable',
+        status: 'unavailable',
+        error: { kind: 'position-unavailable', message: 'Position unavailable' },
+      },
+    ]
+
+    for (const item of cases) {
+      _seedReviewState({
+        liveFix,
+        user: { id: 'user-1' },
+        location: {
+          preference: 'enabled',
+          capability: 'supported',
+          permission: 'granted',
+          status: item.status,
+          error: item.error,
+        },
+      })
+      initReview()
+      buildReviewGrid()
+      await new Promise(resolve => setImmediate(resolve))
+
+      const coordinates = env.document.getElementById('meta-coordinates').textContent
+      const warning = env.document.getElementById('review-location-warning')
+      assert.notEqual(coordinates, '—', item.label)
+      assert.equal(warning.hidden, true, item.label)
+      assert.doesNotMatch(warning.textContent, /without location/i, item.label)
+      assert.doesNotMatch(warning.textContent, /without coordinates/i, item.label)
+    }
+  } finally {
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('permanent opt-out switches a no-fix denied review to disabled', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+
+  try {
     _seedReviewState({
-      liveFix,
+      liveFix: null,
       location: {
         preference: 'enabled',
         capability: 'supported',

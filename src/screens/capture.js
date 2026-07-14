@@ -10,14 +10,17 @@ import { resetReviewAiState } from './review.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
 import { isBlob } from '../observation-shapes.js'
 import {
-  beginCaptureLocationSession,
   endCaptureLocationSession,
   LOCATION_STATE_CHANGED_EVENT,
-  checkLocationCapabilityAndPermission,
-  setLocationPreference,
-  startLocationWatch,
-  stopLocationWatch,
 } from '../geo.js'
+import {
+  cancelActivePreflight,
+  initCaptureLocationSheet,
+  isPreflightCurrent,
+  nextPreflightToken,
+  prepareNewFindLocation,
+  startNewFindLocationAcquisition,
+} from '../capture-location-preflight.js'
 
 let cachedPrimaryMainCameraId = null
 let primaryMainCameraPromise = null
@@ -32,9 +35,6 @@ let pendingCaptureCount = 0
 let finishCaptureWhenPendingComplete = false
 let captureCompleteHandler = null
 const stillCaptureCache = new WeakMap()
-let captureStartupSeq = 0
-let captureLocationPromptResolver = null
-let captureLocationPromptMode = null
 let captureLocationStateListenerWindow = null
 
 export function setCaptureCompleteHandler(handler) {
@@ -42,7 +42,7 @@ export function setCaptureCompleteHandler(handler) {
 }
 
 export function initCapture() {
-  _wireCaptureLocationSheet()
+  initCaptureLocationSheet()
   _syncCaptureLocationStatus()
   if (captureLocationStateListenerWindow !== globalThis.window) {
     captureLocationStateListenerWindow = globalThis.window
@@ -61,83 +61,6 @@ export function initCapture() {
   })
 }
 
-function _wireCaptureLocationSheet() {
-  const overlay = document.getElementById('capture-location-overlay')
-  if (!overlay || overlay._wired) return
-  overlay._wired = true
-
-  document.getElementById('capture-location-backdrop')?.addEventListener('click', () => {
-    // Keep the sheet explicit: only button actions dismiss it.
-  })
-  document.getElementById('capture-location-primary-btn')?.addEventListener('click', () => {
-    const mode = captureLocationPromptMode
-    if (mode === 'ask') {
-      _resolveLocationPrompt('use')
-      return
-    }
-    if (mode === 'denied') {
-      _resolveLocationPrompt('retry')
-      return
-    }
-    _resolveLocationPrompt('continue')
-  })
-  document.getElementById('capture-location-secondary-btn')?.addEventListener('click', () => {
-    _resolveLocationPrompt('continue')
-  })
-}
-
-function _resolveLocationPrompt(result = null) {
-  const overlay = document.getElementById('capture-location-overlay')
-  if (overlay) overlay.style.display = 'none'
-  const resolve = captureLocationPromptResolver
-  captureLocationPromptResolver = null
-  captureLocationPromptMode = null
-  if (typeof resolve === 'function') resolve(result)
-}
-
-function _showLocationPrompt(mode) {
-  const overlay = document.getElementById('capture-location-overlay')
-  const title = document.getElementById('capture-location-title')
-  const body = document.getElementById('capture-location-body')
-  const primaryBtn = document.getElementById('capture-location-primary-btn')
-  const secondaryBtn = document.getElementById('capture-location-secondary-btn')
-  const primaryTitle = document.getElementById('capture-location-primary-title')
-  const secondaryTitle = document.getElementById('capture-location-secondary-title')
-
-  if (!overlay || !title || !body || !primaryBtn || !secondaryBtn || !primaryTitle || !secondaryTitle) {
-    return Promise.resolve(null)
-  }
-
-  captureLocationPromptMode = mode
-  if (mode === 'ask') {
-    title.textContent = 'Add a location to this find?'
-    body.textContent = 'Sporely uses your location while you create the find. You can obscure the location before publishing.'
-    primaryTitle.textContent = 'Use my location'
-    secondaryTitle.textContent = 'Continue without location'
-    primaryBtn.style.display = ''
-    secondaryBtn.style.display = ''
-  } else if (mode === 'denied') {
-    title.textContent = 'Location access was denied'
-    body.textContent = 'Sporely could not access location on this device. You can try again or continue without location.'
-    primaryTitle.textContent = 'Try again'
-    secondaryTitle.textContent = 'Continue without location'
-    primaryBtn.style.display = ''
-    secondaryBtn.style.display = ''
-  } else {
-    title.textContent = 'Automatic location unavailable'
-    body.textContent = 'This platform does not support automatic location in Sporely. You can continue without it.'
-    primaryTitle.textContent = 'Continue without location'
-    primaryBtn.style.display = ''
-    secondaryBtn.style.display = 'none'
-  }
-
-  overlay.style.display = 'flex'
-
-  return new Promise(resolve => {
-    captureLocationPromptResolver = resolve
-  })
-}
-
 function _normalizeCaptureLocationState() {
   const fix = state.location.fix
   const sessionFix = state.captureSessionLocation.fix
@@ -145,7 +68,7 @@ function _normalizeCaptureLocationState() {
   const accuracy = Number(activeFix?.accuracy)
   if (state.location.preference === 'disabled') {
     return {
-      text: 'Location access is off',
+      text: 'Location not included',
       state: 'disabled',
     }
   }
@@ -188,104 +111,16 @@ function _normalizeCaptureLocationState() {
 function _syncCaptureLocationStatus() {
   const pill = document.querySelector('.capture-gps-pill')
   const display = document.getElementById('gps-display')
+  const enableBtn = document.getElementById('capture-gps-enable-btn')
   if (!pill || !display) return
 
   const snapshot = _normalizeCaptureLocationState()
   pill.dataset.gpsState = snapshot.state
   display.textContent = snapshot.text
-}
-
-function _nextCaptureStartupSeq() {
-  captureStartupSeq += 1
-  return captureStartupSeq
-}
-
-function _isCaptureStartupActive(token) {
-  return token === captureStartupSeq
-}
-
-async function _prepareCaptureLocationForStart({ preserveBatch, token }) {
-  if (preserveBatch) return { shouldContinue: true, useLocation: false }
-
-  const preference = state.location.preference
-  if (preference === 'ask') {
-    const choice = await _showLocationPrompt('ask')
-    if (!_isCaptureStartupActive(token) || choice == null) return { shouldContinue: false, useLocation: false }
-    if (choice === 'continue') {
-      setLocationPreference('disabled')
-      beginCaptureLocationSession()
-      return { shouldContinue: true, useLocation: false }
-    }
-    setLocationPreference('enabled')
-    return _prepareCaptureLocationForStart({ preserveBatch: false, token })
+  if (enableBtn) {
+    enableBtn.hidden = snapshot.state !== 'disabled'
+    enableBtn.disabled = snapshot.state !== 'disabled'
   }
-
-  if (preference === 'disabled') {
-    beginCaptureLocationSession()
-    return { shouldContinue: true, useLocation: false }
-  }
-
-  beginCaptureLocationSession()
-  const snapshot = await checkLocationCapabilityAndPermission()
-  if (!_isCaptureStartupActive(token)) return { shouldContinue: false, useLocation: false }
-
-  if (snapshot.capability === 'unsupported') {
-    const choice = await _showLocationPrompt('unsupported')
-    if (!_isCaptureStartupActive(token) || choice == null) return { shouldContinue: false, useLocation: false }
-    if (choice === 'continue') {
-      setLocationPreference('disabled')
-      beginCaptureLocationSession()
-      return { shouldContinue: true, useLocation: false }
-    }
-    return { shouldContinue: false, useLocation: false }
-  }
-
-  if (snapshot.permission === 'denied') {
-    const choice = await _showLocationPrompt('denied')
-    if (!_isCaptureStartupActive(token) || choice == null) return { shouldContinue: false, useLocation: false }
-    if (choice === 'continue') {
-      setLocationPreference('disabled')
-      beginCaptureLocationSession()
-      return { shouldContinue: true, useLocation: false }
-    }
-    return _prepareCaptureLocationForStart({ preserveBatch: false, token })
-  }
-
-  return { shouldContinue: true, useLocation: true }
-}
-
-async function _startCaptureLocationAcquisition({ useLocation, token }) {
-  if (!useLocation) {
-    stopLocationWatch()
-    return true
-  }
-
-  const snapshot = await startLocationWatch({ requestFreshFix: true })
-  if (!_isCaptureStartupActive(token)) return false
-
-  if (snapshot.capability === 'unsupported') {
-    const choice = await _showLocationPrompt('unsupported')
-    if (!_isCaptureStartupActive(token) || choice == null) return false
-    if (choice === 'continue') {
-      setLocationPreference('disabled')
-      stopLocationWatch()
-      return true
-    }
-    return _startCaptureLocationAcquisition({ useLocation: true, token })
-  }
-
-  if (snapshot.permission === 'denied') {
-    const choice = await _showLocationPrompt('denied')
-    if (!_isCaptureStartupActive(token) || choice == null) return false
-    if (choice === 'continue') {
-      setLocationPreference('disabled')
-      stopLocationWatch()
-      return true
-    }
-    return _startCaptureLocationAcquisition({ useLocation: true, token })
-  }
-
-  return true
 }
 
 function _stopMediaStream(stream) {
@@ -646,9 +481,9 @@ export async function startCamera(options = {}) {
   const preserveBatch = !!options.preserveBatch
   try {
     stopCamera()
-    const startupToken = _nextCaptureStartupSeq()
-    const locationStart = await _prepareCaptureLocationForStart({ preserveBatch, token: startupToken })
-    if (!_isCaptureStartupActive(startupToken) || !locationStart.shouldContinue) return
+    const startupToken = nextPreflightToken()
+    const locationStart = await prepareNewFindLocation({ preserveBatch, token: startupToken })
+    if (!isPreflightCurrent(startupToken) || !locationStart.shouldContinue) return
 
     if (!preserveBatch) {
       state.capturedPhotos = []
@@ -657,15 +492,15 @@ export async function startCamera(options = {}) {
     }
 
     if (!preserveBatch) {
-      const acquisitionReady = await _startCaptureLocationAcquisition({
+      const acquisitionReady = await startNewFindLocationAcquisition({
         useLocation: locationStart.useLocation,
         token: startupToken,
       })
-      if (!_isCaptureStartupActive(startupToken) || !acquisitionReady) return
+      if (!isPreflightCurrent(startupToken) || !acquisitionReady) return
     }
 
     const stream = await tryGetUserMedia()
-    if (!_isCaptureStartupActive(startupToken)) {
+    if (!isPreflightCurrent(startupToken)) {
       _stopMediaStream(stream)
       return
     }
@@ -717,8 +552,7 @@ export async function startCamera(options = {}) {
 }
 
 export function stopCamera() {
-  captureStartupSeq += 1
-  _resolveLocationPrompt(null)
+  cancelActivePreflight()
   if (state.cameraStream) {
     if (typeof state.cameraStream.getTracks === 'function') {
       state.cameraStream.getTracks().forEach(t => t.stop())
