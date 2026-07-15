@@ -2931,6 +2931,11 @@ html, body {
 .review-gps-pill {
   max-width: 100%;
 }
+html.light .review-gps-pill {
+  background: transparent;
+  border-color: currentColor;
+  backdrop-filter: none;
+}
 .light-pill {
   background: rgba(13,17,9,0.7);
   border: 1px solid rgba(255,255,255,0.1);
