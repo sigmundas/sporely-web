@@ -133,6 +133,14 @@ function _makeElement(id, tagName = 'div') {
     play() {
       return Promise.resolve()
     },
+    // Video-element-only stub for the shutter first-frame gate. Tests trigger a
+    // frame by invoking runtime.fireFirstVideoFrame(); no callback is scheduled
+    // until the capture code calls requestVideoFrameCallback.
+    _pendingFrameCallbacks: [],
+    requestVideoFrameCallback(cb) {
+      this._pendingFrameCallbacks.push(cb)
+      return this._pendingFrameCallbacks.length
+    },
   }
 }
 
@@ -167,6 +175,9 @@ function _makeRuntime({
   geolocation = {},
   promptDenied = false,
   hasGeolocation = true,
+  userAgent = 'Mozilla/5.0',
+  platform = 'MacIntel',
+  maxTouchPoints = 0,
 } = {}) {
   const elements = new Map()
   const listeners = new Map()
@@ -176,6 +187,8 @@ function _makeRuntime({
     getUserMedia: 0,
     watchPosition: 0,
     clearWatch: [],
+    enumerateDevices: 0,
+    getUserMediaConstraints: [],
   }
 
   const ensure = (id, tagName = 'div') => {
@@ -311,18 +324,23 @@ function _makeRuntime({
   }
 
   const navigator = {
-    userAgent: 'Mozilla/5.0',
-    platform: 'MacIntel',
+    userAgent,
+    platform,
+    maxTouchPoints,
     permissions: {
       query: async () => ({ state: permissionState }),
     },
     geolocation: hasGeolocation ? geolocationState : null,
     mediaDevices: {
-      getUserMedia: async () => {
+      getUserMedia: async constraints => {
         cameraCalls.getUserMedia += 1
+        cameraCalls.getUserMediaConstraints.push(constraints)
         return _createStream()
       },
-      enumerateDevices: async () => [],
+      enumerateDevices: async () => {
+        cameraCalls.enumerateDevices += 1
+        return []
+      },
     },
   }
 
@@ -384,6 +402,14 @@ function _makeRuntime({
     getDocumentListeners(type) {
       return documentListeners.get(type) || []
     },
+    fireFirstVideoFrame() {
+      const video = elements.get('camera-video')
+      const cbs = video?._pendingFrameCallbacks || []
+      if (!cbs.length) return false
+      const cb = cbs.shift()
+      cb?.(performance.now?.() ?? 0, { presentedFrames: 1 })
+      return true
+    },
     async cleanup() {
       try {
         stopCamera()
@@ -425,7 +451,10 @@ test('capture prompt is hidden at boot and only shown when live capture starts',
   initCapture()
 
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
-  assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
+  // Preference is 'ask' by default; the pill must NOT read "Location not included"
+  // because that reads as "user turned it off" — reserve that copy for pref='disabled'.
+  assert.equal(runtime.getElement('gps-display').textContent, 'Location optional')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'idle')
 })
 
 test('preference ask with OS permission granted skips the custom prompt and persists enabled', async () => {
@@ -832,4 +861,79 @@ test('capture and review expose a shared gps status pill', () => {
   assert.doesNotMatch(html, /Creates one observation in Sporely Cloud/)
 
   assert.match(i18nSource, /setText\('#review-gps-display', 'common\.noGpsCaptured'\)/)
+})
+
+test('iOS web opens a single environment-facing getUserMedia and skips device probing', async () => {
+  const runtime = _makeRuntime({
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+    platform: 'iPhone',
+    maxTouchPoints: 5,
+    geolocation: { watchId: 501 },
+  })
+  setLocationPreference('enabled')
+  initCapture()
+
+  const startPromise = startCamera()
+  await startPromise
+
+  // The multi-step torch/lens probe would call getUserMedia + enumerateDevices
+  // + one more getUserMedia. iOS web must issue exactly one getUserMedia call
+  // and never enumerate devices to avoid stream muting.
+  assert.equal(runtime.cameraCalls.getUserMedia, 1)
+  assert.equal(runtime.cameraCalls.enumerateDevices, 0)
+
+  const constraints = runtime.cameraCalls.getUserMediaConstraints[0]
+  assert.deepEqual(constraints.video.facingMode, { ideal: 'environment' })
+  assert.equal(typeof constraints.video.width?.ideal, 'number')
+  assert.equal(typeof constraints.video.height?.ideal, 'number')
+})
+
+test('shutter is disabled until the first video frame is delivered', async () => {
+  const runtime = _makeRuntime({ geolocation: { watchId: 611 } })
+  setLocationPreference('enabled')
+  initCapture()
+
+  const startPromise = startCamera()
+  await startPromise
+
+  const shutter = runtime.getElement('shutter-btn')
+  // Stream is attached but no frame has been reported yet — the pipeline may
+  // have handed back a starved MediaStream. Keep the shutter closed.
+  assert.equal(shutter.disabled, true)
+
+  const fired = runtime.fireFirstVideoFrame()
+  assert.equal(fired, true)
+
+  assert.equal(shutter.disabled, false)
+})
+
+test('stopping the camera resets the first-frame gate so the next session must re-arm', async () => {
+  const runtime = _makeRuntime({ geolocation: { watchId: 612 } })
+  setLocationPreference('enabled')
+  initCapture()
+
+  await startCamera()
+  runtime.fireFirstVideoFrame()
+  assert.equal(runtime.getElement('shutter-btn').disabled, false)
+
+  stopCamera()
+  // stopCamera also clears state.cameraStream, so shutter.disabled during idle
+  // is not meaningful — assert on the re-arm behaviour instead.
+
+  await startCamera()
+  assert.equal(runtime.getElement('shutter-btn').disabled, true, 'shutter must re-arm on the next session')
+  runtime.fireFirstVideoFrame()
+  assert.equal(runtime.getElement('shutter-btn').disabled, false)
+})
+
+test('preference disabled renders "Location not included" and preference ask renders "Location optional"', () => {
+  const runtime = _makeRuntime()
+  initCapture()
+  assert.equal(runtime.getElement('gps-display').textContent, 'Location optional')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'idle')
+
+  setLocationPreference('disabled')
+  runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
+  assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'disabled')
 })

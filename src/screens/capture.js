@@ -3,7 +3,7 @@ import { t } from '../i18n.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
-import { isNativeApp } from '../platform.js'
+import { isIosWebApp, isNativeApp } from '../platform.js'
 import { debugImagePipeline, isImagePipelineDebugEnabled } from '../image-pipeline-debug.js'
 import { clearIrisShutter, startPendingIrisShutter } from '../iris-shutter.js'
 import { resetReviewAiState } from './review.js'
@@ -36,6 +36,10 @@ let finishCaptureWhenPendingComplete = false
 let captureCompleteHandler = null
 const stillCaptureCache = new WeakMap()
 let captureLocationStateListenerWindow = null
+// Gated by first real video frame — see _wireFirstFrameSignal. Prevents users
+// tapping the shutter on a stream that has not yet delivered any frames, which
+// on iOS Safari can happen if getUserMedia hands back a starved MediaStream.
+let firstFrameReady = false
 
 export function setCaptureCompleteHandler(handler) {
   captureCompleteHandler = typeof handler === 'function' ? handler : null
@@ -100,6 +104,14 @@ function _normalizeCaptureLocationState() {
     return {
       text: 'Couldn’t determine location · Try again',
       state: 'unavailable',
+    }
+  }
+  // Preference is 'ask' (undecided) or 'enabled' with no acquisition attempt yet.
+  // Only report "Location not included" for the explicit disabled preference above.
+  if (state.location.preference === 'ask') {
+    return {
+      text: 'Location optional',
+      state: 'idle',
     }
   }
   return {
@@ -201,18 +213,18 @@ async function _getPrimaryMainCameraId() {
         try {
           if (await _probeDeviceForTorch(device)) {
             cachedPrimaryMainCameraId = device.deviceId
-                if (import.meta.env.DEV) console.log('Main 1x camera identified via torch capability:', device.label || device.deviceId)
+                if (import.meta.env?.DEV) console.log('Main 1x camera identified via torch capability:', device.label || device.deviceId)
             return cachedPrimaryMainCameraId
           }
         } catch (err) {
-          if (import.meta.env.DEV) console.warn('Torch heuristic: failed to inspect camera:', device.label || device.deviceId, err)
+          if (import.meta.env?.DEV) console.warn('Torch heuristic: failed to inspect camera:', device.label || device.deviceId, err)
         }
       }
 
-      if (import.meta.env.DEV) console.log('Torch heuristic: no torch-capable camera found; falling back to environment camera.')
+      if (import.meta.env?.DEV) console.log('Torch heuristic: no torch-capable camera found; falling back to environment camera.')
       return null
     } catch (err) {
-      if (import.meta.env.DEV) console.warn('Torch heuristic failed:', err)
+      if (import.meta.env?.DEV) console.warn('Torch heuristic failed:', err)
       if (_isPermissionDeniedError(err)) throw err
       return null
     } finally {
@@ -238,11 +250,11 @@ async function _applyPrimaryLensPreferences(stream) {
       }
     }
   } catch (err) {
-    if (import.meta.env.DEV) console.warn('Camera zoom preference could not be applied:', err)
+    if (import.meta.env?.DEV) console.warn('Camera zoom preference could not be applied:', err)
   }
 
   if (typeof track.getSettings === 'function') {
-    if (import.meta.env.DEV) console.log('Camera stream settings:', track.getSettings())
+    if (import.meta.env?.DEV) console.log('Camera stream settings:', track.getSettings())
   }
 }
 
@@ -266,7 +278,7 @@ async function _getCachedPhotoCapabilities(track) {
   if (!entry.photoCapabilitiesPromise) {
     entry.photoCapabilitiesPromise = typeof entry.imageCapture.getPhotoCapabilities === 'function'
       ? entry.imageCapture.getPhotoCapabilities().catch(error => {
-        if (import.meta.env.DEV) console.warn('Photo capabilities cache failed:', error)
+        if (import.meta.env?.DEV) console.warn('Photo capabilities cache failed:', error)
         return null
       })
       : Promise.resolve(null)
@@ -292,6 +304,23 @@ async function _prefetchStillCaptureData(stream) {
 }
 
 async function tryGetUserMedia() {
+  // iOS Safari / iOS PWA: skip the priming + per-device probing path. WebKit
+  // has documented behaviour where a later getUserMedia call can mute an
+  // existing MediaStream, which manifests as a blank preview and black
+  // captures. Ask for a single environment-facing stream and stop.
+  if (isIosWebApp()) {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: CAMERA_VIDEO_WIDTH_IDEAL },
+        height: { ideal: CAMERA_VIDEO_HEIGHT_IDEAL },
+      },
+      audio: false,
+    })
+    await _applyPrimaryLensPreferences(stream)
+    return stream
+  }
+
   // Step 1: Run the torch heuristic to find the primary main lens
   const mainDeviceId = await _getPrimaryMainCameraId()
 
@@ -310,7 +339,7 @@ async function tryGetUserMedia() {
       return stream
     } catch (err) {
       cachedPrimaryMainCameraId = null
-      if (import.meta.env.DEV) console.warn('Failed to start camera with heuristic deviceId, falling back...', err)
+      if (import.meta.env?.DEV) console.warn('Failed to start camera with heuristic deviceId, falling back...', err)
     }
   }
 
@@ -381,12 +410,12 @@ async function _takeStillPhoto(video) {
   try {
     photoSettings = await _buildStillPhotoSettings(track)
   } catch (err) {
-    if (import.meta.env.DEV) console.warn('Photo capabilities unavailable; taking still with defaults:', err)
+    if (import.meta.env?.DEV) console.warn('Photo capabilities unavailable; taking still with defaults:', err)
   }
 
   const blob = await entry.imageCapture.takePhoto(photoSettings)
   if (!isBlob(blob)) throw new Error('Still photo capture returned no image')
-  if (import.meta.env.DEV) console.log('Captured still photo via ImageCapture:', {
+  if (import.meta.env?.DEV) console.log('Captured still photo via ImageCapture:', {
     bytes: blob.size,
     type: blob.type,
     settings: typeof track.getSettings === 'function' ? track.getSettings() : null,
@@ -416,7 +445,7 @@ async function _captureVideoFrame(video) {
     }, 'image/jpeg', 0.92)
   })
 
-  if (import.meta.env.DEV) console.log('Captured fallback video frame:', { width: w, height: h, bytes: blob.size })
+  if (import.meta.env?.DEV) console.log('Captured fallback video frame:', { width: w, height: h, bytes: blob.size })
   return blob
 }
 
@@ -433,9 +462,40 @@ function _syncCaptureControls() {
     doneBtn.setAttribute('aria-busy', pendingCaptureCount > 0 ? 'true' : 'false')
   }
   if (shutterBtn) {
-    shutterBtn.disabled = pendingCaptureCount > 0
-    shutterBtn.setAttribute('aria-busy', pendingCaptureCount > 0 ? 'true' : 'false')
+    // Demo mode (no cameraStream) shutter is always enabled — it draws an
+    // emoji canvas synchronously and does not depend on video frames.
+    const waitingForFrame = !!state.cameraStream && !firstFrameReady
+    const busy = pendingCaptureCount > 0
+    shutterBtn.disabled = busy || waitingForFrame
+    shutterBtn.setAttribute('aria-busy', busy ? 'true' : 'false')
   }
+}
+
+function _wireFirstFrameSignal(video, stream) {
+  const markReady = () => {
+    // Guard against a late callback landing after stopCamera / a stream swap.
+    if (state.cameraStream !== stream) return
+    if (firstFrameReady) return
+    firstFrameReady = true
+    _syncCaptureControls()
+  }
+
+  if (typeof video.requestVideoFrameCallback === 'function') {
+    try {
+      video.requestVideoFrameCallback(() => markReady())
+      return
+    } catch (_) {
+      // Fall through to the event-based fallback.
+    }
+  }
+
+  const handlePlaying = () => {
+    if (video.videoWidth > 0 && video.videoHeight > 0) {
+      video.removeEventListener('playing', handlePlaying)
+      markReady()
+    }
+  }
+  video.addEventListener('playing', handlePlaying)
 }
 
 function _setPendingCaptureDelta(delta) {
@@ -453,7 +513,7 @@ async function _captureCameraBlob(video) {
     const stillBlob = await _takeStillPhoto(video)
     if (isBlob(stillBlob)) blob = stillBlob
   } catch (err) {
-    if (import.meta.env.DEV) console.warn('ImageCapture still photo failed; falling back to video frame:', err)
+    if (import.meta.env?.DEV) console.warn('ImageCapture still photo failed; falling back to video frame:', err)
   }
   if (isBlob(blob)) {
     return {
@@ -505,6 +565,7 @@ export async function startCamera(options = {}) {
       return
     }
     state.cameraStream = stream
+    firstFrameReady = false
     const video = document.getElementById('camera-video')
     video.classList.remove('camera-video-full-frame')
     video.srcObject = stream
@@ -512,6 +573,7 @@ export async function startCamera(options = {}) {
       try { await video.play() } catch (_) {}
       _syncPreviewFit(video)
     }
+    _wireFirstFrameSignal(video, stream)
     void _prefetchStillCaptureData(stream).catch(() => {})
 
     state.batchCount = state.capturedPhotos.length
@@ -553,6 +615,7 @@ export async function startCamera(options = {}) {
 
 export function stopCamera() {
   cancelActivePreflight()
+  firstFrameReady = false
   if (state.cameraStream) {
     if (typeof state.cameraStream.getTracks === 'function') {
       state.cameraStream.getTracks().forEach(t => t.stop())
@@ -565,6 +628,7 @@ export function stopCamera() {
     video.srcObject = null
     video.classList.remove('camera-video-full-frame')
   }
+  _syncCaptureControls()
 }
 
 async function capturePhoto() {
