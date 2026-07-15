@@ -446,39 +446,33 @@ test('preference ask with OS permission granted skips the custom prompt and pers
   assert.equal(getLocationPreference(), 'enabled')
 })
 
-test('preference ask with an unknown OS permission starts acquisition without a second custom prompt', async () => {
-  let watchSuccess = null
+test('preference ask with OS permission=prompt shows the sheet and only enables after the user taps Use my location', async () => {
+  // Regression guard: on iOS Safari, permission 'prompt' silently short-circuiting
+  // to enabled dropped the sheet-button user-gesture checkpoint and caused a
+  // starved MediaStream (blank preview, black captures). Keep the sheet on 'prompt'.
   const runtime = _makeRuntime({
     geolocation: {
       watchId: 145,
-      watchPosition(success) {
-        watchSuccess = success
-      },
     },
     permissionState: 'prompt',
   })
   initCapture()
 
   const startPromise = startCamera()
+  // Wait a tick so prepareNewFindLocation can reach the sheet.
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.equal(runtime.getElement('capture-location-overlay').style.display, 'flex')
+  assert.equal(runtime.getElement('capture-location-title').textContent, 'Add a location to this find?')
+  assert.equal(runtime.cameraCalls.watchPosition, 0)
+  assert.equal(getLocationPreference(), 'ask')
+
+  runtime.getElement('capture-location-primary-btn').click()
   await startPromise
 
-  assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
   assert.equal(runtime.cameraCalls.watchPosition, 1)
   assert.equal(getLocationPreference(), 'enabled')
-
-  watchSuccess?.({
-    coords: {
-      latitude: 63.4,
-      longitude: 10.4,
-      accuracy: 8,
-      altitude: 12,
-    },
-    timestamp: Date.now(),
-  })
-  await new Promise(resolve => setImmediate(resolve))
-
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
-  assert.equal(state.location.permission, 'granted')
 })
 
 test('capture session starts with a fresh location session and installs one visibility listener', async () => {

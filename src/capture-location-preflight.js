@@ -139,7 +139,7 @@ export async function prepareNewFindLocation({ preserveBatch = false, token } = 
       return prepareNewFindLocation({ preserveBatch: false, token })
     }
 
-    if (snapshot.permission === 'granted' || snapshot.permission === 'prompt' || snapshot.permission === 'unknown') {
+    if (snapshot.permission === 'granted') {
       setLocationPreference('enabled')
       return { shouldContinue: true, useLocation: true }
     }
