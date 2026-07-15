@@ -13,8 +13,14 @@ import {
   setLocationPreference,
   stopLocationWatch,
 } from '../geo.js'
-import { initCapture, startCamera, stopCamera } from './capture.js'
+import { initCapture, startCamera, stopCamera, _setDemoModeForTests } from './capture.js'
 import { isTinyCameraCaptureDimensions } from './capture.js'
+
+function _deferred() {
+  let resolve, reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
 
 const defaultLocationState = () => ({
   preference: 'ask',
@@ -178,6 +184,7 @@ function _makeRuntime({
   userAgent = 'Mozilla/5.0',
   platform = 'MacIntel',
   maxTouchPoints = 0,
+  getUserMediaImpl = null,
 } = {}) {
   const elements = new Map()
   const listeners = new Map()
@@ -335,6 +342,7 @@ function _makeRuntime({
       getUserMedia: async constraints => {
         cameraCalls.getUserMedia += 1
         cameraCalls.getUserMediaConstraints.push(constraints)
+        if (getUserMediaImpl) return getUserMediaImpl(constraints)
         return _createStream()
       },
       enumerateDevices: async () => {
@@ -435,6 +443,7 @@ afterEach(() => {
       activeRuntime.restore()
     } catch {}
   }
+  try { _setDemoModeForTests(false) } catch {}
   activeRuntime = null
   _resetState()
 })
@@ -936,4 +945,116 @@ test('preference disabled renders "Location not included" and preference ask ren
   runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
   assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
   assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'disabled')
+})
+
+test('shutter is disabled from the moment startCamera begins, before getUserMedia resolves', async () => {
+  const gumGate = _deferred()
+  const runtime = _makeRuntime({
+    geolocation: { watchId: 811 },
+    getUserMediaImpl: () => gumGate.promise,
+  })
+  setLocationPreference('enabled')
+  initCapture()
+
+  const startPromise = startCamera()
+  // Let preflight + acquisition awaits settle so we're actually blocked inside
+  // navigator.mediaDevices.getUserMedia — not in a still-scheduled task.
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  const shutter = runtime.getElement('shutter-btn')
+  assert.equal(shutter.disabled, true, 'shutter must be disabled while camera startup is pending')
+  assert.equal(state.cameraStream, null, 'stream has not been attached yet')
+
+  gumGate.resolve(_createStream())
+  await startPromise
+
+  // Stream now attached; still waiting on first frame.
+  assert.equal(!!state.cameraStream, true)
+  assert.equal(shutter.disabled, true, 'still disabled while awaiting first frame')
+
+  runtime.fireFirstVideoFrame()
+  assert.equal(shutter.disabled, false)
+})
+
+test('a shutter press during real-camera startup cannot enter the demo capture branch', async () => {
+  const gumGate = _deferred()
+  const runtime = _makeRuntime({
+    geolocation: { watchId: 812 },
+    getUserMediaImpl: () => gumGate.promise,
+  })
+  setLocationPreference('enabled')
+  initCapture()
+
+  const startPromise = startCamera()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  // Directly invoke the shutter click handler. In production the button's
+  // native `disabled` prop blocks the click; in the mock and any programmatic
+  // caller, capturePhoto() must still refuse. State.cameraStream is null and
+  // video.srcObject is null here — the *exact* shape that would previously
+  // have entered the emoji-canvas demo branch and saved a fake capture.
+  runtime.getElement('shutter-btn').click()
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.equal(state.capturedPhotos.length, 0, 'startup shutter press must not produce a demo capture')
+
+  gumGate.resolve(_createStream())
+  await startPromise
+  assert.equal(state.capturedPhotos.length, 0, 'startup shutter press must not produce a demo capture after startup either')
+})
+
+test('a first-frame callback retained from a previous stream cannot unlock a new session', async () => {
+  const runtime = _makeRuntime({ geolocation: { watchId: 813 } })
+  setLocationPreference('enabled')
+  initCapture()
+
+  await startCamera()
+  const video = runtime.getElement('camera-video')
+  // Snapshot the callback that the first stream registered before we tear down.
+  const staleCallback = video._pendingFrameCallbacks[0]
+  assert.equal(typeof staleCallback, 'function')
+
+  stopCamera()
+  await startCamera()
+
+  // Fire the OLD callback from stream 1. It must not flip firstFrameReady on
+  // the current (stream 2) session. Only a callback registered by the new
+  // session's _wireFirstFrameSignal should unlock the shutter.
+  staleCallback?.(0, { presentedFrames: 1 })
+  assert.equal(runtime.getElement('shutter-btn').disabled, true,
+    'a stale callback from a previous stream must not enable the new shutter')
+
+  // The current session's own callback (last registered) does unlock the shutter.
+  // The mock accumulates callbacks; fire the newest one directly rather than
+  // via fireFirstVideoFrame(), which would replay the stale one first.
+  const currentCallback = video._pendingFrameCallbacks[video._pendingFrameCallbacks.length - 1]
+  assert.notEqual(currentCallback, staleCallback, 'a new session must register a fresh callback')
+  currentCallback?.(0, { presentedFrames: 2 })
+  assert.equal(runtime.getElement('shutter-btn').disabled, false)
+})
+
+test('first-frame gate falls back to the playing event when requestVideoFrameCallback is unavailable', async () => {
+  const runtime = _makeRuntime({ geolocation: { watchId: 814 } })
+  const video = runtime.getElement('camera-video')
+  // Remove rVFC to force the fallback path.
+  delete video.requestVideoFrameCallback
+
+  setLocationPreference('enabled')
+  initCapture()
+
+  await startCamera()
+  const shutter = runtime.getElement('shutter-btn')
+  assert.equal(shutter.disabled, true, 'still gated on the playing event')
+
+  // Playing event without dimensions must NOT unlock the shutter — the fallback
+  // has to see videoWidth/videoHeight before treating this as a live frame.
+  video.dispatchEvent({ type: 'playing' })
+  assert.equal(shutter.disabled, true, 'playing without dimensions is not a frame')
+
+  video.videoWidth = 1920
+  video.videoHeight = 1080
+  video.dispatchEvent({ type: 'playing' })
+  assert.equal(shutter.disabled, false, 'playing with dimensions unlocks the shutter')
 })

@@ -40,6 +40,21 @@ let captureLocationStateListenerWindow = null
 // tapping the shutter on a stream that has not yet delivered any frames, which
 // on iOS Safari can happen if getUserMedia hands back a starved MediaStream.
 let firstFrameReady = false
+// True from the start of startCamera() until we have either attached a stream
+// or bailed out (error / cancel / navigate away). During this window,
+// state.cameraStream is null AND video.srcObject is null, so the "no srcObject
+// ⇒ demo mode" branch in capturePhoto would otherwise fire — a fast shutter
+// press could save a fake emoji capture. Keep the shutter closed instead.
+let cameraStartupPending = false
+// Explicit demo-mode intent. capturePhoto()'s emoji-canvas branch only fires
+// when this is true; a null video.srcObject alone is not treated as consent
+// to enter demo mode (it is a symptom of many transient states, not a signal).
+let demoModeActive = false
+
+export function _setDemoModeForTests(active) {
+  demoModeActive = !!active
+  _syncCaptureControls()
+}
 
 export function setCaptureCompleteHandler(handler) {
   captureCompleteHandler = typeof handler === 'function' ? handler : null
@@ -462,11 +477,16 @@ function _syncCaptureControls() {
     doneBtn.setAttribute('aria-busy', pendingCaptureCount > 0 ? 'true' : 'false')
   }
   if (shutterBtn) {
-    // Demo mode (no cameraStream) shutter is always enabled — it draws an
-    // emoji canvas synchronously and does not depend on video frames.
-    const waitingForFrame = !!state.cameraStream && !firstFrameReady
+    // Shutter is ready when either:
+    //   (a) a live camera stream is attached AND has delivered its first frame, or
+    //   (b) demo mode is explicitly active.
+    // Real-camera startup (permission + getUserMedia awaits) MUST block, because
+    // state.cameraStream is null during startup and would otherwise look identical
+    // to demo mode to any code that only checks video.srcObject.
     const busy = pendingCaptureCount > 0
-    shutterBtn.disabled = busy || waitingForFrame
+    const liveReady = !!state.cameraStream && firstFrameReady
+    const ready = liveReady || demoModeActive
+    shutterBtn.disabled = busy || cameraStartupPending || !ready
     shutterBtn.setAttribute('aria-busy', busy ? 'true' : 'false')
   }
 }
@@ -474,7 +494,12 @@ function _syncCaptureControls() {
 function _wireFirstFrameSignal(video, stream) {
   const markReady = () => {
     // Guard against a late callback landing after stopCamera / a stream swap.
-    if (state.cameraStream !== stream) return
+    // Both checks are needed: a browser could hold the callback across stream
+    // reassignments and fire it after the current session started, in which
+    // case state.cameraStream may already be the NEW stream while this closure
+    // still references the OLD one. Comparing video.srcObject catches the case
+    // where state.cameraStream was reassigned but the element was not.
+    if (state.cameraStream !== stream || video.srcObject !== stream) return
     if (firstFrameReady) return
     firstFrameReady = true
     _syncCaptureControls()
@@ -539,8 +564,14 @@ function _logCaptureDiagnostics(message, details = {}, warn = false) {
 
 export async function startCamera(options = {}) {
   const preserveBatch = !!options.preserveBatch
+  stopCamera()
+  // Mark real-camera startup pending BEFORE awaiting anything. Awaits from
+  // here on include the Sporely sheet, the OS location prompt, the OS camera
+  // prompt, and getUserMedia itself — the shutter must stay closed the whole
+  // time. The finally block clears the flag on every exit path.
+  cameraStartupPending = true
+  _syncCaptureControls()
   try {
-    stopCamera()
     const startupToken = nextPreflightToken()
     const locationStart = await prepareNewFindLocation({ preserveBatch, token: startupToken })
     if (!isPreflightCurrent(startupToken) || !locationStart.shouldContinue) return
@@ -581,7 +612,6 @@ export async function startCamera(options = {}) {
     document.getElementById('batch-area').style.display = state.batchCount ? 'flex' : 'none'
     pendingCaptureCount = 0
     finishCaptureWhenPendingComplete = false
-    _syncCaptureControls()
     _syncCaptureLocationStatus()
   } catch (err) {
     const denied = document.getElementById('camera-denied')
@@ -610,12 +640,16 @@ export async function startCamera(options = {}) {
       body.textContent = t('capture.cameraStartFailed', { name: err.name })
       denied.style.display = 'flex'
     }
+  } finally {
+    cameraStartupPending = false
+    _syncCaptureControls()
   }
 }
 
 export function stopCamera() {
   cancelActivePreflight()
   firstFrameReady = false
+  cameraStartupPending = false
   if (state.cameraStream) {
     if (typeof state.cameraStream.getTracks === 'function') {
       state.cameraStream.getTracks().forEach(t => t.stop())
@@ -632,6 +666,14 @@ export function stopCamera() {
 }
 
 async function capturePhoto() {
+  // Defence in depth for the shutter gate. The button's `disabled` prop is
+  // authoritative for real UI clicks, but capturePhoto is called from a click
+  // handler that dispatches unconditionally in tests — and any future caller
+  // must also be safe. Refuse to run while a real camera session is starting,
+  // and refuse to run against a live stream that hasn't delivered a frame yet.
+  if (cameraStartupPending) return
+  if (state.cameraStream && !firstFrameReady) return
+
   const video  = document.getElementById('camera-video')
   const debugEnabled = isImagePipelineDebugEnabled()
   const track = video?.srcObject?.getVideoTracks?.()[0] || null
@@ -647,6 +689,11 @@ async function capturePhoto() {
   }
 
   if (!video.srcObject) {
+    // No live stream. Only the explicit demoModeActive flag may enter the
+    // emoji-canvas branch — a bare null srcObject is not consent to fabricate
+    // a photo. Without this guard a shutter press before/between real sessions
+    // would save a fake demo capture.
+    if (!demoModeActive) return
     // Demo mode — no real camera
     const captureStartAt = performance.now()
     const shutter = startPendingIrisShutter({
