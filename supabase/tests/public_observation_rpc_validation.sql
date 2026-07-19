@@ -610,7 +610,7 @@ BEGIN
   VALUES (amanita_koh_image_id, visible_user_id, 12.0, 6.0, 'manual');
 
   -- Leucopholiota americana in Sweden: two microscopy images with different
-  -- preparations (fresh + spore_print). Image B (spore_print) is inserted last
+  -- preparations (fresh condition + spore_print source). Image B is inserted last
   -- so it has a higher id — the "latest image" heuristic would pick spore_print.
   -- This observation is in country SE with no region, so it does not interfere
   -- with existing Amanita Norway/region facet assertions.
@@ -638,9 +638,9 @@ BEGIN
     (mixed_fresh_image_id, visible_user_id, 10.0, 5.0, 'manual'),
     (mixed_fresh_image_id, visible_user_id, 11.0, 5.5, 'manual');
 
-  -- Image B: spore_print preparation (inserted second → higher id, "latest").
+  -- Image B: spore_print source (inserted second → higher id, "latest").
   INSERT INTO public.observation_images (
-    observation_id, user_id, storage_path, image_type, sample_type
+    observation_id, user_id, storage_path, image_type, sample_source
   )
   VALUES (
     mixed_prep_id, visible_user_id, 'rpc/mixed-sp.webp', 'microscope', 'spore_print'
@@ -1746,7 +1746,10 @@ BEGIN
 
   -- Test C: spore_print filter — only 3 spore_print measurements from Image B.
   -- Observation must still be selected because it HAS a spore_print image.
-  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set(NULL, 'Leucopholiota', NULL, NULL, NULL, NULL, 'spore_print');
+  SELECT * INTO comp_rpc FROM public.get_public_spore_comparison_set(
+    p_genus := 'Leucopholiota',
+    p_sample_source := 'spore_print'
+  );
 
   IF comp_rpc."sporeObservationCount" IS DISTINCT FROM 1 THEN
     RAISE EXCEPTION 'comp_rpc Test C: Expected sporeObservationCount=1 for Leucopholiota (spore_print filter), got %', comp_rpc."sporeObservationCount";
@@ -1928,13 +1931,13 @@ BEGIN
   -- ── Mixed-preparation tests (leucopholiota-americana) ────────────────────────
   -- mixed_prep_id has two microscopy images:
   --   Image A (fresh): 2 measurements (L=10.0, 11.0)
-  --   Image B (spore_print, inserted later → higher id = "latest"): 3 measurements (L=12.0, 13.0, 14.0)
+  --   Image B (spore_print source, inserted later): 3 measurements (L=12.0, 13.0, 14.0)
   --
   -- These tests verify:
   --   A) facets include ALL prep values, not only the latest image
   --   B) sporeMeasurementCount is filtered at the image/measurement level
 
-  -- Test MP-1: unfiltered — both sample type values appear in facets.
+  -- Test MP-1: unfiltered — condition and source appear in separate facets.
   SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary('leucopholiota-americana');
   IF NOT EXISTS (
     SELECT 1 FROM jsonb_array_elements(dist_rpc."sampleTypeFacets") f
@@ -1943,10 +1946,10 @@ BEGIN
     RAISE EXCEPTION 'dist_rpc MP-1: sampleTypeFacets missing fresh (only latest-image was used)';
   END IF;
   IF NOT EXISTS (
-    SELECT 1 FROM jsonb_array_elements(dist_rpc."sampleTypeFacets") f
+    SELECT 1 FROM jsonb_array_elements(dist_rpc."sampleSourceFacets") f
     WHERE f->>'value' = 'spore_print'
   ) THEN
-    RAISE EXCEPTION 'dist_rpc MP-1: sampleTypeFacets missing spore_print (only latest-image was used)';
+    RAISE EXCEPTION 'dist_rpc MP-1: sampleSourceFacets missing spore_print';
   END IF;
   -- Unfiltered spore count = all 5 measurements
   IF dist_rpc."sporeMeasurementCount" IS DISTINCT FROM 5 THEN
@@ -1964,9 +1967,10 @@ BEGIN
     RAISE EXCEPTION 'dist_rpc MP-2: Expected sporeMeasurementCount=2 for fresh filter (image-level), got %', dist_rpc."sporeMeasurementCount";
   END IF;
 
-  -- Test MP-3: spore_print filter — only 3 spore_print measurements.
+  -- Test MP-3: spore_print source filter — only 3 measurements.
   SELECT * INTO dist_rpc FROM public.get_public_species_distribution_summary(
-    'leucopholiota-americana', NULL, NULL, NULL, NULL, 'spore_print'
+    p_species_slug := 'leucopholiota-americana',
+    p_sample_source := 'spore_print'
   );
   IF dist_rpc."observationCount" IS DISTINCT FROM 1 THEN
     RAISE EXCEPTION 'dist_rpc MP-3: Expected observationCount=1 for spore_print filter, got %', dist_rpc."observationCount";
@@ -2041,7 +2045,7 @@ BEGIN
 
   -- Test MP7: spore_print filter also includes mixed_prep_id.
   IF NOT EXISTS (
-    SELECT 1 FROM public.get_public_map_points(p_sample_type := 'spore_print')
+    SELECT 1 FROM public.get_public_map_points(p_sample_source := 'spore_print')
     WHERE "observationId" = mixed_prep_id
   ) THEN
     RAISE EXCEPTION 'Map points spore_print filter did not include mixed-prep observation';
@@ -2068,7 +2072,7 @@ BEGIN
     RAISE EXCEPTION 'search_public_observations fresh filter (EXISTS fix) did not include mixed-prep observation';
   END IF;
   IF NOT EXISTS (
-    SELECT 1 FROM public.search_public_observations(p_sample := 'spore_print')
+    SELECT 1 FROM public.search_public_observations(p_sample_source := 'spore_print')
     WHERE id = mixed_prep_id
   ) THEN
     RAISE EXCEPTION 'search_public_observations spore_print filter (EXISTS fix) did not include mixed-prep observation';

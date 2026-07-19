@@ -13,6 +13,9 @@ DECLARE
   detail_row record;
   search_row record;
   comp_row record;
+  dist_row record;
+  facets jsonb;
+  result_count integer;
 BEGIN
   IF NOT EXISTS (
     SELECT 1
@@ -87,21 +90,6 @@ BEGIN
   )
   RETURNING id INTO legacy_image_id;
 
-  -- Same conservative rule as the migration: only rows with null/empty source
-  -- and normalized legacy sample_type print values are moved.
-  UPDATE public.observation_images
-  SET
-    sample_source = 'spore_print',
-    sample_type = NULL
-  WHERE nullif(btrim(sample_source), '') IS NULL
-    AND lower(btrim(coalesce(sample_type, ''))) IN ('spore_print', 'spore print', 'print')
-    AND id = legacy_image_id;
-
-  IF (SELECT sample_type FROM public.observation_images WHERE id = legacy_image_id) IS NOT NULL
-     OR (SELECT sample_source FROM public.observation_images WHERE id = legacy_image_id) IS DISTINCT FROM 'spore_print' THEN
-    RAISE EXCEPTION 'legacy spore_print sample_type was not backfilled to sample_source';
-  END IF;
-
   SELECT * INTO detail_row
   FROM public.get_public_observation(metadata_obs_id);
 
@@ -111,15 +99,6 @@ BEGIN
      OR detail_row."contrastMethod" IS DISTINCT FROM 'DIC' THEN
     RAISE EXCEPTION 'metadata-only detail prep output mismatch: sampleType %, sampleSource %, mount %, contrast %',
       detail_row."sampleType", detail_row."sampleSource", detail_row."mountReagent", detail_row."contrastMethod";
-  END IF;
-
-  SELECT * INTO detail_row
-  FROM public.get_public_observation(legacy_obs_id);
-
-  IF detail_row."sampleType" IS NOT NULL
-     OR detail_row."sampleSource" IS DISTINCT FROM 'spore_print' THEN
-    RAISE EXCEPTION 'legacy detail output leaked sampleType or missed sampleSource: sampleType %, sampleSource %',
-      detail_row."sampleType", detail_row."sampleSource";
   END IF;
 
   SELECT * INTO search_row
@@ -133,8 +112,52 @@ BEGIN
       search_row."sampleType", search_row."sampleSource", search_row."stainReagent";
   END IF;
 
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(
+    p_genus := 'Sourcesplitus',
+    p_country := 'NO',
+    p_sample_source := 'context'
+  );
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'composed search sample_source filter returned % rows', result_count;
+  END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(p_sample_source := 'spore_print')
+  WHERE id = legacy_obs_id AND "sampleType" IS NULL AND "sampleSource" = 'spore_print';
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'legacy sample_type print was not normalized as source in search';
+  END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(p_sample := 'spore_print');
+  IF result_count IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'spore_print leaked into specimen-condition filtering';
+  END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.get_public_map_points(p_genus := 'Sourcesplitus', p_sample_source := 'context')
+  WHERE "observationId" = metadata_obs_id;
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'map sample_source filter returned % expected rows', result_count;
+  END IF;
+
+  SELECT * INTO dist_row
+  FROM public.get_public_species_distribution_summary(
+    p_species_slug := 'sourcesplitus-metadataanchor',
+    p_sample_source := 'context'
+  );
+  IF dist_row."observationCount" IS DISTINCT FROM 1
+     OR coalesce((dist_row."sampleSourceFacets"->0)->>'value', '') IS DISTINCT FROM 'context' THEN
+    RAISE EXCEPTION 'distribution sample_source output mismatch: count %, facets %',
+      dist_row."observationCount", dist_row."sampleSourceFacets";
+  END IF;
+
   SELECT * INTO comp_row
-  FROM public.get_public_spore_comparison_set(NULL, 'Sourcesplitus');
+  FROM public.get_public_spore_comparison_set(
+    p_genus := 'Sourcesplitus',
+    p_sample_source := 'context'
+  );
 
   IF comp_row."observations" IS NULL
      OR jsonb_array_length(comp_row."observations") IS DISTINCT FROM 1
@@ -145,6 +168,19 @@ BEGIN
      OR (comp_row."observations"->0)->>'stainReagent' IS DISTINCT FROM 'Congo Red' THEN
     RAISE EXCEPTION 'comparison output did not expose expected prep/source metadata: %',
       comp_row."observations";
+  END IF;
+
+  facets := public.get_public_observation_facets();
+  IF NOT (facets->'sampleSources' @> '[{"value":"context","label":"Context","count":1}]'::jsonb)
+     OR NOT (facets->'sampleSources' @> '[{"value":"spore_print","label":"Spore print","count":1}]'::jsonb) THEN
+    RAISE EXCEPTION 'sampleSources facets missing canonical/legacy values: %', facets->'sampleSources';
+  END IF;
+  IF facets->'sampleTypes' @> '[{"value":"spore_print"}]'::jsonb
+     OR facets->'sampleTypes' @> '[{"value":"spore print"}]'::jsonb
+     OR facets->'sampleTypes' @> '[{"value":"not_set"}]'::jsonb
+     OR facets->'sampleSources' @> '[{"value":"not_set"}]'::jsonb THEN
+    RAISE EXCEPTION 'invalid public prep facet leaked: types %, sources %',
+      facets->'sampleTypes', facets->'sampleSources';
   END IF;
 
   DELETE FROM public.observations

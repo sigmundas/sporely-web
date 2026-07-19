@@ -627,7 +627,7 @@ $$;
 ALTER FUNCTION "public"."get_person_stats"("p_user_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "text" DEFAULT NULL::"text", "p_genus" "text" DEFAULT NULL::"text", "p_search" "text" DEFAULT NULL::"text", "p_country" "text" DEFAULT NULL::"text", "p_region_id" "text" DEFAULT NULL::"text", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_sample_type" "text" DEFAULT NULL::"text", "p_mount_reagent" "text" DEFAULT NULL::"text", "p_contrast_method" "text" DEFAULT NULL::"text", "p_has_microscopy" boolean DEFAULT NULL::boolean, "p_has_spores" boolean DEFAULT NULL::boolean, "p_limit" integer DEFAULT 3000) RETURNS TABLE("observationId" bigint, "speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observedOn" "date", "country" "text", "regionId" "text", "locationLabel" "text", "mapLat" double precision, "mapLon" double precision, "locationPrecision" "text", "hasMicroscopy" boolean, "sporeMeasurementCount" bigint)
+CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "text" DEFAULT NULL::"text", "p_genus" "text" DEFAULT NULL::"text", "p_search" "text" DEFAULT NULL::"text", "p_country" "text" DEFAULT NULL::"text", "p_region_id" "text" DEFAULT NULL::"text", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_sample_type" "text" DEFAULT NULL::"text", "p_mount_reagent" "text" DEFAULT NULL::"text", "p_contrast_method" "text" DEFAULT NULL::"text", "p_has_microscopy" boolean DEFAULT NULL::boolean, "p_has_spores" boolean DEFAULT NULL::boolean, "p_limit" integer DEFAULT 3000, "p_sample_source" "text" DEFAULT NULL::"text") RETURNS TABLE("observationId" bigint, "speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observedOn" "date", "country" "text", "regionId" "text", "locationLabel" "text", "mapLat" double precision, "mapLon" double precision, "locationPrecision" "text", "hasMicroscopy" boolean, "sporeMeasurementCount" bigint)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $_$
@@ -651,6 +651,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
       p_date_from                                               AS date_from,
       p_date_to                                                 AS date_to,
       nullif(btrim(lower(coalesce(p_sample_type,     ''))),  '') AS sample_type,
+      nullif(btrim(lower(coalesce(p_sample_source,   ''))),  '') AS sample_source,
       nullif(btrim(lower(coalesce(p_mount_reagent,   ''))),  '') AS mount_reagent,
       nullif(btrim(lower(coalesce(p_contrast_method, ''))),  '') AS contrast_method,
       p_has_microscopy                                          AS has_microscopy,
@@ -730,7 +731,14 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
           AND i2.image_type = 'microscope'
-          AND lower(coalesce(i2.sample_type, '')) = n.sample_type
+          AND public.public_normalized_specimen_condition(i2.sample_type) = n.sample_type
+      ))
+      AND (n.sample_source IS NULL OR EXISTS (
+        SELECT 1 FROM public.observation_images i2
+        WHERE i2.observation_id = o.id
+          AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
+          AND i2.image_type = 'microscope'
+          AND public.public_normalized_sample_source(i2.sample_source, i2.sample_type) = n.sample_source
       ))
       AND (n.mount_reagent IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
@@ -840,7 +848,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
 $_$;
 
 
-ALTER FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer) OWNER TO "postgres";
+ALTER FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer, "p_sample_source" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" bigint) RETURNS TABLE("id" bigint, "speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observerDisplayName" "text", "observedOn" "date", "country" "text", "regionId" "text", "locationPrecision" "text", "locationLabel" "text", "hasMicroscopy" boolean, "sporeMeasurementCount" bigint, "sporeSummary" "jsonb", "sporePoints" "jsonb", "sporeMosaic" "jsonb", "contrastMethod" "text", "mountReagent" "text", "sampleType" "text", "sampleSource" "text", "prepSummary" "jsonb", "mapLat" double precision, "mapLon" double precision)
@@ -1217,7 +1225,8 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation_facets"() RETURNS "j
       upper(nullif(btrim(coalesce(r.country_code, '')), '')) AS region_country_code,
       latest_image.contrast AS contrast_method,
       latest_image.mount_medium AS mount_reagent,
-      nullif(lower(btrim(coalesce(latest_image.sample_type, ''))), '') AS sample_type
+      public.public_normalized_specimen_condition(latest_image.sample_type) AS sample_type,
+      public.public_normalized_sample_source(latest_image.sample_source, latest_image.sample_type) AS sample_source
     FROM public.observations o
     LEFT JOIN public.public_regions r
       ON r.id = o.region_id
@@ -1225,7 +1234,8 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation_facets"() RETURNS "j
       SELECT
         i.contrast,
         i.mount_medium,
-        i.sample_type
+        i.sample_type,
+        i.sample_source
       FROM public.observation_images i
       WHERE i.observation_id = o.id
         AND i.deleted_at IS NULL
@@ -1405,6 +1415,18 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation_facets"() RETURNS "j
       ) grouped
     ) items
   ),
+  sample_sources AS (
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'value', grouped.sample_source,
+      'label', CASE grouped.sample_source WHEN 'spore_print' THEN 'Spore print' ELSE initcap(grouped.sample_source) END,
+      'count', grouped.facet_count
+    ) ORDER BY grouped.facet_count DESC, grouped.sample_source), '[]'::jsonb) AS items
+    FROM (
+      SELECT vo.sample_source, count(*)::bigint AS facet_count
+      FROM visible_observations vo WHERE vo.sample_source IS NOT NULL
+      GROUP BY vo.sample_source
+    ) grouped
+  ),
   contrast_methods AS (
     SELECT coalesce(
       jsonb_agg(item ORDER BY facet_count DESC, label ASC, value ASC),
@@ -1473,6 +1495,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation_facets"() RETURNS "j
     'countries', (SELECT items FROM countries),
     'regions', (SELECT items FROM regions),
     'sampleTypes', (SELECT items FROM sample_types),
+    'sampleSources', (SELECT items FROM sample_sources),
     'contrastMethods', (SELECT items FROM contrast_methods),
     'mountReagents', (SELECT items FROM mount_reagents)
   )
@@ -1825,7 +1848,7 @@ $_$;
 ALTER FUNCTION "public"."get_public_species"("p_species_slug" "text") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text" DEFAULT NULL::"text", "p_region_id" "text" DEFAULT NULL::"text", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_sample_type" "text" DEFAULT NULL::"text", "p_mount_reagent" "text" DEFAULT NULL::"text", "p_contrast_method" "text" DEFAULT NULL::"text", "p_has_microscopy" boolean DEFAULT NULL::boolean, "p_has_spores" boolean DEFAULT NULL::boolean) RETURNS TABLE("observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" "date", "lastObservedOn" "date", "sampleTypeFacets" "jsonb", "mountReagentFacets" "jsonb", "contrastMethodFacets" "jsonb", "mapPoints" "jsonb", "monthCounts" "jsonb")
+CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text" DEFAULT NULL::"text", "p_region_id" "text" DEFAULT NULL::"text", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_sample_type" "text" DEFAULT NULL::"text", "p_mount_reagent" "text" DEFAULT NULL::"text", "p_contrast_method" "text" DEFAULT NULL::"text", "p_has_microscopy" boolean DEFAULT NULL::boolean, "p_has_spores" boolean DEFAULT NULL::boolean, "p_sample_source" "text" DEFAULT NULL::"text") RETURNS TABLE("observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" "date", "lastObservedOn" "date", "sampleTypeFacets" "jsonb", "sampleSourceFacets" "jsonb", "mountReagentFacets" "jsonb", "contrastMethodFacets" "jsonb", "mapPoints" "jsonb", "monthCounts" "jsonb")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $_$
@@ -1846,6 +1869,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
       p_date_from                                             AS date_from,
       p_date_to                                               AS date_to,
       nullif(btrim(lower(coalesce(p_sample_type,     ''))), '') AS sample_type,
+      nullif(btrim(lower(coalesce(p_sample_source, ''))), '') AS sample_source,
       nullif(btrim(lower(coalesce(p_mount_reagent,   ''))), '') AS mount_reagent,
       nullif(btrim(lower(coalesce(p_contrast_method, ''))), '') AS contrast_method,
       p_has_microscopy                                        AS has_microscopy,
@@ -1917,7 +1941,14 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
         WHERE i2.observation_id = ao.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
           AND i2.image_type = 'microscope'
-          AND lower(coalesce(i2.sample_type, '')) = n.sample_type
+          AND public.public_normalized_specimen_condition(i2.sample_type) = n.sample_type
+      ))
+      AND (n.sample_source IS NULL OR EXISTS (
+        SELECT 1 FROM public.observation_images i2
+        WHERE i2.observation_id = ao.id
+          AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
+          AND i2.image_type = 'microscope'
+          AND public.public_normalized_sample_source(i2.sample_source, i2.sample_type) = n.sample_source
       ))
       AND (n.mount_reagent IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
@@ -1997,7 +2028,8 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
               OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
             )
             -- Image-level prep filters (same conditions as filtered_obs EXISTS).
-            AND (n.sample_type     IS NULL OR lower(coalesce(i.sample_type,  '')) = n.sample_type)
+            AND (n.sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = n.sample_type)
+            AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
             AND (n.mount_reagent   IS NULL OR lower(coalesce(i.mount_medium, '')) = n.mount_reagent)
             AND (n.contrast_method IS NULL OR lower(coalesce(i.contrast,     '')) = n.contrast_method)
         )
@@ -2031,15 +2063,28 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
     ) AS facets
     FROM (
       SELECT
-        nullif(lower(btrim(coalesce(i.sample_type, ''))), '') AS sv,
+        nullif(public.public_normalized_specimen_condition(i.sample_type), '') AS sv,
         count(DISTINCT ao.id)::bigint                          AS cnt
       FROM all_obs ao
       JOIN public.observation_images i ON i.observation_id = ao.id
         AND i.deleted_at IS NULL AND i.purged_at IS NULL
         AND i.image_type = 'microscope'
-      WHERE nullif(lower(btrim(coalesce(i.sample_type, ''))), '') IS NOT NULL
-      GROUP BY nullif(lower(btrim(coalesce(i.sample_type, ''))), '')
+      WHERE nullif(public.public_normalized_specimen_condition(i.sample_type), '') IS NOT NULL
+      GROUP BY nullif(public.public_normalized_specimen_condition(i.sample_type), '')
     ) st
+  ),
+
+  sample_source_facets AS (
+    SELECT coalesce(jsonb_agg(jsonb_build_object('value', ss.sv, 'count', ss.cnt)
+      ORDER BY ss.cnt DESC, ss.sv), '[]'::jsonb) AS facets
+    FROM (
+      SELECT public.public_normalized_sample_source(i.sample_source, i.sample_type) AS sv,
+             count(DISTINCT ao.id)::bigint AS cnt
+      FROM all_obs ao JOIN public.observation_images i ON i.observation_id = ao.id
+       AND i.deleted_at IS NULL AND i.purged_at IS NULL AND i.image_type = 'microscope'
+      WHERE public.public_normalized_sample_source(i.sample_source, i.sample_type) IS NOT NULL
+      GROUP BY public.public_normalized_sample_source(i.sample_source, i.sample_type)
+    ) ss
   ),
 
   -- mountReagentFacets: same fix — all microscopy images, distinct obs per value.
@@ -2153,6 +2198,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
     c.first_observed_on            AS "firstObservedOn",
     c.last_observed_on             AS "lastObservedOn",
     (SELECT facets FROM sample_type_facets)     AS "sampleTypeFacets",
+    (SELECT facets FROM sample_source_facets)   AS "sampleSourceFacets",
     (SELECT facets FROM mount_reagent_facets)   AS "mountReagentFacets",
     (SELECT facets FROM contrast_method_facets) AS "contrastMethodFacets",
     (SELECT points FROM map_points)             AS "mapPoints",
@@ -2162,7 +2208,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
 $_$;
 
 
-ALTER FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean) OWNER TO "postgres";
+ALTER FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_sample_source" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_public_species_spore_summary"("p_species_slug" "text", "p_country" "text" DEFAULT NULL::"text", "p_region_id" "text" DEFAULT NULL::"text", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date") RETURNS TABLE("speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observationCount" bigint, "microscopyObservationCount" bigint, "sporeObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" "date", "lastObservedOn" "date", "countries" "jsonb", "regions" "jsonb", "sporeSummary" "jsonb", "observations" "jsonb")
@@ -2496,7 +2542,7 @@ $_$;
 ALTER FUNCTION "public"."get_public_species_spore_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text" DEFAULT NULL::"text", "p_genus" "text" DEFAULT NULL::"text", "p_country" "text" DEFAULT NULL::"text", "p_region_id" "text" DEFAULT NULL::"text", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_sample_type" "text" DEFAULT NULL::"text", "p_mount_reagent" "text" DEFAULT NULL::"text", "p_contrast_method" "text" DEFAULT NULL::"text") RETURNS TABLE("sourceType" "text", "taxonRank" "text", "speciesSlug" "text", "genus" "text", "label" "text", "filters" "jsonb", "observationCount" bigint, "sporeObservationCount" bigint, "sporeMeasurementCount" bigint, "sporeSummary" "jsonb", "observations" "jsonb")
+CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text" DEFAULT NULL::"text", "p_genus" "text" DEFAULT NULL::"text", "p_country" "text" DEFAULT NULL::"text", "p_region_id" "text" DEFAULT NULL::"text", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_sample_type" "text" DEFAULT NULL::"text", "p_mount_reagent" "text" DEFAULT NULL::"text", "p_contrast_method" "text" DEFAULT NULL::"text", "p_sample_source" "text" DEFAULT NULL::"text") RETURNS TABLE("sourceType" "text", "taxonRank" "text", "speciesSlug" "text", "genus" "text", "label" "text", "filters" "jsonb", "observationCount" bigint, "sporeObservationCount" bigint, "sporeMeasurementCount" bigint, "sporeSummary" "jsonb", "observations" "jsonb")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $_$
@@ -2518,6 +2564,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       p_date_from AS date_from,
       p_date_to   AS date_to,
       nullif(btrim(lower(coalesce(p_sample_type, ''))),     '') AS sample_type,
+      nullif(btrim(lower(coalesce(p_sample_source, ''))), '') AS sample_source,
       nullif(btrim(lower(coalesce(p_mount_reagent, ''))),   '') AS mount_reagent,
       nullif(btrim(lower(coalesce(p_contrast_method, ''))), '') AS contrast_method
   ),
@@ -2589,7 +2636,14 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
           AND i2.image_type = 'microscope'
-          AND lower(btrim(coalesce(i2.sample_type, ''))) = n.sample_type
+          AND public.public_normalized_specimen_condition(i2.sample_type) = n.sample_type
+      ))
+      AND (n.sample_source IS NULL OR EXISTS (
+        SELECT 1 FROM public.observation_images i2
+        WHERE i2.observation_id = o.id
+          AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
+          AND i2.image_type = 'microscope'
+          AND public.public_normalized_sample_source(i2.sample_source, i2.sample_type) = n.sample_source
       ))
       AND (n.mount_reagent IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
@@ -2620,6 +2674,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       to_id.region_label,
       spore_counts.spore_n,
       n.sample_type     AS filter_sample_type,
+      n.sample_source   AS filter_sample_source,
       n.mount_reagent   AS filter_mount_reagent,
       n.contrast_method AS filter_contrast_method
     FROM taxon_obs to_id
@@ -2638,7 +2693,8 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
           OR m.measurement_type = ''
           OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
         )
-        AND (n.sample_type     IS NULL OR lower(btrim(coalesce(i.sample_type,  ''))) = n.sample_type)
+        AND (n.sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = n.sample_type)
+        AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
         AND (n.mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = n.mount_reagent)
         AND (n.contrast_method IS NULL OR lower(btrim(coalesce(i.contrast,     ''))) = n.contrast_method)
     ) spore_counts ON spore_counts.spore_n > 0
@@ -2652,7 +2708,8 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       AND i.deleted_at IS NULL
       AND i.purged_at  IS NULL
       AND i.image_type = 'microscope'
-      AND (se.filter_sample_type     IS NULL OR lower(btrim(coalesce(i.sample_type,  ''))) = se.filter_sample_type)
+      AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
+      AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
       AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
       AND (se.filter_contrast_method IS NULL OR lower(btrim(coalesce(i.contrast,     ''))) = se.filter_contrast_method)
     JOIN public.spore_measurements m ON m.image_id = i.id
@@ -2705,6 +2762,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       END                 AS location_label,
       se.spore_n,
       se.filter_sample_type,
+      se.filter_sample_source,
       se.filter_mount_reagent,
       se.filter_contrast_method,
       rep_img.sample_type    AS rep_sample_type,
@@ -2748,7 +2806,8 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
         AND i.deleted_at IS NULL
         AND i.purged_at  IS NULL
         AND i.image_type = 'microscope'
-        AND (se.filter_sample_type     IS NULL OR lower(btrim(coalesce(i.sample_type,  ''))) = se.filter_sample_type)
+        AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
+        AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
         AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
         AND (se.filter_contrast_method IS NULL OR lower(btrim(coalesce(i.contrast,     ''))) = se.filter_contrast_method)
       ORDER BY contrib.n DESC, i.created_at DESC NULLS LAST, i.id DESC
@@ -2772,7 +2831,8 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
           OR m.measurement_type = ''
           OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
         )
-        AND (se.filter_sample_type     IS NULL OR lower(btrim(coalesce(i.sample_type,  ''))) = se.filter_sample_type)
+        AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
+        AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
         AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
         AND (se.filter_contrast_method IS NULL OR lower(btrim(coalesce(i.contrast,     ''))) = se.filter_contrast_method)
     ) obs_stats ON true
@@ -2802,7 +2862,8 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
           OR m.measurement_type = ''
           OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
         )
-        AND (se.filter_sample_type     IS NULL OR lower(btrim(coalesce(i.sample_type,  ''))) = se.filter_sample_type)
+        AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
+        AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
         AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
         AND (se.filter_contrast_method IS NULL OR lower(btrim(coalesce(i.contrast,     ''))) = se.filter_contrast_method)
     ) obs_agg ON true
@@ -2834,7 +2895,8 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
                 OR lower(m3.measurement_type) IN ('manual', 'spore', 'spores')
               )
           )
-          AND (se.filter_sample_type     IS NULL OR lower(btrim(coalesce(i.sample_type,  ''))) = se.filter_sample_type)
+          AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
+          AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
           AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
           AND (se.filter_contrast_method IS NULL OR lower(btrim(coalesce(i.contrast,     ''))) = se.filter_contrast_method)
       )
@@ -2999,11 +3061,10 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
                                     THEN lower(btrim(coalesce(om.rep_sample_type, om.filter_sample_type)))
                                   ELSE NULL::text
                                 END,
-          'sampleSource',       CASE
-                                  WHEN lower(btrim(coalesce(om.rep_sample_source, ''))) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
-                                    THEN lower(btrim(om.rep_sample_source))
-                                  ELSE NULL::text
-                                END,
+          'sampleSource',       public.public_normalized_sample_source(
+                                  om.rep_sample_source,
+                                  om.rep_sample_type
+                                ),
           'mountReagent',       coalesce(om.rep_mount_reagent,   om.filter_mount_reagent),
           'contrastMethod',     coalesce(om.rep_contrast_method, om.filter_contrast_method),
           'stainReagent',       nullif(btrim(coalesce(om.rep_stain_reagent, '')), ''),
@@ -3030,7 +3091,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
 $_$;
 
 
-ALTER FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text", "p_genus" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text") OWNER TO "postgres";
+ALTER FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text", "p_genus" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_sample_source" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
@@ -3159,6 +3220,22 @@ $$;
 
 
 ALTER FUNCTION "public"."protect_profile_privileged_fields"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."public_normalized_sample_source"("source_value" "text", "legacy_type" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT CASE WHEN lower(btrim(coalesce(source_value, ''))) IN ('spore_print','hymenium','stipe','pileus','context','other') THEN lower(btrim(source_value)) WHEN nullif(btrim(source_value), '') IS NULL AND lower(btrim(coalesce(legacy_type, ''))) IN ('spore_print','spore print','print') THEN 'spore_print' END $$;
+
+
+ALTER FUNCTION "public"."public_normalized_sample_source"("source_value" "text", "legacy_type" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."public_normalized_specimen_condition"("value" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT CASE WHEN lower(btrim(coalesce(value, ''))) IN ('fresh', 'dried') THEN lower(btrim(value)) END $$;
+
+
+ALTER FUNCTION "public"."public_normalized_specimen_condition"("value" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer DEFAULT 50) RETURNS TABLE("dataset_type" "text", "observation_id" bigint, "genus" "text", "species" "text", "contributor_label" "text", "observed_on" "date", "measurement_count" bigint, "image_count" bigint, "length_min" double precision, "length_p05" double precision, "length_p50" double precision, "length_p95" double precision, "length_max" double precision, "width_min" double precision, "width_p05" double precision, "width_p50" double precision, "width_p95" double precision, "width_max" double precision, "q_min" double precision, "q_p50" double precision, "q_max" double precision, "qc_flags" "jsonb")
@@ -3447,7 +3524,7 @@ $_$;
 ALTER FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[]) OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integer DEFAULT 50, "p_offset" integer DEFAULT 0, "p_genus" "text" DEFAULT NULL::"text", "p_species" "text" DEFAULT NULL::"text", "p_country" "text" DEFAULT NULL::"text", "p_region" "text" DEFAULT NULL::"text", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_has_spores" boolean DEFAULT NULL::boolean, "p_has_microscopy" boolean DEFAULT NULL::boolean, "p_contrast" "text" DEFAULT NULL::"text", "p_mount" "text" DEFAULT NULL::"text", "p_sample" "text" DEFAULT NULL::"text", "p_observer" "text" DEFAULT NULL::"text") RETURNS TABLE("id" bigint, "speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observerDisplayName" "text", "observedOn" "date", "country" "text", "regionId" "text", "locationPrecision" "text", "locationLabel" "text", "hasMicroscopy" boolean, "sporeMeasurementCount" bigint, "sporeSummary" "jsonb", "contrastMethod" "text", "mountReagent" "text", "sampleType" "text", "sampleSource" "text", "stainReagent" "text")
+CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integer DEFAULT 50, "p_offset" integer DEFAULT 0, "p_genus" "text" DEFAULT NULL::"text", "p_species" "text" DEFAULT NULL::"text", "p_country" "text" DEFAULT NULL::"text", "p_region" "text" DEFAULT NULL::"text", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_has_spores" boolean DEFAULT NULL::boolean, "p_has_microscopy" boolean DEFAULT NULL::boolean, "p_contrast" "text" DEFAULT NULL::"text", "p_mount" "text" DEFAULT NULL::"text", "p_sample" "text" DEFAULT NULL::"text", "p_observer" "text" DEFAULT NULL::"text", "p_sample_source" "text" DEFAULT NULL::"text") RETURNS TABLE("id" bigint, "speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observerDisplayName" "text", "observedOn" "date", "country" "text", "regionId" "text", "locationPrecision" "text", "locationLabel" "text", "hasMicroscopy" boolean, "sporeMeasurementCount" bigint, "sporeSummary" "jsonb", "contrastMethod" "text", "mountReagent" "text", "sampleType" "text", "sampleSource" "text", "stainReagent" "text")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $_$
@@ -3466,6 +3543,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
       nullif(btrim(coalesce(p_contrast, '')), '') AS contrast,
       nullif(btrim(coalesce(p_mount, '')), '') AS mount,
       nullif(btrim(coalesce(p_sample, '')), '') AS sample,
+      nullif(btrim(lower(coalesce(p_sample_source, ''))), '') AS sample_source,
       nullif(btrim(coalesce(p_observer, '')), '') AS observer
   ),
   candidate_base AS (
@@ -3552,7 +3630,8 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
         AND i.image_type = 'microscope'::text
         AND (n.contrast IS NULL OR lower(btrim(coalesce(i.contrast, '')))     = lower(btrim(n.contrast)))
         AND (n.mount    IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = lower(btrim(n.mount)))
-        AND (n.sample   IS NULL OR lower(btrim(coalesce(i.sample_type, '')))  = lower(btrim(n.sample)))
+        AND (n.sample   IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
+        AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
       ORDER BY i.created_at DESC NULLS LAST, i.id DESC
       LIMIT 1
     ) latest_image ON true
@@ -3606,11 +3685,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
         THEN lower(btrim(e.sample_type))
       ELSE NULL::text
     END AS "sampleType",
-    CASE
-      WHEN lower(btrim(coalesce(e.sample_source, ''))) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
-        THEN lower(btrim(e.sample_source))
-      ELSE NULL::text
-    END AS "sampleSource",
+    public.public_normalized_sample_source(e.sample_source, e.sample_type) AS "sampleSource",
     nullif(btrim(coalesce(e.stain_reagent, '')), '') AS "stainReagent"
   FROM enriched e
   CROSS JOIN normalized n
@@ -3638,7 +3713,14 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
       WHERE i2.observation_id = e.id
         AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
         AND i2.image_type = 'microscope'
-        AND lower(btrim(coalesce(i2.sample_type, ''))) = lower(btrim(n.sample))
+        AND public.public_normalized_specimen_condition(i2.sample_type) = lower(btrim(n.sample))
+    ))
+    AND (n.sample_source IS NULL OR EXISTS (
+      SELECT 1 FROM public.observation_images i2
+      WHERE i2.observation_id = e.id
+        AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
+        AND i2.image_type = 'microscope'
+        AND public.public_normalized_sample_source(i2.sample_source, i2.sample_type) = n.sample_source
     ))
   ORDER BY e.observed_on DESC, e.id DESC
   LIMIT (SELECT lim FROM normalized)
@@ -3646,7 +3728,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
 $_$;
 
 
-ALTER FUNCTION "public"."search_public_observations"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_species" "text", "p_country" "text", "p_region" "text", "p_date_from" "date", "p_date_to" "date", "p_has_spores" boolean, "p_has_microscopy" boolean, "p_contrast" "text", "p_mount" "text", "p_sample" "text", "p_observer" "text") OWNER TO "postgres";
+ALTER FUNCTION "public"."search_public_observations"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_species" "text", "p_country" "text", "p_region" "text", "p_date_from" "date", "p_date_to" "date", "p_has_spores" boolean, "p_has_microscopy" boolean, "p_contrast" "text", "p_mount" "text", "p_sample" "text", "p_observer" "text", "p_sample_source" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."search_public_reference_values"("p_genus" "text", "p_species" "text", "p_limit" integer DEFAULT 50) RETURNS TABLE("reference_id" bigint, "genus" "text", "species" "text", "source" "text", "mount_medium" "text", "stain" "text", "length_min" double precision, "length_p05" double precision, "length_p50" double precision, "length_p95" double precision, "length_max" double precision, "width_min" double precision, "width_p05" double precision, "width_p50" double precision, "width_p95" double precision, "width_max" double precision, "q_min" double precision, "q_p50" double precision, "q_max" double precision, "updated_at" timestamp with time zone)
@@ -6109,10 +6191,9 @@ GRANT ALL ON FUNCTION "public"."get_person_stats"("p_user_id" "uuid") TO "servic
 
 
 
-REVOKE ALL ON FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer) FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer) TO "anon";
-GRANT ALL ON FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer) TO "authenticated";
-GRANT ALL ON FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer) TO "service_role";
+GRANT ALL ON FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer, "p_sample_source" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer, "p_sample_source" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer, "p_sample_source" "text") TO "service_role";
 
 
 
@@ -6150,10 +6231,9 @@ GRANT ALL ON FUNCTION "public"."get_public_species"("p_species_slug" "text") TO 
 
 
 
-REVOKE ALL ON FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean) FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean) TO "anon";
-GRANT ALL ON FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean) TO "authenticated";
-GRANT ALL ON FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean) TO "service_role";
+GRANT ALL ON FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_sample_source" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_sample_source" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_public_species_distribution_summary"("p_species_slug" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_sample_source" "text") TO "service_role";
 
 
 
@@ -6164,10 +6244,9 @@ GRANT ALL ON FUNCTION "public"."get_public_species_spore_summary"("p_species_slu
 
 
 
-REVOKE ALL ON FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text", "p_genus" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text", "p_genus" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text") TO "anon";
-GRANT ALL ON FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text", "p_genus" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text", "p_genus" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text", "p_genus" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_sample_source" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text", "p_genus" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_sample_source" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_public_spore_comparison_set"("p_species_slug" "text", "p_genus" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_sample_source" "text") TO "service_role";
 
 
 
@@ -6203,6 +6282,18 @@ GRANT ALL ON FUNCTION "public"."protect_profile_privileged_fields"() TO "service
 
 
 
+GRANT ALL ON FUNCTION "public"."public_normalized_sample_source"("source_value" "text", "legacy_type" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."public_normalized_sample_source"("source_value" "text", "legacy_type" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."public_normalized_sample_source"("source_value" "text", "legacy_type" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."public_normalized_specimen_condition"("value" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."public_normalized_specimen_condition"("value" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."public_normalized_specimen_condition"("value" "text") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer) TO "service_role";
@@ -6223,10 +6314,9 @@ GRANT ALL ON FUNCTION "public"."search_public_observation_images"("p_observation
 
 
 
-REVOKE ALL ON FUNCTION "public"."search_public_observations"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_species" "text", "p_country" "text", "p_region" "text", "p_date_from" "date", "p_date_to" "date", "p_has_spores" boolean, "p_has_microscopy" boolean, "p_contrast" "text", "p_mount" "text", "p_sample" "text", "p_observer" "text") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."search_public_observations"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_species" "text", "p_country" "text", "p_region" "text", "p_date_from" "date", "p_date_to" "date", "p_has_spores" boolean, "p_has_microscopy" boolean, "p_contrast" "text", "p_mount" "text", "p_sample" "text", "p_observer" "text") TO "anon";
-GRANT ALL ON FUNCTION "public"."search_public_observations"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_species" "text", "p_country" "text", "p_region" "text", "p_date_from" "date", "p_date_to" "date", "p_has_spores" boolean, "p_has_microscopy" boolean, "p_contrast" "text", "p_mount" "text", "p_sample" "text", "p_observer" "text") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."search_public_observations"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_species" "text", "p_country" "text", "p_region" "text", "p_date_from" "date", "p_date_to" "date", "p_has_spores" boolean, "p_has_microscopy" boolean, "p_contrast" "text", "p_mount" "text", "p_sample" "text", "p_observer" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."search_public_observations"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_species" "text", "p_country" "text", "p_region" "text", "p_date_from" "date", "p_date_to" "date", "p_has_spores" boolean, "p_has_microscopy" boolean, "p_contrast" "text", "p_mount" "text", "p_sample" "text", "p_observer" "text", "p_sample_source" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."search_public_observations"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_species" "text", "p_country" "text", "p_region" "text", "p_date_from" "date", "p_date_to" "date", "p_has_spores" boolean, "p_has_microscopy" boolean, "p_contrast" "text", "p_mount" "text", "p_sample" "text", "p_observer" "text", "p_sample_source" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."search_public_observations"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_species" "text", "p_country" "text", "p_region" "text", "p_date_from" "date", "p_date_to" "date", "p_has_spores" boolean, "p_has_microscopy" boolean, "p_contrast" "text", "p_mount" "text", "p_sample" "text", "p_observer" "text", "p_sample_source" "text") TO "service_role";
 
 
 
