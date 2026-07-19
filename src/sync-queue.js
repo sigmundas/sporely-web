@@ -10,6 +10,7 @@ import { startUploadForegroundService, updateUploadForegroundService, stopUpload
 import { normalizeObservationVisibility, toCloudVisibility } from './visibility.js'
 import { debugImagePipeline } from './image-pipeline-debug.js'
 import { isBlob } from './observation-shapes.js'
+import { normalizeObservationGeography } from './observation-geography.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -867,6 +868,7 @@ async function _runSyncQueue() {
           ...observationPayload,
           user_id: authUserId,
           visibility: toCloudVisibility(observationPayload.visibility, 'public'),
+          ...normalizeObservationGeography(observationPayload),
         }
         delete repairedPayload.owner_id
         delete repairedPayload.created_by

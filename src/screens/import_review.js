@@ -12,6 +12,7 @@ import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-ac
 import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js';
 import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
+import { normalizeObservationGeography } from '../observation-geography.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
 import { playIrisShutter } from '../iris-shutter.js';
 import { loadInaturalistSession } from '../inaturalist.js';
@@ -551,6 +552,7 @@ function _buildImportObservationPayload(session, options = {}) {
       : null,
     ai_selected_at: selected.service ? new Date().toISOString() : null,
     aiIdentificationRuns,
+    ..._sessionObservationGeography(normalized),
   })
 
   const imageEntries = normalized.files
@@ -618,6 +620,10 @@ async function _syncImportAiDefaultAvailability() {
 
 function _sessionPhotoIdLookup(session) {
   return session?.locationLookup || null
+}
+
+function _sessionObservationGeography(session) {
+  return normalizeObservationGeography(_sessionPhotoIdLookup(session))
 }
 
 function _resolveSessionPhotoIdServices(session, {

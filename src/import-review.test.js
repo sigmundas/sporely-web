@@ -208,6 +208,10 @@ test('import-review save payload keeps the selected AI run and payload fields', 
     predictions,
   }, fingerprint)
   _applySessionAiTopPrediction(session, predictions, { service: 'artsorakel' })
+  session.locationLookup = {
+    country_code: 'ca',
+    region_id: 'region-123',
+  }
 
   const { obsPayload } = _buildImportObservationPayload(session, { userId: 'user-1' })
   assert.equal(obsPayload.aiIdentificationRuns.length, 1)
@@ -227,6 +231,8 @@ test('import-review save payload keeps the selected AI run and payload fields', 
   assert.equal(obsPayload.ai_selected_taxon_id, '12345')
   assert.equal(obsPayload.ai_selected_scientific_name, 'Amanita muscaria')
   assert.equal(obsPayload.ai_selected_probability, 0.91)
+  assert.equal(obsPayload.country_code, 'CA')
+  assert.equal(obsPayload.region_id, 'region-123')
   assert.match(obsPayload.ai_selected_at, /^\d{4}-\d{2}-\d{2}T/)
 })
 
@@ -295,6 +301,18 @@ test('import-review save payload preserves both service runs and chooses the bes
   assert.equal(obsPayload.ai_selected_taxon_id, '67890')
   assert.equal(obsPayload.ai_selected_scientific_name, 'Amanita pantherina')
   assert.equal(obsPayload.ai_selected_probability, 0.94)
+})
+
+test('import-review save payload omits invalid geography values', () => {
+  const session = _ensureSessionAiState(makeSession())
+  session.locationLookup = {
+    country_code: 'Norway',
+    region_id: '   ',
+  }
+
+  const { obsPayload } = _buildImportObservationPayload(session, { userId: 'user-1' })
+  assert.equal(obsPayload.country_code, undefined)
+  assert.equal(obsPayload.region_id, undefined)
 })
 
 test('import-review save payload marks a changed crop as stale and fingerprints the edited crop', () => {

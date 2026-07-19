@@ -164,3 +164,9 @@ test('sync queue writes observation image metadata only after the R2 uploads com
   assert.match(source.slice(insertIndex, syncKeysIndex), /storage_exif_safe:\s*uploadMeta\?\.storage_exif_safe === true/)
   assert.ok(syncKeysIndex > insertIndex)
 })
+
+test('sync queue repair path preserves resolved geography on observation inserts', () => {
+  const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
+
+  assert.match(source, /\.\.\.normalizeObservationGeography\(observationPayload\)/)
+})

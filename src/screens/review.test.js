@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
-import { __setReviewTestHooks, buildReviewGrid, initReview, openImportedReview, formatLatLon } from './review.js'
+import { __setReviewTestHooks, _buildReviewObservationPayload, buildReviewGrid, initReview, openImportedReview, formatLatLon } from './review.js'
 import { LOCATION_STATE_CHANGED_EVENT } from '../geo.js'
 import { state } from '../state.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
@@ -852,6 +852,32 @@ test('live review saves an existing session fix without requesting location', as
     assert.equal(state.captureSessionLocation.sessionStartAt, null)
   } finally {
     __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('imported review save payload preserves resolved geography from review context', () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+
+  try {
+    _seedReviewState({
+      imported: true,
+      importedGps: { lat: 61.5, lon: 10.2, accuracy: 12, altitude: 41 },
+      locationName: 'Imported ridge',
+      user: { id: 'user-1' },
+    })
+    env.document.getElementById('location-name-input').value = 'Imported ridge'
+    state.reviewContext.locationLookup = {
+      country_code: 'ca',
+      region_id: 'region-456',
+    }
+
+    const obsPayload = _buildReviewObservationPayload()
+    assert.equal(obsPayload.country_code, 'CA')
+    assert.equal(obsPayload.region_id, 'region-456')
+  } finally {
     _restoreReviewState(snapshot)
     env.restore()
   }

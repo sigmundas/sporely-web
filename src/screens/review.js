@@ -54,6 +54,7 @@ import {
   createDefaultObservationDraft,
   createDefaultObservationPayload,
 } from '../observation-defaults.js'
+import { normalizeObservationGeography } from '../observation-geography.js'
 
 const reviewAiState = {
   running: false,
@@ -602,6 +603,10 @@ function _reviewLocationLookup() {
   return state.reviewContext?.locationLookup || getLocationLookup() || null
 }
 
+function _reviewObservationGeography() {
+  return normalizeObservationGeography(_reviewLocationLookup())
+}
+
 function _currentReviewGps() {
   return _cloneReviewGps(_isImportedReview() ? state.reviewContext?.gps : state.captureSessionLocation.fix)
 }
@@ -808,6 +813,54 @@ async function _resolveReviewSaveLocation() {
     }
     if (decision !== 'retry') return { action: 'abort' }
   }
+}
+
+export function _buildReviewObservationPayload() {
+  const photos = state.capturedPhotos
+  const visibility = normalizeVisibility(state.captureDraft.visibility, getDefaultVisibility())
+  const leadPhoto = photos[0] || {}
+  const taxon = photos.find(photo => photo.taxon)?.taxon || {}
+  const aiIdentificationRuns = _buildReviewAiIdentificationRuns(photos)
+  const selectedPrediction = reviewAiState.selectedTaxonSource === 'ai'
+    ? (reviewAiState.selectedPrediction || (
+        reviewAiState.selectedService
+          ? reviewAiState.selectedPredictionByService?.[reviewAiState.selectedService] || null
+          : null
+      ))
+    : null
+  const selectedService = reviewAiState.selectedTaxonSource === 'ai' && (reviewAiState.selectedService || selectedPrediction?.service)
+    ? normalizeIdentifyService(reviewAiState.selectedService || selectedPrediction?.service || '')
+    : null
+
+  return createDefaultObservationPayload({
+    user_id: state.user.id,
+    date: _localDate(leadPhoto.ts || new Date()),
+    captured_at: (leadPhoto.ts || new Date()).toISOString(),
+    gps_latitude: null,
+    gps_longitude: null,
+    gps_altitude: null,
+    gps_accuracy: null,
+    location: getLocationName() || null,
+    habitat: state.captureDraft.habitat.trim() || null,
+    notes: state.captureDraft.notes.trim() || null,
+    uncertain: !!state.captureDraft.uncertain,
+    source_type: 'personal',
+    genus: taxon.genus || null,
+    species: taxon.specificEpithet || null,
+    common_name: taxon.vernacularName || null,
+    visibility: toCloudVisibility(visibility),
+    is_draft: state.captureDraft.is_draft !== false,
+    location_precision: state.captureDraft.location_precision || 'exact',
+    ai_selected_service: selectedService || null,
+    ai_selected_taxon_id: selectedPrediction?.taxonId || null,
+    ai_selected_scientific_name: selectedPrediction?.scientificName || null,
+    ai_selected_probability: selectedService
+      ? reviewAiState.selectedProbabilityByService?.[selectedService] ?? selectedPrediction?.probability ?? null
+      : null,
+    ai_selected_at: selectedService ? new Date().toISOString() : null,
+    aiIdentificationRuns,
+    ..._reviewObservationGeography(),
+  })
 }
 
 function _supportsOpenLocationSettings() {
@@ -2109,48 +2162,7 @@ async function saveObservationBatch() {
       }))
     )
 
-    const visibility = normalizeVisibility(state.captureDraft.visibility, getDefaultVisibility())
-    const leadPhoto = photos[0] || {}
-    const taxon = photos.find(photo => photo.taxon)?.taxon || {}
-    const aiIdentificationRuns = _buildReviewAiIdentificationRuns(photos)
-    const selectedPrediction = reviewAiState.selectedTaxonSource === 'ai'
-      ? (reviewAiState.selectedPrediction || (
-          reviewAiState.selectedService
-            ? reviewAiState.selectedPredictionByService?.[reviewAiState.selectedService] || null
-            : null
-        ))
-      : null
-    const selectedService = reviewAiState.selectedTaxonSource === 'ai' && (reviewAiState.selectedService || selectedPrediction?.service)
-      ? normalizeIdentifyService(reviewAiState.selectedService || selectedPrediction?.service || '')
-      : null
-    const obsPayload = createDefaultObservationPayload({
-      user_id: state.user.id,
-      date: _localDate(leadPhoto.ts || new Date()),
-      captured_at: (leadPhoto.ts || new Date()).toISOString(),
-      gps_latitude: null,
-      gps_longitude: null,
-      gps_altitude: null,
-      gps_accuracy: null,
-      location: getLocationName() || null,
-      habitat: state.captureDraft.habitat.trim() || null,
-      notes: state.captureDraft.notes.trim() || null,
-      uncertain: !!state.captureDraft.uncertain,
-      source_type: 'personal',
-      genus: taxon.genus || null,
-      species: taxon.specificEpithet || null,
-      common_name: taxon.vernacularName || null,
-      visibility: toCloudVisibility(visibility),
-      is_draft: state.captureDraft.is_draft !== false,
-      location_precision: state.captureDraft.location_precision || 'exact',
-      ai_selected_service: selectedService || null,
-      ai_selected_taxon_id: selectedPrediction?.taxonId || null,
-      ai_selected_scientific_name: selectedPrediction?.scientificName || null,
-      ai_selected_probability: selectedService
-        ? reviewAiState.selectedProbabilityByService?.[selectedService] ?? selectedPrediction?.probability ?? null
-        : null,
-      ai_selected_at: selectedService ? new Date().toISOString() : null,
-      aiIdentificationRuns,
-    })
+    const obsPayload = _buildReviewObservationPayload()
 
     const locationResult = await _resolveReviewSaveLocation()
     if (state.currentScreen !== 'review' || !locationResult || locationResult.action === 'manual' || locationResult.action === 'abort') return
