@@ -843,7 +843,7 @@ $_$;
 ALTER FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genus" "text", "p_search" "text", "p_country" "text", "p_region_id" "text", "p_date_from" "date", "p_date_to" "date", "p_sample_type" "text", "p_mount_reagent" "text", "p_contrast_method" "text", "p_has_microscopy" boolean, "p_has_spores" boolean, "p_limit" integer) OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" bigint) RETURNS TABLE("id" bigint, "speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observerDisplayName" "text", "observedOn" "date", "country" "text", "regionId" "text", "locationPrecision" "text", "locationLabel" "text", "hasMicroscopy" boolean, "sporeMeasurementCount" bigint, "sporeSummary" "jsonb", "sporePoints" "jsonb", "sporeMosaic" "jsonb", "contrastMethod" "text", "mountReagent" "text", "sampleType" "text", "sampleSource" "text", "mapLat" double precision, "mapLon" double precision)
+CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" bigint) RETURNS TABLE("id" bigint, "speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observerDisplayName" "text", "observedOn" "date", "country" "text", "regionId" "text", "locationPrecision" "text", "locationLabel" "text", "hasMicroscopy" boolean, "sporeMeasurementCount" bigint, "sporeSummary" "jsonb", "sporePoints" "jsonb", "sporeMosaic" "jsonb", "contrastMethod" "text", "mountReagent" "text", "sampleType" "text", "sampleSource" "text", "prepSummary" "jsonb", "mapLat" double precision, "mapLon" double precision)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $_$
@@ -914,6 +914,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" 
           )
         ELSE NULL::jsonb
       END AS spore_mosaic,
+      prep_agg.prep_summary,
       CASE
         WHEN c.location_precision = 'exact'::text
           THEN o.gps_latitude
@@ -992,7 +993,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" 
     ) latest_mosaic ON true
     LEFT JOIN LATERAL (
       SELECT jsonb_agg(
-        (
+        jsonb_strip_nulls(
           jsonb_build_object(
             'id',             m.id::text,
             'observationId',  c.id::text,
@@ -1004,24 +1005,56 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" 
                                 WHEN m.thumb_key IS NOT NULL
                                   THEN concat('https://media.sporely.no/', m.thumb_key)
                                 ELSE NULL
+                              END,
+            -- Per-point prep metadata. Same normalization as the scalar
+            -- observation-level fields (see the SELECT list below): unset
+            -- variants collapse to NULL and jsonb_strip_nulls removes them
+            -- from the object, keeping the payload small.
+            'contrastMethod', CASE
+                                WHEN nullif(btrim(coalesce(i.contrast, '')), '') IS NULL
+                                     OR lower(btrim(i.contrast)) IN ('not_set', 'not set', 'unset', 'unknown')
+                                  THEN NULL
+                                ELSE btrim(i.contrast)
+                              END,
+            'mountReagent',   CASE
+                                WHEN nullif(btrim(coalesce(i.mount_medium, '')), '') IS NULL
+                                     OR lower(btrim(i.mount_medium)) IN ('not_set', 'not set', 'unset', 'unknown')
+                                  THEN NULL
+                                ELSE btrim(i.mount_medium)
+                              END,
+            'stainReagent',   CASE
+                                WHEN nullif(btrim(coalesce(i.stain, '')), '') IS NULL
+                                     OR lower(btrim(i.stain)) IN ('not_set', 'not set', 'unset', 'unknown')
+                                  THEN NULL
+                                ELSE btrim(i.stain)
+                              END,
+            'sampleType',     CASE
+                                WHEN lower(btrim(coalesce(i.sample_type, ''))) IN ('fresh', 'dried')
+                                  THEN lower(btrim(i.sample_type))
+                                ELSE NULL
+                              END,
+            'sampleSource',   CASE
+                                WHEN lower(btrim(coalesce(i.sample_source, ''))) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
+                                  THEN lower(btrim(i.sample_source))
+                                ELSE NULL
                               END
           )
-          || CASE
-               WHEN t.measurement_id IS NOT NULL
-                 THEN jsonb_build_object(
-                   'mosaicX', t.x_px,
-                   'mosaicY', t.y_px,
-                   'mosaicW', t.w_px,
-                   'mosaicH', t.h_px
-                 )
-                 || CASE
-                      WHEN t.overlay_json IS NOT NULL
-                        THEN jsonb_build_object('overlay', t.overlay_json)
-                      ELSE '{}'::jsonb
-                    END
-               ELSE '{}'::jsonb
-             END
         )
+        || CASE
+             WHEN t.measurement_id IS NOT NULL
+               THEN jsonb_build_object(
+                 'mosaicX', t.x_px,
+                 'mosaicY', t.y_px,
+                 'mosaicW', t.w_px,
+                 'mosaicH', t.h_px
+               )
+               || CASE
+                    WHEN t.overlay_json IS NOT NULL
+                      THEN jsonb_build_object('overlay', t.overlay_json)
+                    ELSE '{}'::jsonb
+                  END
+             ELSE '{}'::jsonb
+           END
         ORDER BY m.id
       ) AS spore_points
       FROM public.observation_images i
@@ -1042,6 +1075,79 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" 
           OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
         )
     ) point_agg ON true
+    LEFT JOIN LATERAL (
+      WITH contributors AS (
+        SELECT DISTINCT
+          i.id AS image_id,
+          nullif(btrim(coalesce(i.contrast, '')), '') AS contrast,
+          nullif(btrim(coalesce(i.mount_medium, '')), '') AS mount_medium,
+          nullif(btrim(coalesce(i.stain, '')), '') AS stain,
+          nullif(btrim(coalesce(i.sample_type, '')), '') AS sample_type,
+          nullif(btrim(coalesce(i.sample_source, '')), '') AS sample_source
+        FROM public.observation_images i
+        WHERE i.observation_id = c.id
+          AND i.deleted_at IS NULL
+          AND i.purged_at IS NULL
+          AND (i.image_type IS NULL OR i.image_type = 'microscope'::text)
+          AND EXISTS (
+            SELECT 1
+            FROM public.spore_measurements m3
+            WHERE m3.image_id = i.id
+              AND (
+                m3.measurement_type IS NULL
+                OR m3.measurement_type = ''
+                OR lower(m3.measurement_type) IN ('manual', 'spore', 'spores')
+              )
+          )
+      )
+      SELECT jsonb_build_object(
+        'contrasts',          coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT contrast AS v
+            FROM contributors
+            WHERE contrast IS NOT NULL
+              AND lower(contrast) NOT IN ('not_set', 'not set', 'unset', 'unknown')
+          ) s
+        ), '[]'::jsonb),
+        'mounts',             coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT mount_medium AS v
+            FROM contributors
+            WHERE mount_medium IS NOT NULL
+              AND lower(mount_medium) NOT IN ('not_set', 'not set', 'unset', 'unknown')
+          ) s
+        ), '[]'::jsonb),
+        'stains',             coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT stain AS v
+            FROM contributors
+            WHERE stain IS NOT NULL
+              AND lower(stain) NOT IN ('not_set', 'not set', 'unset', 'unknown')
+          ) s
+        ), '[]'::jsonb),
+        'specimenConditions', coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT lower(sample_type) AS v
+            FROM contributors
+            WHERE sample_type IS NOT NULL
+              AND lower(sample_type) IN ('fresh', 'dried')
+          ) s
+        ), '[]'::jsonb),
+        'sampleSources',      coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT lower(sample_source) AS v
+            FROM contributors
+            WHERE sample_source IS NOT NULL
+              AND lower(sample_source) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
+          ) s
+        ), '[]'::jsonb)
+      ) AS prep_summary
+    ) prep_agg ON true
   )
   SELECT
     e.id AS id,
@@ -1084,6 +1190,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" 
         THEN lower(btrim(e.sample_source))
       ELSE NULL::text
     END AS "sampleSource",
+    e.prep_summary AS "prepSummary",
     e.map_lat AS "mapLat",
     e.map_lon AS "mapLon"
   FROM enriched e
@@ -2558,24 +2665,24 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
   ),
   agg_len AS (
     SELECT
-      count(*)::bigint                                                           AS n,
-      min(length_um)                                                             AS len_min,
-      max(length_um)                                                             AS len_max,
-      avg(length_um)                                                             AS len_mean,
-      percentile_cont(0.05) WITHIN GROUP (ORDER BY length_um)::double precision AS len_p05,
-      percentile_cont(0.95) WITHIN GROUP (ORDER BY length_um)::double precision AS len_p95
+      count(*)::bigint                                                            AS n,
+      min(length_um)                                                              AS len_min,
+      max(length_um)                                                              AS len_max,
+      avg(length_um)                                                              AS len_mean,
+      percentile_cont(0.05) WITHIN GROUP (ORDER BY length_um)::double precision  AS len_p05,
+      percentile_cont(0.95) WITHIN GROUP (ORDER BY length_um)::double precision  AS len_p95
     FROM raw_meas
   ),
   agg_wq AS (
     SELECT
-      min(width_um)                                                              AS wid_min,
-      max(width_um)                                                              AS wid_max,
-      avg(width_um)                                                              AS wid_mean,
-      percentile_cont(0.05) WITHIN GROUP (ORDER BY width_um)::double precision  AS wid_p05,
-      percentile_cont(0.95) WITHIN GROUP (ORDER BY width_um)::double precision  AS wid_p95,
-      min(length_um / nullif(width_um, 0))                                       AS q_min,
-      max(length_um / nullif(width_um, 0))                                       AS q_max,
-      avg(length_um / nullif(width_um, 0))                                       AS q_mean,
+      min(width_um)                                                               AS wid_min,
+      max(width_um)                                                               AS wid_max,
+      avg(width_um)                                                               AS wid_mean,
+      percentile_cont(0.05) WITHIN GROUP (ORDER BY width_um)::double precision   AS wid_p05,
+      percentile_cont(0.95) WITHIN GROUP (ORDER BY width_um)::double precision   AS wid_p95,
+      min(length_um / nullif(width_um, 0))                                        AS q_min,
+      max(length_um / nullif(width_um, 0))                                        AS q_max,
+      avg(length_um / nullif(width_um, 0))                                        AS q_mean,
       percentile_cont(0.05) WITHIN GROUP (ORDER BY length_um / nullif(width_um, 0))::double precision AS q_p05,
       percentile_cont(0.95) WITHIN GROUP (ORDER BY length_um / nullif(width_um, 0))::double precision AS q_p95
     FROM raw_meas
@@ -2608,7 +2715,13 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       obs_stats.length_mean,
       obs_stats.width_mean,
       obs_stats.q_mean,
-      obs_agg.obs_spore_summary
+      obs_agg.obs_spore_summary,
+      -- Per-observation prep summary. Mirrors the `prep_agg` shape
+      -- emitted by get_public_observation so both endpoints agree on
+      -- what an observation's full prep set contains. Scoped to
+      -- microscope images with at least one spore-typed measurement,
+      -- with the same active prep filters applied.
+      obs_prep_summary.prep_summary
     FROM spore_eligible se
     LEFT JOIN LATERAL (
       SELECT
@@ -2633,7 +2746,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       ) contrib ON contrib.n > 0
       WHERE i.observation_id = se.id
         AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
+        AND i.purged_at  IS NULL
         AND i.image_type = 'microscope'
         AND (se.filter_sample_type     IS NULL OR lower(btrim(coalesce(i.sample_type,  ''))) = se.filter_sample_type)
         AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
@@ -2693,6 +2806,86 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
         AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
         AND (se.filter_contrast_method IS NULL OR lower(btrim(coalesce(i.contrast,     ''))) = se.filter_contrast_method)
     ) obs_agg ON true
+    LEFT JOIN LATERAL (
+      -- Dedupe to one row per contributing image, then aggregate
+      -- distinct values per dimension. Membership, not weight, is
+      -- what the summary conveys: a mount used on eight images
+      -- must not outweigh one used on one image.
+      WITH contributors AS (
+        SELECT DISTINCT
+          i.id AS image_id,
+          nullif(btrim(coalesce(i.contrast, '')), '')      AS contrast,
+          nullif(btrim(coalesce(i.mount_medium, '')), '')  AS mount_medium,
+          nullif(btrim(coalesce(i.stain, '')), '')         AS stain,
+          nullif(btrim(coalesce(i.sample_type, '')), '')   AS sample_type,
+          nullif(btrim(coalesce(i.sample_source, '')), '') AS sample_source
+        FROM public.observation_images i
+        WHERE i.observation_id = se.id
+          AND i.deleted_at IS NULL
+          AND i.purged_at  IS NULL
+          AND (i.image_type IS NULL OR i.image_type = 'microscope'::text)
+          AND EXISTS (
+            SELECT 1
+            FROM public.spore_measurements m3
+            WHERE m3.image_id = i.id
+              AND (
+                m3.measurement_type IS NULL
+                OR m3.measurement_type = ''
+                OR lower(m3.measurement_type) IN ('manual', 'spore', 'spores')
+              )
+          )
+          AND (se.filter_sample_type     IS NULL OR lower(btrim(coalesce(i.sample_type,  ''))) = se.filter_sample_type)
+          AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
+          AND (se.filter_contrast_method IS NULL OR lower(btrim(coalesce(i.contrast,     ''))) = se.filter_contrast_method)
+      )
+      SELECT jsonb_build_object(
+        'contrasts',          coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT contrast AS v
+            FROM contributors
+            WHERE contrast IS NOT NULL
+              AND lower(contrast) NOT IN ('not_set', 'not set', 'unset', 'unknown')
+          ) s
+        ), '[]'::jsonb),
+        'mounts',             coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT mount_medium AS v
+            FROM contributors
+            WHERE mount_medium IS NOT NULL
+              AND lower(mount_medium) NOT IN ('not_set', 'not set', 'unset', 'unknown')
+          ) s
+        ), '[]'::jsonb),
+        'stains',             coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT stain AS v
+            FROM contributors
+            WHERE stain IS NOT NULL
+              AND lower(stain) NOT IN ('not_set', 'not set', 'unset', 'unknown')
+          ) s
+        ), '[]'::jsonb),
+        'specimenConditions', coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT lower(sample_type) AS v
+            FROM contributors
+            WHERE sample_type IS NOT NULL
+              AND lower(sample_type) IN ('fresh', 'dried')
+          ) s
+        ), '[]'::jsonb),
+        'sampleSources',      coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT lower(sample_source) AS v
+            FROM contributors
+            WHERE sample_source IS NOT NULL
+              AND lower(sample_source) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
+          ) s
+        ), '[]'::jsonb)
+      ) AS prep_summary
+    ) obs_prep_summary ON true
   ),
   first_obs AS (
     SELECT obs_genus, obs_species, obs_common_name
@@ -2818,7 +3011,14 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
           'lengthMeanUm',       om.length_mean,
           'widthMeanUm',        om.width_mean,
           'qMean',              om.q_mean,
-          'sporeSummary',       om.obs_spore_summary
+          'sporeSummary',       om.obs_spore_summary,
+          -- Aggregate prep values across all contributing microscope
+          -- images so the caller can distinguish a mixed-prep
+          -- observation from a single-prep one. jsonb_strip_nulls does
+          -- not remove empty arrays, so `prepSummary` is always present
+          -- with the five keys (each an empty array when nothing
+          -- contributed).
+          'prepSummary',        om.prep_summary
         ))
         ORDER BY om.observed_on DESC, om.observation_id DESC
       )
@@ -3785,6 +3985,78 @@ $$;
 
 
 ALTER FUNCTION "public"."set_updated_at"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."touch_observation_updated_at_from_image"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    UPDATE public.observations
+    SET updated_at = now()
+    WHERE id = NEW.observation_id;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    UPDATE public.observations
+    SET updated_at = now()
+    WHERE id IN (OLD.observation_id, NEW.observation_id);
+    RETURN NEW;
+  END IF;
+
+  UPDATE public.observations
+  SET updated_at = now()
+  WHERE id = OLD.observation_id;
+  RETURN OLD;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."touch_observation_updated_at_from_image"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."touch_observation_updated_at_from_measurement"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    UPDATE public.observations
+    SET updated_at = now()
+    WHERE id IN (
+      SELECT DISTINCT oi.observation_id
+      FROM public.observation_images AS oi
+      WHERE oi.id = NEW.image_id
+    );
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    UPDATE public.observations
+    SET updated_at = now()
+    WHERE id IN (
+      SELECT DISTINCT oi.observation_id
+      FROM public.observation_images AS oi
+      WHERE oi.id IN (OLD.image_id, NEW.image_id)
+    );
+    RETURN NEW;
+  END IF;
+
+  UPDATE public.observations
+  SET updated_at = now()
+  WHERE id IN (
+    SELECT DISTINCT oi.observation_id
+    FROM public.observation_images AS oi
+    WHERE oi.id = OLD.image_id
+  );
+  RETURN OLD;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."touch_observation_updated_at_from_measurement"() OWNER TO "postgres";
 
 SET default_tablespace = '';
 
@@ -5169,6 +5441,10 @@ CREATE OR REPLACE TRIGGER "trg_friendships_updated_at" BEFORE UPDATE ON "public"
 
 
 
+CREATE OR REPLACE TRIGGER "trg_observation_images_touch_observation_updated_at" AFTER INSERT OR DELETE OR UPDATE ON "public"."observation_images" FOR EACH ROW EXECUTE FUNCTION "public"."touch_observation_updated_at_from_image"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_observation_spore_summaries_updated_at" BEFORE UPDATE ON "public"."observation_spore_summaries" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
@@ -5182,6 +5458,10 @@ CREATE OR REPLACE TRIGGER "trg_profiles_protect_privileged_fields" BEFORE UPDATE
 
 
 CREATE OR REPLACE TRIGGER "trg_profiles_updated_at" BEFORE UPDATE ON "public"."profiles" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_spore_measurements_touch_observation_updated_at" AFTER INSERT OR DELETE OR UPDATE ON "public"."spore_measurements" FOR EACH ROW EXECUTE FUNCTION "public"."touch_observation_updated_at_from_measurement"();
 
 
 
@@ -5645,7 +5925,7 @@ CREATE POLICY "phase7_observation_images_read" ON "public"."observation_images" 
 
 
 
-CREATE POLICY "phase7_observation_images_update_own" ON "public"."observation_images" FOR UPDATE TO "authenticated" USING ((("auth"."uid"() = "user_id") AND ("deleted_at" IS NULL) AND (EXISTS ( SELECT 1
+CREATE POLICY "phase7_observation_images_update_own" ON "public"."observation_images" FOR UPDATE TO "authenticated" USING ((("auth"."uid"() = "user_id") AND (EXISTS ( SELECT 1
    FROM "public"."observations" "o"
   WHERE (("o"."id" = "observation_images"."observation_id") AND ("o"."user_id" = "auth"."uid"())))))) WITH CHECK ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
    FROM "public"."observations" "o"
@@ -5836,7 +6116,6 @@ GRANT ALL ON FUNCTION "public"."get_public_map_points"("p_species_slug" "text", 
 
 
 
-REVOKE ALL ON FUNCTION "public"."get_public_observation"("p_observation_id" bigint) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."get_public_observation"("p_observation_id" bigint) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_public_observation"("p_observation_id" bigint) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_public_observation"("p_observation_id" bigint) TO "service_role";
@@ -5973,6 +6252,18 @@ GRANT ALL ON FUNCTION "public"."search_taxa"("q" "text", "lang" "text", "lim" in
 GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "anon";
 GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_image"() TO "anon";
+GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_image"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_image"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_measurement"() TO "anon";
+GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_measurement"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_measurement"() TO "service_role";
 
 
 
