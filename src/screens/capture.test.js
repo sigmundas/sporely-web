@@ -440,6 +440,12 @@ afterEach(() => {
       stopLocationWatch()
     } catch {}
     try {
+      // Bump the preflight token so a leaked fire-and-forget
+      // _startCaptureLocationFlow from this test aborts at its next check
+      // instead of mutating the next test's state.
+      stopCamera()
+    } catch {}
+    try {
       activeRuntime.restore()
     } catch {}
   }
@@ -447,6 +453,10 @@ afterEach(() => {
   activeRuntime = null
   _resetState()
 })
+
+async function _flushAsync(rounds = 6) {
+  for (let i = 0; i < rounds; i++) await new Promise(resolve => setImmediate(resolve))
+}
 
 test('tiny camera capture dimensions reject degraded iOS fallback frames', () => {
   assert.equal(isTinyCameraCaptureDimensions(144, 192), true)
@@ -460,10 +470,9 @@ test('capture prompt is hidden at boot and only shown when live capture starts',
   initCapture()
 
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
-  // Preference is 'ask' by default; the pill must NOT read "Location not included"
-  // because that reads as "user turned it off" — reserve that copy for pref='disabled'.
-  assert.equal(runtime.getElement('gps-display').textContent, 'Location optional')
-  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'idle')
+  // One pill: any no-fix, non-searching state reads the same actionable copy.
+  assert.equal(runtime.getElement('gps-display').textContent, 'No location · Tap to fix')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'none')
 })
 
 test('preference ask with OS permission granted skips the custom prompt and persists enabled', async () => {
@@ -475,8 +484,8 @@ test('preference ask with OS permission granted skips the custom prompt and pers
   })
   initCapture()
 
-  const startPromise = startCamera()
-  await startPromise
+  await startCamera()
+  await _flushAsync()
 
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
   assert.equal(runtime.cameraCalls.watchPosition, 1)
@@ -496,9 +505,10 @@ test('preference ask with OS permission=prompt shows the sheet and only enables 
   })
   initCapture()
 
-  const startPromise = startCamera()
-  // Wait a tick so prepareNewFindLocation can reach the sheet.
-  await new Promise(resolve => setTimeout(resolve, 0))
+  // The camera opens first and never waits for the sheet.
+  await startCamera()
+  assert.equal(runtime.cameraCalls.getUserMedia >= 1, true)
+  await _flushAsync()
 
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'flex')
   assert.equal(runtime.getElement('capture-location-title').textContent, 'Add a location to this find?')
@@ -506,7 +516,7 @@ test('preference ask with OS permission=prompt shows the sheet and only enables 
   assert.equal(getLocationPreference(), 'ask')
 
   runtime.getElement('capture-location-primary-btn').click()
-  await startPromise
+  await _flushAsync()
 
   assert.equal(runtime.cameraCalls.watchPosition, 1)
   assert.equal(getLocationPreference(), 'enabled')
@@ -540,9 +550,10 @@ test('Use my location starts acquisition', async () => {
   })
   initCapture()
 
-  const startPromise = startCamera()
+  await startCamera()
+  await _flushAsync()
   runtime.getElement('capture-location-primary-btn').click()
-  await startPromise
+  await _flushAsync()
 
   assert.equal(runtime.cameraCalls.watchPosition, 1)
   assert.equal(runtime.cameraCalls.getUserMedia >= 1, true)
@@ -591,8 +602,8 @@ test('persisted enabled preference skips the explanatory prompt', async () => {
   setLocationPreference('enabled')
   initCapture()
 
-  const startPromise = startCamera()
-  await startPromise
+  await startCamera()
+  await _flushAsync()
 
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
   assert.equal(runtime.cameraCalls.watchPosition, 1)
@@ -603,16 +614,16 @@ test('persisted disabled preference skips acquisition even when OS permission is
   setLocationPreference('disabled')
   initCapture()
 
-  const startPromise = startCamera()
-  await startPromise
+  await startCamera()
+  await _flushAsync()
 
   assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
   assert.equal(runtime.cameraCalls.watchPosition, 0)
-  assert.equal(runtime.getElement('capture-gps-enable-btn').hidden, false)
-  assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
+  assert.equal(runtime.getElement('gps-display').textContent, 'No location · Tap to fix')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsAction, 'fix')
 })
 
-test('disabled preference enable starts acquisition for the current session', async () => {
+test('disabled preference: pill tap opens the sheet and Try again enables acquisition', async () => {
   let permissionState = 'denied'
   const runtime = _makeRuntime({
     geolocation: {
@@ -627,50 +638,46 @@ test('disabled preference enable starts acquisition for the current session', as
   setLocationPreference('disabled')
   initCapture()
 
-  const startPromise = startCamera()
-  await startPromise
+  await startCamera()
+  await _flushAsync()
 
-  assert.equal(runtime.getElement('capture-gps-enable-btn').hidden, false)
-  assert.equal(runtime.getElement('capture-gps-enable-btn').disabled, false)
   assert.equal(runtime.cameraCalls.watchPosition, 0)
-  assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
+  assert.equal(runtime.getElement('gps-display').textContent, 'No location · Tap to fix')
 
   permissionState = 'granted'
-  runtime.getElement('capture-gps-enable-btn').click()
-  await new Promise(resolve => setImmediate(resolve))
+  runtime.getElement('gps-pill').click()
+  await _flushAsync()
+  assert.equal(runtime.getElement('location-fix-overlay').style.display, 'flex')
+  runtime.getElement('location-fix-try-again').click()
+  await _flushAsync()
 
   assert.equal(getLocationPreference(), 'enabled')
   assert.equal(runtime.cameraCalls.watchPosition, 1)
   assert.equal(state.location.watchId, 812)
-  assert.equal(state.location.status, 'locating')
 })
-
-test('denied and unsupported states render the correct actions', async () => {
+test('denied and unsupported states show no prompt; the pill reads No location', async () => {
   const deniedRuntime = _makeRuntime({ permissionState: 'denied' })
   setLocationPreference('enabled')
   initCapture()
 
-  const deniedPromise = startCamera()
-  await new Promise(resolve => setTimeout(resolve, 0))
-  assert.equal(deniedRuntime.getElement('capture-location-title').textContent, 'Location access was denied')
-  assert.equal(deniedRuntime.getElement('capture-location-primary-title').textContent, 'Try again')
-  assert.equal(deniedRuntime.getElement('capture-location-secondary-title').textContent, 'Continue without location')
-  assert.equal(deniedRuntime.getElement('capture-location-secondary-btn').style.display, '')
+  await startCamera()
+  await _flushAsync()
+  assert.equal(deniedRuntime.getElement('capture-location-overlay').style.display, 'none')
+  assert.equal(deniedRuntime.getElement('gps-display').textContent, 'No location · Tap to fix')
+  assert.equal(deniedRuntime.getElement('gps-pill').dataset.gpsAction, 'fix')
+  assert.equal(deniedRuntime.cameraCalls.watchPosition, 0)
   stopCamera()
-  await deniedPromise
+
   const unsupportedRuntime = _makeRuntime({ hasGeolocation: false })
   setLocationPreference('enabled')
   initCapture()
 
-  const unsupportedPromise = startCamera()
-  await new Promise(resolve => setTimeout(resolve, 0))
-  assert.equal(unsupportedRuntime.getElement('capture-location-title').textContent, 'Automatic location unavailable')
-  assert.equal(unsupportedRuntime.getElement('capture-location-primary-title').textContent, 'Continue without location')
-  assert.equal(unsupportedRuntime.getElement('capture-location-secondary-btn').style.display, 'none')
+  await startCamera()
+  await _flushAsync()
+  assert.equal(unsupportedRuntime.getElement('capture-location-overlay').style.display, 'none')
+  assert.equal(unsupportedRuntime.getElement('gps-display').textContent, 'No location · Tap to fix')
   stopCamera()
-  await unsupportedPromise
 })
-
 test('OS permission denial alone never changes the Sporely preference to disabled', async () => {
   const runtime = _makeRuntime({
     geolocation: {
@@ -713,13 +720,15 @@ test('location-state events update the compact capture status', () => {
   }
   state.captureSessionLocation.requestingFreshFix = false
   runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
-  assert.equal(runtime.getElement('gps-display').textContent, 'Location ready · ±5 m')
+  assert.equal(runtime.getElement('gps-display').textContent, 'Location captured · ±5 m')
   assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'fix')
 
   state.location.preference = 'disabled'
+  state.location.fix = null
+  state.captureSessionLocation.fix = null
   runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
-  assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
-  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'disabled')
+  assert.equal(runtime.getElement('gps-display').textContent, 'No location · Tap to fix')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'none')
 })
 
 test('capture to review preserves the live location session and watch', async () => {
@@ -735,8 +744,8 @@ test('capture to review preserves the live location session and watch', async ()
   initCapture()
   setLocationPreference('enabled')
 
-  const startPromise = startCamera()
-  await startPromise
+  await startCamera()
+  await _flushAsync()
 
   assert.equal(state.location.watchId, 401)
   assert.equal(state.captureSessionLocation.sessionStartAt instanceof Date, true)
@@ -767,8 +776,8 @@ test('cancel capture stops and clears the live session', async () => {
   initCapture()
   setLocationPreference('enabled')
 
-  const startPromise = startCamera()
-  await startPromise
+  await startCamera()
+  await _flushAsync()
 
   runtime.getElement('capture-cancel-btn').click()
 
@@ -794,12 +803,12 @@ test('unrelated navigation stops and clears the live session', async () => {
   initCapture()
   setLocationPreference('enabled')
 
-  const startPromise = startCamera()
-  await startPromise
+  await startCamera()
+  await _flushAsync()
 
   state.currentScreen = 'capture'
   navigate('home')
-  await startPromise
+  await _flushAsync()
 
   assert.equal(state.currentScreen, 'home')
   assert.equal(state.captureSessionLocation.sessionStartAt, null)
@@ -830,8 +839,8 @@ test('session ending during resume ignores the late result', async () => {
   initCapture()
   setLocationPreference('enabled')
 
-  const startPromise = startCamera()
-  await startPromise
+  await startCamera()
+  await _flushAsync()
 
   runtime.document.visibilityState = 'hidden'
   runtime.document.hidden = true
@@ -935,18 +944,21 @@ test('stopping the camera resets the first-frame gate so the next session must r
   assert.equal(runtime.getElement('shutter-btn').disabled, false)
 })
 
-test('preference disabled renders "Location not included" and preference ask renders "Location optional"', () => {
+test('all no-fix states render the single No location pill copy', async () => {
   const runtime = _makeRuntime()
+  // Drain any leaked fire-and-forget location flow from earlier tests, then
+  // normalize state before asserting the idle pill.
+  await _flushAsync()
+  _resetState()
   initCapture()
-  assert.equal(runtime.getElement('gps-display').textContent, 'Location optional')
-  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'idle')
+  assert.equal(runtime.getElement('gps-display').textContent, 'No location · Tap to fix')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'none')
 
   setLocationPreference('disabled')
-  runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
-  assert.equal(runtime.getElement('gps-display').textContent, 'Location not included')
-  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'disabled')
+  initCapture()
+  assert.equal(runtime.getElement('gps-display').textContent, 'No location · Tap to fix')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'none')
 })
-
 test('shutter is disabled from the moment startCamera begins, before getUserMedia resolves', async () => {
   const gumGate = _deferred()
   const runtime = _makeRuntime({
@@ -1057,4 +1069,70 @@ test('first-frame gate falls back to the playing event when requestVideoFrameCal
   video.videoHeight = 1080
   video.dispatchEvent({ type: 'playing' })
   assert.equal(shutter.disabled, false, 'playing with dimensions unlocks the shutter')
+})
+
+test('denied state pill tap opens the sheet and the settings option opens app settings', async () => {
+  const runtime = _makeRuntime({ permissionState: 'denied' })
+  await _flushAsync()
+  _resetState()
+  const previousCapacitor = globalThis.Capacitor
+  let openSettingsCalls = 0
+  globalThis.Capacitor = {
+    Plugins: { App: { openSettings: async () => { openSettingsCalls += 1 } } },
+  }
+
+  try {
+    initCapture()
+    state.location.preference = 'enabled'
+    state.location.capability = 'supported'
+    state.location.permission = 'denied'
+    state.location.status = 'error'
+    state.location.error = { kind: 'permission-denied', message: 'denied' }
+    runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
+
+    assert.equal(runtime.getElement('gps-display').textContent, 'No location · Tap to fix')
+    assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'none')
+    assert.equal(runtime.getElement('gps-pill').dataset.gpsAction, 'fix')
+
+    runtime.getElement('gps-pill').click()
+    await _flushAsync()
+    assert.equal(runtime.getElement('location-fix-overlay').style.display, 'flex')
+
+    runtime.getElement('location-fix-settings').click()
+    await _flushAsync()
+
+    assert.equal(openSettingsCalls, 1)
+    assert.equal(runtime.cameraCalls.watchPosition, 0)
+    assert.equal(state.location.preference, 'enabled')
+    assert.equal(runtime.getElement('location-fix-overlay').style.display, 'none')
+  } finally {
+    globalThis.Capacitor = previousCapacitor
+  }
+})
+test('a captured session fix is never overwritten by later warnings', () => {
+  const runtime = _makeRuntime({ permissionState: 'granted' })
+  initCapture()
+
+  state.location.preference = 'enabled'
+  state.location.capability = 'supported'
+  state.location.permission = 'granted'
+  state.location.status = 'timeout'
+  state.location.error = { kind: 'timeout', message: 'timed out' }
+  state.location.fix = null
+  runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
+
+  assert.equal(runtime.getElement('gps-display').textContent, 'No location · Tap to fix')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'none')
+
+  // A valid capture-time fix wins over a later denied state.
+  state.captureSessionLocation.sessionStartAt = new Date()
+  state.captureSessionLocation.fix = { lat: 63.4, lon: 10.4, accuracy: 6, altitude: 2, timestamp: Date.now() }
+  state.location.permission = 'denied'
+  state.location.status = 'error'
+  state.location.error = { kind: 'permission-denied', message: 'denied' }
+  runtime.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
+
+  assert.equal(runtime.getElement('gps-display').textContent, 'Location captured · ±6 m')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'fix')
+  assert.equal(runtime.getElement('gps-pill').dataset.gpsAction, undefined)
 })

@@ -9,6 +9,7 @@ import {
   LOCATION_FIX_MAX_AGE_MS,
   beginCaptureLocationSession,
   checkLocationCapabilityAndPermission,
+  getCaptureSessionRequestToken,
   __getCaptureLocationSessionRequestTokenForTests,
   endCaptureLocationSession,
   requestFreshLocation,
@@ -972,4 +973,78 @@ test('runtime location consumers no longer reference the legacy gps alias or eve
     assert.doesNotMatch(source, /\bstartGeo\b/)
     assert.doesNotMatch(source, /sporely:gps-updated/)
   }
+})
+
+test('getCaptureSessionRequestToken returns the live token and is the only accepted override token', async () => {
+  let currentPositionCalls = 0
+  _installEnvironment({
+    geolocation: {
+      getCurrentPosition(success) {
+        currentPositionCalls += 1
+        success({
+          coords: { latitude: 63.6, longitude: 10.6, accuracy: 4, altitude: 5 },
+          timestamp: Date.now(),
+        })
+      },
+      watchPosition() { return 31 },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  endCaptureLocationSession()
+  assert.equal(getCaptureSessionRequestToken(), null)
+
+  beginCaptureLocationSession()
+  setLocationPreference('enabled')
+  const token = getCaptureSessionRequestToken()
+  assert.notEqual(token, null)
+  assert.equal(token, __getCaptureLocationSessionRequestTokenForTests())
+
+  await requestFreshLocation({ internalOverride: true, captureSessionRequestToken: token })
+  assert.equal(currentPositionCalls, 1)
+
+  // A review-layer session key must be rejected — this exact string shape
+  // silently disabled all save-time GPS requests before the Stage 1 fix.
+  await requestFreshLocation({ internalOverride: true, captureSessionRequestToken: `live:${Date.now()}` })
+  assert.equal(currentPositionCalls, 1)
+
+  endCaptureLocationSession()
+  assert.equal(getCaptureSessionRequestToken(), null)
+})
+
+test('session fix ignores fixes taken after the capture window closes', async () => {
+  let currentPositionCalls = 0
+  _installEnvironment({
+    geolocation: {
+      getCurrentPosition(success) {
+        currentPositionCalls += 1
+        success({
+          coords: { latitude: 63.9, longitude: 10.9, accuracy: 5, altitude: 1 },
+          timestamp: Date.now(),
+        })
+      },
+      clearWatch() {},
+    },
+    permissionState: 'granted',
+  })
+
+  beginCaptureLocationSession()
+  state.captureSessionLocation.captureWindowEndAt = Date.now() - 1_000
+
+  const result = await requestFreshLocation({ maximumAgeMs: 0, timeoutMs: 100 })
+
+  // The global fix still updates (maps etc.), but the session fix — the
+  // observation's location source — stays pinned to the capture window.
+  assert.equal(currentPositionCalls, 1)
+  assert.equal(result.status, 'fix')
+  assert.equal(state.location.fix.lat, 63.9)
+  assert.equal(state.captureSessionLocation.fix, null)
+
+  state.captureSessionLocation.captureWindowEndAt = Date.now() + 60_000
+  await requestFreshLocation({ maximumAgeMs: 0, timeoutMs: 100 })
+  assert.equal(state.captureSessionLocation.fix.lat, 63.9)
+
+  endCaptureLocationSession()
+  assert.equal(state.captureSessionLocation.captureWindowEndAt, null)
 })

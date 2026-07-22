@@ -24,11 +24,12 @@ import {
 import { initHome, refreshHome } from './screens/home.js'
 import { initFinds, loadFinds, requestFindsRefresh } from './screens/finds.js'
 import { initCapture } from './screens/capture.js'
-import { buildReviewGrid, initReview } from './screens/review.js'
+import { buildReviewGrid, initReview, restoreReviewDraft } from './screens/review.js'
 import { initFindDetail } from './screens/find_detail.js'
 import { initPhotoViewer } from './photo-viewer.js'
 import { initImportReview, openNativeCamera, renderSessions, restoreImportSessions } from './screens/import_review.js'
 import { clearImportSessions, loadImportSessions } from './import-store.js'
+import { loadReviewDraft } from './review-draft-store.js'
 import { initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons } from './screens/profile.js'
 import { initPeople, loadPeople } from './screens/people.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
@@ -507,7 +508,15 @@ async function bootApp(user) {
 
   runBootStep('pending-import-restore', async () => {
     const pending = await loadImportSessions()
-    if (pending.length) restoreImportSessions(pending)
+    if (pending.length) {
+      restoreImportSessions(pending)
+      return
+    }
+    // A live review draft persists camera photos that never reached the
+    // sync queue (crash/force-quit during review). The pending import wins
+    // if both exist; the review draft stays stored for the next launch.
+    const reviewDraft = await loadReviewDraft()
+    if (reviewDraft) restoreReviewDraft(reviewDraft)
   })
 }
 

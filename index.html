@@ -430,11 +430,10 @@
           <button class="camera-denied-retry" id="camera-retry-btn">Try again</button>
         </div>
 
-        <div class="gps-pill capture-gps-pill" data-gps-state="searching">
+        <div class="gps-pill capture-gps-pill" data-gps-state="searching" role="button" tabindex="0">
           <span class="gps-dot"></span>
           <span class="gps-label">Location</span>
           <span class="gps-text gps-display" id="gps-display" aria-live="polite">Acquiring…</span>
-          <button type="button" class="capture-gps-enable-btn" id="capture-gps-enable-btn" hidden>Enable</button>
         </div>
 
         <div class="capture-controls" id="capture-controls">
@@ -494,23 +493,6 @@
               <button id="location-apply-btn" class="location-apply-btn" style="display:none">Current location</button>
             </div>
           </div>
-          <div class="location-warning-hint" id="review-location-warning" hidden></div>
-          <div id="review-save-location-overlay" class="sheet-overlay" style="display:none">
-            <div class="sheet-card" id="review-save-location-sheet" role="dialog" aria-modal="true" aria-labelledby="review-save-location-title">
-              <div class="sheet-handle"></div>
-              <div class="sheet-title" id="review-save-location-title">Location is not ready</div>
-              <div class="sheet-subtitle" id="review-save-location-body">Sporely could not determine your position.</div>
-              <button type="button" class="sheet-option" id="review-save-location-try-again">
-                <span class="sheet-option-title">Try again</span>
-              </button>
-              <button type="button" class="sheet-option" id="review-save-location-manual">
-                <span class="sheet-option-title">Enter place manually</span>
-              </button>
-              <button type="button" class="sheet-option" id="review-save-location-save-without">
-                <span class="sheet-option-title">Save without coordinates</span>
-              </button>
-            </div>
-          </div>
           <div class="field-meta-row">
             <div class="field-meta-key">Lat/Lon</div>
             <div class="field-meta-val green" id="meta-coordinates">—</div>
@@ -559,8 +541,8 @@
           <button class="btn-secondary" id="review-cancel-btn">Cancel</button>
           <button class="btn-primary" id="review-save-btn">Save</button>
         </div>
-        <div class="review-gps-status">
-          <div class="gps-pill review-gps-pill" data-gps-state="searching">
+        <div class="review-gps-status" id="review-gps-status">
+          <div class="gps-pill review-gps-pill" id="review-gps-pill" data-gps-state="searching" role="button" tabindex="0">
             <span class="gps-dot"></span>
             <span class="gps-label">Location</span>
             <span class="gps-text" id="review-gps-display" aria-live="polite">No location captured</span>
@@ -908,6 +890,29 @@
         <div class="import-progress-track">
           <div class="import-progress-fill" id="import-progress-fill"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════ LOCATION FIX SHEET ═══════════════════════════ -->
+    <!-- The single reusable sheet for all location-failure interactions on the
+         capture and review screens (pill tap, save without a fix). Must live
+         at #app root: inside a .screen it is trapped in that screen's
+         z-index:1 stacking context and painted below (and made untappable by)
+         #import-progress. See PLAN.md Stage 1. -->
+    <div id="location-fix-overlay" class="sheet-overlay" style="display:none">
+      <div class="sheet-card" id="location-fix-sheet" role="dialog" aria-modal="true" aria-labelledby="location-fix-title">
+        <div class="sheet-handle"></div>
+        <div class="sheet-title" id="location-fix-title">Location is not ready</div>
+        <div class="sheet-subtitle" id="location-fix-body">Sporely could not determine your position.</div>
+        <button type="button" class="sheet-option" id="location-fix-settings">
+          <span class="sheet-option-title">Open location settings</span>
+        </button>
+        <button type="button" class="sheet-option" id="location-fix-try-again">
+          <span class="sheet-option-title">Try again</span>
+        </button>
+        <button type="button" class="sheet-option" id="location-fix-continue">
+          <span class="sheet-option-title">Continue without location</span>
+        </button>
       </div>
     </div>
 

@@ -63,15 +63,19 @@ BEGIN
   RETURNING id INTO other_obs_id;
 
   -- Real storage row: mimics an actually-uploaded microscope image.
+  -- scale_microns_per_pixel is set here so we can assert it flows
+  -- through the public image RPCs (Stage 2A landing scale-bar plumbing).
   INSERT INTO public.observation_images (
     observation_id, user_id, storage_path, image_type,
     sort_order, source_width, source_height, stored_width, stored_height,
-    contrast, mount_medium, sample_type
+    contrast, mount_medium, sample_type,
+    scale_microns_per_pixel
   )
   VALUES (
     obs_id, owner_user_id, owner_user_id::text || '/meta-real.webp', 'microscope',
     0, 4000, 3000, 800, 600,
-    'brightfield', 'water', 'fresh'
+    'brightfield', 'water', 'fresh',
+    0.25
   )
   RETURNING id INTO real_image_id;
 
@@ -81,6 +85,18 @@ BEGIN
   )
   VALUES (obs_id, owner_user_id, NULL, 'microscope')
   RETURNING id INTO meta_image_id;
+
+  -- Field image without calibration — represents the common case for
+  -- non-microscope photos. Used to assert the public image RPCs return
+  -- scaleMicronsPerPixel = NULL cleanly (rather than 0 or absent).
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type,
+    sort_order, source_width, source_height, stored_width, stored_height
+  )
+  VALUES (
+    obs_id, owner_user_id, owner_user_id::text || '/meta-field.webp', 'field',
+    1, 2000, 1500, 800, 600
+  );
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
   VALUES (real_image_id, owner_user_id, 10.0, 5.0, 'manual')
@@ -137,16 +153,23 @@ BEGIN
   END IF;
 
   -- ── search_public_observation_images: skip NULL storage_path ────────────────
+  -- Two visible rows now: the real microscope image AND the field image
+  -- fixture (added for scaleMicronsPerPixel = NULL coverage). The
+  -- metadata-only microscope row (NULL storage_path) must still be
+  -- filtered out — asserted by the imageId NOT-IN check below.
 
-  IF (SELECT count(*) FROM public.search_public_observation_images(ARRAY[obs_id])) IS DISTINCT FROM 1 THEN
-    RAISE EXCEPTION 'search_public_observation_images should return exactly one row (real storage image); got %',
+  IF (SELECT count(*) FROM public.search_public_observation_images(ARRAY[obs_id])) IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'search_public_observation_images should return two rows (real microscope + field); got %',
       (SELECT count(*) FROM public.search_public_observation_images(ARRAY[obs_id]));
   END IF;
 
-  SELECT * INTO img_row FROM public.search_public_observation_images(ARRAY[obs_id]) LIMIT 1;
+  SELECT * INTO img_row
+  FROM public.search_public_observation_images(ARRAY[obs_id])
+  WHERE "imageId" = real_image_id
+  LIMIT 1;
   IF img_row."imageId" IS DISTINCT FROM real_image_id THEN
-    RAISE EXCEPTION 'search_public_observation_images returned the wrong image id (got %, expected %)',
-      img_row."imageId", real_image_id;
+    RAISE EXCEPTION 'search_public_observation_images did not surface the real microscope row (got imageId=%)',
+      img_row."imageId";
   END IF;
 
   IF EXISTS (
@@ -171,6 +194,41 @@ BEGIN
     WHERE "imageId" = meta_image_id
   ) THEN
     RAISE EXCEPTION 'Metadata-only microscope image leaked into get_public_observation_images';
+  END IF;
+
+  -- scaleMicronsPerPixel flows through both image RPCs for the real
+  -- storage row. Fixture sets 0.25 on real_image_id; NULL on the
+  -- metadata-only row (which shouldn't appear here anyway).
+  SELECT * INTO img_row
+  FROM public.search_public_observation_images(ARRAY[obs_id])
+  WHERE "imageId" = real_image_id
+  LIMIT 1;
+  IF img_row."imageId" IS DISTINCT FROM real_image_id THEN
+    RAISE EXCEPTION 'search_public_observation_images did not return the real-storage row';
+  END IF;
+  IF img_row."scaleMicronsPerPixel" IS DISTINCT FROM 0.25::double precision THEN
+    RAISE EXCEPTION 'search_public_observation_images: expected scaleMicronsPerPixel=0.25, got %',
+      img_row."scaleMicronsPerPixel";
+  END IF;
+
+  SELECT * INTO img_row
+  FROM public.get_public_observation_images(obs_id)
+  WHERE "imageId" = real_image_id
+  LIMIT 1;
+  IF img_row."scaleMicronsPerPixel" IS DISTINCT FROM 0.25::double precision THEN
+    RAISE EXCEPTION 'get_public_observation_images: expected scaleMicronsPerPixel=0.25, got %',
+      img_row."scaleMicronsPerPixel";
+  END IF;
+
+  -- Field / uncalibrated row: RPC must return the row (it has a
+  -- storage_path so it is a legitimate public image) with
+  -- scaleMicronsPerPixel = NULL, not 0 or missing.
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.search_public_observation_images(ARRAY[obs_id])
+    WHERE "imageType" = 'field' AND "scaleMicronsPerPixel" IS NULL
+  ) THEN
+    RAISE EXCEPTION 'search_public_observation_images: field image with no calibration should return scaleMicronsPerPixel NULL';
   END IF;
 
   -- ── search_public_species: representativeThumbUrl must not use NULL row ─────

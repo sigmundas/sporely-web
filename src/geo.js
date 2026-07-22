@@ -196,6 +196,9 @@ function _sessionFixIsCurrent(fix) {
 function _captureSessionAcceptsFixTimestamp(fixTimestamp, options = {}) {
   const sessionStartMs = _currentSessionStartMs()
   if (!Number.isFinite(fixTimestamp) || !Number.isFinite(sessionStartMs)) return false
+  const captureWindowEndAt = state.captureSessionLocation.captureWindowEndAt
+  const captureWindowEndMs = captureWindowEndAt == null ? null : _finiteNumber(captureWindowEndAt)
+  if (Number.isFinite(captureWindowEndMs) && fixTimestamp > captureWindowEndMs) return false
   if (fixTimestamp >= sessionStartMs) return true
 
   const requestStartedAt = _finiteNumber(options.requestStartedAt)
@@ -894,6 +897,7 @@ export function beginCaptureLocationSession(options = {}) {
   }
   state.captureSessionLocation.fix = null
   state.captureSessionLocation.requestingFreshFix = false
+  state.captureSessionLocation.captureWindowEndAt = null
   _emitLocationStateChanged()
   return _cloneCaptureSessionLocation()
 }
@@ -972,6 +976,7 @@ export function endCaptureLocationSession() {
   state.captureSessionLocation.sessionStartAt = null
   state.captureSessionLocation.fix = null
   state.captureSessionLocation.requestingFreshFix = false
+  state.captureSessionLocation.captureWindowEndAt = null
   _emitLocationStateChanged()
   return _cloneCaptureSessionLocation()
 }
@@ -988,6 +993,14 @@ export function setLocationPreference(preference) {
   state.location.error = null
   _emitLocationStateChanged()
   return _cloneLocationState()
+}
+
+export function getCaptureSessionRequestToken() {
+  // Opaque token identifying the active live-capture session. Callers that
+  // pass internalOverride to requestFreshLocation/startLocationWatch must
+  // supply this token; review-layer session keys (e.g. 'live:<ms>') are NOT
+  // valid here and will be rejected by _captureSessionRequestIsCurrent.
+  return liveCaptureSession.active ? liveCaptureSession.requestToken : null
 }
 
 export function __getCaptureLocationSessionRequestTokenForTests() {

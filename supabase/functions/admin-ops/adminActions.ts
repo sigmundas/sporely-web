@@ -1,8 +1,9 @@
+import { DeleteObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3'
+
 const DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS = 30
 const PURGE_CANDIDATE_LIMIT = 500
 const R2_BUCKET_NAME = 'sporely-media'
 const R2_REGION = 'auto'
-const R2_SERVICE = 's3'
 
 type AdminActionContext = {
   adminClient: any
@@ -161,6 +162,23 @@ async function purgeExpiredTombstonedImages(context: AdminActionContext): Promis
     })
   }
 
+  const preflightTarget = eligibleRows
+    .flatMap(row => Array.isArray(row.delete_targets) ? row.delete_targets : [])
+    .map(value => normalizeMediaKey(value))
+    .find(Boolean)
+  if (!preflightTarget) {
+    return actionFailureResponse(500, 'missing_recorded_storage_paths', 'Eligible rows have no recorded storage paths')
+  }
+  const r2ClientResult = await prepareR2PurgeClient(context.env, preflightTarget)
+  if (!r2ClientResult.ok) {
+    return actionFailureResponse(
+      r2ClientResult.failure.status,
+      r2ClientResult.failure.code,
+      r2ClientResult.failure.message,
+      r2ClientResult.failure.details ?? null,
+    )
+  }
+
   return await withAdminActionLog({
     adminClient: context.adminClient,
     adminUser: context.adminUser,
@@ -171,9 +189,9 @@ async function purgeExpiredTombstonedImages(context: AdminActionContext): Promis
     requestPayload: context.requestBody,
     beforeSnapshot,
     run: async () => {
-      const rowResults = []
+      const rowResults: Array<Record<string, unknown>> = []
       for (const row of eligibleRows) {
-        const result = await purgeSingleTombstoneRow(context, row)
+        const result = await purgeSingleTombstoneRow(context, row, r2ClientResult.client)
         rowResults.push(result)
       }
 
@@ -968,7 +986,11 @@ function summarizeTombstoneRows(rows: Array<Record<string, unknown>>) {
   return counts
 }
 
-async function purgeSingleTombstoneRow(context: AdminActionContext, row: Record<string, unknown>) {
+async function purgeSingleTombstoneRow(
+  context: AdminActionContext,
+  row: Record<string, unknown>,
+  r2Client: R2BatchClient,
+) {
   const now = new Date().toISOString()
   const rowId = row.id
   const deleteTargets = Array.isArray(row.delete_targets) ? row.delete_targets.map(value => normalizeMediaKey(value)) : []
@@ -988,8 +1010,7 @@ async function purgeSingleTombstoneRow(context: AdminActionContext, row: Record<
   }
 
   try {
-    const client = createR2Client(context.env)
-    await client.deleteObjects(deleteTargets)
+    await r2Client.deleteObjects(deleteTargets)
   } catch (error) {
     const failure = normalizeActionFailure(error)
     await updateTombstonePurgeMetadata(context.adminClient, rowId, {
@@ -1021,12 +1042,23 @@ async function purgeSingleTombstoneRow(context: AdminActionContext, row: Record<
     }
   }
 
-  return {
+  const purgedRow = {
     ...row,
     status: 'purged',
     purged_at: now,
     purge_attempted_at: now,
     purge_error: null,
+    error: null,
+    message: 'Purged successfully',
+  }
+  const issueFlags = buildImageIssueFlags(purgedRow, false)
+
+  return {
+    ...purgedRow,
+    image_status: 'purged',
+    issue_flags: issueFlags,
+    issue_severity: buildMediaIssueSeverity(purgedRow, false),
+    issue_summary: buildIssueSummary(issueFlags),
   }
 }
 
@@ -1183,7 +1215,7 @@ function isBlank(value: unknown) {
 }
 
 function toTimestamp(value: unknown) {
-  const date = new Date(value ?? '')
+  const date = new Date(String(value ?? ''))
   const time = date.getTime()
   return Number.isFinite(time) ? time : 0
 }
@@ -1276,36 +1308,37 @@ function formatBytes(value: unknown) {
 
 function buildImageIssueFlags(row: Record<string, unknown>, forceDeleted: boolean) {
   const flags: string[] = []
+  const metadataOnlyMicroscope = isMetadataOnlyMicroscopeRow(row)
+
+  if (row?.purged_at) {
+    return ['purged']
+  }
 
   if (forceDeleted || row?.deleted_at) {
     flags.push('deleted')
-  }
-
-  if (row?.purged_at) {
-    flags.push('purged')
   }
 
   if (!isBlank(row?.purge_error)) {
     flags.push('purge_error')
   }
 
-  if (isBlank(row?.storage_path)) {
+  if (!metadataOnlyMicroscope && isBlank(row?.storage_path)) {
     flags.push('missing_storage_path')
   }
 
-  if (isBlank(row?.original_storage_path)) {
+  if (!metadataOnlyMicroscope && isBlank(row?.original_storage_path)) {
     flags.push('missing_original_storage_path')
   }
 
-  if (isBlank(row?.source_width) || isBlank(row?.source_height)) {
+  if (!metadataOnlyMicroscope && (isBlank(row?.source_width) || isBlank(row?.source_height))) {
     flags.push('missing_source_dimensions')
   }
 
-  if (isBlank(row?.stored_width) || isBlank(row?.stored_height)) {
+  if (!metadataOnlyMicroscope && (isBlank(row?.stored_width) || isBlank(row?.stored_height))) {
     flags.push('missing_stored_dimensions')
   }
 
-  if (isBlank(row?.stored_bytes)) {
+  if (!metadataOnlyMicroscope && isBlank(row?.stored_bytes)) {
     flags.push('missing_stored_bytes')
   }
 
@@ -1319,6 +1352,10 @@ function buildMediaIssueSeverity(row: Record<string, unknown>, forceDeleted: boo
 
   if (forceDeleted || row?.deleted_at) {
     return 'warning'
+  }
+
+  if (isMetadataOnlyMicroscopeRow(row)) {
+    return null
   }
 
   if (isBlank(row?.storage_path)) {
@@ -1340,6 +1377,10 @@ function buildMediaIssueSeverity(row: Record<string, unknown>, forceDeleted: boo
   }
 
   return null
+}
+
+function isMetadataOnlyMicroscopeRow(row: Record<string, unknown>) {
+  return isBlank(row?.storage_path) && normalizeText(row?.image_type) === 'microscope'
 }
 
 function buildIssueSummary(flags: string[]) {
@@ -1515,37 +1556,62 @@ function createR2Client(env: Record<string, string | undefined>) {
   })
 }
 
-class R2BatchClient {
-  config: {
-    accessKeyId: string
-    secretAccessKey: string
-    s3Endpoint: string
-    bucketName: string
+async function prepareR2PurgeClient(env: Record<string, string | undefined>, preflightTarget: string) {
+  try {
+    const client = createR2Client(env)
+    await client.assertObjectAccess(preflightTarget)
+    return { ok: true as const, client }
+  } catch (error) {
+    return {
+      ok: false as const,
+      failure: normalizeActionFailure(error),
+    }
   }
+}
+
+class R2BatchClient {
+  bucketName: string
+  client: S3Client
 
   constructor(config: { accessKeyId: string; secretAccessKey: string; s3Endpoint: string; bucketName: string }) {
-    this.config = config
+    this.bucketName = config.bucketName
+    this.client = new S3Client({
+      region: R2_REGION,
+      endpoint: config.s3Endpoint,
+      credentials: {
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+      },
+    })
+  }
+
+  async assertObjectAccess(key: string) {
+    try {
+      await this.client.send(new HeadObjectCommand({ Bucket: this.bucketName, Key: key }))
+    } catch (error) {
+      const failure = normalizeR2SdkFailure(error, 'R2 object access check failed')
+      if (failure.status === 404) return
+      throw actionError(
+        failure.status,
+        'r2_access_check_failed',
+        failure.message,
+      )
+    }
   }
 
   async deleteObjects(keys: Iterable<string>) {
     const cleaned = [...new Set([...keys].map(key => normalizeMediaKey(key)).filter(Boolean))]
     if (!cleaned.length) return
 
-    for (const batch of chunkArray(cleaned, 1000)) {
-      const xmlBody = this.buildDeleteXml(batch)
-      const payloadHash = await sha256Hex(xmlBody)
-      const response = await this.request('POST', '', {
-        query: { delete: '' },
-        body: xmlBody,
-        contentType: 'application/xml',
-        payloadHash,
-      })
-      if (!response.ok) {
-        const bodyText = await response.text().catch(() => '')
+    for (const key of cleaned) {
+      try {
+        await this.client.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: key }))
+      } catch (error) {
+        const failure = normalizeR2SdkFailure(error, 'R2 delete failed')
         throw actionError(
-          response.status,
+          failure.status,
           'r2_delete_failed',
-          `R2 delete failed: ${bodyText || response.statusText || 'Delete failed'}`,
+          failure.message,
         )
       }
     }
@@ -1562,133 +1628,37 @@ class R2BatchClient {
       }
     }
 
-    const response = await this.request('HEAD', cleaned)
     const kind = isOriginalImageKey(cleaned) ? 'original' : 'variant'
-    if (response.ok) {
-      const size = Number(response.headers.get('content-length') ?? response.headers.get('Content-Length') ?? 0)
+    try {
+      const response = await this.client.send(new HeadObjectCommand({ Bucket: this.bucketName, Key: cleaned }))
+      const size = Number(response.ContentLength ?? 0)
       return {
         ok: true as const,
-        status: response.status,
+        status: response.$metadata.httpStatusCode ?? 200,
         size: Number.isFinite(size) && size > 0 ? Math.trunc(size) : 0,
         kind,
       }
-    }
-
-    const bodyText = await response.text().catch(() => '')
-    return {
-      ok: false as const,
-      status: response.status,
-      error: `R2 head failed: ${bodyText || response.statusText || 'Head failed'}`,
-      kind,
+    } catch (error) {
+      const failure = normalizeR2SdkFailure(error, 'R2 head failed')
+      return {
+        ok: false as const,
+        status: failure.status,
+        error: failure.message,
+        kind,
+      }
     }
   }
+}
 
-  async request(
-    method: string,
-    key: string,
-    options: {
-      query?: Record<string, string>
-      body?: BodyInit | null
-      contentType?: string
-      payloadHash?: string
-    } = {},
-  ) {
-    const normalizedKey = normalizeMediaKey(key)
-    const canonicalUri = this.canonicalUri(normalizedKey)
-    const canonicalQuery = this.canonicalQuery(options.query ?? {})
-    const bodyBytes = await toUint8Array(options.body)
-    const payloadHash = options.payloadHash || (await sha256Hex(bodyBytes))
-    const amzDate = toAmzDate(new Date())
-    const dateStamp = amzDate.slice(0, 8)
-    const endpoint = new URL(this.config.s3Endpoint)
-    const headers: Record<string, string> = {
-      host: endpoint.host,
-      'x-amz-content-sha256': payloadHash,
-      'x-amz-date': amzDate,
-    }
-    if (options.contentType) {
-      headers['content-type'] = options.contentType
-    }
-
-    const signedHeaders = Object.keys(headers).sort()
-    const canonicalHeaders = signedHeaders.map(name => `${name}:${normalizeHeaderValue(headers[name])}\n`).join('')
-    const canonicalRequest = [
-      method.toUpperCase(),
-      canonicalUri,
-      canonicalQuery,
-      canonicalHeaders,
-      signedHeaders.join(';'),
-      payloadHash,
-    ].join('\n')
-
-    const credentialScope = `${dateStamp}/${R2_REGION}/${R2_SERVICE}/aws4_request`
-    const stringToSign = [
-      'AWS4-HMAC-SHA256',
-      amzDate,
-      credentialScope,
-      await sha256Hex(canonicalRequest),
-    ].join('\n')
-
-    const signature = await this.signature(dateStamp, stringToSign)
-    const authorization = [
-      'AWS4-HMAC-SHA256',
-      `Credential=${this.config.accessKeyId}/${credentialScope}`,
-      `SignedHeaders=${signedHeaders.join(';')}`,
-      `Signature=${signature}`,
-    ].join(' ')
-
-    const requestHeaders = new Headers()
-    requestHeaders.set('Authorization', authorization)
-    requestHeaders.set('x-amz-content-sha256', payloadHash)
-    requestHeaders.set('x-amz-date', amzDate)
-    if (options.contentType) {
-      requestHeaders.set('Content-Type', options.contentType)
-    }
-
-    const url = new URL(this.config.s3Endpoint)
-    url.pathname = canonicalUri
-    url.search = canonicalQuery ? `?${canonicalQuery}` : ''
-
-    return fetch(url.toString(), {
-      method: method.toUpperCase(),
-      headers: requestHeaders,
-      body: bodyBytes.length ? bodyBytes : null,
-    })
-  }
-
-  canonicalUri(key: string) {
-    const segments = [this.config.bucketName]
-    if (key) {
-      segments.push(...key.split('/').filter(Boolean))
-    }
-    return `/${segments.map(segment => encodeURIComponent(segment).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)).join('/')}`
-  }
-
-  canonicalQuery(query: Record<string, string>) {
-    const items = Object.entries(query).map(([name, value]) => [
-      encodeURIComponent(name).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`),
-      encodeURIComponent(value).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`),
-    ])
-    items.sort(([leftName, leftValue], [rightName, rightValue]) => {
-      if (leftName !== rightName) return leftName.localeCompare(rightName)
-      return leftValue.localeCompare(rightValue)
-    })
-    return items.map(([name, value]) => `${name}=${value}`).join('&')
-  }
-
-  buildDeleteXml(keys: string[]) {
-    const xmlKeys = keys
-      .map(key => `<Object><Key>${escapeXml(key)}</Key></Object>`)
-      .join('')
-    return `<?xml version="1.0" encoding="UTF-8"?><Delete>${xmlKeys}</Delete>`
-  }
-
-  async signature(dateStamp: string, stringToSign: string) {
-    const kDate = await hmac(`AWS4${this.config.secretAccessKey}`, dateStamp)
-    const kRegion = await hmacBytes(kDate, R2_REGION)
-    const kService = await hmacBytes(kRegion, R2_SERVICE)
-    const kSigning = await hmacBytes(kService, 'aws4_request')
-    return toHex(await hmacBytes(kSigning, stringToSign))
+function normalizeR2SdkFailure(error: unknown, fallback: string) {
+  const failure = error && typeof error === 'object' ? error as Record<string, any> : {}
+  const status = Number(failure.$metadata?.httpStatusCode ?? failure.statusCode ?? 500)
+  const code = normalizeText(failure.Code ?? failure.code ?? failure.name)
+  const detail = normalizeText(failure.message)
+  const suffix = [code, detail].filter(Boolean).join(': ')
+  return {
+    status: Number.isInteger(status) ? status : 500,
+    message: `${fallback}${status ? ` (${status})` : ''}${suffix ? `: ${suffix}` : ''}`.slice(0, 500),
   }
 }
 
@@ -1746,86 +1716,9 @@ function getStatus(error: unknown) {
   return null
 }
 
-async function toUint8Array(body: BodyInit | null | undefined) {
-  if (body === null || body === undefined) return new Uint8Array()
-  if (typeof body === 'string') return new TextEncoder().encode(body)
-  if (body instanceof Uint8Array) return body
-  if (body instanceof ArrayBuffer) return new Uint8Array(body)
-  if (ArrayBuffer.isView(body)) {
-    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength)
-  }
-  if (body instanceof Blob) {
-    return new Uint8Array(await body.arrayBuffer())
-  }
-  return new TextEncoder().encode(String(body))
-}
-
-async function sha256Hex(input: string | Uint8Array) {
-  const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
-  return toHex(new Uint8Array(digest))
-}
-
-async function hmac(secret: string, message: string) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  )
-  return new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message)))
-}
-
-async function hmacBytes(secretBytes: Uint8Array, message: string) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    secretBytes,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  )
-  return new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message)))
-}
-
-function toHex(bytes: Uint8Array) {
-  return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('')
-}
-
-function toAmzDate(date: Date) {
-  const year = date.getUTCFullYear()
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
-  const day = String(date.getUTCDate()).padStart(2, '0')
-  const hours = String(date.getUTCHours()).padStart(2, '0')
-  const minutes = String(date.getUTCMinutes()).padStart(2, '0')
-  const seconds = String(date.getUTCSeconds()).padStart(2, '0')
-  return `${year}${month}${day}T${hours}${minutes}${seconds}Z`
-}
-
-function normalizeHeaderValue(value: string) {
-  return String(value || '').trim().replace(/\s+/g, ' ')
-}
-
-function escapeXml(value: string) {
-  return String(value || '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;')
-}
-
 function cleanJson(value: unknown) {
   if (value === undefined) return null
   return JSON.parse(JSON.stringify(value))
-}
-
-function chunkArray<T>(values: T[], size: number) {
-  const chunks: T[][] = []
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size))
-  }
-  return chunks
 }
 
 function toDate(value: unknown) {

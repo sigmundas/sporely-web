@@ -22,7 +22,7 @@ import {
 } from '../ai-identification.js'
 import { getIdentifyNoMatchMessage } from '../identify.js'
 import { loadInaturalistSession } from '../inaturalist.js'
-import { initLocationField, openLocationSuggestions, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
+import { initLocationField, startLocationLookup, getLocationName, resetLocationState } from '../location.js'
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
@@ -38,11 +38,14 @@ import { getLocationLookup } from '../location.js'
 import { lookupCoordinateKey } from '../location-lookup.js'
 import {
   endCaptureLocationSession,
+  getCaptureSessionRequestToken,
   LOCATION_STATE_CHANGED_EVENT,
   requestFreshLocation,
   setLocationPreference,
-  startLocationWatch,
+  stopLocationWatch,
 } from '../geo.js'
+import { NO_LOCATION_PILL_TEXT, openLocationSettingsOrExplain } from '../location-settings.js'
+import { hideLocationFixSheet, initLocationFixSheet, showLocationFixSheet } from '../location-fix-sheet.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
 import {
   isBlob,
@@ -54,6 +57,7 @@ import {
   createDefaultObservationDraft,
   createDefaultObservationPayload,
 } from '../observation-defaults.js'
+import { clearReviewDraft, saveReviewDraft, updateReviewDraftFields } from '../review-draft-store.js'
 import { normalizeObservationGeography } from '../observation-geography.js'
 
 const reviewAiState = {
@@ -75,18 +79,27 @@ const reviewAiState = {
 
 let reviewLocationStateListenerWindow = null
 let reviewLocationStateListener = null
-let reviewLocationWarningDismissedSessionKey = null
 let reviewLocationLastLookupKey = ''
-let reviewSaveLocationSheetResolver = null
 let reviewSaveLocationSessionBypassKey = null
 let reviewSaveInFlight = false
+
+// The observation location is pinned to capture time: fixes taken more than
+// this long after the last photo are not used for the session fix, and
+// save-time acquisition stops asking automatically once the window closes.
+const CAPTURE_LOCK_GRACE_MS = 90_000
+const CAPTURE_GPS_SPREAD_WARN_METERS = 200
+let reviewCaptureWindowOverrideKey = null
+let reviewGpsSpreadWarnedKey = null
+
+const REVIEW_DRAFT_FIELD_SYNC_DELAY_MS = 600
+let reviewDraftCheckpointKey = ''
+let reviewDraftFieldSyncTimer = null
 
 const reviewDefaultDependencies = {
   enqueueObservation,
   refreshHome,
   openFinds,
   requestFreshLocation,
-  openLocationSuggestions,
 }
 
 let reviewTestDependencies = null
@@ -95,7 +108,8 @@ export function __setReviewTestHooks(overrides = null) {
   reviewTestDependencies = overrides && typeof overrides === 'object' ? { ...overrides } : null
   if (!reviewTestDependencies) {
     reviewSaveInFlight = false
-    _hideReviewSaveLocationSheet(null)
+    _clearCaptureLockSessionState()
+    hideLocationFixSheet(null)
   }
 }
 
@@ -370,24 +384,37 @@ export function initReview() {
     reviewLocationStateListener = () => {
       if (state.currentScreen !== 'review') return
       _syncReviewLocationStateUi()
+      _stopWatchIfCaptureWindowClosed()
     }
     currentWindow.addEventListener(LOCATION_STATE_CHANGED_EVENT, reviewLocationStateListener)
   }
 
+  const reviewGpsPill = document.getElementById('review-gps-pill')
+  if (reviewGpsPill && !reviewGpsPill._gpsActionWired) {
+    reviewGpsPill._gpsActionWired = true
+    reviewGpsPill.addEventListener('click', () => {
+      void _handleReviewGpsPillTap().catch(error => {
+        console.warn('GPS pill action failed:', error)
+      })
+    })
+  }
   document.getElementById('review-close')?.addEventListener('click', cancelReview)
   document.getElementById('review-cancel-btn')?.addEventListener('click', cancelReview)
   document.getElementById('review-save-btn')?.addEventListener('click', saveObservationBatch)
-  _hideReviewSaveLocationSheet(null)
-  _wireReviewSaveLocationSheet()
+  hideLocationFixSheet(null)
+  initLocationFixSheet()
   document.getElementById('review-habitat')?.addEventListener('input', event => {
     state.captureDraft.habitat = event.target.value
+    _scheduleReviewDraftFieldSync()
   })
   document.getElementById('review-notes')?.addEventListener('input', event => {
     state.captureDraft.notes = event.target.value
+    _scheduleReviewDraftFieldSync()
   })
   document.getElementById('review-uncertain')?.addEventListener('change', event => {
     state.captureDraft.uncertain = event.target.checked
     buildReviewGrid()
+    _scheduleReviewDraftFieldSync()
   })
   document.querySelectorAll('input[name="review-vis"]').forEach(radio => {
     radio.addEventListener('change', event => {
@@ -400,17 +427,20 @@ export function initReview() {
         }
       }
       _updateReviewObscureHint()
+      _scheduleReviewDraftFieldSync()
     })
   })
   const draftToggle = document.getElementById('review-draft')
   if (draftToggle) {
     draftToggle.addEventListener('change', event => {
       state.captureDraft.is_draft = event.target.checked
+      _scheduleReviewDraftFieldSync()
     })
   }
   document.querySelectorAll('input[name="review-location-precision"]').forEach(radio => {
     radio.addEventListener('change', event => {
       if (event.target.checked) state.captureDraft.location_precision = event.target.value
+      _scheduleReviewDraftFieldSync()
     })
   })
 
@@ -419,6 +449,7 @@ export function initReview() {
     reviewObscured.addEventListener('change', event => {
       state.captureDraft.location_precision = event.target.checked ? 'fuzzed' : 'exact'
       _updateReviewObscureHint()
+      _scheduleReviewDraftFieldSync()
     })
   }
 
@@ -428,7 +459,8 @@ export function initReview() {
 export function openImportedReview(session) {
   resetLocationState()
   resetReviewAiState()
-  _clearReviewLocationWarningSuppression()
+  _clearCaptureLockSessionState()
+  state.captureSessionLocation.captureWindowEndAt = null
   reviewLocationLastLookupKey = ''
   Object.assign(reviewAiState, _buildImportedReviewAiState(session))
   const gpsAltitude = _firstFiniteNumber(
@@ -482,6 +514,32 @@ export function openImportedReview(session) {
   state.captureSessionLocation.requestingFreshFix = false
   _hydrateImportedReviewMetadata(session)
   navigate('review')
+}
+
+export function restoreReviewDraft(draft) {
+  if (!draft?.photos?.length) return false
+  resetLocationState()
+  resetReviewAiState()
+  _clearReviewSaveLocationSuppression()
+  _clearCaptureLockSessionState()
+  reviewLocationLastLookupKey = ''
+  state.reviewContext = null
+  state.capturedPhotos = draft.photos
+  state.batchCount = draft.photos.length
+  state.sessionStart = draft.sessionStartAt != null ? new Date(draft.sessionStartAt) : new Date()
+  state.captureSessionLocation.sessionStartAt = state.sessionStart
+  state.captureSessionLocation.fix = draft.sessionFix ? { ...draft.sessionFix } : null
+  state.captureSessionLocation.captureWindowEndAt = draft.captureWindowEndAt ?? null
+  state.captureSessionLocation.requestingFreshFix = false
+  state.captureDraft = createDefaultObservationDraft(draft.captureDraft || {})
+  const locationInput = document.getElementById('location-name-input')
+  if (locationInput && draft.locationName) locationInput.value = draft.locationName
+  // The restored session matches the persisted draft; don't rewrite it until
+  // something actually changes.
+  reviewDraftCheckpointKey = ''
+  navigate('review')
+  showToast('Restored unsaved find')
+  return true
 }
 
 function _metadataGps(metadataSession) {
@@ -607,8 +665,141 @@ function _reviewObservationGeography() {
   return normalizeObservationGeography(_reviewLocationLookup())
 }
 
+function _photoTsMs(photo) {
+  const ts = photo?.ts
+  const ms = ts instanceof Date ? ts.getTime() : Number(ts)
+  return Number.isFinite(ms) ? ms : null
+}
+
+function _isCaptureWindowOverridden() {
+  const sessionKey = _currentReviewSessionKey()
+  return !!sessionKey && reviewCaptureWindowOverrideKey === sessionKey
+}
+
+function _overrideCaptureWindowForSession() {
+  const sessionKey = _currentReviewSessionKey()
+  if (sessionKey) reviewCaptureWindowOverrideKey = sessionKey
+  state.captureSessionLocation.captureWindowEndAt = null
+}
+
+function _clearCaptureLockSessionState() {
+  reviewCaptureWindowOverrideKey = null
+  reviewGpsSpreadWarnedKey = null
+}
+
+function _reviewDraftSnapshot() {
+  return {
+    photos: state.capturedPhotos,
+    sessionStartAt: state.captureSessionLocation.sessionStartAt || state.sessionStart,
+    captureWindowEndAt: state.captureSessionLocation.captureWindowEndAt,
+    sessionFix: state.captureSessionLocation.fix,
+    captureDraft: { ...state.captureDraft },
+    locationName: getLocationName() || '',
+  }
+}
+
+function _checkpointReviewDraft() {
+  if (_isImportedReview()) return
+  const photos = state.capturedPhotos
+  if (!photos.length) return
+  const key = [
+    _currentReviewSessionKey() || '',
+    photos.length,
+    ...photos.map(photo => `${_photoTsMs(photo)}:${photo.aiCropIsCustom ? JSON.stringify(photo.aiCropRect) : ''}`),
+  ].join('|')
+  if (key === reviewDraftCheckpointKey) return
+  reviewDraftCheckpointKey = key
+  void saveReviewDraft(_reviewDraftSnapshot())
+}
+
+function _scheduleReviewDraftFieldSync() {
+  if (_isImportedReview() || !state.capturedPhotos.length) return
+  if (reviewDraftFieldSyncTimer != null) clearTimeout(reviewDraftFieldSyncTimer)
+  reviewDraftFieldSyncTimer = setTimeout(() => {
+    reviewDraftFieldSyncTimer = null
+    void updateReviewDraftFields({
+      captureDraft: { ...state.captureDraft },
+      locationName: getLocationName() || '',
+    })
+  }, REVIEW_DRAFT_FIELD_SYNC_DELAY_MS)
+}
+
+function _discardReviewDraft() {
+  reviewDraftCheckpointKey = ''
+  if (reviewDraftFieldSyncTimer != null) {
+    clearTimeout(reviewDraftFieldSyncTimer)
+    reviewDraftFieldSyncTimer = null
+  }
+  void clearReviewDraft()
+}
+
+function _refreshCaptureLockWindow() {
+  if (_isImportedReview()) return
+  if (_isCaptureWindowOverridden()) return
+  const tsValues = state.capturedPhotos.map(_photoTsMs).filter(Number.isFinite)
+  if (!tsValues.length) return
+  state.captureSessionLocation.captureWindowEndAt = Math.max(...tsValues) + CAPTURE_LOCK_GRACE_MS
+}
+
+function _isCaptureLockWindowOpen() {
+  const endAt = state.captureSessionLocation.captureWindowEndAt
+  if (endAt == null || !Number.isFinite(Number(endAt))) return true
+  return Date.now() <= Number(endAt)
+}
+
+function _stopWatchIfCaptureWindowClosed() {
+  if (_isImportedReview()) return
+  if (state.location.watchId == null) return
+  if (_isCaptureLockWindowOpen()) return
+  stopLocationWatch()
+}
+
+function _warnOnReviewGpsSpread(photosWithGps) {
+  if (photosWithGps.length < 2) return
+  const sessionKey = _currentReviewSessionKey()
+  if (!sessionKey || reviewGpsSpreadWarnedKey === sessionKey) return
+  const lats = photosWithGps.map(photo => photo.gps.lat)
+  const lons = photosWithGps.map(photo => photo.gps.lon)
+  const midLatRad = ((Math.min(...lats) + Math.max(...lats)) / 2) * (Math.PI / 180)
+  const latSpreadM = (Math.max(...lats) - Math.min(...lats)) * 111_320
+  const lonSpreadM = (Math.max(...lons) - Math.min(...lons)) * 111_320 * Math.cos(midLatRad)
+  if (Math.max(latSpreadM, lonSpreadM) <= CAPTURE_GPS_SPREAD_WARN_METERS) return
+  reviewGpsSpreadWarnedKey = sessionKey
+  showToast(`Photo locations are more than ${CAPTURE_GPS_SPREAD_WARN_METERS} m apart — using the first photo's position.`)
+}
+
+function _leadReviewPhotoGps() {
+  const photosWithGps = state.capturedPhotos.filter(photo =>
+    photo?.gps && isUsableCoordinate(photo.gps.lat, photo.gps.lon),
+  )
+  if (!photosWithGps.length) return null
+  _warnOnReviewGpsSpread(photosWithGps)
+  return photosWithGps[0].gps
+}
+
+function _preferMoreAccurateGps(preferred, other) {
+  if (!preferred) return other
+  if (!other) return preferred
+  const preferredAccuracy = Number(preferred.accuracy)
+  const otherAccuracy = Number(other.accuracy)
+  if (Number.isFinite(preferredAccuracy) && Number.isFinite(otherAccuracy)) {
+    return otherAccuracy < preferredAccuracy ? other : preferred
+  }
+  if (Number.isFinite(preferredAccuracy)) return preferred
+  if (Number.isFinite(otherAccuracy)) return other
+  return preferred
+}
+
+function _liveReviewCanonicalGps() {
+  // Both candidates are capture-time correct: the session fix is
+  // window-restricted in geo.js, and per-photo GPS (EXIF or the at-shutter
+  // snapshot) is taken at capture. Prefer whichever is more accurate,
+  // tie-breaking on the session fix.
+  return _preferMoreAccurateGps(state.captureSessionLocation.fix, _leadReviewPhotoGps())
+}
+
 function _currentReviewGps() {
-  return _cloneReviewGps(_isImportedReview() ? state.reviewContext?.gps : state.captureSessionLocation.fix)
+  return _cloneReviewGps(_isImportedReview() ? state.reviewContext?.gps : _liveReviewCanonicalGps())
 }
 
 function _currentReviewNativeCameraGps() {
@@ -643,20 +834,6 @@ function _currentReviewSessionKey() {
   return Number.isFinite(sessionStartAt) ? `live:${sessionStartAt}` : null
 }
 
-function _isReviewLocationWarningSuppressed() {
-  const sessionKey = _currentReviewSessionKey()
-  return !!sessionKey && reviewLocationWarningDismissedSessionKey === sessionKey
-}
-
-function _dismissReviewLocationWarningForSession() {
-  const sessionKey = _currentReviewSessionKey()
-  if (sessionKey) reviewLocationWarningDismissedSessionKey = sessionKey
-}
-
-function _clearReviewLocationWarningSuppression() {
-  reviewLocationWarningDismissedSessionKey = null
-}
-
 function _currentReviewSaveSessionKey() {
   return _currentReviewSessionKey()
 }
@@ -675,143 +852,59 @@ function _clearReviewSaveLocationSuppression() {
   reviewSaveLocationSessionBypassKey = null
 }
 
-function _focusReviewLocationInput() {
-  const locationInput = document.getElementById('location-name-input')
-  if (!locationInput) return
-  try {
-    locationInput.focus({ preventScroll: true })
-  } catch {
-    locationInput.focus()
-  }
-  _reviewDependency('openLocationSuggestions')()
-}
-
-function _syncReviewSaveLocationSheetContent() {
-  const overlay = document.getElementById('review-save-location-overlay')
-  if (!overlay) return false
-
-  const title = document.getElementById('review-save-location-title')
-  const body = document.getElementById('review-save-location-body')
-  const retryBtn = document.getElementById('review-save-location-try-again')
-  const manualBtn = document.getElementById('review-save-location-manual')
-  const saveWithoutBtn = document.getElementById('review-save-location-save-without')
-
-  if (title) title.textContent = 'Location is not ready'
-  if (body) body.textContent = 'Sporely could not determine your position.'
-  if (retryBtn) retryBtn.textContent = 'Try again'
-  if (manualBtn) manualBtn.textContent = 'Enter place manually'
-  if (saveWithoutBtn) saveWithoutBtn.textContent = 'Save without coordinates'
-  return true
-}
-
-function _showReviewSaveLocationSheet() {
-  const overlay = document.getElementById('review-save-location-overlay')
-  if (!overlay || !_syncReviewSaveLocationSheetContent()) {
-    return Promise.resolve('save-without')
-  }
-
-  overlay.style.display = 'flex'
-  return new Promise(resolve => {
-    reviewSaveLocationSheetResolver = resolve
-  })
-}
-
-function _hideReviewSaveLocationSheet(result = null) {
-  const overlay = document.getElementById('review-save-location-overlay')
-  if (overlay) overlay.style.display = 'none'
-  const resolve = reviewSaveLocationSheetResolver
-  reviewSaveLocationSheetResolver = null
-  if (typeof resolve === 'function') resolve(result)
-}
-
-function _resolveReviewSaveLocationSheet(result = null) {
-  _hideReviewSaveLocationSheet(result)
-}
-
-function _wireReviewSaveLocationSheet() {
-  const overlay = document.getElementById('review-save-location-overlay')
-  if (!overlay || overlay._wired) return
-  overlay._wired = true
-
-  document.getElementById('review-save-location-try-again')?.addEventListener('click', event => {
-    event.preventDefault()
-    _resolveReviewSaveLocationSheet('retry')
-  })
-  document.getElementById('review-save-location-manual')?.addEventListener('click', event => {
-    event.preventDefault()
-    _resolveReviewSaveLocationSheet('manual')
-  })
-  document.getElementById('review-save-location-save-without')?.addEventListener('click', event => {
-    event.preventDefault()
-    _resolveReviewSaveLocationSheet('save-without')
-  })
-}
-
-function _canAcquireReviewSaveLocation() {
-  if (_isImportedReview()) return false
-  if (_isReviewSaveLocationSuppressed()) return false
-  if (state.location.preference !== 'enabled') return false
-  if (state.location.capability === 'unsupported' || state.location.error?.kind === 'unsupported') return false
-  if (state.location.permission === 'denied' || state.location.error?.kind === 'permission-denied') return false
-  return true
-}
-
 function _canonicalReviewSaveGps() {
-  return _cloneReviewGps(_isImportedReview() ? state.reviewContext?.gps : state.captureSessionLocation.fix)
-}
-
-function _canRequestReviewSaveFreshLocation(sessionToken) {
-  if (state.currentScreen !== 'review') return false
-  if (_isImportedReview()) return false
-  if (_isReviewSaveLocationSuppressed()) return false
-  if (state.location.preference !== 'enabled') return false
-  return _currentReviewSaveSessionKey() === sessionToken
+  return _currentReviewGps()
 }
 
 async function _requestReviewSaveLocation() {
+  // One short explicit location request, only ever triggered by the sheet's
+  // "Try again". The tap itself is consent: opt the preference in if needed
+  // and reopen the capture window for this session.
+  if (state.currentScreen !== 'review' || _isImportedReview()) return null
   const sessionToken = _currentReviewSaveSessionKey()
-  if (!_canRequestReviewSaveFreshLocation(sessionToken)) return null
+  if (!sessionToken) return null
+  if (state.location.preference !== 'enabled') setLocationPreference('enabled')
+  _overrideCaptureWindowForSession()
   await _reviewDependency('requestFreshLocation')({
     maxAgeMs: 30_000,
-    timeoutMs: 10_000,
+    timeoutMs: 8_000,
     enableHighAccuracy: true,
     internalOverride: true,
-    captureSessionRequestToken: sessionToken,
+    // geo.js validates this against its own numeric session counter; the
+    // review session key ('live:<ms>') only guards against session changes.
+    captureSessionRequestToken: getCaptureSessionRequestToken(),
   })
   if (state.currentScreen !== 'review') return null
+  if (_currentReviewSaveSessionKey() !== sessionToken) return null
   return _canonicalReviewSaveGps()
 }
 
 async function _resolveReviewSaveLocation() {
   while (true) {
-    if (state.currentScreen !== 'review') {
-      return { action: 'abort' }
-    }
-    if (_isImportedReview()) {
-      return { action: 'proceed', gps: _canonicalReviewSaveGps() }
-    }
-    if (state.location.preference === 'disabled') {
-      return { action: 'proceed', gps: null }
-    }
+    if (state.currentScreen !== 'review') return { action: 'abort' }
+    if (_isImportedReview()) return { action: 'proceed', gps: _canonicalReviewSaveGps() }
     const currentGps = _canonicalReviewSaveGps()
     if (currentGps) return { action: 'proceed', gps: currentGps }
-    if (_isReviewSaveLocationSuppressed()) {
+    if (state.location.preference === 'disabled' || _isReviewSaveLocationSuppressed()) {
       return { action: 'proceed', gps: null }
     }
-    if (_canAcquireReviewSaveLocation()) {
-      const freshGps = await _requestReviewSaveLocation()
-      if (freshGps) return { action: 'proceed', gps: freshGps }
-    }
-    const decision = await _showReviewSaveLocationSheet()
-    if (decision === 'manual') {
-      _focusReviewLocationInput()
-      return { action: 'manual' }
-    }
-    if (decision === 'save-without') {
+    // No locked location: show the sheet immediately — never sit through a
+    // GPS timeout the user did not ask for. The progress overlay paints above
+    // the whole screen and would swallow the sheet's taps; hide it first.
+    _hideProgress()
+    const decision = await showLocationFixSheet()
+    if (decision === 'continue') {
       _setReviewSaveLocationSuppressed()
       return { action: 'proceed', gps: _canonicalReviewSaveGps() }
     }
+    if (decision === 'settings') {
+      void openLocationSettingsOrExplain()
+      return { action: 'abort' }
+    }
     if (decision !== 'retry') return { action: 'abort' }
+    _setProgress(0, 1, 'Finding location…')
+    const freshGps = await _requestReviewSaveLocation()
+    if (freshGps) return { action: 'proceed', gps: freshGps }
   }
 }
 
@@ -863,168 +956,70 @@ export function _buildReviewObservationPayload() {
   })
 }
 
-function _supportsOpenLocationSettings() {
-  const app = globalThis.Capacitor?.Plugins?.App || globalThis.Capacitor?.App || null
-  return typeof app?.openSettings === 'function' ? app : null
-}
-
-async function _openReviewLocationSettings() {
-  const app = _supportsOpenLocationSettings()
-  if (!app) return false
-  try {
-    await app.openSettings.call(app)
-    return true
-  } catch (error) {
-    console.warn('Unable to open location settings:', error)
-    return false
-  }
-}
-
-async function _requestReviewLocationRetry() {
-  const sessionToken = _currentReviewSessionKey()
-  if (!_canRequestReviewSaveFreshLocation(sessionToken)) return
-  await requestFreshLocation({
-    maxAgeMs: 0,
-    timeoutMs: 10_000,
-    enableHighAccuracy: true,
-    internalOverride: true,
-    captureSessionRequestToken: sessionToken,
-  })
-  if (state.currentScreen !== 'review' || _isImportedReview()) return
-  if (state.location.preference !== 'enabled') return
-  await startLocationWatch({
-    requestFreshFix: false,
-    maxAgeMs: 0,
-    enableHighAccuracy: true,
-    internalOverride: true,
-  })
-}
-
-function _syncReviewLocationWarning() {
-  const locationWarningEl = document.getElementById('review-location-warning')
-  if (!locationWarningEl) return
-
-  const warning = _reviewLocationWarningState()
-
-  if (!warning) {
-    locationWarningEl.hidden = true
-    locationWarningEl.innerHTML = ''
-    delete locationWarningEl.dataset.locationState
+function _syncReviewGpsStatus() {
+  const statusHost = document.getElementById('review-gps-status')
+  if (reviewSaveInFlight) {
+    // Once Save is pressed, the progress text and the fallback location
+    // sheet are the only location feedback; the pill must not flip to a
+    // warning mid-save.
+    if (statusHost) statusHost.style.display = 'none'
     return
   }
-
-  if (warning.kind === 'disabled') {
-    locationWarningEl.hidden = false
-    locationWarningEl.dataset.locationState = 'disabled'
-    locationWarningEl.innerHTML = `
-      <div class="review-location-warning-title">${warning.title}</div>
-      <div class="review-location-warning-actions">
-        <button type="button" class="btn-secondary" data-review-location-action="enable">Enable</button>
-      </div>
-    `
-  } else {
-    const openSettings = _supportsOpenLocationSettings()
-    const settingsButton = openSettings
-      ? '<button type="button" class="btn-secondary" data-review-location-action="open-settings">Open settings</button>'
-      : ''
-    const tryAgainButton = warning.showTryAgain
-      ? '<button type="button" class="btn-secondary" data-review-location-action="try-again">Try again</button>'
-      : ''
-    locationWarningEl.hidden = false
-    locationWarningEl.dataset.locationState = warning.kind
-    locationWarningEl.innerHTML = `
-      <div class="review-location-warning-header">
-        <div class="review-location-warning-title">${warning.title}</div>
-        <button type="button" class="review-location-warning-dismiss" aria-label="Dismiss" data-review-location-action="dismiss">×</button>
-      </div>
-      <div class="review-location-warning-body">${warning.body}</div>
-      <div class="review-location-warning-actions">
-        ${tryAgainButton}
-        ${settingsButton}
-        <button type="button" class="btn-secondary" data-review-location-action="continue-without-location">Continue without location</button>
-        <button type="button" class="btn-secondary" data-review-location-action="dont-use-location">Don’t use location for future finds</button>
-      </div>
-    `
-  }
-
-  locationWarningEl.querySelectorAll('[data-review-location-action]').forEach(button => {
-    if (button._reviewLocationActionWired) return
-    button._reviewLocationActionWired = true
-    button.addEventListener('click', async event => {
-      event.preventDefault()
-      const action = button.dataset.reviewLocationAction
-      if (action === 'dismiss' || action === 'continue-without-location') {
-        _dismissReviewLocationWarningForSession()
-        _syncReviewLocationWarning()
-        return
-      }
-      if (action === 'dont-use-location') {
-        _dismissReviewLocationWarningForSession()
-        setLocationPreference('disabled')
-        _syncReviewLocationWarning()
-        return
-      }
-      if (action === 'enable') {
-        _clearReviewLocationWarningSuppression()
-        setLocationPreference('enabled')
-        await _requestReviewLocationRetry()
-        buildReviewGrid()
-        return
-      }
-      if (action === 'open-settings') {
-        await _openReviewLocationSettings()
-        return
-      }
-      if (action === 'try-again') {
-        _clearReviewLocationWarningSuppression()
-        await _requestReviewLocationRetry()
-        buildReviewGrid()
-      }
-    })
-  })
-}
-
-function _syncReviewGpsStatus() {
+  if (statusHost) statusHost.style.display = ''
   const gpsStatusEl = document.getElementById('review-gps-display')
   if (!gpsStatusEl) return
 
   const reviewGps = _currentReviewGps()
-  let text = 'No location captured'
-  let stateName = 'idle'
+  let text = NO_LOCATION_PILL_TEXT
+  let stateName = 'none'
+  let action = 'fix'
 
   if (reviewGps) {
+    // A valid locked capture fix always wins — never replaced by warnings.
     text = Number.isFinite(reviewGps.accuracy)
-      ? `Location ready · ±${Math.round(reviewGps.accuracy)} m`
-      : 'Location ready'
+      ? `Location captured · ±${Math.round(reviewGps.accuracy)} m`
+      : 'Location captured'
     stateName = 'fix'
+    action = null
   } else if (_isImportedReview()) {
     text = 'No location captured'
     stateName = 'idle'
-  } else if (state.location.preference === 'disabled') {
-    text = 'Location not included'
-    stateName = 'disabled'
+    action = null
   } else if (state.location.status === 'locating' || state.captureSessionLocation.requestingFreshFix) {
     text = 'Finding location…'
     stateName = 'searching'
-  } else if (state.location.capability === 'unsupported' || state.location.error?.kind === 'unsupported') {
-    text = 'Automatic location unavailable'
-    stateName = 'unavailable'
-  } else if (state.location.permission === 'denied' || state.location.error?.kind === 'permission-denied') {
-    text = 'Location access is off'
-    stateName = 'unavailable'
-  } else if (state.location.status === 'timeout' || state.location.error?.kind === 'timeout'
-    || state.location.status === 'unavailable' || state.location.error?.kind === 'position-unavailable'
-    || state.location.status === 'error') {
-    text = 'Couldn’t determine location · Try again'
-    stateName = 'unavailable'
-  } else {
-    text = 'Couldn’t determine location · Try again'
-    stateName = 'unavailable'
+    action = null
   }
 
-  const pill = gpsStatusEl.closest('.gps-pill')
+  const pill = document.getElementById('review-gps-pill') || gpsStatusEl.closest('.gps-pill')
   gpsStatusEl.textContent = text
-  if (pill) pill.dataset.gpsState = stateName
+  if (pill) {
+    pill.dataset.gpsState = stateName
+    if (action) {
+      pill.dataset.gpsAction = action
+    } else {
+      delete pill.dataset.gpsAction
+    }
+  }
+}
+
+async function _handleReviewGpsPillTap() {
+  if (_isImportedReview()) return
+  const pill = document.getElementById('review-gps-pill')
+  if (!pill?.dataset?.gpsAction) return
+  const decision = await showLocationFixSheet()
+  if (decision === 'settings') {
+    // Geo's visibility-resume path re-checks permission and retries
+    // acquisition when the user returns from settings; the explicit tap is
+    // consent, so opt in and reopen the capture window for the returning fix.
+    if (state.location.preference !== 'enabled') setLocationPreference('enabled')
+    _overrideCaptureWindowForSession()
+    await openLocationSettingsOrExplain()
+    return
+  }
+  if (decision === 'retry') {
+    await _requestReviewSaveLocation()
+  }
 }
 
 function _syncReviewLocationStateUi() {
@@ -1072,55 +1067,7 @@ function _syncReviewLocationStateUi() {
     reviewLocationLastLookupKey = ''
   }
 
-  _syncReviewLocationWarning()
   _syncReviewGpsStatus()
-}
-
-function _reviewLocationWarningState() {
-  const locationState = state.location || {}
-  if (_currentReviewGps()) return null
-
-  if (locationState.preference === 'disabled') {
-    return {
-      kind: 'disabled',
-      title: 'Location not included',
-    }
-  }
-
-  if (_isReviewLocationWarningSuppressed()) return null
-
-  if (locationState.status === 'locating' || state.captureSessionLocation.requestingFreshFix) return null
-
-  if (locationState.capability === 'unsupported' || locationState.error?.kind === 'unsupported') {
-    return {
-      kind: 'unsupported',
-      title: 'Automatic location unavailable',
-      body: 'This platform cannot provide an automatic location. You can enter a place name or continue without location.',
-      showTryAgain: false,
-    }
-  }
-
-  if (locationState.permission === 'denied' || locationState.error?.kind === 'permission-denied') {
-    return {
-      kind: 'denied',
-      title: 'Location not available',
-      body: 'Location access is turned off for Sporely. This find will still be saved if you continue, but without location.',
-      showTryAgain: true,
-    }
-  }
-
-  if (locationState.status === 'timeout' || locationState.error?.kind === 'timeout'
-    || locationState.status === 'unavailable' || locationState.error?.kind === 'position-unavailable'
-    || locationState.status === 'error') {
-    return {
-      kind: 'unavailable',
-      title: 'Location not available',
-      body: 'Sporely could not determine your location. This find will still be saved if you continue, but without location.',
-      showTryAgain: true,
-    }
-  }
-
-  return null
 }
 
 function _resolveReviewPhotoIdServices(availability = {}, options = {}) {
@@ -1234,6 +1181,9 @@ export function buildReviewGrid() {
   if (!_isImportedReview() && count > 0 && !state.captureSessionLocation.sessionStartAt) {
     state.captureSessionLocation.sessionStartAt = state.sessionStart || new Date()
   }
+  _refreshCaptureLockWindow()
+  _stopWatchIfCaptureWindowClosed()
+  _checkpointReviewDraft()
   const reviewCount = document.getElementById('review-count')
   const sharedTaxon = photos.find(photo => photo.taxon)?.taxon || null
   const speciesLabel = sharedTaxon?.displayName
@@ -1277,10 +1227,6 @@ export function buildReviewGrid() {
     locationInput.value = reviewContext?.source === 'import'
       ? (locationInput.value || reviewContext.locationName || '')
       : (reviewContext?.locationName || locationInput.value || '')
-    if (!locationInput._reviewLocationWarningWired) {
-      locationInput._reviewLocationWarningWired = true
-      locationInput.addEventListener('input', _syncReviewLocationWarning)
-    }
   }
   const reviewObscured = document.getElementById('review-obscured')
   if (reviewObscured) reviewObscured.checked = state.captureDraft.location_precision === 'fuzzed'
@@ -2126,9 +2072,10 @@ function cancelReview() {
   reviewAiState.availability = {}
   reviewAiState.resultsByService = {}
   endCaptureLocationSession()
-  _clearReviewLocationWarningSuppression()
   _clearReviewSaveLocationSuppression()
-  _hideReviewSaveLocationSheet(null)
+  _clearCaptureLockSessionState()
+  _discardReviewDraft()
+  hideLocationFixSheet(null)
   reviewLocationLastLookupKey = ''
   resetLocationState()
   navigate('home')
@@ -2150,6 +2097,7 @@ async function saveObservationBatch() {
   const btn = document.getElementById('review-save-btn')
   if (btn) btn.disabled = true
   reviewSaveInFlight = true
+  _syncReviewGpsStatus()
 
   _setProgress(0, 1, 'Preparing observation...')
 
@@ -2165,8 +2113,8 @@ async function saveObservationBatch() {
     const obsPayload = _buildReviewObservationPayload()
 
     const locationResult = await _resolveReviewSaveLocation()
-    if (state.currentScreen !== 'review' || !locationResult || locationResult.action === 'manual' || locationResult.action === 'abort') return
-    const finalGps = _canonicalReviewSaveGps()
+    if (state.currentScreen !== 'review' || !locationResult || locationResult.action !== 'proceed') return
+    const finalGps = locationResult.gps ?? null
     obsPayload.gps_latitude = finalGps?.lat ?? null
     obsPayload.gps_longitude = finalGps?.lon ?? null
     obsPayload.gps_altitude = finalGps?.altitude ?? null
@@ -2202,9 +2150,10 @@ async function saveObservationBatch() {
     state.batchCount = 0
     state.captureDraft = createDefaultObservationDraft()
     endCaptureLocationSession()
-    _clearReviewLocationWarningSuppression()
     _clearReviewSaveLocationSuppression()
-    _hideReviewSaveLocationSheet(null)
+    _clearCaptureLockSessionState()
+    _discardReviewDraft()
+    hideLocationFixSheet(null)
     reviewLocationLastLookupKey = ''
     resetLocationState()
     await _reviewDependency('refreshHome')()
@@ -2217,6 +2166,7 @@ async function saveObservationBatch() {
     _hideProgress()
     reviewSaveInFlight = false
     if (btn) btn.disabled = false
+    if (state.currentScreen === 'review') _syncReviewLocationStateUi()
   }
 }
 

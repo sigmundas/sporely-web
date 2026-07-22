@@ -18,6 +18,10 @@ function _createDefaultCaptureSessionLocationState() {
     fix: null,
     sessionStartAt: null,
     requestingFreshFix: false,
+    // Once set (last photo timestamp + grace), fixes taken after this
+    // moment are rejected for the session fix, so the observation location
+    // stays pinned to capture time even if the device keeps moving.
+    captureWindowEndAt: null,
   }
 }
 

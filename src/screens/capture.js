@@ -10,17 +10,23 @@ import { resetReviewAiState } from './review.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
 import { isBlob } from '../observation-shapes.js'
 import {
+  beginCaptureLocationSession,
+  checkLocationCapabilityAndPermission,
   endCaptureLocationSession,
   LOCATION_STATE_CHANGED_EVENT,
+  setLocationPreference,
+  startLocationWatch,
 } from '../geo.js'
 import {
   cancelActivePreflight,
+  enableCaptureLocationForCurrentSession,
   initCaptureLocationSheet,
   isPreflightCurrent,
   nextPreflightToken,
-  prepareNewFindLocation,
-  startNewFindLocationAcquisition,
+  showLocationPrompt,
 } from '../capture-location-preflight.js'
+import { NO_LOCATION_PILL_TEXT, openLocationSettingsOrExplain } from '../location-settings.js'
+import { hideLocationFixSheet, initLocationFixSheet, showLocationFixSheet } from '../location-fix-sheet.js'
 
 let cachedPrimaryMainCameraId = null
 let primaryMainCameraPromise = null
@@ -62,10 +68,20 @@ export function setCaptureCompleteHandler(handler) {
 
 export function initCapture() {
   initCaptureLocationSheet()
+  initLocationFixSheet()
   _syncCaptureLocationStatus()
   if (captureLocationStateListenerWindow !== globalThis.window) {
     captureLocationStateListenerWindow = globalThis.window
     window.addEventListener(LOCATION_STATE_CHANGED_EVENT, _syncCaptureLocationStatus)
+  }
+  const gpsPill = document.querySelector('.capture-gps-pill')
+  if (gpsPill && !gpsPill._gpsActionWired) {
+    gpsPill._gpsActionWired = true
+    gpsPill.addEventListener('click', () => {
+      void _handleCaptureGpsPillTap().catch(error => {
+        console.warn('GPS pill action failed:', error)
+      })
+    })
   }
   document.getElementById('shutter-btn').addEventListener('click', () => {
     void capturePhoto().catch(error => {
@@ -81,19 +97,12 @@ export function initCapture() {
 }
 
 function _normalizeCaptureLocationState() {
-  const fix = state.location.fix
-  const sessionFix = state.captureSessionLocation.fix
-  const activeFix = fix || sessionFix || null
+  const activeFix = state.location.fix || state.captureSessionLocation.fix || null
   const accuracy = Number(activeFix?.accuracy)
-  if (state.location.preference === 'disabled') {
-    return {
-      text: 'Location not included',
-      state: 'disabled',
-    }
-  }
   if (activeFix && Number.isFinite(Number(activeFix.lat)) && Number.isFinite(Number(activeFix.lon))) {
+    // A valid locked capture fix always wins — never replaced by warnings.
     return {
-      text: Number.isFinite(accuracy) ? `Location ready · ±${Math.round(accuracy)} m` : 'Location ready',
+      text: Number.isFinite(accuracy) ? `Location captured · ±${Math.round(accuracy)} m` : 'Location captured',
       state: 'fix',
     }
   }
@@ -103,50 +112,43 @@ function _normalizeCaptureLocationState() {
       state: 'searching',
     }
   }
-  if (state.location.status === 'timeout' || state.location.error?.kind === 'timeout') {
-    return {
-      text: 'Couldn’t determine location · Try again',
-      state: 'unavailable',
-    }
-  }
-  if (state.location.status === 'unavailable' || state.location.error?.kind === 'position-unavailable') {
-    return {
-      text: 'Couldn’t determine location · Try again',
-      state: 'unavailable',
-    }
-  }
-  if (state.location.status === 'error' || state.location.error?.kind === 'permission-denied') {
-    return {
-      text: 'Couldn’t determine location · Try again',
-      state: 'unavailable',
-    }
-  }
-  // Preference is 'ask' (undecided) or 'enabled' with no acquisition attempt yet.
-  // Only report "Location not included" for the explicit disabled preference above.
-  if (state.location.preference === 'ask') {
-    return {
-      text: 'Location optional',
-      state: 'idle',
-    }
-  }
   return {
-    text: 'Location not included',
-    state: 'disabled',
+    text: NO_LOCATION_PILL_TEXT,
+    state: 'none',
+    action: 'fix',
   }
 }
 
 function _syncCaptureLocationStatus() {
   const pill = document.querySelector('.capture-gps-pill')
   const display = document.getElementById('gps-display')
-  const enableBtn = document.getElementById('capture-gps-enable-btn')
   if (!pill || !display) return
 
   const snapshot = _normalizeCaptureLocationState()
   pill.dataset.gpsState = snapshot.state
+  if (snapshot.action) {
+    pill.dataset.gpsAction = snapshot.action
+  } else {
+    delete pill.dataset.gpsAction
+  }
   display.textContent = snapshot.text
-  if (enableBtn) {
-    enableBtn.hidden = snapshot.state !== 'disabled'
-    enableBtn.disabled = snapshot.state !== 'disabled'
+}
+
+async function _handleCaptureGpsPillTap() {
+  const pill = document.querySelector('.capture-gps-pill')
+  if (!pill?.dataset?.gpsAction) return
+  const decision = await showLocationFixSheet()
+  if (decision === 'settings') {
+    // Opt the app in so geo's visibility-resume path re-checks permission
+    // and retries acquisition when the user returns from settings.
+    if (state.location.preference !== 'enabled') setLocationPreference('enabled')
+    await openLocationSettingsOrExplain()
+    return
+  }
+  if (decision === 'retry') {
+    // One short explicit request: opts the preference in and (re)starts the
+    // capture-session watch.
+    await enableCaptureLocationForCurrentSession()
   }
 }
 
@@ -565,16 +567,17 @@ function _logCaptureDiagnostics(message, details = {}, warn = false) {
 export async function startCamera(options = {}) {
   const preserveBatch = !!options.preserveBatch
   stopCamera()
-  // Mark real-camera startup pending BEFORE awaiting anything. Awaits from
-  // here on include the Sporely sheet, the OS location prompt, the OS camera
-  // prompt, and getUserMedia itself — the shutter must stay closed the whole
-  // time. The finally block clears the flag on every exit path.
+  // Capturing means the capture-lock window is open by definition: new
+  // at-shutter fixes must be accepted again. Review recomputes the window
+  // from the (possibly extended) photo timestamps when the batch returns.
+  state.captureSessionLocation.captureWindowEndAt = null
+  // Mark real-camera startup pending BEFORE awaiting anything — the shutter
+  // must stay closed until a stream has attached. The finally block clears
+  // the flag on every exit path.
   cameraStartupPending = true
   _syncCaptureControls()
   try {
     const startupToken = nextPreflightToken()
-    const locationStart = await prepareNewFindLocation({ preserveBatch, token: startupToken })
-    if (!isPreflightCurrent(startupToken) || !locationStart.shouldContinue) return
 
     if (!preserveBatch) {
       state.capturedPhotos = []
@@ -582,14 +585,8 @@ export async function startCamera(options = {}) {
       resetReviewAiState()
     }
 
-    if (!preserveBatch) {
-      const acquisitionReady = await startNewFindLocationAcquisition({
-        useLocation: locationStart.useLocation,
-        token: startupToken,
-      })
-      if (!isPreflightCurrent(startupToken) || !acquisitionReady) return
-    }
-
+    // The camera opens immediately; location is acquired in parallel and
+    // never delays the viewfinder (see _startCaptureLocationFlow below).
     const stream = await tryGetUserMedia()
     if (!isPreflightCurrent(startupToken)) {
       _stopMediaStream(stream)
@@ -613,6 +610,15 @@ export async function startCamera(options = {}) {
     pendingCaptureCount = 0
     finishCaptureWhenPendingComplete = false
     _syncCaptureLocationStatus()
+
+    // Start location AFTER the camera stream is attached so the OS camera
+    // and geolocation prompts are never stacked (see HISTORY.md iOS gotchas),
+    // and fire-and-forget so GPS never blocks the viewfinder.
+    if (!preserveBatch) {
+      void _startCaptureLocationFlow(startupToken).catch(error => {
+        console.warn('Capture location flow failed:', error)
+      })
+    }
   } catch (err) {
     const denied = document.getElementById('camera-denied')
     const body   = document.getElementById('camera-denied-body')
@@ -646,8 +652,37 @@ export async function startCamera(options = {}) {
   }
 }
 
+// Runs in parallel with (never before) the camera. Only OS permission
+// 'granted' upgrades an undecided preference silently; 'prompt'/'unknown'
+// go through the Sporely consent sheet so a fresh button tap separates the
+// OS geolocation prompt from the camera prompt (HISTORY.md iOS gotcha).
+// Denied/unsupported states show no prompt — the pill reads
+// "No location · Tap to fix" and the location-fix sheet takes over.
+async function _startCaptureLocationFlow(token) {
+  beginCaptureLocationSession()
+  if (state.location.preference === 'disabled') return
+
+  const snapshot = await checkLocationCapabilityAndPermission()
+  if (!isPreflightCurrent(token)) return
+  if (snapshot.capability === 'unsupported' || snapshot.permission === 'denied') return
+
+  if (state.location.preference === 'ask') {
+    if (snapshot.permission === 'granted') {
+      setLocationPreference('enabled')
+    } else {
+      const choice = await showLocationPrompt('ask')
+      if (!isPreflightCurrent(token) || choice !== 'use') return
+      setLocationPreference('enabled')
+    }
+  }
+
+  if (!isPreflightCurrent(token)) return
+  await startLocationWatch({ requestFreshFix: true })
+}
+
 export function stopCamera() {
   cancelActivePreflight()
+  hideLocationFixSheet(null)
   firstFrameReady = false
   cameraStartupPending = false
   if (state.cameraStream) {

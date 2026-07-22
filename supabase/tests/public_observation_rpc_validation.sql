@@ -658,10 +658,16 @@ BEGIN
   -- amanita_private_spore_id) intentionally have no mosaic row so we can assert that
   -- sporeMosaic is null while sporePoints still returns normally.
   INSERT INTO public.spore_measurement_mosaics (
-    observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version
+    observation_id, user_id, storage_key,
+    width_px, height_px, tile_size_px, version,
+    tile_width_px, tile_height_px,
+    common_crop_width_um, common_crop_height_um
   )
   VALUES (
-    public_exact_id, visible_user_id, 'mosaic/public-exact-v1.webp', 256, 128, 128, 1
+    public_exact_id, visible_user_id, 'mosaic/public-exact-v1.webp',
+    256, 128, 128, 1,
+    128, 128,
+    20.0, 20.0
   )
   RETURNING id INTO public_exact_mosaic_id;
 
@@ -1155,6 +1161,17 @@ BEGIN
     RAISE EXCEPTION 'sporeMosaic: dimension/version fields did not match fixture';
   END IF;
 
+  -- Scale + tile-geometry additions (Stage 2A). Fixture supplies all
+  -- four values; jsonb_strip_nulls in the RPC means the keys must be
+  -- present here. A future NULL-column fixture is exercised further
+  -- down (see sporeMosaic partial-scale-fields tests).
+  IF (rpc_row."sporeMosaic"->>'tileWidthPx')::int         IS DISTINCT FROM 128
+     OR (rpc_row."sporeMosaic"->>'tileHeightPx')::int     IS DISTINCT FROM 128
+     OR (rpc_row."sporeMosaic"->>'commonCropWidthUm')::double precision  IS DISTINCT FROM 20.0
+     OR (rpc_row."sporeMosaic"->>'commonCropHeightUm')::double precision IS DISTINCT FROM 20.0 THEN
+    RAISE EXCEPTION 'sporeMosaic: tile / common-crop fields did not match fixture (got %)', rpc_row."sporeMosaic";
+  END IF;
+
   -- Each spore point carries mosaicX/mosaicY/mosaicW/mosaicH when a tile row exists.
   IF NOT (
     (rpc_row."sporePoints"->0) ? 'mosaicX'
@@ -1223,6 +1240,43 @@ BEGIN
      OR (rpc_row."sporePoints"->0) ? 'overlay' THEN
     RAISE EXCEPTION 'sporeMosaic: mosaicless sporePoint leaked mosaic tile fields';
   END IF;
+
+  -- Legacy / unmigrated mosaic rows have NULL calibration columns.
+  -- The RPC must still emit sporeMosaic with url/width/height/tileSize
+  -- present, and the four scale keys omitted (jsonb_strip_nulls).
+  UPDATE public.spore_measurement_mosaics
+     SET tile_width_px = NULL,
+         tile_height_px = NULL,
+         common_crop_width_um = NULL,
+         common_crop_height_um = NULL
+   WHERE id = public_exact_mosaic_id;
+  SELECT * INTO rpc_row FROM public.get_public_observation(public_exact_id);
+  IF rpc_row."sporeMosaic" IS NULL THEN
+    RAISE EXCEPTION 'sporeMosaic: NULL calibration columns dropped the whole mosaic sub-object';
+  END IF;
+  IF (rpc_row."sporeMosaic" ? 'tileWidthPx')
+     OR (rpc_row."sporeMosaic" ? 'tileHeightPx')
+     OR (rpc_row."sporeMosaic" ? 'commonCropWidthUm')
+     OR (rpc_row."sporeMosaic" ? 'commonCropHeightUm') THEN
+    RAISE EXCEPTION 'sporeMosaic: NULL calibration columns leaked as JSON null instead of being stripped (got %)',
+      rpc_row."sporeMosaic";
+  END IF;
+  IF NOT ((rpc_row."sporeMosaic" ? 'url')
+          AND (rpc_row."sporeMosaic" ? 'width')
+          AND (rpc_row."sporeMosaic" ? 'height')
+          AND (rpc_row."sporeMosaic" ? 'tileSize')
+          AND (rpc_row."sporeMosaic" ? 'version')) THEN
+    RAISE EXCEPTION 'sporeMosaic: partial-calibration row dropped required keys (got %)',
+      rpc_row."sporeMosaic";
+  END IF;
+  -- Restore the fixture so downstream assertions (mosaic delete cascade)
+  -- keep working.
+  UPDATE public.spore_measurement_mosaics
+     SET tile_width_px = 128,
+         tile_height_px = 128,
+         common_crop_width_um = 20.0,
+         common_crop_height_um = 20.0
+   WHERE id = public_exact_mosaic_id;
 
   -- Deleting the mosaic row must cascade the tiles (FK ON DELETE CASCADE).
   DELETE FROM public.spore_measurement_mosaics WHERE id = public_exact_mosaic_id;

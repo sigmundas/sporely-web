@@ -71,7 +71,7 @@ Deno.serve(async req => {
     }
 
     const adminClient = getAdminClient()
-    let requestBody = null
+    let requestBody: Record<string, unknown> | null = null
     try {
       requestBody = await readOptionalJsonBody(req)
     } catch (error) {
@@ -201,7 +201,17 @@ async function buildCounts(adminClient, warnings) {
     countExact(adminClient, 'reports', query => query.eq('status', 'pending'), warnings, 'reports_open'),
     countExact(adminClient, 'profiles', query => query.eq('is_banned', true), warnings, 'banned_profiles'),
     countExact(adminClient, 'profiles', query => query.eq('is_admin', true), warnings, 'admin_profiles'),
-    countExact(adminClient, 'observation_images', query => query.is('deleted_at', null).is('storage_path', null), warnings, 'rows_missing_storage_path'),
+    countExact(
+      adminClient,
+      'observation_images',
+      query =>
+        query
+          .is('deleted_at', null)
+          .is('storage_path', null)
+          .or('image_type.is.null,image_type.neq.microscope'),
+      warnings,
+      'rows_missing_storage_path',
+    ),
   ])
 
   const [
@@ -564,7 +574,7 @@ function collectUserIds(groups) {
 }
 
 function rowUserIds(row) {
-  const ids = []
+  const ids: unknown[] = []
 
   if ('cloud_plan' in (row ?? {}) || 'storage_used_bytes' in (row ?? {}) || 'image_count' in (row ?? {})) {
     ids.push(row?.id)
@@ -586,37 +596,38 @@ function rowUserIds(row) {
 }
 
 function buildImageIssueFlags(row, forceDeleted) {
-  const flags = []
+  const flags: string[] = []
+  const metadataOnlyMicroscope = isMetadataOnlyMicroscopeRow(row)
+
+  if (row?.purged_at) {
+    return ['purged']
+  }
 
   if (forceDeleted || row?.deleted_at) {
     flags.push('deleted')
-  }
-
-  if (row?.purged_at) {
-    flags.push('purged')
   }
 
   if (!isBlank(row?.purge_error)) {
     flags.push('purge_error')
   }
 
-  if (isBlank(row?.storage_path)) {
+  if (!metadataOnlyMicroscope && isBlank(row?.storage_path)) {
     flags.push('missing_storage_path')
   }
 
-  if (isBlank(row?.original_storage_path)) {
+  if (!metadataOnlyMicroscope && isBlank(row?.original_storage_path)) {
     flags.push('missing_original_storage_path')
   }
 
-  if (isBlank(row?.source_width) || isBlank(row?.source_height)) {
+  if (!metadataOnlyMicroscope && (isBlank(row?.source_width) || isBlank(row?.source_height))) {
     flags.push('missing_source_dimensions')
   }
 
-  if (isBlank(row?.stored_width) || isBlank(row?.stored_height)) {
+  if (!metadataOnlyMicroscope && (isBlank(row?.stored_width) || isBlank(row?.stored_height))) {
     flags.push('missing_stored_dimensions')
   }
 
-  if (isBlank(row?.stored_bytes)) {
+  if (!metadataOnlyMicroscope && isBlank(row?.stored_bytes)) {
     flags.push('missing_stored_bytes')
   }
 
@@ -630,6 +641,10 @@ function buildMediaIssueSeverity(row, forceDeleted) {
 
   if (forceDeleted || row?.deleted_at) {
     return 'warning'
+  }
+
+  if (isMetadataOnlyMicroscopeRow(row)) {
+    return null
   }
 
   if (isBlank(row?.storage_path)) {
@@ -651,6 +666,10 @@ function buildMediaIssueSeverity(row, forceDeleted) {
   }
 
   return null
+}
+
+function isMetadataOnlyMicroscopeRow(row) {
+  return isBlank(row?.storage_path) && String(row?.image_type ?? '').trim() === 'microscope'
 }
 
 function buildIssueSummary(flags) {
@@ -759,7 +778,7 @@ function uniqueIdsFromValues(values) {
 }
 
 function chunkArray(values, size) {
-  const chunks = []
+  const chunks: unknown[][] = []
   for (let index = 0; index < values.length; index += size) {
     chunks.push(values.slice(index, index + size))
   }

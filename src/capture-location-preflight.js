@@ -45,11 +45,6 @@ export function initCaptureLocationSheet() {
   document.getElementById('capture-location-secondary-btn')?.addEventListener('click', () => {
     _resolvePrompt('continue')
   })
-  document.getElementById('capture-gps-enable-btn')?.addEventListener('click', () => {
-    void enableCaptureLocationForCurrentSession().catch(error => {
-      console.warn('Unable to enable location for the current capture session:', error)
-    })
-  })
 }
 
 function _resolvePrompt(result) {

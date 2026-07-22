@@ -14,9 +14,57 @@ It should not be used as the current task plan. Current tasks belong in `PLAN.md
 - **Black-frame captures pass validation.** `_captureCameraBlob()` / `_takeStillPhoto()` / `_captureVideoFrame()` only check that the returned blob has non-tiny dimensions — they do not check pixel content. A `MediaStream` that is technically live but produces only black frames will yield large, black JPEGs that the pipeline happily uploads. Until per-frame luma rejection is added, gate the shutter behind an actual video frame (`requestVideoFrameCallback`, with `playing` + `videoWidth/Height > 0` as a fallback) so users cannot trigger a capture on a stream that has never delivered a frame.
 - **`!video.srcObject` is NOT a signal of demo mode.** During real-camera startup (preflight sheet, OS permission dialogs, `getUserMedia` await) `state.cameraStream` is null and `video.srcObject` is null — the exact same shape as demo mode. A fast shutter press in that window would previously have entered the emoji-canvas branch and saved a fake capture. Two invariants: (1) `cameraStartupPending` in `src/screens/capture.js` is `true` from the top of `startCamera` (before any await) until the `finally` block clears it; the shutter's `disabled` prop AND an early return inside `capturePhoto()` both check it. (2) The emoji-canvas branch requires the explicit `demoModeActive` flag — a null `srcObject` alone is no longer treated as consent to fabricate a photo.
 - **First-frame callbacks must be stream-safe.** `requestVideoFrameCallback` (and the `playing`-event fallback) can fire after the stream they were registered against has been torn down and replaced. Verify BOTH `state.cameraStream === stream` AND `video.srcObject === stream` before setting `firstFrameReady`. Otherwise a stale callback from a previous session can unlock the shutter on a stream whose first frame has not actually arrived. See the test `a first-frame callback retained from a previous stream cannot unlock a new session` in `src/screens/capture.test.js`.
-- **`Location not included` is reserved for `preference === 'disabled'`.** For the default `preference === 'ask'` state (undecided, no fix, no active request), the pill shows `Location optional` with `data-gps-state="idle"`. Using "not included" for undecided reads as "user turned it off" and misleads users about whether Sporely will start acquisition on their next find.
+- **GPS pill contract (capture + review, simplified 2026-07-22).** Exactly three states: `Location captured · ±x m` (valid fix — always wins, never replaced by warnings), `Finding location…` (acquiring), and `No location · Tap to fix` (every other state: undecided, preference disabled, denied, unavailable, timeout). Tapping the pill — the whole pill, `data-gps-action="fix"` — or pressing Save without a locked location opens the single reusable `#location-fix-overlay` sheet (`src/location-fix-sheet.js`): Open location settings / Try again / Continue without location. Save never waits through a GPS timeout on its own; "Try again" performs one short (8 s) explicit request. Do NOT classify `position-unavailable` as proof the system location is off — only `permission-denied` is a known blocked state (geo.js short-circuits it). Earlier wordings (`Location optional`, `Location not included`, `Location is off · Tap to enable`, `Location locked`, inline review warning banner) were removed in this simplification.
+- **Camera opens immediately; location acquires in parallel.** `startCamera` never awaits location. `_startCaptureLocationFlow` runs fire-and-forget AFTER the stream attaches, so OS camera and geolocation prompts are never stacked (see the iOS gotchas above — the 'ask' consent sheet still gates 'prompt'/'unknown' permission behind a fresh button tap; only OS `granted` upgrades silently). Denied/unsupported produce no prompt at all — the pill and fix sheet own failure UX.
 
 ## Planning History
+
+### 2026-07-22 — Review save freeze fixed + observation locations now pin to capture time
+
+- Incident: saving from the review screen could freeze the app behind the
+  "Preparing observation..." modal with the "Location is not ready" sheet
+  untappable underneath, losing the photos on force-quit. Two root causes:
+  (1) `#import-progress` (z-index 180, at `#app` root) painted above the
+  save-location sheet, which was trapped inside `#screen-review`'s
+  `z-index: 1` stacking context — the sheet's promise could never resolve;
+  (2) review passed its `'live:<ms>'` session key as
+  `captureSessionRequestToken`, which geo.js compares against a numeric
+  counter, so every save-time/`Try again` GPS request was silently blocked
+  before reaching the OS.
+- Fixes: progress overlay is hidden before awaiting the sheet; the sheet
+  markup moved to the `#app` root; `getCaptureSessionRequestToken()`
+  exported from geo.js and used for all internalOverride calls; save uses
+  the resolved `locationResult.gps` snapshot. GPS pill and location warning
+  are frozen/hidden while a save is in flight.
+- **Behavior change — capture-time location lock.** Live observations now
+  pin their location to capture time. `captureSessionLocation.captureWindowEndAt`
+  (last photo timestamp + 90 s grace) is set when photos land in review;
+  geo.js rejects session-fix updates whose fix timestamp is past it (the
+  global `state.location.fix` still updates freely). The canonical live
+  save GPS is the more accurate of the window-restricted session fix and
+  the lead photo's own GPS (EXIF / at-shutter snapshot); automatic
+  save-time acquisition never fires once the window is closed — only the
+  sheet's explicit "Try again" (user consent to current position)
+  overrides it. The location watch stops once the window closes; the pill
+  shows "Location locked · ±x m".
+- Gotcha: `Number(null) === 0`, so `_finiteNumber(null)` returns a finite
+  `0` — a nullable ms-epoch field must be null-checked before
+  `_finiteNumber`, or "no deadline" becomes "deadline at epoch 0" and
+  everything is rejected. This bit both geo.js and review.js during
+  implementation.
+- Crash recovery: live review sessions now persist to IndexedDB
+  (`src/review-draft-store.js`, own DB `sporely-review-drafts` — the
+  `'sporely'` DB is version-locked by import-store.js). Checkpoint on
+  photo changes (deduplicated by fingerprint), debounced field sync,
+  cleared on save/cancel, restored at boot after the pending-import check
+  with a "Restored unsaved find" toast.
+- Tests: real-`requestFreshLocation` save integration test (fake
+  `navigator.geolocation`, real timers) in `src/screens/review.test.js`;
+  sheet/stacking regression tests; closed-window + explicit-retry test;
+  per-photo GPS fallback and accuracy-preference tests; capture-window
+  enforcement test in `src/geo.test.js`; draft-store round-trip suite in
+  `src/review-draft-store.test.js`. Full staged plan with handover notes
+  in `PLAN.md`.
 
 ### 2026-07-16 — iOS web capture regression: closed after shutter startup-gate + demo-mode distinction
 

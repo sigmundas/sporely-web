@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
-import { __setReviewTestHooks, _buildReviewObservationPayload, buildReviewGrid, initReview, openImportedReview, formatLatLon } from './review.js'
-import { LOCATION_STATE_CHANGED_EVENT } from '../geo.js'
+import { __setReviewTestHooks, _buildReviewObservationPayload, buildReviewGrid, initReview, openImportedReview, restoreReviewDraft, formatLatLon } from './review.js'
+import { LOCATION_STATE_CHANGED_EVENT, beginCaptureLocationSession, endCaptureLocationSession } from '../geo.js'
 import { state } from '../state.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
 
@@ -268,7 +268,10 @@ function _seedReviewState({
   sessionStart = null,
   user = null,
 } = {}) {
-  const resolvedSessionStart = sessionStart || new Date(Date.UTC(2026, 6, 13, 12, 0, 0, 0) + reviewStateSeed++)
+  // Recent by default so the capture lock window (last photo + grace) is
+  // open in live-review tests; pass an explicit old sessionStart to test
+  // closed-window behavior.
+  const resolvedSessionStart = sessionStart || new Date(Date.now() - 10_000 + reviewStateSeed++)
   const reviewGps = imported ? importedGps : liveFix
   state.capturedPhotos = [{
     blob: new Blob(['photo']),
@@ -378,7 +381,7 @@ test('live review uses the capture-session fix', async () => {
     assert.equal(env.document.getElementById('meta-coordinates').textContent, formatLatLon(liveFix, 5))
     assert.equal(env.document.getElementById('meta-accuracy').textContent, '± 12 m')
     assert.equal(env.document.getElementById('meta-altitude').textContent, '432 m ASL')
-    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location ready · ±12 m')
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location captured · ±12 m')
   } finally {
     _restoreReviewState(snapshot)
     env.restore()
@@ -408,8 +411,7 @@ test('valid session fix plus later timeout still shows location ready', async ()
     await new Promise(resolve => setImmediate(resolve))
 
     assert.equal(env.document.getElementById('meta-coordinates').textContent, formatLatLon(liveFix, 5))
-    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location ready · ±12 m')
-    assert.equal(env.document.getElementById('review-location-warning').hidden, true)
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location captured · ±12 m')
   } finally {
     _restoreReviewState(snapshot)
     env.restore()
@@ -439,8 +441,7 @@ test('valid session fix plus later unavailable error shows no warning', async ()
     await new Promise(resolve => setImmediate(resolve))
 
     assert.equal(env.document.getElementById('meta-coordinates').textContent, formatLatLon(liveFix, 5))
-    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location ready · ±6 m')
-    assert.equal(env.document.getElementById('review-location-warning').hidden, true)
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location captured · ±6 m')
   } finally {
     _restoreReviewState(snapshot)
     env.restore()
@@ -473,7 +474,7 @@ test('imported review keeps imported GPS separate from the live session fix', as
     assert.equal(env.document.getElementById('meta-coordinates').textContent, formatLatLon(importedGps, 5))
     assert.equal(env.document.getElementById('meta-accuracy').textContent, '± 8 m')
     assert.equal(env.document.getElementById('meta-altitude').textContent, '211 m ASL')
-    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location ready · ±8 m')
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location captured · ±8 m')
   } finally {
     _restoreReviewState(snapshot)
     env.restore()
@@ -544,7 +545,7 @@ test('a delayed live fix updates the review coordinates and reverse location', a
     assert.equal(env.document.getElementById('meta-accuracy').textContent, '± 7 m')
     assert.equal(env.document.getElementById('meta-altitude').textContent, '155 m ASL')
     assert.equal(env.document.getElementById('review-location').textContent, 'Mossesvingen')
-    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location ready · ±7 m')
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location captured · ±7 m')
   } finally {
     globalThis.setTimeout = previousSetTimeout
     globalThis.clearTimeout = previousClearTimeout
@@ -576,146 +577,7 @@ test('manual place names stay distinct from captured coordinates', () => {
     assert.equal(env.document.getElementById('location-name-input').value, 'Trailhead')
     assert.equal(env.document.getElementById('review-location').textContent, '')
     assert.equal(env.document.getElementById('meta-coordinates').textContent, '—')
-    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Couldn’t determine location · Try again')
-  } finally {
-    _restoreReviewState(snapshot)
-    env.restore()
-  }
-})
-
-test('review shows state-specific location copy for denied, timeout, unavailable and unsupported states', () => {
-  const snapshot = _snapshotReviewState()
-  const env = _installReviewGlobals()
-
-  try {
-    const cases = [
-      {
-        label: 'denied',
-        location: {
-          preference: 'enabled',
-          capability: 'supported',
-          permission: 'denied',
-          status: 'error',
-          error: { kind: 'permission-denied', message: 'Permission denied' },
-        },
-        title: 'Location not available',
-        body: 'Location access is turned off for Sporely. This find will still be saved if you continue, but without location.',
-      },
-      {
-        label: 'timeout',
-        location: {
-          preference: 'enabled',
-          capability: 'supported',
-          permission: 'granted',
-          status: 'timeout',
-          error: { kind: 'timeout', message: 'Location request timed out' },
-        },
-        title: 'Location not available',
-        body: 'Sporely could not determine your location. This find will still be saved if you continue, but without location.',
-      },
-      {
-        label: 'unavailable',
-        location: {
-          preference: 'enabled',
-          capability: 'supported',
-          permission: 'granted',
-          status: 'unavailable',
-          error: { kind: 'position-unavailable', message: 'Position unavailable' },
-        },
-        title: 'Location not available',
-        body: 'Sporely could not determine your location. This find will still be saved if you continue, but without location.',
-      },
-      {
-        label: 'unsupported',
-        location: {
-          preference: 'enabled',
-          capability: 'unsupported',
-          permission: 'unknown',
-          status: 'unavailable',
-          error: { kind: 'unsupported', message: 'Geolocation is not supported' },
-        },
-        title: 'Automatic location unavailable',
-        body: 'This platform cannot provide an automatic location. You can enter a place name or continue without location.',
-      },
-    ]
-
-    for (const item of cases) {
-      _seedReviewState({
-        liveFix: null,
-        location: item.location,
-      })
-      initReview()
-      buildReviewGrid()
-      const warning = env.document.getElementById('review-location-warning')
-      assert.equal(warning.hidden, false, item.label)
-      assert.match(warning.textContent, new RegExp(item.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-      assert.match(warning.textContent, new RegExp(item.body.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-      if (item.label === 'timeout') {
-        assert.equal(env.document.getElementById('meta-coordinates').textContent, '—')
-        assert.equal(env.document.getElementById('review-gps-display').textContent, 'Couldn’t determine location · Try again')
-      }
-      if (item.label === 'unsupported') {
-        assert.doesNotMatch(warning.textContent, /Open settings/)
-      }
-      assert.match(warning.textContent, /Continue without location/)
-      assert.match(warning.textContent, /Don’t use location for future finds/)
-    }
-  } finally {
-    _restoreReviewState(snapshot)
-    env.restore()
-  }
-})
-
-test('intentional opt-out is neutral and the x dismisses only the current session', () => {
-  const snapshot = _snapshotReviewState()
-  const env = _installReviewGlobals()
-
-  try {
-    _seedReviewState({
-      liveFix: null,
-      location: {
-        preference: 'enabled',
-        capability: 'supported',
-        permission: 'denied',
-        status: 'error',
-        error: { kind: 'permission-denied', message: 'Permission denied' },
-      },
-    })
-
-    initReview()
-    buildReviewGrid()
-
-    const warning = env.document.getElementById('review-location-warning')
-    assert.equal(warning.hidden, false)
-    const dismissButton = warning.querySelectorAll('[data-review-location-action]').find(button => button.dataset.reviewLocationAction === 'dismiss')
-    assert.ok(dismissButton)
-    dismissButton.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} })
-
-    assert.equal(warning.hidden, true)
-    env.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
-    assert.equal(env.document.getElementById('review-location-warning').hidden, true)
-
-    state.captureSessionLocation.sessionStartAt = new Date('2026-07-13T13:00:00.000Z')
-    buildReviewGrid()
-    assert.equal(env.document.getElementById('review-location-warning').hidden, false)
-
-    _seedReviewState({
-      liveFix: null,
-      location: {
-        preference: 'disabled',
-        capability: 'supported',
-        permission: 'denied',
-        status: 'idle',
-        error: { kind: 'disabled', message: 'Location preference disabled' },
-      },
-    })
-    initReview()
-    buildReviewGrid()
-    const neutralWarning = env.document.getElementById('review-location-warning')
-    assert.equal(neutralWarning.dataset.locationState, 'disabled')
-    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location not included')
-    assert.match(neutralWarning.textContent, /Enable/)
-    assert.doesNotMatch(neutralWarning.textContent, /Try again/)
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'No location · Tap to fix')
   } finally {
     _restoreReviewState(snapshot)
     env.restore()
@@ -758,47 +620,9 @@ test('review never displays coordinates while claiming they will not be saved', 
       await new Promise(resolve => setImmediate(resolve))
 
       const coordinates = env.document.getElementById('meta-coordinates').textContent
-      const warning = env.document.getElementById('review-location-warning')
       assert.notEqual(coordinates, '—', item.label)
-      assert.equal(warning.hidden, true, item.label)
-      assert.doesNotMatch(warning.textContent, /without location/i, item.label)
-      assert.doesNotMatch(warning.textContent, /without coordinates/i, item.label)
+      assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location captured · ±9 m', item.label)
     }
-  } finally {
-    _restoreReviewState(snapshot)
-    env.restore()
-  }
-})
-
-test('permanent opt-out switches a no-fix denied review to disabled', async () => {
-  const snapshot = _snapshotReviewState()
-  const env = _installReviewGlobals()
-
-  try {
-    _seedReviewState({
-      liveFix: null,
-      location: {
-        preference: 'enabled',
-        capability: 'supported',
-        permission: 'denied',
-        status: 'error',
-        error: { kind: 'permission-denied', message: 'Permission denied' },
-      },
-    })
-
-    initReview()
-    buildReviewGrid()
-    await new Promise(resolve => setImmediate(resolve))
-    const warning = env.document.getElementById('review-location-warning')
-    const optOutButton = warning.querySelectorAll('[data-review-location-action]').find(button => button.dataset.reviewLocationAction === 'dont-use-location')
-    assert.ok(optOutButton)
-    optOutButton.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} })
-
-    assert.equal(state.location.preference, 'disabled')
-    assert.equal(state.captureSessionLocation.fix, null)
-    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location not included')
-    assert.equal(env.document.getElementById('review-location-warning').dataset.locationState, 'disabled')
-    assert.match(env.document.getElementById('review-location-warning').textContent, /Enable/)
   } finally {
     _restoreReviewState(snapshot)
     env.restore()
@@ -847,7 +671,7 @@ test('live review saves an existing session fix without requesting location', as
     assert.equal(savedPayload.gps_longitude, liveFix.lon)
     assert.equal(savedPayload.gps_accuracy, liveFix.accuracy)
     assert.equal(savedPayload.gps_altitude, liveFix.altitude)
-    assert.equal(env.document.getElementById('review-save-location-overlay').style.display, 'none')
+    assert.equal(env.document.getElementById('location-fix-overlay').style.display, 'none')
     assert.equal(state.captureSessionLocation.fix, null)
     assert.equal(state.captureSessionLocation.sessionStartAt, null)
   } finally {
@@ -932,7 +756,7 @@ test('failed enqueue preserves the live session', async () => {
     assert.match(String(consoleErrorCalls[0]?.[1]?.message || ''), /enqueue failed/)
     assert.deepEqual(state.captureSessionLocation.fix, liveFix)
     assert.equal(state.captureSessionLocation.sessionStartAt instanceof Date, true)
-    assert.equal(env.document.getElementById('review-save-location-overlay').style.display, 'none')
+    assert.equal(env.document.getElementById('location-fix-overlay').style.display, 'none')
   } finally {
     console.error = previousConsoleError
     __setReviewTestHooks(null)
@@ -941,7 +765,7 @@ test('failed enqueue preserves the live session', async () => {
   }
 })
 
-test('a fresh save-time location request is saved automatically', async () => {
+test('saving without a fix opens the sheet immediately and Try again saves the fresh fix', async () => {
   const snapshot = _snapshotReviewState()
   const env = _installReviewGlobals()
   let requestCount = 0
@@ -985,6 +809,13 @@ test('a fresh save-time location request is saved automatically', async () => {
     initReview()
     buildReviewGrid()
     _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => env.document.getElementById('location-fix-overlay').style.display === 'flex')
+
+    // No automatic GPS wait: the sheet appears immediately, no request fired.
+    assert.equal(requestCount, 0)
+    assert.equal(savedPayload, null)
+
+    _click(env.document.getElementById('location-fix-try-again'))
     await _waitFor(() => savedPayload !== null)
 
     assert.equal(requestCount, 1)
@@ -992,7 +823,7 @@ test('a fresh save-time location request is saved automatically', async () => {
     assert.equal(savedPayload.gps_longitude, freshFix.lon)
     assert.equal(savedPayload.gps_accuracy, freshFix.accuracy)
     assert.equal(savedPayload.gps_altitude, freshFix.altitude)
-    assert.equal(env.document.getElementById('review-save-location-overlay').style.display, 'none')
+    assert.equal(env.document.getElementById('location-fix-overlay').style.display, 'none')
   } finally {
     __setReviewTestHooks(null)
     _restoreReviewState(snapshot)
@@ -1000,7 +831,7 @@ test('a fresh save-time location request is saved automatically', async () => {
   }
 })
 
-test('timeout opens the save sheet and retry can succeed', async () => {
+test('save opens the sheet immediately and a failed retry re-opens it until one succeeds', async () => {
   const snapshot = _snapshotReviewState()
   const env = _installReviewGlobals()
   let requestCount = 0
@@ -1054,79 +885,21 @@ test('timeout opens the save sheet and retry can succeed', async () => {
     initReview()
     buildReviewGrid()
     _click(env.document.getElementById('review-save-btn'))
-    await _waitFor(() => env.document.getElementById('review-save-location-overlay').style.display === 'flex')
+    await _waitFor(() => env.document.getElementById('location-fix-overlay').style.display === 'flex')
 
-    const sheet = env.document.getElementById('review-save-location-overlay')
+    const sheet = env.document.getElementById('location-fix-overlay')
     assert.equal(sheet.style.display, 'flex')
-    assert.equal(env.document.getElementById('review-save-location-title').textContent, 'Location is not ready')
-    assert.equal(env.document.getElementById('review-save-location-body').textContent, 'Sporely could not determine your position.')
 
-    _click(env.document.getElementById('review-save-location-try-again'))
+    // First retry times out → the sheet reappears; second retry succeeds.
+    _click(env.document.getElementById('location-fix-try-again'))
+    await _waitFor(() => requestCount === 1 && sheet.style.display === 'flex')
+    _click(env.document.getElementById('location-fix-try-again'))
     await _waitFor(() => savedPayload !== null)
 
     assert.equal(requestCount, 2)
     assert.equal(savedPayload.gps_latitude, retryFix.lat)
     assert.equal(savedPayload.gps_longitude, retryFix.lon)
     assert.equal(sheet.style.display, 'none')
-  } finally {
-    __setReviewTestHooks(null)
-    _restoreReviewState(snapshot)
-    env.restore()
-  }
-})
-
-test('enter place manually focuses the location field and aborts the save', async () => {
-  const snapshot = _snapshotReviewState()
-  const env = _installReviewGlobals()
-  let requestCount = 0
-  let savedCount = 0
-  let manualFocusCount = 0
-
-  try {
-    _seedReviewState({
-      liveFix: null,
-      user: { id: 'user-1' },
-      location: {
-        preference: 'enabled',
-        capability: 'supported',
-        permission: 'granted',
-        status: 'idle',
-      },
-    })
-
-    __setReviewTestHooks({
-      requestFreshLocation: async () => {
-        requestCount += 1
-        state.location.status = 'timeout'
-        state.location.error = { kind: 'timeout', message: 'Location request timed out' }
-        env.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
-        return {
-          ...state.location,
-          fix: null,
-          error: { ...state.location.error },
-        }
-      },
-      enqueueObservation: async () => {
-        savedCount += 1
-      },
-      refreshHome: async () => {},
-      openFinds: async () => {},
-      openLocationSuggestions: () => {
-        manualFocusCount += 1
-      },
-    })
-
-    initReview()
-    buildReviewGrid()
-    _click(env.document.getElementById('review-save-btn'))
-    await _waitFor(() => env.document.getElementById('review-save-location-overlay').style.display === 'flex')
-    _click(env.document.getElementById('review-save-location-manual'))
-    await _waitFor(() => manualFocusCount > 0)
-
-    assert.equal(requestCount, 1)
-    assert.equal(savedCount, 0)
-    assert.equal(manualFocusCount, 1)
-    assert.equal(env.document.getElementById('review-save-location-overlay').style.display, 'none')
   } finally {
     __setReviewTestHooks(null)
     _restoreReviewState(snapshot)
@@ -1173,8 +946,8 @@ test('save without coordinates preserves the preference and saves null gps field
     initReview()
     buildReviewGrid()
     _click(env.document.getElementById('review-save-btn'))
-    await _waitFor(() => env.document.getElementById('review-save-location-overlay').style.display === 'flex')
-    _click(env.document.getElementById('review-save-location-save-without'))
+    await _waitFor(() => env.document.getElementById('location-fix-overlay').style.display === 'flex')
+    _click(env.document.getElementById('location-fix-continue'))
     await _waitFor(() => savedPayload !== null)
 
     assert.equal(state.location.preference, 'enabled')
@@ -1228,7 +1001,7 @@ test('disabled location preference skips acquisition during save', async () => {
     assert.equal(requestCount, 0)
     assert.equal(savedPayload.gps_latitude, null)
     assert.equal(savedPayload.gps_longitude, null)
-    assert.equal(env.document.getElementById('review-save-location-overlay').style.display, 'none')
+    assert.equal(env.document.getElementById('location-fix-overlay').style.display, 'none')
   } finally {
     __setReviewTestHooks(null)
     _restoreReviewState(snapshot)
@@ -1308,7 +1081,7 @@ test('cancel clears the live session and any save sheet state', async () => {
     assert.equal(state.reviewContext, null)
     assert.equal(state.captureSessionLocation.fix, null)
     assert.equal(state.captureSessionLocation.sessionStartAt, null)
-    assert.equal(env.document.getElementById('review-save-location-overlay').style.display, 'none')
+    assert.equal(env.document.getElementById('location-fix-overlay').style.display, 'none')
   } finally {
     __setReviewTestHooks(null)
     _restoreReviewState(snapshot)
@@ -1316,77 +1089,12 @@ test('cancel clears the live session and any save sheet state', async () => {
   }
 })
 
-test('Open settings appears only when the platform helper supports it', () => {
-  const snapshot = _snapshotReviewState()
-  try {
-    const deniedState = {
-      preference: 'enabled',
-      capability: 'supported',
-      permission: 'denied',
-      status: 'error',
-      error: { kind: 'permission-denied', message: 'Permission denied' },
-    }
-
-    let env = _installReviewGlobals()
-    try {
-      _seedReviewState({ liveFix: null, location: deniedState })
-      initReview()
-      buildReviewGrid()
-      const warning = env.document.getElementById('review-location-warning')
-      assert.doesNotMatch(warning.textContent, /Open settings/)
-    } finally {
-      _restoreReviewState(snapshot)
-      env.restore()
-    }
-
-    env = _installReviewGlobals({
-      capacitor: {
-        Plugins: {
-          App: {
-            openSettings: async () => {},
-          },
-        },
-      },
-    })
-    try {
-      _seedReviewState({ liveFix: null, location: deniedState })
-      initReview()
-      buildReviewGrid()
-      const warning = env.document.getElementById('review-location-warning')
-      assert.match(warning.textContent, /Open settings/)
-      const openSettingsButton = warning.querySelectorAll('[data-review-location-action]').find(button => button.dataset.reviewLocationAction === 'open-settings')
-      assert.ok(openSettingsButton)
-    } finally {
-      _restoreReviewState(snapshot)
-      env.restore()
-    }
-  } finally {
-    _restoreReviewState(snapshot)
-  }
-})
-
-test('review warning copy does not mention queue or sync wording', () => {
-  const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
-  const start = source.indexOf('function _reviewLocationWarningState()')
-  const end = source.indexOf('function _resolveReviewPhotoIdServices')
-  assert.ok(start >= 0)
-  assert.ok(end > start)
-
-  const warningBlock = source.slice(start, end)
-  assert.doesNotMatch(warningBlock, /queue/i)
-  assert.doesNotMatch(warningBlock, /sync/i)
-  assert.match(warningBlock, /Location not available/)
-  assert.match(warningBlock, /Automatic location unavailable/)
-})
-
 test('review save flow uses the decision sheet instead of window.confirm', () => {
   const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
 
   assert.doesNotMatch(source, /window\.confirm/)
-  assert.match(source, /review-save-location-title/)
-  assert.match(source, /Location is not ready/)
-  assert.match(source, /Sporely could not determine your position\./)
-  assert.match(source, /_reviewDependency\('requestFreshLocation'\)\(\{\s*maxAgeMs:\s*30_000,\s*timeoutMs:\s*10_000,\s*enableHighAccuracy:\s*true,/)
+  assert.match(source, /showLocationFixSheet\(\)/)
+  assert.match(source, /_reviewDependency\('requestFreshLocation'\)\(\{\s*maxAgeMs:\s*30_000,\s*timeoutMs:\s*8_000,\s*enableHighAccuracy:\s*true,/)
 })
 
 test('review ai flow keeps the setting-selected primary service and refreshes availability without rebuilding the grid', () => {
@@ -1648,6 +1356,470 @@ test('imported review ignores live location events', async () => {
     assert.equal(state.reviewContext?.source, 'import')
   } finally {
     __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('save-time location request reaches the real geolocation API with a valid session token', async () => {
+  const snapshot = _snapshotReviewState()
+  let geoCalls = 0
+  const env = _installReviewGlobals({
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+    navigator: {
+      geolocation: {
+        getCurrentPosition(success) {
+          geoCalls += 1
+          success({
+            coords: { latitude: 63.42, longitude: 10.39, accuracy: 8, altitude: 150 },
+            timestamp: Date.now(),
+          })
+        },
+        watchPosition() { return 1 },
+        clearWatch() {},
+      },
+    },
+  })
+  let savedPayload = null
+
+  try {
+    beginCaptureLocationSession()
+    _seedReviewState({
+      liveFix: null,
+      sessionStart: new Date(Date.now() - 60_000),
+      user: { id: 'user-1' },
+      location: {
+        preference: 'enabled',
+        capability: 'supported',
+        permission: 'granted',
+        status: 'idle',
+      },
+    })
+
+    // requestFreshLocation is intentionally NOT stubbed here: this test walks
+    // the real geo.js path to catch token-validation regressions the
+    // dependency-injected tests cannot see (the 'live:<ms>' string vs numeric
+    // session-counter mismatch that silently blocked all save-time GPS).
+    __setReviewTestHooks({
+      enqueueObservation: async payload => {
+        savedPayload = payload
+      },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    for (let i = 0; i < 100 && env.document.getElementById('location-fix-overlay').style.display !== 'flex'; i++) {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 20))
+    }
+    assert.equal(geoCalls, 0)
+    _click(env.document.getElementById('location-fix-try-again'))
+    for (let i = 0; i < 100 && savedPayload === null; i++) {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 20))
+    }
+
+    assert.equal(geoCalls, 1)
+    assert.ok(savedPayload, 'save must complete with the fresh fix')
+    assert.equal(savedPayload.gps_latitude, 63.42)
+    assert.equal(savedPayload.gps_longitude, 10.39)
+    assert.equal(env.document.getElementById('location-fix-overlay').style.display, 'none')
+  } finally {
+    endCaptureLocationSession()
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('the progress overlay is hidden whenever the save location sheet awaits a decision', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  let savedPayload = null
+
+  try {
+    _seedReviewState({
+      liveFix: null,
+      user: { id: 'user-1' },
+      location: {
+        preference: 'enabled',
+        capability: 'supported',
+        permission: 'granted',
+        status: 'idle',
+      },
+    })
+
+    __setReviewTestHooks({
+      requestFreshLocation: async () => {
+        state.location.status = 'timeout'
+        state.location.error = { kind: 'timeout', message: 'Location request timed out' }
+        env.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
+        return { ...state.location, fix: null, error: { ...state.location.error } }
+      },
+      enqueueObservation: async payload => {
+        savedPayload = payload
+      },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => env.document.getElementById('location-fix-overlay').style.display === 'flex')
+
+    // The progress overlay paints above the review screen's stacking context;
+    // if it stayed visible it would swallow the sheet's taps (freeze bug).
+    assert.equal(env.document.getElementById('import-progress').style.display, 'none')
+    // While a save is in flight the GPS pill is hidden: progress text and the
+    // sheet are the only location feedback after Save is pressed.
+    assert.equal(env.document.getElementById('review-gps-status').style.display, 'none')
+
+    _click(env.document.getElementById('location-fix-continue'))
+    await _waitFor(() => savedPayload !== null)
+    assert.ok(savedPayload)
+    // Save exited while still on the review screen (stubs skip navigation),
+    // so the pill is restored and resynced.
+    assert.equal(env.document.getElementById('review-gps-status').style.display, '')
+  } finally {
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('save location sheet is mounted at the app root, outside any screen stacking context', () => {
+  const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
+  const overlayIndex = html.indexOf('id="location-fix-overlay"')
+  const progressIndex = html.indexOf('id="import-progress"')
+  const screenReviewIndex = html.indexOf('id="screen-review"')
+  const nextScreenIndex = html.indexOf('id="screen-find-detail"')
+
+  assert.ok(overlayIndex > 0)
+  assert.ok(progressIndex > 0)
+  assert.ok(screenReviewIndex > 0 && nextScreenIndex > screenReviewIndex)
+  assert.ok(
+    !(overlayIndex > screenReviewIndex && overlayIndex < nextScreenIndex),
+    'sheet must not live inside #screen-review — .screen.active z-index:1 traps it below #import-progress',
+  )
+  assert.ok(
+    overlayIndex > progressIndex,
+    'sheet must be a later sibling of #import-progress at the #app root',
+  )
+  // Static copy and the three (and only three) options of the shared sheet.
+  assert.match(html, /Location is not ready/)
+  assert.match(html, /Sporely could not determine your position\./)
+  assert.match(html, /Open location settings/)
+  assert.match(html, /id="location-fix-try-again"/)
+  assert.match(html, /Continue without location/)
+  assert.doesNotMatch(html, /Enter place manually/)
+  assert.doesNotMatch(html, /Save without coordinates/)
+})
+
+test('save flow hides progress before the sheet and passes the real geo session token', () => {
+  const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
+  assert.match(source, /_hideProgress\(\)\s*\n\s*const decision = await showLocationFixSheet\(\)/)
+  assert.match(source, /captureSessionRequestToken: getCaptureSessionRequestToken\(\)/)
+  assert.doesNotMatch(source, /captureSessionRequestToken: sessionToken/)
+  assert.match(source, /const finalGps = locationResult\.gps \?\? null/)
+})
+
+test('closed capture window blocks silent save-time acquisition; explicit retry overrides it', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  let requestCount = 0
+  let savedPayload = null
+
+  try {
+    const retryFix = { lat: 62.9, lon: 12.9, accuracy: 6, altitude: 300, timestamp: Date.now() }
+    // Photos captured 10 minutes ago — well past the 90 s grace window.
+    _seedReviewState({
+      liveFix: null,
+      sessionStart: new Date(Date.now() - 600_000),
+      user: { id: 'user-1' },
+      location: {
+        preference: 'enabled',
+        capability: 'supported',
+        permission: 'granted',
+        status: 'idle',
+      },
+    })
+
+    __setReviewTestHooks({
+      requestFreshLocation: async () => {
+        requestCount += 1
+        state.captureSessionLocation.fix = { ...retryFix }
+        state.location.fix = { ...retryFix }
+        state.location.status = 'fix'
+        state.location.error = null
+        env.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
+        return { ...state.location, fix: { ...state.location.fix }, error: null }
+      },
+      enqueueObservation: async payload => {
+        savedPayload = payload
+      },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    assert.equal(Number.isFinite(state.captureSessionLocation.captureWindowEndAt), true)
+
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => env.document.getElementById('location-fix-overlay').style.display === 'flex')
+
+    // The window is closed: the app must NOT have silently requested the
+    // walking-away position — it goes straight to the sheet.
+    assert.equal(requestCount, 0)
+
+    // Explicit "Try again" is user consent to use the current position.
+    _click(env.document.getElementById('location-fix-try-again'))
+    await _waitFor(() => savedPayload !== null)
+
+    assert.equal(requestCount, 1)
+    assert.equal(savedPayload.gps_latitude, retryFix.lat)
+    assert.equal(savedPayload.gps_longitude, retryFix.lon)
+  } finally {
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('per-photo gps is used for a live save when the session never got a fix', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  let requestCount = 0
+  let savedPayload = null
+
+  try {
+    const photoGps = { lat: 59.1234, lon: 9.5678, accuracy: 12, altitude: 210 }
+    _seedReviewState({
+      liveFix: null,
+      user: { id: 'user-1' },
+      location: {
+        preference: 'enabled',
+        capability: 'supported',
+        permission: 'granted',
+        status: 'idle',
+      },
+    })
+    state.capturedPhotos[0].gps = { ...photoGps }
+
+    __setReviewTestHooks({
+      requestFreshLocation: async () => {
+        requestCount += 1
+        return null
+      },
+      enqueueObservation: async payload => {
+        savedPayload = payload
+      },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => savedPayload !== null)
+
+    assert.equal(requestCount, 0)
+    assert.equal(savedPayload.gps_latitude, photoGps.lat)
+    assert.equal(savedPayload.gps_longitude, photoGps.lon)
+    assert.equal(savedPayload.gps_accuracy, photoGps.accuracy)
+    assert.equal(env.document.getElementById('location-fix-overlay').style.display, 'none')
+  } finally {
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('the more accurate of session fix and photo gps wins a live save', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  let savedPayload = null
+
+  try {
+    const sessionFix = { lat: 60.5, lon: 10.5, accuracy: 5, altitude: 120, timestamp: Date.now() }
+    _seedReviewState({
+      liveFix: sessionFix,
+      user: { id: 'user-1' },
+      location: {
+        preference: 'enabled',
+        capability: 'supported',
+        permission: 'granted',
+        status: 'fix',
+      },
+    })
+    // A coarser at-shutter snapshot must not beat the better session fix.
+    state.capturedPhotos[0].gps = { lat: 60.5001, lon: 10.5001, accuracy: 50, altitude: 120 }
+
+    __setReviewTestHooks({
+      requestFreshLocation: async () => null,
+      enqueueObservation: async payload => {
+        savedPayload = payload
+      },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => savedPayload !== null)
+
+    assert.equal(savedPayload.gps_latitude, sessionFix.lat)
+    assert.equal(savedPayload.gps_accuracy, sessionFix.accuracy)
+  } finally {
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('restoreReviewDraft rebuilds the live session and opens the review screen', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+
+  try {
+    state.currentScreen = 'home'
+    state.capturedPhotos = []
+    const photoTs = Date.now() - 600_000
+    const restoredOk = restoreReviewDraft({
+      photos: [{
+        blob: new Blob(['photo'], { type: 'image/webp' }),
+        aiBlob: new Blob(['photo'], { type: 'image/webp' }),
+        blobPromise: null,
+        gps: { lat: 61.7, lon: 9.8, accuracy: 9, altitude: 700 },
+        ts: new Date(photoTs),
+        emoji: '📸',
+        taxon: null,
+        aiCropRect: null,
+        aiCropSourceW: null,
+        aiCropSourceH: null,
+        aiCropIsCustom: false,
+      }],
+      sessionStartAt: photoTs - 5_000,
+      captureWindowEndAt: photoTs + 90_000,
+      sessionFix: { lat: 61.7, lon: 9.8, accuracy: 4, altitude: 698, timestamp: photoTs },
+      captureDraft: { habitat: 'alpine heath', notes: 'restored', uncertain: true, visibility: 'private', is_draft: true, location_precision: 'exact' },
+      locationName: 'Rondane',
+    })
+
+    assert.equal(restoredOk, true)
+    assert.equal(state.currentScreen, 'review')
+    assert.equal(state.reviewContext, null)
+    assert.equal(state.capturedPhotos.length, 1)
+    assert.equal(state.capturedPhotos[0].gps.lat, 61.7)
+    assert.equal(state.captureDraft.habitat, 'alpine heath')
+    assert.equal(state.captureDraft.uncertain, true)
+    assert.equal(state.captureSessionLocation.fix.lat, 61.7)
+    assert.equal(state.captureSessionLocation.sessionStartAt.getTime(), photoTs - 5_000)
+    // Photos are 10 minutes old: the capture window must be closed so a
+    // save cannot silently pick up the current (post-crash) position.
+    assert.equal(Number.isFinite(state.captureSessionLocation.captureWindowEndAt), true)
+    assert.equal(state.captureSessionLocation.captureWindowEndAt < Date.now(), true)
+    assert.equal(env.document.getElementById('location-name-input').value, 'Rondane')
+
+    assert.equal(restoreReviewDraft(null), false)
+    assert.equal(restoreReviewDraft({ photos: [] }), false)
+
+    // Let the async location lookup kicked off by buildReviewGrid settle
+    // before tearing down the fake DOM.
+    for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve))
+  } finally {
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('review pill shows No location and tapping it opens the sheet; settings option opens app settings', async () => {
+  const snapshot = _snapshotReviewState()
+  let openSettingsCalls = 0
+  const env = _installReviewGlobals({
+    capacitor: {
+      Plugins: { App: { openSettings: async () => { openSettingsCalls += 1 } } },
+    },
+  })
+
+  try {
+    _seedReviewState({
+      liveFix: null,
+      user: { id: 'user-1' },
+      location: {
+        preference: 'enabled',
+        capability: 'supported',
+        permission: 'denied',
+        status: 'error',
+        error: { kind: 'permission-denied', message: 'Permission denied' },
+      },
+    })
+
+    initReview()
+    buildReviewGrid()
+
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'No location · Tap to fix')
+    assert.equal(env.document.getElementById('review-gps-pill').dataset.gpsState, 'none')
+    assert.equal(env.document.getElementById('review-gps-pill').dataset.gpsAction, 'fix')
+
+    _click(env.document.getElementById('review-gps-pill'))
+    await _waitFor(() => env.document.getElementById('location-fix-overlay').style.display === 'flex')
+
+    _click(env.document.getElementById('location-fix-settings'))
+    for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve))
+
+    assert.equal(openSettingsCalls, 1)
+    assert.equal(state.location.preference, 'enabled')
+    assert.equal(env.document.getElementById('location-fix-overlay').style.display, 'none')
+  } finally {
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+test('review pill shows one no-location state and a captured fix is never overwritten', () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+
+  try {
+    _seedReviewState({
+      liveFix: null,
+      user: { id: 'user-1' },
+      location: {
+        preference: 'enabled',
+        capability: 'supported',
+        permission: 'granted',
+        status: 'timeout',
+        error: { kind: 'timeout', message: 'Location request timed out' },
+      },
+    })
+
+    initReview()
+    buildReviewGrid()
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'No location · Tap to fix')
+    assert.equal(env.document.getElementById('review-gps-pill').dataset.gpsState, 'none')
+    assert.equal(env.document.getElementById('review-gps-pill').dataset.gpsAction, 'fix')
+
+    // A captured session fix wins over a later denied/off state.
+    state.captureSessionLocation.fix = { lat: 60.2, lon: 10.3, accuracy: 7, altitude: 90, timestamp: Date.now() }
+    state.location.permission = 'denied'
+    state.location.status = 'error'
+    state.location.error = { kind: 'permission-denied', message: 'denied' }
+    env.window.dispatchEvent({ type: LOCATION_STATE_CHANGED_EVENT })
+
+    assert.equal(env.document.getElementById('review-gps-display').textContent, 'Location captured · ±7 m')
+    assert.equal(env.document.getElementById('review-gps-pill').dataset.gpsState, 'fix')
+    assert.equal(env.document.getElementById('review-gps-pill').dataset.gpsAction, undefined)
+  } finally {
     _restoreReviewState(snapshot)
     env.restore()
   }
