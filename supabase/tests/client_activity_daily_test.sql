@@ -87,7 +87,9 @@ BEGIN
 
   -- Assertion 4: same-day repeat with identical (client, version) upserts
   -- (no new row) and advances last_seen_at while keeping first_seen_at.
-  PERFORM pg_sleep(0.05);
+  -- The RPC uses clock_timestamp() (not now(), which is transaction-scoped),
+  -- but pg_sleep guarantees the wall clock has moved even on a fast machine.
+  PERFORM pg_sleep(0.01);
   PERFORM public.record_client_activity('web_browser', '1.0.0');
 
   SELECT count(*) INTO row_count

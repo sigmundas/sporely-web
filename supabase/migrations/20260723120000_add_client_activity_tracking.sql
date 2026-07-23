@@ -99,13 +99,21 @@ create or replace function public.record_client_activity(
 returns void
 language plpgsql
 security definer
-set search_path = public
+-- Empty search_path forces every reference below to be schema-qualified, so
+-- no attacker-controlled schema on the caller's search_path can shadow a
+-- function or table we resolve here.
+set search_path = ''
 as $$
 declare
   v_user uuid := auth.uid();
   v_version text;
-  v_today date := (now() at time zone 'utc')::date;
-  v_now timestamptz := now();
+  -- clock_timestamp() reads the actual wall clock. now() would return the
+  -- transaction start time, so two calls inside one transaction would stamp
+  -- identical last_seen_at and the monotonic-advance guard on the upsert
+  -- (last_seen_at < excluded.last_seen_at) would silently skip the second
+  -- update. v_today is derived from the same instant for consistency.
+  v_now timestamptz := clock_timestamp();
+  v_today date := (v_now at time zone 'utc')::date;
 begin
   if v_user is null then
     raise exception 'record_client_activity requires an authenticated user';
@@ -123,8 +131,8 @@ begin
   -- rather than erroring, so a client with an unexpectedly long version tag
   -- (dev suffix, build metadata) still gets its activity counted.
   v_version := coalesce(p_app_version, '');
-  if char_length(v_version) > 32 then
-    v_version := substr(v_version, 1, 32);
+  if pg_catalog.char_length(v_version) > 32 then
+    v_version := pg_catalog.substr(v_version, 1, 32);
   end if;
 
   insert into public.client_activity_daily as cad (
@@ -135,15 +143,17 @@ begin
   do update set last_seen_at = excluded.last_seen_at
     where cad.last_seen_at < excluded.last_seen_at;
 
-  update public.profiles
+  update public.profiles p
      set last_client = p_client,
          last_app_version = nullif(v_version, ''),
          last_client_seen_at = v_now
-   where id = v_user;
+   where p.id = v_user;
 end;
 $$;
 
 alter function public.record_client_activity(text, text) owner to postgres;
 
-revoke all on function public.record_client_activity(text, text) from public;
-grant execute on function public.record_client_activity(text, text) to authenticated;
+revoke all on function public.record_client_activity(text, text)
+  from public, anon;
+grant execute on function public.record_client_activity(text, text)
+  to authenticated;
