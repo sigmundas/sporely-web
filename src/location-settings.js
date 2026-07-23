@@ -1,23 +1,33 @@
-// Shared helpers for the GPS pill on the capture and review screens, and for
-// routing "Open location settings" to the native app-settings screen or to
-// concise instructions on the web.
+// Route "Open location settings" from the location-fix sheet to the right
+// Android settings screen. On non-native platforms (or if the intent can't
+// be resolved) fall back to a concise instructions toast.
+//
+// The native side lives in android/app/src/main/java/com/sporelab/sporely/
+// LocationSettingsPlugin.java — Capacitor plugin name "LocationSettings",
+// method openLocationSettings() which tries the system Location toggle
+// first and falls back to this app's details page.
 import { showToast } from './toast.js'
 
 export const NO_LOCATION_PILL_TEXT = 'No location · Tap to fix'
 export const LOCATION_ENABLE_INSTRUCTIONS =
   'Turn on location in your device or browser settings and allow Sporely to use it, then return here.'
 
+function _locationSettingsPlugin() {
+  const plugins = globalThis.Capacitor?.Plugins
+  const plugin = plugins?.LocationSettings
+  return typeof plugin?.openLocationSettings === 'function' ? plugin : null
+}
+
 export function supportsOpenAppSettings() {
-  const app = globalThis.Capacitor?.Plugins?.App || globalThis.Capacitor?.App || null
-  return typeof app?.openSettings === 'function' ? app : null
+  return _locationSettingsPlugin()
 }
 
 export async function openLocationSettingsOrExplain() {
-  const app = supportsOpenAppSettings()
-  if (app) {
+  const plugin = _locationSettingsPlugin()
+  if (plugin) {
     try {
-      await app.openSettings.call(app)
-      return true
+      const result = await plugin.openLocationSettings()
+      if (result?.opened && result.opened !== 'none') return true
     } catch (error) {
       console.warn('Unable to open location settings:', error)
     }

@@ -2,6 +2,7 @@ import { t } from './i18n.js'
 import { navigate } from './router.js'
 import { getUseSystemCamera } from './settings.js'
 import { isNativeApp, isAndroidApp } from './platform.js'
+import { markCameraStep, startCameraTimingRun } from './camera-timing.js'
 
 const ANDROID_WEB_CAMERA_WARNING_KEY = 'sporely-hide-android-web-camera-warning'
 
@@ -38,15 +39,23 @@ export function getEffectiveCameraLabel() {
   return t(_isIosWebApp() ? 'home.sporelyCam' : 'home.webCam')
 }
 
-export async function openPreferredCamera() {
+export async function openPreferredCamera(sourceOverride = null) {
+  const source = typeof sourceOverride === 'string' && sourceOverride
+    ? sourceOverride
+    : 'openPreferredCamera'
+  startCameraTimingRun(source, { native: isAndroidNativeApp(), useSystem: getUseSystemCamera?.() ?? null })
   if (isAndroidNativeApp() && nativeCameraOpener) {
+    markCameraStep('nativeCameraOpener:enter')
     await nativeCameraOpener()
+    markCameraStep('nativeCameraOpener:exit')
     return
   }
   if (_isAndroidWebApp() && localStorage.getItem(ANDROID_WEB_CAMERA_WARNING_KEY) !== '1') {
+    markCameraStep('androidWebCameraWarning:show')
     _showAndroidWebCameraWarning()
     return
   }
+  markCameraStep('navigate:capture')
   navigate('capture')
 }
 

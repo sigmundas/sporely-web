@@ -1747,7 +1747,7 @@ test('review pill shows No location and tapping it opens the sheet; settings opt
   let openSettingsCalls = 0
   const env = _installReviewGlobals({
     capacitor: {
-      Plugins: { App: { openSettings: async () => { openSettingsCalls += 1 } } },
+      Plugins: { LocationSettings: { openLocationSettings: async () => { openSettingsCalls += 1; return { opened: "system" } } } },
     },
   })
 

@@ -65,8 +65,8 @@ function _isMissingMentionPreviewSupport(error) {
 }
 
 export async function initHome() {
-  document.getElementById('home-fab').addEventListener('click', openPreferredCamera)
-  document.getElementById('ac-camera')?.addEventListener('click', openPreferredCamera)
+  document.getElementById('home-fab').addEventListener('click', () => openPreferredCamera('home-fab'))
+  document.getElementById('ac-camera')?.addEventListener('click', () => openPreferredCamera('ac-camera'))
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
   document.getElementById('recent-history-link').addEventListener('click', () => {
     openFinds('feed', { resetSearch: true, secondaryScope: 'public' })

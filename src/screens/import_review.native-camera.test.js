@@ -368,8 +368,10 @@ afterEach(async () => {
   _resetState()
 })
 
-test('Android native New Find with granted OS permission waits for bounded initial location before launch', async () => {
-  const initialFix = { lat: 63.22, lon: 10.22, accuracy: 7, altitude: 18, timestamp: Date.now() - 1_000 }
+test('Android native New Find launches the camera immediately; GPS request runs in parallel', async () => {
+  // Camera-first: never block the native intent on a GPS fix. The initial
+  // getCurrentPosition is fired in parallel with capturePhotos so any fix
+  // that lands before the shutter fires is picked up by the capture window.
   let currentPositionSuccess = null
   const runtime = _makeRuntime({
     getCurrentPosition(success) {
@@ -385,26 +387,14 @@ test('Android native New Find with granted OS permission waits for bounded initi
   const openPromise = openNativeCamera()
   await new Promise(resolve => setImmediate(resolve))
 
-  assert.equal(runtime.getElement('capture-location-overlay').style.display, 'none')
-  assert.equal(nativeCamera.calls.capturePhotos.length, 0)
-  assert.equal(nativeCamera.calls.openSystemCamera.length, 0)
+  // capturePhotos ran without waiting for the fix; the fix request is in flight.
+  assert.equal(nativeCamera.calls.capturePhotos.length, 1)
+  assert.equal(nativeCamera.calls.capturePhotos[0].gps, undefined)
   assert.equal(runtime.calls.getCurrentPosition, 1)
   assert.equal(runtime.calls.getCurrentPositionOptions[0].maximumAge, 0)
+  assert.ok(typeof currentPositionSuccess === 'function', 'GPS request is still pending')
 
-  currentPositionSuccess?.({
-    coords: {
-      latitude: initialFix.lat,
-      longitude: initialFix.lon,
-      accuracy: initialFix.accuracy,
-      altitude: initialFix.altitude,
-    },
-    timestamp: initialFix.timestamp,
-  })
   await openPromise
-
-  assert.equal(nativeCamera.calls.capturePhotos.length, 1)
-  assert.equal(nativeCamera.calls.capturePhotos[0].gps.latitude, initialFix.lat)
-  assert.equal(state.captureSessionLocation.fix, null)
 })
 
 test('granted location starts session, begins acquisition, then launches native camera', async () => {
@@ -546,7 +536,7 @@ test('initial native camera fix survives camera pause and resume timeout', async
   assert.equal(nativeCamera.calls.capturePhotos.length, 1)
 })
 
-test('no initial native camera fix still allows capture and retries after return', async () => {
+test('no initial native camera fix still allows capture; the in-flight GPS request is fire-and-forget', async () => {
   let getCurrentPositionCalls = 0
   const runtime = _makeRuntime({
     getCurrentPosition(success, error) {
@@ -585,10 +575,12 @@ test('no initial native camera fix still allows capture and retries after return
   }
 
   await openNativeCamera()
-  await _waitFor(() => getCurrentPositionCalls >= 2)
 
+  // A single fire-and-forget GPS request is enough — capture never blocks on it,
+  // and no post-return retry is needed. The observation still gets a
+  // capture-time-window fix from the running watch if one lands in time.
   assert.equal(nativeCamera.calls.capturePhotos.length, 1)
-  assert.equal(getCurrentPositionCalls >= 2, true)
+  assert.equal(getCurrentPositionCalls, 1)
 })
 
 test('Native camera returns photos → LIVE review uses captureSessionLocation.fix, reviewContext stays null', async () => {
