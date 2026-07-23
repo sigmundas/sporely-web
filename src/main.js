@@ -5,6 +5,13 @@ import { supabase } from './supabase.js'
 import { getLocale, initI18n, onLocaleChange, setLocale, t } from './i18n.js'
 import { state } from './state.js'
 import { clearSharedAuthSessionCache, getSharedAuthSession, seedSharedAuthSession } from './auth-session.js'
+import { recordClientActivity, shouldRecordOnVisibility } from './client-activity.js'
+
+function _fireClientActivity() {
+  recordClientActivity(supabase).catch(err => {
+    console.warn('record_client_activity failed:', err?.message || err)
+  })
+}
 import { navigate } from './router.js'
 import { applyTheme } from './theme.js'
 import { showToast } from './toast.js'
@@ -582,6 +589,7 @@ async function init() {
     if (event === 'SIGNED_IN' && session?.user && !state.user) {
       clearSharedAuthSessionCache()
       seedSharedAuthSession(session)
+      _fireClientActivity()
       if (recoveryModeActive || document.getElementById('reset-password-form')?.style.display === 'block') {
         return // Do not boot app while resetting password
       }
@@ -603,8 +611,20 @@ async function init() {
     _authStateSubscription = null
   }, { once: true })
 
+  // Foreground pings keep the daily activity row's last_seen_at fresh without
+  // any polling. The RPC is idempotent per (user, UTC date, client, version).
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return
+    if (!state.user) return
+    // Throttle foreground pings — boot and SIGNED_IN always fire immediately,
+    // but tab-switch churn should not hammer the RPC.
+    if (!shouldRecordOnVisibility()) return
+    _fireClientActivity()
+  })
+
   if (initialSession?.user && !recoveryModeActive && document.getElementById('reset-password-form')?.style.display !== 'block') {
     clearPasswordRecoveryHint()
+    _fireClientActivity()
     await bootApp(initialSession.user)
   } else {
     if (document.getElementById('auth-overlay').style.display !== 'flex') {
