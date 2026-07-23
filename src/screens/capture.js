@@ -5,6 +5,7 @@ import { showToast } from '../toast.js'
 import { getDefaultAiCropRect } from '../image_crop.js'
 import { isIosWebApp, isNativeApp } from '../platform.js'
 import { debugImagePipeline, isImagePipelineDebugEnabled } from '../image-pipeline-debug.js'
+import { endCameraTimingRun, markCameraStep } from '../camera-timing.js'
 import { clearIrisShutter, startPendingIrisShutter } from '../iris-shutter.js'
 import { resetReviewAiState } from './review.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
@@ -214,17 +215,26 @@ async function _probeDeviceForTorch(device) {
 
 async function _getPrimaryMainCameraId() {
   if (!navigator.mediaDevices?.getUserMedia || !navigator.mediaDevices?.enumerateDevices) return null
-  if (cachedPrimaryMainCameraId) return cachedPrimaryMainCameraId
-  if (primaryMainCameraPromise) return primaryMainCameraPromise
+  if (cachedPrimaryMainCameraId) {
+    markCameraStep('torchHeuristic:cached', { deviceId: cachedPrimaryMainCameraId })
+    return cachedPrimaryMainCameraId
+  }
+  if (primaryMainCameraPromise) {
+    markCameraStep('torchHeuristic:awaitInFlight')
+    return primaryMainCameraPromise
+  }
 
   primaryMainCameraPromise = (async () => {
+    markCameraStep('torchHeuristic:start')
     try {
       await _primeCameraPermission()
+      markCameraStep('torchHeuristic:primed')
 
       const devices = await navigator.mediaDevices.enumerateDevices()
       const videoDevices = devices.filter(device => device.kind === 'videoinput')
       const candidateDevices = videoDevices.filter(device => !_isClearlyFrontCamera(device))
       const probeDevices = candidateDevices.length ? candidateDevices : videoDevices
+      markCameraStep('torchHeuristic:enumerated', { videoDevices: videoDevices.length, probeDevices: probeDevices.length })
 
       for (const device of probeDevices) {
         try {
@@ -246,6 +256,7 @@ async function _getPrimaryMainCameraId() {
       return null
     } finally {
       primaryMainCameraPromise = null
+      markCameraStep('torchHeuristic:end', { deviceId: cachedPrimaryMainCameraId })
     }
   })()
 
@@ -321,11 +332,13 @@ async function _prefetchStillCaptureData(stream) {
 }
 
 async function tryGetUserMedia() {
+  markCameraStep('tryGetUserMedia:enter', { path: isIosWebApp() ? 'ios' : 'default' })
   // iOS Safari / iOS PWA: skip the priming + per-device probing path. WebKit
   // has documented behaviour where a later getUserMedia call can mute an
   // existing MediaStream, which manifests as a blank preview and black
   // captures. Ask for a single environment-facing stream and stop.
   if (isIosWebApp()) {
+    markCameraStep('gUM:ios:start')
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: 'environment' },
@@ -334,7 +347,9 @@ async function tryGetUserMedia() {
       },
       audio: false,
     })
+    markCameraStep('gUM:ios:end')
     await _applyPrimaryLensPreferences(stream)
+    markCameraStep('applyPrimaryLensPreferences:end')
     return stream
   }
 
@@ -344,6 +359,7 @@ async function tryGetUserMedia() {
   // Step 2: Try to start the camera using the exact device ID if found
   if (mainDeviceId) {
     try {
+      markCameraStep('gUM:exact:start')
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           deviceId: { exact: mainDeviceId },
@@ -352,16 +368,20 @@ async function tryGetUserMedia() {
         },
         audio: false
       })
+      markCameraStep('gUM:exact:end')
       await _applyPrimaryLensPreferences(stream)
+      markCameraStep('applyPrimaryLensPreferences:end')
       return stream
     } catch (err) {
       cachedPrimaryMainCameraId = null
+      markCameraStep('gUM:exact:fail', { error: err?.name || String(err) })
       if (import.meta.env?.DEV) console.warn('Failed to start camera with heuristic deviceId, falling back...', err)
     }
   }
 
   // Step 3: Fallback logic
   try {
+    markCameraStep('gUM:facingMode:start')
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: 'environment' },
@@ -370,11 +390,16 @@ async function tryGetUserMedia() {
       },
       audio: false,
     })
+    markCameraStep('gUM:facingMode:end')
     await _applyPrimaryLensPreferences(stream)
+    markCameraStep('applyPrimaryLensPreferences:end')
     return stream
   } catch {
+    markCameraStep('gUM:facingMode:fail:fallback')
     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
+    markCameraStep('gUM:minimal:end')
     await _applyPrimaryLensPreferences(stream)
+    markCameraStep('applyPrimaryLensPreferences:end')
     return stream
   }
 }
@@ -504,6 +529,8 @@ function _wireFirstFrameSignal(video, stream) {
     if (state.cameraStream !== stream || video.srcObject !== stream) return
     if (firstFrameReady) return
     firstFrameReady = true
+    markCameraStep('firstFrameReady')
+    endCameraTimingRun('firstFrame')
     _syncCaptureControls()
   }
 
@@ -566,7 +593,9 @@ function _logCaptureDiagnostics(message, details = {}, warn = false) {
 
 export async function startCamera(options = {}) {
   const preserveBatch = !!options.preserveBatch
+  markCameraStep('startCamera:enter', { preserveBatch })
   stopCamera()
+  markCameraStep('startCamera:afterStopCamera')
   // Capturing means the capture-lock window is open by definition: new
   // at-shutter fixes must be accepted again. Review recomputes the window
   // from the (possibly extended) photo timestamps when the batch returns.
@@ -588,8 +617,10 @@ export async function startCamera(options = {}) {
     // The camera opens immediately; location is acquired in parallel and
     // never delays the viewfinder (see _startCaptureLocationFlow below).
     const stream = await tryGetUserMedia()
+    markCameraStep('tryGetUserMedia:resolved')
     if (!isPreflightCurrent(startupToken)) {
       _stopMediaStream(stream)
+      endCameraTimingRun('aborted:preflight')
       return
     }
     state.cameraStream = stream
@@ -597,6 +628,7 @@ export async function startCamera(options = {}) {
     const video = document.getElementById('camera-video')
     video.classList.remove('camera-video-full-frame')
     video.srcObject = stream
+    markCameraStep('video:srcObjectAttached')
     video.onloadedmetadata = async () => {
       try { await video.play() } catch (_) {}
       _syncPreviewFit(video)
@@ -620,6 +652,8 @@ export async function startCamera(options = {}) {
       })
     }
   } catch (err) {
+    markCameraStep('startCamera:error', { name: err?.name || String(err) })
+    endCameraTimingRun('error', { name: err?.name || String(err) })
     const denied = document.getElementById('camera-denied')
     const body   = document.getElementById('camera-denied-body')
 

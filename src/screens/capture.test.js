@@ -1078,7 +1078,7 @@ test('denied state pill tap opens the sheet and the settings option opens app se
   const previousCapacitor = globalThis.Capacitor
   let openSettingsCalls = 0
   globalThis.Capacitor = {
-    Plugins: { App: { openSettings: async () => { openSettingsCalls += 1 } } },
+    Plugins: { LocationSettings: { openLocationSettings: async () => { openSettingsCalls += 1; return { opened: "system" } } } },
   }
 
   try {
@@ -1135,4 +1135,17 @@ test('a captured session fix is never overwritten by later warnings', () => {
   assert.equal(runtime.getElement('gps-display').textContent, 'Location captured · ±6 m')
   assert.equal(runtime.getElement('gps-pill').dataset.gpsState, 'fix')
   assert.equal(runtime.getElement('gps-pill').dataset.gpsAction, undefined)
+})
+
+test('openNativeCamera never awaits an initial GPS fix before capturePhotos', () => {
+  // Regression: an awaited pre-camera GPS request blocked the native camera
+  // intent by up to 6.5 s. Fire-and-forget only; capture-time locking still
+  // picks up whichever in-window fix arrives before the shutter fires.
+  const source = fs.readFileSync(new URL('../screens/import_review.js', import.meta.url), 'utf8')
+  const start = source.indexOf('export async function openNativeCamera()')
+  const end = source.indexOf('\nasync function _requestInitialNativeCameraLocation()')
+  assert.ok(start >= 0 && end > start)
+  const body = source.slice(start, end)
+  assert.doesNotMatch(body, /\bawait\s+_requestInitialNativeCameraLocation\b/)
+  assert.match(body, /void\s+_requestInitialNativeCameraLocation\(\)/)
 })

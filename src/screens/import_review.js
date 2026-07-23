@@ -1,4 +1,5 @@
 import { state } from '../state.js';
+import { markCameraStep } from '../camera-timing.js';
 import { formatDate, formatTime, getLocale, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
@@ -1453,32 +1454,42 @@ export async function openPhotoImportPicker() {
 }
 
 export async function openNativeCamera() {
+  markCameraStep('openNativeCamera:enter')
   if (!isAndroidNativeApp()) {
+    markCameraStep('openNativeCamera:notAndroid')
     showToast('Sporely Cam is available in the Android app.')
     return
   }
 
   const preflightToken = nextPreflightToken()
+  markCameraStep('prepareNewFindLocation:start')
   const locationStart = await prepareNewFindLocation({ preserveBatch: false, token: preflightToken })
+  markCameraStep('prepareNewFindLocation:end', {
+    shouldContinue: !!locationStart?.shouldContinue,
+    useLocation: !!locationStart?.useLocation,
+  })
   if (!isPreflightCurrent(preflightToken) || !locationStart.shouldContinue) {
     endCaptureLocationSession()
     return
   }
+  markCameraStep('startNewFindLocationAcquisition:start')
   const acquisitionReady = await startNewFindLocationAcquisition({
     useLocation: locationStart.useLocation,
     token: preflightToken,
   })
+  markCameraStep('startNewFindLocationAcquisition:end', { acquisitionReady })
   if (!isPreflightCurrent(preflightToken) || !acquisitionReady) {
     endCaptureLocationSession()
     return
   }
 
   if (locationStart.useLocation) {
-    await _requestInitialNativeCameraLocation()
-    if (!isPreflightCurrent(preflightToken)) {
-      endCaptureLocationSession()
-      return
-    }
+    // Fire-and-forget: never block the native camera intent on a GPS fix.
+    // The capture-window logic in review picks whichever in-window fix
+    // arrives first — a fresh fix that lands after the camera opens but
+    // before the user taps the shutter is still capture-time correct.
+    markCameraStep('requestInitialNativeCameraLocation:start (async)')
+    void _requestInitialNativeCameraLocation()
   }
 
   const sessionFix = state.captureSessionLocation.fix
@@ -1495,7 +1506,9 @@ export async function openNativeCamera() {
     let result
     if (getUseSystemCamera()) {
       playIrisShutter({ mode: 'quick' })
+      markCameraStep('nativeCamera.openSystemCamera:start')
       result = await _nativeCamera().openSystemCamera()
+      markCameraStep('nativeCamera.openSystemCamera:end')
     } else {
       const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
       if (gps) options.gps = gps
@@ -1505,7 +1518,11 @@ export async function openNativeCamera() {
         gps,
       })
       playIrisShutter({ mode: 'quick' })
+      markCameraStep('nativeCamera.capturePhotos:start', { hasGps: !!gps })
       result = await _nativeCamera().capturePhotos(options)
+      markCameraStep('nativeCamera.capturePhotos:end', {
+        photoCount: Array.isArray(result?.photos) ? result.photos.length : 0,
+      })
       const photos = Array.isArray(result?.photos) ? result.photos : []
       debugImagePipeline('android native camera capture returned', {
         screenPath: 'new-find:native-camera',
@@ -1520,10 +1537,12 @@ export async function openNativeCamera() {
         })),
       })
     }
-    if (locationStart.useLocation && !state.captureSessionLocation.fix) {
-      void _requestInitialNativeCameraLocation()
-    }
+    // (The pre-launch fire-and-forget request above is still in flight if it
+    // hadn't resolved by the time capturePhotos returned; no second request
+    // is needed here.)
+    markCameraStep('handleNativePhotoResultAsLive:start')
     await _handleNativePhotoResultAsLive(result)
+    markCameraStep('handleNativePhotoResultAsLive:end')
   } catch (err) {
     if (isPickerCancel(err)) {
       endCaptureLocationSession()

@@ -17,6 +17,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NativePhotoPickerPlugin.class);
         registerPlugin(NativeCameraPlugin.class);
         registerPlugin(UploadSyncServicePlugin.class);
+        registerPlugin(LocationSettingsPlugin.class);
         super.onCreate(savedInstanceState);
 
         maybeRequestLocationPermission();
