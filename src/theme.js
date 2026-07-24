@@ -2,10 +2,11 @@
 // Separated so both main.js and settings panel can import without circular deps.
 
 export function applyTheme(theme) {
-  // 'auto' → follow system preference
-  const effective = theme === 'auto'
+  // 'auto' (or unset) → follow system preference
+  const resolved = theme || 'auto'
+  const effective = resolved === 'auto'
     ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-    : (theme || 'dark')
+    : resolved
 
   const html = document.documentElement
   const meta = document.querySelector('meta[name=theme-color]')
@@ -20,11 +21,18 @@ export function applyTheme(theme) {
 }
 
 // Apply immediately on module load so there's no flash
-applyTheme(localStorage.getItem('sporely-theme') || 'dark')
+applyTheme(localStorage.getItem('sporely-theme') || 'auto')
 
 // Keep 'auto' in sync with OS preference changes
-window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-  if ((localStorage.getItem('sporely-theme') || 'dark') === 'auto') {
+function refreshIfAuto() {
+  if ((localStorage.getItem('sporely-theme') || 'auto') === 'auto') {
     applyTheme('auto')
   }
+}
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', refreshIfAuto)
+// Android WebView (Capacitor) may not fire the media-query change while backgrounded,
+// so re-check whenever the app returns to the foreground.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshIfAuto()
 })
+window.addEventListener('focus', refreshIfAuto)

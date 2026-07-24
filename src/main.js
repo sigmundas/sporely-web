@@ -316,7 +316,7 @@ function initSettings() {
 }
 
 function _syncSettingsUI() {
-  const current = localStorage.getItem('sporely-theme') || 'dark'
+  const current = localStorage.getItem('sporely-theme') || 'auto'
   document.querySelectorAll('.theme-seg-btn[data-theme]').forEach(b => {
     b.classList.toggle('active', b.dataset.theme === current)
   })
