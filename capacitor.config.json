@@ -1,5 +1,15 @@
 {
   "appId": "com.sporelab.sporely",
   "appName": "Sporely",
-  "webDir": "dist"
+  "webDir": "dist",
+  "plugins": {
+    "SocialLogin": {
+      "providers": {
+        "google": false,
+        "facebook": false,
+        "apple": false,
+        "twitter": false
+      }
+    }
+  }
 }
