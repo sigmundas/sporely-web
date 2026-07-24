@@ -2,6 +2,14 @@ import { supabase } from '../supabase.js'
 import { getSharedAuthSession, seedSharedAuthSession } from '../auth-session.js'
 import { getLocale, setLocale, t } from '../i18n.js'
 import { isAndroidApp, isNativeApp } from '../platform.js'
+import {
+  GoogleSignInCancelledError,
+  GoogleSignInConfigError,
+  GoogleSignInMissingTokenError,
+  isGoogleNativeConfigured,
+  isNativeGoogleSignInAvailable,
+  signInWithGoogleNative,
+} from '../google-auth.js'
 
 const TURNSTILE_SITE_KEY = import.meta.env?.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAC0h9RON_lYu5ib_'
 const SUPABASE_OAUTH_CALLBACK_PATH = '/auth/callback'
@@ -563,6 +571,47 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
       if (!_shouldShowSocialLogin()) return
       showError('')
       googleLoginBtn.disabled = true
+
+      // On native Android we must never fall back to the browser OAuth flow:
+      // that leaks the session into the system browser and (as observed on
+      // Samsung) never returns the user to the app. Missing Google config on
+      // native surfaces as an error, never as a browser redirect.
+      if (isAndroidApp() && isNativeApp()) {
+        if (!isGoogleNativeConfigured()) {
+          console.error('Native Google sign-in is not configured (VITE_GOOGLE_WEB_CLIENT_ID missing).')
+          showError(t('auth.genericError'))
+          googleLoginBtn.disabled = false
+          return
+        }
+        try {
+          const { session } = await signInWithGoogleNative()
+          const resolvedSession = session || await _waitForSession()
+          if (resolvedSession?.user) {
+            _clearAuthDraft()
+            onAuthenticated(resolvedSession)
+            return
+          }
+          showError(t('auth.genericError'))
+        } catch (error) {
+          if (error instanceof GoogleSignInCancelledError) {
+            // User dismissed the picker — not an error worth surfacing.
+          } else if (error instanceof GoogleSignInMissingTokenError) {
+            console.error('Native Google sign-in returned no ID token:', error)
+            showError(t('auth.genericError'))
+          } else if (error instanceof GoogleSignInConfigError) {
+            console.error('Native Google sign-in is not configured:', error)
+            showError(t('auth.genericError'))
+          } else {
+            console.error('Native Google sign-in failed unexpectedly:', error)
+            showError(error?.message || t('auth.genericError'))
+          }
+        } finally {
+          googleLoginBtn.disabled = false
+        }
+        return
+      }
+
+      // Web / PWA: use the standard Supabase OAuth browser redirect.
       try {
         const { error } = await supabase.auth.signInWithOAuth({
           provider: 'google',

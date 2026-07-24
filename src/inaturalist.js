@@ -2,6 +2,11 @@ import { Preferences } from '@capacitor/preferences'
 import { SocialLogin } from '@capgo/capacitor-social-login'
 import { getPlatform } from './platform.js'
 import { recordDebugJsonResponse } from './debug-activity.js'
+import {
+  ensureNativeOAuthInitialized,
+  registerNativeOAuthProviders,
+  resetNativeOAuthStateForTests,
+} from './native-oauth.js'
 
 export const INAT_WEB_CLIENT_ID = import.meta.env?.VITE_INAT_WEB_CLIENT_ID || 'CMLiS0BuLpF0-izU9hHTb-j_44SY3A4dhAoTB-uf5_0'
 export const INAT_WEB_REDIRECT_URI = import.meta.env?.VITE_INAT_WEB_REDIRECT_URI || 'https://app.sporely.no/auth/inaturalist/callback'
@@ -46,7 +51,19 @@ const SUCCESSFUL_SESSION_KEYS = [
   INAT_PLATFORM_KEY,
 ]
 
-let _socialLoginInitPromise = null
+registerNativeOAuthProviders({
+  oauth2: {
+    [INAT_NATIVE_PROVIDER_ID]: {
+      appId: INAT_ANDROID_CLIENT_ID,
+      authorizationBaseUrl: INAT_AUTH_URL,
+      accessTokenEndpoint: INAT_TOKEN_URL,
+      redirectUrl: INAT_ANDROID_REDIRECT_URI,
+      scope: INAT_DEFAULT_SCOPE,
+      pkceEnabled: true,
+      responseType: 'code',
+    },
+  },
+})
 
 function _getCrypto() {
   const cryptoImpl = globalThis.crypto
@@ -126,21 +143,6 @@ function _platformConfig(platform) {
       }
 }
 
-function _nativeOAuthConfig() {
-  return {
-    oauth2: {
-      [INAT_NATIVE_PROVIDER_ID]: {
-        appId: INAT_ANDROID_CLIENT_ID,
-        authorizationBaseUrl: INAT_AUTH_URL,
-        accessTokenEndpoint: INAT_TOKEN_URL,
-        redirectUrl: INAT_ANDROID_REDIRECT_URI,
-        scope: INAT_DEFAULT_SCOPE,
-        pkceEnabled: true,
-        responseType: 'code',
-      },
-    },
-  }
-}
 
 function _pluginAccessTokenValue(accessToken) {
   if (!accessToken) return ''
@@ -626,29 +628,15 @@ export async function initializeInaturalistOAuth(options = {}) {
   const platform = _normalizePlatform(options.platform || (typeof window !== 'undefined' ? getPlatform() : null))
   if (platform !== 'android') return { initialized: false, platform }
 
-  if (!_socialLoginInitPromise) {
-    const socialLogin = options.socialLoginImpl || SocialLogin
-    const initConfig = _nativeOAuthConfig()
-    _debugInatOAuth('initializing native social login', {
-      platform,
-      providerId: INAT_NATIVE_PROVIDER_ID,
-      redirectUrl: initConfig.oauth2[INAT_NATIVE_PROVIDER_ID].redirectUrl,
-    })
-    _socialLoginInitPromise = socialLogin.initialize(initConfig)
-      .then(() => {
-        _debugInatOAuth('SocialLogin.initialize completed', {
-          platform,
-          providerId: INAT_NATIVE_PROVIDER_ID,
-        })
-        return { initialized: true, platform }
-      })
-      .catch(error => {
-        _socialLoginInitPromise = null
-        throw error
-      })
-  }
+  _debugInatOAuth('ensuring native social login runtime', {
+    platform,
+    providerId: INAT_NATIVE_PROVIDER_ID,
+  })
 
-  return _socialLoginInitPromise
+  return ensureNativeOAuthInitialized({
+    platform,
+    socialLoginImpl: options.socialLoginImpl,
+  })
 }
 
 export async function connectInaturalist(options = {}) {
@@ -697,7 +685,7 @@ export async function connectInaturalist(options = {}) {
 }
 
 export function resetInaturalistOAuthStateForTests() {
-  _socialLoginInitPromise = null
+  resetNativeOAuthStateForTests()
 }
 
 async function _refreshAccessTokenIfNeeded(session, storageImpl, fetchImpl = _defaultFetch()) {

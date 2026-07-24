@@ -781,3 +781,66 @@ test('loads a connected iNaturalist session using the compatibility field names'
   assert.equal(session.api_token, 'api-456')
   assert.equal(session.apiToken, 'api-456')
 })
+
+test('regression: connecting iNaturalist never touches the Supabase auth session', async () => {
+  resetInaturalistOAuthStateForTests()
+  const { supabase } = await import('./supabase.js')
+  const supabaseCalls = []
+  const original = {
+    signInWithIdToken: supabase.auth.signInWithIdToken,
+    signInWithOAuth: supabase.auth.signInWithOAuth,
+    signInWithPassword: supabase.auth.signInWithPassword,
+    signUp: supabase.auth.signUp,
+    setSession: supabase.auth.setSession,
+    exchangeCodeForSession: supabase.auth.exchangeCodeForSession,
+  }
+  for (const method of Object.keys(original)) {
+    supabase.auth[method] = async (...args) => {
+      supabaseCalls.push({ method, args })
+      throw new Error(`Supabase auth.${method} must never be called by iNaturalist flows`)
+    }
+  }
+
+  try {
+    const storage = createMemoryStorage()
+    const socialLogin = {
+      async initialize() {},
+      async login() {
+        return {
+          provider: 'oauth2',
+          result: {
+            providerId: 'inaturalist',
+            accessToken: { token: 'access-999' },
+            refreshToken: 'refresh-999',
+            expiresIn: 3600,
+            scope: ['write'],
+          },
+        }
+      },
+    }
+    const fetchImpl = async url => {
+      if (url.endsWith('/users/api_token')) {
+        return jsonResponse({ api_token: 'api-999' })
+      }
+      if (url.endsWith('/v1/users/me')) {
+        return jsonResponse({ results: [{ id: 7, login: 'inat_user' }] })
+      }
+      throw new Error(`Unexpected URL: ${url}`)
+    }
+
+    const session = await connectInaturalist({
+      platform: 'android',
+      socialLoginImpl: socialLogin,
+      fetchImpl,
+      storage,
+    })
+
+    assert.equal(session.connected, true)
+    assert.equal(session.username, 'inat_user')
+    assert.equal(supabaseCalls.length, 0, 'iNaturalist connect must not call any Supabase auth method')
+  } finally {
+    for (const [method, fn] of Object.entries(original)) {
+      supabase.auth[method] = fn
+    }
+  }
+})

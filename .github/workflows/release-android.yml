@@ -34,8 +34,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check Google Web Client ID is available
+        env:
+          VITE_GOOGLE_WEB_CLIENT_ID: ${{ secrets.VITE_GOOGLE_WEB_CLIENT_ID }}
+        run: npm run check:google:web-client-id
+
       - name: Build web assets
+        env:
+          VITE_GOOGLE_WEB_CLIENT_ID: ${{ secrets.VITE_GOOGLE_WEB_CLIENT_ID }}
         run: npm run build
+
+      - name: Verify built bundle contains the Google Web Client ID
+        env:
+          VITE_GOOGLE_WEB_CLIENT_ID: ${{ secrets.VITE_GOOGLE_WEB_CLIENT_ID }}
+        run: npm run verify:build:google-web-client-id
 
       - name: Sync Capacitor Android
         run: npx cap sync android

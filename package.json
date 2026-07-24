@@ -1,7 +1,7 @@
 {
   "name": "sporely-web",
   "private": true,
-  "version": "0.6.15",
+  "version": "0.6.16",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -15,7 +15,9 @@
     "dev:http": "Starts the Vite development server over plain HTTP without the self-signed SSL cert.",
     "build": "Builds the production web app into dist/.",
     "preview:host": "Builds the production app, then serves it on the local network for browser/iPhone/PWA testing.",
-    "android:sync": "Builds production web assets and syncs them into the Capacitor Android project.",
+    "check:google:web-client-id": "Fails early if VITE_GOOGLE_WEB_CLIENT_ID is not available for the Vite build.",
+    "verify:build:google-web-client-id": "Fails if the built dist bundle does not contain the configured Google Web Client ID.",
+    "android:sync": "Runs the Google Web Client ID pre-check, builds production web assets, verifies the built bundle contains the client ID, then syncs Capacitor Android.",
     "android:install": "Builds production web assets, syncs Capacitor Android, then installs an inspectable debug app on a connected Android device.",
     "android:build:debug": "Builds a local debug APK without installing it.",
     "android:build:release": "Builds local signed release APK/AAB if local Android signing is configured. GitHub Actions remains the canonical release builder.",
@@ -32,7 +34,9 @@
     "dev:http": "vite --host --mode http",
     "build": "vite build",
     "preview:host": "npm run build && vite preview --host",
-    "android:sync": "npm run build && npx cap sync android",
+    "check:google:web-client-id": "node scripts/check-google-web-client-id.mjs",
+    "verify:build:google-web-client-id": "node scripts/verify-build-google-web-client-id.mjs",
+    "android:sync": "npm run check:google:web-client-id && npm run build && npm run verify:build:google-web-client-id && npx cap sync android",
     "android:install": "npm run android:sync && cd android && ./gradlew :app:installDebug",
     "android:build:debug": "npm run android:sync && cd android && ./gradlew :app:assembleDebug",
     "android:build:release": "npm run android:sync && cd android && ./gradlew :app:assembleRelease :app:bundleRelease",

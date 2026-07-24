@@ -5,7 +5,7 @@
   "plugins": {
     "SocialLogin": {
       "providers": {
-        "google": false,
+        "google": true,
         "facebook": false,
         "apple": false,
         "twitter": false

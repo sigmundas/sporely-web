@@ -10,6 +10,11 @@ import {
 } from './auth.js'
 import { clearSharedAuthSessionCache, getSharedAuthSession } from '../auth-session.js'
 import { supabase } from '../supabase.js'
+import {
+  _setDefaultSocialLoginImplForTests,
+  _setGoogleWebClientIdForTests,
+} from '../google-auth.js'
+import { resetNativeOAuthStateForTests } from '../native-oauth.js'
 
 function createAuthElement() {
   const listeners = {}
@@ -180,13 +185,21 @@ test('legacy auth hash handling ignores the Supabase OAuth callback route', () =
   }
 })
 
-test('android native auth keeps Google sign-in visible and clickable', async () => {
+test('android with missing Google client id never opens the browser OAuth flow', async () => {
   const harness = installAuthDom('android')
+  _setGoogleWebClientIdForTests(null)
+  _setDefaultSocialLoginImplForTests(null)
   const oauthCalls = []
+  const idTokenCalls = []
   const originalSignInWithOAuth = supabase.auth.signInWithOAuth
+  const originalSignInWithIdToken = supabase.auth.signInWithIdToken
   supabase.auth.signInWithOAuth = async payload => {
     oauthCalls.push(payload)
     return { error: null }
+  }
+  supabase.auth.signInWithIdToken = async payload => {
+    idTokenCalls.push(payload)
+    return { data: { session: null, user: null }, error: null }
   }
 
   try {
@@ -198,11 +211,73 @@ test('android native auth keeps Google sign-in visible and clickable', async () 
       preventDefault() {},
     })
 
-    assert.equal(oauthCalls.length, 1)
-    assert.equal(oauthCalls[0].provider, 'google')
-    assert.match(String(oauthCalls[0].options?.redirectTo || ''), /\/auth\/callback$/)
+    assert.equal(oauthCalls.length, 0, 'browser OAuth must never be called on native Android')
+    assert.equal(idTokenCalls.length, 0, 'signInWithIdToken must not run without a client id')
+    assert.equal(harness.elements['google-login-btn'].disabled, false, 'button must be re-enabled after config error')
+    assert.equal(harness.elements['auth-error'].style.display, 'block')
   } finally {
     supabase.auth.signInWithOAuth = originalSignInWithOAuth
+    supabase.auth.signInWithIdToken = originalSignInWithIdToken
+    harness.restore()
+  }
+})
+
+test('android with configured native Google login exchanges ID token via signInWithIdToken', async () => {
+  const harness = installAuthDom('android')
+  resetNativeOAuthStateForTests({ clearProviders: true })
+  _setGoogleWebClientIdForTests('test-google-web-client-id.apps.googleusercontent.com')
+
+  const socialLoginCalls = []
+  const socialLogin = {
+    async initialize(config) {
+      socialLoginCalls.push({ method: 'initialize', config })
+    },
+    async login(options) {
+      socialLoginCalls.push({ method: 'login', options })
+      return { provider: 'google', result: { idToken: 'id-token-xyz' } }
+    },
+  }
+  _setDefaultSocialLoginImplForTests(socialLogin)
+
+  const oauthCalls = []
+  const idTokenCalls = []
+  const originalSignInWithOAuth = supabase.auth.signInWithOAuth
+  const originalSignInWithIdToken = supabase.auth.signInWithIdToken
+  supabase.auth.signInWithOAuth = async payload => {
+    oauthCalls.push(payload)
+    return { error: null }
+  }
+  const session = { access_token: 'sb-token', user: { id: 'user-42', email: 'a@b.co' } }
+  supabase.auth.signInWithIdToken = async payload => {
+    idTokenCalls.push(payload)
+    return { data: { session, user: session.user }, error: null }
+  }
+
+  const authenticatedWith = []
+  try {
+    initAuth(sess => authenticatedWith.push(sess), true)
+
+    await harness.elements['google-login-btn'].dispatch('click', {
+      preventDefault() {},
+    })
+
+    assert.equal(oauthCalls.length, 0, 'native path must not invoke signInWithOAuth')
+    assert.equal(idTokenCalls.length, 1)
+    assert.deepEqual(idTokenCalls[0], { provider: 'google', token: 'id-token-xyz' })
+    assert.equal(socialLoginCalls[0].method, 'initialize')
+    assert.equal(socialLoginCalls[1].method, 'login')
+    assert.deepEqual(socialLoginCalls[1].options, {
+      provider: 'google',
+      options: {},
+    })
+    assert.equal(authenticatedWith.length, 1)
+    assert.equal(authenticatedWith[0].user.id, 'user-42')
+  } finally {
+    supabase.auth.signInWithOAuth = originalSignInWithOAuth
+    supabase.auth.signInWithIdToken = originalSignInWithIdToken
+    _setDefaultSocialLoginImplForTests(null)
+    _setGoogleWebClientIdForTests(null)
+    resetNativeOAuthStateForTests({ clearProviders: true })
     harness.restore()
   }
 })
