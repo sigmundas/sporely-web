@@ -184,6 +184,63 @@ BEGIN
   END;
   RESET ROLE;
 
+  -- Assertion 11: activity_date is derived from the same captured v_now as
+  -- last_seen_at — i.e. it matches the UTC date of last_seen_at on every row.
+  -- If v_today and v_now ever came from separate clock reads, a row written
+  -- across the UTC midnight boundary could show a mismatch.
+  IF EXISTS (
+    SELECT 1 FROM public.client_activity_daily
+     WHERE user_id IN (user_a, user_b)
+       AND activity_date <> (last_seen_at at time zone 'utc')::date
+  ) THEN
+    RAISE EXCEPTION 'activity_date must match (last_seen_at at UTC)::date on every row';
+  END IF;
+
+  -- Assertion 12: the function has an empty configured search_path.
+  DECLARE
+    v_proconfig text[];
+  BEGIN
+    SELECT p.proconfig INTO v_proconfig
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public'
+       AND p.proname = 'record_client_activity';
+    -- Postgres stores SET search_path = '' as the literal entry
+    -- `search_path=""` (empty double-quoted string) in pg_proc.proconfig.
+    IF v_proconfig IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM unnest(v_proconfig) AS c
+          WHERE c = 'search_path=""' OR c = 'search_path='
+       )
+    THEN
+      RAISE EXCEPTION 'record_client_activity must be defined with SET search_path = '''' (empty), got %', v_proconfig;
+    END IF;
+  END;
+
+  -- Assertion 13: anon cannot execute the function. authenticated CAN (already
+  -- exercised implicitly by every RPC call above under an authenticated JWT).
+  RESET ROLE;
+  SET LOCAL ROLE anon;
+  DECLARE
+    v_anon_rejected boolean := false;
+  BEGIN
+    BEGIN
+      PERFORM public.record_client_activity('web_browser', '1.0.0');
+    EXCEPTION WHEN insufficient_privilege THEN
+      v_anon_rejected := true;
+    WHEN OTHERS THEN
+      -- Any other error is unexpected — the grant model should reject at the
+      -- privilege layer, not by tripping the function body.
+      RESET ROLE;
+      RAISE EXCEPTION 'anon call raised unexpected error: %', SQLERRM;
+    END;
+    IF NOT v_anon_rejected THEN
+      RESET ROLE;
+      RAISE EXCEPTION 'anon must NOT be able to execute record_client_activity';
+    END IF;
+  END;
+  RESET ROLE;
+
   -- Cleanup.
   DELETE FROM public.client_activity_daily WHERE user_id IN (user_a, user_b);
   DELETE FROM public.profiles WHERE id IN (user_a, user_b);
