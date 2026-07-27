@@ -38,6 +38,8 @@ import { esc as _esc } from './esc.js'
 
 const OBSERVATION_IDENTIFICATIONS_MISSING_CACHE_KEY = 'sporely-observation-identifications-missing'
 const OBSERVATION_IDENTIFICATIONS_COMMUNITY_VIEW = 'observation_identifications_community_view'
+export const IDENTIFY_PROVIDER_SLOW_MS = 10_000
+export const IDENTIFY_PROVIDER_TIMEOUT_MS = 20_000
 let _observationIdentificationsAvailable = null
 
 function _normalizeText(value) {
@@ -201,6 +203,108 @@ function _identifyServiceLabel(service) {
   return normalizeIdentifyService(service) === ID_SERVICE_INATURALIST
     ? (t('settings.idServiceInaturalist') || 'iNaturalist')
     : (t('settings.idServiceArtsorakel') || 'Artsorakel')
+}
+
+export function getIdentifySlowMessage(service) {
+  const label = _identifyServiceLabel(service)
+  return t('review.aiProviderSlow', { service: label }) || `${label} is taking longer than usual.`
+}
+
+export function getIdentifyTimeoutMessage(service) {
+  const label = _identifyServiceLabel(service)
+  return t('review.aiProviderTimedOut', { service: label }) || `${label} timed out. Please try again.`
+}
+
+function _identifyCancelledMessage(service) {
+  const label = _identifyServiceLabel(service)
+  return t('review.aiProviderCancelled', { service: label }) || `${label} identification was cancelled.`
+}
+
+function _createIdentifyLifecycleError(service, code, message) {
+  const error = new Error(message)
+  error.name = code === 'timeout' ? 'IdentifyProviderTimeoutError' : 'IdentifyProviderCancelledError'
+  error.code = code
+  error.service = normalizeIdentifyService(service)
+  return error
+}
+
+/**
+ * Run one complete provider operation under one deadline. The signal passed to
+ * the operation is shared by every provider-internal retry/fallback.
+ */
+export async function runIdentifyProviderOperation(service, operation, options = {}) {
+  const normalizedService = normalizeIdentifyService(service)
+  const slowAfterMs = Number.isFinite(Number(options.slowAfterMs))
+    ? Math.max(0, Number(options.slowAfterMs))
+    : IDENTIFY_PROVIDER_SLOW_MS
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+    ? Math.max(slowAfterMs, Number(options.timeoutMs))
+    : IDENTIFY_PROVIDER_TIMEOUT_MS
+  const setTimer = options.setTimeoutImpl || globalThis.setTimeout
+  const clearTimer = options.clearTimeoutImpl || globalThis.clearTimeout
+  const controller = new AbortController()
+  const parentSignal = options.signal || null
+  let slowTimer = null
+  let timeoutTimer = null
+  let rejectGuard = null
+
+  const cleanup = () => {
+    if (slowTimer != null) clearTimer(slowTimer)
+    if (timeoutTimer != null) clearTimer(timeoutTimer)
+    slowTimer = null
+    timeoutTimer = null
+    parentSignal?.removeEventListener?.('abort', handleParentAbort)
+  }
+
+  const handleParentAbort = () => {
+    const error = _createIdentifyLifecycleError(
+      normalizedService,
+      'cancelled',
+      _identifyCancelledMessage(normalizedService),
+    )
+    controller.abort(error)
+    rejectGuard?.(error)
+  }
+
+  const guardPromise = new Promise((_, reject) => {
+    rejectGuard = reject
+    slowTimer = setTimer(() => {
+      try {
+        options.onSlow?.({
+          service: normalizedService,
+          status: 'slow',
+          predictions: [],
+          errorMessage: getIdentifySlowMessage(normalizedService),
+        })
+      } catch (error) {
+        console.warn('AI provider slow-state callback failed:', error)
+      }
+    }, slowAfterMs)
+    timeoutTimer = setTimer(() => {
+      const error = _createIdentifyLifecycleError(
+        normalizedService,
+        'timeout',
+        getIdentifyTimeoutMessage(normalizedService),
+      )
+      controller.abort(error)
+      reject(error)
+    }, timeoutMs)
+  })
+
+  if (parentSignal?.aborted) {
+    handleParentAbort()
+  } else {
+    parentSignal?.addEventListener?.('abort', handleParentAbort, { once: true })
+  }
+
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => operation(controller.signal)),
+      guardPromise,
+    ])
+  } finally {
+    cleanup()
+  }
 }
 
 function _normalizeObservationIdentificationRow(row = {}) {
@@ -637,7 +741,7 @@ export function _renderServiceIcon(serviceState = {}) {
     ? getIdentifyConfidenceState(probability)
     : null
   const toneClass = confidence?.tone ? ` ${confidence.tone}` : ''
-  if (status === 'running') {
+  if (status === 'running' || status === 'slow') {
     return _renderPieSpinnerIcon()
   }
   if (status === 'success' || status === 'stale') {
@@ -652,9 +756,9 @@ export function _renderServiceIcon(serviceState = {}) {
       </span>
     `
   }
-  if (status === 'no_match' || status === 'error') {
+  if (status === 'no_match' || status === 'error' || status === 'timeout') {
     return `
-      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-x ${status === 'error' ? 'is-error' : ''}" aria-hidden="true">
+      <span class="ai-id-service-tab-icon ai-id-service-tab-icon-x ${status === 'error' || status === 'timeout' ? 'is-error' : ''}" aria-hidden="true">
         <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
           <path d="M4 4 12 12M12 4 4 12" />
         </svg>
@@ -852,8 +956,21 @@ export function chooseIdentifyComparisonActiveService(resultsByService = {}, def
   return bestService
 }
 
+export function shouldAutoActivateIdentifyResult(result = null, activeResult = null, manualSelection = false) {
+  const activeHasUsablePredictions = Array.isArray(activeResult?.predictions)
+    && activeResult.predictions.length > 0
+  return Boolean(
+    !manualSelection
+    && result?.status === 'success'
+    && Array.isArray(result.predictions)
+    && result.predictions.length > 0
+    && !activeHasUsablePredictions
+    && ['error', 'timeout', 'no_match', 'unavailable', 'running', 'slow'].includes(activeResult?.status),
+  )
+}
+
 export function isTerminalAiServiceState(serviceState = null) {
-  return ['success', 'no_match', 'error', 'unavailable'].includes(serviceState?.status)
+  return ['success', 'no_match', 'error', 'timeout', 'unavailable'].includes(serviceState?.status)
 }
 
 export function shouldRunServiceFromTab(serviceState = null) {
@@ -863,9 +980,10 @@ export function shouldRunServiceFromTab(serviceState = null) {
 export function canViewServiceResult(serviceState = null) {
   return Boolean(
     serviceState?.canView
-    || ['success', 'no_match', 'error', 'stale', 'unavailable'].includes(serviceState?.status)
+    || ['success', 'no_match', 'error', 'timeout', 'stale', 'unavailable'].includes(serviceState?.status)
     || Array.isArray(serviceState?.predictions) && serviceState.predictions.length > 0
     || serviceState?.status === 'running'
+    || serviceState?.status === 'slow'
     || serviceState?.active
   )
 }
@@ -960,21 +1078,40 @@ async function _runIdentifyService(service, context = {}) {
 
   try {
     let predictions = []
-    if (normalizedService === ID_SERVICE_ARTSORAKEL && !blobs.length && mediaKeys.length) {
-      predictions = await identifyMediaKeys(mediaKeys, normalizedService, language, _buildServiceOptions(normalizedService, context))
-    } else if (normalizedService === ID_SERVICE_ARTSORAKEL) {
-      predictions = await identifyBlobs(blobs, normalizedService, language, _buildServiceOptions(normalizedService, context))
-    } else {
-      predictions = await identifyBlobs(blobs, normalizedService, language, _buildServiceOptions(normalizedService, context))
-    }
+    predictions = await runIdentifyProviderOperation(normalizedService, async signal => {
+      const serviceOptions = _buildServiceOptions(normalizedService, {
+        ...context,
+        signal,
+      })
+      if (normalizedService === ID_SERVICE_ARTSORAKEL && !blobs.length && mediaKeys.length) {
+        return identifyMediaKeys(mediaKeys, normalizedService, language, serviceOptions)
+      }
+      return identifyBlobs(blobs, normalizedService, language, serviceOptions)
+    }, {
+      signal: context.signal,
+      slowAfterMs: context.slowAfterMs,
+      timeoutMs: context.timeoutMs,
+      setTimeoutImpl: context.setTimeoutImpl,
+      clearTimeoutImpl: context.clearTimeoutImpl,
+      onSlow: slowState => context.onServiceState?.(normalizeIdentifyRunResult(normalizedService, [], {
+        status: 'slow',
+        errorMessage: slowState.errorMessage,
+        language,
+      })),
+    })
     return normalizeIdentifyRunResult(normalizedService, predictions, {
       status: Array.isArray(predictions) && predictions.length ? 'success' : 'no_match',
       language,
     })
   } catch (error) {
+    const timedOut = error?.code === 'timeout'
     return normalizeIdentifyRunResult(normalizedService, [], {
-      status: 'error',
-      errorMessage: String(error?.message || error || 'Unknown error'),
+      status: timedOut ? 'timeout' : 'error',
+      errorMessage: timedOut
+        ? getIdentifyTimeoutMessage(normalizedService)
+        : (error?.code === 'cancelled'
+            ? _identifyCancelledMessage(normalizedService)
+            : String(error?.message || error || 'Unknown error')),
       language,
     })
   }
@@ -1400,9 +1537,10 @@ export function renderIdentifyServiceTab(serviceState = {}, options = {}) {
     'ai-id-service-tab',
     serviceState.active ? 'is-active' : '',
     isDisabled ? 'is-disabled' : '',
-    serviceState.status === 'running' ? 'is-running' : '',
+    serviceState.status === 'running' || serviceState.status === 'slow' ? 'is-running' : '',
+    serviceState.status === 'slow' ? 'is-slow' : '',
     serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'has-results' : '',
-    serviceState.status === 'error' ? 'has-error' : '',
+    serviceState.status === 'error' || serviceState.status === 'timeout' ? 'has-error' : '',
   ].filter(Boolean).join(' ')
   const explicitDisplayProbability = _hasFiniteScore(serviceState.displayProbability)
     ? Number(serviceState.displayProbability)
@@ -1441,9 +1579,10 @@ export function renderIdentifyServiceStateSummary(serviceState = {}, options = {
     'ai-id-service-state',
     serviceState.active ? 'is-active' : '',
     serviceState.available === false ? 'is-disabled' : '',
-    serviceState.status === 'running' ? 'is-running' : '',
+    serviceState.status === 'running' || serviceState.status === 'slow' ? 'is-running' : '',
+    serviceState.status === 'slow' ? 'is-slow' : '',
     serviceState.status === 'success' || serviceState.status === 'no_match' || serviceState.status === 'stale' ? 'has-results' : '',
-    serviceState.status === 'error' ? 'has-error' : '',
+    serviceState.status === 'error' || serviceState.status === 'timeout' ? 'has-error' : '',
   ].filter(Boolean).join(' ')
   const explicitDisplayProbability = _hasFiniteScore(serviceState.displayProbability)
     ? Number(serviceState.displayProbability)
@@ -1465,6 +1604,18 @@ export function renderIdentifyServiceStateSummary(serviceState = {}, options = {
       ${stateLabel && badgeProbability !== null ? `<span class="ai-id-service-state-score ${confidence.tone}">${_esc(stateLabel)}</span>` : ''}
     </span>
   `
+}
+
+export function renderIdentifyProviderNotices(resultsByService = {}) {
+  return [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]
+    .map(service => resultsByService?.[service])
+    .filter(result => result?.status === 'slow' && result.errorMessage)
+    .map(result => `
+      <div class="ai-provider-notice" data-identify-provider-notice="${_esc(result.service)}" role="status">
+        ${_esc(result.errorMessage)}
+      </div>
+    `)
+    .join('')
 }
 
 export function renderIdentifyResultRows(service, predictions = []) {

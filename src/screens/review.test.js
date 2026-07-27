@@ -2,7 +2,19 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
-import { __setReviewTestHooks, _buildReviewObservationPayload, buildReviewGrid, initReview, openImportedReview, restoreReviewDraft, formatLatLon } from './review.js'
+import {
+  __getReviewAiStateForTests,
+  __renderReviewAiControlsForTests,
+  __runReviewAiForTests,
+  __setReviewTestHooks,
+  _buildReviewObservationPayload,
+  buildReviewGrid,
+  initReview,
+  openImportedReview,
+  resetReviewAiState,
+  restoreReviewDraft,
+  formatLatLon,
+} from './review.js'
 import { LOCATION_STATE_CHANGED_EVENT, beginCaptureLocationSession, endCaptureLocationSession } from '../geo.js'
 import { state } from '../state.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
@@ -141,6 +153,7 @@ function _installReviewGlobals({
   },
   clearTimeout = () => {},
   navigator = null,
+  localStorage = null,
 } = {}) {
   const restoreStack = []
   const setGlobalProperty = (name, value) => {
@@ -229,6 +242,7 @@ function _installReviewGlobals({
   setGlobalProperty('setTimeout', setTimeout)
   setGlobalProperty('clearTimeout', clearTimeout)
   if (navigator !== null) setGlobalProperty('navigator', navigator)
+  if (localStorage !== null) setGlobalProperty('localStorage', localStorage)
 
   return {
     document,
@@ -255,6 +269,45 @@ async function _waitFor(predicate, attempts = 20) {
     await new Promise(resolve => setImmediate(resolve))
   }
   return predicate()
+}
+
+function _manualTimers() {
+  let now = 0
+  let nextId = 1
+  const timers = new Map()
+  return {
+    setTimeoutImpl(callback, delay) {
+      const id = nextId++
+      timers.set(id, { callback, at: now + Number(delay || 0) })
+      return id
+    },
+    clearTimeoutImpl(id) {
+      timers.delete(id)
+    },
+    advance(ms) {
+      const target = now + ms
+      while (true) {
+        const next = [...timers.entries()]
+          .filter(([, timer]) => timer.at <= target)
+          .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0]
+        if (!next) break
+        const [id, timer] = next
+        timers.delete(id)
+        now = timer.at
+        timer.callback()
+      }
+      now = target
+    },
+    get activeCount() {
+      return timers.size
+    },
+  }
+}
+
+function _deferred() {
+  let resolve
+  const promise = new Promise(res => { resolve = res })
+  return { promise, resolve }
 }
 
 let reviewStateSeed = 0
@@ -1103,9 +1156,9 @@ test('review ai flow keeps the setting-selected primary service and refreshes av
   assert.match(source, /reviewAiState\.activeService = _resolveReviewPhotoIdServices\(reviewAiState\.availability\)\.primary/)
   assert.match(source, /const primaryService = overrideService\s*\?\s*requestedServices\[0\]\s*:\s*\(requestedServices\[0\] \|\| photoIdServices\.primary\)/)
   assert.match(source, /reviewAiState\.activeService = primaryService/)
-  assert.match(source, /const inaturalistSession = await loadInaturalistSession\(\)\s+const availabilityList = await getAvailableIdentifyServices\(\{\s+blobs: images,\s+inaturalistSession,/)
+  assert.match(source, /const inaturalistSession = await _reviewDependency\('loadInaturalistSession'\)\(\)\s+const availabilityList = await _reviewDependency\('getAvailableIdentifyServices'\)\(\{\s+blobs: images,\s+inaturalistSession,/)
   assert.match(source, /if \(!reviewAiState\.activeService\) {\s+reviewAiState\.activeService = _resolveReviewPhotoIdServices\(reviewAiState\.availability\)\.primary\s+}/)
-  assert.match(source, /reviewAiState\.running = false\s+reviewAiState\.stale = false\s+reviewAiState\.requestedFingerprint = reviewAiState\.currentFingerprint\s+reviewAiState\.activeService = primaryService\s+_renderReviewAiBlock\(\)/)
+  assert.match(source, /if \(reviewAiRunController === runController\) {\s+reviewAiRunController = null\s+reviewAiState\.running = false\s+reviewAiState\.stale = false\s+reviewAiState\.requestedFingerprint = reviewAiState\.currentFingerprint\s+_renderReviewAiBlock\(\)/)
   const controlsStart = source.indexOf('function _renderReviewAiControls()')
   const controlsEnd = source.indexOf('async function _syncReviewAiAvailability()')
   assert.ok(controlsStart >= 0)
@@ -1122,6 +1175,120 @@ test('review ai flow keeps the setting-selected primary service and refreshes av
   assert.doesNotMatch(source, /chooseIdentifyComparisonActiveService/)
   assert.doesNotMatch(source, /comparison\.activeService/)
   assert.doesNotMatch(source, /buildReviewGrid\(\)\s*\/\/.*availability/)
+})
+
+test('review provider lifecycle streams results, respects manual tabs, and aborts on teardown', () => {
+  const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
+
+  assert.match(source, /onServiceState: result => {[\s\S]*?_mergeReviewServiceState\(result\.service, result\)/)
+  assert.match(source, /shouldAutoActivateIdentifyResult\(\s*result,\s*activeResult,\s*reviewAiState\.manualTabSelectedDuringRun/)
+  assert.match(source, /if \(reviewAiState\.running\) reviewAiState\.manualTabSelectedDuringRun = true/)
+  assert.match(source, /const runController = new AbortController\(\)/)
+  assert.match(source, /signal: runController\.signal/)
+  assert.match(source, /export function resetReviewAiState\(\) {\s+reviewAiRunController\?\.abort\(\)/)
+  assert.doesNotMatch(source, /finally {[\s\S]{0,400}reviewAiState\.activeService = primaryService/)
+})
+
+test('review renders provider results independently and ignores callbacks after teardown', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals({
+    localStorage: {
+      getItem() {
+        return null
+      },
+      setItem() {},
+      removeItem() {},
+    },
+  })
+  const timers = _manualTimers()
+  const oldOperations = {
+    artsorakel: _deferred(),
+    inat: _deferred(),
+  }
+  const signals = {}
+  let runMode = 'timeout'
+
+  try {
+    _seedReviewState()
+    resetReviewAiState()
+    __setReviewTestHooks({
+      prepareReviewIdentifyInputs: async () => [{
+        blob: state.capturedPhotos[0].aiBlob,
+        originalBlob: state.capturedPhotos[0].blob,
+      }],
+      loadInaturalistSession: async () => ({ connected: true, api_token: 'token' }),
+      getAvailableIdentifyServices: async () => [
+        { service: 'artsorakel', available: true, reason: '' },
+        { service: 'inat', available: true, reason: '' },
+      ],
+      resolvePhotoIdServices: () => ({
+        primary: 'artsorakel',
+        run: ['artsorakel', 'inat'],
+      }),
+      identifyBlobs: async (_blobs, service, _language, options) => {
+        signals[service] = options.signal
+        if (runMode === 'timeout') {
+          if (service === 'artsorakel') return new Promise(() => {})
+          return [{ scientificName: 'Amanita muscaria', probability: 0.91 }]
+        }
+        if (runMode === 'old') return oldOperations[service].promise
+        return service === 'inat'
+          ? [{ scientificName: 'Boletus edulis', probability: 0.88 }]
+          : []
+      },
+      setTimeoutImpl: timers.setTimeoutImpl,
+      clearTimeoutImpl: timers.clearTimeoutImpl,
+    })
+
+    const timeoutRun = __runReviewAiForTests()
+    await _waitFor(() => __getReviewAiStateForTests().resultsByService.inat?.status === 'success')
+
+    let aiState = __getReviewAiStateForTests()
+    assert.equal(aiState.activeService, 'inat')
+    assert.equal(aiState.running, true)
+    assert.match(__renderReviewAiControlsForTests(), /Amanita muscaria/)
+    assert.match(__renderReviewAiControlsForTests(), /data-identify-run-button[\s\S]*disabled/)
+
+    timers.advance(20_000)
+    await timeoutRun
+    aiState = __getReviewAiStateForTests()
+    assert.equal(aiState.resultsByService.artsorakel.status, 'timeout')
+    assert.equal(aiState.resultsByService.inat.status, 'success')
+    assert.equal(aiState.activeService, 'inat')
+    assert.equal(aiState.running, false)
+    assert.match(__renderReviewAiControlsForTests(), /Amanita muscaria/)
+    assert.doesNotMatch(__renderReviewAiControlsForTests(), /data-identify-run-button\s+disabled/)
+    assert.equal(timers.activeCount, 0)
+
+    resetReviewAiState()
+    runMode = 'old'
+    signals.artsorakel = null
+    signals.inat = null
+    const obsoleteRun = __runReviewAiForTests()
+    await _waitFor(() => Boolean(signals.artsorakel && signals.inat))
+    resetReviewAiState()
+    assert.equal(signals.artsorakel.aborted, true)
+    assert.equal(signals.inat.aborted, true)
+
+    runMode = 'new'
+    const nextRun = __runReviewAiForTests()
+    await nextRun
+    assert.equal(__getReviewAiStateForTests().resultsByService.inat.status, 'success')
+    assert.match(__renderReviewAiControlsForTests(), /Boletus edulis/)
+
+    oldOperations.artsorakel.resolve([{ scientificName: 'Stale arts result', probability: 0.99 }])
+    oldOperations.inat.resolve([{ scientificName: 'Stale inat result', probability: 0.99 }])
+    await obsoleteRun
+    await _waitFor(() => true)
+
+    assert.match(__renderReviewAiControlsForTests(), /Boletus edulis/)
+    assert.doesNotMatch(__renderReviewAiControlsForTests(), /Stale (arts|inat) result/)
+  } finally {
+    __setReviewTestHooks(null)
+    resetReviewAiState()
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
 })
 
 test('review keeps ai result state separate from manual taxon selection and queued saves', () => {

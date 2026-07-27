@@ -11,9 +11,11 @@ import {
   _renderServiceIcon,
   renderIdentifyResultRows,
   renderIdentifyRedlistSummary,
+  renderIdentifyProviderNotices,
   renderIdentifyServiceTab,
   markRequestedServicesRunning,
   runIdentifyComparisonForBlobs,
+  shouldAutoActivateIdentifyResult,
   shouldRunServiceFromTab,
   wireIdentifyRunButtonPressFeedback,
   ID_SERVICE_ARTSORAKEL,
@@ -75,7 +77,9 @@ const reviewAiState = {
   stale: false,
   availability: {},
   resultsByService: {},
+  manualTabSelectedDuringRun: false,
 }
+let reviewAiRunController = null
 
 let reviewLocationStateListenerWindow = null
 let reviewLocationStateListener = null
@@ -100,6 +104,11 @@ const reviewDefaultDependencies = {
   refreshHome,
   openFinds,
   requestFreshLocation,
+  loadInaturalistSession,
+  getAvailableIdentifyServices,
+  runIdentifyComparisonForBlobs,
+  resolvePhotoIdServices,
+  prepareReviewIdentifyInputs: null,
 }
 
 let reviewTestDependencies = null
@@ -107,6 +116,8 @@ let reviewTestDependencies = null
 export function __setReviewTestHooks(overrides = null) {
   reviewTestDependencies = overrides && typeof overrides === 'object' ? { ...overrides } : null
   if (!reviewTestDependencies) {
+    reviewAiRunController?.abort()
+    reviewAiRunController = null
     reviewSaveInFlight = false
     _clearCaptureLockSessionState()
     hideLocationFixSheet(null)
@@ -193,7 +204,7 @@ export function _buildImportedReviewAiState(session = null) {
       available: result.available,
       reason: result.reason,
     }
-    if (['success', 'no_match', 'error', 'stale', 'unavailable'].includes(result.status)) {
+    if (['success', 'no_match', 'error', 'timeout', 'stale', 'unavailable'].includes(result.status)) {
       aiState.hasRun = true
     }
   }
@@ -584,6 +595,8 @@ function _applyImportedReviewGps(reviewGps) {
 }
 
 export function resetReviewAiState() {
+  reviewAiRunController?.abort()
+  reviewAiRunController = null
   _clearReviewThumbCropObserver()
   reviewAiState.running = false
   reviewAiState.hasRun = false
@@ -599,6 +612,7 @@ export function resetReviewAiState() {
   reviewAiState.stale = false
   reviewAiState.availability = {}
   reviewAiState.resultsByService = {}
+  reviewAiState.manualTabSelectedDuringRun = false
 }
 
 function _mergeHydratedGps(reviewGps) {
@@ -1072,7 +1086,7 @@ function _syncReviewLocationStateUi() {
 
 function _resolveReviewPhotoIdServices(availability = {}, options = {}) {
   const lookup = _reviewLocationLookup()
-  return resolvePhotoIdServices({
+  return _reviewDependency('resolvePhotoIdServices')({
     mode: getPhotoIdMode(),
     countryCode: lookup?.country_code || null,
     countryName: lookup?.country_name || null,
@@ -1417,6 +1431,7 @@ function wireCardEvents() {
       const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
       const serviceState = reviewAiState.resultsByService?.[service] || null
       reviewAiState.activeService = service
+      if (reviewAiState.running) reviewAiState.manualTabSelectedDuringRun = true
       _renderReviewAiBlock()
       if (reviewAiState.running) return
       if (serviceState?.available === false) return
@@ -1645,10 +1660,10 @@ function _buildReviewAiIdentificationRuns(photos = state.capturedPhotos) {
   const runs = []
   for (const service of [ID_SERVICE_ARTSORAKEL, ID_SERVICE_INATURALIST]) {
     const result = reviewAiState.resultsByService?.[service] || null
-    if (!result || !['success', 'no_match', 'error', 'unavailable', 'stale'].includes(result.status)) {
+    if (!result || !['success', 'no_match', 'error', 'timeout', 'unavailable', 'stale'].includes(result.status)) {
       continue
     }
-    const status = result.status === 'stale' || (reviewAiState.stale && ['success', 'no_match', 'error', 'unavailable'].includes(result.status))
+    const status = result.status === 'stale' || (reviewAiState.stale && ['success', 'no_match', 'error', 'timeout', 'unavailable'].includes(result.status))
       ? 'stale'
       : result.status
     const fingerprint = buildIdentifyFingerprint({
@@ -1676,9 +1691,9 @@ function _reviewAiTabState(service, statusOverride = null) {
   const selectedPrediction = _reviewAiSelectedPredictionForService(service)
   const selectedProbability = reviewAiState.selectedProbabilityByService?.[service] ?? null
   const displayProbability = getReviewServiceDisplayProbability(service)
-  const hasStored = ['success', 'no_match', 'error', 'stale', 'unavailable'].includes(result?.status)
+  const hasStored = ['success', 'no_match', 'error', 'timeout', 'stale', 'unavailable'].includes(result?.status)
     || (Array.isArray(result?.predictions) && result.predictions.length > 0)
-  const hasRunResult = ['success', 'no_match', 'error', 'unavailable', 'stale'].includes(result?.status)
+  const hasRunResult = ['success', 'no_match', 'error', 'timeout', 'unavailable', 'stale'].includes(result?.status)
   return {
     service,
     active: reviewAiState.activeService === service,
@@ -1700,14 +1715,14 @@ function _reviewAiTabState(service, statusOverride = null) {
 function _reviewAiResultsHtml() {
   const activeService = normalizeIdentifyService(reviewAiState.activeService || _resolveReviewPhotoIdServices(reviewAiState.availability).primary)
   const result = reviewAiState.resultsByService[activeService] || null
-  if (result?.status === 'running') {
-    return `<div class="ai-results-empty">${t('common.loading')}</div>`
+  if (result?.status === 'running' || result?.status === 'slow') {
+    return `<div class="ai-results-empty${result.status === 'slow' ? ' ai-results-slow' : ''}">${result.status === 'slow' ? result.errorMessage : t('common.loading')}</div>`
   }
   if (!result?.predictions?.length) {
     if (result?.status === 'unavailable') {
       return `<div class="ai-results-empty">${reviewAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
     }
-    if (result?.status === 'error') {
+    if (result?.status === 'error' || result?.status === 'timeout') {
       return `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
     }
     if (result?.status === 'no_match') {
@@ -1733,7 +1748,7 @@ function _reviewAiDebugDump(label, resolution = null, requestedServices = [], se
 
 async function _runReviewAiService(service, blobs, options = {}) {
   const normalizedService = normalizeIdentifyService(service)
-  const comparison = await runIdentifyComparisonForBlobs(
+  const comparison = await _reviewDependency('runIdentifyComparisonForBlobs')(
     blobs,
     {
       ...options,
@@ -1741,7 +1756,16 @@ async function _runReviewAiService(service, blobs, options = {}) {
       defaultService: normalizedService,
       screen: options.screen || 'review',
       onServiceState: result => {
+        if (options.signal?.aborted) return
         _mergeReviewServiceState(result.service, result)
+        const activeResult = reviewAiState.resultsByService?.[reviewAiState.activeService] || null
+        if (shouldAutoActivateIdentifyResult(
+          result,
+          activeResult,
+          reviewAiState.manualTabSelectedDuringRun,
+        )) {
+          reviewAiState.activeService = result.service
+        }
         reviewAiState.hasRun = Object.values(reviewAiState.resultsByService || {}).some(serviceResult =>
           serviceResult?.status === 'success' || serviceResult?.status === 'no_match'
         )
@@ -1760,9 +1784,10 @@ function _renderReviewAiTabs() {
     const state = _reviewAiTabState(service)
     tab.classList.toggle('is-active', state.active)
     tab.classList.toggle('is-disabled', !state.available)
-    tab.classList.toggle('is-running', state.status === 'running')
+    tab.classList.toggle('is-running', state.status === 'running' || state.status === 'slow')
+    tab.classList.toggle('is-slow', state.status === 'slow')
     tab.classList.toggle('has-results', state.status === 'success' || state.status === 'no_match' || state.status === 'stale')
-    tab.classList.toggle('has-error', state.status === 'error')
+    tab.classList.toggle('has-error', state.status === 'error' || state.status === 'timeout')
     tab.disabled = !state.available
     const icon = tab.querySelector('.ai-id-service-tab-icon')
     if (icon) {
@@ -1824,8 +1849,16 @@ function _renderReviewAiResults() {
   })
 }
 
+function _renderReviewAiNotices() {
+  const noticesEl = document.querySelector('[data-identify-provider-notices]')
+  if (!noticesEl) return
+  noticesEl.innerHTML = renderIdentifyProviderNotices(reviewAiState.resultsByService)
+  noticesEl.style.display = noticesEl.innerHTML ? '' : 'none'
+}
+
 function _renderReviewAiBlock() {
   _renderReviewAiTabs()
+  _renderReviewAiNotices()
   _renderReviewAiResults()
   _syncReviewRedlistSummary()
 }
@@ -1856,6 +1889,9 @@ function _renderReviewAiControls() {
         </div>
       </div>
       <div class="detail-ai-results-shell">
+        <div data-identify-provider-notices>
+          ${renderIdentifyProviderNotices(reviewAiState.resultsByService)}
+        </div>
         ${reviewAiState.stale ? `<div class="detail-ai-stale-note">${t('review.resultsOutdated') || 'Results outdated - run AI Photo ID again.'}</div>` : ''}
         <div class="detail-ai-results" data-identify-results data-identify-service="${activeService}">
           ${_reviewAiResultsHtml()}
@@ -1870,8 +1906,8 @@ async function _syncReviewAiAvailability() {
   const fingerprint = reviewAiState.currentFingerprint
   if (!fingerprint) return
   const images = _reviewCaptureImages()
-  const inaturalistSession = await loadInaturalistSession()
-  const availabilityList = await getAvailableIdentifyServices({
+  const inaturalistSession = await _reviewDependency('loadInaturalistSession')()
+  const availabilityList = await _reviewDependency('getAvailableIdentifyServices')({
     blobs: images,
     inaturalistSession,
   })
@@ -1899,8 +1935,17 @@ async function _runReviewComparison(serviceOverride = null) {
     ? normalizeIdentifyService(serviceOverride)
     : null
   if (reviewAiState.running) return
-  const blobs = await prepareReviewIdentifyInputs()
+  reviewAiState.running = true
+  reviewAiState.manualTabSelectedDuringRun = false
+  reviewAiRunController?.abort()
+  const runController = new AbortController()
+  reviewAiRunController = runController
+  const prepareInputs = _reviewDependency('prepareReviewIdentifyInputs') || prepareReviewIdentifyInputs
+  const blobs = await prepareInputs()
+  if (reviewAiRunController !== runController || runController.signal.aborted) return
   if (!blobs.length) {
+    reviewAiRunController = null
+    reviewAiState.running = false
     showToast(t('detail.noPhotoToIdentify'))
     return
   }
@@ -1912,7 +1957,6 @@ async function _runReviewComparison(serviceOverride = null) {
   })
   reviewAiState.currentFingerprint = fingerprint.requestFingerprint
   reviewAiState.stale = Boolean(reviewAiState.hasRun && reviewAiState.requestedFingerprint && reviewAiState.requestedFingerprint !== fingerprint.requestFingerprint)
-  reviewAiState.running = true
   reviewAiState.requestedFingerprint = fingerprint.requestFingerprint
   reviewAiState.selectedService = null
   reviewAiState.selectedPrediction = null
@@ -1920,11 +1964,13 @@ async function _runReviewComparison(serviceOverride = null) {
   reviewAiState.selectedProbabilityByService = {}
   reviewAiState.selectedTaxonSource = null
 
-  const inaturalistSession = await loadInaturalistSession()
-  const availability = await getAvailableIdentifyServices({
+  const inaturalistSession = await _reviewDependency('loadInaturalistSession')()
+  if (reviewAiRunController !== runController || runController.signal.aborted) return
+  const availability = await _reviewDependency('getAvailableIdentifyServices')({
     blobs: blobs.map(item => item.blob),
     inaturalistSession,
   })
+  if (reviewAiRunController !== runController || runController.signal.aborted) return
   reviewAiState.availability = Object.fromEntries(availability.map(item => [item.service, item]))
   const photoIdServices = _resolveReviewPhotoIdServices(reviewAiState.availability, {
     comparisonRequested: !overrideService,
@@ -1941,6 +1987,7 @@ async function _runReviewComparison(serviceOverride = null) {
   _renderReviewAiBlock()
 
   if (!requestedServices.length) {
+    reviewAiRunController = null
     reviewAiState.running = false
     reviewAiState.requestedFingerprint = reviewAiState.currentFingerprint
     _renderReviewAiBlock()
@@ -1964,8 +2011,14 @@ async function _runReviewComparison(serviceOverride = null) {
         })(),
         observedOn: _localDate(state.capturedPhotos[0]?.ts || state.sessionStart || new Date()),
         screen: 'review',
+        signal: runController.signal,
+        identifyBlobs: _reviewDependency('identifyBlobs'),
+        slowAfterMs: _reviewDependency('slowAfterMs'),
+        timeoutMs: _reviewDependency('timeoutMs'),
+        setTimeoutImpl: _reviewDependency('setTimeoutImpl'),
+        clearTimeoutImpl: _reviewDependency('clearTimeoutImpl'),
       }).then(result => {
-        if (result) {
+        if (result && reviewAiRunController === runController && !runController.signal.aborted) {
           reviewAiState.resultsByService = {
             ...(reviewAiState.resultsByService || {}),
             [service]: result,
@@ -1977,6 +2030,7 @@ async function _runReviewComparison(serviceOverride = null) {
     })
 
     const settled = await Promise.allSettled(tasks)
+    if (reviewAiRunController !== runController || runController.signal.aborted) return
     const resultsByService = {}
     requestedServices.forEach((service, index) => {
       const item = settled[index]
@@ -1995,21 +2049,35 @@ async function _runReviewComparison(serviceOverride = null) {
       ...(reviewAiState.resultsByService || {}),
       ...resultsByService,
     }
-    reviewAiState.activeService = primaryService
     reviewAiState.stale = false
     reviewAiState.hasRun = Object.values(resultsByService).some(result =>
       result?.status === 'success' || result?.status === 'no_match'
     )
   } catch (error) {
+    if (reviewAiRunController !== runController || runController.signal.aborted) return
     console.error('Identification error:', error)
     showToast(t('common.errorPrefix', { message: String(error?.message || error || 'Unknown error') }))
   } finally {
-    reviewAiState.running = false
-    reviewAiState.stale = false
-    reviewAiState.requestedFingerprint = reviewAiState.currentFingerprint
-    reviewAiState.activeService = primaryService
-    _renderReviewAiBlock()
+    if (reviewAiRunController === runController) {
+      reviewAiRunController = null
+      reviewAiState.running = false
+      reviewAiState.stale = false
+      reviewAiState.requestedFingerprint = reviewAiState.currentFingerprint
+      _renderReviewAiBlock()
+    }
   }
+}
+
+export async function __runReviewAiForTests(service = null) {
+  return _runReviewComparison(service)
+}
+
+export function __getReviewAiStateForTests() {
+  return reviewAiState
+}
+
+export function __renderReviewAiControlsForTests() {
+  return _renderReviewAiControls()
 }
 
 async function _openReviewCropEditor(startIndex = 0) {
@@ -2052,6 +2120,8 @@ async function _openReviewCropEditor(startIndex = 0) {
 // ── Draft / sync ──────────────────────────────────────────────────────────────
 
 function cancelReview() {
+  reviewAiRunController?.abort()
+  reviewAiRunController = null
   _disposeReviewDebugPreviewUrls()
   state.capturedPhotos = []
   state.reviewContext = null
@@ -2071,6 +2141,7 @@ function cancelReview() {
   reviewAiState.stale = false
   reviewAiState.availability = {}
   reviewAiState.resultsByService = {}
+  reviewAiState.manualTabSelectedDuringRun = false
   endCaptureLocationSession()
   _clearReviewSaveLocationSuppression()
   _clearCaptureLockSessionState()

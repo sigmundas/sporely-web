@@ -157,6 +157,34 @@ export function isArtsorakelNetworkError(error) {
   )
 }
 
+function _isAbortLikeError(error, seen = new Set()) {
+  if (!error || seen.has(error)) return false
+  seen.add(error)
+  const name = String(error?.name || '').toLowerCase()
+  const code = String(error?.code || '').toLowerCase()
+  if (
+    name.includes('abort')
+    || name.includes('timeout')
+    || name.includes('cancel')
+    || code.includes('abort')
+    || code.includes('timeout')
+    || code.includes('cancel')
+  ) {
+    return true
+  }
+  return [
+    error?.cause,
+    error?.directError,
+    error?.proxyError,
+    ...(Array.isArray(error?.attempts) ? error.attempts : []),
+  ].some(candidate => _isAbortLikeError(candidate, seen))
+}
+
+function _shouldRetryArtsorakelMultipartField(error) {
+  if (_isAbortLikeError(error) || isArtsorakelNetworkError(error)) return false
+  return [400, 415, 422].includes(Number(error?.status))
+}
+
 // ── Language helpers ──────────────────────────────────────────────────────────
 
 export function normalizeLang(code = 'no') {
@@ -590,8 +618,10 @@ async function _requestArtsorakelResponse(preparedItems, options = {}) {
       } catch (error) {
         lastAttemptError = error
         attempts.push(error)
+        if (!_shouldRetryArtsorakelMultipartField(error)) break
       }
     }
+    if (_isAbortLikeError(lastAttemptError)) throw lastAttemptError
     const endpoint = _endpointMeta(kind, url)
     const details = attempts.length ? ` ${attempts.map(err => err.message).join(' | ')}` : ''
     const error = new Error(`Artsdata AI ${endpoint.kind} failed:${details}`.trim())
@@ -607,6 +637,7 @@ async function _requestArtsorakelResponse(preparedItems, options = {}) {
       response = await runEndpoint(endpointUrl, proxyHeaders, endpointKind)
     } catch (error) {
       lastError = error
+      if (options.signal?.aborted || _isAbortLikeError(error)) throw error
       console.warn('Artsorakel proxy failed, falling back to direct endpoint:', error)
     }
   }
@@ -840,6 +871,7 @@ export async function runArtsorakelForBlobs(blobs, lang = 'no', options = {}) {
     }
     return predictions
   } catch (batchError) {
+    if (options.signal?.aborted || _isAbortLikeError(batchError)) throw batchError
     if (!options?.tolerateFailures) throw batchError
     console.warn('Artsorakel batch request failed, falling back to per-image requests:', batchError)
   }

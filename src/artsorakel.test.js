@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { supabase } from './supabase.js'
 import { normalizeAiCropRect } from './image_crop.js'
 import { ID_SERVICE_ARTSORAKEL } from './identify.js'
+import { runIdentifyProviderOperation } from './ai-identification.js'
 import {
   prepareReviewIdentifyInputs,
 } from './screens/review.js'
@@ -19,6 +20,44 @@ import {
 } from './artsorakel.js'
 
 const TEST_APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'
+
+function createManualTimers() {
+  let now = 0
+  let nextId = 1
+  const scheduled = new Map()
+  return {
+    setTimeoutImpl(callback, delay) {
+      const id = nextId++
+      scheduled.set(id, { callback, at: now + Number(delay || 0) })
+      return id
+    },
+    clearTimeoutImpl(id) {
+      scheduled.delete(id)
+    },
+    advance(ms) {
+      const target = now + ms
+      for (const [id, item] of [...scheduled.entries()]
+        .filter(([, item]) => item.at <= target)
+        .sort((left, right) => left[1].at - right[1].at)) {
+        scheduled.delete(id)
+        now = item.at
+        item.callback()
+      }
+      now = target
+    },
+    get activeCount() {
+      return scheduled.size
+    },
+  }
+}
+
+async function waitFor(predicate, limit = 50) {
+  for (let index = 0; index < limit; index++) {
+    if (predicate()) return
+    await Promise.resolve()
+  }
+  assert.fail('Condition did not become true')
+}
 
 function makeResponse({ ok = true, status = 200, statusText = 'OK', jsonBody = null, textBody = '' } = {}) {
   return {
@@ -491,7 +530,7 @@ test('runArtsorakelForBlobs batches multiple images and flattens the combined re
   })
 })
 
-test('retries multipart field "file" after "image" fails', async () => {
+test('retries multipart field "file" after an explicit multipart-style 400 response', async () => {
   await withHarness(async harness => {
     const calls = []
     const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
@@ -499,7 +538,7 @@ test('retries multipart field "file" after "image" fails', async () => {
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
       if (calls.length === 1) {
-        return makeResponse({ ok: false, status: 500, statusText: 'Server Error', textBody: 'image failed' })
+        return makeResponse({ ok: false, status: 400, statusText: 'Bad Request', textBody: 'missing image field' })
       }
       return makeResponse({ jsonBody: { predictions: [{ probability: 0.8, taxon: { scientificName: 'Boletus edulis' } }] } })
     })
@@ -530,14 +569,116 @@ test('falls back to direct Artsorakel when the proxy fails', async () => {
     await runArtsorakel(blob, 'no')
 
     const proxyHeaders = new Headers(calls[0].init.headers)
-    const directHeaders = new Headers(calls[2].init.headers)
+    const directHeaders = new Headers(calls[1].init.headers)
     assert.equal(calls[0].url, 'https://proxy.example/artsorakel')
-    assert.equal(calls[1].url, 'https://proxy.example/artsorakel')
-    assert.equal(calls[2].url, 'https://ai.artsdatabanken.no')
+    assert.equal(calls[1].url, 'https://ai.artsdatabanken.no')
     assert.equal(proxyHeaders.get('X-App-Name'), 'Sporely')
     assert.equal(proxyHeaders.get('X-App-Version'), TEST_APP_VERSION)
     assert.equal(directHeaders.get('X-App-Name'), 'Sporely')
     assert.equal(directHeaders.get('X-App-Version'), TEST_APP_VERSION)
+  })
+})
+
+test('does not retry the alternate multipart field after a network failure', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 800, 600)
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      throw new TypeError('Failed to fetch')
+    })
+
+    await assert.rejects(runArtsorakel(blob, 'no'), /Failed to fetch/)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].init.body.entries[0].name, 'image')
+  })
+})
+
+test('one Artsorakel deadline spans proxy failure and a hanging direct fallback', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const timers = createManualTimers()
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 800, 600)
+    harness.setEnv({ VITE_ARTSORAKEL_BASE_URL: 'https://proxy.example' })
+    harness.setProxySession('proxy-token')
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      if (url.startsWith('https://proxy.example')) {
+        throw new TypeError('Failed to fetch')
+      }
+      return new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => {
+          const error = new Error('aborted')
+          error.name = 'AbortError'
+          reject(error)
+        }, { once: true })
+      })
+    })
+
+    const operation = runIdentifyProviderOperation(
+      ID_SERVICE_ARTSORAKEL,
+      signal => runArtsorakel(blob, 'no', { signal }),
+      {
+        setTimeoutImpl: timers.setTimeoutImpl,
+        clearTimeoutImpl: timers.clearTimeoutImpl,
+      },
+    )
+    await waitFor(() => calls.length === 2)
+    timers.advance(20_000)
+    await assert.rejects(operation, error => error?.code === 'timeout')
+
+    assert.deepEqual(calls.map(call => call.url), [
+      'https://proxy.example/artsorakel',
+      'https://ai.artsdatabanken.no',
+    ])
+    assert.equal(calls.every(call => call.init.body.entries[0].name === 'image'), true)
+    assert.equal(timers.activeCount, 0)
+  })
+})
+
+test('multi-image Artsorakel timeout does not start field or per-image fallbacks', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const timers = createManualTimers()
+    const first = new Blob(['first'], { type: 'image/jpeg' })
+    const second = new Blob(['second'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(first, 800, 600)
+    harness.setBlobDimensions(second, 800, 600)
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => {
+          const error = new Error('aborted')
+          error.name = 'AbortError'
+          reject(error)
+        }, { once: true })
+      })
+    })
+
+    const operation = runIdentifyProviderOperation(
+      ID_SERVICE_ARTSORAKEL,
+      signal => runArtsorakelForBlobs([first, second], 'no', {
+        signal,
+        tolerateFailures: true,
+      }),
+      {
+        setTimeoutImpl: timers.setTimeoutImpl,
+        clearTimeoutImpl: timers.clearTimeoutImpl,
+      },
+    )
+
+    await waitFor(() => calls.length === 1)
+    assert.equal(calls[0].init.body.entries.filter(entry => entry.name === 'image').length, 2)
+
+    timers.advance(20_000)
+    await assert.rejects(operation, error => error?.code === 'timeout')
+    for (let index = 0; index < 10; index++) await Promise.resolve()
+
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].init.body.entries.some(entry => entry.name === 'file'), false)
+    assert.equal(timers.activeCount, 0)
   })
 })
 

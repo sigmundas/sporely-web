@@ -13,6 +13,14 @@ import {
   _sessionAiResultState,
   _sessionServiceNeedsRerun,
   _storeSessionAiServiceResult,
+  __abortImportAiRunsForTests,
+  __getImportAiBatchStateForTests,
+  __getImportAiStateForTests,
+  __renderImportAiControlsForTests,
+  __runImportAiBatchForTests,
+  __runImportAiComparisonForTests,
+  __setImportAiSessionsForTests,
+  __setImportAiTestHooks,
 } from './screens/import_review.js'
 
 function makeSession() {
@@ -30,6 +38,53 @@ function makeSession() {
     aiPredictionsByService: {},
     aiServiceState: {},
   }
+}
+
+function manualTimers() {
+  let now = 0
+  let nextId = 1
+  const timers = new Map()
+  return {
+    setTimeoutImpl(callback, delay) {
+      const id = nextId++
+      timers.set(id, { callback, at: now + Number(delay || 0) })
+      return id
+    },
+    clearTimeoutImpl(id) {
+      timers.delete(id)
+    },
+    advance(ms) {
+      const target = now + ms
+      while (true) {
+        const next = [...timers.entries()]
+          .filter(([, timer]) => timer.at <= target)
+          .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0]
+        if (!next) break
+        const [id, timer] = next
+        timers.delete(id)
+        now = timer.at
+        timer.callback()
+      }
+      now = target
+    },
+    get activeCount() {
+      return timers.size
+    },
+  }
+}
+
+function deferred() {
+  let resolve
+  const promise = new Promise(res => { resolve = res })
+  return { promise, resolve }
+}
+
+async function waitFor(predicate, attempts = 50) {
+  for (let index = 0; index < attempts; index++) {
+    if (predicate()) return
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.fail('Condition did not become true')
 }
 
 test('import sessions keep service predictions and state separate', () => {
@@ -463,11 +518,192 @@ test('service state only shows running for the service that is actually running'
   assert.equal(inat.status, 'running')
 })
 
+test('import review keeps a successful provider visible while the other is slow or times out', () => {
+  const session = _ensureSessionAiState(makeSession())
+  session.aiActiveService = 'inat'
+  session.aiService = 'inat'
+  session.aiServiceState.artsorakel = { status: 'running' }
+  session.aiServiceState.inat = { status: 'running' }
+
+  _storeSessionAiServiceResult(session, 'inat', {
+    status: 'success',
+    predictions: [{
+      scientificName: 'Amanita muscaria',
+      displayName: 'Amanita muscaria',
+      probability: 0.91,
+    }],
+  })
+  _storeSessionAiServiceResult(session, 'artsorakel', {
+    status: 'slow',
+    errorMessage: 'Artsorakel is taking longer than usual.',
+    predictions: [],
+  })
+
+  assert.equal(session.aiActiveService, 'inat')
+  assert.equal(session.aiRunning, true)
+  assert.equal(session.aiServiceState.inat.status, 'success')
+  assert.equal(session.aiServiceState.artsorakel.status, 'slow')
+
+  _storeSessionAiServiceResult(session, 'artsorakel', {
+    status: 'timeout',
+    errorMessage: 'Artsorakel timed out. Please try again.',
+    predictions: [],
+  })
+
+  assert.equal(session.aiActiveService, 'inat')
+  assert.equal(session.aiRunning, false)
+  assert.equal(session.aiServiceState.inat.status, 'success')
+  assert.equal(session.aiServiceState.artsorakel.status, 'timeout')
+})
+
+test('import review provider lifecycle uses per-provider updates and teardown cancellation', () => {
+  const source = fs.readFileSync(new URL('./screens/import_review.js', import.meta.url), 'utf8')
+
+  assert.match(source, /_importAiDependency\('runIdentifyComparisonForBlobs', runIdentifyComparisonForBlobs\)\(/)
+  assert.match(source, /onServiceState: result =>/)
+  assert.match(source, /shouldAutoActivateIdentifyResult\(\s*result,\s*activeState,\s*importAiManualTabSessions\.has\(sid\)/)
+  assert.match(source, /if \(normalized\.aiRunning\) importAiManualTabSessions\.add\(sid\)/)
+  assert.match(source, /function _abortImportAiRuns\(\) {[\s\S]*?for \(const controller of importAiRunControllers\.values\(\)\) controller\.abort\(\)/)
+  assert.match(source, /function _cancelImport\(\) {[\s\S]*?_abortImportAiRuns\(\)/)
+})
+
+test('import review renders independently, reaches batch terminal progress, and rejects obsolete callbacks', async () => {
+  const localStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem() {
+        return null
+      },
+      setItem() {},
+      removeItem() {},
+    },
+  })
+  const timers = manualTimers()
+  const footerStates = []
+  const signals = {}
+  const oldOperations = {
+    artsorakel: deferred(),
+    inat: deferred(),
+  }
+  let runMode = 'timeout'
+
+  __setImportAiTestHooks({
+    persistSessions() {},
+    renderSessions() {},
+    showToast() {},
+    updateFooter(batchState) {
+      footerStates.push({ ...batchState })
+    },
+    loadInaturalistSession: async () => ({ connected: true, api_token: 'token' }),
+    getAvailableIdentifyServices: async () => [
+      { service: 'artsorakel', available: true, reason: '' },
+      { service: 'inat', available: true, reason: '' },
+    ],
+    resolvePhotoIdServices: () => ({
+      primary: 'artsorakel',
+      run: ['artsorakel', 'inat'],
+    }),
+    identifyBlobs: async (_blobs, service, _language, options) => {
+      signals[service] = options.signal
+      options.onImageSent?.()
+      if (runMode === 'timeout') {
+        if (service === 'artsorakel') return new Promise(() => {})
+        options.onIdReceived?.()
+        return [{ scientificName: 'Amanita muscaria', probability: 0.91 }]
+      }
+      if (runMode === 'batch-timeout' || runMode === 'old') return oldOperations[service].promise
+      options.onIdReceived?.()
+      return service === 'inat'
+        ? [{ scientificName: 'Boletus edulis', probability: 0.88 }]
+        : []
+    },
+    setTimeoutImpl: timers.setTimeoutImpl,
+    clearTimeoutImpl: timers.clearTimeoutImpl,
+  })
+
+  try {
+    __setImportAiSessionsForTests([makeSession()])
+    const timeoutRun = __runImportAiComparisonForTests('session-1')
+    await waitFor(() => __getImportAiStateForTests('session-1')?.aiServiceState?.inat?.status === 'success')
+
+    let sessionState = __getImportAiStateForTests('session-1')
+    assert.equal(sessionState.aiActiveService, 'inat')
+    assert.equal(sessionState.aiRunning, true)
+    assert.match(__renderImportAiControlsForTests('session-1'), /Amanita muscaria/)
+    assert.match(__renderImportAiControlsForTests('session-1'), /data-identify-run-button[\s\S]*disabled/)
+
+    timers.advance(20_000)
+    await timeoutRun
+    sessionState = __getImportAiStateForTests('session-1')
+    assert.equal(sessionState.aiServiceState.artsorakel.status, 'timeout')
+    assert.equal(sessionState.aiServiceState.inat.status, 'success')
+    assert.equal(sessionState.aiActiveService, 'inat')
+    assert.equal(sessionState.aiRunning, false)
+    assert.match(__renderImportAiControlsForTests('session-1'), /Amanita muscaria/)
+    assert.doesNotMatch(__renderImportAiControlsForTests('session-1'), /data-identify-run-button[^>]*disabled/)
+    assert.equal(timers.activeCount, 0)
+
+    runMode = 'old'
+    signals.artsorakel = null
+    signals.inat = null
+    __setImportAiSessionsForTests([makeSession()])
+    const obsoleteRun = __runImportAiComparisonForTests('session-1')
+    await waitFor(() => Boolean(signals.artsorakel && signals.inat))
+    __abortImportAiRunsForTests()
+    assert.equal(signals.artsorakel.aborted, true)
+    assert.equal(signals.inat.aborted, true)
+
+    const nextSession = makeSession()
+    __setImportAiSessionsForTests([nextSession])
+    runMode = 'new'
+    await __runImportAiComparisonForTests('session-1')
+    assert.match(__renderImportAiControlsForTests('session-1'), /Boletus edulis/)
+
+    oldOperations.artsorakel.resolve([{ scientificName: 'Stale arts result', probability: 0.99 }])
+    oldOperations.inat.resolve([{ scientificName: 'Stale inat result', probability: 0.99 }])
+    await obsoleteRun
+    assert.match(__renderImportAiControlsForTests('session-1'), /Boletus edulis/)
+    assert.doesNotMatch(__renderImportAiControlsForTests('session-1'), /Stale (arts|inat) result/)
+
+    const batchOperations = {
+      artsorakel: deferred(),
+      inat: deferred(),
+    }
+    oldOperations.artsorakel = batchOperations.artsorakel
+    oldOperations.inat = batchOperations.inat
+    runMode = 'batch-timeout'
+    footerStates.length = 0
+    __setImportAiSessionsForTests([makeSession()])
+    const batchRun = __runImportAiBatchForTests()
+    await waitFor(() => timers.activeCount === 4)
+    timers.advance(20_000)
+    await batchRun
+
+    assert.equal(__getImportAiBatchStateForTests().running, false)
+    assert.equal(__getImportAiStateForTests('session-1').aiRunning, false)
+    assert.equal(__getImportAiStateForTests('session-1').aiServiceState.artsorakel.status, 'timeout')
+    assert.equal(__getImportAiStateForTests('session-1').aiServiceState.inat.status, 'timeout')
+    assert.equal(footerStates.some(item => item.totalUnits === 2 && item.completedUnits === 2), true)
+    assert.equal(footerStates.at(-1).running, false)
+    assert.equal(timers.activeCount, 0)
+  } finally {
+    __abortImportAiRunsForTests()
+    __setImportAiTestHooks(null)
+    __setImportAiSessionsForTests([])
+    if (localStorageDescriptor) {
+      Object.defineProperty(globalThis, 'localStorage', localStorageDescriptor)
+    } else {
+      Reflect.deleteProperty(globalThis, 'localStorage')
+    }
+  }
+})
+
 test('import review source imports the comparison active-service helper', () => {
   const source = fs.readFileSync(new URL('./screens/import_review.js', import.meta.url), 'utf8')
   assert.match(source, /chooseIdentifyComparisonActiveService/)
   assert.match(source, /allowDuringBatch/)
-  assert.match(source, /const availabilityList = await getAvailableIdentifyServices/)
+  assert.match(source, /const availabilityList = await _importAiDependency\('getAvailableIdentifyServices', getAvailableIdentifyServices\)/)
   assert.match(source, /sessionAi\.aiAvailability = availability/)
 })
 

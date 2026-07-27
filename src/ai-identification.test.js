@@ -22,7 +22,65 @@ import {
   canRunService,
   canViewServiceResult,
   shouldRunServiceFromTab,
+  shouldAutoActivateIdentifyResult,
 } from './ai-identification.js'
+
+function createManualTimers() {
+  let now = 0
+  let nextId = 1
+  const scheduled = new Map()
+  return {
+    setTimeoutImpl(callback, delay) {
+      const id = nextId++
+      scheduled.set(id, { callback, at: now + Number(delay || 0) })
+      return id
+    },
+    clearTimeoutImpl(id) {
+      scheduled.delete(id)
+    },
+    advance(ms) {
+      const target = now + ms
+      while (true) {
+        const next = [...scheduled.entries()]
+          .filter(([, item]) => item.at <= target)
+          .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0]
+        if (!next) break
+        const [id, item] = next
+        scheduled.delete(id)
+        now = item.at
+        item.callback()
+      }
+      now = target
+    },
+    get activeCount() {
+      return scheduled.size
+    },
+  }
+}
+
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+async function flushPromises() {
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
+async function waitFor(predicate, limit = 50) {
+  for (let index = 0; index < limit; index++) {
+    if (predicate()) return
+    await flushPromises()
+  }
+  assert.fail('Condition did not become true')
+}
 
 function createSupabaseStub() {
   const rows = []
@@ -166,6 +224,197 @@ test('comparison helper preserves the working service when the other one fails',
   assert.equal(result.resultsByService.artsorakel.status, 'success')
   assert.equal(result.resultsByService.inat.status, 'error')
   assert.equal(result.resultsByService.artsorakel.predictions[0].scientificName, 'Morchella esculenta')
+})
+
+for (const hangingService of ['artsorakel', 'inat']) {
+  test(`${hangingService} slow/timeout does not delay the other provider result`, async () => {
+    const timers = createManualTimers()
+    const events = []
+    let completed = false
+    const successfulService = hangingService === 'artsorakel' ? 'inat' : 'artsorakel'
+    const comparisonPromise = runIdentifyComparisonForBlobs([new Blob(['x'], { type: 'image/jpeg' })], {
+      availability: {
+        artsorakel: { service: 'artsorakel', available: true, reason: '' },
+        inat: { service: 'inat', available: true, reason: '' },
+      },
+      identifyBlobs: async (_blobs, service) => {
+        if (service === hangingService) return new Promise(() => {})
+        return [{ scientificName: 'Amanita muscaria', probability: 0.91 }]
+      },
+      setTimeoutImpl: timers.setTimeoutImpl,
+      clearTimeoutImpl: timers.clearTimeoutImpl,
+      onServiceState: result => events.push({ service: result.service, status: result.status }),
+    }).then(result => {
+      completed = true
+      return result
+    })
+
+    await waitFor(() => events.length === 1)
+    assert.deepEqual(events, [{ service: successfulService, status: 'success' }])
+    assert.equal(completed, false)
+
+    timers.advance(9_999)
+    await flushPromises()
+    assert.equal(events.some(event => event.service === hangingService && event.status === 'slow'), false)
+
+    timers.advance(1)
+    await flushPromises()
+    assert.equal(events.some(event => event.service === hangingService && event.status === 'slow'), true)
+    assert.equal(completed, false)
+
+    timers.advance(10_000)
+    const result = await comparisonPromise
+    assert.equal(result.resultsByService[successfulService].status, 'success')
+    assert.equal(result.resultsByService[hangingService].status, 'timeout')
+    assert.match(result.resultsByService[hangingService].errorMessage, /timed out|tok for lang tid|tog för lång tid|Zeitüberschreitung/i)
+    assert.doesNotMatch(result.resultsByService[hangingService].errorMessage, /AbortError/i)
+    assert.equal(timers.activeCount, 0)
+  })
+}
+
+test('provider errors and differently ordered successes stay independent', async () => {
+  const availability = {
+    artsorakel: { service: 'artsorakel', available: true, reason: '' },
+    inat: { service: 'inat', available: true, reason: '' },
+  }
+  const timers = createManualTimers()
+  const events = []
+  const inat = deferred()
+  const comparisonPromise = runIdentifyComparisonForBlobs([new Blob(['x'], { type: 'image/jpeg' })], {
+    availability,
+    identifyBlobs: async (_blobs, service) => {
+      if (service === 'artsorakel') throw new Error('Artsorakel unavailable')
+      return inat.promise
+    },
+    setTimeoutImpl: timers.setTimeoutImpl,
+    clearTimeoutImpl: timers.clearTimeoutImpl,
+    onServiceState: result => events.push({ service: result.service, status: result.status }),
+  })
+
+  await waitFor(() => events.length === 1)
+  assert.deepEqual(events, [{ service: 'artsorakel', status: 'error' }])
+  inat.resolve([{ scientificName: 'Boletus edulis', probability: 0.88 }])
+  const result = await comparisonPromise
+  assert.equal(result.resultsByService.artsorakel.status, 'error')
+  assert.equal(result.resultsByService.inat.status, 'success')
+  assert.deepEqual(events, [
+    { service: 'artsorakel', status: 'error' },
+    { service: 'inat', status: 'success' },
+  ])
+  assert.equal(timers.activeCount, 0)
+
+  for (const firstService of ['artsorakel', 'inat']) {
+    const orderedTimers = createManualTimers()
+    const arts = deferred()
+    const inaturalist = deferred()
+    const orderedEvents = []
+    const orderedPromise = runIdentifyComparisonForBlobs([new Blob(['x'], { type: 'image/jpeg' })], {
+      availability,
+      identifyBlobs: async (_blobs, service) => service === 'artsorakel' ? arts.promise : inaturalist.promise,
+      setTimeoutImpl: orderedTimers.setTimeoutImpl,
+      clearTimeoutImpl: orderedTimers.clearTimeoutImpl,
+      onServiceState: item => orderedEvents.push(item.service),
+    })
+    const first = firstService === 'artsorakel' ? arts : inaturalist
+    const second = firstService === 'artsorakel' ? inaturalist : arts
+    first.resolve([{ scientificName: 'First species', probability: 0.7 }])
+    await waitFor(() => orderedEvents.length === 1)
+    assert.deepEqual(orderedEvents, [firstService])
+    second.resolve([{ scientificName: 'Second species', probability: 0.8 }])
+    const orderedResult = await orderedPromise
+    assert.equal(orderedResult.resultsByService.artsorakel.status, 'success')
+    assert.equal(orderedResult.resultsByService.inat.status, 'success')
+    assert.equal(orderedTimers.activeCount, 0)
+  }
+})
+
+test('completed provider auto-activation replaces any active state without usable predictions', () => {
+  const completed = {
+    status: 'success',
+    predictions: [{ scientificName: 'Amanita muscaria' }],
+  }
+  for (const completedService of ['artsorakel', 'inat']) {
+    for (const activeStatus of ['error', 'timeout', 'no_match', 'unavailable', 'running', 'slow']) {
+      assert.equal(
+        shouldAutoActivateIdentifyResult(
+          { ...completed, service: completedService },
+          { service: completedService === 'artsorakel' ? 'inat' : 'artsorakel', status: activeStatus, predictions: [] },
+          false,
+        ),
+        true,
+        `${completedService} should activate over ${activeStatus}`,
+      )
+    }
+  }
+})
+
+test('completed provider auto-activation preserves usable and manually selected active tabs', () => {
+  const completed = {
+    status: 'success',
+    predictions: [{ scientificName: 'Amanita muscaria' }],
+  }
+  assert.equal(shouldAutoActivateIdentifyResult(completed, { status: 'running', predictions: [] }, true), false)
+  assert.equal(shouldAutoActivateIdentifyResult(completed, {
+    status: 'success',
+    predictions: [{ scientificName: 'Boletus edulis' }],
+  }, false), false)
+})
+
+test('provider timers and abort signals are cleaned up for success, failure, timeout, and teardown', async () => {
+  for (const outcome of ['success', 'failure']) {
+    const timers = createManualTimers()
+    await runIdentifyComparisonForBlobs([new Blob(['x'], { type: 'image/jpeg' })], {
+      services: ['artsorakel'],
+      availability: { artsorakel: { service: 'artsorakel', available: true, reason: '' } },
+      identifyBlobs: async () => {
+        if (outcome === 'failure') throw new Error('failed')
+        return [{ scientificName: 'Amanita muscaria' }]
+      },
+      setTimeoutImpl: timers.setTimeoutImpl,
+      clearTimeoutImpl: timers.clearTimeoutImpl,
+    })
+    assert.equal(timers.activeCount, 0)
+  }
+
+  const timeoutTimers = createManualTimers()
+  let timeoutSignal = null
+  const timeoutPromise = runIdentifyComparisonForBlobs([new Blob(['x'], { type: 'image/jpeg' })], {
+    services: ['artsorakel'],
+    availability: { artsorakel: { service: 'artsorakel', available: true, reason: '' } },
+    identifyBlobs: async (_blobs, _service, _language, options) => {
+      timeoutSignal = options.signal
+      return new Promise(() => {})
+    },
+    setTimeoutImpl: timeoutTimers.setTimeoutImpl,
+    clearTimeoutImpl: timeoutTimers.clearTimeoutImpl,
+  })
+  await flushPromises()
+  timeoutTimers.advance(20_000)
+  await timeoutPromise
+  assert.equal(timeoutSignal.aborted, true)
+  assert.equal(timeoutTimers.activeCount, 0)
+
+  const teardownTimers = createManualTimers()
+  const teardownController = new AbortController()
+  let teardownSignal = null
+  const teardownPromise = runIdentifyComparisonForBlobs([new Blob(['x'], { type: 'image/jpeg' })], {
+    services: ['inat'],
+    availability: { inat: { service: 'inat', available: true, reason: '' } },
+    signal: teardownController.signal,
+    identifyBlobs: async (_blobs, _service, _language, options) => {
+      teardownSignal = options.signal
+      return new Promise(() => {})
+    },
+    setTimeoutImpl: teardownTimers.setTimeoutImpl,
+    clearTimeoutImpl: teardownTimers.clearTimeoutImpl,
+  })
+  await flushPromises()
+  teardownController.abort()
+  const teardownResult = await teardownPromise
+  assert.equal(teardownSignal.aborted, true)
+  assert.equal(teardownResult.resultsByService.inat.status, 'error')
+  assert.doesNotMatch(teardownResult.resultsByService.inat.errorMessage, /AbortError/i)
+  assert.equal(teardownTimers.activeCount, 0)
 })
 
 test('observation identification cache helpers tolerate a missing production table', async () => {
