@@ -144,7 +144,6 @@ function _openPeopleFinds(card, action = 'finds') {
     resetSearch: true,
     resetFilters: true,
     groupBySpecies: action === 'species',
-    sporesOnly: action === 'spores',
   })
 }
 

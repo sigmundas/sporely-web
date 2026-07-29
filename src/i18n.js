@@ -235,7 +235,7 @@ const messages = {
     'finds.toast.minePrivate': 'Showing your private finds',
     'finds.toast.mineFriends': 'Showing finds shared with friends',
     'finds.toast.minePublic': 'Showing your public finds',
-    'finds.toast.feedAll': 'Showing all feed sources',
+    'finds.toast.feedAll': 'Showing all public finds',
     'finds.toast.feedFollowed': 'Showing followed species',
     'finds.toast.feedFriends': 'Showing friends',
     'finds.toast.feedPublic': 'Showing public finds',
@@ -1912,7 +1912,6 @@ export function applyStaticTranslations() {
   setText('#android-web-camera-warning-continue', 'import.continueAnyway')
 
   setText('#finds-refresh-label', 'finds.pullToRefresh')
-  setText('#finds-filter-spores-label', 'stats.spores')
   setText('#finds-scope-button-prefix', 'finds.scope')
   setText('#finds-status-button-prefix', 'finds.status')
   setText('#finds-sort-button-prefix', 'finds.sort')

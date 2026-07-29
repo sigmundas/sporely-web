@@ -2,7 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  applyFindsMineScope,
+  applyFindsMineStatus,
   classifyDraftAge,
+  compareFindsByScientificName,
   getFindsFeedSourcePagingState,
   getFindsEffectiveStatusFilter,
   getFindsScopeOptions,
@@ -153,12 +156,50 @@ test('finds scope options reflect mine and feed dropdown choices', () => {
 
   assert.deepEqual(
     getFindsScopeOptions('feed').map(option => option.value),
-    ['all', 'followed', 'friends', 'public'],
+    ['all', 'followed', 'friends'],
   )
   assert.deepEqual(
     getFindsScopeOptions('feed').map(option => option.label),
-    ['All', 'Followed', 'Friends', 'Public'],
+    ['All', 'Followed', 'Friends'],
   )
+})
+
+test('mine scope is applied before paging the observations query', () => {
+  const calls = []
+  const query = {
+    eq(column, value) {
+      calls.push({ column, value })
+      return this
+    },
+  }
+
+  assert.equal(applyFindsMineScope(query, 'public'), query)
+  assert.deepEqual(calls, [{ column: 'visibility', value: 'public' }])
+
+  calls.length = 0
+  assert.equal(applyFindsMineScope(query, 'all'), query)
+  assert.deepEqual(calls, [])
+})
+
+test('mine status is applied before paging when draft status is supported', () => {
+  const calls = []
+  const query = {
+    eq(column, value) {
+      calls.push({ column, value })
+      return this
+    },
+  }
+
+  assert.equal(applyFindsMineStatus(query, 'published'), query)
+  assert.deepEqual(calls, [{ column: 'is_draft', value: false }])
+
+  calls.length = 0
+  assert.equal(applyFindsMineStatus(query, 'drafts'), query)
+  assert.deepEqual(calls, [{ column: 'is_draft', value: true }])
+
+  calls.length = 0
+  assert.equal(applyFindsMineStatus(query, 'published', false), query)
+  assert.deepEqual(calls, [])
 })
 
 test('finds sort helper keeps date as default and accepts species', () => {
@@ -169,6 +210,26 @@ test('finds sort helper keeps date as default and accepts species', () => {
     getFindsSortOptions().map(option => option.value),
     ['date', 'species'],
   )
+})
+
+test('species sort orders by scientific name instead of common name', () => {
+  const agaricus = {
+    genus: 'Agaricus',
+    species: 'campestris',
+    common_name: 'Zebra mushroom',
+  }
+  const boletus = {
+    genus: 'Boletus',
+    species: 'edulis',
+    common_name: 'Apple mushroom',
+  }
+  const commonNameOnly = {
+    common_name: 'A common name without taxonomy',
+  }
+
+  assert.ok(compareFindsByScientificName(agaricus, boletus) < 0)
+  assert.ok(compareFindsByScientificName(boletus, agaricus) > 0)
+  assert.ok(compareFindsByScientificName(agaricus, commonNameOnly) < 0)
 })
 
 test('finds redlist tag helper renders only the tag in a thumbnail-friendly badge', () => {
@@ -217,7 +278,6 @@ test('finds dropdown pills update after selection', () => {
       findsView: 'cards',
       findsGroupBySpecies: false,
       findsSort: 'date',
-      findsSporesOnly: false,
       findsStatusFilter: 'all',
       findsTargetUserId: null,
       findsTargetSummaryLoaded: false,
@@ -387,6 +447,15 @@ test('public feed keeps published public observations and excludes public drafts
       visibility: 'friends',
       is_draft: false,
     }),
+    false,
+  )
+
+  assert.equal(
+    isFeedPublicObservation({
+      user_id: 'user-a',
+      visibility: 'public',
+      is_draft: false,
+    }, 'user-a'),
     false,
   )
 })

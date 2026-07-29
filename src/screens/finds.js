@@ -39,10 +39,9 @@ const LEGACY_FINDS_DRAFT_ONLY_STORAGE_KEY = 'sporely-finds-draft-only'
 const FINDS_STATUS_VALUES = new Set(['all', 'drafts', 'published'])
 const FINDS_SORT_VALUES = new Set(['date', 'species'])
 const FINDS_MINE_SCOPE_VALUES = new Set(['all', 'private', 'friends', 'public'])
-const FINDS_FEED_SCOPE_VALUES = new Set(['all', 'followed', 'friends', 'public', 'species'])
+const FINDS_FEED_SCOPE_VALUES = new Set(['all', 'followed', 'friends'])
 const DRAFT_OLD_MS = 90 * 24 * 60 * 60 * 1000
 const DRAFT_STALE_MS = 180 * 24 * 60 * 60 * 1000
-const FEED_SOURCE_MODES = ['followed', 'friends', 'public']
 let _pullTracking = false
 let _pullStartX = 0
 let _pullStartY = 0
@@ -177,7 +176,8 @@ function _normalizeFindsMineScope(scope) {
 function _normalizeFindsFeedScope(scope) {
   const raw = String(scope || '').trim().toLowerCase()
   if (raw === 'species') return 'followed'
-  return FINDS_FEED_SCOPE_VALUES.has(raw) ? raw : 'followed'
+  if (raw === 'public') return 'all'
+  return FINDS_FEED_SCOPE_VALUES.has(raw) ? raw : 'all'
 }
 
 function _findsPrimaryScope() {
@@ -193,7 +193,10 @@ function _findsSecondaryScope(primary = _findsPrimaryScope()) {
 function _normalizeSecondaryScopeForPrimary(primary, scope, fallback = '') {
   const normalized = String(scope || '').trim().toLowerCase()
   if (primary === 'feed') {
-    return _normalizeFindsFeedScope(FINDS_FEED_SCOPE_VALUES.has(normalized) ? normalized : (fallback || 'followed'))
+    const candidate = normalized === 'public' || normalized === 'species' || FINDS_FEED_SCOPE_VALUES.has(normalized)
+      ? normalized
+      : fallback
+    return _normalizeFindsFeedScope(candidate || 'all')
   }
   return _normalizeFindsMineScope(FINDS_MINE_SCOPE_VALUES.has(normalized) ? normalized : (fallback || 'public'))
 }
@@ -229,7 +232,7 @@ function _findsScopeOptionLabel(primary, scope) {
 export function getFindsScopeOptions(primary = _findsPrimaryScope()) {
   const normalizedPrimary = _normalizeFindsPrimaryScope(primary)
   const values = normalizedPrimary === 'feed'
-    ? ['all', 'followed', 'friends', 'public']
+    ? ['all', 'followed', 'friends']
     : ['all', 'private', 'friends', 'public']
   return values.map(value => ({ value, label: _findsScopeOptionLabel(normalizedPrimary, value) }))
 }
@@ -240,8 +243,12 @@ export function getFindsEffectiveStatusFilter(primaryScope = _findsPrimaryScope(
     : _normalizeFindsStatusFilter(statusFilter)
 }
 
-export function isFeedPublicObservation(obs = {}) {
-  return obs?.is_draft !== true && normalizeObservationVisibility(obs?.visibility) === 'public'
+export function isFeedPublicObservation(obs = {}, currentUserId = '') {
+  const ownerId = String(obs?.user_id || '')
+  const viewerId = String(currentUserId || '')
+  return obs?.is_draft !== true
+    && normalizeObservationVisibility(obs?.visibility) === 'public'
+    && (!viewerId || ownerId !== viewerId)
 }
 
 function _ensureFeedSourcePagingBundle(feedPaging) {
@@ -253,8 +260,10 @@ function _ensureFeedSourcePagingBundle(feedPaging) {
 }
 
 export function getFindsFeedSourcePagingState(feedPaging = {}, scope = 'all') {
+  const rawScope = String(scope || '').trim().toLowerCase()
   const normalizedScope = _normalizeFindsFeedScope(scope)
   const bundle = _ensureFeedSourcePagingBundle(feedPaging)
+  if (rawScope === 'public') return bundle.public
   if (normalizedScope === 'all') return bundle
   if (!bundle[normalizedScope]) bundle[normalizedScope] = _createPagingState()
   return bundle[normalizedScope]
@@ -279,8 +288,7 @@ function _findsScopeToastMessage(primary, scope) {
       case 'all': return t('finds.toast.feedAll')
       case 'followed': return t('finds.toast.feedFollowed')
       case 'friends': return t('finds.toast.feedFriends')
-      case 'public': return t('finds.toast.feedPublic')
-      default: return t('finds.toast.feedFollowed')
+      default: return t('finds.toast.feedAll')
     }
   }
 
@@ -305,10 +313,6 @@ function _showFindsStatusHint(status) {
       ? t('finds.toast.statusPublished')
       : t('finds.toast.statusAll')
   showToast(message)
-}
-
-function _showFindsSporesHint(enabled) {
-  showToast(enabled ? t('finds.toast.sporesOn') : t('finds.toast.sporesOff'))
 }
 
 function _showFindsSortHint(sort) {
@@ -445,6 +449,7 @@ export function _selectFindsDropdownValue(key, value) {
       void loadFinds()
     } else {
       _applyFilter()
+      requestFindsRefresh(0)
     }
     return
   }
@@ -454,6 +459,7 @@ export function _selectFindsDropdownValue(key, value) {
     _closeFindsDropdowns()
     _showFindsStatusHint(value)
     _applyFilter()
+    if (_findsPrimaryScope() === 'mine') requestFindsRefresh(0)
     return
   }
 
@@ -487,7 +493,7 @@ function _setFindsPrimaryScope(primary, options = {}) {
     ? options.secondaryScope
     : previousSecondary
   if (nextPrimary === 'feed') {
-    state.findsFeedScope = _normalizeSecondaryScopeForPrimary('feed', preservedSecondary, state.findsFeedScope || 'followed')
+    state.findsFeedScope = _normalizeSecondaryScopeForPrimary('feed', preservedSecondary, state.findsFeedScope || 'all')
   } else {
     state.findsMineScope = _normalizeSecondaryScopeForPrimary('mine', preservedSecondary, state.findsMineScope || 'public')
   }
@@ -497,7 +503,7 @@ function _setFindsSecondaryScope(scope, options = {}) {
   const primary = _findsPrimaryScope()
   const normalized = String(scope || '').trim().toLowerCase()
   if (primary === 'feed') {
-    state.findsFeedScope = _normalizeSecondaryScopeForPrimary('feed', normalized, state.findsFeedScope || 'followed')
+    state.findsFeedScope = _normalizeSecondaryScopeForPrimary('feed', normalized, state.findsFeedScope || 'all')
   } else {
     state.findsMineScope = _normalizeSecondaryScopeForPrimary('mine', normalized, state.findsMineScope || 'public')
   }
@@ -1018,12 +1024,6 @@ export function initFinds() {
   document.getElementById('finds-view-three').addEventListener('click', () => {
     _setFindsView('three')
   })
-  document.getElementById('finds-filter-spores')?.addEventListener('click', () => {
-    state.findsSporesOnly = !state.findsSporesOnly
-    _syncSporesToggle()
-    _showFindsSporesHint(state.findsSporesOnly)
-    _applyFilter()
-  })
   document.getElementById('finds-scope-button')?.addEventListener('click', event => {
     event.preventDefault()
     _toggleFindsDropdown('scope')
@@ -1155,13 +1155,6 @@ function _syncScopeControls() {
 
 globalThis.__syncFindsScopeControls = _syncScopeControls
 
-function _syncSporesToggle() {
-  const btn = document.getElementById('finds-filter-spores')
-  if (!btn) return
-  btn.classList.toggle('active', !!state.findsSporesOnly)
-  btn.setAttribute('aria-pressed', state.findsSporesOnly ? 'true' : 'false')
-}
-
 function _syncStatusSelect() {
   _renderFindsDropdownControl('status')
 }
@@ -1229,10 +1222,9 @@ function _setScope(scope, options = {}) {
   if (options.resetFilters) {
     state.findsGroupBySpecies = false
     state.findsSort = 'date'
-    state.findsSporesOnly = false
     _setFindsStatusFilter('all', { persist: true })
     _setFindsPrimaryScope(_findsPrimaryScope(), {
-      secondaryScope: _findsPrimaryScope() === 'feed' ? 'followed' : 'public',
+      secondaryScope: _findsPrimaryScope() === 'feed' ? 'all' : 'public',
     })
   }
 
@@ -1244,16 +1236,11 @@ function _setScope(scope, options = {}) {
     _setFindsSort(options.sort, { notify: false })
   }
 
-  if (options.sporesOnly !== undefined) {
-    state.findsSporesOnly = !!options.sporesOnly
-  }
-
   if (options.statusFilter !== undefined) {
     _setFindsStatusFilter(options.statusFilter, { persist: false })
   }
 
   _syncScopeControls()
-  _syncSporesToggle()
   _syncStatusSelect()
   _syncSortSelect()
 }
@@ -1265,10 +1252,11 @@ export async function openFinds(scope = _currentScope(), options = {}) {
 }
 
 export function requestFindsRefresh(delayMs = 120) {
+  const timerHost = globalThis.window || globalThis
   if (_queuedRefreshTimer) {
-    window.clearTimeout(_queuedRefreshTimer)
+    timerHost.clearTimeout(_queuedRefreshTimer)
   }
-  _queuedRefreshTimer = window.setTimeout(() => {
+  _queuedRefreshTimer = timerHost.setTimeout(() => {
     _queuedRefreshTimer = null
     void loadFinds()
   }, Math.max(0, Number(delayMs) || 0))
@@ -1310,7 +1298,6 @@ export async function loadFinds() {
   }
 
   _syncScopeControls()
-  _syncSporesToggle()
   _syncStatusSelect()
   _syncSortSelect()
 
@@ -1403,6 +1390,21 @@ async function _runPagedFindsQuery(makeQuery, columns, legacyColumns, offset) {
   )
 }
 
+export function applyFindsMineScope(query, scope) {
+  const normalizedScope = _normalizeFindsMineScope(scope)
+  return FINDS_MINE_SCOPES.has(normalizedScope)
+    ? query.eq('visibility', normalizedScope)
+    : query
+}
+
+export function applyFindsMineStatus(query, status, supportsDraftStatus = true) {
+  if (!supportsDraftStatus) return query
+  const normalizedStatus = _normalizeFindsStatusFilter(status)
+  if (normalizedStatus === 'drafts') return query.eq('is_draft', true)
+  if (normalizedStatus === 'published') return query.eq('is_draft', false)
+  return query
+}
+
 async function _loadMinePage({ loadSeq, reset = false } = {}) {
   if (!state.user?.id) return false
   const paging = _getPagingState('mine')
@@ -1412,7 +1414,17 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
   const currentItems = reset ? [] : (_cache['mine'] || [])
   const queuedPromise = reset ? getQueuedObservations(state.user.id) : Promise.resolve([])
   const pagePromise = _runPagedFindsQuery(
-    columns => supabase.from('observations').select(columns).eq('user_id', state.user.id),
+    columns => {
+      const scopedQuery = applyFindsMineScope(
+        supabase.from('observations').select(columns).eq('user_id', state.user.id),
+        _findsSecondaryScope('mine'),
+      )
+      return applyFindsMineStatus(
+        scopedQuery,
+        state.findsStatusFilter,
+        columns.includes('is_draft'),
+      )
+    },
     MINE_SELECT,
     MINE_SELECT_LEGACY,
     paging.nextOffset,
@@ -1465,10 +1477,12 @@ function _feedSourceQuery(source) {
       .from('observations_community_view')
       .select(columns)
       .eq('visibility', 'public')
+      .neq('user_id', state.user.id)
   }
   return columns => supabase
     .from('observations_follow_view')
     .select(columns)
+    .neq('user_id', state.user.id)
 }
 
 function _feedSourceSelect(source) {
@@ -1482,9 +1496,9 @@ function _feedSourceLegacySelect(source) {
 function _feedSourceFilters(source, rows = []) {
   const data = Array.isArray(rows) ? rows : []
   if (source === 'public') {
-    return data.filter(obs => isFeedPublicObservation(obs))
+    return data.filter(obs => isFeedPublicObservation(obs, state.user?.id))
   }
-  return data.filter(obs => obs?.is_draft !== true)
+  return data.filter(obs => obs?.is_draft !== true && String(obs?.user_id || '') !== String(state.user?.id || ''))
 }
 
 async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState = null, cacheKey = 'feed', updateCache = true } = {}) {
@@ -1553,34 +1567,9 @@ async function _loadFeedSelectionPage({ loadSeq, reset = false } = {}) {
       _setFindsCache('feed', [])
     }
 
-    if (scope === 'all') {
-      const sourcePaging = getFindsFeedSourcePagingState(paging, 'all')
-      paging.sourcePaging = sourcePaging
-      paging.mode = 'all'
-      const sourceResults = await Promise.all(FEED_SOURCE_MODES.map(source => _loadFeedSourcePage(source, {
-        loadSeq,
-        reset,
-        pagingState: sourcePaging[source],
-        cacheKey: 'feed',
-        updateCache: false,
-      })))
-      if (loadSeq !== _loadFindsSeq) return false
-      const errorCount = sourceResults.filter(result => result?.error).length
-      const rawData = sourceResults.flatMap(result => Array.isArray(result?.data) ? result.data : [])
-      const merged = _mergeFindsItems('feed', reset ? [] : (_cache['feed'] || []), rawData)
-      await _attachSporeFlags(merged)
-      await _attachFindsRedlistTags(merged, loadSeq)
-      _setFindsCache('feed', merged)
-      paging.hasMore = FEED_SOURCE_MODES.some(source => sourcePaging[source]?.hasMore)
-      paging.initialized = true
-      if (errorCount && !merged.length) {
-        showToast(t('finds.couldNotLoad'))
-      }
-      return true
-    }
-
-    const sourcePaging = getFindsFeedSourcePagingState(paging, scope)
-    const loaded = await _loadFeedSourcePage(scope, {
+    const source = scope === 'all' ? 'public' : scope
+    const sourcePaging = getFindsFeedSourcePagingState(paging, source)
+    const loaded = await _loadFeedSourcePage(source, {
       loadSeq,
       reset,
       pagingState: sourcePaging,
@@ -1730,8 +1719,9 @@ function _applyFilter() {
       if (mineScope === 'private') return visibility === 'private'
       return visibility === mineScope
     })
+  } else {
+    filtered = filtered.filter(obs => String(obs?.user_id || '') !== String(state.user?.id || ''))
   }
-  if (state.findsSporesOnly) filtered = filtered.filter(obs => !!obs.has_spores || !!obs.spore_short || !!obs.spore_statistics)
   filtered = filtered.filter(obs => matchesFindsStatus(obs, statusFilter))
 
   // Search still runs client-side against the loaded pages only. True global
@@ -1893,7 +1883,6 @@ function _emptyFindsText(q, options = {}) {
   const mineScope = _findsSecondaryScope('mine')
   const feedScope = _findsSecondaryScope('feed')
   if (q) return t('finds.noResults', { query: q })
-  if (state.findsSporesOnly) return t('finds.noSporeMetrics')
   if (currentScope === 'feed') {
     if (feedScope === 'all') return t('finds.noFeedFinds')
     if (feedScope === 'followed') return t('finds.noFollowed')
@@ -1924,6 +1913,17 @@ function _speciesLabel(obs) {
   const latin = formatScientificName(obs.genus || '', obs.species || '')
   const label = obs.common_name && latin ? `${obs.common_name} — ${latin}` : (obs.common_name || latin || t('finds.unidentified'))
   return obs.uncertain ? `? ${label}` : label
+}
+
+export function compareFindsByScientificName(first = {}, second = {}) {
+  const firstName = formatScientificName(first.genus || '', first.species || '')
+  const secondName = formatScientificName(second.genus || '', second.species || '')
+  if (!firstName && secondName) return 1
+  if (firstName && !secondName) return -1
+
+  const scientificOrder = firstName.localeCompare(secondName, undefined, { sensitivity: 'base' })
+  if (scientificOrder) return scientificOrder
+  return _speciesLabel(first).localeCompare(_speciesLabel(second), undefined, { sensitivity: 'base' })
 }
 
 function _uncertainPrefix(obs) {
@@ -2006,7 +2006,7 @@ function _renderBySpecies(list, data, options = {}) {
   const groupMap = new Map()
   for (const obs of data) {
     const key = _speciesKey(obs)
-    if (!groupMap.has(key)) groupMap.set(key, { label: _speciesLabel(obs), items: [] })
+    if (!groupMap.has(key)) groupMap.set(key, { label: _speciesLabel(obs), representative: obs, items: [] })
     groupMap.get(key).items.push(obs)
   }
 
@@ -2015,7 +2015,7 @@ function _renderBySpecies(list, data, options = {}) {
     .sort(([ka, a], [kb, b]) => {
       if (ka === '\x00unidentified') return 1
       if (kb === '\x00unidentified') return -1
-      return a.label.localeCompare(b.label)
+      return compareFindsByScientificName(a.representative, b.representative)
     })
 
   const allObs = groups.flatMap(([, g]) => g.items).filter(o => !o._pendingSync)
