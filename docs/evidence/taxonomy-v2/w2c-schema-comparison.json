@@ -1,0 +1,259 @@
+{
+  "evidence_schema_version": 1,
+  "release_id": "tax-2026.07.30-02",
+  "starting_revisions": {
+    "web": "e05979bfbfa040ccb8c5e483b9bbb9306da5c573",
+    "desktop": "f77418e7856e1354ed5321997149a5100e1c6964"
+  },
+  "runtime": {
+    "node": "v25.8.2",
+    "npm": "11.14.1",
+    "supabase_cli": "2.98.2",
+    "docker_context": "orbstack",
+    "docker_engine": "29.4.0",
+    "postgres": "17.6",
+    "container_psql": "psql (PostgreSQL) 17.6"
+  },
+  "production_baseline_provenance": {
+    "captured_utc": "2026-08-01 12:43:00.564848",
+    "project_reference": "zkpjklzfwzefhjluvhfw",
+    "query": "BEGIN TRANSACTION READ ONLY; SELECT now() AT TIME ZONE 'utc', current_setting('server_version'), pg_database_size(current_database()), current_setting('transaction_read_only'); ROLLBACK;",
+    "database_bytes": 103304339,
+    "postgres_version": "17.6",
+    "transaction_read_only": "on",
+    "operator_tool": "Supabase CLI linked Management API query",
+    "production_writes_performed": false
+  },
+  "baseline_relation_bytes": {
+    "concepts": {"heap": 43343872, "indexes": 14278656, "total": 57671680},
+    "taxa": {"heap": 103915520, "indexes": 128401408, "total": 232382464},
+    "scientific_names": {"heap": 63397888, "indexes": 148717568, "total": 212164608},
+    "vernacular_names": {"heap": 950272, "indexes": 2203648, "total": 3194880},
+    "external_ids": {"heap": 84967424, "indexes": 149741568, "total": 234766336},
+    "legacy_external_ids": {"heap": 8331264, "indexes": 2015232, "total": 10387456},
+    "redlist": {"heap": 2310144, "indexes": 1384448, "total": 3735552},
+    "releases_and_audit": {"total": 114688},
+    "total": 754417664
+  },
+  "baseline_decomposition": {
+    "scientific_names": {
+      "all": 662649,
+      "preferred": 634894,
+      "non_preferred": 27755,
+      "equal_to_canonical": 634894,
+      "preferred_equal_to_canonical": 634894,
+      "case_equal_but_byte_different": 0,
+      "true_aliases_after_canonical_exclusion": 27755,
+      "alias_reason": {"null": 634894, "synonym_of_accepted": 27753, "cross_source_automatic_exact": 2},
+      "concepts_with_zero": 0,
+      "concepts_with_one": 623502,
+      "concepts_with_multiple": 11392,
+      "names_attached_to_multiple_sporely_ids": 10261,
+      "conclusion": "Canonical search makes the 634894 preferred canonical name rows operationally redundant in the cloud runtime; W1 remains unchanged."
+    },
+    "external_ids": {
+      "all": 634894,
+      "preferred": 634894,
+      "non_preferred": 0,
+      "concepts_zero_one_multiple": [0, 634894, 0],
+      "identical_to_taxon_canonical_pair": 634894,
+      "not_represented_by_taxon_canonical_pair": 0,
+      "both_col_and_nortaxa": 0,
+      "authoritative_key_collisions": 0,
+      "by_source_namespace": {"col_xr/col_usage_id": 620975, "nortaxa/nortaxa_taxon_id": 13919},
+      "conclusion": "The full external-ID table is duplicate resolver/display storage for this release; future noncanonical mappings belong in an exception table."
+    },
+    "concept_alternatives": {
+      "no_separate_table_bytes": 0,
+      "id_only_measured_bytes": 37388288,
+      "id_plus_smallint_first_seen_measured_bytes": 42598400,
+      "existing_table_bytes": 57671680,
+      "conclusion": "Active IDs live in the active taxon slot; disappeared IDs are retained only when referenced or retired, backed by immutable W1 artifacts and W3 snapshots."
+    },
+    "rank_scope": {
+      "canonical_source": {"col_xr": 620975, "nortaxa": 13919},
+      "taxonomic_status": {"accepted": 619977, "provisionally accepted": 998, "valid": 13919},
+      "genus": 16549,
+      "species": 183271,
+      "higher_or_other": 435074,
+      "taxa_row_bytes_by_source": {"col_xr": 95757375, "nortaxa": 2171325},
+      "taxa_row_bytes_by_scope": {"genus": 2313370, "species": 29234551, "higher_or_other": 66380779}
+    }
+  },
+  "field_width_analysis": {
+    "taxa_average_row_bytes": 154.244173,
+    "average_column_bytes": {"release_id": 18.0, "genus": 12.3043, "specific_epithet": 3.9219, "family": 14.6940, "canonical_name": 17.0632, "rank": 8.6212, "status": 8.9562, "source": 7.0219, "external_id": 12.0594},
+    "repeated_taxa_column_bytes": {"release_id": 11428092, "genus": 7811901, "family": 7351858, "rank": 5473554, "status": 5686261, "source_system": 4458177},
+    "distinct_values": {"genus": 181312, "family": 1231, "rank": 20, "status": 3, "source_system": 2},
+    "external_id_length_min_p50_max": [1, 14, 14],
+    "canonical_name_length_min_p50_max": [3, 14, 78],
+    "null_fraction": {"family": 0.213367, "parent": 0.0215667, "other_taxa_columns": 0.0},
+    "decision": "Dictionary-code low-cardinality rank, source, language, family, and status values. Genus has 181312 distinct values, so its dictionary saves less and is retained only because measured Candidate C still passes."
+  },
+  "index_overlap_analysis": [
+    {"index":"external_ids_lookup_idx","bytes":47480832,"overlap":"left prefix of authoritative unique index","constraint":false,"needed":"no; unique index resolves"},
+    {"index":"external_ids_authoritative_unique","bytes":53133312,"constraint":true,"needed":"resolver uniqueness"},
+    {"index":"external_ids_taxon_source_idx","bytes":49127424,"constraint":false,"needed":"not in compact runtime"},
+    {"index":"scientific_names_prefix_idx","bytes":64307200,"constraint":false,"needed":"search, with LIKE predicate"},
+    {"index":"scientific_names_unique","bytes":52486144,"constraint":true,"needed":"deduplication"},
+    {"index":"scientific_names_taxon_idx","bytes":31924224,"overlap":"left prefix of unique index","constraint":false,"needed":"no"},
+    {"index":"vernacular_language_prefix_idx","bytes":835584,"constraint":false,"needed":"search"},
+    {"index":"vernacular_unique","bytes":786432,"constraint":true,"needed":"deduplication"},
+    {"index":"vernacular_taxon_language_idx","bytes":581632,"overlap":"left prefix of unique index","constraint":false,"needed":"no"},
+    {"index":"taxa_parent_idx","bytes":26189824,"constraint":false,"needed":"only hierarchy/W3 if approved"},
+    {"index":"taxa_rank_idx","bytes":4276224,"constraint":false,"needed":"not runtime search"},
+    {"index":"taxa_canonical_source_idx","bytes":4218880,"constraint":false,"needed":"replaced by compact resolver index"},
+    {"index":"taxa_canonical_name_prefix_idx","bytes":62128128,"constraint":false,"needed":"canonical search"},
+    {"index":"taxa_primary_key","bytes":31588352,"constraint":true,"needed":"identity"}
+  ],
+  "candidates": {
+    "A_minimally_optimized_w2a": {
+      "transformation": "All W2A rows and decomposition retained; three proven overlapping indexes omitted; literal escaped LIKE prefix predicates.",
+      "omitted_rows": {},
+      "relation_bytes": 674430976,
+      "final_projected_production_bytes": 777735315,
+      "future_replacement_peak_bytes": 1452166291,
+      "search_p50_ms": 0.054,
+      "search_p95_ms": 0.582,
+      "semantic_outcome": "pass",
+      "capacity_outcome": "fail"
+    },
+    "B_compact_active_slot": {
+      "transformation": "Text release_id replaced by smallint slot; W2A decomposition and runtime rows retained; legacy namespace-lost rows kept offline; overlapping indexes omitted.",
+      "omitted_rows": {"legacy_namespace_lost_runtime": 61583},
+      "relation_bytes": 455032832,
+      "final_projected_production_bytes": 558337171,
+      "future_replacement_peak_bytes": 1013370003,
+      "search_p50_ms": 0.06,
+      "search_p95_ms": 0.7,
+      "semantic_outcome": "pass; legacy stays deliberately non-runtime",
+      "capacity_outcome": "fail"
+    },
+    "C_purpose_built_compact": {
+      "transformation": "Compact active taxon display/resolver row; 27755 true aliases only; vernaculars with language dictionary; zero external-ID exceptions; compact Red List; immutable release metadata and active pointer.",
+      "omitted_rows": {"canonical_duplicate_scientific_runtime": 634894, "canonical_duplicate_external_id_runtime": 634894, "legacy_namespace_lost_runtime": 61583, "full_unreferenced_concept_history_runtime": 634894},
+      "omissions_preserved_in": "immutable W1 artifact, release manifest/evidence; active IDs in taxa; future referenced/retired identity registry and W3 observation snapshots",
+      "full_load_counts": {"taxa":634894,"scientific_aliases":27755,"vernacular":10294,"external_id_exceptions":0,"redlist":7866},
+      "first_slot_relation_bytes": 141606912,
+      "future_two_slot_relation_bytes": 303087616,
+      "second_slot_increment_bytes": 161480704,
+      "full_transform_and_index_ms": 4500,
+      "activation_ms": 1.421,
+      "final_projected_production_bytes": 244911251,
+      "first_publication_peak_bytes": 244911251,
+      "future_replacement_peak_bytes": 406391955,
+      "post_legacy_retirement_bytes": 175983763,
+      "post_legacy_retirement_replacement_peak_bytes": 337464467,
+      "semantic_outcome": "pass for accepted release and contract probes",
+      "capacity_outcome": "pass"
+    }
+  },
+  "candidate_schema_definitions": {
+    "A": "W2A decomposition with release text keys; retain constraint indexes and search indexes; omit only three proven left-prefix duplicates; use escaped LIKE predicates.",
+    "B": "release metadata plus smallint slot; concepts(id); taxa; all scientific names; all vernaculars; all authoritative mappings; compact slot-key indexes; Red List; namespace-lost legacy IDs offline.",
+    "C": "publication(slot smallint, release_id, hashes, status); active_publication(singleton, slot); rank/source/language/family dictionaries; taxa(slot,id,parent,genus/display,epithet,family,canonical_name,rank,source,canonical_external_id); scientific_aliases(slot,id,name,preferred); vernacular_names(slot,id,language,name,preferred); external_id_exceptions(slot,id,source,namespace,external_id,role,preferred); redlist(slot,id,area,assessment,category,flags,criteria,url). Bulk tables are list-partitioned by slot in W2D."
+  },
+  "measured_candidate_relation_breakdown": {
+    "B": {
+      "concepts": {"heap":23068672,"indexes":14286848,"total":37388288},
+      "taxa": {"heap":93847552,"indexes":46342144,"total":140247040},
+      "scientific_names": {"heap":52953088,"indexes":67747840,"total":120750080},
+      "vernacular_names": {"heap":786432,"indexes":1032192,"total":1859584},
+      "external_ids": {"heap":74448896,"indexes":77103104,"total":151609344},
+      "redlist": {"heap":2310144,"indexes":827392,"total":3178496}
+    },
+    "C": {
+      "taxa": {"heap":59768832,"indexes":64528384,"total":124346368},
+      "scientific_aliases": {"heap":1761280,"indexes":2752512,"total":4554752},
+      "vernacular_names": {"heap":606208,"indexes":917504,"total":1564672},
+      "external_id_exceptions": {"heap":0,"indexes":16384,"total":24576},
+      "redlist": {"heap":917504,"indexes":466944,"total":1425408},
+      "genus_dictionary": {"total":9478144},
+      "family_dictionary": {"total":106496},
+      "rank_dictionary": {"total":16384},
+      "source_dictionary": {"total":16384},
+      "publication_metadata_and_pointer_included_in_total": true
+    }
+  },
+  "publication_peak_experiment": {
+    "first_slot_relations_bytes": 141606912,
+    "two_slots_relations_bytes": 303087616,
+    "worst_observed_local_database_bytes": 1527344275,
+    "worst_local_database_includes_unrelated_w2a_and_candidate_b_relations": true,
+    "atomic_activation_ms": 1.421,
+    "delete_before_vacuum_relations_bytes": 303087616,
+    "after_ordinary_vacuum_relations_bytes": 303087616,
+    "finding": "DELETE plus ordinary VACUUM does not reclaim the slot footprint. W2D must use independently truncatable/list-partitioned slot storage; truncate/detach only the inactive retired partition after activation."
+  },
+  "search_correctness": {
+    "named_cases": {
+      "Cantharellus cibarius": [168873,626243,159987,150931,168859,168954],
+      "Cantharellus": [129742,626242,159978,168850,168851,133349,80961,140796,168852,168853,168854,133350,168855,168856,168857,168858,168859,133351,168860,80973],
+      "Candolleomyces candolleanus": [133345],
+      "Psathyrella candolleana": [133345],
+      "hvit sprøsopp": [133345],
+      "Aureonarius limonius": [139099,624905],
+      "Cortinarius limonius": [624905],
+      "Inocybe": [69871,625052,625053,625056,142611,18516,18517,625062,18518,18519,18520,18521,18522,18523,102797,18524,103219,18525,139175,18526]
+    },
+    "short_query_rows": 0,
+    "literal_percent_rows": 0,
+    "literal_underscore_rows": 0,
+    "limit_1000_clamped_rows": 50,
+    "languages_in_release": {"nb":6240,"nn":3975,"se":79,"sma":0,"smj":0,"literal_no":0},
+    "same_name_concepts_preserved": true,
+    "legacy_integer_resolver_rows": 0,
+    "redlist_area_counts": {"Norge":7198,"Svalbard":668}
+  },
+  "performance": {
+    "candidate_c_execution_ms_min_p50_p95_max": {
+      "canonical_exact":[0.055,0.059,0.185,0.185],
+      "canonical_prefix":[0.053,0.057,0.085,0.085],
+      "alias_exact":[0.047,0.057,0.142,0.142],
+      "alias_prefix":[0.036,0.042,0.048,0.048],
+      "vernacular_exact":[0.044,0.052,0.121,0.121],
+      "vernacular_prefix":[0.039,0.043,0.062,0.062],
+      "broad_two_character":[0.047,0.051,0.105,0.105],
+      "no_result":[0.025,0.027,0.098,0.098],
+      "col_resolver":[0.033,0.034,0.097,0.097],
+      "nortaxa_resolver":[0.032,0.036,0.093,0.093]
+    },
+    "explain_summary": "All probes used c_taxa_name, c_alias_name, c_vernacular_name, or c_taxa_resolver. Cold selective probes read 2-18 shared blocks; warm probes read zero blocks; temporary blocks were zero; rows removed by filter were zero.",
+    "w2a_baseline_p50_range_ms": [597.153,711.334]
+  },
+  "identity_history_analysis": {
+    "stable_id": "Immutable positive sporely_taxon_id remains the primary runtime identity and is never merged by name.",
+    "disappeared_taxa": "Immutable W1 artifacts retain every release. A small historical identity registry gains rows only for IDs referenced by observations or retired from the active release.",
+    "observation_history": "W3 snapshots must preserve ID, displayed name, authoritative source/ID, and release ID; no retired full search slot is needed for historical display.",
+    "rollback": "Keep previous slot until the rollback window ends. Pointer rollback is atomic. Only then truncate/detach the inactive retired slot.",
+    "security": "W2D must enable RLS with no direct client policies and expose controlled SECURITY DEFINER RPCs with an empty/fixed search_path.",
+    "redlist": "Norge/Svalbard remain separate. Production publication is independently blocked on provenance/licensing."
+  },
+  "decision_matrix": {
+    "A": {"capacity":"fail","search":"pass after predicate fix","complexity":"low","recoverability":"good","future_growth":"fail"},
+    "B": {"capacity":"fail","search":"pass","complexity":"medium","recoverability":"good","future_growth":"fail"},
+    "C": {"capacity":"pass","search":"pass","complexity":"medium-high","recoverability":"good with partitioned slots","future_growth":"monitor"}
+  },
+  "recommended_decision": "compact_supabase_candidate_approved",
+  "unresolved_questions": [
+    "Approve observation-snapshot fields and retention policy in W3 only after W2D.",
+    "Resolve Red List publication provenance/licensing before production enrichment publication.",
+    "Set rollback-window duration and slot cleanup operating policy.",
+    "W2D must remeasure list-partition truncate/detach and realistic index-build WAL/temporary headroom."
+  ],
+  "tests": [
+    {"command":"npm run check:node","exit_code":0},
+    {"command":"node --test scripts/taxonomy-v2/*.test.mjs","exit_code":0,"passed":12,"skipped":3},
+    {"command":"W2B_INTEGRATION=1 node --test scripts/taxonomy-v2/import-release.test.mjs","exit_code":0,"passed":2},
+    {"command":"W2C_INTEGRATION=1 node --test scripts/taxonomy-v2/w2c-prototypes.test.mjs","exit_code":0,"passed":2},
+    {"command":"npm test","exit_code":1,"passed":394,"failed":1,"skipped":3,"baseline_failure":"Leaflet CSS unknown file extension in src/screens/map.test.js"},
+    {"command":"npm run build","exit_code":0},
+    {"command":"taxonomy_v2 schema/search/security/activation SQL tests","exit_code":0,"passed":4},
+    {"command":"public_observation_point_prep_test.sql","exit_code":3,"baseline_failure":"Not_set preparation keys"},
+    {"command":"complete W1 preflight/existing-release validation","exit_code":0},
+    {"command":"complete Candidate A/B/C load, ANALYZE, size and performance experiment","exit_code":0}
+  ],
+  "production_writes_performed": false,
+  "production_activation_performed": false,
+  "w3_authorized": false
+}

@@ -119,6 +119,24 @@ or activation occurred. Measured taxonomy-v2 relations total 754,417,664 bytes;
 the additive production projection is 857,722,003 bytes, so capacity review is
 required before any W3 work or production load. The legacy path remains active.
 
+W2C selected a compact Supabase candidate for a separate W2D implementation.
+The decision and measurements are in
+`docs/evidence/taxonomy-v2/w2c-schema-comparison.{json,md}`. No W2C prototype
+schema is a production migration.
+
+W2D must implement two independently truncatable/list-partitioned slots,
+immutable release metadata, an atomic active-slot pointer, compact taxon rows,
+true scientific aliases only, language-preserving vernacular rows,
+authoritative external-ID exceptions, and compact Red List enrichment. Search
+uses escaped literal `LIKE` prefixes with `text_pattern_ops`; runtime tables
+deny direct client access and are exposed only through reviewed
+`SECURITY DEFINER` RPCs.
+
+The measured projection is 244,911,251 bytes final and 406,391,955 bytes at a
+future two-release publication peak. These figures authorize W2D investigation
+and migration review only. W3, production taxonomy writes, production
+activation, and Red List publication remain blocked.
+
 ### Community spore-data RPCs
 - Public contributor / measurement aggregates should be exposed through `SECURITY DEFINER` RPCs, not by granting blanket public `SELECT` on `spore_measurements`
 - Existing SQL draft:

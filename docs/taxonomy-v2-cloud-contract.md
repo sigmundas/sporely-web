@@ -237,3 +237,44 @@ Combined additively with the 103,304,339-byte production baseline, the projected
 total is 857,722,003 bytes. Capacity is therefore `review_required_capacity`.
 Selective search also remained around 0.65–0.71 seconds; representation/index
 design needs an explicit review. These findings block W3 and production load.
+
+## W2C compact representation decision
+
+W2C measured three complete-release representations and selected a
+purpose-built compact candidate for a separate W2D implementation stage. This
+is an architectural decision, not a production migration. W2A remains the
+local baseline until W2D replaces it additively.
+
+The selected representation uses immutable textual release metadata plus two
+compact, independently truncatable publication slots. Runtime tables use a
+small slot key and dictionary codes. The taxon display table holds the stable
+Sporely ID, optional parent, display fields, canonical name and authoritative
+source/ID. Scientific search storage contains only names distinct from the
+canonical name. Vernacular names preserve literal language distinctions.
+Authoritative mappings distinct from the canonical source/ID go in an
+exception table. Red List regions remain distinct.
+
+For `tax-2026.07.30-02`, all 634,894 preferred scientific rows duplicate the
+canonical taxon name, and all 634,894 authoritative mapping rows duplicate the
+taxon's canonical source/ID. The compact runtime therefore stores 27,755 true
+aliases and zero mapping exceptions without changing W1 or weakening resolver
+semantics. Namespace-lost legacy integers remain artifact/offline-audit data
+and never resolve.
+
+Prefix search must use an escaped literal `lower(value) LIKE query || '%'
+ESCAPE '\\'` representation backed by `text_pattern_ops`. Ranking, language
+fallback, one-result-per-concept, same-name identity separation and limit rules
+remain the existing RPC contract. Direct client table access remains denied;
+W2D owns RLS and controlled `SECURITY DEFINER` RPC implementation.
+
+Publication loads and validates the inactive partition, atomically changes one
+active-slot pointer, retains the prior slot for an approved rollback window,
+then truncates or detaches only that inactive retired partition. Deleting mixed
+slot rows plus ordinary vacuum is not an acceptable reclamation strategy.
+
+Measured compact relations use 141,606,912 bytes for one slot and 303,087,616
+bytes at the observed two-slot peak. With the independently reproduced
+103,304,339-byte production baseline, projected final and replacement-peak
+sizes are 244,911,251 and 406,391,955 bytes. W2D is authorized for design and
+migration work; W3 and production publication are not authorized. Red List
+publication remains separately blocked on provenance/licensing.
