@@ -34,6 +34,22 @@ export async function query(target, sql) {
   return (await run('docker', ['exec', '-i', target.container, 'psql', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', target.database, '-Atc', sql])).stdout.trim();
 }
 
+// queryStdin: same result as query() but streams SQL over stdin so we never
+// hit ARG_MAX. Use this when the SQL text may exceed a few hundred KB (e.g.
+// a manifest with hundreds of records embedded as a jsonb literal).
+export function queryStdin(target, sql) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', ['exec', '-i', target.container, 'psql', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', target.database, '-Atf', '-'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', c => { stdout += c; });
+    child.stderr.on('data', c => { stderr += c; });
+    child.on('error', reject);
+    child.on('close', code => code === 0 ? resolve(stdout.trim()) : reject(new Error(`psql stdin failed (${code}): ${stderr.trim()}`)));
+    child.stdin.write(sql);
+    child.stdin.end();
+  });
+}
+
 export function spawnSession(target) {
   return spawn('docker', ['exec', '-i', target.container, 'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', target.database], { stdio: ['pipe', 'pipe', 'pipe'] });
 }

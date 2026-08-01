@@ -11,7 +11,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { discoverLocalTarget, query } from './lib/docker-psql.mjs';
+import { discoverLocalTarget, query, queryStdin } from './lib/docker-psql.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -142,14 +142,20 @@ export async function applySchema(target) {
 async function callApply(target, manifest, semanticSha) {
   const manifestLiteral = sqlLiteral(JSON.stringify(manifest));
   const shaLiteral = sqlLiteral(semanticSha);
-  const raw = await query(target, `select ${SCHEMA}.apply_reconciliation_manifest(${manifestLiteral}::jsonb, ${shaLiteral})::text`);
+  const sql = `select ${SCHEMA}.apply_reconciliation_manifest(${manifestLiteral}::jsonb, ${shaLiteral})::text;`;
+  const raw = sql.length > 100_000
+    ? await queryStdin(target, sql)
+    : await query(target, sql);
   return JSON.parse(raw);
 }
 
 async function callSimulate(target, manifest, semanticSha) {
   const manifestLiteral = sqlLiteral(JSON.stringify(manifest));
   const shaLiteral = sqlLiteral(semanticSha);
-  const raw = await query(target, `select ${SCHEMA}.simulate_migration(${manifestLiteral}::jsonb, ${shaLiteral})::text`);
+  const sql = `select ${SCHEMA}.simulate_migration(${manifestLiteral}::jsonb, ${shaLiteral})::text;`;
+  const raw = sql.length > 100_000
+    ? await queryStdin(target, sql)
+    : await query(target, sql);
   return JSON.parse(raw);
 }
 

@@ -1,0 +1,64 @@
+{
+  "evidence_version": "w2dr-real-1.0.0",
+  "label": "disposable simulation against real anonymised manifest",
+  "input_manifest": {
+    "semantic_sha256": "8087d4398311268a4fe049435de61ec16edff7f3c52baf169310807c77f77448",
+    "record_count": 369,
+    "record_source": "real anonymised historical export (369 rows); manifest kept outside the repository at the operator's path"
+  },
+  "runner": "scripts/taxonomy-v2/run-w2d-migration-simulation.mjs",
+  "queryStdin_added": "scripts/taxonomy-v2/lib/docker-psql.mjs — new helper streams SQL over psql stdin to avoid the ARG_MAX ceiling encountered when the manifest jsonb literal exceeds ~256KB",
+  "idempotency": {
+    "verified": true,
+    "records_applied_first": 369,
+    "records_applied_second": 369,
+    "identification_snapshot_first": 369,
+    "identification_snapshot_second": 369,
+    "registry_concept_first": 39,
+    "registry_concept_second": 39,
+    "external_mapping_first": 39,
+    "external_mapping_second": 39,
+    "resolution_link_first": 369,
+    "resolution_link_second": 369,
+    "snapshot_fingerprint": "9f7107e948babb356140247802b4b7aa",
+    "snapshot_fingerprint_stable_across_second_apply": true,
+    "snapshot_fingerprint_stable_across_benign_update": true
+  },
+  "rollback": {
+    "verified": true,
+    "induced_failure_sqlstate": "P0001",
+    "error": "synthetic rollback failure marker present in manifest (observation_id=__rollback_forced__)",
+    "zero_orphan_rows": true,
+    "counts_after_failure": {
+      "identification_snapshot": 0,
+      "resolution_link": 0,
+      "registry_concept": 0,
+      "external_mapping": 0,
+      "reconciliation_result": 0
+    }
+  },
+  "aggregate_reconciliation_states": {
+    "resolved_exact": 54,
+    "unresolved_external_identifier": 200,
+    "manual_unresolved": 85,
+    "no_identity_evidence": 30,
+    "total": 369
+  },
+  "runtime": {
+    "docker_context": "orbstack",
+    "docker_engine_version": "29.4.0",
+    "node_version": "v25.8.2",
+    "postgres_version": "17.6"
+  },
+  "production_safety": {
+    "production_supabase_accessed": false,
+    "production_writes": false,
+    "production_migrations_created": false,
+    "production_migrations_applied": false,
+    "client_cutover": false,
+    "raw_export_committed": false,
+    "anonymised_snapshot_committed": false,
+    "manifest_committed": false
+  },
+  "w3_readiness_verdict": "legacy-source recovery required (NorTaxa / iNaturalist mappings need back-filling into the pinned release before automatic resolution of the 200 unresolved_external_identifier records)"
+}
