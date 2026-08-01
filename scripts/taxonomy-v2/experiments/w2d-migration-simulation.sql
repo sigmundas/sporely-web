@@ -49,6 +49,7 @@ create table registry_concept (
   canonical_name text,
   rank text,
   scope_state text,
+  cache_state text not null default 'in_cache' check (cache_state in ('in_cache','out_of_cache')),
   first_materialized_from_release text
 );
 
@@ -186,13 +187,14 @@ begin
     if v_resolved is not null then
       -- Contract §7: materialise the concept (or reuse existing).
       insert into registry_concept (
-        sporely_taxon_id, canonical_name, rank, scope_state,
+        sporely_taxon_id, canonical_name, rank, scope_state, cache_state,
         first_materialized_from_release
       ) values (
         v_resolved,
         v_record->>'resolved_canonical_name',
         v_record->>'resolved_rank',
         v_record->>'resolved_scope_state',
+        coalesce(v_record->>'resolved_cache_state', 'in_cache'),
         v_release_id
       ) on conflict (sporely_taxon_id) do nothing;
 
