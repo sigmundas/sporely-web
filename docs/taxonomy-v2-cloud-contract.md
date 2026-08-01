@@ -16,6 +16,12 @@ owns observation identity and sync/backfill. W4 owns the web picker and
 Artsorakel integration. Client
 cutover and legacy removal remain W5 work.
 
+W2C Phase B is now complete as a disposable local experiment. It recommends
+S2: a persistent sparse registry plus a replaceable compact macrofungi cache.
+This is architecture evidence, not a production migration or activation. A
+separate historical taxonomy reconciliation stage is required before W3 because
+none of the 337 audited observations currently has stable taxonomy-v2 identity.
+
 ## Historical W2A Model B decomposition
 
 Model B describes what W2A and W2B tested. It is not the selected production
@@ -272,3 +278,45 @@ available, selected scientific/vernacular names and rank, source system and
 namespace, raw external ID, source release or response time, selection time,
 resolution state, and original selected result. Historical display must not
 depend on an external API or cache entry remaining available.
+
+## W2C sparse-registry prototype result
+
+The accepted Phase-A `tax-2026.08.01-01` preload is experimental and
+non-exhaustive. `include` concepts are cache-eligible. `review`, `exclude`, and
+`not_evaluated` concepts remain externally discoverable and registerable but
+are absent from the v1 cache. Scope state never establishes or prohibits
+identity.
+
+The local-only `w2c_sparse_experiment` schema compared:
+
+* S1: source metadata, sparse concepts, complete namespaced mappings,
+  registered names, and durable identification snapshots;
+* S2: the same persistent registry plus release-slotted minimal cache concepts,
+  aliases, vernaculars, and COL resolver identities.
+
+The current sparse fixture occupies 376,832 relation bytes. The one-slot cache
+occupies 22,142,976 bytes and the combined final state 22,519,808 bytes. An
+actual two-cache-slot replacement measured 46,022,656 cache bytes and
+46,399,488 bytes combined. Against the 103,304,339-byte baseline, projected S2
+final and replacement-peak totals are 125,824,147 and 149,703,827 bytes, so all
+formal capacity gates pass.
+
+The v1 cache contains exactly 52,881 Phase-A `include` concepts, 4,888 aliases,
+3,923 vernacular names, and 52,881 minimal COL mappings. It contains zero
+review-state concepts, plants, or selectable non-Fungi.
+
+Indexed warm p50 execution was approximately 0.110 ms canonical exact, 0.304
+ms canonical prefix, 0.108–0.113 ms alias/vernacular, and 2.139 ms for a broad
+two-character prefix. Registration fixtures prove exact mapping reuse,
+namespaced raw-ID separation, same-name concept separation, unresolved result
+preservation, later exact resolution without snapshot loss, and deliberate
+out-of-cache registration for review-state taxa.
+
+S2 is recommended over S1 because its measured cache and two-slot publication
+peak are small while it preserves resilient local autocomplete. The cache does
+not own identity; dropping or replacing it cannot remove registry concepts,
+mappings, or historical snapshots. See
+`docs/evidence/taxonomy-v2/w2c-sparse-registry-comparison.{json,md}`.
+
+No production taxonomy write, migration, activation, client cutover,
+observation backfill, or W3 work is authorized by this result.

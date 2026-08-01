@@ -1,0 +1,1661 @@
+{
+  "evidence_schema_version": 1,
+  "web_starting_revision": "a872ea184c93277a005311b94afd948a2bd921a7",
+  "phase_a": {
+    "desktop_revision": "be14e6e28fb00b79a0d05265ef8d6b7008b669bc",
+    "release_id": "tax-2026.08.01-01",
+    "scope_manifest_sha256": "72758b2c574e8aea27432b6b55c62dfb6ad87f3fadc11ad1c892a61abf23ac4e",
+    "included_concepts": 52881
+  },
+  "runtime": {
+    "node": "v25.8.2",
+    "docker_context": "orbstack",
+    "docker_engine_version": "29.4.0",
+    "postgres_version": "17.6",
+    "disposable_schema": "w2c_sparse_experiment"
+  },
+  "scope_state_semantics": {
+    "include": "eligible for optional cache",
+    "exclude": "not cached but registerable",
+    "review": "not cached by default; externally discoverable and registerable",
+    "not_evaluated": "not cached; external discovery and unresolved registration remain allowed",
+    "global_scope_claimed_exhaustive": false
+  },
+  "review_backlog": [
+    {
+      "col_concept_id": "JX",
+      "name": "Tremellomycetes remainder",
+      "rank": "class",
+      "concept_count": 755,
+      "reason": "mixed fruit-body-forming, yeast and mycoparasitic lineages",
+      "prioritization_trigger": "external selection demand or historically referenced observations"
+    },
+    {
+      "col_concept_id": "87",
+      "name": "Atractiellomycetes",
+      "rank": "class",
+      "concept_count": 97,
+      "reason": "optional specialist lineages lack a concise approved whitelist",
+      "prioritization_trigger": "specialist demand or historically referenced observations"
+    },
+    {
+      "col_concept_id": "DQ",
+      "name": "Leotiomycetes remainder",
+      "rank": "class",
+      "concept_count": 11898,
+      "reason": "large mixed class after explicit observable-genus inclusions",
+      "prioritization_trigger": "external selection demand or historically referenced observations"
+    },
+    {
+      "col_concept_id": "J2",
+      "name": "Sordariomycetes remainder",
+      "rank": "class",
+      "concept_count": 27114,
+      "reason": "large mixed class after explicit stromatic-genus inclusions",
+      "prioritization_trigger": "external selection demand or historically referenced observations"
+    },
+    {
+      "col_concept_id": "HYK",
+      "name": "Xylariaceae remainder",
+      "rank": "family",
+      "concept_count": 1095,
+      "reason": "substantial non-macrofruiting and anamorphic content",
+      "prioritization_trigger": "demand for omitted stromatic genera"
+    },
+    {
+      "col_concept_id": "624W7",
+      "name": "Hypoxylaceae remainder",
+      "rank": "family",
+      "concept_count": 147,
+      "reason": "mixed teleomorph and anamorph content",
+      "prioritization_trigger": "demand for omitted stromatic genera"
+    },
+    {
+      "col_concept_id": "977",
+      "name": "Diatrypaceae",
+      "rank": "family",
+      "concept_count": 778,
+      "reason": "specialist review needed across 47 pinned genera",
+      "prioritization_trigger": "specialist demand or observations"
+    },
+    {
+      "col_concept_id": "7XJJ",
+      "name": "Tolypocladium",
+      "rank": "genus",
+      "concept_count": 52,
+      "reason": "mixed life histories require species review",
+      "prioritization_trigger": "selected species demand"
+    },
+    {
+      "col_concept_id": "63W3K",
+      "name": "Trichoderma",
+      "rank": "genus",
+      "concept_count": 484,
+      "reason": "mould-dominated genus with selected stromatic lineages",
+      "prioritization_trigger": "selected stromatic species demand"
+    }
+  ],
+  "logical_schema": {
+    "registry_concept": [
+      "sporely_taxon_id",
+      "canonical_scientific_name",
+      "rank",
+      "canonical_source_system",
+      "canonical_namespace",
+      "canonical_external_id",
+      "parent_sporely_taxon_id",
+      "first_registration_reason",
+      "scope_state",
+      "review_state",
+      "created_at"
+    ],
+    "external_mapping": [
+      "sporely_taxon_id",
+      "source_key",
+      "source_system",
+      "namespace",
+      "external_id",
+      "mapping_status",
+      "mapping_provenance"
+    ],
+    "registered_name": [
+      "sporely_taxon_id",
+      "name",
+      "name_kind",
+      "language",
+      "preferred",
+      "source_key",
+      "source"
+    ],
+    "source_release": [
+      "source_key",
+      "source_system",
+      "namespace",
+      "release_or_response"
+    ],
+    "identification_snapshot": [
+      "sporely_taxon_id",
+      "selected_scientific_name",
+      "selected_vernacular_name",
+      "selected_rank",
+      "source_system",
+      "source_namespace",
+      "raw_external_id",
+      "source_release_or_response",
+      "selection_timestamp",
+      "resolution_state",
+      "original_selected_result",
+      "resolution_note"
+    ],
+    "replaceable_cache": [
+      "release_id",
+      "sporely_taxon_id",
+      "canonical_scientific_name",
+      "rank",
+      "family",
+      "scope_reason",
+      "canonical namespaced external identity",
+      "scientific aliases",
+      "selected vernacular names"
+    ]
+  },
+  "registration_flow": [
+    "preserve complete raw namespaced source identity",
+    "reuse exact existing mapping",
+    "materialize only with exact trusted identity evidence",
+    "allocate through trusted positive-ID allocator where appropriate",
+    "preserve selected name/rank/provenance snapshots",
+    "retain unresolved result when exact identity is unavailable",
+    "never merge by scientific-name equality"
+  ],
+  "out_of_cache_review_flow": [
+    "review-state Trichoderma is absent from cache",
+    "external result is deliberately selected",
+    "raw provider identity and selected snapshot are retained",
+    "exact COL identity 63W3K is used",
+    "registry concept 86820 is materialized with scope_state review",
+    "cache remains unchanged",
+    "identification snapshots can reference the persistent concept"
+  ],
+  "historical_fixture": {
+    "observations": 337,
+    "resolved_stable_identities": 0,
+    "unresolved_legacy": 227,
+    "manual_unresolved": 87,
+    "no_identity_evidence": 23,
+    "separate_reconciliation_required_before_w3": true
+  },
+  "s1": {
+    "schema_tables": [
+      "source_release",
+      "registry_concept",
+      "external_mapping",
+      "registered_name",
+      "identification_snapshot"
+    ],
+    "current_counts": {
+      "concepts": 7,
+      "mappings": 8,
+      "names": 9,
+      "snapshots": 348
+    },
+    "current_scale": {
+      "heap_bytes": 98304,
+      "index_bytes": 212992,
+      "total_relation_bytes": 376832,
+      "tables": [
+        {
+          "table_name": "external_mapping",
+          "estimated_rows": 8,
+          "heap_bytes": 8192,
+          "index_bytes": 49152,
+          "total_bytes": 65536
+        },
+        {
+          "table_name": "identification_snapshot",
+          "estimated_rows": 348,
+          "heap_bytes": 65536,
+          "index_bytes": 81920,
+          "total_bytes": 180224
+        },
+        {
+          "table_name": "registered_name",
+          "estimated_rows": 9,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        },
+        {
+          "table_name": "registry_concept",
+          "estimated_rows": 7,
+          "heap_bytes": 8192,
+          "index_bytes": 16384,
+          "total_bytes": 32768
+        },
+        {
+          "table_name": "source_release",
+          "estimated_rows": 7,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        }
+      ]
+    },
+    "growth": {
+      "337": {
+        "heap_bytes": 196608,
+        "index_bytes": 319488,
+        "total_relation_bytes": 655360,
+        "tables": [
+          {
+            "table_name": "external_mapping",
+            "estimated_rows": 337,
+            "heap_bytes": 32768,
+            "index_bytes": 106496,
+            "total_bytes": 172032
+          },
+          {
+            "table_name": "identification_snapshot",
+            "estimated_rows": 337,
+            "heap_bytes": 65536,
+            "index_bytes": 81920,
+            "total_bytes": 180224
+          },
+          {
+            "table_name": "registered_name",
+            "estimated_rows": 337,
+            "heap_bytes": 32768,
+            "index_bytes": 81920,
+            "total_bytes": 147456
+          },
+          {
+            "table_name": "registry_concept",
+            "estimated_rows": 337,
+            "heap_bytes": 57344,
+            "index_bytes": 16384,
+            "total_bytes": 106496
+          },
+          {
+            "table_name": "source_release",
+            "estimated_rows": 1,
+            "heap_bytes": 8192,
+            "index_bytes": 32768,
+            "total_bytes": 49152
+          }
+        ]
+      },
+      "10000": {
+        "heap_bytes": 3612672,
+        "index_bytes": 3645440,
+        "total_relation_bytes": 7397376,
+        "tables": [
+          {
+            "table_name": "external_mapping",
+            "estimated_rows": 10000,
+            "heap_bytes": 1007616,
+            "index_bytes": 1974272,
+            "total_bytes": 3014656
+          },
+          {
+            "table_name": "identification_snapshot",
+            "estimated_rows": 337,
+            "heap_bytes": 65536,
+            "index_bytes": 81920,
+            "total_bytes": 180224
+          },
+          {
+            "table_name": "registered_name",
+            "estimated_rows": 10000,
+            "heap_bytes": 851968,
+            "index_bytes": 1310720,
+            "total_bytes": 2195456
+          },
+          {
+            "table_name": "registry_concept",
+            "estimated_rows": 10000,
+            "heap_bytes": 1679360,
+            "index_bytes": 245760,
+            "total_bytes": 1957888
+          },
+          {
+            "table_name": "source_release",
+            "estimated_rows": 1,
+            "heap_bytes": 8192,
+            "index_bytes": 32768,
+            "total_bytes": 49152
+          }
+        ]
+      },
+      "50000": {
+        "heap_bytes": 17719296,
+        "index_bytes": 17571840,
+        "total_relation_bytes": 35430400,
+        "tables": [
+          {
+            "table_name": "external_mapping",
+            "estimated_rows": 50000,
+            "heap_bytes": 5054464,
+            "index_bytes": 9469952,
+            "total_bytes": 14557184
+          },
+          {
+            "table_name": "identification_snapshot",
+            "estimated_rows": 337,
+            "heap_bytes": 65536,
+            "index_bytes": 81920,
+            "total_bytes": 180224
+          },
+          {
+            "table_name": "registered_name",
+            "estimated_rows": 50000,
+            "heap_bytes": 4227072,
+            "index_bytes": 6848512,
+            "total_bytes": 11108352
+          },
+          {
+            "table_name": "registry_concept",
+            "estimated_rows": 50000,
+            "heap_bytes": 8364032,
+            "index_bytes": 1138688,
+            "total_bytes": 9535488
+          },
+          {
+            "table_name": "source_release",
+            "estimated_rows": 1,
+            "heap_bytes": 8192,
+            "index_bytes": 32768,
+            "total_bytes": 49152
+          }
+        ]
+      },
+      "100000": {
+        "heap_bytes": 35348480,
+        "index_bytes": 34996224,
+        "total_relation_bytes": 70483968,
+        "tables": [
+          {
+            "table_name": "external_mapping",
+            "estimated_rows": 100000,
+            "heap_bytes": 10108928,
+            "index_bytes": 18808832,
+            "total_bytes": 28950528
+          },
+          {
+            "table_name": "identification_snapshot",
+            "estimated_rows": 337,
+            "heap_bytes": 65536,
+            "index_bytes": 81920,
+            "total_bytes": 180224
+          },
+          {
+            "table_name": "registered_name",
+            "estimated_rows": 100000,
+            "heap_bytes": 8445952,
+            "index_bytes": 13811712,
+            "total_bytes": 22290432
+          },
+          {
+            "table_name": "registry_concept",
+            "estimated_rows": 100000,
+            "heap_bytes": 16719872,
+            "index_bytes": 2260992,
+            "total_bytes": 19013632
+          },
+          {
+            "table_name": "source_release",
+            "estimated_rows": 1,
+            "heap_bytes": 8192,
+            "index_bytes": 32768,
+            "total_bytes": 49152
+          }
+        ]
+      }
+    }
+  },
+  "s2": {
+    "persistent_registry": {
+      "heap_bytes": 98304,
+      "index_bytes": 212992,
+      "total_relation_bytes": 376832,
+      "tables": [
+        {
+          "table_name": "external_mapping",
+          "estimated_rows": 8,
+          "heap_bytes": 8192,
+          "index_bytes": 49152,
+          "total_bytes": 65536
+        },
+        {
+          "table_name": "identification_snapshot",
+          "estimated_rows": 348,
+          "heap_bytes": 65536,
+          "index_bytes": 81920,
+          "total_bytes": 180224
+        },
+        {
+          "table_name": "registered_name",
+          "estimated_rows": 9,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        },
+        {
+          "table_name": "registry_concept",
+          "estimated_rows": 7,
+          "heap_bytes": 8192,
+          "index_bytes": 16384,
+          "total_bytes": 32768
+        },
+        {
+          "table_name": "source_release",
+          "estimated_rows": 7,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        }
+      ]
+    },
+    "replaceable_cache_single_slot": {
+      "heap_bytes": 9543680,
+      "index_bytes": 12525568,
+      "total_relation_bytes": 22142976,
+      "tables": [
+        {
+          "table_name": "cache_concept",
+          "estimated_rows": 52881,
+          "heap_bytes": 8519680,
+          "index_bytes": 10747904,
+          "total_bytes": 19300352
+        },
+        {
+          "table_name": "cache_release",
+          "estimated_rows": 1,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        },
+        {
+          "table_name": "cache_search_name",
+          "estimated_rows": 8811,
+          "heap_bytes": 1015808,
+          "index_bytes": 1744896,
+          "total_bytes": 2793472
+        }
+      ]
+    },
+    "combined_final_state": {
+      "heap_bytes": 9641984,
+      "index_bytes": 12738560,
+      "total_relation_bytes": 22519808,
+      "tables": [
+        {
+          "table_name": "cache_concept",
+          "estimated_rows": 52881,
+          "heap_bytes": 8519680,
+          "index_bytes": 10747904,
+          "total_bytes": 19300352
+        },
+        {
+          "table_name": "cache_release",
+          "estimated_rows": 1,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        },
+        {
+          "table_name": "cache_search_name",
+          "estimated_rows": 8811,
+          "heap_bytes": 1015808,
+          "index_bytes": 1744896,
+          "total_bytes": 2793472
+        },
+        {
+          "table_name": "external_mapping",
+          "estimated_rows": 8,
+          "heap_bytes": 8192,
+          "index_bytes": 49152,
+          "total_bytes": 65536
+        },
+        {
+          "table_name": "identification_snapshot",
+          "estimated_rows": 348,
+          "heap_bytes": 65536,
+          "index_bytes": 81920,
+          "total_bytes": 180224
+        },
+        {
+          "table_name": "registered_name",
+          "estimated_rows": 9,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        },
+        {
+          "table_name": "registry_concept",
+          "estimated_rows": 7,
+          "heap_bytes": 8192,
+          "index_bytes": 16384,
+          "total_bytes": 32768
+        },
+        {
+          "table_name": "source_release",
+          "estimated_rows": 7,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        }
+      ]
+    },
+    "replaceable_cache_two_slot_peak": {
+      "heap_bytes": 18710528,
+      "index_bytes": 27222016,
+      "total_relation_bytes": 46022656,
+      "tables": [
+        {
+          "table_name": "cache_concept",
+          "estimated_rows": 105762,
+          "heap_bytes": 16850944,
+          "index_bytes": 23420928,
+          "total_bytes": 40312832
+        },
+        {
+          "table_name": "cache_release",
+          "estimated_rows": 2,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        },
+        {
+          "table_name": "cache_search_name",
+          "estimated_rows": 17622,
+          "heap_bytes": 1851392,
+          "index_bytes": 3768320,
+          "total_bytes": 5660672
+        }
+      ]
+    },
+    "combined_replacement_peak": {
+      "heap_bytes": 18808832,
+      "index_bytes": 27435008,
+      "total_relation_bytes": 46399488,
+      "tables": [
+        {
+          "table_name": "cache_concept",
+          "estimated_rows": 105762,
+          "heap_bytes": 16850944,
+          "index_bytes": 23420928,
+          "total_bytes": 40312832
+        },
+        {
+          "table_name": "cache_release",
+          "estimated_rows": 2,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        },
+        {
+          "table_name": "cache_search_name",
+          "estimated_rows": 17622,
+          "heap_bytes": 1851392,
+          "index_bytes": 3768320,
+          "total_bytes": 5660672
+        },
+        {
+          "table_name": "external_mapping",
+          "estimated_rows": 8,
+          "heap_bytes": 8192,
+          "index_bytes": 49152,
+          "total_bytes": 65536
+        },
+        {
+          "table_name": "identification_snapshot",
+          "estimated_rows": 348,
+          "heap_bytes": 65536,
+          "index_bytes": 81920,
+          "total_bytes": 180224
+        },
+        {
+          "table_name": "registered_name",
+          "estimated_rows": 9,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        },
+        {
+          "table_name": "registry_concept",
+          "estimated_rows": 7,
+          "heap_bytes": 8192,
+          "index_bytes": 16384,
+          "total_bytes": 32768
+        },
+        {
+          "table_name": "source_release",
+          "estimated_rows": 7,
+          "heap_bytes": 8192,
+          "index_bytes": 32768,
+          "total_bytes": 49152
+        }
+      ]
+    },
+    "cache_contents": {
+      "accepted_concepts": 52881,
+      "scientific_aliases": 4888,
+      "vernacular_names": 3923,
+      "external_mappings": 52881,
+      "review_state_concepts": 0,
+      "plants": 0,
+      "selectable_non_fungi": 0
+    }
+  },
+  "registration_correctness": {
+    "exact_existing_mapping_reused": true,
+    "same_name_concepts_separate": true,
+    "unresolved_external_preserved": true,
+    "namespaced_raw_id_collision_separate": true,
+    "out_of_cache_review_registered": true,
+    "manual_unresolved_count": 87,
+    "historical_unresolved_count": 227,
+    "no_identity_evidence_count": 23,
+    "later_resolution_preserves_original_snapshot": true,
+    "review_state_cache_count": 0,
+    "same_name_search_result_count": 2,
+    "short_query_count": 0,
+    "literal_percent_underscore_count": 1,
+    "limits_clamped": true,
+    "language_distinctions_preserved": true
+  },
+  "registration_results": {
+    "first": {
+      "snapshot_id": 1,
+      "resolution_state": "resolved",
+      "sporely_taxon_id": 78915,
+      "reused_existing_mapping": false
+    },
+    "reused": {
+      "snapshot_id": 2,
+      "resolution_state": "resolved",
+      "sporely_taxon_id": 78915,
+      "reused_existing_mapping": true
+    },
+    "sameNameA": {
+      "snapshot_id": 3,
+      "resolution_state": "resolved",
+      "sporely_taxon_id": 900000001,
+      "reused_existing_mapping": false
+    },
+    "sameNameB": {
+      "snapshot_id": 4,
+      "resolution_state": "resolved",
+      "sporely_taxon_id": 900000002,
+      "reused_existing_mapping": false
+    },
+    "unresolved": {
+      "snapshot_id": 5,
+      "resolution_state": "unresolved_external",
+      "sporely_taxon_id": null,
+      "reused_existing_mapping": false
+    },
+    "reviewed": {
+      "snapshot_id": 6,
+      "resolution_state": "resolved",
+      "sporely_taxon_id": 86820,
+      "reused_existing_mapping": false
+    },
+    "namespaceCollision": {
+      "snapshot_id": 7,
+      "resolution_state": "resolved",
+      "sporely_taxon_id": 900000003,
+      "reused_existing_mapping": false
+    },
+    "artsorakelExact": {
+      "snapshot_id": 348,
+      "resolution_state": "resolved",
+      "sporely_taxon_id": 900000005,
+      "reused_existing_mapping": false
+    },
+    "laterResolution": {
+      "after": {
+        "created_at": "2026-08-01T14:40:00.472973+00:00",
+        "snapshot_id": 345,
+        "selected_rank": "species",
+        "source_system": "nortaxa",
+        "raw_external_id": "later-1",
+        "resolution_note": "trusted later reconciliation",
+        "resolution_state": "resolved",
+        "source_namespace": "nortaxa_taxon_id",
+        "sporely_taxon_id": 900000004,
+        "selection_timestamp": "2026-08-01T12:00:00+00:00",
+        "original_selected_result": {
+          "original": "preserve-me"
+        },
+        "selected_scientific_name": "Original selected snapshot",
+        "selected_vernacular_name": null,
+        "source_release_or_response": "fixture-response-2026-08-01"
+      },
+      "before": {
+        "created_at": "2026-08-01T14:40:00.472973+00:00",
+        "snapshot_id": 345,
+        "selected_rank": "species",
+        "source_system": "nortaxa",
+        "raw_external_id": "later-1",
+        "resolution_note": null,
+        "resolution_state": "unresolved_external",
+        "source_namespace": "nortaxa_taxon_id",
+        "sporely_taxon_id": null,
+        "selection_timestamp": "2026-08-01T12:00:00+00:00",
+        "original_selected_result": {
+          "original": "preserve-me"
+        },
+        "selected_scientific_name": "Original selected snapshot",
+        "selected_vernacular_name": null,
+        "source_release_or_response": "fixture-response-2026-08-01"
+      }
+    }
+  },
+  "cache_replacement_preserved_persistent_state": true,
+  "performance": {
+    "registered_canonical_exact": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.197,
+        "p50": 1.25,
+        "p95": 2.994,
+        "max": 2.994
+      },
+      "execution_ms": {
+        "min": 0.054,
+        "p50": 0.061,
+        "p95": 0.076,
+        "max": 0.076
+      },
+      "shared_hit_blocks": {
+        "min": 51,
+        "p50": 51,
+        "p95": 51,
+        "max": 51
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 8,
+        "p50": 8,
+        "p95": 8,
+        "max": 8
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": []
+    },
+    "registered_canonical_prefix": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.174,
+        "p50": 1.207,
+        "p95": 1.419,
+        "max": 1.419
+      },
+      "execution_ms": {
+        "min": 0.052,
+        "p50": 0.06,
+        "p95": 0.072,
+        "max": 0.072
+      },
+      "shared_hit_blocks": {
+        "min": 51,
+        "p50": 51,
+        "p95": 51,
+        "max": 51
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 8,
+        "p50": 8,
+        "p95": 8,
+        "max": 8
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": []
+    },
+    "cache_canonical_exact": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.224,
+        "p50": 1.344,
+        "p95": 1.913,
+        "max": 1.913
+      },
+      "execution_ms": {
+        "min": 0.096,
+        "p50": 0.11,
+        "p95": 0.17,
+        "max": 0.17
+      },
+      "shared_hit_blocks": {
+        "min": 118,
+        "p50": 118,
+        "p95": 118,
+        "max": 118
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 11,
+        "p50": 11,
+        "p95": 11,
+        "max": 11
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": [
+        "cache_concept_pkey",
+        "cache_concept_prefix_idx",
+        "cache_search_name_prefix_idx"
+      ]
+    },
+    "cache_canonical_prefix": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.203,
+        "p50": 1.355,
+        "p95": 1.494,
+        "max": 1.494
+      },
+      "execution_ms": {
+        "min": 0.279,
+        "p50": 0.304,
+        "p95": 0.414,
+        "max": 0.414
+      },
+      "shared_hit_blocks": {
+        "min": 679,
+        "p50": 679,
+        "p95": 679,
+        "max": 679
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 706,
+        "p50": 706,
+        "p95": 706,
+        "max": 706
+      },
+      "rows_returned": {
+        "min": 20,
+        "p50": 20,
+        "p95": 20,
+        "max": 20
+      },
+      "indexes_used": [
+        "cache_concept_pkey",
+        "cache_concept_prefix_idx",
+        "cache_search_name_prefix_idx"
+      ]
+    },
+    "scientific_alias_exact": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.231,
+        "p50": 1.303,
+        "p95": 1.396,
+        "max": 1.396
+      },
+      "execution_ms": {
+        "min": 0.102,
+        "p50": 0.112,
+        "p95": 0.132,
+        "max": 0.132
+      },
+      "shared_hit_blocks": {
+        "min": 151,
+        "p50": 151,
+        "p95": 151,
+        "max": 151
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 13,
+        "p50": 13,
+        "p95": 13,
+        "max": 13
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": [
+        "cache_concept_pkey",
+        "cache_concept_prefix_idx",
+        "cache_search_name_prefix_idx"
+      ]
+    },
+    "scientific_alias_prefix": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.213,
+        "p50": 1.293,
+        "p95": 1.435,
+        "max": 1.435
+      },
+      "execution_ms": {
+        "min": 0.101,
+        "p50": 0.108,
+        "p95": 0.136,
+        "max": 0.136
+      },
+      "shared_hit_blocks": {
+        "min": 151,
+        "p50": 151,
+        "p95": 151,
+        "max": 151
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 13,
+        "p50": 13,
+        "p95": 13,
+        "max": 13
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": [
+        "cache_concept_pkey",
+        "cache_concept_prefix_idx",
+        "cache_search_name_prefix_idx"
+      ]
+    },
+    "vernacular_exact": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.14,
+        "p50": 1.218,
+        "p95": 1.317,
+        "max": 1.317
+      },
+      "execution_ms": {
+        "min": 0.102,
+        "p50": 0.113,
+        "p95": 0.141,
+        "max": 0.141
+      },
+      "shared_hit_blocks": {
+        "min": 160,
+        "p50": 160,
+        "p95": 160,
+        "max": 160
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 13,
+        "p50": 13,
+        "p95": 13,
+        "max": 13
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": [
+        "cache_concept_pkey",
+        "cache_concept_prefix_idx",
+        "cache_search_name_prefix_idx"
+      ]
+    },
+    "vernacular_prefix": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.176,
+        "p50": 1.216,
+        "p95": 1.364,
+        "max": 1.364
+      },
+      "execution_ms": {
+        "min": 0.106,
+        "p50": 0.112,
+        "p95": 0.123,
+        "max": 0.123
+      },
+      "shared_hit_blocks": {
+        "min": 160,
+        "p50": 160,
+        "p95": 160,
+        "max": 160
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 13,
+        "p50": 13,
+        "p95": 13,
+        "max": 13
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": [
+        "cache_concept_pkey",
+        "cache_concept_prefix_idx",
+        "cache_search_name_prefix_idx"
+      ]
+    },
+    "broad_two_character": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.184,
+        "p50": 1.348,
+        "p95": 1.532,
+        "max": 1.532
+      },
+      "execution_ms": {
+        "min": 2.079,
+        "p50": 2.139,
+        "p95": 2.24,
+        "max": 2.24
+      },
+      "shared_hit_blocks": {
+        "min": 3657,
+        "p50": 3657,
+        "p95": 3657,
+        "max": 3657
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 10191,
+        "p50": 10191,
+        "p95": 10191,
+        "max": 10191
+      },
+      "rows_returned": {
+        "min": 20,
+        "p50": 20,
+        "p95": 20,
+        "max": 20
+      },
+      "indexes_used": [
+        "cache_concept_pkey",
+        "cache_concept_prefix_idx",
+        "cache_search_name_prefix_idx"
+      ]
+    },
+    "no_result": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 1.195,
+        "p50": 1.317,
+        "p95": 1.475,
+        "max": 1.475
+      },
+      "execution_ms": {
+        "min": 0.09,
+        "p50": 0.094,
+        "p95": 0.162,
+        "max": 0.162
+      },
+      "shared_hit_blocks": {
+        "min": 110,
+        "p50": 110,
+        "p95": 110,
+        "max": 110
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 3,
+        "p50": 3,
+        "p95": 3,
+        "max": 3
+      },
+      "rows_returned": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "indexes_used": [
+        "cache_concept_pkey",
+        "cache_concept_prefix_idx",
+        "cache_search_name_prefix_idx"
+      ]
+    },
+    "exact_col_resolution": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 0.156,
+        "p50": 0.164,
+        "p95": 0.202,
+        "max": 0.202
+      },
+      "execution_ms": {
+        "min": 0.033,
+        "p50": 0.037,
+        "p95": 0.044,
+        "max": 0.044
+      },
+      "shared_hit_blocks": {
+        "min": 4,
+        "p50": 4,
+        "p95": 4,
+        "max": 4
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": [
+        "cache_concept_external_idx"
+      ]
+    },
+    "exact_nortaxa_fixture": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 0.124,
+        "p50": 0.134,
+        "p95": 0.151,
+        "max": 0.151
+      },
+      "execution_ms": {
+        "min": 0.023,
+        "p50": 0.025,
+        "p95": 0.041,
+        "max": 0.041
+      },
+      "shared_hit_blocks": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": []
+    },
+    "inaturalist_fixture": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 0.127,
+        "p50": 0.133,
+        "p95": 0.214,
+        "max": 0.214
+      },
+      "execution_ms": {
+        "min": 0.022,
+        "p50": 0.025,
+        "p95": 0.034,
+        "max": 0.034
+      },
+      "shared_hit_blocks": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": []
+    },
+    "artsorakel_fixture": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 0.128,
+        "p50": 0.135,
+        "p95": 0.167,
+        "max": 0.167
+      },
+      "execution_ms": {
+        "min": 0.023,
+        "p50": 0.024,
+        "p95": 0.029,
+        "max": 0.029
+      },
+      "shared_hit_blocks": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": []
+    },
+    "unresolved_external_fixture": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 0.118,
+        "p50": 0.127,
+        "p95": 0.138,
+        "max": 0.138
+      },
+      "execution_ms": {
+        "min": 0.04,
+        "p50": 0.043,
+        "p95": 0.047,
+        "max": 0.047
+      },
+      "shared_hit_blocks": {
+        "min": 8,
+        "p50": 8,
+        "p95": 8,
+        "max": 8
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": []
+    },
+    "out_of_cache_reviewed_registration": {
+      "executions": 10,
+      "planning_ms": {
+        "min": 0.22,
+        "p50": 0.242,
+        "p95": 0.334,
+        "max": 0.334
+      },
+      "execution_ms": {
+        "min": 1.169,
+        "p50": 1.251,
+        "p95": 1.367,
+        "max": 1.367
+      },
+      "shared_hit_blocks": {
+        "min": 2082,
+        "p50": 2082,
+        "p95": 2082,
+        "max": 2082
+      },
+      "shared_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_read_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "temp_written_blocks": {
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "rows_scanned": {
+        "min": 2,
+        "p50": 2,
+        "p95": 2,
+        "max": 2
+      },
+      "rows_returned": {
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "indexes_used": []
+    },
+    "vernacular_probe": {
+      "name": "grå torvvokssopp",
+      "language": "nb"
+    }
+  },
+  "capacity": {
+    "production_baseline_bytes": 103304339,
+    "legacy_taxonomy_relation_bytes": 81920,
+    "s1_projected_production_total_bytes": 103681171,
+    "s2_projected_production_total_bytes": 125824147,
+    "s2_first_publication_peak_bytes": 125824147,
+    "s2_future_replacement_peak_bytes": 149703827,
+    "s2_post_legacy_retirement_total_bytes": 125742227,
+    "s2_post_legacy_retirement_replacement_peak_bytes": 149621907,
+    "s2_headroom_below_500_mib_bytes": 398463853,
+    "replacement_headroom_below_500_mib_bytes": 374584173,
+    "formal_gate_pass": true
+  },
+  "w2b_full_fungi_baseline": {
+    "taxonomy_relation_bytes": 754417664,
+    "projected_production_total_bytes": 857722003
+  },
+  "failure_behavior": {
+    "external_unavailable": "registered concepts and snapshots remain usable; manual unresolved entry remains available",
+    "rate_limited": "preserve existing results and retry discovery; do not invent identity",
+    "unmapped_identifier": "store unresolved_external snapshot with raw namespaced ID and response",
+    "changed_name": "preserve selected snapshot; exact mapping continues to identify the concept",
+    "provider_disagreement": "retain both namespaced results; require explicit resolution evidence",
+    "offline": "registry and S2 cache remain searchable; S1 cannot discover unregistered concepts",
+    "removed_from_future_cache": "registry concept and identification snapshots remain unchanged"
+  },
+  "recommendation": "S2 sparse registry plus compact macrofungi cache",
+  "next_stage": "historical taxonomy reconciliation stage",
+  "production_writes_performed": false,
+  "production_activation_performed": false,
+  "production_migrations_applied": false,
+  "client_cutover_performed": false,
+  "observation_rows_modified": false
+}

@@ -134,6 +134,22 @@ and national Red Lists enrich regional data and do not define global scope.
 Plants are not part of taxonomy-v2 or its search pack. The legacy path remains
 active.
 
+The completed local-only W2C Phase-B prototype recommends S2: a sparse
+persistent registry plus a replaceable compact macrofungi cache. The experiment
+is under `scripts/taxonomy-v2/` and is not a production migration. Its single
+cache slot stores 52,881 Phase-A `include` concepts, 4,888 aliases and 3,923
+vernacular names in 22,142,976 relation bytes; the persistent fixture adds
+376,832 bytes. A measured two-slot cache replacement remains within the formal
+capacity gate, with a projected 149,703,827-byte production replacement peak.
+
+`review`, `exclude`, and `not_evaluated` concepts remain registerable through
+deliberate external selection and are not cache entries. The cache owns no
+stable identity. Identification snapshots retain original namespaced IDs and
+display values independently of provider availability or later cache
+membership. Historical reconciliation must precede W3 because the audit found
+zero existing observations with resolved stable taxonomy-v2 identity. See
+`docs/evidence/taxonomy-v2/w2c-sparse-registry-comparison.md`.
+
 ### Community spore-data RPCs
 - Public contributor / measurement aggregates should be exposed through `SECURITY DEFINER` RPCs, not by granting blanket public `SELECT` on `spore_measurements`
 - Existing SQL draft:
