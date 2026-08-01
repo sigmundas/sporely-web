@@ -12,6 +12,11 @@ See also:
 - `ARCHITECTURE.md` for product-level architecture
 - `SPEC.md` for repo/agent usage conventions
 
+The canonical cross-repository taxonomy-v2 programme plan is:
+sporely-py/docs/taxonomy/sporely-taxonomy-implementation-plan.md
+
+This repository owns the W2–W5 cloud and web implementation described there.
+
 ---
 
 ## Supabase project
