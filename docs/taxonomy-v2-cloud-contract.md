@@ -189,3 +189,51 @@ programme publication/provenance gate, including unresolved Red List licence
 evidence. Import automation, production-readiness policy enforcement, full-load
 performance, retired-release retention beyond the one-active invariant, client
 integration, and legacy retirement are known deferred concerns.
+
+## W2B importer and runbook
+
+W2B adds a Node 22 standard-library importer under `scripts/taxonomy-v2/`. It
+discovers exactly one running database container from the current Supabase
+project label through the active Docker-compatible CLI/context. It does not
+assume Docker Desktop, OrbStack, or any context name. It verifies the project,
+database, PostgreSQL version, W2A table, and migration before writes, then runs
+container `psql` through `docker exec -i` without a TTY.
+
+The importer performs full manifest/hash/type preflight before opening its main
+transaction. It takes advisory lock `846920026072413003`, stages one JSONL file
+at a time through CSV COPY using control-character delimiter/quote bytes, inserts
+explicit typed columns, clears staging, marks the release ready, calls the W2A
+validator, and commits. It never activates. Audit statuses are `running`,
+`succeeded`, `failed`, and `verified_existing`; stored source directories are
+basenames only and failures are sanitized.
+
+Prerequisites and reproducible workflow:
+
+```bash
+docker version
+docker context show
+npm run check:node
+npx supabase db reset
+
+npm run taxonomy:v2:import -- \
+  --source ../sporely-py/database/reference_data/generated/taxonomy_v2/cloud_export_tax-2026.07.30-02 \
+  --release tax-2026.07.30-02
+
+npm run taxonomy:v2:measure -- \
+  --release tax-2026.07.30-02 --activate-local \
+  --output docs/evidence/taxonomy-v2/w2b-tax-2026.07.30-02.json
+```
+
+Local activation is an explicit measurement option and is prohibited for a
+remote target. Exact reruns of a ready/active release with the same hash validate
+and record `verified_existing` without duplicating data. A conflicting hash,
+retired release, or incomplete `loading`/`failed` release stops for manual
+inspection. There is no force/delete option. After a failed import, inspect the
+sanitized audit row; the main transaction leaves no partial release data. Reset
+the disposable local stack or resolve the incomplete release deliberately.
+
+The complete W2B measurement found 754,417,664 bytes of taxonomy-v2 relations.
+Combined additively with the 103,304,339-byte production baseline, the projected
+total is 857,722,003 bytes. Capacity is therefore `review_required_capacity`.
+Selective search also remained around 0.65–0.71 seconds; representation/index
+design needs an explicit review. These findings block W3 and production load.

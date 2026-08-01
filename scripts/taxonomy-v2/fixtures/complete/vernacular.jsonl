@@ -1,0 +1,6 @@
+{"is_preferred_name":true,"language_code":"nb","source":"fixture","taxon_id":1,"vernacular_name":"Bokmål sopp"}
+{"is_preferred_name":true,"language_code":"nn","source":"fixture","taxon_id":1,"vernacular_name":"Nynorsk sopp"}
+{"is_preferred_name":false,"language_code":"no","source":"fixture","taxon_id":1,"vernacular_name":"Norsk\tnavn"}
+{"is_preferred_name":true,"language_code":"se","source":"fixture","taxon_id":2,"vernacular_name":"Sámi sopp"}
+{"is_preferred_name":true,"language_code":"sma","source":"fixture","taxon_id":2,"vernacular_name":"Åarjelsaemien"}
+{"is_preferred_name":true,"language_code":"smj","source":"fixture","taxon_id":3,"vernacular_name":"Julevsámegiella"}

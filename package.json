@@ -43,6 +43,9 @@
     "sync:version:bump-code": "node scripts/sync-version.mjs --bump-code",
     "release:version:patch": "npm version patch --no-git-tag-version && npm run sync:version:bump-code",
     "test": "node --test",
+    "taxonomy:v2:import": "node scripts/taxonomy-v2/import-release.mjs --local",
+    "taxonomy:v2:measure": "node scripts/taxonomy-v2/measure-release.mjs",
+    "taxonomy:v2:validate-full-load": "node scripts/taxonomy-v2/measure-release.mjs",
     "release:version:minor": "npm version minor --no-git-tag-version && npm run sync:version:bump-code",
     "release:version:major": "npm version major --no-git-tag-version && npm run sync:version:bump-code"
   },

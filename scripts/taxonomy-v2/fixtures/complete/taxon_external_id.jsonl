@@ -1,0 +1,3 @@
+{"external_id":"123","external_name":"Fixture duplicate","id_role":"accepted","is_preferred":true,"namespace":"col_usage_id","note":null,"source_system":"col_xr","taxon_id":1}
+{"external_id":"123","external_name":"Fixture duplicate","id_role":"accepted","is_preferred":true,"namespace":"nortaxa_taxon_id","note":null,"source_system":"nortaxa","taxon_id":2}
+{"external_id":"COL-3","external_name":"Fixturegenus","id_role":"accepted","is_preferred":true,"namespace":"col_usage_id","note":null,"source_system":"col_xr","taxon_id":3}

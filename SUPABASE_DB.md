@@ -112,6 +112,13 @@ fixtures only: the complete production release has not been loaded, no client
 source has switched to v2, and production activation remains blocked by W2B
 capacity validation plus the publication/provenance gate.
 
+W2B importer tooling is in `scripts/taxonomy-v2/`, with evidence in
+`docs/evidence/taxonomy-v2/`. The complete candidate was loaded and activated
+only in disposable local Supabase for validation. No production taxonomy write
+or activation occurred. Measured taxonomy-v2 relations total 754,417,664 bytes;
+the additive production projection is 857,722,003 bytes, so capacity review is
+required before any W3 work or production load. The legacy path remains active.
+
 ### Community spore-data RPCs
 - Public contributor / measurement aggregates should be exposed through `SECURITY DEFINER` RPCs, not by granting blanket public `SELECT` on `spore_measurements`
 - Existing SQL draft:

@@ -1,0 +1,4 @@
+{"is_preferred_name":true,"language_code":"sci","note":null,"scientific_name":"Fixture duplicate","source":"fixture","taxon_id":1}
+{"is_preferred_name":false,"language_code":"sci","note":"synonym_of_accepted","scientific_name":"Alias with quote \" and backslash \\","source":"fixture","taxon_id":1}
+{"is_preferred_name":true,"language_code":"sci","note":null,"scientific_name":"Fixture duplicate","source":"fixture","taxon_id":2}
+{"is_preferred_name":true,"language_code":"sci","note":null,"scientific_name":"Fixturegenus","source":"fixture","taxon_id":3}
