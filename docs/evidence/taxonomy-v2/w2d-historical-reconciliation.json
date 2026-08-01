@@ -1,0 +1,51 @@
+{
+  "evidence_version": "w2d-1.0.0",
+  "input_manifest": {
+    "source_repo": "sporely-py",
+    "source_revision": "be14e6e28fb00b79a0d05265ef8d6b7008b669bc",
+    "manifest_path": "sporely-py/database/taxonomy/evidence/historical-reconciliation/reconciliation-manifest.json",
+    "manifest_semantic_sha256": "c4785a25c8690144abd64a75ff369292aaf139dc4030c2ce2ce3df413462d72c",
+    "policy_sha256": "c408601f71b7d89de0283c307220b06876d80a7418bbb9089337b6d3941c43d6",
+    "taxonomy_release_id": "tax-2026.08.01-01",
+    "taxonomy_scope_manifest_sha256": "72758b2c574e8aea27432b6b55c62dfb6ad87f3fadc11ad1c892a61abf23ac4e",
+    "record_count": 13,
+    "record_source": "synthetic fixtures — not real observation data"
+  },
+  "real_data_available": false,
+  "real_data_note": "No local snapshot of the 337 historical observations exists in either sporely-py or sporely-web. The 337/227/87/23 counts originate in scripts/taxonomy-v2/run-sparse-registry-experiment.mjs as generate_series constants. The disposable simulation applies the desktop fixture manifest only.",
+  "simulation": {
+    "schema": "w2d_migration_simulation",
+    "isolation": "disposable local schema; drop-and-recreate at start; never touches supabase/migrations or production",
+    "runner": "scripts/taxonomy-v2/run-w2d-migration-simulation.mjs",
+    "sql": "scripts/taxonomy-v2/experiments/w2d-migration-simulation.sql",
+    "tests": "scripts/taxonomy-v2/w2d-migration-simulation.test.mjs"
+  },
+  "tests": {
+    "non_integration": {
+      "command": "node --test scripts/taxonomy-v2/w2d-migration-simulation.test.mjs",
+      "pass": 10,
+      "fail": 0,
+      "skipped_integration": 11,
+      "notes": "Integration tests skipped when no local Supabase target discoverable; run with W2D_INTEGRATION=1 against an OrbStack-hosted local supabase to execute them."
+    },
+    "check_node": "pass",
+    "build": "pass"
+  },
+  "verdicts": {
+    "idempotency": "asserted by test 'idempotency — applying the fixture manifest twice yields identical row counts and snapshot fingerprint' (integration; skipped without local supabase)",
+    "rollback": "asserted by test 'rollback simulation leaves zero orphan rows' (integration)",
+    "snapshot_preservation": "asserted by test 'later exact resolution preserves the original snapshot verbatim' plus 'snapshot immutability trigger rejects direct UPDATE to original_*' (integration)",
+    "out_of_cache_materialisation": "asserted by test 'out-of-cache concept materialises with scope_state=required_ancestor' (integration)",
+    "manifest_shape_conformance": "verified in non-integration test 'every manifest record carries the contract §6 field set'",
+    "semantic_sha_verification": "verified in non-integration test 'semantic SHA-256 helper matches the desktop-published hash'"
+  },
+  "production_safety": {
+    "supabase_migration_created": false,
+    "production_writes": false,
+    "production_taxonomy_writes": false,
+    "production_observation_writes": false,
+    "client_cutover": false,
+    "legacy_taxonomy_removed": false
+  },
+  "w3_readiness_verdict": "legacy-source recovery required"
+}

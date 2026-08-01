@@ -320,3 +320,41 @@ mappings, or historical snapshots. See
 
 No production taxonomy write, migration, activation, client cutover,
 observation backfill, or W3 work is authorized by this result.
+
+## W2D historical reconciliation addendum
+
+Stage W2D is a read-only reconciliation + disposable migration simulation
+that consumes a reconciliation manifest produced by the desktop repo
+(`sporely-py/database/taxonomy/reconciliation/`).
+
+The disposable simulation lives in an isolated `w2d_migration_simulation`
+schema (see `scripts/taxonomy-v2/experiments/w2d-migration-simulation.sql`).
+It is **not** a Supabase migration and does not live under
+`supabase/migrations/`. Applying the manifest against this schema:
+
+* creates immutable `identification_snapshot` rows keyed by
+  `observation_id`, with a trigger rejecting any `UPDATE` to `original_*`
+  columns;
+* materialises sparse `registry_concept` rows and `(source_system,
+  namespace, external_id)` `external_mapping` rows only when the manifest
+  contains an exact resolved concept;
+* writes a mutable `resolution_link` for every observation — including
+  unresolved states — so later resolutions attach identity without
+  rewriting the original snapshot.
+
+Idempotency, rollback, snapshot preservation, and out-of-cache
+materialisation are covered by
+`scripts/taxonomy-v2/w2d-migration-simulation.test.mjs` (10 non-integration
+tests pass; 11 integration tests skip without a local Supabase target — run
+with `W2D_INTEGRATION=1`).
+
+The real 337-observation audit remains **blocked** — the 337/227/87/23
+counts are hard-coded `generate_series` constants in
+`scripts/taxonomy-v2/run-sparse-registry-experiment.mjs`, not a real
+observation set. An anonymised snapshot conforming to
+`sporely-py/database/taxonomy/docs/w2d-input-snapshot-contract.md` is
+required before the manifest reflects real observations.
+
+W3 readiness verdict: **`legacy-source recovery required`.** No production
+taxonomy write, migration, activation, client cutover, observation
+backfill, or W3 work is authorised by this result.
