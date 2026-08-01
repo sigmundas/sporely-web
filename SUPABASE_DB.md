@@ -85,6 +85,33 @@ This repository owns the W2–W5 cloud and web implementation described there.
 - `search_taxa` (RPC)
   - Deployed and used by the web app for autocomplete/search
 
+#### Additive taxonomy v2 (W2A; not yet used by clients)
+
+Migration `20260724130000_add_taxonomy_v2_schema_and_search.sql` adds Model B
+stable concepts plus release-scoped snapshots:
+
+- `taxonomy_v2_releases`
+- `taxonomy_v2_concepts`
+- `taxonomy_v2_taxa`
+- `taxonomy_v2_scientific_names`
+- `taxonomy_v2_vernacular_names`
+- `taxonomy_v2_external_ids`
+- `taxonomy_v2_legacy_external_ids`
+- `taxonomy_v2_redlist`
+- `taxonomy_v2_import_runs`
+
+All nine tables have RLS enabled. `PUBLIC`, `anon`, and `authenticated` have no
+direct table access; normal clients can use only the additive
+`search_taxa_v2(text,text,integer)` and
+`resolve_taxon_external_id_v2(text,text,text)` RPCs. Validation and activation
+are service-role operations. See `docs/taxonomy-v2-cloud-contract.md` for exact
+release, ranking, language, identifier, and grant behavior.
+
+The legacy taxonomy path remains active and unchanged. W2A uses small local
+fixtures only: the complete production release has not been loaded, no client
+source has switched to v2, and production activation remains blocked by W2B
+capacity validation plus the publication/provenance gate.
+
 ### Community spore-data RPCs
 - Public contributor / measurement aggregates should be exposed through `SECURITY DEFINER` RPCs, not by granting blanket public `SELECT` on `spore_measurements`
 - Existing SQL draft:

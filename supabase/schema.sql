@@ -23,6 +23,80 @@ COMMENT ON SCHEMA "public" IS 'standard public schema';
 
 
 
+CREATE OR REPLACE FUNCTION "public"."admin_client_activity_summary"("p_days" integer DEFAULT 30) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_user uuid := auth.uid();
+  v_is_admin boolean;
+  v_days integer;
+  v_today date := (now() at time zone 'utc')::date;
+  v_since date;
+  v_by_day_client jsonb;
+  v_by_version_today jsonb;
+  v_totals jsonb;
+begin
+  if v_user is null then
+    raise exception 'admin_client_activity_summary requires an authenticated user';
+  end if;
+
+  select p.is_admin into v_is_admin from public.profiles p where p.id = v_user;
+  if coalesce(v_is_admin, false) is not true then
+    raise exception 'admin_client_activity_summary requires an admin profile';
+  end if;
+
+  v_days := greatest(1, least(coalesce(p_days, 30), 365));
+  v_since := v_today - (v_days - 1);
+
+  select coalesce(pg_catalog.jsonb_agg(pg_catalog.row_to_json(t) order by t.activity_date desc, t.client), '[]'::jsonb)
+    into v_by_day_client
+    from (
+      select cad.activity_date, cad.client, count(distinct cad.user_id)::int as users
+        from public.client_activity_daily cad
+       where cad.activity_date >= v_since
+       group by cad.activity_date, cad.client
+    ) t;
+
+  select coalesce(pg_catalog.jsonb_agg(pg_catalog.row_to_json(t) order by t.users desc, t.client, t.app_version), '[]'::jsonb)
+    into v_by_version_today
+    from (
+      select cad.client,
+             nullif(cad.app_version, '') as app_version,
+             count(distinct cad.user_id)::int as users
+        from public.client_activity_daily cad
+       where cad.activity_date = v_today
+       group by cad.client, cad.app_version
+    ) t;
+
+  select pg_catalog.jsonb_build_object(
+      'active_today', coalesce((
+        select count(distinct cad.user_id) from public.client_activity_daily cad
+         where cad.activity_date = v_today), 0),
+      'active_window', coalesce((
+        select count(distinct cad.user_id) from public.client_activity_daily cad
+         where cad.activity_date >= v_since), 0),
+      'rows_in_window', coalesce((
+        select count(*) from public.client_activity_daily cad
+         where cad.activity_date >= v_since), 0)
+    ) into v_totals;
+
+  return pg_catalog.jsonb_build_object(
+    'generated_at', now(),
+    'window_days', v_days,
+    'since', v_since,
+    'today', v_today,
+    'totals', v_totals,
+    'by_day_client', v_by_day_client,
+    'by_version_today', v_by_version_today
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."admin_client_activity_summary"("p_days" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."admin_database_health"() RETURNS "jsonb"
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -913,13 +987,17 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" 
       CASE
         WHEN o.spore_data_visibility = 'public'::text
              AND latest_mosaic.id IS NOT NULL
-          THEN jsonb_build_object(
-            'url',      concat('https://media.sporely.no/', latest_mosaic.storage_key),
-            'width',    latest_mosaic.width_px,
-            'height',   latest_mosaic.height_px,
-            'tileSize', latest_mosaic.tile_size_px,
-            'version',  latest_mosaic.version
-          )
+          THEN jsonb_strip_nulls(jsonb_build_object(
+            'url',                concat('https://media.sporely.no/', latest_mosaic.storage_key),
+            'width',              latest_mosaic.width_px,
+            'height',             latest_mosaic.height_px,
+            'tileSize',           latest_mosaic.tile_size_px,
+            'version',            latest_mosaic.version,
+            'tileWidthPx',        latest_mosaic.tile_width_px,
+            'tileHeightPx',       latest_mosaic.tile_height_px,
+            'commonCropWidthUm',  latest_mosaic.common_crop_width_um,
+            'commonCropHeightUm', latest_mosaic.common_crop_height_um
+          ))
         ELSE NULL::jsonb
       END AS spore_mosaic,
       prep_agg.prep_summary,
@@ -992,7 +1070,11 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" 
         sm.width_px,
         sm.height_px,
         sm.tile_size_px,
-        sm.version
+        sm.version,
+        sm.tile_width_px,
+        sm.tile_height_px,
+        sm.common_crop_width_um,
+        sm.common_crop_height_um
       FROM public.spore_measurement_mosaics sm
       WHERE sm.observation_id = c.id
         AND sm.user_id = c.user_id
@@ -1017,66 +1099,37 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" 
             -- Per-point prep metadata. Same normalization as the scalar
             -- observation-level fields (see the SELECT list below): unset
             -- variants collapse to NULL and jsonb_strip_nulls removes them
-            -- from the object, keeping the payload small.
-            'contrastMethod', CASE
-                                WHEN nullif(btrim(coalesce(i.contrast, '')), '') IS NULL
-                                     OR lower(btrim(i.contrast)) IN ('not_set', 'not set', 'unset', 'unknown')
-                                  THEN NULL
-                                ELSE btrim(i.contrast)
-                              END,
-            'mountReagent',   CASE
-                                WHEN nullif(btrim(coalesce(i.mount_medium, '')), '') IS NULL
-                                     OR lower(btrim(i.mount_medium)) IN ('not_set', 'not set', 'unset', 'unknown')
-                                  THEN NULL
-                                ELSE btrim(i.mount_medium)
-                              END,
-            'stainReagent',   CASE
-                                WHEN nullif(btrim(coalesce(i.stain, '')), '') IS NULL
-                                     OR lower(btrim(i.stain)) IN ('not_set', 'not set', 'unset', 'unknown')
-                                  THEN NULL
-                                ELSE btrim(i.stain)
-                              END,
+            -- from the object before it lands in the aggregate.
+            'contrastMethod', nullif(btrim(coalesce(i.contrast, '')), ''),
+            'mountReagent',   nullif(btrim(coalesce(i.mount_medium, '')), ''),
+            'stainReagent',   nullif(btrim(coalesce(i.stain, '')), ''),
             'sampleType',     CASE
                                 WHEN lower(btrim(coalesce(i.sample_type, ''))) IN ('fresh', 'dried')
                                   THEN lower(btrim(i.sample_type))
-                                ELSE NULL
+                                ELSE NULL::text
                               END,
             'sampleSource',   CASE
                                 WHEN lower(btrim(coalesce(i.sample_source, ''))) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
                                   THEN lower(btrim(i.sample_source))
-                                ELSE NULL
-                              END
+                                ELSE NULL::text
+                              END,
+            'mosaicX',        t.x_px,
+            'mosaicY',        t.y_px,
+            'mosaicW',        t.w_px,
+            'mosaicH',        t.h_px,
+            'overlay',        t.overlay_json
           )
         )
-        || CASE
-             WHEN t.measurement_id IS NOT NULL
-               THEN jsonb_build_object(
-                 'mosaicX', t.x_px,
-                 'mosaicY', t.y_px,
-                 'mosaicW', t.w_px,
-                 'mosaicH', t.h_px
-               )
-               || CASE
-                    WHEN t.overlay_json IS NOT NULL
-                      THEN jsonb_build_object('overlay', t.overlay_json)
-                    ELSE '{}'::jsonb
-                  END
-             ELSE '{}'::jsonb
-           END
-        ORDER BY m.id
       ) AS spore_points
-      FROM public.observation_images i
-      JOIN public.spore_measurements m
-        ON m.image_id = i.id
+      FROM public.spore_measurements m
+      JOIN public.observation_images i
+        ON i.id = m.image_id
       LEFT JOIN public.spore_measurement_mosaic_tiles t
         ON t.measurement_id = m.id
-       AND t.mosaic_id = latest_mosaic.id
       WHERE i.observation_id = c.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
         AND (i.image_type IS NULL OR i.image_type = 'microscope'::text)
-        AND m.length_um IS NOT NULL
-        AND m.width_um IS NOT NULL
         AND (
           m.measurement_type IS NULL
           OR m.measurement_type = ''
@@ -1505,7 +1558,7 @@ $_$;
 ALTER FUNCTION "public"."get_public_observation_facets"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text", "fullUrl" "text", "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean)
+CREATE OR REPLACE FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text", "fullUrl" "text", "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean, "scaleMicronsPerPixel" double precision)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
@@ -3238,6 +3291,85 @@ CREATE OR REPLACE FUNCTION "public"."public_normalized_specimen_condition"("valu
 ALTER FUNCTION "public"."public_normalized_specimen_condition"("value" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."record_client_activity"("p_client" "text", "p_app_version" "text" DEFAULT NULL::"text") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_user uuid := auth.uid();
+  v_version text;
+  v_now timestamptz := clock_timestamp();
+  v_today date := (v_now at time zone 'utc')::date;
+begin
+  if v_user is null then
+    raise exception 'record_client_activity requires an authenticated user';
+  end if;
+
+  if p_client is null
+    or p_client not in (
+      'android_app', 'ios_app', 'web_pwa', 'web_browser', 'desktop_app', 'unknown'
+    )
+  then
+    raise exception 'invalid client: %', p_client;
+  end if;
+
+  v_version := coalesce(p_app_version, '');
+  if pg_catalog.char_length(v_version) > 32 then
+    v_version := pg_catalog.substr(v_version, 1, 32);
+  end if;
+
+  insert into public.client_activity_daily as cad (
+    user_id, activity_date, client, app_version, first_seen_at, last_seen_at
+  )
+  values (v_user, v_today, p_client, v_version, v_now, v_now)
+  on conflict (user_id, activity_date, client, app_version)
+  do update set last_seen_at = excluded.last_seen_at
+    where cad.last_seen_at < excluded.last_seen_at;
+
+  update public.profiles p
+     set last_client = p_client,
+         last_app_version = nullif(v_version, ''),
+         last_client_seen_at = v_now
+   where p.id = v_user;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."record_client_activity"("p_client" "text", "p_app_version" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") RETURNS TABLE("taxon_id" bigint, "taxon_rank" "text", "genus" "text", "specific_epithet" "text", "canonical_scientific_name" "text", "family" "text", "canonical_source_system" "text", "canonical_external_id" "text", "id_role" "text", "is_preferred" boolean)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+  select t.sporely_taxon_id,
+         t.taxon_rank,
+         t.genus,
+         t.specific_epithet,
+         t.canonical_scientific_name,
+         t.family,
+         t.canonical_source_system,
+         t.canonical_external_id,
+         e.id_role,
+         e.is_preferred
+  from public.taxonomy_v2_releases r
+  join public.taxonomy_v2_external_ids e on e.release_id = r.release_id
+  join public.taxonomy_v2_taxa t
+    on t.release_id = e.release_id and t.sporely_taxon_id = e.sporely_taxon_id
+  where r.status = 'active'
+    and nullif(btrim(p_source_system), '') is not null
+    and nullif(btrim(p_namespace), '') is not null
+    and nullif(btrim(p_external_id), '') is not null
+    and e.source_system = btrim(p_source_system)
+    and e.namespace = btrim(p_namespace)
+    and e.external_id = btrim(p_external_id)
+  order by e.is_preferred desc, t.sporely_taxon_id;
+$$;
+
+
+ALTER FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer DEFAULT 50) RETURNS TABLE("dataset_type" "text", "observation_id" bigint, "genus" "text", "species" "text", "contributor_label" "text", "observed_on" "date", "measurement_count" bigint, "image_count" bigint, "length_min" double precision, "length_p05" double precision, "length_p50" double precision, "length_p95" double precision, "length_max" double precision, "width_min" double precision, "width_p05" double precision, "width_p50" double precision, "width_p95" double precision, "width_max" double precision, "q_min" double precision, "q_p50" double precision, "q_max" double precision, "qc_flags" "jsonb")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -3410,7 +3542,7 @@ $$;
 ALTER FUNCTION "public"."search_people_directory"("p_limit" integer, "p_offset" integer, "p_query" "text") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[] DEFAULT NULL::bigint[]) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text", "fullUrl" "text", "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean)
+CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[] DEFAULT NULL::bigint[]) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text", "fullUrl" "text", "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean, "scaleMicronsPerPixel" double precision)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $_$
@@ -3454,6 +3586,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
       i.ai_crop_source_h,
       coalesce(i.ai_crop_is_custom, false) AS ai_crop_is_custom,
       coalesce(i.storage_exif_safe, false) AS storage_exif_safe,
+      i.scale_microns_per_pixel,
       i.created_at
     FROM visible_observations o
     JOIN public.observation_images i
@@ -3461,9 +3594,8 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
     WHERE i.deleted_at IS NULL
       AND i.purged_at IS NULL
       -- Metadata-only microscope anchors have no downloadable bytes and
-      -- must not appear in the public gallery. This is the only line
-      -- that differs from migration 20260711130000; every other clause
-      -- is preserved verbatim.
+      -- must not appear in the public gallery. Preserved verbatim from
+      -- migration 20260714130000.
       AND i.storage_path IS NOT NULL
       AND btrim(i.storage_path) <> ''
   ),
@@ -3483,6 +3615,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
       vi.ai_crop_source_h,
       vi.ai_crop_is_custom,
       vi.storage_exif_safe,
+      vi.scale_microns_per_pixel,
       vi.created_at,
       concat(
         CASE WHEN vi.storage_dir IS NULL THEN '' ELSE vi.storage_dir || '/' END,
@@ -3515,7 +3648,8 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
     p.ai_crop_y2 AS "aiCropY2",
     p.ai_crop_source_w AS "aiCropSourceW",
     p.ai_crop_source_h AS "aiCropSourceH",
-    p.ai_crop_is_custom AS "aiCropIsCustom"
+    p.ai_crop_is_custom AS "aiCropIsCustom",
+    p.scale_microns_per_pixel AS "scaleMicronsPerPixel"
   FROM prepared p
   ORDER BY p.observation_id, p.sort_order NULLS LAST, p.created_at DESC NULLS LAST, p.image_id DESC
 $_$;
@@ -4056,6 +4190,138 @@ $$;
 ALTER FUNCTION "public"."search_taxa"("q" "text", "lang" "text", "lim" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text" DEFAULT 'no'::"text", "lim" integer DEFAULT 20) RETURNS TABLE("taxon_id" bigint, "parent_taxon_id" bigint, "taxon_rank" "text", "genus" "text", "specific_epithet" "text", "canonical_scientific_name" "text", "family" "text", "vernacular_name" "text", "vernacular_language" "text", "canonical_source_system" "text", "canonical_external_id" "text", "col_usage_id" "text", "nortaxa_taxon_id" "text", "matched_name" "text", "matched_language" "text", "match_type" "text")
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+  with input as (
+    select btrim(coalesce(q, '')) as query,
+           btrim(coalesce(nullif(btrim(lang), ''), 'no')) as requested_lang,
+           greatest(1, least(coalesce(lim, 20), 50)) as result_limit
+  ), active_release as (
+    select release_id from public.taxonomy_v2_releases where status = 'active'
+  ), selected_languages as (
+    select selected.language_code
+    from input i
+    cross join lateral unnest(
+      case when i.requested_lang = 'no'
+        then array['nb', 'nn', 'no']::text[]
+        else array[i.requested_lang]::text[]
+      end
+    ) as selected(language_code)
+  ), candidates as (
+    select t.sporely_taxon_id, t.canonical_scientific_name as candidate_name,
+           'sci'::text as candidate_language,
+           case when lower(t.canonical_scientific_name) = lower(i.query) then 1 else 5 end as match_rank,
+           case when lower(t.canonical_scientific_name) = lower(i.query)
+             then 'canonical_exact' else 'canonical_prefix' end as candidate_match_type,
+           null::text as matching_vernacular, null::text as matching_vernacular_language
+    from public.taxonomy_v2_taxa t
+    join active_release ar using (release_id)
+    cross join input i
+    where pg_catalog.char_length(i.query) >= 2
+      and left(lower(t.canonical_scientific_name), pg_catalog.char_length(lower(i.query))) = lower(i.query)
+
+    union all
+
+    select n.sporely_taxon_id, n.scientific_name, n.language_code,
+           case when lower(n.scientific_name) = lower(i.query) then 2 else 6 end,
+           case when lower(n.scientific_name) = lower(i.query)
+             then 'scientific_alias_exact' else 'scientific_alias_prefix' end,
+           null::text, null::text
+    from public.taxonomy_v2_scientific_names n
+    join active_release ar using (release_id)
+    cross join input i
+    where pg_catalog.char_length(i.query) >= 2
+      and left(lower(n.scientific_name), pg_catalog.char_length(lower(i.query))) = lower(i.query)
+
+    union all
+
+    select v.sporely_taxon_id, v.vernacular_name, v.language_code,
+           case
+             when lower(v.vernacular_name) = lower(i.query) and v.is_preferred_name then 3
+             when lower(v.vernacular_name) = lower(i.query) then 4
+             when v.is_preferred_name then 7 else 8
+           end,
+           case when lower(v.vernacular_name) = lower(i.query)
+             then 'vernacular_exact' else 'vernacular_prefix' end,
+           v.vernacular_name, v.language_code
+    from public.taxonomy_v2_vernacular_names v
+    join active_release ar using (release_id)
+    cross join input i
+    where pg_catalog.char_length(i.query) >= 2
+      and v.language_code in (select language_code from selected_languages)
+      and left(lower(v.vernacular_name), pg_catalog.char_length(lower(i.query))) = lower(i.query)
+  ), best as (
+    select c.*,
+           row_number() over (
+             partition by c.sporely_taxon_id
+             order by c.match_rank, lower(c.candidate_name), c.candidate_language, c.candidate_match_type
+           ) as concept_match_number
+    from candidates c
+  )
+  select t.sporely_taxon_id,
+         t.parent_sporely_taxon_id,
+         t.taxon_rank,
+         t.genus,
+         t.specific_epithet,
+         t.canonical_scientific_name,
+         t.family,
+         coalesce(b.matching_vernacular, display_v.vernacular_name),
+         coalesce(b.matching_vernacular_language, display_v.language_code),
+         t.canonical_source_system,
+         t.canonical_external_id,
+         convenience.col_usage_id,
+         convenience.nortaxa_taxon_id,
+         b.candidate_name,
+         b.candidate_language,
+         b.candidate_match_type
+  from best b
+  join active_release ar on true
+  join public.taxonomy_v2_taxa t
+    on t.release_id = ar.release_id and t.sporely_taxon_id = b.sporely_taxon_id
+  cross join input i
+  left join lateral (
+    select v.vernacular_name, v.language_code
+    from public.taxonomy_v2_vernacular_names v
+    where v.release_id = ar.release_id
+      and v.sporely_taxon_id = t.sporely_taxon_id
+      and v.language_code in (select language_code from selected_languages)
+    order by
+      case
+        when v.is_preferred_name and i.requested_lang <> 'no' and v.language_code = i.requested_lang then 1
+        when v.is_preferred_name and i.requested_lang = 'no' and v.language_code = 'nb' then 1
+        when v.is_preferred_name and i.requested_lang = 'no' and v.language_code = 'nn' then 2
+        when v.is_preferred_name and i.requested_lang = 'no' and v.language_code = 'no' then 3
+        else 5
+      end,
+      v.is_preferred_name desc, v.language_code, v.vernacular_name
+    limit 1
+  ) display_v on true
+  left join lateral (
+    select
+      min(e.external_id) filter (
+        where e.source_system = 'col_xr' and e.namespace = 'col_usage_id'
+      ) as col_usage_id,
+      min(e.external_id) filter (
+        where e.source_system = 'nortaxa' and e.namespace = 'nortaxa_taxon_id'
+      ) as nortaxa_taxon_id
+    from public.taxonomy_v2_external_ids e
+    where e.release_id = ar.release_id and e.sporely_taxon_id = t.sporely_taxon_id
+  ) convenience on true
+  where b.concept_match_number = 1
+  order by b.match_rank,
+           case when t.canonical_source_system = 'col_xr' then 0 else 1 end,
+           lower(t.canonical_scientific_name) nulls last,
+           t.taxon_rank nulls last,
+           t.sporely_taxon_id
+  limit (select result_limit from input);
+$$;
+
+
+ALTER FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."set_updated_at"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -4067,6 +4333,225 @@ $$;
 
 
 ALTER FUNCTION "public"."set_updated_at"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."taxonomy_v2_activate_release"("p_release_id" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+declare
+  v_status text;
+  v_validation jsonb;
+begin
+  perform pg_catalog.pg_advisory_xact_lock(846920026072413002::bigint);
+  perform 1 from public.taxonomy_v2_releases
+    where release_id = p_release_id or status = 'active'
+    for update;
+
+  select status into v_status
+  from public.taxonomy_v2_releases
+  where release_id = p_release_id;
+  if not found then
+    raise exception 'taxonomy release % does not exist', p_release_id;
+  end if;
+  if v_status <> 'ready' then
+    raise exception 'taxonomy release % must be ready, got %', p_release_id, v_status;
+  end if;
+
+  v_validation := public.taxonomy_v2_validate_release(p_release_id);
+  if not coalesce((v_validation ->> 'ok')::boolean, false) then
+    raise exception 'taxonomy release % failed validation: %', p_release_id, v_validation -> 'errors';
+  end if;
+
+  update public.taxonomy_v2_releases
+    set status = 'retired'
+    where status = 'active';
+  update public.taxonomy_v2_releases
+    set status = 'active', activated_at = now()
+    where release_id = p_release_id;
+
+  return public.taxonomy_v2_validate_release(p_release_id);
+end;
+$$;
+
+
+ALTER FUNCTION "public"."taxonomy_v2_activate_release"("p_release_id" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."taxonomy_v2_jsonb_nonnegative_integer_counts"("p_value" "jsonb") RETURNS boolean
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+  select pg_catalog.jsonb_typeof(p_value) = 'object'
+    and not exists (
+      select 1
+      from pg_catalog.jsonb_each(p_value) as e(key, value)
+      where pg_catalog.jsonb_typeof(e.value) <> 'number'
+         or (e.value #>> '{}') !~ '^[0-9]+$'
+    );
+$_$;
+
+
+ALTER FUNCTION "public"."taxonomy_v2_jsonb_nonnegative_integer_counts"("p_value" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."taxonomy_v2_validate_release"("p_release_id" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+declare
+  v_release public.taxonomy_v2_releases%rowtype;
+  v_actual_counts jsonb;
+  v_authoritative_counts jsonb;
+  v_legacy_counts jsonb;
+  v_dangling bigint;
+  v_errors jsonb := '[]'::jsonb;
+  v_search_definition text;
+  v_resolver_definition text;
+begin
+  select * into v_release
+  from public.taxonomy_v2_releases
+  where release_id = p_release_id;
+
+  if not found then
+    return pg_catalog.jsonb_build_object(
+      'ok', false, 'release_id', p_release_id, 'status', null,
+      'expected_counts', null, 'actual_counts', null,
+      'errors', pg_catalog.jsonb_build_array('release does not exist'));
+  end if;
+
+  if v_release.status not in ('ready', 'active') then
+    v_errors := v_errors || pg_catalog.jsonb_build_array(
+      pg_catalog.format('release status must be ready or active, got %s', v_release.status));
+  end if;
+  if v_release.taxonomy_schema_version <> 2 then
+    v_errors := v_errors || ' ["taxonomy_schema_version must equal 2"]'::jsonb;
+  end if;
+
+  select pg_catalog.jsonb_build_object(
+    'taxon.jsonl', (select count(*) from public.taxonomy_v2_taxa where release_id = p_release_id),
+    'scientific_name.jsonl', (select count(*) from public.taxonomy_v2_scientific_names where release_id = p_release_id),
+    'vernacular.jsonl', (select count(*) from public.taxonomy_v2_vernacular_names where release_id = p_release_id),
+    'taxon_external_id.jsonl', (select count(*) from public.taxonomy_v2_external_ids where release_id = p_release_id),
+    'taxon_external_id_legacy_integer.jsonl', (select count(*) from public.taxonomy_v2_legacy_external_ids where release_id = p_release_id),
+    'taxon_redlist.jsonl', (select count(*) from public.taxonomy_v2_redlist where release_id = p_release_id)
+  ) into v_actual_counts;
+
+  if v_actual_counts <> v_release.row_counts then
+    v_errors := v_errors || pg_catalog.jsonb_build_array('actual row counts do not match row_counts metadata');
+  end if;
+
+  select coalesce(pg_catalog.jsonb_object_agg(k, n), '{}'::jsonb)
+  into v_authoritative_counts
+  from (
+    select source_system || '/' || namespace as k, count(*) as n
+    from public.taxonomy_v2_external_ids
+    where release_id = p_release_id
+    group by source_system, namespace
+  ) s;
+  if v_authoritative_counts <> v_release.authoritative_namespace_counts then
+    v_errors := v_errors || pg_catalog.jsonb_build_array('authoritative namespace counts do not match metadata');
+  end if;
+
+  select coalesce(pg_catalog.jsonb_object_agg(k, n), '{}'::jsonb)
+  into v_legacy_counts
+  from (
+    select source_system as k, count(*) as n
+    from public.taxonomy_v2_legacy_external_ids
+    where release_id = p_release_id
+    group by source_system
+  ) s;
+  if v_legacy_counts <> v_release.legacy_source_counts then
+    v_errors := v_errors || pg_catalog.jsonb_build_array('legacy source counts do not match metadata');
+  end if;
+
+  select count(*) into v_dangling
+  from public.taxonomy_v2_taxa t
+  where t.release_id = p_release_id
+    and t.parent_sporely_taxon_id is not null
+    and not exists (
+      select 1 from public.taxonomy_v2_taxa p
+      where p.release_id = t.release_id
+        and p.sporely_taxon_id = t.parent_sporely_taxon_id
+    );
+  if v_dangling <> v_release.dangling_parent_count then
+    v_errors := v_errors || pg_catalog.jsonb_build_array('dangling parent count does not match metadata');
+  end if;
+
+  if exists (
+    select 1 from public.taxonomy_v2_taxa t
+    left join public.taxonomy_v2_concepts c using (sporely_taxon_id)
+    where t.release_id = p_release_id and c.sporely_taxon_id is null
+  ) then
+    v_errors := v_errors || pg_catalog.jsonb_build_array('release-scoped taxon without stable concept');
+  end if;
+
+  if exists (
+    select 1
+    from (
+      select release_id, sporely_taxon_id from public.taxonomy_v2_scientific_names where release_id = p_release_id
+      union all
+      select release_id, sporely_taxon_id from public.taxonomy_v2_vernacular_names where release_id = p_release_id
+      union all
+      select release_id, sporely_taxon_id from public.taxonomy_v2_external_ids where release_id = p_release_id
+      union all
+      select release_id, sporely_taxon_id from public.taxonomy_v2_legacy_external_ids where release_id = p_release_id
+      union all
+      select release_id, sporely_taxon_id from public.taxonomy_v2_redlist where release_id = p_release_id
+    ) child
+    left join public.taxonomy_v2_taxa t using (release_id, sporely_taxon_id)
+    where t.sporely_taxon_id is null
+  ) then
+    v_errors := v_errors || pg_catalog.jsonb_build_array('release child row without release-scoped taxon');
+  end if;
+
+  if exists (
+    select 1 from public.taxonomy_v2_external_ids
+    where release_id = p_release_id
+      and (source_system is null or btrim(source_system) = ''
+        or namespace is null or btrim(namespace) = ''
+        or external_id is null or btrim(external_id) = '')
+  ) then
+    v_errors := v_errors || pg_catalog.jsonb_build_array('blank authoritative identifier component');
+  end if;
+
+  if exists (
+    select 1 from public.taxonomy_v2_external_ids
+    where release_id = p_release_id
+    group by source_system, namespace, external_id, sporely_taxon_id
+    having count(*) > 1
+  ) then
+    v_errors := v_errors || pg_catalog.jsonb_build_array('duplicate authoritative semantic key');
+  end if;
+
+  select pg_catalog.pg_get_functiondef('public.search_taxa_v2(text,text,integer)'::regprocedure)
+    into v_search_definition;
+  select pg_catalog.pg_get_functiondef('public.resolve_taxon_external_id_v2(text,text,text)'::regprocedure)
+    into v_resolver_definition;
+  if pg_catalog.strpos(v_search_definition, 'taxonomy_v2_legacy_external_ids') > 0
+     or pg_catalog.strpos(v_resolver_definition, 'taxonomy_v2_legacy_external_ids') > 0 then
+    v_errors := v_errors || pg_catalog.jsonb_build_array('active RPC definition references legacy external IDs');
+  end if;
+
+  return pg_catalog.jsonb_build_object(
+    'ok', pg_catalog.jsonb_array_length(v_errors) = 0,
+    'release_id', v_release.release_id,
+    'status', v_release.status,
+    'expected_counts', v_release.row_counts,
+    'actual_counts', v_actual_counts,
+    'errors', v_errors
+  );
+exception
+  when undefined_function then
+    return pg_catalog.jsonb_build_object(
+      'ok', false, 'release_id', v_release.release_id, 'status', v_release.status,
+      'expected_counts', v_release.row_counts, 'actual_counts', v_actual_counts,
+      'errors', v_errors || pg_catalog.jsonb_build_array('required taxonomy-v2 RPC is missing'));
+end;
+$$;
+
+
+ALTER FUNCTION "public"."taxonomy_v2_validate_release"("p_release_id" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."touch_observation_updated_at_from_image"() RETURNS "trigger"
@@ -4218,6 +4703,21 @@ ALTER TABLE "public"."calibrations" ALTER COLUMN "id" ADD GENERATED ALWAYS AS ID
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."client_activity_daily" (
+    "user_id" "uuid" NOT NULL,
+    "activity_date" "date" NOT NULL,
+    "client" "text" NOT NULL,
+    "app_version" "text" DEFAULT ''::"text" NOT NULL,
+    "first_seen_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "last_seen_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "client_activity_daily_app_version_len" CHECK (("char_length"("app_version") <= 32)),
+    CONSTRAINT "client_activity_daily_client_check" CHECK (("client" = ANY (ARRAY['android_app'::"text", 'ios_app'::"text", 'web_pwa'::"text", 'web_browser'::"text", 'desktop_app'::"text", 'unknown'::"text"])))
+);
+
+
+ALTER TABLE "public"."client_activity_daily" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."comment_moderation" (
     "comment_id" bigint NOT NULL,
     "report_id" "uuid",
@@ -4348,7 +4848,11 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
     "billing_payment_id" "text",
     "billing_checkout_session_id" "text",
     "billing_updated_at" timestamp with time zone,
-    CONSTRAINT "profiles_cloud_plan_check" CHECK (("cloud_plan" = ANY (ARRAY['free'::"text", 'pro'::"text"])))
+    "last_client" "text",
+    "last_app_version" "text",
+    "last_client_seen_at" timestamp with time zone,
+    CONSTRAINT "profiles_cloud_plan_check" CHECK (("cloud_plan" = ANY (ARRAY['free'::"text", 'pro'::"text"]))),
+    CONSTRAINT "profiles_last_client_check" CHECK ((("last_client" IS NULL) OR ("last_client" = ANY (ARRAY['android_app'::"text", 'ios_app'::"text", 'web_pwa'::"text", 'web_browser'::"text", 'desktop_app'::"text", 'unknown'::"text"]))))
 );
 
 
@@ -5064,11 +5568,31 @@ CREATE TABLE IF NOT EXISTS "public"."spore_measurement_mosaics" (
     "version" integer DEFAULT 1 NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "tile_width_px" integer,
+    "tile_height_px" integer,
+    "common_crop_width_um" double precision,
+    "common_crop_height_um" double precision,
     CONSTRAINT "spore_measurement_mosaics_check" CHECK ((("width_px" > 0) AND ("height_px" > 0) AND ("tile_size_px" > 0)))
 );
 
 
 ALTER TABLE "public"."spore_measurement_mosaics" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."spore_measurement_mosaics"."tile_width_px" IS 'Per-tile atlas pixel width. Tiles are rectangular under the common-crop model; tile_size_px is a legacy square-cell integer and must not be read as tile w/h.';
+
+
+
+COMMENT ON COLUMN "public"."spore_measurement_mosaics"."tile_height_px" IS 'Per-tile atlas pixel height. Tiles are rectangular under the common-crop model.';
+
+
+
+COMMENT ON COLUMN "public"."spore_measurement_mosaics"."common_crop_width_um" IS 'Physical width in µm of a single tile''s oriented crop. Uniform across the atlas — landing derives µm per source pixel as common_crop_width_um / tile_width_px.';
+
+
+
+COMMENT ON COLUMN "public"."spore_measurement_mosaics"."common_crop_height_um" IS 'Physical height in µm of a single tile''s oriented crop. Uniform across the atlas.';
+
 
 
 ALTER TABLE "public"."spore_measurement_mosaics" ALTER COLUMN "id" ADD GENERATED BY DEFAULT AS IDENTITY (
@@ -5165,6 +5689,208 @@ ALTER SEQUENCE "public"."taxa_vernacular_id_seq" OWNED BY "public"."taxa_vernacu
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."taxonomy_v2_concepts" (
+    "sporely_taxon_id" bigint NOT NULL,
+    "first_seen_release_id" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "taxonomy_v2_concepts_sporely_taxon_id_check" CHECK (("sporely_taxon_id" > 0))
+);
+
+
+ALTER TABLE "public"."taxonomy_v2_concepts" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."taxonomy_v2_external_ids" (
+    "release_id" "text" NOT NULL,
+    "sporely_taxon_id" bigint NOT NULL,
+    "source_system" "text" NOT NULL,
+    "namespace" "text" NOT NULL,
+    "external_id" "text" NOT NULL,
+    "id_role" "text" NOT NULL,
+    "is_preferred" boolean NOT NULL,
+    "external_name" "text",
+    "note" "text",
+    CONSTRAINT "taxonomy_v2_external_ids_external_id_check" CHECK (("btrim"("external_id") <> ''::"text")),
+    CONSTRAINT "taxonomy_v2_external_ids_namespace_check" CHECK (("btrim"("namespace") <> ''::"text")),
+    CONSTRAINT "taxonomy_v2_external_ids_source_system_check" CHECK (("btrim"("source_system") <> ''::"text"))
+);
+
+
+ALTER TABLE "public"."taxonomy_v2_external_ids" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."taxonomy_v2_import_runs" (
+    "id" bigint NOT NULL,
+    "release_id" "text",
+    "started_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "finished_at" timestamp with time zone,
+    "status" "text" NOT NULL,
+    "importer_version" "text",
+    "source_directory" "text",
+    "whole_export_sha256" "text",
+    "counts" "jsonb",
+    "relation_sizes" "jsonb",
+    "error_message" "text"
+);
+
+
+ALTER TABLE "public"."taxonomy_v2_import_runs" OWNER TO "postgres";
+
+
+ALTER TABLE "public"."taxonomy_v2_import_runs" ALTER COLUMN "id" ADD GENERATED BY DEFAULT AS IDENTITY (
+    SEQUENCE NAME "public"."taxonomy_v2_import_runs_id_seq"
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."taxonomy_v2_legacy_external_ids" (
+    "release_id" "text" NOT NULL,
+    "sporely_taxon_id" bigint NOT NULL,
+    "source_system" "text" NOT NULL,
+    "external_id" "text" NOT NULL,
+    "id_role" "text" NOT NULL,
+    "is_preferred" boolean NOT NULL,
+    "external_name" "text",
+    "note" "text"
+);
+
+
+ALTER TABLE "public"."taxonomy_v2_legacy_external_ids" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."taxonomy_v2_legacy_external_ids" IS 'Namespace-lost audit and compatibility data only. Automatic identity resolution is prohibited. Numeric equality does not establish identity. This table is never consulted by search_taxa_v2 or resolve_taxon_external_id_v2.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."taxonomy_v2_redlist" (
+    "release_id" "text" NOT NULL,
+    "sporely_taxon_id" bigint NOT NULL,
+    "source_system" "text" NOT NULL,
+    "source_release" "text" NOT NULL,
+    "assessment_id" "text" NOT NULL,
+    "assessment_area" "text" NOT NULL,
+    "assessed_name_source" "text" NOT NULL,
+    "assessed_name_namespace" "text" NOT NULL,
+    "assessed_name_id" "text" NOT NULL,
+    "scientific_name_snapshot" "text" NOT NULL,
+    "authorship_snapshot" "text",
+    "taxon_rank_snapshot" "text",
+    "category_raw" "text" NOT NULL,
+    "category_code" "text" NOT NULL,
+    "category_is_downgraded" boolean NOT NULL,
+    "criteria" "text",
+    "expert_group" "text",
+    "assessment_url" "text"
+);
+
+
+ALTER TABLE "public"."taxonomy_v2_redlist" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."taxonomy_v2_redlist" IS 'Release-scoped assessment enrichment. Red List rows never establish concept identity.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."taxonomy_v2_releases" (
+    "release_id" "text" NOT NULL,
+    "taxonomy_schema_version" integer NOT NULL,
+    "export_schema_version" integer NOT NULL,
+    "manifest_schema_version" integer NOT NULL,
+    "exporter_version" "text" NOT NULL,
+    "scope_predicate_id" "text" NOT NULL,
+    "source_gz_sha256" "text" NOT NULL,
+    "source_sqlite_sha256" "text" NOT NULL,
+    "whole_export_sha256" "text" NOT NULL,
+    "manifest_sha256" "text" NOT NULL,
+    "generated_at" timestamp with time zone NOT NULL,
+    "status" "text" NOT NULL,
+    "row_counts" "jsonb" NOT NULL,
+    "authoritative_namespace_counts" "jsonb" NOT NULL,
+    "legacy_source_counts" "jsonb" NOT NULL,
+    "dangling_parent_count" bigint NOT NULL,
+    "dangling_parent_report" "jsonb" NOT NULL,
+    "source_manifest" "jsonb" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "loaded_at" timestamp with time zone,
+    "activated_at" timestamp with time zone,
+    "failed_at" timestamp with time zone,
+    "failure_message" "text",
+    CONSTRAINT "taxonomy_v2_releases_authoritative_namespace_counts_check" CHECK ("public"."taxonomy_v2_jsonb_nonnegative_integer_counts"("authoritative_namespace_counts")),
+    CONSTRAINT "taxonomy_v2_releases_dangling_parent_count_check" CHECK (("dangling_parent_count" >= 0)),
+    CONSTRAINT "taxonomy_v2_releases_dangling_parent_report_check" CHECK (("jsonb_typeof"("dangling_parent_report") = 'object'::"text")),
+    CONSTRAINT "taxonomy_v2_releases_export_schema_version_check" CHECK (("export_schema_version" >= 0)),
+    CONSTRAINT "taxonomy_v2_releases_legacy_source_counts_check" CHECK ("public"."taxonomy_v2_jsonb_nonnegative_integer_counts"("legacy_source_counts")),
+    CONSTRAINT "taxonomy_v2_releases_manifest_schema_version_check" CHECK (("manifest_schema_version" >= 0)),
+    CONSTRAINT "taxonomy_v2_releases_manifest_sha256_check" CHECK (("manifest_sha256" ~ '^[0-9a-f]{64}$'::"text")),
+    CONSTRAINT "taxonomy_v2_releases_release_id_check" CHECK (("release_id" ~ '^tax-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]{2}$'::"text")),
+    CONSTRAINT "taxonomy_v2_releases_row_counts_check" CHECK ("public"."taxonomy_v2_jsonb_nonnegative_integer_counts"("row_counts")),
+    CONSTRAINT "taxonomy_v2_releases_source_gz_sha256_check" CHECK (("source_gz_sha256" ~ '^[0-9a-f]{64}$'::"text")),
+    CONSTRAINT "taxonomy_v2_releases_source_manifest_check" CHECK (("jsonb_typeof"("source_manifest") = 'object'::"text")),
+    CONSTRAINT "taxonomy_v2_releases_source_sqlite_sha256_check" CHECK (("source_sqlite_sha256" ~ '^[0-9a-f]{64}$'::"text")),
+    CONSTRAINT "taxonomy_v2_releases_status_check" CHECK (("status" = ANY (ARRAY['loading'::"text", 'ready'::"text", 'active'::"text", 'retired'::"text", 'failed'::"text"]))),
+    CONSTRAINT "taxonomy_v2_releases_taxonomy_schema_version_check" CHECK (("taxonomy_schema_version" = 2)),
+    CONSTRAINT "taxonomy_v2_releases_whole_export_sha256_check" CHECK (("whole_export_sha256" ~ '^[0-9a-f]{64}$'::"text"))
+);
+
+
+ALTER TABLE "public"."taxonomy_v2_releases" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."taxonomy_v2_scientific_names" (
+    "release_id" "text" NOT NULL,
+    "sporely_taxon_id" bigint NOT NULL,
+    "language_code" "text" NOT NULL,
+    "scientific_name" "text" NOT NULL,
+    "is_preferred_name" boolean NOT NULL,
+    "source" "text",
+    "alias_reason" "text"
+);
+
+
+ALTER TABLE "public"."taxonomy_v2_scientific_names" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."taxonomy_v2_taxa" (
+    "release_id" "text" NOT NULL,
+    "sporely_taxon_id" bigint NOT NULL,
+    "parent_sporely_taxon_id" bigint,
+    "genus" "text" DEFAULT ''::"text" NOT NULL,
+    "specific_epithet" "text" DEFAULT ''::"text" NOT NULL,
+    "family" "text",
+    "canonical_scientific_name" "text",
+    "taxon_rank" "text",
+    "taxonomic_status" "text",
+    "source_system" "text",
+    "canonical_source_system" "text" NOT NULL,
+    "canonical_external_id" "text" NOT NULL
+);
+
+
+ALTER TABLE "public"."taxonomy_v2_taxa" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."taxonomy_v2_taxa"."parent_sporely_taxon_id" IS 'Source parent is preserved even when outside the release scope. W1 tax-2026.07.30-02 deliberately exports Fungi 152331 with dangling parent 150361, so this column intentionally has no self-FK.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."taxonomy_v2_vernacular_names" (
+    "release_id" "text" NOT NULL,
+    "sporely_taxon_id" bigint NOT NULL,
+    "language_code" "text" NOT NULL,
+    "vernacular_name" "text" NOT NULL,
+    "is_preferred_name" boolean NOT NULL,
+    "source" "text"
+);
+
+
+ALTER TABLE "public"."taxonomy_v2_vernacular_names" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."user_blocks" (
     "blocker_id" "uuid" NOT NULL,
     "blocked_id" "uuid" NOT NULL,
@@ -5199,6 +5925,11 @@ ALTER TABLE ONLY "public"."calibrations"
 
 ALTER TABLE ONLY "public"."calibrations"
     ADD CONSTRAINT "calibrations_user_calibration_uuid_key" UNIQUE ("user_id", "calibration_uuid");
+
+
+
+ALTER TABLE ONLY "public"."client_activity_daily"
+    ADD CONSTRAINT "client_activity_daily_pkey" PRIMARY KEY ("user_id", "activity_date", "client", "app_version");
 
 
 
@@ -5342,8 +6073,57 @@ ALTER TABLE ONLY "public"."taxa_vernacular"
 
 
 
+ALTER TABLE ONLY "public"."taxonomy_v2_concepts"
+    ADD CONSTRAINT "taxonomy_v2_concepts_pkey" PRIMARY KEY ("sporely_taxon_id");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_external_ids"
+    ADD CONSTRAINT "taxonomy_v2_external_ids_release_id_source_system_namespace_key" UNIQUE ("release_id", "source_system", "namespace", "external_id", "sporely_taxon_id");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_import_runs"
+    ADD CONSTRAINT "taxonomy_v2_import_runs_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_redlist"
+    ADD CONSTRAINT "taxonomy_v2_redlist_release_id_source_system_source_release_key" UNIQUE ("release_id", "source_system", "source_release", "assessment_id");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_releases"
+    ADD CONSTRAINT "taxonomy_v2_releases_pkey" PRIMARY KEY ("release_id");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_releases"
+    ADD CONSTRAINT "taxonomy_v2_releases_whole_export_sha256_key" UNIQUE ("whole_export_sha256");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_scientific_names"
+    ADD CONSTRAINT "taxonomy_v2_scientific_names_release_id_sporely_taxon_id_la_key" UNIQUE ("release_id", "sporely_taxon_id", "language_code", "scientific_name");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_taxa"
+    ADD CONSTRAINT "taxonomy_v2_taxa_pkey" PRIMARY KEY ("release_id", "sporely_taxon_id");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_vernacular_names"
+    ADD CONSTRAINT "taxonomy_v2_vernacular_names_release_id_sporely_taxon_id_la_key" UNIQUE ("release_id", "sporely_taxon_id", "language_code", "vernacular_name");
+
+
+
 ALTER TABLE ONLY "public"."user_blocks"
     ADD CONSTRAINT "user_blocks_pkey" PRIMARY KEY ("blocker_id", "blocked_id");
+
+
+
+CREATE INDEX "client_activity_daily_date_idx" ON "public"."client_activity_daily" USING "btree" ("activity_date");
 
 
 
@@ -5515,6 +6295,58 @@ CREATE INDEX "spore_measurements_user_id_idx" ON "public"."spore_measurements" U
 
 
 
+CREATE INDEX "taxonomy_v2_external_ids_lookup_idx" ON "public"."taxonomy_v2_external_ids" USING "btree" ("release_id", "source_system", "namespace", "external_id");
+
+
+
+CREATE INDEX "taxonomy_v2_external_ids_taxon_source_idx" ON "public"."taxonomy_v2_external_ids" USING "btree" ("release_id", "sporely_taxon_id", "source_system", "namespace");
+
+
+
+CREATE INDEX "taxonomy_v2_legacy_external_ids_taxon_idx" ON "public"."taxonomy_v2_legacy_external_ids" USING "btree" ("release_id", "sporely_taxon_id");
+
+
+
+CREATE INDEX "taxonomy_v2_redlist_taxon_area_idx" ON "public"."taxonomy_v2_redlist" USING "btree" ("release_id", "sporely_taxon_id", "assessment_area");
+
+
+
+CREATE UNIQUE INDEX "taxonomy_v2_releases_one_active_idx" ON "public"."taxonomy_v2_releases" USING "btree" ("status") WHERE ("status" = 'active'::"text");
+
+
+
+CREATE INDEX "taxonomy_v2_scientific_names_prefix_idx" ON "public"."taxonomy_v2_scientific_names" USING "btree" ("release_id", "lower"("scientific_name") "text_pattern_ops");
+
+
+
+CREATE INDEX "taxonomy_v2_scientific_names_taxon_idx" ON "public"."taxonomy_v2_scientific_names" USING "btree" ("release_id", "sporely_taxon_id");
+
+
+
+CREATE INDEX "taxonomy_v2_taxa_canonical_name_prefix_idx" ON "public"."taxonomy_v2_taxa" USING "btree" ("release_id", "lower"("canonical_scientific_name") "text_pattern_ops");
+
+
+
+CREATE INDEX "taxonomy_v2_taxa_canonical_source_idx" ON "public"."taxonomy_v2_taxa" USING "btree" ("release_id", "canonical_source_system");
+
+
+
+CREATE INDEX "taxonomy_v2_taxa_parent_idx" ON "public"."taxonomy_v2_taxa" USING "btree" ("release_id", "parent_sporely_taxon_id");
+
+
+
+CREATE INDEX "taxonomy_v2_taxa_rank_idx" ON "public"."taxonomy_v2_taxa" USING "btree" ("release_id", "taxon_rank");
+
+
+
+CREATE INDEX "taxonomy_v2_vernacular_names_language_prefix_idx" ON "public"."taxonomy_v2_vernacular_names" USING "btree" ("release_id", "language_code", "lower"("vernacular_name") "text_pattern_ops");
+
+
+
+CREATE INDEX "taxonomy_v2_vernacular_names_taxon_language_idx" ON "public"."taxonomy_v2_vernacular_names" USING "btree" ("release_id", "sporely_taxon_id", "language_code");
+
+
+
 CREATE OR REPLACE TRIGGER "enforce_non_public_observation_limit_trigger" BEFORE INSERT OR UPDATE OF "user_id", "visibility", "location_precision", "is_draft" ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_non_public_observation_limit"();
 
 
@@ -5549,6 +6381,11 @@ CREATE OR REPLACE TRIGGER "trg_spore_measurements_touch_observation_updated_at" 
 
 ALTER TABLE ONLY "public"."calibrations"
     ADD CONSTRAINT "calibrations_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."client_activity_daily"
+    ADD CONSTRAINT "client_activity_daily_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -5712,6 +6549,51 @@ ALTER TABLE ONLY "public"."taxa_vernacular"
 
 
 
+ALTER TABLE ONLY "public"."taxonomy_v2_concepts"
+    ADD CONSTRAINT "taxonomy_v2_concepts_first_seen_release_id_fkey" FOREIGN KEY ("first_seen_release_id") REFERENCES "public"."taxonomy_v2_releases"("release_id");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_external_ids"
+    ADD CONSTRAINT "taxonomy_v2_external_ids_release_id_sporely_taxon_id_fkey" FOREIGN KEY ("release_id", "sporely_taxon_id") REFERENCES "public"."taxonomy_v2_taxa"("release_id", "sporely_taxon_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_import_runs"
+    ADD CONSTRAINT "taxonomy_v2_import_runs_release_id_fkey" FOREIGN KEY ("release_id") REFERENCES "public"."taxonomy_v2_releases"("release_id");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_legacy_external_ids"
+    ADD CONSTRAINT "taxonomy_v2_legacy_external_id_release_id_sporely_taxon_id_fkey" FOREIGN KEY ("release_id", "sporely_taxon_id") REFERENCES "public"."taxonomy_v2_taxa"("release_id", "sporely_taxon_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_redlist"
+    ADD CONSTRAINT "taxonomy_v2_redlist_release_id_sporely_taxon_id_fkey" FOREIGN KEY ("release_id", "sporely_taxon_id") REFERENCES "public"."taxonomy_v2_taxa"("release_id", "sporely_taxon_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_scientific_names"
+    ADD CONSTRAINT "taxonomy_v2_scientific_names_release_id_sporely_taxon_id_fkey" FOREIGN KEY ("release_id", "sporely_taxon_id") REFERENCES "public"."taxonomy_v2_taxa"("release_id", "sporely_taxon_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_taxa"
+    ADD CONSTRAINT "taxonomy_v2_taxa_release_id_fkey" FOREIGN KEY ("release_id") REFERENCES "public"."taxonomy_v2_releases"("release_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_taxa"
+    ADD CONSTRAINT "taxonomy_v2_taxa_sporely_taxon_id_fkey" FOREIGN KEY ("sporely_taxon_id") REFERENCES "public"."taxonomy_v2_concepts"("sporely_taxon_id");
+
+
+
+ALTER TABLE ONLY "public"."taxonomy_v2_vernacular_names"
+    ADD CONSTRAINT "taxonomy_v2_vernacular_names_release_id_sporely_taxon_id_fkey" FOREIGN KEY ("release_id", "sporely_taxon_id") REFERENCES "public"."taxonomy_v2_taxa"("release_id", "sporely_taxon_id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."user_blocks"
     ADD CONSTRAINT "user_blocks_blocked_id_fkey" FOREIGN KEY ("blocked_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
@@ -5851,6 +6733,13 @@ ALTER TABLE "public"."calibrations" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "calibrations: owner full" ON "public"."calibrations" USING (("auth"."uid"() = "user_id")) WITH CHECK (("auth"."uid"() = "user_id"));
+
+
+
+ALTER TABLE "public"."client_activity_daily" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "client_activity_daily_owner_select" ON "public"."client_activity_daily" FOR SELECT USING (("auth"."uid"() = "user_id"));
 
 
 
@@ -6102,6 +6991,33 @@ CREATE POLICY "taxa read" ON "public"."taxa" FOR SELECT TO "authenticated" USING
 ALTER TABLE "public"."taxa_vernacular" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."taxonomy_v2_concepts" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."taxonomy_v2_external_ids" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."taxonomy_v2_import_runs" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."taxonomy_v2_legacy_external_ids" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."taxonomy_v2_redlist" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."taxonomy_v2_releases" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."taxonomy_v2_scientific_names" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."taxonomy_v2_taxa" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."taxonomy_v2_vernacular_names" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."user_blocks" ENABLE ROW LEVEL SECURITY;
 
 
@@ -6113,6 +7029,12 @@ GRANT USAGE ON SCHEMA "public" TO "postgres";
 GRANT USAGE ON SCHEMA "public" TO "anon";
 GRANT USAGE ON SCHEMA "public" TO "authenticated";
 GRANT USAGE ON SCHEMA "public" TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."admin_client_activity_summary"("p_days" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."admin_client_activity_summary"("p_days" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."admin_client_activity_summary"("p_days" integer) TO "service_role";
 
 
 
@@ -6294,6 +7216,19 @@ GRANT ALL ON FUNCTION "public"."public_normalized_specimen_condition"("value" "t
 
 
 
+REVOKE ALL ON FUNCTION "public"."record_client_activity"("p_client" "text", "p_app_version" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."record_client_activity"("p_client" "text", "p_app_version" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."record_client_activity"("p_client" "text", "p_app_version" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer) TO "service_role";
@@ -6339,9 +7274,31 @@ GRANT ALL ON FUNCTION "public"."search_taxa"("q" "text", "lang" "text", "lim" in
 
 
 
+REVOKE ALL ON FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim" integer) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "anon";
 GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."taxonomy_v2_activate_release"("p_release_id" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."taxonomy_v2_activate_release"("p_release_id" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."taxonomy_v2_jsonb_nonnegative_integer_counts"("p_value" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."taxonomy_v2_jsonb_nonnegative_integer_counts"("p_value" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."taxonomy_v2_validate_release"("p_release_id" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."taxonomy_v2_validate_release"("p_release_id" "text") TO "service_role";
 
 
 
@@ -6374,6 +7331,11 @@ GRANT ALL ON TABLE "public"."calibrations" TO "service_role";
 GRANT ALL ON SEQUENCE "public"."calibrations_id_seq" TO "anon";
 GRANT ALL ON SEQUENCE "public"."calibrations_id_seq" TO "authenticated";
 GRANT ALL ON SEQUENCE "public"."calibrations_id_seq" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."client_activity_daily" TO "service_role";
+GRANT SELECT ON TABLE "public"."client_activity_daily" TO "authenticated";
 
 
 
@@ -6594,6 +7556,46 @@ GRANT ALL ON TABLE "public"."taxa_vernacular" TO "service_role";
 GRANT ALL ON SEQUENCE "public"."taxa_vernacular_id_seq" TO "anon";
 GRANT ALL ON SEQUENCE "public"."taxa_vernacular_id_seq" TO "authenticated";
 GRANT ALL ON SEQUENCE "public"."taxa_vernacular_id_seq" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."taxonomy_v2_concepts" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."taxonomy_v2_external_ids" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."taxonomy_v2_import_runs" TO "service_role";
+
+
+
+GRANT ALL ON SEQUENCE "public"."taxonomy_v2_import_runs_id_seq" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."taxonomy_v2_legacy_external_ids" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."taxonomy_v2_redlist" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."taxonomy_v2_releases" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."taxonomy_v2_scientific_names" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."taxonomy_v2_taxa" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."taxonomy_v2_vernacular_names" TO "service_role";
 
 
 
