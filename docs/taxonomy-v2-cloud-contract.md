@@ -358,3 +358,29 @@ required before the manifest reflects real observations.
 W3 readiness verdict: **`legacy-source recovery required`.** No production
 taxonomy write, migration, activation, client cutover, observation
 backfill, or W3 work is authorised by this result.
+
+## W2D-R integration proof and source-recovery status
+
+Stage W2D-R closes the PostgreSQL validation gap flagged by W2D. All 11
+disposable-Supabase integration tests in
+`scripts/taxonomy-v2/w2d-migration-simulation.test.mjs` now execute and
+pass against a local OrbStack-hosted Supabase stack (21/21 total, 0
+skipped). Evidence:
+`docs/evidence/taxonomy-v2/w2dr-postgres-integration.{json,md}`.
+
+Idempotency, rollback, snapshot immutability, later-exact-resolution
+snapshot preservation, namespace isolation, conflicting-evidence
+handling, and out-of-cache materialization are all verified against
+real PostgreSQL rows.
+
+Real historical reconciliation remains **not performed**. No authorized
+anonymized snapshot has been supplied; source-recovery tooling lives in
+the desktop repo under
+`sporely-py/database/taxonomy/reconciliation/snapshot/` with the
+operator runbook at
+`sporely-py/database/taxonomy/docs/w2d-source-recovery-runbook.md`.
+
+Remaining blocker: **human-authorized read-only export required.** No
+production Supabase access, no production migration, no production
+observation writes, and no client cutover have been performed or
+authorized by this result.
