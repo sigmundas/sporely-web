@@ -2,19 +2,24 @@
 
 ## Status and boundary
 
-This document describes the additive W2A implementation in migration
+This document records the additive W2A experiment in migration
 `20260724130000_add_taxonomy_v2_schema_and_search.sql`. The legacy
 `public.taxa`, `public.taxa_vernacular`, and `public.search_taxa(text,text,integer)`
 path remains active. No client uses taxonomy v2 yet, and no complete W1 release
 or production release is loaded or activated in W2A.
 
-W2A adds the schema, fixture-tested validation/activation, prefix search, and
-authoritative resolver. W2B owns the importer, complete local load, storage and
-performance measurements, and capacity decision. W3 owns observation identity
-and sync/backfill. W4 owns the web picker and Artsorakel integration. Client
+W2A added the schema, fixture-tested validation/activation, prefix search, and
+authoritative resolver. W2B proved the importer and complete local load, but
+also proved that the complete global-Fungi production scope is inappropriate.
+W2C is redefined as global macrofungi scope plus sparse-registry design. W3
+owns observation identity and sync/backfill. W4 owns the web picker and
+Artsorakel integration. Client
 cutover and legacy removal remain W5 work.
 
-## Model B decomposition
+## Historical W2A Model B decomposition
+
+Model B describes what W2A and W2B tested. It is not the selected production
+architecture and must not be deployed merely because its importer is valid.
 
 `taxonomy_v2_concepts` stores only stable positive `sporely_taxon_id` identity,
 its first-seen release, and creation time. All mutable taxonomy content is
@@ -166,9 +171,9 @@ execution revoked from `PUBLIC`. Search and resolver are granted to `anon`,
 `authenticated`, and `service_role`. Validation and activation are service-role
 only. Database-owner operations remain available.
 
-## W2B capacity and publication gates
+## W2B verdict and approved cloud direction
 
-W2B must import the complete accepted W1 artifact locally, then record
+W2B imported the complete accepted W1 artifact locally and recorded
 `pg_relation_size`, `pg_indexes_size`, and `pg_total_relation_size` for every new
 taxonomy table and index. It must calculate:
 
@@ -183,12 +188,33 @@ explicit capacity decision if projected total is at least 350 MiB, or if
 headroom below a 500 MiB limit is under 150 MiB. JSONL byte size is not a valid
 database-size estimate.
 
-The pinned candidate `tax-2026.07.30-02` is not activated in production.
-Production activation remains blocked by W2B capacity validation and the
-programme publication/provenance gate, including unresolved Red List licence
-evidence. Import automation, production-readiness policy enforcement, full-load
-performance, retired-release retention beyond the one-active invariant, client
-integration, and legacy retirement are known deferred concerns.
+The pinned `tax-2026.07.30-02` artifact is historical broad-scope evidence, not
+a production candidate. Its complete-Fungi scope and the W2A table model are
+rejected for production. The importer remains valid as an importer experiment.
+No production taxonomy write or activation is authorized, and W3 remains
+blocked.
+
+The approved direction is external discovery plus a sparse internal Sporely
+taxon registry, observation identification snapshots, and an optional compact
+global macrofungi search cache. Catalogue of Life XR remains the complete pinned
+identity/reconciliation backbone and may remain an immutable build artifact.
+Supabase must not store the complete global fungal catalogue. The desktop may
+distribute a substantially broader offline reference, but it must be a reviewed
+macrofungi subset rather than the entire Fungi kingdom. Plants are outside
+taxonomy-v2 and the macrofungi search pack.
+
+Supabase materializes a concept only when used by an observation, selected via
+an external service, received through desktop sync, accepted through a manual
+resolution, explicitly curated, or placed in an approved small cache. The row
+retains a Sporely ID, canonical snapshot, namespaced mappings, selected-name
+snapshots, provenance, scope reason, and review state. Scientific-name equality
+never establishes identity.
+
+iNaturalist may support international discovery and Artsorakel image
+identification. NorTaxa supplies Norwegian mappings/names, Artsorakel
+reconciliation, and legacy continuity. National Red Lists supply regional
+conservation enrichment only. These sources never replace COL or filter the
+global macrofungi scope.
 
 ## W2B importer and runbook
 
@@ -232,8 +258,17 @@ inspection. There is no force/delete option. After a failed import, inspect the
 sanitized audit row; the main transaction leaves no partial release data. Reset
 the disposable local stack or resolve the incomplete release deliberately.
 
-The complete W2B measurement found 754,417,664 bytes of taxonomy-v2 relations.
+The complete W2B measurement found 634,894 concepts, 662,649 scientific-name
+rows, and 754,417,664 bytes (about 719.47 MiB) of taxonomy-v2 relations.
 Combined additively with the 103,304,339-byte production baseline, the projected
 total is 857,722,003 bytes. Capacity is therefore `review_required_capacity`.
 Selective search also remained around 0.65–0.71 seconds; representation/index
-design needs an explicit review. These findings block W3 and production load.
+design needs an explicit review. These findings reject the full global-Fungi
+production scope, redefine W2C as macrofungi-scope and sparse-registry design,
+and block W3 and production load.
+
+Future observation identification must snapshot the resolved Sporely ID when
+available, selected scientific/vernacular names and rank, source system and
+namespace, raw external ID, source release or response time, selection time,
+resolution state, and original selected result. Historical display must not
+depend on an external API or cache entry remaining available.

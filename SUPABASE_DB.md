@@ -85,10 +85,10 @@ This repository owns the W2–W5 cloud and web implementation described there.
 - `search_taxa` (RPC)
   - Deployed and used by the web app for autocomplete/search
 
-#### Additive taxonomy v2 (W2A; not yet used by clients)
+#### Taxonomy v2 experiments and approved sparse direction (not used by clients)
 
-Migration `20260724130000_add_taxonomy_v2_schema_and_search.sql` adds Model B
-stable concepts plus release-scoped snapshots:
+Migration `20260724130000_add_taxonomy_v2_schema_and_search.sql` added the W2A
+Model B experiment: stable concepts plus release-scoped snapshots:
 
 - `taxonomy_v2_releases`
 - `taxonomy_v2_concepts`
@@ -107,17 +107,32 @@ direct table access; normal clients can use only the additive
 are service-role operations. See `docs/taxonomy-v2-cloud-contract.md` for exact
 release, ranking, language, identifier, and grant behavior.
 
-The legacy taxonomy path remains active and unchanged. W2A uses small local
-fixtures only: the complete production release has not been loaded, no client
-source has switched to v2, and production activation remains blocked by W2B
-capacity validation plus the publication/provenance gate.
+The legacy taxonomy path remains active and unchanged. W2A used small local
+fixtures only: no complete release has been loaded in production, no client
+source has switched to v2, and production activation remains blocked.
 
 W2B importer tooling is in `scripts/taxonomy-v2/`, with evidence in
 `docs/evidence/taxonomy-v2/`. The complete candidate was loaded and activated
-only in disposable local Supabase for validation. No production taxonomy write
-or activation occurred. Measured taxonomy-v2 relations total 754,417,664 bytes;
-the additive production projection is 857,722,003 bytes, so capacity review is
-required before any W3 work or production load. The legacy path remains active.
+only in disposable local Supabase for validation. It successfully imported
+634,894 concepts and 662,649 scientific-name rows, but the resulting
+754,417,664-byte (about 719.47 MiB) taxonomy footprint rejects both the complete
+global-Fungi production scope and W2A Model B as the selected production
+architecture. The importer remains valid experimental tooling. No production
+taxonomy write or activation occurred, and W3 is not authorized.
+
+W2C is redefined as global macrofungi scope plus sparse-registry design. COL XR
+remains the complete pinned identity/reconciliation backbone, while production
+Supabase should use external discovery plus a sparse Sporely taxon registry,
+durable observation identification snapshots, and optionally a small approved
+search cache. Materialize concepts for actual observation use, external
+selection, desktop sync, accepted manual resolution, explicit curation, or an
+approved cache seed. Scientific-name equality is not identity.
+
+The desktop may carry a broader reviewed macrofungi pack for offline search,
+but neither cloud nor desktop should preload the entire Fungi kingdom. NorTaxa
+and national Red Lists enrich regional data and do not define global scope.
+Plants are not part of taxonomy-v2 or its search pack. The legacy path remains
+active.
 
 ### Community spore-data RPCs
 - Public contributor / measurement aggregates should be exposed through `SECURITY DEFINER` RPCs, not by granting blanket public `SELECT` on `spore_measurements`
