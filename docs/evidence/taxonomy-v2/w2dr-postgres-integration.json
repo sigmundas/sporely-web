@@ -1,0 +1,65 @@
+{
+  "evidence_version": "w2dr-1.0.0",
+  "starting_commit": "245462b8a0ddfeabfc320022351781578dca6701",
+  "feature_branch": "feat/taxonomy-v2-w2dr-integration-proof",
+  "local_environment": {
+    "supabase_cli_version": "2.98.2",
+    "docker_context": "orbstack",
+    "docker_client_version": "29.4.0",
+    "supabase_running_locally": true,
+    "target_scope": "127.0.0.1 local disposable stack only"
+  },
+  "input_manifest": {
+    "path": "../sporely-py/database/taxonomy/evidence/historical-reconciliation/reconciliation-manifest.json",
+    "semantic_sha256": "c4785a25c8690144abd64a75ff369292aaf139dc4030c2ce2ce3df413462d72c",
+    "record_source": "synthetic fixtures — not real observations"
+  },
+  "tests": {
+    "command_non_integration": "node --test scripts/taxonomy-v2/w2d-migration-simulation.test.mjs",
+    "command_integration": "W2D_INTEGRATION=1 node --test scripts/taxonomy-v2/w2d-migration-simulation.test.mjs",
+    "total": 21,
+    "passed": 21,
+    "failed": 0,
+    "skipped": 0,
+    "duration_ms": 5139,
+    "integration_pass": [
+      "applying the fixture manifest yields the expected aggregate counts",
+      "exact resolved observation materialises concept + mapping with scope_state preserved",
+      "legacy-mapped resolution preserves the chain in resolution_evidence",
+      "synonym-relationship fixture is intentionally skipped and lands as manual_unresolved",
+      "out-of-cache concept materialises with scope_state=required_ancestor",
+      "every unresolved state writes snapshot + resolution_link without registry_concept",
+      "conflicting exact evidence writes resolution_link=conflicting and creates no registry row for the ambiguous concept",
+      "later exact resolution preserves the original snapshot verbatim",
+      "idempotency — applying the fixture manifest twice yields identical row counts and snapshot fingerprint",
+      "rollback simulation leaves zero orphan rows",
+      "snapshot immutability trigger rejects direct UPDATE to original_*"
+    ]
+  },
+  "lifecycle_proofs": {
+    "idempotency": "verified — second apply of the fixture manifest produced identical row counts and snapshot fingerprint",
+    "rollback": "verified — induced-failure transaction left zero orphan rows across registry_concept, external_mapping, identification_snapshot, resolution_link",
+    "snapshot_immutability": "verified — SQL trigger rejects UPDATE to original_* columns while snapshot_locked=true",
+    "later_exact_resolution": "verified — unresolved-then-resolved sequence preserved original snapshot fields verbatim while updating resolution_link",
+    "namespace_isolation": "verified — same raw external id under distinct namespaces remains distinct (unique constraint on (source_system, namespace, external_id))",
+    "conflicting_evidence": "verified — conflicting exact signals produce resolution_link=conflicting with no registry_concept materialized",
+    "out_of_cache_materialisation": "verified — concept outside macrofungi cache materialises in registry with scope_state=required_ancestor preserved verbatim; cache is not broadened"
+  },
+  "real_data": {
+    "real_manifest_applied": false,
+    "reason": "no human-authorized anonymized snapshot supplied — historical audit remains blocked pending Phase B/C tooling execution by an authorized operator"
+  },
+  "production_safety": {
+    "production_supabase_accessed": false,
+    "production_writes": false,
+    "production_taxonomy_writes": false,
+    "production_observation_writes": false,
+    "production_migrations_created": false,
+    "production_migrations_applied": false,
+    "client_cutover": false,
+    "desktop_taxonomy_activated": false,
+    "legacy_taxonomy_removed": false,
+    "name_only_automatic_resolutions": false
+  },
+  "w3_readiness_verdict": "PostgreSQL proof complete; real audit blocked pending authorized snapshot"
+}
