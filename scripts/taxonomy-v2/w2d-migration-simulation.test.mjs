@@ -125,7 +125,10 @@ test('SQL schema is isolated, immutable-snapshot-enforcing, and never targets pu
   assert.match(sql, /raise exception 'identification_snapshot original_\* fields are immutable/);
   assert.match(sql, /apply_reconciliation_manifest/);
   assert.match(sql, /simulate_migration/);
-  assert.match(sql, /on conflict \(source_system, namespace, external_id\) do nothing/);
+  // W2E-A2: hardened conflict invariant. Same-target reapply is idempotent;
+  // a different target raises so the enclosing transaction rolls back.
+  assert.match(sql, /on conflict \(source_system, namespace, external_id\) do update/);
+  assert.match(sql, /W2E-A2 external_mapping conflict/);
   assert.doesNotMatch(sql, /create table public\./i);
   assert.doesNotMatch(sql, /alter table public\./i);
   assert.doesNotMatch(sql, /supabase_migrations/i);
@@ -386,4 +389,55 @@ test('integration: snapshot immutability trigger rejects direct UPDATE to origin
   );
   // Sanity check: benign UPDATE that changes no original_* is allowed.
   await query(target, `update ${SCHEMA}.identification_snapshot set snapshot_written_at=snapshot_written_at where observation_id='fixture-resolved-exact-01'`);
+});
+
+test('integration: W2E-A2 conflict invariant — reallocating an external_id to a different sporely_taxon_id rolls back with zero partial rows', { skip: !integration }, async () => {
+  const target = await discoverLocalTarget(REPO_ROOT);
+  await ensureFreshSchema(target);
+  const { manifest, semanticSha } = await loadReferenceManifest();
+  await applyManifest(target, manifest, semanticSha);
+  const beforeCounts = await counts(target);
+  const beforeFingerprint = await snapshotFingerprint(target);
+
+  // Pick one exact-resolved observation and rebuild a manifest fragment where
+  // its (source_system, namespace, external_id) tuple targets a DIFFERENT
+  // sporely_taxon_id. Apply must fail and roll back with zero new rows.
+  const record = manifest.records.find(r => r.reconciliation_state === 'resolved_exact' && (r.signals_all || []).some(s => s.kind === 'exact'));
+  assert.ok(record, 'expected at least one resolved_exact fixture');
+  const evilTarget = record.resolved_sporely_taxon_id + 999999;
+  const clashRecord = {
+    ...record,
+    observation_id: 'w2ea2-conflict-probe',
+    resolved_sporely_taxon_id: evilTarget,
+    resolved_canonical_name: 'W2E-A2 conflict probe',
+    resolved_rank: 'species',
+    resolved_scope_state: 'not_evaluated',
+    resolved_cache_state: 'out_of_cache',
+    resolution_method: 'trusted_secondary_provider_mapping',
+    resolution_evidence: [{ level: 4, method: 'trusted_secondary_provider_mapping', action: 'lookup_canonical_registry', note: 'W2E-A2 conflict probe' }],
+  };
+  const clashManifest = {
+    ...manifest,
+    aggregate_counts: { ...manifest.aggregate_counts },
+    record_count: 1,
+    records: [clashRecord],
+  };
+  const clashSemanticSha = 'w2ea2-conflict-probe-sha';
+
+  // simulate_migration catches the exception and returns {ok:false, error, sqlstate}
+  // instead of rejecting; the rollback happens inside the wrapper's subtransaction.
+  const clashResult = await simulateManifest(target, clashManifest, clashSemanticSha);
+  assert.equal(clashResult.ok, false, 'conflicting apply must not report ok=true');
+  assert.match(clashResult.error, /W2E-A2 external_mapping conflict/, 'error must identify the W2E-A2 conflict invariant');
+
+  const afterCounts = await counts(target);
+  const afterFingerprint = await snapshotFingerprint(target);
+  assert.deepEqual(afterCounts, beforeCounts, 'row counts must be unchanged after a conflicting apply');
+  assert.equal(afterFingerprint, beforeFingerprint, 'snapshot fingerprint must be unchanged after a conflicting apply');
+
+  // Positive control: applying the same manifest AGAIN (same target, idempotent)
+  // must remain a no-op — proves ON CONFLICT allows the equal-target case.
+  const summary = await applyManifest(target, manifest, semanticSha);
+  const afterIdemCounts = await counts(target);
+  assert.deepEqual(afterIdemCounts, beforeCounts, 'idempotent reapply must not change row counts');
 });

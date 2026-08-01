@@ -137,6 +137,7 @@ declare
   v_release_id text := p_manifest->>'taxonomy_release_id';
   v_resolved integer;
   v_records_applied integer := 0;
+  v_row_count integer;
   v_reg_before integer;
   v_map_before integer;
   v_snap_before integer;
@@ -208,6 +209,11 @@ begin
            and coalesce(nullif(trim(e.value->>'namespace'), ''), '') <> ''
            and coalesce(nullif(trim(e.value->>'external_id'), ''), '') <> ''
       loop
+        -- Contract §5 hardened conflict invariant: (source_system, namespace,
+        -- external_id) resolves to exactly one sporely_taxon_id. Idempotent
+        -- reapply with the same target is a no-op; a DIFFERENT target must
+        -- raise so the enclosing simulate_migration transaction rolls back
+        -- with zero partial changes.
         insert into external_mapping (
           source_system, namespace, external_id, sporely_taxon_id, release_id
         ) values (
@@ -216,7 +222,18 @@ begin
           v_signal->>'external_id',
           v_resolved,
           v_release_id
-        ) on conflict (source_system, namespace, external_id) do nothing;
+        ) on conflict (source_system, namespace, external_id) do update
+          set sporely_taxon_id = external_mapping.sporely_taxon_id
+          where external_mapping.sporely_taxon_id = excluded.sporely_taxon_id;
+        get diagnostics v_row_count = row_count;
+        if v_row_count = 0 then
+          raise exception 'W2E-A2 external_mapping conflict: (%s, %s, %s) already anchored to a different sporely_taxon_id (attempted %s)',
+            v_signal->>'source_system',
+            v_signal->>'namespace',
+            v_signal->>'external_id',
+            v_resolved
+            using errcode = 'unique_violation';
+        end if;
       end loop;
     end if;
 
