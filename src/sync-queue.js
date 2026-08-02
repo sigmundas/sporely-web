@@ -11,6 +11,7 @@ import { normalizeObservationVisibility, toCloudVisibility } from './visibility.
 import { debugImagePipeline } from './image-pipeline-debug.js'
 import { isBlob } from './observation-shapes.js'
 import { normalizeObservationGeography } from './observation-geography.js'
+import { persistObservationTaxonomySelection, takeQueuedTaxonomySelection } from './taxonomy-v2.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -761,6 +762,7 @@ async function _runSyncQueue() {
       const queuedImages = _normalizeQueuedImages(item.imageEntries || item.imageBlobs)
       const queueKey = String(item?.queueKey || '').trim() || _queueKeyForUser(queueUserId)
       const observationPayload = item?.obsPayload || {}
+      const { databasePayload: queuedDatabasePayload, selection: queuedTaxonomySelection } = takeQueuedTaxonomySelection(observationPayload)
       const queuedAiIdentificationRuns = Array.isArray(observationPayload.aiIdentificationRuns)
         ? observationPayload.aiIdentificationRuns
         : []
@@ -865,7 +867,7 @@ async function _runSyncQueue() {
         updateUploadForegroundService('Saving observation…')
 
         repairedPayload = {
-          ...observationPayload,
+          ...queuedDatabasePayload,
           user_id: authUserId,
           visibility: toCloudVisibility(observationPayload.visibility, 'public'),
           ...normalizeObservationGeography(observationPayload),
@@ -920,9 +922,17 @@ async function _runSyncQueue() {
           obsPayload: {
             ...(repairedPayload || current.obsPayload || {}),
             aiIdentificationRuns: queuedAiIdentificationRuns,
+            ...(queuedTaxonomySelection ? { taxonomySelection: queuedTaxonomySelection } : {}),
           },
         }))
         if (!updatedItem) continue
+      }
+
+      if (queuedTaxonomySelection) {
+        await _setQueueSyncStatus(item.id, 'saving-taxonomy-identity', {
+          syncImageCount: queuedImages.length,
+        })
+        await persistObservationTaxonomySelection(obsId, queuedTaxonomySelection)
       }
 
       // 2. Reconcile against remote state so a stale local queue can heal itself.

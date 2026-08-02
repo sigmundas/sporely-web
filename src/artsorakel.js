@@ -2,7 +2,7 @@
  * Artsorakel — species identification + taxon search
  *
  * AI:     POST image → https://ai.artsdatabanken.no (direct, no proxy needed if CORS open)
- * Search: Supabase RPC search_taxa (prefix match on vernacular + scientific names)
+ * Search: active global taxonomy-v2 through the explicit client adapter.
  */
 
 import { supabase } from './supabase.js'
@@ -15,6 +15,7 @@ import {
   getArtsorakelMaxEdge,
   ID_SERVICE_ARTSORAKEL,
 } from './settings.js'
+import { searchTaxaV2 } from './taxonomy-v2.js'
 
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
 const SPORELY_APP_NAME = 'Sporely'
@@ -298,27 +299,7 @@ export function createManualTaxon(value) {
 // ── Taxon search (Supabase RPC) ───────────────────────────────────────────────
 
 export async function searchTaxa(q, lang = 'no') {
-  if (!q || q.trim().length < 2) return []
-  const { data, error } = await supabase.rpc('search_taxa', {
-    q:    q.trim(),
-    lang: normalizeLang(lang),
-    lim:  20,
-  })
-  if (error) { console.warn('Taxa search error:', error.message); return [] }
-  return (data || []).map(row => ({
-    taxonId:            row.taxon_id,
-    genus:              row.genus,
-    specificEpithet:    row.specific_epithet,
-    family:             row.family,
-    vernacularName:     row.vernacular_name || null,
-    scientificName:     row.canonical_scientific_name || `${row.genus} ${row.specific_epithet}`.trim(),
-    norwegianTaxonId:   row.norwegian_taxon_id  || null,
-    swedishTaxonId:     row.swedish_taxon_id    || null,
-    inaturalistTaxonId: row.inaturalist_taxon_id|| null,
-    artportalenTaxonId: row.artportalen_taxon_id|| null,
-    displayName:        formatDisplayName(row.genus, row.specific_epithet, row.vernacular_name),
-    matchType:          row.match_type,
-  }))
+  return searchTaxaV2(q, normalizeLang(lang))
 }
 
 // ── Artsdata AI ───────────────────────────────────────────────────────────────

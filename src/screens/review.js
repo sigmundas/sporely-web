@@ -34,6 +34,7 @@ import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-ac
 import { getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
+import { QUEUED_TAXONOMY_SELECTION_KEY, taxonomySelectionForTaxon } from '../taxonomy-v2.js'
 import { playIrisShutter } from '../iris-shutter.js'
 import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js'
 import { getLocationLookup } from '../location.js'
@@ -939,6 +940,7 @@ export function _buildReviewObservationPayload() {
     ? normalizeIdentifyService(reviewAiState.selectedService || selectedPrediction?.service || '')
     : null
 
+  const taxonomySelection = taxonomySelectionForTaxon(taxon)
   return createDefaultObservationPayload({
     user_id: state.user.id,
     date: _localDate(leadPhoto.ts || new Date()),
@@ -966,6 +968,7 @@ export function _buildReviewObservationPayload() {
       : null,
     ai_selected_at: selectedService ? new Date().toISOString() : null,
     aiIdentificationRuns,
+    ...(taxonomySelection ? { [QUEUED_TAXONOMY_SELECTION_KEY]: taxonomySelection } : {}),
     ..._reviewObservationGeography(),
   })
 }

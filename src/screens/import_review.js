@@ -15,6 +15,7 @@ import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } fr
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { normalizeObservationGeography } from '../observation-geography.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
+import { QUEUED_TAXONOMY_SELECTION_KEY, taxonomySelectionForTaxon } from '../taxonomy-v2.js';
 import { playIrisShutter } from '../iris-shutter.js';
 import { loadInaturalistSession } from '../inaturalist.js';
 import { NativeCamera as _DefaultNativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
@@ -558,6 +559,7 @@ function _buildImportObservationPayload(session, options = {}) {
     ts: normalized.ts || new Date(),
   }
   const taxon = normalized.taxon || {}
+  const taxonomySelection = taxonomySelectionForTaxon(taxon)
   const visibility = normalizeVisibility(normalized.visibility, getDefaultVisibility())
 
   const obsPayload = createDefaultObservationPayload({
@@ -585,6 +587,7 @@ function _buildImportObservationPayload(session, options = {}) {
       : null,
     ai_selected_at: selected.service ? new Date().toISOString() : null,
     aiIdentificationRuns,
+    ...(taxonomySelection ? { [QUEUED_TAXONOMY_SELECTION_KEY]: taxonomySelection } : {}),
     ..._sessionObservationGeography(normalized),
   })
 
@@ -2336,12 +2339,7 @@ function _wireCard(sid) {
             const display = formatDisplayName(r.genus, r.specificEpithet, r.vernacularName);
             const session = sessionById(sid);
             if (session) {
-              session.taxon = {
-                genus: r.genus || null,
-                specificEpithet: r.specificEpithet || null,
-                vernacularName: r.vernacularName || null,
-                displayName: display,
-              };
+              session.taxon = { ...r, displayName: display };
               _clearSessionAiSelection(session);
               _persistSessions();
             }

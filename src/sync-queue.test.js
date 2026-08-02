@@ -170,3 +170,15 @@ test('sync queue repair path preserves resolved geography on observation inserts
 
   assert.match(source, /\.\.\.normalizeObservationGeography\(observationPayload\)/)
 })
+
+test('sync queue keeps old records compatible and persists new taxonomy identity after insert', () => {
+  const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
+  const extractIndex = source.indexOf('takeQueuedTaxonomySelection(observationPayload)')
+  const insertIndex = source.indexOf("supabase.from('observations').insert(repairedPayload)")
+  const persistIndex = source.indexOf('persistObservationTaxonomySelection(obsId, queuedTaxonomySelection)')
+
+  assert.ok(extractIndex > 0)
+  assert.ok(insertIndex > extractIndex)
+  assert.ok(persistIndex > insertIndex)
+  assert.match(source, /if \(queuedTaxonomySelection\) \{/)
+})

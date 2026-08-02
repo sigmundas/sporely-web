@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { discoverLocalTarget, query, spawnSession } from './lib/docker-psql.mjs';
+import { discoverLocalTarget, query, queryStdin, spawnSession } from './lib/docker-psql.mjs';
 import { prepareProductionReleaseImport } from './prepare-production-release-import.mjs';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
@@ -92,6 +92,32 @@ test('integration: generated full release payload imports, validates, activates,
     assert.equal(await query(target, "select count(*) from public.search_taxa_v2('Ustilago maydis','no',20) where match_type like 'scientific_alias_%'"), '1');
     assert.equal(await query(target, "select json_build_object('taxa',(select count(*) from public.taxa),'vernacular',(select count(*) from public.taxa_vernacular),'search',pg_get_functiondef('public.search_taxa(text,text,integer)'::regprocedure))::text"), legacyBefore);
     assert.equal(await query(target, "select json_build_object('taxonomy_v3',(select count(*) from taxonomy_v3.registry_concept)+(select count(*) from taxonomy_v3.external_mapping)+(select count(*) from taxonomy_v3.identification_snapshot)+(select count(*) from taxonomy_v3.resolution_link),'observations',(select count(*) from public.observations))::text"), protectedBefore);
+
+    const owner = '00000000-0000-0000-0000-000000000041';
+    const other = '00000000-0000-0000-0000-000000000042';
+    const historicalBefore = await query(target, "select json_build_object('rows',count(*),'resolved',count(*) filter (where resolved_sporely_taxon_id is not null),'nulls',count(*) filter (where resolved_sporely_taxon_id is null))::text from taxonomy_v3.resolution_link");
+    await queryStdin(target, `
+      insert into auth.users (id, aud, role, instance_id, email) values
+        ('${owner}', 'authenticated', 'authenticated', '00000000-0000-0000-0000-000000000000', 'taxonomy-owner@example.local'),
+        ('${other}', 'authenticated', 'authenticated', '00000000-0000-0000-0000-000000000000', 'taxonomy-other@example.local')
+        on conflict (id) do nothing;
+      insert into public.profiles (id) values ('${owner}'), ('${other}') on conflict (id) do nothing;
+      insert into public.observations (id, user_id, date, genus, species, common_name, visibility, is_draft)
+        overriding system value values
+        (901041, '${owner}', '2026-08-02', 'Crystallocystidium', 'albescens', null, 'private', false),
+        (901042, '${owner}', '2026-08-02', 'LegacyGenus', 'legacy-species', 'Legacy name', 'private', false)
+        on conflict (id) do update set user_id=excluded.user_id;
+    `);
+    await queryStdin(target, `begin; set local role authenticated; select set_config('request.jwt.claim.sub','${owner}',true); select public.set_observation_selected_taxon_v2(901041,167); commit;`);
+    assert.equal(await query(target, 'select selected_sporely_taxon_id from public.observations where id=901041'), '167');
+    assert.equal(await query(target, "select count(*) from public.observations where id=901041 and artsdata_id is null and artportalen_id is null and inaturalist_id is null and mushroomobserver_id is null and desktop_id is null and genus='Crystallocystidium' and species='albescens'"), '1');
+    assert.equal(await query(target, 'select selected_sporely_taxon_id is null from public.observations where id=901042'), 't');
+    await assert.rejects(queryStdin(target, `begin; set local role authenticated; select set_config('request.jwt.claim.sub','${other}',true); select public.set_observation_selected_taxon_v2(901041,167); commit;`), /does not own/);
+    await assert.rejects(queryStdin(target, `begin; set local role authenticated; select set_config('request.jwt.claim.sub','${owner}',true); select public.set_observation_selected_taxon_v2(901041,999999999); commit;`), /missing from the active taxonomy-v2 release/);
+    await assert.rejects(queryStdin(target, `begin; set local role authenticated; select set_config('request.jwt.claim.sub','${owner}',true); update public.observations set selected_sporely_taxon_id=168 where id=901041; commit;`), /must be changed through set_observation_selected_taxon_v2/);
+    await queryStdin(target, `begin; set local role authenticated; select set_config('request.jwt.claim.sub','${owner}',true); select public.set_observation_selected_taxon_v2(901041,null); commit;`);
+    assert.equal(await query(target, 'select selected_sporely_taxon_id is null from public.observations where id=901041'), 't');
+    assert.equal(await query(target, "select json_build_object('rows',count(*),'resolved',count(*) filter (where resolved_sporely_taxon_id is not null),'nulls',count(*) filter (where resolved_sporely_taxon_id is null))::text from taxonomy_v3.resolution_link"), historicalBefore);
 
     await assert.rejects(applyFile(target, output), /identical completed release already installed; safe replay stopped/);
     await query(target, `update public.taxonomy_v2_releases set whole_export_sha256='${'f'.repeat(64)}' where release_id='${RELEASE_ID}'`);

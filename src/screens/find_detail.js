@@ -46,6 +46,7 @@ import { setCaptureCompleteHandler } from './capture.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
 import { prepareImageBlobForUpload } from '../image_crop.js'
 import { isBlob } from '../observation-shapes.js'
+import { persistObservationTaxonomySelection, taxonomySelectionForTaxon } from '../taxonomy-v2.js'
 
 let currentObs    = null
 let selectedTaxon = null
@@ -3317,6 +3318,17 @@ async function _save() {
   if (error) {
     showToast(t('detail.saveFailed', { message: error.message }))
     return
+  }
+
+  const identificationChanged = Boolean(selectedTaxon) || taxonInputValue !== currentDisplayName
+  if (identificationChanged) {
+    try {
+      await persistObservationTaxonomySelection(currentObs.id, taxonomySelectionForTaxon(selectedTaxon))
+    } catch (identityError) {
+      btn.disabled = false
+      showToast(t('detail.saveFailed', { message: identityError?.message || String(identityError) }))
+      return
+    }
   }
 
   if (detailImageCropDirty) {
