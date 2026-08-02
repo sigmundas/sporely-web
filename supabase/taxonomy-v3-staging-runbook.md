@@ -1,7 +1,8 @@
 # Taxonomy-v3 additive migration staging runbook
 
-This runbook is for a human-authorised staging window. It does not authorise
-production access. Keep the deployment manifest, observation export, approved
+This runbook covers local rehearsal and preparation for a separately
+human-authorised installation window. It does not authorise production access.
+Keep the deployment manifest, observation export, approved
 drift file, raw export, pseudonym key, database passwords, and service-role
 credentials outside Git.
 
@@ -90,3 +91,40 @@ authorised maintenance transaction; clients continue using legacy fields.
 Dropping the schema or column is a last-resort, separately reviewed rollback,
 not an automatic migration down-step. After a future client cutover, coordinate
 client fallback before changing canonical links.
+
+## Final production payload preparation
+
+The additive migrations may be installed while all taxonomy-v3 tables remain
+empty and every `public.observations.resolved_sporely_taxon_id` remains NULL.
+Prepare the final data transaction locally; the generator never opens a
+database or network connection:
+
+```bash
+node scripts/taxonomy-v3/prepare-production-install.mjs \
+  --base-release ../sporely-py/database/reference_data/generated/taxonomy_v2/global_macrofungi_tax-2026.08.01-01 \
+  --supplement /tmp/w2ea2v2-supp-a \
+  --supplement /tmp/w2ebv2-supp-a \
+  --reconciliation /tmp/w3b-final/reconciliation-manifest.json \
+  --deployment-manifest /tmp/w3b-deployment/deployment-manifest-drift-checked.jsonl \
+  --approved-drift /tmp/w3b-deployment/approved-drift.json \
+  --current-observations /tmp/w3b-deployment/current-observations.csv \
+  --output /tmp/w3b-deployment/production-install.sql
+```
+
+The command refuses hash, release-order, bridge, duplicate-ID, drift, approval,
+or count mismatches. It refuses output under the repository and creates the SQL
+with mode `0600` without overwriting an existing file. The private output
+contains real observation IDs and must never be committed, pasted into review,
+or copied to a shared location.
+
+The generated transaction performs its own database-side preflight, snapshots
+all 12 legacy taxonomy fields, installs the release chain, verifies the frozen
+counts, links exactly 311 observations, compares the legacy fingerprints, and
+commits only if every assertion succeeds. Verify the printed output SHA-256
+through the operator's independent handoff before execution.
+
+The generator prints the exact containerised `psql` command. Its example uses
+`/path/to/private/production-db.env`; the human operator must create that
+untracked file with `DATABASE_URL`, independently verify project ref
+`zkpjklzfwzefhjluvhfw`, and execute only during the authorised window. Codex
+must not execute that command.
