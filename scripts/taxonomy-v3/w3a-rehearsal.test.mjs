@@ -56,9 +56,12 @@ test('schema SQL is fully isolated in taxonomy_v3 and enables RLS on every table
   // Release-installation carries the hash guard.
   assert.match(sql, /release-ID reuse:/);
   // The schema NEVER touches public.observations as DDL (integration lives
-  // in a separate draft file). Comment mentions are allowed.
+  // in a separate draft file). W3-A2 adds a resolution_link RLS policy that
+  // JOINS to public.observations for owner-scoped visibility; that is a
+  // read-only join, not DDL, and is expressly allowed.
   const sqlNoComments = sql.replace(/--[^\n]*\n/g, '');
-  assert.doesNotMatch(sqlNoComments, /public\.observations/);
+  assert.doesNotMatch(sqlNoComments, /(alter|create|drop)\s+table\s+public\.observations/i);
+  assert.doesNotMatch(sqlNoComments, /truncate\s+public\.observations/i);
 });
 
 test('observations integration draft is additive and service-role guarded', async () => {
@@ -178,11 +181,27 @@ test('integration: later exact resolution can update resolution_link without mod
   const snapBefore = (await query(target, `select row_to_json(t)::text from taxonomy_v3.identification_snapshot t where observation_id = ${JSON.stringify(unresolvedId).replace(/"/g,"'")}`)).trim();
 
   const laterRecord = manifest.records.find(r => r.observation_id === unresolvedId);
+  // W3-A2 hardening: registry_concept ON CONFLICT enforces identity match.
+  // Pull the existing anchor's canonical name / rank / scope / cache state
+  // for 630103 so the later record does not present a conflicting identity.
+  const anchor = JSON.parse((await query(target, `select row_to_json(t) from (select canonical_name, rank, scope_state, cache_state from taxonomy_v3.registry_concept where sporely_taxon_id = 630103) t`)).trim());
   const laterManifest = {
     semantic_sha256: `later-${manifestSha}`,
     record_count: 1,
-    aggregate_counts: null,
-    records: [{ ...laterRecord, reconciliation_state: 'resolved_exact', resolved_sporely_taxon_id: 630103, resolution_method: 'trusted_secondary_provider_mapping', resolution_evidence: [{level:4, note:'later exact resolution rehearsal'}], resolution_release: 'tax-2026.08.03-02' }],
+    aggregate_counts: { resolved_exact: 1 },
+    records: [{
+      ...laterRecord,
+      reconciliation_state: 'resolved_exact',
+      resolved_sporely_taxon_id: 630103,
+      resolved_canonical_name: anchor.canonical_name,
+      resolved_rank: anchor.rank,
+      resolved_scope_state: anchor.scope_state,
+      resolved_cache_state: anchor.cache_state,
+      resolution_method: 'trusted_secondary_provider_mapping',
+      resolution_evidence: [{level:4, note:'later exact resolution rehearsal'}],
+      resolution_release: 'tax-2026.08.03-02',
+      signals_all: laterRecord.signals_all || [],
+    }],
   };
   await installChain(target, base, [], laterManifest);
   const snapAfter = (await query(target, `select row_to_json(t)::text from taxonomy_v3.identification_snapshot t where observation_id = ${JSON.stringify(unresolvedId).replace(/"/g,"'")}`)).trim();
@@ -259,6 +278,9 @@ test('integration: observations link — service_role can attach, unresolved obs
   }
   await query(target, `insert into taxonomy_v3.identification_snapshot (observation_id) values ('900001') on conflict do nothing`);
   await query(target, `insert into taxonomy_v3.resolution_link (observation_id, resolution_state, resolved_sporely_taxon_id) values ('900001', 'resolved_exact', 630103) on conflict (observation_id) do update set resolution_state='resolved_exact', resolved_sporely_taxon_id=630103`);
+  // Reset the observation link so link_observations_to_resolution reports 1
+  // even when a prior run had already attached the same target.
+  await queryStdin(target, `begin; set local role service_role; update public.observations set resolved_sporely_taxon_id = null where id = 900001; commit;`);
   const updated = Number((await query(target, "select taxonomy_v3.link_observations_to_resolution()")).trim());
   assert.equal(updated, 1);
   const linkVal = (await query(target, "select resolved_sporely_taxon_id from public.observations where id = 900001")).trim();

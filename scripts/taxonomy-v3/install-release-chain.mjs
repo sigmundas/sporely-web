@@ -23,6 +23,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { discoverLocalTarget, query, queryStdin } from '../taxonomy-v2/lib/docker-psql.mjs';
+import { computeSemanticSha256 } from '../taxonomy-v2/run-w2d-migration-simulation.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -39,13 +40,33 @@ async function fileSha256(p) {
   return createHash('sha256').update(buf).digest('hex');
 }
 
+// W3-A2: loadBase verifies every artefact listed in taxonomy_export_manifest.json,
+// not just the manifest file itself. Every file's on-disk sha256 must match
+// the sha recorded in the manifest, and the scope_manifest.json file's sha
+// must match manifest.scope_manifest_sha256.
 export async function loadBase(baseDir) {
   const mfPath = path.join(baseDir, 'taxonomy_export_manifest.json');
   const mf = JSON.parse(await readFile(mfPath, 'utf8'));
+  const perFileVerifications = [];
+  for (const entry of mf.files || []) {
+    const filePath = path.join(baseDir, entry.name);
+    const observed = await fileSha256(filePath);
+    if (observed !== entry.sha256) {
+      throw new Error(`W3-A2 base release file ${entry.name} sha256 mismatch (disk=${observed}, manifest=${entry.sha256})`);
+    }
+    perFileVerifications.push({ name: entry.name, sha256: entry.sha256 });
+  }
+  // Scope-manifest cross-check.
+  const scopePath = path.join(baseDir, 'scope-manifest.json');
+  const scopeSha = await fileSha256(scopePath);
+  if (mf.scope_manifest_sha256 && mf.scope_manifest_sha256 !== scopeSha) {
+    throw new Error(`W3-A2 base scope_manifest_sha256 mismatch: manifest=${mf.scope_manifest_sha256}, disk=${scopeSha}`);
+  }
   return {
     release_id: mf.release_id,
     export_manifest_sha256: await fileSha256(mfPath),
-    scope_manifest_sha256: mf.scope_manifest_sha256,
+    scope_manifest_sha256: mf.scope_manifest_sha256 || scopeSha,
+    per_file_verifications: perFileVerifications,
   };
 }
 
@@ -104,10 +125,61 @@ export async function loadSupplementDir(supDir) {
   };
 }
 
+// W3-A2: verifyManifest recomputes the semantic SHA-256 from the manifest
+// body and enforces every structural invariant BEFORE the SQL is prepared.
+// Fails closed on: SHA mismatch, count mismatch, duplicate observation_id,
+// aggregate-state totals disagreeing with actual record states, resolved
+// records with null target, unresolved records with non-null target.
+export function verifyManifest(rawText, expectedSha) {
+  const doc = JSON.parse(rawText);
+  const computedSha = computeSemanticSha256(doc);
+  if (expectedSha && computedSha !== expectedSha) {
+    throw new Error(`W3-A2 manifest sha mismatch: declared=${expectedSha}, recomputed=${computedSha}`);
+  }
+  const records = doc.records || [];
+  if (typeof doc.record_count !== 'number' || doc.record_count !== records.length) {
+    throw new Error(`W3-A2 manifest record_count=${doc.record_count} but records.length=${records.length}`);
+  }
+  const seen = new Set();
+  const stateCounts = {};
+  for (const r of records) {
+    if (typeof r.observation_id !== 'string' || !r.observation_id) {
+      throw new Error('W3-A2 manifest record missing observation_id');
+    }
+    if (seen.has(r.observation_id)) {
+      throw new Error(`W3-A2 manifest has duplicate observation_id=${r.observation_id}`);
+    }
+    seen.add(r.observation_id);
+    stateCounts[r.reconciliation_state] = (stateCounts[r.reconciliation_state] || 0) + 1;
+    const resolvedTarget = r.resolved_sporely_taxon_id;
+    if (r.reconciliation_state === 'resolved_exact' || r.reconciliation_state === 'resolved_exact_via_legacy_mapping' || r.reconciliation_state === 'resolved_exact_via_synonym_relationship') {
+      if (resolvedTarget == null || !Number.isFinite(Number(resolvedTarget))) {
+        throw new Error(`W3-A2 resolved record ${r.observation_id} missing valid target id`);
+      }
+    } else {
+      if (resolvedTarget != null) {
+        throw new Error(`W3-A2 unresolved record ${r.observation_id} has non-null target id (${resolvedTarget})`);
+      }
+    }
+  }
+  const aggregate = doc.aggregate_counts || {};
+  for (const [state, expected] of Object.entries(aggregate)) {
+    const actual = stateCounts[state] || 0;
+    if (actual !== expected) {
+      throw new Error(`W3-A2 aggregate_counts.${state} declared=${expected}, actual=${actual}`);
+    }
+  }
+  return { doc, computedSha };
+}
+
 async function loadManifest(mfPath) {
-  const doc = JSON.parse(await readFile(mfPath, 'utf8'));
+  const rawText = await readFile(mfPath, 'utf8');
+  const inputSha = createHash('sha256').update(rawText, 'utf8').digest('hex');
+  const declaredSha = (await readFile(`${mfPath}.sha256.txt`, 'utf8').catch(() => '')).trim();
+  const { doc, computedSha } = verifyManifest(rawText, declaredSha || undefined);
   return {
-    semantic_sha256: doc.semantic_sha256 || (await readFile(`${mfPath}.sha256.txt`, 'utf8')).trim(),
+    semantic_sha256: computedSha,
+    input_file_sha256: inputSha,
     record_count: doc.record_count,
     aggregate_counts: doc.aggregate_counts || null,
     records: doc.records || [],

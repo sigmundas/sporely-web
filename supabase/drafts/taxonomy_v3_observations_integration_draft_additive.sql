@@ -1,3 +1,7 @@
+-- W3-A2 additive-only draft of the observations integration.
+-- NOT A PRODUCTION MIGRATION. No DROP TRIGGER / DROP COLUMN / DROP CONSTRAINT.
+-- Safe against fresh, current-schema, and already-applied stacks.
+
 -- W3-A local rehearsal — observations integration DRAFT.
 --
 -- NOT A SUPABASE MIGRATION. NOT PRODUCTION.
@@ -97,14 +101,16 @@ begin
   return new;
 end $$;
 
-drop trigger if exists w3a_guard_resolved_sporely_taxon_id_trg on public.observations;
-drop trigger if exists w3a_guard_resolved_sporely_taxon_id_ins_trg on public.observations;
-create trigger w3a_guard_resolved_sporely_taxon_id_ins_trg
+do $$ begin if not exists (select 1 from pg_trigger where tgname='w3a_guard_resolved_sporely_taxon_id_ins_trg') then
+  create trigger w3a_guard_resolved_sporely_taxon_id_ins_trg
   before insert on public.observations
   for each row execute function _w3a_guard_resolved_sporely_taxon_id();
-create trigger w3a_guard_resolved_sporely_taxon_id_trg
+end if; end $$;
+do $$ begin if not exists (select 1 from pg_trigger where tgname='w3a_guard_resolved_sporely_taxon_id_trg') then
+  create trigger w3a_guard_resolved_sporely_taxon_id_trg
   before update of resolved_sporely_taxon_id on public.observations
   for each row execute function _w3a_guard_resolved_sporely_taxon_id();
+end if; end $$;
 
 -- The installer function reads taxonomy_v3.resolution_link and writes to
 -- public.observations.resolved_sporely_taxon_id in one atomic UPDATE.

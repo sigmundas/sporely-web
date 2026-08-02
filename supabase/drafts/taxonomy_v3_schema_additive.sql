@@ -1,3 +1,9 @@
+-- W3-A2 additive-only draft of taxonomy_v3_schema.sql.
+-- NOT A PRODUCTION MIGRATION. Every CREATE is guarded IF NOT EXISTS; there is
+-- NO DROP SCHEMA / DROP TABLE / DROP COLUMN. Safe to run against a fresh
+-- stack, a stack already containing the current production-shaped schema,
+-- and a stack where a prior run already applied the schema.
+
 -- W3-A local rehearsal — production-shaped taxonomy_v3 schema DRAFT.
 --
 -- NOT A SUPABASE MIGRATION. NOT PRODUCTION.
@@ -30,15 +36,14 @@
 -- taxonomy_v3_observations_integration_draft.sql for the additive column
 -- and the compatibility rules.
 
-drop schema if exists taxonomy_v3 cascade;
-create schema taxonomy_v3;
+create schema if not exists taxonomy_v3;
 set search_path = taxonomy_v3, pg_catalog;
 
 -- ---------------------------------------------------------------------------
 -- registry_concept: sparse canonical registry. Cache membership and scope
 -- state are stored INDEPENDENTLY per the W2E-A2 architectural decision.
 
-create table registry_concept (
+create table if not exists registry_concept (
   sporely_taxon_id           integer primary key,
   canonical_name             text,
   rank                       text,
@@ -59,7 +64,7 @@ comment on column registry_concept.scope_state is
 -- reassigning an existing tuple to a different sporely_taxon_id raises inside
 -- the installer transaction and rolls the whole chain back.
 
-create table external_mapping (
+create table if not exists external_mapping (
   source_system     text not null,
   namespace         text not null,
   external_id       text not null,
@@ -68,12 +73,12 @@ create table external_mapping (
   release_id        text not null,
   unique (source_system, namespace, external_id)
 );
-create index external_mapping_taxon_idx on external_mapping (sporely_taxon_id);
+create index if not exists external_mapping_taxon_idx on external_mapping (sporely_taxon_id);
 
 -- ---------------------------------------------------------------------------
 -- identification_snapshot: immutable historical snapshot per observation.
 
-create table identification_snapshot (
+create table if not exists identification_snapshot (
   observation_id              text primary key,
   original_scientific_name    text,
   original_vernacular_name    text,
@@ -106,9 +111,11 @@ begin
   return new;
 end $$;
 
-create trigger identification_snapshot_immutability_trg
+do $$ begin if not exists (select 1 from pg_trigger where tgname='identification_snapshot_immutability_trg') then
+  create trigger identification_snapshot_immutability_trg
   before update on identification_snapshot
   for each row execute function _guard_snapshot_immutability();
+end if; end $$;
 
 -- ---------------------------------------------------------------------------
 -- resolution_link: mutable current-canonical-resolution pointer.
@@ -116,7 +123,7 @@ create trigger identification_snapshot_immutability_trg
 -- snapshot. reconciliation_state carries the manifest verdict verbatim so
 -- callers can distinguish resolved / manual / no-evidence / conflicting etc.
 
-create table resolution_link (
+create table if not exists resolution_link (
   observation_id              text primary key
     references identification_snapshot(observation_id) on delete cascade,
   resolution_state            text not null,
@@ -128,15 +135,15 @@ create table resolution_link (
   manifest_semantic_sha256    text,
   attached_at                 timestamptz not null default now()
 );
-create index resolution_link_taxon_idx on resolution_link (resolved_sporely_taxon_id);
-create index resolution_link_state_idx on resolution_link (resolution_state);
+create index if not exists resolution_link_taxon_idx on resolution_link (resolved_sporely_taxon_id);
+create index if not exists resolution_link_state_idx on resolution_link (resolution_state);
 
 -- ---------------------------------------------------------------------------
 -- Release-installation audit. Every install of a base release or supplement
 -- writes one row here. The installer refuses to install any release_id whose
 -- shard_sha256 differs from a row that already exists.
 
-create table release_installation (
+create table if not exists release_installation (
   release_id                        text primary key,
   artifact_kind                     text not null
     check (artifact_kind in ('release','registry_supplement')),
@@ -149,13 +156,13 @@ create table release_installation (
   installed_at                      timestamptz not null default now()
 );
 
-create table supplement_installation (
+create table if not exists supplement_installation (
   supplement_release_id text not null references release_installation(release_id),
   depends_on_release_id text not null references release_installation(release_id),
   primary key (supplement_release_id, depends_on_release_id)
 );
 
-create table reconciliation_manifest_audit (
+create table if not exists reconciliation_manifest_audit (
   manifest_semantic_sha256 text primary key,
   input_file_sha256        text,
   record_count             integer not null,
@@ -435,19 +442,24 @@ alter table reconciliation_manifest_audit enable row level security;
 
 -- Registry + external_mapping are pure reference data (no PII, no owner):
 -- world-readable by design.
-create policy taxonomy_v3_public_read_registry
+do $$ begin if not exists (select 1 from pg_policies where policyname='taxonomy_v3_public_read_registry') then
+  create policy taxonomy_v3_public_read_registry
   on registry_concept for select
   to anon, authenticated using (true);
-create policy taxonomy_v3_public_read_mapping
+end if; end $$;
+do $$ begin if not exists (select 1 from pg_policies where policyname='taxonomy_v3_public_read_mapping') then
+  create policy taxonomy_v3_public_read_mapping
   on external_mapping for select
   to anon, authenticated using (true);
+end if; end $$;
 
 -- W3-A2 privacy fix: resolution_link inherits per-observation visibility
 -- from public.observations. anon may see rows only when the observation is
 -- publicly visible; authenticated may additionally see rows the caller
 -- owns (matching the baseline visibility model in
 -- supabase/migrations/*_baseline_live_public_schema.sql).
-create policy taxonomy_v3_read_resolution_anon
+do $$ begin if not exists (select 1 from pg_policies where policyname='taxonomy_v3_read_resolution_anon') then
+  create policy taxonomy_v3_read_resolution_anon
   on resolution_link for select
   to anon
   using (
@@ -457,7 +469,9 @@ create policy taxonomy_v3_read_resolution_anon
          and o.visibility = 'public'
     )
   );
-create policy taxonomy_v3_read_resolution_authenticated
+end if; end $$;
+do $$ begin if not exists (select 1 from pg_policies where policyname='taxonomy_v3_read_resolution_authenticated') then
+  create policy taxonomy_v3_read_resolution_authenticated
   on resolution_link for select
   to authenticated
   using (
@@ -467,6 +481,7 @@ create policy taxonomy_v3_read_resolution_authenticated
          and (o.visibility = 'public' or o.user_id = auth.uid())
     )
   );
+end if; end $$;
 -- No public policy on identification_snapshot, release_installation,
 -- supplement_installation, or reconciliation_manifest_audit → default-deny
 -- for anon/authenticated. service_role bypasses RLS.
@@ -474,8 +489,6 @@ create policy taxonomy_v3_read_resolution_authenticated
 revoke all on all tables in schema taxonomy_v3 from public, anon, authenticated;
 grant usage on schema taxonomy_v3 to anon, authenticated, service_role;
 grant select on registry_concept, external_mapping, resolution_link to anon, authenticated;
--- service_role owns the write path — install_release_chain() and
--- link_observations_to_resolution() are the sole authorised entry points.
 grant all on all tables in schema taxonomy_v3 to service_role;
 revoke all on all functions in schema taxonomy_v3 from public, anon, authenticated;
 grant execute on function install_release_chain(jsonb, jsonb, jsonb) to service_role;
