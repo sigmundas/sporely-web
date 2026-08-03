@@ -35,7 +35,6 @@ name to a signing SHA-1.
 | --- | --- |
 | Local debug APK | Developer machine's debug keystore SHA-1 |
 | GitHub release APK | Certificate embedded in the workflow-built APK |
-| Play upload | Upload-key SHA-1 shown in Play Console |
 | Play installation | Play app-signing SHA-1 shown in Play Console; this is often different from the upload key |
 
 Observed during the incident investigation:
