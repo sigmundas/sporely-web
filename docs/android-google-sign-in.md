@@ -66,3 +66,12 @@ npm run android:signing-info -- /tmp/sporely-installed.apk
 ```
 
 The release workflow prints the certificate embedded in its final signed APK.
+
+## Temporary Capgo 8.3.22 security patch
+
+The pinned plugin version contains two Android log statements that can include
+complete cached credentials or a Credential Manager result. The repository's
+strict `postinstall` patch replaces those payloads with presence-only messages
+and refuses unknown source or package versions. Remove the patch script,
+postinstall hook, and exact-version pin when adopting an upstream release that
+fixes both log statements.
