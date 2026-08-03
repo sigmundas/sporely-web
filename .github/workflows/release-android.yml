@@ -77,6 +77,9 @@ jobs:
         working-directory: android
         run: ./gradlew :app:assembleRelease
 
+      - name: Print signed release APK certificate fingerprints
+        run: npm run android:signing-info -- android/app/build/outputs/apk/release/app-release.apk
+
       - name: Build release AAB
         working-directory: android
         run: ./gradlew :app:bundleRelease

@@ -21,6 +21,7 @@
     "android:install": "Builds production web assets, syncs Capacitor Android, then installs an inspectable debug app on a connected Android device.",
     "android:build:debug": "Builds a local debug APK without installing it.",
     "android:build:release": "Builds local signed release APK/AAB if local Android signing is configured. GitHub Actions remains the canonical release builder.",
+    "android:signing-info": "Prints SHA-1/SHA-256 for Gradle signing configs, or for an APK path passed after --.",
     "sync:version:bump-code": "Updates native app version metadata and bumps Android versionCode.",
     "release:version:patch": "Bumps package patch version and Android versionCode without creating a git tag.",
     "test": "Runs the Node test files such as *.test.js."
@@ -40,6 +41,7 @@
     "android:install": "npm run android:sync && cd android && ./gradlew :app:installDebug",
     "android:build:debug": "npm run android:sync && cd android && ./gradlew :app:assembleDebug",
     "android:build:release": "npm run android:sync && cd android && ./gradlew :app:assembleRelease :app:bundleRelease",
+    "android:signing-info": "node scripts/android-signing-info.mjs",
     "sync:version:bump-code": "node scripts/sync-version.mjs --bump-code",
     "release:version:patch": "npm version patch --no-git-tag-version && npm run sync:version:bump-code",
     "test": "node --test",
