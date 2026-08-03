@@ -12,6 +12,54 @@ Status: all three stages implemented and tested (2026-07-22), awaiting
 on-device verification. See the 2026-07-22 entry in `HISTORY.md` for the
 condensed summary.
 
+## Future Android release optimization
+
+Evaluate enabling R8 code shrinking and Android resource shrinking in a dedicated release after the current `0.6.18 / versionCode 270` closed test is complete.
+
+Scope:
+
+```groovy
+buildTypes {
+    release {
+        minifyEnabled true
+        shrinkResources true
+        proguardFiles(
+            getDefaultProguardFile('proguard-android-optimize.txt'),
+            'proguard-rules.pro'
+        )
+    }
+}
+```
+
+For AGP 8.13, also evaluate:
+
+```properties
+android.r8.optimizedResourceShrinking=true
+```
+
+Treat this as a separate release, likely `0.6.19 / versionCode 271`. Do not modify or replace version 270 while it is in review.
+
+Required verification before publishing:
+
+* clean production web build and Capacitor sync;
+* signed release AAB builds successfully;
+* compare AAB/APK size before and after optimization;
+* cold-start and startup regression check;
+* Google sign-in;
+* camera capture and gallery import;
+* location permissions and coordinate capture;
+* biometric login;
+* push notifications;
+* Artsorakel;
+* taxonomy search and taxon persistence;
+* image upload and cloud sync;
+* offline queue and reconnect retry;
+* inspect `mapping.txt`, merged manifest, and R8 warnings;
+* add narrowly scoped keep rules only for confirmed reflection-related failures.
+
+Do not enable R8 merely to address taxonomy-search latency. That lookup is primarily a network/database path and should be profiled separately.
+
+
 ## Incident and background
 
 A user captured photos with the native camera, reached the review screen
