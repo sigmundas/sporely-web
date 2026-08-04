@@ -10,6 +10,17 @@ custom_domain = true
 binding = "MEDIA_BUCKET"
 bucket_name = "sporely-media"
 
+# Stage 2 private media bucket. Uncomment and provision at Stage 2c cutover.
+# See `docs/security/stage-2-media-authorization.md`.
+#
+# The bucket MUST be created with `custom_domain = false` and no public-dev
+# URL. New canonical uploads go here; legacy objects are backfilled from
+# `sporely-media`. During transition both bindings coexist.
+#
+# [[r2_buckets]]
+# binding = "PRIVATE_MEDIA_BUCKET"
+# bucket_name = "sporely-media-private"
+
 [vars]
 SUPABASE_URL = "https://zkpjklzfwzefhjluvhfw.supabase.co"
 SUPABASE_JWT_AUDIENCE = "authenticated"
