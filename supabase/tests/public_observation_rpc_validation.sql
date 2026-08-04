@@ -50,6 +50,19 @@ DECLARE
   public_exact_measurement_b bigint;
   public_exact_mosaic_id bigint;
   amanita_se_measurement_id bigint;
+  context_split_id bigint;
+  context_split_dic_image_id bigint;
+  context_split_brightfield_image_id bigint;
+  context_split_measurement_id bigint;
+  context_split_mosaic_id bigint;
+  context_dic_id bigint;
+  context_dic_image_id bigint;
+  context_dic_unmeasured_image_id bigint;
+  context_dic_measurement_id bigint;
+  context_dic_mosaic_id bigint;
+  context_conjunction_id bigint;
+  context_conjunction_dic_image_id bigint;
+  context_conjunction_brightfield_image_id bigint;
 BEGIN
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN visibility DROP NOT NULL';
   EXECUTE 'ALTER TABLE public.observations ALTER COLUMN location_precision DROP NOT NULL';
@@ -2130,6 +2143,189 @@ BEGIN
     WHERE id = mixed_prep_id
   ) THEN
     RAISE EXCEPTION 'search_public_observations spore_print filter (EXISTS fix) did not include mixed-prep observation';
+  END IF;
+
+  -- Public microscopy-context regression fixtures.  Source images may be
+  -- metadata-only; displayability comes from a current public mosaic tile (or,
+  -- for legacy measurements, thumb_key), never from source-image bytes.
+  INSERT INTO public.observations (
+    user_id, date, genus, species, visibility, is_draft,
+    spore_data_visibility, location_precision
+  ) VALUES (
+    visible_user_id, '2026-08-01', 'Contextsplit', 'fixture',
+    'public', false, 'public', 'hidden'
+  ) RETURNING id INTO context_split_id;
+
+  -- Metadata-only DIC context without measurements: it must not qualify DIC.
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, contrast
+  ) VALUES (
+    context_split_id, visible_user_id, NULL, 'microscope', 'DIC'
+  ) RETURNING id INTO context_split_dic_image_id;
+
+  -- The drawable spores belong to a different, brightfield source image.
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, contrast
+  ) VALUES (
+    context_split_id, visible_user_id, NULL, 'microscope', 'brightfield'
+  ) RETURNING id INTO context_split_brightfield_image_id;
+
+  INSERT INTO public.spore_measurements (
+    image_id, user_id, length_um, width_um, measurement_type
+  ) VALUES (
+    context_split_brightfield_image_id, visible_user_id, 10.0, 5.0, 'manual'
+  ) RETURNING id INTO context_split_measurement_id;
+
+  INSERT INTO public.spore_measurement_mosaics (
+    observation_id, user_id, storage_key, width_px, height_px,
+    tile_size_px, version
+  ) VALUES (
+    context_split_id, visible_user_id, 'mosaic/context-split-v1.webp',
+    128, 128, 128, 1
+  ) RETURNING id INTO context_split_mosaic_id;
+
+  INSERT INTO public.spore_measurement_mosaic_tiles (
+    measurement_id, mosaic_id, x_px, y_px, w_px, h_px
+  ) VALUES (
+    context_split_measurement_id, context_split_mosaic_id, 0, 0, 128, 128
+  );
+
+  IF NOT EXISTS (
+    SELECT 1 FROM public.search_public_observations()
+    WHERE id = context_split_id
+  ) THEN
+    RAISE EXCEPTION 'Metadata-only split-context fixture missing from unfiltered search';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.search_public_observations(p_contrast := 'DIC')
+    WHERE id = context_split_id
+  ) THEN
+    RAISE EXCEPTION 'Unmeasured metadata-only DIC image incorrectly satisfied DIC filter';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.search_public_observations(p_contrast := 'brightfield')
+    WHERE id = context_split_id
+  ) THEN
+    RAISE EXCEPTION 'Measured metadata-only brightfield image did not satisfy brightfield filter';
+  END IF;
+
+  SELECT * INTO rpc_row FROM public.get_public_observation(context_split_id);
+  IF rpc_row."sporeMosaic" IS NULL
+     OR jsonb_array_length(coalesce(rpc_row."sporePoints", '[]'::jsonb)) <> 1
+     OR NOT ((rpc_row."sporePoints"->0) ? 'mosaicX')
+     OR NOT ((rpc_row."sporePoints"->0) ? 'mosaicY')
+     OR NOT ((rpc_row."sporePoints"->0) ? 'mosaicW')
+     OR NOT ((rpc_row."sporePoints"->0) ? 'mosaicH') THEN
+    RAISE EXCEPTION 'Unfiltered split-context card cannot draw its measured spore from the public mosaic';
+  END IF;
+
+  -- A metadata-only DIC source with a valid measured spore does qualify.
+  INSERT INTO public.observations (
+    user_id, date, genus, species, visibility, is_draft,
+    spore_data_visibility, location_precision
+  ) VALUES (
+    visible_user_id, '2026-08-02', 'Contextdic', 'fixture',
+    'public', false, 'public', 'hidden'
+  ) RETURNING id INTO context_dic_id;
+
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, contrast, stain
+  ) VALUES (
+    context_dic_id, visible_user_id, NULL, 'microscope', 'DIC', 'Congo Red'
+  ) RETURNING id INTO context_dic_image_id;
+
+  INSERT INTO public.spore_measurements (
+    image_id, user_id, length_um, width_um, measurement_type
+  ) VALUES (
+    context_dic_image_id, visible_user_id, 11.0, 5.5, 'manual'
+  ) RETURNING id INTO context_dic_measurement_id;
+
+  INSERT INTO public.spore_measurement_mosaics (
+    observation_id, user_id, storage_key, width_px, height_px,
+    tile_size_px, version
+  ) VALUES (
+    context_dic_id, visible_user_id, 'mosaic/context-dic-v1.webp',
+    128, 128, 128, 1
+  ) RETURNING id INTO context_dic_mosaic_id;
+
+  INSERT INTO public.spore_measurement_mosaic_tiles (
+    measurement_id, mosaic_id, x_px, y_px, w_px, h_px
+  ) VALUES (
+    context_dic_measurement_id, context_dic_mosaic_id, 0, 0, 128, 128
+  );
+
+  -- Newer matching context, but without a measurement.  It remains valid
+  -- microscopy metadata for an unfiltered card, but must not supply metadata
+  -- for a DIC-filtered result that qualified through the older measured image.
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, contrast, stain
+  ) VALUES (
+    context_dic_id, visible_user_id, NULL, 'microscope', 'DIC', 'Melzer'
+  ) RETURNING id INTO context_dic_unmeasured_image_id;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM public.search_public_observations(p_contrast := 'DIC')
+    WHERE id = context_dic_id
+  ) THEN
+    RAISE EXCEPTION 'Measured metadata-only DIC image did not satisfy DIC filter';
+  END IF;
+
+  SELECT * INTO rpc_row
+  FROM public.search_public_observations(p_contrast := 'DIC')
+  WHERE id = context_dic_id;
+  IF rpc_row."stainReagent" IS DISTINCT FROM 'Congo Red' THEN
+    RAISE EXCEPTION 'DIC-filtered metadata came from newer unmeasured image (stain=%)',
+      rpc_row."stainReagent";
+  END IF;
+
+  SELECT * INTO rpc_row
+  FROM public.search_public_observations()
+  WHERE id = context_dic_id;
+  IF rpc_row."stainReagent" IS DISTINCT FROM 'Melzer' THEN
+    RAISE EXCEPTION 'Unfiltered search did not preserve newest metadata-only microscope image (stain=%)',
+      rpc_row."stainReagent";
+  END IF;
+
+  -- Every active context dimension must match the same measured source image.
+  INSERT INTO public.observations (
+    user_id, date, genus, species, visibility, is_draft,
+    spore_data_visibility, location_precision
+  ) VALUES (
+    visible_user_id, '2026-08-03', 'Contextjoin', 'fixture',
+    'public', false, 'public', 'hidden'
+  ) RETURNING id INTO context_conjunction_id;
+
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, contrast, mount_medium
+  ) VALUES (
+    context_conjunction_id, visible_user_id, NULL, 'microscope', 'DIC', 'water'
+  ) RETURNING id INTO context_conjunction_dic_image_id;
+
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, contrast, mount_medium
+  ) VALUES (
+    context_conjunction_id, visible_user_id, NULL, 'microscope', 'brightfield', 'KOH'
+  ) RETURNING id INTO context_conjunction_brightfield_image_id;
+
+  INSERT INTO public.spore_measurements (
+    image_id, user_id, length_um, width_um, measurement_type
+  ) VALUES
+    (context_conjunction_dic_image_id, visible_user_id, 9.0, 4.5, 'manual'),
+    (context_conjunction_brightfield_image_id, visible_user_id, 12.0, 6.0, 'manual');
+
+  IF NOT EXISTS (
+    SELECT 1 FROM public.search_public_observations(
+      p_contrast := 'DIC', p_mount := 'water'
+    ) WHERE id = context_conjunction_id
+  ) THEN
+    RAISE EXCEPTION 'Same-image DIC + water conjunction did not include fixture';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.search_public_observations(
+      p_contrast := 'DIC', p_mount := 'KOH'
+    ) WHERE id = context_conjunction_id
+  ) THEN
+    RAISE EXCEPTION 'Cross-image DIC + KOH incorrectly included conjunction fixture';
   END IF;
 
   DELETE FROM auth.users

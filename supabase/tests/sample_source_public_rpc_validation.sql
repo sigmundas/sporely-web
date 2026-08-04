@@ -8,6 +8,8 @@ DECLARE
   sample_user_id uuid := '00000000-0000-4000-8000-00000000a151';
   metadata_obs_id bigint;
   metadata_image_id bigint;
+  visible_obs_id bigint;
+  visible_image_id bigint;
   legacy_obs_id bigint;
   legacy_image_id bigint;
   detail_row record;
@@ -90,6 +92,12 @@ BEGIN
   )
   RETURNING id INTO legacy_image_id;
 
+  INSERT INTO public.spore_measurements (
+    image_id, user_id, length_um, width_um, measurement_type
+  ) VALUES (
+    legacy_image_id, sample_user_id, 10.0, 5.0, 'manual'
+  );
+
   SELECT * INTO detail_row
   FROM public.get_public_observation(metadata_obs_id);
 
@@ -105,11 +113,18 @@ BEGIN
   FROM public.search_public_observations(p_genus := 'Sourcesplitus')
   WHERE id = metadata_obs_id;
 
-  IF search_row."sampleType" IS DISTINCT FROM 'fresh'
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'metadata-only observation was omitted from unfiltered search';
+  END IF;
+  IF search_row."hasMicroscopy" IS DISTINCT FROM true
+     OR search_row."sampleType" IS DISTINCT FROM 'fresh'
      OR search_row."sampleSource" IS DISTINCT FROM 'context'
+     OR search_row."contrastMethod" IS DISTINCT FROM 'DIC'
+     OR search_row."mountReagent" IS DISTINCT FROM 'water'
      OR search_row."stainReagent" IS DISTINCT FROM 'Congo Red' THEN
-    RAISE EXCEPTION 'search output mismatch: sampleType %, sampleSource %, stain %',
-      search_row."sampleType", search_row."sampleSource", search_row."stainReagent";
+    RAISE EXCEPTION 'metadata-only search output mismatch: hasMicroscopy %, sampleType %, sampleSource %, contrast %, mount %, stain %',
+      search_row."hasMicroscopy", search_row."sampleType", search_row."sampleSource",
+      search_row."contrastMethod", search_row."mountReagent", search_row."stainReagent";
   END IF;
 
   SELECT count(*) INTO result_count
@@ -117,10 +132,114 @@ BEGIN
     p_genus := 'Sourcesplitus',
     p_country := 'NO',
     p_sample_source := 'context'
-  );
+  )
+  WHERE id = metadata_obs_id;
   IF result_count IS DISTINCT FROM 1 THEN
-    RAISE EXCEPTION 'composed search sample_source filter returned % rows', result_count;
+    RAISE EXCEPTION 'measured metadata-only observation did not match sample_source filter';
   END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(p_contrast := 'DIC')
+  WHERE id = metadata_obs_id;
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'measured metadata-only observation did not match contrast filter';
+  END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(p_mount := 'water')
+  WHERE id = metadata_obs_id;
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'measured metadata-only observation did not match mount filter';
+  END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(p_sample := 'fresh')
+  WHERE id = metadata_obs_id;
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'measured metadata-only observation did not match specimen-condition filter';
+  END IF;
+
+  INSERT INTO public.observations (
+    user_id, date, genus, species, visibility, is_draft, spore_data_visibility,
+    location_precision, country_code
+  )
+  VALUES (
+    sample_user_id, '2026-07-03', 'Sourcesplitus', 'visibleanchor',
+    'public', false, 'public', 'hidden', 'NO'
+  )
+  RETURNING id INTO visible_obs_id;
+
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type,
+    sample_type, sample_source, mount_medium, contrast, stain
+  )
+  VALUES (
+    visible_obs_id, sample_user_id,
+    concat(sample_user_id::text, '/sample-source/visible.webp'), 'microscope',
+    'fresh', 'context', 'water', 'DIC', 'Congo Red'
+  )
+  RETURNING id INTO visible_image_id;
+
+  INSERT INTO public.spore_measurements (
+    image_id, user_id, length_um, width_um, measurement_type
+  ) VALUES (
+    visible_image_id, sample_user_id, 9.0, 4.5, 'manual'
+  );
+
+  SELECT * INTO search_row
+  FROM public.search_public_observations(p_genus := 'Sourcesplitus')
+  WHERE id = visible_obs_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'image-backed observation was omitted from unfiltered search';
+  END IF;
+  IF search_row."hasMicroscopy" IS DISTINCT FROM true
+     OR search_row."sampleType" IS DISTINCT FROM 'fresh'
+     OR search_row."sampleSource" IS DISTINCT FROM 'context'
+     OR search_row."contrastMethod" IS DISTINCT FROM 'DIC'
+     OR search_row."mountReagent" IS DISTINCT FROM 'water'
+     OR search_row."stainReagent" IS DISTINCT FROM 'Congo Red' THEN
+    RAISE EXCEPTION 'image-backed search output mismatch: hasMicroscopy %, sampleType %, sampleSource %, contrast %, mount %, stain %',
+      search_row."hasMicroscopy", search_row."sampleType", search_row."sampleSource",
+      search_row."contrastMethod", search_row."mountReagent", search_row."stainReagent";
+  END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(
+    p_genus := 'Sourcesplitus',
+    p_country := 'NO',
+    p_sample_source := 'context'
+  )
+  WHERE id = visible_obs_id;
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'image-backed observation did not match sample_source filter';
+  END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(p_contrast := 'DIC')
+  WHERE id = visible_obs_id;
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'image-backed observation did not match contrast filter';
+  END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(p_mount := 'water')
+  WHERE id = visible_obs_id;
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'image-backed observation did not match mount filter';
+  END IF;
+
+  SELECT count(*) INTO result_count
+  FROM public.search_public_observations(p_sample := 'fresh')
+  WHERE id = visible_obs_id;
+  IF result_count IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'image-backed observation did not match specimen-condition filter';
+  END IF;
+
+  -- Keep all existing non-search RPC and facet expectations unchanged. The
+  -- migration under test replaces only search_public_observations.
+  DELETE FROM public.observations
+  WHERE id = visible_obs_id;
 
   SELECT count(*) INTO result_count
   FROM public.search_public_observations(p_sample_source := 'spore_print')

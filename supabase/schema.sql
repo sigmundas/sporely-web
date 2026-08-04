@@ -3735,6 +3735,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
       latest_image.sample_source AS sample_source,
       latest_image.stain AS stain_reagent,
       (latest_image.id IS NOT NULL) AS has_microscopy,
+      o.spore_data_visibility,
       CASE
         WHEN o.spore_data_visibility = 'public'::text
           THEN coalesce(spore_stats.spore_measurement_count, 0::bigint)
@@ -3766,6 +3767,26 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
         AND (n.mount    IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = lower(btrim(n.mount)))
         AND (n.sample   IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
         AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
+        AND (
+          (
+            n.contrast IS NULL
+            AND n.mount IS NULL
+            AND n.sample IS NULL
+            AND n.sample_source IS NULL
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM public.spore_measurements m
+            WHERE m.image_id = i.id
+              AND m.length_um IS NOT NULL
+              AND m.width_um IS NOT NULL
+              AND (
+                m.measurement_type IS NULL
+                OR btrim(m.measurement_type) = ''
+                OR lower(btrim(m.measurement_type)) IN ('manual', 'spore', 'spores')
+              )
+          )
+        )
       ORDER BY i.created_at DESC NULLS LAST, i.id DESC
       LIMIT 1
     ) latest_image ON true
@@ -3780,9 +3801,11 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
         AND i.image_type = 'microscope'::text
         AND (
           m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          OR btrim(m.measurement_type) = ''
+          OR lower(btrim(m.measurement_type)) IN ('manual', 'spore', 'spores')
         )
+        AND m.length_um IS NOT NULL
+        AND m.width_um IS NOT NULL
     ) spore_stats ON true
   )
   SELECT
@@ -3828,34 +3851,38 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
       n.has_spores IS NULL
       OR (e.spore_measurement_count > 0) = n.has_spores
     )
-    AND (n.contrast IS NULL OR EXISTS (
-      SELECT 1 FROM public.observation_images i2
-      WHERE i2.observation_id = e.id
-        AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-        AND i2.image_type = 'microscope'
-        AND lower(btrim(coalesce(i2.contrast, ''))) = lower(btrim(n.contrast))
-    ))
-    AND (n.mount IS NULL OR EXISTS (
-      SELECT 1 FROM public.observation_images i2
-      WHERE i2.observation_id = e.id
-        AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-        AND i2.image_type = 'microscope'
-        AND lower(btrim(coalesce(i2.mount_medium, ''))) = lower(btrim(n.mount))
-    ))
-    AND (n.sample IS NULL OR EXISTS (
-      SELECT 1 FROM public.observation_images i2
-      WHERE i2.observation_id = e.id
-        AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-        AND i2.image_type = 'microscope'
-        AND public.public_normalized_specimen_condition(i2.sample_type) = lower(btrim(n.sample))
-    ))
-    AND (n.sample_source IS NULL OR EXISTS (
-      SELECT 1 FROM public.observation_images i2
-      WHERE i2.observation_id = e.id
-        AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-        AND i2.image_type = 'microscope'
-        AND public.public_normalized_sample_source(i2.sample_source, i2.sample_type) = n.sample_source
-    ))
+    AND (
+      (
+        n.contrast IS NULL
+        AND n.mount IS NULL
+        AND n.sample IS NULL
+        AND n.sample_source IS NULL
+      )
+      OR (
+        e.spore_data_visibility = 'public'::text
+        AND EXISTS (
+          SELECT 1
+          FROM public.spore_measurements m
+          JOIN public.observation_images i
+            ON i.id = m.image_id
+          WHERE i.observation_id = e.id
+            AND i.deleted_at IS NULL
+            AND i.purged_at IS NULL
+            AND i.image_type = 'microscope'::text
+            AND (n.contrast IS NULL OR lower(btrim(coalesce(i.contrast, ''))) = lower(btrim(n.contrast)))
+            AND (n.mount IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = lower(btrim(n.mount)))
+            AND (n.sample IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
+            AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
+            AND (
+              m.measurement_type IS NULL
+              OR btrim(m.measurement_type) = ''
+              OR lower(btrim(m.measurement_type)) IN ('manual', 'spore', 'spores')
+            )
+            AND m.length_um IS NOT NULL
+            AND m.width_um IS NOT NULL
+        )
+      )
+    )
   ORDER BY e.observed_on DESC, e.id DESC
   LIMIT (SELECT lim FROM normalized)
   OFFSET (SELECT off FROM normalized)
