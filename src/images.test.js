@@ -14,7 +14,7 @@ function withSupabaseFromStub(stub, fn) {
     })
 }
 
-test('public image rows are read from the community image view first', async () => {
+test('public image rows are merged from the owner raw table and the community image view', async () => {
   const calls = []
 
   await withSupabaseFromStub(table => {
@@ -48,5 +48,6 @@ test('public image rows are read from the community image view first', async () 
     assert.equal(sources[696].fallbackUrl, 'https://media.sporely.no/user-a/696/0_123.webp')
   })
 
-  assert.equal(calls[0], 'observation_images_community_view')
+  assert.ok(calls.includes('observation_images_community_view'), 'community view queried')
+  assert.ok(calls.includes('observation_images'), 'owner raw table queried')
 })
