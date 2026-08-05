@@ -25,7 +25,12 @@ setNativeBridge(acquireNativeTurnstileToken)
 
 const SUPABASE_OAUTH_CALLBACK_PATH = '/auth/callback'
 const SUPABASE_OAUTH_FALLBACK_ORIGIN = 'https://app.sporely.no'
+const SUPABASE_EMAIL_CONFIRM_REDIRECT = 'https://app.sporely.no/auth/callback?flow=signup'
 const PASSWORD_RESET_WEB_ORIGIN = 'https://app.sporely.no'
+
+export function getSignupEmailRedirectUrl() {
+  return SUPABASE_EMAIL_CONFIRM_REDIRECT
+}
 const PERSIST_AUTH_DRAFTS = !!import.meta.env?.DEV
 const AUTH_DRAFT_KEY = 'sporely-auth-draft'
 const PASSWORD_RECOVERY_HINT_KEY = 'sporely-password-recovery-hint'
@@ -443,7 +448,11 @@ function showResendPrompt(email) {
 }
 
 async function doResend(email) {
-  const { error } = await supabase.auth.resend({ type: 'signup', email })
+  const { error } = await supabase.auth.resend({
+    type: 'signup',
+    email,
+    options: { emailRedirectTo: SUPABASE_EMAIL_CONFIRM_REDIRECT },
+  })
   if (error) {
     // "already confirmed" means they can just sign in
     if (error.message.toLowerCase().includes('already confirmed')) {
@@ -708,7 +717,14 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
         }
         throw captchaError
       }
-      const signUpPayload = { email, password, options: { captchaToken } }
+      const signUpPayload = {
+        email,
+        password,
+        options: {
+          captchaToken,
+          emailRedirectTo: SUPABASE_EMAIL_CONFIRM_REDIRECT,
+        },
+      }
       const { error } = await supabase.auth.signUp(signUpPayload)
       if (error) resetTurnstile('signup')
 

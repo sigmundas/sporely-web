@@ -38,6 +38,16 @@ test('signUp, signInWithPassword and resetPasswordForEmail all pass captchaToken
     'resetPasswordForEmail must pass captchaToken')
 })
 
+test('signUp passes emailRedirectTo pointing at the HTTPS App Link callback', () => {
+  // The payload constant carries emailRedirectTo:
+  assert.match(authSource, /signUpPayload\s*=\s*\{[\s\S]*?emailRedirectTo/)
+  assert.match(authSource, /https:\/\/app\.sporely\.no\/auth\/callback\?flow=signup/)
+})
+
+test('resend also carries emailRedirectTo', () => {
+  assert.match(authSource, /supabase\.auth\.resend\([\s\S]*?emailRedirectTo/)
+})
+
 test('bridge never returns the Capacitor App proxy from an async function (thenable trap guard)', () => {
   const source = readFileSync(new URL('./screens/auth-turnstile-mobile.js', import.meta.url), 'utf8')
   // The App plugin proxy has a .then property; returning it from a promise

@@ -74,6 +74,7 @@ import {
 } from './settings.js'
 import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel, isAndroidNativeApp } from './camera-actions.js'
 import { getPlatform, isAndroidApp } from './platform.js'
+import { registerNativeAuthLinkListener } from './native-auth-links.js'
 
 initI18n()
 setNativeCameraOpener(openNativeCamera)
@@ -768,7 +769,26 @@ async function init() {
   }
 
   clearSharedAuthSessionCache()
-  const oauthCallbackResult = await maybeHandleSupabaseOAuthCallback(window.location.href)
+
+  // Cold-start: if the app was launched by tapping an email-confirmation
+  // App Link, App.getLaunchUrl gives us the URL BEFORE Vite/router touch
+  // window.location. Feed it into the shared callback handler so the
+  // session is exchanged before we decide which screen to render.
+  let nativeCallbackResult = null
+  await registerNativeAuthLinkListener(async url => {
+    nativeCallbackResult = await maybeHandleSupabaseOAuthCallback(url)
+    if (nativeCallbackResult?.session?.user) {
+      seedSharedAuthSession(nativeCallbackResult.session)
+      await _resolveAndRouteForUser(nativeCallbackResult.session.user)
+    } else if (nativeCallbackResult?.status === 'error') {
+      showAuthOverlay()
+      switchToLogin()
+      showAuthError(nativeCallbackResult.errorMessage || t('auth.genericError'))
+    }
+  })
+
+  const oauthCallbackResult = nativeCallbackResult
+    || await maybeHandleSupabaseOAuthCallback(window.location.href)
   const initialSession = (await getSharedAuthSession({ refresh: true })) || oauthCallbackResult?.session || null
 
   const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
