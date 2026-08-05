@@ -1512,9 +1512,34 @@ async function _fetchObservationImageRowsFrom(table, obsIds, selectFields) {
     .order('sort_order', { ascending: true })
 }
 
+export function ensureImageIdentitySelect(selectFields) {
+  const fields = String(selectFields || '')
+    .split(',')
+    .map(field => field.trim())
+    .filter(Boolean)
+
+  if (!fields.some(field => field === 'id' || field.endsWith('.id'))) {
+    fields.unshift('id')
+  }
+
+  return fields.join(', ')
+}
+
+function _imageRowIdentity(row) {
+  if (row?.id !== undefined && row?.id !== null) return row.id
+  const observationId = row?.observation_id ?? ''
+  const storagePath = row?.storage_path ?? ''
+  const sortOrder = row?.sort_order ?? ''
+  if (!observationId && !storagePath && sortOrder === '') return null
+  return `__composite__:${observationId}|${storagePath}|${sortOrder}`
+}
+
 export async function fetchObservationImageRows(obsIds, options = {}) {
   if (!obsIds.length) return []
-  const selectFields = options.selectFields || 'id, observation_id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom, deleted_at'
+  const selectFields = ensureImageIdentitySelect(
+    options.selectFields
+      || 'id, observation_id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom, deleted_at',
+  )
 
   // Owner rows (incl. private/draft/friends-only observations) live
   // behind RLS on the raw table; non-owner rows are surfaced by the
@@ -1526,11 +1551,37 @@ export async function fetchObservationImageRows(obsIds, options = {}) {
     _fetchObservationImageRowsFrom(OBSERVATION_IMAGES_COMMUNITY_VIEW, obsIds, selectFields),
   ])
 
-  const merged = new Map()
-  for (const row of (rawRes.data || [])) merged.set(row.id, row)
-  for (const row of (communityRes.data || [])) {
-    if (!merged.has(row.id)) merged.set(row.id, row)
+  const rawError = rawRes?.error || null
+  const communityError = communityRes?.error || null
+  if (rawError && communityError) {
+    console.warn('[fetchObservationImageRows] both image queries failed', {
+      raw: _formatSupabaseError(rawError),
+      community: _formatSupabaseError(communityError),
+    })
+    return []
   }
+  if (import.meta.env?.DEV) {
+    if (rawError) {
+      console.warn('[fetchObservationImageRows] owner raw query failed; using community view only', _formatSupabaseError(rawError))
+    }
+    if (communityError) {
+      console.warn('[fetchObservationImageRows] community view query failed; using owner raw only', _formatSupabaseError(communityError))
+    }
+  }
+
+  const merged = new Map()
+  const addRow = row => {
+    const key = _imageRowIdentity(row)
+    if (key === null) {
+      if (import.meta.env?.DEV) {
+        console.warn('[fetchObservationImageRows] skipping malformed image row without identity', row)
+      }
+      return
+    }
+    if (!merged.has(key)) merged.set(key, row)
+  }
+  for (const row of (rawRes?.data || [])) addRow(row)
+  for (const row of (communityRes?.data || [])) addRow(row)
 
   return Array.from(merged.values()).sort((a, b) => {
     const oa = Number(a.sort_order ?? 0)

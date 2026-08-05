@@ -43,3 +43,4 @@ supabase/.temp/
 exports/public-geography-*.csv
 exports/admin-public-geography-*.csv
 exports/geocode-cache.json
+backups/
