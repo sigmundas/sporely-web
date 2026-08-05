@@ -659,11 +659,13 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
         }
         throw captchaError
       }
+      try { console.info('[auth] password_signin_started', { hasToken: !!captchaToken }) } catch (_) {}
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
         options: { captchaToken },
       })
+      try { console.info('[auth] password_signin_completed', { ok: !error, code: error?.code || error?.name || null }) } catch (_) {}
       if (error) resetTurnstile('login')
 
       if (!error) {

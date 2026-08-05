@@ -84,6 +84,43 @@ let _syncFeedbackBound = false
 let _appBootstrapped = false
 let _authStateSubscription = null
 
+// ── Deferred auth event pipeline ─────────────────────────────────────────────
+//
+// supabase-js holds an internal auth lock while dispatching onAuthStateChange
+// events. Awaiting Supabase API calls (exchangeCodeForSession, PostgREST
+// queries, RPCs, signOut, getSession, ...) inside the direct listener
+// deadlocks the lock: SIGNED_IN never returns, and the next auth call hangs
+// forever. Fix: the direct listener MUST return synchronously without
+// touching Supabase. All processing is deferred one macrotask later and
+// serialized through a single promise chain so one bad event cannot
+// permanently poison the queue.
+let _authEventQueue = Promise.resolve()
+// One in-flight resolution per user id. Prevents double-loads when the
+// direct callback path (exchangeCodeForSession / signInWithPassword result)
+// and the deferred SIGNED_IN event both observe the same session.
+const _resolutionInFlight = new Map() // userId -> Promise
+const _resolvedUsers = new Set()       // userId (completed at least once)
+
+function _authLog(phase, extra = {}) {
+  // Safe, credential-free structured phase log. Only booleans, status codes
+  // and anonymized labels — never tokens/emails/codes/URLs.
+  try { console.info(`[auth] ${phase}`, extra) } catch (_) {}
+}
+
+function _safeErrorCode(err) {
+  if (!err) return 'unknown'
+  if (typeof err === 'string') return err.slice(0, 64)
+  return err?.code || err?.name || err?.status || 'error'
+}
+
+function enqueueAuthEvent(event, session, deferred) {
+  _authEventQueue = _authEventQueue
+    .then(() => deferred(event, session))
+    .catch(err => {
+      _authLog('deferred_auth_event_failed', { code: _safeErrorCode(err) })
+    })
+}
+
 function _lockPortraitOrientation() {
   const lock = globalThis.screen?.orientation?.lock
   if (typeof lock !== 'function') return
@@ -489,6 +526,46 @@ async function _clearInMemoryUserState() {
   state.findsTargetSummaryComplete = false
 }
 
+// Central de-duplicated resolution. All auth-success paths funnel through
+// this so the callback result + deferred SIGNED_IN cannot both trigger
+// profile loading. Successful resolution is remembered so a token-refresh
+// SIGNED_IN for the same user is a no-op; a failure clears the marker so
+// retry works.
+export function resolveAuthenticatedSessionOnce(session, source) {
+  const user = session?.user
+  if (!user?.id) return Promise.resolve({ status: 'ignored' })
+
+  const inFlight = _resolutionInFlight.get(user.id)
+  if (inFlight) return inFlight
+
+  const currentAuth = getAuthState()
+  const alreadyResolved = _resolvedUsers.has(user.id)
+    && currentAuth.userId === user.id
+    && currentAuth.state !== AUTH_STATE.RESOLVING
+    && currentAuth.state !== AUTH_STATE.UNAUTHENTICATED
+  if (alreadyResolved) return Promise.resolve({ status: 'noop' })
+
+  _authLog('session_resolution_started', { source })
+  seedSharedAuthSession(session)
+
+  const promise = (async () => {
+    try {
+      await _resolveAndRouteForUser(user)
+      _resolvedUsers.add(user.id)
+      _authLog('session_resolution_completed', { source, ok: true })
+      return { status: 'resolved' }
+    } catch (err) {
+      _authLog('session_resolution_completed', { source, ok: false, code: _safeErrorCode(err) })
+      throw err
+    } finally {
+      _resolutionInFlight.delete(user.id)
+    }
+  })()
+
+  _resolutionInFlight.set(user.id, promise)
+  return promise
+}
+
 async function _resolveAndRouteForUser(user) {
   // Always show a neutral auth-resolution surface first so the previous
   // user's Home never flashes between sign-out and sign-in.
@@ -763,7 +840,11 @@ async function init() {
       recoveryModeActive = false
       clearPasswordRecoveryHint()
       const bootSession = session || await getSharedAuthSession({ refresh: true })
-      if (bootSession?.user) await _resolveAndRouteForUser(bootSession.user)
+      if (bootSession?.user) {
+        try {
+          await resolveAuthenticatedSessionOnce(bootSession, 'auth_form_submit')
+        } catch (_) { /* handled by profile-resolution error surface */ }
+      }
     }, skipDraftRestore)
     authUiInitialized = true
   }
@@ -776,11 +857,21 @@ async function init() {
   // session is exchanged before we decide which screen to render.
   let nativeCallbackResult = null
   await registerNativeAuthLinkListener(async url => {
+    _authLog('native_callback_received', {})
+    // Immediately clear the stale "Check your inbox / Resend email" message
+    // and show a neutral resolving state so the confirmed user doesn't see
+    // the old signup form as though confirmation failed.
+    try { showAuthError('') } catch (_) {}
+    setAuthState({ state: AUTH_STATE.RESOLVING, userId: null })
+    _authLog('callback_exchange_started', {})
     nativeCallbackResult = await maybeHandleSupabaseOAuthCallback(url)
+    _authLog('callback_exchange_completed', { ok: nativeCallbackResult?.status === 'success' })
     if (nativeCallbackResult?.session?.user) {
-      seedSharedAuthSession(nativeCallbackResult.session)
-      await _resolveAndRouteForUser(nativeCallbackResult.session.user)
+      try {
+        await resolveAuthenticatedSessionOnce(nativeCallbackResult.session, 'native_callback')
+      } catch (_) { /* profile-resolution error surface handles UX */ }
     } else if (nativeCallbackResult?.status === 'error') {
+      setAuthState({ state: AUTH_STATE.UNAUTHENTICATED, userId: null })
       showAuthOverlay()
       switchToLogin()
       showAuthError(nativeCallbackResult.errorMessage || t('auth.genericError'))
@@ -791,7 +882,9 @@ async function init() {
     || await maybeHandleSupabaseOAuthCallback(window.location.href)
   const initialSession = (await getSharedAuthSession({ refresh: true })) || oauthCallbackResult?.session || null
 
-  const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+  // Deferred handler — runs OUTSIDE the Supabase auth lock. Safe to call
+  // Supabase APIs, PostgREST, RPCs here.
+  async function _handleDeferredAuthEvent(event, session) {
     if (event === 'PASSWORD_RECOVERY') {
       clearSharedAuthSessionCache()
       ensureAuthUiInitialized(true)
@@ -801,48 +894,50 @@ async function init() {
       return
     }
     if (event === 'SIGNED_IN' && session?.user) {
-      // Same user re-firing SIGNED_IN (token refresh, tab focus): no-op.
-      const currentAuth = getAuthState()
-      if (currentAuth.userId === session.user.id &&
-          currentAuth.state !== AUTH_STATE.RESOLVING &&
-          currentAuth.state !== AUTH_STATE.UNAUTHENTICATED) {
+      _authLog('signed_in_event_deferred', { hasUser: true })
+      if (recoveryModeActive || document.getElementById('reset-password-form')?.style.display === 'block') {
         return
       }
       clearSharedAuthSessionCache()
-      seedSharedAuthSession(session)
       _fireClientActivity()
-      if (recoveryModeActive || document.getElementById('reset-password-form')?.style.display === 'block') {
-        return // Do not boot app while resetting password
+      try {
+        await resolveAuthenticatedSessionOnce(session, 'onAuthStateChange')
+      } catch (err) {
+        // resolveAuthenticatedSessionOnce already logged via safe phase log.
+        // The profile-resolution error surface handles user-visible retry.
       }
-      await _resolveAndRouteForUser(session.user)
+      return
     }
     if (event === 'SIGNED_OUT') {
       clearSharedAuthSessionCache()
-      // Purge drafts BEFORE clearing the owner marker so a failed purge
-      // leaves the marker in place; the next cold-start ownership check
-      // will retry the purge instead of forgetting who owned the stores.
+      _resolvedUsers.clear()
+      _resolutionInFlight.clear()
       let purgeOk = true
       try {
         await _purgeUserDrafts()
       } catch (err) {
         purgeOk = false
-        console.error('Draft purge on sign-out failed; owner marker preserved for next-boot retry:', err)
+        console.error('Draft purge on sign-out failed; owner marker preserved for next-boot retry:', _safeErrorCode(err))
       }
       await _clearInMemoryUserState()
       if (purgeOk) clearLocalDataOwner()
-      // Force any lingering Profile/setup overlay closed; setup mode alone
-      // won't dismiss itself, and a stale sheet must not cover the login UI.
-      try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay failed:', err) }
+      try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay failed:', _safeErrorCode(err)) }
       _hideProfileResolutionError()
-      // Do NOT reset `_appBootstrapped`. Screens stay initialized so their
-      // listeners remain single-instance across repeated sign-out/sign-in
-      // cycles; user-scoped data is refreshed on the next `_resolveAndRouteForUser`.
       setAuthState({ state: AUTH_STATE.UNAUTHENTICATED, userId: null })
       ensureAuthUiInitialized(true)
       showAuthOverlay()
       switchToLogin()
       navigate('home')
     }
+  }
+
+  // Direct listener. STRICTLY synchronous — no async, no await, no Supabase
+  // calls. Only copies the event onto a queue and returns immediately so the
+  // auth lock is released.
+  const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    setTimeout(() => {
+      enqueueAuthEvent(event, session, _handleDeferredAuthEvent)
+    }, 0)
   })
   _authStateSubscription = subscription
 
@@ -865,7 +960,9 @@ async function init() {
   if (initialSession?.user && !recoveryModeActive && document.getElementById('reset-password-form')?.style.display !== 'block') {
     clearPasswordRecoveryHint()
     _fireClientActivity()
-    await _resolveAndRouteForUser(initialSession.user)
+    try {
+      await resolveAuthenticatedSessionOnce(initialSession, 'initial_boot')
+    } catch (_) { /* error surface handles UX */ }
   } else {
     setAuthState({ state: AUTH_STATE.UNAUTHENTICATED, userId: null })
     if (document.getElementById('auth-overlay').style.display !== 'flex') {
