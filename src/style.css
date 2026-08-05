@@ -4217,7 +4217,11 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
 .profile-avatar-wrap {
   position: relative;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
+.profile-avatar-label { display: block; }
 .profile-avatar-circle {
   width: 72px;
   height: 72px;

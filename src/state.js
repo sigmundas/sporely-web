@@ -39,7 +39,7 @@ export const state = {
   cloudPlan: null,
   searchQuery: '',
   observationScope: 'mine',
-  findsScopePrimary: 'mine',
+  findsScopePrimary: 'feed',
   findsMineScope: 'public',
   findsFeedScope: 'all',
   mapTimeScope: 'month',

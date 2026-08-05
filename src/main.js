@@ -468,7 +468,7 @@ async function _clearInMemoryUserState() {
   state.batchCount = 0
   state.searchQuery = ''
   state.observationScope = 'mine'
-  state.findsScopePrimary = 'mine'
+  state.findsScopePrimary = 'feed'
   state.findsMineScope = 'public'
   state.findsFeedScope = 'all'
   state.findsView = 'cards'

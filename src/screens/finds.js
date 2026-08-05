@@ -164,7 +164,7 @@ function _findsStatusOptions() {
 
 function _normalizeFindsPrimaryScope(scope) {
   const raw = String(scope || '').trim().toLowerCase()
-  return FINDS_PRIMARY_SCOPES.has(raw) ? raw : 'mine'
+  return FINDS_PRIMARY_SCOPES.has(raw) ? raw : 'feed'
 }
 
 function _normalizeFindsMineScope(scope) {
