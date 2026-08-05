@@ -43,6 +43,7 @@ export function initProfile() {
   })
   document.getElementById('delete-account-btn').addEventListener('click', _deleteAccount)
   document.getElementById('profile-save-btn').addEventListener('click', _saveProfile)
+  document.getElementById('profile-username')?.addEventListener('input', _syncProfileSaveEnabled)
   document.getElementById('profile-avatar-btn').addEventListener('click', _openAvatarSourcePicker)
   document.getElementById('profile-avatar-circle').addEventListener('click', _openAvatarSourcePicker)
   document.getElementById('avatar-source-overlay').addEventListener('click', e => {
@@ -158,6 +159,20 @@ export function closeProfileOverlay() {
   _profileOpener = null
 }
 
+// In setup mode, disable Save until the user types a username. Outside
+// setup, Save is always enabled — editing an existing profile without
+// changing the username is a valid no-op save.
+function _syncProfileSaveEnabled() {
+  const btn = document.getElementById('profile-save-btn')
+  if (!btn) return
+  if (!_profileSetupMode) {
+    btn.disabled = false
+    return
+  }
+  const username = String(document.getElementById('profile-username')?.value || '').trim()
+  btn.disabled = !username
+}
+
 function _applyProfileSetupModeUi() {
   const overlay = document.getElementById('profile-overlay')
   if (!overlay) return
@@ -182,6 +197,7 @@ function _applyProfileSetupModeUi() {
   if (title) {
     title.textContent = _profileSetupMode ? t('profile.setupTitle') : t('profile.title')
   }
+  _syncProfileSaveEnabled()
 }
 
 function _initProfileDragEvents() {
@@ -348,6 +364,7 @@ async function _loadProfileData() {
   const normalizedUsername = _normalizeUsername(data.username, state.user?.email || '')
   document.getElementById('profile-username').value  = normalizedUsername || ''
   document.getElementById('profile-fullname').value  = _normalizeDisplayName(data.display_name, state.user?.email || '') || ''
+  _syncProfileSaveEnabled()
   document.getElementById('profile-bio').value = data.bio || ''
   document.getElementById('profile-email-display').textContent = state.user?.email || ''
   const initials = _initials(normalizedUsername || state.user?.email || '')
@@ -374,7 +391,7 @@ async function _saveProfile() {
   const display_name = _normalizeDisplayName(rawDisplayName, state.user?.email || '')
   const bio = document.getElementById('profile-bio').value.trim() || null
 
-  if (_profileSetupMode && (!String(rawUsername || '').trim() || !String(rawDisplayName || '').trim())) {
+  if (_profileSetupMode && !String(rawUsername || '').trim()) {
     btn.disabled = false
     showToast(t('profile.setupIncompleteToast'))
     return
