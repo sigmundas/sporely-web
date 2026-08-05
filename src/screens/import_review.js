@@ -18,7 +18,7 @@ import { isAndroidNativeApp } from '../camera-actions.js';
 import { QUEUED_TAXONOMY_SELECTION_KEY, taxonomySelectionForTaxon } from '../taxonomy-v2.js';
 import { playIrisShutter } from '../iris-shutter.js';
 import { loadInaturalistSession } from '../inaturalist.js';
-import { NativeCamera as _DefaultNativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
+import { NativeCamera as _DefaultNativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, PICKER_OPTIONS_IMPORT, nativePickedPhotoToFile, captureNativePhotoExif, createNativeMetadataHydrationPromise, captureExif, processFile } from './import-helpers.js';
 import {
   LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS,
   endCaptureLocationSession,
@@ -1518,7 +1518,7 @@ export function restoreImportSessions(savedSessions) {
 export async function openPhotoImportPicker() {
   if (isAndroidNativeApp()) {
     try {
-      const result = await pickImagesWithNativePhotoPicker();
+      const result = await pickImagesWithNativePhotoPicker(PICKER_OPTIONS_IMPORT);
       await _handleNativePhotoResult(result);
       return;
     } catch (err) {
@@ -1733,7 +1733,7 @@ async function _handleNativePhotoResult(result) {
 export async function openFileImportPicker() {
   if (isAndroidNativeApp()) {
     try {
-      await _handleNativePhotoResult(await pickImagesWithNativePhotoPicker());
+      await _handleNativePhotoResult(await pickImagesWithNativePhotoPicker(PICKER_OPTIONS_IMPORT));
       return;
     } catch (err) {
       if (isPickerCancel(err)) return;
@@ -2693,7 +2693,7 @@ async function _openCameraForSession(sid) {
 async function _openPickerForSession(sid) {
   if (isAndroidNativeApp()) {
     try {
-      const result = await pickImagesWithNativePhotoPicker();
+      const result = await pickImagesWithNativePhotoPicker(PICKER_OPTIONS_IMPORT);
       const photos = Array.isArray(result?.photos) ? result.photos : [];
       if (!photos.length) return;
       debugImagePipeline('android native picker returned', {

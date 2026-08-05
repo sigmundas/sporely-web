@@ -182,13 +182,23 @@ export async function loadImportSessions() {
 
 export async function clearImportSessions() {
   try {
-    debugImagePipeline('clear import sessions')
-    const db = await _open()
+    await clearImportSessionsStrict()
+  } catch (err) {
+    console.warn('clearImportSessions failed:', err)
+  }
+}
+
+// Strict variant for privacy-sensitive callers (sign-out, account switch,
+// cold-start owner-mismatch purge). Throws on failure so the caller can
+// avoid clearing the owner marker until the purge actually succeeded.
+export async function clearImportSessionsStrict() {
+  debugImagePipeline('clear import sessions (strict)')
+  const db = await _open()
+  try {
     const tx = db.transaction(STORE, 'readwrite')
     tx.objectStore(STORE).clear()
     await _txComplete(tx)
+  } finally {
     db.close()
-  } catch (err) {
-    console.warn('clearImportSessions failed:', err)
   }
 }

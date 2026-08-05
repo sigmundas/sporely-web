@@ -22,13 +22,53 @@ export function isPickerCancel(err) {
   return err?.name === 'AbortError' || err?.code === 'CANCELLED' || message.includes('cancel')
 }
 
-export async function pickImagesWithNativePhotoPicker() {
-  try {
-    await FilePicker.requestPermissions({ permissions: ['accessMediaLocation'] })
-  } catch (error) {
-    console.warn('Could not request media-location permission before import:', error)
+// Picker option presets. Callers pick a preset instead of assembling flags
+// each time. The native side inspects the flags to decide which Android
+// picker implementation to launch:
+//   - PICKER_OPTIONS_IMPORT: multiple=true, includeExif=true,
+//     requestMediaLocation=true, persistReadPermission=true. Uses
+//     ACTION_OPEN_DOCUMENT so we can read EXIF/GPS via
+//     MediaStore.setRequireOriginal() (Q+).
+//   - PICKER_OPTIONS_AVATAR: multiple=false, includeExif=false,
+//     requestMediaLocation=false, persistReadPermission=false. On API 33+ the
+//     plugin launches the Android system Photo Picker
+//     (MediaStore.ACTION_PICK_IMAGES), which needs no runtime media
+//     permission and skips the Gallery/Photos chooser. On older API levels
+//     it falls back to ACTION_OPEN_DOCUMENT without EXTRA_ALLOW_MULTIPLE.
+export const PICKER_OPTIONS_IMPORT = Object.freeze({
+  multiple: true,
+  includeExif: true,
+  requestMediaLocation: true,
+  persistReadPermission: true,
+})
+
+export const PICKER_OPTIONS_AVATAR = Object.freeze({
+  multiple: false,
+  includeExif: false,
+  requestMediaLocation: false,
+  persistReadPermission: false,
+})
+
+export async function pickImagesWithNativePhotoPicker(options = {}) {
+  const {
+    multiple = true,
+    includeExif = true,
+    requestMediaLocation = true,
+    persistReadPermission = true,
+  } = options
+  if (requestMediaLocation) {
+    try {
+      await FilePicker.requestPermissions({ permissions: ['accessMediaLocation'] })
+    } catch (error) {
+      console.warn('Could not request media-location permission before import:', error)
+    }
   }
-  return NativePhotoPicker.pickImages()
+  return NativePhotoPicker.pickImages({
+    multiple,
+    includeExif,
+    requestMediaLocation,
+    persistReadPermission,
+  })
 }
 
 export async function nativePickedPhotoToFile(photo, index, options = {}) {

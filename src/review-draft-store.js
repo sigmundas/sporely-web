@@ -202,13 +202,21 @@ export async function loadReviewDraft() {
 
 export async function clearReviewDraft() {
   try {
-    debugImagePipeline('clear review draft')
-    const db = await _open()
+    await clearReviewDraftStrict()
+  } catch (err) {
+    console.warn('clearReviewDraft failed:', err)
+  }
+}
+
+// Strict variant — see import-store.js clearImportSessionsStrict().
+export async function clearReviewDraftStrict() {
+  debugImagePipeline('clear review draft (strict)')
+  const db = await _open()
+  try {
     const tx = db.transaction(STORE, 'readwrite')
     tx.objectStore(STORE).clear()
     await _txComplete(tx)
+  } finally {
     db.close()
-  } catch (err) {
-    console.warn('clearReviewDraft failed:', err)
   }
 }

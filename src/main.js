@@ -35,9 +35,12 @@ import { buildReviewGrid, initReview, restoreReviewDraft } from './screens/revie
 import { initFindDetail } from './screens/find_detail.js'
 import { initPhotoViewer } from './photo-viewer.js'
 import { initImportReview, openNativeCamera, renderSessions, restoreImportSessions } from './screens/import_review.js'
-import { clearImportSessions, loadImportSessions } from './import-store.js'
-import { loadReviewDraft } from './review-draft-store.js'
-import { initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons } from './screens/profile.js'
+import { clearImportSessions, clearImportSessionsStrict, loadImportSessions } from './import-store.js'
+import { clearReviewDraftStrict, loadReviewDraft } from './review-draft-store.js'
+import { forceCloseProfileOverlay, initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons } from './screens/profile.js'
+import { AUTH_STATE, getAuthState, setAuthState } from './auth-state.js'
+import { fetchProfileWithSignupRetry, isProfileComplete } from './profile-completion.js'
+import { clearLocalDataOwner, resolveLocalDataOwner, setLocalDataOwner } from './local-data-owner.js'
 import { initPeople, loadPeople } from './screens/people.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
@@ -439,13 +442,186 @@ async function _handleInaturalistOAuthReturn(url) {
   return outcome
 }
 
+// Purges the two privacy-sensitive draft stores. THROWS on failure so the
+// caller can leave the owner marker in place and retry on the next boot.
+async function _purgeUserDrafts() {
+  await clearImportSessionsStrict()
+  await clearReviewDraftStrict()
+}
+
+async function _clearInMemoryUserState() {
+  // In-memory media URL cache (Supabase signed URLs).
+  try { clearMediaUrlCache() } catch (err) { console.warn('clearMediaUrlCache on sign-out failed:', err) }
+  // HTTP/service-worker caches.
+  try {
+    if (window.caches?.keys) {
+      const keys = await caches.keys()
+      await Promise.all(keys.map(key => caches.delete(key)))
+    }
+  } catch (err) { console.warn('caches purge on sign-out failed:', err) }
+  // Reset in-memory `state` to defaults (keep the shape stable, just clear
+  // user-scoped fields).
+  state.user = null
+  state.cloudPlan = null
+  state.capturedPhotos = []
+  state.reviewContext = null
+  state.batchCount = 0
+  state.searchQuery = ''
+  state.observationScope = 'mine'
+  state.findsScopePrimary = 'mine'
+  state.findsMineScope = 'public'
+  state.findsFeedScope = 'all'
+  state.findsView = 'cards'
+  state.findsGroupBySpecies = false
+  state.findsSort = 'date'
+  state.findsStatusFilter = 'all'
+  state.findsTargetUserId = null
+  state.findsTargetSummaryLoaded = false
+  state.findsTargetUsername = null
+  state.findsTargetAvatarUrl = null
+  state.findsTargetDisplayName = null
+  state.findsTargetBio = null
+  state.findsTargetRelationship = null
+  state.findsTargetFinds = 0
+  state.findsTargetSpecies = 0
+  state.findsTargetSpores = 0
+  state.findsTargetSummaryComplete = false
+}
+
+async function _resolveAndRouteForUser(user) {
+  // Always show a neutral auth-resolution surface first so the previous
+  // user's Home never flashes between sign-out and sign-in.
+  setAuthState({ state: AUTH_STATE.RESOLVING, userId: user?.id || null })
+  showAuthOverlay()
+  _hideProfileResolutionError()
+
+  const { profile, error } = await fetchProfileWithSignupRetry(user.id)
+  if (error) {
+    // A profile-fetch error is NOT a sign-out. Supabase still has a session;
+    // silently converting a transient network/RLS failure into an
+    // unauthenticated state hides the real problem and leaves the user
+    // guessing. Keep the app blocked behind an error surface with explicit
+    // Try again / Sign out actions.
+    console.error('Profile fetch failed during auth resolution:', error)
+    _showProfileResolutionError(user, error)
+    return
+  }
+  const complete = isProfileComplete(profile)
+
+  if (!complete) {
+    setAuthState({ state: AUTH_STATE.AUTHENTICATED_INCOMPLETE, userId: user.id })
+    // Boot the app shell so Profile setup has DOM to sit inside. Setup covers
+    // the shell and blocks navigation. `onSetupCompleted` is called by the
+    // setup save with the persisted row so we can refresh Home BEFORE the
+    // overlay is dismissed — no blank/stale Home flash.
+    await _ensureAppReadyForUser(user)
+    hideAuthOverlay()
+    navigate('home')
+    await openProfileOverlay({
+      setup: true,
+      onSetupCompleted: async persisted => {
+        // Home refresh is CRITICAL. Preload it BEFORE flipping auth state or
+        // revealing anything, so a failure here leaves setup intact and the
+        // user gets a retryable error instead of a blank Home.
+        navigate('home')
+        await refreshHome() // rethrows on failure → profile.js keeps setup open
+        setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: persisted?.id || user.id })
+        // Header avatar/initials are best-effort — the app is fully usable
+        // if this fails and it will refresh naturally on the next navigate.
+        try {
+          await refreshHeaderProfileButtons({
+            username: persisted?.username,
+            display_name: persisted?.display_name,
+            avatar_url: persisted?.avatar_url || '',
+          })
+        } catch (err) { console.warn('refreshHeaderProfileButtons after setup failed:', err) }
+      },
+      // The setup sign-out flow re-throws on failure; profile.js keeps the
+      // overlay visible and surfaces the error. On success the SIGNED_OUT
+      // handler force-closes the overlay.
+      onSetupSignOut: async () => { await supabase.auth.signOut() },
+    })
+    return
+  }
+
+  setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: user.id })
+  await _ensureAppReadyForUser(user)
+  hideAuthOverlay()
+  navigate('home')
+  // Force a fresh render so a lingering DOM from a previous sign-in on this
+  // page cannot flash to the new user.
+  try { await refreshHome() } catch (err) { console.warn('refreshHome on sign-in failed:', err) }
+  try { await refreshHeaderProfileButtons() } catch (err) { console.warn('refreshHeaderProfileButtons on sign-in failed:', err) }
+}
+
+function _showProfileResolutionError(user, error) {
+  const overlay = document.getElementById('profile-resolve-error-overlay')
+  const message = document.getElementById('profile-resolve-error-message')
+  if (message) message.textContent = error?.message || String(error || t('auth.genericError'))
+  if (overlay) overlay.style.display = 'flex'
+  showAuthOverlay()
+  // Do NOT downgrade the auth state to UNAUTHENTICATED — Supabase still has a
+  // valid session. Stay in RESOLVING so nothing renders Home.
+  setAuthState({ state: AUTH_STATE.RESOLVING, userId: user?.id || null })
+
+  const tryAgainBtn = document.getElementById('profile-resolve-error-retry')
+  const signOutBtn = document.getElementById('profile-resolve-error-signout')
+  const onTryAgain = async () => {
+    _hideProfileResolutionError()
+    await _resolveAndRouteForUser(user)
+  }
+  const onSignOut = async () => {
+    _hideProfileResolutionError()
+    try { await supabase.auth.signOut() }
+    catch (err) { console.warn('Sign-out from resolution error failed:', err) }
+  }
+  // Replace nodes to wipe prior click handlers — this button is bound per
+  // error surface, not once at boot.
+  if (tryAgainBtn) {
+    const fresh = tryAgainBtn.cloneNode(true)
+    tryAgainBtn.parentNode.replaceChild(fresh, tryAgainBtn)
+    fresh.addEventListener('click', onTryAgain)
+  }
+  if (signOutBtn) {
+    const fresh = signOutBtn.cloneNode(true)
+    signOutBtn.parentNode.replaceChild(fresh, signOutBtn)
+    fresh.addEventListener('click', onSignOut)
+  }
+}
+
+function _hideProfileResolutionError() {
+  const overlay = document.getElementById('profile-resolve-error-overlay')
+  if (overlay) overlay.style.display = 'none'
+}
+
+// Boot the app the FIRST time only. Subsequent sign-ins (including account
+// switches) reuse the initialized screens and their existing listeners, so
+// nothing can be double-bound across repeated sign-out/sign-in cycles. On
+// account switch we clear the prior user's data but leave the DOM listeners
+// in place; the refresh calls above repopulate the visible screen.
+async function _ensureAppReadyForUser(user) {
+  const previousUserId = state.user?.id || null
+  if (previousUserId && previousUserId !== user.id) {
+    // Account switch. Purge drafts BEFORE moving the owner marker; if the
+    // purge throws, the marker stays with the previous user so the next
+    // cold-start ownership check retries it.
+    await _purgeUserDrafts()
+    setLocalDataOwner(user.id)
+    await _clearInMemoryUserState()
+  } else {
+    // First boot on this page load: align the marker without a purge.
+    setLocalDataOwner(user.id)
+  }
+  state.user = user
+  await bootApp(user)
+}
+
 async function bootApp(user) {
   if (_appBootstrapped && state.user?.id === user?.id) {
     return
   }
 
   state.user = user
-  hideAuthOverlay()
   showAuthError('')
 
   if (_appBootstrapped) return
@@ -502,18 +678,36 @@ async function bootApp(user) {
   runBootStep('inaturalist-ui', () => _syncInaturalistUi()) // Initial sync of iNaturalist UI
   runBootStep('identify-labels', () => syncIdentifyButtonLabels())
 
-  navigate('home')
-
-  runBootStep('profile-check', async () => {
-    for (let i = 0; i < 3; i++) {
-      const { data } = await supabase.from('profiles').select('id').eq('id', user.id).single()
-      if (data) return
-      await new Promise(resolve => setTimeout(resolve, 500))
-    }
-    console.warn('Profile not found for user, proceeding anyway.', user.id)
-  })
-
   runBootStep('pending-import-restore', async () => {
+    // Cold-start account-switch guard: the SIGNED_OUT handler may not have
+    // run last time (process kill, externally revoked session, etc.). Ask
+    // the owner module to purge on mismatch BEFORE we touch the stores. The
+    // purge is strict — a thrown IDB error keeps the marker in place so the
+    // next boot retries and drafts stay hidden until then.
+    const { outcome } = await resolveLocalDataOwner(user.id, _purgeUserDrafts, {
+      // Legacy rollout: if there's no owner marker but data exists in either
+      // draft store, treat as unowned pre-upgrade data and purge. Documented
+      // trade-off: this may discard one pre-upgrade draft in favor of account
+      // isolation across account switches.
+      hasLegacyData: async () => {
+        try {
+          const sessions = await loadImportSessions()
+          if (sessions.length > 0) return true
+          const draft = await loadReviewDraft()
+          return draft != null
+        } catch { return false }
+      },
+    })
+    if (outcome === 'purge_failed' || outcome === 'legacy_purge_failed') {
+      console.warn('[boot] Ownership purge failed; skipping draft restore this session.')
+      return
+    }
+    if (outcome === 'purged') {
+      console.info('[boot] Purged prior owner\'s local drafts on cold-start.')
+      return
+    }
+    // Only 'match' or 'assigned' reach here.
+
     const pending = await loadImportSessions()
     if (pending.length) {
       restoreImportSessions(pending)
@@ -568,7 +762,7 @@ async function init() {
       recoveryModeActive = false
       clearPasswordRecoveryHint()
       const bootSession = session || await getSharedAuthSession({ refresh: true })
-      if (bootSession?.user) await bootApp(bootSession.user)
+      if (bootSession?.user) await _resolveAndRouteForUser(bootSession.user)
     }, skipDraftRestore)
     authUiInitialized = true
   }
@@ -586,18 +780,44 @@ async function init() {
       switchToResetPassword()
       return
     }
-    if (event === 'SIGNED_IN' && session?.user && !state.user) {
+    if (event === 'SIGNED_IN' && session?.user) {
+      // Same user re-firing SIGNED_IN (token refresh, tab focus): no-op.
+      const currentAuth = getAuthState()
+      if (currentAuth.userId === session.user.id &&
+          currentAuth.state !== AUTH_STATE.RESOLVING &&
+          currentAuth.state !== AUTH_STATE.UNAUTHENTICATED) {
+        return
+      }
       clearSharedAuthSessionCache()
       seedSharedAuthSession(session)
       _fireClientActivity()
       if (recoveryModeActive || document.getElementById('reset-password-form')?.style.display === 'block') {
         return // Do not boot app while resetting password
       }
-      await bootApp(session.user)
+      await _resolveAndRouteForUser(session.user)
     }
     if (event === 'SIGNED_OUT') {
       clearSharedAuthSessionCache()
-      state.user = null
+      // Purge drafts BEFORE clearing the owner marker so a failed purge
+      // leaves the marker in place; the next cold-start ownership check
+      // will retry the purge instead of forgetting who owned the stores.
+      let purgeOk = true
+      try {
+        await _purgeUserDrafts()
+      } catch (err) {
+        purgeOk = false
+        console.error('Draft purge on sign-out failed; owner marker preserved for next-boot retry:', err)
+      }
+      await _clearInMemoryUserState()
+      if (purgeOk) clearLocalDataOwner()
+      // Force any lingering Profile/setup overlay closed; setup mode alone
+      // won't dismiss itself, and a stale sheet must not cover the login UI.
+      try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay failed:', err) }
+      _hideProfileResolutionError()
+      // Do NOT reset `_appBootstrapped`. Screens stay initialized so their
+      // listeners remain single-instance across repeated sign-out/sign-in
+      // cycles; user-scoped data is refreshed on the next `_resolveAndRouteForUser`.
+      setAuthState({ state: AUTH_STATE.UNAUTHENTICATED, userId: null })
       ensureAuthUiInitialized(true)
       showAuthOverlay()
       switchToLogin()
@@ -625,8 +845,9 @@ async function init() {
   if (initialSession?.user && !recoveryModeActive && document.getElementById('reset-password-form')?.style.display !== 'block') {
     clearPasswordRecoveryHint()
     _fireClientActivity()
-    await bootApp(initialSession.user)
+    await _resolveAndRouteForUser(initialSession.user)
   } else {
+    setAuthState({ state: AUTH_STATE.UNAUTHENTICATED, userId: null })
     if (document.getElementById('auth-overlay').style.display !== 'flex') {
       showAuthOverlay()
     }

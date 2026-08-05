@@ -4516,14 +4516,17 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
 .avatar-crop-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: 1500;
   background: rgba(0,0,0,0.85);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .avatar-source-overlay {
-  z-index: 999;
+  /* Must sit above #profile-overlay (z-index 1300) since it is opened from
+     inside the profile sheet. Also stays above the crop overlay so the
+     source picker cannot be occluded on any platform. */
+  z-index: 1600;
   align-items: flex-end;
 }
 .avatar-source-sheet {
@@ -5044,6 +5047,72 @@ html.light .ai-id-dot.is-complete::before {
 }
 
 /* ── SETTINGS PANEL (bottom sheet) ── */
+.profile-setup-banner {
+  background: var(--accent-bg, rgba(45, 156, 96, 0.12));
+  color: var(--text-primary);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 14px;
+  line-height: 1.35;
+  border: 1px solid var(--border);
+}
+.profile-setup-signout-btn {
+  width: 100%;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px;
+  margin-bottom: 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.profile-setup-signout-btn:hover { color: var(--text-primary); }
+
+.profile-resolve-error-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.profile-resolve-error-card {
+  width: min(92vw, 420px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px 22px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+.profile-resolve-error-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+.profile-resolve-error-message {
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  margin-bottom: 18px;
+  word-break: break-word;
+}
+.profile-resolve-error-actions {
+  display: flex;
+  gap: 8px;
+  flex-direction: column;
+}
+.profile-resolve-error-actions .btn-primary,
+.profile-resolve-error-actions .btn-secondary {
+  padding: 10px;
+  border-radius: 10px;
+  width: 100%;
+}
+
 #settings-overlay,
 #profile-overlay {
   position: absolute; inset: 0;

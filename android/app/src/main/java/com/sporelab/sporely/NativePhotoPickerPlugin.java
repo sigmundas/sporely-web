@@ -34,18 +34,50 @@ public class NativePhotoPickerPlugin extends Plugin {
     // 50 MP phones are downsampled 2x via inSampleSize before this cap.
     private static final int MAX_EDGE_PX = 4000;
 
+    // Import Photos and the Profile-avatar picker call this plugin with
+    // different options; the option set decides which Android picker
+    // implementation to launch:
+    //
+    //   - multiple=true + includeExif=true (Import Photos): use
+    //     ACTION_OPEN_DOCUMENT so we can read EXIF/GPS via
+    //     MediaStore.setRequireOriginal() on Android 10+.
+    //   - multiple=false + includeExif=false (Profile avatar): use
+    //     MediaStore.ACTION_PICK_IMAGES (Android system Photo Picker) on
+    //     API 33+, which does not require READ_MEDIA_IMAGES and never shows
+    //     the "Complete action using Gallery or Photos" chooser. On older
+    //     versions fall through to ACTION_OPEN_DOCUMENT without
+    //     EXTRA_ALLOW_MULTIPLE.
     @PluginMethod
     public void pickImages(PluginCall call) {
+        boolean multiple = getBoolOption(call, "multiple", true);
+        boolean includeExif = getBoolOption(call, "includeExif", true);
+        boolean requestMediaLocation = getBoolOption(call, "requestMediaLocation", true);
+        boolean persistReadPermission = getBoolOption(call, "persistReadPermission", true);
+
         Intent intent;
-        // Use the document/content picker instead of Android's newer Photo Picker.
-        // Photo Picker URIs can expose redacted EXIF GPS on Android 13+, while
-        // ACTION_OPEN_DOCUMENT gives us a normal readable URI for metadata import.
-        intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("image/*");
-        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        boolean usePhotoPicker = !multiple
+            && !includeExif
+            && !requestMediaLocation
+            && !persistReadPermission
+            && Build.VERSION.SDK_INT >= 33;
+
+        if (usePhotoPicker) {
+            intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            intent.setType("image/*");
+            // No EXTRA_PICK_IMAGES_MAX == single-image selection.
+        } else {
+            intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("image/*");
+            if (multiple) {
+                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            }
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            if (persistReadPermission) {
+                intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            }
+        }
+
         startActivityForResult(call, intent, "handlePickedImages");
     }
 
@@ -57,18 +89,32 @@ public class NativePhotoPickerPlugin extends Plugin {
             return;
         }
 
+        boolean multiple = getBoolOption(call, "multiple", true);
+        boolean includeExif = getBoolOption(call, "includeExif", true);
+        boolean requestMediaLocation = getBoolOption(call, "requestMediaLocation", true);
+        boolean persistReadPermission = getBoolOption(call, "persistReadPermission", true);
+
         Intent data = result.getData();
         List<Uri> uris = collectUris(data);
+        if (!multiple && uris.size() > 1) {
+            uris = uris.subList(0, 1);
+        }
+
         JSArray photos = new JSArray();
         for (Uri uri : uris) {
-            persistReadPermission(data, uri);
-            JSObject photo = buildPhotoObject(uri);
+            if (persistReadPermission) persistReadPermission(data, uri);
+            JSObject photo = buildPhotoObject(uri, includeExif, requestMediaLocation);
             if (photo != null) photos.put(photo);
         }
 
         JSObject ret = new JSObject();
         ret.put("photos", photos);
         call.resolve(ret);
+    }
+
+    private static boolean getBoolOption(PluginCall call, String key, boolean defaultValue) {
+        Boolean value = call.getBoolean(key);
+        return value != null ? value : defaultValue;
     }
 
     private void persistReadPermission(Intent data, Uri uri) {
@@ -97,38 +143,48 @@ public class NativePhotoPickerPlugin extends Plugin {
         return uris;
     }
 
-    private JSObject buildPhotoObject(Uri uri) {
+    private JSObject buildPhotoObject(Uri uri, boolean includeExif, boolean requestMediaLocation) {
         try {
             ContentResolver resolver = getContext().getContentResolver();
             String mimeType = resolver.getType(uri);
             String displayName = queryDisplayName(uri);
             String format = inferFormat(displayName, mimeType);
 
-            // Read EXIF metadata (GPS, timestamps, orientation). On Android 10+,
-            // GPS can be redacted unless the original media URI is explicitly requested.
             JSObject exifJson = new JSObject();
             int exifOrientation = ExifInterface.ORIENTATION_NORMAL;
-            try (InputStream stream = openExifInputStream(uri, resolver)) {
-                if (stream != null) {
-                    ExifInterface exif = new ExifInterface(stream);
-                    float[] latLong = new float[2];
-                    if (exif.getLatLong(latLong)) {
-                        if (isUsableCoordinate(latLong[0], latLong[1])) {
-                            exifJson.put("latitude", latLong[0]);
-                            exifJson.put("longitude", latLong[1]);
+            if (includeExif) {
+                try (InputStream stream = openExifInputStream(uri, resolver, requestMediaLocation)) {
+                    if (stream != null) {
+                        ExifInterface exif = new ExifInterface(stream);
+                        float[] latLong = new float[2];
+                        if (exif.getLatLong(latLong)) {
+                            if (isUsableCoordinate(latLong[0], latLong[1])) {
+                                exifJson.put("latitude", latLong[0]);
+                                exifJson.put("longitude", latLong[1]);
+                            }
                         }
+                        String dateTimeOriginal = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL);
+                        String dateTime = exif.getAttribute(ExifInterface.TAG_DATETIME);
+                        if (dateTimeOriginal != null) exifJson.put("DateTimeOriginal", dateTimeOriginal);
+                        if (dateTime != null) exifJson.put("CreateDate", dateTime);
+                        double altitude = exif.getAltitude(Double.NaN);
+                        if (!Double.isNaN(altitude)) exifJson.put("GPSAltitude", altitude);
+                        exifOrientation = exif.getAttributeInt(
+                            ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+                        exifJson.put("Orientation", exifOrientation);
                     }
-                    String dateTimeOriginal = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL);
-                    String dateTime = exif.getAttribute(ExifInterface.TAG_DATETIME);
-                    if (dateTimeOriginal != null) exifJson.put("DateTimeOriginal", dateTimeOriginal);
-                    if (dateTime != null) exifJson.put("CreateDate", dateTime);
-                    double altitude = exif.getAltitude(Double.NaN);
-                    if (!Double.isNaN(altitude)) exifJson.put("GPSAltitude", altitude);
-                    exifOrientation = exif.getAttributeInt(
-                        ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
-                    exifJson.put("Orientation", exifOrientation);
-                }
-            } catch (Exception ignored) {}
+                } catch (Exception ignored) {}
+            } else {
+                // Even without EXIF import, we still read orientation so
+                // rotated HEIC -> JPEG conversion produces an upright bitmap.
+                try (InputStream stream = resolver.openInputStream(uri)) {
+                    if (stream != null) {
+                        ExifInterface exif = new ExifInterface(stream);
+                        exifOrientation = exif.getAttributeInt(
+                            ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+                    }
+                } catch (Exception ignored) {}
+            }
 
             // Convert HEIC/HEIF to JPEG on the Java side (hardware-accelerated).
             // This avoids the slow pure-JS heic2any decoder entirely.
@@ -174,8 +230,8 @@ public class NativePhotoPickerPlugin extends Plugin {
         return !(Math.abs(latitude) < 0.000001 && Math.abs(longitude) < 0.000001);
     }
 
-    private InputStream openExifInputStream(Uri uri, ContentResolver resolver) throws IOException {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    private InputStream openExifInputStream(Uri uri, ContentResolver resolver, boolean requestMediaLocation) throws IOException {
+        if (requestMediaLocation && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
                 return resolver.openInputStream(MediaStore.setRequireOriginal(uri));
             } catch (SecurityException | UnsupportedOperationException ignored) {

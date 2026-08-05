@@ -2,22 +2,21 @@ import { supabase } from '../supabase.js'
 import { formatDate, formatTime, t } from '../i18n.js'
 import { state } from '../state.js'
 import { showToast } from '../toast.js'
-import { showAuthOverlay, switchToLogin } from './auth.js'
-import { navigate } from '../router.js'
 import { fetchCloudPlanProfile, formatStorageBytes } from '../cloud-plan.js'
 import { getLastSyncAt } from '../settings.js'
 import { hideProfileOverlay, showProfileOverlay } from '../profile-overlay.js'
-import { Capacitor } from '@capacitor/core'
-import { FilePicker } from '@capawesome/capacitor-file-picker'
+import { isPickerCancel, nativePickedPhotoToFile, PICKER_OPTIONS_AVATAR, pickImagesWithNativePhotoPicker } from './import-helpers.js'
+import { isAndroidNativeApp } from '../camera-actions.js'
+import { isProfileComplete, saveProfileEdit, saveProfileSetup } from '../profile-completion.js'
+import { runProfileSetupCompletion, runSetupSignOut } from '../profile-setup-flow.js'
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
-function _isNativeApp() {
-  return !!window.Capacitor?.isNativePlatform?.() || ['android', 'ios'].includes(window.Capacitor?.getPlatform?.());
-}
-
 let _profileOpener = null
 let _profilePreviousScreen = 'home'
+let _profileSetupMode = false
+let _profileSetupCompleted = null
+let _profileSetupSignOut = null
 let _profileDragStartY = 0
 let _profileDragStartX = 0
 let _profileDragCurrentY = 0
@@ -32,12 +31,13 @@ export function initProfile() {
     const originalLabel = btn.textContent
     btn.disabled = true
     btn.textContent = t('common.pleaseWait')
+    // Force-close the overlay ignoring setup-mode guard: on manual sign-out,
+    // the SIGNED_OUT handler will reset the app anyway.
+    _profileSetupMode = false
     closeProfileOverlay()
+    // supabase.auth.signOut() fires SIGNED_OUT which the main.js listener
+    // uses to purge user-scoped caches, reset state, and show the login form.
     try { await supabase.auth.signOut() } catch (e) { console.warn('Sign out error:', e) }
-    state.user = null
-    showAuthOverlay()
-    switchToLogin()
-    navigate('home')
     btn.disabled = false
     btn.textContent = originalLabel
   })
@@ -77,15 +77,66 @@ export function initProfile() {
   document.getElementById('profile-tos-btn')?.addEventListener('click', () => {
     window.open('https://sporely.no/terms', '_blank')
   })
+
+  const setupSignOutBtn = document.getElementById('profile-setup-signout-btn')
+  setupSignOutBtn?.addEventListener('click', async () => {
+    if (!_profileSetupMode) return
+    // Keep setup visible while sign-out is in flight. If sign-out fails
+    // (network/RLS/etc.) we must NOT dismiss the overlay — otherwise the
+    // user is stranded on Home for an account whose setup is still incomplete.
+    // A successful sign-out is finalized by the centralized SIGNED_OUT
+    // handler in main.js, which calls forceCloseProfileOverlay().
+    const originalLabel = setupSignOutBtn.textContent
+    setupSignOutBtn.disabled = true
+    setupSignOutBtn.textContent = t('common.pleaseWait')
+    const handler = _profileSetupSignOut
+    try {
+      await runSetupSignOut(handler)
+      // Success path: forceCloseProfileOverlay() (driven by the SIGNED_OUT
+      // handler) clears state and dismisses. Do NOT clear
+      // _profileSetupCompleted / _profileSetupSignOut here so a retry after
+      // a rejected in-flight signOut still works.
+    } catch (err) {
+      console.error('Setup sign-out failed:', err)
+      showToast(t('profile.setupSignOutFailed', { message: err?.message || String(err) }))
+      setupSignOutBtn.disabled = false
+      setupSignOutBtn.textContent = originalLabel
+    }
+  })
 }
 
-export async function openProfileOverlay({ opener = null } = {}) {
+// Called from main.js `SIGNED_OUT` handler. Force-dismisses the overlay
+// regardless of setup mode so no stale sheet remains after sign-out (which
+// might otherwise still cover the login screen).
+export function forceCloseProfileOverlay() {
+  _profileSetupCompleted = null
+  _profileSetupSignOut = null
+  _profileSetupMode = false
+  const setupSignOutBtn = document.getElementById('profile-setup-signout-btn')
+  if (setupSignOutBtn) {
+    setupSignOutBtn.disabled = false
+    setupSignOutBtn.textContent = t('profile.setupUseAnotherAccount')
+  }
+  _applyProfileSetupModeUi()
+  const overlay = document.getElementById('profile-overlay')
+  if (overlay) {
+    _profileResetDrag()
+    hideProfileOverlay({ overlay, profileOpener: _profileOpener })
+    _profileOpener = null
+  }
+}
+
+export async function openProfileOverlay({ opener = null, setup = false, onSetupCompleted = null, onSetupSignOut = null } = {}) {
   const overlay = document.getElementById('profile-overlay')
   if (!overlay) return
 
   _profileOpener = opener || document.activeElement || null
   _profilePreviousScreen = state.currentScreen || 'home'
   state.currentScreen = 'profile'
+  _profileSetupMode = !!setup
+  _profileSetupCompleted = setup ? onSetupCompleted : null
+  _profileSetupSignOut = setup ? onSetupSignOut : null
+  _applyProfileSetupModeUi()
 
   _profileResetDrag()
   showProfileOverlay({ overlay })
@@ -96,6 +147,8 @@ export async function openProfileOverlay({ opener = null } = {}) {
 }
 
 export function closeProfileOverlay() {
+  // In setup mode the user cannot dismiss the overlay until they save.
+  if (_profileSetupMode) return
   const overlay = document.getElementById('profile-overlay')
   if (!overlay) return
 
@@ -103,6 +156,32 @@ export function closeProfileOverlay() {
   hideProfileOverlay({ overlay, profileOpener: _profileOpener })
   state.currentScreen = _profilePreviousScreen || 'home'
   _profileOpener = null
+}
+
+function _applyProfileSetupModeUi() {
+  const overlay = document.getElementById('profile-overlay')
+  if (!overlay) return
+  overlay.dataset.setup = _profileSetupMode ? 'true' : ''
+  const closeBtn = document.getElementById('profile-close-btn')
+  const signOutBtn = document.getElementById('sign-out-btn')
+  const deleteBtn = document.getElementById('delete-account-btn')
+  const setupBanner = document.getElementById('profile-setup-banner')
+  const title = document.getElementById('profile-title')
+  if (closeBtn) closeBtn.style.display = _profileSetupMode ? 'none' : ''
+  if (signOutBtn) signOutBtn.style.display = _profileSetupMode ? 'none' : ''
+  if (deleteBtn) deleteBtn.style.display = _profileSetupMode ? 'none' : ''
+  if (setupBanner) {
+    setupBanner.style.display = _profileSetupMode ? 'block' : 'none'
+    setupBanner.textContent = t('profile.setupBanner')
+  }
+  const setupSignOutBtn = document.getElementById('profile-setup-signout-btn')
+  if (setupSignOutBtn) {
+    setupSignOutBtn.style.display = _profileSetupMode ? 'block' : 'none'
+    setupSignOutBtn.textContent = t('profile.setupUseAnotherAccount')
+  }
+  if (title) {
+    title.textContent = _profileSetupMode ? t('profile.setupTitle') : t('profile.title')
+  }
 }
 
 function _initProfileDragEvents() {
@@ -287,20 +366,75 @@ async function _loadProfileData() {
 
 async function _saveProfile() {
   const btn = document.getElementById('profile-save-btn')
+  const originalLabel = btn.textContent
   btn.disabled = true
-  const username     = _normalizeUsername(document.getElementById('profile-username').value, state.user?.email || '')
-  const display_name = _normalizeDisplayName(document.getElementById('profile-fullname').value, state.user?.email || '')
+  const rawUsername    = document.getElementById('profile-username').value
+  const rawDisplayName = document.getElementById('profile-fullname').value
+  const username     = _normalizeUsername(rawUsername, state.user?.email || '')
+  const display_name = _normalizeDisplayName(rawDisplayName, state.user?.email || '')
   const bio = document.getElementById('profile-bio').value.trim() || null
-  const { error } = await supabase.from('profiles').update({ username, display_name, bio }).eq('id', state.user.id)
-  btn.disabled = false
+
+  if (_profileSetupMode && (!String(rawUsername || '').trim() || !String(rawDisplayName || '').trim())) {
+    btn.disabled = false
+    showToast(t('profile.setupIncompleteToast'))
+    return
+  }
+
+  // Setup save stamps `profile_completed_at`; ordinary edits leave it alone.
+  const saver = _profileSetupMode ? saveProfileSetup : saveProfileEdit
+  const { persisted, error } = await saver(supabase, state.user.id, { username, display_name, bio })
+
   if (error) {
+    btn.disabled = false
     showToast(error.code === '23505' ? t('profile.usernameTaken') : t('common.errorPrefix', { message: error.message }))
     return
   }
-  document.getElementById('profile-username').value = username || ''
-  await refreshHeaderProfileButtons({ username, display_name, avatar_url: document.getElementById('profile-avatar-img')?.getAttribute('src') || '' })
+
+  document.getElementById('profile-username').value = persisted?.username || ''
+
+  // Setup completion: keep the save button disabled through the WHOLE
+  // transition (persist → auth-state → Home refresh → dismiss). If Home
+  // refresh fails, stay in setup mode and surface the error so the user can
+  // retry. Never dismiss the overlay unless the completion handler succeeded.
+  if (_profileSetupMode && isProfileComplete(persisted)) {
+    btn.textContent = t('common.pleaseWait')
+    const handler = _profileSetupCompleted
+    try {
+      await runProfileSetupCompletion(persisted, handler, () => {
+        _profileSetupCompleted = null
+        _profileSetupSignOut = null
+        _profileSetupMode = false
+        _applyProfileSetupModeUi()
+        const overlay = document.getElementById('profile-overlay')
+        if (overlay) {
+          _profileResetDrag()
+          hideProfileOverlay({ overlay, profileOpener: _profileOpener })
+          state.currentScreen = _profilePreviousScreen || 'home'
+          _profileOpener = null
+        }
+      })
+      showToast(t('profile.saved'))
+    } catch (err) {
+      console.error('Profile setup completion failed:', err)
+      // Stay in setup mode. Do not clear _profileSetupCompleted so a retry
+      // still routes through main.js. Do not show "Profile saved".
+      showToast(t('profile.setupCompletionFailed', { message: err?.message || String(err) }))
+    } finally {
+      btn.disabled = false
+      btn.textContent = originalLabel
+    }
+    return
+  }
+
+  btn.disabled = false
+  await refreshHeaderProfileButtons({
+    username: persisted?.username,
+    display_name: persisted?.display_name,
+    avatar_url: persisted?.avatar_url || document.getElementById('profile-avatar-img')?.getAttribute('src') || '',
+  })
   showToast(t('profile.saved'))
 }
+
 
 // ── Avatar crop ────────────────────────────────────────────────────────────────
 
@@ -320,36 +454,30 @@ function _closeAvatarSourcePicker() {
 }
 
 async function _openAvatarLibraryPicker() {
-  if (_isNativeApp()) {
+  // Android app: reuse the same system photo picker as Import Photos so users
+  // get the modern one-tap picker instead of the legacy Gallery/Photos chooser
+  // and its broad READ_MEDIA_IMAGES permission prompt.
+  if (isAndroidNativeApp()) {
     try {
-      await FilePicker.requestPermissions()
-      const result = await FilePicker.pickImages({ multiple: false, readData: false })
-      const photo = result?.files?.[0]
-      if (!photo) return
-
-      let path = photo.path
-      let mimeType = photo.mimeType || 'image/jpeg'
-      if (mimeType === 'image/heic' || mimeType === 'image/heif' || photo.format === 'heic' || photo.format === 'heif') {
-        try {
-          if (window.Capacitor?.Plugins?.FilePicker?.convertHeicToJpeg) {
-            const converted = await FilePicker.convertHeicToJpeg({ path })
-            path = converted.path
-            mimeType = 'image/jpeg'
-          }
-        } catch (error) {
-          console.warn('Native HEIC conversion failed:', error)
-        }
-      }
-
-      const response = await fetch(Capacitor.convertFileSrc(path))
-      const blob = await response.blob()
-      await _showCrop(new File([blob], photo.name || 'avatar.jpg', { type: mimeType }))
+      const result = await pickImagesWithNativePhotoPicker(PICKER_OPTIONS_AVATAR)
+      const photos = Array.isArray(result?.photos) ? result.photos
+        : Array.isArray(result?.files) ? result.files
+          : []
+      if (!photos.length) return // user cancelled — silent
+      const file = await nativePickedPhotoToFile(photos[0], 0, {
+        captureSource: 'profile-avatar',
+        screenPath: 'profile',
+      })
+      await _showCrop(file)
       return
     } catch (error) {
+      if (isPickerCancel(error)) return
       console.warn('Native avatar picker failed, falling back to browser input:', error)
     }
   }
 
+  // Web/PWA and non-Android natives fall back to the standard <input type=file>
+  // — same predictable single-image behaviour, no plugin permission surface.
   document.getElementById('profile-avatar-input').click()
 }
 
@@ -837,11 +965,8 @@ async function _deleteAccount() {
     return
   }
 
+  // SIGNED_OUT handler in main.js performs the cache purge + UI reset.
   try { await supabase.auth.signOut() } catch (e) { console.warn('Sign out error:', e) }
-  state.user = null
-  showAuthOverlay()
-  switchToLogin()
-  navigate('home')
   btn.disabled = false
   btn.textContent = originalLabel
   showToast(t('profile.accountDeleted'))

@@ -24,6 +24,17 @@
 <div id="app">
 
   <!-- ═══════════════════════ AUTH OVERLAY ═══════════════════════ -->
+  <div id="profile-resolve-error-overlay" class="profile-resolve-error-overlay" style="display:none">
+    <div class="profile-resolve-error-card">
+      <div class="profile-resolve-error-title" id="profile-resolve-error-title">Could not load your profile</div>
+      <div class="profile-resolve-error-message" id="profile-resolve-error-message"></div>
+      <div class="profile-resolve-error-actions">
+        <button type="button" class="btn-primary" id="profile-resolve-error-retry">Try again</button>
+        <button type="button" class="btn-secondary" id="profile-resolve-error-signout">Sign out</button>
+      </div>
+    </div>
+  </div>
+
   <div id="auth-overlay">
     <div class="auth-card">
       <div class="auth-brand">
@@ -925,6 +936,8 @@
         </div>
 
         <div class="profile-body">
+          <div class="profile-setup-banner" id="profile-setup-banner" style="display:none">Choose a username and display name to finish creating your account.</div>
+          <button type="button" class="profile-setup-signout-btn" id="profile-setup-signout-btn" style="display:none">Use another account</button>
           <div class="profile-identity">
             <div class="profile-avatar-wrap">
               <div class="profile-avatar-circle" id="profile-avatar-circle">
