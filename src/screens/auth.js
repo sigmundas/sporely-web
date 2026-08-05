@@ -10,68 +10,44 @@ import {
   isNativeGoogleSignInAvailable,
   signInWithGoogleNative,
 } from '../google-auth.js'
+import {
+  acquireTurnstileToken,
+  consumeTurnstileToken,
+  resetTurnstile,
+  setNativeBridge,
+  TurnstileCancelledError,
+  TurnstileChallengeError,
+  TurnstileConfigError,
+} from '../turnstile.js'
+import { acquireNativeTurnstileToken } from './auth-turnstile-mobile.js'
 
-const TURNSTILE_SITE_KEY = import.meta.env?.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAC0h9RON_lYu5ib_'
+setNativeBridge(acquireNativeTurnstileToken)
+
 const SUPABASE_OAUTH_CALLBACK_PATH = '/auth/callback'
 const SUPABASE_OAUTH_FALLBACK_ORIGIN = 'https://app.sporely.no'
-let _captchaToken      = null
-let _turnstileWidgetId = null
-
-function _isLocalTestingHost(hostname = window.location.hostname) {
-  if (!hostname) return false
-
-  if (
-    hostname === 'localhost' ||
-    hostname === '127.0.0.1' ||
-    hostname === '::1' ||
-    hostname === '[::1]' ||
-    hostname.endsWith('.local')
-  ) {
-    return true
-  }
-
-  if (!/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) return false
-  const [a, b] = hostname.split('.').map(Number)
-
-  return (
-    a === 10 ||
-    a === 127 ||
-    (a === 192 && b === 168) ||
-    (a === 172 && b >= 16 && b <= 31)
-  )
-}
-
-const BYPASS_TURNSTILE = isNativeApp() || (import.meta.env?.DEV && _isLocalTestingHost())
 const PASSWORD_RESET_WEB_ORIGIN = 'https://app.sporely.no'
 const PERSIST_AUTH_DRAFTS = !!import.meta.env?.DEV
 const AUTH_DRAFT_KEY = 'sporely-auth-draft'
 const PASSWORD_RECOVERY_HINT_KEY = 'sporely-password-recovery-hint'
 const PASSWORD_RECOVERY_HINT_TTL_MS = 1000 * 60 * 60
 
-async function _initTurnstile() {
-  if (BYPASS_TURNSTILE) return
-  // Don't render a second widget if one already exists
-  if (_turnstileWidgetId !== null) return
-
-  for (let i = 0; i < 100; i++) {
-    if (window.turnstile) break
-    await new Promise(r => setTimeout(r, 50))
-  }
-  if (!window.turnstile) return
-  _turnstileWidgetId = window.turnstile.render('#turnstile-container', {
-    sitekey:            TURNSTILE_SITE_KEY,
-    theme:              'dark',
-    callback:           token  => { _captchaToken = token },
-    'expired-callback': ()     => { _captchaToken = null },
-    'error-callback':   ()     => { _captchaToken = null },
-  })
+async function _obtainCaptchaToken(action) {
+  await acquireTurnstileToken(action)
+  return consumeTurnstileToken(action)
 }
 
-function _resetTurnstile() {
-  _captchaToken = null
-  if (window.turnstile && _turnstileWidgetId !== null) {
-    window.turnstile.reset(_turnstileWidgetId)
+function _handleCaptchaError(action, error) {
+  resetTurnstile(action)
+  if (error instanceof TurnstileCancelledError) {
+    return t('auth.captchaCancelled')
   }
+  if (error instanceof TurnstileConfigError) {
+    return error.message || t('auth.captchaConfig')
+  }
+  if (error instanceof TurnstileChallengeError) {
+    return t('auth.captchaFailed')
+  }
+  return null
 }
 
 async function _withTimeout(promise, timeoutMs, label) {
@@ -340,14 +316,7 @@ function _persistAuthInputs() {
 }
 
 function _captchaErrorMessage(message) {
-  const text = String(message || '')
-  const lower = text.toLowerCase()
-
-  if (BYPASS_TURNSTILE && (lower.includes('captcha') || lower.includes('turnstile') || lower.includes('challenge'))) {
-    return t('auth.localCaptchaHint')
-  }
-
-  return text
+  return String(message || '')
 }
 
 function setLoading(btn, loading) {
@@ -400,6 +369,12 @@ async function _waitForSession(maxAttempts = 5, delayMs = 150) {
   return null
 }
 
+function _resetAllTurnstileActions() {
+  resetTurnstile('signup')
+  resetTurnstile('login')
+  resetTurnstile('password_reset')
+}
+
 export function switchToLogin(prefillEmail = '', resetMessage = false) {
   showError('')
   document.getElementById('signup-form').style.display = 'none'
@@ -407,9 +382,7 @@ export function switchToLogin(prefillEmail = '', resetMessage = false) {
   document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('login-form').style.display  = 'block'
   _setSocialLoginVisibility(_shouldShowSocialLogin())
-  // Hide Turnstile on the login view — captcha is signup-only
-  const tc = document.getElementById('turnstile-container')
-  if (tc) tc.style.display = 'none'
+  _resetAllTurnstileActions()
   if (prefillEmail) document.getElementById('login-email').value = prefillEmail
   _writeAuthDraft({ mode: 'login', loginEmail: prefillEmail || document.getElementById('login-email').value })
   if (resetMessage) {
@@ -424,10 +397,7 @@ function switchToSignup(prefillEmail = '') {
   document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('signup-form').style.display = 'block'
   _setSocialLoginVisibility(_shouldShowSocialLogin())
-  // Show and init Turnstile when entering signup view
-  const tc = document.getElementById('turnstile-container')
-  if (tc) tc.style.display = 'flex'
-  _initTurnstile()
+  _resetAllTurnstileActions()
   if (prefillEmail) document.getElementById('signup-email').value = prefillEmail
   _writeAuthDraft({ mode: 'signup', signupEmail: prefillEmail || document.getElementById('signup-email').value })
 }
@@ -439,8 +409,7 @@ export function switchToForgotPassword(prefillEmail = '') {
   document.getElementById('reset-password-form').style.display = 'none'
   document.getElementById('forgot-password-form').style.display = 'block'
   _setSocialLoginVisibility(false)
-  const tc = document.getElementById('turnstile-container')
-  if (tc) tc.style.display = 'none'
+  _resetAllTurnstileActions()
   if (prefillEmail) document.getElementById('forgot-email').value = prefillEmail
 }
 
@@ -451,8 +420,7 @@ export function switchToResetPassword() {
   document.getElementById('forgot-password-form').style.display = 'none'
   document.getElementById('reset-password-form').style.display = 'block'
   _setSocialLoginVisibility(false)
-  const tc = document.getElementById('turnstile-container')
-  if (tc) tc.style.display = 'none'
+  _resetAllTurnstileActions()
   document.getElementById('new-password').value = ''
   document.getElementById('confirm-new-password').value = ''
 }
@@ -669,9 +637,25 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     const email    = document.getElementById('login-email').value.trim()
     const password = document.getElementById('login-password').value
 
+    let captchaToken
     try {
       setLoading(loginBtn, true)
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+      try {
+        captchaToken = await _obtainCaptchaToken('login')
+      } catch (captchaError) {
+        const captchaMessage = _handleCaptchaError('login', captchaError)
+        if (captchaMessage) {
+          showError(captchaMessage)
+          return
+        }
+        throw captchaError
+      }
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+        options: { captchaToken },
+      })
+      if (error) resetTurnstile('login')
 
       if (!error) {
         const session = data?.session || await _waitForSession()
@@ -711,14 +695,22 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
       return
     }
 
+    let captchaToken
     try {
       setLoading(signupBtn, true)
-      const signUpPayload = { email, password }
-      if (!BYPASS_TURNSTILE) {
-        signUpPayload.options = { captchaToken: _captchaToken }
+      try {
+        captchaToken = await _obtainCaptchaToken('signup')
+      } catch (captchaError) {
+        const captchaMessage = _handleCaptchaError('signup', captchaError)
+        if (captchaMessage) {
+          showError(captchaMessage)
+          return
+        }
+        throw captchaError
       }
-      const { data, error } = await supabase.auth.signUp(signUpPayload)
-      _resetTurnstile()
+      const signUpPayload = { email, password, options: { captchaToken } }
+      const { error } = await supabase.auth.signUp(signUpPayload)
+      if (error) resetTurnstile('signup')
 
       if (error) {
         // "User already registered" — send them to login instead
@@ -772,13 +764,26 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     showError('')
     const email = document.getElementById('forgot-email').value.trim()
     
+    let captchaToken
     try {
       setLoading(forgotBtn, true)
+      try {
+        captchaToken = await _obtainCaptchaToken('password_reset')
+      } catch (captchaError) {
+        const captchaMessage = _handleCaptchaError('password_reset', captchaError)
+        if (captchaMessage) {
+          showError(captchaMessage)
+          return
+        }
+        throw captchaError
+      }
 
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: _getPasswordResetRedirectUrl()
+        redirectTo: _getPasswordResetRedirectUrl(),
+        captchaToken,
       })
-      
+      if (error) resetTurnstile('password_reset')
+
       if (error) {
         showError(_captchaErrorMessage(error.message))
       } else {

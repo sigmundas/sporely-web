@@ -5,6 +5,37 @@
   Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; manifest-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://media.sporely.no https://*.supabase.co https://tile.openstreetmap.org https://*.tile.openstreetmap.org; connect-src 'self' https://*.supabase.co https://challenges.cloudflare.com https://api.inaturalist.org https://www.inaturalist.org https://ai.artsdatabanken.no https://stedsnavn.artsdatabanken.no https://api.dataforsyningen.dk https://nominatim.openstreetmap.org https://upload.sporely.no https://media.sporely.no; frame-src 'self' https://challenges.cloudflare.com; worker-src 'self' blob:; media-src 'self' blob: data:;
   Content-Security-Policy-Report-Only: default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; manifest-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://media.sporely.no https://*.supabase.co https://tile.openstreetmap.org https://*.tile.openstreetmap.org; connect-src 'self' https://*.supabase.co https://challenges.cloudflare.com https://api.inaturalist.org https://www.inaturalist.org https://ai.artsdatabanken.no https://stedsnavn.artsdatabanken.no https://api.dataforsyningen.dk https://nominatim.openstreetmap.org https://upload.sporely.no https://media.sporely.no; frame-src 'self' https://challenges.cloudflare.com; worker-src 'self' blob:; media-src 'self' blob: data:;
 
+# Hosted Turnstile challenge page (loaded as an iframe by the Android app).
+#
+# Cloudflare Pages `_headers` MERGES matching rules. Without the
+# `! Header-Name` detachment syntax, the global `/*` block's CSP with
+# `frame-ancestors 'self'` and any inherited `X-Frame-Options` continue
+# to apply to this route and block embedding from the Capacitor WebView.
+#
+# Detach the inherited headers first, then re-emit exactly one Content
+# Security Policy that allows framing from the Android/iOS Capacitor
+# origins. This preserves the tight `frame-ancestors 'self'` on the
+# rest of the site — only this helper route is embeddable.
+#
+# Capacitor origin allowlist (verified against @capacitor/android 8 +
+# capacitor.config.json — no `server` block, so defaults apply):
+#   Android : https://localhost         (androidScheme defaults to https)
+#   iOS     : capacitor://localhost     (iosScheme defaults to capacitor)
+# `http://localhost` is included as a legacy fallback for older Capacitor
+# configs / dev tunnels; drop it once every shipped build is confirmed to
+# be on the https scheme.
+/auth/turnstile-mobile
+  ! Content-Security-Policy
+  ! Content-Security-Policy-Report-Only
+  ! X-Frame-Options
+  Content-Security-Policy: default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors http://localhost https://localhost capacitor://localhost
+
+/auth/turnstile-mobile.html
+  ! Content-Security-Policy
+  ! Content-Security-Policy-Report-Only
+  ! X-Frame-Options
+  Content-Security-Policy: default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors http://localhost https://localhost capacitor://localhost
+
 # PWA manifest and icons — short cache so updates are picked up quickly
 /manifest.json
   Cache-Control: no-cache

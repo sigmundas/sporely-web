@@ -70,6 +70,7 @@
         <label class="auth-label"><span id="login-password-label">Password</span>
           <input type="password" id="login-password" name="password" class="auth-input" placeholder="••••••••" required autocomplete="current-password">
         </label>
+        <div data-turnstile="login" style="margin-bottom:16px;display:flex;justify-content:center"></div>
         <button type="submit" class="auth-btn" id="login-btn">Sign in</button>
         <p class="auth-switch" style="margin-bottom:8px"><a href="#" id="show-forgot-password">Forgot password?</a></p>
         <p class="auth-switch"><span id="login-switch-prefix">No account?</span> <a href="#" id="show-signup">Create one</a></p>
@@ -82,6 +83,7 @@
         <label class="auth-label"><span id="forgot-email-label">Email</span>
           <input type="email" id="forgot-email" name="email" class="auth-input" placeholder="you@example.com" required autocomplete="username">
         </label>
+        <div data-turnstile="password_reset" style="margin-bottom:16px;display:flex;justify-content:center"></div>
         <button type="submit" class="auth-btn" id="forgot-btn">Send reset link</button>
         <p class="auth-switch"><a href="#" id="show-login-from-forgot">Back to sign in</a></p>
       </form>
@@ -116,7 +118,7 @@
         <span style="font-size:13px; font-weight:normal; color:var(--text-dim, #aaa)">I agree to <a href="https://sporely.no/terms" target="_blank" style="color:var(--brand, #4CAF50); text-decoration:none;">terms of service and privacy policy</a></span>
       </label>
     <!-- Turnstile CAPTCHA -->
-    <div id="turnstile-container" style="margin-bottom:16px;display:none;justify-content:center"></div>
+    <div data-turnstile="signup" style="margin-bottom:16px;display:flex;justify-content:center"></div>
 
       <div style="display:flex; justify-content:center;">
       <button type="submit" class="auth-btn" id="signup-btn" style="padding-left:32px; padding-right:32px; min-width:200px;">Create account</button>
