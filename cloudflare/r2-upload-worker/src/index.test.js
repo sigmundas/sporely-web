@@ -1071,3 +1071,235 @@ test('Stage2a-r3: overwrite in private mode PRESERVES prior bytes when canonical
     } finally { globalThis.fetch = originalFetch }
   })
 
+// ── DELETE /upload/<key> attempts both legacy + private buckets ───────
+
+function makeTrackedBucket(entries = {}) {
+  const store = new Map(Object.entries(entries))
+  const events = []
+  return {
+    events,
+    head: async key => {
+      events.push({ op: 'head', key })
+      if (!store.has(key)) return null
+      return { size: store.get(key).size }
+    },
+    delete: async key => {
+      events.push({ op: 'delete', key })
+      store.delete(key)
+    },
+    _has: key => store.has(key),
+  }
+}
+
+test('DELETE /upload/<key>: removes from BOTH legacy and private buckets when both are bound', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock({
+    is_pro: true,
+    cloud_plan: 'pro',
+    storage_quota_bytes: null,
+    total_storage_bytes: 3000,
+    storage_used_bytes: 3000,
+    image_count: 3,
+    is_banned: false,
+  })
+  const legacyBucket = makeTrackedBucket({ 'user-123/a/full.webp': { size: 1000 } })
+  const privateBucket = makeTrackedBucket({ 'user-123/a/full.webp': { size: 500 } })
+
+  try {
+    const res = await worker.fetch(
+      new Request('https://upload.sporely.no/upload/user-123/a/full.webp', {
+        method: 'DELETE',
+        headers: {
+          Origin: 'https://localhost',
+          Authorization: `Bearer ${token}`,
+        },
+      }),
+      {
+        ...TEST_ENV,
+        MEDIA_BUCKET: legacyBucket,
+        PRIVATE_MEDIA_BUCKET: privateBucket,
+        SUPABASE_URL: 'https://example.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+        SUPABASE_JWT_SECRET: jwtSecret,
+      },
+      {},
+    )
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.ok, true)
+    assert.equal(body.buckets.legacy, true)
+    assert.equal(body.buckets.private, true)
+    // Both buckets received a delete call.
+    assert.ok(legacyBucket.events.some(e => e.op === 'delete' && e.key === 'user-123/a/full.webp'))
+    assert.ok(privateBucket.events.some(e => e.op === 'delete' && e.key === 'user-123/a/full.webp'))
+    assert.equal(legacyBucket._has('user-123/a/full.webp'), false)
+    assert.equal(privateBucket._has('user-123/a/full.webp'), false)
+  } finally { restoreFetch() }
+})
+
+test('DELETE /upload/<key>: works when object lives ONLY in the private bucket', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock({
+    is_pro: true,
+    cloud_plan: 'pro',
+    storage_quota_bytes: null,
+    total_storage_bytes: 500,
+    storage_used_bytes: 500,
+    image_count: 1,
+    is_banned: false,
+  })
+  const legacyBucket = makeTrackedBucket()
+  const privateBucket = makeTrackedBucket({ 'user-123/a/full.webp': { size: 500 } })
+
+  try {
+    const res = await worker.fetch(
+      new Request('https://upload.sporely.no/upload/user-123/a/full.webp', {
+        method: 'DELETE',
+        headers: { Origin: 'https://localhost', Authorization: `Bearer ${token}` },
+      }),
+      {
+        ...TEST_ENV,
+        MEDIA_BUCKET: legacyBucket,
+        PRIVATE_MEDIA_BUCKET: privateBucket,
+        SUPABASE_URL: 'https://example.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+        SUPABASE_JWT_SECRET: jwtSecret,
+      },
+      {},
+    )
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.buckets.legacy, false)
+    assert.equal(body.buckets.private, true)
+    assert.equal(privateBucket._has('user-123/a/full.webp'), false)
+  } finally { restoreFetch() }
+})
+
+test('DELETE /upload/<key>: works when object lives ONLY in the legacy bucket', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock({
+    is_pro: false,
+    cloud_plan: 'free',
+    storage_quota_bytes: null,
+    total_storage_bytes: 1000,
+    storage_used_bytes: 1000,
+    image_count: 1,
+    is_banned: false,
+  })
+  const legacyBucket = makeTrackedBucket({ 'user-123/legacy/full.webp': { size: 1000 } })
+  const privateBucket = makeTrackedBucket()
+
+  try {
+    const res = await worker.fetch(
+      new Request('https://upload.sporely.no/upload/user-123/legacy/full.webp', {
+        method: 'DELETE',
+        headers: { Origin: 'https://localhost', Authorization: `Bearer ${token}` },
+      }),
+      {
+        ...TEST_ENV,
+        MEDIA_BUCKET: legacyBucket,
+        PRIVATE_MEDIA_BUCKET: privateBucket,
+        SUPABASE_URL: 'https://example.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+        SUPABASE_JWT_SECRET: jwtSecret,
+      },
+      {},
+    )
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.buckets.legacy, true)
+    assert.equal(body.buckets.private, false)
+    assert.equal(legacyBucket._has('user-123/legacy/full.webp'), false)
+  } finally { restoreFetch() }
+})
+
+test('DELETE /upload/<key>: missing-from-both is a 200 no-op (idempotent for account deletion retry)', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock({
+    is_pro: false,
+    cloud_plan: 'free',
+    storage_quota_bytes: null,
+    total_storage_bytes: 0,
+    storage_used_bytes: 0,
+    image_count: 0,
+    is_banned: false,
+  })
+  const legacyBucket = makeTrackedBucket()
+  const privateBucket = makeTrackedBucket()
+
+  try {
+    const res = await worker.fetch(
+      new Request('https://upload.sporely.no/upload/user-123/nope.webp', {
+        method: 'DELETE',
+        headers: { Origin: 'https://localhost', Authorization: `Bearer ${token}` },
+      }),
+      {
+        ...TEST_ENV,
+        MEDIA_BUCKET: legacyBucket,
+        PRIVATE_MEDIA_BUCKET: privateBucket,
+        SUPABASE_URL: 'https://example.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+        SUPABASE_JWT_SECRET: jwtSecret,
+      },
+      {},
+    )
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.ok, true)
+    assert.equal(body.buckets.legacy, false)
+    assert.equal(body.buckets.private, false)
+  } finally { restoreFetch() }
+})
+
+test('DELETE /upload/<key>: refuses when NEITHER bucket binding is configured', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const res = await worker.fetch(
+    new Request('https://upload.sporely.no/upload/user-123/a.webp', {
+      method: 'DELETE',
+      headers: { Origin: 'https://localhost', Authorization: `Bearer ${token}` },
+    }),
+    {
+      ...TEST_ENV,
+      SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+      SUPABASE_JWT_SECRET: jwtSecret,
+    },
+    {},
+  )
+  assert.equal(res.status, 500)
+  const body = await res.json()
+  assert.equal(body.error, 'missing_bucket')
+})
+
+test('DELETE /upload/<key>: still enforces key must start with authenticated user id', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock({
+    is_pro: false, cloud_plan: 'free', storage_quota_bytes: null,
+    total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0, is_banned: false,
+  })
+  const legacyBucket = makeTrackedBucket({ 'other-user/foo.webp': { size: 1 } })
+  const privateBucket = makeTrackedBucket()
+  try {
+    const res = await worker.fetch(
+      new Request('https://upload.sporely.no/upload/other-user/foo.webp', {
+        method: 'DELETE',
+        headers: { Origin: 'https://localhost', Authorization: `Bearer ${token}` },
+      }),
+      {
+        ...TEST_ENV,
+        MEDIA_BUCKET: legacyBucket,
+        PRIVATE_MEDIA_BUCKET: privateBucket,
+        SUPABASE_URL: 'https://example.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+        SUPABASE_JWT_SECRET: jwtSecret,
+      },
+      {},
+    )
+    assert.equal(res.status, 403)
+    const body = await res.json()
+    assert.equal(body.error, 'key_not_allowed')
+    // Ensure no delete was issued to either bucket.
+    assert.equal(legacyBucket.events.filter(e => e.op === 'delete').length, 0)
+    assert.equal(privateBucket.events.filter(e => e.op === 'delete').length, 0)
+  } finally { restoreFetch() }
+})

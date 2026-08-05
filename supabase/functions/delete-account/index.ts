@@ -2,6 +2,10 @@
 /// <reference lib="deno.ns" />
 
 import { createClient } from 'jsr:@supabase/supabase-js@2'
+// Deno resolves the plain-JS plan module fine; Node tests import the same
+// file. Keeping it .js avoids the TS-import ceremony on both sides.
+// deno-lint-ignore-file no-explicit-any
+import { encodeObjectKey, normalizeStoragePath, runDeletionPlan } from './plan.js'
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
 const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
@@ -13,9 +17,7 @@ const admin = createClient(supabaseUrl, serviceRoleKey, {
 
 // Native Capacitor Android runs the WebView at https://localhost by default
 // (Capacitor 4+ androidScheme). iOS uses capacitor://localhost. The web app
-// lives at https://app.sporely.no. Rather than a wildcard, echo the caller's
-// origin when it matches this allowlist — that keeps CORS strict and works
-// with `credentials: 'include'` if a caller ever needs it.
+// lives at https://app.sporely.no.
 const ALLOWED_ORIGINS = new Set([
   'https://app.sporely.no',
   'https://localhost',
@@ -40,200 +42,98 @@ Deno.serve(async req => {
   const corsHeaders = corsHeadersFor(req)
 
   if (req.method === 'OPTIONS') {
-    // Answer preflight before any auth or body handling. Status 204 with
-    // no body is the standard preflight response.
     return new Response(null, { status: 204, headers: corsHeaders })
   }
 
-  try {
-    const authHeader = req.headers.get('Authorization')
-    if (!authHeader) {
-      return json({ error: 'Missing Authorization header' }, 401, corsHeaders)
-    }
+  const authHeader = req.headers.get('Authorization')
+  if (!authHeader) {
+    return json({ error: 'unauthorized' }, 401, corsHeaders)
+  }
 
-    const userClient = createClient(supabaseUrl, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
-      global: { headers: { Authorization: authHeader } },
-      auth: { autoRefreshToken: false, persistSession: false },
+  // Authenticate the caller with the anon client so RLS confirms the JWT
+  // belongs to a real user; then we execute deletes with the service role.
+  const userClient = createClient(supabaseUrl, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+    global: { headers: { Authorization: authHeader } },
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
+  const { data: userData, error: userError } = await userClient.auth.getUser()
+  if (userError || !userData?.user) {
+    return json({ error: 'unauthorized' }, 401, corsHeaders)
+  }
+  const uid = userData.user.id
+
+  const worker = {
+    async deleteKey(key: string) {
+      const url = `${mediaUploadBaseUrl}/upload/${encodeObjectKey(key)}`
+      try {
+        const response = await fetch(url, {
+          method: 'DELETE',
+          headers: { Authorization: authHeader },
+        })
+        if (response.ok) return { ok: true, status: response.status }
+        // 404 = already deleted; the plan treats it as success.
+        if (response.status === 404) return { ok: true, status: 404 }
+        let detail = response.statusText || 'unknown'
+        try {
+          const text = await response.text()
+          if (text) {
+            try {
+              const parsed = JSON.parse(text)
+              detail = parsed?.error || parsed?.message || detail
+            } catch { detail = text }
+          }
+        } catch { /* swallow body-read errors */ }
+        return { ok: false, status: response.status, detail }
+      } catch (err) {
+        return { ok: false, detail: (err as Error).message }
+      }
+    },
+  }
+
+  try {
+    const result = await runDeletionPlan({
+      uid,
+      admin,
+      worker,
+      r2Keys: new Set<string>(),
     })
 
-    const { data: { user }, error: userError } = await userClient.auth.getUser()
-    if (userError || !user) {
-      return json({ error: 'Unauthorized' }, 401, corsHeaders)
+    if (result.ok) {
+      logDeletionOutcome({ ok: true, completed: result.completed })
+      return json({ ok: true }, 200, corsHeaders)
     }
 
-    const uid = user.id
-
-    // Canonical observation media now lives in R2, so delete the current
-    // observation-image keys through the upload worker first.
-    await deleteObservationMedia(uid, authHeader)
-
-    // Legacy Supabase Storage cleanup remains as a compatibility sweep for
-    // old pre-migration observation-images rows and avatars.
-    await deleteFolderContents('observation-images', uid)
-    await deleteFolderContents('avatars', uid)
-
-    await admin.from('comments').delete().eq('user_id', uid)
-    await admin.from('observation_shares').delete().eq('shared_with_id', uid)
-    await admin.from('friendships').delete().or(`requester_id.eq.${uid},addressee_id.eq.${uid}`)
-    await admin.from('user_blocks').delete().or(`blocker_id.eq.${uid},blocked_id.eq.${uid}`)
-
-    const { data: observations, error: observationsError } = await admin
-      .from('observations')
-      .select('id')
-      .eq('user_id', uid)
-
-    if (observationsError) {
-      throw new Error(`Failed to load observations for account deletion: ${observationsError.message}`)
-    }
-
-    const observationIds = (observations || []).map(obs => obs.id)
-    if (observationIds.length) {
-      await admin.from('comments').delete().in('observation_id', observationIds)
-      await admin.from('observation_images').delete().in('observation_id', observationIds)
-      await admin.from('observation_shares').delete().in('observation_id', observationIds)
-      await admin.from('observations').delete().in('id', observationIds)
-    }
-
-    // Also delete desktop-app synced tables to prevent FK constraint errors.
-    await admin.from('spore_measurements').delete().eq('user_id', uid)
-    await admin.from('calibrations').delete().eq('user_id', uid)
-
-    await admin.from('profiles').delete().eq('id', uid)
-
-    const { error: deleteUserError } = await admin.auth.admin.deleteUser(uid)
-    if (deleteUserError) {
-      console.error('deleteUser failed:', deleteUserError)
-      return json({ error: deleteUserError.message }, 500, corsHeaders)
-    }
-
-    return json({ ok: true }, 200, corsHeaders)
-  } catch (error) {
-    console.error(error)
-    return json({ error: error instanceof Error ? error.message : 'Unexpected error' }, 500, corsHeaders)
+    // Structured error surface. `stage` tells ops which step failed; `error`
+    // is a client-safe short message. Detailed server-side log carries the
+    // full error text with the stage label but no access token/user id.
+    logDeletionOutcome({
+      ok: false,
+      stage: result.stage,
+      error: result.error,
+      completed: result.completed,
+    })
+    return json({ error: 'account_delete_failed', stage: result.stage || 'unknown' }, 500, corsHeaders)
+  } catch (err) {
+    // Should not happen — runDeletionPlan is expected to catch its own
+    // stage errors — but a defensive catch prevents raw exceptions leaking.
+    console.error('[delete-account] unexpected', { message: (err as Error).message })
+    return json({ error: 'account_delete_failed', stage: 'unknown' }, 500, corsHeaders)
   }
 })
 
-async function deleteObservationMedia(uid: string, authHeader: string) {
-  const { data, error } = await admin
-    .from('observation_images')
-    .select('storage_path')
-    .eq('user_id', uid)
-
-  if (error) {
-    throw new Error(`Failed to load observation media for account deletion: ${error.message}`)
-  }
-
-  const keys = new Set<string>()
-  for (const row of data || []) {
-    for (const key of observationMediaDeleteTargets(row.storage_path)) {
-      if (key) keys.add(key)
-    }
-  }
-
-  for (const key of keys) {
-    await deleteMediaViaWorker(key, authHeader)
-  }
-}
-
-function observationMediaDeleteTargets(storagePath: string) {
-  const normalizedPath = normalizeStoragePath(storagePath)
-  if (!normalizedPath) return []
-
-  const segments = normalizedPath.split('/').filter(Boolean)
-  const fileName = segments.pop() || ''
-  if (!fileName) return [normalizedPath]
-
-  const dir = segments.join('/')
-  const originalName = fileName.startsWith('thumb_') ? fileName.slice('thumb_'.length) : fileName
-  const thumbName = fileName.startsWith('thumb_') ? fileName : `thumb_${fileName}`
-
-  return [...new Set([joinStoragePath(dir, originalName), joinStoragePath(dir, thumbName)])]
-}
-
-function joinStoragePath(dir: string, fileName: string) {
-  return dir ? `${dir}/${fileName}` : fileName
-}
-
-function normalizeStoragePath(storagePath: string) {
-  return String(storagePath ?? '').trim().replace(/^\/+/, '')
-}
-
-async function deleteMediaViaWorker(storagePath: string, authHeader: string) {
-  const normalizedPath = normalizeStoragePath(storagePath)
-  if (!normalizedPath) return
-
-  const response = await fetch(`${mediaUploadBaseUrl}/upload/${encodeObjectKey(normalizedPath)}`, {
-    method: 'DELETE',
-    headers: {
-      Authorization: authHeader,
-    },
+function logDeletionOutcome(entry: {
+  ok: boolean
+  stage?: string
+  error?: string
+  completed: string[]
+}) {
+  // NEVER log user ids, storage paths, tokens, or profile values.
+  console.info('[delete-account]', {
+    ok: entry.ok,
+    stage: entry.stage || null,
+    completedCount: entry.completed.length,
+    errorSummary: entry.error ? entry.error.slice(0, 200) : null,
   })
-
-  if (!response.ok) {
-    const responseText = await response.text()
-    let detail = response.statusText || 'Delete failed'
-    if (responseText) {
-      try {
-        const payload = JSON.parse(responseText)
-        if (payload?.error) detail = payload.error
-        else if (payload?.message) detail = payload.message
-      } catch (_) {
-        detail = responseText
-      }
-    }
-    throw new Error(`Worker delete failed for ${normalizedPath}: ${detail}`)
-  }
-}
-
-function encodeObjectKey(storagePath: string) {
-  return normalizeStoragePath(storagePath)
-    .split('/')
-    .filter(Boolean)
-    .map(segment => encodeURIComponent(segment))
-    .join('/')
-}
-
-async function deleteFolderContents(bucket: string, uid: string) {
-  const folders = [{ path: uid, prefix: uid }]
-
-  while (folders.length) {
-    const current = folders.pop()
-    if (!current) continue
-
-    let offset = 0
-    while (true) {
-      const { data, error } = await admin.storage.from(bucket).list(current.path, {
-        limit: 1000,
-        offset,
-      })
-
-      if (error) {
-        throw new Error(`Failed listing files from ${bucket}: ${error.message}`)
-      }
-      if (!data?.length) break
-
-      const files: string[] = []
-      for (const item of data) {
-        if (!item.name) continue
-        const itemPath = `${current.prefix}/${item.name}`
-        if (item.id) {
-          files.push(itemPath)
-        } else {
-          folders.push({ path: itemPath, prefix: itemPath })
-        }
-      }
-
-      if (files.length) {
-        const { error: removeError } = await admin.storage.from(bucket).remove(files)
-        if (removeError) {
-          throw new Error(`Failed removing files from ${bucket}: ${removeError.message}`)
-        }
-      }
-
-      if (data.length < 1000) break
-      offset += data.length
-    }
-  }
 }
 
 function json(body: Record<string, unknown>, status = 200, corsHeaders: Record<string, string> = {}) {
@@ -245,3 +145,7 @@ function json(body: Record<string, unknown>, status = 200, corsHeaders: Record<s
     },
   })
 }
+
+// Keep the following exports so future callers can use them without
+// duplicating logic. Not referenced at runtime here.
+export { normalizeStoragePath }

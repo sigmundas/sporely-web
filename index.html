@@ -24,6 +24,27 @@
 <div id="app">
 
   <!-- ═══════════════════════ AUTH OVERLAY ═══════════════════════ -->
+  <!-- In-app delete-account confirmation. Opened from Profile → Delete
+       account. Kept out of the profile-sheet DOM so it can sit above at a
+       higher z-index without a stacking-context clip. -->
+  <div id="delete-account-overlay" class="delete-account-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="delete-account-title">
+    <div class="delete-account-card">
+      <div class="delete-account-title" id="delete-account-title">Delete this account?</div>
+      <div class="delete-account-message" id="delete-account-message"></div>
+      <div class="delete-account-actions">
+        <button type="button" class="btn-secondary" id="delete-account-cancel">Cancel</button>
+        <button type="button" class="delete-account-confirm-btn" id="delete-account-confirm">Delete permanently</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Blocking overlay that stays visible from "sign-in succeeded" until the
+       destination screen has been populated for the newly authenticated user.
+       Prevents any frame in which the previous account's Home is visible. -->
+  <div id="account-transition-overlay" class="account-transition-overlay" style="display:none" aria-hidden="true">
+    <div class="account-transition-spinner" aria-label="Loading account"></div>
+  </div>
+
   <div id="profile-resolve-error-overlay" class="profile-resolve-error-overlay" style="display:none">
     <div class="profile-resolve-error-card">
       <div class="profile-resolve-error-title" id="profile-resolve-error-title">Could not load your profile</div>

@@ -565,7 +565,13 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
           const resolvedSession = session || await _waitForSession()
           if (resolvedSession?.user) {
             _clearAuthDraft()
-            onAuthenticated(resolvedSession)
+            // Await routing so this branch does not complete while account
+            // resolution is still in flight. The direct result and the
+            // deferred SIGNED_IN event both funnel through
+            // resolveAuthenticatedSessionOnce(), so the second call is a
+            // no-op — but returning early here would race the finally
+            // block that re-enables the Google button.
+            await onAuthenticated(resolvedSession)
             return
           }
           showError(t('auth.genericError'))
@@ -583,6 +589,8 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
             showError(error?.message || t('auth.genericError'))
           }
         } finally {
+          // Always restore the Google button so a rejected routing does not
+          // leave it stuck disabled.
           googleLoginBtn.disabled = false
         }
         return
@@ -672,7 +680,7 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
         const session = data?.session || await _waitForSession()
         if (session?.user) {
           _clearAuthDraft()
-          onAuthenticated(session)
+          await onAuthenticated(session)
           return
         }
         showError(t('common.errorPrefix', { message: 'Sign-in succeeded but no session was available yet. Please try again.' }))
@@ -759,7 +767,7 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
           }
         }
         _clearAuthDraft()
-        onAuthenticated(session)
+        await onAuthenticated(session)
         return
       }
 

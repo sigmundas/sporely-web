@@ -694,8 +694,14 @@ async function handleDownload(request, env, ctx, url) {
 }
 
 async function handleDelete(request, env, ctx, url) {
-  if (!env.MEDIA_BUCKET) {
-    throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
+  // Account-deletion clean-up (and normal per-image delete) must remove the
+  // object regardless of whether it lives in the legacy public bucket or in
+  // the private bucket. The `media_authorize_delivery` RPC records
+  // canonical_bucket per row, but this route is called with just the object
+  // key — we don't know which bucket ahead of time. Attempt both bindings
+  // that are configured; a missing object in either is a no-op.
+  if (!env.MEDIA_BUCKET && !env.PRIVATE_MEDIA_BUCKET) {
+    throw httpError(500, 'missing_bucket', 'No R2 bucket bindings are configured')
   }
 
   const origin = resolveAllowedOrigin(request, env)
@@ -715,10 +721,19 @@ async function handleDelete(request, env, ctx, url) {
     throw httpError(403, 'key_not_allowed', 'Delete key must start with the authenticated user id')
   }
 
-  const existingObject = await env.MEDIA_BUCKET.head(key)
-  await env.MEDIA_BUCKET.delete(key)
-  const existingBytes = mediaObjectSize(existingObject)
-  const imageDelta = isOriginalImageKey(key) && existingObject ? -1 : 0
+  const legacyObject = env.MEDIA_BUCKET ? await env.MEDIA_BUCKET.head(key) : null
+  const privateObject = env.PRIVATE_MEDIA_BUCKET ? await env.PRIVATE_MEDIA_BUCKET.head(key) : null
+
+  if (env.MEDIA_BUCKET) await env.MEDIA_BUCKET.delete(key)
+  if (env.PRIVATE_MEDIA_BUCKET) await env.PRIVATE_MEDIA_BUCKET.delete(key)
+
+  // Storage-usage accounting: sum bytes from whichever buckets held the
+  // key. Image-count decrements by ONE for an original key regardless of
+  // whether one or both buckets held it — the row represents a single
+  // logical image.
+  const existingBytes = mediaObjectSize(legacyObject) + mediaObjectSize(privateObject)
+  const held = !!(legacyObject || privateObject)
+  const imageDelta = isOriginalImageKey(key) && held ? -1 : 0
   const trackedProfile = await applyStorageDelta(env, claims.sub, -existingBytes, imageDelta)
 
   return jsonResponse(
@@ -726,6 +741,10 @@ async function handleDelete(request, env, ctx, url) {
       ok: true,
       key,
       deleted: true,
+      buckets: {
+        legacy: !!legacyObject,
+        private: !!privateObject,
+      },
       storage: trackedProfile,
     },
     200,

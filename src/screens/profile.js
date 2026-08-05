@@ -959,7 +959,7 @@ async function _removeFriend(friendUserId) {
 
 async function _deleteAccount() {
   const email = state.user?.email || 'this account'
-  const confirmed = window.confirm(t('profile.deleteConfirm', { email }))
+  const confirmed = await _confirmDeleteAccount(email)
   if (!confirmed) return
 
   const btn = document.getElementById('delete-account-btn')
@@ -974,8 +974,17 @@ async function _deleteAccount() {
   if (error) {
     btn.disabled = false
     btn.textContent = originalLabel
+    // Diagnostic log for devs: dump the full supabase-js error so its
+    // `context.res` / status / stage payload is available in devtools.
+    // User-facing message deliberately stays generic — we never leak
+    // stage names, storage paths, or ids.
+    console.error('[delete-account] request failed', error)
+    // "Failed to send a request to the Edge Function" from supabase-js
+    // means the fetch itself never reached the function — offline, CORS
+    // block, or the function URL 404s. Anything else is a structured
+    // failure returned by the deployed function.
     if (String(error.message || '').toLowerCase().includes('failed to send')) {
-      showToast(t('profile.deleteFunctionMissing'))
+      showToast(t('profile.deleteUnavailable'))
     } else {
       showToast(t('profile.deleteFailed', { message: error.message }))
     }
@@ -987,6 +996,51 @@ async function _deleteAccount() {
   btn.disabled = false
   btn.textContent = originalLabel
   showToast(t('profile.accountDeleted'))
+}
+
+// In-app replacement for window.confirm. Returns a promise that resolves to
+// true only if the user pressed the destructive confirm button. Keeps the
+// modal above #profile-overlay via its own z-index (1700).
+function _confirmDeleteAccount(email) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById('delete-account-overlay')
+    const messageEl = document.getElementById('delete-account-message')
+    const cancelBtn = document.getElementById('delete-account-cancel')
+    const confirmBtn = document.getElementById('delete-account-confirm')
+    if (!overlay || !confirmBtn || !cancelBtn) {
+      // Fallback for environments where the markup is missing — better to
+      // block deletion than to silently proceed without confirmation.
+      resolve(false)
+      return
+    }
+
+    if (messageEl) messageEl.textContent = t('profile.deleteConfirm', { email })
+    cancelBtn.textContent = t('profile.deleteCancel')
+    confirmBtn.textContent = t('profile.deleteConfirmButton')
+
+    // Replace nodes so previous handlers do not stack across repeated opens.
+    const freshCancel = cancelBtn.cloneNode(true)
+    const freshConfirm = confirmBtn.cloneNode(true)
+    cancelBtn.parentNode.replaceChild(freshCancel, cancelBtn)
+    confirmBtn.parentNode.replaceChild(freshConfirm, confirmBtn)
+
+    const onKey = e => { if (e.key === 'Escape') dismiss(false) }
+    const onBackdrop = e => { if (e.target === overlay) dismiss(false) }
+
+    function dismiss(result) {
+      overlay.style.display = 'none'
+      overlay.removeEventListener('click', onBackdrop)
+      document.removeEventListener('keydown', onKey)
+      resolve(result)
+    }
+
+    freshCancel.addEventListener('click', () => dismiss(false))
+    freshConfirm.addEventListener('click', () => dismiss(true))
+    overlay.addEventListener('click', onBackdrop)
+    document.addEventListener('keydown', onKey)
+
+    overlay.style.display = 'flex'
+  })
 }
 
 function _esc(str) {

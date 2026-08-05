@@ -41,6 +41,14 @@ import { forceCloseProfileOverlay, initProfile, loadProfile, openProfileOverlay,
 import { AUTH_STATE, getAuthState, setAuthState } from './auth-state.js'
 import { fetchProfileWithSignupRetry, isProfileComplete } from './profile-completion.js'
 import { clearLocalDataOwner, resolveLocalDataOwner, setLocalDataOwner } from './local-data-owner.js'
+import {
+  beginAccountTransition,
+  clearUserScopedUi,
+  currentAccountGeneration,
+  hideAccountTransitionBlocker,
+  isCurrentAccountTransition,
+  showAccountTransitionBlocker,
+} from './account-transition.js'
 import { initPeople, loadPeople } from './screens/people.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
@@ -550,10 +558,15 @@ export function resolveAuthenticatedSessionOnce(session, source) {
 
   const promise = (async () => {
     try {
-      await _resolveAndRouteForUser(user)
-      _resolvedUsers.add(user.id)
-      _authLog('session_resolution_completed', { source, ok: true })
-      return { status: 'resolved' }
+      const result = await _resolveAndRouteForUser(user)
+      // Only successful, revealed destinations count as resolved. Error
+      // and stale outcomes leave `_resolvedUsers` unchanged so a retry (or
+      // a fresh transition) still runs the full pipeline.
+      if (result?.status === 'complete-home' || result?.status === 'incomplete-profile-setup') {
+        _resolvedUsers.add(user.id)
+      }
+      _authLog('session_resolution_completed', { source, ok: true, status: result?.status || 'unknown' })
+      return result || { status: 'unknown' }
     } catch (err) {
       _authLog('session_resolution_completed', { source, ok: false, code: _safeErrorCode(err) })
       throw err
@@ -566,46 +579,95 @@ export function resolveAuthenticatedSessionOnce(session, source) {
   return promise
 }
 
+// Explicit resolution results. Only `complete-home` and
+// `incomplete-profile-setup` reveal a destination; anything else keeps the
+// app blocked. `resolveAuthenticatedSessionOnce` gates `_resolvedUsers.add`
+// on these two success statuses.
+const RESOLUTION_STATUS = Object.freeze({
+  COMPLETE_HOME: 'complete-home',
+  INCOMPLETE_PROFILE_SETUP: 'incomplete-profile-setup',
+  PROFILE_FETCH_FAILED: 'profile-fetch-failed',
+  STALE: 'stale',
+})
+
 async function _resolveAndRouteForUser(user) {
-  // Always show a neutral auth-resolution surface first so the previous
-  // user's Home never flashes between sign-out and sign-in.
-  setAuthState({ state: AUTH_STATE.RESOLVING, userId: user?.id || null })
+  // Open an explicit account-transition boundary. Every async DOM write
+  // below must verify this generation before running.
+  const generation = beginAccountTransition()
+  const expectedUserId = user?.id || null
+  _authLog('account_transition_started', {})
+
+  // Synchronously blank prior-user content and put up the opaque blocker
+  // BEFORE any await runs. Neither the browser paint pipeline nor a late
+  // account-A response can leak stale DOM after this point.
+  clearUserScopedUi()
+  showAccountTransitionBlocker()
+  setAuthState({ state: AUTH_STATE.RESOLVING, userId: expectedUserId })
   showAuthOverlay()
+  try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay in transition failed:', err) }
   _hideProfileResolutionError()
 
   const { profile, error } = await fetchProfileWithSignupRetry(user.id)
+
+  // Discard if a newer transition superseded us while we were awaiting the
+  // profile fetch. Do NOT touch DOM or reveal anything.
+  if (!isCurrentAccountTransition(generation, expectedUserId, user.id)) {
+    _authLog('stale_account_result_discarded', { source: 'profile_fetch' })
+    return { status: RESOLUTION_STATUS.STALE }
+  }
+
   if (error) {
     // A profile-fetch error is NOT a sign-out. Supabase still has a session;
     // silently converting a transient network/RLS failure into an
-    // unauthenticated state hides the real problem and leaves the user
-    // guessing. Keep the app blocked behind an error surface with explicit
-    // Try again / Sign out actions.
+    // unauthenticated state hides the real problem. Keep the app blocked
+    // behind an error surface with explicit Try again / Sign out actions.
+    // Blocker stays visible; do not reveal Home.
     console.error('Profile fetch failed during auth resolution:', error)
+    _authLog('profile_completion_checked', { hasProfile: false, complete: false, fetchOk: false })
     _showProfileResolutionError(user, error)
-    return
+    return { status: RESOLUTION_STATUS.PROFILE_FETCH_FAILED }
   }
+
   const complete = isProfileComplete(profile)
+  _authLog('profile_completion_checked', {
+    hasProfile: !!profile,
+    hasUsername: !!(profile?.username && String(profile.username).trim()),
+    hasDisplayName: !!(profile?.display_name && String(profile.display_name).trim()),
+    hasProfileCompletedAt: !!profile?.profile_completed_at,
+    complete,
+    fetchOk: true,
+  })
 
   if (!complete) {
+    // INCOMPLETE-PROFILE branch. Prepare-then-reveal:
+    //   1) init app shell + purge previous-user data (behind the blocker)
+    //   2) mount Profile setup for B
+    //   3) verify no newer transition superseded us
+    //   4) only THEN drop the blocker + auth overlay
     setAuthState({ state: AUTH_STATE.AUTHENTICATED_INCOMPLETE, userId: user.id })
-    // Boot the app shell so Profile setup has DOM to sit inside. Setup covers
-    // the shell and blocks navigation. `onSetupCompleted` is called by the
-    // setup save with the persisted row so we can refresh Home BEFORE the
-    // overlay is dismissed — no blank/stale Home flash.
     await _ensureAppReadyForUser(user)
-    hideAuthOverlay()
+    if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
+      _authLog('stale_account_result_discarded', { source: 'ensure_ready_incomplete' })
+      return { status: RESOLUTION_STATUS.STALE }
+    }
     navigate('home')
+    _authLog('destination_render_started', { destination: 'profile-setup' })
     await openProfileOverlay({
       setup: true,
       onSetupCompleted: async persisted => {
-        // Home refresh is CRITICAL. Preload it BEFORE flipping auth state or
-        // revealing anything, so a failure here leaves setup intact and the
-        // user gets a retryable error instead of a blank Home.
+        // Setup save's completion — Home refresh is CRITICAL. Runs at a
+        // later moment than the initial transition; capture a fresh
+        // generation so a late Google callback for another account cannot
+        // race this refresh either.
+        const g = currentAccountGeneration()
+        const uid = persisted?.id || user.id
         navigate('home')
-        await refreshHome() // rethrows on failure → profile.js keeps setup open
-        setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: persisted?.id || user.id })
-        // Header avatar/initials are best-effort — the app is fully usable
-        // if this fails and it will refresh naturally on the next navigate.
+        await refreshHome()
+        if (!isCurrentAccountTransition(g, uid, state.user?.id)) {
+          _authLog('stale_account_result_discarded', { source: 'setup_completion' })
+          throw new Error('stale-account-transition')
+        }
+        setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: uid })
         try {
           await refreshHeaderProfileButtons({
             username: persisted?.username,
@@ -614,22 +676,64 @@ async function _resolveAndRouteForUser(user) {
           })
         } catch (err) { console.warn('refreshHeaderProfileButtons after setup failed:', err) }
       },
-      // The setup sign-out flow re-throws on failure; profile.js keeps the
-      // overlay visible and surfaces the error. On success the SIGNED_OUT
-      // handler force-closes the overlay.
       onSetupSignOut: async () => { await supabase.auth.signOut() },
     })
-    return
+    // openProfileOverlay resolved => Profile setup DOM is mounted and its
+    // `loadProfile()` has run for user B. Verify once more before dropping
+    // the blocker; if a newer transition kicked off since, keep the
+    // blocker (that transition will replace it).
+    if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
+      _authLog('stale_account_result_discarded', { source: 'setup_open' })
+      return { status: RESOLUTION_STATUS.STALE }
+    }
+    _authLog('destination_render_completed', { destination: 'profile-setup' })
+    hideAuthOverlay()
+    hideAccountTransitionBlocker()
+    _authLog('account_transition_revealed', { destination: 'profile-setup' })
+    return { status: RESOLUTION_STATUS.INCOMPLETE_PROFILE_SETUP }
   }
 
-  setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: user.id })
+  // COMPLETE branch. Prepare-then-reveal:
+  //   1) init app shell + purge previous-user data (behind the blocker)
+  //   2) refresh Home for B
+  //   3) verify no newer transition superseded us
+  //   4) navigate to Home
+  //   5) only THEN drop the blocker + auth overlay
   await _ensureAppReadyForUser(user)
-  hideAuthOverlay()
+  if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
+    _authLog('stale_account_result_discarded', { source: 'ensure_ready_complete' })
+    return { status: RESOLUTION_STATUS.STALE }
+  }
+  _authLog('destination_render_started', { destination: 'home' })
+  // Home refresh is CRITICAL for a complete user's first sign-in on this
+  // page: a swallowed failure would reveal a blank/stale Home. Throw to
+  // the error surface instead.
+  try {
+    await refreshHome()
+  } catch (err) {
+    console.error('Initial Home refresh failed for authenticated user:', err)
+    _showProfileResolutionError(user, err)
+    return { status: RESOLUTION_STATUS.PROFILE_FETCH_FAILED }
+  }
+  if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
+    _authLog('stale_account_result_discarded', { source: 'home_refresh' })
+    return { status: RESOLUTION_STATUS.STALE }
+  }
+  // Header avatar/initials are best-effort — a failure here does not warrant
+  // blocking the app. It refreshes naturally on the next screen change.
+  try { await refreshHeaderProfileButtons() }
+  catch (err) { console.warn('refreshHeaderProfileButtons on sign-in failed:', err) }
+  if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
+    _authLog('stale_account_result_discarded', { source: 'header_refresh' })
+    return { status: RESOLUTION_STATUS.STALE }
+  }
+  setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: user.id })
   navigate('home')
-  // Force a fresh render so a lingering DOM from a previous sign-in on this
-  // page cannot flash to the new user.
-  try { await refreshHome() } catch (err) { console.warn('refreshHome on sign-in failed:', err) }
-  try { await refreshHeaderProfileButtons() } catch (err) { console.warn('refreshHeaderProfileButtons on sign-in failed:', err) }
+  _authLog('destination_render_completed', { destination: 'home' })
+  hideAuthOverlay()
+  hideAccountTransitionBlocker()
+  _authLog('account_transition_revealed', { destination: 'home' })
+  return { status: RESOLUTION_STATUS.COMPLETE_HOME }
 }
 
 function _showProfileResolutionError(user, error) {
@@ -902,7 +1006,7 @@ async function init() {
       _fireClientActivity()
       try {
         await resolveAuthenticatedSessionOnce(session, 'onAuthStateChange')
-      } catch (err) {
+      } catch {
         // resolveAuthenticatedSessionOnce already logged via safe phase log.
         // The profile-resolution error surface handles user-visible retry.
       }
@@ -912,6 +1016,13 @@ async function init() {
       clearSharedAuthSessionCache()
       _resolvedUsers.clear()
       _resolutionInFlight.clear()
+      // Bump the transition generation FIRST so any in-flight resolution
+      // for the previous user is rejected as stale before touching DOM.
+      beginAccountTransition()
+      // Synchronously blank prior-user DOM before any await — no A content
+      // may survive after this line, and none of the following awaits may
+      // paint it back.
+      clearUserScopedUi()
       let purgeOk = true
       try {
         await _purgeUserDrafts()
@@ -923,6 +1034,7 @@ async function init() {
       if (purgeOk) clearLocalDataOwner()
       try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay failed:', _safeErrorCode(err)) }
       _hideProfileResolutionError()
+      hideAccountTransitionBlocker()
       setAuthState({ state: AUTH_STATE.UNAUTHENTICATED, userId: null })
       ensureAuthUiInitialized(true)
       showAuthOverlay()

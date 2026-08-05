@@ -4195,7 +4195,11 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   max-width: min(calc(100vw - 24px), 420px);
   box-sizing: border-box;
   text-align: center;
-  z-index: 999;
+  /* Must sit above #profile-overlay (1300) and #avatar-source-overlay (1600)
+     so toasts fired from inside those flows (e.g. "Please confirm you want
+     to delete your account") are actually visible. Stays below the auth
+     transition blocker (1900) which owns the boot pipeline. */
+  z-index: 1800;
   opacity: 0;
   transition: opacity 0.2s, transform 0.2s;
   pointer-events: none;
@@ -5073,6 +5077,86 @@ html.light .ai-id-dot.is-complete::before {
   font-size: 13px;
 }
 .profile-setup-signout-btn:hover { color: var(--text-primary); }
+
+/* Delete-account confirmation. Sits above #profile-overlay (1300) so the
+   modal is clickable and its accompanying toasts (1800) remain visible. */
+.delete-account-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1700;
+  background: rgba(0, 0, 0, 0.72);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.delete-account-card {
+  width: min(92vw, 420px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px 22px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+.delete-account-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+.delete-account-message {
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  margin-bottom: 18px;
+  white-space: pre-line;
+  word-break: break-word;
+}
+.delete-account-actions {
+  display: flex;
+  gap: 8px;
+  flex-direction: column;
+}
+.delete-account-actions .btn-secondary,
+.delete-account-confirm-btn {
+  padding: 10px;
+  border-radius: 10px;
+  width: 100%;
+  font-size: 14px;
+  cursor: pointer;
+}
+.delete-account-confirm-btn {
+  background: #b3261e;
+  color: #fff;
+  border: 1px solid #b3261e;
+}
+.delete-account-confirm-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Account-transition blocker. Sits ABOVE every regular screen and modal
+   but BELOW the auth overlay's absolute stacking so the auth overlay can
+   still cover it when the app transitions to unauthenticated. */
+.account-transition-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1900;
+  background: var(--surface, #111);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+.account-transition-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--green-bright, #4caf7c);
+  animation: account-transition-spin 0.9s linear infinite;
+}
+@keyframes account-transition-spin { to { transform: rotate(360deg); } }
 
 .profile-resolve-error-overlay {
   position: fixed;
