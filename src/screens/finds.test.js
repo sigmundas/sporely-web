@@ -489,7 +489,7 @@ test('public visibility helper excludes drafts and owner rows', () => {
   )
 })
 
-test('detail loader returns owner drafts from the base table', async () => {
+test('detail loader returns owner drafts from the base table and stops', async () => {
   const calls = []
   const client = {
     from(table) {
@@ -523,36 +523,237 @@ test('detail loader returns owner drafts from the base table', async () => {
 
   const result = await loadDetailObservation(696, { client })
 
-  assert.equal(calls.length, 1)
+  assert.equal(calls.length, 1, 'owner path must not consult non-owner views')
   assert.equal(calls[0].table, 'observations')
   assert.equal(result.source, 'observations')
   assert.equal(result.observation?.id, 696)
   assert.equal(result.observation?.is_draft, true)
+  assert.equal(result.outcome, 'observation')
 })
 
-test('detail loader falls back to the community view when the base row is invisible', async () => {
+// Helper: build a mock supabase-js client that records every
+// .from(...).select(...).eq(...).maybeSingle() call in `calls` and
+// returns the queued response for that (table, sequence) pair.
+function makeSequencedClient(routes) {
   const calls = []
+  const cursors = new Map()
+  return {
+    calls,
+    client: {
+      from(table) {
+        return {
+          select(columns) {
+            return {
+              eq(column, value) {
+                return {
+                  async maybeSingle() {
+                    const index = cursors.get(table) ?? 0
+                    cursors.set(table, index + 1)
+                    calls.push({ table, columns, column, value })
+                    const sequence = routes[table] || []
+                    if (!sequence.length) return { data: null, error: null }
+                    const response = sequence[Math.min(index, sequence.length - 1)]
+                    if (typeof response === 'function') {
+                      return response({ columns, index })
+                    }
+                    return response
+                  },
+                }
+              },
+            }
+          },
+        }
+      },
+    },
+  }
+}
+
+test('detail loader falls back to community view for a public non-owner row and stops', async () => {
+  const communityRow = {
+    id: 720,
+    user_id: 'user-b',
+    visibility: 'public',
+    is_draft: false,
+    genus: 'Boletus',
+    species: 'edulis',
+    location_precision: 'exact',
+    gps_latitude: 63.1,
+    gps_longitude: 10.1,
+    red_list_category: 'LC',
+    red_list_categories_json: { NO: 'LC' },
+  }
+  const { client, calls } = makeSequencedClient({
+    observations: [{ data: null, error: null }],
+    observations_community_view: [{ data: communityRow, error: null }],
+    observations_friend_view: [{ data: { id: 720, user_id: 'user-b' }, error: null }],
+  })
+
+  const result = await loadDetailObservation(720, { client })
+
+  const observationsCalls = calls.filter(c => c.table === 'observations')
+  const communityCalls = calls.filter(c => c.table === 'observations_community_view')
+  const friendCalls = calls.filter(c => c.table === 'observations_friend_view')
+
+  assert.equal(observationsCalls.length, 1)
+  assert.equal(communityCalls.length, 1)
+  assert.equal(friendCalls.length, 0, 'friend view must NOT be queried once community view returns a row')
+  assert.equal(result.source, 'observations_community_view')
+  assert.equal(result.observation?.id, 720)
+  assert.equal(result.observation?.visibility, 'public')
+  assert.equal(result.observation?.red_list_category, 'LC')
+  assert.equal(result.outcome, 'observation')
+})
+
+test('detail loader retries community view without red-list columns on 42703 for a public row', async () => {
+  const publicRow = {
+    id: 701,
+    user_id: 'user-b',
+    visibility: 'public',
+    is_draft: false,
+    genus: 'Amanita',
+    species: 'muscaria',
+    location_precision: 'exact',
+    gps_latitude: 63.4,
+    gps_longitude: 10.4,
+  }
+  const { client, calls } = makeSequencedClient({
+    observations: [{ data: null, error: null }],
+    observations_community_view: [
+      {
+        data: null,
+        error: {
+          code: '42703',
+          message: "column observations_community_view.red_list_category does not exist",
+        },
+      },
+      { data: publicRow, error: null },
+    ],
+    observations_friend_view: [{ data: null, error: null }],
+  })
+
+  const result = await loadDetailObservation(701, { client })
+
+  const communityCalls = calls.filter(call => call.table === 'observations_community_view')
+  const friendCalls = calls.filter(call => call.table === 'observations_friend_view')
+  assert.equal(communityCalls.length, 2)
+  assert.match(communityCalls[0].columns, /red_list_category/)
+  assert.match(communityCalls[0].columns, /red_list_categories_json/)
+  assert.doesNotMatch(communityCalls[1].columns, /red_list_category/)
+  assert.doesNotMatch(communityCalls[1].columns, /red_list_categories_json/)
+  assert.match(communityCalls[1].columns, /ai_selected_service/)
+  assert.match(communityCalls[1].columns, /is_draft/)
+  assert.equal(friendCalls.length, 0, 'friend view must not be consulted after a successful community-view retry')
+  assert.equal(result.outcome, 'observation')
+  assert.equal(result.source, 'observations_community_view')
+  assert.equal(result.observation?.id, 701)
+})
+
+test('detail loader retries only when the missing column is red-list', async () => {
+  const { client, calls } = makeSequencedClient({
+    observations: [{ data: null, error: null }],
+    observations_community_view: [
+      {
+        data: null,
+        error: {
+          code: '42703',
+          message: "column observations_community_view.unrelated_column does not exist",
+        },
+      },
+    ],
+    observations_friend_view: [{ data: null, error: null }],
+  })
+
+  const result = await loadDetailObservation(899, { client })
+
+  const communityCalls = calls.filter(call => call.table === 'observations_community_view')
+  const friendCalls = calls.filter(call => call.table === 'observations_friend_view')
+  assert.equal(communityCalls.length, 1, 'unrelated 42703 errors must not trigger the red-list retry')
+  assert.equal(friendCalls.length, 0, 'community-view query error must NOT fall through to friend view')
+  assert.equal(result.outcome, 'error')
+  assert.equal(result.observation, null)
+  assert.equal(result.source, null)
+  assert.equal(result.error?.code, '42703')
+})
+
+test('community view query error does not fall through to friend view', async () => {
+  const { client, calls } = makeSequencedClient({
+    observations: [{ data: null, error: null }],
+    observations_community_view: [
+      {
+        data: null,
+        error: {
+          code: '42501',
+          message: 'permission denied for view observations_community_view',
+        },
+      },
+    ],
+    observations_friend_view: [{
+      data: { id: 899, user_id: 'friend-id', visibility: 'friends' },
+      error: null,
+    }],
+  })
+
+  const result = await loadDetailObservation(899, { client })
+
+  const communityCalls = calls.filter(call => call.table === 'observations_community_view')
+  const friendCalls = calls.filter(call => call.table === 'observations_friend_view')
+  assert.equal(communityCalls.length, 1)
+  assert.equal(friendCalls.length, 0, 'community-view error must NOT be masked by a friend-view lookup')
+  assert.equal(result.outcome, 'error')
+  assert.equal(result.error?.code, '42501')
+})
+
+test('friend view query error surfaces as outcome=error', async () => {
+  const { client, calls } = makeSequencedClient({
+    observations: [{ data: null, error: null }],
+    observations_community_view: [{ data: null, error: null }],
+    observations_friend_view: [
+      {
+        data: null,
+        error: {
+          code: '42501',
+          message: 'permission denied for view observations_friend_view',
+        },
+      },
+    ],
+  })
+
+  const result = await loadDetailObservation(899, { client })
+
+  const friendCalls = calls.filter(call => call.table === 'observations_friend_view')
+  assert.equal(friendCalls.length, 1)
+  assert.equal(result.outcome, 'error')
+  assert.equal(result.error?.code, '42501')
+})
+
+test('detail loader returns clean no-row when all three surfaces return no row', async () => {
+  const { client, calls } = makeSequencedClient({
+    observations: [{ data: null, error: null }],
+    observations_community_view: [{ data: null, error: null }],
+    observations_friend_view: [{ data: null, error: null }],
+  })
+
+  const result = await loadDetailObservation(899, { client })
+
+  assert.equal(calls.filter(c => c.table === 'observations').length, 1)
+  assert.equal(calls.filter(c => c.table === 'observations_community_view').length, 1)
+  assert.equal(calls.filter(c => c.table === 'observations_friend_view').length, 1)
+  assert.equal(result.outcome, 'no-row')
+  assert.equal(result.observation, null)
+  assert.equal(result.error, null)
+  assert.equal(result.source, null)
+})
+
+test('detail loader propagates thrown errors as outcome=error', async () => {
   const client = {
-    from(table) {
+    from() {
       return {
-        select(columns) {
+        select() {
           return {
-            eq(column, value) {
+            eq() {
               return {
                 async maybeSingle() {
-                  calls.push({ table, columns, column, value })
-                  if (table === 'observations') {
-                    return { data: null, error: null }
-                  }
-                  return {
-                    data: {
-                      id: 696,
-                      user_id: 'user-b',
-                      visibility: 'public',
-                      is_draft: false,
-                    },
-                    error: null,
-                  }
+                  throw new Error('network down')
                 },
               }
             },
@@ -562,12 +763,153 @@ test('detail loader falls back to the community view when the base row is invisi
     },
   }
 
-  const result = await loadDetailObservation(696, { client })
+  const result = await loadDetailObservation(899, { client })
+  assert.equal(result.outcome, 'error')
+  assert.equal(result.observation, null)
+  assert.match(String(result.error?.message || result.error || ''), /network down/)
+})
 
-  assert.equal(calls.length, 2)
-  assert.equal(calls[0].table, 'observations')
-  assert.equal(calls[1].table, 'observations_community_view')
+// Realistic observation-899 fixture: friends-only observation
+// authored by an accepted friend. Community view returns clean
+// no-row (public-only predicate), friend view returns the row.
+// This mirrors the actual production flow after the migration and
+// frontend fallback chain are deployed together.
+test('regression: observation 899 loads via friend view for a non-owner accepted friend', async () => {
+  const friendRow = {
+    id: 899,
+    user_id: 'friend-user-id',
+    visibility: 'friends',
+    is_draft: false,
+    genus: 'Cortinarius',
+    species: 'violaceus',
+    common_name: 'Violet Webcap',
+    location: 'Trondheim',
+    location_precision: 'exact',
+    gps_latitude: 63.42,
+    gps_longitude: 10.39,
+    ai_selected_service: 'artsorakel',
+    ai_selected_scientific_name: 'Cortinarius violaceus',
+    red_list_category: 'VU',
+    red_list_categories_json: { NO: 'VU' },
+  }
+  const { client, calls } = makeSequencedClient({
+    observations: [{ data: null, error: null }],
+    observations_community_view: [{ data: null, error: null }],
+    observations_friend_view: [{ data: friendRow, error: null }],
+  })
+
+  const result = await loadDetailObservation(899, { client })
+
+  assert.equal(result.outcome, 'observation')
+  assert.equal(result.source, 'observations_friend_view')
+  assert.equal(result.observation?.id, 899)
+  assert.equal(result.observation?.visibility, 'friends')
+  assert.equal(result.observation?.genus, 'Cortinarius')
+  assert.equal(result.observation?.species, 'violaceus')
+  assert.equal(result.observation?.location, 'Trondheim')
+  assert.equal(result.observation?.location_precision, 'exact')
+  assert.equal(result.observation?.gps_latitude, 63.42)
+  assert.equal(result.observation?.red_list_category, 'VU')
+
+  const communityCalls = calls.filter(c => c.table === 'observations_community_view')
+  const friendCalls = calls.filter(c => c.table === 'observations_friend_view')
+  assert.equal(communityCalls.length, 1)
+  assert.equal(friendCalls.length, 1)
+})
+
+// Deployment-skew test: a briefly older friend view lacks both the
+// AI-selection columns AND the red-list columns. The generic
+// compatibility retry must recover: drop red-list first, then fall
+// back to the legacy select on the subsequent 42703 for ai_selected_*.
+test('detail loader recovers from an old friend view missing both AI-selection and red-list columns', async () => {
+  const friendRowLegacy = {
+    id: 899,
+    user_id: 'friend-user-id',
+    visibility: 'friends',
+    is_draft: false,
+    genus: 'Cortinarius',
+    species: 'violaceus',
+    location_precision: 'exact',
+    gps_latitude: 63.42,
+    gps_longitude: 10.39,
+  }
+  const { client, calls } = makeSequencedClient({
+    observations: [{ data: null, error: null }],
+    observations_community_view: [{ data: null, error: null }],
+    observations_friend_view: [
+      {
+        data: null,
+        error: {
+          code: '42703',
+          message: "column observations_friend_view.red_list_category does not exist",
+        },
+      },
+      {
+        data: null,
+        error: {
+          code: '42703',
+          message: "column observations_friend_view.ai_selected_service does not exist",
+        },
+      },
+      { data: friendRowLegacy, error: null },
+    ],
+  })
+
+  const result = await loadDetailObservation(899, { client })
+
+  const friendCalls = calls.filter(call => call.table === 'observations_friend_view')
+  assert.equal(friendCalls.length, 3, 'friend view must go full → no-redlist → legacy select')
+  assert.match(friendCalls[0].columns, /red_list_category/)
+  assert.match(friendCalls[0].columns, /ai_selected_service/)
+  assert.doesNotMatch(friendCalls[1].columns, /red_list_category/)
+  assert.doesNotMatch(friendCalls[1].columns, /red_list_categories_json/)
+  assert.match(friendCalls[1].columns, /ai_selected_service/)
+  assert.doesNotMatch(friendCalls[2].columns, /ai_selected_service/)
+  assert.doesNotMatch(friendCalls[2].columns, /red_list_category/)
+  assert.equal(result.outcome, 'observation')
+  assert.equal(result.source, 'observations_friend_view')
+  assert.equal(result.observation?.id, 899)
+})
+
+test('detail loader recovers from an old community view missing both AI-selection and red-list columns', async () => {
+  const publicRowLegacy = {
+    id: 702,
+    user_id: 'user-b',
+    visibility: 'public',
+    is_draft: false,
+    genus: 'Amanita',
+    species: 'muscaria',
+  }
+  const { client, calls } = makeSequencedClient({
+    observations: [{ data: null, error: null }],
+    observations_community_view: [
+      {
+        data: null,
+        error: {
+          code: '42703',
+          message: "column observations_community_view.red_list_category does not exist",
+        },
+      },
+      {
+        data: null,
+        error: {
+          code: '42703',
+          message: "column observations_community_view.ai_selected_service does not exist",
+        },
+      },
+      { data: publicRowLegacy, error: null },
+    ],
+    observations_friend_view: [{ data: null, error: null }],
+  })
+
+  const result = await loadDetailObservation(702, { client })
+
+  const communityCalls = calls.filter(call => call.table === 'observations_community_view')
+  const friendCalls = calls.filter(call => call.table === 'observations_friend_view')
+  assert.equal(communityCalls.length, 3, 'community view must go full → no-redlist → legacy select')
+  assert.doesNotMatch(communityCalls[2].columns, /ai_selected_service/)
+  assert.doesNotMatch(communityCalls[2].columns, /red_list_category/)
+  assert.equal(friendCalls.length, 0)
+  assert.equal(result.outcome, 'observation')
   assert.equal(result.source, 'observations_community_view')
-  assert.equal(result.observation?.id, 696)
-  assert.equal(result.observation?.is_draft, false)
 })
