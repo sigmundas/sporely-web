@@ -46,6 +46,10 @@ let cachedJwksAt = 0
 let lastNominatimRequestStartedAt = 0
 let nominatimQueue = Promise.resolve()
 
+export async function _testFetch(request, env, ctx) {
+  return handleRequest(request, env, ctx)
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -73,11 +77,31 @@ async function handleRequest(request, env, ctx) {
   }
 
   if (url.pathname === '/healthz') {
+    // Report the media storage mode + binding availability so operators
+    // can confirm the worker is running in the expected posture without
+    // exposing any secret material. Storage mode is derived defensively:
+    // an invalid MEDIA_STORAGE_MODE value here is surfaced rather than
+    // silently defaulted.
+    let storageMode
+    let storageModeError = null
+    try {
+      storageMode = resolveMediaStorageMode(env)
+    } catch (e) {
+      storageMode = null
+      storageModeError = e?.code || e?.message || 'invalid'
+    }
     return jsonResponse(
       {
-        ok: true,
+        ok: storageModeError === null,
         service: 'sporely-r2-upload-worker',
         workerVersion: WORKER_VERSION_MARKER,
+        mediaStorageMode: storageMode,
+        mediaStorageModeError: storageModeError,
+        bindings: {
+          hasMediaBucket: !!env.MEDIA_BUCKET,
+          hasPrivateMediaBucket: !!env.PRIVATE_MEDIA_BUCKET,
+        },
+        mediaVariants: Array.from(MEDIA_VARIANTS),
         mediaPolicy: {
           fullResizeMaxPixels: CLOUD_FULL_RESIZE_MAX_PIXELS,
           fullResizeMaxEdge: CLOUD_FULL_RESIZE_MAX_EDGE,
@@ -113,6 +137,18 @@ async function handleRequest(request, env, ctx) {
 
   if (request.method === 'DELETE' && url.pathname.startsWith('/upload/')) {
     return handleDelete(request, env, ctx, url)
+  }
+
+  // Stage 2 image-media delivery route: image-ID + variant based.
+  if (request.method === 'GET' && url.pathname.startsWith('/m/')) {
+    return handleMediaDelivery(request, env, ctx, url)
+  }
+
+  // Stage 2 mosaic delivery route (round-3 amendment): identity is a
+  // `spore_measurement_mosaics.id`; there is no variant. Authorization
+  // flows through `public.media_authorize_mosaic_delivery`.
+  if (request.method === 'GET' && url.pathname.startsWith('/mm/')) {
+    return handleMosaicDelivery(request, env, ctx, url)
   }
 
   throw httpError(404, 'not_found', 'Route not found')
@@ -275,9 +311,13 @@ async function fetchDawaSuggestion(lat, lon) {
 }
 
 async function handleUpload(request, env, ctx, url) {
-  if (!env.MEDIA_BUCKET) {
-    throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
-  }
+  // Stage 2: bucket selection is entirely governed by MEDIA_STORAGE_MODE.
+  // An accidental binding omission FAILS the request rather than silently
+  // downgrading to the legacy public bucket.
+  const uploadTarget = selectUploadBucket(env)
+  const uploadBucket = uploadTarget.bucket
+  const canonicalBucket = uploadTarget.name  // 'legacy' | 'private'
+  const storageMode = uploadTarget.mode      // 'legacy' | 'private'
 
   const origin = resolveAllowedOrigin(request, env)
   if (request.headers.get('Origin') && !origin) {
@@ -324,8 +364,32 @@ async function handleUpload(request, env, ctx, url) {
     })
   }
 
-  const existingObject = await env.MEDIA_BUCKET.head(key)
+  const existingObject = await uploadBucket.head(key)
   const existingBytes = mediaObjectSize(existingObject)
+
+  // Round-3 amendment: real overwrite state machine.
+  //
+  // The invariant is that a post-write failure MUST NOT destroy the
+  // previously valid object. R2's `put` is a destructive atomic
+  // replace, so in the overwrite case we cannot write the new body
+  // directly to `key` and then roll back on a downstream failure —
+  // the original bytes are already gone.
+  //
+  // For private mode, when an object already exists we:
+  //   1. Write the new body to a temporary key `<key>.pending-<nonce>`.
+  //   2. Run quota + canonical_bucket finalization.
+  //   3. On success: copy temp → final (a fresh `put(key, tempBody)`),
+  //      then delete the temp key.
+  //   4. On any failure after step 1: delete ONLY the temp key. The
+  //      original `key` object is untouched.
+  //
+  // For a first-write (no existingObject), the destination is
+  // unoccupied, so we write directly. In legacy mode we retain the
+  // historic behaviour for backward compatibility.
+  const isOverwrite = existingObject !== null && existingObject !== undefined
+  const useTempKeyForOverwrite = canonicalBucket === 'private' && isOverwrite
+  const nonce = crypto.randomUUID().replace(/-/g, '')
+  const writeKey = useTempKeyForOverwrite ? `${key}.pending-${nonce}` : key
   const storageDelta = Math.max(0, bodyBytes - existingBytes)
   const rawProfile = await fetchStorageProfile(env, claims.sub)
   if (rawProfile?.is_banned === true) {
@@ -336,7 +400,44 @@ async function handleUpload(request, env, ctx, url) {
 
   const uploadModeHeader = String(request.headers.get('X-Sporely-Upload-Mode') || '').trim().toLowerCase()
   const uploadMode = uploadModeHeader === 'full' ? 'full' : 'reduced'
-  const uploadVariant = String(request.headers.get('X-Sporely-Upload-Variant') || 'full').trim().toLowerCase() || 'full'
+  // Variant must be in the canonical allowlist. Legacy clients that send
+  // aliases like 'small' / 'medium' / 'cards' are coerced to 'thumb'
+  // because the storage-side canonical variant for downsized copies is
+  // always 'thumb'. Unknown variants fail closed.
+  const rawUploadVariant = String(request.headers.get('X-Sporely-Upload-Variant') || 'full').trim().toLowerCase() || 'full'
+  const uploadVariant = ['small','medium','cards','preview'].includes(rawUploadVariant)
+    ? 'thumb'
+    : rawUploadVariant
+  if (!MEDIA_VARIANTS.has(uploadVariant)) {
+    throw httpError(400, 'invalid_variant',
+      `Upload variant must be one of: ${Array.from(MEDIA_VARIANTS).join(', ')}`)
+  }
+
+  // Stage 2 server-validated image identity. In `private` mode the client
+  // MUST have already inserted an `observation_images` row and must
+  // present its id in `X-Sporely-Image-Id`; the worker verifies the row
+  // exists, is owned by the caller, and that its `storage_path` matches
+  // the URL's key. This closes the "key prefix = authorization" gap for
+  // new uploads. In `legacy` mode the header is optional so existing
+  // client releases continue to work during the phased rollout.
+  const requestedImageIdRaw = String(request.headers.get('X-Sporely-Image-Id') || '').trim()
+  let validatedImageId = null
+  if (requestedImageIdRaw) {
+    const parsedImageId = Number.parseInt(requestedImageIdRaw, 10)
+    if (!Number.isFinite(parsedImageId) || parsedImageId <= 0
+        || String(parsedImageId) !== requestedImageIdRaw) {
+      throw httpError(400, 'invalid_image_id',
+        'X-Sporely-Image-Id must be a positive integer')
+    }
+    const rowMatch = await verifyImageRowMatchesUpload(env, parsedImageId, claims.sub, key, uploadVariant)
+    if (!rowMatch.ok) {
+      throw httpError(rowMatch.status, rowMatch.code, rowMatch.message)
+    }
+    validatedImageId = parsedImageId
+  } else if (storageMode === 'private') {
+    throw httpError(400, 'image_id_required',
+      'X-Sporely-Image-Id header is required when MEDIA_STORAGE_MODE=private')
+  }
   const uploadPolicy = buildCloudUploadPolicy(profile, { uploadMode })
   const encodingQualityHeader = Number.parseFloat(String(request.headers.get('X-Sporely-Encoding-Quality') || ''))
   const encodingFormatHeader = String(request.headers.get('X-Sporely-Encoding-Format') || '').trim().toLowerCase()
@@ -416,8 +517,15 @@ async function handleUpload(request, env, ctx, url) {
     }
   }
 
-  const cacheControl = String(request.headers.get('Cache-Control') || 'public, max-age=31536000, immutable').trim()
-  const object = await env.MEDIA_BUCKET.put(key, bodyBuffer, {
+  // Stage 2: when writing to the private bucket, the Worker owns the
+  // Cache-Control on the R2 object. Client Cache-Control is ignored, so a
+  // rogue or misconfigured client cannot produce a public-immutable
+  // canonical object. When still writing to the legacy public bucket the
+  // client value is honoured for backward compat with in-flight releases.
+  const cacheControl = canonicalBucket === 'private'
+    ? 'private, no-store'
+    : String(request.headers.get('Cache-Control') || 'public, max-age=31536000, immutable').trim()
+  const object = await uploadBucket.put(writeKey, bodyBuffer, {
     httpMetadata: {
       contentType,
       cacheControl,
@@ -440,24 +548,105 @@ async function handleUpload(request, env, ctx, url) {
     },
   })
   const imageDelta = isOriginalImageKey(key) && !existingObject ? 1 : 0
+
+  // Failure helper: on any post-put failure we delete ONLY the write
+  // target (which is a temp key when we're doing an overwrite).
+  // The original `key` object is left untouched in the overwrite case.
+  async function rollbackWrittenBytesOnly() {
+    await uploadBucket.delete(writeKey).catch(deleteError => {
+      console.error('Failed to remove uploaded object during rollback', deleteError)
+    })
+  }
+
   let trackedProfile = null
   try {
     trackedProfile = await applyStorageDelta(env, claims.sub, bodyBytes - existingBytes, imageDelta)
   } catch (error) {
-    await env.MEDIA_BUCKET.delete(key).catch(deleteError => {
-      console.error('Failed to roll back R2 upload after tally error', deleteError)
-    })
+    await rollbackWrittenBytesOnly()
     throw error
   }
 
+  if (canonicalBucket === 'private' && validatedImageId !== null) {
+    const patch = await markRowCanonicalBucketPrivate(env, validatedImageId)
+    if (!patch || !patch.ok) {
+      await rollbackWrittenBytesOnly()
+      try {
+        await applyStorageDelta(env, claims.sub, -(bodyBytes - existingBytes), -imageDelta)
+      } catch (rollbackError) {
+        console.error('Failed to roll back quota after canonical_bucket PATCH error', rollbackError)
+      }
+      throw httpError(500, 'canonical_bucket_patch_failed',
+        `Could not upgrade observation_images.canonical_bucket to private (status=${patch?.status})`)
+    }
+  }
+
+  // Commit: for the temp-key overwrite path, promote temp → final now
+  // that DB state is confirmed. Any failure during promotion also
+  // leaves the original `key` untouched (we've merely failed to
+  // publish the new bytes).
+  if (useTempKeyForOverwrite) {
+    let promoted = false
+    try {
+      await uploadBucket.put(key, bodyBuffer, {
+        httpMetadata: { contentType, cacheControl },
+        customMetadata: {
+          user_id: String(claims.sub),
+          uploaded_at: new Date().toISOString(),
+          uploaded_by: String(claims.email || ''),
+          upload_mode: String(uploadMode),
+          upload_variant: String(uploadVariant),
+          cloud_plan: String(profile?.cloudPlan || 'free'),
+          quality_profile: String(uploadPolicy?.qualityProfile || profile?.qualityProfile || 'standard'),
+          encoding_quality: Number.isFinite(encodingQualityHeader) ? String(encodingQualityHeader) : '',
+          encoding_format: encodingFormat,
+          source_width: Number.isFinite(sourceWidth) ? String(sourceWidth) : '',
+          source_height: Number.isFinite(sourceHeight) ? String(sourceHeight) : '',
+          stored_width: normalizedStoredWidth !== null ? String(normalizedStoredWidth) : '',
+          stored_height: normalizedStoredHeight !== null ? String(normalizedStoredHeight) : '',
+          stored_bytes: String(bodyBytes),
+          promoted_from_temp: writeKey,
+        },
+      })
+      promoted = true
+    } finally {
+      // Always delete the temp; even if promotion succeeded we don't
+      // want the temp object lingering. If promotion failed, the
+      // temp cleanup still runs; the original `key` object is intact
+      // regardless.
+      await uploadBucket.delete(writeKey).catch(deleteError => {
+        console.error('Failed to delete temp upload key after promotion', deleteError)
+      })
+    }
+    if (!promoted) {
+      // Try to unwind the DB PATCH we made above so DB and R2 agree.
+      if (canonicalBucket === 'private' && validatedImageId !== null && !isOverwrite) {
+        // Only if we upgraded canonical_bucket; on overwrite the row
+        // was already 'private' before this request so no PATCH to
+        // undo. (For an overwrite, canonical_bucket is unchanged.)
+      }
+      try {
+        await applyStorageDelta(env, claims.sub, -(bodyBytes - existingBytes), -imageDelta)
+      } catch (rollbackError) {
+        console.error('Failed to roll back quota after promotion failure', rollbackError)
+      }
+      throw httpError(500, 'promotion_failed',
+        'Failed to promote temp upload to the canonical key; previous bytes preserved')
+    }
+  }
+
+  // Stage 2: only emit a public `url` while still writing to the legacy
+  // bucket. Once uploads are private-by-default, clients must resolve
+  // media via the worker's `GET /m/<image_id>/<variant>` route — they no
+  // longer receive an unrestricted bucket URL in the response.
   return jsonResponse(
     {
       ok: true,
       key,
       etag: object?.etag || null,
       size: bodyBytes,
+      canonical_bucket: canonicalBucket,
       storage: trackedProfile,
-      url: publicMediaUrl(env, key),
+      ...(canonicalBucket === 'legacy' ? { url: publicMediaUrl(env, key) } : {}),
     },
     201,
     request,
@@ -1091,6 +1280,345 @@ function normalizeObjectKey(rawPath) {
 function publicMediaUrl(env, key) {
   const base = String(env.MEDIA_PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '')
   return base ? `${base}/${key}` : null
+}
+
+// Stage 2 canonical variant allowlist. MUST stay in lock-step with
+// `public.media_variant_is_supported(text)` in
+// 20260805130000_media_authorization_hardening.sql. Unknown variants fail
+// closed on both sides.
+// Round-3 amendment: `mosaic` moved to its own /mm/ route. This
+// allowlist governs the observation-image /m/ route only.
+export const MEDIA_VARIANTS = new Set(['full', 'thumb', 'original'])
+
+// Stage 2 explicit storage mode. Set via `MEDIA_STORAGE_MODE` env var. Fail
+// closed: `private` mode REQUIRES `PRIVATE_MEDIA_BUCKET` binding and never
+// falls back to `MEDIA_BUCKET`. `legacy` mode uses `MEDIA_BUCKET`. Any
+// other value is a configuration error.
+export function resolveMediaStorageMode(env) {
+  const raw = String(env.MEDIA_STORAGE_MODE || 'legacy').trim().toLowerCase()
+  if (raw !== 'legacy' && raw !== 'private') {
+    throw httpError(500, 'invalid_media_storage_mode',
+      `MEDIA_STORAGE_MODE must be 'legacy' or 'private' (got ${JSON.stringify(raw)})`)
+  }
+  return raw
+}
+
+// Stage 2: which bucket holds new canonical uploads. Selection is entirely
+// determined by MEDIA_STORAGE_MODE — not by which bindings happen to be
+// present — so an accidental binding omission cannot silently downgrade
+// security. Returns `{ bucket, name }` where name ∈ {'legacy','private'}.
+export function selectUploadBucket(env) {
+  const mode = resolveMediaStorageMode(env)
+  if (mode === 'private') {
+    if (!env.PRIVATE_MEDIA_BUCKET) {
+      throw httpError(500, 'missing_private_bucket',
+        'MEDIA_STORAGE_MODE=private but PRIVATE_MEDIA_BUCKET binding is missing')
+    }
+    return { bucket: env.PRIVATE_MEDIA_BUCKET, name: 'private', mode }
+  }
+  if (!env.MEDIA_BUCKET) {
+    throw httpError(500, 'missing_media_bucket',
+      'MEDIA_STORAGE_MODE=legacy but MEDIA_BUCKET binding is missing')
+  }
+  return { bucket: env.MEDIA_BUCKET, name: 'legacy', mode }
+}
+
+// Resolve `canonical_bucket` (`legacy` | `private`) returned by
+// `media_authorize_delivery` to the actual R2 binding.
+function resolveBucketBinding(env, canonicalBucket) {
+  if (canonicalBucket === 'private') return env.PRIVATE_MEDIA_BUCKET || null
+  return env.MEDIA_BUCKET || null
+}
+
+// Stage 2 delivery route: `GET /m/<image_id>/<variant>`. Anonymous callers
+// hit it without a Bearer; authenticated callers pass their Supabase JWT.
+// The Worker resolves the image row + caller identity to a single decision
+// via `public.media_authorize_delivery` (service-role RPC) and streams
+// bytes from the appropriate bucket. Cache-Control is set by the Worker.
+async function handleMediaDelivery(request, env, ctx, url) {
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const segments = url.pathname.slice('/m/'.length).split('/').filter(Boolean)
+  if (segments.length < 2) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+  const imageIdRaw = segments[0]
+  const variant = segments[1]
+  const imageId = Number.parseInt(imageIdRaw, 10)
+  if (!Number.isFinite(imageId) || imageId <= 0 || String(imageId) !== imageIdRaw) {
+    // Malformed image_id — do not disclose whether an image exists.
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+  // Explicit variant allowlist — unknown variants fail closed.
+  if (!MEDIA_VARIANTS.has(variant)) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+
+  // Required `?v=<media_version>` — pinned to the row's current version at
+  // URL-issue time. Missing / non-positive / non-integer values are 404.
+  const requestedVersionRaw = url.searchParams.get('v')
+  if (!requestedVersionRaw) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+  const requestedVersion = Number.parseInt(requestedVersionRaw, 10)
+  if (!Number.isFinite(requestedVersion) || requestedVersion < 1
+      || String(requestedVersion) !== requestedVersionRaw) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+
+  // Optional bearer — anonymous is a valid caller.
+  let callerSub = null
+  const authHeader = request.headers.get('Authorization')
+  if (authHeader) {
+    const token = parseBearerToken(authHeader)
+    const claims = await verifySupabaseJwt(token, env, ctx)
+    callerSub = claims?.sub || null
+  }
+
+  const decision = await authorizeMediaDelivery(env, imageId, variant, callerSub)
+  if (!decision || !decision.allowed || decision.cache_class === 'deny') {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+
+  // Version validation. A URL issued before a revocation event (visibility
+  // flip, tombstone, storage_path rewrite, canonical_bucket move, owner ban)
+  // has an old `?v=`. Deny without disclosing existence.
+  if (Number(decision.media_version) !== requestedVersion) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+
+  const bucket = resolveBucketBinding(env, decision.canonical_bucket)
+  if (!bucket) {
+    throw httpError(500, 'missing_bucket',
+      `No R2 binding for canonical_bucket=${decision.canonical_bucket}`)
+  }
+  // Per-variant key derivation. The RPC returned the base
+  // `storage_path` (for full/thumb/mosaic) or `original_storage_path`
+  // (for original). For `thumb`, prefix the last path segment with
+  // `thumb_`; other variants use the returned path verbatim. `mosaic`
+  // is currently served from the row's storage_path — Stage 2b will
+  // introduce a dedicated mosaic key column if the product needs a
+  // distinct derived key.
+  const objectKey = variant === 'thumb'
+    ? deriveThumbKey(decision.storage_path)
+    : decision.storage_path
+  if (!objectKey) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+  const object = await bucket.get(objectKey)
+  if (!object) {
+    // Row references a key the bucket does not currently hold. Treat as
+    // not-found rather than 500 so a mid-purge race is invisible to callers.
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+
+  const headers = corsHeaders(request, env, origin)
+  object.writeHttpMetadata(headers)
+  if (object.httpEtag) headers.set('ETag', object.httpEtag)
+
+  // Stage 2a foundation default: `no-store` for ALL /m/ responses,
+  // including public. Enabling public edge caching requires dedicated
+  // revocation tests (see Stage 2b). Until then, protected responses stay
+  // `private, no-store` and public responses are `no-store` so a cache
+  // race cannot serve stale bytes across a version bump.
+  headers.set('Cache-Control', 'no-store')
+  const existingVary = headers.get('Vary')
+  headers.set('Vary', existingVary ? `${existingVary}, Authorization` : 'Authorization')
+
+  return new Response(object.body, { status: 200, headers })
+}
+
+// Validate that the observation_images row named by X-Sporely-Image-Id
+// exists, is owned by the authenticated caller, and that its stored
+// `storage_path` matches the key the client is about to write to. This
+// removes the "any key prefixed by my UUID is fair game" gap by binding
+// each upload to a server-known image identity.
+//
+// For the `thumb` variant the row's storage_path holds the FULL key; the
+// thumb key is derived by prefixing the final path segment with `thumb_`.
+// The check accepts either form so a client uploading a thumb variant can
+// present the thumb key in the URL.
+async function verifyImageRowMatchesUpload(env, imageId, callerSub, uploadKey, variant) {
+  if (!hasSupabaseServiceRole(env)) {
+    return {
+      ok: false, status: 500, code: 'missing_supabase_admin',
+      message: 'Service role required to verify image ownership',
+    }
+  }
+  const query = [
+    `id=eq.${encodeURIComponent(imageId)}`,
+    `user_id=eq.${encodeURIComponent(callerSub)}`,
+    'select=id,storage_path,canonical_bucket',
+    'limit=1',
+  ].join('&')
+  const response = await supabaseRestFetch(env, `/rest/v1/observation_images?${query}`, { method: 'GET' })
+  if (!response.ok) {
+    return {
+      ok: false, status: 500, code: 'image_lookup_failed',
+      message: 'Could not verify image ownership',
+    }
+  }
+  const rows = await response.json()
+  const row = Array.isArray(rows) ? rows[0] || null : null
+  if (!row) {
+    return {
+      ok: false, status: 403, code: 'image_not_found_or_not_owner',
+      message: 'observation_images row does not exist or is not owned by the caller',
+    }
+  }
+  const rowStoragePath = String(row.storage_path || '')
+  // Accept the row's stored path directly (matches 'full' / 'original' /
+  // 'mosaic' uploads) or the derived thumb path.
+  const derivedThumbKey = deriveThumbKey(rowStoragePath)
+  const acceptable = new Set([rowStoragePath, derivedThumbKey].filter(Boolean))
+  if (!acceptable.has(uploadKey)) {
+    return {
+      ok: false, status: 403, code: 'storage_path_mismatch',
+      message: 'Upload key does not match the observation_images row',
+    }
+  }
+  return { ok: true, row }
+}
+
+export function deriveThumbKey(fullKey) {
+  const key = String(fullKey || '').trim()
+  if (!key) return ''
+  const idx = key.lastIndexOf('/')
+  if (idx < 0) {
+    return key.startsWith('thumb_') ? key : `thumb_${key}`
+  }
+  const dir = key.slice(0, idx)
+  const fileName = key.slice(idx + 1)
+  const stripped = fileName.replace(/^(thumb_|small_|medium_|cards_|preview_)/, '')
+  return `${dir}/thumb_${stripped}`
+}
+
+// After a successful `private`-mode upload, upgrade the row's
+// `canonical_bucket` from 'legacy' to 'private'. Runs as service_role so
+// the server-owned-field guard trigger allows the mutation.
+async function markRowCanonicalBucketPrivate(env, imageId) {
+  if (!hasSupabaseServiceRole(env)) return null
+  const response = await supabaseRestFetch(env,
+    `/rest/v1/observation_images?id=eq.${encodeURIComponent(imageId)}`, {
+      method: 'PATCH',
+      headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({ canonical_bucket: 'private' }),
+    })
+  if (!response.ok) {
+    // Non-fatal: the object is written but the row is out of sync. Return
+    // the reason so the caller can decide whether to roll back.
+    return { ok: false, status: response.status, text: await response.text() }
+  }
+  return { ok: true }
+}
+
+async function handleMosaicDelivery(request, env, ctx, url) {
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const segments = url.pathname.slice('/mm/'.length).split('/').filter(Boolean)
+  if (segments.length !== 1) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+  const mosaicIdRaw = segments[0]
+  const mosaicId = Number.parseInt(mosaicIdRaw, 10)
+  if (!Number.isFinite(mosaicId) || mosaicId <= 0 || String(mosaicId) !== mosaicIdRaw) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+
+  const requestedVersionRaw = url.searchParams.get('v')
+  if (!requestedVersionRaw) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+  const requestedVersion = Number.parseInt(requestedVersionRaw, 10)
+  if (!Number.isFinite(requestedVersion) || requestedVersion < 1
+      || String(requestedVersion) !== requestedVersionRaw) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+
+  let callerSub = null
+  const authHeader = request.headers.get('Authorization')
+  if (authHeader) {
+    const token = parseBearerToken(authHeader)
+    const claims = await verifySupabaseJwt(token, env, ctx)
+    callerSub = claims?.sub || null
+  }
+
+  const decision = await authorizeMosaicDelivery(env, mosaicId, callerSub)
+  if (!decision || !decision.allowed || decision.cache_class === 'deny') {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+  if (Number(decision.media_version) !== requestedVersion) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+
+  const bucket = resolveBucketBinding(env, decision.canonical_bucket)
+  if (!bucket) {
+    throw httpError(500, 'missing_bucket',
+      `No R2 binding for canonical_bucket=${decision.canonical_bucket}`)
+  }
+  const objectKey = decision.storage_key
+  if (!objectKey) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+  const object = await bucket.get(objectKey)
+  if (!object) {
+    throw httpError(404, 'media_not_found', 'Media not available')
+  }
+
+  const headers = corsHeaders(request, env, origin)
+  object.writeHttpMetadata(headers)
+  if (object.httpEtag) headers.set('ETag', object.httpEtag)
+  headers.set('Cache-Control', 'no-store')
+  const existingVary = headers.get('Vary')
+  headers.set('Vary', existingVary ? `${existingVary}, Authorization` : 'Authorization')
+  return new Response(object.body, { status: 200, headers })
+}
+
+async function authorizeMosaicDelivery(env, mosaicId, callerSub) {
+  if (!hasSupabaseServiceRole(env)) {
+    throw httpError(500, 'missing_supabase_admin',
+      'SUPABASE_SERVICE_ROLE_KEY is required for mosaic authorization')
+  }
+  const response = await supabaseRestFetch(env, '/rest/v1/rpc/media_authorize_mosaic_delivery', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_mosaic_id: mosaicId,
+      p_caller: callerSub || null,
+    }),
+  })
+  if (!response.ok) {
+    throw httpError(500, 'mosaic_authorize_failed',
+      'media_authorize_mosaic_delivery RPC failed')
+  }
+  const rows = await response.json()
+  return Array.isArray(rows) ? rows[0] || null : rows
+}
+
+async function authorizeMediaDelivery(env, imageId, variant, callerSub) {
+  if (!hasSupabaseServiceRole(env)) {
+    throw httpError(500, 'missing_supabase_admin',
+      'SUPABASE_SERVICE_ROLE_KEY is required for media authorization')
+  }
+  const response = await supabaseRestFetch(env, '/rest/v1/rpc/media_authorize_delivery', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_image_id: imageId,
+      p_variant: variant,
+      p_caller: callerSub || null,
+    }),
+  })
+  if (!response.ok) {
+    throw httpError(500, 'media_authorize_failed',
+      'media_authorize_delivery RPC failed')
+  }
+  const rows = await response.json()
+  return Array.isArray(rows) ? rows[0] || null : rows
 }
 
 const LOCAL_NETWORK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(:\d+)?$/

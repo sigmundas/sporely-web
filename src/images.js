@@ -1516,17 +1516,27 @@ export async function fetchObservationImageRows(obsIds, options = {}) {
   if (!obsIds.length) return []
   const selectFields = options.selectFields || 'id, observation_id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom, deleted_at'
 
-  const communityRes = await _fetchObservationImageRowsFrom(OBSERVATION_IMAGES_COMMUNITY_VIEW, obsIds, selectFields)
-  if (!communityRes.error) {
-    return communityRes.data || []
+  // Owner rows (incl. private/draft/friends-only observations) live
+  // behind RLS on the raw table; non-owner rows are surfaced by the
+  // community-safe view. Query both and merge — dedupe by id so mixed-
+  // ownership queries return each row exactly once. Either query
+  // returning an error is non-fatal as long as the other one succeeds.
+  const [rawRes, communityRes] = await Promise.all([
+    _fetchObservationImageRowsFrom('observation_images', obsIds, selectFields),
+    _fetchObservationImageRowsFrom(OBSERVATION_IMAGES_COMMUNITY_VIEW, obsIds, selectFields),
+  ])
+
+  const merged = new Map()
+  for (const row of (rawRes.data || [])) merged.set(row.id, row)
+  for (const row of (communityRes.data || [])) {
+    if (!merged.has(row.id)) merged.set(row.id, row)
   }
 
-  const fallbackRes = await _fetchObservationImageRowsFrom('observation_images', obsIds, selectFields)
-  if (!fallbackRes.error) {
-    return fallbackRes.data || []
-  }
-
-  return []
+  return Array.from(merged.values()).sort((a, b) => {
+    const oa = Number(a.sort_order ?? 0)
+    const ob = Number(b.sort_order ?? 0)
+    return oa - ob
+  })
 }
 
 /**

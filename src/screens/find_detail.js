@@ -584,6 +584,19 @@ function _renderDetailUnavailableState(message = 'Observation not found or not v
   if (timeVal) timeVal.textContent = ''
 }
 
+// A query/schema/DB error is distinct from "no visible row". Rendering it
+// with the privacy-tinted "not visible" copy would mislead the user into
+// thinking a friend revoked access when the failure is actually a schema
+// mismatch, network glitch or PostgREST fault. Show a neutral load-error
+// message instead — no DB details are leaked to the UI; those are logged
+// via console.warn upstream.
+function _renderDetailLoadErrorState() {
+  _renderDetailUnavailableState(
+    t('detail.couldNotLoadObservation') || 'Could not load observation',
+    t('detail.loadErrorRetryHint') || 'Something went wrong while loading this observation. Please try again later.',
+  )
+}
+
 function _clearDetailUnavailableState() {
   _setDetailUnavailableSectionVisibility(true)
   const noteEl = document.getElementById('detail-readonly-note')
@@ -654,6 +667,75 @@ async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
   return result
 }
 
+// PostgREST reports missing view columns with code 42703. Older
+// production databases may still ship a detail read view definition
+// that predates the red-list projection, so the non-owner detail
+// reads carry a two-stage compatibility retry:
+//   1. 42703 for red_list_category / red_list_categories_json →
+//      retry dropping ONLY those two fields.
+//   2. If phase-7 (is_draft / location_precision) or AI-selection
+//      columns are still absent, drop to the legacy select.
+// Permission errors, invalid IDs, network errors, and unrelated
+// missing columns are NOT retried and are surfaced verbatim so the
+// caller can classify them as query errors instead of "not visible".
+function _isMissingRedListColumnError(error) {
+  if (!error) return false
+  if (String(error.code || '') !== '42703') return false
+  return _isMissingObservationColumnError(error, DETAIL_AI_SELECTION_REDLIST_FIELDS)
+}
+
+function _stripRedListFieldsFromViewSelect(select = '') {
+  const dropSet = new Set(
+    DETAIL_AI_SELECTION_REDLIST_FIELDS.map(field => String(field).toLowerCase()),
+  )
+  return String(select || '')
+    .split(',')
+    .map(field => field.trim())
+    .filter(field => field && !dropSet.has(field.toLowerCase()))
+    .join(', ')
+}
+
+// Generic compatibility retry usable against any non-owner read view
+// (community_view, friend_view, ...) whose deployed projection may
+// briefly lag the frontend contract.
+async function _loadDetailViewWithCompatibility(makeQuery, viewSelect, viewLegacySelect) {
+  // 1) Full select including red_list_* AND ai_selected_*.
+  const primary = await makeQuery(viewSelect)
+  if (primary.data || !primary.error) {
+    // Success or benign no-row: no compatibility retry needed.
+    return primary
+  }
+  // 2) 42703 for red_list_*: retry dropping ONLY those two fields.
+  if (_isMissingRedListColumnError(primary.error)) {
+    const noRedlistSelect = _stripRedListFieldsFromViewSelect(viewSelect)
+    if (noRedlistSelect && noRedlistSelect !== viewSelect) {
+      const retry = await makeQuery(noRedlistSelect)
+      if (retry.data || !retry.error) return retry
+      // Fall through into the phase-7 / AI legacy fallback below.
+      if (
+        _isPhase7ColumnError(retry.error)
+        || _isMissingObservationColumnError(retry.error, DETAIL_AI_SELECTION_FIELDS)
+      ) {
+        return makeQuery(viewLegacySelect)
+      }
+      return retry
+    }
+  }
+  // 3) Existing phase-7 / AI legacy fallback for very old schemas.
+  //    Also handles the case where an older deployment lacks both
+  //    the AI-selection columns AND the red-list columns (older
+  //    friend view before 20260805120000).
+  if (
+    _isPhase7ColumnError(primary.error)
+    || _isMissingObservationColumnError(primary.error, DETAIL_AI_SELECTION_FIELDS)
+  ) {
+    return makeQuery(viewLegacySelect)
+  }
+  // 4) Unrelated error: surface it verbatim so the caller can
+  //    classify it as a query error rather than "not visible".
+  return primary
+}
+
 export async function loadDetailObservation(obsId, options = {}) {
   const client = options.client || supabase
   const detailSelect = options.detailSelect || DETAIL_SELECT
@@ -661,45 +743,111 @@ export async function loadDetailObservation(obsId, options = {}) {
   const detailViewSelect = options.detailViewSelect || DETAIL_VIEW_SELECT
   const detailViewLegacySelect = options.detailViewLegacySelect || DETAIL_VIEW_SELECT_LEGACY
 
-  const loadObservation = (table, selectColumns, legacyColumns) => _withPhase7Fallback(
-    columns => client
-      .from(table)
-      .select(columns)
-      .eq('id', obsId)
-      .maybeSingle(),
-    selectColumns,
-    legacyColumns,
-  )
+  const buildMakeQuery = table => columns => client
+    .from(table)
+    .select(columns)
+    .eq('id', obsId)
+    .maybeSingle()
 
   try {
-    const baseRes = await loadObservation('observations', detailSelect, detailLegacySelect)
+    // 1) Owner path: raw table under RLS. Never surfaces the friend
+    //    or public rows to a non-owner because of the raw-table
+    //    lockdown (20260803120000).
+    const baseRes = await _withPhase7Fallback(
+      buildMakeQuery('observations'),
+      detailSelect,
+      detailLegacySelect,
+    )
     if (baseRes.data) {
       return {
         observation: baseRes.data,
         source: 'observations',
-        error: baseRes.error || null,
+        error: null,
+        outcome: 'observation',
       }
     }
 
-    const communityRes = await loadObservation('observations_community_view', detailViewSelect, detailViewLegacySelect)
+    // 2) Community view: public visibility only. This is the
+    //    correct surface for a non-owner viewing a friend's PUBLIC
+    //    observation. It intentionally does NOT expose friends-only
+    //    rows — those go through observations_friend_view below.
+    const communityRes = await _loadDetailViewWithCompatibility(
+      buildMakeQuery('observations_community_view'),
+      detailViewSelect,
+      detailViewLegacySelect,
+    )
     if (communityRes.data) {
       return {
         observation: communityRes.data,
         source: 'observations_community_view',
-        error: baseRes.error || communityRes.error || null,
+        error: null,
+        outcome: 'observation',
+      }
+    }
+    // Community view had a genuine query/schema error — surface it
+    // as an error outcome; do NOT fall through to the friend view.
+    // That guarantees we never mask a broken community-view read
+    // behind a friend-view lookup (which would also produce a row
+    // for public observations authored by a friend, hiding the
+    // underlying fault).
+    if (communityRes.error) {
+      return {
+        observation: null,
+        source: null,
+        error: communityRes.error,
+        outcome: 'error',
       }
     }
 
+    // 3) Friend view: accepted-friend surface. Only consulted when
+    //    the community view returned a clean no-row result. Reserved
+    //    for friends-only observations authored by an accepted
+    //    friend; the view itself enforces the friendship check.
+    const friendRes = await _loadDetailViewWithCompatibility(
+      buildMakeQuery('observations_friend_view'),
+      detailViewSelect,
+      detailViewLegacySelect,
+    )
+    if (friendRes.data) {
+      return {
+        observation: friendRes.data,
+        source: 'observations_friend_view',
+        error: null,
+        outcome: 'observation',
+      }
+    }
+    if (friendRes.error) {
+      return {
+        observation: null,
+        source: null,
+        error: friendRes.error,
+        outcome: 'error',
+      }
+    }
+
+    // All three surfaces returned no row without error. If the base
+    // table had a benign non-throwing error (unlikely but possible),
+    // surface that; otherwise this is a genuine "no visible row".
+    if (baseRes.error) {
+      return {
+        observation: null,
+        source: null,
+        error: baseRes.error,
+        outcome: 'error',
+      }
+    }
     return {
       observation: null,
       source: null,
-      error: communityRes.error || baseRes.error || null,
+      error: null,
+      outcome: 'no-row',
     }
   } catch (error) {
     return {
       observation: null,
       source: null,
       error,
+      outcome: 'error',
     }
   }
 }
@@ -973,23 +1121,32 @@ export async function openFindDetail(obsId, options = {}) {
   if (cancelBtn) cancelBtn.style.display = hideCancelOverride ? 'none' : ''
   navigate('find-detail')
 
-  const { observation: obs, error } = await loadDetailObservation(obsId, {
+  const { observation: obs, error, outcome } = await loadDetailObservation(obsId, {
     client: supabase,
   })
 
-  if (!obs) {
-    if (error) {
-      console.warn('Failed to load observation detail:', {
-        observationId: obsId,
-        error: {
-          code: error?.code || null,
-          message: error?.message || '',
-          details: error?.details || '',
-          hint: error?.hint || '',
-        },
-      })
-    }
+  if (outcome === 'error') {
+    // Log full PostgREST diagnostics for triage but never surface DB
+    // internals to the UI. The user sees a neutral load-error state;
+    // "not visible" implies a privacy state that may not be true.
+    console.warn('Failed to load observation detail:', {
+      observationId: obsId,
+      error: {
+        code: error?.code || null,
+        message: error?.message || '',
+        details: error?.details || '',
+        hint: error?.hint || '',
+      },
+    })
     showToast(t('detail.couldNotLoadObservation'))
+    _renderDetailLoadErrorState()
+    return
+  }
+
+  if (!obs) {
+    // Genuine "no visible row": both the owner table and the community
+    // view returned no row, without any query error. This is the ONLY
+    // path that renders the privacy-tinted unavailable state.
     _renderDetailUnavailableState()
     return
   }
