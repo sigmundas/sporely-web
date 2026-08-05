@@ -11,20 +11,44 @@ const admin = createClient(supabaseUrl, serviceRoleKey, {
   auth: { autoRefreshToken: false, persistSession: false },
 })
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+// Native Capacitor Android runs the WebView at https://localhost by default
+// (Capacitor 4+ androidScheme). iOS uses capacitor://localhost. The web app
+// lives at https://app.sporely.no. Rather than a wildcard, echo the caller's
+// origin when it matches this allowlist — that keeps CORS strict and works
+// with `credentials: 'include'` if a caller ever needs it.
+const ALLOWED_ORIGINS = new Set([
+  'https://app.sporely.no',
+  'https://localhost',
+  'http://localhost',
+  'capacitor://localhost',
+  'ionic://localhost',
+])
+
+function corsHeadersFor(req: Request): Record<string, string> {
+  const origin = req.headers.get('Origin') || ''
+  const allowOrigin = ALLOWED_ORIGINS.has(origin) ? origin : 'https://app.sporely.no'
+  return {
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Max-Age': '86400',
+    'Vary': 'Origin',
+  }
 }
 
 Deno.serve(async req => {
+  const corsHeaders = corsHeadersFor(req)
+
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+    // Answer preflight before any auth or body handling. Status 204 with
+    // no body is the standard preflight response.
+    return new Response(null, { status: 204, headers: corsHeaders })
   }
 
   try {
     const authHeader = req.headers.get('Authorization')
     if (!authHeader) {
-      return json({ error: 'Missing Authorization header' }, 401)
+      return json({ error: 'Missing Authorization header' }, 401, corsHeaders)
     }
 
     const userClient = createClient(supabaseUrl, Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
@@ -34,7 +58,7 @@ Deno.serve(async req => {
 
     const { data: { user }, error: userError } = await userClient.auth.getUser()
     if (userError || !user) {
-      return json({ error: 'Unauthorized' }, 401)
+      return json({ error: 'Unauthorized' }, 401, corsHeaders)
     }
 
     const uid = user.id
@@ -79,13 +103,13 @@ Deno.serve(async req => {
     const { error: deleteUserError } = await admin.auth.admin.deleteUser(uid)
     if (deleteUserError) {
       console.error('deleteUser failed:', deleteUserError)
-      return json({ error: deleteUserError.message }, 500)
+      return json({ error: deleteUserError.message }, 500, corsHeaders)
     }
 
-    return json({ ok: true })
+    return json({ ok: true }, 200, corsHeaders)
   } catch (error) {
     console.error(error)
-    return json({ error: error instanceof Error ? error.message : 'Unexpected error' }, 500)
+    return json({ error: error instanceof Error ? error.message : 'Unexpected error' }, 500, corsHeaders)
   }
 })
 
@@ -212,7 +236,7 @@ async function deleteFolderContents(bucket: string, uid: string) {
   }
 }
 
-function json(body: Record<string, unknown>, status = 200) {
+function json(body: Record<string, unknown>, status = 200, corsHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
