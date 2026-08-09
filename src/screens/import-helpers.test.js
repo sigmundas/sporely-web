@@ -8,6 +8,7 @@ import {
   _extractLatLonFromRawGps,
   isHeicBlobContent,
   isHeicLikeFile,
+  processFile,
 } from './import-helpers.js'
 
 test('raw GPS altitude parsing handles common EXIF shapes', () => {
@@ -90,4 +91,46 @@ test('browser HEIC processing retains the lazy JPEG conversion path', () => {
   assert.match(source, /import\('heic2any'\)/)
   assert.match(source, /const blob = options\.forceJpeg \|\| _isHeicLike\(file\)[\s\S]*?_canvasToJpegBlob\(img, w, h, 0\.88\)/)
   assert.match(source, /resolve\(\{ blob, aiBlob, metaSource: blob \}\)/)
+})
+
+test('Android picker JPEG keeps the native fast path when its filename is HEIC', async () => {
+  const previousWindow = globalThis.window
+  const previousImage = globalThis.Image
+  globalThis.window = {
+    Capacitor: {
+      getPlatform: () => 'android',
+      isNativePlatform: () => true,
+    },
+  }
+  globalThis.Image = class UnexpectedImageDecode {
+    constructor() {
+      throw new Error('native JPEG should not be decoded in the browser import path')
+    }
+  }
+
+  try {
+    const file = new File(['native-jpeg'], 'converted.HEIC', { type: 'image/jpeg' })
+    const result = await processFile(file, {
+      nativePhoto: {
+        name: 'converted.HEIC',
+        mimeType: 'image/jpeg',
+        originalMimeType: 'image/heic',
+        format: 'jpeg',
+        originalFormat: 'heic',
+        converted: true,
+      },
+    })
+
+    assert.equal(result.blob, file)
+    assert.equal(result.aiBlob, file)
+    assert.deepEqual(result.meta, {
+      aiCropRect: null,
+      aiCropSourceW: null,
+      aiCropSourceH: null,
+      aiCropIsCustom: false,
+    })
+  } finally {
+    globalThis.window = previousWindow
+    globalThis.Image = previousImage
+  }
 })

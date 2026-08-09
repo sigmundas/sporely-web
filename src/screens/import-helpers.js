@@ -699,8 +699,10 @@ export async function captureExif(file) {
 }
 
 export async function processFile(file, options = {}) {
-  const heicInput = _isHeicLike(file) || await isHeicBlobContent(file)
-  if (isAndroidNativeApp() && !!options.nativePhoto && file?.type === 'image/jpeg' && !heicInput) {
+  // The Android picker converts HEIC/HEIF to JPEG before returning it, while
+  // retaining the source filename. Trust the returned MIME type here so a
+  // converted JPEG with a .heic name is not decoded and encoded again in JS.
+  if (isAndroidNativeApp() && !!options.nativePhoto && file?.type === 'image/jpeg') {
     if (isImagePipelineDebugEnabled()) {
       debugImagePipeline('android native jpeg process', {
         captureSource: options.captureSource || options.nativePhoto?.captureSource || null,
@@ -724,6 +726,7 @@ export async function processFile(file, options = {}) {
     }
     return { blob: file, aiBlob: file, meta: { aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null, aiCropIsCustom: false } }
   }
+  const heicInput = _isHeicLike(file) || await isHeicBlobContent(file)
   try {
     const { blob, aiBlob, metaSource } = await _prepareImportBlobs(file, { forceJpeg: heicInput })
     const meta = await createImageCropMeta(metaSource || blob, { preseed: true })
