@@ -19,6 +19,7 @@ Cloudflare Worker for authenticated media uploads to the `sporely-media` R2 buck
 See `wrangler.toml` and `wrangler.toml.example`.
 
 - `MEDIA_BUCKET`
+- `MEDIA_STORAGE_MODE` (current production value: `legacy`)
 - `SUPABASE_URL`
 - `MEDIA_PUBLIC_BASE_URL`
 - `ALLOWED_ORIGINS`

@@ -7,6 +7,7 @@ binding = "MEDIA_BUCKET"
 bucket_name = "sporely-media"
 
 [vars]
+MEDIA_STORAGE_MODE = "legacy"
 SUPABASE_URL = "https://zkpjklzfwzefhjluvhfw.supabase.co"
 SUPABASE_JWT_AUDIENCE = "authenticated"
 MEDIA_PUBLIC_BASE_URL = "https://media.sporely.no"

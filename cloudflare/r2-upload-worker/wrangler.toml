@@ -22,6 +22,7 @@ bucket_name = "sporely-media"
 # bucket_name = "sporely-media-private"
 
 [vars]
+MEDIA_STORAGE_MODE = "legacy"
 SUPABASE_URL = "https://zkpjklzfwzefhjluvhfw.supabase.co"
 SUPABASE_JWT_AUDIENCE = "authenticated"
 MEDIA_PUBLIC_BASE_URL = "https://media.sporely.no"
