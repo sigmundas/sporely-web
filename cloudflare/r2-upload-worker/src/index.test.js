@@ -4,6 +4,8 @@ import { createHmac } from 'node:crypto'
 
 import worker, {
   MEDIA_VARIANTS as MEDIA_VARIANTS_STAGE2,
+  LEGACY_UPLOAD_TYPES as LEGACY_UPLOAD_TYPES_STAGE2,
+  normalizeUploadType as normalizeUploadType_STAGE2,
   resolveMediaStorageMode as resolveMediaStorageMode_STAGE2,
   selectUploadBucket as selectUploadBucket_STAGE2,
   deriveThumbKey as deriveThumbKey_STAGE2,
@@ -141,7 +143,7 @@ test('OPTIONS preflight allows the Android upload metadata headers', async () =>
     headers: {
       Origin: 'https://localhost',
       'Access-Control-Request-Method': 'PUT',
-      'Access-Control-Request-Headers': 'authorization,content-type,cache-control,x-sporely-source-height,x-sporely-source-width,x-sporely-stored-height,x-sporely-stored-width,x-sporely-encoding-quality,x-sporely-encoding-format,x-sporely-upload-mode,x-sporely-upload-variant,x-sporely-cloud-plan,x-sporely-quality-profile',
+      'Access-Control-Request-Headers': 'authorization,content-type,cache-control,x-sporely-source-height,x-sporely-source-width,x-sporely-stored-height,x-sporely-stored-width,x-sporely-encoding-quality,x-sporely-encoding-format,x-sporely-upload-mode,x-sporely-upload-variant,x-sporely-upload-type,x-sporely-image-id,x-sporely-mosaic-id,x-sporely-cloud-plan,x-sporely-quality-profile',
     },
   })
 
@@ -169,6 +171,9 @@ test('OPTIONS preflight allows the Android upload metadata headers', async () =>
     'x-sporely-encoding-format',
     'x-sporely-upload-mode',
     'x-sporely-upload-variant',
+    'x-sporely-upload-type',
+    'x-sporely-image-id',
+    'x-sporely-mosaic-id',
     'x-sporely-cloud-plan',
     'x-sporely-quality-profile',
   ]) {
@@ -230,7 +235,7 @@ test('healthz exposes media policy values', async () => {
   })
 })
 
-test('full pro high webp uploads at 5184x3888 succeed under the plan caps', async () => {
+test('legacy full upload without image identity succeeds under the plan caps', async () => {
   const { jwtSecret, token } = createWorkerAuthToken()
   const restoreFetch = installProfileFetchMock({
     is_pro: true,
@@ -282,6 +287,71 @@ test('full pro high webp uploads at 5184x3888 succeed under the plan caps', asyn
   } finally {
     restoreFetch()
   }
+})
+
+test('legacy thumbnail upload without image identity succeeds', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock({
+    is_pro: true, cloud_plan: 'pro', storage_quota_bytes: null,
+    total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0, is_banned: false,
+  })
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: 1234, uploadMode: 'reduced', uploadVariant: 'thumb',
+        cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 1200,
+        sourceHeight: 900, storedWidth: 360, storedHeight: 270,
+      }),
+      {
+        ...TEST_ENV,
+        MEDIA_STORAGE_MODE: 'legacy',
+        MEDIA_BUCKET: { head: async () => null, put: async () => ({ etag: 'thumb-etag' }) },
+        SUPABASE_URL: 'https://example.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+        SUPABASE_JWT_SECRET: jwtSecret,
+      }, {},
+    )
+    const payload = await response.json()
+    assert.equal(response.status, 201)
+    assert.equal(payload.key, 'user-123/obs-123/0_000000.webp')
+  } finally { restoreFetch() }
+})
+
+test('legacy desktop spore_mosaic upload without mosaic identity succeeds', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock({
+    is_pro: true, cloud_plan: 'pro', storage_quota_bytes: null,
+    total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0, is_banned: false,
+  })
+  try {
+    const response = await worker.fetch(
+      new Request('https://upload.sporely.no/upload/user-123/obs-123/spore_mosaic.webp', {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'image/webp',
+          'X-Sporely-Upload-Mode': 'reduced',
+          'X-Sporely-Upload-Variant': 'spore_mosaic',
+          'X-Sporely-Cloud-Plan': 'pro',
+          'X-Sporely-Quality-Profile': 'high',
+        },
+        body: new TextEncoder().encode('MOSAIC'),
+      }),
+      {
+        ...TEST_ENV,
+        MEDIA_STORAGE_MODE: 'legacy',
+        MEDIA_BUCKET: { head: async () => null, put: async () => ({ etag: 'mosaic-etag' }) },
+        MEDIA_PUBLIC_BASE_URL: 'https://media.sporely.no',
+        SUPABASE_URL: 'https://example.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+        SUPABASE_JWT_SECRET: jwtSecret,
+      }, {},
+    )
+    const payload = await response.json()
+    assert.equal(response.status, 201)
+    assert.equal(payload.key, 'user-123/obs-123/spore_mosaic.webp')
+    assert.equal(payload.url, 'https://media.sporely.no/user-123/obs-123/spore_mosaic.webp')
+  } finally { restoreFetch() }
 })
 
 test('full free standard uploads over 1.5 MB fail with a byte cap reason', async () => {
@@ -496,6 +566,15 @@ test('Stage2a: MEDIA_VARIANTS allowlist is exactly {full,thumb,original} (mosaic
   )
 })
 
+test('Stage2a: legacy upload types remain separate from delivery variants', () => {
+  assert.deepEqual(
+    Array.from(LEGACY_UPLOAD_TYPES_STAGE2).sort(),
+    ['full', 'original', 'spore_mosaic', 'thumb'].sort(),
+  )
+  assert.equal(normalizeUploadType_STAGE2('small'), 'thumb')
+  assert.equal(MEDIA_VARIANTS_STAGE2.has('spore_mosaic'), false)
+})
+
 test('Stage2a: deriveThumbKey shape', () => {
   assert.equal(deriveThumbKey_STAGE2('u/o/0_123.webp'), 'u/o/thumb_0_123.webp')
   assert.equal(deriveThumbKey_STAGE2('u/o/thumb_0_123.webp'), 'u/o/thumb_0_123.webp')
@@ -548,6 +627,9 @@ test('Stage2a: /healthz reports mode + bindings without secrets', async () => {
   assert.equal(res.status, 200)
   assert.equal(body.ok, true)
   assert.equal(body.mediaStorageMode, 'private')
+  assert.equal(body.legacyBucketBound, true)
+  assert.equal(body.privateBucketBound, true)
+  assert.deepEqual(body.supportedMediaVariants, ['full', 'thumb', 'original'])
   assert.deepEqual(body.bindings, { hasMediaBucket: true, hasPrivateMediaBucket: true })
   const serialized = JSON.stringify(body)
   assert.ok(!serialized.includes('test-service-role'), 'service role leaked in /healthz')
@@ -650,6 +732,47 @@ test('Stage2a: /m/ RPC "deny" translates to 404 (no existence disclosure)', asyn
     assert.equal(res.status, 404)
   } finally { restore() }
 })
+
+for (const accessCase of [
+  { name: 'owner can read private full media', caller: 'owner-1', variant: 'full', allowed: true, reason: 'owner' },
+  { name: 'friend can read friends-visible full media', caller: 'friend-1', variant: 'full', allowed: true, reason: 'friend' },
+  { name: 'unrelated user cannot read friends-visible full media', caller: 'other-1', variant: 'full', allowed: false, reason: 'denied' },
+  { name: 'friend cannot read original media', caller: 'friend-1', variant: 'original', allowed: false, reason: 'original_owner_only' },
+  { name: 'banned-owner media is denied', caller: 'viewer-1', variant: 'full', allowed: false, reason: 'owner_banned' },
+]) {
+  test(`Stage2a: ${accessCase.name}`, async () => {
+    const jwtSecret = 'worker-test-secret'
+    const token = buildJwtForSub(accessCase.caller, jwtSecret)
+    const restore = installMockFetchStage2([
+      ['/rest/v1/rpc/media_authorize_delivery', async ({ init }) => {
+        const payload = JSON.parse(init.body)
+        assert.equal(payload.p_caller, accessCase.caller)
+        assert.equal(payload.p_variant, accessCase.variant)
+        return { status: 200, body: [{
+          allowed: accessCase.allowed,
+          storage_path: accessCase.allowed ? 'u/o/full.webp' : null,
+          canonical_bucket: 'legacy', media_version: 5,
+          cache_class: accessCase.allowed ? 'private-short' : 'deny',
+          reason: accessCase.reason,
+        }] }
+      }],
+    ])
+    const env = baseDeliveryEnv({
+      SUPABASE_JWT_SECRET: jwtSecret,
+      MEDIA_BUCKET: makeMockBucketStage2({
+        'u/o/full.webp': { body: new TextEncoder().encode('AUTHORIZED') },
+      }),
+    })
+    try {
+      const res = await worker.fetch(new Request(
+        `https://upload.sporely.no/m/100/${accessCase.variant}?v=5`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      ), env, {})
+      assert.equal(res.status, accessCase.allowed ? 200 : 404)
+      if (accessCase.allowed) assert.equal(await res.text(), 'AUTHORIZED')
+    } finally { restore() }
+  })
+}
 
 test('Stage2a: /m/ tombstone returns 404 (no bytes to any caller)', async () => {
   const restore = installMockFetchStage2([
@@ -849,6 +972,38 @@ test('Stage2a-r2: private-mode upload requires X-Sporely-Image-Id', async () => 
     assert.equal(res.status, 400)
     const body = await res.json()
     assert.equal(body.error, 'image_id_required')
+  } finally { restoreFetch() }
+})
+
+test('Stage2a-r2: private mode rejects mosaic upload instead of using legacy validation', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock({
+    is_pro: true, cloud_plan: 'pro', storage_quota_bytes: null,
+    total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0, is_banned: false,
+  })
+  try {
+    const res = await worker.fetch(
+      new Request('https://upload.sporely.no/upload/user-123/mosaic.webp', {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'image/webp',
+          'X-Sporely-Upload-Variant': 'spore_mosaic',
+        },
+        body: new TextEncoder().encode('MOSAIC'),
+      }),
+      {
+        ...TEST_ENV,
+        MEDIA_STORAGE_MODE: 'private',
+        PRIVATE_MEDIA_BUCKET: makeMockBucketStage2(),
+        MEDIA_BUCKET: makeMockBucketStage2(),
+        SUPABASE_URL: 'https://example.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+        SUPABASE_JWT_SECRET: jwtSecret,
+      }, {},
+    )
+    assert.equal(res.status, 501)
+    assert.equal((await res.json()).error, 'private_mosaic_upload_not_ready')
   } finally { restoreFetch() }
 })
 

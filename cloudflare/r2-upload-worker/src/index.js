@@ -31,6 +31,9 @@ const DEFAULT_ALLOWED_HEADERS = [
   'X-Sporely-Stored-Width',
   'X-Sporely-Stored-Height',
   'X-Sporely-Upload-Origin',
+  'X-Sporely-Upload-Type',
+  'X-Sporely-Image-Id',
+  'X-Sporely-Mosaic-Id',
 ].join(', ')
 const DEFAULT_ALLOWED_HEADER_NAMES = DEFAULT_ALLOWED_HEADERS
   .split(',')
@@ -101,7 +104,10 @@ async function handleRequest(request, env, ctx) {
           hasMediaBucket: !!env.MEDIA_BUCKET,
           hasPrivateMediaBucket: !!env.PRIVATE_MEDIA_BUCKET,
         },
+        legacyBucketBound: !!env.MEDIA_BUCKET,
+        privateBucketBound: !!env.PRIVATE_MEDIA_BUCKET,
         mediaVariants: Array.from(MEDIA_VARIANTS),
+        supportedMediaVariants: Array.from(MEDIA_VARIANTS),
         mediaPolicy: {
           fullResizeMaxPixels: CLOUD_FULL_RESIZE_MAX_PIXELS,
           fullResizeMaxEdge: CLOUD_FULL_RESIZE_MAX_EDGE,
@@ -400,17 +406,24 @@ async function handleUpload(request, env, ctx, url) {
 
   const uploadModeHeader = String(request.headers.get('X-Sporely-Upload-Mode') || '').trim().toLowerCase()
   const uploadMode = uploadModeHeader === 'full' ? 'full' : 'reduced'
-  // Variant must be in the canonical allowlist. Legacy clients that send
-  // aliases like 'small' / 'medium' / 'cards' are coerced to 'thumb'
-  // because the storage-side canonical variant for downsized copies is
-  // always 'thumb'. Unknown variants fail closed.
-  const rawUploadVariant = String(request.headers.get('X-Sporely-Upload-Variant') || 'full').trim().toLowerCase() || 'full'
-  const uploadVariant = ['small','medium','cards','preview'].includes(rawUploadVariant)
-    ? 'thumb'
-    : rawUploadVariant
-  if (!MEDIA_VARIANTS.has(uploadVariant)) {
-    throw httpError(400, 'invalid_variant',
-      `Upload variant must be one of: ${Array.from(MEDIA_VARIANTS).join(', ')}`)
+  // Upload types and authorized-delivery variants are separate contracts.
+  // Existing clients send the historic X-Sporely-Upload-Variant header, so
+  // prefer the future Upload-Type spelling but retain Variant as the wire
+  // fallback. In legacy mode this includes the desktop `spore_mosaic` upload
+  // type; mosaic delivery still uses /mm/<mosaic_id>, never /m/.../mosaic.
+  const rawUploadType = String(
+    request.headers.get('X-Sporely-Upload-Type')
+    || request.headers.get('X-Sporely-Upload-Variant')
+    || 'full',
+  ).trim().toLowerCase() || 'full'
+  const uploadType = normalizeUploadType(rawUploadType)
+  if (!LEGACY_UPLOAD_TYPES.has(uploadType)) {
+    throw httpError(400, 'invalid_upload_type',
+      `Upload type must be one of: ${Array.from(LEGACY_UPLOAD_TYPES).join(', ')}`)
+  }
+  if (storageMode === 'private' && uploadType === 'spore_mosaic') {
+    throw httpError(501, 'private_mosaic_upload_not_ready',
+      'Private mosaic upload requires a validated mosaic identity contract')
   }
 
   // Stage 2 server-validated image identity. In `private` mode the client
@@ -429,7 +442,7 @@ async function handleUpload(request, env, ctx, url) {
       throw httpError(400, 'invalid_image_id',
         'X-Sporely-Image-Id must be a positive integer')
     }
-    const rowMatch = await verifyImageRowMatchesUpload(env, parsedImageId, claims.sub, key, uploadVariant)
+    const rowMatch = await verifyImageRowMatchesUpload(env, parsedImageId, claims.sub, key, uploadType)
     if (!rowMatch.ok) {
       throw httpError(rowMatch.status, rowMatch.code, rowMatch.message)
     }
@@ -480,13 +493,13 @@ async function handleUpload(request, env, ctx, url) {
     storedPixelCap,
     resizeMaxEdge: storedEdgeCap,
     uploadMode,
-    uploadVariant,
+    uploadVariant: uploadType,
     encodingFormat,
     contentType,
     storagePath: key,
   })
 
-  if (uploadVariant !== 'thumb') {
+  if (uploadType !== 'thumb') {
     const planByteCap = Math.max(1, Number(uploadPolicy.fullImageByteCap || 0) || 0)
     if (bodyBytes > planByteCap) {
       const details = buildImageTooLargeDetails('byte_cap', planByteCap)
@@ -535,7 +548,7 @@ async function handleUpload(request, env, ctx, url) {
       uploaded_at: new Date().toISOString(),
       uploaded_by: String(claims.email || ''),
       upload_mode: String(uploadMode),
-      upload_variant: String(uploadVariant),
+      upload_variant: String(uploadType),
       cloud_plan: String(profile?.cloudPlan || 'free'),
       quality_profile: String(uploadPolicy?.qualityProfile || profile?.qualityProfile || 'standard'),
       encoding_quality: Number.isFinite(encodingQualityHeader) ? String(encodingQualityHeader) : '',
@@ -594,7 +607,7 @@ async function handleUpload(request, env, ctx, url) {
           uploaded_at: new Date().toISOString(),
           uploaded_by: String(claims.email || ''),
           upload_mode: String(uploadMode),
-          upload_variant: String(uploadVariant),
+          upload_variant: String(uploadType),
           cloud_plan: String(profile?.cloudPlan || 'free'),
           quality_profile: String(uploadPolicy?.qualityProfile || profile?.qualityProfile || 'standard'),
           encoding_quality: Number.isFinite(encodingQualityHeader) ? String(encodingQualityHeader) : '',
@@ -1302,12 +1315,24 @@ function publicMediaUrl(env, key) {
 }
 
 // Stage 2 canonical variant allowlist. MUST stay in lock-step with
-// `public.media_variant_is_supported(text)` in
-// 20260805130000_media_authorization_hardening.sql. Unknown variants fail
+// `public.media_variant_is_supported(text)` in the consolidated
+// 20260804120000_media_authorization.sql migration. Unknown variants fail
 // closed on both sides.
 // Round-3 amendment: `mosaic` moved to its own /mm/ route. This
 // allowlist governs the observation-image /m/ route only.
 export const MEDIA_VARIANTS = new Set(['full', 'thumb', 'original'])
+
+// Historic upload metadata values accepted while writing to the legacy
+// bucket. This is intentionally distinct from MEDIA_VARIANTS: spore mosaics
+// are uploaded as objects but authorized for delivery through /mm/, not /m/.
+export const LEGACY_UPLOAD_TYPES = new Set(['full', 'thumb', 'original', 'spore_mosaic'])
+
+export function normalizeUploadType(value) {
+  const normalized = String(value || '').trim().toLowerCase() || 'full'
+  return ['small', 'medium', 'cards', 'preview'].includes(normalized)
+    ? 'thumb'
+    : normalized
+}
 
 // Stage 2 explicit storage mode. Set via `MEDIA_STORAGE_MODE` env var. Fail
 // closed: `private` mode REQUIRES `PRIVATE_MEDIA_BUCKET` binding and never
@@ -1414,13 +1439,10 @@ async function handleMediaDelivery(request, env, ctx, url) {
     throw httpError(500, 'missing_bucket',
       `No R2 binding for canonical_bucket=${decision.canonical_bucket}`)
   }
-  // Per-variant key derivation. The RPC returned the base
-  // `storage_path` (for full/thumb/mosaic) or `original_storage_path`
-  // (for original). For `thumb`, prefix the last path segment with
-  // `thumb_`; other variants use the returned path verbatim. `mosaic`
-  // is currently served from the row's storage_path — Stage 2b will
-  // introduce a dedicated mosaic key column if the product needs a
-  // distinct derived key.
+  // Per-variant key derivation. The RPC returns the base `storage_path`
+  // for full/thumb and `original_storage_path` for original. For `thumb`,
+  // prefix the final path segment with `thumb_`; other variants use the
+  // returned path verbatim. Mosaics are resolved only by the /mm/ route.
   const objectKey = variant === 'thumb'
     ? deriveThumbKey(decision.storage_path)
     : decision.storage_path
@@ -1458,8 +1480,7 @@ async function handleMediaDelivery(request, env, ctx, url) {
 //
 // For the `thumb` variant the row's storage_path holds the FULL key; the
 // thumb key is derived by prefixing the final path segment with `thumb_`.
-// The check accepts either form so a client uploading a thumb variant can
-// present the thumb key in the URL.
+// A client uploading a thumb variant must present that derived thumb key.
 async function verifyImageRowMatchesUpload(env, imageId, callerSub, uploadKey, variant) {
   if (!hasSupabaseServiceRole(env)) {
     return {
@@ -1470,7 +1491,7 @@ async function verifyImageRowMatchesUpload(env, imageId, callerSub, uploadKey, v
   const query = [
     `id=eq.${encodeURIComponent(imageId)}`,
     `user_id=eq.${encodeURIComponent(callerSub)}`,
-    'select=id,storage_path,canonical_bucket',
+    'select=id,storage_path,original_storage_path,canonical_bucket',
     'limit=1',
   ].join('&')
   const response = await supabaseRestFetch(env, `/rest/v1/observation_images?${query}`, { method: 'GET' })
@@ -1489,11 +1510,13 @@ async function verifyImageRowMatchesUpload(env, imageId, callerSub, uploadKey, v
     }
   }
   const rowStoragePath = String(row.storage_path || '')
-  // Accept the row's stored path directly (matches 'full' / 'original' /
-  // 'mosaic' uploads) or the derived thumb path.
-  const derivedThumbKey = deriveThumbKey(rowStoragePath)
-  const acceptable = new Set([rowStoragePath, derivedThumbKey].filter(Boolean))
-  if (!acceptable.has(uploadKey)) {
+  const rowOriginalStoragePath = String(row.original_storage_path || '')
+  const expectedKey = variant === 'thumb'
+    ? deriveThumbKey(rowStoragePath)
+    : variant === 'original'
+      ? rowOriginalStoragePath
+      : rowStoragePath
+  if (!expectedKey || uploadKey !== expectedKey) {
     return {
       ok: false, status: 403, code: 'storage_path_mismatch',
       message: 'Upload key does not match the observation_images row',
