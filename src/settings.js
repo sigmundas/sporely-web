@@ -65,6 +65,23 @@ function _isNordicCountryCode(value) {
   return NORDIC_COUNTRY_CODES.has(_normalizeCountryCodeHint(value))
 }
 
+function _isNordicCoordinateHint(lat, lon) {
+  const latitude = Number(lat)
+  const longitude = Number(lon)
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false
+
+  // Approximate regional boxes used only until reverse geocoding supplies a
+  // country. An explicit country remains authoritative.
+  return (
+    (latitude >= 54.4 && latitude <= 57.9 && longitude >= 7.5 && longitude <= 15.5) // Denmark
+    || (latitude >= 57.5 && latitude < 63 && longitude >= 4 && longitude <= 20) // Southern Scandinavia
+    || (latitude >= 63 && latitude <= 71.5 && longitude >= 4 && longitude <= 31.7) // Northern Scandinavia
+    || (latitude >= 59.5 && latitude < 63 && longitude >= 19 && longitude <= 31.7) // Southern Finland
+    || (latitude >= 63 && latitude <= 67.5 && longitude >= -25 && longitude <= -13) // Iceland
+    || (latitude >= 61 && latitude <= 63 && longitude >= -8 && longitude <= -6) // Faroe Islands
+  )
+}
+
 export function normalizeArtsorakelMaxEdge(value) {
   const parsed = Number.parseInt(value, 10)
   return Number.isFinite(parsed)
@@ -168,14 +185,17 @@ function _resolvePrimaryPhotoIdService({
   mode = PHOTO_ID_MODE_AUTO,
   countryCode = '',
   countryName = '',
+  lat = null,
+  lon = null,
   locale = '',
   inaturalistAvailable = false,
 } = {}) {
   const normalizedMode = normalizePhotoIdMode(mode)
-  const normalizedCountry = _normalizeCountryCodeHint(countryCode || countryName)
+  const countryHint = _normalizeHintText(countryCode || countryName)
+  const normalizedCountry = _normalizeCountryCodeHint(countryHint)
   const localeHint = _normalizeLocaleHint(locale)
   const nordicHint = _isNordicCountryCode(normalizedCountry)
-    || (!normalizedCountry && LOCALE_HINTS.has(localeHint))
+    || (!countryHint && (_isNordicCoordinateHint(lat, lon) || LOCALE_HINTS.has(localeHint)))
 
   if (normalizedMode === PHOTO_ID_MODE_ARTSORAKEL) return ID_SERVICE_ARTSORAKEL
   if (normalizedMode === PHOTO_ID_MODE_INATURALIST) return ID_SERVICE_INATURALIST
@@ -203,6 +223,8 @@ export function resolvePhotoIdServices({
     mode: normalizedMode,
     countryCode,
     countryName,
+    lat,
+    lon,
     locale,
     inaturalistAvailable: inatAvailable,
   })
@@ -237,8 +259,8 @@ export function resolvePhotoIdServices({
     disabledReason,
     countryCode: _normalizeCountryCodeHint(countryCode || countryName) || null,
     locale: _normalizeLocaleHint(locale) || '',
-    lat: Number.isFinite(Number(lat)) ? Number(lat) : null,
-    lon: Number.isFinite(Number(lon)) ? Number(lon) : null,
+    lat: lat != null && Number.isFinite(Number(lat)) ? Number(lat) : null,
+    lon: lon != null && Number.isFinite(Number(lon)) ? Number(lon) : null,
   }
 }
 

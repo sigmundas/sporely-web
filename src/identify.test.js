@@ -181,6 +181,35 @@ test('resolves photo ID services by mode, country, and iNaturalist availability'
   assert.equal(autoLocaleHint.primary, ID_SERVICE_ARTSORAKEL)
   assert.deepEqual(autoLocaleHint.run, [ID_SERVICE_ARTSORAKEL])
 
+  const autoNorwayCoordinates = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_AUTO,
+    lat: 59.91,
+    lon: 10.75,
+    locale: 'en',
+    inaturalistAvailable: true,
+  })
+  assert.equal(autoNorwayCoordinates.primary, ID_SERVICE_ARTSORAKEL)
+  assert.deepEqual(autoNorwayCoordinates.run, [ID_SERVICE_ARTSORAKEL])
+
+  const explicitCountryWinsOverCoordinates = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_AUTO,
+    countryCode: 'de',
+    lat: 59.91,
+    lon: 10.75,
+    locale: 'en',
+    inaturalistAvailable: true,
+  })
+  assert.equal(explicitCountryWinsOverCoordinates.primary, ID_SERVICE_INATURALIST)
+
+  const autoBalticCoordinates = resolvePhotoIdServices({
+    mode: PHOTO_ID_MODE_AUTO,
+    lat: 58.5,
+    lon: 25,
+    locale: 'en',
+    inaturalistAvailable: true,
+  })
+  assert.equal(autoBalticCoordinates.primary, ID_SERVICE_INATURALIST)
+
   const bothLoggedIn = resolvePhotoIdServices({
     mode: PHOTO_ID_MODE_BOTH,
     countryCode: 'us',

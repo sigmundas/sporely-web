@@ -234,10 +234,10 @@ function _createIdentifyLifecycleError(service, code, message) {
  */
 export async function runIdentifyProviderOperation(service, operation, options = {}) {
   const normalizedService = normalizeIdentifyService(service)
-  const slowAfterMs = Number.isFinite(Number(options.slowAfterMs))
+  const slowAfterMs = options.slowAfterMs != null && Number.isFinite(Number(options.slowAfterMs))
     ? Math.max(0, Number(options.slowAfterMs))
     : IDENTIFY_PROVIDER_SLOW_MS
-  const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+  const timeoutMs = options.timeoutMs != null && Number.isFinite(Number(options.timeoutMs))
     ? Math.max(slowAfterMs, Number(options.timeoutMs))
     : IDENTIFY_PROVIDER_TIMEOUT_MS
   const setTimer = options.setTimeoutImpl || globalThis.setTimeout

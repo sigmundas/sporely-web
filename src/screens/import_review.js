@@ -47,7 +47,7 @@ export function __setImportAiTestHooks(overrides = null) {
   importAiTestDependencies = overrides && typeof overrides === 'object' ? { ...overrides } : null;
   if (!importAiTestDependencies) _abortImportAiRuns();
 }
-function _importAiDependency(name, fallback = null) {
+function _importAiDependency(name, fallback = undefined) {
   return importAiTestDependencies?.[name] ?? fallback;
 }
 function _nativeCamera() {
@@ -637,7 +637,7 @@ async function _syncImportAiDefaultAvailability() {
   const inaturalistAvailable = Boolean(session?.connected && (session?.api_token || session?.apiToken))
   const hasRunnableTarget = _getBatchAiTargets().some(target => _resolveSessionPhotoIdServices(target, {
     inaturalistAvailable,
-    comparisonRequested: true,
+    comparisonRequested: false,
   }).run.length > 0)
   const available = hasTargets && hasRunnableTarget
   const reason = hasTargets
@@ -662,15 +662,27 @@ function _sessionObservationGeography(session) {
   return normalizeObservationGeography(_sessionPhotoIdLookup(session))
 }
 
+async function _awaitSessionProviderLocation(session) {
+  if (!session?.metadataPromise) return
+  try {
+    await session.metadataPromise
+  } catch (_) {}
+}
+
 function _resolveSessionPhotoIdServices(session, {
   inaturalistAvailable = false,
   comparisonRequested = false,
 } = {}) {
   const lookup = _sessionPhotoIdLookup(session)
+  const sessionLat = Number(session?.gpsLat)
+  const sessionLon = Number(session?.gpsLon)
+  const hasSessionCoordinates = isUsableCoordinate(sessionLat, sessionLon)
   return _importAiDependency('resolvePhotoIdServices', resolvePhotoIdServices)({
     mode: getPhotoIdMode(),
     countryCode: lookup?.country_code || null,
     countryName: lookup?.country_name || null,
+    lat: hasSessionCoordinates ? sessionLat : lookup?.latitude ?? null,
+    lon: hasSessionCoordinates ? sessionLon : lookup?.longitude ?? null,
     locale: getLocale(),
     inaturalistAvailable,
     comparisonRequested,
@@ -891,7 +903,6 @@ async function _runSessionAiService(sid, service, options = {}) {
     const comparison = await _importAiDependency('runIdentifyComparisonForBlobs', runIdentifyComparisonForBlobs)(
       _sessionAiInputs(normalized).map(item => ({
         blob: item.blob,
-        originalBlob: item.originalBlob || null,
         cropRect: item.cropRect,
         lat: item.lat ?? null,
         lon: item.lon ?? null,
@@ -961,6 +972,8 @@ async function _runSessionAiComparison(sid, options = {}) {
   const lifecycleGeneration = importAiLifecycleGeneration
   const session = sessionById(sid)
   if (!session?.files?.length || (importAiBatchState.running && !options.allowDuringBatch)) return
+  await _awaitSessionProviderLocation(session)
+  if (lifecycleGeneration !== importAiLifecycleGeneration || sessionById(sid) !== session) return
   const sessionAi = _ensureSessionAiState(session)
   if (!sessionAi) return
   const inaturalistSession = await _importAiDependency('loadInaturalistSession', loadInaturalistSession)()
@@ -975,7 +988,7 @@ async function _runSessionAiComparison(sid, options = {}) {
   const inaturalistAvailable = availability?.[ID_SERVICE_INATURALIST]?.available ?? false
   const resolution = _resolveSessionPhotoIdServices(session, {
     inaturalistAvailable,
-    comparisonRequested: true,
+    comparisonRequested: false,
   })
   const lookup = _sessionPhotoIdLookup(session)
   const services = resolution.run
@@ -1098,13 +1111,15 @@ async function _runAiIdAll() {
   if (importAiBatchState.running) return;
   const lifecycleGeneration = importAiLifecycleGeneration;
   const targets = _getBatchAiTargets();
+  await Promise.all(targets.map(_awaitSessionProviderLocation));
+  if (lifecycleGeneration !== importAiLifecycleGeneration) return;
   const inaturalistSession = await _importAiDependency('loadInaturalistSession', loadInaturalistSession)();
   if (lifecycleGeneration !== importAiLifecycleGeneration) return;
   const inaturalistAvailable = Boolean(inaturalistSession?.connected && (inaturalistSession?.api_token || inaturalistSession?.apiToken));
   const totalUnits = targets.reduce((sum, session) => {
     const services = _resolveSessionPhotoIdServices(session, {
       inaturalistAvailable,
-      comparisonRequested: true,
+      comparisonRequested: false,
     }).run.length
     return sum + ((session.files?.length || 0) * services)
   }, 0)
@@ -1140,7 +1155,7 @@ async function _runAiIdAll() {
         const sessionState = _ensureSessionAiState(session);
         const resolution = _resolveSessionPhotoIdServices(session, {
           inaturalistAvailable: sessionState.aiAvailability?.[ID_SERVICE_INATURALIST]?.available ?? inaturalistAvailable,
-          comparisonRequested: true,
+          comparisonRequested: false,
         });
         sessionState.aiActiveService = chooseIdentifyComparisonActiveService(sessionState.aiServiceState || {}, resolution.primary)
         sessionState.aiService = sessionState.aiActiveService

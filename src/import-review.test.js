@@ -4,6 +4,7 @@ import fs from 'node:fs'
 
 import { buildIdentifyFingerprint } from './ai-identification.js'
 import { shouldShowAiCropOverlay } from './image_crop.js'
+import { resolvePhotoIdServices } from './settings.js'
 import { _buildImportedReviewAiState } from './screens/review.js'
 import {
   _buildImportObservationPayload,
@@ -23,9 +24,9 @@ import {
   __setImportAiTestHooks,
 } from './screens/import_review.js'
 
-function makeSession() {
+function makeSession(id = 'session-1') {
   return {
-    id: 'session-1',
+    id,
     files: [new Blob(['a'], { type: 'image/jpeg' })],
     aiFiles: [new Blob(['a'], { type: 'image/jpeg' })],
     imageMeta: [{
@@ -565,6 +566,178 @@ test('import review provider lifecycle uses per-provider updates and teardown ca
   assert.match(source, /if \(normalized\.aiRunning\) importAiManualTabSessions\.add\(sid\)/)
   assert.match(source, /function _abortImportAiRuns\(\) {[\s\S]*?for \(const controller of importAiRunControllers\.values\(\)\) controller\.abort\(\)/)
   assert.match(source, /function _cancelImport\(\) {[\s\S]*?_abortImportAiRuns\(\)/)
+})
+
+test('import review leaves omitted provider deadlines undefined', async () => {
+  const localStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem() { return null }, setItem() {}, removeItem() {} },
+  })
+  let capturedOptions = null
+
+  __setImportAiTestHooks({
+    persistSessions() {},
+    renderSessions() {},
+    showToast() {},
+    loadInaturalistSession: async () => ({ connected: false }),
+    getAvailableIdentifyServices: async () => [
+      { service: 'artsorakel', available: true, reason: '' },
+      { service: 'inat', available: false, reason: 'login required' },
+    ],
+    resolvePhotoIdServices: () => ({ primary: 'artsorakel', run: ['artsorakel'] }),
+    runIdentifyComparisonForBlobs: async (_inputs, options) => {
+      capturedOptions = options
+      const result = {
+        service: 'artsorakel',
+        status: 'success',
+        predictions: [{ scientificName: 'Amanita muscaria', probability: 0.9 }],
+      }
+      options.onServiceState?.(result)
+      return { resultsByService: { artsorakel: result } }
+    },
+  })
+
+  try {
+    __setImportAiSessionsForTests([makeSession()])
+    await __runImportAiComparisonForTests('session-1')
+
+    assert.equal(capturedOptions.slowAfterMs, undefined)
+    assert.equal(capturedOptions.timeoutMs, undefined)
+    assert.equal(capturedOptions.setTimeoutImpl, undefined)
+    assert.equal(capturedOptions.clearTimeoutImpl, undefined)
+  } finally {
+    __abortImportAiRunsForTests()
+    __setImportAiTestHooks(null)
+    __setImportAiSessionsForTests([])
+    if (localStorageDescriptor) {
+      Object.defineProperty(globalThis, 'localStorage', localStorageDescriptor)
+    } else {
+      Reflect.deleteProperty(globalThis, 'localStorage')
+    }
+  }
+})
+
+test('ID All uses EXIF coordinates, the selected Auto provider, and bounded AI images', async () => {
+  const localStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem() { return null }, setItem() {}, removeItem() {} },
+  })
+  const resolutionInputs = []
+  const providerCalls = []
+  const importedSessions = [makeSession('session-1'), makeSession('session-2')]
+  importedSessions.forEach((session, index) => {
+    session.files = [new Blob([`full-resolution-${index}`], { type: 'image/jpeg' })]
+    session.aiFiles = [new Blob([`bounded-${index}`], { type: 'image/jpeg' })]
+    session.gpsLat = 59.91
+    session.gpsLon = 10.75
+  })
+  const boundedBlobs = new Set(importedSessions.flatMap(session => session.aiFiles))
+
+  __setImportAiTestHooks({
+    persistSessions() {},
+    renderSessions() {},
+    showToast() {},
+    updateFooter() {},
+    loadInaturalistSession: async () => ({ connected: true, api_token: 'token' }),
+    getAvailableIdentifyServices: async () => [
+      { service: 'artsorakel', available: true, reason: '' },
+      { service: 'inat', available: true, reason: '' },
+    ],
+    resolvePhotoIdServices: options => {
+      resolutionInputs.push(options)
+      return resolvePhotoIdServices(options)
+    },
+    identifyBlobs: async (images, service, _language, options) => {
+      providerCalls.push({ images, service })
+      options.onImageSent?.()
+      options.onIdReceived?.()
+      return [{ scientificName: 'Amanita muscaria', probability: 0.9 }]
+    },
+  })
+
+  try {
+    __setImportAiSessionsForTests(importedSessions)
+    await __runImportAiBatchForTests()
+
+    assert.deepEqual(providerCalls.map(call => call.service), ['artsorakel', 'artsorakel'])
+    assert.equal(providerCalls.flatMap(call => call.images).every(image => (
+      boundedBlobs.has(image.blob) && !Object.hasOwn(image, 'originalBlob')
+    )), true)
+    assert.equal(resolutionInputs.every(input => input.lat === 59.91 && input.lon === 10.75), true)
+    assert.equal(resolutionInputs.every(input => input.comparisonRequested === false), true)
+  } finally {
+    __abortImportAiRunsForTests()
+    __setImportAiTestHooks(null)
+    __setImportAiSessionsForTests([])
+    if (localStorageDescriptor) {
+      Object.defineProperty(globalThis, 'localStorage', localStorageDescriptor)
+    } else {
+      Reflect.deleteProperty(globalThis, 'localStorage')
+    }
+  }
+})
+
+test('Auto provider selection waits for deferred EXIF coordinates', async () => {
+  const localStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem() { return null }, setItem() {}, removeItem() {} },
+  })
+  const metadataReady = deferred()
+  const resolutionInputs = []
+  let identifyCalls = 0
+
+  __setImportAiTestHooks({
+    persistSessions() {},
+    renderSessions() {},
+    showToast() {},
+    loadInaturalistSession: async () => ({ connected: true, api_token: 'token' }),
+    getAvailableIdentifyServices: async () => [
+      { service: 'artsorakel', available: true, reason: '' },
+      { service: 'inat', available: true, reason: '' },
+    ],
+    resolvePhotoIdServices: options => {
+      resolutionInputs.push(options)
+      return resolvePhotoIdServices(options)
+    },
+    identifyBlobs: async () => {
+      identifyCalls++
+      return [{ scientificName: 'Amanita muscaria', probability: 0.9 }]
+    },
+  })
+
+  try {
+    const session = makeSession()
+    session.gpsLat = null
+    session.gpsLon = null
+    session.metadataPromise = metadataReady.promise.then(() => {
+      session.gpsLat = 59.91
+      session.gpsLon = 10.75
+    })
+    __setImportAiSessionsForTests([session])
+
+    const comparison = __runImportAiComparisonForTests('session-1')
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(resolutionInputs.length, 0)
+    assert.equal(identifyCalls, 0)
+
+    metadataReady.resolve()
+    await comparison
+    assert.equal(identifyCalls, 1)
+    assert.equal(resolutionInputs.every(input => input.lat === 59.91 && input.lon === 10.75), true)
+  } finally {
+    metadataReady.resolve()
+    __abortImportAiRunsForTests()
+    __setImportAiTestHooks(null)
+    __setImportAiSessionsForTests([])
+    if (localStorageDescriptor) {
+      Object.defineProperty(globalThis, 'localStorage', localStorageDescriptor)
+    } else {
+      Reflect.deleteProperty(globalThis, 'localStorage')
+    }
+  }
 })
 
 test('import review renders independently, reaches batch terminal progress, and rejects obsolete callbacks', async () => {

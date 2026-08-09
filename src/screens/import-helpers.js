@@ -132,6 +132,20 @@ export function isHeicLikeFile(file) {
   return /\.(heic|heif)$/i.test(file?.name || '') || /heic|heif/i.test(file?.type || '')
 }
 
+export async function isHeicBlobContent(blob) {
+  if (!blob?.slice || typeof blob.arrayBuffer !== 'function') return false
+  try {
+    const bytes = new Uint8Array(await blob.slice(0, 64).arrayBuffer())
+    if (bytes.length < 12) return false
+    const ascii = (start, length) => String.fromCharCode(...bytes.slice(start, start + length))
+    if (ascii(4, 4) !== 'ftyp') return false
+    for (let offset = 8; offset + 4 <= bytes.length; offset += 4) {
+      if (/^(heic|heix|hevc|hevx|heim|heis|hevm|hevs)$/i.test(ascii(offset, 4))) return true
+    }
+  } catch (_) {}
+  return false
+}
+
 function normalizeNativeMimeType(mimeType, format) {
   const normalizedMime = String(mimeType || '').trim().toLowerCase()
   if (normalizedMime) return normalizedMime
@@ -232,6 +246,7 @@ function _getRawGpsValue(rawGps, keys = []) {
 function _withHemisphere(value, ref, negativeRef) {
   if (value === null) return null
   const normalized = String(ref || '').trim().toUpperCase()
+  if (!normalized) return value
   if (normalized === negativeRef) return -Math.abs(value)
   return Math.abs(value)
 }
@@ -244,11 +259,8 @@ export function _extractLatLonFromRawGps(rawGps) {
   const latRef = _getRawGpsValue(rawGps, ['latitudeRef', 'GPSLatitudeRef', 'LatitudeRef', 'GpsLatitudeRef', 'latRef'])
   const lonRef = _getRawGpsValue(rawGps, ['longitudeRef', 'GPSLongitudeRef', 'LongitudeRef', 'GpsLongitudeRef', 'lonRef'])
 
-  let lat = _toDecimalDegrees(latValue)
-  let lon = _toDecimalDegrees(lonValue)
-
-  if (lat == null) lat = _withHemisphere(_toDecimalDegrees(_getRawGpsValue(rawGps, ['GPSLatitude', 'Latitude', 'GpsLatitude'])), latRef, 'S')
-  if (lon == null) lon = _withHemisphere(_toDecimalDegrees(_getRawGpsValue(rawGps, ['GPSLongitude', 'Longitude', 'GpsLongitude'])), lonRef, 'W')
+  let lat = _withHemisphere(_toDecimalDegrees(latValue), latRef, 'S')
+  let lon = _withHemisphere(_toDecimalDegrees(lonValue), lonRef, 'W')
 
   lat = _coerceExifNumber(lat)
   lon = _coerceExifNumber(lon)
@@ -687,7 +699,8 @@ export async function captureExif(file) {
 }
 
 export async function processFile(file, options = {}) {
-  if (isAndroidNativeApp() && !!options.nativePhoto && file?.type === 'image/jpeg') {
+  const heicInput = _isHeicLike(file) || await isHeicBlobContent(file)
+  if (isAndroidNativeApp() && !!options.nativePhoto && file?.type === 'image/jpeg' && !heicInput) {
     if (isImagePipelineDebugEnabled()) {
       debugImagePipeline('android native jpeg process', {
         captureSource: options.captureSource || options.nativePhoto?.captureSource || null,
@@ -712,10 +725,31 @@ export async function processFile(file, options = {}) {
     return { blob: file, aiBlob: file, meta: { aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null, aiCropIsCustom: false } }
   }
   try {
-    const { blob, aiBlob, metaSource } = await _prepareImportBlobs(file)
+    const { blob, aiBlob, metaSource } = await _prepareImportBlobs(file, { forceJpeg: heicInput })
     const meta = await createImageCropMeta(metaSource || blob, { preseed: true })
     return { blob, aiBlob, meta }
   } catch (_) {}
+
+  // Chromium cannot decode HEIC/HEIF. EXIF has already been read from the
+  // original file, so convert the visual data before continuing normally.
+  if (heicInput) {
+    const heic2any = (await import('heic2any')).default
+    let converted = await heic2any({
+      blob: file,
+      toType: 'image/jpeg',
+      quality: 0.88,
+    })
+    if (Array.isArray(converted)) converted = converted[0]
+    if (!(converted instanceof Blob)) throw new Error('HEIC converter returned no image')
+
+    const jpegBlob = converted.type === 'image/jpeg'
+      ? converted
+      : new Blob([converted], { type: 'image/jpeg' })
+    const { blob, aiBlob, metaSource } = await _prepareImportBlobs(jpegBlob)
+    const meta = await createImageCropMeta(metaSource || blob, { preseed: true })
+    return { blob, aiBlob, meta }
+  }
+
   const meta = await createImageCropMeta(file, { preseed: true }).catch(() => ({ aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null, aiCropIsCustom: false }))
   return { blob: file, aiBlob: file, meta }
 }
@@ -749,7 +783,7 @@ function summarizeNativePhoto(photo = {}, options = {}) {
   }
 }
 
-function _prepareImportBlobs(file) {
+function _prepareImportBlobs(file, options = {}) {
   return new Promise((resolve, reject) => {
     const img = new Image()
     const url = URL.createObjectURL(file)
@@ -758,11 +792,16 @@ function _prepareImportBlobs(file) {
         const w = img.naturalWidth
         const h = img.naturalHeight
         if (!w || !h) { reject(new Error('format not supported')); return }
+        const blob = options.forceJpeg || _isHeicLike(file)
+          ? await _canvasToJpegBlob(img, w, h, 0.88)
+          : file
         const scale = Math.min(1, IMPORT_AI_MAX_EDGE / Math.max(w, h))
         const aiW = Math.max(1, Math.round(w * scale))
         const aiH = Math.max(1, Math.round(h * scale))
-        const aiBlob = (aiW === w && aiH === h && file.type === 'image/jpeg') ? file : await _canvasToJpegBlob(img, aiW, aiH, 0.88)
-        resolve({ blob: file, aiBlob, metaSource: file })
+        const aiBlob = (aiW === w && aiH === h && blob.type === 'image/jpeg')
+          ? blob
+          : await _canvasToJpegBlob(img, aiW, aiH, 0.88)
+        resolve({ blob, aiBlob, metaSource: blob })
       } catch (error) { reject(error) } finally { URL.revokeObjectURL(url) }
     }
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('load failed')) }

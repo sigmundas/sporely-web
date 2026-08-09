@@ -272,6 +272,36 @@ for (const hangingService of ['artsorakel', 'inat']) {
   })
 }
 
+test('null provider deadlines use production defaults instead of zero milliseconds', async () => {
+  const timers = createManualTimers()
+  let providerSignal = null
+  const comparisonPromise = runIdentifyComparisonForBlobs([new Blob(['x'], { type: 'image/jpeg' })], {
+    services: ['artsorakel'],
+    availability: {
+      artsorakel: { service: 'artsorakel', available: true, reason: '' },
+    },
+    identifyBlobs: async (_blobs, _service, _language, options) => {
+      providerSignal = options.signal
+      return new Promise(() => {})
+    },
+    slowAfterMs: null,
+    timeoutMs: null,
+    setTimeoutImpl: timers.setTimeoutImpl,
+    clearTimeoutImpl: timers.clearTimeoutImpl,
+  })
+
+  await waitFor(() => providerSignal !== null)
+  timers.advance(1)
+  await flushPromises()
+  assert.equal(providerSignal.aborted, false)
+
+  timers.advance(19_999)
+  const result = await comparisonPromise
+  assert.equal(providerSignal.aborted, true)
+  assert.equal(result.resultsByService.artsorakel.status, 'timeout')
+  assert.equal(timers.activeCount, 0)
+})
+
 test('provider errors and differently ordered successes stay independent', async () => {
   const availability = {
     artsorakel: { service: 'artsorakel', available: true, reason: '' },
