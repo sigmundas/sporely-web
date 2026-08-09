@@ -4,6 +4,9 @@ import { readFileSync, existsSync } from 'node:fs'
 
 const assetlinksPath = new URL('../public/.well-known/assetlinks.json', import.meta.url)
 const manifestPath = new URL('../android/app/src/main/AndroidManifest.xml', import.meta.url)
+const releaseManifestPath = new URL('../android/app/src/release/AndroidManifest.xml', import.meta.url)
+const debugStringsPath = new URL('../android/app/src/debug/res/values/strings.xml', import.meta.url)
+const buildGradlePath = new URL('../android/app/build.gradle', import.meta.url)
 
 test('public/.well-known/assetlinks.json exists', () => {
   assert.equal(existsSync(assetlinksPath), true)
@@ -26,8 +29,8 @@ test('assetlinks.json declares the correct package and handle_all_urls relation'
   }
 })
 
-test('AndroidManifest has an autoVerify HTTPS App Link intent filter for /auth/callback', () => {
-  const manifest = readFileSync(manifestPath, 'utf8')
+test('release AndroidManifest has an autoVerify HTTPS App Link intent filter for /auth/callback', () => {
+  const manifest = readFileSync(releaseManifestPath, 'utf8')
   // Presence of autoVerify=true intent filter.
   assert.match(manifest, /<intent-filter[^>]*android:autoVerify="true"/)
   // https scheme + app.sporely.no host + /auth/callback pathPrefix.
@@ -39,9 +42,18 @@ test('AndroidManifest has an autoVerify HTTPS App Link intent filter for /auth/c
   assert.match(block, /category android:name="android\.intent\.category\.BROWSABLE"/)
 })
 
-test('AndroidManifest still declares the custom-scheme intent filter for legacy links', () => {
+test('main AndroidManifest derives the custom scheme from the variant application ID', () => {
   const manifest = readFileSync(manifestPath, 'utf8')
-  assert.match(manifest, /android:scheme="com\.sporelab\.sporely"/)
+  assert.match(manifest, /android:scheme="\$\{applicationId\}"/)
+  assert.doesNotMatch(manifest, /android:scheme="https"/)
+})
+
+test('debug variant has a separate application ID and app label', () => {
+  const buildGradle = readFileSync(buildGradlePath, 'utf8')
+  const debugStrings = readFileSync(debugStringsPath, 'utf8')
+  assert.match(buildGradle, /debug\s*\{\s*applicationIdSuffix\s+"\.debug"\s*\}/)
+  assert.match(debugStrings, /<string name="app_name">Sporely Dev<\/string>/)
+  assert.match(debugStrings, /<string name="title_activity_main">Sporely Dev<\/string>/)
 })
 
 test('dist/.well-known/assetlinks.json is emitted by the build (when dist exists)', () => {

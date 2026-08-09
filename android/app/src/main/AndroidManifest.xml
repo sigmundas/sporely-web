@@ -55,25 +55,8 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data
-                    android:scheme="com.sporelab.sporely"
+                    android:scheme="${applicationId}"
                     android:host="auth" />
-            </intent-filter>
-
-            <!--
-                Verified Android App Link for Supabase auth callbacks.
-                autoVerify=true instructs Android to check
-                https://app.sporely.no/.well-known/assetlinks.json against
-                the installed package's signing certificate. Scoped to
-                /auth/callback so the rest of app.sporely.no keeps opening
-                in the browser.
-            -->
-            <intent-filter android:autoVerify="true">
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" />
-                <data android:host="app.sporely.no" />
-                <data android:pathPrefix="/auth/callback" />
             </intent-filter>
 
         </activity>

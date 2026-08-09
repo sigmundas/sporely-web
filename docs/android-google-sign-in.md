@@ -10,13 +10,25 @@ Create both credentials in the same Google Cloud project:
 1. A **Web application** OAuth client. Set its client ID as
    `VITE_GOOGLE_WEB_CLIENT_ID` and configure the same Web client ID and secret
    in Supabase's Google provider.
-2. An **Android** OAuth client for every signing certificate that distributes
-   the app:
+2. An **Android** OAuth client for every package-name/signing-certificate pair
+   that distributes the app. Production channels use:
 
    ```text
    package: com.sporelab.sporely
    SHA-1: exact certificate on the installed APK
    ```
+
+   Local side-by-side debug builds use a separate Android OAuth client:
+
+   ```text
+   package: com.sporelab.sporely.debug
+   SHA-1: A9:30:44:2B:48:6F:79:81:AC:F2:35:E5:E8:FE:5D:82:23:E2:16:AB
+   ```
+
+`@capgo/capacitor-social-login` uses the Web client ID directly and this app
+does not use Firebase configuration, so these OAuth clients do not require a
+`google-services.json` file. Supabase continues to use the same Web client ID
+and secret; no debug-specific Supabase redirect URL is needed.
 
 The 2026-08-03 incident was fixed by registering the Google Play app-signing
 SHA-1:
@@ -31,11 +43,11 @@ name to a signing SHA-1.
 
 ## Signing channels
 
-| Channel | Certificate to register |
-| --- | --- |
-| Local debug APK | Developer machine's debug keystore SHA-1 |
-| GitHub release APK | Certificate embedded in the workflow-built APK |
-| Play installation | Play app-signing SHA-1 shown in Play Console; this is often different from the upload key |
+| Channel | Package | Certificate to register |
+| --- | --- | --- |
+| Local debug APK | `com.sporelab.sporely.debug` | Developer machine's debug keystore SHA-1 |
+| GitHub release APK | `com.sporelab.sporely` | Certificate embedded in the workflow-built APK |
+| Play installation | `com.sporelab.sporely` | Play app-signing SHA-1 shown in Play Console; this is often different from the upload key |
 
 Observed during the incident investigation:
 

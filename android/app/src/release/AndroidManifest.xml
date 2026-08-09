@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name=".MainActivity">
+            <!--
+                Production-only verified Android App Link for Supabase auth
+                callbacks. Debug builds must not claim the Play app's link.
+            -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:host="app.sporely.no" />
+                <data android:pathPrefix="/auth/callback" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
