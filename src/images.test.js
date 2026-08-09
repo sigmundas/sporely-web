@@ -7,6 +7,7 @@ import {
   fetchCardImages,
   fetchFirstImages,
   fetchObservationImageRows,
+  resolveMediaSources,
 } from './images.js'
 
 function withSupabaseFromStub(stub, fn) {
@@ -39,6 +40,56 @@ function makeTableStub(getRowsForTable, { captureSelects } = {}) {
     }
   }
 }
+
+test('authorized full URL wins without changing the storage identity', () => {
+  const [source] = resolveMediaSources([{
+    full_media_url: 'https://upload.sporely.no/m/4960/full?v=1',
+    storage_path: 'user/obs/image.webp',
+  }], { variant: 'original' })
+
+  assert.equal(source.primaryUrl, 'https://upload.sporely.no/m/4960/full?v=1')
+  assert.equal(source.key, 'user/obs/image.webp')
+})
+
+test('authorized thumbnail wins over camelCase and legacy thumbnail fields', () => {
+  const [snakeSource] = resolveMediaSources([{
+    thumb_media_url: 'https://upload.sporely.no/m/4960/thumb?v=1',
+    thumb_key: 'user/obs/thumb_image.webp',
+    storage_path: 'user/obs/image.webp',
+  }], { variant: 'medium' })
+  const [camelSource] = resolveMediaSources([{
+    thumbMediaUrl: 'https://upload.sporely.no/m/4961/thumb?v=2',
+    thumbUrl: 'https://media.sporely.no/user/obs/thumb_old.webp',
+    fullMediaUrl: 'https://upload.sporely.no/m/4961/full?v=2',
+  }], { variant: 'thumb' })
+
+  assert.equal(snakeSource.primaryUrl, 'https://upload.sporely.no/m/4960/thumb?v=1')
+  assert.equal(camelSource.primaryUrl, 'https://upload.sporely.no/m/4961/thumb?v=2')
+  assert.equal(camelSource.key, '', 'an authorized URL must not become a storage key')
+})
+
+test('empty authorized fields fall back to exact legacy URLs', () => {
+  const [source] = resolveMediaSources([{
+    full_media_url: ' ',
+    thumb_media_url: null,
+    storage_path: 'user/obs/image.webp',
+    thumb_key: 'user/obs/thumb_image.webp',
+  }], { variant: 'medium' })
+
+  assert.equal(source.primaryUrl, 'https://media.sporely.no/user/obs/thumb_image.webp')
+  assert.equal(source.fallbackUrl, 'https://media.sporely.no/user/obs/image.webp')
+  assert.equal(source.key, 'user/obs/image.webp')
+})
+
+test('authorized URL use can be disabled for protected img-src rendering', () => {
+  const [source] = resolveMediaSources([{
+    full_media_url: 'https://upload.sporely.no/m/4960/full?v=1',
+    thumb_media_url: 'https://upload.sporely.no/m/4960/thumb?v=1',
+    storage_path: 'user/obs/image.webp',
+  }], { variant: 'thumb', allowAuthorizedUrl: false })
+
+  assert.equal(source.primaryUrl, 'https://media.sporely.no/user/obs/thumb_image.webp')
+})
 
 test('public image rows are merged from the owner raw table and the community image view', async () => {
   const calls = []
@@ -77,6 +128,45 @@ test('public image rows are merged from the owner raw table and the community im
 
   assert.ok(calls.includes('observation_images_community_view'), 'community view queried')
   assert.ok(calls.includes('observation_images'), 'owner raw table queried')
+})
+
+test('public card image prefers authorized projection URL', async () => {
+  await withSupabaseFromStub(makeTableStub(table => {
+    if (table === 'observation_images') return []
+    return [{
+      id: 4960,
+      image_id: 4960,
+      observation_id: 697,
+      storage_path: 'user-a/697/0_123.webp',
+      sort_order: 0,
+      observation_visibility: 'public',
+      media_version: 1,
+      full_media_url: 'https://upload.sporely.no/m/4960/full?v=1',
+      thumb_media_url: 'https://upload.sporely.no/m/4960/thumb?v=1',
+    }]
+  }), async () => {
+    const sources = await fetchFirstImages([697], { variant: 'medium' })
+    assert.equal(sources[697].primaryUrl, 'https://upload.sporely.no/m/4960/thumb?v=1')
+    assert.equal(sources[697].fallbackUrl, 'https://upload.sporely.no/m/4960/full?v=1')
+  })
+})
+
+test('friends-only card image keeps legacy URL until authenticated blob rendering exists', async () => {
+  await withSupabaseFromStub(makeTableStub(table => {
+    if (table === 'observation_images') return []
+    return [{
+      id: 4962,
+      observation_id: 698,
+      storage_path: 'user-a/698/0_123.webp',
+      sort_order: 0,
+      observation_visibility: 'friends',
+      full_media_url: 'https://upload.sporely.no/m/4962/full?v=1',
+      thumb_media_url: 'https://upload.sporely.no/m/4962/thumb?v=1',
+    }]
+  }), async () => {
+    const sources = await fetchFirstImages([698], { variant: 'medium' })
+    assert.equal(sources[698].primaryUrl, 'https://media.sporely.no/user-a/698/thumb_0_123.webp')
+  })
 })
 
 test('ensureImageIdentitySelect prepends id when omitted and leaves it when present', () => {

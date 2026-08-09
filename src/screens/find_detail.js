@@ -1311,8 +1311,14 @@ export async function openFindDetail(obsId, options = {}) {
   }
 
   if (imgData?.length) {
-    const originalSources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'original' })
-    const displaySources = await resolveMediaSources(imgData.map(i => i.storage_path), { variant: 'medium' })
+    const originalSources = imgData.map(row => resolveMediaSources([row], {
+      variant: 'original',
+      allowAuthorizedUrl: row?.observation_visibility === 'public',
+    })[0])
+    const displaySources = imgData.map(row => resolveMediaSources([row], {
+      variant: 'medium',
+      allowAuthorizedUrl: row?.observation_visibility === 'public',
+    })[0])
     const aiSources = displaySources
     detailImageRows = [...imgData]
     detailImageSources = [...originalSources]

@@ -1471,12 +1471,45 @@ export async function syncObservationMediaKeys(observationId, storagePath, optio
   return true
 }
 
-export async function resolveMediaSources(paths, options = {}) {
+export function resolveMediaSources(paths, options = {}) {
   const variant = options.variant || 'original'
-  const normalizedPaths = (paths || []).map(normalizeMediaKey)
-
-  return normalizedPaths.map(originalPath => {
-    if (!originalPath) return { key: '', primaryUrl: null, fallbackUrl: null }
+  return (paths || []).map(input => {
+    const row = input && typeof input === 'object' && !Array.isArray(input) ? input : null
+    const allowAuthorizedUrl = options.allowAuthorizedUrl !== false
+    const authorizedFullUrl = allowAuthorizedUrl
+      ? _firstAbsoluteMediaUrl(row?.full_media_url, row?.fullMediaUrl)
+      : ''
+    const authorizedThumbUrl = allowAuthorizedUrl
+      ? _firstAbsoluteMediaUrl(row?.thumb_media_url, row?.thumbMediaUrl)
+      : ''
+    const existingFullUrl = _firstAbsoluteMediaUrl(
+      row?.full_url,
+      row?.fullUrl,
+      row?.image_url,
+      row?.imageUrl,
+      row?.url,
+      row?.storage_path,
+      row?.image_key,
+      typeof input === 'string' ? input : '',
+    )
+    const existingThumbUrl = _firstAbsoluteMediaUrl(
+      row?.thumb_url,
+      row?.thumbUrl,
+      row?.preview_url,
+      row?.previewUrl,
+      row?.thumb_key,
+    )
+    const rawOriginalPath = row
+      ? (row.storage_path || row.image_key || row.key || '')
+      : input
+    const rawThumbPath = row?.thumb_key || ''
+    const originalPath = normalizeMediaKey(rawOriginalPath)
+    if (!originalPath) {
+      const directUrl = variant === 'original'
+        ? (authorizedFullUrl || existingFullUrl)
+        : (authorizedThumbUrl || existingThumbUrl || authorizedFullUrl || existingFullUrl)
+      return { key: '', primaryUrl: directUrl || null, fallbackUrl: null }
+    }
     const canonicalOriginalPath = (() => {
       const { dir, fileName } = _splitPath(originalPath)
       const stripped = _stripLegacyVariantPrefixes(fileName)
@@ -1490,17 +1523,34 @@ export async function resolveMediaSources(paths, options = {}) {
     if (variant === 'original') {
       return {
         key: canonicalOriginalPath,
-        primaryUrl: originalUrl,
-        fallbackUrl: null,
+        primaryUrl: authorizedFullUrl || existingFullUrl || originalUrl,
+        fallbackUrl: authorizedFullUrl || existingFullUrl
+          ? originalUrl
+          : null,
       }
     }
-    const fallbackUrl = originalUrl !== variantUrl ? originalUrl : null
+    const legacyThumbUrl = rawThumbPath
+      ? (_firstAbsoluteMediaUrl(rawThumbPath) || getPublicMediaUrl(rawThumbPath, 'original'))
+      : variantUrl
+    const primaryUrl = authorizedThumbUrl || existingThumbUrl || legacyThumbUrl
+    const fullFallbackUrl = authorizedFullUrl || existingFullUrl || originalUrl
+    const fallbackUrl = fullFallbackUrl !== primaryUrl ? fullFallbackUrl : null
     return {
       key: canonicalOriginalPath,
-      primaryUrl: variantUrl,
+      primaryUrl,
       fallbackUrl,
     }
   })
+}
+
+function _firstAbsoluteMediaUrl(...values) {
+  for (const value of values) {
+    const text = String(value || '').trim()
+    if (/^https?:\/\//i.test(text) || text.startsWith('blob:') || text.startsWith('data:')) {
+      return text
+    }
+  }
+  return ''
 }
 
 async function _fetchObservationImageRowsFrom(table, obsIds, selectFields) {
@@ -1536,10 +1586,15 @@ function _imageRowIdentity(row) {
 
 export async function fetchObservationImageRows(obsIds, options = {}) {
   if (!obsIds.length) return []
-  const selectFields = ensureImageIdentitySelect(
+  const rawSelectFields = ensureImageIdentitySelect(
     options.selectFields
       || 'id, observation_id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom, deleted_at',
   )
+  const authorizedFields = ['image_id', 'media_version', 'full_media_url', 'thumb_media_url', 'observation_visibility']
+  const communitySelectFields = ensureImageIdentitySelect([
+    rawSelectFields,
+    ...authorizedFields,
+  ].join(', '))
 
   // Owner rows (incl. private/draft/friends-only observations) live
   // behind RLS on the raw table; non-owner rows are surfaced by the
@@ -1547,8 +1602,14 @@ export async function fetchObservationImageRows(obsIds, options = {}) {
   // ownership queries return each row exactly once. Either query
   // returning an error is non-fatal as long as the other one succeeds.
   const [rawRes, communityRes] = await Promise.all([
-    _fetchObservationImageRowsFrom('observation_images', obsIds, selectFields),
-    _fetchObservationImageRowsFrom(OBSERVATION_IMAGES_COMMUNITY_VIEW, obsIds, selectFields),
+    _fetchObservationImageRowsFrom('observation_images', obsIds, rawSelectFields),
+    _fetchObservationImageRowsFrom(OBSERVATION_IMAGES_COMMUNITY_VIEW, obsIds, communitySelectFields)
+      .then(async result => {
+        if (!result?.error || !authorizedFields.some(field => _isMissingColumnError(result.error, field))) {
+          return result
+        }
+        return _fetchObservationImageRowsFrom(OBSERVATION_IMAGES_COMMUNITY_VIEW, obsIds, rawSelectFields)
+      }),
   ])
 
   const rawError = rawRes?.error || null
@@ -1602,24 +1663,19 @@ export async function fetchFirstImages(obsIds, options = {}) {
   })
   if (!data.length) return {}
 
-  const firstPaths = {}
+  const firstRows = {}
   for (const img of data) {
-    if (!firstPaths[img.observation_id]) {
-      firstPaths[img.observation_id] = img.storage_path
+    if (!firstRows[img.observation_id]) {
+      firstRows[img.observation_id] = img
     }
   }
 
-  const originalPaths = Object.values(firstPaths)
-  const sourcesByPath = new Map()
-  const sources = await resolveMediaSources(originalPaths, { variant })
-  sources.forEach(source => {
-    if (source?.key) sourcesByPath.set(source.key, source)
-  })
-
   const imageSources = {}
-  Object.entries(firstPaths).forEach(([obsId, originalPath]) => {
-    const normalizedPath = normalizeMediaKey(originalPath)
-    const source = sourcesByPath.get(normalizedPath)
+  Object.entries(firstRows).forEach(([obsId, row]) => {
+    const [source] = resolveMediaSources([row], {
+      variant,
+      allowAuthorizedUrl: row?.observation_visibility === 'public',
+    })
     const primaryUrl = source?.primaryUrl || null
     const fallbackUrl = source?.fallbackUrl || null
     if (primaryUrl || fallbackUrl) {
@@ -1643,36 +1699,31 @@ export async function fetchCardImages(obsIds, options = {}) {
   })
   if (!data.length) return {}
 
-  // Collect first two paths + count per observation
+  // Collect first two rows + count per observation
   const firstTwo = {}
   const counts = {}
   for (const img of data) {
     const id = img.observation_id
     counts[id] = (counts[id] || 0) + 1
     if (!firstTwo[id]) {
-      firstTwo[id] = [img.storage_path]
+      firstTwo[id] = [img]
     } else if (firstTwo[id].length === 1) {
-      firstTwo[id].push(img.storage_path)
+      firstTwo[id].push(img)
     }
   }
 
-  const allPaths = Object.values(firstTwo).flat()
-  const sourcesByPath = new Map()
-  const sources = await resolveMediaSources(allPaths, { variant })
-  sources.forEach(source => {
-    if (source?.key) sourcesByPath.set(source.key, source)
-  })
-
   const result = {}
-  for (const [obsId, paths] of Object.entries(firstTwo)) {
-    const toSource = path => {
-      const normalized = normalizeMediaKey(path)
-      const s = sourcesByPath.get(normalized)
+  for (const [obsId, rows] of Object.entries(firstTwo)) {
+    const toSource = row => {
+      const [s] = resolveMediaSources([row], {
+        variant,
+        allowAuthorizedUrl: row?.observation_visibility === 'public',
+      })
       return (s?.primaryUrl || s?.fallbackUrl) ? s : null
     }
     result[obsId] = {
-      first: toSource(paths[0]),
-      second: paths[1] ? toSource(paths[1]) : null,
+      first: toSource(rows[0]),
+      second: rows[1] ? toSource(rows[1]) : null,
       count: counts[obsId] || 1,
     }
   }
