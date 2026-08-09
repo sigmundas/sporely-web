@@ -1,13 +1,10 @@
 # Stage 2 — Private Media Storage and Authorized Delivery
 
-**Status:** design + Stage 2a implementation (three review rounds applied)
-**Branch (intended):** `fix/private-media-delivery`, stacked on `fix/lock-down-observation-sync`
-**Migrations (final Stage 2a set):**
+**Status:** Stage 2a database + Worker deployed with `MEDIA_STORAGE_MODE=legacy`; Stage 2b additive API projection in review
+**Migrations:**
 - `20260803120000_lock_down_observation_sync_tables.sql` (Stage 1)
-- `20260805120000_media_authorization.sql` (Stage 2a foundation)
-- `20260805130000_media_authorization_hardening.sql` (round 1 hardening)
-- `20260805140000_media_authorization_variant_matrix.sql` (round 2: variant matrix + key-aliasing prevention)
-- `20260805150000_media_authorization_read_integrity_and_mosaic.sql` (round 3: mosaic identity, read-time integrity, final-state guard, protected origin, revoked helper grant)
+- `20260804120000_media_authorization.sql` (consolidated Stage 2a)
+- `20260809120000_stage2b_authorized_media_projections.sql` (additive Stage 2b API layer; not yet applied)
 
 ## 1. Threat model
 
@@ -18,9 +15,9 @@
   UUID-prefixed key as authorized. Removed.
 - **Cache is a liability.** The historic `public, max-age=31536000, immutable`
   header persists past database revocation.
-- **Community/friend/follow views leak keys** — Stage 1 tightened row
-  visibility but the projected columns still include raw R2 keys. Stage 2b
-  removes them.
+- **Community/friend/follow views expose keys during transition** — Stage 1
+  tightened row visibility. Stage 2b adds authorized ID/version URLs while
+  retaining raw-key fields temporarily for shipped-client compatibility.
 - **`original` variant leak.** A pre-round-2 RPC applied uniform visibility to
   every variant, exposing `original_storage_path` on any public row.
 - **Key aliasing via `original_storage_path`.** `storage_path` was constrained
@@ -278,16 +275,10 @@ client-role EXECUTE grants are not required for the trigger to function.
 **Not fully dormant.** Triggers, guards, and new public routes are all
 observable behaviour on deployment.
 
-Deploy in order:
-1. Database migrations `20260805120000` + `20260805130000` +
-   `20260805140000` + `20260805150000`. Adds columns, triggers,
-   RPCs, `_media_worker_config`, and the mosaic identity. Write behaviour
-   changes only for the guarded columns; ordinary user-editable columns
-   unaffected.
-2. Worker (with `MEDIA_STORAGE_MODE=legacy`). New `/m/`, `/mm/` routes
-   are inert until Stage 2b consumers emit URLs. Legacy `PUT /upload/*`
-   continues to work unchanged except for variant allowlist enforcement
-   (client aliases coerced).
+Current production has consolidated Stage 2a migration
+`20260804120000_media_authorization.sql` and the Worker deployed with
+`MEDIA_STORAGE_MODE=legacy`. Stage 2b adds authorized fields to read
+surfaces without removing legacy keys or URLs.
 
 **Not safe** to set `MEDIA_STORAGE_MODE=private` until Stage 2b consumers
 ship (they stop reading response `url`) AND Stage 2c legacy backfill
@@ -306,20 +297,19 @@ legacy `sporely-media` bucket until Stage 2c. Until it is detached:
 - The Worker cannot enforce revocation on those requests.
 
 The only definitive fix is Stage 2c cutover (detach the custom domain).
-Stage 2a mitigates by: (a) not emitting any new `media.sporely.no` URLs
-in RPCs (Stage 2b), (b) refusing to write new bytes to the legacy bucket
-once `MEDIA_STORAGE_MODE=private` is activated.
+Stage 2b begins emitting Worker-authorized alternatives but intentionally
+retains existing `media.sporely.no` URLs for compatibility. The public domain
+must remain attached until shipped consumers have migrated and Stage 2c is
+complete.
 
 ### 3.16 Stage 2b / 2c scope
 
-**Stage 2b (next review pass — consumer cutover):**
-- Update public RPCs (`search_public_observation_images`,
-  `get_public_observation_images`, `get_public_observation`,
-  `get_public_spore_comparison_set`, species/spore URL emitters) to
-  emit `/m/` and `/mm/` URLs via `build_worker_media_url` + mosaic
-  equivalent.
-- Drop `storage_path` from `observation_images_community_view`; drop
-  `image_key`/`thumb_key` from `observations_community_view` etc.
+**Stage 2b (additive API projection, then consumer cutover):**
+- Add `/m/` and `/mm/` identity/version URLs to public image, observation,
+  mosaic, and representative-species projections.
+- Keep `storage_path`, `image_key`, `thumb_key`, `storage_key`, and legacy
+  URLs until the web, Android, desktop, and landing consumers have shipped
+  their authorized-URL cutover. Raw-key removal is a later reviewed change.
 - `src/images.js`: `getWorkerMediaUrl(imageId, variant, version)` and
   mosaic equivalent; refactor `resolveMediaSources`; retire direct URL
   construction.
