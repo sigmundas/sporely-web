@@ -81,14 +81,18 @@ test('empty authorized fields fall back to exact legacy URLs', () => {
   assert.equal(source.key, 'user/obs/image.webp')
 })
 
-test('authorized URL use can be disabled for protected img-src rendering', () => {
+test('protected authorized URL is separated from direct img-src and legacy fallback', () => {
   const [source] = resolveMediaSources([{
     full_media_url: 'https://upload.sporely.no/m/4960/full?v=1',
     thumb_media_url: 'https://upload.sporely.no/m/4960/thumb?v=1',
+    observation_visibility: 'friends',
     storage_path: 'user/obs/image.webp',
-  }], { variant: 'thumb', allowAuthorizedUrl: false })
+  }], { variant: 'thumb' })
 
-  assert.equal(source.primaryUrl, 'https://media.sporely.no/user/obs/thumb_image.webp')
+  assert.equal(source.primaryUrl, null)
+  assert.equal(source.fallbackUrl, null)
+  assert.equal(source.protectedUrl, 'https://upload.sporely.no/m/4960/thumb?v=1')
+  assert.equal(source.key, 'user/obs/image.webp')
 })
 
 test('public image rows are merged from the owner raw table and the community image view', async () => {
@@ -151,7 +155,7 @@ test('public card image prefers authorized projection URL', async () => {
   })
 })
 
-test('friends-only card image keeps legacy URL until authenticated blob rendering exists', async () => {
+test('friends-only card image uses authenticated Worker delivery without a legacy fallback', async () => {
   await withSupabaseFromStub(makeTableStub(table => {
     if (table === 'observation_images') return []
     return [{
@@ -165,7 +169,30 @@ test('friends-only card image keeps legacy URL until authenticated blob renderin
     }]
   }), async () => {
     const sources = await fetchFirstImages([698], { variant: 'medium' })
-    assert.equal(sources[698].primaryUrl, 'https://media.sporely.no/user-a/698/thumb_0_123.webp')
+    assert.equal(sources[698].primaryUrl, null)
+    assert.equal(sources[698].fallbackUrl, null)
+    assert.equal(sources[698].protectedUrl, 'https://upload.sporely.no/m/4962/thumb?v=1')
+  })
+})
+
+test('community projection enriches a duplicate raw row with authorized public URLs', async () => {
+  await withSupabaseFromStub(makeTableStub(table => {
+    if (table === 'observation_images') {
+      return [{ id: 6001, observation_id: 699, storage_path: 'u/699/0.webp', sort_order: 0 }]
+    }
+    return [{
+      id: 6001,
+      observation_id: 699,
+      storage_path: 'u/699/0.webp',
+      sort_order: 0,
+      observation_visibility: 'public',
+      media_version: 3,
+      full_media_url: 'https://upload.sporely.no/m/6001/full?v=3',
+      thumb_media_url: 'https://upload.sporely.no/m/6001/thumb?v=3',
+    }]
+  }), async () => {
+    const sources = await fetchFirstImages([699], { variant: 'medium' })
+    assert.equal(sources[699].primaryUrl, 'https://upload.sporely.no/m/6001/thumb?v=3')
   })
 })
 

@@ -54,6 +54,7 @@ import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
 import { fetchCloudPlanProfile } from './cloud-plan.js'
 import { clearMediaUrlCache } from './images.js'
+import { notifyProtectedMediaSessionChange } from './protected-media.js'
 import { initDebugDashboard } from './debug-dashboard.js'
 import { hideSettingsOverlay, showSettingsOverlay } from './settings-overlay.js'
 import { isWebInatOAuthConfigured } from './inaturalist.js'
@@ -1047,6 +1048,7 @@ async function init() {
   // calls. Only copies the event onto a queue and returns immediately so the
   // auth lock is released.
   const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    notifyProtectedMediaSessionChange(session)
     setTimeout(() => {
       enqueueAuthEvent(event, session, _handleDeferredAuthEvent)
     }, 0)

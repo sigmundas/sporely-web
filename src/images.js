@@ -1499,6 +1499,13 @@ export function resolveMediaSources(paths, options = {}) {
       row?.previewUrl,
       row?.thumb_key,
     )
+    const visibility = String(row?.observation_visibility ?? row?.visibility ?? '').trim().toLowerCase()
+    const protectedDelivery = allowAuthorizedUrl && !!visibility && visibility !== 'public'
+    const protectedUrl = protectedDelivery
+      ? (variant === 'original'
+          ? authorizedFullUrl
+          : (authorizedThumbUrl || authorizedFullUrl))
+      : ''
     const rawOriginalPath = row
       ? (row.storage_path || row.image_key || row.key || '')
       : input
@@ -1508,7 +1515,12 @@ export function resolveMediaSources(paths, options = {}) {
       const directUrl = variant === 'original'
         ? (authorizedFullUrl || existingFullUrl)
         : (authorizedThumbUrl || existingThumbUrl || authorizedFullUrl || existingFullUrl)
-      return { key: '', primaryUrl: directUrl || null, fallbackUrl: null }
+      return {
+        key: '',
+        primaryUrl: protectedUrl ? null : (directUrl || null),
+        fallbackUrl: null,
+        protectedUrl: protectedUrl || null,
+      }
     }
     const canonicalOriginalPath = (() => {
       const { dir, fileName } = _splitPath(originalPath)
@@ -1521,6 +1533,14 @@ export function resolveMediaSources(paths, options = {}) {
     const variantUrl = getPublicMediaUrl(canonicalOriginalPath, variant)
 
     if (variant === 'original') {
+      if (protectedUrl) {
+        return {
+          key: canonicalOriginalPath,
+          primaryUrl: null,
+          fallbackUrl: null,
+          protectedUrl,
+        }
+      }
       return {
         key: canonicalOriginalPath,
         primaryUrl: authorizedFullUrl || existingFullUrl || originalUrl,
@@ -1535,6 +1555,14 @@ export function resolveMediaSources(paths, options = {}) {
     const primaryUrl = authorizedThumbUrl || existingThumbUrl || legacyThumbUrl
     const fullFallbackUrl = authorizedFullUrl || existingFullUrl || originalUrl
     const fallbackUrl = fullFallbackUrl !== primaryUrl ? fullFallbackUrl : null
+    if (protectedUrl) {
+      return {
+        key: canonicalOriginalPath,
+        primaryUrl: null,
+        fallbackUrl: null,
+        protectedUrl,
+      }
+    }
     return {
       key: canonicalOriginalPath,
       primaryUrl,
@@ -1678,12 +1706,13 @@ export async function fetchFirstImages(obsIds, options = {}) {
   Object.entries(firstRows).forEach(([obsId, row]) => {
     const [source] = resolveMediaSources([row], {
       variant,
-      allowAuthorizedUrl: row?.observation_visibility === 'public',
+      allowAuthorizedUrl: true,
     })
     const primaryUrl = source?.primaryUrl || null
     const fallbackUrl = source?.fallbackUrl || null
-    if (primaryUrl || fallbackUrl) {
-      imageSources[obsId] = { primaryUrl, fallbackUrl }
+    const protectedUrl = source?.protectedUrl || null
+    if (primaryUrl || fallbackUrl || protectedUrl) {
+      imageSources[obsId] = { primaryUrl, fallbackUrl, protectedUrl, key: source?.key || '' }
     }
   })
 
@@ -1721,9 +1750,9 @@ export async function fetchCardImages(obsIds, options = {}) {
     const toSource = row => {
       const [s] = resolveMediaSources([row], {
         variant,
-        allowAuthorizedUrl: row?.observation_visibility === 'public',
+        allowAuthorizedUrl: true,
       })
-      return (s?.primaryUrl || s?.fallbackUrl) ? s : null
+      return (s?.primaryUrl || s?.fallbackUrl || s?.protectedUrl) ? s : null
     }
     result[obsId] = {
       first: toSource(rows[0]),

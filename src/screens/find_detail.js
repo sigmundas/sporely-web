@@ -25,6 +25,7 @@ import {
 } from '../ai-identification.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath, fetchObservationImageRows } from '../images.js'
+import { bindProtectedMedia } from '../protected-media.js'
 import { classifyDraftAge, loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
@@ -1405,11 +1406,11 @@ export async function openFindDetail(obsId, options = {}) {
   if (imgData?.length) {
     const originalSources = imgData.map(row => resolveMediaSources([row], {
       variant: 'original',
-      allowAuthorizedUrl: row?.observation_visibility === 'public',
+      allowAuthorizedUrl: true,
     })[0])
     const displaySources = imgData.map(row => resolveMediaSources([row], {
       variant: 'medium',
-      allowAuthorizedUrl: row?.observation_visibility === 'public',
+      allowAuthorizedUrl: true,
     })[0])
     const aiSources = displaySources
     detailImageRows = [...imgData]
@@ -1462,7 +1463,8 @@ function _mediaSourceUrl(source) {
 function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   const originalSource = options.originalSource || source
   const displayUrl = _mediaSourceUrl(source) || _mediaSourceUrl(originalSource)
-  if (!row || !displayUrl) return null
+  const protectedUrl = originalSource?.protectedUrl || source?.protectedUrl || ''
+  if (!row || (!displayUrl && !protectedUrl)) return null
   const gallery = document.getElementById('detail-gallery')
   if (!gallery) return null
 
@@ -1474,13 +1476,13 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
 
   const img = document.createElement('img')
   img.className = 'detail-gallery-img'
-  img.src = displayUrl
+  if (displayUrl) img.src = displayUrl
   img.loading = 'lazy'
   img.alt = ''
   img.dataset.storagePath = row.storage_path || ''
-  img.dataset.fullSrc = _mediaSourceUrl(originalSource) || displayUrl
-  img.dataset.aiSrc = _mediaSourceUrl(aiSource) || displayUrl
-  img.dataset.aiFallback = _mediaSourceUrl(originalSource) || _mediaSourceUrl(source) || displayUrl
+  img.dataset.fullSrc = _mediaSourceUrl(originalSource) || displayUrl || ''
+  img.dataset.aiSrc = _mediaSourceUrl(aiSource) || displayUrl || ''
+  img.dataset.aiFallback = _mediaSourceUrl(originalSource) || _mediaSourceUrl(source) || displayUrl || ''
   img.dataset.aiCropX1 = row.ai_crop_x1 ?? ''
   img.dataset.aiCropY1 = row.ai_crop_y1 ?? ''
   img.dataset.aiCropX2 = row.ai_crop_x2 ?? ''
@@ -1525,6 +1527,15 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
     caption.className = 'detail-microscope-capture'
     caption.textContent = microscopyCaption
     container.appendChild(caption)
+  }
+  if (protectedUrl) {
+    bindProtectedMedia(img, protectedUrl, {
+      onLoad: objectUrl => {
+        img.dataset.fullSrc = objectUrl
+        img.dataset.aiSrc = objectUrl
+        img.dataset.aiFallback = objectUrl
+      },
+    })
   }
   _syncDetailThumbCropOverlay(container, row)
 
