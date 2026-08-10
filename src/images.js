@@ -1586,13 +1586,16 @@ function _imageRowIdentity(row) {
 
 export async function fetchObservationImageRows(obsIds, options = {}) {
   if (!obsIds.length) return []
-  const rawSelectFields = ensureImageIdentitySelect(
+  const sharedSelectFields = ensureImageIdentitySelect(
     options.selectFields
       || 'id, observation_id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom, deleted_at',
   )
+  const rawSelectFields = ensureImageIdentitySelect(
+    options.ownerSelectFields || sharedSelectFields,
+  )
   const authorizedFields = ['image_id', 'media_version', 'full_media_url', 'thumb_media_url', 'observation_visibility']
   const communitySelectFields = ensureImageIdentitySelect([
-    rawSelectFields,
+    sharedSelectFields,
     ...authorizedFields,
   ].join(', '))
 
@@ -1608,7 +1611,7 @@ export async function fetchObservationImageRows(obsIds, options = {}) {
         if (!result?.error || !authorizedFields.some(field => _isMissingColumnError(result.error, field))) {
           return result
         }
-        return _fetchObservationImageRowsFrom(OBSERVATION_IMAGES_COMMUNITY_VIEW, obsIds, rawSelectFields)
+        return _fetchObservationImageRowsFrom(OBSERVATION_IMAGES_COMMUNITY_VIEW, obsIds, sharedSelectFields)
       }),
   ])
 
@@ -1639,7 +1642,8 @@ export async function fetchObservationImageRows(obsIds, options = {}) {
       }
       return
     }
-    if (!merged.has(key)) merged.set(key, row)
+    const existing = merged.get(key)
+    merged.set(key, existing ? { ...existing, ...row } : row)
   }
   for (const row of (rawRes?.data || [])) addRow(row)
   for (const row of (communityRes?.data || [])) addRow(row)

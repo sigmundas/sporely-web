@@ -15,12 +15,13 @@ let _startPanX = 0
 let _startPanY = 0
 let _lastTap = 0
 
-let _overlay, _img, _counter, _prevBtn, _nextBtn, _shareBtn, _shareMenu
+let _overlay, _img, _counter, _metadata, _prevBtn, _nextBtn, _shareBtn, _shareMenu
 
 export function initPhotoViewer() {
   _overlay = document.getElementById('photo-viewer')
   _img = document.getElementById('photo-viewer-img')
   _counter = document.getElementById('photo-viewer-counter')
+  _metadata = document.getElementById('photo-viewer-metadata')
   _prevBtn = document.getElementById('photo-viewer-prev')
   _nextBtn = document.getElementById('photo-viewer-next')
   _shareBtn = document.getElementById('photo-viewer-share')
@@ -318,6 +319,11 @@ function _showCurrent() {
     delete _img.dataset.fallbackApplied
   }
   _counter.textContent = _photos.length > 1 ? `${_current + 1} / ${_photos.length}` : ''
+  const metadata = typeof photo === 'object' ? String(photo?.metadata || '') : ''
+  if (_metadata) {
+    _metadata.textContent = metadata
+    _metadata.style.display = metadata ? 'block' : 'none'
+  }
   _prevBtn.style.display = (_current > 0 && _photos.length > 1) ? 'flex' : 'none'
   _nextBtn.style.display = (_current < _photos.length - 1 && _photos.length > 1) ? 'flex' : 'none'
 }

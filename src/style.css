@@ -2328,6 +2328,17 @@ html, body {
   flex-shrink: 0;
   display: block;
 }
+.detail-microscope-capture {
+  max-width: 220px;
+  padding: 6px 4px 0;
+  color: var(--text-dim);
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .detail-gallery-item-wrap,
 .ai-crop-gallery-item {
   isolation: isolate;
@@ -2434,6 +2445,18 @@ html, body {
   font-family: 'DM Mono', monospace; font-size: 12px; color: var(--text-dim);
   white-space: nowrap;
   grid-column: 1 / -1;
+}
+.detail-last-microscopy {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+}
+.detail-last-microscopy > :first-child {
+  color: var(--text-secondary);
 }
 .detail-top-row {
   display: grid;
@@ -5491,6 +5514,15 @@ html.light .ai-id-dot.is-complete::before {
   color: rgba(255,255,255,0.7); font-size: 13px;
   font-family: 'DM Mono', monospace;
   background: rgba(0,0,0,0.4); padding: 4px 10px; border-radius: 20px;
+}
+#photo-viewer-metadata {
+  position: absolute; bottom: 58px; left: 50%; transform: translateX(-50%);
+  max-width: calc(100% - 40px);
+  color: rgba(255,255,255,0.85); font-size: 12px;
+  font-family: 'DM Mono', monospace;
+  background: rgba(0,0,0,0.52); padding: 5px 10px; border-radius: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  z-index: 10;
 }
 
 /* ── AI IMPORT BUTTON ── */

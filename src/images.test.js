@@ -270,6 +270,27 @@ test('id is auto-included in the Supabase select even when callers omit it', asy
   }
 })
 
+test('owner-only image fields are selected from raw rows but never from the community projection', async () => {
+  const captureSelects = []
+  await withSupabaseFromStub(makeTableStub(table => table === 'observation_images'
+    ? [{ id: 88, observation_id: 808, image_type: 'microscope', captured_at: '2026-08-10T19:42:00Z' }]
+    : [], { captureSelects }), async () => {
+    const rows = await fetchObservationImageRows([808], {
+      selectFields: 'id, observation_id, image_type',
+      ownerSelectFields: 'id, observation_id, image_type, captured_at',
+    })
+    assert.equal(rows[0].captured_at, '2026-08-10T19:42:00Z')
+  })
+
+  const ownerSelect = captureSelects.find(call => call.table === 'observation_images')?.selectFields || ''
+  const communitySelects = captureSelects
+    .filter(call => call.table === 'observation_images_community_view')
+    .map(call => call.selectFields)
+  assert.match(ownerSelect, /captured_at/)
+  assert.ok(communitySelects.length > 0)
+  communitySelects.forEach(selectFields => assert.doesNotMatch(selectFields, /captured_at/))
+})
+
 test('a row missing id does not collapse other rows', async () => {
   await withSupabaseFromStub(makeTableStub(table => {
     if (table === 'observation_images') {

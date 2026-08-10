@@ -64,6 +64,8 @@ let detailAuthorProfile = null
 let detailFriendship = null
 let detailFollowState = { user: false, observation: false, taxon: false, genus: false }
 let detailPrivacySlotCount = null
+let detailLoadGeneration = 0
+let detailLatestMicroscopy = { available: false, capturedAt: null }
 const detailAiState = {
   running: false,
   runningByService: {},
@@ -541,6 +543,8 @@ const DETAIL_AI_SELECTION_REDLIST_FIELDS = [
 const DETAIL_IMAGE_SELECT_WITH_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom'
 const DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h'
 const DETAIL_IMAGE_SELECT_BASE = 'id, storage_path, sort_order'
+const DETAIL_OWNER_IMAGE_SELECT_WITH_CUSTOM = `${DETAIL_IMAGE_SELECT_WITH_CUSTOM}, captured_at`
+const DETAIL_OWNER_IMAGE_SELECT_WITHOUT_CUSTOM = `${DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM}, captured_at`
 const DETAIL_UNAVAILABLE_SECTION_IDS = [
   'detail-author',
   'detail-social-row',
@@ -852,14 +856,16 @@ export async function loadDetailObservation(obsId, options = {}) {
   }
 }
 
-async function _loadDetailObservationImages(obsId) {
+async function _loadDetailObservationImages(obsId, { isOwner = false } = {}) {
   const rows = await fetchObservationImageRows([obsId], {
     selectFields: DETAIL_IMAGE_SELECT_WITH_CUSTOM,
+    ownerSelectFields: isOwner ? DETAIL_OWNER_IMAGE_SELECT_WITH_CUSTOM : undefined,
   })
   if (rows.length) return _normalizeDetailImageRows(rows)
 
   const withoutCustomRows = await fetchObservationImageRows([obsId], {
     selectFields: DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM,
+    ownerSelectFields: isOwner ? DETAIL_OWNER_IMAGE_SELECT_WITHOUT_CUSTOM : undefined,
   })
   if (withoutCustomRows.length) {
     return _normalizeDetailImageRows(withoutCustomRows).map(row => ({
@@ -886,6 +892,81 @@ async function _loadDetailObservationImages(obsId) {
   }
 
   return []
+}
+
+export async function loadOwnerLatestMicroscopeCapturedAt({ client = supabase, observationId, isOwner }) {
+  if (!isOwner || !observationId) return { available: false, capturedAt: null }
+  try {
+    const { data, error } = await client.rpc('get_observation_latest_microscope_captured_at', {
+      p_observation_id: observationId,
+    })
+    if (error) {
+      console.warn('Optional Last microscopy metadata is unavailable:', {
+        observationId,
+        code: error?.code || null,
+      })
+      return { available: false, capturedAt: null }
+    }
+    return { available: true, capturedAt: data || null }
+  } catch (error) {
+    console.warn('Optional Last microscopy metadata could not be loaded:', {
+      observationId,
+      message: error?.message || String(error),
+    })
+    return { available: false, capturedAt: null }
+  }
+}
+
+export function formatMicroscopeCapturedAt(value, separator = ', ') {
+  if (!value) return ''
+  const instant = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(instant.getTime())) return ''
+  const date = formatDate(instant, { day: 'numeric', month: 'short', year: 'numeric' })
+  const time = formatTime(instant, { hour: '2-digit', minute: '2-digit' })
+  return `${date}${separator}${time}`
+}
+
+export function microscopeCapturePresentation(row, isOwner) {
+  if (!isOwner || row?.image_type !== 'microscope') return null
+  if (!Object.prototype.hasOwnProperty.call(row, 'captured_at')) return null
+  const formatted = formatMicroscopeCapturedAt(row.captured_at, ' · ')
+  return formatted || t('detail.captureTimeUnknown')
+}
+
+export function lastMicroscopyPresentation(imageRows, latestMicroscopy, isOwner) {
+  if (!isOwner || !latestMicroscopy?.available) return null
+  if (!(imageRows || []).some(row => row?.image_type === 'microscope')) return null
+  return formatMicroscopeCapturedAt(latestMicroscopy.capturedAt) || t('common.unknown')
+}
+
+function _renderLatestMicroscopy() {
+  const rowEl = document.getElementById('detail-last-microscopy')
+  const labelEl = document.getElementById('detail-last-microscopy-label')
+  const valueEl = document.getElementById('detail-last-microscopy-val')
+  if (!rowEl || !valueEl) return
+  if (labelEl) labelEl.textContent = t('detail.lastMicroscopy')
+  const presentation = lastMicroscopyPresentation(
+    detailImageRows,
+    detailLatestMicroscopy,
+    currentObsIsOwner,
+  )
+  rowEl.style.display = presentation ? 'flex' : 'none'
+  if (!presentation) {
+    valueEl.textContent = ''
+    return
+  }
+  valueEl.textContent = presentation
+}
+
+async function _refreshOwnerLatestMicroscopy(observationId, generation = detailLoadGeneration) {
+  const result = await loadOwnerLatestMicroscopeCapturedAt({
+    client: supabase,
+    observationId,
+    isOwner: currentObsIsOwner,
+  })
+  if (generation !== detailLoadGeneration || String(currentObs?.id) !== String(observationId)) return
+  detailLatestMicroscopy = result
+  _renderLatestMicroscopy()
 }
 
 function _buildDetailAiSelectionPatch(selectionState = {}) {
@@ -1083,6 +1164,7 @@ export function initFindDetail() {
 }
 
 export async function openFindDetail(obsId, options = {}) {
+  const loadGeneration = ++detailLoadGeneration
   currentObs    = null
   selectedTaxon = null
   currentObsIsOwner = false
@@ -1105,6 +1187,7 @@ export async function openFindDetail(obsId, options = {}) {
   detailAiState.stale = false
   detailImageCropDirty = false
   detailLocationLookup = null
+  detailLatestMicroscopy = { available: false, capturedAt: null }
 
   // Update back button label — state.currentScreen is still the previous screen at this point
   const prevLabel = {
@@ -1124,6 +1207,7 @@ export async function openFindDetail(obsId, options = {}) {
   const { observation: obs, error, outcome } = await loadDetailObservation(obsId, {
     client: supabase,
   })
+  if (loadGeneration !== detailLoadGeneration) return
 
   if (outcome === 'error') {
     // Log full PostgREST diagnostics for triage but never surface DB
@@ -1217,7 +1301,15 @@ export async function openFindDetail(obsId, options = {}) {
   _renderPrivacySlotNote()
   _loadPrivacySlotCount()
 
-  const imgData = await _loadDetailObservationImages(obsId)
+  const imagePromise = _loadDetailObservationImages(obsId, { isOwner: currentObsIsOwner })
+  const latestMicroscopyPromise = loadOwnerLatestMicroscopeCapturedAt({
+    client: supabase,
+    observationId: obsId,
+    isOwner: currentObsIsOwner,
+  })
+  const [imgData, latestMicroscopy] = await Promise.all([imagePromise, latestMicroscopyPromise])
+  if (loadGeneration !== detailLoadGeneration || String(currentObs?.id) !== String(obsId)) return
+  detailLatestMicroscopy = latestMicroscopy
 
   const gallery = document.getElementById('detail-gallery')
   _clearDetailThumbCropObserver()
@@ -1332,6 +1424,8 @@ export async function openFindDetail(obsId, options = {}) {
     })
   }
 
+  _renderLatestMicroscopy()
+
   if (currentObsIsOwner) {
     const addCardContainer = document.createElement('div')
     addCardContainer.className = 'detail-gallery-item-wrap'
@@ -1394,6 +1488,8 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   img.dataset.aiCropSourceW = row.ai_crop_source_w ?? ''
   img.dataset.aiCropSourceH = row.ai_crop_source_h ?? ''
   img.dataset.aiCropIsCustom = row.ai_crop_is_custom === true ? 'true' : ''
+  const microscopyCaption = microscopeCapturePresentation(row, currentObsIsOwner)
+  if (microscopyCaption) img.dataset.microscopyCaption = microscopyCaption
   const fallbackSources = [...new Set([
     source.fallbackUrl,
   ].filter(url => url && url !== source.primaryUrl))]
@@ -1420,9 +1516,16 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
       fallbackSrc: i.src,
       storagePath: i.dataset.storagePath || '',
       filenameStem: galleryImgs.length > 1 ? `${stem}-${idx + 1}` : stem,
+      metadata: i.dataset.microscopyCaption || '',
     })), Math.max(0, currentIndex))
   })
   container.appendChild(img)
+  if (microscopyCaption) {
+    const caption = document.createElement('div')
+    caption.className = 'detail-microscope-capture'
+    caption.textContent = microscopyCaption
+    container.appendChild(caption)
+  }
   _syncDetailThumbCropOverlay(container, row)
 
   if (currentObsIsOwner) {
@@ -1531,6 +1634,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
           await supabase.from('observations').update({ image_key: null, thumb_key: null }).eq('id', currentObs.id)
         }
         container.remove()
+        _refreshOwnerLatestMicroscopy(currentObs.id)
         _markDetailAiStale()
       } catch (err) {
         console.error('Failed to delete image:', err)

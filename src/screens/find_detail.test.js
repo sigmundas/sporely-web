@@ -14,6 +14,10 @@ import {
   _renderDetailAiTabs,
   _setDetailAiActiveService,
   detailAiState,
+  formatMicroscopeCapturedAt,
+  loadOwnerLatestMicroscopeCapturedAt,
+  lastMicroscopyPresentation,
+  microscopeCapturePresentation,
 } from './find_detail.js'
 
 class MockClassList {
@@ -175,6 +179,128 @@ test('find detail redlist summary sits between the date block and the gallery', 
   assert.ok(galleryIdx > summaryIdx)
   assert.ok(galleryIdx > socialRowIdx)
   assert.match(html, /id="detail-social-row"[\s\S]*id="detail-redlist-summary"[\s\S]*id="detail-gallery"/)
+})
+
+test('owner Last microscopy loader is owner-only and treats null as a valid result', async () => {
+  const calls = []
+  const client = {
+    async rpc(name, args) {
+      calls.push({ name, args })
+      return { data: null, error: null }
+    },
+  }
+
+  assert.deepEqual(await loadOwnerLatestMicroscopeCapturedAt({
+    client,
+    observationId: 42,
+    isOwner: false,
+  }), { available: false, capturedAt: null })
+  assert.equal(calls.length, 0)
+
+  assert.deepEqual(await loadOwnerLatestMicroscopeCapturedAt({
+    client,
+    observationId: 42,
+    isOwner: true,
+  }), { available: true, capturedAt: null })
+  assert.deepEqual(calls, [{
+    name: 'get_observation_latest_microscope_captured_at',
+    args: { p_observation_id: 42 },
+  }])
+})
+
+test('optional Last microscopy RPC failure is non-fatal and unavailable', async () => {
+  const previousWarn = console.warn
+  console.warn = () => {}
+  try {
+    const result = await loadOwnerLatestMicroscopeCapturedAt({
+      client: { rpc: async () => ({ data: null, error: { code: 'PGRST202' } }) },
+      observationId: 43,
+      isOwner: true,
+    })
+    assert.deepEqual(result, { available: false, capturedAt: null })
+  } finally {
+    console.warn = previousWarn
+  }
+})
+
+test('microscope image capture labels never fall back to upload time or leak to viewers', () => {
+  const captured = microscopeCapturePresentation({
+    image_type: 'microscope',
+    captured_at: '2026-08-10T19:42:00Z',
+    created_at: '2030-01-01T00:00:00Z',
+  }, true)
+  assert.match(captured, /2026/)
+  assert.doesNotMatch(captured, /2030/)
+
+  assert.equal(microscopeCapturePresentation({
+    image_type: 'microscope',
+    captured_at: null,
+    created_at: '2030-01-01T00:00:00Z',
+  }, true), 'Capture time unknown')
+  assert.equal(microscopeCapturePresentation({
+    image_type: 'microscope',
+    captured_at: '2026-08-10T19:42:00Z',
+  }, false), null)
+  assert.equal(microscopeCapturePresentation({
+    image_type: 'field',
+    captured_at: '2026-08-10T19:42:00Z',
+  }, true), null)
+})
+
+test('Last microscopy distinguishes no microscopy, unknown capture time, and a real instant', () => {
+  const fieldRows = [{ image_type: 'field' }]
+  const microscopeRows = [{ image_type: 'microscope', captured_at: null }]
+
+  assert.equal(lastMicroscopyPresentation(
+    fieldRows,
+    { available: true, capturedAt: null },
+    true,
+  ), null)
+  assert.equal(lastMicroscopyPresentation(
+    microscopeRows,
+    { available: true, capturedAt: null },
+    true,
+  ), 'Unknown')
+  assert.match(lastMicroscopyPresentation(
+    microscopeRows,
+    { available: true, capturedAt: '2026-08-10T19:42:00Z' },
+    true,
+  ), /2026/)
+  assert.equal(lastMicroscopyPresentation(
+    microscopeRows,
+    { available: false, capturedAt: null },
+    true,
+  ), null)
+  assert.equal(lastMicroscopyPresentation(
+    microscopeRows,
+    { available: true, capturedAt: '2026-08-10T19:42:00Z' },
+    false,
+  ), null)
+})
+
+test('microscope timestamps format the instant in the browser timezone across UTC midnight', () => {
+  const previousTimezone = process.env.TZ
+  process.env.TZ = 'America/Los_Angeles'
+  try {
+    const formatted = formatMicroscopeCapturedAt('2026-08-10T00:30:00Z')
+    assert.match(formatted, /Aug 9, 2026/)
+    assert.doesNotMatch(formatted, /Aug 10, 2026/)
+  } finally {
+    if (previousTimezone === undefined) delete process.env.TZ
+    else process.env.TZ = previousTimezone
+  }
+})
+
+test('detail markup and load path keep microscopy metadata owner-only and race-safe', () => {
+  const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+
+  assert.match(html, /id="detail-last-microscopy" style="display:none"/)
+  assert.match(html, /id="photo-viewer-metadata" style="display:none"/)
+  assert.match(source, /isOwner: currentObsIsOwner/)
+  assert.match(source, /loadGeneration !== detailLoadGeneration/)
+  assert.match(source, /ownerSelectFields: isOwner \? DETAIL_OWNER_IMAGE_SELECT_WITH_CUSTOM : undefined/)
+  assert.doesNotMatch(source, /created_at[^\n]+captureTimeUnknown/)
 })
 
 test('non-owner detail tabs stay disabled until there is a stored result to view', () => {
