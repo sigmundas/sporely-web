@@ -564,53 +564,85 @@ async function recalculateProfileStorageUsage(context: AdminActionContext): Prom
   const beforeSnapshot = {
     profile: profile.row,
     inventory: {
-      observation_image_rows: storageRows.rows.length,
+      observation_image_rows: storageRows.rows.filter(row => row.media_kind === 'image').length,
+      mosaic_rows: storageRows.rows.filter(row => row.media_kind === 'mosaic').length,
+    },
+  }
+  const recalculated = await calculateProfileStorageUsage(context.env, storageRows.rows)
+  const currentTotalStorageBytes = Number(profile.row.total_storage_bytes ?? 0)
+  const currentStorageUsedBytes = Number(profile.row.storage_used_bytes ?? 0)
+  const currentImageCount = Number(profile.row.image_count ?? 0)
+  const delta = {
+    storage_used_bytes: recalculated.storage_used_bytes - currentStorageUsedBytes,
+    image_count: recalculated.image_count - currentImageCount,
+  }
+  const result = {
+    profile_id: profile.row.id,
+    recalculated,
+    delta,
+    current: {
+      total_storage_bytes: currentTotalStorageBytes,
+      storage_used_bytes: currentStorageUsedBytes,
+      image_count: currentImageCount,
     },
   }
 
-  return await withAdminActionLog({
-    adminClient: context.adminClient,
-    adminUser: context.adminUser,
-    action: 'recalculate_profile_storage_usage',
-    targetType: 'profile',
-    targetId: profileId.value,
-    reason: reason.value,
-    requestPayload: context.requestBody,
-    beforeSnapshot,
-    run: async () => {
-      const recalculated = await calculateProfileStorageUsage(context.env, storageRows.rows)
-      const currentStorageUsedBytes = Number(profile.row.storage_used_bytes ?? 0)
-      const currentImageCount = Number(profile.row.image_count ?? 0)
-      const storageDelta = recalculated.storage_used_bytes - currentStorageUsedBytes
-      const imageDelta = recalculated.image_count - currentImageCount
+  if (context.requestBody?.dry_run === true) {
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        action: 'recalculate_profile_storage_usage',
+        dry_run: true,
+        result,
+      },
+    }
+  }
 
-      const { data, error } = await context.adminClient.rpc('apply_profile_storage_delta', {
-        p_user_id: profile.row.id,
-        p_storage_delta: storageDelta,
-        p_image_delta: imageDelta,
-      })
-
-      if (error) {
-        throw actionError(500, 'profile_storage_recalculate_failed', `Failed to update profile storage totals: ${error.message}`)
-      }
-
-      const updatedProfile = Array.isArray(data) ? data[0] ?? null : data
-      return {
-        profile_id: profile.row.id,
-        recalculated,
-        delta: {
-          storage_used_bytes: storageDelta,
-          image_count: imageDelta,
-        },
-        profile: updatedProfile ?? {
-          id: profile.row.id,
-          total_storage_bytes: recalculated.storage_used_bytes,
-          storage_used_bytes: recalculated.storage_used_bytes,
-          image_count: recalculated.image_count,
-        },
-      }
-    },
+  const { data, error } = await context.adminClient.rpc('reconcile_profile_storage_usage', {
+    p_user_id: profile.row.id,
+    p_expected_total_storage_bytes: currentTotalStorageBytes,
+    p_expected_storage_used_bytes: currentStorageUsedBytes,
+    p_expected_image_count: currentImageCount,
+    p_storage_used_bytes: recalculated.storage_used_bytes,
+    p_image_count: recalculated.image_count,
+    p_reason: reason.value,
+    p_admin_user_id: context.adminUser.id,
+    p_admin_email: context.adminUser.email,
+    p_request_payload: cleanJson(context.requestBody),
+    p_before_snapshot: cleanJson(beforeSnapshot),
+    p_recalculated: cleanJson(recalculated),
   })
+
+  if (error) {
+    const concurrent = error.code === 'PT409'
+    return actionFailureResponse(
+      concurrent ? 409 : 500,
+      concurrent ? 'profile_storage_changed' : 'profile_storage_recalculate_failed',
+      concurrent
+        ? 'Profile accounting changed during recalculation; run a fresh dry-run and retry'
+        : `Failed to update profile storage totals: ${error.message}`,
+    )
+  }
+
+  const updated = Array.isArray(data) ? data[0] ?? null : data
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      action: 'recalculate_profile_storage_usage',
+      action_log_id: updated?.action_log_id ?? null,
+      result: {
+        ...result,
+        profile: {
+          id: profile.row.id,
+          total_storage_bytes: Number(updated?.total_storage_bytes ?? recalculated.storage_used_bytes),
+          storage_used_bytes: Number(updated?.storage_used_bytes ?? recalculated.storage_used_bytes),
+          image_count: Number(updated?.image_count ?? recalculated.image_count),
+        },
+      },
+    },
+  }
 }
 
 async function withAdminActionLog(options: {
@@ -747,7 +779,7 @@ async function loadTombstoneSelection(
   let query = adminClient
     .from('observation_images')
     .select(
-      'id, observation_id, user_id, storage_path, original_storage_path, original_filename, deleted_at, purged_at, purge_attempted_at, purge_error, created_at, source_width, source_height, stored_width, stored_height, stored_bytes, image_type, micro_category, upload_mode, sort_order, observation:observations!observation_images_observation_id_fkey(id, date, genus, species, common_name, species_guess, author, ai_selected_scientific_name, ai_selected_taxon_id, ai_selected_probability, created_at), owner:profiles!observation_images_user_id_fkey(id, username, display_name)',
+      'id, observation_id, user_id, storage_path, original_storage_path, original_filename, deleted_at, purged_at, purge_attempted_at, purge_error, purge_accounting_bytes, created_at, source_width, source_height, stored_width, stored_height, stored_bytes, image_type, micro_category, upload_mode, sort_order, observation:observations!observation_images_observation_id_fkey(id, date, genus, species, common_name, species_guess, author, ai_selected_scientific_name, ai_selected_taxon_id, ai_selected_probability, created_at), owner:profiles!observation_images_user_id_fkey(id, username, display_name)',
     )
     .not('deleted_at', 'is', null)
     .order('deleted_at', { ascending: true })
@@ -784,21 +816,46 @@ async function loadTombstoneSelection(
 }
 
 async function loadProfileStorageRows(adminClient: any, profileId: string) {
-  const { data, error } = await adminClient
-    .from('observation_images')
-    .select('id, storage_path, original_storage_path, deleted_at, purged_at, original_filename')
-    .eq('user_id', profileId)
+  const [images, mosaics] = await Promise.all([
+    loadAllStoragePages(() => adminClient
+      .from('observation_images')
+      .select('id, storage_path, original_storage_path, deleted_at, purged_at, original_filename')
+      .eq('user_id', profileId)
+      .is('purged_at', null)
+      .order('id', { ascending: true })),
+    loadAllStoragePages(() => adminClient
+      .from('spore_measurement_mosaics')
+      .select('id, storage_key, observation_id, version')
+      .eq('user_id', profileId)
+      .order('id', { ascending: true })),
+  ])
 
-  if (error) {
+  if (images.error || mosaics.error) {
+    const message = images.error?.message || mosaics.error?.message || 'unknown error'
     return {
       ok: false as const,
-      response: actionFailureResponse(500, 'profile_storage_rows_failed', `Failed to load profile storage inventory: ${error.message}`),
+      response: actionFailureResponse(500, 'profile_storage_rows_failed', `Failed to load profile storage inventory: ${message}`),
     }
   }
 
   return {
     ok: true as const,
-    rows: Array.isArray(data) ? data : [],
+    rows: [
+      ...(Array.isArray(images.data) ? images.data.map((row: any) => ({ ...row, media_kind: 'image' })) : []),
+      ...(Array.isArray(mosaics.data) ? mosaics.data.map((row: any) => ({ ...row, media_kind: 'mosaic' })) : []),
+    ],
+  }
+}
+
+async function loadAllStoragePages(buildQuery: () => any) {
+  const rows: any[] = []
+  const pageSize = 1000
+  for (let offset = 0; ; offset += pageSize) {
+    const result = await buildQuery().range(offset, offset + pageSize - 1)
+    if (result.error) return result
+    const page = Array.isArray(result.data) ? result.data : []
+    rows.push(...page)
+    if (page.length < pageSize) return { data: rows, error: null }
   }
 }
 
@@ -806,54 +863,87 @@ async function calculateProfileStorageUsage(
   env: Record<string, string | undefined>,
   rows: Array<Record<string, unknown>>,
 ) {
-  const client = createR2Client(env)
-  const seenKeys = new Set<string>()
+  return calculateProfileStorageUsageWithClient(rows, createR2Client(env))
+}
+
+export async function calculateProfileStorageUsageWithClient(
+  rows: Array<Record<string, unknown>>,
+  client: { headObject: (key: string) => Promise<any> },
+) {
+  const logicalObjects = new Map<string, string>()
   const rowSummaries: Array<Record<string, unknown>> = []
   let storageUsedBytes = 0
   let imageCount = 0
   let missingObjects = 0
   const warnings: string[] = []
+  const classes: Record<string, { bytes: number; objects: number; missing: number }> = {
+    full: { bytes: 0, objects: 0, missing: 0 },
+    thumb: { bytes: 0, objects: 0, missing: 0 },
+    original: { bytes: 0, objects: 0, missing: 0 },
+    mosaic: { bytes: 0, objects: 0, missing: 0 },
+  }
 
   for (const row of rows) {
-    const keys = buildProfileStorageKeys(row)
+    if (row.media_kind !== 'mosaic' && row.purged_at) continue
+    for (const entry of buildProfileStorageEntries(row)) {
+      if (!logicalObjects.has(entry.key)) logicalObjects.set(entry.key, entry.kind)
+    }
+  }
+
+  const headResults = new Map<string, any>()
+  const objectEntries = [...logicalObjects]
+  const objectHeads = await mapWithConcurrency(objectEntries, 32, async ([key]) =>
+    await client.headObject(key))
+  for (let index = 0; index < objectEntries.length; index += 1) {
+    const [key, kind] = objectEntries[index]
+    const head = objectHeads[index]
+    headResults.set(key, head)
+    if (head.ok) {
+      const bytes = Number(head.size || 0)
+      storageUsedBytes += bytes
+      classes[kind].bytes += bytes
+      classes[kind].objects += 1
+      if (kind === 'full') imageCount += 1
+    } else if (head.status === 404) {
+      missingObjects += 1
+      classes[kind].missing += 1
+    } else {
+      warnings.push(`${key}: ${head.error}`)
+    }
+  }
+
+  for (const row of rows) {
+    if (row.media_kind !== 'mosaic' && row.purged_at) continue
+    const entries = buildProfileStorageEntries(row)
     let rowBytes = 0
-    let rowHasOriginalObject = false
     const missingKeys: string[] = []
     const rowErrors: string[] = []
 
-    for (const key of keys) {
-      seenKeys.add(key)
-      const head = await client.headObject(key)
+    for (const { key } of entries) {
+      const head = headResults.get(key)
       if (head.ok) {
-        rowBytes += head.size
-        if (head.kind === 'original') {
-          rowHasOriginalObject = true
-        }
+        rowBytes += Number(head.size || 0)
         continue
       }
 
       if (head.status === 404) {
         missingKeys.push(key)
-        missingObjects += 1
         continue
       }
 
       rowErrors.push(`${key}: ${head.error}`)
-      warnings.push(`${key}: ${head.error}`)
     }
 
-    if (rowHasOriginalObject) {
-      imageCount += 1
-    }
-
-    storageUsedBytes += rowBytes
     rowSummaries.push({
       id: row.id ?? null,
       original_filename: row.original_filename ?? null,
       storage_path: row.storage_path ?? null,
       original_storage_path: row.original_storage_path ?? null,
+      storage_key: row.storage_key ?? null,
+      media_kind: row.media_kind ?? 'image',
       bytes: rowBytes,
-      has_original_object: rowHasOriginalObject,
+      has_primary_object: entries.some(entry =>
+        entry.kind === 'full' && headResults.get(entry.key)?.ok),
       missing_keys: missingKeys,
       errors: rowErrors,
     })
@@ -862,11 +952,50 @@ async function calculateProfileStorageUsage(
   return {
     storage_used_bytes: storageUsedBytes,
     image_count: imageCount,
-    checked_objects: seenKeys.size,
+    checked_objects: logicalObjects.size,
     missing_objects: missingObjects,
+    classes,
     warnings,
     rows: rowSummaries,
   }
+}
+
+async function mapWithConcurrency<T, R>(
+  values: T[],
+  limit: number,
+  mapper: (value: T) => Promise<R>,
+) {
+  const results = new Array<R>(values.length)
+  let nextIndex = 0
+  async function worker() {
+    while (nextIndex < values.length) {
+      const index = nextIndex++
+      results[index] = await mapper(values[index])
+    }
+  }
+  await Promise.all(Array.from(
+    { length: Math.min(Math.max(1, limit), values.length) },
+    () => worker(),
+  ))
+  return results
+}
+
+function buildProfileStorageEntries(row: Record<string, unknown>) {
+  if (row.media_kind === 'mosaic') {
+    const key = normalizeMediaKey(row.storage_key)
+    return key ? [{ key, kind: 'mosaic' }] : []
+  }
+  const entries: Array<{ key: string; kind: string }> = []
+  const fullPath = normalizeMediaKey(row.storage_path)
+  if (fullPath) {
+    entries.push({ key: fullPath, kind: 'full' })
+    for (const key of legacyDerivedVariantPaths(fullPath)) {
+      entries.push({ key, kind: 'thumb' })
+    }
+  }
+  const originalPath = normalizeMediaKey(row.original_storage_path)
+  if (originalPath) entries.push({ key: originalPath, kind: 'original' })
+  return entries
 }
 
 function buildTombstonePreviewRow(row: any, restoreWindowDays: number, mediaPublicBaseUrl: string | null) {
@@ -989,7 +1118,7 @@ function summarizeTombstoneRows(rows: Array<Record<string, unknown>>) {
 async function purgeSingleTombstoneRow(
   context: AdminActionContext,
   row: Record<string, unknown>,
-  r2Client: R2BatchClient,
+  r2Client: R2MultiBucketClient,
 ) {
   const now = new Date().toISOString()
   const rowId = row.id
@@ -1009,13 +1138,21 @@ async function purgeSingleTombstoneRow(
     }
   }
 
+  let deletion
   try {
-    await r2Client.deleteObjects(deleteTargets)
+    deletion = await r2Client.deleteObjects(deleteTargets)
   } catch (error) {
     const failure = normalizeActionFailure(error)
+    const retryAccountingBytes = Math.max(
+      0,
+      Number(row.purge_accounting_bytes || 0),
+      Number(row.stored_bytes || 0),
+      Number(failure.details?.logicalBytes || 0),
+    )
     await updateTombstonePurgeMetadata(context.adminClient, rowId, {
       purge_attempted_at: now,
       purge_error: failure.message,
+      purge_accounting_bytes: retryAccountingBytes,
     })
     return {
       ...row,
@@ -1026,19 +1163,42 @@ async function purgeSingleTombstoneRow(
     }
   }
 
-  const updateResult = await updateTombstonePurgeMetadata(context.adminClient, rowId, {
-    purged_at: now,
+  const accountingBytes = Math.max(
+    0,
+    Number(deletion.logicalBytes || 0),
+    Number(row.purge_accounting_bytes || 0),
+    Number(row.stored_bytes || 0),
+  )
+  const snapshotResult = await updateTombstonePurgeMetadata(context.adminClient, rowId, {
     purge_attempted_at: now,
-    purge_error: null,
+    purge_accounting_bytes: accountingBytes,
   })
-
-  if (!updateResult.ok) {
+  if (!snapshotResult.ok) {
     return {
       ...row,
       status: 'error',
-      error: 'purge_metadata_update_failed',
+      error: 'purge_accounting_snapshot_failed',
       purge_attempted_at: now,
-      purge_error: 'purge_metadata_update_failed',
+      purge_error: 'purge_accounting_snapshot_failed',
+    }
+  }
+
+  const { error: finalizeError } = await context.adminClient.rpc('finalize_observation_image_purge', {
+    p_image_id: rowId,
+    p_purged_at: now,
+    p_storage_bytes: accountingBytes,
+  })
+  if (finalizeError) {
+    await updateTombstonePurgeMetadata(context.adminClient, rowId, {
+      purge_attempted_at: now,
+      purge_error: `purge_finalize_failed: ${finalizeError.message}`.slice(0, 500),
+    })
+    return {
+      ...row,
+      status: 'error',
+      error: 'purge_finalize_failed',
+      purge_attempted_at: now,
+      purge_error: 'purge_finalize_failed',
     }
   }
 
@@ -1050,6 +1210,8 @@ async function purgeSingleTombstoneRow(
     purge_error: null,
     error: null,
     message: 'Purged successfully',
+    logical_bytes_deleted: accountingBytes,
+    bucket_results: deletion.targets,
   }
   const issueFlags = buildImageIssueFlags(purgedRow, false)
 
@@ -1076,31 +1238,19 @@ async function updateTombstonePurgeMetadata(adminClient: any, imageId: unknown, 
   return { ok: true as const }
 }
 
-function buildProfileStorageKeys(row: Record<string, unknown>) {
-  const keys = new Set<string>()
-  for (const rawPath of [row.storage_path, row.original_storage_path]) {
-    const normalized = normalizeMediaKey(rawPath)
-    if (!normalized) continue
-    keys.add(normalized)
-    const thumbPath = getVariantPath(normalized, 'thumb')
-    if (thumbPath && thumbPath !== normalized) {
-      keys.add(thumbPath)
-    }
-  }
-  return [...keys]
+export function buildProfileStorageKeys(row: Record<string, unknown>) {
+  return [...new Set(buildProfileStorageEntries(row).map(entry => entry.key))]
 }
 
-function buildTombstoneDeleteTargets(storagePath: string, originalStoragePath: string) {
+export function buildTombstoneDeleteTargets(storagePath: string, originalStoragePath: string) {
   const paths = new Set<string>()
-  for (const path of [storagePath, originalStoragePath]) {
-    const normalized = normalizeMediaKey(path)
-    if (!normalized) continue
-    paths.add(normalized)
-    const thumbPath = getVariantPath(normalized, 'thumb')
-    if (thumbPath && thumbPath !== normalized) {
-      paths.add(thumbPath)
-    }
+  const fullPath = normalizeMediaKey(storagePath)
+  if (fullPath) {
+    paths.add(fullPath)
+    for (const variantPath of legacyDerivedVariantPaths(fullPath)) paths.add(variantPath)
   }
+  const originalPath = normalizeMediaKey(originalStoragePath)
+  if (originalPath) paths.add(originalPath)
   return [...paths]
 }
 
@@ -1157,17 +1307,16 @@ function getMediaPublicBaseUrl(env: Record<string, string | undefined>) {
   return normalizeText(env.MEDIA_PUBLIC_BASE_URL ?? env.VITE_MEDIA_BASE_URL).replace(/\/+$/, '')
 }
 
-function getVariantPath(storagePath: string, variant = 'original') {
+function legacyDerivedVariantPaths(storagePath: string) {
   const normalized = normalizeMediaKey(storagePath)
-  if (!normalized || variant === 'original') return normalized
-
+  if (!normalized) return []
   const parts = normalized.split('/')
-  const fileName = parts.pop() || ''
+  const fileName = stripLegacyVariantPrefixes(parts.pop() || '')
   const dir = parts.join('/')
-  const variantName = ['thumb', 'small', 'medium', 'cards'].includes(String(variant || '').toLowerCase())
-    ? `thumb_${stripLegacyVariantPrefixes(fileName)}`
-    : `${variant}_${fileName}`
-  return dir ? `${dir}/${variantName}` : variantName
+  return ['thumb', 'thumb_small', 'thumb_medium'].map(prefix => {
+    const name = `${prefix}_${fileName}`
+    return dir ? `${dir}/${name}` : name
+  })
 }
 
 function deriveThumbPath(storagePath: unknown) {
@@ -1542,18 +1691,19 @@ function createR2Client(env: Record<string, string | undefined>) {
   const accessKeyId = normalizeText(env.R2_ACCESS_KEY_ID)
   const secretAccessKey = normalizeText(env.R2_SECRET_ACCESS_KEY)
   const s3Endpoint = normalizeText(env.R2_S3_ENDPOINT).replace(/\/+$/, '')
-  const bucketName = normalizeText(env.R2_BUCKET_NAME) || R2_BUCKET_NAME
+  const legacyBucketName = normalizeText(env.R2_BUCKET_NAME) || R2_BUCKET_NAME
+  const privateBucketName = normalizeText(env.R2_PRIVATE_BUCKET_NAME)
 
   if (!accessKeyId || !secretAccessKey || !s3Endpoint) {
     throw actionError(500, 'missing_r2_configuration', 'R2 purge is not configured')
   }
 
-  return new R2BatchClient({
-    accessKeyId,
-    secretAccessKey,
-    s3Endpoint,
-    bucketName,
-  })
+  const common = { accessKeyId, secretAccessKey, s3Endpoint }
+  const clients = [new R2BatchClient({ ...common, bucketName: legacyBucketName, role: 'legacy' })]
+  if (privateBucketName && privateBucketName !== legacyBucketName) {
+    clients.push(new R2BatchClient({ ...common, bucketName: privateBucketName, role: 'private' }))
+  }
+  return new R2MultiBucketClient(clients)
 }
 
 async function prepareR2PurgeClient(env: Record<string, string | undefined>, preflightTarget: string) {
@@ -1569,11 +1719,104 @@ async function prepareR2PurgeClient(env: Record<string, string | undefined>, pre
   }
 }
 
+export class R2MultiBucketClient {
+  clients: R2BatchClient[]
+
+  constructor(clients: R2BatchClient[]) {
+    this.clients = clients
+  }
+
+  async assertObjectAccess(key: string) {
+    const results = await Promise.all(this.clients.map(client => client.headObject(key)))
+    const failed = results.find(result => !result.ok && result.status !== 404)
+    if (failed) {
+      throw actionError(failed.status, 'r2_access_check_failed', failed.error || 'R2 object access check failed', {
+        role: failed.role,
+        operation: 'head',
+      })
+    }
+  }
+
+  async headObject(key: string) {
+    const results = await Promise.all(this.clients.map(client => client.headObject(key)))
+    const failed = results.find(result => !result.ok && result.status !== 404)
+    if (failed) return failed
+    const present = results.filter(result => result.ok)
+    if (!present.length) {
+      return {
+        ok: false as const,
+        status: 404,
+        error: 'Object not found in any configured bucket',
+        kind: isOriginalImageKey(key) ? 'original' as const : 'variant' as const,
+        role: 'all',
+      }
+    }
+    return {
+      ok: true as const,
+      status: 200,
+      size: Math.max(...present.map(result => Number(result.size || 0))),
+      kind: isOriginalImageKey(key) ? 'original' as const : 'variant' as const,
+      role: 'logical',
+      targets: results.map(result => ({
+        role: result.role,
+        present: result.ok,
+        bytes: result.ok ? result.size : 0,
+      })),
+    }
+  }
+
+  async deleteObjects(keys: Iterable<string>) {
+    const cleaned = [...new Set([...keys].map(key => normalizeMediaKey(key)).filter(Boolean))]
+    let logicalBytes = 0
+    const targets: Array<Record<string, unknown>> = []
+    let firstFailure: ActionFailure | null = null
+
+    for (const key of cleaned) {
+      const heads = await Promise.all(this.clients.map(client => client.headObject(key)))
+      const headFailure = heads.find(result => !result.ok && result.status !== 404)
+      if (headFailure) {
+        targets.push({ key, role: headFailure.role, operation: 'head', ok: false, error: headFailure.error })
+        firstFailure ??= {
+          status: headFailure.status,
+          code: 'r2_head_failed',
+          message: headFailure.error || 'R2 head failed',
+        }
+        continue
+      }
+      logicalBytes += Math.max(0, ...heads.map(result => result.ok ? Number(result.size || 0) : 0))
+
+      const deletes = await Promise.all(this.clients.map(async client => {
+        try {
+          await client.deleteObject(key)
+          return { key, role: client.role, operation: 'delete', ok: true }
+        } catch (error) {
+          const failure = normalizeActionFailure(error)
+          firstFailure ??= failure
+          return { key, role: client.role, operation: 'delete', ok: false, error: failure.message }
+        }
+      }))
+      targets.push(...deletes)
+    }
+
+    if (firstFailure) {
+      throw actionError(
+        firstFailure.status,
+        'r2_delete_partial_failure',
+        'R2 cleanup was incomplete and can be retried',
+        { targets, logicalBytes },
+      )
+    }
+    return { logicalBytes, targets }
+  }
+}
+
 class R2BatchClient {
+  role: 'legacy' | 'private'
   bucketName: string
   client: S3Client
 
-  constructor(config: { accessKeyId: string; secretAccessKey: string; s3Endpoint: string; bucketName: string }) {
+  constructor(config: { accessKeyId: string; secretAccessKey: string; s3Endpoint: string; bucketName: string; role: 'legacy' | 'private' }) {
+    this.role = config.role
     this.bucketName = config.bucketName
     this.client = new S3Client({
       region: R2_REGION,
@@ -1585,35 +1828,15 @@ class R2BatchClient {
     })
   }
 
-  async assertObjectAccess(key: string) {
+  async deleteObject(key: string) {
     try {
-      await this.client.send(new HeadObjectCommand({ Bucket: this.bucketName, Key: key }))
+      await this.client.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: key }))
     } catch (error) {
-      const failure = normalizeR2SdkFailure(error, 'R2 object access check failed')
-      if (failure.status === 404) return
-      throw actionError(
-        failure.status,
-        'r2_access_check_failed',
-        failure.message,
-      )
-    }
-  }
-
-  async deleteObjects(keys: Iterable<string>) {
-    const cleaned = [...new Set([...keys].map(key => normalizeMediaKey(key)).filter(Boolean))]
-    if (!cleaned.length) return
-
-    for (const key of cleaned) {
-      try {
-        await this.client.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: key }))
-      } catch (error) {
-        const failure = normalizeR2SdkFailure(error, 'R2 delete failed')
-        throw actionError(
-          failure.status,
-          'r2_delete_failed',
-          failure.message,
-        )
-      }
+      const failure = normalizeR2SdkFailure(error, 'R2 delete failed')
+      throw actionError(failure.status, 'r2_delete_failed', failure.message, {
+        role: this.role,
+        operation: 'delete',
+      })
     }
   }
 
@@ -1625,6 +1848,7 @@ class R2BatchClient {
         status: 400,
         error: 'Missing R2 key',
         kind: 'variant' as const,
+        role: this.role,
       }
     }
 
@@ -1637,6 +1861,7 @@ class R2BatchClient {
         status: response.$metadata.httpStatusCode ?? 200,
         size: Number.isFinite(size) && size > 0 ? Math.trunc(size) : 0,
         kind,
+        role: this.role,
       }
     } catch (error) {
       const failure = normalizeR2SdkFailure(error, 'R2 head failed')
@@ -1645,6 +1870,7 @@ class R2BatchClient {
         status: failure.status,
         error: failure.message,
         kind,
+        role: this.role,
       }
     }
   }
