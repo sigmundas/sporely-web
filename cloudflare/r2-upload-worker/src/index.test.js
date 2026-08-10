@@ -8,7 +8,10 @@ import worker, {
   normalizeUploadType as normalizeUploadType_STAGE2,
   resolveMediaStorageMode as resolveMediaStorageMode_STAGE2,
   selectUploadBucket as selectUploadBucket_STAGE2,
+  candidateReadBuckets,
+  findMediaObject,
   deriveThumbKey as deriveThumbKey_STAGE2,
+  deleteMediaObjectCopies,
 } from './index.js'
 
 const TEST_ENV = {
@@ -43,9 +46,11 @@ function createWorkerAuthToken() {
   return { jwtSecret, token }
 }
 
-function installProfileFetchMock(profileRow, storageDeltaRow = null) {
+function installProfileFetchMock(profileRow, storageDeltaRow = null, onStorageDelta = null, options = {}) {
   const originalFetch = globalThis.fetch
-  globalThis.fetch = async (input) => {
+  const preparedDeletes = new Map()
+  let finalizeFailuresRemaining = options.failFinalizeOnce ? 1 : 0
+  globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : String(input?.url || '')
     if (url.includes('/rest/v1/profiles?')) {
       return new Response(JSON.stringify([profileRow]), {
@@ -56,6 +61,9 @@ function installProfileFetchMock(profileRow, storageDeltaRow = null) {
       })
     }
     if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      if (typeof onStorageDelta === 'function') {
+        onStorageDelta(JSON.parse(String(init?.body || '{}')))
+      }
       return new Response(JSON.stringify([storageDeltaRow || {
         total_storage_bytes: 420240170,
         storage_used_bytes: 420240170,
@@ -66,6 +74,40 @@ function installProfileFetchMock(profileRow, storageDeltaRow = null) {
           'Content-Type': 'application/json',
         },
       })
+    }
+    if (url.includes('/rest/v1/rpc/prepare_media_object_deletion')) {
+      const payload = JSON.parse(String(init?.body || '{}'))
+      const id = `${payload.p_user_id}:${payload.p_storage_key}`
+      const existing = preparedDeletes.get(id) || { storageBytes: 0, imageCount: 0, finalized: false }
+      preparedDeletes.set(id, {
+        storageBytes: Math.max(existing.storageBytes, Number(payload.p_storage_bytes || 0)),
+        imageCount: Math.max(existing.imageCount, Number(payload.p_image_count || 0)),
+        finalized: existing.finalized,
+      })
+      return new Response('null', { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    if (url.includes('/rest/v1/rpc/finalize_media_object_deletion')) {
+      const payload = JSON.parse(String(init?.body || '{}'))
+      const id = `${payload.p_user_id}:${payload.p_storage_key}`
+      const prepared = preparedDeletes.get(id)
+      if (!prepared) return new Response('not prepared', { status: 500 })
+      if (finalizeFailuresRemaining > 0) {
+        finalizeFailuresRemaining -= 1
+        return new Response('temporary finalize failure', { status: 500 })
+      }
+      if (!prepared.finalized && typeof onStorageDelta === 'function') {
+        onStorageDelta({
+          p_user_id: payload.p_user_id,
+          p_storage_delta: prepared.storageBytes ? -prepared.storageBytes : 0,
+          p_image_delta: prepared.imageCount ? -prepared.imageCount : 0,
+        })
+      }
+      prepared.finalized = true
+      return new Response(JSON.stringify([storageDeltaRow || {
+        total_storage_bytes: 420240170,
+        storage_used_bytes: 420240170,
+        image_count: 244,
+      }]), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }
     throw new Error(`Unexpected fetch call: ${url}`)
   }
@@ -502,12 +544,16 @@ test('full pro high uploads above the edge cap fail with an edge cap reason', as
 
 function makeMockBucketStage2(initial = {}) {
   const objects = new Map(Object.entries(initial))
+  const events = []
   return {
+    events,
     async head(key) {
+      events.push({ op: 'head', key })
       const v = objects.get(key)
       return v ? { size: v.body?.byteLength ?? 0, etag: v.etag || 'etag' } : null
     },
     async get(key) {
+      events.push({ op: 'get', key })
       const v = objects.get(key)
       if (!v) return null
       return {
@@ -519,10 +565,15 @@ function makeMockBucketStage2(initial = {}) {
       }
     },
     async put(key, body, opts) {
+      events.push({ op: 'put', key })
       objects.set(key, { body, ...(opts?.httpMetadata || {}), etag: 'etag-put' })
       return { etag: 'etag-put' }
     },
-    async delete(key) { objects.delete(key) },
+    async delete(key) {
+      events.push({ op: 'delete', key })
+      objects.delete(key)
+    },
+    _has(key) { return objects.has(key) },
   }
 }
 
@@ -614,6 +665,80 @@ test('Stage2a: legacy mode requires MEDIA_BUCKET binding', () => {
   assert.throws(() => selectUploadBucket_STAGE2({ MEDIA_STORAGE_MODE: 'legacy' }))
 })
 
+test('Stage2h: candidate reads prefer current mode and retain migration fallback', () => {
+  const legacy = makeMockBucketStage2()
+  const priv = makeMockBucketStage2()
+  assert.deepEqual(
+    candidateReadBuckets({ MEDIA_STORAGE_MODE: 'legacy', MEDIA_BUCKET: legacy, PRIVATE_MEDIA_BUCKET: priv })
+      .map(target => target.role),
+    ['legacy', 'private'],
+  )
+  assert.deepEqual(
+    candidateReadBuckets({ MEDIA_STORAGE_MODE: 'private', MEDIA_BUCKET: legacy, PRIVATE_MEDIA_BUCKET: priv })
+      .map(target => target.role),
+    ['private', 'legacy'],
+  )
+  assert.deepEqual(
+    candidateReadBuckets(
+      { MEDIA_STORAGE_MODE: 'legacy', MEDIA_BUCKET: legacy, PRIVATE_MEDIA_BUCKET: priv },
+      'private',
+    ).map(target => target.role),
+    ['private', 'legacy'],
+  )
+})
+
+test('Stage2h: physical lookup handles legacy-only, private-only, both, and neither', async () => {
+  const key = 'user-123/obs/full.webp'
+  const legacy = makeMockBucketStage2({ [key]: { body: new TextEncoder().encode('LEGACY') } })
+  const priv = makeMockBucketStage2()
+  const env = { MEDIA_STORAGE_MODE: 'legacy', MEDIA_BUCKET: legacy, PRIVATE_MEDIA_BUCKET: priv }
+  assert.equal((await findMediaObject(env, key)).role, 'legacy')
+
+  await legacy.delete(key)
+  await priv.put(key, new TextEncoder().encode('PRIVATE'), {})
+  assert.equal((await findMediaObject(env, key)).role, 'private')
+
+  await legacy.put(key, new TextEncoder().encode('LEGACY_AGAIN'), {})
+  assert.equal((await findMediaObject(env, key)).role, 'legacy')
+
+  await legacy.delete(key)
+  await priv.delete(key)
+  assert.equal(await findMediaObject(env, key), null)
+})
+
+test('Stage2h: owner GET authorizes before private-bucket fallback', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const key = 'user-123/obs/originals/42/source.webp'
+  const legacy = makeMockBucketStage2()
+  const priv = makeMockBucketStage2({
+    [key]: { body: new TextEncoder().encode('PRIVATE_ORIGINAL') },
+  })
+  const env = {
+    ...TEST_ENV,
+    MEDIA_STORAGE_MODE: 'legacy',
+    MEDIA_BUCKET: legacy,
+    PRIVATE_MEDIA_BUCKET: priv,
+    SUPABASE_JWT_SECRET: jwtSecret,
+  }
+  const allowed = await worker.fetch(new Request(`https://upload.sporely.no/upload/${key}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }), env, {})
+  assert.equal(allowed.status, 200)
+  assert.equal(await allowed.text(), 'PRIVATE_ORIGINAL')
+  assert.deepEqual(legacy.events.filter(event => event.op === 'get').map(event => event.key), [key])
+  assert.deepEqual(priv.events.filter(event => event.op === 'get').map(event => event.key), [key])
+
+  legacy.events.length = 0
+  priv.events.length = 0
+  const denied = await worker.fetch(new Request(
+    'https://upload.sporely.no/upload/other-user/obs/full.webp', {
+      headers: { Authorization: `Bearer ${token}` },
+    }), env, {})
+  assert.equal(denied.status, 403)
+  assert.equal(legacy.events.filter(event => event.op === 'get').length, 0)
+  assert.equal(priv.events.filter(event => event.op === 'get').length, 0)
+})
+
 // ── /healthz ────────────────────────────────────────────────────
 
 test('Stage2a: /healthz reports mode + bindings without secrets', async () => {
@@ -627,6 +752,7 @@ test('Stage2a: /healthz reports mode + bindings without secrets', async () => {
   assert.equal(res.status, 200)
   assert.equal(body.ok, true)
   assert.equal(body.mediaStorageMode, 'private')
+  assert.equal(body.writeBindingReady, true)
   assert.equal(body.legacyBucketBound, true)
   assert.equal(body.privateBucketBound, true)
   assert.deepEqual(body.supportedMediaVariants, ['full', 'thumb', 'original'])
@@ -827,6 +953,27 @@ test('Stage2a: /m/ selects PRIVATE_MEDIA_BUCKET when canonical_bucket=private', 
   } finally { restore() }
 })
 
+test('Stage2h: /m/ falls back to legacy for an authorized not-yet-backfilled key', async () => {
+  const restore = installMockFetchStage2([
+    ['/rest/v1/rpc/media_authorize_delivery', async () => ({ status: 200, body: [{
+      allowed: true, storage_path: 'u/o/full.webp', canonical_bucket: 'private',
+      media_version: 1, cache_class: 'public', reason: 'public',
+    }] })],
+  ])
+  const env = baseDeliveryEnv({
+    PRIVATE_MEDIA_BUCKET: makeMockBucketStage2(),
+    MEDIA_BUCKET: makeMockBucketStage2({
+      'u/o/full.webp': { body: new TextEncoder().encode('LEGACY_ONLY') },
+    }),
+  })
+  try {
+    const res = await worker.fetch(
+      new Request('https://upload.sporely.no/m/42/full?v=1'), env, {})
+    assert.equal(res.status, 200)
+    assert.equal(await res.text(), 'LEGACY_ONLY')
+  } finally { restore() }
+})
+
 test('Stage2a: /m/ RPC failure surfaces as 500 not 200 with default body', async () => {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => new Response('boom', { status: 500 })
@@ -975,7 +1122,162 @@ test('Stage2a-r2: private-mode upload requires X-Sporely-Image-Id', async () => 
   } finally { restoreFetch() }
 })
 
-test('Stage2a-r2: private mode rejects mosaic upload instead of using legacy validation', async () => {
+test('Stage2h: private full, thumb, and original uploads target only the private binding', async t => {
+  for (const uploadType of ['full', 'thumb', 'original']) {
+    await t.test(uploadType, async () => {
+      const { jwtSecret, token } = createWorkerAuthToken()
+      const fullKey = 'user-123/obs-123/full.webp'
+      const key = uploadType === 'thumb'
+        ? 'user-123/obs-123/thumb_full.webp'
+        : uploadType === 'original'
+          ? 'user-123/obs-123/originals/42/source.webp'
+          : fullKey
+      const legacy = makeMockBucketStage2()
+      const priv = makeMockBucketStage2()
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = async (input, init = {}) => {
+        const url = typeof input === 'string' ? input : String(input?.url || '')
+        if (url.includes('/rest/v1/profiles?')) return new Response(JSON.stringify([{
+          is_pro: true, cloud_plan: 'pro', total_storage_bytes: 0,
+          storage_used_bytes: 0, image_count: 0, is_banned: false,
+        }]), { status: 200 })
+        if (url.includes('/rest/v1/observation_images?') && init.method !== 'PATCH') {
+          return new Response(JSON.stringify([{
+            id: 42,
+            storage_path: fullKey,
+            original_storage_path: 'user-123/obs-123/originals/42/source.webp',
+            canonical_bucket: 'legacy',
+          }]), { status: 200 })
+        }
+        if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+          return new Response(JSON.stringify([{
+            total_storage_bytes: 4, storage_used_bytes: 4, image_count: 1,
+          }]), { status: 200 })
+        }
+        if (url.includes('/rest/v1/observation_images?id=eq.42') && init.method === 'PATCH') {
+          return new Response(JSON.stringify([{}]), { status: 200 })
+        }
+        throw new Error(`Unexpected fetch: ${url}`)
+      }
+      try {
+        const res = await worker.fetch(new Request(`https://upload.sporely.no/upload/${key}`, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'image/webp',
+            'X-Sporely-Image-Id': '42',
+            'X-Sporely-Upload-Variant': uploadType,
+          },
+          body: new TextEncoder().encode('DATA'),
+        }), {
+          ...TEST_ENV,
+          MEDIA_STORAGE_MODE: 'private',
+          MEDIA_BUCKET: legacy,
+          PRIVATE_MEDIA_BUCKET: priv,
+          SUPABASE_URL: 'https://example.supabase.co',
+          SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+          SUPABASE_JWT_SECRET: jwtSecret,
+        }, {})
+        assert.equal(res.status, 201)
+        assert.equal(priv._has(key), true)
+        assert.equal(legacy._has(key), false)
+      } finally { globalThis.fetch = originalFetch }
+    })
+  }
+})
+
+test('Stage2h: legacy full, thumb, and original uploads remain legacy-only', async t => {
+  for (const uploadType of ['full', 'thumb', 'original']) {
+    await t.test(uploadType, async () => {
+      const { jwtSecret, token } = createWorkerAuthToken()
+      const key = `user-123/obs-123/${uploadType}.webp`
+      const legacy = makeMockBucketStage2()
+      const restoreFetch = installProfileFetchMock({
+        is_pro: true, cloud_plan: 'pro', total_storage_bytes: 0,
+        storage_used_bytes: 0, image_count: 0, is_banned: false,
+      })
+      try {
+        const res = await worker.fetch(new Request(`https://upload.sporely.no/upload/${key}`, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'image/webp',
+            'X-Sporely-Upload-Variant': uploadType,
+          },
+          body: new TextEncoder().encode('LEGACY'),
+        }), {
+          ...TEST_ENV,
+          MEDIA_STORAGE_MODE: 'legacy',
+          MEDIA_BUCKET: legacy,
+          SUPABASE_URL: 'https://example.supabase.co',
+          SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+          SUPABASE_JWT_SECRET: jwtSecret,
+        }, {})
+        assert.equal(res.status, 201)
+        assert.equal(legacy._has(key), true)
+      } finally { restoreFetch() }
+    })
+  }
+})
+
+test('Stage2h: backfill-era private write does not double-count a legacy copy', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const key = 'user-123/obs-123/full.webp'
+  const legacy = makeMockBucketStage2({
+    [key]: { body: new TextEncoder().encode('LEGACY') },
+  })
+  const priv = makeMockBucketStage2()
+  let storageDeltaCalls = 0
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    if (url.includes('/rest/v1/profiles?')) return new Response(JSON.stringify([{
+      is_pro: true, cloud_plan: 'pro', total_storage_bytes: 6,
+      storage_used_bytes: 6, image_count: 1, is_banned: false,
+    }]), { status: 200 })
+    if (url.includes('/rest/v1/observation_images?') && init.method !== 'PATCH') {
+      return new Response(JSON.stringify([{
+        id: 42, storage_path: key, canonical_bucket: 'legacy',
+      }]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      storageDeltaCalls += 1
+      return new Response(JSON.stringify([{
+        total_storage_bytes: 6, storage_used_bytes: 6, image_count: 1,
+      }]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/observation_images?id=eq.42') && init.method === 'PATCH') {
+      return new Response(JSON.stringify([{}]), { status: 200 })
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+  try {
+    const res = await worker.fetch(new Request(`https://upload.sporely.no/upload/${key}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'image/webp',
+        'X-Sporely-Image-Id': '42',
+        'X-Sporely-Upload-Variant': 'full',
+      },
+      body: new TextEncoder().encode('NEW!'),
+    }), {
+      ...TEST_ENV,
+      MEDIA_STORAGE_MODE: 'private',
+      MEDIA_BUCKET: legacy,
+      PRIVATE_MEDIA_BUCKET: priv,
+      SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+      SUPABASE_JWT_SECRET: jwtSecret,
+    }, {})
+    assert.equal(res.status, 201)
+    assert.equal(storageDeltaCalls, 0)
+    assert.equal(priv._has(key), true)
+    assert.equal(legacy._has(key), true)
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('Stage2h: private mosaic upload requires an identity', async () => {
   const { jwtSecret, token } = createWorkerAuthToken()
   const restoreFetch = installProfileFetchMock({
     is_pro: true, cloud_plan: 'pro', storage_quota_bytes: null,
@@ -1002,9 +1304,138 @@ test('Stage2a-r2: private mode rejects mosaic upload instead of using legacy val
         SUPABASE_JWT_SECRET: jwtSecret,
       }, {},
     )
-    assert.equal(res.status, 501)
-    assert.equal((await res.json()).error, 'private_mosaic_upload_not_ready')
+    assert.equal(res.status, 400)
+    assert.equal((await res.json()).error, 'mosaic_id_required')
   } finally { restoreFetch() }
+})
+
+test('Stage2h: private mosaic upload fails closed without the private binding', async () => {
+  const res = await worker.fetch(
+    new Request('https://upload.sporely.no/upload/user-123/mosaic.webp', {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer deliberately-unused',
+        'Content-Type': 'image/webp',
+        'X-Sporely-Mosaic-Id': '77',
+        'X-Sporely-Upload-Variant': 'spore_mosaic',
+      },
+      body: new TextEncoder().encode('MOSAIC'),
+    }),
+    {
+      ...TEST_ENV,
+      MEDIA_STORAGE_MODE: 'private',
+      MEDIA_BUCKET: makeMockBucketStage2(),
+      PRIVATE_MEDIA_BUCKET: undefined,
+    }, {},
+  )
+  assert.equal(res.status, 500)
+  assert.equal((await res.json()).error, 'missing_private_bucket')
+})
+
+test('Stage2h: private mosaic upload validates its row and targets private storage', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const key = 'user-123/obs-123/spore_mosaic_v1_abcdef0123456789.webp'
+  const legacy = makeMockBucketStage2()
+  const priv = makeMockBucketStage2()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    if (url.includes('/rest/v1/profiles?')) return new Response(JSON.stringify([{
+      is_pro: true, cloud_plan: 'pro', total_storage_bytes: 0,
+      storage_used_bytes: 0, image_count: 0, is_banned: false,
+    }]), { status: 200 })
+    if (url.includes('/rest/v1/spore_measurement_mosaics?') && init.method !== 'PATCH') {
+      return new Response(JSON.stringify([{
+        id: 77, observation_id: 'obs-123',
+        storage_key: 'user-123/obs-123/spore_mosaic_v1_old.webp',
+        canonical_bucket: 'legacy',
+      }]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      return new Response(JSON.stringify([{
+        total_storage_bytes: 6, storage_used_bytes: 6, image_count: 0,
+      }]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/spore_measurement_mosaics?id=eq.77') && init.method === 'PATCH') {
+      return new Response(JSON.stringify([{}]), { status: 200 })
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+  try {
+    const res = await worker.fetch(new Request(`https://upload.sporely.no/upload/${key}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'image/webp',
+        'X-Sporely-Mosaic-Id': '77',
+        'X-Sporely-Upload-Variant': 'spore_mosaic',
+      },
+      body: new TextEncoder().encode('MOSAIC'),
+    }), {
+      ...TEST_ENV,
+      MEDIA_STORAGE_MODE: 'private',
+      MEDIA_BUCKET: legacy,
+      PRIVATE_MEDIA_BUCKET: priv,
+      SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+      SUPABASE_JWT_SECRET: jwtSecret,
+    }, {})
+    assert.equal(res.status, 201)
+    assert.equal(priv._has(key), true)
+    assert.equal(legacy._has(key), false)
+    assert.equal((await res.json()).key, key)
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('Stage2h: failed mosaic finalization rolls back the actual private write target', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const key = 'user-123/obs-123/spore_mosaic_v1_deadbeef.webp'
+  const priv = makeMockBucketStage2()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    if (url.includes('/rest/v1/profiles?')) return new Response(JSON.stringify([{
+      is_pro: true, cloud_plan: 'pro', total_storage_bytes: 0,
+      storage_used_bytes: 0, image_count: 0, is_banned: false,
+    }]), { status: 200 })
+    if (url.includes('/rest/v1/spore_measurement_mosaics?') && init.method !== 'PATCH') {
+      return new Response(JSON.stringify([{
+        id: 77, observation_id: 'obs-123', storage_key: key,
+        canonical_bucket: 'legacy',
+      }]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      return new Response(JSON.stringify([{
+        total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0,
+      }]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/spore_measurement_mosaics?id=eq.77') && init.method === 'PATCH') {
+      return new Response('failed', { status: 500 })
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+  try {
+    const res = await worker.fetch(new Request(`https://upload.sporely.no/upload/${key}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'image/webp',
+        'X-Sporely-Mosaic-Id': '77',
+        'X-Sporely-Upload-Variant': 'spore_mosaic',
+      },
+      body: new TextEncoder().encode('MOSAIC'),
+    }), {
+      ...TEST_ENV,
+      MEDIA_STORAGE_MODE: 'private',
+      MEDIA_BUCKET: makeMockBucketStage2(),
+      PRIVATE_MEDIA_BUCKET: priv,
+      SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+      SUPABASE_JWT_SECRET: jwtSecret,
+    }, {})
+    assert.equal(res.status, 500)
+    assert.equal(priv._has(key), false)
+  } finally { globalThis.fetch = originalFetch }
 })
 
 
@@ -1079,6 +1510,27 @@ test('Stage2a-r3: /mm/ obsolete version returns 404', async () => {
     const res = await worker.fetch(
       new Request('https://upload.sporely.no/mm/42?v=3'), env, {})
     assert.equal(res.status, 404, 'obsolete mosaic ?v= must deny')
+  } finally { restore() }
+})
+
+test('Stage2h: /mm/ uses canonical role first and migration fallback second', async () => {
+  const restore = installMockFetchStage2([
+    ['/rest/v1/rpc/media_authorize_mosaic_delivery', async () => ({ status: 200, body: [{
+      allowed: true, storage_key: 'u/o/mosaic.webp', canonical_bucket: 'private',
+      media_version: 2, cache_class: 'public', reason: 'public',
+    }] })],
+  ])
+  const priv = makeMockBucketStage2()
+  const legacy = makeMockBucketStage2({
+    'u/o/mosaic.webp': { body: new TextEncoder().encode('LEGACY_MOSAIC') },
+  })
+  try {
+    const res = await worker.fetch(
+      new Request('https://upload.sporely.no/mm/42?v=2'),
+      baseDeliveryEnv({ MEDIA_BUCKET: legacy, PRIVATE_MEDIA_BUCKET: priv }), {})
+    assert.equal(res.status, 200)
+    assert.equal(await res.text(), 'LEGACY_MOSAIC')
+    assert.equal(priv.events.find(event => event.op === 'get')?.key, 'u/o/mosaic.webp')
   } finally { restore() }
 })
 
@@ -1248,6 +1700,7 @@ function makeTrackedBucket(entries = {}) {
 
 test('DELETE /upload/<key>: removes from BOTH legacy and private buckets when both are bound', async () => {
   const { jwtSecret, token } = createWorkerAuthToken()
+  const storageDeltas = []
   const restoreFetch = installProfileFetchMock({
     is_pro: true,
     cloud_plan: 'pro',
@@ -1256,7 +1709,7 @@ test('DELETE /upload/<key>: removes from BOTH legacy and private buckets when bo
     storage_used_bytes: 3000,
     image_count: 3,
     is_banned: false,
-  })
+  }, null, delta => storageDeltas.push(delta))
   const legacyBucket = makeTrackedBucket({ 'user-123/a/full.webp': { size: 1000 } })
   const privateBucket = makeTrackedBucket({ 'user-123/a/full.webp': { size: 500 } })
 
@@ -1289,6 +1742,11 @@ test('DELETE /upload/<key>: removes from BOTH legacy and private buckets when bo
     assert.ok(privateBucket.events.some(e => e.op === 'delete' && e.key === 'user-123/a/full.webp'))
     assert.equal(legacyBucket._has('user-123/a/full.webp'), false)
     assert.equal(privateBucket._has('user-123/a/full.webp'), false)
+    assert.deepEqual(storageDeltas, [{
+      p_user_id: 'user-123',
+      p_storage_delta: -1000,
+      p_image_delta: -1,
+    }], 'dual physical copies count as one logical object')
   } finally { restoreFetch() }
 })
 
@@ -1456,5 +1914,187 @@ test('DELETE /upload/<key>: still enforces key must start with authenticated use
     // Ensure no delete was issued to either bucket.
     assert.equal(legacyBucket.events.filter(e => e.op === 'delete').length, 0)
     assert.equal(privateBucket.events.filter(e => e.op === 'delete').length, 0)
+  } finally { restoreFetch() }
+})
+
+test('deleteMediaObjectCopies: full, thumb, original, and mosaic keys use the same dual-bucket contract', async () => {
+  for (const key of [
+    'user-123/obs/full.webp',
+    'user-123/obs/thumb_full.webp',
+    'user-123/obs/originals/42/source.heic',
+    'user-123/obs/spore_mosaic_v1_hash.webp',
+  ]) {
+    const legacy = makeTrackedBucket({ [key]: { size: 40 } })
+    const priv = makeTrackedBucket({ [key]: { size: 40 } })
+    const result = await deleteMediaObjectCopies({
+      MEDIA_STORAGE_MODE: 'legacy',
+      MEDIA_BUCKET: legacy,
+      PRIVATE_MEDIA_BUCKET: priv,
+    }, key)
+
+    assert.equal(result.ok, true, key)
+    assert.equal(result.logicalBytes, 40, key)
+    assert.equal(legacy._has(key), false, key)
+    assert.equal(priv._has(key), false, key)
+  }
+})
+
+test('DELETE /upload/<key>: reports a configured private-bucket failure after attempting legacy cleanup', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const storageDeltas = []
+  const restoreFetch = installProfileFetchMock({
+    is_pro: true,
+    cloud_plan: 'pro',
+    storage_quota_bytes: null,
+    total_storage_bytes: 100,
+    storage_used_bytes: 100,
+    image_count: 1,
+    is_banned: false,
+  }, null, delta => storageDeltas.push(delta))
+  const key = 'user-123/obs/full.webp'
+  const legacy = makeTrackedBucket({ [key]: { size: 100 } })
+  const priv = makeTrackedBucket({ [key]: { size: 100 } })
+  priv.delete = async deleteKey => {
+    priv.events.push({ op: 'delete', key: deleteKey })
+    throw Object.assign(new Error('temporary failure'), { code: 'R2_TEMPORARY' })
+  }
+
+  try {
+    const res = await worker.fetch(
+      new Request(`https://upload.sporely.no/upload/${key}`, {
+        method: 'DELETE',
+        headers: { Origin: 'https://localhost', Authorization: `Bearer ${token}` },
+      }),
+      {
+        ...TEST_ENV,
+        MEDIA_BUCKET: legacy,
+        PRIVATE_MEDIA_BUCKET: priv,
+        SUPABASE_URL: 'https://example.supabase.co',
+        SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+        SUPABASE_JWT_SECRET: jwtSecret,
+      },
+      {},
+    )
+    assert.equal(res.status, 502)
+    const body = await res.json()
+    assert.equal(body.error, 'media_delete_partial_failure')
+    assert.equal(body.details.targets.find(target => target.role === 'private').phase, 'delete')
+    assert.equal(legacy._has(key), false)
+    assert.equal(priv._has(key), true)
+    assert.deepEqual(storageDeltas, [], 'quota waits until all configured copies are removed')
+  } finally { restoreFetch() }
+})
+
+test('DELETE /upload/<key>: an idempotent retry does not decrement quota twice', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const storageDeltas = []
+  const restoreFetch = installProfileFetchMock({
+    is_pro: true,
+    cloud_plan: 'pro',
+    storage_quota_bytes: null,
+    total_storage_bytes: 100,
+    storage_used_bytes: 100,
+    image_count: 1,
+    is_banned: false,
+  }, null, delta => storageDeltas.push(delta))
+  const key = 'user-123/obs/full.webp'
+  const legacy = makeTrackedBucket({ [key]: { size: 100 } })
+  const env = {
+    ...TEST_ENV,
+    MEDIA_BUCKET: legacy,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    SUPABASE_JWT_SECRET: jwtSecret,
+  }
+  const request = () => new Request(`https://upload.sporely.no/upload/${key}`, {
+    method: 'DELETE',
+    headers: { Origin: 'https://localhost', Authorization: `Bearer ${token}` },
+  })
+
+  try {
+    assert.equal((await worker.fetch(request(), env, {})).status, 200)
+    assert.equal((await worker.fetch(request(), env, {})).status, 200)
+    assert.equal(storageDeltas.length, 1)
+    assert.equal(storageDeltas[0].p_storage_delta, -100)
+  } finally { restoreFetch() }
+})
+
+test('DELETE /upload/<key>: thumb, preserved original, and mosaic release bytes without decrementing logical image_count', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const storageDeltas = []
+  const restoreFetch = installProfileFetchMock({
+    is_pro: true,
+    cloud_plan: 'pro',
+    storage_quota_bytes: null,
+    total_storage_bytes: 300,
+    storage_used_bytes: 300,
+    image_count: 1,
+    is_banned: false,
+  }, null, delta => storageDeltas.push(delta))
+  const keys = [
+    'user-123/obs/thumb_full.webp',
+    'user-123/obs/originals/42/source.heic',
+    'user-123/obs/spore_mosaic_v1_hash.webp',
+  ]
+  const bucket = makeTrackedBucket(Object.fromEntries(keys.map(key => [key, { size: 100 }])))
+  const env = {
+    ...TEST_ENV,
+    MEDIA_BUCKET: bucket,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    SUPABASE_JWT_SECRET: jwtSecret,
+  }
+
+  try {
+    for (const key of keys) {
+      const res = await worker.fetch(new Request(`https://upload.sporely.no/upload/${key}`, {
+        method: 'DELETE',
+        headers: { Origin: 'https://localhost', Authorization: `Bearer ${token}` },
+      }), env, {})
+      assert.equal(res.status, 200)
+    }
+    assert.deepEqual(storageDeltas.map(delta => delta.p_storage_delta), [-100, -100, -100])
+    assert.deepEqual(storageDeltas.map(delta => delta.p_image_delta), [0, 0, 0])
+  } finally { restoreFetch() }
+})
+
+test('DELETE /upload/<key>: retry after quota-finalize failure uses the pre-delete byte snapshot exactly once', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const storageDeltas = []
+  const restoreFetch = installProfileFetchMock({
+    is_pro: true,
+    cloud_plan: 'pro',
+    storage_quota_bytes: null,
+    total_storage_bytes: 100,
+    storage_used_bytes: 100,
+    image_count: 1,
+    is_banned: false,
+  }, null, delta => storageDeltas.push(delta), { failFinalizeOnce: true })
+  const key = 'user-123/obs/full.webp'
+  const bucket = makeTrackedBucket({ [key]: { size: 100 } })
+  const env = {
+    ...TEST_ENV,
+    MEDIA_BUCKET: bucket,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    SUPABASE_JWT_SECRET: jwtSecret,
+  }
+  const request = () => new Request(`https://upload.sporely.no/upload/${key}`, {
+    method: 'DELETE',
+    headers: { Origin: 'https://localhost', Authorization: `Bearer ${token}` },
+  })
+
+  try {
+    const first = await worker.fetch(request(), env, {})
+    assert.equal(first.status, 500)
+    assert.equal((await first.json()).error, 'media_delete_accounting_finalize_failed')
+    assert.equal(bucket._has(key), false)
+
+    assert.equal((await worker.fetch(request(), env, {})).status, 200)
+    assert.deepEqual(storageDeltas, [{
+      p_user_id: 'user-123',
+      p_storage_delta: -100,
+      p_image_delta: -1,
+    }])
   } finally { restoreFetch() }
 })

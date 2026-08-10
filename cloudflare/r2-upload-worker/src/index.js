@@ -100,6 +100,9 @@ async function handleRequest(request, env, ctx) {
         workerVersion: WORKER_VERSION_MARKER,
         mediaStorageMode: storageMode,
         mediaStorageModeError: storageModeError,
+        writeBindingReady: storageMode === 'private'
+          ? !!env.PRIVATE_MEDIA_BUCKET
+          : storageMode === 'legacy' ? !!env.MEDIA_BUCKET : false,
         bindings: {
           hasMediaBucket: !!env.MEDIA_BUCKET,
           hasPrivateMediaBucket: !!env.PRIVATE_MEDIA_BUCKET,
@@ -370,8 +373,29 @@ async function handleUpload(request, env, ctx, url) {
     })
   }
 
-  const existingObject = await uploadBucket.head(key)
-  const existingBytes = mediaObjectSize(existingObject)
+  const existingCopies = await Promise.all(configuredBucketRoles(env).map(async target => {
+    try {
+      const object = await target.bucket.head(key)
+      return { ...target, object, bytes: mediaObjectSize(object), ok: true }
+    } catch (error) {
+      return { ...target, object: null, bytes: 0, ok: false, error }
+    }
+  }))
+  const inspectionFailure = existingCopies.find(target => !target.ok)
+  if (inspectionFailure) {
+    throw httpError(502, 'media_upload_inspection_failed',
+      `Could not inspect ${inspectionFailure.role} storage before upload`)
+  }
+  const targetCopy = existingCopies.find(target => target.role === canonicalBucket)
+  const existingObject = targetCopy?.object || null
+  const existingLogicalBytes = Math.max(
+    0, ...existingCopies.map(target => Number(target.bytes || 0)))
+  const alternateLogicalBytes = Math.max(
+    0,
+    ...existingCopies
+      .filter(target => target.role !== canonicalBucket)
+      .map(target => Number(target.bytes || 0)),
+  )
 
   // Round-3 amendment: real overwrite state machine.
   //
@@ -396,7 +420,9 @@ async function handleUpload(request, env, ctx, url) {
   const useTempKeyForOverwrite = canonicalBucket === 'private' && isOverwrite
   const nonce = crypto.randomUUID().replace(/-/g, '')
   const writeKey = useTempKeyForOverwrite ? `${key}.pending-${nonce}` : key
-  const storageDelta = Math.max(0, bodyBytes - existingBytes)
+  const resultingLogicalBytes = Math.max(bodyBytes, alternateLogicalBytes)
+  const accountingStorageDelta = resultingLogicalBytes - existingLogicalBytes
+  const storageDelta = Math.max(0, accountingStorageDelta)
   const rawProfile = await fetchStorageProfile(env, claims.sub)
   if (rawProfile?.is_banned === true) {
     throw httpError(403, 'user_banned', 'User is banned from uploading media')
@@ -421,11 +447,6 @@ async function handleUpload(request, env, ctx, url) {
     throw httpError(400, 'invalid_upload_type',
       `Upload type must be one of: ${Array.from(LEGACY_UPLOAD_TYPES).join(', ')}`)
   }
-  if (storageMode === 'private' && uploadType === 'spore_mosaic') {
-    throw httpError(501, 'private_mosaic_upload_not_ready',
-      'Private mosaic upload requires a validated mosaic identity contract')
-  }
-
   // Stage 2 server-validated image identity. In `private` mode the client
   // MUST have already inserted an `observation_images` row and must
   // present its id in `X-Sporely-Image-Id`; the worker verifies the row
@@ -434,8 +455,28 @@ async function handleUpload(request, env, ctx, url) {
   // new uploads. In `legacy` mode the header is optional so existing
   // client releases continue to work during the phased rollout.
   const requestedImageIdRaw = String(request.headers.get('X-Sporely-Image-Id') || '').trim()
+  const requestedMosaicIdRaw = String(request.headers.get('X-Sporely-Mosaic-Id') || '').trim()
   let validatedImageId = null
-  if (requestedImageIdRaw) {
+  let validatedMosaicId = null
+  if (uploadType === 'spore_mosaic') {
+    if (requestedMosaicIdRaw) {
+      const parsedMosaicId = Number.parseInt(requestedMosaicIdRaw, 10)
+      if (!Number.isFinite(parsedMosaicId) || parsedMosaicId <= 0
+          || String(parsedMosaicId) !== requestedMosaicIdRaw) {
+        throw httpError(400, 'invalid_mosaic_id',
+          'X-Sporely-Mosaic-Id must be a positive integer')
+      }
+      const rowMatch = await verifyMosaicRowMatchesUpload(
+        env, parsedMosaicId, claims.sub, key)
+      if (!rowMatch.ok) {
+        throw httpError(rowMatch.status, rowMatch.code, rowMatch.message)
+      }
+      validatedMosaicId = parsedMosaicId
+    } else if (storageMode === 'private') {
+      throw httpError(400, 'mosaic_id_required',
+        'X-Sporely-Mosaic-Id header is required for private mosaic uploads')
+    }
+  } else if (requestedImageIdRaw) {
     const parsedImageId = Number.parseInt(requestedImageIdRaw, 10)
     if (!Number.isFinite(parsedImageId) || parsedImageId <= 0
         || String(parsedImageId) !== requestedImageIdRaw) {
@@ -560,7 +601,11 @@ async function handleUpload(request, env, ctx, url) {
       stored_bytes: String(bodyBytes),
     },
   })
-  const imageDelta = isOriginalImageKey(key) && !existingObject ? 1 : 0
+  // image_count represents logical observation-image rows. Derived thumbs,
+  // preserved originals, and observation mosaics contribute bytes but do
+  // not create additional logical images.
+  const imageDelta = uploadType === 'full'
+    && !existingCopies.some(target => !!target.object) ? 1 : 0
 
   // Failure helper: on any post-put failure we delete ONLY the write
   // target (which is a temp key when we're doing an overwrite).
@@ -573,23 +618,27 @@ async function handleUpload(request, env, ctx, url) {
 
   let trackedProfile = null
   try {
-    trackedProfile = await applyStorageDelta(env, claims.sub, bodyBytes - existingBytes, imageDelta)
+    trackedProfile = await applyStorageDelta(
+      env, claims.sub, accountingStorageDelta, imageDelta)
   } catch (error) {
     await rollbackWrittenBytesOnly()
     throw error
   }
 
-  if (canonicalBucket === 'private' && validatedImageId !== null) {
-    const patch = await markRowCanonicalBucketPrivate(env, validatedImageId)
+  if (canonicalBucket === 'private'
+      && (validatedImageId !== null || validatedMosaicId !== null)) {
+    const patch = validatedMosaicId !== null
+      ? await markMosaicCanonicalBucketPrivate(env, validatedMosaicId)
+      : await markImageCanonicalBucketPrivate(env, validatedImageId)
     if (!patch || !patch.ok) {
       await rollbackWrittenBytesOnly()
       try {
-        await applyStorageDelta(env, claims.sub, -(bodyBytes - existingBytes), -imageDelta)
+        await applyStorageDelta(env, claims.sub, -accountingStorageDelta, -imageDelta)
       } catch (rollbackError) {
         console.error('Failed to roll back quota after canonical_bucket PATCH error', rollbackError)
       }
       throw httpError(500, 'canonical_bucket_patch_failed',
-        `Could not upgrade observation_images.canonical_bucket to private (status=${patch?.status})`)
+        `Could not upgrade media canonical_bucket to private (status=${patch?.status})`)
     }
   }
 
@@ -638,7 +687,7 @@ async function handleUpload(request, env, ctx, url) {
         // undo. (For an overwrite, canonical_bucket is unchanged.)
       }
       try {
-        await applyStorageDelta(env, claims.sub, -(bodyBytes - existingBytes), -imageDelta)
+        await applyStorageDelta(env, claims.sub, -accountingStorageDelta, -imageDelta)
       } catch (rollbackError) {
         console.error('Failed to roll back quota after promotion failure', rollbackError)
       }
@@ -669,10 +718,6 @@ async function handleUpload(request, env, ctx, url) {
 }
 
 async function handleDownload(request, env, ctx, url) {
-  if (!env.MEDIA_BUCKET) {
-    throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
-  }
-
   const origin = resolveAllowedOrigin(request, env)
   if (request.headers.get('Origin') && !origin) {
     throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
@@ -690,10 +735,14 @@ async function handleDownload(request, env, ctx, url) {
     throw httpError(403, 'key_not_allowed', 'Download key is not available to the authenticated user')
   }
 
-  const object = await env.MEDIA_BUCKET.get(key)
-  if (!object) {
+  // Authorization is resolved once for the canonical key before physical
+  // storage lookup. Bucket fallback cannot turn a denied identity into an
+  // allowed one; it only locates the same authorized key during migration.
+  const located = await findMediaObject(env, key)
+  if (!located) {
     throw httpError(404, 'media_not_found', 'Media object was not found')
   }
+  const object = located.object
 
   const headers = corsHeaders(request, env, origin)
   object.writeHttpMetadata(headers)
@@ -734,20 +783,34 @@ async function handleDelete(request, env, ctx, url) {
     throw httpError(403, 'key_not_allowed', 'Delete key must start with the authenticated user id')
   }
 
-  const legacyObject = env.MEDIA_BUCKET ? await env.MEDIA_BUCKET.head(key) : null
-  const privateObject = env.PRIVATE_MEDIA_BUCKET ? await env.PRIVATE_MEDIA_BUCKET.head(key) : null
+  const deletion = await deleteMediaObjectCopies(env, key, {
+    beforeDelete: async snapshot => {
+      await prepareMediaDeleteAccounting(
+        env,
+        claims.sub,
+        key,
+        snapshot.logicalBytes,
+        isPrimaryImageKey(key) && snapshot.held ? 1 : 0,
+      )
+    },
+  })
+  if (!deletion.ok) {
+    throw httpError(
+      502,
+      'media_delete_partial_failure',
+      'Media cleanup was incomplete and can be retried',
+      {
+        key,
+        targets: deletion.targets,
+      },
+    )
+  }
 
-  if (env.MEDIA_BUCKET) await env.MEDIA_BUCKET.delete(key)
-  if (env.PRIVATE_MEDIA_BUCKET) await env.PRIVATE_MEDIA_BUCKET.delete(key)
-
-  // Storage-usage accounting: sum bytes from whichever buckets held the
-  // key. Image-count decrements by ONE for an original key regardless of
-  // whether one or both buckets held it — the row represents a single
-  // logical image.
-  const existingBytes = mediaObjectSize(legacyObject) + mediaObjectSize(privateObject)
-  const held = !!(legacyObject || privateObject)
-  const imageDelta = isOriginalImageKey(key) && held ? -1 : 0
-  const trackedProfile = await applyStorageDelta(env, claims.sub, -existingBytes, imageDelta)
+  // User quota is logical media usage, not migration-copy usage. A key that
+  // temporarily exists in both buckets counts once, using the largest copy
+  // as the conservative logical size. Backfill therefore cannot double the
+  // user's quota, and deletion cannot double-decrement it.
+  const trackedProfile = await finalizeMediaDeleteAccounting(env, claims.sub, key)
 
   return jsonResponse(
     {
@@ -755,9 +818,10 @@ async function handleDelete(request, env, ctx, url) {
       key,
       deleted: true,
       buckets: {
-        legacy: !!legacyObject,
-        private: !!privateObject,
+        legacy: deletion.targets.some(target => target.role === 'legacy' && target.present),
+        private: deletion.targets.some(target => target.role === 'private' && target.present),
       },
+      targets: deletion.targets,
       storage: trackedProfile,
     },
     200,
@@ -765,6 +829,87 @@ async function handleDelete(request, env, ctx, url) {
     env,
     origin,
   )
+}
+
+/**
+ * Delete one logical object identity from every applicable bucket binding.
+ * This deliberately does not consult MEDIA_STORAGE_MODE: old objects may
+ * remain legacy-only after private writes begin, while backfill may leave a
+ * temporary copy in both buckets.
+ *
+ * A failed HEAD is not followed by DELETE for that role because doing so
+ * would discard the only byte count available for an accounting-safe retry.
+ * Other configured roles are still attempted. Missing objects are successful
+ * no-ops, and an unbound future private bucket is simply not applicable.
+ */
+export async function deleteMediaObjectCopies(env, key, options = {}) {
+  const bindings = configuredBucketRoles(env)
+
+  if (!bindings.length) {
+    throw httpError(500, 'missing_bucket', 'No R2 bucket bindings are configured')
+  }
+
+  const inspectedTargets = await Promise.all(bindings.map(async ({ role, bucket }) => {
+    let object
+    try {
+      object = await bucket.head(key)
+    } catch (error) {
+      return {
+        role,
+        configured: true,
+        present: null,
+        deleted: false,
+        ok: false,
+        phase: 'head',
+        error: safeOperationError(error),
+      }
+    }
+
+    const present = !!object
+    const bytes = mediaObjectSize(object)
+    return { role, bucket, configured: true, present, bytes, ok: true }
+  }))
+
+  if (inspectedTargets.some(target => !target.ok)) {
+    return {
+      ok: false,
+      logicalBytes: Math.max(0, ...inspectedTargets.map(target => Number(target.bytes || 0))),
+      targets: inspectedTargets.map(({ bucket: _bucket, ...target }) => target),
+    }
+  }
+
+  const logicalBytes = Math.max(0, ...inspectedTargets.map(target => Number(target.bytes || 0)))
+  const held = inspectedTargets.some(target => target.present)
+  if (typeof options.beforeDelete === 'function') {
+    await options.beforeDelete({ logicalBytes, held })
+  }
+
+  const targets = await Promise.all(inspectedTargets.map(async target => {
+    const { bucket, ...result } = target
+    try {
+      await bucket.delete(key)
+      return { ...result, deleted: true }
+    } catch (error) {
+      return {
+        ...result,
+        deleted: false,
+        ok: false,
+        phase: 'delete',
+        error: safeOperationError(error),
+      }
+    }
+  }))
+
+  return {
+    ok: targets.every(target => target.ok),
+    logicalBytes,
+    targets,
+  }
+}
+
+function safeOperationError(error) {
+  const code = String(error?.code || error?.name || 'operation_failed').trim()
+  return code.slice(0, 120)
 }
 
 async function fetchStorageProfile(env, userId) {
@@ -820,6 +965,46 @@ async function applyStorageDelta(env, userId, storageDelta, imageDelta) {
   } : null
 }
 
+async function prepareMediaDeleteAccounting(env, userId, key, storageBytes, imageCount) {
+  if (!hasSupabaseServiceRole(env)) return null
+  const response = await supabaseRestFetch(env, '/rest/v1/rpc/prepare_media_object_deletion', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_user_id: userId,
+      p_storage_key: key,
+      p_storage_bytes: Math.max(0, Math.trunc(storageBytes || 0)),
+      p_image_count: Math.max(0, Math.trunc(imageCount || 0)),
+    }),
+  })
+  if (!response.ok) {
+    throw httpError(500, 'media_delete_accounting_prepare_failed',
+      'Could not snapshot media deletion accounting')
+  }
+  return true
+}
+
+async function finalizeMediaDeleteAccounting(env, userId, key) {
+  if (!hasSupabaseServiceRole(env)) return null
+  const response = await supabaseRestFetch(env, '/rest/v1/rpc/finalize_media_object_deletion', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_user_id: userId,
+      p_storage_key: key,
+    }),
+  })
+  if (!response.ok) {
+    throw httpError(500, 'media_delete_accounting_finalize_failed',
+      'Could not finalize media deletion accounting')
+  }
+  const rows = await response.json()
+  const profile = Array.isArray(rows) ? rows[0] || null : rows
+  return profile ? {
+    total_storage_bytes: Number(profile.total_storage_bytes || 0),
+    storage_used_bytes: Number(profile.storage_used_bytes || 0),
+    image_count: Number(profile.image_count || 0),
+  } : null
+}
+
 function hasSupabaseServiceRole(env) {
   return !!String(env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
 }
@@ -847,9 +1032,13 @@ function mediaObjectSize(object) {
   return Number.isFinite(size) && size > 0 ? Math.trunc(size) : 0
 }
 
-function isOriginalImageKey(key) {
-  const filename = String(key || '').split('/').pop() || ''
-  return !!filename && !filename.startsWith('thumb_')
+function isPrimaryImageKey(key) {
+  const normalized = String(key || '').replace(/^\/+/, '')
+  const filename = normalized.split('/').pop() || ''
+  if (!filename || filename.startsWith('thumb_')) return false
+  if (normalized.includes('/originals/')) return false
+  if (/^spore_mosaic(?:_|\.)/i.test(filename)) return false
+  return true
 }
 
 async function canReadMediaKey(env, claims, key) {
@@ -925,10 +1114,6 @@ async function handleArtsorakel(request, env, ctx) {
 }
 
 async function handleArtsorakelMedia(request, env, ctx) {
-  if (!env.MEDIA_BUCKET) {
-    throw httpError(500, 'missing_bucket', 'MEDIA_BUCKET binding is not configured')
-  }
-
   const origin = resolveAllowedOrigin(request, env)
   if (request.headers.get('Origin') && !origin) {
     throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
@@ -1020,8 +1205,8 @@ async function handleArtsorakelMedia(request, env, ctx) {
 async function getMediaObjectForAi(env, key, variant) {
   const candidates = mediaCandidateKeys(key, variant)
   for (const candidate of candidates) {
-    const object = await env.MEDIA_BUCKET.get(candidate)
-    if (object) return object
+    const located = await findMediaObject(env, candidate)
+    if (located) return located.object
   }
   return null
 }
@@ -1367,11 +1552,43 @@ export function selectUploadBucket(env) {
   return { bucket: env.MEDIA_BUCKET, name: 'legacy', mode }
 }
 
-// Resolve `canonical_bucket` (`legacy` | `private`) returned by
-// `media_authorize_delivery` to the actual R2 binding.
-function resolveBucketBinding(env, canonicalBucket) {
-  if (canonicalBucket === 'private') return env.PRIVATE_MEDIA_BUCKET || null
-  return env.MEDIA_BUCKET || null
+export function configuredBucketRoles(env) {
+  return [
+    { role: 'legacy', bucket: env.MEDIA_BUCKET || null },
+    { role: 'private', bucket: env.PRIVATE_MEDIA_BUCKET || null },
+  ].filter(target => target.bucket)
+}
+
+// Physical lookup is intentionally separate from the current write target.
+// A canonical role supplied by the database is tried first. Owner raw-key
+// reads have no row identity, so they prefer the current write role and then
+// the alternate configured role. This preserves legacy behavior before
+// cutover and prefers private copies after cutover without losing access to
+// not-yet-backfilled legacy objects.
+export function candidateReadBuckets(env, preferredRole = null) {
+  const configured = configuredBucketRoles(env)
+  if (!configured.length) return []
+  const mode = resolveMediaStorageMode(env)
+  const firstRole = preferredRole === 'legacy' || preferredRole === 'private'
+    ? preferredRole
+    : mode
+  return [...configured].sort((left, right) => {
+    if (left.role === firstRole) return -1
+    if (right.role === firstRole) return 1
+    return left.role.localeCompare(right.role)
+  })
+}
+
+export async function findMediaObject(env, key, preferredRole = null) {
+  const candidates = candidateReadBuckets(env, preferredRole)
+  if (!candidates.length) {
+    throw httpError(500, 'missing_bucket', 'No R2 bucket bindings are configured')
+  }
+  for (const target of candidates) {
+    const object = await target.bucket.get(key)
+    if (object) return { object, role: target.role }
+  }
+  return null
 }
 
 // Stage 2 delivery route: `GET /m/<image_id>/<variant>`. Anonymous callers
@@ -1434,11 +1651,6 @@ async function handleMediaDelivery(request, env, ctx, url) {
     throw httpError(404, 'media_not_found', 'Media not available')
   }
 
-  const bucket = resolveBucketBinding(env, decision.canonical_bucket)
-  if (!bucket) {
-    throw httpError(500, 'missing_bucket',
-      `No R2 binding for canonical_bucket=${decision.canonical_bucket}`)
-  }
   // Per-variant key derivation. The RPC returns the base `storage_path`
   // for full/thumb and `original_storage_path` for original. For `thumb`,
   // prefix the final path segment with `thumb_`; other variants use the
@@ -1449,12 +1661,13 @@ async function handleMediaDelivery(request, env, ctx, url) {
   if (!objectKey) {
     throw httpError(404, 'media_not_found', 'Media not available')
   }
-  const object = await bucket.get(objectKey)
-  if (!object) {
+  const located = await findMediaObject(env, objectKey, decision.canonical_bucket)
+  if (!located) {
     // Row references a key the bucket does not currently hold. Treat as
     // not-found rather than 500 so a mid-purge race is invisible to callers.
     throw httpError(404, 'media_not_found', 'Media not available')
   }
+  const object = located.object
 
   const headers = corsHeaders(request, env, origin)
   object.writeHttpMetadata(headers)
@@ -1525,6 +1738,49 @@ async function verifyImageRowMatchesUpload(env, imageId, callerSub, uploadKey, v
   return { ok: true, row }
 }
 
+async function verifyMosaicRowMatchesUpload(env, mosaicId, callerSub, uploadKey) {
+  if (!hasSupabaseServiceRole(env)) {
+    return {
+      ok: false, status: 500, code: 'missing_supabase_admin',
+      message: 'Service role required to verify mosaic ownership',
+    }
+  }
+  const query = [
+    `id=eq.${encodeURIComponent(mosaicId)}`,
+    `user_id=eq.${encodeURIComponent(callerSub)}`,
+    'select=id,observation_id,storage_key,canonical_bucket',
+    'limit=1',
+  ].join('&')
+  const response = await supabaseRestFetch(
+    env, `/rest/v1/spore_measurement_mosaics?${query}`, { method: 'GET' })
+  if (!response.ok) {
+    return {
+      ok: false, status: 500, code: 'mosaic_lookup_failed',
+      message: 'Could not verify mosaic ownership',
+    }
+  }
+  const rows = await response.json()
+  const row = Array.isArray(rows) ? rows[0] || null : null
+  if (!row) {
+    return {
+      ok: false, status: 403, code: 'mosaic_not_found_or_not_owner',
+      message: 'Mosaic row does not exist or is not owned by the caller',
+    }
+  }
+  const replacementPrefix = `${callerSub}/${row.observation_id}/`
+  const replacementName = uploadKey.slice(replacementPrefix.length)
+  const validReplacementKey = uploadKey.startsWith(replacementPrefix)
+    && /^spore_mosaic_v[0-9]+_[a-f0-9]+\.(?:webp|avif|png|jpe?g)$/i.test(replacementName)
+  if (!row.storage_key
+      || (uploadKey !== String(row.storage_key) && !validReplacementKey)) {
+    return {
+      ok: false, status: 403, code: 'storage_path_mismatch',
+      message: 'Upload key does not match the mosaic row',
+    }
+  }
+  return { ok: true, row }
+}
+
 export function deriveThumbKey(fullKey) {
   const key = String(fullKey || '').trim()
   if (!key) return ''
@@ -1541,7 +1797,7 @@ export function deriveThumbKey(fullKey) {
 // After a successful `private`-mode upload, upgrade the row's
 // `canonical_bucket` from 'legacy' to 'private'. Runs as service_role so
 // the server-owned-field guard trigger allows the mutation.
-async function markRowCanonicalBucketPrivate(env, imageId) {
+async function markImageCanonicalBucketPrivate(env, imageId) {
   if (!hasSupabaseServiceRole(env)) return null
   const response = await supabaseRestFetch(env,
     `/rest/v1/observation_images?id=eq.${encodeURIComponent(imageId)}`, {
@@ -1552,6 +1808,21 @@ async function markRowCanonicalBucketPrivate(env, imageId) {
   if (!response.ok) {
     // Non-fatal: the object is written but the row is out of sync. Return
     // the reason so the caller can decide whether to roll back.
+    return { ok: false, status: response.status, text: await response.text() }
+  }
+  return { ok: true }
+}
+
+
+async function markMosaicCanonicalBucketPrivate(env, mosaicId) {
+  if (!hasSupabaseServiceRole(env)) return null
+  const response = await supabaseRestFetch(env,
+    `/rest/v1/spore_measurement_mosaics?id=eq.${encodeURIComponent(mosaicId)}`, {
+      method: 'PATCH',
+      headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({ canonical_bucket: 'private' }),
+    })
+  if (!response.ok) {
     return { ok: false, status: response.status, text: await response.text() }
   }
   return { ok: true }
@@ -1599,19 +1870,15 @@ async function handleMosaicDelivery(request, env, ctx, url) {
     throw httpError(404, 'media_not_found', 'Media not available')
   }
 
-  const bucket = resolveBucketBinding(env, decision.canonical_bucket)
-  if (!bucket) {
-    throw httpError(500, 'missing_bucket',
-      `No R2 binding for canonical_bucket=${decision.canonical_bucket}`)
-  }
   const objectKey = decision.storage_key
   if (!objectKey) {
     throw httpError(404, 'media_not_found', 'Media not available')
   }
-  const object = await bucket.get(objectKey)
-  if (!object) {
+  const located = await findMediaObject(env, objectKey, decision.canonical_bucket)
+  if (!located) {
     throw httpError(404, 'media_not_found', 'Media not available')
   }
+  const object = located.object
 
   const headers = corsHeaders(request, env, origin)
   object.writeHttpMetadata(headers)
