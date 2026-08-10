@@ -322,6 +322,13 @@ test('runDeletionPlan: R2 500 fails the stage and preserves the auth user', asyn
   const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
   assert.equal(r.ok, false)
   assert.equal(r.stage, 'delete_r2_media')
+  assert.deepEqual(worker.deleted, [
+    `${UID}/x.jpg`,
+    `${UID}/thumb_x.jpg`,
+    `${UID}/thumb_small_x.jpg`,
+    `${UID}/thumb_medium_x.jpg`,
+  ],
+    'a failed key must not prevent remaining snapshotted identities from being attempted')
   assert.equal(admin._calls.find(c => c.op === 'deleteUser'), undefined)
 })
 
@@ -409,6 +416,8 @@ test('observationMediaDeleteTargets returns original AND thumb keys from a norma
   assert.deepEqual(targets.sort(), [
     `${UID}/2026/01/photo.jpg`,
     `${UID}/2026/01/thumb_photo.jpg`,
+    `${UID}/2026/01/thumb_small_photo.jpg`,
+    `${UID}/2026/01/thumb_medium_photo.jpg`,
   ].sort())
 })
 
@@ -417,13 +426,20 @@ test('observationMediaDeleteTargets pairs a thumb_ path with its original', () =
   assert.deepEqual(targets.sort(), [
     `${UID}/2026/photo.jpg`,
     `${UID}/2026/thumb_photo.jpg`,
+    `${UID}/2026/thumb_small_photo.jpg`,
+    `${UID}/2026/thumb_medium_photo.jpg`,
   ].sort())
 })
 
 test('observationMediaDeleteTargets handles empty and single-segment paths', () => {
   assert.deepEqual(observationMediaDeleteTargets(''), [])
   assert.deepEqual(observationMediaDeleteTargets('   '), [])
-  assert.deepEqual(observationMediaDeleteTargets('/leading-slash.jpg'), ['leading-slash.jpg', 'thumb_leading-slash.jpg'])
+  assert.deepEqual(observationMediaDeleteTargets('/leading-slash.jpg'), [
+    'leading-slash.jpg',
+    'thumb_leading-slash.jpg',
+    'thumb_small_leading-slash.jpg',
+    'thumb_medium_leading-slash.jpg',
+  ])
 })
 
 test('encodeObjectKey percent-encodes each segment individually', () => {

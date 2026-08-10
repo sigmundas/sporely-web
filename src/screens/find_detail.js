@@ -3637,13 +3637,23 @@ async function _delete() {
 
   try {
     // Delete storage images first
-    const { data: imgData } = await supabase
+    const { data: imgData, error: imageInventoryError } = await supabase
       .from('observation_images')
-      .select('storage_path')
+      .select('storage_path, original_storage_path')
       .eq('observation_id', currentObs.id)
+    if (imageInventoryError) throw imageInventoryError
 
-    if (imgData?.length) {
-      await deleteObservationMedia(imgData.map(i => i.storage_path))
+    const { data: mosaicData, error: mosaicInventoryError } = await supabase
+      .from('spore_measurement_mosaics')
+      .select('storage_key')
+      .eq('observation_id', currentObs.id)
+      .eq('user_id', state.user.id)
+    if (mosaicInventoryError) throw mosaicInventoryError
+
+    if (imgData?.length || mosaicData?.length) {
+      await deleteObservationMedia(imgData, {
+        standalonePaths: (mosaicData || []).map(row => row.storage_key),
+      })
     }
 
     const { error } = await supabase

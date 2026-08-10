@@ -1103,17 +1103,36 @@ function _warnMissingAiCropCustomFallback(action, error, details = {}) {
   })
 }
 
-export async function deleteObservationMedia(paths) {
-  const normalized = [...new Set((paths || [])
-    .map(normalizeMediaKey)
-    .filter(Boolean)
-  )]
-  if (!normalized.length) return
+export function buildMediaDeleteTargets(imageRows = [], standalonePaths = []) {
+  const targets = new Set()
+  for (const value of imageRows || []) {
+    const row = value && typeof value === 'object' ? value : { storage_path: value }
+    const fullPath = normalizeMediaKey(row.storage_path)
+    if (fullPath) {
+      targets.add(fullPath)
+      const { dir, fileName } = _splitPath(fullPath)
+      const baseName = _stripLegacyVariantPrefixes(fileName)
+      for (const variantName of [
+        `thumb_${baseName}`,
+        `thumb_small_${baseName}`,
+        `thumb_medium_${baseName}`,
+      ]) {
+        targets.add(dir ? `${dir}/${variantName}` : variantName)
+      }
+    }
+    const originalPath = normalizeMediaKey(row.original_storage_path)
+    if (originalPath) targets.add(originalPath)
+  }
+  for (const value of standalonePaths || []) {
+    const key = normalizeMediaKey(value)
+    if (key) targets.add(key)
+  }
+  return [...targets].filter(Boolean)
+}
 
-  const withVariants = [...new Set(normalized.flatMap(path => [
-    path,
-    getVariantPath(path, 'thumb'),
-  ]))]
+export async function deleteObservationMedia(imageRows, options = {}) {
+  const withVariants = buildMediaDeleteTargets(imageRows, options.standalonePaths)
+  if (!withVariants.length) return
 
   const mediaUploadBaseUrl = getMediaUploadBaseUrl()
   if (mediaUploadBaseUrl) {

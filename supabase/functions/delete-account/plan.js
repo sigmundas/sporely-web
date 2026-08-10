@@ -148,14 +148,16 @@ export const STAGES = Object.freeze([
   {
     name: 'delete_r2_media',
     apply: async ctx => {
+      const failures = []
       for (const key of ctx.r2Keys) {
         const outcome = await ctx.worker.deleteKey(key)
         if (!outcome.ok) {
           // 404 is idempotent success.
           if (outcome.status === 404) continue
-          return { ok: false, error: `r2 delete failed for ${maskKey(key)}: ${outcome.detail || outcome.status || 'unknown'}` }
+          failures.push(`r2 delete failed for ${maskKey(key)}: ${outcome.detail || outcome.status || 'unknown'}`)
         }
       }
+      if (failures.length) return { ok: false, error: failures.join('; ') }
       return { ok: true }
     },
   },
@@ -357,8 +359,13 @@ export function observationMediaDeleteTargets(storagePath) {
   if (!fileName) return [normalizedPath]
   const dir = segments.join('/')
   const originalName = fileName.startsWith('thumb_') ? fileName.slice('thumb_'.length) : fileName
-  const thumbName = fileName.startsWith('thumb_') ? fileName : `thumb_${fileName}`
-  return [...new Set([joinStoragePath(dir, originalName), joinStoragePath(dir, thumbName)])]
+  const baseName = originalName.replace(/^(?:small_|medium_)+/i, '')
+  return [...new Set([
+    joinStoragePath(dir, baseName),
+    joinStoragePath(dir, `thumb_${baseName}`),
+    joinStoragePath(dir, `thumb_small_${baseName}`),
+    joinStoragePath(dir, `thumb_medium_${baseName}`),
+  ])]
 }
 
 export function joinStoragePath(dir, fileName) {

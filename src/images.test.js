@@ -3,12 +3,38 @@ import assert from 'node:assert/strict'
 
 import { supabase } from './supabase.js'
 import {
+  buildMediaDeleteTargets,
   ensureImageIdentitySelect,
   fetchCardImages,
   fetchFirstImages,
   fetchObservationImageRows,
   resolveMediaSources,
 } from './images.js'
+
+test('buildMediaDeleteTargets includes full, thumb, exact original, and exact mosaic identities', () => {
+  assert.deepEqual(buildMediaDeleteTargets([
+    {
+      storage_path: 'user/obs/full.webp',
+      original_storage_path: 'user/obs/originals/42/source.heic',
+    },
+  ], ['user/obs/spore_mosaic_v1_hash.webp']), [
+    'user/obs/full.webp',
+    'user/obs/thumb_full.webp',
+    'user/obs/thumb_small_full.webp',
+    'user/obs/thumb_medium_full.webp',
+    'user/obs/originals/42/source.heic',
+    'user/obs/spore_mosaic_v1_hash.webp',
+  ])
+})
+
+test('buildMediaDeleteTargets does not manufacture thumb variants for originals or mosaics', () => {
+  const targets = buildMediaDeleteTargets([
+    { original_storage_path: 'user/obs/originals/42/source.heic' },
+  ], ['user/obs/spore_mosaic.webp'])
+
+  assert.equal(targets.some(key => key.includes('thumb_source.heic')), false)
+  assert.equal(targets.some(key => key.includes('thumb_spore_mosaic')), false)
+})
 
 function withSupabaseFromStub(stub, fn) {
   const originalFrom = supabase.from
