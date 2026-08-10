@@ -23,6 +23,1369 @@ COMMENT ON SCHEMA "public" IS 'standard public schema';
 
 
 
+CREATE OR REPLACE FUNCTION "public"."_get_public_observation_stage2a"("p_observation_id" bigint) RETURNS TABLE("id" bigint, "speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observerDisplayName" "text", "observedOn" "date", "country" "text", "regionId" "text", "locationPrecision" "text", "locationLabel" "text", "hasMicroscopy" boolean, "sporeMeasurementCount" bigint, "sporeSummary" "jsonb", "sporePoints" "jsonb", "sporeMosaic" "jsonb", "contrastMethod" "text", "mountReagent" "text", "sampleType" "text", "sampleSource" "text", "prepSummary" "jsonb", "mapLat" double precision, "mapLon" double precision)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $_$
+  WITH candidate_base AS (
+    SELECT
+      o.id,
+      nullif(btrim(coalesce(o.genus, '')), '') AS genus,
+      nullif(btrim(coalesce(o.species, '')), '') AS species,
+      nullif(btrim(coalesce(o.common_name, '')), '') AS common_name,
+      o.user_id,
+      o.author,
+      o.date AS observed_on,
+      nullif(btrim(coalesce(o.country_code, '')), '') AS country,
+      nullif(btrim(coalesce(o.region_id, '')), '') AS region_id,
+      coalesce(o.location_precision, 'hidden') AS location_precision,
+      nullif(btrim(coalesce(o.location, '')), '') AS location,
+      nullif(btrim(coalesce(r.label, '')), '') AS region_label,
+      public.community_contributor_label(o.user_id, o.author) AS observer_display_name
+    FROM public.observations o
+    LEFT JOIN public.public_regions r
+      ON r.id = o.region_id
+    WHERE o.id = p_observation_id
+      AND o.visibility = 'public'::text
+      AND NOT coalesce(o.is_draft, false)
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+  ),
+  enriched AS (
+    SELECT
+      c.*,
+      latest_image.contrast AS contrast_method,
+      latest_image.mount_medium AS mount_reagent,
+      latest_image.sample_type AS sample_type,
+      latest_image.sample_source AS sample_source,
+      (latest_image.id IS NOT NULL) AS has_microscopy,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+          THEN coalesce(spore_stats.spore_measurement_count, 0::bigint)
+        ELSE 0::bigint
+      END AS spore_measurement_count,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+          THEN o.spore_statistics
+        ELSE NULL::jsonb
+      END AS spore_summary,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+          THEN point_agg.spore_points
+        ELSE NULL::jsonb
+      END AS spore_points,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+             AND latest_mosaic.id IS NOT NULL
+          THEN jsonb_strip_nulls(jsonb_build_object(
+            'url',                concat('https://media.sporely.no/', latest_mosaic.storage_key),
+            'width',              latest_mosaic.width_px,
+            'height',             latest_mosaic.height_px,
+            'tileSize',           latest_mosaic.tile_size_px,
+            'version',            latest_mosaic.version,
+            'tileWidthPx',        latest_mosaic.tile_width_px,
+            'tileHeightPx',       latest_mosaic.tile_height_px,
+            'commonCropWidthUm',  latest_mosaic.common_crop_width_um,
+            'commonCropHeightUm', latest_mosaic.common_crop_height_um
+          ))
+        ELSE NULL::jsonb
+      END AS spore_mosaic,
+      prep_agg.prep_summary,
+      CASE
+        WHEN c.location_precision = 'exact'::text
+          THEN o.gps_latitude
+        WHEN c.location_precision = 'fuzzed'::text
+          THEN round(o.gps_latitude::numeric, 2)::double precision
+        ELSE NULL::double precision
+      END AS map_lat,
+      CASE
+        WHEN c.location_precision = 'exact'::text
+          THEN o.gps_longitude
+        WHEN c.location_precision = 'fuzzed'::text
+          THEN round(o.gps_longitude::numeric, 2)::double precision
+        ELSE NULL::double precision
+      END AS map_lon
+    FROM candidate_base c
+    JOIN public.observations o
+      ON o.id = c.id
+    LEFT JOIN LATERAL (
+      SELECT
+        i.id,
+        i.contrast,
+        i.mount_medium,
+        i.sample_type,
+        i.sample_source
+      FROM public.observation_images i
+      WHERE i.observation_id = c.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND (
+          i.image_type = 'microscope'::text
+          OR (
+            i.image_type IS NULL
+            AND EXISTS (
+              SELECT 1
+              FROM public.spore_measurements m2
+              WHERE m2.image_id = i.id
+                AND (
+                  m2.measurement_type IS NULL
+                  OR m2.measurement_type = ''
+                  OR lower(m2.measurement_type) IN ('manual', 'spore', 'spores')
+                )
+            )
+          )
+        )
+      ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
+      LIMIT 1
+    ) latest_image ON true
+    LEFT JOIN LATERAL (
+      SELECT count(*)::bigint AS spore_measurement_count
+      FROM public.observation_images i
+      JOIN public.spore_measurements m
+        ON m.image_id = i.id
+      WHERE i.observation_id = c.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND (i.image_type IS NULL OR i.image_type = 'microscope'::text)
+        AND (
+          m.measurement_type IS NULL
+          OR m.measurement_type = ''
+          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+        )
+    ) spore_stats ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        sm.id,
+        sm.storage_key,
+        sm.width_px,
+        sm.height_px,
+        sm.tile_size_px,
+        sm.version,
+        sm.tile_width_px,
+        sm.tile_height_px,
+        sm.common_crop_width_um,
+        sm.common_crop_height_um
+      FROM public.spore_measurement_mosaics sm
+      WHERE sm.observation_id = c.id
+        AND sm.user_id = c.user_id
+      ORDER BY sm.version DESC, sm.id DESC
+      LIMIT 1
+    ) latest_mosaic ON true
+    LEFT JOIN LATERAL (
+      SELECT jsonb_agg(
+        jsonb_strip_nulls(
+          jsonb_build_object(
+            'id',             m.id::text,
+            'observationId',  c.id::text,
+            'imageId',        i.id::text,
+            'lengthUm',       m.length_um,
+            'widthUm',        m.width_um,
+            'q',              round((m.length_um / nullif(m.width_um, 0))::numeric, 4)::double precision,
+            'cropUrl',        CASE
+                                WHEN m.thumb_key IS NOT NULL
+                                  THEN concat('https://media.sporely.no/', m.thumb_key)
+                                ELSE NULL
+                              END,
+            -- Per-point prep metadata. Same normalization as the scalar
+            -- observation-level fields (see the SELECT list below): unset
+            -- variants collapse to NULL and jsonb_strip_nulls removes them
+            -- from the object before it lands in the aggregate.
+            'contrastMethod', nullif(btrim(coalesce(i.contrast, '')), ''),
+            'mountReagent',   nullif(btrim(coalesce(i.mount_medium, '')), ''),
+            'stainReagent',   nullif(btrim(coalesce(i.stain, '')), ''),
+            'sampleType',     CASE
+                                WHEN lower(btrim(coalesce(i.sample_type, ''))) IN ('fresh', 'dried')
+                                  THEN lower(btrim(i.sample_type))
+                                ELSE NULL::text
+                              END,
+            'sampleSource',   CASE
+                                WHEN lower(btrim(coalesce(i.sample_source, ''))) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
+                                  THEN lower(btrim(i.sample_source))
+                                ELSE NULL::text
+                              END,
+            'mosaicX',        t.x_px,
+            'mosaicY',        t.y_px,
+            'mosaicW',        t.w_px,
+            'mosaicH',        t.h_px,
+            'overlay',        t.overlay_json
+          )
+        )
+      ) AS spore_points
+      FROM public.spore_measurements m
+      JOIN public.observation_images i
+        ON i.id = m.image_id
+      LEFT JOIN public.spore_measurement_mosaic_tiles t
+        ON t.measurement_id = m.id
+      WHERE i.observation_id = c.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND (i.image_type IS NULL OR i.image_type = 'microscope'::text)
+        AND (
+          m.measurement_type IS NULL
+          OR m.measurement_type = ''
+          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+        )
+    ) point_agg ON true
+    LEFT JOIN LATERAL (
+      WITH contributors AS (
+        SELECT DISTINCT
+          i.id AS image_id,
+          nullif(btrim(coalesce(i.contrast, '')), '') AS contrast,
+          nullif(btrim(coalesce(i.mount_medium, '')), '') AS mount_medium,
+          nullif(btrim(coalesce(i.stain, '')), '') AS stain,
+          nullif(btrim(coalesce(i.sample_type, '')), '') AS sample_type,
+          nullif(btrim(coalesce(i.sample_source, '')), '') AS sample_source
+        FROM public.observation_images i
+        WHERE i.observation_id = c.id
+          AND i.deleted_at IS NULL
+          AND i.purged_at IS NULL
+          AND (i.image_type IS NULL OR i.image_type = 'microscope'::text)
+          AND EXISTS (
+            SELECT 1
+            FROM public.spore_measurements m3
+            WHERE m3.image_id = i.id
+              AND (
+                m3.measurement_type IS NULL
+                OR m3.measurement_type = ''
+                OR lower(m3.measurement_type) IN ('manual', 'spore', 'spores')
+              )
+          )
+      )
+      SELECT jsonb_build_object(
+        'contrasts',          coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT contrast AS v
+            FROM contributors
+            WHERE contrast IS NOT NULL
+              AND lower(contrast) NOT IN ('not_set', 'not set', 'unset', 'unknown')
+          ) s
+        ), '[]'::jsonb),
+        'mounts',             coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT mount_medium AS v
+            FROM contributors
+            WHERE mount_medium IS NOT NULL
+              AND lower(mount_medium) NOT IN ('not_set', 'not set', 'unset', 'unknown')
+          ) s
+        ), '[]'::jsonb),
+        'stains',             coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT stain AS v
+            FROM contributors
+            WHERE stain IS NOT NULL
+              AND lower(stain) NOT IN ('not_set', 'not set', 'unset', 'unknown')
+          ) s
+        ), '[]'::jsonb),
+        'specimenConditions', coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT lower(sample_type) AS v
+            FROM contributors
+            WHERE sample_type IS NOT NULL
+              AND lower(sample_type) IN ('fresh', 'dried')
+          ) s
+        ), '[]'::jsonb),
+        'sampleSources',      coalesce((
+          SELECT jsonb_agg(v ORDER BY v)
+          FROM (
+            SELECT DISTINCT lower(sample_source) AS v
+            FROM contributors
+            WHERE sample_source IS NOT NULL
+              AND lower(sample_source) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
+          ) s
+        ), '[]'::jsonb)
+      ) AS prep_summary
+    ) prep_agg ON true
+  )
+  SELECT
+    e.id AS id,
+    nullif(
+      regexp_replace(
+        regexp_replace(lower(btrim(concat_ws(' ', e.genus, e.species))), '[^a-z0-9]+', '-', 'g'),
+        '(^-|-$)',
+        '',
+        'g'
+      ),
+      ''
+    ) AS "speciesSlug",
+    nullif(btrim(concat_ws(' ', e.genus, e.species)), '') AS "speciesName",
+    e.common_name AS "speciesCommonName",
+    e.observer_display_name AS "observerDisplayName",
+    e.observed_on AS "observedOn",
+    e.country AS country,
+    e.region_id AS "regionId",
+    e.location_precision AS "locationPrecision",
+    CASE
+      WHEN e.location_precision = 'exact'::text THEN e.location
+      WHEN e.location_precision = 'fuzzed'::text THEN coalesce(e.region_label, e.country)
+      WHEN e.location_precision = 'region'::text THEN e.region_label
+      ELSE NULL::text
+    END AS "locationLabel",
+    e.has_microscopy AS "hasMicroscopy",
+    e.spore_measurement_count AS "sporeMeasurementCount",
+    e.spore_summary AS "sporeSummary",
+    e.spore_points AS "sporePoints",
+    e.spore_mosaic AS "sporeMosaic",
+    e.contrast_method AS "contrastMethod",
+    e.mount_reagent AS "mountReagent",
+    CASE
+      WHEN lower(btrim(coalesce(e.sample_type, ''))) IN ('fresh', 'dried')
+        THEN lower(btrim(e.sample_type))
+      ELSE NULL::text
+    END AS "sampleType",
+    CASE
+      WHEN lower(btrim(coalesce(e.sample_source, ''))) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
+        THEN lower(btrim(e.sample_source))
+      ELSE NULL::text
+    END AS "sampleSource",
+    e.prep_summary AS "prepSummary",
+    e.map_lat AS "mapLat",
+    e.map_lon AS "mapLon"
+  FROM enriched e
+  LIMIT 1
+$_$;
+
+
+ALTER FUNCTION "public"."_get_public_observation_stage2a"("p_observation_id" bigint) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_get_public_species_stage2a"("p_species_slug" "text") RETURNS TABLE("speciesSlug" "text", "genus" "text", "species" "text", "speciesName" "text", "commonName" "text", "observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" "date", "lastObservedOn" "date", "countries" "jsonb", "regions" "jsonb", "representativeThumbUrl" "text", "recentObservationIds" bigint[])
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $_$
+  WITH normalized AS (
+    SELECT nullif(
+      regexp_replace(
+        lower(btrim(coalesce(p_species_slug, ''))),
+        '[^a-z0-9]+',
+        '-',
+        'g'
+      ),
+      ''
+    ) AS species_slug
+  ),
+  country_labels AS (
+    SELECT *
+    FROM (
+      VALUES
+        ('DE'::text, 'Germany'::text),
+        ('FI'::text, 'Finland'::text),
+        ('GB'::text, 'United Kingdom'::text),
+        ('NO'::text, 'Norway'::text),
+        ('SE'::text, 'Sweden'::text)
+    ) AS c(country_code, label)
+  ),
+  visible_observations AS (
+    SELECT
+      o.id,
+      nullif(btrim(coalesce(o.genus, '')), '') AS genus,
+      nullif(btrim(coalesce(o.species, '')), '') AS species,
+      nullif(btrim(concat_ws(' ', nullif(btrim(coalesce(o.genus, '')), ''), nullif(btrim(coalesce(o.species, '')), ''))), '') AS species_name,
+      nullif(
+        regexp_replace(
+          regexp_replace(
+            lower(btrim(concat_ws(' ', nullif(btrim(coalesce(o.genus, '')), ''), nullif(btrim(coalesce(o.species, '')), '')))),
+            '[^a-z0-9]+',
+            '-',
+            'g'
+          ),
+          '(^-|-$)',
+          '',
+          'g'
+        ),
+        ''
+      ) AS species_slug,
+      nullif(btrim(coalesce(o.common_name, '')), '') AS common_name,
+      o.date AS observed_on,
+      upper(nullif(btrim(coalesce(o.country_code, '')), '')) AS country_code,
+      nullif(btrim(coalesce(o.region_id, '')), '') AS region_id,
+      nullif(btrim(coalesce(r.label, '')), '') AS region_label,
+      upper(nullif(btrim(coalesce(r.country_code, '')), '')) AS region_country_code,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+          THEN coalesce(spore_stats.spore_measurement_count, 0::bigint)
+        ELSE 0::bigint
+      END AS spore_measurement_count,
+      (latest_microscope_image.id IS NOT NULL) AS has_microscopy
+    FROM public.observations o
+    LEFT JOIN public.public_regions r
+      ON r.id = o.region_id
+    LEFT JOIN LATERAL (
+      SELECT count(*)::bigint AS spore_measurement_count
+      FROM public.observation_images i
+      JOIN public.spore_measurements m
+        ON m.image_id = i.id
+      WHERE i.observation_id = o.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND i.image_type = 'microscope'::text
+        AND (
+          m.measurement_type IS NULL
+          OR m.measurement_type = ''
+          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+        )
+    ) spore_stats ON true
+    LEFT JOIN LATERAL (
+      SELECT i.id
+      FROM public.observation_images i
+      WHERE i.observation_id = o.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND i.image_type = 'microscope'::text
+      ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
+      LIMIT 1
+    ) latest_microscope_image ON true
+    WHERE o.visibility = 'public'::text
+      AND NOT coalesce(o.is_draft, false)
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+  ),
+  species_groups AS (
+    SELECT
+      vo.species_slug,
+      vo.genus,
+      vo.species,
+      vo.species_name,
+      min(vo.common_name) AS common_name,
+      count(*)::bigint AS observation_count,
+      count(*) FILTER (WHERE vo.has_microscopy)::bigint AS microscopy_observation_count,
+      coalesce(sum(vo.spore_measurement_count), 0)::bigint AS spore_measurement_count,
+      min(vo.observed_on) AS first_observed_on,
+      max(vo.observed_on) AS last_observed_on
+    FROM visible_observations vo
+    WHERE vo.species_slug IS NOT NULL
+    GROUP BY vo.species_slug, vo.genus, vo.species, vo.species_name
+  ),
+  target_species AS (
+    SELECT sg.*
+    FROM species_groups sg
+    JOIN normalized n
+      ON n.species_slug = sg.species_slug
+  )
+  SELECT
+    ts.species_slug AS "speciesSlug",
+    ts.genus AS genus,
+    ts.species AS species,
+    ts.species_name AS "speciesName",
+    ts.common_name AS "commonName",
+    ts.observation_count AS "observationCount",
+    ts.microscopy_observation_count AS "microscopyObservationCount",
+    ts.spore_measurement_count AS "sporeMeasurementCount",
+    ts.first_observed_on AS "firstObservedOn",
+    ts.last_observed_on AS "lastObservedOn",
+    coalesce(countries.items, '[]'::jsonb) AS countries,
+    coalesce(regions.items, '[]'::jsonb) AS regions,
+    rep.representative_thumb_url AS "representativeThumbUrl",
+    recent.recent_observation_ids AS "recentObservationIds"
+  FROM target_species ts
+  LEFT JOIN LATERAL (
+    SELECT coalesce(
+      jsonb_agg(item ORDER BY facet_count DESC, label ASC, value ASC),
+      '[]'::jsonb
+    ) AS items
+    FROM (
+      SELECT
+        grouped.country_code AS value,
+        coalesce(cl.label, grouped.country_code) AS label,
+        grouped.facet_count,
+        jsonb_build_object(
+          'value', grouped.country_code,
+          'label', coalesce(cl.label, grouped.country_code),
+          'count', grouped.facet_count
+        ) AS item
+      FROM (
+        SELECT
+          vo.country_code,
+          count(*)::bigint AS facet_count
+        FROM visible_observations vo
+        WHERE vo.species_slug = ts.species_slug
+          AND vo.country_code IS NOT NULL
+        GROUP BY vo.country_code
+      ) grouped
+      LEFT JOIN country_labels cl
+        ON cl.country_code = grouped.country_code
+    ) items
+  ) countries ON true
+  LEFT JOIN LATERAL (
+    SELECT coalesce(
+      jsonb_agg(item ORDER BY facet_count DESC, label ASC, value ASC),
+      '[]'::jsonb
+    ) AS items
+    FROM (
+      SELECT
+        grouped.region_id AS value,
+        grouped.region_label AS label,
+        grouped.region_country_code AS country_code,
+        grouped.facet_count,
+        jsonb_build_object(
+          'value', grouped.region_id,
+          'label', grouped.region_label,
+          'countryCode', grouped.region_country_code,
+          'count', grouped.facet_count
+        ) AS item
+      FROM (
+        SELECT
+          vo.region_id,
+          coalesce(vo.region_label, vo.region_id) AS region_label,
+          coalesce(vo.region_country_code, vo.country_code) AS region_country_code,
+          count(*)::bigint AS facet_count
+        FROM visible_observations vo
+        WHERE vo.species_slug = ts.species_slug
+          AND vo.region_id IS NOT NULL
+        GROUP BY
+          vo.region_id,
+          coalesce(vo.region_label, vo.region_id),
+          coalesce(vo.region_country_code, vo.country_code)
+      ) grouped
+    ) items
+  ) regions ON true
+  LEFT JOIN LATERAL (
+    SELECT concat(
+      'https://media.sporely.no/',
+      concat(
+        CASE WHEN rep.storage_dir IS NULL THEN '' ELSE rep.storage_dir || '/' END,
+        'thumb_',
+        regexp_replace(rep.file_name, '^(?:thumb_|medium_|small_|cards_)+', '', 'i')
+      )
+    ) AS representative_thumb_url
+    FROM (
+      SELECT
+        nullif(
+          regexp_replace(btrim(i.storage_path, '/'), '/[^/]+$', '', ''),
+          btrim(i.storage_path, '/')
+        ) AS storage_dir,
+        regexp_replace(btrim(i.storage_path, '/'), '^.*/', '') AS file_name,
+        vo.observed_on,
+        i.sort_order,
+        i.created_at,
+        i.id
+      FROM visible_observations vo
+      JOIN public.observation_images i
+        ON i.observation_id = vo.id
+      WHERE vo.species_slug = ts.species_slug
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND i.storage_path IS NOT NULL
+    ) rep
+    ORDER BY rep.observed_on DESC, rep.sort_order NULLS LAST, rep.created_at DESC NULLS LAST, rep.id DESC
+    LIMIT 1
+  ) rep ON true
+  LEFT JOIN LATERAL (
+    SELECT coalesce(
+      array_agg(x.id ORDER BY x.observed_on DESC, x.id DESC),
+      '{}'::bigint[]
+    ) AS recent_observation_ids
+    FROM (
+      SELECT vo.id, vo.observed_on
+      FROM visible_observations vo
+      WHERE vo.species_slug = ts.species_slug
+      ORDER BY vo.observed_on DESC, vo.id DESC
+      LIMIT 5
+    ) x
+  ) recent ON true
+$_$;
+
+
+ALTER FUNCTION "public"."_get_public_species_stage2a"("p_species_slug" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_guard_selected_sporely_taxon_id_v2"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+begin
+  if current_user not in ('service_role', 'postgres', 'supabase_admin')
+     and ((tg_op = 'INSERT' and new.selected_sporely_taxon_id is not null)
+       or (tg_op = 'UPDATE' and new.selected_sporely_taxon_id is distinct from old.selected_sporely_taxon_id)) then
+    raise exception 'public.observations.selected_sporely_taxon_id must be changed through set_observation_selected_taxon_v2'
+      using errcode = '42501';
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_guard_selected_sporely_taxon_id_v2"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_bump_child_images_on_obs"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+BEGIN
+  IF (TG_OP = 'UPDATE')
+     AND NEW.visibility IS NOT DISTINCT FROM OLD.visibility
+     AND NEW.is_draft   IS NOT DISTINCT FROM OLD.is_draft
+     AND NEW.user_id    IS NOT DISTINCT FROM OLD.user_id THEN
+    RETURN NULL;
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(NEW.user_id::text, 42));
+  UPDATE public.observation_images
+     SET media_version = media_version + 1
+   WHERE observation_id = NEW.id;
+  RETURN NULL;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_bump_child_images_on_obs"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_bump_mosaics_on_obs"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+BEGIN
+  IF (TG_OP = 'UPDATE')
+     AND NEW.visibility            IS NOT DISTINCT FROM OLD.visibility
+     AND NEW.is_draft              IS NOT DISTINCT FROM OLD.is_draft
+     AND NEW.spore_data_visibility IS NOT DISTINCT FROM OLD.spore_data_visibility
+     AND NEW.user_id               IS NOT DISTINCT FROM OLD.user_id THEN
+    RETURN NULL;
+  END IF;
+  UPDATE public.spore_measurement_mosaics
+     SET media_version = media_version + 1
+   WHERE observation_id = NEW.id;
+  RETURN NULL;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_bump_mosaics_on_obs"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_bump_on_image_change"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+BEGIN
+  IF (TG_OP = 'UPDATE')
+     AND NEW.deleted_at            IS NOT DISTINCT FROM OLD.deleted_at
+     AND NEW.purged_at             IS NOT DISTINCT FROM OLD.purged_at
+     AND NEW.storage_path          IS NOT DISTINCT FROM OLD.storage_path
+     AND NEW.original_storage_path IS NOT DISTINCT FROM OLD.original_storage_path
+     AND NEW.canonical_bucket      IS NOT DISTINCT FROM OLD.canonical_bucket THEN
+    RETURN NEW;
+  END IF;
+  NEW.media_version := COALESCE(OLD.media_version, 0) + 1;
+  RETURN NEW;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_bump_on_image_change"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_bump_on_mosaic_change"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+BEGIN
+  IF TG_OP = 'UPDATE'
+     AND NEW.storage_key      IS NOT DISTINCT FROM OLD.storage_key
+     AND NEW.canonical_bucket IS NOT DISTINCT FROM OLD.canonical_bucket
+     AND NEW.observation_id   IS NOT DISTINCT FROM OLD.observation_id THEN
+    RETURN NEW;
+  END IF;
+  NEW.media_version := COALESCE(OLD.media_version, 0) + 1;
+  RETURN NEW;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_bump_on_mosaic_change"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_bump_on_profile_ban_change"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+BEGIN
+  IF NEW.is_banned IS NOT DISTINCT FROM OLD.is_banned THEN
+    RETURN NEW;
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(NEW.id::text, 43));
+  UPDATE public.observations
+     SET media_version = media_version + 1
+   WHERE user_id = NEW.id;
+  UPDATE public.observation_images
+     SET media_version = media_version + 1
+   WHERE user_id = NEW.id;
+  RETURN NEW;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_bump_on_profile_ban_change"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_bump_own_version_on_obs"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+BEGIN
+  IF (TG_OP = 'UPDATE')
+     AND NEW.visibility IS NOT DISTINCT FROM OLD.visibility
+     AND NEW.is_draft   IS NOT DISTINCT FROM OLD.is_draft
+     AND NEW.user_id    IS NOT DISTINCT FROM OLD.user_id THEN
+    RETURN NEW;
+  END IF;
+  NEW.media_version := COALESCE(OLD.media_version, 0) + 1;
+  RETURN NEW;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_bump_own_version_on_obs"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_final_state_guard_image"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+DECLARE
+  is_trusted boolean := (auth.uid() IS NULL);
+  delta bigint;
+BEGIN
+  IF is_trusted THEN RETURN NULL; END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.media_version IS DISTINCT FROM 1 THEN
+      RAISE EXCEPTION
+        'final-state guard: media_version must be 1 on client INSERT (got %)',
+        NEW.media_version USING ERRCODE='insufficient_privilege';
+    END IF;
+    IF NEW.canonical_bucket IS DISTINCT FROM 'legacy' THEN
+      RAISE EXCEPTION
+        'final-state guard: canonical_bucket must be ''legacy'' on client INSERT (got %)',
+        NEW.canonical_bucket USING ERRCODE='insufficient_privilege';
+    END IF;
+    RETURN NULL;
+  END IF;
+
+  IF NEW.canonical_bucket IS DISTINCT FROM OLD.canonical_bucket THEN
+    RAISE EXCEPTION
+      'final-state guard: canonical_bucket transition rejected for client role'
+      USING ERRCODE='insufficient_privilege';
+  END IF;
+
+  IF NEW.media_version IS DISTINCT FROM OLD.media_version THEN
+    delta := COALESCE(NEW.media_version, 0) - COALESCE(OLD.media_version, 0);
+    IF delta <> 1 THEN
+      RAISE EXCEPTION
+        'final-state guard: only monotonic +1 media_version transitions allowed for client role (delta=%)',
+        delta USING ERRCODE='insufficient_privilege';
+    END IF;
+  END IF;
+
+  RETURN NULL;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_final_state_guard_image"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_final_state_guard_obs"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+DECLARE
+  is_trusted boolean := (auth.uid() IS NULL);
+  delta bigint;
+BEGIN
+  IF is_trusted THEN RETURN NULL; END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.media_version IS DISTINCT FROM 1 THEN
+      RAISE EXCEPTION
+        'final-state guard: observations.media_version must be 1 on client INSERT (got %)',
+        NEW.media_version USING ERRCODE='insufficient_privilege';
+    END IF;
+    RETURN NULL;
+  END IF;
+
+  IF NEW.media_version IS DISTINCT FROM OLD.media_version THEN
+    delta := COALESCE(NEW.media_version, 0) - COALESCE(OLD.media_version, 0);
+    IF delta <> 1 THEN
+      RAISE EXCEPTION
+        'final-state guard: only monotonic +1 observations.media_version transitions allowed for client role (delta=%)',
+        delta USING ERRCODE='insufficient_privilege';
+    END IF;
+  END IF;
+
+  RETURN NULL;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_final_state_guard_obs"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_get_observation_user_id"("p_obs_id" bigint) RETURNS "uuid"
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+  SELECT user_id FROM public.observations WHERE id = p_obs_id
+$$;
+
+
+ALTER FUNCTION "public"."_media_get_observation_user_id"("p_obs_id" bigint) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."_media_get_observation_user_id"("p_obs_id" bigint) IS 'RLS-bypass helper used solely by the key-ownership trigger to look up a parent observation''s owner when the caller is an authenticated user whose RLS would otherwise hide the row. Not client-callable.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_guard_key_ownership_image"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+DECLARE
+  is_trusted boolean := (auth.uid() IS NULL);
+  caller_uid uuid    := auth.uid();
+  parent_owner uuid;
+  expected_prefix text;
+BEGIN
+  IF is_trusted THEN
+    RETURN NEW;
+  END IF;
+
+  IF caller_uid IS NULL THEN
+    RAISE EXCEPTION 'observation_images write requires an authenticated caller'
+      USING ERRCODE='insufficient_privilege';
+  END IF;
+
+  IF NEW.user_id IS DISTINCT FROM caller_uid THEN
+    RAISE EXCEPTION
+      'observation_images.user_id (%) must equal auth.uid() (%)',
+      NEW.user_id, caller_uid
+      USING ERRCODE='insufficient_privilege';
+  END IF;
+
+  parent_owner := public._media_get_observation_user_id(NEW.observation_id);
+  IF parent_owner IS NULL THEN
+    RAISE EXCEPTION 'observation_id % does not exist', NEW.observation_id
+      USING ERRCODE='foreign_key_violation';
+  END IF;
+  IF NEW.user_id IS DISTINCT FROM parent_owner THEN
+    RAISE EXCEPTION
+      'observation_images.user_id (%) must equal observations.user_id (%)',
+      NEW.user_id, parent_owner
+      USING ERRCODE='insufficient_privilege';
+  END IF;
+
+  expected_prefix := NEW.user_id::text || '/';
+
+  IF NEW.storage_path IS NOT NULL AND NEW.storage_path <> ''
+     AND NOT (NEW.storage_path LIKE expected_prefix || '%') THEN
+    RAISE EXCEPTION
+      'storage_path (%) must live under the row owner''s prefix (%)',
+      NEW.storage_path, expected_prefix
+      USING ERRCODE='insufficient_privilege';
+  END IF;
+
+  IF NEW.original_storage_path IS NOT NULL AND NEW.original_storage_path <> ''
+     AND NOT (NEW.original_storage_path LIKE expected_prefix || '%') THEN
+    RAISE EXCEPTION
+      'original_storage_path (%) must live under the row owner''s prefix (%)',
+      NEW.original_storage_path, expected_prefix
+      USING ERRCODE='insufficient_privilege';
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.observation_id IS DISTINCT FROM OLD.observation_id THEN
+      RAISE EXCEPTION 'observation_images.observation_id is immutable'
+        USING ERRCODE='insufficient_privilege';
+    END IF;
+    IF NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+      RAISE EXCEPTION 'observation_images.user_id is immutable'
+        USING ERRCODE='insufficient_privilege';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_guard_key_ownership_image"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_guard_server_owned_fields_image"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+DECLARE
+  is_trusted boolean := current_user IN ('postgres','service_role','supabase_admin');
+  nested     boolean := pg_trigger_depth() > 1;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NOT is_trusted THEN
+      IF NEW.canonical_bucket IS DISTINCT FROM 'legacy' THEN
+        RAISE EXCEPTION
+          'canonical_bucket is server-owned and must default to ''legacy'' on client insert (got %)',
+          NEW.canonical_bucket USING ERRCODE='insufficient_privilege';
+      END IF;
+      IF NEW.media_version IS NOT NULL AND NEW.media_version <> 1 THEN
+        RAISE EXCEPTION
+          'media_version is server-owned and must default to 1 on client insert (got %)',
+          NEW.media_version USING ERRCODE='insufficient_privilege';
+      END IF;
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.canonical_bucket IS DISTINCT FROM OLD.canonical_bucket THEN
+    IF NOT is_trusted THEN
+      RAISE EXCEPTION
+        'canonical_bucket may be changed only by a trusted role (got %)',
+        current_user USING ERRCODE='insufficient_privilege';
+    END IF;
+  END IF;
+
+  IF NEW.media_version IS DISTINCT FROM OLD.media_version THEN
+    IF is_trusted THEN
+      NULL;
+    ELSIF nested THEN
+      IF NEW.media_version IS NULL THEN
+        RAISE EXCEPTION 'media_version cannot be set to NULL'
+          USING ERRCODE='insufficient_privilege';
+      END IF;
+      IF OLD.media_version IS NULL OR NEW.media_version <> OLD.media_version + 1 THEN
+        RAISE EXCEPTION
+          'nested media_version transition must be exactly OLD+1 (was %, now %)',
+          OLD.media_version, NEW.media_version
+          USING ERRCODE='insufficient_privilege';
+      END IF;
+    ELSE
+      RAISE EXCEPTION
+        'media_version is server-owned and cannot be modified by role %',
+        current_user USING ERRCODE='insufficient_privilege';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_guard_server_owned_fields_image"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_guard_server_owned_fields_obs"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+DECLARE
+  is_trusted boolean := current_user IN ('postgres','service_role','supabase_admin');
+  nested     boolean := pg_trigger_depth() > 1;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NOT is_trusted
+       AND NEW.media_version IS NOT NULL
+       AND NEW.media_version <> 1 THEN
+      RAISE EXCEPTION
+        'observations.media_version is server-owned and must default to 1 on client insert (got %)',
+        NEW.media_version USING ERRCODE='insufficient_privilege';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.media_version IS DISTINCT FROM OLD.media_version THEN
+    IF is_trusted THEN
+      NULL;
+    ELSIF nested THEN
+      IF NEW.media_version IS NULL THEN
+        RAISE EXCEPTION 'observations.media_version cannot be set to NULL'
+          USING ERRCODE='insufficient_privilege';
+      END IF;
+      IF OLD.media_version IS NULL OR NEW.media_version <> OLD.media_version + 1 THEN
+        RAISE EXCEPTION
+          'nested observations.media_version transition must be exactly OLD+1 (was %, now %)',
+          OLD.media_version, NEW.media_version
+          USING ERRCODE='insufficient_privilege';
+      END IF;
+    ELSE
+      RAISE EXCEPTION
+        'observations.media_version is server-owned and cannot be modified by role %',
+        current_user USING ERRCODE='insufficient_privilege';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END $$;
+
+
+ALTER FUNCTION "public"."_media_guard_server_owned_fields_obs"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_media_worker_base_url"() RETURNS "text"
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+  SELECT base_url FROM public._media_worker_config WHERE singleton = true LIMIT 1
+$$;
+
+
+ALTER FUNCTION "public"."_media_worker_base_url"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."_media_worker_base_url"() IS 'Hardcoded Worker origin resolver. Reads a superuser-owned config table via SECURITY DEFINER. Ordinary sessions cannot override the returned host.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."_search_public_species_stage2a"("p_limit" integer DEFAULT 50, "p_offset" integer DEFAULT 0, "p_genus" "text" DEFAULT NULL::"text", "p_query" "text" DEFAULT NULL::"text") RETURNS TABLE("speciesSlug" "text", "genus" "text", "species" "text", "speciesName" "text", "commonName" "text", "observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" "date", "lastObservedOn" "date", "countries" "jsonb", "regions" "jsonb", "representativeThumbUrl" "text")
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $_$
+  WITH normalized AS (
+    SELECT
+      greatest(1, least(coalesce(p_limit, 50), 100)) AS lim,
+      greatest(coalesce(p_offset, 0), 0) AS off,
+      nullif(btrim(coalesce(p_genus, '')), '') AS genus,
+      nullif(btrim(coalesce(p_query, '')), '') AS query
+  ),
+  country_labels AS (
+    SELECT *
+    FROM (
+      VALUES
+        ('DE'::text, 'Germany'::text),
+        ('FI'::text, 'Finland'::text),
+        ('GB'::text, 'United Kingdom'::text),
+        ('NO'::text, 'Norway'::text),
+        ('SE'::text, 'Sweden'::text)
+    ) AS c(country_code, label)
+  ),
+  visible_observations AS (
+    SELECT
+      o.id,
+      nullif(btrim(coalesce(o.genus, '')), '') AS genus,
+      nullif(btrim(coalesce(o.species, '')), '') AS species,
+      nullif(btrim(concat_ws(' ', nullif(btrim(coalesce(o.genus, '')), ''), nullif(btrim(coalesce(o.species, '')), ''))), '') AS species_name,
+      nullif(
+        regexp_replace(
+          regexp_replace(
+            lower(btrim(concat_ws(' ', nullif(btrim(coalesce(o.genus, '')), ''), nullif(btrim(coalesce(o.species, '')), '')))),
+            '[^a-z0-9]+',
+            '-',
+            'g'
+          ),
+          '(^-|-$)',
+          '',
+          'g'
+        ),
+        ''
+      ) AS species_slug,
+      nullif(btrim(coalesce(o.common_name, '')), '') AS common_name,
+      o.date AS observed_on,
+      upper(nullif(btrim(coalesce(o.country_code, '')), '')) AS country_code,
+      nullif(btrim(coalesce(o.region_id, '')), '') AS region_id,
+      nullif(btrim(coalesce(r.label, '')), '') AS region_label,
+      upper(nullif(btrim(coalesce(r.country_code, '')), '')) AS region_country_code,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+          THEN coalesce(spore_stats.spore_measurement_count, 0::bigint)
+        ELSE 0::bigint
+      END AS spore_measurement_count,
+      (latest_microscope_image.id IS NOT NULL) AS has_microscopy
+    FROM public.observations o
+    LEFT JOIN public.public_regions r
+      ON r.id = o.region_id
+    LEFT JOIN LATERAL (
+      SELECT count(*)::bigint AS spore_measurement_count
+      FROM public.observation_images i
+      JOIN public.spore_measurements m
+        ON m.image_id = i.id
+      WHERE i.observation_id = o.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND i.image_type = 'microscope'::text
+        AND (
+          m.measurement_type IS NULL
+          OR m.measurement_type = ''
+          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+        )
+    ) spore_stats ON true
+    LEFT JOIN LATERAL (
+      SELECT i.id
+      FROM public.observation_images i
+      WHERE i.observation_id = o.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND i.image_type = 'microscope'::text
+      ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
+      LIMIT 1
+    ) latest_microscope_image ON true
+    WHERE o.visibility = 'public'::text
+      AND NOT coalesce(o.is_draft, false)
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+  ),
+  species_groups AS (
+    SELECT
+      vo.species_slug,
+      vo.genus,
+      vo.species,
+      vo.species_name,
+      min(vo.common_name) AS common_name,
+      count(*)::bigint AS observation_count,
+      count(*) FILTER (WHERE vo.has_microscopy)::bigint AS microscopy_observation_count,
+      coalesce(sum(vo.spore_measurement_count), 0)::bigint AS spore_measurement_count,
+      min(vo.observed_on) AS first_observed_on,
+      max(vo.observed_on) AS last_observed_on
+    FROM visible_observations vo
+    WHERE vo.species_slug IS NOT NULL
+    GROUP BY vo.species_slug, vo.genus, vo.species, vo.species_name
+  ),
+  filtered_species AS (
+    SELECT sg.*
+    FROM species_groups sg
+    CROSS JOIN normalized n
+    WHERE (n.genus IS NULL OR lower(coalesce(sg.genus, '')) = lower(n.genus))
+      AND (
+        n.query IS NULL
+        OR coalesce(sg.species_name, '') ILIKE '%' || n.query || '%'
+        OR coalesce(sg.common_name, '') ILIKE '%' || n.query || '%'
+        OR coalesce(sg.genus, '') ILIKE '%' || n.query || '%'
+        OR coalesce(sg.species, '') ILIKE '%' || n.query || '%'
+        OR lower(coalesce(sg.species_slug, '')) ILIKE '%' || lower(n.query) || '%'
+      )
+  )
+  SELECT
+    fs.species_slug AS "speciesSlug",
+    fs.genus AS genus,
+    fs.species AS species,
+    fs.species_name AS "speciesName",
+    fs.common_name AS "commonName",
+    fs.observation_count AS "observationCount",
+    fs.microscopy_observation_count AS "microscopyObservationCount",
+    fs.spore_measurement_count AS "sporeMeasurementCount",
+    fs.first_observed_on AS "firstObservedOn",
+    fs.last_observed_on AS "lastObservedOn",
+    coalesce(countries.items, '[]'::jsonb) AS countries,
+    coalesce(regions.items, '[]'::jsonb) AS regions,
+    rep.representative_thumb_url AS "representativeThumbUrl"
+  FROM filtered_species fs
+  LEFT JOIN LATERAL (
+    SELECT coalesce(
+      jsonb_agg(item ORDER BY facet_count DESC, label ASC, value ASC),
+      '[]'::jsonb
+    ) AS items
+    FROM (
+      SELECT
+        grouped.country_code AS value,
+        coalesce(cl.label, grouped.country_code) AS label,
+        grouped.facet_count,
+        jsonb_build_object(
+          'value', grouped.country_code,
+          'label', coalesce(cl.label, grouped.country_code),
+          'count', grouped.facet_count
+        ) AS item
+      FROM (
+        SELECT
+          vo.country_code,
+          count(*)::bigint AS facet_count
+        FROM visible_observations vo
+        WHERE vo.species_slug = fs.species_slug
+          AND vo.country_code IS NOT NULL
+        GROUP BY vo.country_code
+      ) grouped
+      LEFT JOIN country_labels cl
+        ON cl.country_code = grouped.country_code
+    ) items
+  ) countries ON true
+  LEFT JOIN LATERAL (
+    SELECT coalesce(
+      jsonb_agg(item ORDER BY facet_count DESC, label ASC, value ASC),
+      '[]'::jsonb
+    ) AS items
+    FROM (
+      SELECT
+        grouped.region_id AS value,
+        grouped.region_label AS label,
+        grouped.region_country_code AS country_code,
+        grouped.facet_count,
+        jsonb_build_object(
+          'value', grouped.region_id,
+          'label', grouped.region_label,
+          'countryCode', grouped.region_country_code,
+          'count', grouped.facet_count
+        ) AS item
+      FROM (
+        SELECT
+          vo.region_id,
+          coalesce(vo.region_label, vo.region_id) AS region_label,
+          coalesce(vo.region_country_code, vo.country_code) AS region_country_code,
+          count(*)::bigint AS facet_count
+        FROM visible_observations vo
+        WHERE vo.species_slug = fs.species_slug
+          AND vo.region_id IS NOT NULL
+        GROUP BY
+          vo.region_id,
+          coalesce(vo.region_label, vo.region_id),
+          coalesce(vo.region_country_code, vo.country_code)
+      ) grouped
+    ) items
+  ) regions ON true
+  LEFT JOIN LATERAL (
+    SELECT concat(
+      'https://media.sporely.no/',
+      concat(
+        CASE WHEN rep.storage_dir IS NULL THEN '' ELSE rep.storage_dir || '/' END,
+        'thumb_',
+        regexp_replace(rep.file_name, '^(?:thumb_|medium_|small_|cards_)+', '', 'i')
+      )
+    ) AS representative_thumb_url
+    FROM (
+      SELECT
+        nullif(
+          regexp_replace(btrim(i.storage_path, '/'), '/[^/]+$', '', ''),
+          btrim(i.storage_path, '/')
+        ) AS storage_dir,
+        regexp_replace(btrim(i.storage_path, '/'), '^.*/', '') AS file_name,
+        vo.observed_on,
+        i.sort_order,
+        i.created_at,
+        i.id
+      FROM visible_observations vo
+      JOIN public.observation_images i
+        ON i.observation_id = vo.id
+      WHERE vo.species_slug = fs.species_slug
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND i.storage_path IS NOT NULL
+    ) rep
+    ORDER BY rep.observed_on DESC, rep.sort_order NULLS LAST, rep.created_at DESC NULLS LAST, rep.id DESC
+    LIMIT 1
+  ) rep ON true
+  ORDER BY fs.observation_count DESC, fs.last_observed_on DESC, fs.species_name ASC, fs.species_slug ASC
+  LIMIT (SELECT lim FROM normalized)
+  OFFSET (SELECT off FROM normalized)
+$_$;
+
+
+ALTER FUNCTION "public"."_search_public_species_stage2a"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_query" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_stage2b_observation_primary_media"("p_observation_id" bigint, "p_legacy_image_key" "text" DEFAULT NULL::"text") RETURNS TABLE("image_id" bigint, "media_version" bigint, "full_media_url" "text", "thumb_media_url" "text")
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+  SELECT
+    i.id,
+    i.media_version,
+    public.build_worker_media_url(i.id, 'full', i.media_version),
+    public.build_worker_media_url(i.id, 'thumb', i.media_version)
+  FROM public.observations o
+  JOIN public.observation_images i ON i.observation_id = o.id
+  WHERE o.id = p_observation_id
+    AND i.deleted_at IS NULL
+    AND i.purged_at IS NULL
+    AND i.storage_path IS NOT NULL
+    AND btrim(i.storage_path) <> ''
+    AND NOT COALESCE(o.is_draft, false)
+    AND public.can_read_observation(o.user_id, o.visibility)
+    AND NOT EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.id = o.user_id AND p.is_banned = true
+    )
+    AND NOT public.is_blocked_between(auth.uid(), o.user_id)
+  ORDER BY
+    (i.storage_path = p_legacy_image_key) DESC,
+    i.sort_order NULLS LAST,
+    i.created_at DESC NULLS LAST,
+    i.id DESC
+  LIMIT 1
+$$;
+
+
+ALTER FUNCTION "public"."_stage2b_observation_primary_media"("p_observation_id" bigint, "p_legacy_image_key" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."_stage2b_observation_primary_media"("p_observation_id" bigint, "p_legacy_image_key" "text") IS 'Authorization-gated representative image identity for transitional non-owner projections. Returns no raw key and no original URL.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."_stage2b_species_representative_media"("p_species_slug" "text") RETURNS TABLE("image_id" bigint, "media_version" bigint, "thumb_media_url" "text")
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public,pg_catalog'
+    AS $_$
+  SELECT
+    i.id,
+    i.media_version,
+    public.build_worker_media_url(i.id, 'thumb', i.media_version)
+  FROM public.observations o
+  JOIN public.observation_images i ON i.observation_id = o.id
+  WHERE o.visibility = 'public'
+    AND NOT COALESCE(o.is_draft, false)
+    AND i.deleted_at IS NULL
+    AND i.purged_at IS NULL
+    AND i.storage_path IS NOT NULL
+    AND btrim(i.storage_path) <> ''
+    AND nullif(
+      regexp_replace(
+        regexp_replace(lower(btrim(concat_ws(' ', o.genus, o.species))), '[^a-z0-9]+', '-', 'g'),
+        '(^-|-$)', '', 'g'
+      ), ''
+    ) = p_species_slug
+    AND NOT EXISTS (
+      SELECT 1 FROM public.profiles p
+      WHERE p.id = o.user_id AND p.is_banned = true
+    )
+    AND (auth.uid() IS NULL OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE)
+  ORDER BY o.date DESC, i.sort_order NULLS LAST, i.created_at DESC NULLS LAST, i.id DESC
+  LIMIT 1
+$_$;
+
+
+ALTER FUNCTION "public"."_stage2b_species_representative_media"("p_species_slug" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_w3a_guard_resolved_sporely_taxon_id"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+declare
+  v_role text := current_user;
+  v_allowed boolean := v_role in ('service_role', 'postgres', 'supabase_admin');
+begin
+  if TG_OP = 'INSERT' then
+    if new.resolved_sporely_taxon_id is not null and not v_allowed then
+      raise exception 'public.observations.resolved_sporely_taxon_id can only be set by service_role (attempted by %)', v_role
+        using errcode = 'insufficient_privilege';
+    end if;
+  elsif TG_OP = 'UPDATE' then
+    if new.resolved_sporely_taxon_id is distinct from old.resolved_sporely_taxon_id then
+      if not v_allowed then
+        raise exception 'public.observations.resolved_sporely_taxon_id can only be updated by service_role (attempted by %)', v_role
+          using errcode = 'insufficient_privilege';
+      end if;
+    end if;
+  end if;
+  return new;
+end $$;
+
+
+ALTER FUNCTION "public"."_w3a_guard_resolved_sporely_taxon_id"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."admin_client_activity_summary"("p_days" integer DEFAULT 30) RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -306,6 +1669,60 @@ $$;
 ALTER FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."build_worker_media_url"("p_image_id" bigint, "p_variant" "text", "p_media_version" bigint) RETURNS "text"
+    LANGUAGE "plpgsql" STABLE PARALLEL SAFE
+    SET "search_path" TO 'public,pg_catalog'
+    AS $_$
+DECLARE
+  base_url text;
+BEGIN
+  IF p_image_id IS NULL OR p_image_id <= 0 THEN RETURN NULL; END IF;
+  IF p_media_version IS NULL OR p_media_version < 1 THEN RETURN NULL; END IF;
+  IF NOT public.media_variant_is_supported(p_variant) THEN RETURN NULL; END IF;
+
+  base_url := regexp_replace(public._media_worker_base_url(), '/+$', '');
+  IF base_url IS NULL OR base_url !~ '^https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$' THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN base_url
+      || '/m/' || p_image_id::text
+      || '/' || p_variant
+      || '?v=' || p_media_version::text;
+END $_$;
+
+
+ALTER FUNCTION "public"."build_worker_media_url"("p_image_id" bigint, "p_variant" "text", "p_media_version" bigint) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."build_worker_media_url"("p_image_id" bigint, "p_variant" "text", "p_media_version" bigint) IS 'STABLE (reads _media_worker_config). Returns NULL for non-positive ids/versions or unsupported variants — surrounding views and RPCs must treat NULL as "no URL".';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) RETURNS "text"
+    LANGUAGE "plpgsql" STABLE PARALLEL SAFE
+    SET "search_path" TO 'public,pg_catalog'
+    AS $_$
+DECLARE
+  base_url text;
+BEGIN
+  IF p_mosaic_id IS NULL OR p_mosaic_id <= 0 THEN RETURN NULL; END IF;
+  IF p_media_version IS NULL OR p_media_version < 1 THEN RETURN NULL; END IF;
+  base_url := regexp_replace(public._media_worker_base_url(), '/+$', '');
+  IF base_url IS NULL OR base_url !~ '^https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$' THEN
+    RETURN NULL;
+  END IF;
+  RETURN base_url || '/mm/' || p_mosaic_id::text || '?v=' || p_media_version::text;
+END $_$;
+
+
+ALTER FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) IS 'Builds an authorized /mm/<mosaic-id>?v=<media-version> URL from the protected Worker origin.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."can_access_spore_data"("owner_id" "uuid", "spore_visibility" "text") RETURNS boolean
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -396,28 +1813,22 @@ CREATE OR REPLACE FUNCTION "public"."community_spore_taxon_summary"("p_genus" "t
     AS $$
   WITH public_points AS (
     SELECT
-      o.id AS observation_id,
-      m.length_um,
-      m.width_um,
+      o.id AS observation_id, m.length_um, m.width_um,
       (m.length_um / nullif(m.width_um, 0)) AS q_value
     FROM public.observations o
     JOIN public.observation_images i
       ON i.observation_id = o.id
      AND i.deleted_at IS NULL
-    JOIN public.spore_measurements m
-      ON m.image_id = i.id
+     AND i.purged_at  IS NULL
+    JOIN public.spore_measurements m ON m.image_id = i.id
     WHERE lower(coalesce(o.genus, '')) = lower(trim(coalesce(p_genus, '')))
       AND (trim(coalesce(p_species, '')) = '' OR lower(coalesce(o.species, '')) = lower(trim(p_species)))
       AND NOT coalesce(o.is_draft, false)
+      AND public.can_read_observation(o.user_id, o.visibility)
       AND o.spore_data_visibility = 'public'
-      AND m.length_um IS NOT NULL
-      AND m.width_um IS NOT NULL
-      AND m.width_um <> 0
-      AND (
-        m.measurement_type IS NULL
-        OR m.measurement_type = ''
-        OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
-      )
+      AND m.length_um IS NOT NULL AND m.width_um IS NOT NULL AND m.width_um <> 0
+      AND (m.measurement_type IS NULL OR m.measurement_type = ''
+           OR lower(m.measurement_type) IN ('manual','spore','spores'))
   )
   SELECT
     count(distinct observation_id) AS dataset_count,
@@ -426,18 +1837,15 @@ CREATE OR REPLACE FUNCTION "public"."community_spore_taxon_summary"("p_genus" "t
     percentile_cont(0.05) WITHIN GROUP (ORDER BY length_um)::double precision AS length_p05,
     percentile_cont(0.50) WITHIN GROUP (ORDER BY length_um)::double precision AS length_p50,
     percentile_cont(0.95) WITHIN GROUP (ORDER BY length_um)::double precision AS length_p95,
-    max(length_um) AS length_max,
-    avg(length_um) AS length_avg,
+    max(length_um) AS length_max, avg(length_um) AS length_avg,
     min(width_um) AS width_min,
     percentile_cont(0.05) WITHIN GROUP (ORDER BY width_um)::double precision AS width_p05,
     percentile_cont(0.50) WITHIN GROUP (ORDER BY width_um)::double precision AS width_p50,
     percentile_cont(0.95) WITHIN GROUP (ORDER BY width_um)::double precision AS width_p95,
-    max(width_um) AS width_max,
-    avg(width_um) AS width_avg,
+    max(width_um) AS width_max, avg(width_um) AS width_avg,
     min(q_value) AS q_min,
     percentile_cont(0.50) WITHIN GROUP (ORDER BY q_value)::double precision AS q_p50,
-    max(q_value) AS q_max,
-    avg(q_value) AS q_avg
+    max(q_value) AS q_max, avg(q_value) AS q_avg
   FROM public_points
 $$;
 
@@ -520,60 +1928,129 @@ $$;
 ALTER FUNCTION "public"."enforce_non_public_observation_limit"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."finalize_media_object_deletion"("p_user_id" "uuid", "p_storage_key" "text") RETURNS TABLE("total_storage_bytes" bigint, "storage_used_bytes" bigint, "image_count" integer)
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+DECLARE
+  v_accounting public.media_object_deletion_accounting%ROWTYPE;
+BEGIN
+  SELECT *
+    INTO v_accounting
+    FROM public.media_object_deletion_accounting a
+   WHERE a.user_id = p_user_id
+     AND a.storage_key = trim(p_storage_key)
+   FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'media deletion accounting record not prepared';
+  END IF;
+
+  IF v_accounting.finalized_at IS NULL THEN
+    RETURN QUERY
+      SELECT delta.total_storage_bytes, delta.storage_used_bytes, delta.image_count
+        FROM public.apply_profile_storage_delta(
+          p_user_id,
+          -v_accounting.storage_bytes,
+          -v_accounting.image_count
+        ) AS delta;
+
+    UPDATE public.media_object_deletion_accounting a
+       SET finalized_at = now()
+     WHERE a.user_id = p_user_id
+       AND a.storage_key = trim(p_storage_key);
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+    SELECT p.total_storage_bytes, p.storage_used_bytes, p.image_count
+      FROM public.profiles p
+     WHERE p.id = p_user_id;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."finalize_media_object_deletion"("p_user_id" "uuid", "p_storage_key" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."finalize_observation_image_purge"("p_image_id" bigint, "p_purged_at" timestamp with time zone, "p_storage_bytes" bigint) RETURNS TABLE("image_id" bigint, "purged_at" timestamp with time zone, "accounted_storage_bytes" bigint, "quota_changed" boolean)
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+DECLARE
+  v_image public.observation_images%ROWTYPE;
+  v_bytes bigint;
+BEGIN
+  SELECT *
+    INTO v_image
+    FROM public.observation_images oi
+   WHERE oi.id = p_image_id
+   FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'observation image % not found', p_image_id;
+  END IF;
+
+  v_bytes := greatest(
+    0,
+    coalesce(p_storage_bytes, 0),
+    coalesce(v_image.purge_accounting_bytes, 0),
+    coalesce(v_image.stored_bytes, 0)
+  );
+
+  IF v_image.purged_at IS NULL THEN
+    UPDATE public.observation_images oi
+       SET purged_at = coalesce(p_purged_at, now()),
+           purge_attempted_at = coalesce(p_purged_at, now()),
+           purge_error = NULL,
+           purge_accounting_bytes = v_bytes
+     WHERE oi.id = p_image_id;
+
+    PERFORM public.apply_profile_storage_delta(v_image.user_id, -v_bytes, -1);
+
+    RETURN QUERY
+      SELECT p_image_id, coalesce(p_purged_at, now()), v_bytes, true;
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+    SELECT p_image_id, v_image.purged_at, coalesce(v_image.purge_accounting_bytes, v_bytes), false;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."finalize_observation_image_purge"("p_image_id" bigint, "p_purged_at" timestamp with time zone, "p_storage_bytes" bigint) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_community_spore_dataset"("p_observation_id" bigint) RETURNS TABLE("dataset_type" "text", "observation_id" bigint, "genus" "text", "species" "text", "common_name" "text", "contributor_label" "text", "observed_on" "date", "measurement_count" bigint, "image_count" bigint, "mount_media" "text"[], "stains" "text"[], "sample_types" "text"[], "contrasts" "text"[], "objectives" "text"[], "scale_min" double precision, "scale_max" double precision, "qc_flags" "jsonb", "length_min" double precision, "length_p05" double precision, "length_p50" double precision, "length_p95" double precision, "length_max" double precision, "length_avg" double precision, "width_min" double precision, "width_p05" double precision, "width_p50" double precision, "width_p95" double precision, "width_max" double precision, "width_avg" double precision, "q_min" double precision, "q_p50" double precision, "q_max" double precision, "q_avg" double precision, "measurements_json" "jsonb")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
   WITH filtered AS (
     SELECT
-      o.id AS observation_id,
-      o.user_id,
-      o.genus,
-      o.species,
-      o.common_name,
-      o.date,
-      o.author,
-      i.id AS image_id,
-      i.mount_medium,
-      i.stain,
-      i.sample_type,
-      i.contrast,
-      i.objective_name,
+      o.id AS observation_id, o.user_id, o.genus, o.species, o.common_name, o.date, o.author,
+      i.id AS image_id, i.mount_medium, i.stain, i.sample_type, i.contrast, i.objective_name,
       i.scale_microns_per_pixel,
-      m.id AS measurement_id,
-      m.length_um,
-      m.width_um,
-      m.p1_x,
-      m.p1_y,
-      m.p2_x,
-      m.p2_y,
-      m.p3_x,
-      m.p3_y,
-      m.p4_x,
-      m.p4_y,
-      m.measured_at
+      m.id AS measurement_id, m.length_um, m.width_um,
+      m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.measured_at
     FROM public.observations o
     JOIN public.observation_images i
       ON i.observation_id = o.id
-    JOIN public.spore_measurements m
-      ON m.image_id = i.id
+     AND i.deleted_at IS NULL
+     AND i.purged_at  IS NULL
+    JOIN public.spore_measurements m ON m.image_id = i.id
     WHERE o.id = p_observation_id
       AND NOT coalesce(o.is_draft, false)
+      AND public.can_read_observation(o.user_id, o.visibility)
       AND public.can_access_spore_data(o.user_id, o.spore_data_visibility)
-      AND m.length_um IS NOT NULL
-      AND m.width_um IS NOT NULL
-      AND (
-        m.measurement_type IS NULL
-        OR m.measurement_type = ''
-        OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
-      )
+      AND m.length_um IS NOT NULL AND m.width_um IS NOT NULL
+      AND (m.measurement_type IS NULL OR m.measurement_type = ''
+           OR lower(m.measurement_type) IN ('manual','spore','spores'))
   )
   SELECT
     'observation'::text AS dataset_type,
     max(f.observation_id) AS observation_id,
-    max(f.genus) AS genus,
-    max(f.species) AS species,
-    max(f.common_name) AS common_name,
+    max(f.genus) AS genus, max(f.species) AS species, max(f.common_name) AS common_name,
     public.community_contributor_label((array_agg(f.user_id))[1], max(f.author)) AS contributor_label,
     max(f.date) AS observed_on,
     count(f.measurement_id) AS measurement_count,
@@ -583,50 +2060,37 @@ CREATE OR REPLACE FUNCTION "public"."get_community_spore_dataset"("p_observation
     array_remove(array_agg(distinct nullif(f.sample_type, '')), NULL) AS sample_types,
     array_remove(array_agg(distinct nullif(f.contrast, '')), NULL) AS contrasts,
     array_remove(array_agg(distinct nullif(f.objective_name, '')), NULL) AS objectives,
-    min(f.scale_microns_per_pixel) AS scale_min,
-    max(f.scale_microns_per_pixel) AS scale_max,
+    min(f.scale_microns_per_pixel) AS scale_min, max(f.scale_microns_per_pixel) AS scale_max,
     jsonb_build_object(
-      'has_mount', bool_or(nullif(f.mount_medium, '') IS NOT NULL),
-      'has_stain', bool_or(nullif(f.stain, '') IS NOT NULL),
-      'has_sample_type', bool_or(nullif(f.sample_type, '') IS NOT NULL),
-      'has_contrast', bool_or(nullif(f.contrast, '') IS NOT NULL),
-      'has_objective', bool_or(nullif(f.objective_name, '') IS NOT NULL),
-      'has_scale', bool_or(f.scale_microns_per_pixel IS NOT NULL),
-      'has_point_geometry', bool_or(
-        f.p1_x IS NOT NULL OR f.p1_y IS NOT NULL OR f.p2_x IS NOT NULL OR f.p2_y IS NOT NULL
-      ),
-      'measurement_count', count(f.measurement_id)
+      'has_mount',           bool_or(nullif(f.mount_medium, '') IS NOT NULL),
+      'has_stain',           bool_or(nullif(f.stain, '') IS NOT NULL),
+      'has_sample_type',     bool_or(nullif(f.sample_type, '') IS NOT NULL),
+      'has_contrast',        bool_or(nullif(f.contrast, '') IS NOT NULL),
+      'has_objective',       bool_or(nullif(f.objective_name, '') IS NOT NULL),
+      'has_scale',           bool_or(f.scale_microns_per_pixel IS NOT NULL),
+      'has_point_geometry',  bool_or(f.p1_x IS NOT NULL OR f.p1_y IS NOT NULL OR f.p2_x IS NOT NULL OR f.p2_y IS NOT NULL),
+      'measurement_count',   count(f.measurement_id)
     ) AS qc_flags,
     min(f.length_um) AS length_min,
     percentile_cont(0.05) WITHIN GROUP (ORDER BY f.length_um)::double precision AS length_p05,
     percentile_cont(0.50) WITHIN GROUP (ORDER BY f.length_um)::double precision AS length_p50,
     percentile_cont(0.95) WITHIN GROUP (ORDER BY f.length_um)::double precision AS length_p95,
-    max(f.length_um) AS length_max,
-    avg(f.length_um) AS length_avg,
+    max(f.length_um) AS length_max, avg(f.length_um) AS length_avg,
     min(f.width_um) AS width_min,
     percentile_cont(0.05) WITHIN GROUP (ORDER BY f.width_um)::double precision AS width_p05,
     percentile_cont(0.50) WITHIN GROUP (ORDER BY f.width_um)::double precision AS width_p50,
     percentile_cont(0.95) WITHIN GROUP (ORDER BY f.width_um)::double precision AS width_p95,
-    max(f.width_um) AS width_max,
-    avg(f.width_um) AS width_avg,
+    max(f.width_um) AS width_max, avg(f.width_um) AS width_avg,
     min(f.length_um / nullif(f.width_um, 0)) AS q_min,
     percentile_cont(0.50) WITHIN GROUP (ORDER BY (f.length_um / nullif(f.width_um, 0)))::double precision AS q_p50,
     max(f.length_um / nullif(f.width_um, 0)) AS q_max,
     avg(f.length_um / nullif(f.width_um, 0)) AS q_avg,
     jsonb_agg(
       jsonb_build_object(
-        'measurement_id', f.measurement_id,
-        'image_id', f.image_id,
-        'length_um', f.length_um,
-        'width_um', f.width_um,
-        'p1_x', f.p1_x,
-        'p1_y', f.p1_y,
-        'p2_x', f.p2_x,
-        'p2_y', f.p2_y,
-        'p3_x', f.p3_x,
-        'p3_y', f.p3_y,
-        'p4_x', f.p4_x,
-        'p4_y', f.p4_y,
+        'measurement_id', f.measurement_id, 'image_id', f.image_id,
+        'length_um', f.length_um, 'width_um', f.width_um,
+        'p1_x', f.p1_x, 'p1_y', f.p1_y, 'p2_x', f.p2_x, 'p2_y', f.p2_y,
+        'p3_x', f.p3_x, 'p3_y', f.p3_y, 'p4_x', f.p4_x, 'p4_y', f.p4_y,
         'measured_at', f.measured_at
       )
       ORDER BY f.measured_at, f.measurement_id
@@ -636,6 +2100,29 @@ $$;
 
 
 ALTER FUNCTION "public"."get_community_spore_dataset"("p_observation_id" bigint) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_observation_latest_microscope_captured_at"("p_observation_id" bigint) RETURNS timestamp with time zone
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  SELECT max(i.captured_at)
+  FROM public.observations o
+  JOIN public.observation_images i
+    ON i.observation_id = o.id
+  WHERE o.id = p_observation_id
+    AND o.user_id = auth.uid()
+    AND i.image_type = 'microscope'
+    AND i.deleted_at IS NULL
+    AND i.purged_at IS NULL
+$$;
+
+
+ALTER FUNCTION "public"."get_observation_latest_microscope_captured_at"("p_observation_id" bigint) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."get_observation_latest_microscope_captured_at"("p_observation_id" bigint) IS 'Owner-only derived timestamp of the latest real capture time among active microscope images. Never falls back to upload time.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."get_person_stats"("p_user_id" "uuid") RETURNS TABLE("user_id" "uuid", "public_find_count" bigint, "public_species_count" bigint, "public_spore_count" bigint)
@@ -928,335 +2415,46 @@ ALTER FUNCTION "public"."get_public_map_points"("p_species_slug" "text", "p_genu
 CREATE OR REPLACE FUNCTION "public"."get_public_observation"("p_observation_id" bigint) RETURNS TABLE("id" bigint, "speciesSlug" "text", "speciesName" "text", "speciesCommonName" "text", "observerDisplayName" "text", "observedOn" "date", "country" "text", "regionId" "text", "locationPrecision" "text", "locationLabel" "text", "hasMicroscopy" boolean, "sporeMeasurementCount" bigint, "sporeSummary" "jsonb", "sporePoints" "jsonb", "sporeMosaic" "jsonb", "contrastMethod" "text", "mountReagent" "text", "sampleType" "text", "sampleSource" "text", "prepSummary" "jsonb", "mapLat" double precision, "mapLon" double precision)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
-    AS $_$
-  WITH candidate_base AS (
-    SELECT
-      o.id,
-      nullif(btrim(coalesce(o.genus, '')), '') AS genus,
-      nullif(btrim(coalesce(o.species, '')), '') AS species,
-      nullif(btrim(coalesce(o.common_name, '')), '') AS common_name,
-      o.user_id,
-      o.author,
-      o.date AS observed_on,
-      nullif(btrim(coalesce(o.country_code, '')), '') AS country,
-      nullif(btrim(coalesce(o.region_id, '')), '') AS region_id,
-      coalesce(o.location_precision, 'hidden') AS location_precision,
-      nullif(btrim(coalesce(o.location, '')), '') AS location,
-      nullif(btrim(coalesce(r.label, '')), '') AS region_label,
-      public.community_contributor_label(o.user_id, o.author) AS observer_display_name
-    FROM public.observations o
-    LEFT JOIN public.public_regions r
-      ON r.id = o.region_id
-    WHERE o.id = p_observation_id
-      AND o.visibility = 'public'::text
-      AND NOT coalesce(o.is_draft, false)
-      AND NOT EXISTS (
-        SELECT 1
-        FROM public.profiles p
-        WHERE p.id = o.user_id
-          AND p.is_banned = true
-      )
-      AND (
-        auth.uid() IS NULL
-        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
-      )
-  ),
-  enriched AS (
-    SELECT
-      c.*,
-      latest_image.contrast AS contrast_method,
-      latest_image.mount_medium AS mount_reagent,
-      latest_image.sample_type AS sample_type,
-      latest_image.sample_source AS sample_source,
-      (latest_image.id IS NOT NULL) AS has_microscopy,
-      CASE
-        WHEN o.spore_data_visibility = 'public'::text
-          THEN coalesce(spore_stats.spore_measurement_count, 0::bigint)
-        ELSE 0::bigint
-      END AS spore_measurement_count,
-      CASE
-        WHEN o.spore_data_visibility = 'public'::text
-          THEN o.spore_statistics
-        ELSE NULL::jsonb
-      END AS spore_summary,
-      CASE
-        WHEN o.spore_data_visibility = 'public'::text
-          THEN point_agg.spore_points
-        ELSE NULL::jsonb
-      END AS spore_points,
-      CASE
-        WHEN o.spore_data_visibility = 'public'::text
-             AND latest_mosaic.id IS NOT NULL
-          THEN jsonb_strip_nulls(jsonb_build_object(
-            'url',                concat('https://media.sporely.no/', latest_mosaic.storage_key),
-            'width',              latest_mosaic.width_px,
-            'height',             latest_mosaic.height_px,
-            'tileSize',           latest_mosaic.tile_size_px,
-            'version',            latest_mosaic.version,
-            'tileWidthPx',        latest_mosaic.tile_width_px,
-            'tileHeightPx',       latest_mosaic.tile_height_px,
-            'commonCropWidthUm',  latest_mosaic.common_crop_width_um,
-            'commonCropHeightUm', latest_mosaic.common_crop_height_um
-          ))
-        ELSE NULL::jsonb
-      END AS spore_mosaic,
-      prep_agg.prep_summary,
-      CASE
-        WHEN c.location_precision = 'exact'::text
-          THEN o.gps_latitude
-        WHEN c.location_precision = 'fuzzed'::text
-          THEN round(o.gps_latitude::numeric, 2)::double precision
-        ELSE NULL::double precision
-      END AS map_lat,
-      CASE
-        WHEN c.location_precision = 'exact'::text
-          THEN o.gps_longitude
-        WHEN c.location_precision = 'fuzzed'::text
-          THEN round(o.gps_longitude::numeric, 2)::double precision
-        ELSE NULL::double precision
-      END AS map_lon
-    FROM candidate_base c
-    JOIN public.observations o
-      ON o.id = c.id
-    LEFT JOIN LATERAL (
-      SELECT
-        i.id,
-        i.contrast,
-        i.mount_medium,
-        i.sample_type,
-        i.sample_source
-      FROM public.observation_images i
-      WHERE i.observation_id = c.id
-        AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
-        AND (
-          i.image_type = 'microscope'::text
-          OR (
-            i.image_type IS NULL
-            AND EXISTS (
-              SELECT 1
-              FROM public.spore_measurements m2
-              WHERE m2.image_id = i.id
-                AND (
-                  m2.measurement_type IS NULL
-                  OR m2.measurement_type = ''
-                  OR lower(m2.measurement_type) IN ('manual', 'spore', 'spores')
-                )
-            )
-          )
-        )
-      ORDER BY i.created_at DESC NULLS LAST, i.id DESC
-      LIMIT 1
-    ) latest_image ON true
-    LEFT JOIN LATERAL (
-      SELECT count(*)::bigint AS spore_measurement_count
-      FROM public.observation_images i
-      JOIN public.spore_measurements m
-        ON m.image_id = i.id
-      WHERE i.observation_id = c.id
-        AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
-        AND (i.image_type IS NULL OR i.image_type = 'microscope'::text)
-        AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
-        )
-    ) spore_stats ON true
-    LEFT JOIN LATERAL (
-      SELECT
-        sm.id,
-        sm.storage_key,
-        sm.width_px,
-        sm.height_px,
-        sm.tile_size_px,
-        sm.version,
-        sm.tile_width_px,
-        sm.tile_height_px,
-        sm.common_crop_width_um,
-        sm.common_crop_height_um
-      FROM public.spore_measurement_mosaics sm
-      WHERE sm.observation_id = c.id
-        AND sm.user_id = c.user_id
-      ORDER BY sm.version DESC, sm.id DESC
-      LIMIT 1
-    ) latest_mosaic ON true
-    LEFT JOIN LATERAL (
-      SELECT jsonb_agg(
-        jsonb_strip_nulls(
-          jsonb_build_object(
-            'id',             m.id::text,
-            'observationId',  c.id::text,
-            'imageId',        i.id::text,
-            'lengthUm',       m.length_um,
-            'widthUm',        m.width_um,
-            'q',              round((m.length_um / nullif(m.width_um, 0))::numeric, 4)::double precision,
-            'cropUrl',        CASE
-                                WHEN m.thumb_key IS NOT NULL
-                                  THEN concat('https://media.sporely.no/', m.thumb_key)
-                                ELSE NULL
-                              END,
-            -- Per-point prep metadata. Same normalization as the scalar
-            -- observation-level fields (see the SELECT list below): unset
-            -- variants collapse to NULL and jsonb_strip_nulls removes them
-            -- from the object before it lands in the aggregate.
-            'contrastMethod', nullif(btrim(coalesce(i.contrast, '')), ''),
-            'mountReagent',   nullif(btrim(coalesce(i.mount_medium, '')), ''),
-            'stainReagent',   nullif(btrim(coalesce(i.stain, '')), ''),
-            'sampleType',     CASE
-                                WHEN lower(btrim(coalesce(i.sample_type, ''))) IN ('fresh', 'dried')
-                                  THEN lower(btrim(i.sample_type))
-                                ELSE NULL::text
-                              END,
-            'sampleSource',   CASE
-                                WHEN lower(btrim(coalesce(i.sample_source, ''))) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
-                                  THEN lower(btrim(i.sample_source))
-                                ELSE NULL::text
-                              END,
-            'mosaicX',        t.x_px,
-            'mosaicY',        t.y_px,
-            'mosaicW',        t.w_px,
-            'mosaicH',        t.h_px,
-            'overlay',        t.overlay_json
-          )
-        )
-      ) AS spore_points
-      FROM public.spore_measurements m
-      JOIN public.observation_images i
-        ON i.id = m.image_id
-      LEFT JOIN public.spore_measurement_mosaic_tiles t
-        ON t.measurement_id = m.id
-      WHERE i.observation_id = c.id
-        AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
-        AND (i.image_type IS NULL OR i.image_type = 'microscope'::text)
-        AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
-        )
-    ) point_agg ON true
-    LEFT JOIN LATERAL (
-      WITH contributors AS (
-        SELECT DISTINCT
-          i.id AS image_id,
-          nullif(btrim(coalesce(i.contrast, '')), '') AS contrast,
-          nullif(btrim(coalesce(i.mount_medium, '')), '') AS mount_medium,
-          nullif(btrim(coalesce(i.stain, '')), '') AS stain,
-          nullif(btrim(coalesce(i.sample_type, '')), '') AS sample_type,
-          nullif(btrim(coalesce(i.sample_source, '')), '') AS sample_source
-        FROM public.observation_images i
-        WHERE i.observation_id = c.id
-          AND i.deleted_at IS NULL
-          AND i.purged_at IS NULL
-          AND (i.image_type IS NULL OR i.image_type = 'microscope'::text)
-          AND EXISTS (
-            SELECT 1
-            FROM public.spore_measurements m3
-            WHERE m3.image_id = i.id
-              AND (
-                m3.measurement_type IS NULL
-                OR m3.measurement_type = ''
-                OR lower(m3.measurement_type) IN ('manual', 'spore', 'spores')
-              )
-          )
-      )
-      SELECT jsonb_build_object(
-        'contrasts',          coalesce((
-          SELECT jsonb_agg(v ORDER BY v)
-          FROM (
-            SELECT DISTINCT contrast AS v
-            FROM contributors
-            WHERE contrast IS NOT NULL
-              AND lower(contrast) NOT IN ('not_set', 'not set', 'unset', 'unknown')
-          ) s
-        ), '[]'::jsonb),
-        'mounts',             coalesce((
-          SELECT jsonb_agg(v ORDER BY v)
-          FROM (
-            SELECT DISTINCT mount_medium AS v
-            FROM contributors
-            WHERE mount_medium IS NOT NULL
-              AND lower(mount_medium) NOT IN ('not_set', 'not set', 'unset', 'unknown')
-          ) s
-        ), '[]'::jsonb),
-        'stains',             coalesce((
-          SELECT jsonb_agg(v ORDER BY v)
-          FROM (
-            SELECT DISTINCT stain AS v
-            FROM contributors
-            WHERE stain IS NOT NULL
-              AND lower(stain) NOT IN ('not_set', 'not set', 'unset', 'unknown')
-          ) s
-        ), '[]'::jsonb),
-        'specimenConditions', coalesce((
-          SELECT jsonb_agg(v ORDER BY v)
-          FROM (
-            SELECT DISTINCT lower(sample_type) AS v
-            FROM contributors
-            WHERE sample_type IS NOT NULL
-              AND lower(sample_type) IN ('fresh', 'dried')
-          ) s
-        ), '[]'::jsonb),
-        'sampleSources',      coalesce((
-          SELECT jsonb_agg(v ORDER BY v)
-          FROM (
-            SELECT DISTINCT lower(sample_source) AS v
-            FROM contributors
-            WHERE sample_source IS NOT NULL
-              AND lower(sample_source) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
-          ) s
-        ), '[]'::jsonb)
-      ) AS prep_summary
-    ) prep_agg ON true
-  )
+    AS $$
   SELECT
-    e.id AS id,
-    nullif(
-      regexp_replace(
-        regexp_replace(lower(btrim(concat_ws(' ', e.genus, e.species))), '[^a-z0-9]+', '-', 'g'),
-        '(^-|-$)',
-        '',
-        'g'
-      ),
-      ''
-    ) AS "speciesSlug",
-    nullif(btrim(concat_ws(' ', e.genus, e.species)), '') AS "speciesName",
-    e.common_name AS "speciesCommonName",
-    e.observer_display_name AS "observerDisplayName",
-    e.observed_on AS "observedOn",
-    e.country AS country,
-    e.region_id AS "regionId",
-    e.location_precision AS "locationPrecision",
+    legacy.id,
+    legacy."speciesSlug",
+    legacy."speciesName",
+    legacy."speciesCommonName",
+    legacy."observerDisplayName",
+    legacy."observedOn",
+    legacy.country,
+    legacy."regionId",
+    legacy."locationPrecision",
+    legacy."locationLabel",
+    legacy."hasMicroscopy",
+    legacy."sporeMeasurementCount",
+    legacy."sporeSummary",
+    legacy."sporePoints",
     CASE
-      WHEN e.location_precision = 'exact'::text THEN e.location
-      WHEN e.location_precision = 'fuzzed'::text THEN coalesce(e.region_label, e.country)
-      WHEN e.location_precision = 'region'::text THEN e.region_label
-      ELSE NULL::text
-    END AS "locationLabel",
-    e.has_microscopy AS "hasMicroscopy",
-    e.spore_measurement_count AS "sporeMeasurementCount",
-    e.spore_summary AS "sporeSummary",
-    e.spore_points AS "sporePoints",
-    e.spore_mosaic AS "sporeMosaic",
-    e.contrast_method AS "contrastMethod",
-    e.mount_reagent AS "mountReagent",
-    CASE
-      WHEN lower(btrim(coalesce(e.sample_type, ''))) IN ('fresh', 'dried')
-        THEN lower(btrim(e.sample_type))
-      ELSE NULL::text
-    END AS "sampleType",
-    CASE
-      WHEN lower(btrim(coalesce(e.sample_source, ''))) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
-        THEN lower(btrim(e.sample_source))
-      ELSE NULL::text
-    END AS "sampleSource",
-    e.prep_summary AS "prepSummary",
-    e.map_lat AS "mapLat",
-    e.map_lon AS "mapLon"
-  FROM enriched e
-  LIMIT 1
-$_$;
+      WHEN legacy."sporeMosaic" IS NULL OR mosaic.id IS NULL THEN legacy."sporeMosaic"
+      ELSE legacy."sporeMosaic" || jsonb_build_object(
+        'mosaicId', mosaic.id,
+        'mosaicMediaVersion', mosaic.media_version,
+        'mosaicMediaUrl', public.build_worker_mosaic_url(mosaic.id, mosaic.media_version)
+      )
+    END AS "sporeMosaic",
+    legacy."contrastMethod",
+    legacy."mountReagent",
+    legacy."sampleType",
+    legacy."sampleSource",
+    legacy."prepSummary",
+    legacy."mapLat",
+    legacy."mapLon"
+  FROM public._get_public_observation_stage2a(p_observation_id) legacy
+  LEFT JOIN LATERAL (
+    SELECT sm.id, sm.media_version
+    FROM public.spore_measurement_mosaics sm
+    WHERE sm.observation_id = legacy.id
+    ORDER BY sm.version DESC, sm.id DESC
+    LIMIT 1
+  ) mosaic ON true
+$$;
 
 
 ALTER FUNCTION "public"."get_public_observation"("p_observation_id" bigint) OWNER TO "postgres";
@@ -1294,7 +2492,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation_facets"() RETURNS "j
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
         AND i.image_type = 'microscope'::text
-      ORDER BY i.created_at DESC NULLS LAST, i.id DESC
+      ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
       LIMIT 1
     ) latest_image ON true
     WHERE o.visibility = 'public'::text
@@ -1558,12 +2756,11 @@ $_$;
 ALTER FUNCTION "public"."get_public_observation_facets"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text", "fullUrl" "text", "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean, "scaleMicronsPerPixel" double precision)
+CREATE OR REPLACE FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text", "fullUrl" "text", "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean, "scaleMicronsPerPixel" double precision, "mediaVersion" bigint, "fullMediaUrl" "text", "thumbMediaUrl" "text")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
-  SELECT *
-  FROM public.search_public_observation_images(ARRAY[p_observation_id])
+  SELECT * FROM public.search_public_observation_images(ARRAY[p_observation_id])
 $$;
 
 
@@ -1653,249 +2850,18 @@ $$;
 ALTER FUNCTION "public"."get_public_observation_spore_summaries"("p_observation_ids" bigint[], "p_sample_type" "text", "p_mount_reagent" "text", "p_stain_reagent" "text", "p_contrast_method" "text") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_public_species"("p_species_slug" "text") RETURNS TABLE("speciesSlug" "text", "genus" "text", "species" "text", "speciesName" "text", "commonName" "text", "observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" "date", "lastObservedOn" "date", "countries" "jsonb", "regions" "jsonb", "representativeThumbUrl" "text", "recentObservationIds" bigint[])
+CREATE OR REPLACE FUNCTION "public"."get_public_species"("p_species_slug" "text") RETURNS TABLE("speciesSlug" "text", "genus" "text", "species" "text", "speciesName" "text", "commonName" "text", "observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" "date", "lastObservedOn" "date", "countries" "jsonb", "regions" "jsonb", "representativeThumbUrl" "text", "recentObservationIds" bigint[], "representativeImageId" bigint, "representativeMediaVersion" bigint, "representativeThumbMediaUrl" "text")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
-    AS $_$
-  WITH normalized AS (
-    SELECT nullif(
-      regexp_replace(
-        lower(btrim(coalesce(p_species_slug, ''))),
-        '[^a-z0-9]+',
-        '-',
-        'g'
-      ),
-      ''
-    ) AS species_slug
-  ),
-  country_labels AS (
-    SELECT *
-    FROM (
-      VALUES
-        ('DE'::text, 'Germany'::text),
-        ('FI'::text, 'Finland'::text),
-        ('GB'::text, 'United Kingdom'::text),
-        ('NO'::text, 'Norway'::text),
-        ('SE'::text, 'Sweden'::text)
-    ) AS c(country_code, label)
-  ),
-  visible_observations AS (
-    SELECT
-      o.id,
-      nullif(btrim(coalesce(o.genus, '')), '') AS genus,
-      nullif(btrim(coalesce(o.species, '')), '') AS species,
-      nullif(btrim(concat_ws(' ', nullif(btrim(coalesce(o.genus, '')), ''), nullif(btrim(coalesce(o.species, '')), ''))), '') AS species_name,
-      nullif(
-        regexp_replace(
-          regexp_replace(
-            lower(btrim(concat_ws(' ', nullif(btrim(coalesce(o.genus, '')), ''), nullif(btrim(coalesce(o.species, '')), '')))),
-            '[^a-z0-9]+',
-            '-',
-            'g'
-          ),
-          '(^-|-$)',
-          '',
-          'g'
-        ),
-        ''
-      ) AS species_slug,
-      nullif(btrim(coalesce(o.common_name, '')), '') AS common_name,
-      o.date AS observed_on,
-      upper(nullif(btrim(coalesce(o.country_code, '')), '')) AS country_code,
-      nullif(btrim(coalesce(o.region_id, '')), '') AS region_id,
-      nullif(btrim(coalesce(r.label, '')), '') AS region_label,
-      upper(nullif(btrim(coalesce(r.country_code, '')), '')) AS region_country_code,
-      CASE
-        WHEN o.spore_data_visibility = 'public'::text
-          THEN coalesce(spore_stats.spore_measurement_count, 0::bigint)
-        ELSE 0::bigint
-      END AS spore_measurement_count,
-      (latest_microscope_image.id IS NOT NULL) AS has_microscopy
-    FROM public.observations o
-    LEFT JOIN public.public_regions r
-      ON r.id = o.region_id
-    LEFT JOIN LATERAL (
-      SELECT count(*)::bigint AS spore_measurement_count
-      FROM public.observation_images i
-      JOIN public.spore_measurements m
-        ON m.image_id = i.id
-      WHERE i.observation_id = o.id
-        AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
-        AND i.image_type = 'microscope'::text
-        AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
-        )
-    ) spore_stats ON true
-    LEFT JOIN LATERAL (
-      SELECT i.id
-      FROM public.observation_images i
-      WHERE i.observation_id = o.id
-        AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
-        AND i.image_type = 'microscope'::text
-      ORDER BY i.created_at DESC NULLS LAST, i.id DESC
-      LIMIT 1
-    ) latest_microscope_image ON true
-    WHERE o.visibility = 'public'::text
-      AND NOT coalesce(o.is_draft, false)
-      AND NOT EXISTS (
-        SELECT 1
-        FROM public.profiles p
-        WHERE p.id = o.user_id
-          AND p.is_banned = true
-      )
-      AND (
-        auth.uid() IS NULL
-        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
-      )
-  ),
-  species_groups AS (
-    SELECT
-      vo.species_slug,
-      vo.genus,
-      vo.species,
-      vo.species_name,
-      min(vo.common_name) AS common_name,
-      count(*)::bigint AS observation_count,
-      count(*) FILTER (WHERE vo.has_microscopy)::bigint AS microscopy_observation_count,
-      coalesce(sum(vo.spore_measurement_count), 0)::bigint AS spore_measurement_count,
-      min(vo.observed_on) AS first_observed_on,
-      max(vo.observed_on) AS last_observed_on
-    FROM visible_observations vo
-    WHERE vo.species_slug IS NOT NULL
-    GROUP BY vo.species_slug, vo.genus, vo.species, vo.species_name
-  ),
-  target_species AS (
-    SELECT sg.*
-    FROM species_groups sg
-    JOIN normalized n
-      ON n.species_slug = sg.species_slug
-  )
+    AS $$
   SELECT
-    ts.species_slug AS "speciesSlug",
-    ts.genus AS genus,
-    ts.species AS species,
-    ts.species_name AS "speciesName",
-    ts.common_name AS "commonName",
-    ts.observation_count AS "observationCount",
-    ts.microscopy_observation_count AS "microscopyObservationCount",
-    ts.spore_measurement_count AS "sporeMeasurementCount",
-    ts.first_observed_on AS "firstObservedOn",
-    ts.last_observed_on AS "lastObservedOn",
-    coalesce(countries.items, '[]'::jsonb) AS countries,
-    coalesce(regions.items, '[]'::jsonb) AS regions,
-    rep.representative_thumb_url AS "representativeThumbUrl",
-    recent.recent_observation_ids AS "recentObservationIds"
-  FROM target_species ts
-  LEFT JOIN LATERAL (
-    SELECT coalesce(
-      jsonb_agg(item ORDER BY facet_count DESC, label ASC, value ASC),
-      '[]'::jsonb
-    ) AS items
-    FROM (
-      SELECT
-        grouped.country_code AS value,
-        coalesce(cl.label, grouped.country_code) AS label,
-        grouped.facet_count,
-        jsonb_build_object(
-          'value', grouped.country_code,
-          'label', coalesce(cl.label, grouped.country_code),
-          'count', grouped.facet_count
-        ) AS item
-      FROM (
-        SELECT
-          vo.country_code,
-          count(*)::bigint AS facet_count
-        FROM visible_observations vo
-        WHERE vo.species_slug = ts.species_slug
-          AND vo.country_code IS NOT NULL
-        GROUP BY vo.country_code
-      ) grouped
-      LEFT JOIN country_labels cl
-        ON cl.country_code = grouped.country_code
-    ) items
-  ) countries ON true
-  LEFT JOIN LATERAL (
-    SELECT coalesce(
-      jsonb_agg(item ORDER BY facet_count DESC, label ASC, value ASC),
-      '[]'::jsonb
-    ) AS items
-    FROM (
-      SELECT
-        grouped.region_id AS value,
-        grouped.region_label AS label,
-        grouped.region_country_code AS country_code,
-        grouped.facet_count,
-        jsonb_build_object(
-          'value', grouped.region_id,
-          'label', grouped.region_label,
-          'countryCode', grouped.region_country_code,
-          'count', grouped.facet_count
-        ) AS item
-      FROM (
-        SELECT
-          vo.region_id,
-          coalesce(vo.region_label, vo.region_id) AS region_label,
-          coalesce(vo.region_country_code, vo.country_code) AS region_country_code,
-          count(*)::bigint AS facet_count
-        FROM visible_observations vo
-        WHERE vo.species_slug = ts.species_slug
-          AND vo.region_id IS NOT NULL
-        GROUP BY
-          vo.region_id,
-          coalesce(vo.region_label, vo.region_id),
-          coalesce(vo.region_country_code, vo.country_code)
-      ) grouped
-    ) items
-  ) regions ON true
-  LEFT JOIN LATERAL (
-    SELECT concat(
-      'https://media.sporely.no/',
-      concat(
-        CASE WHEN rep.storage_dir IS NULL THEN '' ELSE rep.storage_dir || '/' END,
-        'thumb_',
-        regexp_replace(rep.file_name, '^(?:thumb_|medium_|small_|cards_)+', '', 'i')
-      )
-    ) AS representative_thumb_url
-    FROM (
-      SELECT
-        nullif(
-          regexp_replace(btrim(i.storage_path, '/'), '/[^/]+$', '', ''),
-          btrim(i.storage_path, '/')
-        ) AS storage_dir,
-        regexp_replace(btrim(i.storage_path, '/'), '^.*/', '') AS file_name,
-        vo.observed_on,
-        i.sort_order,
-        i.created_at,
-        i.id
-      FROM visible_observations vo
-      JOIN public.observation_images i
-        ON i.observation_id = vo.id
-      WHERE vo.species_slug = ts.species_slug
-        AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
-        AND i.storage_path IS NOT NULL
-    ) rep
-    ORDER BY rep.observed_on DESC, rep.sort_order NULLS LAST, rep.created_at DESC NULLS LAST, rep.id DESC
-    LIMIT 1
-  ) rep ON true
-  LEFT JOIN LATERAL (
-    SELECT coalesce(
-      array_agg(x.id ORDER BY x.observed_on DESC, x.id DESC),
-      '{}'::bigint[]
-    ) AS recent_observation_ids
-    FROM (
-      SELECT vo.id, vo.observed_on
-      FROM visible_observations vo
-      WHERE vo.species_slug = ts.species_slug
-      ORDER BY vo.observed_on DESC, vo.id DESC
-      LIMIT 5
-    ) x
-  ) recent ON true
-$_$;
+    legacy.*,
+    media.image_id AS "representativeImageId",
+    media.media_version AS "representativeMediaVersion",
+    media.thumb_media_url AS "representativeThumbMediaUrl"
+  FROM public._get_public_species_stage2a(p_species_slug) legacy
+  LEFT JOIN LATERAL public._stage2b_species_representative_media(legacy."speciesSlug") media ON true
+$$;
 
 
 ALTER FUNCTION "public"."get_public_species"("p_species_slug" "text") OWNER TO "postgres";
@@ -2863,7 +3829,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
         AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
         AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
         AND (se.filter_contrast_method IS NULL OR lower(btrim(coalesce(i.contrast,     ''))) = se.filter_contrast_method)
-      ORDER BY contrib.n DESC, i.created_at DESC NULLS LAST, i.id DESC
+      ORDER BY contrib.n DESC, i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
       LIMIT 1
     ) rep_img ON true
     JOIN LATERAL (
@@ -3211,6 +4177,290 @@ $$;
 ALTER FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_b" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."media_authorize_delivery"("p_image_id" bigint, "p_variant" "text", "p_caller" "uuid") RETURNS TABLE("allowed" boolean, "storage_path" "text", "canonical_bucket" "text", "media_version" bigint, "cache_class" "text", "reason" "text")
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+DECLARE
+  r RECORD;
+  is_owner boolean;
+  namespace_prefix text;
+  chosen_key text;
+BEGIN
+  IF public.media_variant_is_supported(p_variant) IS DISTINCT FROM true THEN
+    allowed := false; storage_path := NULL; canonical_bucket := NULL;
+    media_version := NULL; cache_class := 'deny'; reason := 'unsupported_variant';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  IF p_image_id IS NULL OR p_image_id <= 0 THEN
+    allowed := false; storage_path := NULL; canonical_bucket := NULL;
+    media_version := NULL; cache_class := 'deny'; reason := 'invalid_image_id';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  SELECT
+    oi.id, oi.observation_id,
+    oi.user_id                    AS image_user_id,
+    oi.storage_path,
+    oi.original_storage_path,
+    oi.canonical_bucket,
+    oi.deleted_at,
+    oi.purged_at,
+    oi.media_version,
+    o.user_id                     AS obs_user_id,
+    o.visibility,
+    COALESCE(o.spore_data_visibility, 'public') AS spore_data_visibility,
+    o.is_draft,
+    COALESCE(p.is_banned, false)  AS owner_banned
+  INTO r
+  FROM public.observation_images oi
+  JOIN public.observations       o ON o.id = oi.observation_id
+  LEFT JOIN public.profiles      p ON p.id = o.user_id
+  WHERE oi.id = p_image_id;
+
+  IF NOT FOUND THEN
+    allowed := false; storage_path := NULL; canonical_bucket := NULL;
+    media_version := NULL; cache_class := 'deny'; reason := 'not_found';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  media_version := r.media_version;
+  canonical_bucket := r.canonical_bucket;
+
+  -- Read-time integrity.
+  IF r.canonical_bucket IS NULL OR r.canonical_bucket NOT IN ('legacy','private') THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'invalid_bucket';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF r.media_version IS NULL OR r.media_version < 1 THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'invalid_media_version';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF r.image_user_id IS DISTINCT FROM r.obs_user_id THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'owner_mismatch';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  IF r.deleted_at IS NOT NULL THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'deleted';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF r.purged_at IS NOT NULL THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'purged';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  is_owner := (p_caller IS NOT NULL AND r.obs_user_id = p_caller);
+  namespace_prefix := r.image_user_id::text || '/';
+
+  -- `original` — owner-only, no non-owner branch.
+  IF p_variant = 'original' THEN
+    chosen_key := r.original_storage_path;
+    IF chosen_key IS NULL OR chosen_key = '' THEN
+      allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'metadata_only';
+      RETURN NEXT; RETURN;
+    END IF;
+    IF NOT (chosen_key LIKE namespace_prefix || '%') THEN
+      allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'invalid_original_namespace';
+      RETURN NEXT; RETURN;
+    END IF;
+    IF NOT is_owner THEN
+      allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'original_owner_only';
+      RETURN NEXT; RETURN;
+    END IF;
+    storage_path := chosen_key;
+    allowed := true; cache_class := 'private-short'; reason := 'owner_original';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  -- full / thumb.
+  chosen_key := r.storage_path;
+  IF chosen_key IS NULL OR chosen_key = '' THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'metadata_only';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF NOT (chosen_key LIKE namespace_prefix || '%') THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'invalid_storage_namespace';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  IF is_owner THEN
+    storage_path := chosen_key;
+    allowed := true; cache_class := 'private-short'; reason := 'owner';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  IF r.owner_banned THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'owner_banned';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF COALESCE(r.is_draft, false) THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'draft';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF p_caller IS NOT NULL AND public.is_blocked_between(p_caller, r.obs_user_id) THEN
+    allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'blocked';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  IF COALESCE(r.visibility, 'public') = 'public' THEN
+    storage_path := chosen_key;
+    allowed := true; cache_class := 'public'; reason := 'public';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF COALESCE(r.visibility, 'public') = 'friends'
+     AND p_caller IS NOT NULL
+     AND public.are_friends(p_caller, r.obs_user_id) THEN
+    storage_path := chosen_key;
+    allowed := true; cache_class := 'private-short'; reason := 'friend';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  allowed := false; storage_path := NULL; cache_class := 'deny'; reason := 'observation_denied';
+  RETURN NEXT;
+END $$;
+
+
+ALTER FUNCTION "public"."media_authorize_delivery"("p_image_id" bigint, "p_variant" "text", "p_caller" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."media_authorize_delivery"("p_image_id" bigint, "p_variant" "text", "p_caller" "uuid") IS 'Variant-specific media authorization RPC. Called by the Cloudflare Worker on the /m/<image_id>/<variant>?v=<v> route via service_role. `original` is owner-only. Read-time integrity: owner_mismatch, invalid_storage_namespace, invalid_original_namespace, invalid_bucket, invalid_media_version.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."media_authorize_mosaic_delivery"("p_mosaic_id" bigint, "p_caller" "uuid") RETURNS TABLE("allowed" boolean, "storage_key" "text", "canonical_bucket" "text", "media_version" bigint, "cache_class" "text", "reason" "text")
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public,pg_catalog'
+    AS $$
+DECLARE
+  r RECORD;
+  is_owner boolean;
+BEGIN
+  IF p_mosaic_id IS NULL OR p_mosaic_id <= 0 THEN
+    allowed := false; storage_key := NULL; canonical_bucket := NULL;
+    media_version := NULL; cache_class := 'deny'; reason := 'invalid_mosaic_id';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  SELECT
+    m.id, m.user_id AS mosaic_user_id, m.storage_key, m.canonical_bucket,
+    m.media_version,
+    o.user_id AS obs_user_id, o.visibility,
+    COALESCE(o.spore_data_visibility,'public') AS spore_data_visibility,
+    o.is_draft,
+    COALESCE(p.is_banned, false) AS owner_banned
+  INTO r
+  FROM public.spore_measurement_mosaics m
+  JOIN public.observations o ON o.id = m.observation_id
+  LEFT JOIN public.profiles p ON p.id = o.user_id
+  WHERE m.id = p_mosaic_id;
+
+  IF NOT FOUND THEN
+    allowed := false; storage_key := NULL; canonical_bucket := NULL;
+    media_version := NULL; cache_class := 'deny'; reason := 'not_found';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  media_version := r.media_version;
+  canonical_bucket := r.canonical_bucket;
+
+  IF r.canonical_bucket IS NULL OR r.canonical_bucket NOT IN ('legacy','private') THEN
+    allowed := false; storage_key := NULL; cache_class := 'deny'; reason := 'invalid_bucket';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF r.media_version IS NULL OR r.media_version < 1 THEN
+    allowed := false; storage_key := NULL; cache_class := 'deny'; reason := 'invalid_media_version';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF r.mosaic_user_id IS DISTINCT FROM r.obs_user_id THEN
+    allowed := false; storage_key := NULL; cache_class := 'deny'; reason := 'owner_mismatch';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF r.storage_key IS NULL OR r.storage_key = '' THEN
+    allowed := false; storage_key := NULL; cache_class := 'deny'; reason := 'no_key';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  is_owner := (p_caller IS NOT NULL AND r.obs_user_id = p_caller);
+
+  IF is_owner THEN
+    storage_key := r.storage_key;
+    allowed := true; cache_class := 'private-short'; reason := 'owner';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  IF r.owner_banned THEN
+    allowed := false; storage_key := NULL; cache_class := 'deny'; reason := 'owner_banned';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF COALESCE(r.is_draft, false) THEN
+    allowed := false; storage_key := NULL; cache_class := 'deny'; reason := 'draft';
+    RETURN NEXT; RETURN;
+  END IF;
+  IF p_caller IS NOT NULL AND public.is_blocked_between(p_caller, r.obs_user_id) THEN
+    allowed := false; storage_key := NULL; cache_class := 'deny'; reason := 'blocked';
+    RETURN NEXT; RETURN;
+  END IF;
+
+  DECLARE
+    obs_ok boolean := false;
+    spore_ok boolean := false;
+  BEGIN
+    IF COALESCE(r.visibility,'public') = 'public' THEN obs_ok := true;
+    ELSIF COALESCE(r.visibility,'public') = 'friends'
+          AND p_caller IS NOT NULL
+          AND public.are_friends(p_caller, r.obs_user_id) THEN obs_ok := true;
+    END IF;
+
+    IF r.spore_data_visibility = 'public' THEN spore_ok := true;
+    ELSIF r.spore_data_visibility = 'friends'
+          AND p_caller IS NOT NULL
+          AND public.are_friends(p_caller, r.obs_user_id) THEN spore_ok := true;
+    END IF;
+
+    IF NOT obs_ok THEN
+      allowed := false; storage_key := NULL; cache_class := 'deny'; reason := 'observation_denied';
+      RETURN NEXT; RETURN;
+    END IF;
+    IF NOT spore_ok THEN
+      allowed := false; storage_key := NULL; cache_class := 'deny'; reason := 'spore_data_denied';
+      RETURN NEXT; RETURN;
+    END IF;
+  END;
+
+  storage_key := r.storage_key;
+  IF COALESCE(r.visibility,'public') = 'public' THEN
+    allowed := true; cache_class := 'public'; reason := 'public';
+  ELSE
+    allowed := true; cache_class := 'private-short'; reason := 'friend';
+  END IF;
+  RETURN NEXT;
+END $$;
+
+
+ALTER FUNCTION "public"."media_authorize_mosaic_delivery"("p_mosaic_id" bigint, "p_caller" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."media_authorize_mosaic_delivery"("p_mosaic_id" bigint, "p_caller" "uuid") IS 'Mosaic-specific delivery authorization. Called by the Cloudflare Worker on the /mm/<mosaic_id>?v=<v> route via service_role. Access requires BOTH observation visibility AND spore_data_visibility permission. Read-time integrity checks match media_authorize_delivery.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."media_variant_is_supported"("p_variant" "text") RETURNS boolean
+    LANGUAGE "sql" IMMUTABLE PARALLEL SAFE
+    SET "search_path" TO 'pg_catalog'
+    AS $$
+  SELECT p_variant IS NOT NULL AND p_variant IN ('full','thumb','original')
+$$;
+
+
+ALTER FUNCTION "public"."media_variant_is_supported"("p_variant" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."media_variant_is_supported"("p_variant" "text") IS 'Canonical Stage 2 image-variant allowlist. Case-sensitive exact match. NULL, whitespace, mixed-case, and unknown inputs all yield false. Extending the set requires this function AND the Worker MEDIA_VARIANTS constant to change together.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") RETURNS integer
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -3227,6 +4477,50 @@ $$;
 
 
 ALTER FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."prepare_media_object_deletion"("p_user_id" "uuid", "p_storage_key" "text", "p_storage_bytes" bigint, "p_image_count" integer) RETURNS "void"
+    LANGUAGE "sql"
+    SET "search_path" TO 'public'
+    AS $$
+  INSERT INTO public.media_object_deletion_accounting (
+    user_id, storage_key, storage_bytes, image_count
+  )
+  VALUES (
+    p_user_id,
+    trim(p_storage_key),
+    greatest(0, coalesce(p_storage_bytes, 0)),
+    greatest(0, coalesce(p_image_count, 0))
+  )
+  ON CONFLICT (user_id, storage_key) DO UPDATE
+     SET storage_bytes = CASE
+           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
+                AND (EXCLUDED.storage_bytes > 0 OR EXCLUDED.image_count > 0)
+             THEN EXCLUDED.storage_bytes
+           ELSE greatest(media_object_deletion_accounting.storage_bytes, EXCLUDED.storage_bytes)
+         END,
+         image_count = CASE
+           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
+                AND (EXCLUDED.storage_bytes > 0 OR EXCLUDED.image_count > 0)
+             THEN EXCLUDED.image_count
+           ELSE greatest(media_object_deletion_accounting.image_count, EXCLUDED.image_count)
+         END,
+         prepared_at = CASE
+           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
+                AND (EXCLUDED.storage_bytes > 0 OR EXCLUDED.image_count > 0)
+             THEN now()
+           ELSE media_object_deletion_accounting.prepared_at
+         END,
+         finalized_at = CASE
+           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
+                AND (EXCLUDED.storage_bytes > 0 OR EXCLUDED.image_count > 0)
+             THEN NULL
+           ELSE media_object_deletion_accounting.finalized_at
+         END;
+$$;
+
+
+ALTER FUNCTION "public"."prepare_media_object_deletion"("p_user_id" "uuid", "p_storage_key" "text", "p_storage_bytes" bigint, "p_image_count" integer) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."profile_has_pro_access"("profile_id" "uuid") RETURNS boolean
@@ -3289,6 +4583,86 @@ CREATE OR REPLACE FUNCTION "public"."public_normalized_specimen_condition"("valu
 
 
 ALTER FUNCTION "public"."public_normalized_specimen_condition"("value" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."reconcile_profile_storage_usage"("p_user_id" "uuid", "p_expected_total_storage_bytes" bigint, "p_expected_storage_used_bytes" bigint, "p_expected_image_count" integer, "p_storage_used_bytes" bigint, "p_image_count" integer, "p_reason" "text", "p_admin_user_id" "uuid", "p_admin_email" "text", "p_request_payload" "jsonb", "p_before_snapshot" "jsonb", "p_recalculated" "jsonb") RETURNS TABLE("action_log_id" bigint, "total_storage_bytes" bigint, "storage_used_bytes" bigint, "image_count" integer)
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+DECLARE
+  v_profile public.profiles%ROWTYPE;
+  v_log_id bigint;
+BEGIN
+  IF p_storage_used_bytes < 0 OR p_image_count < 0 THEN
+    RAISE EXCEPTION 'Reconciled storage values must be non-negative';
+  END IF;
+  IF btrim(coalesce(p_reason, '')) = '' THEN
+    RAISE EXCEPTION 'Reconciliation reason is required';
+  END IF;
+
+  SELECT * INTO v_profile
+  FROM public.profiles
+  WHERE id = p_user_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Profile not found: %', p_user_id USING ERRCODE = 'P0002';
+  END IF;
+
+  IF coalesce(v_profile.total_storage_bytes, 0) <> p_expected_total_storage_bytes
+     OR coalesce(v_profile.storage_used_bytes, 0) <> p_expected_storage_used_bytes
+     OR coalesce(v_profile.image_count, 0) <> p_expected_image_count THEN
+    RAISE EXCEPTION 'Profile accounting changed during reconciliation'
+      USING ERRCODE = 'PT409';
+  END IF;
+
+  UPDATE public.profiles
+  SET total_storage_bytes = p_storage_used_bytes,
+      storage_used_bytes = p_storage_used_bytes,
+      image_count = p_image_count
+  WHERE id = p_user_id;
+
+  INSERT INTO public.admin_action_log (
+    admin_user_id,
+    admin_email,
+    action,
+    target_type,
+    target_id,
+    reason,
+    request_payload,
+    before_snapshot,
+    result_snapshot
+  ) VALUES (
+    p_admin_user_id,
+    p_admin_email,
+    'reconcile_profile_storage_usage',
+    'profile',
+    p_user_id::text,
+    p_reason,
+    coalesce(p_request_payload, '{}'::jsonb),
+    coalesce(p_before_snapshot, '{}'::jsonb),
+    jsonb_build_object(
+      'profile_id', p_user_id,
+      'recalculated', coalesce(p_recalculated, '{}'::jsonb),
+      'profile', jsonb_build_object(
+        'id', p_user_id,
+        'total_storage_bytes', p_storage_used_bytes,
+        'storage_used_bytes', p_storage_used_bytes,
+        'image_count', p_image_count
+      )
+    )
+  ) RETURNING id INTO v_log_id;
+
+  RETURN QUERY SELECT
+    v_log_id,
+    p_storage_used_bytes,
+    p_storage_used_bytes,
+    p_image_count;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."reconcile_profile_storage_usage"("p_user_id" "uuid", "p_expected_total_storage_bytes" bigint, "p_expected_storage_used_bytes" bigint, "p_expected_image_count" integer, "p_storage_used_bytes" bigint, "p_image_count" integer, "p_reason" "text", "p_admin_user_id" "uuid", "p_admin_email" "text", "p_request_payload" "jsonb", "p_before_snapshot" "jsonb", "p_recalculated" "jsonb") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."record_client_activity"("p_client" "text", "p_app_version" "text" DEFAULT NULL::"text") RETURNS "void"
@@ -3370,58 +4744,55 @@ $$;
 ALTER FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."scrub_user_mentions"("p_user_id" "uuid") RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  affected integer;
+begin
+  update public.comments
+     set mentioned_user_ids = array_remove(mentioned_user_ids, p_user_id)
+   where p_user_id = any(mentioned_user_ids);
+  get diagnostics affected = row_count;
+  return coalesce(affected, 0);
+end;
+$$;
+
+
+ALTER FUNCTION "public"."scrub_user_mentions"("p_user_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."search_community_spore_datasets"("p_genus" "text", "p_species" "text", "p_limit" integer DEFAULT 50) RETURNS TABLE("dataset_type" "text", "observation_id" bigint, "genus" "text", "species" "text", "contributor_label" "text", "observed_on" "date", "measurement_count" bigint, "image_count" bigint, "length_min" double precision, "length_p05" double precision, "length_p50" double precision, "length_p95" double precision, "length_max" double precision, "width_min" double precision, "width_p05" double precision, "width_p50" double precision, "width_p95" double precision, "width_max" double precision, "q_min" double precision, "q_p50" double precision, "q_max" double precision, "qc_flags" "jsonb")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
   WITH filtered AS (
     SELECT
-      o.id AS observation_id,
-      o.user_id,
-      o.genus,
-      o.species,
-      o.date,
-      o.author,
-      i.id AS image_id,
-      i.mount_medium,
-      i.stain,
-      i.sample_type,
-      i.contrast,
-      i.objective_name,
+      o.id AS observation_id, o.user_id, o.genus, o.species, o.date, o.author,
+      i.id AS image_id, i.mount_medium, i.stain, i.sample_type, i.contrast, i.objective_name,
       i.scale_microns_per_pixel,
-      m.id AS measurement_id,
-      m.length_um,
-      m.width_um,
-      m.p1_x,
-      m.p1_y,
-      m.p2_x,
-      m.p2_y,
-      m.p3_x,
-      m.p3_y,
-      m.p4_x,
-      m.p4_y
+      m.id AS measurement_id, m.length_um, m.width_um,
+      m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y
     FROM public.observations o
     JOIN public.observation_images i
       ON i.observation_id = o.id
-    JOIN public.spore_measurements m
-      ON m.image_id = i.id
+     AND i.deleted_at IS NULL
+     AND i.purged_at  IS NULL
+    JOIN public.spore_measurements m ON m.image_id = i.id
     WHERE lower(coalesce(o.genus, '')) = lower(trim(coalesce(p_genus, '')))
       AND (trim(coalesce(p_species, '')) = '' OR lower(coalesce(o.species, '')) = lower(trim(p_species)))
       AND NOT coalesce(o.is_draft, false)
+      AND public.can_read_observation(o.user_id, o.visibility)
       AND public.can_access_spore_data(o.user_id, o.spore_data_visibility)
-      AND m.length_um IS NOT NULL
-      AND m.width_um IS NOT NULL
-      AND (
-        m.measurement_type IS NULL
-        OR m.measurement_type = ''
-        OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
-      )
+      AND m.length_um IS NOT NULL AND m.width_um IS NOT NULL
+      AND (m.measurement_type IS NULL OR m.measurement_type = ''
+           OR lower(m.measurement_type) IN ('manual','spore','spores'))
   )
   SELECT
     'observation'::text AS dataset_type,
     f.observation_id,
-    max(f.genus) AS genus,
-    max(f.species) AS species,
+    max(f.genus) AS genus, max(f.species) AS species,
     public.community_contributor_label((array_agg(f.user_id))[1], max(f.author)) AS contributor_label,
     max(f.date) AS observed_on,
     count(f.measurement_id) AS measurement_count,
@@ -3440,23 +4811,18 @@ CREATE OR REPLACE FUNCTION "public"."search_community_spore_datasets"("p_genus" 
     percentile_cont(0.50) WITHIN GROUP (ORDER BY (f.length_um / nullif(f.width_um, 0)))::double precision AS q_p50,
     max(f.length_um / nullif(f.width_um, 0)) AS q_max,
     jsonb_build_object(
-      'has_mount', bool_or(nullif(f.mount_medium, '') IS NOT NULL),
-      'has_stain', bool_or(nullif(f.stain, '') IS NOT NULL),
-      'has_sample_type', bool_or(nullif(f.sample_type, '') IS NOT NULL),
-      'has_contrast', bool_or(nullif(f.contrast, '') IS NOT NULL),
-      'has_objective', bool_or(nullif(f.objective_name, '') IS NOT NULL),
-      'has_scale', bool_or(f.scale_microns_per_pixel IS NOT NULL),
-      'has_point_geometry', bool_or(
-        f.p1_x IS NOT NULL OR f.p1_y IS NOT NULL OR f.p2_x IS NOT NULL OR f.p2_y IS NOT NULL
-      ),
-      'measurement_count', count(f.measurement_id)
+      'has_mount',           bool_or(nullif(f.mount_medium, '') IS NOT NULL),
+      'has_stain',           bool_or(nullif(f.stain, '') IS NOT NULL),
+      'has_sample_type',     bool_or(nullif(f.sample_type, '') IS NOT NULL),
+      'has_contrast',        bool_or(nullif(f.contrast, '') IS NOT NULL),
+      'has_objective',       bool_or(nullif(f.objective_name, '') IS NOT NULL),
+      'has_scale',           bool_or(f.scale_microns_per_pixel IS NOT NULL),
+      'has_point_geometry',  bool_or(f.p1_x IS NOT NULL OR f.p1_y IS NOT NULL OR f.p2_x IS NOT NULL OR f.p2_y IS NOT NULL),
+      'measurement_count',   count(f.measurement_id)
     ) AS qc_flags
   FROM filtered f
   GROUP BY f.observation_id
-  ORDER BY
-    count(f.measurement_id) DESC,
-    max(f.date) DESC,
-    f.observation_id DESC
+  ORDER BY count(f.measurement_id) DESC, max(f.date) DESC, f.observation_id DESC
   LIMIT greatest(coalesce(p_limit, 50), 1)
 $$;
 
@@ -3542,30 +4908,11 @@ $$;
 ALTER FUNCTION "public"."search_people_directory"("p_limit" integer, "p_offset" integer, "p_query" "text") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[] DEFAULT NULL::bigint[]) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text", "fullUrl" "text", "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean, "scaleMicronsPerPixel" double precision)
+CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[] DEFAULT NULL::bigint[]) RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" "text", "width" integer, "height" integer, "thumbUrl" "text", "previewUrl" "text", "fullUrl" "text", "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean, "scaleMicronsPerPixel" double precision, "mediaVersion" bigint, "fullMediaUrl" "text", "thumbMediaUrl" "text")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $_$
-  WITH visible_observations AS (
-    SELECT
-      o.id,
-      o.user_id
-    FROM public.observations o
-    WHERE o.visibility = 'public'::text
-      AND NOT coalesce(o.is_draft, false)
-      AND o.id = ANY (coalesce(p_observation_ids, '{}'::bigint[]))
-      AND NOT EXISTS (
-        SELECT 1
-        FROM public.profiles p
-        WHERE p.id = o.user_id
-          AND p.is_banned = true
-      )
-      AND (
-        auth.uid() IS NULL
-        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
-      )
-  ),
-  visible_images AS (
+  WITH visible_images AS (
     SELECT
       o.id AS observation_id,
       i.id AS image_id,
@@ -3573,54 +4920,35 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
       i.image_type,
       coalesce(i.stored_width, i.source_width) AS width,
       coalesce(i.stored_height, i.source_height) AS height,
-      nullif(
-        regexp_replace(btrim(i.storage_path, '/'), '/[^/]+$', '', ''),
-        btrim(i.storage_path, '/')
-      ) AS storage_dir,
+      nullif(regexp_replace(btrim(i.storage_path, '/'), '/[^/]+$', '', ''), btrim(i.storage_path, '/')) AS storage_dir,
       regexp_replace(btrim(i.storage_path, '/'), '^.*/', '') AS file_name,
-      i.ai_crop_x1,
-      i.ai_crop_y1,
-      i.ai_crop_x2,
-      i.ai_crop_y2,
-      i.ai_crop_source_w,
-      i.ai_crop_source_h,
+      i.ai_crop_x1, i.ai_crop_y1, i.ai_crop_x2, i.ai_crop_y2,
+      i.ai_crop_source_w, i.ai_crop_source_h,
       coalesce(i.ai_crop_is_custom, false) AS ai_crop_is_custom,
       coalesce(i.storage_exif_safe, false) AS storage_exif_safe,
       i.scale_microns_per_pixel,
+      i.media_version,
       i.created_at
-    FROM visible_observations o
-    JOIN public.observation_images i
-      ON i.observation_id = o.id
-    WHERE i.deleted_at IS NULL
+    FROM public.observations o
+    JOIN public.observation_images i ON i.observation_id = o.id
+    WHERE o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.id = ANY (coalesce(p_observation_ids, '{}'::bigint[]))
+      AND i.deleted_at IS NULL
       AND i.purged_at IS NULL
-      -- Metadata-only microscope anchors have no downloadable bytes and
-      -- must not appear in the public gallery. Preserved verbatim from
-      -- migration 20260714130000.
       AND i.storage_path IS NOT NULL
       AND btrim(i.storage_path) <> ''
-  ),
-  prepared AS (
+      AND NOT EXISTS (
+        SELECT 1 FROM public.profiles p
+        WHERE p.id = o.user_id AND p.is_banned = true
+      )
+      AND (auth.uid() IS NULL OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE)
+  ), prepared AS (
     SELECT
-      vi.observation_id,
-      vi.image_id,
-      vi.sort_order,
-      vi.image_type,
-      vi.width,
-      vi.height,
-      vi.ai_crop_x1,
-      vi.ai_crop_y1,
-      vi.ai_crop_x2,
-      vi.ai_crop_y2,
-      vi.ai_crop_source_w,
-      vi.ai_crop_source_h,
-      vi.ai_crop_is_custom,
-      vi.storage_exif_safe,
-      vi.scale_microns_per_pixel,
-      vi.created_at,
+      vi.*,
       concat(
         CASE WHEN vi.storage_dir IS NULL THEN '' ELSE vi.storage_dir || '/' END,
-        'thumb_',
-        regexp_replace(vi.file_name, '^(?:thumb_|medium_|small_|cards_)+', '', 'i')
+        'thumb_', regexp_replace(vi.file_name, '^(?:thumb_|medium_|small_|cards_)+', '', 'i')
       ) AS thumb_path,
       concat(
         CASE WHEN vi.storage_dir IS NULL THEN '' ELSE vi.storage_dir || '/' END,
@@ -3637,11 +4965,8 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
     p.height AS "height",
     concat('https://media.sporely.no/', p.thumb_path) AS "thumbUrl",
     concat('https://media.sporely.no/', p.thumb_path) AS "previewUrl",
-    CASE
-      WHEN p.storage_exif_safe
-        THEN concat('https://media.sporely.no/', p.full_path)
-      ELSE NULL
-    END AS "fullUrl",
+    CASE WHEN p.storage_exif_safe
+      THEN concat('https://media.sporely.no/', p.full_path) ELSE NULL END AS "fullUrl",
     p.ai_crop_x1 AS "aiCropX1",
     p.ai_crop_y1 AS "aiCropY1",
     p.ai_crop_x2 AS "aiCropX2",
@@ -3649,7 +4974,10 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observation_images"("p_observ
     p.ai_crop_source_w AS "aiCropSourceW",
     p.ai_crop_source_h AS "aiCropSourceH",
     p.ai_crop_is_custom AS "aiCropIsCustom",
-    p.scale_microns_per_pixel AS "scaleMicronsPerPixel"
+    p.scale_microns_per_pixel AS "scaleMicronsPerPixel",
+    p.media_version AS "mediaVersion",
+    public.build_worker_media_url(p.image_id, 'full', p.media_version) AS "fullMediaUrl",
+    public.build_worker_media_url(p.image_id, 'thumb', p.media_version) AS "thumbMediaUrl"
   FROM prepared p
   ORDER BY p.observation_id, p.sort_order NULLS LAST, p.created_at DESC NULLS LAST, p.image_id DESC
 $_$;
@@ -3787,7 +5115,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
               )
           )
         )
-      ORDER BY i.created_at DESC NULLS LAST, i.id DESC
+      ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
       LIMIT 1
     ) latest_image ON true
     LEFT JOIN LATERAL (
@@ -3928,242 +5256,18 @@ $$;
 ALTER FUNCTION "public"."search_public_reference_values"("p_genus" "text", "p_species" "text", "p_limit" integer) OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."search_public_species"("p_limit" integer DEFAULT 50, "p_offset" integer DEFAULT 0, "p_genus" "text" DEFAULT NULL::"text", "p_query" "text" DEFAULT NULL::"text") RETURNS TABLE("speciesSlug" "text", "genus" "text", "species" "text", "speciesName" "text", "commonName" "text", "observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" "date", "lastObservedOn" "date", "countries" "jsonb", "regions" "jsonb", "representativeThumbUrl" "text")
+CREATE OR REPLACE FUNCTION "public"."search_public_species"("p_limit" integer DEFAULT 50, "p_offset" integer DEFAULT 0, "p_genus" "text" DEFAULT NULL::"text", "p_query" "text" DEFAULT NULL::"text") RETURNS TABLE("speciesSlug" "text", "genus" "text", "species" "text", "speciesName" "text", "commonName" "text", "observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" "date", "lastObservedOn" "date", "countries" "jsonb", "regions" "jsonb", "representativeThumbUrl" "text", "representativeImageId" bigint, "representativeMediaVersion" bigint, "representativeThumbMediaUrl" "text")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
-    AS $_$
-  WITH normalized AS (
-    SELECT
-      greatest(1, least(coalesce(p_limit, 50), 100)) AS lim,
-      greatest(coalesce(p_offset, 0), 0) AS off,
-      nullif(btrim(coalesce(p_genus, '')), '') AS genus,
-      nullif(btrim(coalesce(p_query, '')), '') AS query
-  ),
-  country_labels AS (
-    SELECT *
-    FROM (
-      VALUES
-        ('DE'::text, 'Germany'::text),
-        ('FI'::text, 'Finland'::text),
-        ('GB'::text, 'United Kingdom'::text),
-        ('NO'::text, 'Norway'::text),
-        ('SE'::text, 'Sweden'::text)
-    ) AS c(country_code, label)
-  ),
-  visible_observations AS (
-    SELECT
-      o.id,
-      nullif(btrim(coalesce(o.genus, '')), '') AS genus,
-      nullif(btrim(coalesce(o.species, '')), '') AS species,
-      nullif(btrim(concat_ws(' ', nullif(btrim(coalesce(o.genus, '')), ''), nullif(btrim(coalesce(o.species, '')), ''))), '') AS species_name,
-      nullif(
-        regexp_replace(
-          regexp_replace(
-            lower(btrim(concat_ws(' ', nullif(btrim(coalesce(o.genus, '')), ''), nullif(btrim(coalesce(o.species, '')), '')))),
-            '[^a-z0-9]+',
-            '-',
-            'g'
-          ),
-          '(^-|-$)',
-          '',
-          'g'
-        ),
-        ''
-      ) AS species_slug,
-      nullif(btrim(coalesce(o.common_name, '')), '') AS common_name,
-      o.date AS observed_on,
-      upper(nullif(btrim(coalesce(o.country_code, '')), '')) AS country_code,
-      nullif(btrim(coalesce(o.region_id, '')), '') AS region_id,
-      nullif(btrim(coalesce(r.label, '')), '') AS region_label,
-      upper(nullif(btrim(coalesce(r.country_code, '')), '')) AS region_country_code,
-      CASE
-        WHEN o.spore_data_visibility = 'public'::text
-          THEN coalesce(spore_stats.spore_measurement_count, 0::bigint)
-        ELSE 0::bigint
-      END AS spore_measurement_count,
-      (latest_microscope_image.id IS NOT NULL) AS has_microscopy
-    FROM public.observations o
-    LEFT JOIN public.public_regions r
-      ON r.id = o.region_id
-    LEFT JOIN LATERAL (
-      SELECT count(*)::bigint AS spore_measurement_count
-      FROM public.observation_images i
-      JOIN public.spore_measurements m
-        ON m.image_id = i.id
-      WHERE i.observation_id = o.id
-        AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
-        AND i.image_type = 'microscope'::text
-        AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
-        )
-    ) spore_stats ON true
-    LEFT JOIN LATERAL (
-      SELECT i.id
-      FROM public.observation_images i
-      WHERE i.observation_id = o.id
-        AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
-        AND i.image_type = 'microscope'::text
-      ORDER BY i.created_at DESC NULLS LAST, i.id DESC
-      LIMIT 1
-    ) latest_microscope_image ON true
-    WHERE o.visibility = 'public'::text
-      AND NOT coalesce(o.is_draft, false)
-      AND NOT EXISTS (
-        SELECT 1
-        FROM public.profiles p
-        WHERE p.id = o.user_id
-          AND p.is_banned = true
-      )
-      AND (
-        auth.uid() IS NULL
-        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
-      )
-  ),
-  species_groups AS (
-    SELECT
-      vo.species_slug,
-      vo.genus,
-      vo.species,
-      vo.species_name,
-      min(vo.common_name) AS common_name,
-      count(*)::bigint AS observation_count,
-      count(*) FILTER (WHERE vo.has_microscopy)::bigint AS microscopy_observation_count,
-      coalesce(sum(vo.spore_measurement_count), 0)::bigint AS spore_measurement_count,
-      min(vo.observed_on) AS first_observed_on,
-      max(vo.observed_on) AS last_observed_on
-    FROM visible_observations vo
-    WHERE vo.species_slug IS NOT NULL
-    GROUP BY vo.species_slug, vo.genus, vo.species, vo.species_name
-  ),
-  filtered_species AS (
-    SELECT sg.*
-    FROM species_groups sg
-    CROSS JOIN normalized n
-    WHERE (n.genus IS NULL OR lower(coalesce(sg.genus, '')) = lower(n.genus))
-      AND (
-        n.query IS NULL
-        OR coalesce(sg.species_name, '') ILIKE '%' || n.query || '%'
-        OR coalesce(sg.common_name, '') ILIKE '%' || n.query || '%'
-        OR coalesce(sg.genus, '') ILIKE '%' || n.query || '%'
-        OR coalesce(sg.species, '') ILIKE '%' || n.query || '%'
-        OR lower(coalesce(sg.species_slug, '')) ILIKE '%' || lower(n.query) || '%'
-      )
-  )
+    AS $$
   SELECT
-    fs.species_slug AS "speciesSlug",
-    fs.genus AS genus,
-    fs.species AS species,
-    fs.species_name AS "speciesName",
-    fs.common_name AS "commonName",
-    fs.observation_count AS "observationCount",
-    fs.microscopy_observation_count AS "microscopyObservationCount",
-    fs.spore_measurement_count AS "sporeMeasurementCount",
-    fs.first_observed_on AS "firstObservedOn",
-    fs.last_observed_on AS "lastObservedOn",
-    coalesce(countries.items, '[]'::jsonb) AS countries,
-    coalesce(regions.items, '[]'::jsonb) AS regions,
-    rep.representative_thumb_url AS "representativeThumbUrl"
-  FROM filtered_species fs
-  LEFT JOIN LATERAL (
-    SELECT coalesce(
-      jsonb_agg(item ORDER BY facet_count DESC, label ASC, value ASC),
-      '[]'::jsonb
-    ) AS items
-    FROM (
-      SELECT
-        grouped.country_code AS value,
-        coalesce(cl.label, grouped.country_code) AS label,
-        grouped.facet_count,
-        jsonb_build_object(
-          'value', grouped.country_code,
-          'label', coalesce(cl.label, grouped.country_code),
-          'count', grouped.facet_count
-        ) AS item
-      FROM (
-        SELECT
-          vo.country_code,
-          count(*)::bigint AS facet_count
-        FROM visible_observations vo
-        WHERE vo.species_slug = fs.species_slug
-          AND vo.country_code IS NOT NULL
-        GROUP BY vo.country_code
-      ) grouped
-      LEFT JOIN country_labels cl
-        ON cl.country_code = grouped.country_code
-    ) items
-  ) countries ON true
-  LEFT JOIN LATERAL (
-    SELECT coalesce(
-      jsonb_agg(item ORDER BY facet_count DESC, label ASC, value ASC),
-      '[]'::jsonb
-    ) AS items
-    FROM (
-      SELECT
-        grouped.region_id AS value,
-        grouped.region_label AS label,
-        grouped.region_country_code AS country_code,
-        grouped.facet_count,
-        jsonb_build_object(
-          'value', grouped.region_id,
-          'label', grouped.region_label,
-          'countryCode', grouped.region_country_code,
-          'count', grouped.facet_count
-        ) AS item
-      FROM (
-        SELECT
-          vo.region_id,
-          coalesce(vo.region_label, vo.region_id) AS region_label,
-          coalesce(vo.region_country_code, vo.country_code) AS region_country_code,
-          count(*)::bigint AS facet_count
-        FROM visible_observations vo
-        WHERE vo.species_slug = fs.species_slug
-          AND vo.region_id IS NOT NULL
-        GROUP BY
-          vo.region_id,
-          coalesce(vo.region_label, vo.region_id),
-          coalesce(vo.region_country_code, vo.country_code)
-      ) grouped
-    ) items
-  ) regions ON true
-  LEFT JOIN LATERAL (
-    SELECT concat(
-      'https://media.sporely.no/',
-      concat(
-        CASE WHEN rep.storage_dir IS NULL THEN '' ELSE rep.storage_dir || '/' END,
-        'thumb_',
-        regexp_replace(rep.file_name, '^(?:thumb_|medium_|small_|cards_)+', '', 'i')
-      )
-    ) AS representative_thumb_url
-    FROM (
-      SELECT
-        nullif(
-          regexp_replace(btrim(i.storage_path, '/'), '/[^/]+$', '', ''),
-          btrim(i.storage_path, '/')
-        ) AS storage_dir,
-        regexp_replace(btrim(i.storage_path, '/'), '^.*/', '') AS file_name,
-        vo.observed_on,
-        i.sort_order,
-        i.created_at,
-        i.id
-      FROM visible_observations vo
-      JOIN public.observation_images i
-        ON i.observation_id = vo.id
-      WHERE vo.species_slug = fs.species_slug
-        AND i.deleted_at IS NULL
-        AND i.purged_at IS NULL
-        AND i.storage_path IS NOT NULL
-    ) rep
-    ORDER BY rep.observed_on DESC, rep.sort_order NULLS LAST, rep.created_at DESC NULLS LAST, rep.id DESC
-    LIMIT 1
-  ) rep ON true
-  ORDER BY fs.observation_count DESC, fs.last_observed_on DESC, fs.species_name ASC, fs.species_slug ASC
-  LIMIT (SELECT lim FROM normalized)
-  OFFSET (SELECT off FROM normalized)
-$_$;
+    legacy.*,
+    media.image_id AS "representativeImageId",
+    media.media_version AS "representativeMediaVersion",
+    media.thumb_media_url AS "representativeThumbMediaUrl"
+  FROM public._search_public_species_stage2a(p_limit, p_offset, p_genus, p_query) legacy
+  LEFT JOIN LATERAL public._stage2b_species_representative_media(legacy."speciesSlug") media ON true
+$$;
 
 
 ALTER FUNCTION "public"."search_public_species"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_query" "text") OWNER TO "postgres";
@@ -4347,6 +5451,42 @@ $$;
 
 
 ALTER FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."set_observation_selected_taxon_v2"("p_observation_id" bigint, "p_sporely_taxon_id" bigint) RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+begin
+  if auth.uid() is null then
+    raise exception 'authentication required' using errcode = '42501';
+  end if;
+
+  if not exists (
+    select 1 from public.observations o
+    where o.id = p_observation_id and o.user_id = auth.uid()
+  ) then
+    raise exception 'observation not found or caller does not own it' using errcode = '42501';
+  end if;
+
+  if p_sporely_taxon_id is not null and not exists (
+    select 1
+    from public.taxonomy_v2_releases r
+    join public.taxonomy_v2_taxa t on t.release_id = r.release_id
+    where r.status = 'active' and t.sporely_taxon_id = p_sporely_taxon_id
+  ) then
+    raise exception 'sporely_taxon_id % is missing from the active taxonomy-v2 release', p_sporely_taxon_id
+      using errcode = '22023';
+  end if;
+
+  update public.observations
+     set selected_sporely_taxon_id = p_sporely_taxon_id
+   where id = p_observation_id;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."set_observation_selected_taxon_v2"("p_observation_id" bigint, "p_sporely_taxon_id" bigint) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."set_updated_at"() RETURNS "trigger"
@@ -4657,6 +5797,16 @@ SET default_tablespace = '';
 SET default_table_access_method = "heap";
 
 
+CREATE TABLE IF NOT EXISTS "public"."_media_worker_config" (
+    "singleton" boolean DEFAULT true NOT NULL,
+    "base_url" "text" DEFAULT 'https://upload.sporely.no'::"text" NOT NULL,
+    CONSTRAINT "_media_worker_config_singleton_check" CHECK (("singleton" = true))
+);
+
+
+ALTER TABLE "public"."_media_worker_config" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."admin_action_log" (
     "id" bigint NOT NULL,
     "admin_user_id" "uuid",
@@ -4833,15 +5983,24 @@ CREATE TABLE IF NOT EXISTS "public"."observations" (
     "region_id" "text",
     "red_list_category" "text",
     "red_list_categories_json" "jsonb",
+    "resolved_sporely_taxon_id" integer,
+    "selected_sporely_taxon_id" bigint,
+    "media_version" bigint DEFAULT 1 NOT NULL,
     CONSTRAINT "observations_country_code_check" CHECK ((("country_code" IS NULL) OR ("country_code" ~ '^[A-Z]{2}$'::"text"))),
     CONSTRAINT "observations_location_precision_check" CHECK (("location_precision" = ANY (ARRAY['exact'::"text", 'fuzzed'::"text", 'region'::"text", 'hidden'::"text"]))),
+    CONSTRAINT "observations_media_version_positive" CHECK (("media_version" >= 1)),
     CONSTRAINT "observations_red_list_categories_json_object_chk" CHECK ((("red_list_categories_json" IS NULL) OR ("jsonb_typeof"("red_list_categories_json") = 'object'::"text"))),
     CONSTRAINT "observations_spore_data_visibility_check" CHECK (("spore_data_visibility" = ANY (ARRAY['private'::"text", 'friends'::"text", 'public'::"text"]))),
-    CONSTRAINT "observations_visibility_check" CHECK (("visibility" = ANY (ARRAY['private'::"text", 'friends'::"text", 'public'::"text"])))
+    CONSTRAINT "observations_visibility_check" CHECK (("visibility" = ANY (ARRAY['private'::"text", 'friends'::"text", 'public'::"text"]))),
+    CONSTRAINT "w3a_new_column_nullable" CHECK ((("resolved_sporely_taxon_id" IS NULL) OR ("resolved_sporely_taxon_id" > 0)))
 );
 
 
 ALTER TABLE "public"."observations" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."observations" IS 'Owner-only direct table access. Non-owner reads MUST go through `observations_community_view`, `observations_friend_view`, `observations_follow_view`, or the SECURITY DEFINER public-read RPCs. Locked down by 20260803120000_lock_down_observation_sync_tables.';
+
 
 
 COMMENT ON COLUMN "public"."observations"."gps_altitude" IS 'Altitude in meters above sea level';
@@ -4849,6 +6008,18 @@ COMMENT ON COLUMN "public"."observations"."gps_altitude" IS 'Altitude in meters 
 
 
 COMMENT ON COLUMN "public"."observations"."gps_accuracy" IS 'Horizontal accuracy of the GPS coordinates in meters';
+
+
+
+COMMENT ON COLUMN "public"."observations"."resolved_sporely_taxon_id" IS 'W3-A additive canonical link to the sparse taxonomy_v3 registry. NULL until historical reconciliation attaches identity, and NULL for observations that remain unresolved / manual / no-evidence. NEVER rewritten by the resolver — only updated by service_role via taxonomy_v3.install_release_chain(). Legacy taxonomy/name columns on this row remain the authoritative historical snapshot.';
+
+
+
+COMMENT ON COLUMN "public"."observations"."selected_sporely_taxon_id" IS 'Stable Sporely concept explicitly selected by the observation owner through set_observation_selected_taxon_v2. Additive to the submitted name/provider snapshot and separate from trusted taxonomy-v3 historical resolution.';
+
+
+
+COMMENT ON COLUMN "public"."observations"."media_version" IS 'Monotonic version bumped on visibility/is_draft/user_id/is_banned change. Cascaded to child observation_images and mosaics.';
 
 
 
@@ -4878,6 +6049,7 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
     "last_client" "text",
     "last_app_version" "text",
     "last_client_seen_at" timestamp with time zone,
+    "profile_completed_at" timestamp with time zone,
     CONSTRAINT "profiles_cloud_plan_check" CHECK (("cloud_plan" = ANY (ARRAY['free'::"text", 'pro'::"text"]))),
     CONSTRAINT "profiles_last_client_check" CHECK ((("last_client" IS NULL) OR ("last_client" = ANY (ARRAY['android_app'::"text", 'ios_app'::"text", 'web_pwa'::"text", 'web_browser'::"text", 'desktop_app'::"text", 'unknown'::"text"]))))
 );
@@ -4956,6 +6128,21 @@ ALTER TABLE "public"."friendships" ALTER COLUMN "id" ADD GENERATED ALWAYS AS IDE
     CACHE 1
 );
 
+
+
+CREATE TABLE IF NOT EXISTS "public"."media_object_deletion_accounting" (
+    "user_id" "uuid" NOT NULL,
+    "storage_key" "text" NOT NULL,
+    "storage_bytes" bigint DEFAULT 0 NOT NULL,
+    "image_count" integer DEFAULT 0 NOT NULL,
+    "prepared_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "finalized_at" timestamp with time zone,
+    CONSTRAINT "media_object_deletion_accounting_image_count_check" CHECK (("image_count" >= 0)),
+    CONSTRAINT "media_object_deletion_accounting_storage_bytes_check" CHECK (("storage_bytes" >= 0))
+);
+
+
+ALTER TABLE "public"."media_object_deletion_accounting" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."observation_identifications" (
@@ -5083,13 +6270,24 @@ CREATE TABLE IF NOT EXISTS "public"."observation_images" (
     "purge_error" "text",
     "storage_exif_safe" boolean DEFAULT false NOT NULL,
     "sample_source" "text",
+    "media_version" bigint DEFAULT 1 NOT NULL,
+    "canonical_bucket" "text" DEFAULT 'legacy'::"text" NOT NULL,
+    "purge_accounting_bytes" bigint,
+    "captured_at" timestamp with time zone,
+    CONSTRAINT "observation_images_canonical_bucket_check" CHECK (("canonical_bucket" = ANY (ARRAY['legacy'::"text", 'private'::"text"]))),
     CONSTRAINT "observation_images_image_type_check" CHECK (("image_type" = ANY (ARRAY['field'::"text", 'microscope'::"text"]))),
+    CONSTRAINT "observation_images_media_version_positive" CHECK (("media_version" >= 1)),
+    CONSTRAINT "observation_images_purge_accounting_bytes_check" CHECK ((("purge_accounting_bytes" IS NULL) OR ("purge_accounting_bytes" >= 0))),
     CONSTRAINT "observation_images_storage_path_required_unless_microscope" CHECK ((("storage_path" IS NOT NULL) OR (NOT ("image_type" IS DISTINCT FROM 'microscope'::"text")))),
     CONSTRAINT "observation_images_upload_mode_check" CHECK ((("upload_mode" IS NULL) OR ("upload_mode" = ANY (ARRAY['reduced'::"text", 'full'::"text"]))))
 );
 
 
 ALTER TABLE "public"."observation_images" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."observation_images" IS 'Owner-only direct table access — including tombstones (deleted_at) and originals. Non-owner reads MUST go through `observation_images_community_view` (community-safe projection, no originals, no tombstones, no purged rows) or the SECURITY DEFINER RPCs. Locked down by 20260803120000_lock_down_observation_sync_tables.';
+
 
 
 COMMENT ON COLUMN "public"."observation_images"."storage_exif_safe" IS 'True only when observation_images.storage_path is known to be public-safe / EXIF-GPS stripped. Public fullUrl exposure must be gated on this.';
@@ -5100,60 +6298,71 @@ COMMENT ON COLUMN "public"."observation_images"."sample_source" IS 'Where micros
 
 
 
-CREATE OR REPLACE VIEW "public"."observation_images_community_view" AS
+COMMENT ON COLUMN "public"."observation_images"."media_version" IS 'Monotonic version bumped whenever any state that affects the authorization decision changes. Used by the /m/ worker route as part of the cache key. Client roles cannot modify; nested-trigger contexts may only perform the exact +1 transition (enforced by _media_final_state_guard_image).';
+
+
+
+COMMENT ON COLUMN "public"."observation_images"."canonical_bucket" IS 'Which R2 bucket holds the canonical bytes for this row. `legacy` = the pre-Stage-2 `sporely-media` bucket. `private` = the Stage-2 private bucket bound to the worker as `PRIVATE_MEDIA_BUCKET`. Set by the worker after a successful private-mode upload; migrated legacy → private by the Stage 2c backfill script.';
+
+
+
+COMMENT ON COLUMN "public"."observation_images"."captured_at" IS 'Actual date/time the source image was captured. Distinct from the observation event and cloud row creation timestamps.';
+
+
+
+CREATE OR REPLACE VIEW "public"."observation_images_community_view" WITH ("security_barrier"='true') AS
  SELECT "oi"."id",
     "oi"."observation_id",
     "oi"."user_id",
     "oi"."storage_path",
-    "oi"."original_filename",
     "oi"."sort_order",
     "oi"."image_type",
     "oi"."micro_category",
     "oi"."objective_name",
     "oi"."scale_microns_per_pixel",
-    "oi"."resample_scale_factor",
     "oi"."mount_medium",
     "oi"."stain",
     "oi"."sample_type",
     "oi"."contrast",
-    "oi"."measure_color",
-    "oi"."notes",
     "oi"."ai_crop_x1",
     "oi"."ai_crop_y1",
     "oi"."ai_crop_x2",
     "oi"."ai_crop_y2",
     "oi"."ai_crop_source_w",
     "oi"."ai_crop_source_h",
+    "oi"."ai_crop_is_custom",
     "oi"."crop_mode",
     "oi"."scale_bar_x1",
     "oi"."scale_bar_y1",
     "oi"."scale_bar_x2",
     "oi"."scale_bar_y2",
-    "oi"."gps_source",
-    "oi"."desktop_id",
-    "oi"."created_at",
-    "oi"."upload_mode",
     "oi"."source_width",
     "oi"."source_height",
     "oi"."stored_width",
     "oi"."stored_height",
-    "oi"."stored_bytes",
-    "oi"."ai_crop_is_custom",
-    "oi"."deleted_at",
+    "oi"."created_at",
     "oi"."calibration_uuid",
-    "oi"."original_storage_path",
+    NULL::timestamp with time zone AS "deleted_at",
     "o"."user_id" AS "observation_user_id",
     "o"."visibility" AS "observation_visibility",
     "o"."is_draft" AS "observation_is_draft",
-    "o"."spore_data_visibility" AS "observation_spore_data_visibility"
+    "o"."spore_data_visibility" AS "observation_spore_data_visibility",
+    "oi"."id" AS "image_id",
+    "oi"."media_version",
+    "public"."build_worker_media_url"("oi"."id", 'full'::"text", "oi"."media_version") AS "full_media_url",
+    "public"."build_worker_media_url"("oi"."id", 'thumb'::"text", "oi"."media_version") AS "thumb_media_url"
    FROM ("public"."observation_images" "oi"
      JOIN "public"."observations" "o" ON (("o"."id" = "oi"."observation_id")))
-  WHERE ((("o"."user_id" = "auth"."uid"()) OR ((NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility"))) AND (NOT (EXISTS ( SELECT 1
+  WHERE (("oi"."deleted_at" IS NULL) AND ("oi"."purged_at" IS NULL) AND (NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility") AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
           WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
 
 
 ALTER VIEW "public"."observation_images_community_view" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."observation_images_community_view" IS 'Transitional non-owner image projection. storage_path remains for shipped clients; prefer image_id/media_version/full_media_url/thumb_media_url. Never exposes originals.';
+
 
 
 ALTER TABLE "public"."observation_images" ALTER COLUMN "id" ADD GENERATED ALWAYS AS IDENTITY (
@@ -5293,6 +6502,32 @@ ALTER TABLE "public"."observation_spore_summaries" ALTER COLUMN "id" ADD GENERAT
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."public_regions" (
+    "id" "text" NOT NULL,
+    "country_code" "text" NOT NULL,
+    "label" "text" NOT NULL,
+    "sort_order" integer,
+    "map_x" numeric,
+    "map_y" numeric,
+    CONSTRAINT "public_regions_country_code_check" CHECK (("country_code" ~ '^[A-Z]{2}$'::"text"))
+);
+
+
+ALTER TABLE "public"."public_regions" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."public_regions" IS 'Normalized region lookup rows for public explorer filters and schematic map layout.';
+
+
+
+COMMENT ON COLUMN "public"."public_regions"."map_x" IS 'Schematic map coordinate, not GPS.';
+
+
+
+COMMENT ON COLUMN "public"."public_regions"."map_y" IS 'Schematic map coordinate, not GPS.';
+
+
+
 CREATE OR REPLACE VIEW "public"."observations_community_view" WITH ("security_barrier"='true') AS
  SELECT "o"."id",
     "o"."user_id",
@@ -5306,8 +6541,7 @@ CREATE OR REPLACE VIEW "public"."observations_community_view" WITH ("security_ba
     "o"."author",
         CASE
             WHEN (COALESCE("o"."location_precision", 'exact'::"text") = 'exact'::"text") THEN "o"."location"
-            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = 'fuzzed'::"text") THEN COALESCE("pr"."label", "o"."country_code")
-            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = 'region'::"text") THEN COALESCE("pr"."label", "o"."country_code")
+            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = ANY (ARRAY['fuzzed'::"text", 'region'::"text"])) THEN COALESCE("pr"."label", "o"."country_code")
             ELSE NULL::"text"
         END AS "location",
     "o"."habitat",
@@ -5341,9 +6575,14 @@ CREATE OR REPLACE VIEW "public"."observations_community_view" WITH ("security_ba
             ELSE NULL::"jsonb"
         END AS "spore_statistics",
     "o"."red_list_category",
-    "o"."red_list_categories_json"
-   FROM ("public"."observations" "o"
+    "o"."red_list_categories_json",
+    "media"."image_id",
+    "media"."media_version",
+    "media"."full_media_url",
+    "media"."thumb_media_url"
+   FROM (("public"."observations" "o"
      LEFT JOIN "public"."public_regions" "pr" ON (("pr"."id" = "o"."region_id")))
+     LEFT JOIN LATERAL "public"."_stage2b_observation_primary_media"("o"."id", "o"."image_key") "media"("image_id", "media_version", "full_media_url", "thumb_media_url") ON (true))
   WHERE ((COALESCE("o"."visibility", 'public'::"text") = 'public'::"text") AND (NOT COALESCE("o"."is_draft", false)) AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
           WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
@@ -5352,7 +6591,11 @@ CREATE OR REPLACE VIEW "public"."observations_community_view" WITH ("security_ba
 ALTER VIEW "public"."observations_community_view" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."observations_follow_view" AS
+COMMENT ON VIEW "public"."observations_community_view" IS 'Transitional public observation projection. image_key/thumb_key remain temporarily; prefer authorized image identity fields.';
+
+
+
+CREATE OR REPLACE VIEW "public"."observations_follow_view" WITH ("security_barrier"='true') AS
  SELECT DISTINCT "o"."id",
     "o"."user_id",
     "o"."desktop_id",
@@ -5363,7 +6606,11 @@ CREATE OR REPLACE VIEW "public"."observations_follow_view" AS
     "o"."species",
     "o"."common_name",
     "o"."author",
-    "o"."location",
+        CASE
+            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = 'exact'::"text") THEN "o"."location"
+            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = ANY (ARRAY['fuzzed'::"text", 'region'::"text"])) THEN COALESCE("pr"."label", "o"."country_code")
+            ELSE NULL::"text"
+        END AS "location",
     "o"."habitat",
     "o"."notes",
     "o"."uncertain",
@@ -5371,10 +6618,12 @@ CREATE OR REPLACE VIEW "public"."observations_follow_view" AS
     "o"."visibility",
         CASE
             WHEN (COALESCE("o"."location_precision", 'exact'::"text") = 'fuzzed'::"text") THEN ("round"(("o"."gps_latitude")::numeric, 2))::double precision
+            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = ANY (ARRAY['region'::"text", 'hidden'::"text"])) THEN NULL::double precision
             ELSE "o"."gps_latitude"
         END AS "gps_latitude",
         CASE
             WHEN (COALESCE("o"."location_precision", 'exact'::"text") = 'fuzzed'::"text") THEN ("round"(("o"."gps_longitude")::numeric, 2))::double precision
+            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = ANY (ARRAY['region'::"text", 'hidden'::"text"])) THEN NULL::double precision
             ELSE "o"."gps_longitude"
         END AS "gps_longitude",
     "o"."source_type",
@@ -5382,15 +6631,25 @@ CREATE OR REPLACE VIEW "public"."observations_follow_view" AS
     "o"."image_key",
     "o"."thumb_key",
     "o"."is_draft",
-    "o"."location_precision"
-   FROM ("public"."observations" "o"
+    "o"."location_precision",
+    "media"."image_id",
+    "media"."media_version",
+    "media"."full_media_url",
+    "media"."thumb_media_url"
+   FROM ((("public"."observations" "o"
      JOIN "public"."follows" "f" ON ((("f"."user_id" = "auth"."uid"()) AND ((("f"."target_type" = 'user'::"text") AND ("f"."target_id" = ("o"."user_id")::"text")) OR (("f"."target_type" = 'observation'::"text") AND ("f"."target_id" = ("o"."id")::"text")) OR (("f"."target_type" = 'genus'::"text") AND ("lower"("f"."target_id") = "lower"(COALESCE("o"."genus", ''::"text")))) OR (("f"."target_type" = 'species'::"text") AND ("lower"("f"."target_id") = "lower"(TRIM(BOTH FROM "concat_ws"(' '::"text", "o"."genus", "o"."species")))))))))
+     LEFT JOIN "public"."public_regions" "pr" ON (("pr"."id" = "o"."region_id")))
+     LEFT JOIN LATERAL "public"."_stage2b_observation_primary_media"("o"."id", "o"."image_key") "media"("image_id", "media_version", "full_media_url", "thumb_media_url") ON (true))
   WHERE ("public"."can_read_observation"("o"."user_id", "o"."visibility") AND (NOT COALESCE("o"."is_draft", false)) AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
           WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
 
 
 ALTER VIEW "public"."observations_follow_view" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."observations_follow_view" IS 'Transitional follow projection. image_key/thumb_key remain temporarily; prefer authorized image identity fields.';
+
 
 
 CREATE OR REPLACE VIEW "public"."observations_friend_view" WITH ("security_barrier"='true') AS
@@ -5406,8 +6665,7 @@ CREATE OR REPLACE VIEW "public"."observations_friend_view" WITH ("security_barri
     "o"."author",
         CASE
             WHEN (COALESCE("o"."location_precision", 'exact'::"text") = 'exact'::"text") THEN "o"."location"
-            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = 'fuzzed'::"text") THEN COALESCE("pr"."label", "o"."country_code")
-            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = 'region'::"text") THEN COALESCE("pr"."label", "o"."country_code")
+            WHEN (COALESCE("o"."location_precision", 'exact'::"text") = ANY (ARRAY['fuzzed'::"text", 'region'::"text"])) THEN COALESCE("pr"."label", "o"."country_code")
             ELSE NULL::"text"
         END AS "location",
     "o"."habitat",
@@ -5437,15 +6695,24 @@ CREATE OR REPLACE VIEW "public"."observations_friend_view" WITH ("security_barri
     "o"."ai_selected_probability",
     "o"."ai_selected_at",
     "o"."red_list_category",
-    "o"."red_list_categories_json"
-   FROM ("public"."observations" "o"
+    "o"."red_list_categories_json",
+    "media"."image_id",
+    "media"."media_version",
+    "media"."full_media_url",
+    "media"."thumb_media_url"
+   FROM (("public"."observations" "o"
      LEFT JOIN "public"."public_regions" "pr" ON (("pr"."id" = "o"."region_id")))
+     LEFT JOIN LATERAL "public"."_stage2b_observation_primary_media"("o"."id", "o"."image_key") "media"("image_id", "media_version", "full_media_url", "thumb_media_url") ON (true))
   WHERE ((COALESCE("o"."visibility", 'public'::"text") = ANY (ARRAY['friends'::"text", 'public'::"text"])) AND (NOT COALESCE("o"."is_draft", false)) AND "public"."are_friends"("auth"."uid"(), "o"."user_id") AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
           WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
 
 
 ALTER VIEW "public"."observations_friend_view" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."observations_friend_view" IS 'Transitional friend observation projection. image_key/thumb_key remain temporarily; prefer authorized image identity fields.';
+
 
 
 ALTER TABLE "public"."observations" ALTER COLUMN "id" ADD GENERATED ALWAYS AS IDENTITY (
@@ -5456,32 +6723,6 @@ ALTER TABLE "public"."observations" ALTER COLUMN "id" ADD GENERATED ALWAYS AS ID
     NO MAXVALUE
     CACHE 1
 );
-
-
-
-CREATE TABLE IF NOT EXISTS "public"."public_regions" (
-    "id" "text" NOT NULL,
-    "country_code" "text" NOT NULL,
-    "label" "text" NOT NULL,
-    "sort_order" integer,
-    "map_x" numeric,
-    "map_y" numeric,
-    CONSTRAINT "public_regions_country_code_check" CHECK (("country_code" ~ '^[A-Z]{2}$'::"text"))
-);
-
-
-ALTER TABLE "public"."public_regions" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "public"."public_regions" IS 'Normalized region lookup rows for public explorer filters and schematic map layout.';
-
-
-
-COMMENT ON COLUMN "public"."public_regions"."map_x" IS 'Schematic map coordinate, not GPS.';
-
-
-
-COMMENT ON COLUMN "public"."public_regions"."map_y" IS 'Schematic map coordinate, not GPS.';
 
 
 
@@ -5622,7 +6863,11 @@ CREATE TABLE IF NOT EXISTS "public"."spore_measurement_mosaics" (
     "tile_height_px" integer,
     "common_crop_width_um" double precision,
     "common_crop_height_um" double precision,
-    CONSTRAINT "spore_measurement_mosaics_check" CHECK ((("width_px" > 0) AND ("height_px" > 0) AND ("tile_size_px" > 0)))
+    "media_version" bigint DEFAULT 1 NOT NULL,
+    "canonical_bucket" "text" DEFAULT 'legacy'::"text" NOT NULL,
+    CONSTRAINT "spore_measurement_mosaics_canonical_bucket_check" CHECK (("canonical_bucket" = ANY (ARRAY['legacy'::"text", 'private'::"text"]))),
+    CONSTRAINT "spore_measurement_mosaics_check" CHECK ((("width_px" > 0) AND ("height_px" > 0) AND ("tile_size_px" > 0))),
+    CONSTRAINT "spore_measurement_mosaics_media_version_positive" CHECK (("media_version" >= 1))
 );
 
 
@@ -5642,6 +6887,10 @@ COMMENT ON COLUMN "public"."spore_measurement_mosaics"."common_crop_width_um" IS
 
 
 COMMENT ON COLUMN "public"."spore_measurement_mosaics"."common_crop_height_um" IS 'Physical height in µm of a single tile''s oriented crop. Uniform across the atlas.';
+
+
+
+COMMENT ON COLUMN "public"."spore_measurement_mosaics"."media_version" IS 'Monotonic version bumped on storage_key/canonical_bucket/observation_id change AND on parent observation visibility/is_draft/spore_data_visibility/user_id change. Used by the /mm/ worker route.';
 
 
 
@@ -5681,6 +6930,10 @@ CREATE TABLE IF NOT EXISTS "public"."spore_measurements" (
 
 
 ALTER TABLE "public"."spore_measurements" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."spore_measurements" IS 'Owner-only direct table access. Non-owner reads MUST go through SECURITY DEFINER RPCs (`get_community_spore_dataset`, `community_spore_taxon_summary`, `search_community_spore_datasets`, `get_public_spore_comparison_set`, `get_public_observation_spore_summaries`). Locked down by 20260803120000_lock_down_observation_sync_tables.';
+
 
 
 ALTER TABLE "public"."spore_measurements" ALTER COLUMN "id" ADD GENERATED ALWAYS AS IDENTITY (
@@ -5963,6 +7216,11 @@ ALTER TABLE ONLY "public"."taxa_vernacular" ALTER COLUMN "id" SET DEFAULT "nextv
 
 
 
+ALTER TABLE ONLY "public"."_media_worker_config"
+    ADD CONSTRAINT "_media_worker_config_pkey" PRIMARY KEY ("singleton");
+
+
+
 ALTER TABLE ONLY "public"."admin_action_log"
     ADD CONSTRAINT "admin_action_log_pkey" PRIMARY KEY ("id");
 
@@ -6005,6 +7263,11 @@ ALTER TABLE ONLY "public"."friendships"
 
 ALTER TABLE ONLY "public"."friendships"
     ADD CONSTRAINT "friendships_requester_id_addressee_id_key" UNIQUE ("requester_id", "addressee_id");
+
+
+
+ALTER TABLE ONLY "public"."media_object_deletion_accounting"
+    ADD CONSTRAINT "media_object_deletion_accounting_pkey" PRIMARY KEY ("user_id", "storage_key");
 
 
 
@@ -6293,6 +7556,10 @@ CREATE INDEX "observation_identifications_user_idx" ON "public"."observation_ide
 
 
 
+CREATE INDEX "observation_images_microscope_captured_at_idx" ON "public"."observation_images" USING "btree" ("observation_id", "captured_at" DESC) WHERE (("image_type" = 'microscope'::"text") AND ("captured_at" IS NOT NULL));
+
+
+
 CREATE INDEX "observation_images_observation_id_idx" ON "public"."observation_images" USING "btree" ("observation_id");
 
 
@@ -6401,11 +7668,47 @@ CREATE OR REPLACE TRIGGER "enforce_non_public_observation_limit_trigger" BEFORE 
 
 
 
+CREATE OR REPLACE TRIGGER "guard_selected_sporely_taxon_id_v2_trg" BEFORE INSERT OR UPDATE OF "selected_sporely_taxon_id" ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."_guard_selected_sporely_taxon_id_v2"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_00_media_guard_server_owned_image" BEFORE INSERT OR UPDATE ON "public"."observation_images" FOR EACH ROW EXECUTE FUNCTION "public"."_media_guard_server_owned_fields_image"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_00_media_guard_server_owned_obs" BEFORE INSERT OR UPDATE ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."_media_guard_server_owned_fields_obs"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_01_media_guard_key_ownership" BEFORE INSERT OR UPDATE ON "public"."observation_images" FOR EACH ROW EXECUTE FUNCTION "public"."_media_guard_key_ownership_image"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_friendships_updated_at" BEFORE UPDATE ON "public"."friendships" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
 
+CREATE OR REPLACE TRIGGER "trg_mosaic_media_version_bump" BEFORE UPDATE ON "public"."spore_measurement_mosaics" FOR EACH ROW EXECUTE FUNCTION "public"."_media_bump_on_mosaic_change"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_observation_image_media_version_bump" BEFORE UPDATE ON "public"."observation_images" FOR EACH ROW EXECUTE FUNCTION "public"."_media_bump_on_image_change"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_observation_images_touch_observation_updated_at" AFTER INSERT OR DELETE OR UPDATE ON "public"."observation_images" FOR EACH ROW EXECUTE FUNCTION "public"."touch_observation_updated_at_from_image"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_observation_media_version_bump_own" BEFORE UPDATE ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."_media_bump_own_version_on_obs"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_observation_media_version_cascade" AFTER UPDATE ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."_media_bump_child_images_on_obs"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_observation_mosaic_cascade" AFTER UPDATE ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."_media_bump_mosaics_on_obs"();
 
 
 
@@ -6414,6 +7717,10 @@ CREATE OR REPLACE TRIGGER "trg_observation_spore_summaries_updated_at" BEFORE UP
 
 
 CREATE OR REPLACE TRIGGER "trg_observations_updated_at" BEFORE UPDATE ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_profile_ban_media_version_bump" AFTER UPDATE OF "is_banned" ON "public"."profiles" FOR EACH ROW EXECUTE FUNCTION "public"."_media_bump_on_profile_ban_change"();
 
 
 
@@ -6426,6 +7733,22 @@ CREATE OR REPLACE TRIGGER "trg_profiles_updated_at" BEFORE UPDATE ON "public"."p
 
 
 CREATE OR REPLACE TRIGGER "trg_spore_measurements_touch_observation_updated_at" AFTER INSERT OR DELETE OR UPDATE ON "public"."spore_measurements" FOR EACH ROW EXECUTE FUNCTION "public"."touch_observation_updated_at_from_measurement"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_zz_media_final_state_guard_image" AFTER INSERT OR UPDATE ON "public"."observation_images" FOR EACH ROW EXECUTE FUNCTION "public"."_media_final_state_guard_image"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_zz_media_final_state_guard_obs" AFTER INSERT OR UPDATE ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."_media_final_state_guard_obs"();
+
+
+
+CREATE OR REPLACE TRIGGER "w3a_guard_resolved_sporely_taxon_id_ins_trg" BEFORE INSERT ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."_w3a_guard_resolved_sporely_taxon_id"();
+
+
+
+CREATE OR REPLACE TRIGGER "w3a_guard_resolved_sporely_taxon_id_trg" BEFORE UPDATE OF "resolved_sporely_taxon_id" ON "public"."observations" FOR EACH ROW EXECUTE FUNCTION "public"."_w3a_guard_resolved_sporely_taxon_id"();
 
 
 
@@ -6466,6 +7789,11 @@ ALTER TABLE ONLY "public"."friendships"
 
 ALTER TABLE ONLY "public"."friendships"
     ADD CONSTRAINT "friendships_requester_id_fkey" FOREIGN KEY ("requester_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."media_object_deletion_accounting"
+    ADD CONSTRAINT "media_object_deletion_accounting_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -6516,6 +7844,16 @@ ALTER TABLE ONLY "public"."observation_spore_summaries"
 
 ALTER TABLE ONLY "public"."observations"
     ADD CONSTRAINT "observations_region_id_fkey" FOREIGN KEY ("region_id") REFERENCES "public"."public_regions"("id") ON UPDATE CASCADE ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."observations"
+    ADD CONSTRAINT "observations_resolved_sporely_taxon_id_fkey" FOREIGN KEY ("resolved_sporely_taxon_id") REFERENCES "taxonomy_v3"."registry_concept"("sporely_taxon_id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."observations"
+    ADD CONSTRAINT "observations_selected_sporely_taxon_id_fkey" FOREIGN KEY ("selected_sporely_taxon_id") REFERENCES "public"."taxonomy_v2_concepts"("sporely_taxon_id") ON DELETE SET NULL;
 
 
 
@@ -6668,10 +8006,6 @@ CREATE POLICY "Users can delete their own blocks" ON "public"."user_blocks" FOR 
 
 
 
-CREATE POLICY "Users can delete their own measurements" ON "public"."spore_measurements" FOR DELETE USING (("user_id" = "auth"."uid"()));
-
-
-
 CREATE POLICY "Users can delete their own spore mosaics" ON "public"."spore_measurement_mosaics" FOR DELETE USING ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
    FROM "public"."observations" "o"
   WHERE (("o"."id" = "spore_measurement_mosaics"."observation_id") AND ("o"."user_id" = "auth"."uid"()))))));
@@ -6693,10 +8027,6 @@ CREATE POLICY "Users can insert own observation identifications" ON "public"."ob
 
 
 CREATE POLICY "Users can insert their own blocks" ON "public"."user_blocks" FOR INSERT WITH CHECK (("auth"."uid"() = "blocker_id"));
-
-
-
-CREATE POLICY "Users can insert their own measurements" ON "public"."spore_measurements" FOR INSERT WITH CHECK (("user_id" = "auth"."uid"()));
 
 
 
@@ -6728,10 +8058,6 @@ CREATE POLICY "Users can update own observation identifications" ON "public"."ob
 
 
 
-CREATE POLICY "Users can update their own measurements" ON "public"."spore_measurements" FOR UPDATE USING (("user_id" = "auth"."uid"())) WITH CHECK (("user_id" = "auth"."uid"()));
-
-
-
 CREATE POLICY "Users can update their own spore mosaics" ON "public"."spore_measurement_mosaics" FOR UPDATE USING ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
    FROM "public"."observations" "o"
   WHERE (("o"."id" = "spore_measurement_mosaics"."observation_id") AND ("o"."user_id" = "auth"."uid"())))))) WITH CHECK ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
@@ -6756,12 +8082,6 @@ CREATE POLICY "Users can view their own blocks" ON "public"."user_blocks" FOR SE
 
 
 
-CREATE POLICY "Users can view their own measurements" ON "public"."spore_measurements" FOR SELECT USING ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
-   FROM "public"."observation_images" "oi"
-  WHERE (("oi"."id" = "spore_measurements"."image_id") AND ("oi"."deleted_at" IS NULL))))));
-
-
-
 CREATE POLICY "Users can view their own spore mosaics" ON "public"."spore_measurement_mosaics" FOR SELECT USING ((("user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
    FROM "public"."observations" "o"
   WHERE (("o"."id" = "spore_measurement_mosaics"."observation_id") AND ("o"."user_id" = "auth"."uid"()))))));
@@ -6774,6 +8094,9 @@ CREATE POLICY "Users can view tiles for their own mosaics" ON "public"."spore_me
      JOIN "public"."observation_images" "img" ON (("img"."id" = "meas"."image_id")))
   WHERE (("sm"."id" = "spore_measurement_mosaic_tiles"."mosaic_id") AND ("sm"."user_id" = "auth"."uid"()) AND ("img"."observation_id" = "sm"."observation_id")))));
 
+
+
+ALTER TABLE "public"."_media_worker_config" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."admin_action_log" ENABLE ROW LEVEL SECURITY;
@@ -6839,26 +8162,13 @@ CREATE POLICY "friendships: requester can insert" ON "public"."friendships" FOR 
 
 
 
+ALTER TABLE "public"."media_object_deletion_accounting" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."observation_identifications" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."observation_images" ENABLE ROW LEVEL SECURITY;
-
-
-CREATE POLICY "observation_images friend read" ON "public"."observation_images" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
-   FROM "public"."observations" "o"
-  WHERE (("o"."id" = "observation_images"."observation_id") AND (NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility")))));
-
-
-
-CREATE POLICY "observation_images: friends read" ON "public"."observation_images" FOR SELECT USING ((EXISTS ( SELECT 1
-   FROM "public"."observations" "o"
-  WHERE (("o"."id" = "observation_images"."observation_id") AND (NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility")))));
-
-
-
-CREATE POLICY "observation_images: owner select including deleted" ON "public"."observation_images" FOR SELECT TO "authenticated" USING (("auth"."uid"() = "user_id"));
-
 
 
 ALTER TABLE "public"."observation_shares" ENABLE ROW LEVEL SECURITY;
@@ -6884,14 +8194,6 @@ CREATE POLICY "observation_spore_summaries: owner full" ON "public"."observation
 
 
 ALTER TABLE "public"."observations" ENABLE ROW LEVEL SECURITY;
-
-
-CREATE POLICY "observations: friends read public" ON "public"."observations" FOR SELECT USING (((NOT COALESCE("is_draft", false)) AND "public"."can_read_observation"("user_id", "visibility")));
-
-
-
-CREATE POLICY "observations: owner full" ON "public"."observations" USING (("auth"."uid"() = "user_id")) WITH CHECK (("auth"."uid"() = "user_id"));
-
 
 
 CREATE POLICY "phase7_comments_delete_own" ON "public"."comments" FOR DELETE TO "authenticated" USING (("auth"."uid"() = "user_id"));
@@ -6940,9 +8242,7 @@ CREATE POLICY "phase7_observation_images_insert_own" ON "public"."observation_im
 
 
 
-CREATE POLICY "phase7_observation_images_read" ON "public"."observation_images" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
-   FROM "public"."observations" "o"
-  WHERE (("o"."id" = "observation_images"."observation_id") AND (NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility")))));
+CREATE POLICY "phase7_observation_images_read" ON "public"."observation_images" FOR SELECT TO "authenticated" USING (("auth"."uid"() = "user_id"));
 
 
 
@@ -6962,7 +8262,7 @@ CREATE POLICY "phase7_observations_insert_own" ON "public"."observations" FOR IN
 
 
 
-CREATE POLICY "phase7_observations_read" ON "public"."observations" FOR SELECT TO "authenticated" USING ((("auth"."uid"() = "user_id") OR ((NOT COALESCE("is_draft", false)) AND "public"."can_read_observation"("user_id", "visibility"))));
+CREATE POLICY "phase7_observations_read" ON "public"."observations" FOR SELECT TO "authenticated" USING (("auth"."uid"() = "user_id"));
 
 
 
@@ -7020,14 +8320,19 @@ ALTER TABLE "public"."spore_measurement_mosaics" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."spore_measurements" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "spore_measurements: friends read" ON "public"."spore_measurements" FOR SELECT USING ((EXISTS ( SELECT 1
-   FROM ("public"."observation_images" "oi"
-     JOIN "public"."observations" "o" ON (("o"."id" = "oi"."observation_id")))
-  WHERE (("oi"."id" = "spore_measurements"."image_id") AND (NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility") AND "public"."can_access_spore_data"("o"."user_id", "o"."spore_data_visibility")))));
+CREATE POLICY "spore_measurements_owner_delete" ON "public"."spore_measurements" FOR DELETE TO "authenticated" USING (("user_id" = "auth"."uid"()));
 
 
 
-CREATE POLICY "spore_measurements: owner full" ON "public"."spore_measurements" USING (("auth"."uid"() = "user_id")) WITH CHECK (("auth"."uid"() = "user_id"));
+CREATE POLICY "spore_measurements_owner_insert" ON "public"."spore_measurements" FOR INSERT TO "authenticated" WITH CHECK (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "spore_measurements_owner_read" ON "public"."spore_measurements" FOR SELECT TO "authenticated" USING (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "spore_measurements_owner_update" ON "public"."spore_measurements" FOR UPDATE TO "authenticated" USING (("user_id" = "auth"."uid"())) WITH CHECK (("user_id" = "auth"."uid"()));
 
 
 
@@ -7082,6 +8387,109 @@ GRANT USAGE ON SCHEMA "public" TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."_get_public_observation_stage2a"("p_observation_id" bigint) FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "public"."_get_public_species_stage2a"("p_species_slug" "text") FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "public"."_guard_selected_sporely_taxon_id_v2"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_guard_selected_sporely_taxon_id_v2"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_bump_child_images_on_obs"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_bump_child_images_on_obs"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_bump_mosaics_on_obs"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_bump_mosaics_on_obs"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_bump_on_image_change"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_bump_on_image_change"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_bump_on_mosaic_change"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_bump_on_mosaic_change"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_bump_on_profile_ban_change"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_bump_on_profile_ban_change"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_bump_own_version_on_obs"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_bump_own_version_on_obs"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_final_state_guard_image"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_final_state_guard_image"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_final_state_guard_obs"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_final_state_guard_obs"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_get_observation_user_id"("p_obs_id" bigint) FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_guard_key_ownership_image"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_guard_key_ownership_image"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_guard_server_owned_fields_image"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_guard_server_owned_fields_image"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_guard_server_owned_fields_obs"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_guard_server_owned_fields_obs"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_media_worker_base_url"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_media_worker_base_url"() TO "service_role";
+GRANT ALL ON FUNCTION "public"."_media_worker_base_url"() TO "anon";
+GRANT ALL ON FUNCTION "public"."_media_worker_base_url"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_search_public_species_stage2a"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_query" "text") FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "public"."_stage2b_observation_primary_media"("p_observation_id" bigint, "p_legacy_image_key" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_stage2b_observation_primary_media"("p_observation_id" bigint, "p_legacy_image_key" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."_stage2b_observation_primary_media"("p_observation_id" bigint, "p_legacy_image_key" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."_stage2b_observation_primary_media"("p_observation_id" bigint, "p_legacy_image_key" "text") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_stage2b_species_representative_media"("p_species_slug" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_stage2b_species_representative_media"("p_species_slug" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."_stage2b_species_representative_media"("p_species_slug" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."_stage2b_species_representative_media"("p_species_slug" "text") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "public"."_w3a_guard_resolved_sporely_taxon_id"() TO "anon";
+GRANT ALL ON FUNCTION "public"."_w3a_guard_resolved_sporely_taxon_id"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_w3a_guard_resolved_sporely_taxon_id"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."admin_client_activity_summary"("p_days" integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."admin_client_activity_summary"("p_days" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."admin_client_activity_summary"("p_days" integer) TO "service_role";
@@ -7102,6 +8510,20 @@ REVOKE ALL ON FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") 
 GRANT ALL ON FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."build_worker_media_url"("p_image_id" bigint, "p_variant" "text", "p_media_version" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."build_worker_media_url"("p_image_id" bigint, "p_variant" "text", "p_media_version" bigint) TO "service_role";
+GRANT ALL ON FUNCTION "public"."build_worker_media_url"("p_image_id" bigint, "p_variant" "text", "p_media_version" bigint) TO "anon";
+GRANT ALL ON FUNCTION "public"."build_worker_media_url"("p_image_id" bigint, "p_variant" "text", "p_media_version" bigint) TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) TO "service_role";
+GRANT ALL ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) TO "anon";
+GRANT ALL ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) TO "authenticated";
 
 
 
@@ -7150,9 +8572,25 @@ GRANT ALL ON FUNCTION "public"."enforce_non_public_observation_limit"() TO "serv
 
 
 
+REVOKE ALL ON FUNCTION "public"."finalize_media_object_deletion"("p_user_id" "uuid", "p_storage_key" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."finalize_media_object_deletion"("p_user_id" "uuid", "p_storage_key" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."finalize_observation_image_purge"("p_image_id" bigint, "p_purged_at" timestamp with time zone, "p_storage_bytes" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."finalize_observation_image_purge"("p_image_id" bigint, "p_purged_at" timestamp with time zone, "p_storage_bytes" bigint) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_community_spore_dataset"("p_observation_id" bigint) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_community_spore_dataset"("p_observation_id" bigint) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_community_spore_dataset"("p_observation_id" bigint) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."get_observation_latest_microscope_captured_at"("p_observation_id" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."get_observation_latest_microscope_captured_at"("p_observation_id" bigint) TO "service_role";
+GRANT ALL ON FUNCTION "public"."get_observation_latest_microscope_captured_at"("p_observation_id" bigint) TO "authenticated";
 
 
 
@@ -7169,9 +8607,10 @@ GRANT ALL ON FUNCTION "public"."get_public_map_points"("p_species_slug" "text", 
 
 
 
+REVOKE ALL ON FUNCTION "public"."get_public_observation"("p_observation_id" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."get_public_observation"("p_observation_id" bigint) TO "service_role";
 GRANT ALL ON FUNCTION "public"."get_public_observation"("p_observation_id" bigint) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_public_observation"("p_observation_id" bigint) TO "authenticated";
-GRANT ALL ON FUNCTION "public"."get_public_observation"("p_observation_id" bigint) TO "service_role";
 
 
 
@@ -7183,9 +8622,9 @@ GRANT ALL ON FUNCTION "public"."get_public_observation_facets"() TO "service_rol
 
 
 REVOKE ALL ON FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) TO "service_role";
 GRANT ALL ON FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) TO "anon";
 GRANT ALL ON FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) TO "authenticated";
-GRANT ALL ON FUNCTION "public"."get_public_observation_images"("p_observation_id" bigint) TO "service_role";
 
 
 
@@ -7197,9 +8636,9 @@ GRANT ALL ON FUNCTION "public"."get_public_observation_spore_summaries"("p_obser
 
 
 REVOKE ALL ON FUNCTION "public"."get_public_species"("p_species_slug" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."get_public_species"("p_species_slug" "text") TO "service_role";
 GRANT ALL ON FUNCTION "public"."get_public_species"("p_species_slug" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_public_species"("p_species_slug" "text") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."get_public_species"("p_species_slug" "text") TO "service_role";
 
 
 
@@ -7234,10 +8673,32 @@ GRANT ALL ON FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_b" "u
 
 
 
+REVOKE ALL ON FUNCTION "public"."media_authorize_delivery"("p_image_id" bigint, "p_variant" "text", "p_caller" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."media_authorize_delivery"("p_image_id" bigint, "p_variant" "text", "p_caller" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."media_authorize_mosaic_delivery"("p_mosaic_id" bigint, "p_caller" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."media_authorize_mosaic_delivery"("p_mosaic_id" bigint, "p_caller" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."media_variant_is_supported"("p_variant" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."media_variant_is_supported"("p_variant" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."media_variant_is_supported"("p_variant" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."media_variant_is_supported"("p_variant" "text") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."prepare_media_object_deletion"("p_user_id" "uuid", "p_storage_key" "text", "p_storage_bytes" bigint, "p_image_count" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."prepare_media_object_deletion"("p_user_id" "uuid", "p_storage_key" "text", "p_storage_bytes" bigint, "p_image_count" integer) TO "service_role";
 
 
 
@@ -7266,6 +8727,11 @@ GRANT ALL ON FUNCTION "public"."public_normalized_specimen_condition"("value" "t
 
 
 
+REVOKE ALL ON FUNCTION "public"."reconcile_profile_storage_usage"("p_user_id" "uuid", "p_expected_total_storage_bytes" bigint, "p_expected_storage_used_bytes" bigint, "p_expected_image_count" integer, "p_storage_used_bytes" bigint, "p_image_count" integer, "p_reason" "text", "p_admin_user_id" "uuid", "p_admin_email" "text", "p_request_payload" "jsonb", "p_before_snapshot" "jsonb", "p_recalculated" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."reconcile_profile_storage_usage"("p_user_id" "uuid", "p_expected_total_storage_bytes" bigint, "p_expected_storage_used_bytes" bigint, "p_expected_image_count" integer, "p_storage_used_bytes" bigint, "p_image_count" integer, "p_reason" "text", "p_admin_user_id" "uuid", "p_admin_email" "text", "p_request_payload" "jsonb", "p_before_snapshot" "jsonb", "p_recalculated" "jsonb") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."record_client_activity"("p_client" "text", "p_app_version" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."record_client_activity"("p_client" "text", "p_app_version" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."record_client_activity"("p_client" "text", "p_app_version" "text") TO "service_role";
@@ -7276,6 +8742,11 @@ REVOKE ALL ON FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system"
 GRANT ALL ON FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."resolve_taxon_external_id_v2"("p_source_system" "text", "p_namespace" "text", "p_external_id" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."scrub_user_mentions"("p_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."scrub_user_mentions"("p_user_id" "uuid") TO "service_role";
 
 
 
@@ -7293,9 +8764,9 @@ GRANT ALL ON FUNCTION "public"."search_people_directory"("p_limit" integer, "p_o
 
 
 REVOKE ALL ON FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[]) TO "service_role";
 GRANT ALL ON FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[]) TO "anon";
 GRANT ALL ON FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[]) TO "authenticated";
-GRANT ALL ON FUNCTION "public"."search_public_observation_images"("p_observation_ids" bigint[]) TO "service_role";
 
 
 
@@ -7312,9 +8783,9 @@ GRANT ALL ON FUNCTION "public"."search_public_reference_values"("p_genus" "text"
 
 
 REVOKE ALL ON FUNCTION "public"."search_public_species"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_query" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."search_public_species"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_query" "text") TO "service_role";
 GRANT ALL ON FUNCTION "public"."search_public_species"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_query" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."search_public_species"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_query" "text") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."search_public_species"("p_limit" integer, "p_offset" integer, "p_genus" "text", "p_query" "text") TO "service_role";
 
 
 
@@ -7328,6 +8799,12 @@ REVOKE ALL ON FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim
 GRANT ALL ON FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."search_taxa_v2"("q" "text", "lang" "text", "lim" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."set_observation_selected_taxon_v2"("p_observation_id" bigint, "p_sporely_taxon_id" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."set_observation_selected_taxon_v2"("p_observation_id" bigint, "p_sporely_taxon_id" bigint) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_observation_selected_taxon_v2"("p_observation_id" bigint, "p_sporely_taxon_id" bigint) TO "service_role";
 
 
 
@@ -7361,6 +8838,10 @@ GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_image"() TO "s
 GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_measurement"() TO "anon";
 GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_measurement"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."touch_observation_updated_at_from_measurement"() TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."_media_worker_config" TO "service_role";
 
 
 
@@ -7399,9 +8880,8 @@ GRANT ALL ON TABLE "public"."comments" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."observations" TO "anon";
-GRANT ALL ON TABLE "public"."observations" TO "authenticated";
 GRANT ALL ON TABLE "public"."observations" TO "service_role";
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."observations" TO "authenticated";
 
 
 
@@ -7441,6 +8921,10 @@ GRANT ALL ON SEQUENCE "public"."friendships_id_seq" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."media_object_deletion_accounting" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."observation_identifications" TO "anon";
 GRANT ALL ON TABLE "public"."observation_identifications" TO "authenticated";
 GRANT ALL ON TABLE "public"."observation_identifications" TO "service_role";
@@ -7459,20 +8943,17 @@ GRANT ALL ON SEQUENCE "public"."observation_identifications_id_seq" TO "service_
 
 
 
-GRANT ALL ON TABLE "public"."observation_images" TO "anon";
-GRANT ALL ON TABLE "public"."observation_images" TO "authenticated";
 GRANT ALL ON TABLE "public"."observation_images" TO "service_role";
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."observation_images" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "public"."observation_images_community_view" TO "anon";
-GRANT ALL ON TABLE "public"."observation_images_community_view" TO "authenticated";
 GRANT ALL ON TABLE "public"."observation_images_community_view" TO "service_role";
+GRANT SELECT ON TABLE "public"."observation_images_community_view" TO "anon";
+GRANT SELECT ON TABLE "public"."observation_images_community_view" TO "authenticated";
 
 
 
-GRANT ALL ON SEQUENCE "public"."observation_images_id_seq" TO "anon";
-GRANT ALL ON SEQUENCE "public"."observation_images_id_seq" TO "authenticated";
 GRANT ALL ON SEQUENCE "public"."observation_images_id_seq" TO "service_role";
 
 
@@ -7501,33 +8982,31 @@ GRANT ALL ON SEQUENCE "public"."observation_spore_summaries_id_seq" TO "service_
 
 
 
-GRANT ALL ON TABLE "public"."observations_community_view" TO "anon";
-GRANT ALL ON TABLE "public"."observations_community_view" TO "authenticated";
-GRANT ALL ON TABLE "public"."observations_community_view" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."observations_follow_view" TO "anon";
-GRANT ALL ON TABLE "public"."observations_follow_view" TO "authenticated";
-GRANT ALL ON TABLE "public"."observations_follow_view" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."observations_friend_view" TO "anon";
-GRANT ALL ON TABLE "public"."observations_friend_view" TO "authenticated";
-GRANT ALL ON TABLE "public"."observations_friend_view" TO "service_role";
-
-
-
-GRANT ALL ON SEQUENCE "public"."observations_id_seq" TO "anon";
-GRANT ALL ON SEQUENCE "public"."observations_id_seq" TO "authenticated";
-GRANT ALL ON SEQUENCE "public"."observations_id_seq" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "public"."public_regions" TO "anon";
 GRANT ALL ON TABLE "public"."public_regions" TO "authenticated";
 GRANT ALL ON TABLE "public"."public_regions" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."observations_community_view" TO "service_role";
+GRANT SELECT ON TABLE "public"."observations_community_view" TO "anon";
+GRANT SELECT ON TABLE "public"."observations_community_view" TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "public"."observations_follow_view" TO "service_role";
+GRANT SELECT ON TABLE "public"."observations_follow_view" TO "anon";
+GRANT SELECT ON TABLE "public"."observations_follow_view" TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "public"."observations_friend_view" TO "service_role";
+GRANT SELECT ON TABLE "public"."observations_friend_view" TO "anon";
+GRANT SELECT ON TABLE "public"."observations_friend_view" TO "authenticated";
+
+
+
+GRANT ALL ON SEQUENCE "public"."observations_id_seq" TO "service_role";
 
 
 
@@ -7579,14 +9058,11 @@ GRANT ALL ON SEQUENCE "public"."spore_measurement_mosaics_id_seq" TO "service_ro
 
 
 
-GRANT ALL ON TABLE "public"."spore_measurements" TO "anon";
-GRANT ALL ON TABLE "public"."spore_measurements" TO "authenticated";
 GRANT ALL ON TABLE "public"."spore_measurements" TO "service_role";
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."spore_measurements" TO "authenticated";
 
 
 
-GRANT ALL ON SEQUENCE "public"."spore_measurements_id_seq" TO "anon";
-GRANT ALL ON SEQUENCE "public"."spore_measurements_id_seq" TO "authenticated";
 GRANT ALL ON SEQUENCE "public"."spore_measurements_id_seq" TO "service_role";
 
 
@@ -7656,8 +9132,6 @@ GRANT ALL ON TABLE "public"."user_blocks" TO "service_role";
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQUENCES TO "postgres";
-ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQUENCES TO "anon";
-ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQUENCES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQUENCES TO "service_role";
 
 
@@ -7666,8 +9140,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQ
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "postgres";
-ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "anon";
-ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "service_role";
 
 
@@ -7676,6 +9148,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUN
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "postgres";
-ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
-ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
