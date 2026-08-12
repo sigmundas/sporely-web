@@ -338,7 +338,7 @@ async function _loadPeoplePageFallback({ query = '', offset = 0 } = {}) {
   const normalizedQuery = _normalizePeopleQuery(query)
   const blockedIds = await _loadBlockedPeopleIds()
   let profileQuery = supabase
-    .from('profiles')
+    .from('public_profiles')
     .select('id, username, display_name, bio, avatar_url')
 
   if (normalizedQuery) {

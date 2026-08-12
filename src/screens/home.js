@@ -231,7 +231,7 @@ async function loadFriendRequests() {
     ...accepted.map(req => req.addressee_id),
   ])]
   const { data: profiles } = await supabase
-    .from('profiles')
+    .from('public_profiles')
     .select('id, username, display_name, avatar_url')
     .in('id', requesterIds)
   const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p]))
@@ -620,7 +620,7 @@ async function _loadProfileMap(observations) {
   if (!userIds.length) return {}
 
   const { data, error } = await supabase
-    .from('profiles')
+    .from('public_profiles')
     .select('id, username, display_name, avatar_url')
     .in('id', userIds)
 

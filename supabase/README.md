@@ -19,6 +19,10 @@ This folder is the authoritative home for the Sporely Supabase schema.
 ## Account entitlement / privacy enforcement
 
 - `public.profiles` contains both user-editable profile fields and server-owned entitlement/quota state.
+- Normal clients can read `public.profiles` only for their own user id. Public
+  identity lookups use the read-only `public.public_profiles` projection,
+  which contains only `id`, `username`, `display_name`, `avatar_url`, and
+  `bio`.
 - Server-owned fields include `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `billing_customer_id`, `billing_payment_id`, `billing_checkout_session_id`, `billing_updated_at`, `total_storage_bytes`, `image_count`, `is_admin`, and `is_banned`.
 - Normal authenticated writes cannot change those server-owned fields; the `trg_profiles_protect_privileged_fields` trigger preserves them.
 - Free accounts can keep at most 20 cloud observations that are private or fuzzed (`visibility != 'public' OR location_precision = 'fuzzed'`); the enforcement trigger takes a per-user lock so concurrent inserts cannot race past the cap.

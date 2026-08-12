@@ -7,7 +7,7 @@ export async function fetchCommentAuthorMap(comments, currentUser = null) {
 
   if (userIds.length) {
     const { data, error } = await supabase
-      .from('profiles')
+      .from('public_profiles')
       .select('id, username, display_name')
       .in('id', userIds)
 

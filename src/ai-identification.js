@@ -38,6 +38,23 @@ import { esc as _esc } from './esc.js'
 
 const OBSERVATION_IDENTIFICATIONS_MISSING_CACHE_KEY = 'sporely-observation-identifications-missing'
 const OBSERVATION_IDENTIFICATIONS_COMMUNITY_VIEW = 'observation_identifications_community_view'
+const PUBLIC_OBSERVATION_IDENTIFICATION_COLUMNS = [
+  'id',
+  'observation_id',
+  'service',
+  'status',
+  'results',
+  'top_scientific_name',
+  'top_vernacular_name',
+  'top_taxon_id',
+  'top_probability',
+  'top_species_url',
+  'top_redlist_category',
+  'top_redlist_status',
+  'top_redlist_source',
+  'created_at',
+  'updated_at',
+].join(', ')
 export const IDENTIFY_PROVIDER_SLOW_MS = 10_000
 export const IDENTIFY_PROVIDER_TIMEOUT_MS = 20_000
 let _observationIdentificationsAvailable = null
@@ -1172,26 +1189,20 @@ export async function loadObservationIdentifications(observationId, options = {}
   if (_isObservationIdentificationsTableUnavailable()) return []
   const client = options.supabaseClient || defaultSupabase
   try {
-    const readRows = table => client
-      .from(table)
-      .select('*')
+    const communityRes = await client
+      .from(OBSERVATION_IDENTIFICATIONS_COMMUNITY_VIEW)
+      .select(PUBLIC_OBSERVATION_IDENTIFICATION_COLUMNS)
       .eq('observation_id', observationId)
       .order('created_at', { ascending: false })
 
-    const communityRes = await readRows(OBSERVATION_IDENTIFICATIONS_COMMUNITY_VIEW)
-    if (!communityRes.error) {
-      return (Array.isArray(communityRes.data) ? communityRes.data : []).map(_normalizeObservationIdentificationRow)
-    }
-
-    const fallbackRes = await readRows('observation_identifications')
-    if (fallbackRes.error) {
-      if (_isMissingObservationIdentificationsTableError(fallbackRes.error)) {
+    if (communityRes.error) {
+      if (_isMissingObservationIdentificationsTableError(communityRes.error)) {
         _markObservationIdentificationsTableMissing()
         return []
       }
-      throw fallbackRes.error
+      throw communityRes.error
     }
-    return (Array.isArray(fallbackRes.data) ? fallbackRes.data : []).map(_normalizeObservationIdentificationRow)
+    return (Array.isArray(communityRes.data) ? communityRes.data : []).map(_normalizeObservationIdentificationRow)
   } catch (error) {
     if (_isMissingObservationIdentificationsTableError(error)) {
       _markObservationIdentificationsTableMissing()
@@ -1276,28 +1287,22 @@ export async function maybeLoadCachedIdentification({
   if (_isObservationIdentificationsTableUnavailable()) return null
   const normalizedService = normalizeIdentifyService(service)
   try {
-    const readRow = table => supabaseClient
-      .from(table)
+    const rawRes = await supabaseClient
+      .from('observation_identifications')
       .select('*')
       .eq('observation_id', observationId)
       .eq('service', normalizedService)
       .eq('request_fingerprint', requestFingerprint)
       .maybeSingle()
 
-    const communityRes = await readRow(OBSERVATION_IDENTIFICATIONS_COMMUNITY_VIEW)
-    if (!communityRes.error) {
-      return communityRes.data ? _normalizeObservationIdentificationRow(communityRes.data) : null
-    }
-
-    const fallbackRes = await readRow('observation_identifications')
-    if (fallbackRes.error) {
-      if (_isMissingObservationIdentificationsTableError(fallbackRes.error)) {
+    if (rawRes.error) {
+      if (_isMissingObservationIdentificationsTableError(rawRes.error)) {
         _markObservationIdentificationsTableMissing()
         return null
       }
-      throw fallbackRes.error
+      throw rawRes.error
     }
-    return fallbackRes.data ? _normalizeObservationIdentificationRow(fallbackRes.data) : null
+    return rawRes.data ? _normalizeObservationIdentificationRow(rawRes.data) : null
   } catch (error) {
     if (_isMissingObservationIdentificationsTableError(error)) {
       _markObservationIdentificationsTableMissing()

@@ -154,11 +154,25 @@ BEGIN
     fail_msgs := array_append(fail_msgs,
       'A: service_role lacks EXECUTE on media_authorize_delivery (regression)');
   END IF;
+  IF has_function_privilege(
+       'service_role',
+       'public.are_friends(uuid, uuid)',
+       'EXECUTE')
+     OR has_function_privilege(
+       'service_role',
+       'public.is_blocked_between(uuid, uuid)',
+       'EXECUTE') THEN
+    fail_msgs := array_append(fail_msgs,
+      'A: service_role holds direct relationship-helper EXECUTE');
+  END IF;
 
   -- Runtime confirmation: attempting to call as anon must raise
-  -- insufficient_privilege.
+  -- insufficient_privilege. Direct service_role relationship probes must also
+  -- fail; Sections B and K prove the nested SECURITY DEFINER paths still work.
   DECLARE
     anon_call_succeeded boolean := false;
+    service_friend_probe_succeeded boolean := false;
+    service_block_probe_succeeded boolean := false;
   BEGIN
     BEGIN
       SET LOCAL ROLE anon;
@@ -169,6 +183,25 @@ BEGIN
     IF anon_call_succeeded THEN
       fail_msgs := array_append(fail_msgs,
         'A: anon successfully invoked media_authorize_delivery (privilege leak)');
+    END IF;
+
+    BEGIN
+      SET LOCAL ROLE service_role;
+      PERFORM public.are_friends(owner_id, friend_id);
+      service_friend_probe_succeeded := true;
+    EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+    RESET ROLE;
+
+    BEGIN
+      SET LOCAL ROLE service_role;
+      PERFORM public.is_blocked_between(owner_id, stranger_id);
+      service_block_probe_succeeded := true;
+    EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+    RESET ROLE;
+
+    IF service_friend_probe_succeeded OR service_block_probe_succeeded THEN
+      fail_msgs := array_append(fail_msgs,
+        'A: service_role directly invoked a restricted relationship helper');
     END IF;
   END;
 

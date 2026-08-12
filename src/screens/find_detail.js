@@ -2916,7 +2916,7 @@ async function _loadDetailAuthorAndSocial(options = {}) {
   const isOwner = currentObs.user_id === state.user?.id
   const canQuerySocial = Boolean(state.user?.id)
   const profilePromise = supabase
-    .from('profiles')
+    .from('public_profiles')
     .select('id, username, display_name, avatar_url')
     .eq('id', currentObs.user_id)
     .maybeSingle()
@@ -3149,7 +3149,7 @@ async function _openAuthorFinds() {
     detailAuthorProfile
       ? Promise.resolve({ data: detailAuthorProfile })
       : supabase
-        .from('profiles')
+        .from('public_profiles')
         .select('id, username, display_name, avatar_url, bio')
         .eq('id', userId)
         .maybeSingle(),
@@ -3852,14 +3852,14 @@ function _initMentions(input) {
 async function _searchMentions(query, dropdown, input, mentionStart) {
   if (query.length < 1) { dropdown.style.display = 'none'; return }
   const { data } = await supabase
-    .from('profiles')
-    .select('id, username, full_name')
+    .from('public_profiles')
+    .select('id, username, display_name')
     .ilike('username', `${query}%`)
     .limit(5)
   if (!data?.length) { dropdown.style.display = 'none'; return }
 
   dropdown.innerHTML = data.map((u, i) =>
-    `<li data-idx="${i}" data-username="${u.username}">@${u.username}${u.full_name ? ` · ${u.full_name}` : ''}</li>`
+    `<li data-idx="${i}" data-username="${u.username}">@${u.username}${u.display_name ? ` · ${u.display_name}` : ''}</li>`
   ).join('')
   dropdown.style.display = 'block'
   dropdown._users = data
@@ -3954,7 +3954,7 @@ async function _sendComment() {
     let mentionedUserIds = []
     if (mentionedUsernames.length) {
       const { data: profiles } = await supabase
-        .from('profiles')
+        .from('public_profiles')
         .select('id, username')
         .in('username', mentionedUsernames)
       mentionedUserIds = (profiles || []).map(p => p.id)

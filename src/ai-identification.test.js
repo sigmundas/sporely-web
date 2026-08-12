@@ -1090,6 +1090,7 @@ test('old bloated identification rows still normalize on read', async () => {
 test('loadObservationIdentifications prefers the community view for visible observations', async () => {
   resetObservationIdentificationsTableAvailabilityForTests()
   const calls = []
+  const selections = []
   const rows = [
     {
       id: 'community-row-1',
@@ -1108,7 +1109,7 @@ test('loadObservationIdentifications prefers the community view for visible obse
     from(table) {
       calls.push(table)
       return {
-        select() { return this },
+        select(columns) { selections.push({ table, columns }); return this },
         eq() { return this },
         order() {
           if (table === 'observation_identifications_community_view') {
@@ -1123,6 +1124,21 @@ test('loadObservationIdentifications prefers the community view for visible obse
   const loaded = await loadObservationIdentifications('obs-visible', { supabaseClient: client })
 
   assert.equal(calls[0], 'observation_identifications_community_view')
+  const selectedColumns = selections[0].columns.split(',').map(column => column.trim())
+  for (const forbiddenColumn of [
+    'user_id',
+    'source',
+    'image_fingerprint',
+    'crop_fingerprint',
+    'request_fingerprint',
+    'language',
+    'model_version',
+    'error_message',
+  ]) {
+    assert.equal(selectedColumns.includes(forbiddenColumn), false)
+  }
+  assert.match(selections[0].columns, /results/)
+  assert.match(selections[0].columns, /top_scientific_name/)
   assert.equal(loaded.length, 1)
   assert.equal(loaded[0].service, 'artsorakel')
   assert.equal(loaded[0].top_scientific_name, 'Amanita muscaria')

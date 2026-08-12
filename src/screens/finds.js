@@ -716,7 +716,7 @@ async function _loadFindsTargetCard(userId) {
   const loadPromise = (async () => {
     const [profileRes, statsRes, relationshipMap] = await Promise.all([
       supabase
-        .from('profiles')
+        .from('public_profiles')
         .select('id, username, display_name, avatar_url, bio')
         .eq('id', targetUserId)
         .maybeSingle(),
@@ -1338,7 +1338,7 @@ async function _loadProfilesForScope(data, loadSeq = _loadFindsSeq) {
 
   const [profilesRes, relationships] = await Promise.all([
     supabase
-      .from('profiles')
+      .from('public_profiles')
       .select('id, username, display_name, avatar_url')
       .in('id', userIds),
     loadPeopleSocialState(userIds),

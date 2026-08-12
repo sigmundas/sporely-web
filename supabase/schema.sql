@@ -1648,7 +1648,7 @@ ALTER FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid", "p_sto
 
 CREATE OR REPLACE FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") RETURNS boolean
     LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
+    SET "search_path" TO ''
     AS $$
   SELECT user_a IS NOT NULL
      AND user_b IS NOT NULL
@@ -1659,14 +1659,17 @@ CREATE OR REPLACE FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uui
        WHERE f.status = 'accepted'
          AND (
            (f.requester_id = user_a AND f.addressee_id = user_b)
-           OR
-           (f.requester_id = user_b AND f.addressee_id = user_a)
+           OR (f.requester_id = user_b AND f.addressee_id = user_a)
          )
-     )
+     );
 $$;
 
 
 ALTER FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") IS 'Internal two-user relationship helper for postgres-owned authorization paths; not client-executable.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."build_worker_media_url"("p_image_id" bigint, "p_variant" "text", "p_media_version" bigint) RETURNS "text"
@@ -1720,6 +1723,32 @@ ALTER FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media
 
 
 COMMENT ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) IS 'Builds an authorized /mm/<mosaic-id>?v=<media-version> URL from the protected Worker origin.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."can_access_observation_comments"("p_observation_id" bigint) RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observations o
+    WHERE o.id = p_observation_id
+      AND (
+        o.user_id = auth.uid()
+        OR (
+          NOT coalesce(o.is_draft, false)
+          AND public.can_read_observation(o.user_id, o.visibility)
+        )
+      )
+  )
+$$;
+
+
+ALTER FUNCTION "public"."can_access_observation_comments"("p_observation_id" bigint) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."can_access_observation_comments"("p_observation_id" bigint) IS 'Policy helper that checks observation comment access without exposing owner-only observation rows.';
 
 
 
@@ -1851,6 +1880,38 @@ $$;
 
 
 ALTER FUNCTION "public"."community_spore_taxon_summary"("p_genus" "text", "p_species" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."current_user_is_blocked_with"("other_user_id" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT auth.uid() IS NOT NULL
+     AND public.is_blocked_between(auth.uid(), other_user_id)
+$$;
+
+
+ALTER FUNCTION "public"."current_user_is_blocked_with"("other_user_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."current_user_is_blocked_with"("other_user_id" "uuid") IS 'Community-view helper restricted implicitly to auth.uid(); cannot query arbitrary user pairs.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."current_user_is_friend_with"("other_user_id" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT auth.uid() IS NOT NULL
+     AND public.are_friends(auth.uid(), other_user_id)
+$$;
+
+
+ALTER FUNCTION "public"."current_user_is_friend_with"("other_user_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."current_user_is_friend_with"("other_user_id" "uuid") IS 'Community-view helper restricted implicitly to auth.uid(); cannot query arbitrary user pairs.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."enable_spatial_ref_sys_rls"() RETURNS "void"
@@ -4161,7 +4222,7 @@ ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_b" "uuid") RETURNS boolean
     LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
+    SET "search_path" TO ''
     AS $$
   SELECT user_a IS NOT NULL
      AND user_b IS NOT NULL
@@ -4170,11 +4231,35 @@ CREATE OR REPLACE FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_
        FROM public.user_blocks ub
        WHERE (ub.blocker_id = user_a AND ub.blocked_id = user_b)
           OR (ub.blocker_id = user_b AND ub.blocked_id = user_a)
-     )
+     );
 $$;
 
 
 ALTER FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_b" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_b" "uuid") IS 'Internal two-user block helper for postgres-owned authorization paths; not client-executable.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."is_comment_hidden"("p_comment_id" bigint) RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.comment_moderation cm
+    WHERE cm.comment_id = p_comment_id
+      AND cm.hidden_at IS NOT NULL
+  )
+$$;
+
+
+ALTER FUNCTION "public"."is_comment_hidden"("p_comment_id" bigint) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."is_comment_hidden"("p_comment_id" bigint) IS 'Policy helper that preserves comment moderation filtering without exposing comment_moderation rows to clients.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."media_authorize_delivery"("p_image_id" bigint, "p_variant" "text", "p_caller" "uuid") RETURNS TABLE("allowed" boolean, "storage_path" "text", "canonical_bucket" "text", "media_version" bigint, "cache_class" "text", "reason" "text")
@@ -4462,21 +4547,34 @@ COMMENT ON FUNCTION "public"."media_variant_is_supported"("p_variant" "text") IS
 
 
 CREATE OR REPLACE FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") RETURNS integer
-    LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
     AS $$
-  SELECT count(*)::integer
-  FROM public.observations o
-  WHERE o.user_id = profile_id
-    AND NOT coalesce(o.is_draft, false)
-    AND (
-      coalesce(o.visibility, 'public') <> 'public'
-      OR coalesce(o.location_precision, 'exact') IN ('fuzzed', 'region', 'hidden')
-    )
+BEGIN
+  IF auth.uid() IS DISTINCT FROM profile_id THEN
+    RAISE EXCEPTION 'non_public_observation_count may only be called for the current user'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  RETURN (
+    SELECT count(*)::integer
+    FROM public.observations o
+    WHERE o.user_id = profile_id
+      AND NOT coalesce(o.is_draft, false)
+      AND (
+        coalesce(o.visibility, 'public') <> 'public'
+        OR coalesce(o.location_precision, 'exact') IN ('fuzzed', 'region', 'hidden')
+      )
+  );
+END
 $$;
 
 
 ALTER FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") IS 'Self-only authenticated RPC returning the current user privacy-slot observation count.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."prepare_media_object_deletion"("p_user_id" "uuid", "p_storage_key" "text", "p_storage_bytes" bigint, "p_image_count" integer) RETURNS "void"
@@ -4525,7 +4623,7 @@ ALTER FUNCTION "public"."prepare_media_object_deletion"("p_user_id" "uuid", "p_s
 
 CREATE OR REPLACE FUNCTION "public"."profile_has_pro_access"("profile_id" "uuid") RETURNS boolean
     LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
+    SET "search_path" TO ''
     AS $$
   SELECT coalesce(p.is_pro, false) OR coalesce(p.cloud_plan, 'free') = 'pro'
   FROM public.profiles p
@@ -4534,6 +4632,10 @@ $$;
 
 
 ALTER FUNCTION "public"."profile_has_pro_access"("profile_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."profile_has_pro_access"("profile_id" "uuid") IS 'Internal entitlement helper for postgres-owned trigger/function execution; not client-executable.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."protect_profile_privileged_fields"() RETURNS "trigger"
@@ -4583,6 +4685,34 @@ CREATE OR REPLACE FUNCTION "public"."public_normalized_specimen_condition"("valu
 
 
 ALTER FUNCTION "public"."public_normalized_specimen_condition"("value" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."read_public_profiles"() RETURNS TABLE("id" "uuid", "username" "text", "display_name" "text", "avatar_url" "text", "bio" "text")
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT
+    p.id,
+    p.username,
+    p.display_name,
+    p.avatar_url,
+    p.bio
+  FROM public.profiles p
+  WHERE p.is_banned IS NOT TRUE
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.user_blocks ub
+      WHERE (ub.blocker_id = auth.uid() AND ub.blocked_id = p.id)
+         OR (ub.blocker_id = p.id AND ub.blocked_id = auth.uid())
+    )
+$$;
+
+
+ALTER FUNCTION "public"."read_public_profiles"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."read_public_profiles"() IS 'RLS-bypass helper for public_profiles. Returns only five public fields, excludes banned profiles, and enforces two-way blocks for authenticated users.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."reconcile_profile_storage_usage"("p_user_id" "uuid", "p_expected_total_storage_bytes" bigint, "p_expected_storage_used_bytes" bigint, "p_expected_image_count" integer, "p_storage_used_bytes" bigint, "p_image_count" integer, "p_reason" "text", "p_admin_user_id" "uuid", "p_admin_email" "text", "p_request_payload" "jsonb", "p_before_snapshot" "jsonb", "p_recalculated" "jsonb") RETURNS TABLE("action_log_id" bigint, "total_storage_bytes" bigint, "storage_used_bytes" bigint, "image_count" integer)
@@ -6067,7 +6197,7 @@ CREATE OR REPLACE VIEW "public"."comments_community_view" AS
     "c"."mentioned_user_ids"
    FROM ("public"."comments" "c"
      JOIN "public"."observations" "o" ON (("o"."id" = "c"."observation_id")))
-  WHERE ((("o"."user_id" = "auth"."uid"()) OR ((NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility"))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "c"."user_id")) AND (NOT (EXISTS ( SELECT 1
+  WHERE ((("o"."user_id" = "auth"."uid"()) OR ((NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility"))) AND (NOT "public"."current_user_is_blocked_with"("c"."user_id")) AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
           WHERE (("p"."id" = "c"."user_id") AND ("p"."is_banned" = true))))) AND (NOT (EXISTS ( SELECT 1
            FROM "public"."comment_moderation" "cm"
@@ -6162,13 +6292,13 @@ CREATE TABLE IF NOT EXISTS "public"."observation_identifications" (
     "top_vernacular_name" "text",
     "top_taxon_id" "text",
     "top_probability" numeric,
+    "error_message" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "top_species_url" "text",
     "top_redlist_category" "text",
     "top_redlist_status" "text",
     "top_redlist_source" "text",
-    "error_message" "text",
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     CONSTRAINT "observation_identifications_probability_check" CHECK ((("top_probability" IS NULL) OR (("top_probability" >= (0)::numeric) AND ("top_probability" <= (1)::numeric)))),
     CONSTRAINT "observation_identifications_service_check" CHECK (("service" = ANY (ARRAY['artsorakel'::"text", 'inat'::"text", 'inaturalist'::"text"]))),
     CONSTRAINT "observation_identifications_status_check" CHECK (("status" = ANY (ARRAY['success'::"text", 'no_match'::"text", 'error'::"text", 'stale'::"text", 'unavailable'::"text"])))
@@ -6178,19 +6308,12 @@ CREATE TABLE IF NOT EXISTS "public"."observation_identifications" (
 ALTER TABLE "public"."observation_identifications" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."observation_identifications_community_view" AS
+CREATE OR REPLACE VIEW "public"."observation_identifications_community_view" WITH ("security_barrier"='true') AS
  SELECT "oi"."id",
     "oi"."observation_id",
-    "oi"."user_id",
     "oi"."service",
-    "oi"."source",
     "oi"."status",
-    "oi"."image_fingerprint",
-    "oi"."crop_fingerprint",
-    "oi"."request_fingerprint",
-    "oi"."language",
-    "oi"."model_version",
-    "oi"."results",
+    "safe_results"."results",
     "oi"."top_scientific_name",
     "oi"."top_vernacular_name",
     "oi"."top_taxon_id",
@@ -6199,17 +6322,26 @@ CREATE OR REPLACE VIEW "public"."observation_identifications_community_view" AS
     "oi"."top_redlist_category",
     "oi"."top_redlist_status",
     "oi"."top_redlist_source",
-    "oi"."error_message",
     "oi"."created_at",
     "oi"."updated_at"
-   FROM ("public"."observation_identifications" "oi"
+   FROM (("public"."observation_identifications" "oi"
      JOIN "public"."observations" "o" ON (("o"."id" = "oi"."observation_id")))
+     CROSS JOIN LATERAL ( SELECT COALESCE("jsonb_agg"("jsonb_strip_nulls"("jsonb_build_object"('rank', COALESCE(("candidate"."value" -> 'rank'::"text"), "to_jsonb"(("candidate"."ordinality")::integer)), 'service', COALESCE(("candidate"."value" -> 'service'::"text"), "to_jsonb"("oi"."service")), 'taxon_id', COALESCE(("candidate"."value" -> 'taxon_id'::"text"), ("candidate"."value" -> 'taxonId'::"text")), 'scientific_name', COALESCE(("candidate"."value" -> 'scientific_name'::"text"), ("candidate"."value" -> 'scientificName'::"text")), 'vernacular_name', COALESCE(("candidate"."value" -> 'vernacular_name'::"text"), ("candidate"."value" -> 'vernacularName'::"text")), 'probability', COALESCE(("candidate"."value" -> 'probability'::"text"), ("candidate"."value" -> 'score'::"text")), 'species_url', COALESCE(("candidate"."value" -> 'species_url'::"text"), ("candidate"."value" -> 'speciesUrl'::"text")), 'redlist_category', COALESCE(("candidate"."value" -> 'redlist_category'::"text"), ("candidate"."value" -> 'redlistCategory'::"text")), 'redlist_status', COALESCE(("candidate"."value" -> 'redlist_status'::"text"), ("candidate"."value" -> 'redlistStatus'::"text")), 'redlist_source', COALESCE(("candidate"."value" -> 'redlist_source'::"text"), ("candidate"."value" -> 'redlistSource'::"text")), 'picture_url', COALESCE(("candidate"."value" -> 'picture_url'::"text"), ("candidate"."value" -> 'pictureUrl'::"text"), ("candidate"."value" -> 'photo_url'::"text"), ("candidate"."value" -> 'photoUrl'::"text"), ("candidate"."value" -> 'image_url'::"text"), ("candidate"."value" -> 'imageUrl'::"text"), ("candidate"."value" -> 'thumbnail_url'::"text"), ("candidate"."value" -> 'thumbnailUrl'::"text")), 'external_ids', NULLIF("jsonb_strip_nulls"("jsonb_build_object"('gbif', (("candidate"."value" -> 'external_ids'::"text") -> 'gbif'::"text"), 'inat', (("candidate"."value" -> 'external_ids'::"text") -> 'inat'::"text"), 'nbic', (("candidate"."value" -> 'external_ids'::"text") -> 'nbic'::"text"))), '{}'::"jsonb"))) ORDER BY "candidate"."ordinality"), '[]'::"jsonb") AS "results"
+           FROM "jsonb_array_elements"(
+                CASE
+                    WHEN ("jsonb_typeof"("oi"."results") = 'array'::"text") THEN "oi"."results"
+                    ELSE '[]'::"jsonb"
+                END) WITH ORDINALITY "candidate"("value", "ordinality")) "safe_results")
   WHERE ((("o"."user_id" = "auth"."uid"()) OR ((NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility"))) AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
-          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
+          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."current_user_is_blocked_with"("o"."user_id")));
 
 
 ALTER VIEW "public"."observation_identifications_community_view" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."observation_identifications_community_view" IS 'Public AI-identification display projection. Excludes user/source fields, fingerprints, request/language/model metadata, raw provider/debug payloads, and error details.';
+
 
 
 ALTER TABLE "public"."observation_identifications" ALTER COLUMN "id" ADD GENERATED BY DEFAULT AS IDENTITY (
@@ -6310,7 +6442,7 @@ COMMENT ON COLUMN "public"."observation_images"."captured_at" IS 'Actual date/ti
 
 
 
-CREATE OR REPLACE VIEW "public"."observation_images_community_view" WITH ("security_barrier"='true') AS
+CREATE OR REPLACE VIEW "public"."observation_images_community_view" AS
  SELECT "oi"."id",
     "oi"."observation_id",
     "oi"."user_id",
@@ -6355,7 +6487,7 @@ CREATE OR REPLACE VIEW "public"."observation_images_community_view" WITH ("secur
      JOIN "public"."observations" "o" ON (("o"."id" = "oi"."observation_id")))
   WHERE (("oi"."deleted_at" IS NULL) AND ("oi"."purged_at" IS NULL) AND (NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility") AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
-          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
+          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."current_user_is_blocked_with"("o"."user_id")));
 
 
 ALTER VIEW "public"."observation_images_community_view" OWNER TO "postgres";
@@ -6528,7 +6660,7 @@ COMMENT ON COLUMN "public"."public_regions"."map_y" IS 'Schematic map coordinate
 
 
 
-CREATE OR REPLACE VIEW "public"."observations_community_view" WITH ("security_barrier"='true') AS
+CREATE OR REPLACE VIEW "public"."observations_community_view" AS
  SELECT "o"."id",
     "o"."user_id",
     "o"."desktop_id",
@@ -6585,7 +6717,7 @@ CREATE OR REPLACE VIEW "public"."observations_community_view" WITH ("security_ba
      LEFT JOIN LATERAL "public"."_stage2b_observation_primary_media"("o"."id", "o"."image_key") "media"("image_id", "media_version", "full_media_url", "thumb_media_url") ON (true))
   WHERE ((COALESCE("o"."visibility", 'public'::"text") = 'public'::"text") AND (NOT COALESCE("o"."is_draft", false)) AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
-          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
+          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."current_user_is_blocked_with"("o"."user_id")));
 
 
 ALTER VIEW "public"."observations_community_view" OWNER TO "postgres";
@@ -6595,7 +6727,7 @@ COMMENT ON VIEW "public"."observations_community_view" IS 'Transitional public o
 
 
 
-CREATE OR REPLACE VIEW "public"."observations_follow_view" WITH ("security_barrier"='true') AS
+CREATE OR REPLACE VIEW "public"."observations_follow_view" AS
  SELECT DISTINCT "o"."id",
     "o"."user_id",
     "o"."desktop_id",
@@ -6642,7 +6774,7 @@ CREATE OR REPLACE VIEW "public"."observations_follow_view" WITH ("security_barri
      LEFT JOIN LATERAL "public"."_stage2b_observation_primary_media"("o"."id", "o"."image_key") "media"("image_id", "media_version", "full_media_url", "thumb_media_url") ON (true))
   WHERE ("public"."can_read_observation"("o"."user_id", "o"."visibility") AND (NOT COALESCE("o"."is_draft", false)) AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
-          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
+          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."current_user_is_blocked_with"("o"."user_id")));
 
 
 ALTER VIEW "public"."observations_follow_view" OWNER TO "postgres";
@@ -6652,7 +6784,7 @@ COMMENT ON VIEW "public"."observations_follow_view" IS 'Transitional follow proj
 
 
 
-CREATE OR REPLACE VIEW "public"."observations_friend_view" WITH ("security_barrier"='true') AS
+CREATE OR REPLACE VIEW "public"."observations_friend_view" AS
  SELECT "o"."id",
     "o"."user_id",
     "o"."desktop_id",
@@ -6703,9 +6835,9 @@ CREATE OR REPLACE VIEW "public"."observations_friend_view" WITH ("security_barri
    FROM (("public"."observations" "o"
      LEFT JOIN "public"."public_regions" "pr" ON (("pr"."id" = "o"."region_id")))
      LEFT JOIN LATERAL "public"."_stage2b_observation_primary_media"("o"."id", "o"."image_key") "media"("image_id", "media_version", "full_media_url", "thumb_media_url") ON (true))
-  WHERE ((COALESCE("o"."visibility", 'public'::"text") = ANY (ARRAY['friends'::"text", 'public'::"text"])) AND (NOT COALESCE("o"."is_draft", false)) AND "public"."are_friends"("auth"."uid"(), "o"."user_id") AND (NOT (EXISTS ( SELECT 1
+  WHERE ((COALESCE("o"."visibility", 'public'::"text") = ANY (ARRAY['friends'::"text", 'public'::"text"])) AND (NOT COALESCE("o"."is_draft", false)) AND "public"."current_user_is_friend_with"("o"."user_id") AND (NOT (EXISTS ( SELECT 1
            FROM "public"."profiles" "p"
-          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."is_blocked_between"("auth"."uid"(), "o"."user_id")));
+          WHERE (("p"."id" = "o"."user_id") AND ("p"."is_banned" = true))))) AND (NOT "public"."current_user_is_blocked_with"("o"."user_id")));
 
 
 ALTER VIEW "public"."observations_friend_view" OWNER TO "postgres";
@@ -6723,6 +6855,22 @@ ALTER TABLE "public"."observations" ALTER COLUMN "id" ADD GENERATED ALWAYS AS ID
     NO MAXVALUE
     CACHE 1
 );
+
+
+
+CREATE OR REPLACE VIEW "public"."public_profiles" WITH ("security_barrier"='true', "security_invoker"='true') AS
+ SELECT "id",
+    "username",
+    "display_name",
+    "avatar_url",
+    "bio"
+   FROM "public"."read_public_profiles"() "p"("id", "username", "display_name", "avatar_url", "bio");
+
+
+ALTER VIEW "public"."public_profiles" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."public_profiles" IS 'Read-only public profile projection. Never add entitlement, billing, moderation, storage, activity, or onboarding fields.';
 
 
 
@@ -8122,24 +8270,6 @@ ALTER TABLE "public"."comment_moderation" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."comments" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "comments_delete" ON "public"."comments" FOR DELETE USING (("auth"."uid"() = "user_id"));
-
-
-
-CREATE POLICY "comments_insert" ON "public"."comments" FOR INSERT WITH CHECK (("auth"."uid"() = "user_id"));
-
-
-
-CREATE POLICY "comments_select" ON "public"."comments" FOR SELECT USING (((EXISTS ( SELECT 1
-   FROM "public"."observations" "o"
-  WHERE (("o"."id" = "comments"."observation_id") AND (("o"."user_id" = "auth"."uid"()) OR ((NOT COALESCE("o"."is_draft", false)) AND (("o"."visibility" = 'public'::"text") OR (("o"."visibility" = 'friends'::"text") AND (EXISTS ( SELECT 1
-           FROM "public"."friendships" "f"
-          WHERE (("f"."status" = 'accepted'::"text") AND ((("f"."requester_id" = "auth"."uid"()) AND ("f"."addressee_id" = "o"."user_id")) OR (("f"."addressee_id" = "auth"."uid"()) AND ("f"."requester_id" = "o"."user_id"))))))))))))) AND (NOT (EXISTS ( SELECT 1
-   FROM "public"."comment_moderation" "cm"
-  WHERE (("cm"."comment_id" = "comments"."id") AND ("cm"."hidden_at" IS NOT NULL)))))));
-
-
-
 ALTER TABLE "public"."follows" ENABLE ROW LEVEL SECURITY;
 
 
@@ -8200,17 +8330,11 @@ CREATE POLICY "phase7_comments_delete_own" ON "public"."comments" FOR DELETE TO 
 
 
 
-CREATE POLICY "phase7_comments_insert_visible" ON "public"."comments" FOR INSERT TO "authenticated" WITH CHECK ((("auth"."uid"() = "user_id") AND (EXISTS ( SELECT 1
-   FROM "public"."observations" "o"
-  WHERE (("o"."id" = "comments"."observation_id") AND (("o"."user_id" = "auth"."uid"()) OR ((NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility"))))))));
+CREATE POLICY "phase7_comments_insert_visible" ON "public"."comments" FOR INSERT TO "authenticated" WITH CHECK ((("auth"."uid"() = "user_id") AND "public"."can_access_observation_comments"("observation_id")));
 
 
 
-CREATE POLICY "phase7_comments_read" ON "public"."comments" FOR SELECT TO "authenticated" USING (((EXISTS ( SELECT 1
-   FROM "public"."observations" "o"
-  WHERE (("o"."id" = "comments"."observation_id") AND (("o"."user_id" = "auth"."uid"()) OR ((NOT COALESCE("o"."is_draft", false)) AND "public"."can_read_observation"("o"."user_id", "o"."visibility")))))) AND (NOT (EXISTS ( SELECT 1
-   FROM "public"."comment_moderation" "cm"
-  WHERE (("cm"."comment_id" = "comments"."id") AND ("cm"."hidden_at" IS NOT NULL)))))));
+CREATE POLICY "phase7_comments_read" ON "public"."comments" FOR SELECT TO "authenticated" USING (("public"."can_access_observation_comments"("observation_id") AND (NOT "public"."is_comment_hidden"("id"))));
 
 
 
@@ -8273,17 +8397,7 @@ CREATE POLICY "phase7_observations_update_own" ON "public"."observations" FOR UP
 ALTER TABLE "public"."profiles" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "profiles public read" ON "public"."profiles" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "profiles: friends can read" ON "public"."profiles" FOR SELECT USING ((EXISTS ( SELECT 1
-   FROM "public"."friendships" "f"
-  WHERE (("f"."status" = 'accepted'::"text") AND ((("f"."requester_id" = "auth"."uid"()) AND ("f"."addressee_id" = "profiles"."id")) OR (("f"."addressee_id" = "auth"."uid"()) AND ("f"."requester_id" = "profiles"."id")))))));
-
-
-
-CREATE POLICY "profiles: owner read-write" ON "public"."profiles" USING (("auth"."uid"() = "id")) WITH CHECK (("auth"."uid"() = "id"));
+CREATE POLICY "profiles: owner read-write" ON "public"."profiles" TO "authenticated" USING (("auth"."uid"() = "id")) WITH CHECK (("auth"."uid"() = "id"));
 
 
 
@@ -8507,9 +8621,6 @@ GRANT ALL ON FUNCTION "public"."apply_profile_storage_delta"("p_user_id" "uuid",
 
 
 REVOKE ALL ON FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") TO "anon";
-GRANT ALL ON FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."are_friends"("user_a" "uuid", "user_b" "uuid") TO "service_role";
 
 
 
@@ -8524,6 +8635,11 @@ REVOKE ALL ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, 
 GRANT ALL ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) TO "service_role";
 GRANT ALL ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) TO "anon";
 GRANT ALL ON FUNCTION "public"."build_worker_mosaic_url"("p_mosaic_id" bigint, "p_media_version" bigint) TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."can_access_observation_comments"("p_observation_id" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."can_access_observation_comments"("p_observation_id" bigint) TO "authenticated";
 
 
 
@@ -8556,6 +8672,20 @@ GRANT ALL ON FUNCTION "public"."community_contributor_label"("profile_id" "uuid"
 GRANT ALL ON FUNCTION "public"."community_spore_taxon_summary"("p_genus" "text", "p_species" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."community_spore_taxon_summary"("p_genus" "text", "p_species" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."community_spore_taxon_summary"("p_genus" "text", "p_species" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."current_user_is_blocked_with"("other_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."current_user_is_blocked_with"("other_user_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."current_user_is_blocked_with"("other_user_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."current_user_is_blocked_with"("other_user_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."current_user_is_friend_with"("other_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."current_user_is_friend_with"("other_user_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."current_user_is_friend_with"("other_user_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."current_user_is_friend_with"("other_user_id" "uuid") TO "service_role";
 
 
 
@@ -8667,9 +8797,12 @@ GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_b" "uuid") TO "anon";
-GRANT ALL ON FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_b" "uuid") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_b" "uuid") TO "service_role";
+REVOKE ALL ON FUNCTION "public"."is_blocked_between"("user_a" "uuid", "user_b" "uuid") FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "public"."is_comment_hidden"("p_comment_id" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."is_comment_hidden"("p_comment_id" bigint) TO "authenticated";
 
 
 
@@ -8691,9 +8824,7 @@ GRANT ALL ON FUNCTION "public"."media_variant_is_supported"("p_variant" "text") 
 
 
 REVOKE ALL ON FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."non_public_observation_count"("profile_id" "uuid") TO "service_role";
 
 
 
@@ -8703,9 +8834,6 @@ GRANT ALL ON FUNCTION "public"."prepare_media_object_deletion"("p_user_id" "uuid
 
 
 REVOKE ALL ON FUNCTION "public"."profile_has_pro_access"("profile_id" "uuid") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."profile_has_pro_access"("profile_id" "uuid") TO "anon";
-GRANT ALL ON FUNCTION "public"."profile_has_pro_access"("profile_id" "uuid") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."profile_has_pro_access"("profile_id" "uuid") TO "service_role";
 
 
 
@@ -8724,6 +8852,13 @@ GRANT ALL ON FUNCTION "public"."public_normalized_sample_source"("source_value" 
 GRANT ALL ON FUNCTION "public"."public_normalized_specimen_condition"("value" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."public_normalized_specimen_condition"("value" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."public_normalized_specimen_condition"("value" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."read_public_profiles"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."read_public_profiles"() TO "service_role";
+GRANT ALL ON FUNCTION "public"."read_public_profiles"() TO "anon";
+GRANT ALL ON FUNCTION "public"."read_public_profiles"() TO "authenticated";
 
 
 
@@ -8885,15 +9020,14 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."observations" TO "authentic
 
 
 
-GRANT ALL ON TABLE "public"."profiles" TO "anon";
-GRANT ALL ON TABLE "public"."profiles" TO "authenticated";
 GRANT ALL ON TABLE "public"."profiles" TO "service_role";
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."profiles" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "public"."comments_community_view" TO "anon";
-GRANT ALL ON TABLE "public"."comments_community_view" TO "authenticated";
 GRANT ALL ON TABLE "public"."comments_community_view" TO "service_role";
+GRANT SELECT ON TABLE "public"."comments_community_view" TO "anon";
+GRANT SELECT ON TABLE "public"."comments_community_view" TO "authenticated";
 
 
 
@@ -8931,8 +9065,8 @@ GRANT ALL ON TABLE "public"."observation_identifications" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."observation_identifications_community_view" TO "anon";
-GRANT ALL ON TABLE "public"."observation_identifications_community_view" TO "authenticated";
+GRANT SELECT ON TABLE "public"."observation_identifications_community_view" TO "anon";
+GRANT SELECT ON TABLE "public"."observation_identifications_community_view" TO "authenticated";
 GRANT ALL ON TABLE "public"."observation_identifications_community_view" TO "service_role";
 
 
@@ -9007,6 +9141,12 @@ GRANT SELECT ON TABLE "public"."observations_friend_view" TO "authenticated";
 
 
 GRANT ALL ON SEQUENCE "public"."observations_id_seq" TO "service_role";
+
+
+
+GRANT SELECT ON TABLE "public"."public_profiles" TO "anon";
+GRANT SELECT ON TABLE "public"."public_profiles" TO "authenticated";
+GRANT SELECT ON TABLE "public"."public_profiles" TO "service_role";
 
 
 

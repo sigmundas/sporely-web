@@ -880,7 +880,7 @@ async function _loadFriends() {
 
   const friendIds = friendships.map(f => f.requester_id === uid ? f.addressee_id : f.requester_id)
   const { data: profiles } = await supabase
-    .from('profiles').select('id, username, display_name').in('id', friendIds)
+    .from('public_profiles').select('id, username, display_name').in('id', friendIds)
 
   list.innerHTML = (profiles || []).map(p => {
     const label = p.username ? `@${p.username}` : (p.display_name || p.id)
@@ -916,7 +916,7 @@ async function _loadPending() {
   section.style.display = 'block'
 
   const { data: profiles } = await supabase
-    .from('profiles').select('id, username, display_name').in('id', pending.map(p => p.requester_id))
+    .from('public_profiles').select('id, username, display_name').in('id', pending.map(p => p.requester_id))
   const pm = Object.fromEntries((profiles || []).map(p => [p.id, p]))
 
   list.innerHTML = pending.map(req => {
