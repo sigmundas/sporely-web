@@ -22,11 +22,13 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.OrientationEventListener;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.Surface;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.activity.OnBackPressedCallback;
@@ -44,6 +46,7 @@ import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.MeteringPoint;
 import androidx.camera.core.MeteringPointFactory;
 import androidx.camera.core.Preview;
+import androidx.camera.core.ZoomState;
 import androidx.camera.core.resolutionselector.ResolutionSelector;
 import androidx.camera.core.resolutionselector.ResolutionStrategy;
 import androidx.camera.lifecycle.ProcessCameraProvider;
@@ -53,6 +56,7 @@ import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.exifinterface.media.ExifInterface;
+import androidx.lifecycle.LiveData;
 import com.google.common.util.concurrent.ListenableFuture;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -91,12 +95,21 @@ public class NativeCameraActivity extends AppCompatActivity {
     private static final int CONTROL_ROW_HEIGHT_DP = 118;
     private static final int CONTROL_ROW_BOTTOM_PADDING_DP = 18;
     private static final int SHUTTER_BUTTON_SIZE_DP = 82;
+    private static final float MAX_USER_ZOOM_RATIO = 5f;
+    private static final float[] ZOOM_PRESET_RATIOS = { 1f, 2f, 3f };
+    private static final int ZOOM_CONTROLS_ABOVE_CONTROLS_DP = CONTROL_ROW_HEIGHT_DP + 12;
     private static final int NIGHT_TOGGLE_ABOVE_CONTROLS_DP = CONTROL_ROW_HEIGHT_DP + 76;
     private static final int HDR_TOGGLE_ABOVE_CONTROLS_DP = NIGHT_TOGGLE_ABOVE_CONTROLS_DP + 44;
     private static final int FOCUS_RING_SIZE_DP = 74;
     private static final Size TARGET_CAPTURE_SIZE = new Size(4000, 3000);
 
     private PreviewView previewView;
+    private ScaleGestureDetector scaleGestureDetector;
+    private boolean suppressFocusForGesture = false;
+    private TextView zoomIndicator;
+    private final TextView[] zoomPresetButtons = new TextView[ZOOM_PRESET_RATIOS.length];
+    private FrameLayout.LayoutParams zoomControlsParams;
+    private LiveData<ZoomState> observedZoomState;
     private View focusRing;
     private FrameLayout batchStack;
     private TextView countBadge;
@@ -176,6 +189,12 @@ public class NativeCameraActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onDestroy() {
+        clearZoomStateObserver();
+        super.onDestroy();
+    }
+
+    @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_CAMERA_PERMISSION
@@ -195,6 +214,12 @@ public class NativeCameraActivity extends AppCompatActivity {
 
         previewView = new PreviewView(this);
         previewView.setScaleType(PreviewView.ScaleType.FILL_CENTER);
+        scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScale(ScaleGestureDetector detector) {
+                return applyZoom(detector.getScaleFactor());
+            }
+        });
         previewView.setOnTouchListener((v, event) -> handlePreviewTouch(v, event));
         previewView.setClickable(true);
         root.addView(previewView, new FrameLayout.LayoutParams(
@@ -240,6 +265,54 @@ public class NativeCameraActivity extends AppCompatActivity {
         );
         controlParams.setMargins(0, 0, 0, dp(CONTROLS_BOTTOM_MARGIN_DP));
         root.addView(controls, controlParams);
+
+        FrameLayout zoomControls = new FrameLayout(this);
+
+        zoomIndicator = new TextView(this);
+        zoomIndicator.setText("1.0\u00d7");
+        zoomIndicator.setTextColor(Color.WHITE);
+        zoomIndicator.setTextSize(14);
+        zoomIndicator.setTypeface(Typeface.DEFAULT_BOLD);
+        zoomIndicator.setGravity(Gravity.CENTER);
+        zoomIndicator.setPadding(dp(10), dp(5), dp(10), dp(5));
+        zoomIndicator.setBackground(makeRoundedBackground(Color.argb(140, 0, 0, 0), 12, 0, Color.TRANSPARENT));
+        FrameLayout.LayoutParams zoomIndicatorParams = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.START | Gravity.CENTER_VERTICAL
+        );
+        zoomIndicatorParams.setMargins(dp(ACTION_BUTTON_SIDE_MARGIN_DP), 0, 0, 0);
+        zoomControls.addView(zoomIndicator, zoomIndicatorParams);
+
+        LinearLayout zoomPresets = new LinearLayout(this);
+        zoomPresets.setOrientation(LinearLayout.HORIZONTAL);
+        zoomPresets.setGravity(Gravity.CENTER);
+        zoomPresets.setPadding(dp(3), dp(3), dp(3), dp(3));
+        zoomPresets.setBackground(makeRoundedBackground(Color.argb(120, 0, 0, 0), 19, 1, Color.argb(150, 255, 255, 255)));
+        for (int i = 0; i < ZOOM_PRESET_RATIOS.length; i++) {
+            float presetRatio = ZOOM_PRESET_RATIOS[i];
+            TextView presetButton = makeZoomPresetButton(presetRatio);
+            presetButton.setOnClickListener(v -> setZoomRatio(camera, presetRatio));
+            zoomPresetButtons[i] = presetButton;
+            LinearLayout.LayoutParams presetButtonParams = new LinearLayout.LayoutParams(dp(48), dp(32));
+            presetButtonParams.setMargins(dp(1), 0, dp(1), 0);
+            zoomPresets.addView(presetButton, presetButtonParams);
+        }
+        FrameLayout.LayoutParams zoomPresetParams = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER
+        );
+        zoomControls.addView(zoomPresets, zoomPresetParams);
+
+        zoomControlsParams = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(38),
+            Gravity.BOTTOM
+        );
+        zoomControlsParams.setMargins(0, 0, 0, dp(CONTROLS_BOTTOM_MARGIN_DP + ZOOM_CONTROLS_ABOVE_CONTROLS_DP));
+        root.addView(zoomControls, zoomControlsParams);
+
         batchParams = new FrameLayout.LayoutParams(dp(54), dp(54), Gravity.BOTTOM | Gravity.END);
         batchParams.setMargins(0, 0, dp(28), dp(CONTROLS_BOTTOM_MARGIN_DP + CONTROL_ROW_HEIGHT_DP));
         root.addView(batchStack, batchParams);
@@ -284,6 +357,10 @@ public class NativeCameraActivity extends AppCompatActivity {
         int batchBottom = controlsBottom + dp(CONTROL_ROW_HEIGHT_DP);
         if (batchParams != null && batchParams.bottomMargin != batchBottom) {
             batchParams.setMargins(0, 0, dp(28), batchBottom);
+        }
+        int zoomControlsBottom = controlsBottom + dp(ZOOM_CONTROLS_ABOVE_CONTROLS_DP);
+        if (zoomControlsParams != null && zoomControlsParams.bottomMargin != zoomControlsBottom) {
+            zoomControlsParams.setMargins(0, 0, 0, zoomControlsBottom);
         }
         int hdrBottom = controlsBottom + dp(HDR_TOGGLE_ABOVE_CONTROLS_DP);
         if (hdrModeParams != null && hdrModeParams.bottomMargin != hdrBottom) {
@@ -411,8 +488,38 @@ public class NativeCameraActivity extends AppCompatActivity {
         return button;
     }
 
+    private TextView makeZoomPresetButton(float ratio) {
+        TextView button = new TextView(this);
+        button.setText(String.format(Locale.US, "%.0f\u00d7", ratio));
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(13);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setGravity(Gravity.CENTER);
+        button.setBackground(makeRoundedBackground(Color.TRANSPARENT, 16, 0, Color.TRANSPARENT));
+        return button;
+    }
+
     private boolean handlePreviewTouch(View view, MotionEvent event) {
-        if (event.getAction() != MotionEvent.ACTION_UP) {
+        int touchAction = event.getActionMasked();
+        if (touchAction == MotionEvent.ACTION_DOWN) {
+            suppressFocusForGesture = false;
+        } else if (touchAction == MotionEvent.ACTION_POINTER_DOWN || event.getPointerCount() > 1) {
+            suppressFocusForGesture = true;
+        }
+
+        if (scaleGestureDetector != null) {
+            scaleGestureDetector.onTouchEvent(event);
+        }
+
+        if (touchAction == MotionEvent.ACTION_CANCEL) {
+            suppressFocusForGesture = false;
+            return true;
+        }
+        if (touchAction != MotionEvent.ACTION_UP) {
+            return true;
+        }
+        if (suppressFocusForGesture) {
+            suppressFocusForGesture = false;
             return true;
         }
         showFocusRing(event.getX(), event.getY());
@@ -426,6 +533,44 @@ public class NativeCameraActivity extends AppCompatActivity {
         }
         view.performClick();
         return true;
+    }
+
+    private boolean applyZoom(float scaleFactor) {
+        Camera activeCamera = camera;
+        if (activeCamera == null || Float.isNaN(scaleFactor) || Float.isInfinite(scaleFactor) || scaleFactor <= 0f) {
+            return false;
+        }
+
+        ZoomState zoomState = activeCamera.getCameraInfo().getZoomState().getValue();
+        if (zoomState == null) return false;
+
+        return setZoomRatio(activeCamera, zoomState.getZoomRatio() * scaleFactor);
+    }
+
+    private boolean setZoomRatio(Camera activeCamera, float requestedRatio) {
+        if (activeCamera == null || Float.isNaN(requestedRatio) || Float.isInfinite(requestedRatio)) return false;
+
+        ZoomState zoomState = activeCamera.getCameraInfo().getZoomState().getValue();
+        if (zoomState == null) return false;
+        float clampedRatio = Math.max(
+            zoomState.getMinZoomRatio(),
+            Math.min(requestedRatio, Math.min(zoomState.getMaxZoomRatio(), MAX_USER_ZOOM_RATIO))
+        );
+
+        try {
+            ListenableFuture<Void> zoomFuture = activeCamera.getCameraControl().setZoomRatio(clampedRatio);
+            zoomFuture.addListener(() -> {
+                try {
+                    zoomFuture.get();
+                } catch (Exception ex) {
+                    Log.d(TAG, "Zoom request was not applied", ex);
+                }
+            }, ContextCompat.getMainExecutor(this));
+            return true;
+        } catch (RuntimeException ex) {
+            Log.d(TAG, "Zoom request failed", ex);
+            return false;
+        }
     }
 
     private void showFocusRing(float x, float y) {
@@ -474,6 +619,7 @@ public class NativeCameraActivity extends AppCompatActivity {
     @SuppressWarnings("UnsafeOptInUsageError")
     private void bindCamera(ExtensionsManager extensionsManager) {
         if (cameraProvider == null) return;
+        clearZoomStateObserver();
         cameraProvider.unbindAll();
         camera = null;
 
@@ -544,6 +690,38 @@ public class NativeCameraActivity extends AppCompatActivity {
         logRotationState("bindCamera", null, null);
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
         camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
+        observeZoomState(camera);
+    }
+
+    private void observeZoomState(Camera activeCamera) {
+        observedZoomState = activeCamera.getCameraInfo().getZoomState();
+        observedZoomState.observe(this, this::updateZoomIndicator);
+    }
+
+    private void clearZoomStateObserver() {
+        if (observedZoomState != null) {
+            observedZoomState.removeObservers(this);
+            observedZoomState = null;
+        }
+    }
+
+    private void updateZoomIndicator(ZoomState zoomState) {
+        if (zoomIndicator != null && zoomState != null) {
+            zoomIndicator.setText(String.format(Locale.US, "%.1f\u00d7", zoomState.getZoomRatio()));
+            updateZoomPresetSelection(zoomState.getZoomRatio());
+        }
+    }
+
+    private void updateZoomPresetSelection(float zoomRatio) {
+        for (int i = 0; i < zoomPresetButtons.length; i++) {
+            TextView button = zoomPresetButtons[i];
+            if (button == null) continue;
+            boolean selected = Math.abs(zoomRatio - ZOOM_PRESET_RATIOS[i]) < 0.05f;
+            button.setBackground(selected
+                ? makeRoundedBackground(SPORELY_GREEN, 16, 1, SPORELY_GREEN)
+                : makeRoundedBackground(Color.TRANSPARENT, 16, 0, Color.TRANSPARENT)
+            );
+        }
     }
 
     private void toggleNightMode() {
