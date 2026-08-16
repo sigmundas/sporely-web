@@ -9,8 +9,8 @@ import { showToast } from '../toast.js'
 import { openFindDetail } from './find_detail.js'
 import { openPhotoImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
-import { refreshHeaderProfileButtons } from './profile.js'
 import { imageHtml as _imageHtml, wireImageFallback as _wireImageFallback } from '../image-helpers.js'
+import { mark as _bootMark } from '../boot-timings.js'
 
 function _isDebugCommentQueryEnabled() {
   try {
@@ -64,7 +64,10 @@ function _isMissingMentionPreviewSupport(error) {
   )
 }
 
-export async function initHome() {
+// UI-only bootstrap for the Home screen. Bind interaction handlers; do NOT
+// trigger the network. Startup owns exactly one `refreshHome()` — kicking off
+// another one from `initHome()` would double-hydrate every launch.
+export function initHome() {
   document.getElementById('home-fab').addEventListener('click', () => openPreferredCamera('home-fab'))
   document.getElementById('ac-camera')?.addEventListener('click', () => openPreferredCamera('ac-camera'))
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
@@ -90,8 +93,6 @@ export async function initHome() {
     warningOverlay.style.display = 'none'
     browseInput?.click()
   })
-
-  await refreshHome()
 }
 
 function _syncCameraAction() {
@@ -101,9 +102,67 @@ function _syncCameraAction() {
   if (label) label.textContent = getEffectiveCameraLabel()
 }
 
+// Network hydration for Home. The header avatar/initials are refreshed by
+// the auth-resolution path (or by explicit navigation), NOT here — routing
+// that through refreshHome() previously double-fired every navigation and
+// every startup.
+//
+// After the app shell has been revealed (Stage A reveal-before-hydrate work),
+// a section-level failure must not throw the user back behind the auth
+// overlay. `refreshHomeSafe` wraps every loader in a try/catch and renders an
+// inline error state instead of propagating; the caller — which decides
+// whether Home should be visible at all — controls that gating.
 export async function refreshHome() {
+  _bootMark('home-refresh-start')
   _syncCameraAction()
-  await Promise.all([loadRecentFinds(), loadFriendRequests(), loadRecentComments(), loadStats(), checkSyncStatus(), refreshHeaderProfileButtons()])
+  try {
+    await Promise.all([
+      loadRecentFinds(),
+      loadFriendRequests(),
+      loadRecentComments(),
+      loadStats(),
+      checkSyncStatus(),
+    ])
+  } finally {
+    _bootMark('home-refresh-end')
+  }
+}
+
+function _renderSectionError(id, message) {
+  const el = document.getElementById(id)
+  if (!el) return
+  const safe = _esc(message || t('common.error'))
+  el.innerHTML = `<p class="home-section-error" style="color:var(--text-dim);font-size:13px;padding:12px 0">${safe}</p>`
+}
+
+// Same as `refreshHome`, but any per-section failure is caught and rendered
+// inline. Use this from paths where the shell is already revealed and a
+// thrown network error would incorrectly bounce the user back to auth.
+export async function refreshHomeSafe() {
+  _bootMark('home-refresh-start')
+  _syncCameraAction()
+  const results = await Promise.allSettled([
+    loadRecentFinds(),
+    loadFriendRequests(),
+    loadRecentComments(),
+    loadStats(),
+    checkSyncStatus(),
+  ])
+  const sectionIds = [
+    'recent-finds-list',
+    'home-friend-requests-list',
+    'recent-comments-list',
+    null, // stats update in-place, no container we should rewrite
+    null, // sync check has no visible list
+  ]
+  results.forEach((res, i) => {
+    if (res.status === 'rejected' && sectionIds[i]) {
+      console.warn('Home section refresh failed:', res.reason)
+      _renderSectionError(sectionIds[i], t('common.errorPrefix', { message: res.reason?.message || t('common.error') }))
+    }
+  })
+  _bootMark('home-refresh-end')
+  return results
 }
 
 // ── Mixed feed ────────────────────────────────────────────────────────────────

@@ -1,9 +1,12 @@
 import { Preferences } from '@capacitor/preferences'
-import { SocialLogin } from '@capgo/capacitor-social-login'
 import { getPlatform } from './platform.js'
 import { recordDebugJsonResponse } from './debug-activity.js'
+// Do NOT statically import `@capgo/capacitor-social-login` here — the plugin
+// must remain in a lazy chunk. `getNativeSocialLogin` dynamically resolves
+// it the first time a native login is actually requested.
 import {
   ensureNativeOAuthInitialized,
+  getNativeSocialLogin,
   registerNativeOAuthProviders,
   resetNativeOAuthStateForTests,
 } from './native-oauth.js'
@@ -642,11 +645,15 @@ export async function initializeInaturalistOAuth(options = {}) {
 export async function connectInaturalist(options = {}) {
   const platform = _normalizePlatform(options.platform || (typeof window !== 'undefined' ? getPlatform() : null))
   if (platform === 'android') {
+    // Lazy dynamic import — the SocialLogin plugin must not be reachable from
+    // the eager startup chunk. `getNativeSocialLogin` returns the same
+    // instance that `ensureNativeOAuthInitialized` used, so we never end up
+    // with two competing initialize() calls.
+    const socialLogin = options.socialLoginImpl || await getNativeSocialLogin({ platform })
     await initializeInaturalistOAuth({
       platform,
-      socialLoginImpl: options.socialLoginImpl,
+      socialLoginImpl: socialLogin,
     })
-    const socialLogin = options.socialLoginImpl || SocialLogin
     const loginResult = await socialLogin.login({
       provider: 'oauth2',
       options: {

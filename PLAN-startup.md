@@ -49,3 +49,104 @@ I would split implementation into **three agent-sized stages** rather than one l
 I would **not add a service worker yet**. Once Android behaves correctly, the same read-cache layer can be reused for the PWA, and *then* a service worker can solve the separate problem of getting the web application shell itself to launch without a connection.
 
 The end goal is therefore not too optimistic. In fact, Sporely is already halfway there because its hardest offline-write problem—persisting photos/drafts and queueing uploads—exists. The missing half is essentially **offline identity plus read-side caching**.
+
+---
+
+## Stage A — implementation progress (branch `startup-perf-and-offline`)
+
+Status: **implementation complete, uncommitted** on branch `startup-perf-and-offline`. Base commit `37ab74e`. Not committed; awaiting review.
+
+### What shipped
+
+Files touched:
+
+- New: `src/boot-timings.js`, `src/boot-timings.test.js`.
+- New: `public/fonts/` (Outfit, DM Mono, Instrument Serif italic — latin + latin-ext .woff2 files, OFL licensed) + `LICENSE-fonts.txt`.
+- Modified: `index.html`, `src/style.css`, `src/main.js`, `src/screens/home.js`, `src/google-auth.js`, `src/native-oauth.js`, `src/inaturalist.js`.
+
+Item-by-item:
+
+- **A. Boot instrumentation.** `src/boot-timings.js` exposes `mark(name)` / `measure(from, to)` / `snapshot()` anchored to module load. Marks placed at `js-init-start`, `authenticated-user-resolved`, `app-shell-initialized`, `app-shell-revealed`, `home-refresh-start`, `home-refresh-end`. Zero I/O, no user-identifying data, no `await`s on the boot path. Six unit tests, all pass.
+- **B. Lazy SocialLogin.** `@capgo/capacitor-social-login` is no longer statically imported from the eager startup graph. `initializeInaturalistOAuth()` no longer runs during `init()`. The plugin is loaded on demand from a single lazy loader shared by `google-auth.js`, `native-oauth.js` and `inaturalist.js`; combined provider registration and initialize-once semantics are preserved via a shared init promise. Build verified: SocialLogin implementation lives in `dist/assets/web-m7WQyxfB.js` (44 kB, 11.38 kB gzipped) + `dist/assets/index-B1XnNOld.js` (6.25 kB, 2.16 kB gzipped) — the main chunk contains only the lazy loader wrapper (`dynamic import().catch(...)`).
+- **C. One Home hydration.** `initHome()` now only binds UI. Startup performs exactly one `refreshHome()`. The redundant `runBootStep('header-profile-buttons', …)` in `bootApp()` was removed — the authenticated-resolve path already awaits it. Regression coverage lives in the `home.js` inline behavior (no `refreshHome()` call inside `initHome`).
+- **D. Reveal-before-hydrate.** `_resolveAndRouteForUser()` now: (1) `_ensureAppReadyForUser` behind the blocker, (2) `refreshHeaderProfileButtons` awaited so chrome reflects B before reveal, (3) `hideAuthOverlay()` + `hideAccountTransitionBlocker()`, (4) `void refreshHomeSafe()` fires-and-forgets, filling sections into DOM skeletons already present in `index.html`. Skeleton CSS is in `src/style.css`. `refreshHomeSafe` catches per-section errors and renders inline offline/error states — a Home network failure after reveal never bounces the user back to the auth overlay.
+- **E. Boot-path awaits trimmed.** `initializeInaturalistOAuth()` gone from `init()`. iNat OAuth-return handling is gated behind `_urlLooksLikeInaturalistReturn(location.href)` (cheap synchronous URL check). Supabase OAuth callback handling is gated behind `_urlLooksLikeSupabaseOAuthCallback(...)`. Native app-link listener registration remains where it needs to be for correctness.
+- **F. Self-hosted fonts.** Google Fonts stylesheet + `preconnect` removed from `index.html`. `@font-face` rules for Outfit (400 & full weight range), DM Mono (400, 500), Instrument Serif italic in `src/style.css` — all with `font-display: swap`. `public/fonts/LICENSE-fonts.txt` credits OFL. First paint no longer depends on `fonts.googleapis.com`. Turnstile remains load-on-auth (unchanged).
+
+### Startup path — before → after
+
+Before (from initial audit):
+
+`APK → JS → initI18n → initializeInaturalistOAuth (await) → 4 more awaits → getSharedAuthSession({refresh:true}) → fetchProfile → bootApp → refreshHome (await) → hideAuthOverlay`
+
+After (Stage A):
+
+`APK → JS → initI18n (sync) → cheap URL-shape checks → getSharedAuthSession → fetchProfile → _ensureAppReadyForUser (blank A's DOM behind blocker) → refreshHeaderProfileButtons (await, so B's chrome is correct) → navigate('home') → hideAuthOverlay + hideAccountTransitionBlocker → void refreshHomeSafe() (fills skeletons, per-section errors render inline)`
+
+### Account-transition privacy (unchanged guarantees)
+
+- `_ensureAppReadyForUser` still synchronously clears previous-user DOM behind the account-transition blocker.
+- `isCurrentAccountTransition(...)` is re-verified at every await boundary (`_ensureAppReadyForUser`, `refreshHeaderProfileButtons`) — a superseded transition returns `STALE` and never calls `hideAuthOverlay()`.
+- Reveal now happens **after** header chrome reflects B, **before** Home data lands. Home data replaces the skeletons; skeletons themselves are account-agnostic.
+- `refreshHomeSafe` never throws to the caller, so a per-section network failure cannot force the auth overlay back up while A's DOM is still being cleared elsewhere.
+
+### Chunk-size evidence
+
+Post-build (`npm run build`):
+
+| Chunk | bytes | gzip |
+| --- | --- | --- |
+| `dist/assets/main-*.js` | 973 448 | 263.74 kB |
+| `dist/assets/web-m7WQyxfB.js` (SocialLoginWeb) | 44 059 | 11.38 kB |
+| `dist/assets/index-B1XnNOld.js` (plugin registration) | 6 248 | 2.16 kB |
+| `dist/assets/main-*.css` | 124 580 | 21.51 kB |
+
+Baseline main chunk size from the pre-Stage-A audit: 972 kB. The eager main chunk did **not** shrink materially because the web SocialLogin implementation was already a small stub; the win is that it no longer **runs** on boot (no provider init, no plugin instantiation) and its 44 kB lazy chunk is only fetched when the user actually taps Google / iNaturalist. Baseline vs current worktree builds were not compared side-by-side because a worktree build was not required to reach this conclusion.
+
+### Runtime timings
+
+**No trustworthy pre-change runtime timings exist.** The new `boot-timings` module is the baseline for Stage B comparisons.
+
+### Test / build results
+
+- `npm test`: 720 passing, 2 failing. Both failures are pre-existing on `main` (verified): `src/screens/map.test.js` (leaflet CSS import in the Node test env), `supabase/functions/admin-ops/adminActions.test.ts` (Deno). Neither is caused by Stage A.
+- `npm run build`: succeeds; sizes above.
+
+### Manual reasoning (not exercised on device)
+
+1. Email/password existing-user cold start: session resolves → header refreshes → reveal → skeletons → Home fills.
+2. Native Google sign-in: click → lazy loader dynamically imports SocialLogin → provider init runs once (shared promise) → sign-in.
+3. iNaturalist connect: same lazy loader; combined provider registration preserved.
+4. Supabase OAuth callback launches with `?code=…` still routed via `maybeHandleSupabaseOAuthCallback`.
+5. Home refresh failure after reveal: per-section `_renderSectionError` inline; auth overlay stays down.
+6. A → B transition: blocker + DOM blank happen before any B reveal; STALE checks at every await; skeletons are user-agnostic.
+
+### Remaining Stage A work
+
+None blocking. Optional follow-ups for a later polish pass, not required for Stage B:
+
+- Verify skeleton-clear timing on `initHome` bind path (the container `innerHTML` replacement in `loadRecentFinds` / `loadRecentComments` already replaces skeletons; friend-requests currently has skeleton attribute but no rows — cosmetic).
+- Preload `outfit-latin.woff2` via `<link rel="preload">` if measurements later show FOUT on Android WebView cold start.
+
+### Handoff to Stage B
+
+Seams introduced that Stage B can build on:
+
+- `boot-timings.js` gives Stage B a `js-init-start → app-shell-revealed → home-refresh-end` baseline for measurement.
+- Home now has an explicit `refreshHomeSafe()` seam that Stage B's cache-first `renderHome(model)` can slot into: cache read renders synchronously into the same DOM regions, then `refreshHomeSafe()` (or its replacement) writes the fresh model.
+- `_resolveAndRouteForUser` already has an explicit reveal boundary; Stage B's `AUTHENTICATED_CACHED` mode can reveal at the same point without further restructuring.
+- Lazy SocialLogin loader is centralized — Stage B does not need to touch native OAuth to add cached-authenticated mode.
+
+Stage A explicitly did NOT touch:
+
+- `getSharedAuthSession({refresh:true})` — kept as-is; do not change in Stage B without the "last validated local account" record that gives us a correct offline auth story.
+- Logout / revocation semantics.
+- Any read-side cache. No service worker.
+- Account-switch reveal path — the same reveal boundary is used for cold boot and account switch today. If Stage B introduces a cached-first cold-boot path, keep account-switch on the current (post-header, post-STALE-check) reveal; make the distinction explicit (e.g. `revealMode: 'cold-boot' | 'account-switch'`).
+
+Stage B refinements suggested by Stage A findings:
+
+- Home skeletons + `refreshHomeSafe` mean Stage B can render a cached model into the skeleton slots without any DOM restructuring.
+- Because `refreshHeaderProfileButtons` is now the load-bearing await before reveal, Stage B's cached-authenticated mode should render header chrome from the cached profile summary synchronously — that removes the last remaining network dependency before reveal.
+- The redundant duplicate-hydration bug fixed here would silently reappear under a naive cache-then-network refactor; keep the "exactly one intentional startup Home hydration" invariant explicit in Stage B tests.
+

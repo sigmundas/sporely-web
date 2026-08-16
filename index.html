@@ -12,8 +12,7 @@
 <link rel="icon" type="image/png" href="/icon-192-v3.png">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon-192-v3.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<!-- Fonts self-hosted under /fonts/, declared in src/style.css. -->
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <script>
@@ -260,15 +259,36 @@
           <div class="section-link" id="recent-history-link">History →</div>
         </div>
 
-        <div id="recent-finds-list">
-          <!-- populated by home.js -->
+        <div id="recent-finds-list" data-home-skeleton="finds">
+          <!-- populated by home.js; boot-time skeleton rows below -->
+          <div class="home-skeleton home-skeleton--find" aria-hidden="true">
+            <div class="home-skeleton-thumb"></div>
+            <div class="home-skeleton-lines">
+              <div class="home-skeleton-line home-skeleton-line--80"></div>
+              <div class="home-skeleton-line home-skeleton-line--55"></div>
+            </div>
+          </div>
+          <div class="home-skeleton home-skeleton--find" aria-hidden="true">
+            <div class="home-skeleton-thumb"></div>
+            <div class="home-skeleton-lines">
+              <div class="home-skeleton-line home-skeleton-line--70"></div>
+              <div class="home-skeleton-line home-skeleton-line--45"></div>
+            </div>
+          </div>
+          <div class="home-skeleton home-skeleton--find" aria-hidden="true">
+            <div class="home-skeleton-thumb"></div>
+            <div class="home-skeleton-lines">
+              <div class="home-skeleton-line home-skeleton-line--60"></div>
+              <div class="home-skeleton-line home-skeleton-line--40"></div>
+            </div>
+          </div>
         </div>
 
         <div class="section-header home-section-gap">
           <div class="section-title" id="home-friend-requests-title">Friend requests</div>
         </div>
 
-        <div id="home-friend-requests-list">
+        <div id="home-friend-requests-list" data-home-skeleton="friend-requests">
           <!-- populated by home.js -->
         </div>
 
@@ -276,8 +296,22 @@
           <div class="section-title" id="home-recent-comments-title">Recent Comments</div>
         </div>
 
-        <div id="recent-comments-list">
-          <!-- populated by home.js -->
+        <div id="recent-comments-list" data-home-skeleton="comments">
+          <!-- populated by home.js; boot-time skeleton rows below -->
+          <div class="home-skeleton home-skeleton--comment" aria-hidden="true">
+            <div class="home-skeleton-avatar"></div>
+            <div class="home-skeleton-lines">
+              <div class="home-skeleton-line home-skeleton-line--50"></div>
+              <div class="home-skeleton-line home-skeleton-line--85"></div>
+            </div>
+          </div>
+          <div class="home-skeleton home-skeleton--comment" aria-hidden="true">
+            <div class="home-skeleton-avatar"></div>
+            <div class="home-skeleton-lines">
+              <div class="home-skeleton-line home-skeleton-line--65"></div>
+              <div class="home-skeleton-line home-skeleton-line--70"></div>
+            </div>
+          </div>
         </div>
 
         <div class="home-stats-row">

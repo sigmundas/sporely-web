@@ -1,6 +1,12 @@
 import './style.css'
 import './theme.js'   // applies saved theme immediately, no flash
 
+// Startup instrumentation is imported as early as possible so `mark(...)`
+// calls throughout boot can anchor to the module-load timestamp. The module
+// itself performs no I/O.
+import { mark as _bootMark, measure as _bootMeasure } from './boot-timings.js'
+_bootMark('js-init-start')
+
 import { supabase } from './supabase.js'
 import { getLocale, initI18n, onLocaleChange, setLocale, t } from './i18n.js'
 import { state } from './state.js'
@@ -28,7 +34,7 @@ import {
   switchToLogin,
   switchToResetPassword,
 } from './screens/auth.js'
-import { initHome, refreshHome } from './screens/home.js'
+import { initHome, refreshHome, refreshHomeSafe } from './screens/home.js'
 import { initFinds, loadFinds, requestFindsRefresh } from './screens/finds.js'
 import { initCapture } from './screens/capture.js'
 import { buildReviewGrid, initReview, restoreReviewDraft } from './screens/review.js'
@@ -62,7 +68,6 @@ import { installIrisShutterDebugControls } from './iris-shutter.js'
 import {
   connectInaturalist,
   forgetInaturalistSession,
-  initializeInaturalistOAuth,
   loadInaturalistSession,
   maybeHandleInaturalistOAuthReturn,
 } from './inaturalist.js'
@@ -694,46 +699,65 @@ async function _resolveAndRouteForUser(user) {
     return { status: RESOLUTION_STATUS.INCOMPLETE_PROFILE_SETUP }
   }
 
-  // COMPLETE branch. Prepare-then-reveal:
+  // COMPLETE branch. Reveal-before-hydrate (Stage A cold-start work):
   //   1) init app shell + purge previous-user data (behind the blocker)
-  //   2) refresh Home for B
+  //   2) refresh the header avatar so B's chrome is correct before reveal
   //   3) verify no newer transition superseded us
-  //   4) navigate to Home
-  //   5) only THEN drop the blocker + auth overlay
+  //   4) navigate to Home (still behind the blocker)
+  //   5) drop the blocker + auth overlay -> user sees the shell with skeletons
+  //   6) asynchronously hydrate Home; per-section failures render inline
+  //
+  // Privacy note: this does NOT weaken the August account-transition guard.
+  // `clearUserScopedUi()` has already blanked A's DOM synchronously, the
+  // blocker is up throughout, and we still re-verify the generation before
+  // every reveal. The reveal itself now happens before the Home network
+  // hydration completes, but only after we've confirmed the current user is
+  // still B and the header chrome reflects B.
   await _ensureAppReadyForUser(user)
   if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
     _authLog('stale_account_result_discarded', { source: 'ensure_ready_complete' })
     return { status: RESOLUTION_STATUS.STALE }
   }
+  _bootMark('authenticated-user-resolved')
   _authLog('destination_render_started', { destination: 'home' })
-  // Home refresh is CRITICAL for a complete user's first sign-in on this
-  // page: a swallowed failure would reveal a blank/stale Home. Throw to
-  // the error surface instead.
-  try {
-    await refreshHome()
-  } catch (err) {
-    console.error('Initial Home refresh failed for authenticated user:', err)
-    _showProfileResolutionError(user, err)
-    return { status: RESOLUTION_STATUS.PROFILE_FETCH_FAILED }
-  }
-  if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
-    _authLog('stale_account_result_discarded', { source: 'home_refresh' })
-    return { status: RESOLUTION_STATUS.STALE }
-  }
-  // Header avatar/initials are best-effort — a failure here does not warrant
-  // blocking the app. It refreshes naturally on the next screen change.
+
+  // Header avatar/initials must land BEFORE we reveal, otherwise the shell
+  // could briefly show the fallback initials for account A. A failure here
+  // is not fatal — subsequent screen navigation reruns it — but reveal
+  // waits for the current attempt to settle.
   try { await refreshHeaderProfileButtons() }
   catch (err) { console.warn('refreshHeaderProfileButtons on sign-in failed:', err) }
   if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
     _authLog('stale_account_result_discarded', { source: 'header_refresh' })
     return { status: RESOLUTION_STATUS.STALE }
   }
+
   setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: user.id })
   navigate('home')
+  _bootMark('app-shell-initialized')
   _authLog('destination_render_completed', { destination: 'home' })
   hideAuthOverlay()
   hideAccountTransitionBlocker()
+  _bootMark('app-shell-revealed')
   _authLog('account_transition_revealed', { destination: 'home' })
+
+  // Kick off Home hydration AFTER reveal so the user sees the shell with
+  // skeletons immediately. `refreshHomeSafe` renders per-section errors
+  // inline instead of throwing — a failure here must not throw the user
+  // back behind the auth overlay or expose stale DOM from account A.
+  void (async () => {
+    try {
+      await refreshHomeSafe()
+    } catch (err) {
+      // refreshHomeSafe already swallows per-section errors, but guard
+      // against future refactors that reintroduce a throw.
+      console.warn('Post-reveal Home hydration failed:', err)
+    } finally {
+      _bootMeasure('js-init-start', 'app-shell-revealed')
+      _bootMeasure('js-init-start', 'home-refresh-end')
+    }
+  })()
+
   return { status: RESOLUTION_STATUS.COMPLETE_HOME }
 }
 
@@ -857,7 +881,10 @@ async function bootApp(user) {
       });
     });
   })
-  runBootStep('header-profile-buttons', () => refreshHeaderProfileButtons())
+  // NOTE: refreshHeaderProfileButtons() is intentionally NOT called here.
+  // The authenticated-resolve path (`_resolveAndRouteForUser`) awaits it
+  // before revealing the shell, so calling it a second time from
+  // bootApp() would double-fire the profile fetch on every startup.
   runBootStep('inaturalist-ui', () => _syncInaturalistUi()) // Initial sync of iNaturalist UI
   runBootStep('identify-labels', () => syncIdentifyButtonLabels())
 
@@ -920,14 +947,43 @@ onLocaleChange(() => {
   syncIdentifyButtonLabels()
 })
 
+// Cheap, side-effect-free check: does this URL look like a possible
+// iNaturalist OAuth return? Startup can skip the parse when it doesn't.
+function _urlLooksLikeInaturalistReturn(href) {
+  if (typeof href !== 'string' || !href) return false
+  try {
+    const url = new URL(href)
+    // Android deep-link scheme.
+    if (url.protocol === 'com.sporelab.sporely:' && url.hostname === 'auth') return true
+    // Web callback path.
+    if (url.pathname === '/auth/inaturalist/callback') return true
+    // Root rescue path only if a code+state are visible in the query.
+    if ((url.pathname === '/' || url.pathname === '') && url.searchParams.get('code') && url.searchParams.get('state')) return true
+    return false
+  } catch (_) { return false }
+}
+
+function _urlLooksLikeSupabaseOAuthCallback(href) {
+  if (typeof href !== 'string' || !href) return false
+  try {
+    const url = new URL(href)
+    if (url.pathname !== '/auth/callback') return false
+    return !!(url.searchParams.get('code') || url.searchParams.get('error') || url.searchParams.get('error_description'))
+  } catch (_) { return false }
+}
+
 async function init() {
   initDebugDashboard()
 
-  await initializeInaturalistOAuth()
   _lockPortraitOrientation()
   document.addEventListener('pointerdown', _lockPortraitOrientation, { once: true, passive: true })
 
-  if (getPlatform() !== 'android') {
+  // Stage A: `initializeInaturalistOAuth()` no longer runs eagerly. The
+  // native SocialLogin plugin is lazy-loaded when Google or iNaturalist is
+  // actually used. On non-Android, iNat-callback parsing only runs when the
+  // launch URL actually looks like an iNat return so a normal cold start
+  // does not touch that code path.
+  if (getPlatform() !== 'android' && _urlLooksLikeInaturalistReturn(window.location.href)) {
     await _handleInaturalistOAuthReturn(window.location.href)
   }
 
@@ -961,7 +1017,7 @@ async function init() {
   // window.location. Feed it into the shared callback handler so the
   // session is exchanged before we decide which screen to render.
   let nativeCallbackResult = null
-  await registerNativeAuthLinkListener(async url => {
+  const _nativeLinkResult = await registerNativeAuthLinkListener(async url => {
     _authLog('native_callback_received', {})
     // Immediately clear the stale "Check your inbox / Resend email" message
     // and show a neutral resolving state so the confirmed user doesn't see
@@ -982,10 +1038,17 @@ async function init() {
       showAuthError(nativeCallbackResult.errorMessage || t('auth.genericError'))
     }
   })
+  _bootMark('native-auth-link-listener-registered', { registered: !!_nativeLinkResult?.registered })
 
+  // Only invoke the Supabase OAuth callback exchange when the launch URL
+  // actually looks like one. Ordinary cold starts (no code/error present)
+  // skip a whole network exchange.
   const oauthCallbackResult = nativeCallbackResult
-    || await maybeHandleSupabaseOAuthCallback(window.location.href)
+    || (_urlLooksLikeSupabaseOAuthCallback(window.location.href)
+      ? await maybeHandleSupabaseOAuthCallback(window.location.href)
+      : null)
   const initialSession = (await getSharedAuthSession({ refresh: true })) || oauthCallbackResult?.session || null
+  _bootMark('supabase-session-resolved', { hasUser: !!initialSession?.user })
 
   // Deferred handler — runs OUTSIDE the Supabase auth lock. Safe to call
   // Supabase APIs, PostgREST, RPCs here.
