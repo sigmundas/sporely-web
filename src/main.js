@@ -35,7 +35,8 @@ import {
   switchToLogin,
   switchToResetPassword,
 } from './screens/auth.js'
-import { initHome, refreshHome, refreshHomeSafe } from './screens/home.js'
+import { initHome, refreshHome, refreshHomeSafe, renderHomeFromCache, resetHomeSectionTracking } from './screens/home.js'
+import { clearAllHomeCaches, clearHomeCache } from './home-cache.js'
 import { initFinds, loadFinds, requestFindsRefresh } from './screens/finds.js'
 import { initCapture } from './screens/capture.js'
 import { buildReviewGrid, initReview, restoreReviewDraft } from './screens/review.js'
@@ -109,6 +110,13 @@ if (import.meta.env.DEV) installIrisShutterDebugControls()
 let _syncFeedbackBound = false
 let _appBootstrapped = false
 let _authStateSubscription = null
+
+// Stage B2a: on the ONLINE boot path the cached Home render is sequenced
+// before the single network refresh, so the cache read gets a tight budget —
+// a healthy IndexedDB read is single-digit milliseconds; anything slower
+// forfeits the cached paint rather than delaying fresh data. Offline boots
+// use the home-cache default (4 s) since the cache is the only content.
+const HOME_CACHE_ONLINE_BOOT_BUDGET_MS = 300
 
 // ── Deferred auth event pipeline ─────────────────────────────────────────────
 //
@@ -388,6 +396,7 @@ function initSettings() {
     try {
       await clearImportSessions()
       clearMediaUrlCache()
+      await clearAllHomeCaches()
       if (window.caches?.keys) {
         const keys = await caches.keys()
         await Promise.all(keys.map(key => caches.delete(key)))
@@ -625,9 +634,102 @@ const RESOLUTION_STATUS = Object.freeze({
   INCOMPLETE_PROFILE_SETUP: 'incomplete-profile-setup',
   PROFILE_FETCH_FAILED: 'profile-fetch-failed',
   STALE: 'stale',
+  // Stage B2a: an in-place revalidation of the already-revealed cached shell
+  // could not complete (profile fetch failed). The cached shell stays up;
+  // the reconnect triggers retry later. Deliberately NOT a success status.
+  CACHED_REVALIDATION_DEFERRED: 'cached-revalidation-deferred',
 })
 
+// Stage B2a: same-user revalidation of an already-revealed cached shell
+// (AUTHENTICATED_CACHED / AUTHENTICATED_REAUTH_REQUIRED → COMPLETE). The
+// cached Home content is VISIBLE — running the full account-transition
+// pipeline would blank it behind the blocker and flash skeletons. For the
+// SAME user there is no privacy boundary to enforce, so we refresh in place:
+// profile check → header refresh → COMPLETE → exactly ONE Home refresh that
+// hydrates over the visible cached content and persists the fresh model.
+//
+// Returns null when the caller must fall through to the full transition
+// (profile no longer complete — the setup pipeline owns that path).
+async function _revalidateCachedRevealInPlace(user) {
+  const generation = currentAccountGeneration()
+  _authLog('in_place_revalidation_started', {})
+
+  const { profile, error } = await fetchProfileWithSignupRetry(user.id)
+  if (!isCurrentAccountTransition(generation, user.id, state.user?.id)) {
+    _authLog('stale_account_result_discarded', { source: 'in_place_profile_fetch' })
+    return { status: RESOLUTION_STATUS.STALE }
+  }
+  if (error) {
+    // Do NOT put the blocking error overlay over a working cached shell.
+    // Stay in cached mode; the revalidation triggers will retry.
+    console.warn('In-place revalidation profile fetch failed; staying in cached mode:', error)
+    _authLog('in_place_revalidation_profile_failed', { code: _safeErrorCode(error) })
+    return { status: RESOLUTION_STATUS.CACHED_REVALIDATION_DEFERRED }
+  }
+  if (!isProfileComplete(profile)) return null
+
+  state.user = user
+  let headerRefreshOk = true
+  try {
+    await refreshHeaderProfileButtons()
+  } catch (err) {
+    headerRefreshOk = false
+    console.warn('refreshHeaderProfileButtons during in-place revalidation failed:', err)
+  }
+  if (!isCurrentAccountTransition(generation, user.id, state.user?.id)) {
+    _authLog('stale_account_result_discarded', { source: 'in_place_header_refresh' })
+    return { status: RESOLUTION_STATUS.STALE }
+  }
+
+  setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: user.id })
+  _setOfflineIndicator(false)
+  _authLog('in_place_revalidation_completed', {})
+
+  void (async () => {
+    let cloudPlan = null
+    try { cloudPlan = await fetchCloudPlanProfile(user.id) }
+    catch (err) { console.warn('[cached-auth] cloud plan fetch on in-place revalidation failed:', err) }
+    if (cloudPlan) state.cloudPlan = cloudPlan
+    if (!isCurrentAccountTransition(generation, user.id, state.user?.id)) return
+    _persistLastValidatedAccountSnapshot({
+      userId: user.id,
+      email: user.email || '',
+      profile,
+      cloudPlan,
+      headerRefreshOk,
+    })
+  })()
+
+  // Exactly ONE online Home refresh for this reconnect. The visible cached
+  // content stays put; fresh sections replace it in place and the assembled
+  // model is persisted by refreshHomeSafe.
+  void (async () => {
+    try {
+      await refreshHomeSafe()
+    } catch (err) {
+      console.warn('Home hydration after in-place revalidation failed:', err)
+    }
+  })()
+
+  return { status: RESOLUTION_STATUS.COMPLETE_HOME }
+}
+
 async function _resolveAndRouteForUser(user) {
+  // Stage B2a: a reconnect for the SAME user whose cached shell is already
+  // revealed must hydrate in place instead of re-running the transition
+  // boundary (which would blank the visible cached Home). Account switches
+  // (different userId) always take the full path below.
+  const authAtEntry = getAuthState()
+  const isCachedRevealForSameUser = (
+    authAtEntry.state === AUTH_STATE.AUTHENTICATED_CACHED
+    || authAtEntry.state === AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED
+  ) && authAtEntry.userId === user?.id && state.user?.id === user?.id
+  if (isCachedRevealForSameUser) {
+    const inPlace = await _revalidateCachedRevealInPlace(user)
+    if (inPlace) return inPlace
+    // Profile no longer complete → fall through to the full transition so
+    // the setup flow owns the reveal.
+  }
   // Open an explicit account-transition boundary. Every async DOM write
   // below must verify this generation before running.
   const generation = beginAccountTransition()
@@ -805,11 +907,29 @@ async function _resolveAndRouteForUser(user) {
     })
   })()
 
-  // Kick off Home hydration AFTER reveal so the user sees the shell with
-  // skeletons immediately. `refreshHomeSafe` renders per-section errors
-  // inline instead of throwing — a failure here must not throw the user
-  // back behind the auth overlay or expose stale DOM from account A.
+  // Kick off Home hydration AFTER reveal so the user sees the shell
+  // immediately. Stage B2a makes this cache-first: the persisted Home model
+  // for THIS user renders into the skeletons first (bounded local-only read
+  // — a hung IndexedDB resolves null and never blocks), then exactly ONE
+  // online refresh replaces it with fresh data and persists the new model.
+  // `refreshHomeSafe` renders per-section errors inline instead of throwing
+  // — a failure here must not throw the user back behind the auth overlay
+  // or expose stale DOM from account A.
   void (async () => {
+    try {
+      // Cached render strictly precedes the network refresh so stale data
+      // can never paint over fresh data. Keeps skeletons when no cache.
+      // The read is capped by HOME_CACHE_ONLINE_BOOT_BUDGET_MS: on the
+      // ONLINE path a slow/hung IndexedDB must not delay a healthy network
+      // refresh, so past the budget we skip the cached render entirely.
+      await renderHomeFromCache(user.id, {
+        emptyStatesWhenMissing: false,
+        timeoutMs: HOME_CACHE_ONLINE_BOOT_BUDGET_MS,
+      })
+    } catch (err) {
+      console.warn('Cache-first Home render failed:', err)
+    }
+    if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) return
     try {
       await refreshHomeSafe()
     } catch (err) {
@@ -918,6 +1038,12 @@ async function _ensureAppReadyForUser(user) {
     // purge throws, the marker stays with the previous user so the next
     // cold-start ownership check retries it.
     await _purgeUserDrafts()
+    // Stage B2a: the previous user's Home cache follows the existing purge
+    // semantics. Best-effort — the store is strictly userId-keyed, so a
+    // failed delete cannot leak into the new user's session.
+    if (!(await clearHomeCache(previousUserId))) {
+      console.warn('Home cache clear on account switch failed; record remains user-scoped.')
+    }
     setLocalDataOwner(user.id)
     await _clearInMemoryUserState()
   } else {
@@ -1205,6 +1331,20 @@ async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError =
   _bootMeasure('js-init-start', 'app-shell-revealed')
   _authLog('cached_boot_revealed', { targetState })
 
+  // Stage B2a: render this user's persisted Home model — a strictly local
+  // IndexedDB read, ZERO Supabase hydration. When no cache exists the boot
+  // skeletons are replaced with offline empty states so the shell is never
+  // a permanent shimmer. The read runs after reveal so a slow/hung
+  // IndexedDB cannot delay the shell.
+  void (async () => {
+    try {
+      if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) return
+      await renderHomeFromCache(snapshot.userId)
+    } catch (err) {
+      console.warn('Cached Home render on offline boot failed:', err)
+    }
+  })()
+
   // If the backend is REACHABLE but our session is missing, a single
   // deferred re-probe is redundant — reveal the shell in
   // AUTHENTICATED_REAUTH_REQUIRED and let the user reauth (or the
@@ -1437,6 +1577,18 @@ async function init() {
       return
     }
     if (event === 'SIGNED_OUT') {
+      // Captured before in-memory state is cleared so the Home cache purge
+      // below targets the right user even after _clearInMemoryUserState.
+      const signedOutUserId = state.user?.id || getLocalDataOwner() || null
+      // Revoke offline trust IMMEDIATELY and unconditionally. An explicit
+      // sign-out must never leave a bootable offline identity behind, even
+      // when the draft/cache cleanup below fails. "May this account boot
+      // offline?" (the B1 snapshot) and "does this account still have local
+      // data awaiting cleanup?" (the owner marker) are separate states: the
+      // snapshot dies here; the owner marker is only moved after a
+      // successful purge so the next boot retries the cleanup — and cached
+      // boot fails closed on the missing snapshot regardless.
+      clearLastValidatedAccount()
       clearSharedAuthSessionCache()
       _resolvedUsers.clear()
       _resolutionInFlight.clear()
@@ -1456,13 +1608,22 @@ async function init() {
       }
       await _clearInMemoryUserState()
       if (purgeOk) {
-        // Stage B1: the cached-authenticated snapshot must NOT survive a
-        // real sign-out — otherwise a subsequent offline launch would let
-        // the just-signed-out account back in. Order matches
-        // clearLocalDataOwner semantics: only clear on successful purge.
+        // Owner marker only moves after a successful purge so the next boot
+        // retries the draft cleanup (offline trust was already revoked via
+        // clearLastValidatedAccount at the top of this handler).
         clearLocalDataOwner()
-        clearLastValidatedAccount()
       }
+      // Stage B2a: the Home read-model cache is cleared unconditionally —
+      // explicit sign-out (and account deletion, which routes through
+      // signOut) removes the user's cached Home regardless of how the draft
+      // purge fared. A failed delete is only logged: with the snapshot gone,
+      // cached boot fails closed and the leftover record is unreadable
+      // without a fresh online sign-in as that same user.
+      const cacheCleared = signedOutUserId
+        ? await clearHomeCache(signedOutUserId)
+        : await clearAllHomeCaches()
+      if (!cacheCleared) console.warn('Home cache clear on sign-out failed; record remains gated by the revoked snapshot.')
+      resetHomeSectionTracking()
       try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay failed:', _safeErrorCode(err)) }
       _hideProfileResolutionError()
       hideAccountTransitionBlocker()

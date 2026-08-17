@@ -44,7 +44,12 @@ export function isCurrentAccountTransition(generation, expectedUserId, actualUse
 const CLEARED_TEXT_IDS = [
   'home-username', 'home-user-full-name',
   'home-total-finds', 'home-species-count',
-  'home-recent-finds', 'home-recent-comments', 'home-recent-friend-requests',
+  // Stage B2a fix: the actual Home containers/stat values. The previous
+  // entries ('home-recent-finds' etc.) did not match any DOM id, so cached
+  // Home content would have survived an A→B transition once Home began
+  // rendering persisted models.
+  'recent-finds-list', 'recent-comments-list', 'home-friend-requests-list',
+  'hstat-obs', 'hstat-sp', 'hstat-spores',
   'home-cloud-plan-summary',
   'finds-list', 'finds-species-list', 'finds-empty-state',
   'find-detail-title', 'find-detail-subtitle', 'find-detail-comments-list',
@@ -58,7 +63,7 @@ const CLEARED_TEXT_IDS = [
 ]
 
 const CLEARED_HTML_IDS = [
-  'home-recent-finds', 'home-recent-comments', 'home-recent-friend-requests',
+  'recent-finds-list', 'recent-comments-list', 'home-friend-requests-list',
   'finds-list', 'friends-list', 'pending-list', 'people-list',
   'find-detail-comments-list',
 ]

@@ -154,7 +154,7 @@ Stage B refinements suggested by Stage A findings:
 
 ## Stage B — implementation progress
 
-Status: **B1 implementation complete, uncommitted** on branch `startup-perf-and-offline`. Base commit `230c990` (Stage A). Not committed; awaiting review.
+Status: **B1 complete, manually verified on Android, committed** as `8956744` on branch `startup-perf-and-offline` (Stage A committed as `230c990`).
 
 ### B1 scope shipped
 
@@ -281,7 +281,7 @@ Home hydration is intentionally NOT called on the cached path — this matches t
 
 ### Logout / delete behavior
 
-- `SIGNED_OUT` handler in `main.js` clears the snapshot **only after** the draft purge succeeds — same ordering as `clearLocalDataOwner()`. A failed purge preserves both markers so the next boot retries; boot code will fail closed on the mismatched-owner check.
+- `SIGNED_OUT` handler in `main.js` clears the snapshot **only after** the draft purge succeeds — same ordering as `clearLocalDataOwner()`. A failed purge preserves both markers so the next boot retries; boot code will fail closed on the mismatched-owner check. *(Superseded in B2a: the snapshot is now cleared unconditionally BEFORE the purge — see the B2a logout section. Only the owner marker remains purge-gated.)*
 - A transport failure never triggers this path (an explicit `SIGNED_OUT` event is required).
 - Account deletion routes through `supabase.auth.signOut()` (existing behavior) which then hits the SIGNED_OUT handler. No new call site required.
 
@@ -379,3 +379,146 @@ Not measured on device this stage. The new synchronous paint path (cached-header
 - All seven Android scenarios above.
 - Verify the persistent Offline indicator is placed correctly across screen headers on real Android (safe-area handling on notch/dynamic-island parity).
 
+
+---
+
+## Stage B2a — Home read-model cache
+
+Status: **implementation complete, uncommitted** on branch `startup-perf-and-offline`. Base commit `8956744` (B1). Awaiting review + Android manual verification.
+
+Staged roadmap (unchanged):
+
+- B1 = offline identity foundation — **COMPLETE** (committed `8956744`, Android-verified).
+- B2a = Home/read-model cache — **THIS STAGE** (code complete, device verification outstanding).
+- B2b = cached-mode gating for online-only actions — not started.
+- B3 = persistent protected-media/avatar/thumbnail cache — not started.
+- Later = broader Finds/detail/map caching.
+
+### Pre-work audit of Home hydration (as found after A+B1)
+
+`refreshHome()` / `refreshHomeSafe()` ran five parallel loaders, each coupling fetch + DOM mutation:
+
+1. `loadRecentFinds` — `observations` (mine, 3) + `observations_friend_view` (friends, 3) → merge/sort → top 4; then `_loadProfileMap` (`public_profiles` + **signed** avatar URLs via `createSignedUrls`, 3600 s) and `fetchFirstImages(..., {variant:'medium'})` → `{ key, primaryUrl, fallbackUrl, protectedUrl }` per observation.
+2. `loadFriendRequests` — pending + accepted `friendships` rows, `public_profiles` for requesters; "accepted unseen" filter mutates a localStorage seen-set at fetch time.
+3. `loadRecentComments` — `comments_community_view` (5) + optional mention-preview query (3), `fetchCommentAuthorMap`, observation titles from `observations` + `observations_community_view`, `fetchFirstImages(..., 'small')`.
+4. `loadStats` — three queries (obs count, genus/species rows, spore count).
+5. `checkSyncStatus` — a 1-row Supabase query used purely as a connectivity probe for the header "Sync" tag.
+
+Header/profile chrome is separate (B1 `renderCachedHeaderProfileButtons` + online `refreshHeaderProfileButtons`). Image URLs enter the model at `fetchFirstImages` (public URLs derived deterministically from the stable media `key`; `protectedUrl` is a session-bound authorized worker URL) and at `_loadProfileMap` (signed avatar URLs — never durable).
+
+**Audit finding fixed in this stage:** `clearUserScopedUi()` cleared ids `home-recent-finds` / `home-recent-comments` / `home-recent-friend-requests`, which do not exist in `index.html`. The real containers (`recent-finds-list`, `recent-comments-list`, `home-friend-requests-list`, `hstat-obs|sp|spores`) were never blanked on A→B. Harmless while Home was skeletons-until-network, load-bearing once cached content renders pre-network — the lists in `account-transition.js` now use the real ids, and a structural test cross-checks every id against `index.html`.
+
+### Files
+
+New:
+
+- `src/home-cache.js` — user-scoped IndexedDB Home model cache.
+- `src/home-cache.test.js` — 13 store tests (in-memory backend).
+- `src/home-cache-orchestration.test.js` — 11 boot/reconnect/isolation orchestration tests using the real cache module.
+
+Modified:
+
+- `src/screens/home.js` — fetch/render split, cache-first orchestration, offline gating, persist policy, offline empty states.
+- `src/main.js` — cache-first COMPLETE boot, cached-boot Home render, in-place same-user revalidation, cache lifecycle (sign-out / account switch / clear-cache).
+- `src/account-transition.js` — real Home container ids in the cleared lists.
+- `src/i18n.js` — `home.offlineNoCache` (en / nb_NO / sv_SE / de_DE).
+- `src/startup-invariants.test.js` — 13 new B2a structural invariants; the snapshot-after-reveal test rescoped to `_resolveAndRouteForUser` (the in-place helper legitimately persists without a reveal).
+
+### Cache store (`home-cache.js`)
+
+- IndexedDB `sporely-home-cache` v1, object store `home_models`, **keyPath `userId`** — one record per user; reads are keyed strictly by the requested id and additionally re-verify `record.userId`. No "last cache" fallback exists.
+- Record: `{ version: 1, userId, updatedAt, model }`.
+- Fail-closed reads: missing userId, version mismatch (no migration — caller refreshes online and overwrites), cross-user record, malformed model, storage exception ⇒ `null`; never throws. Reads are local-only and resolve `null` after a 4 s timeout if IndexedDB hangs, so boot can never block on cache I/O.
+- Writes sanitize to plain JSON, allowlist top-level sections (`recentFinds`, `friendRequests`, `recentComments`, `stats`), and deep-scrub: `protectedUrl` / token-named keys dropped, signed-URL strings (`?token=` / `/object/sign/`) nulled. Tokens can never persist.
+- Staleness: **stale-while-revalidate**. No TTL; `updatedAt` + derived `ageMs` returned as metadata (emitted into the `home-cache-rendered` boot mark; no age UI added — the existing Offline pill is the offline surface; revisit in B2b if wanted).
+- `clearHomeCache(userId)` / `clearAllHomeCaches()`; injectable backend for Node tests.
+
+### Normalized Home model (schema v1)
+
+```
+{
+  recentFinds:    { items: [{ ...obs row, _owner, image: {key, primaryUrl, fallbackUrl} | null }],
+                    profiles: { [userId]: {id, username, display_name, avatar_url} } },
+  friendRequests: { pending: [rows], accepted: [unseen rows], profiles: {...} },
+  recentComments: { items: [comment rows], authors: {...}, observations: { [obsId]: {id, genus, species, common_name} },
+                    images: { [obsId]: {key, primaryUrl, fallbackUrl} } },
+  stats:          { observations, species, sporeMeasurements }
+}
+```
+
+Per-field decisions:
+
+- **Cached (durable read data):** observation rows, display/taxon text, dates, locations, friend-request rows, comment bodies/authors, stats counts, stable media `key`s, public/immutable media URLs (deterministically derived from the key), public or `data:` avatar URLs.
+- **Recomputed locally (never cached):** section loading/error flags, "seen accepted friend" filtering state (localStorage, applied at fetch time), camera-action label, sync-queue/pending state (owned by `sync-queue.js` IndexedDB + `QUEUE_EVENT`; the model has no sync section, and the store's allowlist drops any such key — test-enforced).
+- **Online-only (excluded):** `checkSyncStatus` header-tag probe, `protectedUrl` (session-bound worker URL), signed avatar/media URLs, mention-preview availability, Supabase response objects/AbortControllers/DOM state.
+
+### Fetch/render split (`screens/home.js`)
+
+Each section is now `fetch*Model()` (network → plain data) + `render*()` (plain data → DOM): `fetchRecentFindsModel/renderRecentFinds`, `fetchFriendRequestsModel/renderFriendRequests`, `fetchRecentCommentsModel/renderRecentComments`, `fetchStatsModel/renderStats`. `renderHomeModel(model)` renders whatever sections are present; `renderHomeFromCache(userId)` is the local-only entry (cache read → render, offline empty states when missing); `renderHomeOfflineEmptyStates()` replaces boot skeletons with a quiet `home.offlineNoCache` notice. Markup/interaction code unchanged; `refreshHome()` now delegates to `refreshHomeSafe()` and rethrows the first section failure for callers that await success (setup completion, find-detail/review edits).
+
+`fetchStatsModel` treats any failed sub-query as a section failure (a partial result must not render as truth or overwrite good cache). `fetchRecentFindsModel` fails only when both feed queries fail.
+
+### Startup sequences
+
+**Online (AUTHENTICATED_COMPLETE):** identity resolved → header refreshed → reveal (unchanged) → post-reveal task: cached Home render (bounded local read; keeps skeletons on miss, never blocks reveal) → **exactly ONE** `refreshHomeSafe()` → fresh sections render in place → assembled model persisted in the background. Cached render is **sequenced strictly before** the refresh so stale data can never paint over fresh data (invariant-tested). Because of that sequencing, the ONLINE-path cache read carries a tight startup budget (`HOME_CACHE_ONLINE_BOOT_BUDGET_MS = 300` in main.js, invariant-capped at ≤ 1 s): a slow/hung IndexedDB forfeits the cached paint instead of delaying a healthy network refresh. Offline boots keep the store's 4 s default, where the cache is the only content and waiting is the better trade.
+
+**Offline (AUTHENTICATED_CACHED) / reauth (AUTHENTICATED_REAUTH_REQUIRED):** B1 owner-matched cached boot → reveal → local-only `renderHomeFromCache(userId)`; no cache ⇒ offline empty states, never Login, no error toasts. **Zero** Home Supabase hydration: `refreshHomeSafe`/`refreshHome` are gated on these two states and re-render from cache instead of touching the network (so Home nav taps offline are also silent). REAUTH_REQUIRED reads the same cached Home; authenticated hydration resumes only at COMPLETE.
+
+Home network refresh count by state: COMPLETE cold boot = 1; CACHED = 0; REAUTH_REQUIRED = 0; reconnect transition to COMPLETE = 1.
+
+### Cache write / failure semantics
+
+- Writes only from a trustworthy online result: gated on `AUTHENTICATED_COMPLETE` + matching `auth.userId` + `state.user.id`.
+- Per-section merge-preserve: sections that refreshed successfully update; failed sections keep their previous cached value; nothing is written when every section failed. **A temporary network failure can never destroy a good offline cache** (tested).
+- Error rendering: if a section already shows content (cached or fresh), a failed refresh keeps it visible; the inline error placeholder renders only when the section has nothing (tracked per user via `resetHomeSectionTracking`, reset on sign-out).
+
+### Reconnect (refresh-trigger ownership)
+
+`_attemptCachedRevalidation` (online event / visibility / deferred re-probe, `_cachedRevalidationInFlight`-guarded) remains the single owner. On a session materializing for the SAME user whose cached shell is revealed, `_resolveAndRouteForUser` now short-circuits into `_revalidateCachedRevealInPlace`: profile check → header refresh → COMPLETE → snapshot persist → exactly one `refreshHomeSafe()`. **No blocker, no `clearUserScopedUi`, no skeleton flash** — cached Home stays visible and hydrates in place. Profile-fetch failure returns `cached-revalidation-deferred` (shell stays up; triggers retry). A DIFFERENT user's session always takes the full transition path. Duplicate-refresh protection: `_resolutionInFlight` / `_resolvedUsers` dedupe the auth-event and revalidation paths (orchestration-tested).
+
+### Account isolation
+
+- Storage lookups are userId-keyed; A's record is unreadable for B by construction (plus stored-userId re-verification and cross-user read tests).
+- `renderHomeFromCache` additionally refuses to render when `state.user.id` differs from the requested id.
+- A→B: B1 blocker/clear boundary unchanged; `clearUserScopedUi` now actually blanks the real Home containers (audit fix above); B's cache renders only after B's identity/ownership is established; B without a cache gets skeletons/empty states, never A fallback.
+
+### Logout / delete / clear lifecycle
+
+- **Explicit sign-out (refined during B2a review):** offline trust is revoked IMMEDIATELY and unconditionally — `clearLastValidatedAccount()` runs at the top of the SIGNED_OUT handler, before the draft purge, so a cleanup failure can never preserve a bootable offline identity. "May this account boot offline" (snapshot) and "does this account still have local data awaiting cleanup" (owner marker) are separate states: the owner marker still moves only after a successful purge so the next boot retries the cleanup, and cached boot fails closed on the missing snapshot regardless. The signed-out user's Home cache is likewise cleared unconditionally (outside the purge-success gate); a failed delete is logged only — the record is unreadable without a fresh online sign-in as the same user. This ordering is invariant-tested.
+- **Account delete:** routes through `signOut()` → same handler.
+- **Account switch (A→B):** A's Home cache is cleared alongside the existing draft purge in `_ensureAppReadyForUser` (follows current local-data-owner purge semantics — no multi-account retention today). Best-effort: a failed delete cannot leak because reads are user-scoped.
+- **Settings → Clear local cache:** now also clears all Home caches.
+
+### Media seam for B3
+
+Persisted image sources are `{ key, primaryUrl, fallbackUrl }`. `key` is the stable media key; public `primaryUrl`s are deterministic per key and safe to persist. Protected media persists key-only ⇒ offline thumbnails render the existing 🍄 placeholder (no network attempts; `imageHtml` handles null sources). Signed avatar URLs are nulled at persist ⇒ cached author/friend avatars degrade to initials (same policy as the B1 header). B3 replaces "primaryUrl or placeholder" with "resolve `key` against a user-scoped blob store, then fall back to `primaryUrl`, then placeholder" — no model change needed. Public thumbnails may incidentally load from the browser HTTP cache offline; correctness does not depend on it.
+
+### Boot timing marks added
+
+`home-cache-read-started`, `home-cache-read-completed` (hit flag), `home-cache-rendered` (ageMs), `home-network-refresh-started`, `home-network-refresh-completed` (fresh/failed counts), `home-cache-write-completed` (section count). Stage A's `home-refresh-start`/`home-refresh-end` retained for measure continuity. None block startup; no PII.
+
+### Tests / build
+
+- New: `home-cache.test.js` (13), `home-cache-orchestration.test.js` (11), 13 new invariants in `startup-invariants.test.js`. Coverage: roundtrip, userId keying, A↛B, malformed/version-mismatch/missing-userId fail-closed, storage failure, hung-IDB timeout, stale-readable, per-user + all clear, signed-URL/protectedUrl/token scrub, unknown-section drop, failed-write preserves record; cache-before-fresh ordering, single-refresh, overwrite-on-success, miss-doesn't-block, total/partial network-failure preservation, offline boot with/without cache, repeated offline launch, reauth read-but-no-write, reconnect single refresh + cache rewrite, isolation, sync-key exclusion.
+- `npm test`: 875 tests, **837 pass**, 2 fail, 36 skipped. Both failures (`src/screens/map.test.js` leaflet CSS import; `supabase/functions/admin-ops/adminActions.test.ts` Deno) re-verified against the unmodified base via `git stash` — pre-existing, unrelated.
+- `npm run build`: succeeds; main chunk 991.83 kB (269.09 kB gzip), +~11 kB over B1's 980.9 kB (cache module + orchestration).
+- `git diff --check`: clean. ESLint on changed files: 0 errors (3 pre-existing B1 warnings in main.js).
+
+### Manual Android acceptance (NOT yet executed — required before B2a → merged)
+
+1. Populate: launch online, Home loads, wait for `home-cache-write-completed` in `window.__sporelyBoot`, force-stop.
+2. Airplane mode + reopen ⇒ correct account shell, Offline pill, cached recent finds/comments/stats visible, no Login, no error spam, thumbnails may be placeholders (protected) / cached (public).
+3. Force-stop offline + reopen ⇒ same cached Home.
+4. Reconnect while cached Home visible ⇒ content stays (no blocker/skeleton flash), state → COMPLETE, exactly one refresh (`home-network-refresh-started` once), cache rewritten.
+5. Queue observations offline ⇒ sync/pending UI reflects live queue (Home cache holds no sync state by design).
+6. A→B switch ⇒ never flash A's Home; B cache or B skeleton/empty.
+7. Logout + offline relaunch ⇒ no cached-account access (snapshot, owner and Home cache all cleared).
+
+Boot timing observations: not measured on device this stage; the cached render path adds one local IDB read before the (unchanged) single network refresh and nothing before reveal.
+
+### B2b / B3 refinements suggested by B2a
+
+- B2b should reuse the `AUTHENTICATED_CACHED`/`REAUTH_REQUIRED` gate now applied inside `refreshHomeSafe` as the pattern for gating other online-only actions (friend accept/decline taps on cached rows currently still attempt the network and surface an error toast — acceptable for B2a, first candidate for B2b).
+- B3: resolve persisted `key`s through a user-scoped blob store in `image-helpers`' render path (single choke point: `imageHtml`/`wireImageFallback`); also cache the header avatar blob so the B1 "public URL only" policy can go away.
+- Consider surfacing `ageMs` ("Saved 2 days ago") near the Offline pill in B2b if field feedback asks for it — the data is already in the read result.
+- The `_HOME_SECTIONS` registry in home.js is the extension point for caching My Finds/detail/map later — same fetch/render/persist triple per section.
