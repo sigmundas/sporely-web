@@ -45,6 +45,7 @@ const messages = {
     'auth.passwordsDontMatch': 'Passwords do not match.',
     'auth.backToLogin': 'Back to sign in',
     'common.sync': 'Sync',
+    'common.offline': 'Offline',
     'common.pleaseWait': 'Please wait…',
     'common.cancel': 'Cancel',
     'common.save': 'Save',
@@ -492,6 +493,7 @@ const messages = {
     'auth.passwordsDontMatch': 'Passordene stemmer ikke overens.',
     'auth.backToLogin': 'Tilbake til innlogging',
     'common.sync': 'Synk',
+    'common.offline': 'Frakoblet',
     'common.pleaseWait': 'Vent litt…',
     'common.cancel': 'Avbryt',
     'common.save': 'Lagre',
@@ -896,6 +898,7 @@ const messages = {
     'auth.passwordsDontMatch': 'Lösenorden matchar inte.',
     'auth.backToLogin': 'Tillbaka till inloggning',
     'common.sync': 'Synk',
+    'common.offline': 'Frånkopplad',
     'common.pleaseWait': 'Vänta…',
     'common.cancel': 'Avbryt',
     'common.save': 'Spara',
@@ -1300,6 +1303,7 @@ const messages = {
     'auth.passwordsDontMatch': 'Passwörter stimmen nicht überein.',
     'auth.backToLogin': 'Zurück zur Anmeldung',
     'common.sync': 'Sync',
+    'common.offline': 'Offline',
     'common.pleaseWait': 'Bitte warten…',
     'common.cancel': 'Abbrechen',
     'common.save': 'Speichern',
@@ -1855,6 +1859,7 @@ export function applyStaticTranslations() {
   setPlaceholder('#profile-fullname', 'profile.fullNameOptional')
 
   setText('#header-sync-tag span', 'common.sync')
+  setText('#app-offline-indicator-label', 'common.offline')
   setText('#home-recent-finds-title', 'home.recentFinds')
   setText('#recent-history-link', 'home.history')
   setText('#home-friend-requests-title', 'home.friendRequests')

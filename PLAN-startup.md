@@ -150,3 +150,232 @@ Stage B refinements suggested by Stage A findings:
 - Because `refreshHeaderProfileButtons` is now the load-bearing await before reveal, Stage B's cached-authenticated mode should render header chrome from the cached profile summary synchronously — that removes the last remaining network dependency before reveal.
 - The redundant duplicate-hydration bug fixed here would silently reappear under a naive cache-then-network refactor; keep the "exactly one intentional startup Home hydration" invariant explicit in Stage B tests.
 
+---
+
+## Stage B — implementation progress
+
+Status: **B1 implementation complete, uncommitted** on branch `startup-perf-and-offline`. Base commit `230c990` (Stage A). Not committed; awaiting review.
+
+### B1 scope shipped
+
+Files created:
+
+- `src/last-validated-account.js` — versioned localStorage record for the last successfully-online-validated account on this device.
+- `src/last-validated-account.test.js` — 15 unit tests.
+- `src/cloud-plan.test.js` — 8 unit tests around the new NETWORK / FALLBACK / CACHED source tagging.
+- `src/cached-header.test.js` — 6 unit tests around synchronous cached-header rendering.
+- `src/offline-boot.test.js` — 11 orchestration tests mirroring `_tryCachedAuthenticatedBoot`.
+- `src/startup-invariants.test.js` — 11 structural tests (Stage A + Stage B1 invariants).
+
+Files modified:
+
+- `src/auth-state.js` — added `AUTHENTICATED_CACHED` state.
+- `src/cloud-plan.js` — `_source` tagging (`NETWORK` / `FALLBACK` / `CACHED`), `reviveCachedCloudPlan`, `getCloudPlanSource`.
+- `src/screens/profile.js` — added `renderCachedHeaderProfileButtons()` (synchronous, no Supabase).
+- `src/main.js` — cached-boot path (`_tryCachedAuthenticatedBoot`), snapshot writer, background revalidation, `_isExplicitAuthRejection` / `_isTransportSessionError` classifiers, offline indicator toggle, `clearLastValidatedAccount()` in SIGNED_OUT handler.
+- `src/auth-state.test.js` — new AUTHENTICATED_CACHED distinctness test.
+- `src/i18n.js` — `common.offline` key (en/nb_NO/sv_SE/de_DE), setText wiring for the new indicator label.
+- `index.html` — persistent `#app-offline-indicator` element.
+- `src/style.css` — offline indicator pill styling.
+
+### Chosen schema (last-validated-account, v1)
+
+Persisted at localStorage key `sporely-last-validated-account-v1`:
+
+```json
+{
+  "version": 1,
+  "userId": "<uuid>",
+  "email": "<string>",
+  "profileComplete": true,
+  "profileSummary": { "username": "<string|null>", "display_name": "<string|null>", "avatar_url": "<string|null>" },
+  "cloudPlan": <cloud plan blob | null>,
+  "lastValidatedAt": <ms epoch>
+}
+```
+
+Explicit exclusions: NO access_token, NO refresh_token, NO session object. Supabase remains authoritative for its credentials. The write path enumerates accepted fields so a careless caller cannot smuggle tokens into the record (guard test included).
+
+Storage mechanism: `localStorage` — same as `local-data-owner.js`. Fail-closed on malformed JSON, schema-version mismatch, missing userId, or any storage exception (private-mode Safari). The write API returns `false` on failure so the caller can decide whether to log.
+
+### New auth states
+
+Two distinct reveal-only states were introduced. Both mean "the shell is revealed with a cached identity but the server has NOT confirmed the current session during this launch"; downstream code that writes to Supabase must gate on `AUTHENTICATED_COMPLETE` only. `isAuthorizedForAuthenticatedNetworkOps(state)` is the canonical predicate — it returns `true` for `AUTHENTICATED_COMPLETE` and `false` for every other state.
+
+- `AUTH_STATE.AUTHENTICATED_CACHED` — the reachability probe reported UNREACHABLE. Home network activity is presumed to fail; the Offline indicator is shown.
+- `AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED` (refined from initial B1 draft) — the reachability probe reported REACHABLE but the local Supabase session is missing/expired-and-unrefreshable. The shell reveals cached identity so drafts remain available, but authenticated network writes MUST NOT be attempted (would return a real 401). Reconnect triggers still fire; when a genuine session materializes, the state transitions to `AUTHENTICATED_COMPLETE`.
+
+### Auth-error classifier (refined)
+
+Extracted into `src/auth-classification.js` for testability. `isExplicitAuthRejection(err)` matches ONLY server-confirmed session rejections:
+
+- `invalid_grant`, `invalid_refresh_token`, `refresh_token_not_found`, `refresh_token_already_used`, `refresh token expired`, `user_not_found`, `session_not_found`.
+
+Tags REMOVED from the initial B1 draft:
+
+- `jwt expired` — a bare expired access JWT is common on every offline launch (access tokens are short-lived by design). Denying cached boot on this signal would deny it on every offline launch.
+- `jwt malformed` — same reasoning; the access token expired well before the WebView came up, so the JWT does not decode cleanly. Not a server rejection.
+- `no user found with that email` — this is an auth-form-error string, not a session-rejection signal.
+- Bare `401` / `403` status without a matching payload — these are ambiguous (could be a transient network path issue). Only the payload tags above are conclusive.
+
+`isTransportSessionError(err)` matches network keywords, HTTP 5xx, and an EXPLICIT `err.status === 0` field (an unrelated Error without a status is no longer force-classified as transport).
+
+### Reachability probe
+
+`probeBackendReachability({ timeoutMs=3000, fetchImpl=fetch, origin=SUPABASE_ORIGIN })` — a tiny anonymous `GET /auth/v1/health` with `cache: 'no-store'` and no auth headers. Classifies as:
+
+- REACHABLE — any well-formed HTTP response with status < 500 (200, 301, 401, 403, 404 all count — the hop reached Supabase).
+- UNREACHABLE — thrown fetch, abort/timeout, status 0, HTTP 5xx.
+
+Never used as auth authority — the write gate remains `AUTHENTICATED_COMPLETE`. The probe result only controls cached-boot state selection and gates the reveal-time UI. `navigator.onLine` remains banned as an auth signal.
+
+### Deferred re-probe (replaces the unconditional 3s timer)
+
+The initial B1 draft had an unconditional `setTimeout(trigger, 3000)` that fired on every cached boot regardless of state. That was removed because a REAUTH_REQUIRED state (server reachable, session missing) is not helped by an automatic re-probe — the user needs to sign in, and the reconnect triggers already re-run the session refresh. The refined design schedules a **single** deferred re-probe (5 s) only when the initial probe classified the backend as UNREACHABLE, so a genuinely-offline boot self-heals if the network flakes back within a few seconds.
+
+Reconnect triggers (`window.online` event, `visibilitychange → visible`) are unchanged.
+
+### Ownership invariant
+
+Cached-authenticated boot requires `readLastValidatedAccount().userId === getLocalDataOwner()`. Any mismatch (including the "no owner marker at all" case on a fresh install) fails closed — the snapshot is cleared and control falls through to the unauthenticated flow. This preserves the Stage A privacy guarantee against cross-account leaks.
+
+### Cached header
+
+`renderCachedHeaderProfileButtons(profileSummary, { email })`:
+
+- Purely synchronous. Zero Supabase calls.
+- Paints initials + optional avatar across all four header targets (`home-profile-*`, `finds-profile-*`, `map-profile-*`, `people-profile-*`).
+- Accepts inline (`data:`) and public http(s) avatar URLs. Signed URLs (`?token=` / `/object/sign/`) are refused — the loader would need a network fetch that we already know is failing — and the header degrades to initials in that case.
+- Runs BEFORE the shell is revealed on the cached path, matching Stage A's "chrome-first" contract.
+
+### Cached cloud-plan behavior
+
+- `fetchCloudPlanProfile()` now tags its result. A successful policy fetch is `NETWORK`; the previously-silent default fallback is now `FALLBACK`; a revived persisted plan is `CACHED`.
+- Snapshot writer only overwrites `record.cloudPlan` when the fresh result is `NETWORK`-sourced. A `FALLBACK` result never overwrites a previously good plan (this is exactly the "no silent Pro downgrade offline" rail).
+- On cached boot, `state.cloudPlan` is revived from `snapshot.cloudPlan`. Uploads that consult `state.cloudPlan` therefore see the last-known Pro/Free status even when the network is unreachable.
+- `updateLastValidatedCloudPlan(userId, cloudPlan)` is a userId-gated single-field updater; a mismatched userId is a no-op (defensive against in-flight account transitions).
+
+### Boot orchestration (cached path)
+
+1. `readLastValidatedAccount()` — `last-validated-account-loaded` mark.
+2. Owner-match guard. Missing owner OR mismatch => clear snapshot + fall through to unauth.
+3. If eager session threw an explicit-rejection classifier match => skip cached boot (goes to normal SIGNED_OUT recovery).
+4. `probeBackendReachability()` — `reachability-probe-started` / `reachability-probe-completed` marks.
+5. Target state selected: REACHABLE → `AUTHENTICATED_REAUTH_REQUIRED`; UNREACHABLE → `AUTHENTICATED_CACHED`.
+6. `cached-auth-selected` mark, begin account-transition boundary, `clearUserScopedUi()`, show blocker, minimal `state.user = { id, email }`, revive `state.cloudPlan`.
+7. `_ensureAppReadyForUser` runs behind the blocker (init screens + restore drafts).
+8. `renderCachedHeaderProfileButtons()` — `cached-header-rendered` mark.
+9. `setAuthState(target)`, `navigate('home')`, hide auth overlay + blocker, `_setOfflineIndicator(true)`, `app-shell-revealed` mark.
+10. `_scheduleCachedRevalidation({ initialReachability })` — `online` + `visibilitychange:visible` triggers, plus a single deferred re-probe at 5 s ONLY when the initial probe was UNREACHABLE.
+
+Home hydration is intentionally NOT called on the cached path — this matches the plan's "zero online Home refresh until revalidation" invariant. Home renders the existing Stage A skeletons; when a section-level fetch fails on future navigation, `refreshHomeSafe` already renders inline offline placeholders instead of modal errors.
+
+### Reconnect behavior
+
+`_attemptCachedRevalidation(source)` re-probes reachability, then re-runs the session refresh:
+
+- Same-user, session found => routes through `resolveAuthenticatedSessionOnce()` (the existing pipeline) which refreshes header + cloud plan, writes a fresh snapshot, and transitions to `AUTHENTICATED_COMPLETE`. `revalidation-completed` mark. Works whether the previous state was `AUTHENTICATED_CACHED` or `AUTHENTICATED_REAUTH_REQUIRED`.
+- Transport failure or no session => `_syncCachedStateWithReachability` reflects the fresh probe result: cached ↔ reauth-required. No transition to COMPLETE.
+- Explicit auth rejection => invoke `supabase.auth.signOut()` which fires SIGNED_OUT and the normal sign-out cleanup runs — including `clearLastValidatedAccount()`.
+- A different user's session materializing on this device is handled by the same `resolveAuthenticatedSessionOnce()` call (kicks the normal account-transition path).
+
+### Logout / delete behavior
+
+- `SIGNED_OUT` handler in `main.js` clears the snapshot **only after** the draft purge succeeds — same ordering as `clearLocalDataOwner()`. A failed purge preserves both markers so the next boot retries; boot code will fail closed on the mismatched-owner check.
+- A transport failure never triggers this path (an explicit `SIGNED_OUT` event is required).
+- Account deletion routes through `supabase.auth.signOut()` (existing behavior) which then hits the SIGNED_OUT handler. No new call site required.
+
+### A → B account switch (privacy)
+
+- Same reveal path as Stage A. Cached boot only reveals when `snapshot.userId === getLocalDataOwner()`; if the owner marker was updated by an interrupted transition, cached boot fails closed.
+- The Stage A account-transition boundary (`beginAccountTransition` + `clearUserScopedUi` + blocker + STALE check) is preserved by cached boot. Structural test (`startup-invariants.test.js`) enforces this.
+- Reveal ordering: header chrome from the CURRENT owner's cached summary first, then reveal. A → B online sign-in during a cached-mode session goes through `resolveAuthenticatedSessionOnce()` which re-establishes B's identity through the normal `_resolveAndRouteForUser` pipeline.
+
+### Boot timings (new marks)
+
+Emitted on the cached path via `boot-timings.mark()`:
+
+- `last-validated-account-loaded` — after the localStorage read.
+- `reachability-probe-started` / `reachability-probe-completed` — around the `/auth/v1/health` GET.
+- `cached-auth-selected` — after owner-match + error-classification passed. Includes the `targetState` and `reachability`.
+- `cached-header-rendered` — after synchronous header paint.
+- `revalidation-started` — background revalidation kicked (with source: `online-event` / `visibility-visible` / `deferred-reprobe`).
+- `revalidation-completed` — successful revalidation transitioned state to COMPLETE.
+
+Also emitted on the COMPLETE branch: `last-validated-account-written` (with cloudPlan source + headerRefreshOk).
+
+### Offline UI
+
+- Persistent `#app-offline-indicator` (top-centre, small amber pill, `role="status"`, `aria-live="polite"`). Shown by `_setOfflineIndicator(true)` when cached mode is entered; hidden on successful revalidation and on SIGNED_OUT.
+- Home sections remain in Stage A skeleton state on cached boot (no online refresh is called). Per-section errors on later navigations continue to render inline via `refreshHomeSafe`. No modal error surfaces on the cached path.
+
+### Boot classifier
+
+`_isExplicitAuthRejection(err)` matches: `invalid_grant`, `invalid_refresh_token`, `refresh_token_not_found`, `refresh_token_already_used`, `user_not_found`, `jwt expired`, `jwt malformed`, `session_not_found`, HTTP 401/403.
+
+`_isTransportSessionError(err)` matches network keywords and HTTP 5xx / status 0. This is a hint-only helper — the cached boot decision only refuses on _explicit_ rejection; every other failure (or missing session with no thrown error) falls through to cached mode if a valid owner-matched snapshot exists.
+
+Explicitly NOT used as auth authority: `navigator.onLine`. Structural test enforces this (`startup-invariants.test.js: no navigator.onLine is used as auth authority`).
+
+### Tests + results
+
+`npm test`: 810 tests, **772 pass**, **2 fail**, 36 skipped, 0 cancelled, 0 todo.
+
+The two failures are the pre-existing Stage A failures — confirmed unrelated to Stage B1:
+
+- `src/screens/map.test.js` — leaflet CSS import in Node test env.
+- `supabase/functions/admin-ops/adminActions.test.ts` — Deno runtime.
+
+New / extended tests all pass:
+
+- `src/last-validated-account.test.js` — **15 tests** (roundtrip, malformed JSON, schema mismatch, missing userId, storage exceptions, clear, cloud-plan userId-gated update, token-leak guard, sanitization).
+- `src/cloud-plan.test.js` — **8 tests** (NETWORK / FALLBACK / CACHED tagging, missing-column edge, thrown error, empty userId, revive-cached, JSON.stringify guard).
+- `src/cached-header.test.js` — **6 tests** (initials fallback, public URL avatar, signed URL rejection, all four screens covered, email-initial fallback, synchronous return).
+- `src/offline-boot.test.js` — **11 tests** (validated snapshot + owner match, no snapshot, owner mismatch, missing owner, corrupt JSON, explicit auth-reject, sign-out then relaunch, reconnect variants, account-delete).
+- `src/startup-invariants.test.js` — **11 tests** (Stage A hydration invariant, cached path has zero online Home refresh, snapshot integration, SIGNED_OUT snapshot clear, snapshot write ordering, FALLBACK guard, classifier presence, revalidation listeners, boot marks, navigator.onLine guard, account-transition boundary preserved).
+- `src/auth-state.test.js` — **+1 test** (`AUTHENTICATED_CACHED` distinctness).
+
+Total new/extended assertions across Stage B1: **52** new tests.
+
+`npm run build`: succeeds. Main chunk `main-DxlsBxWA.js` = 980.90 kB (265.97 kB gzipped) — up ~7.4 kB from Stage A's 973 kB baseline. Delta accounted for by `last-validated-account.js` + Stage B1 additions in `main.js` and `cloud-plan.js`.
+
+`git diff --check`: clean.
+
+### Manual Android verification
+
+**Not yet executed on device.** Requires device verification before B1 can be marked "complete":
+
+- Scenario 1: online sign-in on Android; observe snapshot creation via `window.__sporelyBoot` marks + localStorage inspection.
+- Scenario 2: force-close app + enable airplane mode + relaunch => cached shell revealed, Offline indicator shown, correct username/avatar/plan.
+- Scenario 3: enable airplane mode DURING first launch (before snapshot write) + force-close + relaunch offline => must fall through to unauth (no snapshot yet).
+- Scenario 4: cached boot with an expired access token but valid refresh token => refresh succeeds when network returns; auto-transition to COMPLETE + Offline indicator hidden.
+- Scenario 5: cached boot with a revoked session (server-side revocation) => reconnect fires SIGNED_OUT + snapshot cleared + login screen.
+- Scenario 6: A → B on Android with cached boot (log in as A, force-close offline, sign in as B when online again). B's cached record replaces A's after the online COMPLETE flow.
+- Scenario 7: Pro user offline: verify `state.cloudPlan.hasProAccess === true` from snapshot in DevTools.
+
+All scenarios above are architecturally exercised by unit / orchestration tests, but the Capacitor Android WebView's actual behavior for `supabase.auth.getSession()` in airplane mode is not covered by Node tests.
+
+### Boot timing observations
+
+Not measured on device this stage. The new synchronous paint path (cached-header before reveal, no network on the critical path) is strictly a subset of Stage A's online cold path, so the cached cold start is expected to be at least as fast as Stage A's online cold start — and materially faster when the network is actually reachable but slow, because the shell reveals without waiting on any Supabase RPC.
+
+### Deliberately deferred to B2 / B3
+
+- Home read cache (assembled Home model). Cached boot currently shows Stage A skeletons on Home.
+- Media/thumbnail IndexedDB cache. Protected media still refuses to render offline; header avatar degrades to initials when the cached URL is signed.
+- My Finds / observation-detail / map cached reads.
+- Service worker for the PWA shell.
+
+### B2 / B3 refinements suggested by B1 findings
+
+- `renderCachedHeaderProfileButtons`'s "public URL only" avatar policy is deliberate for B1; B2 should introduce a user-scoped IndexedDB media blob store so cached avatars survive Android process death and cached URLs stop being an implicit surface area problem.
+- The snapshot writer runs post-reveal in `void (async () => …)()`. B2 may want to persist the assembled Home model in the same background task so the next cold start renders Home from cache before revalidation. Keep the "only write on NETWORK-sourced data" rule.
+- Cached-mode gating for online-only actions (Google connect, friend-accept, taxonomy search, AI ID, iNat connect) is NOT implemented in B1. B2 should subscribe to `subscribeAuthState` and disable/annotate these actions when `state === AUTHENTICATED_CACHED`.
+- `_attemptCachedRevalidation` uses a fixed 3-second post-reveal retry. B2 should replace this with a proper reachability probe (a cheap Supabase HEAD or a Postgres health RPC) rather than an unconditional timer.
+- The `_isExplicitAuthRejection` classifier is conservative. If Supabase-JS surfaces newer error tags we may need to add them; the current tag list is documented in `main.js` and covered by structural tests.
+
+### Requires device verification before B1 → merged
+
+- All seven Android scenarios above.
+- Verify the persistent Offline indicator is placed correctly across screen headers on real Android (safe-area handling on notch/dynamic-island parity).
+

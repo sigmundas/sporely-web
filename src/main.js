@@ -7,7 +7,8 @@ import './theme.js'   // applies saved theme immediately, no flash
 import { mark as _bootMark, measure as _bootMeasure } from './boot-timings.js'
 _bootMark('js-init-start')
 
-import { supabase } from './supabase.js'
+import { supabase, SUPABASE_ORIGIN } from './supabase.js'
+import { isExplicitAuthRejection, isTransportSessionError, probeBackendReachability } from './auth-classification.js'
 import { getLocale, initI18n, onLocaleChange, setLocale, t } from './i18n.js'
 import { state } from './state.js'
 import { clearSharedAuthSessionCache, getSharedAuthSession, seedSharedAuthSession } from './auth-session.js'
@@ -43,10 +44,16 @@ import { initPhotoViewer } from './photo-viewer.js'
 import { initImportReview, openNativeCamera, renderSessions, restoreImportSessions } from './screens/import_review.js'
 import { clearImportSessions, clearImportSessionsStrict, loadImportSessions } from './import-store.js'
 import { clearReviewDraftStrict, loadReviewDraft } from './review-draft-store.js'
-import { forceCloseProfileOverlay, initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons } from './screens/profile.js'
+import { forceCloseProfileOverlay, initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons, renderCachedHeaderProfileButtons } from './screens/profile.js'
 import { AUTH_STATE, getAuthState, setAuthState } from './auth-state.js'
 import { fetchProfileWithSignupRetry, isProfileComplete } from './profile-completion.js'
-import { clearLocalDataOwner, resolveLocalDataOwner, setLocalDataOwner } from './local-data-owner.js'
+import { clearLocalDataOwner, getLocalDataOwner, resolveLocalDataOwner, setLocalDataOwner } from './local-data-owner.js'
+import {
+  clearLastValidatedAccount,
+  readLastValidatedAccount,
+  updateLastValidatedCloudPlan,
+  writeLastValidatedAccount,
+} from './last-validated-account.js'
 import {
   beginAccountTransition,
   clearUserScopedUi,
@@ -58,7 +65,12 @@ import {
 import { initPeople, loadPeople } from './screens/people.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
 import { loadMapScreen } from './map-loader.js'
-import { fetchCloudPlanProfile } from './cloud-plan.js'
+import {
+  CLOUD_PLAN_SOURCE,
+  fetchCloudPlanProfile,
+  getCloudPlanSource,
+  reviveCachedCloudPlan,
+} from './cloud-plan.js'
 import { clearMediaUrlCache } from './images.js'
 import { notifyProtectedMediaSessionChange } from './protected-media.js'
 import { initDebugDashboard } from './debug-dashboard.js'
@@ -134,6 +146,25 @@ function enqueueAuthEvent(event, session, deferred) {
       _authLog('deferred_auth_event_failed', { code: _safeErrorCode(err) })
     })
 }
+
+// Stage B1: persistent Offline indicator. Hidden by default; shown while in
+// AUTHENTICATED_CACHED mode. Reveal timing matches the app-shell's — do not
+// paint the indicator until reveal, otherwise the boot flash briefly shows
+// the badge on top of the auth overlay.
+function _setOfflineIndicator(visible) {
+  try {
+    const el = document.getElementById('app-offline-indicator')
+    if (!el) return
+    el.style.display = visible ? 'flex' : 'none'
+  } catch (_) { /* DOM missing in test envs */ }
+}
+
+// Auth-classifier + reachability probe live in `auth-classification.js` so
+// they can be imported into unit tests without pulling the whole DOM/CSS
+// module graph. `_isExplicitAuthRejection` / `_isTransportSessionError`
+// wrappers keep the existing local names used in this file.
+function _isExplicitAuthRejection(err) { return isExplicitAuthRejection(err) }
+function _isTransportSessionError(err) { return isTransportSessionError(err) }
 
 function _lockPortraitOrientation() {
   const lock = globalThis.screen?.orientation?.lock
@@ -724,15 +755,25 @@ async function _resolveAndRouteForUser(user) {
   // Header avatar/initials must land BEFORE we reveal, otherwise the shell
   // could briefly show the fallback initials for account A. A failure here
   // is not fatal — subsequent screen navigation reruns it — but reveal
-  // waits for the current attempt to settle.
-  try { await refreshHeaderProfileButtons() }
-  catch (err) { console.warn('refreshHeaderProfileButtons on sign-in failed:', err) }
+  // waits for the current attempt to settle. Stage A network path is left
+  // unchanged (this awaits a PostgREST fetch inside `refreshHeaderProfileButtons`);
+  // the Stage B1 snapshot writer below uses the already-fetched `profile`.
+  let headerRefreshOk = true
+  try {
+    await refreshHeaderProfileButtons()
+  } catch (err) {
+    headerRefreshOk = false
+    console.warn('refreshHeaderProfileButtons on sign-in failed:', err)
+  }
   if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
     _authLog('stale_account_result_discarded', { source: 'header_refresh' })
     return { status: RESOLUTION_STATUS.STALE }
   }
 
   setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: user.id })
+  // A successful online resolution supersedes any cached-mode indicator
+  // that a prior boot may have shown. Hide it before revealing.
+  _setOfflineIndicator(false)
   navigate('home')
   _bootMark('app-shell-initialized')
   _authLog('destination_render_completed', { destination: 'home' })
@@ -740,6 +781,29 @@ async function _resolveAndRouteForUser(user) {
   hideAccountTransitionBlocker()
   _bootMark('app-shell-revealed')
   _authLog('account_transition_revealed', { destination: 'home' })
+
+  // Fetch cloud plan (best-effort) and persist the last-validated-account
+  // snapshot for the next cold start. `fetchCloudPlanProfile` tags its
+  // result so a FALLBACK response never overwrites a previously persisted
+  // good plan. This is Stage B1's authority write site.
+  //
+  // Ordering rationale: writing the snapshot AFTER reveal so a slow plan
+  // fetch does not delay the shell. The snapshot only affects the NEXT
+  // launch; the current launch is already fully online-resolved.
+  void (async () => {
+    let cloudPlan = null
+    try { cloudPlan = await fetchCloudPlanProfile(user.id) }
+    catch (err) { console.warn('[cached-auth] cloud plan fetch on resolve failed:', err) }
+    if (cloudPlan) state.cloudPlan = cloudPlan
+    if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) return
+    _persistLastValidatedAccountSnapshot({
+      userId: user.id,
+      email: user.email || '',
+      profile,
+      cloudPlan,
+      headerRefreshOk,
+    })
+  })()
 
   // Kick off Home hydration AFTER reveal so the user sees the shell with
   // skeletons immediately. `refreshHomeSafe` renders per-section errors
@@ -759,6 +823,47 @@ async function _resolveAndRouteForUser(user) {
   })()
 
   return { status: RESOLUTION_STATUS.COMPLETE_HOME }
+}
+
+// Stage B1: persist "last successful online validation" for the cached-
+// authenticated cold boot. NEVER stores Supabase tokens; only the minimal
+// profile summary + last known cloudPlan. See last-validated-account.js.
+function _persistLastValidatedAccountSnapshot({ userId, email, profile, cloudPlan, headerRefreshOk }) {
+  if (!userId) return
+  if (!profile) return // profile-fetch failure path never reaches here, but be defensive
+  // Cloud-plan source guard: a FALLBACK plan is a network-failed default
+  // and must not overwrite a previously persisted good plan (that path is
+  // one of the main Stage B failure modes to prevent — no silent Pro
+  // downgrade offline).
+  const source = getCloudPlanSource(cloudPlan)
+  const usableCloudPlan = source === CLOUD_PLAN_SOURCE.NETWORK ? cloudPlan : null
+  const existing = readLastValidatedAccount()
+  const preservedCloudPlan = existing && existing.userId === userId && existing.cloudPlan
+    ? existing.cloudPlan
+    : null
+  const snapshotCloudPlan = usableCloudPlan || preservedCloudPlan || null
+  const ok = writeLastValidatedAccount({
+    userId,
+    email: email || '',
+    profileComplete: true,
+    profileSummary: {
+      username: profile?.username || null,
+      display_name: profile?.display_name || null,
+      avatar_url: profile?.avatar_url || null,
+    },
+    cloudPlan: snapshotCloudPlan,
+    lastValidatedAt: Date.now(),
+  })
+  if (ok) {
+    _bootMark('last-validated-account-written', {
+      cloudPlanSource: source || 'unknown',
+      headerRefreshOk: !!headerRefreshOk,
+    })
+    _authLog('last_validated_snapshot_written', {
+      cloudPlanSource: source || 'unknown',
+      preservedCachedPlan: !usableCloudPlan && !!preservedCloudPlan,
+    })
+  }
 }
 
 function _showProfileResolutionError(user, error) {
@@ -972,6 +1077,247 @@ function _urlLooksLikeSupabaseOAuthCallback(href) {
   } catch (_) { return false }
 }
 
+// Stage B1: reveal the shell for a previously-validated local account when
+// the current launch cannot fully validate a Supabase session. See
+// PLAN-startup.md.
+//
+// Preconditions checked here:
+//   1. `readLastValidatedAccount()` returns a well-formed record.
+//   2. `getLocalDataOwner()` === record.userId. Any mismatch fails closed:
+//      snapshot is cleared and the caller falls through to unauth.
+//   3. The eager session refresh did NOT produce a server-confirmed
+//      session rejection (invalid_refresh_token / session_not_found /
+//      user_not_found / …). Explicit rejection => normal sign-out recovery.
+//
+// After the preconditions pass, a small reachability probe against
+// Supabase's `/auth/v1/health` selects the reveal state:
+//
+//   * probe UNREACHABLE  => AUTHENTICATED_CACHED — the device is offline
+//     from Supabase's perspective; reconnect triggers will retry.
+//   * probe REACHABLE    => AUTHENTICATED_REAUTH_REQUIRED — the server is
+//     reachable but our stored session is missing; authenticated network
+//     writes MUST be gated. The reconnect triggers will still re-run the
+//     session refresh so that a normal refresh path can transition to
+//     AUTHENTICATED_COMPLETE.
+async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError = false, probe = probeBackendReachability } = {}) {
+  _bootMark('last-validated-account-loaded')
+  const snapshot = readLastValidatedAccount()
+  if (!snapshot) return false
+
+  // Owner-mismatch guard (privacy). If the local IDB stores belong to a
+  // different user than the persisted snapshot, we cannot trust either —
+  // clear the snapshot and let the unauthenticated flow take over.
+  const owner = getLocalDataOwner()
+  if (!owner) {
+    // No draft-owner marker at all → treat as if the device does not yet
+    // trust this record. Fail closed and clear the snapshot to force a
+    // fresh online sign-in the next time this device sees Supabase.
+    _authLog('cached_boot_skipped_missing_owner', {})
+    clearLastValidatedAccount()
+    return false
+  }
+  if (owner !== snapshot.userId) {
+    _authLog('cached_boot_owner_mismatch', {})
+    clearLastValidatedAccount()
+    return false
+  }
+
+  // Server-confirmed rejection must not enter cached mode; the server has
+  // said "no". Only transport failures / "no session locally" fall through
+  // to cached — never `navigator.onLine` as authority.
+  if (sessionError && _isExplicitAuthRejection(sessionError)) {
+    _authLog('cached_boot_skipped_auth_reject', { code: _safeErrorCode(sessionError) })
+    return false
+  }
+
+  // Reachability probe drives the state selection. Do it BEFORE any DOM
+  // changes so an unreachable-with-transient-throw scenario still routes
+  // through the same code path.
+  _bootMark('reachability-probe-started', { sessionThrown: !!sessionError })
+  let reachability = 'unreachable'
+  try { reachability = await probe() }
+  catch (_) { reachability = 'unreachable' }
+  _bootMark('reachability-probe-completed', { reachability })
+  _authLog('reachability_probe', { reachability, sessionThrown: !!sessionError })
+
+  const targetState = reachability === 'reachable'
+    ? AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED
+    : AUTH_STATE.AUTHENTICATED_CACHED
+
+  _bootMark('cached-auth-selected', {
+    hasCloudPlan: !!snapshot.cloudPlan,
+    reachability,
+    reason: sessionError ? 'transport-error' : 'no-session',
+    targetState,
+  })
+  _authLog('cached_boot_selected', {
+    hasCloudPlan: !!snapshot.cloudPlan,
+    hasHashError: !!hasHashError,
+    reachability,
+    targetState,
+  })
+
+  const generation = beginAccountTransition()
+  const expectedUserId = snapshot.userId
+
+  // Minimal state.user shape: everything else derives from Supabase-live
+  // queries which will be gated by AUTHENTICATED_CACHED /
+  // AUTHENTICATED_REAUTH_REQUIRED state.
+  state.user = { id: snapshot.userId, email: snapshot.email || '' }
+  if (snapshot.cloudPlan) {
+    const revived = reviveCachedCloudPlan(snapshot.cloudPlan)
+    if (revived) state.cloudPlan = revived
+  }
+
+  // Synchronously blank any prior-user DOM and put up the blocker BEFORE
+  // any await — even for the same owner this keeps the boundary intact.
+  clearUserScopedUi()
+  showAccountTransitionBlocker()
+  setAuthState({ state: AUTH_STATE.RESOLVING, userId: expectedUserId })
+  showAuthOverlay()
+  try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay in cached boot failed:', err) }
+  _hideProfileResolutionError()
+
+  // Init the shell + restore drafts behind the blocker.
+  await _ensureAppReadyForUser(state.user)
+  if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
+    _authLog('cached_boot_stale', { source: 'ensure_ready' })
+    return true // do not fall through — a newer online transition is now in charge
+  }
+
+  // Paint header chrome from cached profile summary (synchronous, no
+  // Supabase). Never attempt a signed-URL avatar here — the loader would
+  // require a network fetch that we know is failing.
+  try {
+    renderCachedHeaderProfileButtons(snapshot.profileSummary, { email: snapshot.email })
+    _bootMark('cached-header-rendered')
+  } catch (err) {
+    console.warn('renderCachedHeaderProfileButtons in cached boot failed:', err)
+  }
+
+  setAuthState({ state: targetState, userId: snapshot.userId })
+  navigate('home')
+  _bootMark('app-shell-initialized')
+  hideAuthOverlay()
+  hideAccountTransitionBlocker()
+  _setOfflineIndicator(true)
+  _bootMark('app-shell-revealed')
+  _bootMeasure('js-init-start', 'app-shell-revealed')
+  _authLog('cached_boot_revealed', { targetState })
+
+  // If the backend is REACHABLE but our session is missing, a single
+  // deferred re-probe is redundant — reveal the shell in
+  // AUTHENTICATED_REAUTH_REQUIRED and let the user reauth (or the
+  // reconnect triggers pick up a materialized session). If UNREACHABLE,
+  // schedule the same reconnect triggers so a network heal transitions
+  // us out of cached mode.
+  _scheduleCachedRevalidation({ initialReachability: reachability })
+  return true
+}
+
+let _cachedRevalidationListenersBound = false
+let _cachedRevalidationInFlight = false
+let _deferredReprobeScheduled = false
+
+function _scheduleCachedRevalidation({ initialReachability = 'unreachable' } = {}) {
+  if (!_cachedRevalidationListenersBound) {
+    _cachedRevalidationListenersBound = true
+    const trigger = source => { void _attemptCachedRevalidation(source) }
+    try {
+      window.addEventListener('online', () => trigger('online-event'))
+    } catch (_) {}
+    try {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') trigger('visibility-visible')
+      })
+    } catch (_) {}
+  }
+  // Single deferred re-probe. Only scheduled when the initial probe said
+  // UNREACHABLE — a reachable backend already produced a definitive answer
+  // (the state is AUTHENTICATED_REAUTH_REQUIRED and no timer will fix that;
+  // the user has to sign in or the reconnect triggers materialize a fresh
+  // session). This replaces the earlier unconditional 3s retry that fired
+  // even when the state was already known.
+  if (!_deferredReprobeScheduled && initialReachability === 'unreachable') {
+    _deferredReprobeScheduled = true
+    setTimeout(() => { void _attemptCachedRevalidation('deferred-reprobe') }, 5000)
+  }
+}
+
+async function _attemptCachedRevalidation(source) {
+  if (_cachedRevalidationInFlight) return
+  const current = getAuthState()
+  const cachedStates = new Set([AUTH_STATE.AUTHENTICATED_CACHED, AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED])
+  if (!cachedStates.has(current.state)) return
+  _cachedRevalidationInFlight = true
+  _bootMark('revalidation-started', { source, fromState: current.state })
+  _authLog('cached_revalidation_started', { source, fromState: current.state })
+  try {
+    // Re-probe reachability so a network-heal / network-drop transitions
+    // state correctly even if getSession() returns the same null-session
+    // it returned at boot.
+    let reachability = 'unreachable'
+    try { reachability = await probeBackendReachability() }
+    catch (_) { reachability = 'unreachable' }
+
+    let session = null
+    let sessionError = null
+    try {
+      clearSharedAuthSessionCache()
+      session = await getSharedAuthSession({ refresh: true })
+    } catch (err) {
+      sessionError = err
+    }
+    if (sessionError) {
+      if (_isExplicitAuthRejection(sessionError)) {
+        _authLog('cached_revalidation_auth_rejected', { code: _safeErrorCode(sessionError) })
+        // Server said no — kick a real sign-out so the SIGNED_OUT handler
+        // performs the normal purge (which will also clear the snapshot).
+        try { await supabase.auth.signOut() } catch (err) { console.warn('signOut after cached revalidation rejection failed:', err) }
+        return
+      }
+      _authLog('cached_revalidation_transport_failed', { code: _safeErrorCode(sessionError) })
+      // Sync state to probe result — a probe that flipped reachable while
+      // the session call still failed with a transport error is unlikely
+      // but harmless to reflect.
+      _syncCachedStateWithReachability(current.userId, reachability)
+      return
+    }
+    if (!session?.user) {
+      _authLog('cached_revalidation_no_user', { reachability })
+      _syncCachedStateWithReachability(current.userId, reachability)
+      return
+    }
+    // Route through the normal resolve pipeline. This will refresh header +
+    // cloud plan, persist a fresh snapshot, and transition state to
+    // AUTHENTICATED_COMPLETE. It also handles the account-switch case
+    // where a different user's session materializes.
+    try {
+      await resolveAuthenticatedSessionOnce(session, `cached_revalidation:${source}`)
+      _bootMark('revalidation-completed')
+      _authLog('cached_revalidation_completed', { ok: true })
+    } catch (err) {
+      _authLog('cached_revalidation_completed', { ok: false, code: _safeErrorCode(err) })
+    }
+  } finally {
+    _cachedRevalidationInFlight = false
+  }
+}
+
+function _syncCachedStateWithReachability(userId, reachability) {
+  const target = reachability === 'reachable'
+    ? AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED
+    : AUTH_STATE.AUTHENTICATED_CACHED
+  const current = getAuthState()
+  if (current.state === target) return
+  // Only transition between the two cached-ish states; do not resurrect
+  // the shell from an unauthenticated or resolving state here.
+  const cachedStates = new Set([AUTH_STATE.AUTHENTICATED_CACHED, AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED])
+  if (!cachedStates.has(current.state)) return
+  setAuthState({ state: target, userId })
+  _authLog('cached_state_synced_with_reachability', { target, reachability })
+}
+
 async function init() {
   initDebugDashboard()
 
@@ -1047,8 +1393,22 @@ async function init() {
     || (_urlLooksLikeSupabaseOAuthCallback(window.location.href)
       ? await maybeHandleSupabaseOAuthCallback(window.location.href)
       : null)
-  const initialSession = (await getSharedAuthSession({ refresh: true })) || oauthCallbackResult?.session || null
-  _bootMark('supabase-session-resolved', { hasUser: !!initialSession?.user })
+  // Stage B1: capture whatever error the eager session refresh throws so a
+  // later cached-boot classifier can distinguish transport from auth-reject.
+  // A thrown session must NOT crash init() — the whole point of cached-boot
+  // is that a network failure here is recoverable via the persisted record.
+  let eagerSession = null
+  let eagerSessionError = null
+  try {
+    eagerSession = await getSharedAuthSession({ refresh: true })
+  } catch (err) {
+    eagerSessionError = err
+  }
+  const initialSession = eagerSession || oauthCallbackResult?.session || null
+  _bootMark('supabase-session-resolved', {
+    hasUser: !!initialSession?.user,
+    thrown: !!eagerSessionError,
+  })
 
   // Deferred handler — runs OUTSIDE the Supabase auth lock. Safe to call
   // Supabase APIs, PostgREST, RPCs here.
@@ -1095,10 +1455,18 @@ async function init() {
         console.error('Draft purge on sign-out failed; owner marker preserved for next-boot retry:', _safeErrorCode(err))
       }
       await _clearInMemoryUserState()
-      if (purgeOk) clearLocalDataOwner()
+      if (purgeOk) {
+        // Stage B1: the cached-authenticated snapshot must NOT survive a
+        // real sign-out — otherwise a subsequent offline launch would let
+        // the just-signed-out account back in. Order matches
+        // clearLocalDataOwner semantics: only clear on successful purge.
+        clearLocalDataOwner()
+        clearLastValidatedAccount()
+      }
       try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay failed:', _safeErrorCode(err)) }
       _hideProfileResolutionError()
       hideAccountTransitionBlocker()
+      _setOfflineIndicator(false)
       setAuthState({ state: AUTH_STATE.UNAUTHENTICATED, userId: null })
       ensureAuthUiInitialized(true)
       showAuthOverlay()
@@ -1141,16 +1509,38 @@ async function init() {
       await resolveAuthenticatedSessionOnce(initialSession, 'initial_boot')
     } catch (_) { /* error surface handles UX */ }
   } else {
-    setAuthState({ state: AUTH_STATE.UNAUTHENTICATED, userId: null })
-    if (document.getElementById('auth-overlay').style.display !== 'flex') {
-      showAuthOverlay()
+    // Stage B1: cached-authenticated boot path. Only attempt when we are
+    // NOT in recovery mode, NOT handling a Supabase OAuth error, and the
+    // reset-password form is not already visible. `oauthCallbackResult`
+    // returning `status === 'error'` means the server has actively rejected
+    // this launch; treat that as an explicit auth failure and skip cached
+    // boot.
+    let cachedBootHandled = false
+    const resetFormVisible = document.getElementById('reset-password-form')?.style.display === 'block'
+    const oauthErrored = oauthCallbackResult?.status === 'error'
+    if (!recoveryModeActive && !resetFormVisible && !oauthErrored && !hasHashError) {
+      try {
+        cachedBootHandled = await _tryCachedAuthenticatedBoot({
+          sessionError: eagerSessionError,
+          hasHashError,
+        })
+      } catch (err) {
+        console.warn('Cached-authenticated boot path threw; falling through to unauth:', err)
+        cachedBootHandled = false
+      }
     }
-    ensureAuthUiInitialized(hasHashError || recoveryModeActive)
-    if (recoveryModeActive) {
-      switchToResetPassword()
-    } else if (oauthCallbackResult?.status === 'error') {
-      switchToLogin()
-      showAuthError(oauthCallbackResult.errorMessage || oauthCallbackResult.error?.message || t('auth.genericError'))
+    if (!cachedBootHandled) {
+      setAuthState({ state: AUTH_STATE.UNAUTHENTICATED, userId: null })
+      if (document.getElementById('auth-overlay').style.display !== 'flex') {
+        showAuthOverlay()
+      }
+      ensureAuthUiInitialized(hasHashError || recoveryModeActive)
+      if (recoveryModeActive) {
+        switchToResetPassword()
+      } else if (oauthCallbackResult?.status === 'error') {
+        switchToLogin()
+        showAuthError(oauthCallbackResult.errorMessage || oauthCallbackResult.error?.message || t('auth.genericError'))
+      }
     }
   }
 

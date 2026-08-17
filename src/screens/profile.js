@@ -287,6 +287,79 @@ export async function loadProfile() {
   await Promise.all([_loadProfileData(), _loadFriends(), _loadPending()])
 }
 
+// Synchronous, network-free header renderer for Stage B1's cached-authenticated
+// boot path. Paints username/display-name/avatar from a persisted profile
+// summary; if the cached avatar URL is a protected-media URL that would
+// require a network fetch we degrade to initials rather than attempt the
+// fetch before the shell is even revealed.
+//
+// This function must NEVER touch Supabase — it runs before we know whether
+// we have connectivity. `refreshHeaderProfileButtons()` remains the
+// authoritative online path and will overwrite the DOM once revalidation
+// succeeds.
+export function renderCachedHeaderProfileButtons(profileSummary = {}, options = {}) {
+  const emailFallback = _cleanString(options?.email) || state.user?.email || ''
+  const rawUsername = _cleanString(profileSummary?.username)
+  const rawDisplay = _cleanString(profileSummary?.display_name)
+  const avatarUrl = _cleanString(profileSummary?.avatar_url)
+
+  const normalizedUsername = _normalizeUsername(rawUsername || rawDisplay, emailFallback)
+  const initials = _initials(normalizedUsername || rawDisplay || emailFallback)
+
+  // Only accept avatar URLs that a plain <img src> can display offline. That
+  // means public URLs (http/https) or a data URI. Anything that requires
+  // token-bearing fetches (protected-media / signed URLs behind Workers)
+  // must fall back to initials until refreshHeaderProfileButtons runs
+  // online. We intentionally treat Supabase signed-URLs as unsafe here
+  // because they still require the WebView to reach Supabase.
+  const canUseCachedAvatar = _looksLikeInlineOrPublicAvatar(avatarUrl)
+
+  const targets = [
+    ['home-profile-img', 'home-profile-initials'],
+    ['finds-profile-img', 'finds-profile-initials'],
+    ['map-profile-img', 'map-profile-initials'],
+    ['people-profile-img', 'people-profile-initials'],
+  ]
+
+  for (const [imgId, initialsId] of targets) {
+    const img = document.getElementById(imgId)
+    const label = document.getElementById(initialsId)
+    if (!img || !label) continue
+
+    label.textContent = initials
+    if (canUseCachedAvatar) {
+      img.src = avatarUrl
+      img.style.display = 'block'
+      label.style.display = 'none'
+    } else {
+      img.removeAttribute('src')
+      img.style.display = 'none'
+      label.style.display = ''
+    }
+  }
+}
+
+function _cleanString(value) {
+  const s = String(value || '').trim()
+  return s
+}
+
+function _looksLikeInlineOrPublicAvatar(url) {
+  const value = _cleanString(url)
+  if (!value) return false
+  if (value.startsWith('data:image/')) return true
+  // Public storage URLs from Supabase are of the shape .../storage/v1/object/public/…
+  // We keep the check tolerant: any http(s) URL that is not obviously a
+  // signed URL (`?token=…` / `sign/`) is considered safe to use offline; the
+  // <img> tag falls back gracefully if the fetch fails.
+  if (/^https?:\/\//i.test(value)) {
+    if (/[?&]token=/.test(value)) return false
+    if (/\/object\/sign\//.test(value)) return false
+    return true
+  }
+  return false
+}
+
 export async function refreshHeaderProfileButtons(profile = null) {
   const uid = state.user?.id
   if (!uid) return
