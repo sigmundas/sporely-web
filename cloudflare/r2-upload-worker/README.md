@@ -5,7 +5,7 @@ Cloudflare Worker for authenticated media uploads to the `sporely-media` R2 buck
 ## What It Does
 
 - Accepts authenticated `GET`, `PUT`, and `DELETE` requests at `/upload/{key}`.
-- Accepts authenticated `POST /artsorakel/media` requests that identify saved R2 images without browser-side image downloads.
+- Accepts authenticated `POST /artsorakel` and `POST /artsorakel/media` requests that forward image identification to Artsdatabanken's Artsorakel `/identify` API. The Worker attaches the server-side `ARTSORAKEL_API_TOKEN` bearer credential so browsers never see it.
 - Validates the caller's Supabase JWT before writing to R2.
 - Enforces that the object key starts with the authenticated user's `sub`, for example:
   - `user_uuid/observation_uuid/field_001.jpg`
@@ -29,6 +29,7 @@ See `wrangler.toml` and `wrangler.toml.example`.
 - optional `SUPABASE_JWKS_URL`
 - optional `SUPABASE_JWT_SECRET`
 - secret `SUPABASE_SERVICE_ROLE_KEY` for profile storage tally/quota updates
+- secret `ARTSORAKEL_API_TOKEN` — Artsdatabanken Artsorakel `/identify` bearer token. Required for `/artsorakel` and `/artsorakel/media` routes.
 - optional `FREE_STORAGE_QUOTA_BYTES`
 
 ## Deploy
@@ -40,7 +41,9 @@ See `wrangler.toml` and `wrangler.toml.example`.
 4. Run `supabase/profile-storage-usage.sql` in Supabase SQL Editor.
 5. Add the service role key secret:
    `wrangler secret put SUPABASE_SERVICE_ROLE_KEY`
-6. Deploy:
+6. Add the Artsorakel bearer token secret (required for `/artsorakel*`):
+   `npx wrangler secret put ARTSORAKEL_API_TOKEN`
+7. Deploy:
    `wrangler deploy`
 
 ## Request Format

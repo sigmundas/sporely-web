@@ -551,7 +551,7 @@ test('retries multipart field "file" after an explicit multipart-style 400 respo
   })
 })
 
-test('falls back to direct Artsorakel when the proxy fails', async () => {
+test('does not fall back to direct Artsdatabanken when the proxy fails', async () => {
   await withHarness(async harness => {
     const calls = []
     const blob = new Blob(['webp'], { type: 'image/webp' })
@@ -560,22 +560,14 @@ test('falls back to direct Artsorakel when the proxy fails', async () => {
     harness.setProxySession('proxy-token')
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
-      if (url.startsWith('https://proxy.example')) {
-        return makeResponse({ ok: false, status: 500, statusText: 'Proxy Error', textBody: 'proxy failed' })
-      }
-      return makeResponse({ jsonBody: { predictions: [{ probability: 0.9, taxon: { scientificName: 'Cantharellus cibarius' } }] } })
+      return makeResponse({ ok: false, status: 500, statusText: 'Proxy Error', textBody: 'proxy failed' })
     })
 
-    await runArtsorakel(blob, 'no')
+    await assert.rejects(runArtsorakel(blob, 'no'))
 
-    const proxyHeaders = new Headers(calls[0].init.headers)
-    const directHeaders = new Headers(calls[1].init.headers)
+    assert.equal(calls.length, 1)
     assert.equal(calls[0].url, 'https://proxy.example/artsorakel')
-    assert.equal(calls[1].url, 'https://ai.artsdatabanken.no')
-    assert.equal(proxyHeaders.get('X-App-Name'), 'Sporely')
-    assert.equal(proxyHeaders.get('X-App-Version'), TEST_APP_VERSION)
-    assert.equal(directHeaders.get('X-App-Name'), 'Sporely')
-    assert.equal(directHeaders.get('X-App-Version'), TEST_APP_VERSION)
+    assert.equal(calls.some(call => call.url === 'https://ai.artsdatabanken.no'), false)
   })
 })
 
@@ -595,7 +587,7 @@ test('does not retry the alternate multipart field after a network failure', asy
   })
 })
 
-test('one Artsorakel deadline spans proxy failure and a hanging direct fallback', async () => {
+test('Artsorakel proxy timeout aborts without falling back to direct Artsdatabanken', async () => {
   await withHarness(async harness => {
     const calls = []
     const timers = createManualTimers()
@@ -605,9 +597,6 @@ test('one Artsorakel deadline spans proxy failure and a hanging direct fallback'
     harness.setProxySession('proxy-token')
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
-      if (url.startsWith('https://proxy.example')) {
-        throw new TypeError('Failed to fetch')
-      }
       return new Promise((resolve, reject) => {
         init.signal.addEventListener('abort', () => {
           const error = new Error('aborted')
@@ -625,15 +614,14 @@ test('one Artsorakel deadline spans proxy failure and a hanging direct fallback'
         clearTimeoutImpl: timers.clearTimeoutImpl,
       },
     )
-    await waitFor(() => calls.length === 2)
+    await waitFor(() => calls.length === 1)
     timers.advance(20_000)
     await assert.rejects(operation, error => error?.code === 'timeout')
 
     assert.deepEqual(calls.map(call => call.url), [
       'https://proxy.example/artsorakel',
-      'https://ai.artsdatabanken.no',
     ])
-    assert.equal(calls.every(call => call.init.body.entries[0].name === 'image'), true)
+    assert.equal(calls[0].init.body.entries[0].name, 'image')
     assert.equal(timers.activeCount, 0)
   })
 })
@@ -682,7 +670,7 @@ test('multi-image Artsorakel timeout does not start field or per-image fallbacks
   })
 })
 
-test('throws an error with endpoint and blob metadata when both proxy and direct fail', async () => {
+test('throws an error with endpoint and blob metadata when the proxy fails', async () => {
   await withHarness(async harness => {
     const blob = new Blob(['webp'], { type: 'image/webp' })
     harness.setBlobDimensions(blob, 1700, 1300)
@@ -694,7 +682,6 @@ test('throws an error with endpoint and blob metadata when both proxy and direct
       runArtsorakel(blob, 'no'),
       error => {
         assert.match(error.message, /proxy/i)
-        assert.match(error.message, /direct/i)
         assert.match(error.message, /status=500/)
         assert.match(error.message, /body=bad news/)
         assert.match(error.message, /blob=image\/jpeg:/)
@@ -704,12 +691,13 @@ test('throws an error with endpoint and blob metadata when both proxy and direct
   })
 })
 
-test('does not use VITE_MEDIA_UPLOAD_BASE_URL as an implicit Artsorakel proxy', async () => {
+test('uses VITE_MEDIA_UPLOAD_BASE_URL as the Artsorakel proxy when the explicit URL is unset', async () => {
   await withHarness(async harness => {
     const calls = []
     const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
     harness.setBlobDimensions(blob, 800, 600)
     harness.setEnv({ VITE_MEDIA_UPLOAD_BASE_URL: 'https://upload.example' })
+    harness.setProxySession('proxy-token')
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
       return makeResponse({ jsonBody: { predictions: [] } })
@@ -717,8 +705,10 @@ test('does not use VITE_MEDIA_UPLOAD_BASE_URL as an implicit Artsorakel proxy', 
 
     await runArtsorakel(blob, 'no')
 
-    assert.equal(calls[0].url, 'https://ai.artsdatabanken.no')
-    assert.equal(calls.some(call => call.url.startsWith('https://upload.example')), false)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].url, 'https://upload.example/artsorakel')
+    assert.equal(calls.some(call => call.url === 'https://ai.artsdatabanken.no'), false)
+    assert.equal(new Headers(calls[0].init.headers).get('Authorization'), 'Bearer proxy-token')
   })
 })
 
@@ -782,7 +772,7 @@ test('debug logging failures do not break the Artsorakel request', async () => {
 test('runArtsorakelForMediaKeys requires a real Artsorakel proxy', async () => {
   await withHarness(async harness => {
     const calls = []
-    harness.setEnv({ VITE_MEDIA_UPLOAD_BASE_URL: 'https://upload.example' })
+    harness.setEnv({})
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
       return makeResponse({ jsonBody: { predictions: [] } })

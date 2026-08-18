@@ -43,7 +43,9 @@ function _envText(key) {
 }
 
 function _getArtsorakelProxyBaseUrl() {
-  return _envText('VITE_ARTSORAKEL_BASE_URL').replace(/\/+$/, '')
+  const explicit = _envText('VITE_ARTSORAKEL_BASE_URL').replace(/\/+$/, '')
+  if (explicit) return explicit
+  return _envText('VITE_MEDIA_UPLOAD_BASE_URL').replace(/\/+$/, '')
 }
 
 function _buildNetworkErrorMessage(error) {
@@ -586,7 +588,6 @@ async function _requestArtsorakelResponse(preparedItems, options = {}) {
   }
 
   let response = null
-  let lastError = null
   let endpointUrl = ARTSDATA_AI_URL
   let endpointKind = 'direct'
 
@@ -612,32 +613,13 @@ async function _requestArtsorakelResponse(preparedItems, options = {}) {
   }
 
   if (proxyBaseUrl) {
-    try {
-      endpointUrl = `${proxyBaseUrl}/artsorakel`
-      endpointKind = 'proxy'
-      response = await runEndpoint(endpointUrl, proxyHeaders, endpointKind)
-    } catch (error) {
-      lastError = error
-      if (options.signal?.aborted || _isAbortLikeError(error)) throw error
-      console.warn('Artsorakel proxy failed, falling back to direct endpoint:', error)
-    }
-  }
-
-  if (!response) {
-    try {
-      endpointUrl = ARTSDATA_AI_URL
-      endpointKind = 'direct'
-      response = await runEndpoint(endpointUrl, null, endpointKind)
-    } catch (error) {
-      const combined = lastError
-        ? new Error(`${lastError.message}; direct fallback failed: ${error.message}`)
-        : error
-      if (combined === error) throw error
-      combined.cause = error
-      combined.proxyError = lastError
-      combined.directError = error
-      throw combined
-    }
+    endpointUrl = `${proxyBaseUrl}/artsorakel`
+    endpointKind = 'proxy'
+    response = await runEndpoint(endpointUrl, proxyHeaders, endpointKind)
+  } else {
+    endpointUrl = ARTSDATA_AI_URL
+    endpointKind = 'direct'
+    response = await runEndpoint(endpointUrl, null, endpointKind)
   }
 
   return { response, endpointUrl, endpointKind }
