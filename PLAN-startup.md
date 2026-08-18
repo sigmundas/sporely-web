@@ -1087,3 +1087,463 @@ Pre-resolution network side effects audited: `_fireClientActivity` → `recordCl
 - `src/profile-fetch-offline-fallback.test.js` — new (12 tests).
 - `src/startup-invariants.test.js` — 7 new invariants; 3 repointed at the shared reveal.
 - `PLAN-startup.md` — this section.
+
+---
+
+## Field-offline UX + reconnect polish
+
+Status: **implementation complete, uncommitted, on `main`.** Narrow follow-on to Stage B; not full Stage C.
+
+This pass fixes three field-observable regressions without expanding Stage B/C scope:
+
+1. Airplane-mode capture was blocked by an aggressive fresh-fix timeout (~6.5–8 s). Geolocation does not require the network, so the timeout is raised to 30 s so slow offline GNSS acquisition succeeds. `enableHighAccuracy=true` and the stale-session capture-token safeguards are preserved. Observation save never blocks on the fix; a timeout still surfaces the existing "GPS unavailable"-family UX.
+2. Finds screen showed a permanent "Loading…" or "No observations yet — go capture some!" whenever the app was in `AUTHENTICATED_CACHED` / `AUTHENTICATED_REAUTH_REQUIRED`. It now renders an intentional offline state and, for the "mine" scope, surfaces the existing IndexedDB sync queue as recognizably-local pending cards using the existing `getQueuedObservations(userId)` API — no new cache, no second image copy, filtered exactly like the sync processor. Per-item wording per capability: "Waiting for connection" (CACHED — including items stranded at stage `retrying` by a pre-disconnect failure), "Sign in to upload" (REAUTH), "Waiting to upload" (pre-processing), existing "Uploading image X of N…" / "Retrying upload" strings during active stages. Blocked items keep their existing user-facing blocked reason. A queue write immediately re-renders Finds via the existing `QUEUE_EVENT`; there is no `setTimeout` hack. *(The offline layout + wording were reworked in the follow-up pass below; the original `finds.offlineCachedTitle`/`finds.offlineCachedBody`/`finds.offlineReauthTitle`/`finds.olderRequireConnection` keys and the `.finds-offline-shell*` styles were replaced.)*
+3. Reconnect: on the auth-state transition `AUTHENTICATED_CACHED`/`AUTHENTICATED_REAUTH_REQUIRED` → `AUTHENTICATED_COMPLETE` (same user), `triggerSync()` is called and — if Finds is the current screen — `requestFindsRefresh(0)` fires. The raw `online` event still exists on `window`, but sync-queue's `triggerSync()` is gated by `canPerformCloudMutation()` (Stage B2b), so an `online` firing while state is still CACHED cannot upload; the fix is at the auth transition, not by weakening the queue gate. Duplicate starts are prevented by `triggerSync()`'s existing in-flight guard.
+
+### Implemented in this pass
+
+- Local sync queue visibility inside Finds (reusing `sync-queue.js`).
+- Intentional offline text for CACHED / REAUTH_REQUIRED (localized: en / nb_NO / sv_SE / de_DE).
+- Extended GPS wait for offline GNSS.
+- Auto-`triggerSync()` and Finds refresh on capability-COMPLETE revalidation.
+- SYNC_SUCCESS_EVENT already refreshes Finds when a queue item finalizes (unchanged, reused).
+
+### Still Stage C (NOT implemented here)
+
+- Persisted remote My Finds dataset (offline browse of prior observations).
+- Detail-page offline data (observation-detail read cache).
+- Offline maps.
+- Broader field cache beyond queued items.
+
+### Files changed
+
+- `src/screens/finds.js` — `_isOfflineFindsMode`, `_renderFindsOfflineShell`, offline gating in `loadFinds`, queue-status wording, QUEUE_EVENT listener extended for offline scopes.
+- `src/screens/review.js` — field-capture fresh-fix `timeoutMs: 30_000`.
+- `src/screens/import_review.js` — initial native-camera fresh-fix `timeoutMs: 30_000`.
+- `src/main.js` — `_bindReconnectTriggerToAuthState` (CACHED/REAUTH → COMPLETE authoritative reconnect).
+- `src/i18n.js` — new `finds.offline*` and `finds.pendingWaiting*` keys in en/nb_NO/sv_SE/de_DE *(offline keys reworded in the follow-up pass below)*.
+- `src/style.css` — offline-state styling *(replaced by `.finds-offline-note*` in the follow-up pass below)*.
+- `src/field-offline-ux.test.js` — new focused test (extended in the follow-up pass).
+- `src/screens/review.test.js` — updated timeout assertion to `30_000`.
+
+### Verification
+
+- `node --test src/field-offline-ux.test.js` → 9/9 pass at the time of this pass (the follow-up pass below extends the file; see its verification for final numbers).
+- `npm test` → 1026 tests, **988 pass, 2 fail, 36 skipped**. Both failures are the documented pre-existing ones (`src/screens/map.test.js` Leaflet CSS import under bare `node --test`; `supabase/functions/admin-ops/adminActions.test.ts` Deno) — unchanged and unrelated.
+- `npm run build` → succeeds; main chunk `main-Cd2xw7Ay.js` = 1,015.03 kB (275.62 kB gzip).
+- `git diff --check` → clean. `npx eslint` on changed files → 0 errors; only pre-existing warnings.
+
+### Android device acceptance (DEVICE-QA-REQUIRED)
+
+Not exercised on device this pass. Six scenarios to verify manually:
+
+1. Online → toggle airplane mode → open Finds ⇒ intentional offline text; no "Loading…" hang.
+2. Airplane-mode capture ⇒ GPS acquires within ≤30 s or times out cleanly; observation save proceeds either way.
+3. Force-stop / reopen offline ⇒ cached shell + Finds offline text + any queued items visible immediately.
+4. Restore connectivity while on Finds ⇒ auth transitions to COMPLETE, `triggerSync()` fires once, Finds refreshes; completed queue items disappear as their remote observation appears.
+5. Restore connectivity on another screen (Home / Map) ⇒ upload proceeds silently; Finds shows the fresh remote observation next time it opens.
+6. A → B account switch while B has no snapshot ⇒ A's queued cards must NOT render for B; sign-out clears rendered queue UI immediately.
+
+---
+
+## Native reconnect + offline Finds layout (device-QA follow-up)
+
+Status: **implementation complete, uncommitted, on `main`.** Narrow follow-on to the field-offline pass above; still NOT Stage C.
+
+Device QA on Android surfaced two remaining issues: (1) reconnect after airplane-mode-off was not reliably noticed (the WebView `online` event is unreliable in Capacitor), and (2) the offline Finds screen rendered a full-width plain-text paragraph flush against the viewport edge above/instead of the queued cards. Both are fixed here.
+
+### 1. Native device-connectivity signal (`@capacitor/network` 8.0.1)
+
+- New dependency `@capacitor/network@^8.0.1`; `npx cap sync android` ran (`android/app/capacitor.build.gradle` + generated `capacitor.settings.gradle` now include `:capacitor-network`; 8 Android plugins total).
+- New module `src/native-network.js` — bound once for the app lifetime from `main.js` (`_bindNativeConnectivityMonitor`), native builds only (`isNativeApp()`); the plugin is dynamically imported so web/PWA never loads it (verified: it lands in a lazy chunk, not `main-*.js`).
+- `networkStatusChange` **false→true edge** → wake-up callback. `connected === false` performs NO action (only arms the edge). A first `connected: true` with unknown prior state also notifies (covers an edge missed before binding); the bind-time `getStatus()` seed deliberately does NOT notify.
+- **Resume check:** on `visibilitychange → visible` AND on Capacitor `App` `resume`, the monitor runs `Network.getStatus()`; `connected === true` fires the same wake-up. This recovers a reconnect that happened while backgrounded even when the change event never reached the WebView.
+- INVARIANT: `connected === true` is ONLY a wake-up signal. The module imports no auth/capability/sync code (test-enforced); the actual recovery still runs `probeBackendReachability` → session refresh → `resolveAuthenticatedSessionOnce` → profile revalidation, and uploads stay behind `canPerformCloudMutation()`.
+- Cleanup: `unbindNativeNetworkMonitor()` on `pagehide` (same handler that drops the Supabase auth subscription).
+
+### 2. One deduped revalidation entry point
+
+`requestConnectivityRevalidation(reason)` in `main.js` is the single convergence point for: `native-network-change`, `native-resume-status`, `web-online`, `focus`, `visibility`, `deferred-probe`, `cached-watchdog`.
+
+- CACHED / REAUTH_REQUIRED → `_attemptCachedRevalidation(reason)` — unchanged pipeline, guarded by `_cachedRevalidationInFlight` (one probe + one session refresh per event burst) and by the per-user `_resolutionInFlight` map downstream.
+- AUTHENTICATED_COMPLETE → nothing to revalidate; the signal only nudges `triggerSync()` (self-deduping, capability-gated) so a mid-session reconnect drains the queue without waiting for the 30 s retry timer.
+- All other states → no-op.
+- The browser fallback listeners (`online`, `focus`, `visibilitychange:visible`) remain bound by `_scheduleCachedRevalidation` exactly as before (single call site inside the shared cached reveal — invariant preserved) and now route through the same entry point. Five platform events firing together issue ONE Supabase probe.
+
+### 3. COMPLETE transition starts the queue (unchanged, re-verified)
+
+`_bindReconnectTriggerToAuthState` (previous pass) remains the authoritative upload trigger: same-user CACHED/REAUTH → COMPLETE fires `triggerSync()` + `requestFindsRefresh(0)` when Finds is visible. A network callback that ran while capability was still denied is harmless — the transition re-fires the sync.
+
+### 4. Bounded cached-mode watchdog (added — judged necessary)
+
+Native events + resume checks are primary, but device QA already demonstrated lost events on OEM WebViews, and scenario A (airplane off while the app stays foregrounded and visible) has NO other signal if the plugin event is dropped. Backstop:
+
+- Runs ONLY while auth state === `AUTHENTICATED_CACHED` AND the app is visible AND `state.user.id === authState.userId` (same trusted user).
+- Ticks every **20 s** (`CACHED_WATCHDOG_INTERVAL_MS`); each tick probes only when the Finds screen is visible OR `getQueuedObservations(userId)` has pending work (cheap local IDB read); the probe goes through `requestConnectivityRevalidation('cached-watchdog')` — same dedupe.
+- Stops immediately on any state exit (COMPLETE / REAUTH_REQUIRED / UNAUTHENTICATED / RESOLVING — covers sign-out and account transitions) and on hide. Never polls in the healthy online state. `navigator.onLine` is never consulted.
+
+### 5. Finds offline layout v2 (queue-first, contained note)
+
+- Hierarchy: header/nav → **queued observation cards** (species/name, time, local preview, "Waiting for connection") → compact informational note. The note is appended INSIDE `_renderCards`/`_renderBySpecies` after the grid + footer (the previous `appendChild` after `_applyFilter()` was wiped by the async image-promise re-render — with queued items the info text never actually survived on device).
+- Wording (en/nb_NO/sv_SE/de_DE): with queue → headline `finds.offlineTitle` ("Finds offline") + `finds.offlineQueuedBody` ("Saved observations on this device are shown above. Reconnect to load your other Finds."); without queue → same headline + `finds.offlineEmptyBody` ("Reconnect to load your Finds. You can still capture new observations while offline."); REAUTH_REQUIRED → `finds.offlineReauthBody` ("Sign in to load your Finds and upload saved observations."). The old "Finds aren't available offline yet." headline and `finds.olderRequireConnection`/`finds.pendingWaitingRetry` keys are removed.
+- Presentation: `.finds-offline-note` — contained block sharing the cards' 14 px horizontal margins, `--card` background, `--border-dim` border, 16 px radius, small cloud-off icon, 13 px title + 12 px muted body. No edge-to-edge text, no giant paragraph.
+- Controls: Mine/Feed tabs, view toggle and search stay usable (local work); the scope/status/sort dropdowns are DISABLED offline via `_findsDropdownShouldDisable` (`is-disabled` + `button.disabled`) — they act on remote data, and the visibility scope filter could hide the queued cards. Re-enabled automatically on the next `loadFinds()` after COMPLETE.
+- Queue cards stranded at stage `retrying` by a pre-disconnect failure now show the offline wording too (no retry can run while capability is denied).
+- Reconnect race guard: an empty "mine" render while `hasActiveSyncPass()` (new read-only export from sync-queue) shows "Loading…" instead of flashing "No observations yet" between queue-card removal and the follow-up remote refresh.
+
+### 6. Finds auto refresh (existing paths, re-verified)
+
+COMPLETE transition → `requestFindsRefresh(0)` when Finds visible; `SYNC_SUCCESS_EVENT` → `requestFindsRefresh()` when Finds visible (initSyncFeedback); `QUEUE_EVENT` → refresh on stage changes/deletion. Desired sequence works without pull-to-refresh: "Waiting for connection" → reconnect → revalidation → COMPLETE → upload stages → card disappears → server observation renders.
+
+### 7. GPS (verify-only — no changes)
+
+The ≥30 s fresh-fix timeout from the previous pass is retained (`review.js` / `import_review.js`, `timeoutMs: 30_000`, `enableHighAccuracy: true`). Verified via code + tests that geolocation acquisition has NO auth/network capability gate: `geo.js` imports neither `capabilities.js` nor `auth-state.js` and never consults `navigator.onLine`; `_canAcquireLocation` gates only on the location preference / internal-override token, so the request starts and stays alive in `AUTHENTICATED_CACHED`, and a timeout never blocks observation save. **Android outdoor GPS QA is still pending (DEVICE-QA-REQUIRED, scenario C below).**
+
+### Files changed
+
+- `package.json` / `package-lock.json` — `@capacitor/network@^8.0.1`.
+- `android/app/capacitor.build.gradle` — `:capacitor-network` (via `npx cap sync android`).
+- `src/native-network.js` — NEW: native connectivity monitor (listener + resume getStatus + cleanup).
+- `src/main.js` — `requestConnectivityRevalidation`, `_bindNativeConnectivityMonitor`, bounded cached watchdog, web fallback reasons renamed (`web-online`/`focus`/`visibility`/`deferred-probe`), pagehide cleanup.
+- `src/sync-queue.js` — `hasActiveSyncPass()` export (read-only).
+- `src/screens/finds.js` — offline shell v2 (`_findsOfflineInfoHtml`, queue-first render, empty-state guards, offline dropdown disabling, retrying-stage offline wording).
+- `src/i18n.js` — `finds.offlineTitle`/`offlineQueuedBody`/`offlineEmptyBody`/`offlineReauthBody` ×4 locales; removed superseded keys.
+- `src/style.css` — `.finds-offline-note*` replaces `.finds-offline-shell*`.
+- `src/native-network.test.js` — NEW (14 tests).
+- `src/field-offline-ux.test.js` — extended to 20 tests (reconnect wiring, dedupe, watchdog bounds, layout/wording, GPS no-gate, different-user queue isolation).
+- `PLAN-startup.md` — this section + corrections to the superseded wording references above.
+
+### Verification
+
+- `node --test src/native-network.test.js` → 14/14 pass.
+- `node --test src/field-offline-ux.test.js` → 20/20 pass.
+- `node --test` on adjacent suites (startup-invariants, profile-fetch-offline-fallback, offline-boot, capability-gates, capabilities, geo, sync-queue, finds, review, people, cached-header) → all pass.
+- `npm test` → 1051 tests, **1013 pass, 2 fail, 36 skipped**. Both failures are the documented pre-existing ones (`src/screens/map.test.js` Leaflet CSS import under bare `node --test`; `supabase/functions/admin-ops/adminActions.test.ts` Deno) — unchanged and unrelated.
+- `npm run build` → succeeds; main chunk `main-De2lDqeS.js` = 1,000.51 kB (272.49 kB gzip); `@capacitor/network` code splits into a lazy chunk that web boots never fetch. `npx cap sync android` re-run after the final build (fresh assets copied; 8 Android plugins).
+- `git diff --check` → clean. `npx eslint` on changed files → 0 errors; remaining warnings are pre-existing.
+
+### Android device acceptance (DEVICE-QA-REQUIRED)
+
+Not performable in this environment. Three scenarios remain open, with expected outcomes:
+
+- **A — airplane off while app foregrounded (hands-free recovery):** boot offline → AUTHENTICATED_CACHED with queued item → leave the app visible on Finds → disable airplane mode. Expected: `networkStatusChange` (or the 20 s watchdog at worst) triggers ONE revalidation → COMPLETE → `triggerSync()` → card progresses (Waiting to upload → Saving observation… → Uploading image…) → card disappears → server observation appears WITHOUT pull-to-refresh or backgrounding.
+- **B — airplane off while backgrounded:** background the app in CACHED state → disable airplane mode → return to the app. Expected: resume/visibility `Network.getStatus()` discovers connectivity → same single revalidation path → COMPLETE → sync + Finds refresh as in A.
+- **C — outdoor GPS in airplane mode:** field capture with no connectivity. Expected: GNSS fix accepted within the 30 s window (`enableHighAccuracy`); on timeout the existing GPS-unavailable UX shows and the observation still saves locally. (Retained from the previous pass — still unexercised outdoors on device.)
+
+Scenarios 1–6 from the previous pass above also remain to be re-verified against the new layout/wording.
+
+## QA round 2 — connectivity loss, local-first Save, multi-item queue integrity (still NOT Stage C)
+
+Device QA against the previous pass surfaced three functional issues and one
+layout correction. This round fixes them narrowly; persisted remote My Finds
+data, detail-page offline data, offline maps and the broader field cache
+remain Stage C and are still NOT implemented.
+
+### 1. Native disconnect edge was previously ignored (Issue 1)
+
+Confirmed root cause: `src/native-network.js` only surfaced the false→true
+edge (`connected === false` performed "NO action" by design) and the
+reconnect watchdog runs only while AUTHENTICATED_CACHED — so airplane mode
+while AUTHENTICATED_COMPLETE left a permanently stale "online" state: no
+Offline pill, Finds ran doomed remote loaders and showed the misleading
+"No observations yet", and Save could hit transport errors.
+
+Fix — single connectivity-loss entry point:
+- `native-network.js` now notifies an optional `onConnectivityLost` on the
+  true→false `networkStatusChange` edge AND when the foreground/resume
+  `Network.getStatus()` check reports `connected === false` (no waiting for
+  a request to fail). Restore-edge semantics are unchanged.
+- `main.js` `handleConnectivityLost(reason)`: while COMPLETE, and only when
+  the trusted identity invariants hold (auth userId === `state.user.id` ===
+  last-validated-snapshot user === local-data owner), the SAME user is
+  downgraded to AUTHENTICATED_CACHED via the existing `setAuthState`
+  machinery — no sign-out, no session/cache/queue purge, no shell rebuild.
+  Invariant failure fails closed (log only). Consequences flow from existing
+  subscriptions: Offline pill, `canPerformCloudMutation()` denial, cached
+  watchdog arming, Finds offline swap.
+- Web/PWA: `window 'offline'` acts as the same loss hint. `navigator.onLine`
+  is still never treated as proof the backend IS reachable; no COMPLETE
+  poller was added (watchdog remains CACHED-only).
+- Finds follows the loss immediately (E): the downgrade bumps the Finds
+  load sequence (`requestFindsRefresh(0)`) so in-flight stale remote results
+  are discarded and the offline note renders; "No observations yet" is only
+  reachable after an authoritative COMPLETE remote query.
+
+### 2. Save during stale-COMPLETE failed with "Could not queue observation" (Issue 2)
+
+Confirmed root cause: the durable enqueue itself is IndexedDB-only and
+succeeded — but `saveObservationBatch()` ran `refreshHome()` and
+`openFinds('mine')` inside the SAME try block after the queue write; their
+Supabase fetches threw `TypeError: Failed to fetch` which the outer catch
+mis-reported as a queue failure.
+
+Fix — local-first Save invariant:
+- Nothing between Save start and the committed queue write performs network
+  I/O (verified by test). Post-save `refreshHome`/`openFinds` now run in
+  their own try/catch: a transport failure there logs a warning; the
+  "Could not queue observation" toast is reserved for genuine LOCAL
+  persistence failures.
+- `_runSyncQueue()` wraps its `getSharedAuthSession({ refresh: true })` in
+  try/catch so a transport race no longer rejects the sync pass (queue
+  untouched, next reconnect trigger retries).
+- Encoding/preparation timing unchanged; images still serialize locally
+  before the queue commit and upload variants still prepare during sync.
+
+### 3. Multi-item queue could collapse into one remote observation (Issue 3)
+
+Audit of `_findRemoteObservationForQueueItem()`: recovery matched by
+`user_id + captured_at` and ran UNCONDITIONALLY for any item without a
+`remoteObservationId`. With a shared `captured_at` (imported EXIF second
+granularity, bursts, missing-timestamp fallbacks), Q2/Q3 could "recover"
+Q1's freshly inserted remote row, see its image set as complete, finalize
+and be deleted WITHOUT uploading — several local observations silently
+collapsing into one remote row (device QA: only one Find after reconnect).
+
+Fix — no DB migration required:
+- Recovery is now gated on a persisted prior insert attempt:
+  `syncInsertAttemptedAt` is written to the queue item immediately BEFORE
+  the observation insert request; only items whose insert response may have
+  been lost are eligible (`shouldAttemptRemoteRecovery`). Fresh items always
+  insert their own remote row.
+- A per-pass `claimedRemoteIds` set (seeded from every item's persisted
+  `remoteObservationId`, extended on each insert/recovery) guarantees a
+  remote id can never be recovered by a second queue item
+  (`pickRecoveredRemoteObservationId`). Ambiguity resolves toward a fresh
+  insert, never toward collapsing two local observations.
+- Finalization invariant re-verified and test-pinned: a queue item is
+  deleted ONLY by `_finalizeSyncedQueueItem` after remote confirmation of
+  the parent row AND the full expected image count; the processing loop
+  never deletes directly, so processing Q1 cannot delete Q2/Q3. Retryable
+  errors mark 'retrying' and halt the pass, retaining the failed and later
+  items for the scheduled retry.
+
+### 4. Finds offline info box moved ABOVE queued cards (layout F)
+
+The compact contained note now renders first, then the queued cards.
+Wording (en): with queued items — "Finds offline" / "Saved observations on
+this device are shown below. Reconnect to load your other Finds."; without —
+"Finds offline" / "Reconnect to load your Finds. You can still capture new
+observations while offline."; REAUTH — "Sign in to load your Finds and
+upload saved observations." Localized in en / nb_NO / sv_SE / de_DE.
+
+### 5. GPS and cold start
+
+GPS unchanged this round (high accuracy, 30 s timeout, no network/auth
+gate); outdoor airplane QA still pending. The reported cold-start "minor
+hiccup" was not reproducible from the description — no speculative redesign;
+existing `_bootMark`/`_authLog` instrumentation is preserved so the next
+device test can characterize it.
+
+### Files changed (this round)
+
+- `src/native-network.js` (+ loss callback, resume-loss detection)
+- `src/main.js` (`handleConnectivityLost`, window offline hint, monitor bind)
+- `src/screens/review.js` (local-first Save; post-save nav isolated)
+- `src/screens/import_review.js` (per-group local enqueue error isolation;
+  post-save Finds navigation isolated)
+- `src/screens/finds.js` (`_mergeFindsItems` likely-same dedup restricted to
+  pending-vs-remote pairs — remote rows never collapse into one card;
+  helper exported for tests)
+- `src/sync-queue.js` (recovery gating, claimed-id set, attempt marker,
+  transport-safe session refresh)
+- `src/i18n.js` ("shown below" wording, 4 locales)
+- `src/connectivity-loss.test.js` (new), `src/native-network.test.js`,
+  `src/field-offline-ux.test.js` (updated)
+- `PLAN-startup.md` — this section.
+
+### Android device acceptance (DEVICE-QA-REQUIRED)
+
+None of this round was verified on a physical device. Required scenarios:
+online→airplane (Offline pill + Finds offline note within seconds);
+airplane capture with GPS wait; force-stop/reopen offline; restore
+connectivity on Finds (cards progress, remote Finds refresh, ≥3 queued
+observations produce ≥3 distinct remote observations); restore connectivity
+on another screen; A→B account switch (A's queue never renders for B).
+
+## QA round 3 — live reconnect, onLine gates, watchdog poll, chips, GPS stuck (still NOT Stage C)
+
+Device QA of round 2 confirmed WORKING: runtime online→offline detection
+(Offline pill, offline Finds/queue view), durable local-first offline Saves,
+first offline GNSS fix (~100 m on the test device), and the Finds dedup fix
+(previously "lost" observations reappeared once online — they had been
+uploaded but collapsed client-side).
+
+STILL BROKEN before this round: live offline→online recovery while the
+process stayed alive (app remained CACHED, queue pending, pull-to-refresh
+inert; force-close + reopen synced immediately); Offline and Sync header
+tags overlapped on Home; a second consecutive capture session could remain
+on "Finding location…" indefinitely after no fix.
+
+### 1. Live reconnect trace + fixes
+
+The instrumented path is: Capacitor `networkStatusChange` →
+native-network.js callback → `requestConnectivityRevalidation(reason)` →
+reachability probe → session refresh → auth transition →
+`triggerSync()` → queue pass. Dev logging (logcat/WebView console, no
+tokens/URLs): `[network] status-change connected=…`, `[network] watchdog
+getStatus connected=…`, `[auth] reconnect requested reason=…`, `[auth]
+reconnect probe reachable/unreachable`, `[auth] reconnect COMPLETE/CACHED`,
+`[sync] reconnect trigger`, `[sync] queue pass started`.
+
+Failures found in the tree and fixed:
+- **navigator.onLine was a hard sync gate.** `_runSyncQueue()` returned on
+  `!navigator.onLine`, the item loop `break`-ed on it, `_scheduleSyncRetry()`
+  refused to schedule on it, and the keepalive consulted it. On Android
+  WebViews `navigator.onLine` can stay stale-false after Capacitor reports
+  connectivity — so even a successful CACHED→COMPLETE transition could not
+  drain the queue until a process restart. All four uses removed. Authority
+  is now: COMPLETE capability gate (`canPerformCloudMutation()`, checked by
+  triggerSync and now mid-pass) + `canSyncOnCurrentConnection()`. A genuinely
+  offline attempt fails with a transport error, items stay queued 'retrying'.
+- **Native connectivity events were edge-dependent.** `connected===true` was
+  suppressed when `_lastConnected` was already true (a lost false event or a
+  paused WebView silenced recovery forever). Every status event is now a
+  WAKE-UP in both directions; dedupe/throttle live downstream
+  (`_cachedRevalidationInFlight` + 15 s backend throttle; loss handler
+  self-guards on COMPLETE).
+- **Cached watchdog now polls the local OS status.** While
+  AUTHENTICATED_CACHED + visible + same trusted user, native builds run
+  `Network.getStatus()` every ~5 s (local query, zero network I/O) via the
+  new `checkNativeConnectivityNow()`; `false` → stay cached, no backend
+  request; `true` → deduped revalidation. Backend revalidation attempts are
+  throttled to ≥15 s (`CACHED_REVALIDATION_MIN_RETRY_MS`) so internet-less
+  Wi-Fi cannot hammer Supabase. Web keeps the previous ≥20 s probe fallback.
+  Polling stops on COMPLETE / REAUTH / UNAUTHENTICATED / hidden / sign-out /
+  account transition — never polls in healthy COMPLETE.
+- **Pull-to-refresh while CACHED is a manual recovery signal.** Finds
+  dispatches `sporely-connectivity-revalidation-request`
+  ('finds-pull-refresh'); main.js routes it through the same gated
+  revalidation entry point (bypasses only the retry throttle, never
+  auth/capability gates). Success → COMPLETE transition refreshes Finds and
+  triggers sync; genuinely offline → the offline queue view remains.
+
+### 2. Offline / Sync chip precedence
+
+AUTHENTICATED_CACHED → Offline pill only: `_setOfflineIndicator(true)` hides
+`#header-sync-tag`, and Home's `checkSyncStatus()` renders the Sync tag only
+in AUTHENTICATED_COMPLETE (which also removes its Supabase probe from cached
+mode). Never both in the header.
+
+### 3. GPS second-capture stuck state
+
+Root cause: the capture-session watch (`startLocationWatch({ requestFreshFix:
+true })`) passes no timeout to `watchPosition`, and an Android GNSS watch
+that never obtains a fix may never invoke its error callback — the first
+capture's fix was the only thing that ever cleared "Finding location…".
+Fix: a fresh-fix acquisition supervisor
+(`LOCATION_FRESH_FIX_ACQUISITION_TIMEOUT_MS` = 30 s, acquisition timeout
+unchanged) clears `requestingFreshFix` and surfaces the standard timeout
+state when no session fix arrived, while the watch keeps listening for a
+late same-session fix. The supervisor is bound to its watch id and cleared
+on watch teardown, so a session-A timer can never mutate session B. Saving
+was and remains never blocked on GPS.
+
+### Files changed (this round)
+
+- `src/native-network.js` (wake-up semantics both directions,
+  `checkNativeConnectivityNow()`, `[network]` dev logs)
+- `src/main.js` (watchdog → 5 s native OS poll + 15 s backend throttle,
+  pull-refresh event listener, chip precedence, `[auth]`/`[sync]` dev logs)
+- `src/sync-queue.js` (navigator.onLine removed everywhere; mid-pass
+  capability halt; `[sync] queue pass started`)
+- `src/screens/finds.js` (pull-refresh recovery event)
+- `src/screens/home.js` (Sync tag gated on COMPLETE)
+- `src/geo.js` (fresh-fix acquisition supervisor)
+- `src/live-reconnect.test.js` (new), `src/native-network.test.js`,
+  `src/connectivity-loss.test.js`, `src/field-offline-ux.test.js` (updated
+  to the wake-up / poll / throttle contracts)
+- `PLAN-startup.md` — this section.
+
+Still explicitly NOT Stage C: no persisted remote My Finds dataset, no
+detail-page offline data, no offline maps, no broader field cache.
+
+### Android device acceptance (DEVICE-QA-REQUIRED)
+
+Not verified on a physical device this round: live airplane-off recovery
+while the app stays foregrounded (expect `[network]`/`[auth]`/`[sync]` log
+chain, Offline pill clears, queue drains, Finds auto-refreshes, both queued
+observations become two distinct remote observations); pull-to-refresh
+recovery on Finds while CACHED; chip precedence at narrow widths; second
+consecutive offline capture leaving "Finding location…" at ~30 s; outdoor
+airplane-mode GNSS.
+
+## QA round 4 — live reconnect: backend probe is the authority (still NOT Stage C)
+
+Device result after round 3: live reconnect STILL failed (CACHED + restore
+connectivity → app stayed Offline indefinitely; force-close + reopen synced
+immediately). Cold-start detection, the durable queue and cloud sync are
+fine — the defect was specifically the live CACHED→COMPLETE recovery path.
+
+### Why the round-3 watchdog did not fire (tree audit)
+
+1. The round-3 native watchdog gated the backend probe on
+   `Network.getStatus().connected === true`. On the test device that status
+   evidently never turned true while the app stayed foregrounded (stale or
+   undelivered plugin state; a plugin gap even returns null silently) — so
+   NO backend probe was ever attempted. Native connectivity state has now
+   twice proven unreliable as a recovery PREREQUISITE.
+2. The web/window `online`/`focus`/`visibilitychange` wake-up listeners were
+   bound only inside `_scheduleCachedRevalidation`, which runs only on the
+   cached BOOT reveal paths — a RUNTIME COMPLETE→CACHED downgrade (start
+   online → airplane → restore) had no such wake-ups at all.
+
+### Fixes
+
+- **Network status demoted to a wake-up hint everywhere.** No
+  navigator.onLine, Capacitor `Network.connected`, or `networkStatusChange`
+  event is required before a backend reachability probe while CACHED. The
+  probe (`probeBackendReachability`) is the authority.
+- **Simple robust CACHED watchdog:** while auth === AUTHENTICATED_CACHED +
+  app visible + same trusted user → every ~15 s
+  (`CACHED_WATCHDOG_INTERVAL_MS = 15_000`) →
+  `requestConnectivityRevalidation('cached-watchdog')` → probe →
+  unreachable: remain CACHED; reachable: session refresh → same user →
+  AUTHENTICATED_COMPLETE → `triggerSync()` + Finds refresh. Intentionally a
+  real HTTP probe: CACHED-only, foreground-only, ~15 s, stops instantly on
+  COMPLETE / REAUTH_REQUIRED / UNAUTHENTICATED / hidden / sign-out /
+  account transition. Never polls in COMPLETE or REAUTH_REQUIRED.
+- **Native events are the fast path only.** `networkStatusChange
+  connected=true` immediately calls the revalidation entry point (no
+  getStatus re-query — test-pinned); resume/visibility wake-ups likewise.
+  The 15 s watchdog guarantees eventual recovery if Android never delivers
+  them.
+- **Wake-up listeners bound at module init** so runtime downgrades are
+  covered.
+- **Pull-to-refresh probes directly:** Finds CACHED pull dispatches
+  `finds-pull-refresh` with `force: true` — immediate backend attempt even
+  if a recent automatic attempt failed; bypasses only the throttle, never
+  the cached-state gate or the single-flight guard.
+- **One revalidation pipeline:** every source converges on
+  `requestConnectivityRevalidation(reason)` +
+  `_cachedRevalidationInFlight`; automatic attempts throttled by
+  `CACHED_REVALIDATION_MIN_RETRY_MS = 12_000` (kept below the watchdog
+  interval so ticks are never skipped).
+- **Diagnostic logging per cycle** (dev, no tokens/URLs): `[network] cached
+  watchdog tick`, `[auth] reconnect requested reason=…`, `[auth] reconnect
+  probe reachable=…`, `[auth] reconnect session same-user=…`, `[auth]
+  reconnect state COMPLETE|CACHED`, `[sync] reconnect trigger`, `[sync]
+  queue pass started`.
+
+Untouched (per instruction): queue reconciliation, multi-item identity,
+Finds remote-vs-remote dedup, media cache, GPS architecture, auth states.
+
+### Files changed (this round)
+
+- `src/main.js` (watchdog rewrite; force option + throttle; wake-up
+  listeners at init; logging)
+- `src/screens/finds.js` (pull-refresh dispatches `force: true`)
+- `src/live-reconnect.test.js`, `src/field-offline-ux.test.js`,
+  `src/connectivity-loss.test.js` (contracts updated to round-4 invariants)
+- `PLAN-startup.md` — this section.
+
+### DEVICE ACCEPTANCE (Android, required)
+
+(A) Start online → airplane ON → CACHED → queue two observations →
+airplane OFF → DO NOTHING → within ≤~15–20 s: `[network] cached watchdog
+tick` → probe succeeds → Offline pill disappears → queue starts → both
+observations sync (two distinct remote observations) → Finds refreshes —
+with no force-close, navigation, or pull-refresh.
+(B) Repeat assuming Capacitor never sends connected=true — the watchdog
+alone must still recover on the same timeline.
+(C) While CACHED after restore, pull Finds immediately → immediate recovery
+attempt (force) rather than waiting for the next watchdog tick.

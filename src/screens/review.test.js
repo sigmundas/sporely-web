@@ -1151,7 +1151,9 @@ test('review save flow uses the decision sheet instead of window.confirm', () =>
 
   assert.doesNotMatch(source, /window\.confirm/)
   assert.match(source, /showLocationFixSheet\(\)/)
-  assert.match(source, /_reviewDependency\('requestFreshLocation'\)\(\{\s*maxAgeMs:\s*30_000,\s*timeoutMs:\s*8_000,\s*enableHighAccuracy:\s*true,/)
+  // Field-offline UX: fresh-fix timeout raised to 30s to allow slow GNSS
+  // acquisition in airplane mode / poor sky. Save must not block on GPS.
+  assert.match(source, /_reviewDependency\('requestFreshLocation'\)\(\{[\s\S]*?timeoutMs:\s*30_000,[\s\S]*?enableHighAccuracy:\s*true,/)
 })
 
 test('review ai flow keeps the setting-selected primary service and refreshes availability without rebuilding the grid', () => {

@@ -244,6 +244,7 @@ function _acceptFix(position, options = {}) {
   state.location.permission = 'granted'
 
   _updateCaptureSessionFixFromAcceptedFix(fix, options)
+  _clearFreshFixAcquisitionTimer()
   _emitAcceptedFix(fix)
   return fix
 }
@@ -349,6 +350,48 @@ function _classifyGeolocationError(error) {
   }
 }
 
+// ── Fresh-fix acquisition supervisor (QA round 3) ────────────────────────────
+//
+// The capture-session watch (`startLocationWatch({ requestFreshFix: true })`)
+// passes no `timeout` to watchPosition, and on Android a GNSS watch that
+// never obtains a fix may NEVER invoke its error callback — so the UI stayed
+// on "Finding location…" indefinitely (observed on the second consecutive
+// offline capture; the first got a fix, which is the only path that cleared
+// the state). This supervisor bounds the ACQUISITION UI, not the watch: when
+// the configured timeout elapses with no accepted session fix, it clears
+// `requestingFreshFix` and reports the standard timeout state, while the
+// watch keeps running so a late fix for THIS session can still land (the
+// session request-token safeguards keep it from touching a newer session).
+// Saving is never blocked by any of this.
+export const LOCATION_FRESH_FIX_ACQUISITION_TIMEOUT_MS = 30_000
+let _freshFixAcquisitionTimer = null
+
+function _clearFreshFixAcquisitionTimer() {
+  if (_freshFixAcquisitionTimer != null) {
+    clearTimeout(_freshFixAcquisitionTimer)
+    _freshFixAcquisitionTimer = null
+  }
+}
+
+function _armFreshFixAcquisitionTimer(watchId, timeoutMs = LOCATION_FRESH_FIX_ACQUISITION_TIMEOUT_MS) {
+  _clearFreshFixAcquisitionTimer()
+  const normalized = Number(timeoutMs)
+  if (!Number.isFinite(normalized) || normalized <= 0) return
+  _freshFixAcquisitionTimer = setTimeout(() => {
+    _freshFixAcquisitionTimer = null
+    // A different (or no) watch is active now — a newer session owns the UI.
+    if (watchId == null || state.location.watchId !== watchId) return
+    // A fix arrived (or another terminal state resolved the UI) — nothing to do.
+    const stillLocating = state.location.status === 'locating'
+      || state.captureSessionLocation.requestingFreshFix === true
+    if (!stillLocating) return
+    if (_sessionFixIsCurrent(state.captureSessionLocation.fix)) return
+    // Standard timeout surface: clears requestingFreshFix, emits the state
+    // change, and leaves the watch running for a late same-session fix.
+    _setWatchErrorState(_createTimeoutError())
+  }, normalized)
+}
+
 function _clearWatchId(watchId = state.location.watchId) {
   if (watchId == null) return false
   const clearWatch = globalThis.navigator?.geolocation?.clearWatch
@@ -359,6 +402,7 @@ function _clearWatchId(watchId = state.location.watchId) {
   }
   if (state.location.watchId === watchId) {
     state.location.watchId = null
+    _clearFreshFixAcquisitionTimer()
   }
   return true
 }
@@ -835,6 +879,16 @@ export async function startLocationWatch(options = {}) {
 
   if (watchStart.terminalError) {
     return _cloneLocationState()
+  }
+
+  // Bound the "Finding location…" acquisition state: a GNSS watch with no
+  // fix may never error on Android. After the acquisition timeout the UI
+  // reports the standard timeout state while the watch keeps listening.
+  if (options.requestFreshFix && watchStart.watchId != null) {
+    _armFreshFixAcquisitionTimer(
+      watchStart.watchId,
+      options.acquisitionTimeoutMs ?? LOCATION_FRESH_FIX_ACQUISITION_TIMEOUT_MS,
+    )
   }
 
   return _cloneLocationState()

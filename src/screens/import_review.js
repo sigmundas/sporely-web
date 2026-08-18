@@ -1668,7 +1668,10 @@ async function _requestInitialNativeCameraLocation() {
     await requestFreshLocation({
       maximumAgeMs: 0,
       acceptedFixMaxAgeMs: LOCATION_ACCEPTED_FRESH_FIX_MAX_AGE_MS,
-      timeoutMs: 6_500,
+      // 30s to allow slow offline GNSS acquisition (airplane mode / no
+      // network). Geolocation is NOT gated on connectivity; a timeout here
+      // does not block observation save.
+      timeoutMs: 30_000,
       enableHighAccuracy: true,
     })
   } catch (error) {
@@ -2554,10 +2557,18 @@ async function saveAll() {
     }
   }
 
+  // Local-first: enqueueObservation persists to IndexedDB only. A failure
+  // here is a genuine LOCAL persistence problem (quota/serialization) —
+  // surface it per-group and keep the remaining groups going.
   for (let i = 0; i < queuedSessions.length; i++) {
     const { obsPayload, imageEntries } = queuedSessions[i];
-    await enqueueObservation(obsPayload, imageEntries);
-    savedCount++;
+    try {
+      await enqueueObservation(obsPayload, imageEntries);
+      savedCount++;
+    } catch (err) {
+      console.error('Failed to queue import group locally:', err);
+      showToast(t('import.failedOneGroup'));
+    }
     _setProgress(i + 1, queuedSessions.length, t('import.processing'));
   }
 
@@ -2570,7 +2581,14 @@ async function saveAll() {
   if (savedCount > 0) showToast(t('import.saved', { count: tp('counts.observation', savedCount) }));
   _hideProgress();
   saveBtn.disabled = false;
-  await openFinds('mine', { resetSearch: true });
+  // Post-save navigation may hit the network when COMPLETE; the
+  // observations are already durably queued — never let this failure look
+  // like a save failure.
+  try {
+    await openFinds('mine', { resetSearch: true });
+  } catch (err) {
+    console.warn('Post-save Finds navigation failed (observations are queued):', err);
+  }
 }
 
 function _getScaledSize(width, height, maxEdge) {

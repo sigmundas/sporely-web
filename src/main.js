@@ -37,7 +37,7 @@ import {
 } from './screens/auth.js'
 import { initHome, refreshHome, refreshHomeSafe, renderHomeFromCache, resetHomeSectionTracking } from './screens/home.js'
 import { clearAllHomeCaches, clearHomeCache } from './home-cache.js'
-import { initFinds, loadFinds, requestFindsRefresh } from './screens/finds.js'
+import { initFinds, loadFinds, requestFindsRefresh, CONNECTIVITY_REVALIDATION_REQUEST_EVENT } from './screens/finds.js'
 import { initCapture } from './screens/capture.js'
 import { buildReviewGrid, initReview, restoreReviewDraft } from './screens/review.js'
 import { initFindDetail } from './screens/find_detail.js'
@@ -88,7 +88,7 @@ import {
   maybeHandleInaturalistOAuthReturn,
 } from './inaturalist.js'
 import { syncIdentifyButtonLabels } from './identify.js'
-import { SYNC_SUCCESS_EVENT } from './sync-queue.js'
+import { SYNC_SUCCESS_EVENT, triggerSync } from './sync-queue.js'
 import {
   getArtsorakelMaxEdge,
   getDefaultVisibility,
@@ -105,6 +105,7 @@ import {
 import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel, isAndroidNativeApp } from './camera-actions.js'
 import { getPlatform, isAndroidApp } from './platform.js'
 import { registerNativeAuthLinkListener } from './native-auth-links.js'
+import { bindNativeNetworkMonitor, unbindNativeNetworkMonitor } from './native-network.js'
 
 initI18n()
 setNativeCameraOpener(openNativeCamera)
@@ -178,6 +179,15 @@ function _setOfflineIndicator(visible) {
     const el = document.getElementById('app-offline-indicator')
     if (!el) return
     el.style.display = visible ? 'flex' : 'none'
+    // Status-chip precedence (QA round 3): the Offline pill SUPERSEDES the
+    // header Sync tag — never render both (they visually overlapped on
+    // narrow Android widths). While CACHED, pending-upload state belongs to
+    // the Finds queue cards; the Sync tag may only return via
+    // checkSyncStatus() once the app is AUTHENTICATED_COMPLETE again.
+    if (visible) {
+      const syncTag = document.getElementById('header-sync-tag')
+      if (syncTag) syncTag.style.display = 'none'
+    }
   } catch (_) { /* DOM missing in test envs */ }
 }
 
@@ -196,6 +206,250 @@ function _bindOfflineIndicatorToAuthState() {
   } catch (err) { console.warn('offline-indicator subscription failed:', err) }
 }
 _bindOfflineIndicatorToAuthState()
+
+// Field-offline reconnect: when the auth capability transitions from a
+// cached / reauth-required reveal state to AUTHENTICATED_COMPLETE for the
+// same user, drain the sync queue and refresh Finds (if visible). This is
+// the authoritative trigger — raw `online` events cannot upload because
+// sync-queue.js gates triggerSync() on canPerformCloudMutation(). Duplicate
+// starts are prevented by triggerSync()'s in-flight guard.
+let _lastAuthCompleteUserId = null
+let _reconnectSubscribeBound = false
+function _bindReconnectTriggerToAuthState() {
+  if (_reconnectSubscribeBound) return
+  _reconnectSubscribeBound = true
+  const cachedLike = new Set([AUTH_STATE.AUTHENTICATED_CACHED, AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED])
+  let prev = getAuthState()?.state || AUTH_STATE.RESOLVING
+  let prevUid = getAuthState()?.userId || null
+  try {
+    subscribeAuthState(next => {
+      const nextState = next?.state
+      const nextUid = next?.userId || null
+      const wasCached = cachedLike.has(prev)
+      if (nextState === AUTH_STATE.AUTHENTICATED_COMPLETE && nextUid) {
+        const sameUser = prevUid === nextUid || _lastAuthCompleteUserId === nextUid
+        const shouldTriggerReconnect = wasCached && sameUser
+        _lastAuthCompleteUserId = nextUid
+        if (shouldTriggerReconnect) {
+          console.info('[sync] reconnect trigger (auth COMPLETE transition)')
+          try { void triggerSync() } catch (err) { console.warn('reconnect triggerSync failed:', err) }
+          if (state.currentScreen === 'finds') {
+            try { requestFindsRefresh(0) } catch (err) { console.warn('reconnect requestFindsRefresh failed:', err) }
+          }
+        }
+      }
+      prev = nextState
+      prevUid = nextUid
+    })
+  } catch (err) { console.warn('reconnect auth-state subscription failed:', err) }
+}
+_bindReconnectTriggerToAuthState()
+
+// ── Single connectivity-revalidation entry point ─────────────────────────────
+//
+// Native network events, the native resume/getStatus check, the browser
+// `online`/`focus`/`visibilitychange` fallbacks, the deferred re-probe and
+// the bounded cached-mode watchdog ALL converge here. A burst of platform
+// events therefore issues at most ONE backend revalidation:
+//
+//   * cached/reauth states → `_attemptCachedRevalidation(reason)`, which
+//     holds the single `_cachedRevalidationInFlight` guard (one probe +
+//     one session refresh per burst) and routes same-user recovery through
+//     `resolveAuthenticatedSessionOnce` (per-user in-flight map).
+//   * AUTHENTICATED_COMPLETE → nothing to revalidate; the signal is only a
+//     nudge for the sync queue. `triggerSync()` self-dedupes an active pass
+//     and re-checks `canPerformCloudMutation()` — device connectivity can
+//     never bypass the capability gate.
+//   * every other state (RESOLVING / UNAUTHENTICATED / INCOMPLETE) → no-op.
+//
+// `connected === true` from the OS is ONLY a wake-up signal: the actual
+// transition to AUTHENTICATED_COMPLETE still requires the reachability
+// probe + session refresh + profile revalidation pipeline to succeed.
+// `options.force` (explicit user action, e.g. Finds pull-to-refresh) bypasses
+// the automatic-attempt throttle — never the auth/capability gates or the
+// single-flight guard.
+function requestConnectivityRevalidation(reason, options = {}) {
+  const current = getAuthState()
+  console.info(`[auth] reconnect requested reason=${reason} state=${current.state}`)
+  if (current.state === AUTH_STATE.AUTHENTICATED_COMPLETE) {
+    console.info('[sync] reconnect trigger (already COMPLETE — queue nudge)')
+    try { void triggerSync() } catch (err) { console.warn('connectivity sync nudge failed:', err) }
+    return
+  }
+  void _attemptCachedRevalidation(reason, options)
+}
+
+// Manual recovery escape hatch (QA round 3): pull-to-refresh on Finds while
+// the app is in a cached/reauth state dispatches this event instead of the
+// doomed remote loader. It funnels into the SAME deduped + capability-gated
+// revalidation entry point — it can never bypass auth gates, and a genuinely
+// offline device simply stays on the offline queue view.
+try {
+  window.addEventListener(CONNECTIVITY_REVALIDATION_REQUEST_EVENT, event => {
+    requestConnectivityRevalidation(
+      String(event?.detail?.reason || 'manual-refresh'),
+      { force: event?.detail?.force === true },
+    )
+  })
+} catch (_) { /* no window in test envs */ }
+
+// Native Capacitor builds: bind the OS connectivity monitor once for the app
+// lifetime (no-op on web — the browser fallback listeners bound by the
+// cached-revalidation scheduler further down and sync-queue's own
+// `online`/`focus` listeners remain the web mechanism). Both the
+// `networkStatusChange` false→true edge and the foreground
+// `Network.getStatus()` check funnel into the deduped entry point above.
+let _nativeNetworkMonitorRequested = false
+function _bindNativeConnectivityMonitor() {
+  if (_nativeNetworkMonitorRequested) return
+  _nativeNetworkMonitorRequested = true
+  void bindNativeNetworkMonitor({
+    onConnectivityRestored: reason => requestConnectivityRevalidation(reason),
+    onConnectivityLost: reason => handleConnectivityLost(reason),
+  }).catch(err => console.warn('native network monitor bind failed:', err))
+}
+_bindNativeConnectivityMonitor()
+
+// ── Single connectivity-LOSS entry point ─────────────────────────────────────
+//
+// QA round 2: airplane mode while AUTHENTICATED_COMPLETE previously left the
+// app in a stale "online" state (Offline pill never shown, Finds ran doomed
+// remote loaders, Save could surface transport errors). The native
+// networkStatusChange true→false edge and the resume getStatus()===false
+// check now converge here; on web the window `offline` event acts as the
+// same LOSS HINT (navigator.onLine is never proof the backend IS reachable,
+// but "the OS says we have no route" is a safe reason to stop pretending
+// we are COMPLETE).
+//
+// Downgrade policy — COMPLETE → AUTHENTICATED_CACHED for the SAME user, only
+// when the trusted local identity invariants hold:
+//   1. auth state is AUTHENTICATED_COMPLETE with a userId,
+//   2. state.user.id matches that userId,
+//   3. the last-validated-account snapshot belongs to that user,
+//   4. the local-data owner is that user.
+// If any gate fails we fail closed: log and take NO action (never reveal
+// cached data on a mismatched identity; the capability gate still protects
+// writes). The downgrade NEVER signs out, never clears the Supabase session,
+// trusted caches or queued work, and does not rebuild the shell — the
+// existing auth-state subscriptions handle the consequences (Offline pill,
+// capability denial, cached-mode watchdog arming, Finds offline swap below).
+export function handleConnectivityLost(reason) {
+  const current = getAuthState()
+  if (current.state !== AUTH_STATE.AUTHENTICATED_COMPLETE) return { downgraded: false, reason: 'not-complete' }
+  const uid = current.userId
+  if (!uid || state.user?.id !== uid) {
+    console.warn('connectivity loss: identity invariant failed (state.user mismatch); no downgrade')
+    return { downgraded: false, reason: 'user-mismatch' }
+  }
+  let snapshot
+  try { snapshot = readLastValidatedAccount() } catch (_) { snapshot = null }
+  if (!snapshot?.userId || snapshot.userId !== uid) {
+    console.warn('connectivity loss: no trusted snapshot for current user; no downgrade')
+    return { downgraded: false, reason: 'snapshot-mismatch' }
+  }
+  let owner
+  try { owner = getLocalDataOwner() } catch (_) { owner = null }
+  if (owner !== uid) {
+    console.warn('connectivity loss: local-data owner mismatch; no downgrade')
+    return { downgraded: false, reason: 'owner-mismatch' }
+  }
+  _authLog('connectivity_lost_downgrade', { reason, userId: uid })
+  setAuthState({ state: AUTH_STATE.AUTHENTICATED_CACHED, userId: uid })
+  // Finds must follow the loss immediately: re-render swaps to the offline
+  // shell; the load-sequence guard in loadFinds() discards any in-flight
+  // stale remote results.
+  if (state.currentScreen === 'finds') {
+    try { requestFindsRefresh(0) } catch (err) { console.warn('offline finds swap failed:', err) }
+  }
+  return { downgraded: true, reason }
+}
+
+// Web/PWA loss hint: `offline` fires when the OS reports no network route.
+// Bound once; harmless on native (the plugin edge usually fires first and
+// handleConnectivityLost self-guards on auth state).
+try {
+  window.addEventListener('offline', () => { void handleConnectivityLost('window-offline') })
+} catch (_) { /* no window in test envs */ }
+
+// ── Bounded cached-mode reconnect watchdog ───────────────────────────────────
+//
+// QA round 4: the round-3 watchdog gated the backend probe on
+// `Network.getStatus().connected === true` — on the test device that status
+// never turned true (stale/undelivered plugin state), so NO backend probe
+// was ever attempted and a live airplane-off left the app CACHED until a
+// process restart. Device QA has now proven twice that native connectivity
+// state is not reliable enough to be a PREREQUISITE for recovery.
+//
+// The watchdog is therefore a direct, simple backend-probe loop:
+//   while auth === AUTHENTICATED_CACHED AND app visible AND same trusted
+//   user → every ~15s → requestConnectivityRevalidation('cached-watchdog')
+//   → probeBackendReachability() (the actual authority) → unreachable:
+//   remain CACHED; reachable: session refresh → same user →
+//   AUTHENTICATED_COMPLETE → triggerSync() + Finds refresh.
+//
+// This is intentionally a real HTTP probe. Acceptable because it runs ONLY
+// while CACHED, ONLY foregrounded, ONLY every ~15s, and stops the moment the
+// state leaves AUTHENTICATED_CACHED (COMPLETE / REAUTH_REQUIRED /
+// UNAUTHENTICATED / account transition → RESOLVING / sign-out) or the app is
+// hidden. It never polls in healthy COMPLETE or in REAUTH_REQUIRED.
+// navigator.onLine, Capacitor Network.connected and networkStatusChange are
+// WAKE-UP HINTS ONLY (fast path) — none of them gate this loop.
+export const CACHED_WATCHDOG_INTERVAL_MS = 15_000
+let _cachedWatchdogTimer = null
+let _cachedWatchdogBound = false
+
+function _stopCachedRevalidationWatchdog() {
+  if (_cachedWatchdogTimer) {
+    clearTimeout(_cachedWatchdogTimer)
+    _cachedWatchdogTimer = null
+  }
+}
+
+function _cachedWatchdogEligible() {
+  const current = getAuthState()
+  if (current.state !== AUTH_STATE.AUTHENTICATED_CACHED) return false
+  if (!current.userId || state.user?.id !== current.userId) return false
+  try {
+    if (document.visibilityState !== 'visible') return false
+  } catch (_) { return false }
+  return true
+}
+
+function _cachedWatchdogTick() {
+  _cachedWatchdogTimer = null
+  if (!_cachedWatchdogEligible()) return
+  console.info('[network] cached watchdog tick')
+  // Direct backend revalidation attempt — NO Network.getStatus / onLine
+  // prerequisite. The single-flight guard + automatic-attempt throttle in
+  // _attemptCachedRevalidation dedupe this against event-driven wake-ups.
+  requestConnectivityRevalidation('cached-watchdog')
+  if (!_cachedWatchdogEligible()) return
+  _armCachedRevalidationWatchdog()
+}
+
+function _armCachedRevalidationWatchdog() {
+  if (_cachedWatchdogTimer) return
+  if (!_cachedWatchdogEligible()) return
+  _cachedWatchdogTimer = setTimeout(() => { _cachedWatchdogTick() }, CACHED_WATCHDOG_INTERVAL_MS)
+}
+
+function _bindCachedRevalidationWatchdog() {
+  if (_cachedWatchdogBound) return
+  _cachedWatchdogBound = true
+  try {
+    subscribeAuthState(next => {
+      if (next?.state === AUTH_STATE.AUTHENTICATED_CACHED) _armCachedRevalidationWatchdog()
+      else _stopCachedRevalidationWatchdog()
+    })
+  } catch (err) { console.warn('watchdog auth-state subscription failed:', err) }
+  try {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') _armCachedRevalidationWatchdog()
+      else _stopCachedRevalidationWatchdog()
+    })
+  } catch (_) { /* DOM missing in test envs */ }
+}
+_bindCachedRevalidationWatchdog()
 
 // Auth-classifier + reachability probe live in `auth-classification.js` so
 // they can be imported into unit tests without pulling the whole DOM/CSS
@@ -1568,19 +1822,35 @@ let _cachedRevalidationListenersBound = false
 let _cachedRevalidationInFlight = false
 let _deferredReprobeScheduled = false
 
+// Browser/window fallback wake-up listeners for the revalidation pipeline.
+// QA round 4 audit: these were previously bound only inside
+// `_scheduleCachedRevalidation`, which runs only on the cached BOOT reveal
+// paths — so a RUNTIME COMPLETE→CACHED downgrade (start online → airplane →
+// restore) had NO `online`/`focus`/`visibility` wake-ups at all; recovery
+// depended entirely on the native plugin event (unreliable on device) and
+// the status-gated round-3 watchdog. Bound at module init instead, once.
+// All wake-ups converge on the same deduped + throttled entry point; a
+// wake-up in a non-cached state is a no-op (or a COMPLETE queue nudge).
+function _bindRevalidationWakeupListeners() {
+  if (_cachedRevalidationListenersBound) return
+  _cachedRevalidationListenersBound = true
+  const trigger = reason => requestConnectivityRevalidation(reason)
+  try {
+    window.addEventListener('online', () => trigger('web-online'))
+  } catch (_) { /* no window in test envs */ }
+  try {
+    window.addEventListener('focus', () => trigger('focus'))
+  } catch (_) { /* no window in test envs */ }
+  try {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') trigger('visibility')
+    })
+  } catch (_) { /* DOM missing in test envs */ }
+}
+_bindRevalidationWakeupListeners()
+
 function _scheduleCachedRevalidation({ initialReachability = 'unreachable' } = {}) {
-  if (!_cachedRevalidationListenersBound) {
-    _cachedRevalidationListenersBound = true
-    const trigger = source => { void _attemptCachedRevalidation(source) }
-    try {
-      window.addEventListener('online', () => trigger('online-event'))
-    } catch (_) {}
-    try {
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') trigger('visibility-visible')
-      })
-    } catch (_) {}
-  }
+  _bindRevalidationWakeupListeners()
   // Single deferred re-probe. Only scheduled when the initial probe said
   // UNREACHABLE — a reachable backend already produced a definitive answer
   // (the state is AUTHENTICATED_REAUTH_REQUIRED and no timer will fix that;
@@ -1589,15 +1859,33 @@ function _scheduleCachedRevalidation({ initialReachability = 'unreachable' } = {
   // even when the state was already known.
   if (!_deferredReprobeScheduled && initialReachability === 'unreachable') {
     _deferredReprobeScheduled = true
-    setTimeout(() => { void _attemptCachedRevalidation('deferred-reprobe') }, 5000)
+    setTimeout(() => { void _attemptCachedRevalidation('deferred-probe') }, 5000)
   }
 }
 
-async function _attemptCachedRevalidation(source) {
+// Throttle AUTOMATIC backend revalidation attempts (QA round 4): the 15s
+// cached watchdog plus a burst of event wake-ups (native change / resume /
+// visibility / web online) must produce at most ~one probe + session refresh
+// per interval. Kept slightly BELOW the watchdog interval so consecutive
+// watchdog ticks are never skipped by timer jitter. Explicit user actions
+// (Finds pull-to-refresh → { force: true }) bypass the throttle for an
+// immediate retry — never the cached-state gate or the single-flight guard.
+export const CACHED_REVALIDATION_MIN_RETRY_MS = 12_000
+const USER_INITIATED_REVALIDATION_REASONS = new Set(['finds-pull-refresh'])
+let _lastRevalidationAttemptAt = 0
+
+async function _attemptCachedRevalidation(source, { force = false } = {}) {
   if (_cachedRevalidationInFlight) return
   const current = getAuthState()
   const cachedStates = new Set([AUTH_STATE.AUTHENTICATED_CACHED, AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED])
   if (!cachedStates.has(current.state)) return
+  const now = Date.now()
+  if (!force
+    && !USER_INITIATED_REVALIDATION_REASONS.has(source)
+    && now - _lastRevalidationAttemptAt < CACHED_REVALIDATION_MIN_RETRY_MS) {
+    return
+  }
+  _lastRevalidationAttemptAt = now
   _cachedRevalidationInFlight = true
   _bootMark('revalidation-started', { source, fromState: current.state })
   _authLog('cached_revalidation_started', { source, fromState: current.state })
@@ -1608,6 +1896,7 @@ async function _attemptCachedRevalidation(source) {
     let reachability = 'unreachable'
     try { reachability = await probeBackendReachability() }
     catch (_) { reachability = 'unreachable' }
+    console.info(`[auth] reconnect probe reachable=${reachability === 'reachable'}`)
 
     let session = null
     let sessionError = null
@@ -1641,12 +1930,15 @@ async function _attemptCachedRevalidation(source) {
     // cloud plan, persist a fresh snapshot, and transition state to
     // AUTHENTICATED_COMPLETE. It also handles the account-switch case
     // where a different user's session materializes.
+    console.info(`[auth] reconnect session same-user=${session.user.id === current.userId}`)
     try {
       await resolveAuthenticatedSessionOnce(session, `cached_revalidation:${source}`)
       _bootMark('revalidation-completed')
       _authLog('cached_revalidation_completed', { ok: true })
+      console.info(`[auth] reconnect state ${getAuthState()?.state === AUTH_STATE.AUTHENTICATED_COMPLETE ? 'COMPLETE' : 'CACHED'}`)
     } catch (err) {
       _authLog('cached_revalidation_completed', { ok: false, code: _safeErrorCode(err) })
+      console.info('[auth] reconnect state CACHED (resolve failed)')
     }
   } finally {
     _cachedRevalidationInFlight = false
@@ -1869,6 +2161,8 @@ async function init() {
   window.addEventListener('pagehide', () => {
     _authStateSubscription?.unsubscribe?.()
     _authStateSubscription = null
+    _stopCachedRevalidationWatchdog()
+    void unbindNativeNetworkMonitor()
   }, { once: true })
 
   // Foreground pings keep the daily activity row's last_seen_at fresh without

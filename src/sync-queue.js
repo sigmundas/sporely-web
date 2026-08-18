@@ -378,7 +378,12 @@ async function _setQueueSyncStatus(itemId, stage, extras = {}) {
 }
 
 function _scheduleSyncRetry() {
-  if (_retryTimer || !navigator.onLine) return
+  // QA round 3: navigator.onLine is NOT consulted — on Android WebViews it
+  // can stay stale (false) after Capacitor reports connectivity restored,
+  // which previously stranded the queue until a process restart. If the
+  // network is genuinely down, the retry attempt fails on its capability
+  // gate / transport error and reschedules; that is cheap and correct.
+  if (_retryTimer) return
   _retryTimer = window.setTimeout(() => {
     _retryTimer = null
     triggerSync()
@@ -593,6 +598,14 @@ export async function deleteQueuedObservationsForUser(userId) {
 export { QUEUE_EVENT, SYNC_SUCCESS_EVENT }
 
 let isSyncing = false
+
+// True while a sync pass is consuming the queue. Read-only introspection for
+// UI: Finds uses it to avoid flashing "No observations yet" in the window
+// between a queue item's deletion and the follow-up remote refresh that
+// renders the freshly synced observation.
+export function hasActiveSyncPass() {
+  return isSyncing
+}
 const _cloudPlanCache = new Map()
 
 async function _fetchRemoteObservationState(observationId) {
@@ -664,7 +677,41 @@ async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'loc
   })
 }
 
-async function _findRemoteObservationForQueueItem(item) {
+// Remote-recovery eligibility (QA round 2 — multi-item integrity).
+//
+// The user_id + captured_at match below is NOT collision-safe: two offline
+// captures can legitimately share a captured_at (burst captures, imported
+// photos with second-granularity EXIF timestamps, payloads without a
+// captured_at fallback). If recovery ran unconditionally, Q2/Q3 could attach
+// to Q1's freshly inserted remote row, see its image set as "complete",
+// finalize and be DELETED without ever uploading — silently collapsing
+// several local observations into one remote observation (observed on
+// device: only one Find appeared after reconnect).
+//
+// Recovery therefore only runs for items that genuinely need it: a previous
+// pass ATTEMPTED the insert (syncInsertAttemptedAt is persisted immediately
+// before the insert request) but the response was lost before
+// remoteObservationId could be recorded. Fresh, never-attempted items always
+// insert a new remote row.
+export function shouldAttemptRemoteRecovery(item) {
+  if (!item) return false
+  if (item.remoteObservationId) return false
+  return Number.isFinite(Number(item.syncInsertAttemptedAt)) && Number(item.syncInsertAttemptedAt) > 0
+}
+
+// Second collision guard: a remote id already claimed by ANOTHER queue item
+// (persisted remoteObservationId, or inserted/recovered earlier in this same
+// pass) can never be recovered again. Ambiguity resolves toward a fresh
+// insert — never toward collapsing two local observations into one row.
+export function pickRecoveredRemoteObservationId(candidateIds, claimedRemoteIds) {
+  const claimed = claimedRemoteIds instanceof Set ? claimedRemoteIds : new Set(claimedRemoteIds || [])
+  for (const id of candidateIds || []) {
+    if (id && !claimed.has(id)) return id
+  }
+  return null
+}
+
+async function _findRemoteObservationForQueueItem(item, claimedRemoteIds = new Set()) {
   const payload = item?.obsPayload || {}
   const capturedAt = String(payload.captured_at || '').trim()
   const userId = String(item?.userId || payload.user_id || '').trim()
@@ -676,14 +723,15 @@ async function _findRemoteObservationForQueueItem(item) {
     .eq('user_id', userId)
     .eq('captured_at', capturedAt)
     .order('id', { ascending: false })
-    .limit(1)
+    .limit(5)
 
   if (error) {
     if (error?.message?.includes('captured_at')) return null
     throw error
   }
 
-  return Array.isArray(data) ? data[0]?.id || null : null
+  const candidateIds = (Array.isArray(data) ? data : []).map(row => row?.id).filter(Boolean)
+  return pickRecoveredRemoteObservationId(candidateIds, claimedRemoteIds)
 }
 
 async function _persistQueuedObservationIdentifications({
@@ -736,9 +784,27 @@ async function _persistQueuedObservationIdentifications({
 }
 
 async function _runSyncQueue() {
-  if (!navigator.onLine || !canSyncOnCurrentConnection()) return
+  // QA round 3: navigator.onLine removed as a hard prerequisite (stale-false
+  // WebView flag stranded a fully-connected device). Authority: the caller
+  // (triggerSync) already gates on canPerformCloudMutation() — i.e. the
+  // backend-validated AUTHENTICATED_COMPLETE state — plus the user's sync
+  // connection preference below. If the device is actually offline the
+  // first remote op fails with a transport error, the item stays queued as
+  // 'retrying', and the existing retry/revalidation machinery takes over.
+  if (!canSyncOnCurrentConnection()) return
+  console.info('[sync] queue pass started')
 
-  const session = await getSharedAuthSession({ refresh: true })
+  // Transport-safe: connectivity may vanish between the capability check and
+  // this refresh (stale-COMPLETE race). A thrown "Failed to fetch" here must
+  // not reject the sync pass — queued items stay untouched and the next
+  // reconnect trigger retries.
+  let session
+  try {
+    session = await getSharedAuthSession({ refresh: true })
+  } catch (err) {
+    console.warn('Sync pass skipped — session refresh failed (transport):', err?.message || err)
+    return
+  }
   if (!session?.user?.id) return
   const authUserId = _normalizeQueueUserId(session.user.id)
 
@@ -755,8 +821,17 @@ async function _runSyncQueue() {
     )
   }
 
+  // Remote ids already owned by SOME queue item — persisted before this pass
+  // or inserted/recovered during it. Recovery may never hand one of these to
+  // a different item (multi-item integrity, QA round 2).
+  const claimedRemoteIds = new Set(
+    items.map(other => other?.remoteObservationId).filter(Boolean)
+  )
+
   for (const item of items) {
-    if (!navigator.onLine) break
+    // Mid-pass halt on capability loss (e.g. runtime COMPLETE→CACHED
+    // downgrade) — replaces the old stale-prone navigator.onLine check.
+    if (!canPerformCloudMutation().allowed) break
     const queueUserId = _queueUserFromItem(item)
 
     try {
@@ -841,7 +916,11 @@ async function _runSyncQueue() {
       let obsId = item.remoteObservationId || null
       let repairedPayload = null
 
-      if (!obsId) {
+      // Remote recovery ONLY heals a lost insert response: it requires a
+      // persisted prior insert attempt (see shouldAttemptRemoteRecovery) and
+      // never resolves to a remote id another queue item already claimed.
+      // A fresh item goes straight to a fresh insert below.
+      if (!obsId && shouldAttemptRemoteRecovery(item)) {
         obsId = await _findRemoteObservationForQueueItem({
           ...item,
           userId: queueUserId,
@@ -849,8 +928,9 @@ async function _runSyncQueue() {
             ...observationPayload,
             user_id: authUserId,
           },
-        })
+        }, claimedRemoteIds)
         if (obsId) {
+          claimedRemoteIds.add(obsId)
           const updatedItem = await _updateQueueItem(item.id, current => current ? {
             ...current,
             remoteObservationId: obsId,
@@ -865,6 +945,14 @@ async function _runSyncQueue() {
         await _setQueueSyncStatus(item.id, 'saving-observation', {
           syncImageCount: queuedImages.length,
         })
+        // Persist the attempt marker BEFORE the network request: if the
+        // response is lost (transport drop after server accept), the next
+        // pass is allowed to run remote recovery for this item — and ONLY
+        // for this item (see shouldAttemptRemoteRecovery).
+        await _updateQueueItem(item.id, current => current ? {
+          ...current,
+          syncInsertAttemptedAt: Date.now(),
+        } : current)
         updateUploadForegroundService('Saving observation…')
 
         repairedPayload = {
@@ -917,6 +1005,7 @@ async function _runSyncQueue() {
         if (error) throw error
 
         obsId = obsData.id
+        claimedRemoteIds.add(obsId)
         const updatedItem = await _updateQueueItem(item.id, current => ({
           ...current,
           remoteObservationId: obsId,
@@ -1121,7 +1210,7 @@ function _settleUploadKeepalive() {
   // foreground service alive so the retry can fire with the screen off, but
   // only for a bounded number of cycles — after that, syncing resumes the
   // next time the app is foregrounded.
-  if (_retryTimer && navigator.onLine && _keepaliveRetryCycles < KEEPALIVE_MAX_RETRY_CYCLES) {
+  if (_retryTimer && _keepaliveRetryCycles < KEEPALIVE_MAX_RETRY_CYCLES) {
     _keepaliveRetryCycles += 1
     updateUploadForegroundService('Waiting to retry upload…')
     return

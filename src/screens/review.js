@@ -883,7 +883,9 @@ async function _requestReviewSaveLocation() {
   _overrideCaptureWindowForSession()
   await _reviewDependency('requestFreshLocation')({
     maxAgeMs: 30_000,
-    timeoutMs: 8_000,
+    // 30s to allow slow offline GNSS acquisition (airplane mode / no network).
+    // enableHighAccuracy remains true; a timeout does not block observation save.
+    timeoutMs: 30_000,
     enableHighAccuracy: true,
     internalOverride: true,
     // geo.js validates this against its own numeric session counter; the
@@ -2225,6 +2227,12 @@ async function saveObservationBatch() {
       
     _setProgress(0, 1, 'Encoding images for storage...')
     await new Promise(r => setTimeout(r, 100)) // Yield to let button un-press
+    // Local-first invariant: the durable queue write is IndexedDB-only —
+    // nothing before this point performs network I/O (payload construction,
+    // GPS and image serialization are all local). "Could not queue
+    // observation" may therefore only be shown for a genuine LOCAL
+    // persistence failure — the outer catch below covers exactly this line
+    // and the local preparation above it.
     await _reviewDependency('enqueueObservation')(obsPayload, imageEntries)
 
     showToast(t('review.synced', { count: tp('counts.photo', photos.length) }))
@@ -2244,8 +2252,21 @@ async function saveObservationBatch() {
     hideLocationFixSheet(null)
     reviewLocationLastLookupKey = ''
     resetLocationState()
-    await _reviewDependency('refreshHome')()
-    await _reviewDependency('openFinds')('mine', { resetSearch: true })
+    // Post-save navigation/refresh may hit the network (refreshHome rethrows
+    // its first section failure by design; loadFinds queries Supabase when
+    // COMPLETE). The observation is ALREADY safely queued at this point —
+    // a transport failure here must never surface as "Could not queue
+    // observation" (device QA: airplane mode during a stale-COMPLETE save).
+    try {
+      await _reviewDependency('refreshHome')()
+    } catch (err) {
+      console.warn('Post-save Home refresh failed (observation is queued):', err)
+    }
+    try {
+      await _reviewDependency('openFinds')('mine', { resetSearch: true })
+    } catch (err) {
+      console.warn('Post-save Finds navigation failed (observation is queued):', err)
+    }
   } catch (err) {
     showToast(t('review.syncFailed', { message: err.message }))
     console.error('Sync error:', err)

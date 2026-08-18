@@ -941,6 +941,14 @@ function renderStats(model) {
 
 async function checkSyncStatus() {
   const tag = document.getElementById('header-sync-tag')
+  // Status-chip precedence (QA round 3): only AUTHENTICATED_COMPLETE may show
+  // the Sync tag. In cached/reauth modes the Offline pill owns the header
+  // status (they visually overlapped on device), and probing Supabase from a
+  // cached shell would violate the zero-network invariant anyway.
+  if (getAuthState()?.state !== AUTH_STATE.AUTHENTICATED_COMPLETE) {
+    if (tag) tag.style.display = 'none'
+    return
+  }
   try {
     const { error } = await supabase.from('observations').select('id').limit(1)
     if (!error && tag) tag.style.display = 'flex'

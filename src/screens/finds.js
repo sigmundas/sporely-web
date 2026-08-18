@@ -15,6 +15,7 @@ import {
   PRIVACY_SLOT_LIMIT_USER_MESSAGE,
   deleteQueuedObservation,
   getQueuedObservations,
+  hasActiveSyncPass,
   isImageTooLargeForPlanError,
   isPrivacySlotLimitError,
   triggerSync,
@@ -24,6 +25,22 @@ import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openPreferredCamera } from '../camera-actions.js'
 import { normalizeObservationVisibility } from '../visibility.js'
 import { buildPeopleCard, loadPeopleSocialState, wireAvatarFallback, wirePeopleCardActions } from './people.js'
+import { AUTH_STATE, getAuthState } from '../auth-state.js'
+
+// Field-offline UX (Stage C polish): when the app is revealed with a cached
+// identity but no authoritative session for this launch, Finds must NOT run
+// a remote loader that can never complete. See src/capabilities.js and
+// PLAN-startup.md § field-offline UX + reconnect polish.
+function _findsAuthMode() {
+  const s = getAuthState()?.state
+  if (s === AUTH_STATE.AUTHENTICATED_CACHED) return 'cached'
+  if (s === AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED) return 'reauth'
+  return 'online'
+}
+function _isOfflineFindsMode() {
+  const m = _findsAuthMode()
+  return m === 'cached' || m === 'reauth'
+}
 
 
 const _cache = {}   // scope → array of observations
@@ -101,14 +118,24 @@ function _pageRange(offset) {
   return { from, to: from + FINDS_PAGE_SIZE - 1 }
 }
 
-function _mergeFindsItems(scope, existingItems, incomingItems) {
+// Exported for tests (device-QA regression: remote-vs-remote likely-same
+// collapse hid all but the last of several queued-offline observations).
+export function _mergeFindsItems(scope, existingItems, incomingItems) {
   const merged = [...(existingItems || [])]
   const seenIds = new Set(merged.map(item => String(item?.id || '').trim()).filter(Boolean))
   for (const item of incomingItems || []) {
     if (!item) continue
     const itemId = String(item.id || '').trim()
     if (itemId && seenIds.has(itemId)) continue
-    if (scope === 'mine' && merged.some(existing => _observationsLikelySame(existing, item))) continue
+    // Likely-same dedup exists ONLY to avoid showing a queued (pending)
+    // card next to its just-synced remote row. It must never compare two
+    // remote rows against each other: multiple offline captures share
+    // date / empty taxon / null GPS and land within the 15-minute window,
+    // so remote-vs-remote matching collapsed distinct observations into one
+    // visible card (device QA: only the LAST of three queued finds shown).
+    if (scope === 'mine' && merged.some(existing =>
+      (existing?._pendingSync === true || item?._pendingSync === true)
+      && _observationsLikelySame(existing, item))) continue
     merged.push(item)
     if (itemId) seenIds.add(itemId)
   }
@@ -355,6 +382,13 @@ function _findsDropdownShouldHide(key) {
 }
 
 function _findsDropdownShouldDisable(key) {
+  // Field-offline: the scope/status/sort dropdowns act on the remote
+  // dataset that cannot load in cached/reauth mode — and the visibility
+  // 'scope' filter could hide the queued cards that ARE the primary offline
+  // content. Disable all three (Mine/Feed tabs, view toggle and search stay
+  // usable — they operate on local content). Re-enabled automatically on
+  // the next loadFinds() after the state returns to COMPLETE.
+  if (_isOfflineFindsMode()) return true
   if (key === 'status') return isFindsStatusControlDisabled(_findsPrimaryScope())
   return false
 }
@@ -865,11 +899,37 @@ function _setRefreshIndicator(distance = 0, stateName = 'idle') {
   )
 }
 
+// Manual recovery signal (QA round 3): a pull-to-refresh while the app is in
+// a cached/reauth state previously did nothing (the offline shell re-rendered
+// and triggerSync was capability-denied). It now asks main.js for a
+// connectivity revalidation through this event — the SAME deduped,
+// capability-gated pipeline as every other reconnect trigger. It cannot
+// bypass auth gates: if the device is genuinely offline the revalidation
+// fails and the offline queue view simply remains; if it succeeds, the
+// CACHED→COMPLETE transition itself refreshes Finds and drains the queue.
+export const CONNECTIVITY_REVALIDATION_REQUEST_EVENT = 'sporely-connectivity-revalidation-request'
+
+function _requestManualConnectivityRevalidation(reason) {
+  try {
+    // force: true — an explicit user pull may retry immediately even if a
+    // recent automatic watchdog attempt failed (bypasses only the attempt
+    // throttle; the auth gates and single-flight guard still apply). The
+    // probe goes DIRECTLY to the backend — no Network.getStatus/onLine
+    // prerequisite.
+    window.dispatchEvent(new CustomEvent(CONNECTIVITY_REVALIDATION_REQUEST_EVENT, { detail: { reason, force: true } }))
+  } catch (err) {
+    console.warn('manual connectivity revalidation dispatch failed:', err)
+  }
+}
+
 async function _refreshFindsFeed() {
   if (_isRefreshing) return
   _isRefreshing = true
   _setRefreshIndicator(56, 'refreshing')
   try {
+    if (_isOfflineFindsMode()) {
+      _requestManualConnectivityRevalidation('finds-pull-refresh')
+    }
     try {
       await loadFinds()
     } catch (error) {
@@ -1052,7 +1112,12 @@ export function initFinds() {
   })
 
   window.addEventListener(QUEUE_EVENT, () => {
-    if (state.currentScreen === 'finds' && _currentScope() === 'mine') {
+    // Refresh Finds on any queue change (enqueue / stage change / blocked /
+    // completion). Online COMPLETE-mode: only refresh on mine scope so the
+    // feed's remote pagination isn't perturbed. Offline modes: refresh so
+    // queued items appear/update immediately regardless of the visible scope.
+    if (state.currentScreen !== 'finds') return
+    if (_isOfflineFindsMode() || _currentScope() === 'mine') {
       requestFindsRefresh()
     }
   })
@@ -1289,6 +1354,13 @@ export async function loadFinds() {
   _closeFindsDropdowns()
 
   _setFindsCache(currentScope, [])
+
+  // Field-offline: never start a remote loader that can't complete, and
+  // never show "Loading…" merely because the server is unreachable.
+  if (_isOfflineFindsMode()) {
+    return _renderFindsOfflineShell(list, { loadSeq, primaryScope, currentScope })
+  }
+
   if (list) {
     list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
   }
@@ -1313,6 +1385,53 @@ export async function loadFinds() {
   if (loadSeq !== _loadFindsSeq) return
   _applyFilter()
   void _maybeLoadMoreFinds()
+}
+
+async function _renderFindsOfflineShell(list, { loadSeq, primaryScope, currentScope } = {}) {
+  // Queued observations for the CURRENT user only are the PRIMARY offline
+  // content of the "mine" scope. Failing soft (e.g. IDB unavailable) keeps
+  // rendering the compact offline note alone.
+  let queued = []
+  if (state.user?.id) {
+    try {
+      queued = await getQueuedObservations(state.user.id)
+    } catch (err) {
+      console.warn('getQueuedObservations offline failed:', err)
+      queued = []
+    }
+  }
+  if (loadSeq !== _loadFindsSeq) return
+  const showQueued = primaryScope === 'mine' && currentScope !== 'user' && queued.length > 0
+  _setFindsCache('mine', showQueued ? queued : [])
+
+  // Header/nav/search stay live; the remote-only dropdowns render disabled
+  // via _findsDropdownShouldDisable (offline mode).
+  _syncScopeControls()
+  _syncStatusSelect()
+  _syncSortSelect()
+
+  if (!list) return
+  // Render through the normal card pipeline so the hierarchy is:
+  // compact offline note first, then queue cards (prepended inside
+  // _renderCards/_renderBySpecies as part of the async grid paint —
+  // painting here would be wiped by the image-promise re-render). With no
+  // queued items the render functions show the note alone.
+  _applyFilter()
+}
+
+// Compact informational state for offline/reauth Finds. Rendered ABOVE the
+// queued observation cards, inside a contained note that shares the cards'
+// horizontal margins — no edge-to-edge text. All strings come from i18n.
+function _findsOfflineInfoHtml(hasQueueCards) {
+  if (!_isOfflineFindsMode()) return ''
+  const icon = `<svg class="finds-offline-note-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
+  const mode = _findsAuthMode()
+  if (mode === 'reauth') {
+    // Backend reachable, session missing — not "offline". Single-line state.
+    return `<div class="finds-offline-note" role="status" aria-live="polite">${icon}<div class="finds-offline-note-text"><div class="finds-offline-note-title">${_esc(t('finds.offlineReauthBody'))}</div></div></div>`
+  }
+  const body = hasQueueCards ? t('finds.offlineQueuedBody') : t('finds.offlineEmptyBody')
+  return `<div class="finds-offline-note" role="status" aria-live="polite">${icon}<div class="finds-offline-note-text"><div class="finds-offline-note-title">${_esc(t('finds.offlineTitle'))}</div><div class="finds-offline-note-body">${_esc(body)}</div></div></div>`
 }
 
 async function _attachSporeFlags(observations) {
@@ -1755,6 +1874,20 @@ function _pendingStatusText(obs) {
   const total = Math.max(0, Number(obs._syncImageCount || obs._pendingPhotoCount || 0))
   const current = Math.max(1, Number(obs._syncImageIndex || 1))
 
+  // Field-offline surface: while the app is in a cached / reauth reveal
+  // mode, no upload is in flight — surface that explicitly instead of the
+  // generic "Queued for upload" wording. This includes items stranded at
+  // stage 'retrying' by a pre-disconnect failure: no retry can run while
+  // the capability is denied, so "Waiting for connection" is the truth.
+  // Blocked items still show their existing blocked reason.
+  const mode = _findsAuthMode()
+  const stage = String(obs._syncStage || '').trim()
+  if (stage !== 'blocked' && stage !== 'uploading-image') {
+    if (mode === 'cached') return t('finds.pendingWaitingConnection')
+    if (mode === 'reauth') return t('finds.pendingWaitingSignIn')
+  }
+  if (!stage) return t('finds.pendingWaitingUpload')
+
   switch (obs._syncStage) {
     case 'saving-observation':
     case 'reconciling':
@@ -1997,6 +2130,15 @@ function _renderBySpecies(list, data, options = {}) {
   const q = (state.searchQuery || '').trim()
   const currentScope = _currentScope()
   if (!data.length) {
+    // Field-offline: compact offline note instead of the generic empty text.
+    if (_isOfflineFindsMode()) {
+      list.innerHTML = _findsOfflineInfoHtml(false)
+      return
+    }
+    if (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user') {
+      list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
+      return
+    }
     const emptyText = _emptyFindsText(q)
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
@@ -2025,7 +2167,9 @@ function _renderBySpecies(list, data, options = {}) {
     : fetchFirstImages(allObs.map(o => o.id), { variant: imageVariant })
 
   imagePromise.then(imageData => {
-    let html = '<div class="finds-grid-outer">'
+    // Offline note first, then queue cards below it.
+    let html = _findsOfflineInfoHtml(true)
+    html += '<div class="finds-grid-outer">'
 
     for (const [, group] of groups) {
       const count = group.items.length
@@ -2203,6 +2347,21 @@ function _renderCards(list, data, options) {
   const q = (state.searchQuery || '').trim()
   const currentScope = _currentScope()
   if (!data.length) {
+    // Field-offline: the compact offline note replaces the generic empty
+    // text — never "No observations yet" while the app cannot load remote
+    // Finds.
+    if (_isOfflineFindsMode()) {
+      list.innerHTML = _findsOfflineInfoHtml(false)
+      return
+    }
+    // Reconnect race: a sync pass is finalizing queue items right now; the
+    // queue card is already gone but the follow-up refresh (SYNC_SUCCESS /
+    // QUEUE_EVENT) will render the freshly synced observation. Show the
+    // loading state instead of flashing "No observations yet".
+    if (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user') {
+      list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
+      return
+    }
     const emptyText = _emptyFindsText(q, { isFriends, capture: true })
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
     return
@@ -2225,7 +2384,9 @@ function _renderCards(list, data, options) {
       seen[key].push(obs)
     })
 
-    let html = '<div class="finds-grid-outer">'
+    // Offline note first, then queue cards below it.
+    let html = _findsOfflineInfoHtml(true)
+    html += '<div class="finds-grid-outer">'
     groups.forEach(({ date, items }) => {
       const dateLabel = date !== '—'
         ? formatDate(new Date(date + 'T12:00:00'), { day: 'numeric', month: 'long', year: 'numeric' })

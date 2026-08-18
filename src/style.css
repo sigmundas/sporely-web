@@ -1331,6 +1331,44 @@ html, body {
   font-family: 'DM Mono', monospace;
 }
 
+/* Field-offline Finds: compact secondary informational note. Rendered AFTER
+   the queued observation cards (queue cards are the primary offline
+   content). Shares the cards' 14px horizontal margins — never edge-to-edge
+   text — and uses normal app text sizes with a muted supporting line. */
+.finds-offline-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 18px 14px 28px;
+  padding: 14px;
+  background: var(--card);
+  border: 1px solid var(--border-dim);
+  border-radius: 16px;
+}
+.finds-offline-note-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--text-dim);
+}
+.finds-offline-note-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.finds-offline-note-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.finds-offline-note-body {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
 .finds-bottom-sentinel--loading {
   color: var(--green-accent);
 }
