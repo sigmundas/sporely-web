@@ -2098,3 +2098,344 @@ test('DELETE /upload/<key>: retry after quota-finalize failure uses the pre-dele
     }])
   } finally { restoreFetch() }
 })
+
+// ── Artsorakel hotfix regression tests ──────────────────────────────────────
+
+function installArtsorakelUpstreamMock(handler) {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    calls.push({ url, init })
+    return handler({ url, init })
+  }
+  return {
+    calls,
+    restore() { globalThis.fetch = originalFetch },
+  }
+}
+
+test('POST /artsorakel forwards to https://ai.artsdatabanken.no/identify with bearer token', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const upstream = installArtsorakelUpstreamMock(async () => new Response(
+    JSON.stringify({ predictions: [] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  ))
+  const env = {
+    ...TEST_ENV,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    ARTSORAKEL_API_TOKEN: 'test-secret-token',
+  }
+  const boundary = '----sporely-test-boundary'
+  const body = `--${boundary}\r\nContent-Disposition: form-data; name="application"\r\n\r\nSporely\r\n--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\nJPEGDATA\r\n--${boundary}--\r\n`
+  const request = new Request('https://upload.sporely.no/artsorakel', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'X-App-Name': 'Sporely',
+      'X-App-Version': '1.2.3',
+    },
+    body,
+  })
+
+  try {
+    const response = await worker.fetch(request, env, {})
+    assert.equal(response.status, 200)
+    assert.equal(upstream.calls.length, 1)
+    assert.equal(upstream.calls[0].url, 'https://ai.artsdatabanken.no/identify')
+    const headers = new Headers(upstream.calls[0].init.headers)
+    assert.equal(headers.get('Authorization'), 'Bearer test-secret-token')
+    assert.ok(String(headers.get('Content-Type') || '').startsWith('multipart/form-data'))
+    assert.equal(headers.get('X-App-Name'), 'Sporely')
+    assert.equal(headers.get('X-App-Version'), '1.2.3')
+    // The client's Supabase bearer must not be forwarded upstream.
+    assert.notEqual(headers.get('Authorization'), `Bearer ${token}`)
+    // Multipart body preserved verbatim.
+    const forwarded = Buffer.from(upstream.calls[0].init.body).toString('utf8')
+    assert.ok(forwarded.includes('name="application"'))
+    assert.ok(forwarded.includes('Sporely'))
+    assert.ok(forwarded.includes('name="image"'))
+  } finally { upstream.restore() }
+})
+
+test('POST /artsorakel fails cleanly when ARTSORAKEL_API_TOKEN is missing and never calls upstream', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const upstream = installArtsorakelUpstreamMock(async () => {
+    throw new Error('upstream must not be called')
+  })
+  const env = {
+    ...TEST_ENV,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    // ARTSORAKEL_API_TOKEN intentionally unset.
+  }
+  const request = new Request('https://upload.sporely.no/artsorakel', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'multipart/form-data; boundary=x',
+    },
+    body: '--x--\r\n',
+  })
+
+  try {
+    const response = await worker.fetch(request, env, {})
+    assert.equal(response.status, 500)
+    const payload = await response.json()
+    assert.equal(payload.error, 'artsorakel_token_missing')
+    assert.equal(upstream.calls.length, 0)
+    // Token value never appears anywhere in the response.
+    const raw = JSON.stringify(payload)
+    assert.equal(raw.includes('Bearer'), false)
+  } finally { upstream.restore() }
+})
+
+test('POST /artsorakel does not leak ARTSORAKEL_API_TOKEN in responses or error bodies', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const secret = 'super-secret-artsorakel-token-xyz'
+  const upstream = installArtsorakelUpstreamMock(async () => new Response(
+    'echo: no leaks',
+    { status: 502, headers: { 'Content-Type': 'text/plain' } },
+  ))
+  const env = {
+    ...TEST_ENV,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    ARTSORAKEL_API_TOKEN: secret,
+  }
+  const request = new Request('https://upload.sporely.no/artsorakel', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'multipart/form-data; boundary=x',
+    },
+    body: '--x--\r\n',
+  })
+
+  try {
+    const response = await worker.fetch(request, env, {})
+    const text = await response.text()
+    assert.equal(text.includes(secret), false)
+  } finally { upstream.restore() }
+})
+
+test('POST /artsorakel/media builds a multipart form with image+application and bearer token', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const upstream = installArtsorakelUpstreamMock(async ({ url }) => {
+    if (url.includes('/rest/v1/observation_images')) {
+      return new Response(JSON.stringify([{ observation_id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (url.includes('/rest/v1/observations')) {
+      return new Response(JSON.stringify([{ id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({ predictions: [] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  })
+
+  const mediaBucket = {
+    head: async () => ({ size: 12, httpMetadata: { contentType: 'image/jpeg' } }),
+    get: async () => ({
+      arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      httpMetadata: { contentType: 'image/jpeg' },
+    }),
+  }
+
+  const env = {
+    ...TEST_ENV,
+    MEDIA_BUCKET: mediaBucket,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    SUPABASE_SERVICE_ROLE_KEY: 'srk',
+    ARTSORAKEL_API_TOKEN: 'media-token',
+  }
+  const request = new Request('https://upload.sporely.no/artsorakel/media', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'X-App-Name': 'Sporely',
+      'X-App-Version': '9.9.9',
+    },
+    body: JSON.stringify({ keys: ['user-123/obs/full.jpg'], variant: 'medium' }),
+  })
+
+  try {
+    const response = await worker.fetch(request, env, {})
+    assert.equal(response.status, 200)
+    const upstreamCalls = upstream.calls.filter(call => call.url === 'https://ai.artsdatabanken.no/identify')
+    assert.equal(upstreamCalls.length >= 1, true)
+    const headers = new Headers(upstreamCalls[0].init.headers)
+    assert.equal(headers.get('Authorization'), 'Bearer media-token')
+    assert.equal(headers.get('X-App-Name'), 'Sporely')
+    assert.equal(headers.get('X-App-Version'), '9.9.9')
+    const form = upstreamCalls[0].init.body
+    assert.ok(form instanceof FormData)
+    assert.equal(form.get('application'), 'Sporely')
+    assert.ok(form.get('image'))
+  } finally { upstream.restore() }
+})
+
+test('POST /artsorakel/media fails cleanly when ARTSORAKEL_API_TOKEN is missing', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const upstream = installArtsorakelUpstreamMock(async ({ url }) => {
+    if (url.startsWith('https://ai.artsdatabanken.no')) {
+      throw new Error('upstream must not be called')
+    }
+    return new Response('[]', {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  })
+  const env = {
+    ...TEST_ENV,
+    MEDIA_BUCKET: { head: async () => null, get: async () => null },
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    SUPABASE_SERVICE_ROLE_KEY: 'srk',
+  }
+  const request = new Request('https://upload.sporely.no/artsorakel/media', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ keys: ['user-123/obs/full.jpg'], variant: 'medium' }),
+  })
+
+  try {
+    const response = await worker.fetch(request, env, {})
+    assert.equal(response.status, 500)
+    const payload = await response.json()
+    assert.equal(payload.error, 'artsorakel_token_missing')
+    assert.equal(
+      upstream.calls.some(call => call.url.startsWith('https://ai.artsdatabanken.no')),
+      false,
+    )
+  } finally { upstream.restore() }
+})
+
+test('POST /artsorakel/media validates latitude/longitude and forwards rounded pair upstream', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const upstream = installArtsorakelUpstreamMock(async ({ url }) => {
+    if (url.includes('/rest/v1/observation_images')) {
+      return new Response(JSON.stringify([{ observation_id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (url.includes('/rest/v1/observations')) {
+      return new Response(JSON.stringify([{ id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({ predictions: [] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  })
+  const mediaBucket = {
+    head: async () => ({ size: 12, httpMetadata: { contentType: 'image/jpeg' } }),
+    get: async () => ({
+      arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      httpMetadata: { contentType: 'image/jpeg' },
+    }),
+  }
+  const env = {
+    ...TEST_ENV,
+    MEDIA_BUCKET: mediaBucket,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    SUPABASE_SERVICE_ROLE_KEY: 'srk',
+    ARTSORAKEL_API_TOKEN: 'media-token',
+  }
+  const request = new Request('https://upload.sporely.no/artsorakel/media', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      keys: ['user-123/obs/full.jpg'],
+      variant: 'medium',
+      latitude: 59.9139,
+      longitude: 10.7522,
+    }),
+  })
+
+  try {
+    const response = await worker.fetch(request, env, {})
+    assert.equal(response.status, 200)
+    const upstreamCalls = upstream.calls.filter(call => call.url === 'https://ai.artsdatabanken.no/identify')
+    assert.equal(upstreamCalls.length >= 1, true)
+    const form = upstreamCalls[0].init.body
+    assert.equal(form.get('latitude'), '59.9')
+    assert.equal(form.get('longitude'), '10.8')
+  } finally { upstream.restore() }
+})
+
+test('POST /artsorakel/media omits both coordinates when only one is supplied or values are out of range', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const upstream = installArtsorakelUpstreamMock(async ({ url }) => {
+    if (url.includes('/rest/v1/observation_images')) {
+      return new Response(JSON.stringify([{ observation_id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (url.includes('/rest/v1/observations')) {
+      return new Response(JSON.stringify([{ id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({ predictions: [] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  })
+  const mediaBucket = {
+    head: async () => ({ size: 12, httpMetadata: { contentType: 'image/jpeg' } }),
+    get: async () => ({
+      arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      httpMetadata: { contentType: 'image/jpeg' },
+    }),
+  }
+  const env = {
+    ...TEST_ENV,
+    MEDIA_BUCKET: mediaBucket,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    SUPABASE_SERVICE_ROLE_KEY: 'srk',
+    ARTSORAKEL_API_TOKEN: 'media-token',
+  }
+
+  const bodies = [
+    { keys: ['user-123/obs/full.jpg'], latitude: 59.9139 },
+    { keys: ['user-123/obs/full.jpg'], longitude: 10.7522 },
+    { keys: ['user-123/obs/full.jpg'], latitude: 95, longitude: 10 },
+    { keys: ['user-123/obs/full.jpg'], latitude: 'nope', longitude: 10 },
+    { keys: ['user-123/obs/full.jpg'] },
+  ]
+
+  try {
+    for (const body of bodies) {
+      const request = new Request('https://upload.sporely.no/artsorakel/media', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      })
+      const response = await worker.fetch(request, env, {})
+      assert.equal(response.status, 200)
+    }
+    const upstreamCalls = upstream.calls.filter(call => call.url === 'https://ai.artsdatabanken.no/identify')
+    assert.ok(upstreamCalls.length >= bodies.length)
+    for (const call of upstreamCalls) {
+      assert.equal(call.init.body.get('latitude'), null)
+      assert.equal(call.init.body.get('longitude'), null)
+    }
+  } finally { upstream.restore() }
+})

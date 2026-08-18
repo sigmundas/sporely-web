@@ -39,3 +39,7 @@ FREE_STORAGE_QUOTA_BYTES = "0"
 # Optional secrets:
 # wrangler secret put SUPABASE_JWT_SECRET
 # wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+
+# Required secret for Artsorakel identification (POST /artsorakel and
+# POST /artsorakel/media). Do NOT place the token under [vars].
+# npx wrangler secret put ARTSORAKEL_API_TOKEN

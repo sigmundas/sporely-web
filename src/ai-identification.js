@@ -1074,6 +1074,8 @@ function _buildServiceOptions(service, options = {}) {
     return {
       ...shared,
       maxEdge: options.maxEdge,
+      latitude: options.latitude ?? options.lat ?? null,
+      longitude: options.longitude ?? options.lon ?? options.lng ?? null,
     }
   }
   return shared
