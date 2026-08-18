@@ -28,6 +28,7 @@ import { initLocationField, startLocationLookup, getLocationName, resetLocationS
 import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
+import { canPerformCloudMutation } from '../capabilities.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js'
@@ -1499,6 +1500,19 @@ async function handleTaxonInput(input) {
     return
   }
   if (q.length < 2) { ul.style.display = 'none'; ul.innerHTML = ''; return }
+
+  // Stage B2b: check capability BEFORE dispatch. In CACHED / REAUTH_REQUIRED
+  // the RPC would be gated to []. Rendering [] as a hidden dropdown would
+  // silently look like "no matches" for the current query. Instead show
+  // the capability message in a non-selectable dropdown row so the user
+  // gets useful feedback. The existing selected taxonomy value on the row
+  // (a separate piece of state) is untouched.
+  const cap = canPerformCloudMutation()
+  if (!cap.allowed) {
+    ul.innerHTML = `<li class="taxon-dropdown-offline" aria-disabled="true" style="opacity:0.7;pointer-events:none;font-style:italic">${cap.message}</li>`
+    ul.style.display = 'block'
+    return
+  }
 
   const results = await searchTaxa(q, getTaxonomyLanguage())
   if (!results.length) { ul.style.display = 'none'; ul.innerHTML = ''; return }

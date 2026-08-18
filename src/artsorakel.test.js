@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
+// Stage B2b: capability gate defaults to blocking non-COMPLETE states.
+import { AUTH_STATE, setAuthState } from './auth-state.js'
+setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: 'test-user' })
+
 import { supabase } from './supabase.js'
 import { normalizeAiCropRect } from './image_crop.js'
 import { ID_SERVICE_ARTSORAKEL } from './identify.js'
@@ -551,7 +555,7 @@ test('retries multipart field "file" after an explicit multipart-style 400 respo
   })
 })
 
-test('falls back to direct Artsorakel when the proxy fails', async () => {
+test('does not fall back to direct Artsdatabanken when the proxy fails', async () => {
   await withHarness(async harness => {
     const calls = []
     const blob = new Blob(['webp'], { type: 'image/webp' })
@@ -560,22 +564,14 @@ test('falls back to direct Artsorakel when the proxy fails', async () => {
     harness.setProxySession('proxy-token')
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
-      if (url.startsWith('https://proxy.example')) {
-        return makeResponse({ ok: false, status: 500, statusText: 'Proxy Error', textBody: 'proxy failed' })
-      }
-      return makeResponse({ jsonBody: { predictions: [{ probability: 0.9, taxon: { scientificName: 'Cantharellus cibarius' } }] } })
+      return makeResponse({ ok: false, status: 500, statusText: 'Proxy Error', textBody: 'proxy failed' })
     })
 
-    await runArtsorakel(blob, 'no')
+    await assert.rejects(runArtsorakel(blob, 'no'))
 
-    const proxyHeaders = new Headers(calls[0].init.headers)
-    const directHeaders = new Headers(calls[1].init.headers)
+    assert.equal(calls.length, 1)
     assert.equal(calls[0].url, 'https://proxy.example/artsorakel')
-    assert.equal(calls[1].url, 'https://ai.artsdatabanken.no')
-    assert.equal(proxyHeaders.get('X-App-Name'), 'Sporely')
-    assert.equal(proxyHeaders.get('X-App-Version'), TEST_APP_VERSION)
-    assert.equal(directHeaders.get('X-App-Name'), 'Sporely')
-    assert.equal(directHeaders.get('X-App-Version'), TEST_APP_VERSION)
+    assert.equal(calls.some(call => call.url === 'https://ai.artsdatabanken.no'), false)
   })
 })
 
@@ -595,7 +591,7 @@ test('does not retry the alternate multipart field after a network failure', asy
   })
 })
 
-test('one Artsorakel deadline spans proxy failure and a hanging direct fallback', async () => {
+test('Artsorakel proxy timeout aborts without falling back to direct Artsdatabanken', async () => {
   await withHarness(async harness => {
     const calls = []
     const timers = createManualTimers()
@@ -605,9 +601,6 @@ test('one Artsorakel deadline spans proxy failure and a hanging direct fallback'
     harness.setProxySession('proxy-token')
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
-      if (url.startsWith('https://proxy.example')) {
-        throw new TypeError('Failed to fetch')
-      }
       return new Promise((resolve, reject) => {
         init.signal.addEventListener('abort', () => {
           const error = new Error('aborted')
@@ -625,15 +618,14 @@ test('one Artsorakel deadline spans proxy failure and a hanging direct fallback'
         clearTimeoutImpl: timers.clearTimeoutImpl,
       },
     )
-    await waitFor(() => calls.length === 2)
+    await waitFor(() => calls.length === 1)
     timers.advance(20_000)
     await assert.rejects(operation, error => error?.code === 'timeout')
 
     assert.deepEqual(calls.map(call => call.url), [
       'https://proxy.example/artsorakel',
-      'https://ai.artsdatabanken.no',
     ])
-    assert.equal(calls.every(call => call.init.body.entries[0].name === 'image'), true)
+    assert.equal(calls[0].init.body.entries[0].name, 'image')
     assert.equal(timers.activeCount, 0)
   })
 })
@@ -682,7 +674,7 @@ test('multi-image Artsorakel timeout does not start field or per-image fallbacks
   })
 })
 
-test('throws an error with endpoint and blob metadata when both proxy and direct fail', async () => {
+test('throws an error with endpoint and blob metadata when the proxy fails', async () => {
   await withHarness(async harness => {
     const blob = new Blob(['webp'], { type: 'image/webp' })
     harness.setBlobDimensions(blob, 1700, 1300)
@@ -694,7 +686,6 @@ test('throws an error with endpoint and blob metadata when both proxy and direct
       runArtsorakel(blob, 'no'),
       error => {
         assert.match(error.message, /proxy/i)
-        assert.match(error.message, /direct/i)
         assert.match(error.message, /status=500/)
         assert.match(error.message, /body=bad news/)
         assert.match(error.message, /blob=image\/jpeg:/)
@@ -704,12 +695,13 @@ test('throws an error with endpoint and blob metadata when both proxy and direct
   })
 })
 
-test('does not use VITE_MEDIA_UPLOAD_BASE_URL as an implicit Artsorakel proxy', async () => {
+test('uses VITE_MEDIA_UPLOAD_BASE_URL as the Artsorakel proxy when the explicit URL is unset', async () => {
   await withHarness(async harness => {
     const calls = []
     const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
     harness.setBlobDimensions(blob, 800, 600)
     harness.setEnv({ VITE_MEDIA_UPLOAD_BASE_URL: 'https://upload.example' })
+    harness.setProxySession('proxy-token')
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
       return makeResponse({ jsonBody: { predictions: [] } })
@@ -717,8 +709,10 @@ test('does not use VITE_MEDIA_UPLOAD_BASE_URL as an implicit Artsorakel proxy', 
 
     await runArtsorakel(blob, 'no')
 
-    assert.equal(calls[0].url, 'https://ai.artsdatabanken.no')
-    assert.equal(calls.some(call => call.url.startsWith('https://upload.example')), false)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].url, 'https://upload.example/artsorakel')
+    assert.equal(calls.some(call => call.url === 'https://ai.artsdatabanken.no'), false)
+    assert.equal(new Headers(calls[0].init.headers).get('Authorization'), 'Bearer proxy-token')
   })
 })
 
@@ -782,7 +776,7 @@ test('debug logging failures do not break the Artsorakel request', async () => {
 test('runArtsorakelForMediaKeys requires a real Artsorakel proxy', async () => {
   await withHarness(async harness => {
     const calls = []
-    harness.setEnv({ VITE_MEDIA_UPLOAD_BASE_URL: 'https://upload.example' })
+    harness.setEnv({})
     harness.setFetch(async (url, init) => {
       calls.push({ url, init })
       return makeResponse({ jsonBody: { predictions: [] } })
@@ -1030,4 +1024,177 @@ test('splitScientificName returns [null, null] for genus-only input', () => {
 test('splitScientificName returns [null, null] for empty input', () => {
   assert.deepEqual(splitScientificName(''), [null, null])
   assert.deepEqual(splitScientificName(null), [null, null])
+})
+
+// ── Coordinate hotfix regression tests ──────────────────────────────────────
+
+test('runArtsorakel rounds coordinates to 1 decimal and appends latitude/longitude', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 400, 300)
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({ jsonBody: { predictions: [] } })
+    })
+
+    await runArtsorakel(blob, 'no', { latitude: 59.9139, longitude: 10.7522 })
+
+    const form = calls[0].init.body
+    assert.equal(form.get('latitude'), '59.9')
+    assert.equal(form.get('longitude'), '10.8')
+    // High precision must never reach upstream.
+    const forwarded = form.entries.map(entry => String(entry.value))
+    assert.equal(forwarded.some(value => value.includes('59.9139')), false)
+    assert.equal(forwarded.some(value => value.includes('10.7522')), false)
+  })
+})
+
+test('runArtsorakel omits both latitude and longitude when either is missing', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 400, 300)
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({ jsonBody: { predictions: [] } })
+    })
+
+    await runArtsorakel(blob, 'no', { latitude: 59.9139 })
+    await runArtsorakel(blob, 'no', { longitude: 10.7522 })
+    await runArtsorakel(blob, 'no', {})
+
+    for (const call of calls) {
+      assert.equal(call.init.body.get('latitude'), null)
+      assert.equal(call.init.body.get('longitude'), null)
+    }
+  })
+})
+
+test('runArtsorakel rejects out-of-range or non-finite coordinates', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 400, 300)
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({ jsonBody: { predictions: [] } })
+    })
+
+    await runArtsorakel(blob, 'no', { latitude: 95, longitude: 10 })
+    await runArtsorakel(blob, 'no', { latitude: 45, longitude: -181 })
+    await runArtsorakel(blob, 'no', { latitude: 'not-a-number', longitude: 10 })
+    await runArtsorakel(blob, 'no', { latitude: Number.NaN, longitude: 10 })
+
+    for (const call of calls) {
+      assert.equal(call.init.body.get('latitude'), null)
+      assert.equal(call.init.body.get('longitude'), null)
+    }
+  })
+})
+
+test('runArtsorakel accepts lat/lon aliases and rounds them', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 400, 300)
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({ jsonBody: { predictions: [] } })
+    })
+
+    await runArtsorakel(blob, 'no', { lat: 63.4305, lon: 10.3951 })
+
+    const form = calls[0].init.body
+    assert.equal(form.get('latitude'), '63.4')
+    assert.equal(form.get('longitude'), '10.4')
+  })
+})
+
+test('runArtsorakelForBlobs sends observation coordinates once per multi-image request', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const first = new Blob(['a'], { type: 'image/jpeg' })
+    const second = new Blob(['b'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(first, 400, 300)
+    harness.setBlobDimensions(second, 400, 300)
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({ jsonBody: { predictions: [] } })
+    })
+
+    await runArtsorakelForBlobs([first, second], 'no', { latitude: 59.9139, longitude: 10.7522 })
+
+    assert.equal(calls.length, 1)
+    const form = calls[0].init.body
+    const latEntries = form.entries.filter(entry => entry.name === 'latitude')
+    const lonEntries = form.entries.filter(entry => entry.name === 'longitude')
+    assert.equal(latEntries.length, 1)
+    assert.equal(lonEntries.length, 1)
+    assert.equal(latEntries[0].value, '59.9')
+    assert.equal(lonEntries[0].value, '10.8')
+    assert.equal(form.entries.filter(entry => entry.name === 'image').length, 2)
+  })
+})
+
+test('runArtsorakelForBlobs forwards coordinates through the Worker proxy path', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 400, 300)
+    harness.setEnv({ VITE_ARTSORAKEL_BASE_URL: 'https://proxy.example' })
+    harness.setProxySession('proxy-token')
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({ jsonBody: { predictions: [] } })
+    })
+
+    await runArtsorakelForBlobs([blob], 'no', { latitude: 59.9139, longitude: 10.7522 })
+
+    assert.equal(calls[0].url, 'https://proxy.example/artsorakel')
+    assert.equal(calls[0].init.body.get('latitude'), '59.9')
+    assert.equal(calls[0].init.body.get('longitude'), '10.8')
+  })
+})
+
+test('runArtsorakelForMediaKeys forwards rounded coordinates in the Worker JSON contract', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    harness.setEnv({ VITE_ARTSORAKEL_BASE_URL: 'https://proxy.example' })
+    harness.setProxySession('proxy-token')
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({
+        jsonBody: { ok: true, total: 1, responses: [{ key: 'media/key.jpg', data: { predictions: [] } }], errors: [] },
+      })
+    })
+
+    await runArtsorakelForMediaKeys(['media/key.jpg'], 'no', { latitude: 59.9139, longitude: 10.7522 })
+
+    const payload = JSON.parse(calls[0].init.body)
+    assert.equal(payload.latitude, 59.9)
+    assert.equal(payload.longitude, 10.8)
+    // High precision must never reach the wire.
+    assert.equal(String(calls[0].init.body).includes('59.9139'), false)
+    assert.equal(String(calls[0].init.body).includes('10.7522'), false)
+  })
+})
+
+test('runArtsorakelForMediaKeys omits coordinates when the pair is incomplete', async () => {
+  await withHarness(async harness => {
+    const calls = []
+    harness.setEnv({ VITE_ARTSORAKEL_BASE_URL: 'https://proxy.example' })
+    harness.setProxySession('proxy-token')
+    harness.setFetch(async (url, init) => {
+      calls.push({ url, init })
+      return makeResponse({
+        jsonBody: { ok: true, total: 1, responses: [], errors: [] },
+      })
+    })
+
+    await runArtsorakelForMediaKeys(['media/key.jpg'], 'no', { latitude: 59.9139 })
+    const payload = JSON.parse(calls[0].init.body)
+    assert.equal('latitude' in payload, false)
+    assert.equal('longitude' in payload, false)
+  })
 })

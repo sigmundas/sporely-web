@@ -43,6 +43,37 @@ const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
 const ARTS_MAX_DIST = 0.006
 const NOMINATIM_INTERVAL_MS = 1000
 const WORKER_VERSION_MARKER = 'sporely-r2-upload-worker@source'
+const ARTSORAKEL_UPSTREAM_URL = 'https://ai.artsdatabanken.no/identify'
+
+function resolveArtsorakelToken(env) {
+  const token = String(env?.ARTSORAKEL_API_TOKEN || '').trim()
+  if (!token) {
+    throw httpError(
+      500,
+      'artsorakel_token_missing',
+      'ARTSORAKEL_API_TOKEN is not configured on the Worker',
+    )
+  }
+  return token
+}
+
+function normalizeArtsorakelUpstreamLatLon(source) {
+  if (!source || typeof source !== 'object') return null
+  const rawLat = source.latitude ?? source.lat ?? null
+  const rawLon = source.longitude ?? source.lon ?? source.lng ?? null
+  if (rawLat === null || rawLat === undefined
+      || rawLon === null || rawLon === undefined) {
+    return null
+  }
+  const lat = Number(rawLat)
+  const lon = Number(rawLon)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null
+  return {
+    latitude: Math.round(lat * 10) / 10,
+    longitude: Math.round(lon * 10) / 10,
+  }
+}
 
 let cachedJwks = null
 let cachedJwksAt = 0
@@ -1083,6 +1114,8 @@ async function handleArtsorakel(request, env, ctx) {
   const token = parseBearerToken(authHeader)
   await verifySupabaseJwt(token, env, ctx)
 
+  const artsorakelToken = resolveArtsorakelToken(env)
+
   if (!request.body) {
     throw httpError(400, 'missing_body', 'Request body is required')
   }
@@ -1091,9 +1124,10 @@ async function handleArtsorakel(request, env, ctx) {
   const bodyBuffer = await request.arrayBuffer()
   const appName = String(request.headers.get('X-App-Name') || '').trim()
   const appVersion = String(request.headers.get('X-App-Version') || '').trim()
-  const upstream = await fetch('https://ai.artsdatabanken.no', {
+  const upstream = await fetch(ARTSORAKEL_UPSTREAM_URL, {
     method: 'POST',
     headers: {
+      Authorization: `Bearer ${artsorakelToken}`,
       ...(contentType ? { 'Content-Type': contentType } : {}),
       ...(appName ? { 'X-App-Name': appName } : {}),
       ...(appVersion ? { 'X-App-Version': appVersion } : {}),
@@ -1123,6 +1157,8 @@ async function handleArtsorakelMedia(request, env, ctx) {
   const token = parseBearerToken(authHeader)
   const claims = await verifySupabaseJwt(token, env, ctx)
 
+  const artsorakelToken = resolveArtsorakelToken(env)
+
   let body
   try {
     body = await request.json()
@@ -1140,6 +1176,7 @@ async function handleArtsorakelMedia(request, env, ctx) {
   }
 
   const variant = String(body?.variant || 'medium').trim() || 'medium'
+  const location = normalizeArtsorakelUpstreamLatLon(body)
   const appHeaders = {}
   const appName = String(request.headers.get('X-App-Name') || '').trim()
   const appVersion = String(request.headers.get('X-App-Version') || '').trim()
@@ -1169,7 +1206,7 @@ async function handleArtsorakelMedia(request, env, ctx) {
     }
 
     try {
-      const data = await runArtsorakelForMediaObject(object, appHeaders)
+      const data = await runArtsorakelForMediaObject(object, appHeaders, artsorakelToken, location)
       responses.push({ key, data })
     } catch (error) {
       console.error('Artsorakel media request failed', error)
@@ -1220,13 +1257,13 @@ function mediaCandidateKeys(key, variant) {
   return [...new Set([primaryKey, key].filter(Boolean))]
 }
 
-async function runArtsorakelForMediaObject(object, appHeaders = {}) {
+async function runArtsorakelForMediaObject(object, appHeaders = {}, artsorakelToken = '', location = null) {
   const contentType = String(object?.httpMetadata?.contentType || '').trim() || 'image/jpeg'
   const bodyBuffer = await object.arrayBuffer()
 
-  let upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'image', appHeaders)
+  let upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'image', appHeaders, artsorakelToken, location)
   if (!upstream.ok) {
-    upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'file', appHeaders)
+    upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'file', appHeaders, artsorakelToken, location)
   }
   if (!upstream.ok) {
     throw httpError(502, 'artsorakel_failed', `Artsdata AI ${upstream.status}`)
@@ -1234,12 +1271,20 @@ async function runArtsorakelForMediaObject(object, appHeaders = {}) {
   return upstream.json()
 }
 
-function postArtsorakelBuffer(bodyBuffer, contentType, fieldName, appHeaders = {}) {
+function postArtsorakelBuffer(bodyBuffer, contentType, fieldName, appHeaders = {}, artsorakelToken = '', location = null) {
   const form = new FormData()
   form.append(fieldName, new Blob([bodyBuffer], { type: contentType }), 'photo.jpg')
-  return fetch('https://ai.artsdatabanken.no', {
+  form.append('application', 'Sporely')
+  if (location) {
+    form.append('latitude', String(location.latitude))
+    form.append('longitude', String(location.longitude))
+  }
+  return fetch(ARTSORAKEL_UPSTREAM_URL, {
     method: 'POST',
-    headers: appHeaders,
+    headers: {
+      ...(artsorakelToken ? { Authorization: `Bearer ${artsorakelToken}` } : {}),
+      ...appHeaders,
+    },
     body: form,
   })
 }

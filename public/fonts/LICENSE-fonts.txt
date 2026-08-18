@@ -1,0 +1,28 @@
+Self-hosted font files
+======================
+
+Sporely bundles these fonts directly so the Capacitor Android build's first
+paint does not depend on fonts.googleapis.com. All three families are
+released under the SIL Open Font License, Version 1.1, which allows
+redistribution as part of any software so long as the OFL notice is retained
+and the fonts themselves are not sold on their own.
+
+  Outfit            Copyright 2020 The Outfit Project Authors
+                    https://github.com/Outfitio/Outfit-Fonts
+                    Licensed under SIL OFL 1.1
+
+  DM Mono           Copyright 2019 Colophon Foundry
+                    Copyright 2019 Google LLC
+                    https://github.com/googlefonts/dm-mono
+                    Licensed under SIL OFL 1.1
+
+  Instrument Serif  Copyright 2022 The Instrument Serif Project Authors
+                    https://github.com/Instrument/instrument-serif
+                    Licensed under SIL OFL 1.1
+
+The SIL Open Font License 1.1 is available at:
+  https://openfontlicense.org
+
+Files bundled here are latin / latin-ext subsets fetched from
+fonts.gstatic.com and correspond to the following @font-face declarations
+in src/style.css.

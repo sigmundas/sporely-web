@@ -4,12 +4,19 @@
 //
 // This module intentionally does not know about iNaturalist. It shares only
 // the underlying SocialLogin.initialize() call via native-oauth.js.
+//
+// Cold-start rule: the `@capgo/capacitor-social-login` plugin must never be
+// statically imported here. It ships a large native/web runtime that we only
+// need when the user actually taps “Continue with Google” on Android.
+// `getNativeSocialLogin()` performs a lazy dynamic import behind a shared
+// init promise so that button click, an iNat connect, or an OAuth callback
+// all reuse the same instance.
 
-import { SocialLogin } from '@capgo/capacitor-social-login'
 import { supabase } from './supabase.js'
 import { getPlatform } from './platform.js'
 import {
   ensureNativeOAuthInitialized,
+  getNativeSocialLogin,
   registerNativeOAuthProviders,
 } from './native-oauth.js'
 
@@ -22,10 +29,6 @@ let _defaultSocialLoginOverride = null
 
 function _resolveGoogleWebClientId() {
   return _googleWebClientIdOverride ?? GOOGLE_WEB_CLIENT_ID_ENV
-}
-
-function _resolveSocialLogin() {
-  return _defaultSocialLoginOverride || SocialLogin
 }
 
 if (GOOGLE_WEB_CLIENT_ID_ENV) {
@@ -145,9 +148,11 @@ export async function signInWithGoogleNative(options = {}) {
     )
   }
 
-  const socialLogin = options.socialLoginImpl || _resolveSocialLogin()
   const authClient = options.supabaseClient || supabase
 
+  const socialLogin = options.socialLoginImpl
+    || _defaultSocialLoginOverride
+    || await getNativeSocialLogin({ platform })
   await ensureNativeOAuthInitialized({ platform, socialLoginImpl: socialLogin })
 
   // Deliberately pass an empty options object. The plugin's GoogleProvider

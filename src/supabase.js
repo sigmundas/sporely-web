@@ -20,3 +20,7 @@ function _getSupabaseSingleton() {
 }
 
 export const supabase = _getSupabaseSingleton()
+// Stage B1 reachability probe needs the raw origin so it can issue a
+// tiny anon fetch against `/auth/v1/health` without going through the
+// supabase-js client (which would try to attach the missing session).
+export const SUPABASE_ORIGIN = SUPABASE_URL

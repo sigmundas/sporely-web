@@ -20,6 +20,37 @@ import { searchTaxaV2 } from './taxonomy-v2.js'
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
 const SPORELY_APP_NAME = 'Sporely'
 
+function _roundArtsorakelCoordinate(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return null
+  return Math.round(number * 10) / 10
+}
+
+export function normalizeArtsorakelLatLon(source = {}) {
+  const rawLat = source.latitude ?? source.lat ?? null
+  const rawLon = source.longitude ?? source.lon ?? source.lng ?? null
+  if (rawLat === null || rawLat === undefined
+      || rawLon === null || rawLon === undefined) {
+    return null
+  }
+  const lat = Number(rawLat)
+  const lon = Number(rawLon)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null
+  return {
+    latitude: _roundArtsorakelCoordinate(lat),
+    longitude: _roundArtsorakelCoordinate(lon),
+  }
+}
+
+function _appendArtsorakelLatLon(form, source) {
+  const coords = normalizeArtsorakelLatLon(source)
+  if (!coords) return null
+  form.append('latitude', String(coords.latitude))
+  form.append('longitude', String(coords.longitude))
+  return coords
+}
+
 function _selectIdentifySourceBlob(item) {
   if (isBlob(item?.originalBlob)) return item.originalBlob
   if (isBlob(item?.sourceBlob)) return item.sourceBlob
@@ -43,7 +74,9 @@ function _envText(key) {
 }
 
 function _getArtsorakelProxyBaseUrl() {
-  return _envText('VITE_ARTSORAKEL_BASE_URL').replace(/\/+$/, '')
+  const explicit = _envText('VITE_ARTSORAKEL_BASE_URL').replace(/\/+$/, '')
+  if (explicit) return explicit
+  return _envText('VITE_MEDIA_UPLOAD_BASE_URL').replace(/\/+$/, '')
 }
 
 function _buildNetworkErrorMessage(error) {
@@ -392,7 +425,7 @@ function _buildArtsorakelFilename(blob) {
   return 'photo.jpg'
 }
 
-function _buildArtsorakelFormData(preparedItems = [], fieldName = 'image') {
+function _buildArtsorakelFormData(preparedItems = [], fieldName = 'image', location = null) {
   const form = new FormData()
   for (const item of preparedItems) {
     const blob = item?.blob
@@ -400,6 +433,7 @@ function _buildArtsorakelFormData(preparedItems = [], fieldName = 'image') {
     form.append(fieldName, blob, _buildArtsorakelFilename(blob))
   }
   form.append('application', SPORELY_APP_NAME)
+  if (location) _appendArtsorakelLatLon(form, location)
   return form
 }
 
@@ -515,7 +549,7 @@ async function _prepareArtsorakelImageBlob(blob, options = {}) {
 async function _postArtsorakelRequest(url, preparedItems, headers = null, fieldName = 'image', kind = 'direct', options = {}) {
   const request = {
     method: 'POST',
-    body: _buildArtsorakelFormData(preparedItems, fieldName),
+    body: _buildArtsorakelFormData(preparedItems, fieldName, options.location || null),
     headers: _buildArtsorakelRequestHeaders(headers),
     signal: options.signal,
   }
@@ -577,6 +611,8 @@ async function _postArtsorakelRequest(url, preparedItems, headers = null, fieldN
 async function _requestArtsorakelResponse(preparedItems, options = {}) {
   const proxyBaseUrl = _getArtsorakelProxyBaseUrl()
   let proxyHeaders = null
+  const location = normalizeArtsorakelLatLon(options)
+  const postOptions = { ...options, location }
 
   if (proxyBaseUrl) {
     const session = await getSharedAuthSession()
@@ -586,7 +622,6 @@ async function _requestArtsorakelResponse(preparedItems, options = {}) {
   }
 
   let response = null
-  let lastError = null
   let endpointUrl = ARTSDATA_AI_URL
   let endpointKind = 'direct'
 
@@ -595,7 +630,7 @@ async function _requestArtsorakelResponse(preparedItems, options = {}) {
     let lastAttemptError = null
     for (const fieldName of ['image', 'file']) {
       try {
-        return await _postArtsorakelRequest(url, preparedItems, headers, fieldName, kind, options)
+        return await _postArtsorakelRequest(url, preparedItems, headers, fieldName, kind, postOptions)
       } catch (error) {
         lastAttemptError = error
         attempts.push(error)
@@ -612,32 +647,13 @@ async function _requestArtsorakelResponse(preparedItems, options = {}) {
   }
 
   if (proxyBaseUrl) {
-    try {
-      endpointUrl = `${proxyBaseUrl}/artsorakel`
-      endpointKind = 'proxy'
-      response = await runEndpoint(endpointUrl, proxyHeaders, endpointKind)
-    } catch (error) {
-      lastError = error
-      if (options.signal?.aborted || _isAbortLikeError(error)) throw error
-      console.warn('Artsorakel proxy failed, falling back to direct endpoint:', error)
-    }
-  }
-
-  if (!response) {
-    try {
-      endpointUrl = ARTSDATA_AI_URL
-      endpointKind = 'direct'
-      response = await runEndpoint(endpointUrl, null, endpointKind)
-    } catch (error) {
-      const combined = lastError
-        ? new Error(`${lastError.message}; direct fallback failed: ${error.message}`)
-        : error
-      if (combined === error) throw error
-      combined.cause = error
-      combined.proxyError = lastError
-      combined.directError = error
-      throw combined
-    }
+    endpointUrl = `${proxyBaseUrl}/artsorakel`
+    endpointKind = 'proxy'
+    response = await runEndpoint(endpointUrl, proxyHeaders, endpointKind)
+  } else {
+    endpointUrl = ARTSDATA_AI_URL
+    endpointKind = 'direct'
+    response = await runEndpoint(endpointUrl, null, endpointKind)
   }
 
   return { response, endpointUrl, endpointKind }
@@ -908,6 +924,7 @@ export async function runArtsorakelForMediaKeys(mediaKeys, lang = 'no', options 
       keys,
       variant: options?.variant || 'medium',
       lang: normalizeLang(lang),
+      ...(normalizeArtsorakelLatLon(options) || {}),
     }),
     signal: options?.signal,
   })

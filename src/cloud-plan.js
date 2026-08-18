@@ -7,6 +7,15 @@ import {
 export const CLOUD_UPLOAD_POLICY_CHANGED_EVENT = 'sporely-cloud-upload-policy-changed'
 const IMAGE_RESOLUTION_MODE_KEY = 'sporely-image-resolution-mode'
 
+// Stage B1: `_source` tags distinguish where a policy came from. Callers
+// (main.js snapshot writer, offline boot) MUST check this so a network
+// fallback never overwrites a valid persisted plan.
+export const CLOUD_PLAN_SOURCE = Object.freeze({
+  NETWORK: 'network',   // explicit successful policy fetch
+  FALLBACK: 'fallback', // network failure — default policy, do NOT persist
+  CACHED: 'cached',     // loaded from last-validated-account snapshot
+})
+
 function _isMissingColumnError(error, columnName) {
   const text = String(error?.message || error?.details || error?.hint || '').toLowerCase()
   const column = String(columnName || '').toLowerCase()
@@ -48,15 +57,55 @@ export function getEffectiveCloudUploadPolicy(profile) {
   }
 }
 
+// Convenience: tag a policy object with its provenance. Non-enumerable so it
+// does not leak into JSON.stringify (which would persist the tag into
+// last-validated-account and confuse a later read).
+function _tag(policy, source) {
+  if (!policy || typeof policy !== 'object') return policy
+  try {
+    Object.defineProperty(policy, '_source', {
+      value: source,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    })
+  } catch { /* frozen — ignore */ }
+  return policy
+}
+
+export function getCloudPlanSource(policy) {
+  return policy?._source || null
+}
+
+// Reconstruct an effective upload policy from a cached cloud plan (whatever
+// shape the plan had when it was last persisted). Tags the result as
+// CACHED so downstream code can decide whether to trust it as authoritative.
+export function reviveCachedCloudPlan(cachedPlan) {
+  if (!cachedPlan || typeof cachedPlan !== 'object') return null
+  const revived = getEffectiveCloudUploadPolicy(cachedPlan)
+  return _tag(revived, CLOUD_PLAN_SOURCE.CACHED)
+}
+
 export async function fetchCloudPlanProfile(userId) {
   const uid = String(userId || '').trim()
-  if (!uid) return getEffectiveCloudUploadPolicy()
+  if (!uid) return _tag(getEffectiveCloudUploadPolicy(), CLOUD_PLAN_SOURCE.FALLBACK)
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('is_pro, cloud_plan, full_res_storage_enabled, storage_quota_bytes, total_storage_bytes, storage_used_bytes, image_count')
-    .eq('id', uid)
-    .single()
+  let data
+  let error
+  try {
+    const result = await supabase
+      .from('profiles')
+      .select('is_pro, cloud_plan, full_res_storage_enabled, storage_quota_bytes, total_storage_bytes, storage_used_bytes, image_count')
+      .eq('id', uid)
+      .single()
+    data = result?.data
+    error = result?.error
+  } catch (thrown) {
+    // Network-level failure — treat as FALLBACK so the caller does not
+    // persist this over a good cached plan.
+    console.warn('fetchCloudPlanProfile threw:', thrown)
+    return _tag(getEffectiveCloudUploadPolicy(), CLOUD_PLAN_SOURCE.FALLBACK)
+  }
 
   if (error) {
     const missingColumns = [
@@ -69,13 +118,15 @@ export async function fetchCloudPlanProfile(userId) {
       'image_count',
     ]
     if (missingColumns.some(column => _isMissingColumnError(error, column))) {
-      return getEffectiveCloudUploadPolicy()
+      // Missing-column path is a deployment/schema case, not a live-user
+      // downgrade — safe to persist as the current known plan.
+      return _tag(getEffectiveCloudUploadPolicy(), CLOUD_PLAN_SOURCE.NETWORK)
     }
     console.warn('fetchCloudPlanProfile failed:', error)
-    return getEffectiveCloudUploadPolicy()
+    return _tag(getEffectiveCloudUploadPolicy(), CLOUD_PLAN_SOURCE.FALLBACK)
   }
 
-  return getEffectiveCloudUploadPolicy(data)
+  return _tag(getEffectiveCloudUploadPolicy(data), CLOUD_PLAN_SOURCE.NETWORK)
 }
 
 export function formatStorageBytes(bytes) {

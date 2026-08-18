@@ -2,6 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
+// Stage B2b: AI provider ops are capability-gated. These tests focus on
+// provider orchestration, not gating — seed COMPLETE at module load so
+// runIdentifyProviderOperation proceeds normally.
+import { AUTH_STATE, setAuthState } from './auth-state.js'
+setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: 'test-user' })
+
 import {
   buildIdentifyFingerprint,
   getIdentifyTopProbability,

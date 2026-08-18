@@ -5,6 +5,7 @@ import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
 import { searchTaxa, formatDisplayName, createManualTaxon } from '../artsorakel.js';
 import { enqueueObservation } from '../sync-queue.js';
+import { canPerformCloudMutation } from '../capabilities.js';
 import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
@@ -2339,6 +2340,16 @@ function _wireCard(sid) {
     debounceTimer = setTimeout(async () => {
       try {
         if (q.length < 2) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
+        // Stage B2b: capability check at the UI layer so cached/reauth
+        // users see an offline hint instead of a silently hidden dropdown
+        // that could look like "no matches". Selected taxa on the session
+        // are untouched (they are stored on `session.taxon`).
+        const cap = canPerformCloudMutation();
+        if (!cap.allowed) {
+          dropdown.innerHTML = `<li class="taxon-dropdown-offline" aria-disabled="true" style="opacity:0.7;pointer-events:none;font-style:italic">${cap.message}</li>`;
+          dropdown.style.display = 'block';
+          return;
+        }
         const results = await searchTaxa(q, getTaxonomyLanguage());
         if (!results?.length) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
         dropdown.innerHTML = results.map((r, i) => {

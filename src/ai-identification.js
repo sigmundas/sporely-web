@@ -15,6 +15,7 @@ import {
 } from './identify.js'
 import { isBlob } from './observation-shapes.js'
 import { esc as _esc } from './esc.js'
+import { canPerformCloudMutation } from './capabilities.js'
 
 /**
  * AI identification image input shape. Callers pass the decode blob plus the
@@ -251,6 +252,23 @@ function _createIdentifyLifecycleError(service, code, message) {
  */
 export async function runIdentifyProviderOperation(service, operation, options = {}) {
   const normalizedService = normalizeIdentifyService(service)
+  // Stage B2b: AI identification (Artsorakel & iNat vision) hits an
+  // authenticated Edge Function / external API. Refuse cleanly BEFORE
+  // invocation in CACHED / REAUTH_REQUIRED so the user gets a stable
+  // "Internet connection required" / "Sign in to reconnect" message
+  // instead of a provider-specific timeout. Local image prep, crop, and
+  // review UI are NOT gated — they run entirely on-device.
+  if (options.bypassCapabilityGate !== true) {
+    const capability = canPerformCloudMutation()
+    if (!capability.allowed) {
+      const err = new Error(capability.message)
+      err.name = 'IdentifyProviderCapabilityError'
+      err.code = 'capability_denied'
+      err.capabilityReason = capability.reason
+      err.service = normalizedService
+      throw err
+    }
+  }
   const slowAfterMs = options.slowAfterMs != null && Number.isFinite(Number(options.slowAfterMs))
     ? Math.max(0, Number(options.slowAfterMs))
     : IDENTIFY_PROVIDER_SLOW_MS
@@ -1056,6 +1074,8 @@ function _buildServiceOptions(service, options = {}) {
     return {
       ...shared,
       maxEdge: options.maxEdge,
+      latitude: options.latitude ?? options.lat ?? null,
+      longitude: options.longitude ?? options.lon ?? options.lng ?? null,
     }
   }
   return shared

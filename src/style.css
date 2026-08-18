@@ -1,3 +1,82 @@
+/* ── Self-hosted fonts ────────────────────────────────────────────────────
+   Stage A cold-start work: previously the app first-painted only after
+   fonts.googleapis.com responded and returned a stylesheet referencing
+   fonts.gstatic.com. That is a two-hop dependency that must not exist for
+   a Capacitor Android launch. These files live under public/fonts/ and are
+   bundled directly into the APK; `font-display: swap` still lets the shell
+   render immediately with the fallback and swap in the real face when the
+   local read resolves.
+
+   Weight/subset selection matches what src/style.css and index.html
+   actually reference: Outfit 400–700 (single variable-font file per
+   subset), DM Mono 400 & 500, Instrument Serif italic (used only by
+   .observation-name). Weight 300 is not used anywhere, and Instrument
+   Serif upright is not used, so neither is bundled. */
+@font-face {
+  font-family: 'Outfit';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/outfit-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Outfit';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/outfit-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/dm-mono-400-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/dm-mono-400-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/dm-mono-500-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/dm-mono-500-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Instrument Serif';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/instrument-serif-italic-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Instrument Serif';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/instrument-serif-italic-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 :root {
   /* Surfaces */
   --bg:           #0d1109;
@@ -566,6 +645,61 @@ html, body {
 .home-section-gap { margin-top: 22px; }
 .section-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 .section-link { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--green-bright); cursor: pointer; }
+
+/* Home reveal-before-hydrate skeletons.
+   These are the DOM-visible placeholders that the app shell renders while the
+   first Home refresh runs. `home.js` replaces the container's innerHTML on
+   completion, so once real content lands the skeletons are gone. If refresh
+   fails after the shell is already revealed the section falls back to the
+   inline error state instead of being replaced with these skeletons. */
+.home-skeleton {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-dim);
+}
+.home-skeleton:last-child { border-bottom: none; }
+.home-skeleton-thumb {
+  width: 48px; height: 48px; border-radius: 8px;
+  background: linear-gradient(90deg, var(--card) 0%, var(--card-raised) 50%, var(--card) 100%);
+  background-size: 200% 100%;
+  animation: home-skeleton-pulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.home-skeleton-avatar {
+  width: 32px; height: 32px; border-radius: 999px;
+  background: linear-gradient(90deg, var(--card) 0%, var(--card-raised) 50%, var(--card) 100%);
+  background-size: 200% 100%;
+  animation: home-skeleton-pulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.home-skeleton-lines { flex: 1; min-width: 0; }
+.home-skeleton-line {
+  height: 10px; border-radius: 4px; margin: 6px 0;
+  background: linear-gradient(90deg, var(--card) 0%, var(--card-raised) 50%, var(--card) 100%);
+  background-size: 200% 100%;
+  animation: home-skeleton-pulse 1.4s ease-in-out infinite;
+}
+.home-skeleton-line--40 { width: 40%; }
+.home-skeleton-line--45 { width: 45%; }
+.home-skeleton-line--50 { width: 50%; }
+.home-skeleton-line--55 { width: 55%; }
+.home-skeleton-line--60 { width: 60%; }
+.home-skeleton-line--65 { width: 65%; }
+.home-skeleton-line--70 { width: 70%; }
+.home-skeleton-line--80 { width: 80%; }
+.home-skeleton-line--85 { width: 85%; }
+
+@keyframes home-skeleton-pulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-skeleton-thumb,
+  .home-skeleton-avatar,
+  .home-skeleton-line { animation: none; }
+}
 
 .find-row {
   display: flex; align-items: center; gap: 12px;
@@ -5156,6 +5290,39 @@ html.light .ai-id-dot.is-complete::before {
 .delete-account-confirm-btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* Persistent Offline indicator (Stage B1). Floats top-centre inside the
+   app-shell viewport; a small amber pill that stays visible across screens
+   while auth is in AUTHENTICATED_CACHED mode. It is dismissed automatically
+   once background revalidation succeeds. */
+.app-offline-indicator {
+  position: fixed;
+  top: env(safe-area-inset-top, 0);
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 6px;
+  z-index: 1800;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 8px;
+  border-radius: 999px;
+  background: rgba(200, 120, 20, 0.15);
+  border: 1px solid rgba(200, 120, 20, 0.4);
+  color: #d99a3c;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+.app-offline-indicator-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
 }
 
 /* Account-transition blocker. Sits ABOVE every regular screen and modal
