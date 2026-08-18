@@ -2,14 +2,20 @@ import { supabase } from '../supabase.js'
 import { formatDate, formatTime, t } from '../i18n.js'
 import { state } from '../state.js'
 import { showToast } from '../toast.js'
-import { fetchCloudPlanProfile, formatStorageBytes } from '../cloud-plan.js'
+import { fetchCloudPlanProfile, formatStorageBytes, mergeCloudPlanForOfflineFallback } from '../cloud-plan.js'
 import { getLastSyncAt } from '../settings.js'
 import { hideProfileOverlay, showProfileOverlay } from '../profile-overlay.js'
 import { isPickerCancel, nativePickedPhotoToFile, PICKER_OPTIONS_AVATAR, pickImagesWithNativePhotoPicker } from './import-helpers.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { isProfileComplete, saveProfileEdit, saveProfileSetup } from '../profile-completion.js'
 import { runProfileSetupCompletion, runSetupSignOut } from '../profile-setup-flow.js'
-import { requireCloudMutation } from '../capabilities.js'
+import { canUseAuthenticatedNetwork, requireCloudMutation } from '../capabilities.js'
+import {
+  MEDIA_KIND,
+  MEDIA_PRIVACY_SCOPE,
+  readCachedMedia,
+  writeCachedMedia,
+} from '../media-cache.js'
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
@@ -288,32 +294,94 @@ export async function loadProfile() {
   await Promise.all([_loadProfileData(), _loadFriends(), _loadPending()])
 }
 
+// Stage B: user-scoped avatar identity for the persistent media cache.
+// The avatar mediaKey is the sentinel string `self:<userId>` (never a
+// signed URL, never the storage path) so B cannot read A's blob.
+function _avatarIdentity(userId) {
+  const uid = String(userId || '').trim()
+  if (!uid) return null
+  return {
+    userId: uid,
+    mediaKind: MEDIA_KIND.AVATAR,
+    privacyScope: MEDIA_PRIVACY_SCOPE.SELF,
+    mediaKey: `self:${uid}`,
+    variant: 'original',
+  }
+}
+
+// Best-effort: paint cached avatar blobs asynchronously into the header
+// avatar <img> targets. Never throws; a miss leaves initials untouched.
+async function _paintCachedAvatarInto(targets, userId, initials) {
+  const identity = _avatarIdentity(userId)
+  if (!identity) return
+  let cached
+  try { cached = await readCachedMedia(identity) }
+  catch (_) { cached = null }
+  if (!cached?.blob) return
+  let objectUrl
+  try { objectUrl = URL.createObjectURL(cached.blob) }
+  catch (_) { return }
+  // Guard: the state.user may have transitioned mid-await; refuse to paint
+  // over a different user's chrome.
+  if (state.user?.id && state.user.id !== userId) {
+    try { URL.revokeObjectURL(objectUrl) } catch (_) {}
+    return
+  }
+  for (const [imgId, initialsId] of targets) {
+    const img = document.getElementById(imgId)
+    const label = document.getElementById(initialsId)
+    if (!img || !label) continue
+    if (label.textContent !== initials) continue // super-defensive: only paint on the current identity
+    img.src = objectUrl
+    img.style.display = 'block'
+    label.style.display = 'none'
+  }
+}
+
+// Persist an avatar blob to the media cache under `self:<userId>`. Called
+// after a successful upload or after a fresh online avatar fetch.
+async function _persistAvatarBlob(userId, blob) {
+  const identity = _avatarIdentity(userId)
+  if (!identity || !blob) return
+  try { await writeCachedMedia(identity, blob) } catch (_) { /* best-effort */ }
+}
+
+// Fetch a remote avatar URL as a blob (best-effort, cross-origin-safe). Used
+// to warm the cache after a successful online avatar refresh. Returns null
+// on failure.
+async function _fetchRemoteBlob(url) {
+  if (!url) return null
+  try {
+    const res = await fetch(url, { cache: 'no-store', credentials: 'omit' })
+    if (!res?.ok) return null
+    const type = String(res.headers?.get?.('content-type') || '').toLowerCase()
+    if (!type.startsWith('image/')) return null
+    const blob = await res.blob()
+    return blob
+  } catch (_) { return null }
+}
+
 // Synchronous, network-free header renderer for Stage B1's cached-authenticated
-// boot path. Paints username/display-name/avatar from a persisted profile
-// summary; if the cached avatar URL is a protected-media URL that would
-// require a network fetch we degrade to initials rather than attempt the
-// fetch before the shell is even revealed.
+// boot path. Paints initials synchronously from the persisted profile
+// summary, and asynchronously swaps in the user-scoped cached avatar blob
+// (if any) via the media cache. This function NEVER touches Supabase and
+// NEVER assigns an http(s) URL to `img.src` — a plain `<img src=…>` would
+// issue a browser-level network request, which violates the CACHED / REAUTH
+// invariant that avatar rendering fires ZERO network in those states.
+// `refreshHeaderProfileButtons()` remains the authoritative online path and
+// will overwrite the DOM once revalidation succeeds.
 //
-// This function must NEVER touch Supabase — it runs before we know whether
-// we have connectivity. `refreshHeaderProfileButtons()` remains the
-// authoritative online path and will overwrite the DOM once revalidation
-// succeeds.
+// The `profileSummary.avatar_url` argument is intentionally ignored for
+// synchronous paint. On a fresh install with no persisted blob, initials
+// are the correct rendering; a background revalidation to COMPLETE will
+// warm the cache and repaint on the next launch.
 export function renderCachedHeaderProfileButtons(profileSummary = {}, options = {}) {
   const emailFallback = _cleanString(options?.email) || state.user?.email || ''
   const rawUsername = _cleanString(profileSummary?.username)
   const rawDisplay = _cleanString(profileSummary?.display_name)
-  const avatarUrl = _cleanString(profileSummary?.avatar_url)
 
   const normalizedUsername = _normalizeUsername(rawUsername || rawDisplay, emailFallback)
   const initials = _initials(normalizedUsername || rawDisplay || emailFallback)
-
-  // Only accept avatar URLs that a plain <img src> can display offline. That
-  // means public URLs (http/https) or a data URI. Anything that requires
-  // token-bearing fetches (protected-media / signed URLs behind Workers)
-  // must fall back to initials until refreshHeaderProfileButtons runs
-  // online. We intentionally treat Supabase signed-URLs as unsafe here
-  // because they still require the WebView to reach Supabase.
-  const canUseCachedAvatar = _looksLikeInlineOrPublicAvatar(avatarUrl)
 
   const targets = [
     ['home-profile-img', 'home-profile-initials'],
@@ -322,21 +390,28 @@ export function renderCachedHeaderProfileButtons(profileSummary = {}, options = 
     ['people-profile-img', 'people-profile-initials'],
   ]
 
+  // Synchronous initials paint on every header target. No `img.src`
+  // assignment here — a browser-level GET for the http(s) URL would
+  // violate the CACHED / REAUTH "zero avatar network" invariant.
   for (const [imgId, initialsId] of targets) {
     const img = document.getElementById(imgId)
     const label = document.getElementById(initialsId)
     if (!img || !label) continue
 
     label.textContent = initials
-    if (canUseCachedAvatar) {
-      img.src = avatarUrl
-      img.style.display = 'block'
-      label.style.display = 'none'
-    } else {
-      img.removeAttribute('src')
-      img.style.display = 'none'
-      label.style.display = ''
-    }
+    img.removeAttribute('src')
+    img.style.display = 'none'
+    label.style.display = ''
+  }
+
+  // Stage B FINAL: kick off an async best-effort read of the persisted
+  // avatar blob for this user. On hit we replace the initials with the
+  // cached image. On miss we do NOTHING — no HTTP avatar request is
+  // dispatched. The user id is read from `state.user` (set by the caller
+  // before invoking us on the cached boot path).
+  const uid = state.user?.id || ''
+  if (uid) {
+    void _paintCachedAvatarInto(targets, uid, initials)
   }
 }
 
@@ -345,25 +420,21 @@ function _cleanString(value) {
   return s
 }
 
-function _looksLikeInlineOrPublicAvatar(url) {
-  const value = _cleanString(url)
-  if (!value) return false
-  if (value.startsWith('data:image/')) return true
-  // Public storage URLs from Supabase are of the shape .../storage/v1/object/public/…
-  // We keep the check tolerant: any http(s) URL that is not obviously a
-  // signed URL (`?token=…` / `sign/`) is considered safe to use offline; the
-  // <img> tag falls back gracefully if the fetch fails.
-  if (/^https?:\/\//i.test(value)) {
-    if (/[?&]token=/.test(value)) return false
-    if (/\/object\/sign\//.test(value)) return false
-    return true
-  }
-  return false
-}
-
 export async function refreshHeaderProfileButtons(profile = null) {
   const uid = state.user?.id
   if (!uid) return
+
+  // Stage B FINAL invariant: CACHED / REAUTH_REQUIRED must never trigger an
+  // avatar network request. If the capability gate denies authenticated
+  // network use, delegate to the cache-first render (initials + async
+  // persistent-media paint) and return without touching Supabase storage or
+  // creating an Image() probe. Callers in the online path (main.js resolve,
+  // in-place revalidation, _uploadAvatar, _saveProfile) will exclusively
+  // dispatch this method under AUTHENTICATED_COMPLETE.
+  if (!canUseAuthenticatedNetwork()?.allowed) {
+    renderCachedHeaderProfileButtons(profile || {}, { email: state.user?.email || '' })
+    return
+  }
 
   let summary = profile
   if (!summary) {
@@ -416,6 +487,17 @@ export async function refreshHeaderProfileButtons(profile = null) {
       label.style.display = ''
     }
   }
+
+  // Stage B: warm the persistent avatar cache in the background so the
+  // next cold boot (offline or otherwise) can render this avatar without
+  // any HTTP request. Best-effort; a fetch/persist failure never
+  // interferes with the immediate paint above.
+  if (isValid && avatarUrl && uid) {
+    void (async () => {
+      const blob = await _fetchRemoteBlob(avatarUrl)
+      if (blob) await _persistAvatarBlob(uid, blob)
+    })()
+  }
 }
 
 
@@ -429,7 +511,12 @@ async function _loadProfileData() {
     .select('username, display_name, bio, avatar_url')
     .eq('id', uid)
     .single()
-  state.cloudPlan = await fetchCloudPlanProfile(uid)
+  // Stage B final: a FALLBACK plan (network failure default) must NEVER
+  // replace a known-good CACHED/NETWORK plan; that would silently downgrade
+  // an offline Pro user to Free while Settings/Profile is open. Route every
+  // assignment through the merge helper.
+  const nextPlan = await fetchCloudPlanProfile(uid)
+  state.cloudPlan = mergeCloudPlanForOfflineFallback(state.cloudPlan, nextPlan)
   if (!data) {
     _renderCloudPlan(state.cloudPlan)
     return
@@ -755,6 +842,10 @@ async function _uploadAvatar(blob) {
     username: _normalizeUsername(document.getElementById('profile-username')?.value, state.user?.email || ''),
     avatar_url: publicUrl,
   })
+  // Stage B: seed the persistent avatar cache directly from the uploaded
+  // blob so we never depend on refetching the freshly-uploaded remote URL
+  // for the next launch's warm paint.
+  void _persistAvatarBlob(uid, blob)
   showToast(t('profile.photoUpdated'))
 }
 

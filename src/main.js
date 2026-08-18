@@ -46,7 +46,7 @@ import { initImportReview, openNativeCamera, renderSessions, restoreImportSessio
 import { clearImportSessions, clearImportSessionsStrict, loadImportSessions } from './import-store.js'
 import { clearReviewDraftStrict, loadReviewDraft } from './review-draft-store.js'
 import { forceCloseProfileOverlay, initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons, renderCachedHeaderProfileButtons } from './screens/profile.js'
-import { AUTH_STATE, getAuthState, setAuthState } from './auth-state.js'
+import { AUTH_STATE, getAuthState, setAuthState, subscribeAuthState } from './auth-state.js'
 import { requireCloudMutation } from './capabilities.js'
 import { fetchProfileWithSignupRetry, isProfileComplete } from './profile-completion.js'
 import { clearLocalDataOwner, getLocalDataOwner, resolveLocalDataOwner, setLocalDataOwner } from './local-data-owner.js'
@@ -71,10 +71,12 @@ import {
   CLOUD_PLAN_SOURCE,
   fetchCloudPlanProfile,
   getCloudPlanSource,
+  mergeCloudPlanForOfflineFallback,
   reviveCachedCloudPlan,
 } from './cloud-plan.js'
 import { clearMediaUrlCache } from './images.js'
 import { notifyProtectedMediaSessionChange } from './protected-media.js'
+import { clearAllCachedMedia, clearMediaCacheForUser } from './media-cache.js'
 import { initDebugDashboard } from './debug-dashboard.js'
 import { hideSettingsOverlay, showSettingsOverlay } from './settings-overlay.js'
 import { isWebInatOAuthConfigured } from './inaturalist.js'
@@ -160,6 +162,17 @@ function enqueueAuthEvent(event, session, deferred) {
 // AUTHENTICATED_CACHED mode. Reveal timing matches the app-shell's — do not
 // paint the indicator until reveal, otherwise the boot flash briefly shows
 // the badge on top of the auth overlay.
+//
+// STAGE B FINAL BEHAVIOR (spec L1):
+//   * AUTHENTICATED_CACHED  → visible.
+//   * AUTHENTICATED_REAUTH_REQUIRED → HIDDEN (backend reachable; the pill
+//     would misinform the user that they are offline).
+//   * AUTHENTICATED_COMPLETE / anything else → hidden.
+//   * `navigator.onLine` is never consulted here.
+//
+// A subscription bound at boot mirrors the current auth-state onto the pill
+// so `_syncCachedStateWithReachability` toggles that flip the state also
+// flip the indicator without any extra call site.
 function _setOfflineIndicator(visible) {
   try {
     const el = document.getElementById('app-offline-indicator')
@@ -167,6 +180,22 @@ function _setOfflineIndicator(visible) {
     el.style.display = visible ? 'flex' : 'none'
   } catch (_) { /* DOM missing in test envs */ }
 }
+
+function _shouldShowOfflineIndicatorForState(stateValue) {
+  return stateValue === AUTH_STATE.AUTHENTICATED_CACHED
+}
+
+let _offlineIndicatorSubscriptionBound = false
+function _bindOfflineIndicatorToAuthState() {
+  if (_offlineIndicatorSubscriptionBound) return
+  _offlineIndicatorSubscriptionBound = true
+  try {
+    subscribeAuthState(next => {
+      _setOfflineIndicator(_shouldShowOfflineIndicatorForState(next?.state))
+    })
+  } catch (err) { console.warn('offline-indicator subscription failed:', err) }
+}
+_bindOfflineIndicatorToAuthState()
 
 // Auth-classifier + reachability probe live in `auth-classification.js` so
 // they can be imported into unit tests without pulling the whole DOM/CSS
@@ -218,7 +247,10 @@ function initSettings() {
   async function _refreshSettingsCloudPlan() {
     const uid = state.user?.id
     if (!uid) return
-    state.cloudPlan = await fetchCloudPlanProfile(uid)
+    // Stage B final: never let a FALLBACK plan clobber a known-good
+    // CACHED/NETWORK plan. The merge helper picks the authoritative one.
+    const next = await fetchCloudPlanProfile(uid)
+    state.cloudPlan = mergeCloudPlanForOfflineFallback(state.cloudPlan, next)
     _syncSettingsUI()
   }
 
@@ -398,6 +430,11 @@ function initSettings() {
       await clearImportSessions()
       clearMediaUrlCache()
       await clearAllHomeCaches()
+      // Stage B: the persistent media blob cache is cleared in full too.
+      // The revoked cached-shell state means we lose warmed thumbnails on
+      // the next launch until an online refresh, but that is the explicit
+      // user intent of "Clear local cache".
+      await clearAllCachedMedia()
       if (window.caches?.keys) {
         const keys = await caches.keys()
         await Promise.all(keys.map(key => caches.delete(key)))
@@ -639,6 +676,14 @@ const RESOLUTION_STATUS = Object.freeze({
   // could not complete (profile fetch failed). The cached shell stays up;
   // the reconnect triggers retry later. Deliberately NOT a success status.
   CACHED_REVALIDATION_DEFERRED: 'cached-revalidation-deferred',
+  // Stage B device-QA regression fix: the initial ONLINE resolution held a
+  // locally persisted session, but the profile fetch failed against an
+  // unreachable backend, and the trusted cached shell was revealed instead
+  // for the SAME user. Deliberately NOT a success status —
+  // `resolveAuthenticatedSessionOnce` must not mark the user resolved, so
+  // the existing cached-revalidation triggers re-run the full pipeline on
+  // reconnect (which takes the same-user in-place path to COMPLETE).
+  CACHED_OFFLINE_FALLBACK: 'cached-offline-fallback',
 })
 
 // Stage B2a: same-user revalidation of an already-revealed cached shell
@@ -690,7 +735,7 @@ async function _revalidateCachedRevealInPlace(user) {
     let cloudPlan = null
     try { cloudPlan = await fetchCloudPlanProfile(user.id) }
     catch (err) { console.warn('[cached-auth] cloud plan fetch on in-place revalidation failed:', err) }
-    if (cloudPlan) state.cloudPlan = cloudPlan
+    if (cloudPlan) state.cloudPlan = mergeCloudPlanForOfflineFallback(state.cloudPlan, cloudPlan)
     if (!isCurrentAccountTransition(generation, user.id, state.user?.id)) return
     _persistLastValidatedAccountSnapshot({
       userId: user.id,
@@ -764,6 +809,28 @@ async function _resolveAndRouteForUser(user) {
     // Blocker stays visible; do not reveal Home.
     console.error('Profile fetch failed during auth resolution:', error)
     _authLog('profile_completion_checked', { hasProfile: false, complete: false, fetchOk: false })
+    // Stage B device-QA regression fix: `supabase.auth.getSession()` returns
+    // a locally persisted session even in airplane mode, so an offline cold
+    // start lands HERE (transport-failed profile fetch) instead of in
+    // `_tryCachedAuthenticatedBoot`. Attempt the trusted cached-shell
+    // fallback — SAME user only, and only when a post-failure probe confirms
+    // the backend is unreachable — before surfacing the blocking error.
+    let fallback
+    try {
+      fallback = await _tryCachedFallbackAfterProfileFetchFailure({ user, error, generation })
+    } catch (fallbackErr) {
+      console.warn('Cached fallback after profile-fetch failure threw; keeping error surface:', fallbackErr)
+      fallback = 'denied'
+    }
+    if (fallback === 'revealed') return { status: RESOLUTION_STATUS.CACHED_OFFLINE_FALLBACK }
+    if (fallback === 'stale') return { status: RESOLUTION_STATUS.STALE }
+    // The fallback may have awaited its reachability probe — re-verify the
+    // transition so a superseded resolution never paints the error surface
+    // over a newer account's UI.
+    if (!isCurrentAccountTransition(generation, expectedUserId, user.id)) {
+      _authLog('stale_account_result_discarded', { source: 'profile_fetch_error_surface' })
+      return { status: RESOLUTION_STATUS.STALE }
+    }
     _showProfileResolutionError(user, error)
     return { status: RESOLUTION_STATUS.PROFILE_FETCH_FAILED }
   }
@@ -897,7 +964,7 @@ async function _resolveAndRouteForUser(user) {
     let cloudPlan = null
     try { cloudPlan = await fetchCloudPlanProfile(user.id) }
     catch (err) { console.warn('[cached-auth] cloud plan fetch on resolve failed:', err) }
-    if (cloudPlan) state.cloudPlan = cloudPlan
+    if (cloudPlan) state.cloudPlan = mergeCloudPlanForOfflineFallback(state.cloudPlan, cloudPlan)
     if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) return
     _persistLastValidatedAccountSnapshot({
       userId: user.id,
@@ -1044,6 +1111,13 @@ async function _ensureAppReadyForUser(user) {
     // failed delete cannot leak into the new user's session.
     if (!(await clearHomeCache(previousUserId))) {
       console.warn('Home cache clear on account switch failed; record remains user-scoped.')
+    }
+    // Stage B: clear the previous user's persistent media blobs on account
+    // switch too. The store is userId-keyed so B can never read A's blobs
+    // even if this delete fails — but explicit cleanup keeps quotas
+    // predictable.
+    if (!(await clearMediaCacheForUser(previousUserId))) {
+      console.warn('Media cache clear on account switch failed; entries remain user-scoped.')
     }
     setLocalDataOwner(user.id)
     await _clearInMemoryUserState()
@@ -1274,22 +1348,147 @@ async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError =
   try { reachability = await probe() }
   catch (_) { reachability = 'unreachable' }
   _bootMark('reachability-probe-completed', { reachability })
-  _authLog('reachability_probe', { reachability, sessionThrown: !!sessionError })
+  _authLog('reachability_probe', { hasHashError: !!hasHashError, reachability, sessionThrown: !!sessionError })
 
   const targetState = reachability === 'reachable'
     ? AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED
     : AUTH_STATE.AUTHENTICATED_CACHED
 
+  // If the backend is REACHABLE but our session is missing, the reveal below
+  // enters AUTHENTICATED_REAUTH_REQUIRED and the user reauths (or the
+  // reconnect triggers pick up a materialized session). If UNREACHABLE, the
+  // reveal enters AUTHENTICATED_CACHED and schedules the reconnect triggers
+  // so a network heal transitions us out of cached mode.
+  await _revealTrustedCachedShell({
+    snapshot,
+    targetState,
+    reachability,
+    reason: sessionError ? 'transport-error' : 'no-session',
+  })
+  // Both 'revealed' and 'stale' count as handled: a stale reveal means a
+  // newer online transition is now in charge — do NOT fall through to the
+  // unauthenticated flow.
+  return true
+}
+
+// Stage B device-QA regression fix (persisted-local-session offline cold
+// start). `supabase.auth.getSession()` returns a locally persisted session
+// even in airplane mode, so the initial boot takes the ONLINE resolution
+// path; its profile fetch then fails with a transport error ("TypeError:
+// Failed to fetch") and previously surfaced the blocking profile-resolution
+// error — the MOST COMMON offline launch never reached AUTHENTICATED_CACHED.
+//
+// This helper runs ONLY after a profile-resolution failure inside
+// `_resolveAndRouteForUser` — never on the healthy path, so Stage A startup
+// performance is untouched (ZERO reachability probes when the profile fetch
+// succeeds).
+//
+// The cached fallback is allowed ONLY when ALL of these hold:
+//   1. the profile-fetch error is NOT a server-confirmed auth rejection
+//      (explicit rejection keeps the existing rejection/sign-out semantics)
+//      AND the error is transport-shaped — a well-formed server failure
+//      (RLS / schema / server bug) must keep the blocking error surface;
+//   2. `readLastValidatedAccount()` returns a valid snapshot;
+//   3. the snapshot belongs to the SAME user as the local session
+//      (`snapshot.userId === user.id`) — never reveal another user's cache;
+//   4. `getLocalDataOwner() === user.id` (Stage B1 privacy boundary);
+//   5. a reachability probe — run only NOW, after the failure — classifies
+//      the backend as unreachable. A reachable backend means the failure is
+//      real and must stay visible (never disguise server errors as offline).
+//
+// Returns:
+//   'revealed' — the trusted cached shell is up (single shared reveal path).
+//   'stale'    — a newer account transition superseded us; nothing painted.
+//   'denied'   — conditions not met; the caller keeps the existing blocking
+//                profile-resolution error surface.
+async function _tryCachedFallbackAfterProfileFetchFailure({ user, error, generation, probe = probeBackendReachability }) {
+  if (!user?.id) return 'denied'
+  // Gate 1 — error classification. Synchronous, zero network.
+  if (_isExplicitAuthRejection(error)) {
+    _authLog('cached_fallback_skipped_auth_reject', { code: _safeErrorCode(error) })
+    return 'denied'
+  }
+  if (!_isTransportSessionError(error)) {
+    _authLog('cached_fallback_skipped_non_transport', { code: _safeErrorCode(error) })
+    return 'denied'
+  }
+  // Gates 2–4 — trusted local identity for the SAME user. Synchronous,
+  // zero network. Unlike `_tryCachedAuthenticatedBoot` (which has no session
+  // and trusts owner === snapshot alone), this path holds a session user and
+  // requires BOTH markers to equal that exact user id.
+  const snapshot = readLastValidatedAccount()
+  if (!snapshot) {
+    _authLog('cached_fallback_skipped_no_snapshot', {})
+    return 'denied'
+  }
+  if (snapshot.userId !== user.id) {
+    _authLog('cached_fallback_snapshot_user_mismatch', {})
+    return 'denied'
+  }
+  const owner = getLocalDataOwner()
+  if (!owner || owner !== user.id) {
+    _authLog('cached_fallback_owner_mismatch', { hasOwner: !!owner })
+    return 'denied'
+  }
+  // Gate 5 — reachability. This probe exists ONLY on this failure path.
+  _bootMark('reachability-probe-started', { trigger: 'profile-fetch-failure' })
+  let reachability
+  try { reachability = await probe() }
+  catch (_) { reachability = 'unreachable' }
+  _bootMark('reachability-probe-completed', { reachability, trigger: 'profile-fetch-failure' })
+  _authLog('cached_fallback_probe', { reachability })
+  if (reachability !== 'unreachable') {
+    _authLog('cached_fallback_skipped_backend_reachable', {})
+    return 'denied'
+  }
+  // Stale-async safety: the probe awaited — a newer account transition may
+  // own the UI now. The reveal below opens its own transition generation;
+  // never open one over a newer transition's back.
+  if (!isCurrentAccountTransition(generation, user.id, user.id)) {
+    _authLog('stale_account_result_discarded', { source: 'cached_fallback_probe' })
+    return 'stale'
+  }
+  // Backend unreachable + trusted same-user snapshot → the fallback always
+  // reveals AUTHENTICATED_CACHED (never REAUTH_REQUIRED — that state is for
+  // "reachable but no session", which cannot be this branch).
+  return _revealTrustedCachedShell({
+    snapshot,
+    targetState: AUTH_STATE.AUTHENTICATED_CACHED,
+    reachability,
+    reason: 'profile-fetch-transport',
+  })
+}
+
+// ── SINGLE trusted cached-shell reveal ───────────────────────────────────────
+//
+// Both cached entry points converge here so there is exactly ONE
+// implementation of "reveal the shell from the persisted snapshot":
+//
+//   1. `_tryCachedAuthenticatedBoot` — no usable local session at boot
+//      (Stage B1: null session, or getSession() threw a transport error).
+//   2. `_tryCachedFallbackAfterProfileFetchFailure` — a locally persisted
+//      session EXISTS but the initial online resolution failed against an
+//      unreachable backend (the airplane-mode cold start observed in
+//      device QA).
+//
+// Callers own ALL trust decisions (snapshot validity, owner match, same-user
+// equality, rejection classification, reachability). This function only
+// performs the reveal — and re-verifies its own account-transition
+// generation at every await boundary so a superseded reveal paints nothing.
+//
+// Returns 'revealed' when the cached shell is up, or 'stale' when a newer
+// account transition took over mid-flight.
+async function _revealTrustedCachedShell({ snapshot, targetState, reachability, reason }) {
   _bootMark('cached-auth-selected', {
     hasCloudPlan: !!snapshot.cloudPlan,
     reachability,
-    reason: sessionError ? 'transport-error' : 'no-session',
+    reason,
     targetState,
   })
   _authLog('cached_boot_selected', {
     hasCloudPlan: !!snapshot.cloudPlan,
-    hasHashError: !!hasHashError,
     reachability,
+    reason,
     targetState,
   })
 
@@ -1311,14 +1510,14 @@ async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError =
   showAccountTransitionBlocker()
   setAuthState({ state: AUTH_STATE.RESOLVING, userId: expectedUserId })
   showAuthOverlay()
-  try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay in cached boot failed:', err) }
+  try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay in cached reveal failed:', err) }
   _hideProfileResolutionError()
 
   // Init the shell + restore drafts behind the blocker.
   await _ensureAppReadyForUser(state.user)
   if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) {
     _authLog('cached_boot_stale', { source: 'ensure_ready' })
-    return true // do not fall through — a newer online transition is now in charge
+    return 'stale'
   }
 
   // Paint header chrome from cached profile summary (synchronous, no
@@ -1328,7 +1527,7 @@ async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError =
     renderCachedHeaderProfileButtons(snapshot.profileSummary, { email: snapshot.email })
     _bootMark('cached-header-rendered')
   } catch (err) {
-    console.warn('renderCachedHeaderProfileButtons in cached boot failed:', err)
+    console.warn('renderCachedHeaderProfileButtons in cached reveal failed:', err)
   }
 
   setAuthState({ state: targetState, userId: snapshot.userId })
@@ -1336,7 +1535,11 @@ async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError =
   _bootMark('app-shell-initialized')
   hideAuthOverlay()
   hideAccountTransitionBlocker()
-  _setOfflineIndicator(true)
+  // Offline pill follows the Stage B FINAL matrix (L1): visible for
+  // AUTHENTICATED_CACHED, hidden for AUTHENTICATED_REAUTH_REQUIRED (backend
+  // reachable — the pill would misinform). The auth-state subscription
+  // mirrors this too; the explicit call keeps reveal timing deterministic.
+  _setOfflineIndicator(_shouldShowOfflineIndicatorForState(targetState))
   _bootMark('app-shell-revealed')
   _bootMeasure('js-init-start', 'app-shell-revealed')
   _authLog('cached_boot_revealed', { targetState })
@@ -1351,18 +1554,14 @@ async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError =
       if (!isCurrentAccountTransition(generation, expectedUserId, state.user?.id)) return
       await renderHomeFromCache(snapshot.userId)
     } catch (err) {
-      console.warn('Cached Home render on offline boot failed:', err)
+      console.warn('Cached Home render on cached reveal failed:', err)
     }
   })()
 
-  // If the backend is REACHABLE but our session is missing, a single
-  // deferred re-probe is redundant — reveal the shell in
-  // AUTHENTICATED_REAUTH_REQUIRED and let the user reauth (or the
-  // reconnect triggers pick up a materialized session). If UNREACHABLE,
-  // schedule the same reconnect triggers so a network heal transitions
-  // us out of cached mode.
+  // Reuse the existing reconnect machinery — listeners bind once, and the
+  // single deferred re-probe only schedules when the backend was UNREACHABLE.
   _scheduleCachedRevalidation({ initialReachability: reachability })
-  return true
+  return 'revealed'
 }
 
 let _cachedRevalidationListenersBound = false
@@ -1633,6 +1832,16 @@ async function init() {
         ? await clearHomeCache(signedOutUserId)
         : await clearAllHomeCaches()
       if (!cacheCleared) console.warn('Home cache clear on sign-out failed; record remains gated by the revoked snapshot.')
+      // Stage B: the persistent media blob cache is user-scoped. Explicit
+      // sign-out clears this user's media unconditionally (not blocked by
+      // draft-purge failure). Delete failures are only logged — the store
+      // is userId-keyed, so remnants cannot leak into another user's
+      // session anyway, and the next successful online sign-in as the
+      // same user will overwrite them.
+      const mediaCleared = signedOutUserId
+        ? await clearMediaCacheForUser(signedOutUserId)
+        : await clearAllCachedMedia()
+      if (!mediaCleared) console.warn('Media cache clear on sign-out failed; entries remain userId-keyed.')
       resetHomeSectionTracking()
       try { forceCloseProfileOverlay() } catch (err) { console.warn('forceCloseProfileOverlay failed:', _safeErrorCode(err)) }
       _hideProfileResolutionError()

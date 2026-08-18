@@ -6,6 +6,7 @@ import {
   CLOUD_PLAN_SOURCE,
   fetchCloudPlanProfile,
   getCloudPlanSource,
+  mergeCloudPlanForOfflineFallback,
   reviveCachedCloudPlan,
 } from './cloud-plan.js'
 
@@ -114,4 +115,74 @@ test('_source tag is non-enumerable so it does not leak into JSON.stringify', ()
   const revived = reviveCachedCloudPlan(cached)
   const json = JSON.stringify(revived)
   assert.equal(json.includes('_source'), false, 'tag must not appear in JSON')
+})
+
+// Stage B FINAL — mergeCloudPlanForOfflineFallback rules. Callers in main.js
+// (settings/refresh, in-place revalidation, cold boot) and profile.js
+// (_loadProfileData) must funnel every assignment through this helper so
+// that a FALLBACK response can never silently downgrade a Pro user offline.
+
+function proNetwork() {
+  const revived = reviveCachedCloudPlan({ cloudPlan: 'pro', hasProAccess: true, qualityProfile: 'high' })
+  // Re-tag as NETWORK to simulate a real successful fetch.
+  Object.defineProperty(revived, '_source', {
+    value: CLOUD_PLAN_SOURCE.NETWORK,
+    enumerable: false, writable: true, configurable: true,
+  })
+  return revived
+}
+
+function proCached() {
+  return reviveCachedCloudPlan({ cloudPlan: 'pro', hasProAccess: true, qualityProfile: 'high' })
+}
+
+function freeFallback() {
+  const plan = reviveCachedCloudPlan({ cloudPlan: 'free', hasProAccess: false, qualityProfile: 'standard' })
+  Object.defineProperty(plan, '_source', {
+    value: CLOUD_PLAN_SOURCE.FALLBACK,
+    enumerable: false, writable: true, configurable: true,
+  })
+  return plan
+}
+
+test('merge: NETWORK plan replaces every prior value', () => {
+  const current = proCached()
+  const next = freeFallback()
+  Object.defineProperty(next, '_source', { value: CLOUD_PLAN_SOURCE.NETWORK, enumerable: false, writable: true, configurable: true })
+  const merged = mergeCloudPlanForOfflineFallback(current, next)
+  assert.strictEqual(merged, next)
+})
+
+test('merge: FALLBACK plan does NOT clobber a CACHED plan (offline Pro protection)', () => {
+  const cached = proCached()
+  const fallback = freeFallback()
+  const merged = mergeCloudPlanForOfflineFallback(cached, fallback)
+  assert.strictEqual(merged, cached)
+  assert.equal(merged.hasProAccess, true)
+})
+
+test('merge: FALLBACK plan does NOT clobber a NETWORK plan either', () => {
+  const network = proNetwork()
+  const fallback = freeFallback()
+  const merged = mergeCloudPlanForOfflineFallback(network, fallback)
+  assert.strictEqual(merged, network)
+})
+
+test('merge: FALLBACK plan is accepted when nothing better is known (fresh boot)', () => {
+  const fallback = freeFallback()
+  const merged = mergeCloudPlanForOfflineFallback(null, fallback)
+  assert.strictEqual(merged, fallback)
+})
+
+test('merge: CACHED plan is accepted when current is null', () => {
+  const cached = proCached()
+  const merged = mergeCloudPlanForOfflineFallback(null, cached)
+  assert.strictEqual(merged, cached)
+})
+
+test('merge: CACHED plan does NOT downgrade a NETWORK plan (avoid mid-session flap)', () => {
+  const network = proNetwork()
+  const cached = proCached()
+  const merged = mergeCloudPlanForOfflineFallback(network, cached)
+  assert.strictEqual(merged, network)
 })

@@ -69,6 +69,39 @@ curl -X POST "https://upload.sporely.no/artsorakel/media" \
   --data '{"keys":["<user_id>/<obs_id>/image.jpg"],"variant":"medium"}'
 ```
 
+## Public media bucket CORS (`media.sporely.no`)
+
+`cors.json` in this directory is the CORS policy for the **`sporely-media` R2
+bucket** (served publicly via the `media.sporely.no` custom domain). It is NOT
+part of `wrangler deploy` — it must be applied to the bucket separately:
+
+```bash
+npx wrangler r2 bucket cors set sporely-media --file cloudflare/r2-upload-worker/cors.json
+```
+
+(or paste the JSON into Cloudflare dashboard → R2 → `sporely-media` →
+Settings → CORS policy.)
+
+Why it matters: Stage B cache-first thumbnails call `fetch(publicUrl)` from
+JS to warm the persistent blob cache. Unlike plain `<img src>` rendering,
+a JS `fetch` requires `Access-Control-Allow-Origin` on the response. The
+Capacitor Android WebView runs at origin `https://localhost`, so that origin
+(and every other app origin) must be in `AllowedOrigins` or cache warming
+fails with a CORS error.
+
+- `AllowedOrigins` mirrors the Worker `ALLOWED_ORIGINS` allowlist in
+  `wrangler.toml` — keep the two in sync; `wrangler.toml` is the source of
+  truth for app origins.
+- Only `GET`/`HEAD` are allowed: the browser never writes to the bucket
+  directly (all uploads go through this Worker at `upload.sporely.no`).
+- R2 bucket CORS supports exact origins only — LAN-dev origins
+  (`https://192.168.x.x:5173`) cannot be listed. That is acceptable: the web
+  client falls back to a direct `<img src>` render when cache warming is
+  CORS-blocked, so images still display; only the persistent cache warm is
+  skipped on LAN dev.
+- After changing the policy, purge the Cloudflare cache for
+  `media.sporely.no` (previously cached responses may lack the CORS headers).
+
 ## Notes
 
 - The Worker validates JWT signatures against Supabase JWKS by default.

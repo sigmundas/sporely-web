@@ -697,3 +697,393 @@ Current audit (verified by the invariants above):
 
 1. **Concern 1 — narrow-usage rule for `bypassCapabilityGate`.** Two invariant tests added to `src/capability-gates.test.js` enforcing (a) no screen leak and (b) an allowlist of definition sites for the flag. The B3 media-cache recommendation was rewritten (see "Findings that should shape B3" above) so it does NOT propagate the bypass pattern — instead the loader reads local blobs unconditionally and only gates the remote fetch.
 2. **Concern 2 — taxonomy search UI must not look like "no results".** The three taxonomy-search callers (`src/screens/review.js`, `src/screens/import_review.js`, `src/screens/find_detail.js`) now check `canPerformCloudMutation()` BEFORE dispatching `searchTaxa` and render a non-selectable `<li class="taxon-dropdown-offline">` with the localized capability message (`"Internet connection required."` / `"Sign in to reconnect."`) in the dropdown. Existing selected taxa on the observation/session remain untouched. A functional test simulates the offline branch and confirms the offline row renders (not an empty dropdown), and static invariants ensure every `searchTaxa` call is preceded by a `canPerformCloudMutation()` check in the same file.
+
+---
+
+## Stage B — final completion (persistent media cache + FINAL corrections)
+
+Status: **code complete, uncommitted** on `main` at base `aaaabca` / package `0.7.1`. Device verification (all 10 Android scenarios) is DEVICE-QA-REQUIRED and pending. Stage C not begun.
+
+Historical predecessor notes above (Stage A / B1 / B2a / B2b) remain accurate for their base commits. The B1 statement "Home cache render on cached boot performs ZERO Supabase hydration" is preserved; the B3 recommendation section is superseded by the concrete implementation described here (it is no longer a suggestion — it is code).
+
+### Base and merge status
+
+- Merged on `main` prior to this stage: Stage A cold-start work, Stage B1 last-validated-account + cached auth states, Stage B2a Home read-model cache, Stage B2b centralized capability gating, hotfix/artsorakel-identify-api. HEAD = `aaaabca` (`Merge branch 'startup-perf-and-offline'`); package version = `0.7.1`.
+- Not yet on `main`: the persistent media blob cache, the FINAL corrections to the offline indicator matrix, and the FINAL cloud-plan-FALLBACK guard everywhere it is assigned. This section covers those.
+
+### Persistent media cache (`src/media-cache.js`)
+
+- IndexedDB DB `sporely-media-cache`, version 1, object store `media_blobs`, keyPath `cacheKey`.
+- Record: `{ version, cacheKey, userId, mediaKind, privacyScope, mediaKey, variant, contentType, sizeBytes, createdAt, updatedAt, lastAccessedAt, blob }`.
+- Cache identity: `v1|<userId>|<mediaKind>|<privacyScope>|<mediaKey>|<variant>`. Derived STRICTLY from durable data — never from signed URLs, worker tokens, bearer headers, or the media worker origin. `mediaKey` for observation media is the canonical storage key (`normalizeMediaKey` upstream); for the avatar it is the sentinel `self:<userId>`.
+- Variant normalization: any of `thumb`/`small`/`medium`/`cards` collapse to canonical `thumb`. Avatar always canonicalizes to `original`.
+- Scopes: `public` (observation thumbnails from `resolveMediaSources` non-protected path), `protected` (authorized worker fetch path), `self` (the current user's own avatar). Public and protected records for the same observation live under DIFFERENT cache keys and never alias each other.
+- Fail-closed: missing userId, schema version mismatch, mismatched userId on a stored record, missing/non-image blob, IDB open failure, quota errors all resolve to `null` / `false`. Storage errors never bubble to callers.
+- Never persists: Supabase access/refresh tokens, signed URLs (`?token=…` / `/object/sign/…`), the media-worker origin, Bearer headers.
+
+### Limits and eviction
+
+- `MEDIA_CACHE_MAX_TOTAL_BYTES = 64 MiB`.
+- `MEDIA_CACHE_MAX_ENTRY_BYTES = 5 MiB`. Any single blob larger than this is refused (write returns false, remote path does not persist).
+- LRU by `lastAccessedAt`. Reads touch the access time on hit; a touch failure never fails the read.
+- Pre-emptive eviction on write: sum the projected total, drop oldest entries (excluding the record currently being written) until the projected total fits under the cap.
+- `QuotaExceededError` is caught; the module then evicts the oldest quarter of entries and retries `put(...)` once.
+- Never deletes a newer / currently-used entry to satisfy a stale LRU update. All constants are exported so tests can assert them.
+
+### Loader (`src/protected-media.js`) — cache-first for keyed media
+
+- `bindCacheableMedia(element, identity, { publicUrl, protectedUrl })` is the new entry point. Every keyed thumbnail (public or protected) plus the avatar routes through this method. The legacy `bindProtectedMedia(element, urlOrSource)` continues to work for call sites that only have a `protectedUrl` (no durable key).
+- Load order:
+  1. LOCAL cache read via `readCachedMedia(identity)` — no capability gate (local ops are always allowed).
+  2. On hit: paint `URL.createObjectURL(blob)`; set `data-protected-media-state="ready"`; done.
+  3. On miss: consult `canUseAuthenticatedNetwork()`. If denied (CACHED / REAUTH_REQUIRED / UNAUTHENTICATED / RESOLVING / INCOMPLETE), mark `data-protected-media-state="unavailable"` and STOP. Zero remote traffic.
+  4. On COMPLETE miss: fetch (Bearer header for `protectedUrl`, plain `cache: 'no-store'` GET for `publicUrl`); validate content-type starts with `image/`; enforce `MEDIA_CACHE_MAX_ENTRY_BYTES`; persist to cache as a background best-effort; paint the blob.
+- In-flight deduplication: `_InFlightRegistry` keyed by `cacheKey`. Multiple DOM elements bound to the same identity share ONE round-trip; stale bindings (released or superseded by a session change) never paint.
+- Session change: `handleSessionChange({ session })` bumps the internal `sessionGeneration`, revokes every current object URL, and either disposes (sign-out or A→B) or requeues (same-user token refresh). A's URL cannot be reused for B.
+- Protected `401`/`403`/`404` → `deleteCachedMedia(identity)` before painting placeholder, so a subsequent load cannot resurrect the stale blob.
+- Cache misses never break existing online display fallback: if a keyed identity cannot be resolved (e.g., no `state.user.id` is available at wire time), `wireImageFallback` falls back to setting `src=<publicUrl>` on the element so the online display still works.
+
+### Image helper (`src/image-helpers.js`) — no raw `src` for keyed images
+
+- `imageHtml(source, className, placeholder)` now emits `data-media-cache="1"` + `data-media-kind` / `data-media-scope` / `data-media-key` / `data-media-variant` / `data-media-public-url` / `data-media-protected-url` (as applicable) instead of a raw `src="…"` when the source carries a stable `key`. The previous behavior emitted `<img src=<remoteUrl>>` for public thumbnails, which triggered a network request from a cached-Home render BEFORE the loader could evaluate the capability gate. The Stage B fix eliminates that pre-JS network burst.
+- `wireImageFallback(root)` picks up the data-attrs and binds each element via `bindCacheableMedia(...)`. Legacy paths (`data-protected-media-url`, `data-fallback-src`) are preserved unchanged for non-keyed sources.
+- `imageHtml` for sources WITHOUT a durable key retains the legacy direct-src emit (blob:/data: previews, local pending-sync photos) — those have no durable identity and are not cacheable.
+
+### Public thumbnails — acquisition path
+
+- Public thumbnails are cached from a same-origin `fetch(publicUrl, { cache: 'no-store' })` when the app is in `AUTHENTICATED_COMPLETE`. Sporely media is served from `media.sporely.no`, which is same-origin from the web app's perspective; from the Capacitor Android WebView it uses `https://` with CORS. If a specific target proves unreliable in device QA, the loader can be extended to fall through to the authenticated worker path for the same key without any schema change (the identity does not include the transport URL). No changes were made to the Artsorakel path (identify secret stays server-side on the Sporely Worker).
+- Cache failure preserves online display: if `fetch` succeeds but content-type/size guards refuse the blob, the loader still paints the response object URL for THIS render — only the persist step is skipped.
+
+### Protected thumbnails — acquisition path
+
+- Existing `ProtectedMediaLoader` bearer-authenticated worker fetch is unchanged. The change is: the response blob is persisted to the media cache on success, keyed under the durable observation key + `privacyScope: 'protected'` + `variant: 'thumb'`. No bearer token or Worker URL is ever persisted.
+- Subsequent loads (across process death) render from the persisted blob in CACHED / REAUTH_REQUIRED with ZERO authenticated network attempts.
+
+### Avatar caching
+
+- Cached-boot path (`renderCachedHeaderProfileButtons`): still synchronously paints initials / public URL. Additionally, an async best-effort `readCachedMedia(_avatarIdentity(userId))` may replace the initials with a persisted blob object URL. NO HTTP avatar request is dispatched in CACHED / REAUTH — that path is guarded by the loader's capability gate anyway.
+- Online path (`refreshHeaderProfileButtons`): existing signed-URL / public-URL resolution unchanged. After a successful paint, the same URL is re-fetched (`cache: 'no-store'`, `credentials: 'omit'`) as a blob and written to the cache under `self:<userId>`. Best-effort; failure to persist does not affect the immediate paint.
+- Upload path (`_uploadAvatar`): the cropped blob is persisted directly to the media cache immediately after the profile row update succeeds, so the next cold boot can render it without any refetch.
+- Different-user isolation: identity is `self:<userId>`; A's blob is unreadable for B by construction. Test-enforced in `media-avatar.test.js`.
+
+### CACHED / REAUTH / COMPLETE behavior
+
+- **CACHED**: user-scoped identity → local blob → hit paints objectURL, miss paints placeholder. ZERO remote attempts. Offline indicator visible.
+- **REAUTH_REQUIRED**: same. ZERO remote attempts. Offline indicator HIDDEN (backend is reachable — the pill would misinform the user).
+- **COMPLETE**: local first; hit paints; miss runs remote via the authenticated media delivery, validates image + enforces the size guard, persists, paints. All remote gated by `canUseAuthenticatedNetwork()`.
+- **UNAUTHENTICATED / RESOLVING / INCOMPLETE**: capability gate denies remote; no cache read is attempted for a user whose id does not match the loader's stored `_knownUserId`.
+
+### Reconnect
+
+- No new scheduler. Reused seams:
+  - `notifyProtectedMediaSessionChange(session)` fires from the direct Supabase `onAuthStateChange` listener. When a same-user token refresh materializes, existing bindings are revoked and requeued through the cache-first path — an image that missed cache in CACHED can now fetch remotely because the capability gate returns `{ allowed: true }` under COMPLETE.
+  - `_attemptCachedRevalidation` (B1 unchanged) transitions state to COMPLETE, which flips the capability gate.
+  - Different-user session materializing goes through the full `_resolveAndRouteForUser` account-transition boundary. The loader's `handleSessionChange` disposes every current binding so B never reads A's object URLs.
+
+### Offline indicator correction (L1)
+
+- The pill is driven by an `auth-state` subscription bound at boot: it shows for `AUTHENTICATED_CACHED` and hides for every other state. `_syncCachedStateWithReachability` (which already toggles CACHED ↔ REAUTH_REQUIRED on the fly) causes the subscription to update the pill automatically.
+- `navigator.onLine` is not consulted anywhere in this decision.
+
+### Cloud-plan FALLBACK correction (L2)
+
+- New helper `mergeCloudPlanForOfflineFallback(current, next)` in `src/cloud-plan.js` is the sole assignment rule:
+  - `NETWORK` next → replaces current.
+  - `CACHED` next → accepted only if current is not `NETWORK`.
+  - `FALLBACK` next → accepted only if nothing better is currently known (never over `NETWORK` / `CACHED`).
+- Callers routed through the helper: `_refreshSettingsCloudPlan` (settings overlay), `_resolveAndRouteForUser` (COMPLETE branch background write), `_revalidateCachedRevealInPlace` (in-place revalidation background write), `_loadProfileData` (profile screen). Regression tests in `cloud-plan.test.js`.
+
+### Lifecycle / account isolation
+
+- Explicit SIGNED_OUT: `clearLastValidatedAccount()` at the top of the handler (B1 refined, unchanged). Home cache clear for the signed-out user is unconditional (B2a). Persistent media clear for the signed-out user is unconditional (new); a failed delete is only logged. The store is userId-keyed so remnants cannot leak into a different user's session anyway.
+- Account switch (A→B) in `_ensureAppReadyForUser`: A's Home cache is cleared (existing); A's persistent media is cleared (new).
+- Account deletion: routes through `supabase.auth.signOut()` → same SIGNED_OUT cleanup path.
+- Settings → Clear local cache: additionally clears every persistent media entry via `clearAllCachedMedia()`.
+- Transient network loss NEVER triggers any of these. Only an explicit sign-out / account switch / user-driven "Clear local cache".
+
+### Migration / back-compat
+
+- Fresh installs boot normally; the media DB is created on first write. First online view warms the cache; first offline before warming shows placeholders.
+- Records with `record.version !== 1` fail soft as a cache miss. Online re-warms overwrites them.
+- No migration from signed URLs — the identity was never derived from them.
+- No Home cache schema bump was required.
+
+### Tests added (new files)
+
+- `src/media-cache.js` (new).
+- `src/media-cache.test.js` — 19 tests: variant normalization; key composition (no tokens/URLs); write/read roundtrip; missing userId; malformed records; schema mismatch; cross-user refusal; public/protected scope separation; non-image refusal; oversized refusal; LRU touch on read; oldest-eviction on cap; QuotaExceeded evict-and-retry; storage exception is swallowed; per-user clear; global clear; single delete; avatar scope; exported constants.
+- `src/media-loader.test.js` — 15 tests: CACHED miss zero remote; CACHED local hit renders zero remote; REAUTH miss zero remote; COMPLETE miss fetch-validate-persist-paint; non-image not cached; oversized not cached; in-flight dedup; release before completion prevents late paint; protected 401 evicts; protected 403 evicts; session change invalidates prior binding; `imageHtml` emits data-attrs and NEVER a raw src for keyed images; legacy protected-URL-only path preserved; legacy direct-src path preserved for data: URIs.
+- `src/media-avatar.test.js` — 4 tests: avatar identity is user-scoped self:<uid>; roundtrip; A cannot resolve B's avatar; per-user clear.
+- `src/cloud-plan.test.js` — 6 tests added: NETWORK replaces everything; FALLBACK cannot clobber CACHED; FALLBACK cannot clobber NETWORK; FALLBACK accepted when nothing known; CACHED accepted when current is null; CACHED does not downgrade NETWORK.
+- Existing `src/protected-media.test.js` unchanged in intent; the harness explicitly opts into the "allowed" capability gate so it exercises the raw fetch path (the Stage B gate is covered separately in `media-loader.test.js`).
+
+### Non-goals (Stage C explicitly not started)
+
+- No My Finds / detail / map cached reads.
+- No taxonomy cache.
+- No offline Capture/Import/Review redesign.
+- No new mutation queues.
+- No service worker.
+- No full-resolution media cache.
+- No new auth states.
+- No Artsorakel redesign (server-side identify stays on the Sporely Worker).
+
+---
+
+## Stage B — post-review corrections (audit round)
+
+Status: **code complete, uncommitted** on `main`. Extends the Stage B completion section above. Applies four invariant corrections and one architectural cleanup on top of the code described in "Stage B — final completion". Stage C is still not started; the Artsorakel identify routing is untouched.
+
+### Correction 1 — CACHED / REAUTH avatar: absolute no-network invariant
+
+Previously `renderCachedHeaderProfileButtons` synchronously assigned `img.src = profileSummary.avatar_url` when the URL matched `_looksLikeInlineOrPublicAvatar(...)` (a public http(s) URL without `?token=` / `/object/sign/`). A plain `<img src="…">` triggers a browser-level GET, so this violated the "zero avatar network in CACHED / REAUTH" invariant.
+
+Fix (`src/screens/profile.js`):
+
+- `renderCachedHeaderProfileButtons(profileSummary, options)` now paints initials only, synchronously, on every header target. The `profileSummary.avatar_url` field is ignored for synchronous paint. The async `_paintCachedAvatarInto(targets, uid, initials)` still runs and swaps in a `blob:` object URL from the persisted media cache on hit; a miss retains initials. Zero avatar network requests in any state.
+- `refreshHeaderProfileButtons(profile)` is defensively guarded: at the top it consults `canUseAuthenticatedNetwork()` and — if denied — delegates to `renderCachedHeaderProfileButtons(profile || {}, { email: state.user?.email || '' })` and returns. The online path (Supabase storage signed URL + `_canLoadImage` probe) only runs under `AUTHENTICATED_COMPLETE`. Every call site in the codebase (`_loadProfileData`, `_saveProfile`, `_uploadAvatar`, `main.js` in-place revalidation, `main.js` post-setup, `main.js` sign-in) is already an online path, but the gate is now enforced structurally rather than by convention.
+- Removed the now-unused helper `_looksLikeInlineOrPublicAvatar()` — the "safe public URL" concept no longer applies to synchronous cached-boot paint.
+
+Behavior matrix:
+
+| State | Sync paint | Async paint | Network |
+| --- | --- | --- | --- |
+| CACHED | initials | `blob:` from cache on hit; initials on miss | zero |
+| REAUTH_REQUIRED | initials | `blob:` from cache on hit; initials on miss | zero |
+| COMPLETE | initials, then online refresh may repaint | `blob:` from cache on hit, otherwise overwritten by refreshHeaderProfileButtons | authorized fetch + persist |
+
+### Correction 2 — Public-thumbnail unresolved-identity fallback
+
+Previously `wireImageFallback()` unconditionally assigned `img.src = publicUrl` when a keyed public thumbnail had no resolvable identity (e.g. `state.user.id` not yet bound). Any subsequent browser-level GET would still fire under CACHED / REAUTH.
+
+Fix (`src/image-helpers.js`):
+
+- Added `import { canUseAuthenticatedNetwork } from './capabilities.js'`.
+- The unresolved-identity branch now returns without assigning `img.src` unless the capability gate is `allowed`. The behavior is:
+  - CACHED / REAUTH_REQUIRED / UNAUTHENTICATED / RESOLVING / INCOMPLETE → no `src` assignment, no fetch — the placeholder stays visible.
+  - COMPLETE → the previous behavior is preserved (assign `publicUrl` so the online display still works when the cache cannot own the render, e.g. before `state.user.id` is set).
+- Regression tests in `src/image-helpers.test.js` cover both denied states and the allowed COMPLETE path with a `globalThis.fetch` trap that fails the test on any network call.
+
+### Correction 3 — Non-image vs oversized response separation
+
+Previously `_extractImageBlob()` returned `null` for both non-image responses AND for VALID images exceeding `MEDIA_CACHE_MAX_ENTRY_BYTES`. That collapsed two very different failure modes into a single "placeholder" outcome and broke online display for legitimate but too-big-to-cache images.
+
+Fix (`src/protected-media.js`):
+
+- Non-image response (`content-type` does not start with `image/`): return `null` → no paint, no persist, element degrades to `data-protected-media-state="unavailable"`. Unchanged from before.
+- Oversized VALID image (`content-type` starts with `image/`, `size > _maxEntryBytes`): SKIP the cache persist step and return the blob so the loader paints via `URL.createObjectURL(...)`. The element still gets `data-protected-media-state="ready"`. On the next cold boot the cache will miss again and — if COMPLETE — refetch; if CACHED / REAUTH the element degrades to placeholder.
+- Protected `401 / 403 / 404` behavior is unchanged: `_doAuthorizedFetch` still evicts the cache entry before painting placeholder.
+
+Tests in `src/media-loader.test.js` were updated in place:
+
+- `COMPLETE non-image response is NOT cached AND NOT rendered (placeholder retained)` — asserts no `blob:` created, `img.src === ''`, `data-protected-media-state === 'unavailable'`, and the cache map is empty.
+- `COMPLETE oversized valid image RENDERS (object URL) but is NOT persisted` — asserts a `blob:sim-*` was created and bound to `img.src`, `data-protected-media-state === 'ready'`, and the cache map is empty.
+
+### Correction 4 — Global state exposure audit (architectural)
+
+Previous Stage B code exposed the full application state as `globalThis.__sporelyState` and a helper `globalThis.__sporelyCurrentUserId()` from `src/state.js`. The stated rationale was "avoid a hard dependency cycle with state.js at module-load time" in `src/image-helpers.js`.
+
+Audit finding: the cycle is not real. The import graph is
+
+- `image-helpers.js → protected-media.js → { auth-session.js, capabilities.js → { auth-state.js, i18n.js }, media-cache.js }`
+- `image-helpers.js → media-cache.js` (leaf)
+- `state.js → { observation-defaults.js → settings.js → visibility.js, settings.js }`
+
+`state.js` and its transitive deps do NOT import `image-helpers.js`, so a normal ESM import from `image-helpers.js` into `state.js` is safe. The "DOM-lite tests" concern was unfounded — the test files that exercise `image-helpers.js` already tolerate a small state module load (e.g. `cached-header.test.js` already imports `state` directly).
+
+Fix (option 1 — normal module dependency):
+
+- `src/state.js`: removed `_publishSporelyState()` and its call. `state.js` no longer touches `globalThis`.
+- `src/image-helpers.js`: replaced the `globalThis.__sporelyCurrentUserId?.() || __sporelyState?.user?.id` late-bind with a direct `import { state } from './state.js'` and `String(state?.user?.id || '').trim()` inside `_currentUserId()`. No cycle materializes at runtime or in the module graph.
+
+Regression tests added in `src/startup-invariants.test.js`:
+
+- `state.js does NOT publish app state on globalThis` — imports `./state.js` and asserts no property matching `^__sporely` exists on `globalThis`, plus explicit spot-checks for the two prior names (`__sporelyState`, `__sporelyCurrentUserId`).
+- `state.js source contains no _publishSporelyState-style globalThis publisher` — grep-guard against reintroduction.
+
+### Tests added / updated in this audit round
+
+- `src/media-avatar.test.js` — added four new tests exercising `renderCachedHeaderProfileButtons` under `AUTHENTICATED_CACHED` and `AUTHENTICATED_REAUTH_REQUIRED` with a stubbed DOM + a `globalThis.fetch` trap + an `img.src` spy that throws on any http/https/signed URL assignment. Verifies initials-only paint on miss and blob-URL-only paint on hit. Total avatar tests: 8.
+- `src/image-helpers.test.js` — added three tests covering the unresolved-identity fallback: CACHED denies, REAUTH_REQUIRED denies, COMPLETE preserves the online publicUrl fallback. Total tests: 5.
+- `src/media-loader.test.js` — updated the two "not cached" tests to reflect the split: non-image = no render + no persist; oversized valid image = render + no persist.
+- `src/cached-header.test.js` — updated three tests to reflect that `renderCachedHeaderProfileButtons` never assigns an http(s) URL to `img.src` synchronously. The previously-existing "uses a public URL avatar synchronously" test was inverted to assert the opposite (initials-only paint).
+- `src/startup-invariants.test.js` — added two tests locking down the removal of the `__sporely*` globals (per-object-name check + source grep).
+
+### Files changed in this audit round
+
+- `src/state.js` — removed `_publishSporelyState` and its call.
+- `src/image-helpers.js` — normal import of `{ state }` and `{ canUseAuthenticatedNetwork }`; unresolved-identity fallback is now capability-gated.
+- `src/protected-media.js` — `_extractImageBlob` split so oversized valid images paint but do not persist; non-image responses still return null.
+- `src/screens/profile.js` — `renderCachedHeaderProfileButtons` no longer paints http(s) URLs; `refreshHeaderProfileButtons` gated by `canUseAuthenticatedNetwork()`.
+- `src/cached-header.test.js`, `src/image-helpers.test.js`, `src/media-avatar.test.js`, `src/media-loader.test.js`, `src/startup-invariants.test.js` — coverage described above.
+- `PLAN-startup.md` — this section.
+
+### Verification results (this round)
+
+- Targeted: `node --test src/media-cache.test.js src/media-loader.test.js src/media-avatar.test.js src/cloud-plan.test.js src/protected-media.test.js` → **65 tests pass, 0 fail**.
+- Full: `npm test` → **987 tests, 949 pass, 2 fail, 36 skipped**. Both failures are the pre-existing Leaflet-CSS map test (`src/screens/map.test.js`) and the Deno admin-ops test (`supabase/functions/admin-ops/adminActions.test.ts`) — unchanged and unrelated to this audit. Test count increased by 79 (908 → 987) — includes new avatar / helper / global-exposure invariants.
+- `npm run build` → succeeds. Main chunk `dist/assets/main-CZ-c_ZnJ.js` = 1,007.70 kB (273.71 kB gzipped). Bundle size delta is negligible — the changes remove code paths (a helper + globals) and add a capability import.
+- `git diff --check` → clean.
+- `npx eslint <changed files>` → 0 errors, 0 warnings.
+
+### Invariant answers (post-fix)
+
+1. Can any CACHED / REAUTH path assign an HTTP media URL to `img.src`? **No.** `renderCachedHeaderProfileButtons` paints initials only; `refreshHeaderProfileButtons` delegates back to it when the capability gate denies; `wireImageFallback` skips the publicUrl fallback under denied capability; `ProtectedMediaLoader._loadCacheable` short-circuits at the capability gate; `_paintFromBlob` only ever assigns `blob:` object URLs.
+2. Can any CACHED / REAUTH path call `fetch` for media / avatar? **No.** Every remote branch is behind either `canUseAuthenticatedNetwork()` (loader `_loadCacheable`, loader `_loadLegacyProtected`, `wireImageFallback` unresolved-identity branch) or is called only from paths already gated by that check (`refreshHeaderProfileButtons`, `_uploadAvatar`, `_setProfileAvatarSource` via its online-only callers).
+3. What happens for oversized valid images? **Render, no persist.** The loader paints via `URL.createObjectURL(blob)` and skips `cacheWrite`. On the next cold boot the cache misses again and — if COMPLETE — refetches; if CACHED / REAUTH the element degrades to the placeholder.
+4. What happens for non-image responses? **No render, no persist, placeholder.** `_extractImageBlob` returns null; `_loadCacheable` calls `_markUnavailable(binding)` which removes `src` and sets `data-protected-media-state="unavailable"`.
+5. Was the global state exposure removed, narrowed, or retained? **Removed.** `state.js` no longer touches `globalThis`; `image-helpers.js` reads the current user id via a normal ESM import. The design choice was option 1 (normal module dependency) after verifying the previously-cited "hard dependency cycle" did not exist in the module graph.
+
+---
+
+## Stage B — B3 regression correction (public thumbnails broken in the Capacitor WebView)
+
+Status: **code complete, uncommitted** on `main`. Extends the two Stage B sections above. Stage C is still not started; the Artsorakel identify routing is untouched.
+
+### The regression
+
+Observed on-device in the Capacitor Android WebView (app origin `https://localhost`):
+
+```
+Access to fetch at https://media.sporely.no/<key>/thumb_....webp
+from origin https://localhost has been blocked by CORS:
+No Access-Control-Allow-Origin header.
+```
+
+Root cause: before Stage B, public thumbnails rendered via a plain `<img src="https://media.sporely.no/...">`. Cross-origin `<img>` rendering does not require fetch CORS. Stage B routed keyed public thumbnails through the cache-first loader (`bindCacheableMedia` → `_loadCacheable`), which calls `fetch(publicUrl)` from JS to acquire a Blob for IndexedDB. That JS fetch IS subject to CORS, and the `sporely-media` R2 bucket behind `media.sporely.no` did not permit the app origins. Consequence: cache warming failed AND the element fell through to the unavailable placeholder — images that were previously displayable online went blank. The "same-origin from the web app's perspective" assumption recorded in "Public thumbnails — acquisition path" above was wrong for every real deployment target (`app.sporely.no` is also a different origin from `media.sporely.no`).
+
+### Correction 1 — client fails OPEN for PUBLIC online display (`src/protected-media.js`)
+
+`_fetchAndCache` now returns an outcome `{ blob, publicSrcFallbackEligible }`. `publicSrcFallbackEligible` is `true` ONLY when a PUBLIC acquisition failed for a **non-authoritative** reason: fetch threw (CORS `TypeError`, transport error), non-OK status, or a non-image body. The public CDN never issues a ruling we trust over the browser's own `<img>` resolution — including 404 and non-image responses, which pre-Stage-B were resolved by the browser itself. On such a failure `_loadCacheable` falls back to a direct `img.src = publicUrl` assignment (`data-protected-media-state="direct"`) instead of the placeholder.
+
+Guard rails on the fallback (`_canFallBackToDirectPublicSrc`):
+
+- `identity.privacyScope === 'public'` only. Protected media stays fail-closed in EVERY failure mode (401/403/404 still evict + placeholder; transport failures paint placeholder; the `publicUrl` option is ignored for protected identities). The `self` avatar scope is also excluded.
+- Account-isolation refusals (session user ≠ identity user, `_knownUserId` mismatch) are NOT fallback-eligible — they return `publicSrcFallbackEligible: false`.
+- `canUseAuthenticatedNetwork().allowed === true` is **re-checked at assignment time**, because the state may flip to CACHED / REAUTH_REQUIRED while the warming fetch is in flight (a network drop is a likely cause of the failure itself). An http(s) `src` assignment is a browser-level GET and must never happen in those states.
+- A `getSession()` exception no longer aborts PUBLIC acquisition (pre-Stage-B the public `<img>` path never consulted the session); protected acquisition still requires token + userId and fails closed.
+
+Resulting behavior matrix for keyed PUBLIC thumbnails:
+
+| State | Cache hit | Miss + warm succeeds | Miss + warm fails (CORS/transport/non-OK/non-image) |
+| --- | --- | --- | --- |
+| COMPLETE | `blob:` object URL | validate → persist (≤ 5 MiB) → `blob:` object URL | direct `img.src = publicUrl` (browser renders; nothing persisted) |
+| CACHED | `blob:` object URL | — (no fetch) | placeholder, zero fetch, zero http(s) src |
+| REAUTH_REQUIRED | `blob:` object URL | — (no fetch) | placeholder, zero fetch, zero http(s) src |
+
+`src/image-helpers.js` needed no change: its unresolved-identity fallback already assigns `publicUrl` only when the capability gate allows (audit-round Correction 2) — now consistent with the loader-level fallback.
+
+Supersedes audit-round invariant answer 4 for PUBLIC media only: a public non-image response now falls back to the direct public src under COMPLETE (it is not a tombstone); protected non-image responses still degrade to the placeholder with no render and no persist.
+
+### Correction 2 — public-media CORS deployment (`cloudflare/r2-upload-worker/cors.json`)
+
+`media.sporely.no` is the `sporely-media` R2 bucket exposed via a Cloudflare custom domain; its CORS policy is the repo file `cloudflare/r2-upload-worker/cors.json` (applied to the bucket out-of-band, not by `wrangler deploy`). The stale policy allowed only `https://app.sporely.no`, `https://sporely.no`, `http://localhost:5173`, `http://localhost:3000` — missing `https://localhost` (Capacitor Android), `capacitor://localhost` (Capacitor iOS), `https://www.sporely.no`, and `https://localhost:5173`.
+
+The file now mirrors the canonical app-origin allowlist (`ALLOWED_ORIGINS` in `cloudflare/r2-upload-worker/wrangler.toml` — the single source of truth; no second allowlist invented): `https://app.sporely.no`, `https://sporely.no`, `https://www.sporely.no`, `https://localhost:5173`, `http://localhost:5173`, `https://localhost`, `capacitor://localhost`. Methods narrowed to `GET`/`HEAD` (smallest policy for JS reads; the browser never writes to the bucket directly — all uploads go through the Worker). `http://localhost:3000` was dropped (not in the canonical allowlist; no fetch consumer exists). No `Authorization` was added to public media URLs; protected media authorization semantics are unchanged.
+
+**Deployment required (NOT performed — no deploys from this task):**
+
+```bash
+npx wrangler r2 bucket cors set sporely-media --file cloudflare/r2-upload-worker/cors.json
+```
+
+(or paste the JSON in Cloudflare dashboard → R2 → `sporely-media` → Settings → CORS policy), then purge the Cloudflare cache for `media.sporely.no` so previously-cached objects pick up the CORS headers.
+
+**Until that bucket policy is deployed, persistent public-thumbnail caching does NOT work from the app origins** — every COMPLETE render uses the direct-src fallback (exactly the pre-Stage-B behavior) and offline boots show placeholders for public thumbnails. Protected-thumbnail and avatar caching are unaffected (worker + Supabase URLs, not bucket CORS). LAN-dev origins (`https://192.168.x.x:5173`) can never be listed in R2 CORS (exact origins only); the fail-open fallback keeps images displayable there permanently.
+
+### Tests (extended `src/media-loader.test.js`; suite 15 → 26 tests)
+
+- COMPLETE public miss + fetch throws (transport error) → `img.src === publicUrl`, `data-protected-media-state="direct"`, nothing persisted, no object URL.
+- COMPLETE public miss + CORS-like `TypeError('Failed to fetch')` → publicUrl assigned (exact Android failure shape, `https://media.sporely.no/<key>/thumb_....webp`).
+- COMPLETE public miss + non-OK status → direct publicUrl fallback (not a tombstone).
+- COMPLETE public non-image response → NOT cached, NOT blob-rendered, direct publicUrl fallback (test updated from the audit round).
+- COMPLETE successful warm still renders the `blob:` object URL, never the publicUrl (assertions added to the existing warm test).
+- CACHED and REAUTH_REQUIRED with a CORS-failing CDN → zero fetch, zero http(s) src, placeholder.
+- Capability flip to denied while the warming fetch is in flight → fallback suppressed, placeholder.
+- Protected transport failure with a `publicUrl` option supplied → placeholder, the public URL is never assigned.
+- Protected 401/403/404 → placeholder + eviction, never a public URL.
+- Protected non-image → placeholder, no render, no persist, no public fallback.
+
+### Verification (this round)
+
+- Targeted: `node --test src/media-loader.test.js src/media-avatar.test.js src/media-cache.test.js src/protected-media.test.js src/image-helpers.test.js` → **67 tests pass, 0 fail**.
+- Full `npm test`, `npm run build`, `git diff --check`, `npx eslint` — see the run log in the task report; pre-existing Leaflet-CSS map test and Deno admin-ops test failures remain unrelated.
+- On-device Android verification of the rendered fallback and (post-CORS-deploy) of successful cache warming is **DEVICE-QA-REQUIRED** and pending, along with the 10 Stage B scenarios above.
+
+### Files changed in this round
+
+- `src/protected-media.js` — outcome-based `_fetchAndCache`, `_canFallBackToDirectPublicSrc`, `_paintDirectPublicUrl`, session-read hardening for public acquisition.
+- `src/media-loader.test.js` — coverage described above.
+- `cloudflare/r2-upload-worker/cors.json` — origin allowlist mirrored from `wrangler.toml` `ALLOWED_ORIGINS`; methods narrowed to GET/HEAD.
+- `cloudflare/r2-upload-worker/README.md` — documents what `cors.json` governs, the apply command, the keep-in-sync rule, and the cache-purge note.
+- `PLAN-startup.md` — this section.
+
+---
+
+## Stage B — device-QA regression fix (persisted-local-session offline cold start)
+
+Status: **code complete, uncommitted** on `main`. Extends the Stage B sections above. Stage C is still not started.
+
+### The regression (observed on Android device)
+
+Sequence: sign in online → warm Home/media cache → force-stop → airplane mode → relaunch. Expected: AUTHENTICATED_CACHED + cached Home. Observed: blocking error **"Could not load your profile. TypeError: Failed to fetch"** with Try again / Sign out — the MOST COMMON offline case never entered AUTHENTICATED_CACHED.
+
+Root cause (confirmed in code):
+
+1. `src/auth-session.js` — `getSharedAuthSession({ refresh: true })` bypasses Sporely's 1-second cache but ultimately calls `supabase.auth.getSession()`, which returns the **locally persisted** session while offline (no network needed when the stored access token is still valid).
+2. `src/main.js` `init()` — `initialSession?.user` is therefore truthy, so the initial boot takes the ONLINE path (`resolveAuthenticatedSessionOnce(initialSession, 'initial_boot')`) and **skips `_tryCachedAuthenticatedBoot` entirely**. The B1 cached boot only ever ran for the *no-local-session* / *getSession-threw* cases.
+3. `_resolveAndRouteForUser` — `fetchProfileWithSignupRetry(user.id)` fails offline; postgrest-js wraps the thrown fetch as `{ message: 'TypeError: Failed to fetch' }`; the error branch called `_showProfileResolutionError` → the blocking overlay.
+
+### The fix — narrow post-failure fallback, single shared reveal
+
+NO unconditional reachability probe was added to the healthy startup path (Stage A cold-start performance preserved — structurally test-enforced: `_resolveAndRouteForUser` and `_revalidateCachedRevealInPlace` contain no probe reference). Instead:
+
+- **`_revealTrustedCachedShell({ snapshot, targetState, reachability, reason })`** (main.js) — the cached-shell reveal logic was extracted from `_tryCachedAuthenticatedBoot` into ONE trusted implementation: transition boundary (begin/blank/blocker), minimal `state.user`, cloud-plan revive, `_ensureAppReadyForUser`, STALE recheck at every await, cached header paint, target-state set, reveal, Offline pill from `_shouldShowOfflineIndicatorForState(targetState)` (CACHED shows, REAUTH hides — matching the L1 matrix; the previous unconditional `_setOfflineIndicator(true)` was corrected here), local-only `renderHomeFromCache`, `_scheduleCachedRevalidation` (the EXISTING listeners/deferred-re-probe — no new reconnect mechanism). Returns `'revealed' | 'stale'`.
+- **`_tryCachedAuthenticatedBoot`** keeps only the B1 no-session gates (snapshot / owner / explicit-rejection / probe → target state) and delegates the reveal.
+- **`_tryCachedFallbackAfterProfileFetchFailure({ user, error, generation })`** (main.js) — invoked ONLY from `_resolveAndRouteForUser`'s profile-fetch error branch, BEFORE `_showProfileResolutionError`. Gate order (all must pass):
+  1. error is NOT `_isExplicitAuthRejection` (explicit rejection keeps the existing rejection semantics) AND IS `_isTransportSessionError` (a well-formed RLS/schema/server failure never probes — backend reachable by definition);
+  2. `readLastValidatedAccount()` valid;
+  3. `snapshot.userId === session.user.id` (explicit SAME-user invariant — the fallback never calls into the reveal for a user other than the initialSession's user);
+  4. `getLocalDataOwner() === session.user.id`;
+  5. `probeBackendReachability()` — run only NOW, after the failure — classifies UNREACHABLE.
+  Then it re-verifies `isCurrentAccountTransition(generation, …)` (the probe awaited; a newer transition suppresses the reveal → `'stale'`) and reveals via `_revealTrustedCachedShell` with `targetState: AUTHENTICATED_CACHED` (never REAUTH — that state means reachable-without-session, which cannot be this branch).
+- New `RESOLUTION_STATUS.CACHED_OFFLINE_FALLBACK` is deliberately NOT a success status: `resolveAuthenticatedSessionOnce` does not add the user to `_resolvedUsers`, so a reconnect re-enters the pipeline and (state CACHED + same user) takes the existing `_revalidateCachedRevealInPlace` path — in-place COMPLETE, no blocker, exactly one Home refresh, snapshot rewrite.
+- The error branch re-checks the transition generation after a denied fallback before painting the blocking error, so a superseded resolution paints nothing.
+
+Behavior matrix (final):
+
+| Case | Outcome |
+| --- | --- |
+| A. Local session + profile fetch succeeds | unchanged AUTHENTICATED_COMPLETE path (zero probes) |
+| B. Local session + transport-failed profile fetch + probe UNREACHABLE + valid same-user snapshot/owner | trusted cached shell: AUTHENTICATED_CACHED, cached header/plan, cached Home, Offline pill, ZERO Home network hydration, existing revalidation triggers |
+| C. Local session + profile fetch fails but backend REACHABLE (or error not transport-shaped) | existing blocking profile-resolution error (server failures are never disguised as offline) |
+| D. Session user ≠ snapshot user or ≠ local data owner | fail closed → blocking error; another user's cache never revealed; identity gates run BEFORE the probe |
+| E. Explicit server-confirmed auth rejection | existing rejection behavior; fallback denied without probing |
+
+Pre-resolution network side effects audited: `_fireClientActivity` → `recordClientActivity` catches all fetch/RPC failures internally (returns `{ called, error }`, never throws) and main.js adds a `.catch` → it fails silently offline, cannot block the fallback, and surfaces no user-visible error. No change required.
+
+### Tests (this round)
+
+- New `src/profile-fetch-offline-fallback.test.js` — **12 tests** mirroring the production gate order with the REAL last-validated-account / local-data-owner / auth-classification (classifiers + probe with injected fetch) / account-transition / auth-state / capabilities modules: (1) offline cold start with persisted session → CACHED revealed; (2) cached Home path, no error overlay, zero Home network hydration, pill shown, capability denied; (3) probe reachable → existing error surface (one probe, post-failure); (3b) non-transport server error → error surface with ZERO probes; (4) snapshot user mismatch → denied pre-probe; (5) owner mismatch → denied pre-probe; (6) explicit rejections (`session_not_found`, `user_not_found`, `invalid_refresh_token`, `invalid_grant`) → denied without probing; (7) healthy path → zero probes, exactly one Home refresh, COMPLETE; (8) reconnect after fallback → in-place COMPLETE, exactly one Home refresh, pill clears, `canUseAuthenticatedNetwork()` flips allowed (media misses become network-capable); (9) sign-out clears snapshot/owner and the fallback fails closed afterwards; plus stale-async suppression mid-probe and real-probe classification of the exact device error shape.
+- `src/startup-invariants.test.js` — **7 new structural invariants** pinning production code: fallback attempted inside the error branch before the error surface; all five gates present with local gates before the probe and probe before the reveal (and REAUTH never selectable by the fallback); healthy path probe-free; stale-async rechecks after the probe and before the error surface; single shared reveal (both entry points delegate; one cached-header paint site; one revalidation-scheduling site); `CACHED_OFFLINE_FALLBACK` excluded from `_resolvedUsers` success statuses; pill driven by target state. Three existing invariants were repointed at `_revealTrustedCachedShell` (zero-Home-hydration, transition-boundary, cached-Home-render) — same invariants, now enforced on the shared implementation.
+
+### Verification (this round)
+
+- Focused: `node --test` across offline-boot / startup-invariants / home-cache(+orchestration) / auth-classification / auth-state / cached-header / last-validated-account / cloud-plan / capabilities / capability-gates / media-cache / media-loader / media-avatar / protected-media / image-helpers / profile-fetch-offline-fallback → **260 pass, 0 fail**.
+- Full `npm test` → **1017 tests, 979 pass, 2 fail, 36 skipped**. Both failures are the documented pre-existing ones (`src/screens/map.test.js` Leaflet CSS import in Node; `supabase/functions/admin-ops/adminActions.test.ts` Deno) — unrelated and unchanged.
+- `npm run build` → succeeds; main chunk `main-*.js` = 1,010.86 kB (274.44 kB gzip), +~3 kB over the audit round.
+- `git diff --check` → clean. `npx eslint` on changed files → 0 errors; only the 3 pre-existing main.js warnings remain.
+
+### Device acceptance sequence (DEVICE-QA-REQUIRED before this fix is merged)
+
+1. Sign in online on Android; let Home load fully and media warm (`home-cache-write-completed` mark present; thumbnails/avatar visible). Force-stop the app. Enable airplane mode. Relaunch:
+   ⇒ **cached shell revealed (NOT the profile-resolution error)**, Offline pill visible, cached Home content (recent finds / comments / stats), warmed thumbnails and avatar render from the persistent media cache, cached cloud plan correct (Pro stays Pro), and **zero Home/media network attempts after the cached state is established** (verify via `chrome://inspect` network panel: only the single post-failure `/auth/v1/health` probe fires, nothing else).
+2. Restore connectivity (airplane mode off) while the cached shell is visible:
+   ⇒ the SAME shell revalidates **in place** (no blocker, no skeleton flash), state transitions to AUTHENTICATED_COMPLETE, the Offline pill clears, and **exactly one** Home refresh runs (`home-network-refresh-started` fires once); cached-media misses now fetch and persist normally.
+
+### Files changed in this round
+
+- `src/main.js` — `_tryCachedFallbackAfterProfileFetchFailure`, `_revealTrustedCachedShell` extraction, `RESOLUTION_STATUS.CACHED_OFFLINE_FALLBACK`, error-branch fallback + post-fallback staleness guard.
+- `src/profile-fetch-offline-fallback.test.js` — new (12 tests).
+- `src/startup-invariants.test.js` — 7 new invariants; 3 repointed at the shared reveal.
+- `PLAN-startup.md` — this section.

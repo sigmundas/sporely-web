@@ -30,6 +30,11 @@ function createHarness(responses = [imageResponse()]) {
   const revoked = []
   let nextObjectUrl = 1
   const loader = new ProtectedMediaLoader({
+    // Tests directly exercise the raw loader with a stubbed session and no
+    // AUTH_STATE machinery around it, so the capability gate is inverted for
+    // these tests. The Stage B gate itself is covered separately in the new
+    // media-loader tests.
+    capabilityCheck: () => ({ allowed: true }),
     getSession: async () => ({ access_token: 'secret-token', user: { id: 'user-a' } }),
     fetch: async (url, options) => {
       requests.push({ url, options })

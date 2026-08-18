@@ -129,6 +129,34 @@ export async function fetchCloudPlanProfile(userId) {
   return _tag(getEffectiveCloudUploadPolicy(data), CLOUD_PLAN_SOURCE.NETWORK)
 }
 
+// Stage B: single authoritative merge rule for "assigning a freshly fetched
+// cloud plan onto state.cloudPlan / persisted snapshot". Callers must funnel
+// every assignment through this helper so a network FALLBACK can never
+// clobber a known-good CACHED / NETWORK plan.
+//
+//   NETWORK  → replaces every prior value.
+//   CACHED   → authoritative offline; NEVER replaced by a FALLBACK.
+//   FALLBACK → written ONLY when nothing better is currently known.
+//
+// Returns the plan that should be assigned (may equal `current` — in that
+// case the caller should skip the assignment).
+export function mergeCloudPlanForOfflineFallback(current, next) {
+  if (!next) return current || null
+  const nextSource = getCloudPlanSource(next) || null
+  const currentSource = getCloudPlanSource(current) || null
+  if (nextSource === CLOUD_PLAN_SOURCE.NETWORK) return next
+  if (nextSource === CLOUD_PLAN_SOURCE.CACHED) {
+    // A CACHED plan cannot upgrade a NETWORK plan; only accept if we do not
+    // currently have a NETWORK-sourced plan.
+    return currentSource === CLOUD_PLAN_SOURCE.NETWORK ? current : next
+  }
+  // FALLBACK: only accept if we have nothing better known.
+  if (currentSource === CLOUD_PLAN_SOURCE.NETWORK || currentSource === CLOUD_PLAN_SOURCE.CACHED) {
+    return current
+  }
+  return current || next
+}
+
 export function formatStorageBytes(bytes) {
   const value = Math.max(0, Number(bytes) || 0)
   if (value < 1024) return `${value} B`

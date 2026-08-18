@@ -78,9 +78,17 @@ function _extractCachedBootBody() {
   return _extractFunctionBody(mainSource, 'async function _tryCachedAuthenticatedBoot(')
 }
 
+// The shared trusted reveal implementation both cached entry points delegate
+// to (Stage B regression fix: no-session boot + profile-fetch-failed fallback
+// converge on ONE implementation).
+function _extractCachedRevealBody() {
+  return _extractFunctionBody(mainSource, 'async function _revealTrustedCachedShell(')
+}
+
 test('Stage B1 cached-boot: the cached path does NOT call refreshHome/refreshHomeSafe (zero online Home hydration)', () => {
-  const body = _extractCachedBootBody()
-  assert.equal(/\brefreshHome(?:Safe)?\s*\(/.test(body), false, 'cached boot must not fire an online Home refresh')
+  for (const body of [_extractCachedBootBody(), _extractCachedRevealBody()]) {
+    assert.equal(/\brefreshHome(?:Safe)?\s*\(/.test(body), false, 'cached boot/reveal must not fire an online Home refresh')
+  }
 })
 
 test('SIGNED_OUT handler clears the last-validated-account snapshot', () => {
@@ -170,11 +178,14 @@ test('no navigator.onLine is used as auth authority anywhere in main.js', () => 
 })
 
 test('cached-boot preserves account-transition boundary (blocker + STALE recheck)', () => {
-  const body = _extractCachedBootBody()
-  assert.match(body, /beginAccountTransition\(\)/)
-  assert.match(body, /clearUserScopedUi\(\)/)
-  assert.match(body, /showAccountTransitionBlocker\(\)/)
-  assert.match(body, /isCurrentAccountTransition\(/)
+  // The boundary lives in the single shared reveal implementation, and the
+  // no-session boot path must delegate to it.
+  const revealBody = _extractCachedRevealBody()
+  assert.match(revealBody, /beginAccountTransition\(\)/)
+  assert.match(revealBody, /clearUserScopedUi\(\)/)
+  assert.match(revealBody, /showAccountTransitionBlocker\(\)/)
+  assert.match(revealBody, /isCurrentAccountTransition\(/)
+  assert.match(_extractCachedBootBody(), /_revealTrustedCachedShell\(/, 'cached boot must route through the shared reveal')
 })
 
 // ── Stage B2a: Home read-model cache ─────────────────────────────────────────
@@ -200,7 +211,9 @@ test('B2a online boot: exactly ONE Home network hydration in the COMPLETE branch
 })
 
 test('B2a cached boot: renders the persisted Home model, still with zero online Home refresh', () => {
-  const body = _extractCachedBootBody()
+  // The cached Home render lives in the shared reveal so BOTH cached entry
+  // points (no-session boot + profile-fetch-failure fallback) get it.
+  const body = _extractCachedRevealBody()
   assert.match(body, /renderHomeFromCache\(/)
   assert.equal(/\brefreshHome(?:Safe)?\s*\(/.test(body), false)
 })
@@ -303,4 +316,135 @@ test('B2a media seam: persisted image sources never carry protectedUrl or signed
   const urlGuard = _extractFunctionBody(homeSource, 'function _durableUrlOrNull(')
   assert.match(urlGuard, /token=/)
   assert.ok(urlGuard.includes('object') && urlGuard.includes('sign'), 'signed-path guard must be present')
+})
+
+// ── Stage B FINAL: no global state exposure ──────────────────────────────
+
+test('state.js does NOT publish app state on globalThis (privacy: no session/token/user surface via globals)', async () => {
+  // Simply importing state.js must not create any `__sporely*` globals.
+  // The prior implementation exposed the full app state as
+  // `globalThis.__sporelyState` and a user-id resolver as
+  // `globalThis.__sporelyCurrentUserId` — the Task 4 audit replaced them
+  // with a normal module import in image-helpers.js.
+  await import('./state.js')
+  const suspiciousKeys = Object.getOwnPropertyNames(globalThis)
+    .filter(name => /^__sporely/i.test(name))
+  assert.deepEqual(suspiciousKeys, [], `no __sporely* globals allowed on globalThis, found: ${suspiciousKeys.join(', ')}`)
+  // Explicit spot-checks for the two names the prior implementation used.
+  assert.equal(typeof globalThis.__sporelyState, 'undefined', '__sporelyState must not exist')
+  assert.equal(typeof globalThis.__sporelyCurrentUserId, 'undefined', '__sporelyCurrentUserId must not exist')
+})
+
+test('state.js source contains no `_publishSporelyState`-style globalThis publisher', () => {
+  const stateSource = readFileSync(new URL('./state.js', import.meta.url), 'utf8')
+  assert.equal(/globalThis\.__sporely/.test(stateSource), false, 'state.js must not assign any __sporely* on globalThis')
+})
+
+// ── Stage B regression fix: persisted-local-session offline cold start ──────
+//
+// Device QA showed: sign in online → force-stop → airplane mode → relaunch
+// produced the blocking "Could not load your profile. TypeError: Failed to
+// fetch" error instead of AUTHENTICATED_CACHED. Cause: getSession() returns
+// the locally persisted session offline, so init() takes the ONLINE path and
+// skips _tryCachedAuthenticatedBoot entirely. These invariants pin the fix.
+
+function _extractFallbackBody() {
+  return _extractFunctionBody(mainSource, 'async function _tryCachedFallbackAfterProfileFetchFailure(')
+}
+
+test('offline fallback: profile-fetch failure attempts the trusted cached fallback BEFORE the blocking error surface', () => {
+  const body = _extractFunctionBody(mainSource, 'async function _resolveAndRouteForUser(')
+  const errorIdx = body.indexOf('if (error) {')
+  const fallbackIdx = body.indexOf('_tryCachedFallbackAfterProfileFetchFailure(')
+  const errorSurfaceIdx = body.indexOf('_showProfileResolutionError(')
+  assert.ok(errorIdx > 0, 'error branch must exist')
+  assert.ok(fallbackIdx > errorIdx, 'fallback must be attempted inside the error branch (never on the healthy path)')
+  assert.ok(errorSurfaceIdx > fallbackIdx, 'the blocking error surface must only show AFTER the fallback declined')
+})
+
+test('offline fallback: ALL five gates present, local gates before the probe, probe before the reveal', () => {
+  const body = _extractFallbackBody()
+  const rejectIdx = body.indexOf('_isExplicitAuthRejection(error)')
+  const transportIdx = body.indexOf('_isTransportSessionError(error)')
+  const snapshotIdx = body.indexOf('readLastValidatedAccount()')
+  const snapshotUserIdx = body.indexOf('snapshot.userId !== user.id')
+  const ownerIdx = body.indexOf('owner !== user.id')
+  const probeIdx = body.indexOf('await probe()')
+  const revealIdx = body.indexOf('_revealTrustedCachedShell(')
+  for (const [label, idx] of [
+    ['explicit-rejection gate', rejectIdx],
+    ['transport classification gate', transportIdx],
+    ['snapshot gate', snapshotIdx],
+    ['snapshot same-user gate', snapshotUserIdx],
+    ['owner same-user gate', ownerIdx],
+    ['reachability probe', probeIdx],
+    ['shared reveal', revealIdx],
+  ]) {
+    assert.ok(idx > 0, `${label} must exist in the fallback`)
+  }
+  // Synchronous local gates strictly precede the (network) probe; the probe
+  // strictly precedes the reveal.
+  for (const idx of [rejectIdx, transportIdx, snapshotIdx, snapshotUserIdx, ownerIdx]) {
+    assert.ok(idx < probeIdx, 'local gates must run before the reachability probe')
+  }
+  assert.ok(probeIdx < revealIdx, 'the probe must classify UNREACHABLE before any reveal')
+  // Backend reachable → denied (existing blocking error stays).
+  assert.match(body, /reachability !== 'unreachable'/)
+  // The fallback only ever reveals AUTHENTICATED_CACHED — never REAUTH.
+  assert.match(body, /targetState:\s*AUTH_STATE\.AUTHENTICATED_CACHED/)
+  assert.equal(/AUTHENTICATED_REAUTH_REQUIRED/.test(body), false, 'the fallback must not select REAUTH_REQUIRED (that state means reachable-without-session)')
+})
+
+test('offline fallback: healthy resolution path performs NO reachability probe', () => {
+  // The probe is confined to the failure-only helper; neither the main
+  // resolve pipeline nor the in-place revalidation may reference it.
+  const resolveBody = _extractFunctionBody(mainSource, 'async function _resolveAndRouteForUser(')
+  assert.equal(/probeBackendReachability|await probe\(/.test(resolveBody), false, '_resolveAndRouteForUser must never probe — Stage A healthy-path startup must stay probe-free')
+  const inPlaceBody = _extractFunctionBody(mainSource, 'async function _revalidateCachedRevealInPlace(')
+  assert.equal(/probeBackendReachability|await probe\(/.test(inPlaceBody), false, 'in-place revalidation must not add a probe')
+})
+
+test('offline fallback: stale-async safety — generation re-verified after the probe and before the error surface', () => {
+  const fallbackBody = _extractFallbackBody()
+  const probeIdx = fallbackBody.indexOf('await probe()')
+  const staleIdx = fallbackBody.indexOf('isCurrentAccountTransition(')
+  assert.ok(staleIdx > probeIdx, 'the fallback must re-verify the account transition AFTER awaiting the probe')
+  const revealIdx = fallbackBody.indexOf('_revealTrustedCachedShell(')
+  assert.ok(staleIdx < revealIdx, 'the stale check must run BEFORE opening the reveal transition')
+  // And the error branch itself re-verifies before painting the blocking
+  // error, since the fallback may have awaited.
+  const resolveBody = _extractFunctionBody(mainSource, 'async function _resolveAndRouteForUser(')
+  const fallbackCallIdx = resolveBody.indexOf('_tryCachedFallbackAfterProfileFetchFailure(')
+  const errorSurfaceIdx = resolveBody.indexOf('_showProfileResolutionError(')
+  const recheck = resolveBody.slice(fallbackCallIdx, errorSurfaceIdx)
+  assert.match(recheck, /isCurrentAccountTransition\(/, 'the error surface must be guarded by a post-fallback staleness check')
+})
+
+test('offline fallback: single shared cached-reveal implementation (no duplication)', () => {
+  // Both entry points delegate to _revealTrustedCachedShell...
+  assert.match(_extractCachedBootBody(), /_revealTrustedCachedShell\(/)
+  assert.match(_extractFallbackBody(), /_revealTrustedCachedShell\(/)
+  // ...and the reveal-only responsibilities appear exactly once in main.js:
+  // the cached header paint and the revalidation scheduling are owned by the
+  // shared reveal, not re-implemented per entry point.
+  const headerCalls = mainSource.match(/renderCachedHeaderProfileButtons\(snapshot/g) || []
+  assert.equal(headerCalls.length, 1, 'exactly one cached-header paint site (inside the shared reveal)')
+  const scheduleCalls = mainSource.match(/(?<!function )_scheduleCachedRevalidation\(\{/g) || []
+  assert.equal(scheduleCalls.length, 1, 'exactly one revalidation-scheduling site (inside the shared reveal) — no new reconnect mechanism')
+})
+
+test('offline fallback: cached fallback status is NOT a success status (reconnect re-runs the full pipeline)', () => {
+  assert.match(mainSource, /CACHED_OFFLINE_FALLBACK:\s*'cached-offline-fallback'/)
+  // _resolvedUsers gating must remain restricted to the two success statuses
+  // so a later same-user session (reconnect) still resolves in place.
+  const resolveOnce = _extractFunctionBody(mainSource, 'export function resolveAuthenticatedSessionOnce(')
+  assert.match(resolveOnce, /'complete-home'/)
+  assert.match(resolveOnce, /'incomplete-profile-setup'/)
+  assert.equal(/cached-offline-fallback/.test(resolveOnce), false, 'cached fallback must never mark the user as resolved')
+})
+
+test('offline fallback: reveal drives the Offline pill from the target state (CACHED shows, REAUTH hides)', () => {
+  const revealBody = _extractCachedRevealBody()
+  assert.match(revealBody, /_setOfflineIndicator\(_shouldShowOfflineIndicatorForState\(targetState\)\)/)
+  assert.equal(/_setOfflineIndicator\(true\)/.test(revealBody), false, 'the reveal must not force the pill on unconditionally')
 })
