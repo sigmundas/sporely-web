@@ -522,3 +522,178 @@ Boot timing observations: not measured on device this stage; the cached render p
 - B3: resolve persisted `key`s through a user-scoped blob store in `image-helpers`' render path (single choke point: `imageHtml`/`wireImageFallback`); also cache the header avatar blob so the B1 "public URL only" policy can go away.
 - Consider surfacing `ageMs` ("Saved 2 days ago") near the Offline pill in B2b if field feedback asks for it — the data is already in the read result.
 - The `_HOME_SECTIONS` registry in home.js is the extension point for caching My Finds/detail/map later — same fetch/render/persist triple per section.
+
+
+---
+
+## Stage B2b — capability gating for online-only actions
+
+Status: **implementation complete, uncommitted** on branch `startup-perf-and-offline`. Base commit `d3638cf` (B2a). Awaiting review + Android manual verification.
+
+Roadmap unchanged: B2b = capability gating (this stage); B3 = persistent media/avatar/thumbnail blob cache; later = broader cached Finds/detail/map/taxonomy.
+
+### Capability architecture
+
+New module `src/capabilities.js` centralizes the "is this action allowed right now?" decision so no call site has to re-encode the auth-state → allowed rules. The capability is derived exclusively from `getAuthState()` — `navigator.onLine` remains banned as an authorization signal (Stage B1 invariant preserved).
+
+Public API:
+
+- `canUseAuthenticatedNetwork(overrideState?) → { allowed, reason?, message? }`
+- `canPerformCloudMutation(overrideState?)` — same predicate, exposed under a name that documents intent at Supabase INSERT/UPDATE/DELETE/RPC/Edge/Storage sites.
+- `canUseOAuthLink(overrideState?)` — Google / iNaturalist "connect this authenticated account" linking. Same gate as `canPerformCloudMutation`.
+- `canBeginLoginOAuth(overrideState?)` — the unauthenticated Login pipeline. Allowed only in `UNAUTHENTICATED` (and denied elsewhere so a cached shell never accidentally re-starts the Login OAuth flow — the Reconnect surface handles that instead). Stage A's lazy SocialLogin loader is left intact.
+- `isOfflineCachedMode(overrideState?)` — CACHED-only truth for inline UI hints.
+- `requiresReauthentication(overrideState?)` — REAUTH_REQUIRED-only.
+- `requireCloudMutation({ showToast, silent, overrideState })` — helper that dispatches the standard denial toast (or stays quiet with `{ silent: true }`) and returns the capability object so the caller can `if (!... .allowed) return`.
+- `canPerformLocalOperation()` — always `{ allowed: true }`; exists so call sites can be explicit about intent for drafts / queued observations / cache reads.
+- `CAPABILITY_REASON` — stable string constants (`offline`, `reauth_required`, `unauthenticated`, `setup_incomplete`, `resolving`).
+
+Denial result shape: `{ allowed: false, reason: <CAPABILITY_REASON>, message: <localized string> }`. Localized copy lives in `src/i18n.js` under `common.internetRequired`, `common.signInToReconnect`, `common.finishSetup` in all four supported locales (en, nb_NO, sv_SE, de_DE).
+
+Gate matrix by state:
+
+| Auth state | Cloud mutation | OAuth link | Login OAuth |
+| --- | --- | --- | --- |
+| `AUTHENTICATED_COMPLETE` | ALLOWED | ALLOWED | denied |
+| `AUTHENTICATED_CACHED` | denied — reason `offline` | denied — reason `offline` | denied |
+| `AUTHENTICATED_REAUTH_REQUIRED` | denied — reason `reauth_required` | denied — reason `reauth_required` | denied |
+| `AUTHENTICATED_INCOMPLETE` | denied — `setup_incomplete` | denied | denied |
+| `UNAUTHENTICATED` | denied — `unauthenticated` | denied | ALLOWED |
+| `RESOLVING` | denied — `resolving` | denied | denied |
+
+### Network-action audit summary
+
+Every user-triggered Supabase call site under `src/` was inventoried and classified:
+
+1. **Local-only / always allowed** — Capture, Import, Review draft flows, `enqueueObservation`, `getQueuedObservations`, `deleteQueuedObservation*`, local avatar preview, offline settings (theme, locale, camera preference), Home cache reads, review-draft persistence, iNat "Forget" (local-only), any read-model rendering from cache. NOT gated.
+2. **Queued for background sync (unchanged by this stage)** — observation persistence flows through the existing sync queue; capability gates only refuse *manual/foreground* triggers so queued items are neither consumed nor failed while in CACHED / REAUTH_REQUIRED.
+3. **Requires authenticated live network (gated at call site)** — comment INSERT, friend accept/decline/remove, avatar upload + `profiles.update`, profile edit save, `delete-account` Edge Function, user_blocks INSERT, reports INSERT, iNaturalist connect, taxonomy `search_taxa_v2` RPC (and its legacy fallback), AI provider operations (`runIdentifyProviderOperation` — the chokepoint shared by Artsorakel and iNat identify).
+4. **Requires reauth-specific handling (surfaced via `reason: reauth_required`)** — same set as (3); the message differs so REAUTH_REQUIRED users see "Sign in to reconnect." instead of "Internet connection required."
+5. **Read-only with graceful handling (already handled in Stage B2a)** — Home section fetches; `refreshHomeSafe` short-circuits to the cache in CACHED / REAUTH_REQUIRED. Not modified in this stage.
+6. **Ambiguous / cross-cutting** — auth-session refresh, cloud-plan snapshot writes, and Home cache write are driven by the Stage B1 revalidation pipeline, not user taps; the state machine itself is the guard. Not user-triggered → not gated at this stage.
+
+### Actions gated in this stage
+
+Explicit `requireCloudMutation({ showToast })` / capability check placed **before any Supabase dispatch** at:
+
+- `src/screens/profile.js`:
+  - `_acceptRequest` (friend accept)
+  - `_declineRequest` (friend decline)
+  - `_removeFriend` (friend remove)
+  - `_uploadAvatar` (Supabase storage upload + profiles.update)
+  - `_deleteAccount` (delete-account Edge Function invoke)
+  - Profile setup/edit save (`saveProfileSetup`/`saveProfileEdit` call)
+- `src/screens/find_detail.js`:
+  - `_sendComment` (comments INSERT)
+  - `_blockObservationAuthor` (user_blocks INSERT)
+  - `_reportObservation` (reports INSERT)
+  - Per-comment report / block click handlers
+- `src/main.js`: `.inat-connect-btn` click handler — refuses BEFORE calling `connectInaturalist` so the lazy SocialLogin plugin is not initialized for a doomed request. `.inat-forget-btn` (local session forget) is intentionally NOT gated.
+- `src/taxonomy-v2.js`: `searchTaxaV2` short-circuits to `[]` when `canPerformCloudMutation` denies — the debounced typing input therefore fires ZERO RPCs and never surfaces auth-error toasts. Callers may pass `bypassCapabilityGate: true` for internal orchestration; test suite uses this flag where it stubs the client directly.
+- `src/ai-identification.js`: `runIdentifyProviderOperation` throws an `IdentifyProviderCapabilityError` (`code: 'capability_denied'`, `capabilityReason: 'offline' | 'reauth_required'`) BEFORE invoking the provider operation. Local image prep / crop / review remain unaffected — the gate is at the network chokepoint only.
+- `src/sync-queue.js`: `triggerSync()` returns `null` without consuming or failing queued work when capability denies. Queued items keep their per-item retry state; when the auth state transitions to COMPLETE the existing reconnect triggers (`online` / `focus` / `visibilitychange:visible`) call `triggerSync()` again and pick up where we left off.
+
+### Actions explicitly NOT gated (preserved offline)
+
+- Capture flows (Sporely Cam, native camera, web camera, import).
+- Import Review local edits and draft persistence.
+- `enqueueObservation` — the existing sync queue is the offline write path and remains unchanged. The plan's "do not redesign the sync queue" rail is preserved.
+- Home cache read / render (B2a).
+- Local settings (theme, locale, camera preferences).
+- The Login screen's Google / password / signup / reset flows (`canBeginLoginOAuth` allows them in `UNAUTHENTICATED`).
+- iNat "Forget" — removes local tokens only.
+
+### UX / message strategy
+
+- Least intrusive per action:
+  - Friend accept/decline/remove: click intercepted BEFORE the request; standard denial toast; cached row stays visible so the user can retry on reconnect. The cache is NOT destroyed on denial (Stage B1 invariant).
+  - Comment send / block / report: click intercepted; input text preserved.
+  - Avatar upload: upload refused; the pre-upload preview is reverted on next profile refresh.
+  - Taxonomy search: input remains typable, offline state simply returns no live results (existing search UI treats `[]` as "no matches"). Already-selected taxonomy values persist as observation state and are unaffected.
+  - AI identification: refusal is a clean thrown error (`IdentifyProviderCapabilityError`) with the localized message — callers already surface provider errors as toasts.
+  - Manual sync trigger: silent no-op (returns `null`); the persistent Offline pill and queue-pending UI already tell the user what's happening.
+- Two-message split (per plan): CACHED → "Internet connection required."; REAUTH_REQUIRED → "Sign in to reconnect." Localized in en / nb_NO / sv_SE / de_DE.
+
+### CACHED UX
+
+- Persistent Offline pill (B1) remains the primary status surface.
+- Every gated tap surfaces "Internet connection required." via `showToast` — one message per tap, no cascading errors.
+- No blanket-disable: buttons remain visible + tappable so field feedback is intuitive (tapping tells you why). Cached content stays visible; no destructive UI transitions.
+
+### REAUTH_REQUIRED UX
+
+- Distinguishes from offline via the reason code + message ("Sign in to reconnect."). The Offline pill is intentionally NOT shown (backend IS reachable — B1 semantics).
+- The user is not routed to Login on tap; they are informed and can reach the Reconnect path through the existing Profile / sign-out surface. The cached shell remains fully usable for reads and local drafts.
+- Same reconnect pipeline as B1 — no additional plumbing here.
+
+### State-transition behavior
+
+- `CACHED → COMPLETE` and `REAUTH_REQUIRED → COMPLETE`: capability results immediately return `{ allowed: true }`; no reload needed. Every gated site consults `getAuthState()` on each tap. Verified by `capability-gates.test.js` transitions block.
+- `COMPLETE → CACHED`: subsequent taps deny; in-flight requests are not aborted (they either complete normally or fail with a real network error already handled per-site).
+- Home refresh count invariants (from B2a) are unchanged.
+
+### Tests / results
+
+New:
+
+- `src/capabilities.test.js` — **12 tests**: COMPLETE allows; CACHED denies with `offline`; REAUTH_REQUIRED denies with `reauth_required`; UNAUTHENTICATED denies mutations but allows Login OAuth; COMPLETE forbids re-starting Login OAuth; stable reason codes; local ops always allowed; `overrideState` bypass; `requireCloudMutation` toast + silent variants + allowed path; CACHED vs REAUTH messages distinguishable.
+- `src/capability-gates.test.js` — **18 tests**: taxonomy zero-RPC in CACHED/REAUTH + one-RPC in COMPLETE + bypass; AI zero-invocation with correct reason in CACHED/REAUTH + normal path in COMPLETE; manual sync no-op in CACHED/REAUTH; static verification that every DOM-bound handler (profile, find_detail, main, sync-queue) still contains its `requireCloudMutation` / capability check; i18n coverage in all four locales; state transitions.
+
+Existing tests updated:
+
+- `src/taxonomy-v2.test.js` — three call sites now pass `bypassCapabilityGate: true` (they directly test RPC-level behavior with a stubbed client and are not the app path).
+- `src/ai-identification.test.js`, `src/artsorakel.test.js`, `src/import-review.test.js`, `src/screens/review.test.js` — seed `AUTHENTICATED_COMPLETE` at module load so the AI-orchestration tests exercise the provider pipeline (not the gate, which has its own tests).
+
+Results:
+
+- `npm test` → 908 tests, **870 pass**, **2 fail**, 36 skipped. The two remaining failures are the pre-existing map (`src/screens/map.test.js` — leaflet CSS import in Node) and admin-ops (`supabase/functions/admin-ops/adminActions.test.ts` — Deno) failures verified as unchanged and unrelated to this stage.
+- `npm run build` → succeeds. Main chunk `dist/assets/main-f30tTCCp.js` = 994.62 kB (269.87 kB gzipped), +~2.8 kB over B2a's 991.83 kB baseline (capabilities.js + gate call sites).
+- `git diff --check` → clean.
+- ESLint on changed files → 0 errors. 7 pre-existing warnings in `ai-identification.js`, `main.js`, `find_detail.js` (none introduced by this stage).
+
+### Android manual QA checklist (required before B2b → merged)
+
+Executed only in Node so far. Device verification needed for the nine scenarios below:
+
+1. Sign in online → wait for `AUTHENTICATED_COMPLETE` → tap "Identify" on a Capture image; provider run completes normally. Force-close and re-open in airplane mode → tap "Identify" → the provider run is refused with "Internet connection required."; no network attempt fired (verify via `chrome://inspect` DevTools network panel).
+2. Tap a pending friend request Accept/Decline in cached mode → toast shows "Internet connection required." and the request row stays visible (not deleted from cache). Restore connectivity → transition to COMPLETE → tap Accept again → the request is accepted normally.
+3. In REAUTH_REQUIRED (e.g. force an invalidated session with backend reachable) tap Accept → toast reads "Sign in to reconnect."; user stays in cached shell.
+4. Open Find detail on a cached observation → type a comment → tap Send in CACHED → toast fires; input text preserved. Same in REAUTH_REQUIRED.
+5. Open Review → in the taxonomy search box type 3+ letters in CACHED mode → verify DevTools shows zero `search_taxa_v2` RPC calls; UI shows empty results; no toasts spam. Confirm already-selected taxa on prior observations still render.
+6. Profile → tap "Connect iNaturalist" in CACHED / REAUTH → toast fires; SocialLogin plugin is NOT initialized (verify via Android logcat — no `capacitor-social-login` init log). Confirm same button works normally in COMPLETE.
+7. Profile → edit username / bio → tap Save in CACHED → toast; overlay stays open (button re-enabled). Same in REAUTH.
+8. Queue 3 observations offline → in CACHED tap pull-to-refresh on Finds (which calls `triggerSync`) → items are NOT consumed / failed / retried; queue-pending UI still shows 3 waiting. Restore connectivity → transition to COMPLETE → next `online` / `focus` / `visibilitychange` event drains the queue.
+9. Sign in on Login screen → verify unauthenticated Google/password flows still work (Stage A lazy SocialLogin behavior preserved).
+
+Scenarios covered by Node tests today: 2 (partial — the click handler code path is statically asserted + the capability module verifies denial), 5 (taxonomy zero-RPC), 6 (main.js iNat gating is statically asserted; the plugin non-init behavior is design-guaranteed by the gate order), 8 (triggerSync no-op verified).
+
+### `bypassCapabilityGate` — narrow-usage rule (hard constraint)
+
+The `bypassCapabilityGate: true` option on `searchTaxaV2` and `runIdentifyProviderOperation` is an escape hatch around the offline guarantee. It is deliberately narrow and MUST remain so.
+
+Rules:
+
+1. Allowed callers: (a) the module's own definition site, and (b) `*.test.js` files. That's it.
+2. It MUST NOT appear anywhere under `src/screens/**` or any other user-triggered click / input / navigation handler.
+3. Test suite enforces the rule via two invariants in `src/capability-gates.test.js`:
+   - `no screen/user-triggered file passes bypassCapabilityGate` (grep-style scan of `src/screens/**`, ignoring `.test.js`).
+   - `bypassCapabilityGate is only referenced by (a) module definitions and (b) test files` (repo-wide scan of `src/` with an explicit allowlist of definition sites: `src/taxonomy-v2.js`, `src/ai-identification.js`).
+
+Current audit (verified by the invariants above):
+
+- `src/taxonomy-v2.js` — definition site (allowed).
+- `src/ai-identification.js` — definition site (allowed).
+- `src/taxonomy-v2.test.js` — internal test fixtures with a stubbed Supabase client (allowed).
+- `src/capability-gates.test.js` — asserts the bypass path works (allowed).
+- No screen or other production file references the flag. Any future PR that introduces one will fail the invariant tests.
+
+### Findings that should shape B3
+
+- **Media loader rule (revised):** `ProtectedMediaLoader` MUST NOT be a general bypass. The rule is: read local blob (from the B3 user-scoped IndexedDB blob store) regardless of network capability — that read is a local operation and always allowed. Only attempt the authenticated remote fetch when `canUseAuthenticatedNetwork()` (or `canPerformCloudMutation()`) returns `{ allowed: true }`. In CACHED / REAUTH_REQUIRED the loader silently falls back to the placeholder if the blob is missing, rather than firing a doomed authenticated request. This removes the last "signed URL → 401 → placeholder" round-trip observed in B2a on cached avatars WITHOUT introducing a per-caller escape hatch.
+- Do NOT introduce a `bypassCapabilityGate`-shaped option to the media loader. Local read is a plain local op and needs no bypass; remote fetch is capability-gated exactly like every other authenticated network op. The narrow-usage invariants in `capability-gates.test.js` remain the source of truth.
+- No schema changes to the auth state model were needed for B2b — B3 does not need to introduce new states either.
+
+### Post-review changes (reviewer concerns 1 + 2)
+
+1. **Concern 1 — narrow-usage rule for `bypassCapabilityGate`.** Two invariant tests added to `src/capability-gates.test.js` enforcing (a) no screen leak and (b) an allowlist of definition sites for the flag. The B3 media-cache recommendation was rewritten (see "Findings that should shape B3" above) so it does NOT propagate the bypass pattern — instead the loader reads local blobs unconditionally and only gates the remote fetch.
+2. **Concern 2 — taxonomy search UI must not look like "no results".** The three taxonomy-search callers (`src/screens/review.js`, `src/screens/import_review.js`, `src/screens/find_detail.js`) now check `canPerformCloudMutation()` BEFORE dispatching `searchTaxa` and render a non-selectable `<li class="taxon-dropdown-offline">` with the localized capability message (`"Internet connection required."` / `"Sign in to reconnect."`) in the dropdown. Existing selected taxa on the observation/session remain untouched. A functional test simulates the offline branch and confirms the offline row renders (not an empty dropdown), and static invariants ensure every `searchTaxa` call is preceded by a `canPerformCloudMutation()` check in the same file.

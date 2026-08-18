@@ -1,4 +1,5 @@
 import { supabase } from './supabase.js'
+import { canPerformCloudMutation } from './capabilities.js'
 
 export const TAXONOMY_IDENTITY_CAPABILITY = 'sporely-taxonomy-v2'
 export const LEGACY_TAXONOMY_IDENTITY_CAPABILITY = 'legacy-provider-taxonomy'
@@ -88,6 +89,14 @@ function isUnavailableRpcError(error) {
 export async function searchTaxaV2(q, lang = 'no', options = {}) {
   const query = String(q || '').trim()
   if (query.length < 2) return []
+  // Stage B2b: taxonomy search is a Supabase RPC. In CACHED / REAUTH_REQUIRED
+  // there is no useful backend session — dispatching would either fail
+  // (offline) or return 401 (reauth). We suppress dispatch BEFORE the RPC
+  // fires so the user's typing doesn't spam auth-error toasts. Callers
+  // treat this as "no results yet". Already-selected taxonomy values on
+  // an observation remain intact (they live in observation state, not
+  // here).
+  if (options.bypassCapabilityGate !== true && !canPerformCloudMutation().allowed) return []
   const limit = Math.max(1, Math.min(Number(options.limit) || 20, 50))
   const normalizedLang = normalizeSearchLanguage(lang)
   const client = options.supabaseClient || supabase

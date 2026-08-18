@@ -2,6 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
+// Stage B2b: capability gate defaults to blocking non-COMPLETE states.
+import { AUTH_STATE, setAuthState } from './auth-state.js'
+setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: 'test-user' })
+
 import { buildIdentifyFingerprint } from './ai-identification.js'
 import { shouldShowAiCropOverlay } from './image_crop.js'
 import { resolvePhotoIdServices } from './settings.js'

@@ -12,6 +12,7 @@ import { debugImagePipeline } from './image-pipeline-debug.js'
 import { isBlob } from './observation-shapes.js'
 import { normalizeObservationGeography } from './observation-geography.js'
 import { persistObservationTaxonomySelection, takeQueuedTaxonomySelection } from './taxonomy-v2.js'
+import { canPerformCloudMutation } from './capabilities.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -1091,6 +1092,18 @@ async function _runSyncQueue() {
 
 export async function triggerSync() {
   if (isSyncing) return _currentSyncPromise
+
+  // Stage B2b: refuse to consume queued work when the capability model
+  // says a live authenticated session isn't available. This preserves
+  // queued observations across CACHED / REAUTH_REQUIRED — they are NOT
+  // marked failed and their per-item retry state is untouched. When the
+  // auth state transitions back to COMPLETE, the existing reconnect
+  // triggers (`online`, `focus`, `visibilitychange:visible`) will call
+  // triggerSync() again and pick up where we left off.
+  if (!canPerformCloudMutation().allowed) {
+    debugImagePipeline('trigger sync deferred — capability denied')
+    return null
+  }
 
   debugImagePipeline('trigger sync requested')
   isSyncing = true

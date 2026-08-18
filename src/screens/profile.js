@@ -9,6 +9,7 @@ import { isPickerCancel, nativePickedPhotoToFile, PICKER_OPTIONS_AVATAR, pickIma
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { isProfileComplete, saveProfileEdit, saveProfileSetup } from '../profile-completion.js'
 import { runProfileSetupCompletion, runSetupSignOut } from '../profile-setup-flow.js'
+import { requireCloudMutation } from '../capabilities.js'
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
@@ -470,6 +471,14 @@ async function _saveProfile() {
     return
   }
 
+  // Stage B2b: profile save is a remote profiles.update. Local-only
+  // preferences (settings-overlay) remain editable offline; this remote
+  // write is gated.
+  if (!requireCloudMutation({ showToast }).allowed) {
+    btn.disabled = false
+    return
+  }
+
   // Setup save stamps `profile_completed_at`; ordinary edits leave it alone.
   const saver = _profileSetupMode ? saveProfileSetup : saveProfileEdit
   const { persisted, error } = await saver(supabase, state.user.id, { username, display_name, bio })
@@ -723,6 +732,10 @@ async function _confirmCrop() {
 }
 
 async function _uploadAvatar(blob) {
+  // Stage B2b: avatar upload is a cloud storage write + profiles.update.
+  // Gate before any network dispatch — the local preview will be reverted
+  // on the next profile refresh in cached mode.
+  if (!requireCloudMutation({ showToast }).allowed) return
   const uid  = state.user.id
   const path = `${uid}/avatar.jpg`
   const { error: upErr } = await supabase.storage
@@ -1010,6 +1023,12 @@ async function _loadPending() {
 }
 
 async function _acceptRequest(friendshipId) {
+  // Stage B2b: gate authenticated mutations. In CACHED / REAUTH_REQUIRED
+  // there is no live session — dispatching the update would either fail
+  // (offline) or return a real 401 (reauth). Show the standard toast and
+  // leave the pending request card visible so the user can retry on
+  // reconnect.
+  if (!requireCloudMutation({ showToast }).allowed) return
   const { error } = await supabase
     .from('friendships').update({ status: 'accepted' }).eq('id', friendshipId)
   if (error) { showToast(t('common.errorPrefix', { message: error.message })); return }
@@ -1018,11 +1037,13 @@ async function _acceptRequest(friendshipId) {
 }
 
 async function _declineRequest(friendshipId) {
+  if (!requireCloudMutation({ showToast }).allowed) return
   await supabase.from('friendships').delete().eq('id', friendshipId)
   loadProfile()
 }
 
 async function _removeFriend(friendUserId) {
+  if (!requireCloudMutation({ showToast }).allowed) return
   const uid = state.user.id
   await supabase.from('friendships').delete()
     .or(`and(requester_id.eq.${uid},addressee_id.eq.${friendUserId}),and(requester_id.eq.${friendUserId},addressee_id.eq.${uid})`)
@@ -1034,6 +1055,10 @@ async function _deleteAccount() {
   const email = state.user?.email || 'this account'
   const confirmed = await _confirmDeleteAccount(email)
   if (!confirmed) return
+
+  // Stage B2b: account deletion is an Edge Function call — requires a live
+  // session. Refuse before invocation in CACHED/REAUTH_REQUIRED.
+  if (!requireCloudMutation({ showToast }).allowed) return
 
   const btn = document.getElementById('delete-account-btn')
   btn.disabled = true

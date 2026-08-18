@@ -36,6 +36,7 @@ import { normalizeVisibility, observationUsesPrivacySlot, toCloudVisibility } fr
 import { getIdentifyNoMatchMessage, runIdentifyForBlobs, runIdentifyForMediaKeys } from '../identify.js'
 import { loadInaturalistSession } from '../inaturalist.js'
 import { refreshHome } from './home.js'
+import { requireCloudMutation, canPerformCloudMutation } from '../capabilities.js'
 import { loadPeopleSocialState } from './people.js'
 import { buildGpsMetaHtml } from './review.js'
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js'
@@ -3428,6 +3429,17 @@ function _applyOwnershipMode(isOwner) {
 async function _searchTaxon(q, dropdown) {
   if (q.length < 2) { dropdown.style.display = 'none'; return }
 
+  // Stage B2b: check capability at the UI layer so offline users see an
+  // inline hint instead of a hidden dropdown that could look like "no
+  // matches" for the query they just typed. The currently-selected taxon
+  // (in `selectedTaxon` / the detail header) is not touched.
+  const cap = canPerformCloudMutation()
+  if (!cap.allowed) {
+    dropdown.innerHTML = `<li class="taxon-dropdown-offline" aria-disabled="true" style="opacity:0.7;pointer-events:none;font-style:italic">${cap.message}</li>`
+    dropdown.style.display = 'block'
+    return
+  }
+
   const results = await searchTaxa(q, getTaxonomyLanguage())
   if (!results.length) { dropdown.style.display = 'none'; return }
 
@@ -3676,8 +3688,10 @@ async function _delete() {
 
 async function _blockObservationAuthor() {
   if (!currentObs || !state.user) return
+  // Stage B2b: user_blocks INSERT — cloud mutation.
+  if (!requireCloudMutation({ showToast }).allowed) return
   if (!confirm(t('detail.blockUserConfirm') || 'Block this user? You will no longer see their posts and comments.')) return
-  
+
   const btn = document.getElementById('detail-block-btn')
   if (btn) btn.disabled = true
   
@@ -3700,6 +3714,8 @@ async function _blockObservationAuthor() {
 
 async function _reportObservation() {
   if (!currentObs || !state.user) return
+  // Stage B2b: reports INSERT — cloud mutation.
+  if (!requireCloudMutation({ showToast }).allowed) return
   const reason = prompt(t('detail.reportReason') || 'Why are you reporting this post? (e.g. spam, inappropriate)')
   if (!reason) return
   
@@ -3776,6 +3792,7 @@ async function _loadComments(obsId) {
 
   list.querySelectorAll('.comment-report-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
+      if (!requireCloudMutation({ showToast }).allowed) return
       const reason = prompt(t('comments.reportReason') || 'Why are you reporting this comment?')
       if (!reason) return
       const uid = btn.dataset.uid
@@ -3798,6 +3815,7 @@ async function _loadComments(obsId) {
 
   list.querySelectorAll('.comment-block-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
+      if (!requireCloudMutation({ showToast }).allowed) return
       if (!confirm(t('comments.blockConfirm') || 'Block this user?')) return
       const uid = btn.dataset.uid
       const { error } = await supabase.from('user_blocks').insert({
@@ -3946,6 +3964,10 @@ async function _sendComment() {
   const body = String(input?.value || '').trim()
   const btn = document.getElementById('comment-send-btn')
   if (!body || !currentObs || !_detailCommentCanPost()) return
+  // Stage B2b: comments are an authenticated INSERT. Gate before dispatch
+  // so we do not persist a doomed request; local draft text stays in the
+  // input for the user to resend on reconnect.
+  if (!requireCloudMutation({ showToast }).allowed) return
   if (btn) btn.disabled = true
 
   try {

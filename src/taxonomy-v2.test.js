@@ -43,7 +43,7 @@ test('search normalizes canonical, alias, genus, vernacular and NorTaxa-backed r
   ]
   const calls = []
   const client = { rpc: async (name, args) => { calls.push({ name, args }); return { data: rows, error: null } } }
-  const results = await searchTaxaV2('Crystallocystidium', 'nb-NO', { supabaseClient: client })
+  const results = await searchTaxaV2('Crystallocystidium', 'nb-NO', { supabaseClient: client, bypassCapabilityGate: true })
   assert.equal(calls[0].name, 'search_taxa_v2')
   assert.equal(calls[0].args.lang, 'no')
   assert.deepEqual(results.map(result => result.matchType), ['canonical_exact', 'canonical_prefix', 'scientific_alias_exact', 'vernacular_exact', 'scientific_alias_exact'])
@@ -54,7 +54,7 @@ test('search normalizes canonical, alias, genus, vernacular and NorTaxa-backed r
 test('empty result never falls back and unavailable RPC fallback is capability-separated', async () => {
   const emptyCalls = []
   const emptyClient = { rpc: async name => { emptyCalls.push(name); return { data: [], error: null } } }
-  assert.deepEqual(await searchTaxaV2('zzzz-no-result', 'no', { supabaseClient: emptyClient }), [])
+  assert.deepEqual(await searchTaxaV2('zzzz-no-result', 'no', { supabaseClient: emptyClient, bypassCapabilityGate: true }), [])
   assert.deepEqual(emptyCalls, ['search_taxa_v2'])
 
   const calls = []
@@ -63,7 +63,7 @@ test('empty result never falls back and unavailable RPC fallback is capability-s
     if (name === 'search_taxa_v2') return { data: null, error: { code: 'PGRST202', message: 'function not found in schema cache' } }
     return { data: [{ taxon_id: 44, genus: 'Legacy', specific_epithet: 'taxon', norwegian_taxon_id: 99 }], error: null }
   } }
-  const [result] = await searchTaxaV2('Legacy', 'no', { supabaseClient: client })
+  const [result] = await searchTaxaV2('Legacy', 'no', { supabaseClient: client, bypassCapabilityGate: true })
   assert.deepEqual(calls, ['search_taxa_v2', 'search_taxa'])
   assert.equal(result.identityCapability, LEGACY_TAXONOMY_IDENTITY_CAPABILITY)
   assert.equal(result.sporelyTaxonId, undefined)

@@ -47,6 +47,7 @@ import { clearImportSessions, clearImportSessionsStrict, loadImportSessions } fr
 import { clearReviewDraftStrict, loadReviewDraft } from './review-draft-store.js'
 import { forceCloseProfileOverlay, initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons, renderCachedHeaderProfileButtons } from './screens/profile.js'
 import { AUTH_STATE, getAuthState, setAuthState } from './auth-state.js'
+import { requireCloudMutation } from './capabilities.js'
 import { fetchProfileWithSignupRetry, isProfileComplete } from './profile-completion.js'
 import { clearLocalDataOwner, getLocalDataOwner, resolveLocalDataOwner, setLocalDataOwner } from './local-data-owner.js'
 import {
@@ -1092,6 +1093,12 @@ async function bootApp(user) {
     // Wire iNat buttons after profile screen is initialized
     document.querySelectorAll('.inat-connect-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
+        // Stage B2b: iNat linking runs OAuth against a live authenticated
+        // session. Refuse in CACHED / REAUTH_REQUIRED so we don't init the
+        // lazy SocialLogin plugin for a doomed request. Note: Stage A's
+        // lazy loader is untouched — the plugin still only imports on
+        // demand for legitimate connects.
+        if (!requireCloudMutation({ showToast }).allowed) return
         try {
           const session = await connectInaturalist()
           if (session?.connected) {
@@ -1106,6 +1113,9 @@ async function bootApp(user) {
     });
     document.querySelectorAll('.inat-forget-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
+        // Forgetting the local iNat session is a local mutation only —
+        // intentionally NOT gated by capability. It removes local tokens
+        // so the user can end their linked-session offline.
         await forgetInaturalistSession();
         await _syncInaturalistUi();
         showToast(t('settings.inaturalistLoggedOut'));
