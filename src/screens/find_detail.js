@@ -1972,29 +1972,48 @@ export async function runDetailIdentify(service, galleryImgs, options = {}) {
   const identifyBlobs = options.identifyBlobs || runIdentifyForBlobs
   const identifyMediaKeys = options.identifyMediaKeys || runIdentifyForMediaKeys
 
+  const detailGps = _detailIdentifyGps()
+  const detailLat = options.lat ?? detailGps?.lat ?? null
+  const detailLon = options.lon ?? detailGps?.lon ?? null
+
   if (blobs.length) {
     try {
-      const detailGps = _detailIdentifyGps()
       const identifyOptions = service === ID_SERVICE_ARTSORAKEL
-        ? { tolerateFailures: true, maxEdge: getArtsorakelMaxEdge(), screen: 'detail' }
+        ? {
+            tolerateFailures: true,
+            maxEdge: getArtsorakelMaxEdge(),
+            screen: 'detail',
+            latitude: detailLat,
+            longitude: detailLon,
+          }
         : {
             tolerateFailures: true,
             screen: 'detail',
-            lat: detailGps?.lat ?? null,
-            lon: detailGps?.lon ?? null,
+            lat: detailLat,
+            lon: detailLon,
             observedOn: _detailIdentifyObservedOn(),
           }
       return await identifyBlobs(identifyInputs, service, language, identifyOptions)
     } catch (error) {
       if (service === ID_SERVICE_ARTSORAKEL && mediaKeys.length && _isArtsorakelBlobFallbackError(error)) {
-        return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'original', screen: 'detail' })
+        return identifyMediaKeys(mediaKeys, service, language, {
+          variant: options.variant || 'original',
+          screen: 'detail',
+          latitude: detailLat,
+          longitude: detailLon,
+        })
       }
       throw error
     }
   }
 
   if (mediaKeys.length && service === ID_SERVICE_ARTSORAKEL) {
-    return identifyMediaKeys(mediaKeys, service, language, { variant: options.variant || 'original', screen: 'detail' })
+    return identifyMediaKeys(mediaKeys, service, language, {
+      variant: options.variant || 'original',
+      screen: 'detail',
+      latitude: detailLat,
+      longitude: detailLon,
+    })
   }
 
   if (service === ID_SERVICE_ARTSORAKEL) {

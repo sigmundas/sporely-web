@@ -57,6 +57,24 @@ function resolveArtsorakelToken(env) {
   return token
 }
 
+function normalizeArtsorakelUpstreamLatLon(source) {
+  if (!source || typeof source !== 'object') return null
+  const rawLat = source.latitude ?? source.lat ?? null
+  const rawLon = source.longitude ?? source.lon ?? source.lng ?? null
+  if (rawLat === null || rawLat === undefined
+      || rawLon === null || rawLon === undefined) {
+    return null
+  }
+  const lat = Number(rawLat)
+  const lon = Number(rawLon)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null
+  return {
+    latitude: Math.round(lat * 10) / 10,
+    longitude: Math.round(lon * 10) / 10,
+  }
+}
+
 let cachedJwks = null
 let cachedJwksAt = 0
 let lastNominatimRequestStartedAt = 0
@@ -1158,6 +1176,7 @@ async function handleArtsorakelMedia(request, env, ctx) {
   }
 
   const variant = String(body?.variant || 'medium').trim() || 'medium'
+  const location = normalizeArtsorakelUpstreamLatLon(body)
   const appHeaders = {}
   const appName = String(request.headers.get('X-App-Name') || '').trim()
   const appVersion = String(request.headers.get('X-App-Version') || '').trim()
@@ -1187,7 +1206,7 @@ async function handleArtsorakelMedia(request, env, ctx) {
     }
 
     try {
-      const data = await runArtsorakelForMediaObject(object, appHeaders, artsorakelToken)
+      const data = await runArtsorakelForMediaObject(object, appHeaders, artsorakelToken, location)
       responses.push({ key, data })
     } catch (error) {
       console.error('Artsorakel media request failed', error)
@@ -1238,13 +1257,13 @@ function mediaCandidateKeys(key, variant) {
   return [...new Set([primaryKey, key].filter(Boolean))]
 }
 
-async function runArtsorakelForMediaObject(object, appHeaders = {}, artsorakelToken = '') {
+async function runArtsorakelForMediaObject(object, appHeaders = {}, artsorakelToken = '', location = null) {
   const contentType = String(object?.httpMetadata?.contentType || '').trim() || 'image/jpeg'
   const bodyBuffer = await object.arrayBuffer()
 
-  let upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'image', appHeaders, artsorakelToken)
+  let upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'image', appHeaders, artsorakelToken, location)
   if (!upstream.ok) {
-    upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'file', appHeaders, artsorakelToken)
+    upstream = await postArtsorakelBuffer(bodyBuffer, contentType, 'file', appHeaders, artsorakelToken, location)
   }
   if (!upstream.ok) {
     throw httpError(502, 'artsorakel_failed', `Artsdata AI ${upstream.status}`)
@@ -1252,10 +1271,14 @@ async function runArtsorakelForMediaObject(object, appHeaders = {}, artsorakelTo
   return upstream.json()
 }
 
-function postArtsorakelBuffer(bodyBuffer, contentType, fieldName, appHeaders = {}, artsorakelToken = '') {
+function postArtsorakelBuffer(bodyBuffer, contentType, fieldName, appHeaders = {}, artsorakelToken = '', location = null) {
   const form = new FormData()
   form.append(fieldName, new Blob([bodyBuffer], { type: contentType }), 'photo.jpg')
   form.append('application', 'Sporely')
+  if (location) {
+    form.append('latitude', String(location.latitude))
+    form.append('longitude', String(location.longitude))
+  }
   return fetch(ARTSORAKEL_UPSTREAM_URL, {
     method: 'POST',
     headers: {

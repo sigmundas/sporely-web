@@ -2319,3 +2319,123 @@ test('POST /artsorakel/media fails cleanly when ARTSORAKEL_API_TOKEN is missing'
     )
   } finally { upstream.restore() }
 })
+
+test('POST /artsorakel/media validates latitude/longitude and forwards rounded pair upstream', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const upstream = installArtsorakelUpstreamMock(async ({ url }) => {
+    if (url.includes('/rest/v1/observation_images')) {
+      return new Response(JSON.stringify([{ observation_id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (url.includes('/rest/v1/observations')) {
+      return new Response(JSON.stringify([{ id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({ predictions: [] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  })
+  const mediaBucket = {
+    head: async () => ({ size: 12, httpMetadata: { contentType: 'image/jpeg' } }),
+    get: async () => ({
+      arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      httpMetadata: { contentType: 'image/jpeg' },
+    }),
+  }
+  const env = {
+    ...TEST_ENV,
+    MEDIA_BUCKET: mediaBucket,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    SUPABASE_SERVICE_ROLE_KEY: 'srk',
+    ARTSORAKEL_API_TOKEN: 'media-token',
+  }
+  const request = new Request('https://upload.sporely.no/artsorakel/media', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      keys: ['user-123/obs/full.jpg'],
+      variant: 'medium',
+      latitude: 59.9139,
+      longitude: 10.7522,
+    }),
+  })
+
+  try {
+    const response = await worker.fetch(request, env, {})
+    assert.equal(response.status, 200)
+    const upstreamCalls = upstream.calls.filter(call => call.url === 'https://ai.artsdatabanken.no/identify')
+    assert.equal(upstreamCalls.length >= 1, true)
+    const form = upstreamCalls[0].init.body
+    assert.equal(form.get('latitude'), '59.9')
+    assert.equal(form.get('longitude'), '10.8')
+  } finally { upstream.restore() }
+})
+
+test('POST /artsorakel/media omits both coordinates when only one is supplied or values are out of range', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const upstream = installArtsorakelUpstreamMock(async ({ url }) => {
+    if (url.includes('/rest/v1/observation_images')) {
+      return new Response(JSON.stringify([{ observation_id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (url.includes('/rest/v1/observations')) {
+      return new Response(JSON.stringify([{ id: 'obs-1' }]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify({ predictions: [] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  })
+  const mediaBucket = {
+    head: async () => ({ size: 12, httpMetadata: { contentType: 'image/jpeg' } }),
+    get: async () => ({
+      arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      httpMetadata: { contentType: 'image/jpeg' },
+    }),
+  }
+  const env = {
+    ...TEST_ENV,
+    MEDIA_BUCKET: mediaBucket,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    SUPABASE_SERVICE_ROLE_KEY: 'srk',
+    ARTSORAKEL_API_TOKEN: 'media-token',
+  }
+
+  const bodies = [
+    { keys: ['user-123/obs/full.jpg'], latitude: 59.9139 },
+    { keys: ['user-123/obs/full.jpg'], longitude: 10.7522 },
+    { keys: ['user-123/obs/full.jpg'], latitude: 95, longitude: 10 },
+    { keys: ['user-123/obs/full.jpg'], latitude: 'nope', longitude: 10 },
+    { keys: ['user-123/obs/full.jpg'] },
+  ]
+
+  try {
+    for (const body of bodies) {
+      const request = new Request('https://upload.sporely.no/artsorakel/media', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      })
+      const response = await worker.fetch(request, env, {})
+      assert.equal(response.status, 200)
+    }
+    const upstreamCalls = upstream.calls.filter(call => call.url === 'https://ai.artsdatabanken.no/identify')
+    assert.ok(upstreamCalls.length >= bodies.length)
+    for (const call of upstreamCalls) {
+      assert.equal(call.init.body.get('latitude'), null)
+      assert.equal(call.init.body.get('longitude'), null)
+    }
+  } finally { upstream.restore() }
+})
