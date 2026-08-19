@@ -1547,3 +1547,102 @@ with no force-close, navigation, or pull-refresh.
 alone must still recover on the same timeline.
 (C) While CACHED after restore, pull Finds immediately → immediate recovery
 attempt (force) rather than waiting for the next watchdog tick.
+
+## QA round 5 — cached reconnect no-op regression (still NOT Stage C)
+
+Device result after round 4: the round-4 watchdog fired correctly on live
+reconnect — `probeBackendReachability()` returned `reachable=true`,
+`getSharedAuthSession({ refresh: true })` returned the same user's session
+— but the app nonetheless stayed CACHED indefinitely until a force-quit.
+Cold-start recovery still worked; only the *runtime*
+`COMPLETE → CACHED → restore` path was broken.
+
+### Root cause
+
+`resolveAuthenticatedSessionOnce()` in `main.js` deduped on:
+
+```js
+_resolvedUsers.has(user.id)
+  && currentAuth.userId === user.id
+  && currentAuth.state !== AUTH_STATE.RESOLVING
+  && currentAuth.state !== AUTH_STATE.UNAUTHENTICATED
+```
+
+`_resolvedUsers` is populated after any prior online resolution reaches
+`complete-home` / `incomplete-profile-setup`, and the runtime downgrade in
+`handleConnectivityLost` deliberately leaves that set untouched (the local
+identity trust survives an airplane-mode blip). So when the watchdog handed
+the resolver a refreshed same-user session, `alreadyResolved` was `true`
+(state was CACHED — neither RESOLVING nor UNAUTHENTICATED), the resolver
+returned `{ status: 'noop' }`, and `_resolveAndRouteForUser` was never
+entered — meaning `_revalidateCachedRevealInPlace` never ran and the state
+never lifted back to COMPLETE. Force-quit fixed it only because it dropped
+the in-memory `_resolvedUsers` set.
+
+### Fix
+
+The invariant was formulated backwards: presence in `_resolvedUsers` alone
+was treated as terminal. The corrected invariant is **state-aware**: skip
+only when the current auth state is itself *terminally resolved* for the
+same user. Introduced:
+
+- `isTerminallyResolvedAuthState(stateValue)` in `src/auth-state.js`.
+  Returns `true` only for `AUTHENTICATED_COMPLETE` and
+  `AUTHENTICATED_INCOMPLETE`. `AUTHENTICATED_CACHED` and
+  `AUTHENTICATED_REAUTH_REQUIRED` are trusted-cache reveals — the shell is
+  visible but the backend has NOT validated the session this launch, so a
+  live reconnect for the same user MUST re-enter the resolver and take the
+  existing in-place revalidation branch.
+- `isUserAlreadyResolved(userId, resolvedUsers, currentAuth)` in
+  `src/auth-state.js`. Pure predicate that combines the two checks — used
+  by `resolveAuthenticatedSessionOnce`'s dedupe.
+
+`resolveAuthenticatedSessionOnce` now calls `isUserAlreadyResolved` instead
+of open-coding the check. `_resolutionInFlight` single-flight protection is
+untouched. `handleConnectivityLost` still does NOT clear `_resolvedUsers`
+(the invariant belongs in the resolver, not the loss handler — deleting on
+loss would still leave the resolver dedupe wrong for anything else that
+can produce a same-user CACHED/REAUTH state, e.g. cached-shell fallback
+after a profile-fetch failure).
+
+Reconnect chain is now: `[network] cached watchdog tick` → `[auth]
+reconnect requested … state=AUTHENTICATED_CACHED` → `[auth] reconnect probe
+reachable=true` → `[auth] reconnect session same-user=true` → `[auth]
+session_resolution_started …` → `[auth] in_place_revalidation_started` →
+`[auth] in_place_revalidation_completed` → `[sync] reconnect trigger (auth
+COMPLETE transition)` → `[sync] queue pass started`. Before the fix,
+`session_resolution_started` / `in_place_revalidation_started` never
+appeared after a same-user reconnect — that is the specific failure
+signature.
+
+### Invariant (record explicitly)
+
+`_resolvedUsers` records users the online resolution pipeline reached a
+terminal destination for at least once this process lifetime. It is
+**not** sufficient on its own to prove the user is currently in a
+terminally resolved state — the process can move through
+`AUTHENTICATED_CACHED` / `AUTHENTICATED_REAUTH_REQUIRED` and back
+without leaving/re-entering the set. Any dedupe that trusts this set MUST
+also require the *current* auth state to be terminally resolved
+(`isTerminallyResolvedAuthState`), or same-user reconnects will silently
+no-op.
+
+### Files changed
+
+- `src/auth-state.js` — new `isTerminallyResolvedAuthState` and
+  `isUserAlreadyResolved` predicates.
+- `src/main.js` — resolver dedupe delegates to `isUserAlreadyResolved`;
+  no other behavioral changes.
+- `src/auth-state.test.js` — full behavioral truth table for the new
+  predicates across every `AUTH_STATE` value.
+- `src/live-reconnect.test.js` — structural regressions pinning the
+  resolver → predicate wiring, the CACHED/REAUTH → in-place branch entry,
+  and that `handleConnectivityLost` does not paper over the invariant by
+  clearing `_resolvedUsers`.
+- `PLAN-startup.md` — this section.
+
+### DEVICE ACCEPTANCE (Android, required)
+
+Repeat round-4 acceptance (A) with an emphasis on the log chain above —
+`session_resolution_started` and `in_place_revalidation_started` MUST
+appear after a same-user reconnect from CACHED.

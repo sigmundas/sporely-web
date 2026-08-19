@@ -44,6 +44,49 @@ export function isAuthorizedForAuthenticatedNetworkOps(stateValue) {
   return stateValue === AUTH_STATE.AUTHENTICATED_COMPLETE
 }
 
+// Terminally resolved states — the profile-resolution pipeline has run to a
+// resting destination (server-validated home or the setup screen) and does
+// NOT need to re-run for the same user until state moves.
+//
+// Deliberately EXCLUDES `AUTHENTICATED_CACHED` and
+// `AUTHENTICATED_REAUTH_REQUIRED`. Those are trusted-cache reveals: a prior
+// launch validated this identity, and the shell is painted from the persisted
+// snapshot so the user is not blocked, but the backend has NOT confirmed a
+// session during this reveal. A live reconnect for the same user MUST re-enter
+// the resolver so `_revalidateCachedRevealInPlace()` runs, refreshes the
+// profile, and lifts the state to `AUTHENTICATED_COMPLETE` (which then drives
+// the reconnect sync trigger). Round-5 regression: previously the resolver's
+// `_resolvedUsers` dedupe treated CACHED as terminal, which turned a live
+// airplane-off recovery into a permanent no-op until the app was force-quit.
+export function isTerminallyResolvedAuthState(stateValue) {
+  return stateValue === AUTH_STATE.AUTHENTICATED_COMPLETE
+    || stateValue === AUTH_STATE.AUTHENTICATED_INCOMPLETE
+}
+
+// Pure dedupe predicate used by `resolveAuthenticatedSessionOnce` in main.js.
+// Extracted so every auth state can be proven behaviorally in a unit test —
+// main.js runs heavy side-effects at import, so it can't be pulled into a
+// Node test directly. See PLAN-startup.md "Round 5 — cached reconnect no-op
+// regression" for the concrete failure this predicate prevents.
+//
+// Returns true iff:
+//   - a prior online resolution recorded `userId` as reaching a terminal
+//     destination (`resolvedUsers.has(userId)`),
+//   - the current auth state's userId matches, AND
+//   - the current auth state is itself terminally resolved (COMPLETE or
+//     INCOMPLETE — see `isTerminallyResolvedAuthState`).
+//
+// A CACHED / REAUTH_REQUIRED shell for the same previously-resolved user
+// MUST return false: the trusted-cache shell was revealed without server
+// validation, and a live reconnect needs to re-enter the resolver so the
+// existing in-place revalidation path can lift the state back to COMPLETE.
+export function isUserAlreadyResolved(userId, resolvedUsers, currentAuth) {
+  if (!userId) return false
+  if (!resolvedUsers?.has?.(userId)) return false
+  if (currentAuth?.userId !== userId) return false
+  return isTerminallyResolvedAuthState(currentAuth?.state)
+}
+
 let _current = { state: AUTH_STATE.RESOLVING, userId: null }
 const _subs = new Set()
 

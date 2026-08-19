@@ -427,3 +427,109 @@ test('QA4: native connected=true remains the FAST PATH (immediate revalidation, 
     assert.equal(getStatusCalls, callsAfterBind, 'the event handler must not re-query getStatus')
   })
 })
+
+// ── QA round 5 — cached reconnect no-op regression ─────────────────────────
+//
+// Runtime device behavior observed on `main`:
+//   1. cold start online → AUTHENTICATED_COMPLETE (userId added to
+//      `_resolvedUsers`),
+//   2. airplane mode → COMPLETE → AUTHENTICATED_CACHED (`handleConnectivityLost`
+//      downgrade; `_resolvedUsers` is deliberately untouched),
+//   3. airplane off → round-4 watchdog probes the backend, refreshes the
+//      Supabase session, calls `resolveAuthenticatedSessionOnce` with the same
+//      user,
+//   4. the resolver's dedupe saw `_resolvedUsers.has(user.id)` AND state !==
+//      RESOLVING / UNAUTHENTICATED → returned `{ status: 'noop' }`,
+//   5. `_resolveAndRouteForUser` was never entered → in-place revalidation
+//      never ran → app stayed CACHED until force-quit cleared the in-memory
+//      set.
+//
+// The fix is a semantic tightening of the dedupe: only skip when the current
+// auth state is *terminally resolved* (COMPLETE / INCOMPLETE) for the same
+// user. CACHED / REAUTH_REQUIRED must fall through so
+// `_revalidateCachedRevealInPlace` runs. The behavioral truth table is
+// covered by unit tests on the pure `isUserAlreadyResolved` predicate (see
+// `auth-state.test.js`); the tests below pin the wiring in production code.
+
+test('QA5: resolveAuthenticatedSessionOnce dedupes via the pure isUserAlreadyResolved predicate', () => {
+  const main = readSrc('main.js')
+  // The pure predicate is imported from auth-state.js — main.js does not
+  // maintain its own copy of the "may this user be skipped?" logic.
+  assert.match(main, /import\s*\{[^}]*\bisUserAlreadyResolved\b[^}]*\}\s*from\s*'\.\/auth-state\.js'/,
+    'main.js must import isUserAlreadyResolved from auth-state.js')
+
+  // Extract the resolver body and confirm it delegates to the predicate.
+  const sig = 'export function resolveAuthenticatedSessionOnce('
+  const startIdx = main.indexOf(sig)
+  assert.ok(startIdx > 0, 'resolveAuthenticatedSessionOnce must exist')
+  const braceIdx = main.indexOf('{', main.indexOf(')', startIdx))
+  let depth = 1
+  let i = braceIdx + 1
+  while (i < main.length && depth > 0) {
+    const c = main[i]
+    if (c === '{') depth++
+    else if (c === '}') depth--
+    if (depth === 0) break
+    i++
+  }
+  const body = main.slice(braceIdx, i + 1)
+
+  assert.match(body, /isUserAlreadyResolved\(\s*user\.id\s*,\s*_resolvedUsers\s*,\s*currentAuth\s*\)/,
+    'resolver must call the pure predicate rather than open-code the check')
+
+  // The old open-coded dedupe (state !== RESOLVING && state !== UNAUTHENTICATED)
+  // must NOT reappear — that was the buggy formulation the round-5 fix removed.
+  const stripped = _stripComments(body)
+  assert.equal(/state\s*!==\s*AUTH_STATE\.RESOLVING/.test(stripped), false,
+    'the buggy "not RESOLVING and not UNAUTHENTICATED" dedupe must not return — CACHED/REAUTH would slip through again')
+
+  // In-flight single-flight protection is preserved.
+  assert.match(body, /_resolutionInFlight\.get\(user\.id\)/)
+  assert.match(body, /_resolutionInFlight\.set\(user\.id/)
+  assert.match(body, /_resolutionInFlight\.delete\(user\.id\)/)
+})
+
+test('QA5: _resolveAndRouteForUser routes CACHED / REAUTH same-user reconnects into in-place revalidation', () => {
+  const main = readSrc('main.js')
+  const sig = 'async function _resolveAndRouteForUser('
+  const startIdx = main.indexOf(sig)
+  assert.ok(startIdx > 0, '_resolveAndRouteForUser must exist')
+  // Take a generous slice covering the entry-branch — the branch runs before
+  // any beginAccountTransition() so the visible cached Home is not blanked.
+  const chunk = main.slice(startIdx, startIdx + 1600)
+  assert.match(chunk, /AUTH_STATE\.AUTHENTICATED_CACHED/, 'CACHED must be recognized as the in-place branch trigger')
+  assert.match(chunk, /AUTH_STATE\.AUTHENTICATED_REAUTH_REQUIRED/, 'REAUTH_REQUIRED must be recognized as the in-place branch trigger')
+  assert.match(chunk, /_revalidateCachedRevealInPlace\(user\)/,
+    'CACHED / REAUTH same-user reconnects must be handled by _revalidateCachedRevealInPlace before the transition boundary')
+})
+
+test('QA5: watchdog reconnect for a same-user CACHED shell reaches the resolver (no early return)', () => {
+  const main = readSrc('main.js')
+  // The cached-revalidation trigger (the watchdog tick and the wake-up hints)
+  // must funnel through resolveAuthenticatedSessionOnce with a
+  // `cached_revalidation:` source. Round-5: this call MUST NOT be short-
+  // circuited by the resolver's dedupe when state is CACHED — the previous
+  // test asserts the predicate; this test pins the call site.
+  assert.match(main, /await\s+resolveAuthenticatedSessionOnce\(\s*session\s*,\s*`cached_revalidation:\$\{source\}`\s*\)/,
+    'cached revalidation must call resolveAuthenticatedSessionOnce with a cached_revalidation source tag')
+})
+
+test('QA5: handleConnectivityLost does not clear _resolvedUsers (fix belongs in the resolver, not the loss handler)', () => {
+  const main = readSrc('main.js')
+  const sig = 'export function handleConnectivityLost('
+  const startIdx = main.indexOf(sig)
+  assert.ok(startIdx > 0, 'handleConnectivityLost must exist')
+  const braceIdx = main.indexOf('{', main.indexOf(')', startIdx))
+  let depth = 1
+  let i = braceIdx + 1
+  while (i < main.length && depth > 0) {
+    const c = main[i]
+    if (c === '{') depth++
+    else if (c === '}') depth--
+    if (depth === 0) break
+    i++
+  }
+  const body = main.slice(braceIdx, i + 1)
+  assert.equal(/_resolvedUsers\.(delete|clear)\(/.test(body), false,
+    'do not paper over the invariant by clearing _resolvedUsers on connectivity loss — the resolver dedupe must be state-aware')
+})

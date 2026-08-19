@@ -46,7 +46,7 @@ import { initImportReview, openNativeCamera, renderSessions, restoreImportSessio
 import { clearImportSessions, clearImportSessionsStrict, loadImportSessions } from './import-store.js'
 import { clearReviewDraftStrict, loadReviewDraft } from './review-draft-store.js'
 import { forceCloseProfileOverlay, initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons, renderCachedHeaderProfileButtons } from './screens/profile.js'
-import { AUTH_STATE, getAuthState, setAuthState, subscribeAuthState } from './auth-state.js'
+import { AUTH_STATE, getAuthState, isUserAlreadyResolved, setAuthState, subscribeAuthState } from './auth-state.js'
 import { requireCloudMutation } from './capabilities.js'
 import { fetchProfileWithSignupRetry, isProfileComplete } from './profile-completion.js'
 import { clearLocalDataOwner, getLocalDataOwner, resolveLocalDataOwner, setLocalDataOwner } from './local-data-owner.js'
@@ -137,7 +137,16 @@ let _authEventQueue = Promise.resolve()
 // direct callback path (exchangeCodeForSession / signInWithPassword result)
 // and the deferred SIGNED_IN event both observe the same session.
 const _resolutionInFlight = new Map() // userId -> Promise
-const _resolvedUsers = new Set()       // userId (completed at least once)
+// Users the online resolution pipeline reached a terminal destination for
+// (`complete-home` or `incomplete-profile-setup`) at least once this process
+// lifetime. NB: presence in this set alone is NOT a signal the user is
+// currently in a terminally resolved auth state — the process can transition
+// through AUTHENTICATED_CACHED / AUTHENTICATED_REAUTH_REQUIRED and back
+// without leaving/re-entering the set. The resolver dedupe must combine this
+// with `isTerminallyResolvedAuthState(currentAuth.state)` — see
+// `_isUserAlreadyResolved` and PLAN-startup.md "Round 5 — cached reconnect
+// no-op regression".
+const _resolvedUsers = new Set()       // userId (reached COMPLETE / INCOMPLETE at least once)
 
 function _authLog(phase, extra = {}) {
   // Safe, credential-free structured phase log. Only booleans, status codes
@@ -885,11 +894,14 @@ export function resolveAuthenticatedSessionOnce(session, source) {
   if (inFlight) return inFlight
 
   const currentAuth = getAuthState()
-  const alreadyResolved = _resolvedUsers.has(user.id)
-    && currentAuth.userId === user.id
-    && currentAuth.state !== AUTH_STATE.RESOLVING
-    && currentAuth.state !== AUTH_STATE.UNAUTHENTICATED
-  if (alreadyResolved) return Promise.resolve({ status: 'noop' })
+  // Skip only when the user has previously reached a terminally resolved
+  // destination (COMPLETE / INCOMPLETE) AND the current auth state is still
+  // that terminal state for the same user. CACHED / REAUTH_REQUIRED are
+  // NOT terminal — falling through lets `_resolveAndRouteForUser` take the
+  // in-place revalidation branch and lift the state back to COMPLETE.
+  if (isUserAlreadyResolved(user.id, _resolvedUsers, currentAuth)) {
+    return Promise.resolve({ status: 'noop' })
+  }
 
   _authLog('session_resolution_started', { source })
   seedSharedAuthSession(session)

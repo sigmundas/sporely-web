@@ -5,6 +5,8 @@ import {
   AUTH_STATE,
   getAuthState,
   isAuthorizedForAuthenticatedNetworkOps,
+  isTerminallyResolvedAuthState,
+  isUserAlreadyResolved,
   setAuthState,
   subscribeAuthState,
   _resetAuthStateForTests,
@@ -80,6 +82,72 @@ test('AUTHENTICATED_REAUTH_REQUIRED is distinct from CACHED and COMPLETE', () =>
   assert.notEqual(AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED, AUTH_STATE.AUTHENTICATED_CACHED)
   assert.notEqual(AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED, AUTH_STATE.AUTHENTICATED_COMPLETE)
   assert.notEqual(AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED, AUTH_STATE.UNAUTHENTICATED)
+})
+
+test('isTerminallyResolvedAuthState: only COMPLETE and INCOMPLETE are terminal', () => {
+  // Round-5 live-reconnect regression. The resolver's `_resolvedUsers` dedupe
+  // uses this predicate: CACHED / REAUTH_REQUIRED must NOT count as terminal
+  // so a same-user reconnect re-enters the resolver and reaches the in-place
+  // revalidation branch. Every state is proven explicitly.
+  assert.equal(isTerminallyResolvedAuthState(AUTH_STATE.AUTHENTICATED_COMPLETE), true)
+  assert.equal(isTerminallyResolvedAuthState(AUTH_STATE.AUTHENTICATED_INCOMPLETE), true)
+  assert.equal(isTerminallyResolvedAuthState(AUTH_STATE.AUTHENTICATED_CACHED), false,
+    'CACHED is a trusted-cache reveal, not a validated resolution — reconnect must re-enter')
+  assert.equal(isTerminallyResolvedAuthState(AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED), false,
+    'REAUTH_REQUIRED is a trusted-cache reveal, not a validated resolution — reconnect must re-enter')
+  assert.equal(isTerminallyResolvedAuthState(AUTH_STATE.RESOLVING), false)
+  assert.equal(isTerminallyResolvedAuthState(AUTH_STATE.UNAUTHENTICATED), false)
+  assert.equal(isTerminallyResolvedAuthState(undefined), false)
+  assert.equal(isTerminallyResolvedAuthState(null), false)
+  assert.equal(isTerminallyResolvedAuthState('nonsense'), false)
+})
+
+test('isUserAlreadyResolved: full behavioral truth table across every auth state', () => {
+  // Round-5 live-reconnect regression — the resolver dedupe MUST NOT skip a
+  // same-user resolution attempt when the current state is CACHED /
+  // REAUTH_REQUIRED, even though the user is present in `_resolvedUsers` from
+  // the previous online resolution. This test locks in the full truth table.
+  const uid = 'user-A'
+  const otherUid = 'user-B'
+  const resolved = new Set([uid])
+  const empty = new Set()
+
+  // Every terminally resolved same-user pair must dedupe (== true).
+  for (const state of [AUTH_STATE.AUTHENTICATED_COMPLETE, AUTH_STATE.AUTHENTICATED_INCOMPLETE]) {
+    assert.equal(isUserAlreadyResolved(uid, resolved, { state, userId: uid }), true,
+      `${state} + same user + present in resolvedUsers → skip`)
+  }
+
+  // Every non-terminal state for the same user must fall through (== false).
+  // These are the states the runtime landed in when the bug fired.
+  for (const state of [
+    AUTH_STATE.AUTHENTICATED_CACHED,
+    AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED,
+    AUTH_STATE.RESOLVING,
+    AUTH_STATE.UNAUTHENTICATED,
+  ]) {
+    assert.equal(isUserAlreadyResolved(uid, resolved, { state, userId: uid }), false,
+      `${state} + same user in resolvedUsers → MUST re-enter resolver`)
+  }
+
+  // User not yet in the resolvedUsers set — never dedupe, regardless of state.
+  for (const state of Object.values(AUTH_STATE)) {
+    assert.equal(isUserAlreadyResolved(uid, empty, { state, userId: uid }), false,
+      `${state} but not in resolvedUsers → resolve`)
+  }
+
+  // Different-user auth state — never dedupe (account-switch isolation).
+  assert.equal(
+    isUserAlreadyResolved(uid, resolved, { state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: otherUid }),
+    false,
+    'auth state belongs to another user → same-user dedupe must not apply')
+
+  // Degenerate inputs must be treated as "not resolved" (fail-open into the
+  // resolver rather than silently no-op).
+  assert.equal(isUserAlreadyResolved(null, resolved, { state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: uid }), false)
+  assert.equal(isUserAlreadyResolved(uid, null, { state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: uid }), false)
+  assert.equal(isUserAlreadyResolved(uid, resolved, null), false)
+  assert.equal(isUserAlreadyResolved(uid, resolved, { state: undefined, userId: uid }), false)
 })
 
 test('isAuthorizedForAuthenticatedNetworkOps: only AUTHENTICATED_COMPLETE returns true', () => {
