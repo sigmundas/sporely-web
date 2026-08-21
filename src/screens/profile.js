@@ -9,7 +9,10 @@ import { isPickerCancel, nativePickedPhotoToFile, PICKER_OPTIONS_AVATAR, pickIma
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { isProfileComplete, saveProfileEdit, saveProfileSetup } from '../profile-completion.js'
 import { runProfileSetupCompletion, runSetupSignOut } from '../profile-setup-flow.js'
-import { canUseAuthenticatedNetwork, requireCloudMutation } from '../capabilities.js'
+import { canUseAuthenticatedNetwork, requireCloudMutation, requiresReauthentication } from '../capabilities.js'
+import { beginReauthentication } from '../reauth.js'
+import { readLastValidatedAccount } from '../last-validated-account.js'
+import { performExplicitSignOut } from '../auth-signout.js'
 import {
   MEDIA_KIND,
   MEDIA_PRIVACY_SCOPE,
@@ -30,8 +33,14 @@ let _profileDragCurrentY = 0
 let _profileDragStarted = false
 let _profileDragTracking = false
 let _profileResetDrag = () => {}
-
 export function initProfile() {
+  // Session recovery goes through the single beginReauthentication() seam
+  // (never signOut — queued observations and drafts must survive).
+  document.getElementById('profile-reauth-btn')?.addEventListener('click', () => {
+    const email = state.user?.email || ''
+    closeProfileOverlay()
+    beginReauthentication(email)
+  })
   document.getElementById('profile-avatar-img').addEventListener('error', _showInitialsAvatar)
   document.getElementById('sign-out-btn').addEventListener('click', async () => {
     const btn = document.getElementById('sign-out-btn')
@@ -42,9 +51,10 @@ export function initProfile() {
     // the SIGNED_OUT handler will reset the app anyway.
     _profileSetupMode = false
     closeProfileOverlay()
-    // supabase.auth.signOut() fires SIGNED_OUT which the main.js listener
-    // uses to purge user-scoped caches, reset state, and show the login form.
-    try { await supabase.auth.signOut() } catch (e) { console.warn('Sign out error:', e) }
+    // Explicit sign-out fires SIGNED_OUT which the main.js listener uses to
+    // purge user-scoped caches, reset state, and show the login form. Routed
+    // through the explicit seam so the handler keeps full purge semantics.
+    try { await performExplicitSignOut() } catch (e) { console.warn('Sign out error:', e) }
     btn.disabled = false
     btn.textContent = originalLabel
   })
@@ -291,7 +301,70 @@ function _initProfileDragEvents() {
 // ── Load (called on navigate to profile) ─────────────────────────────────────
 
 export async function loadProfile() {
+  _applyReauthBannerUi()
+  // CACHED / REAUTH_REQUIRED: zero authenticated network from the Profile
+  // sheet. Render the cached snapshot summary instead of firing doomed
+  // PostgREST reads that leave blank fields looking like live server data.
+  if (!canUseAuthenticatedNetwork()?.allowed) {
+    _renderProfileFromCachedSnapshot()
+    return
+  }
   await Promise.all([_loadProfileData(), _loadFriends(), _loadPending()])
+}
+
+// REAUTH_REQUIRED banner + gated-field state. The banner is reauth-only
+// (never shown for plain offline/CACHED — that is not a "session expired"
+// condition); the identity inputs are disabled in BOTH gated states because
+// a save could not be dispatched anyway.
+function _applyReauthBannerUi() {
+  const banner = document.getElementById('profile-reauth-banner')
+  const reauth = requiresReauthentication()
+  if (banner) {
+    banner.style.display = reauth ? 'block' : 'none'
+    if (reauth) {
+      const title = document.getElementById('profile-reauth-title')
+      const body = document.getElementById('profile-reauth-body')
+      const btn = document.getElementById('profile-reauth-btn')
+      if (title) title.textContent = t('profile.sessionExpired')
+      if (body) body.textContent = t('profile.sessionExpiredBody')
+      if (btn) btn.textContent = t('profile.signInAgain')
+    }
+  }
+  const gated = !canUseAuthenticatedNetwork()?.allowed
+  for (const id of ['profile-username', 'profile-fullname', 'profile-bio', 'profile-save-btn']) {
+    const el = document.getElementById(id)
+    if (el) el.disabled = gated
+  }
+  if (!gated) _syncProfileSaveEnabled()
+}
+
+// Network-free profile render for the gated states: cached snapshot summary
+// (same-user only), initials avatar via the cached-media path, cached cloud
+// plan. Never touches Supabase.
+function _renderProfileFromCachedSnapshot() {
+  const uid = state.user?.id
+  if (!uid) return
+  let snapshot = null
+  try { snapshot = readLastValidatedAccount() } catch (_) { snapshot = null }
+  const summary = (snapshot && snapshot.userId === uid) ? (snapshot.profileSummary || {}) : {}
+  const email = state.user?.email || ''
+  // Match the online render: only the actual username fills this field
+  // (email local-part fallback), never the display name.
+  const normalizedUsername = _normalizeUsername(summary.username, email)
+  const usernameEl = document.getElementById('profile-username')
+  const fullnameEl = document.getElementById('profile-fullname')
+  if (usernameEl) usernameEl.value = normalizedUsername || ''
+  if (fullnameEl) fullnameEl.value = _normalizeDisplayName(summary.display_name, email) || ''
+  // Bio is not part of the persisted snapshot summary; a blank disabled
+  // field is honest ("could not load") — never leave a stale prior render.
+  const bioEl = document.getElementById('profile-bio')
+  if (bioEl) bioEl.value = ''
+  const emailEl = document.getElementById('profile-email-display')
+  if (emailEl) emailEl.textContent = email
+  const initialsEl = document.getElementById('profile-avatar-initials')
+  if (initialsEl) initialsEl.textContent = _initials(normalizedUsername || email)
+  _showInitialsAvatar()
+  _renderCloudPlan(state.cloudPlan)
 }
 
 // Stage B: user-scoped avatar identity for the persistent media cache.
@@ -1181,7 +1254,7 @@ async function _deleteAccount() {
   }
 
   // SIGNED_OUT handler in main.js performs the cache purge + UI reset.
-  try { await supabase.auth.signOut() } catch (e) { console.warn('Sign out error:', e) }
+  try { await performExplicitSignOut() } catch (e) { console.warn('Sign out error:', e) }
   btn.disabled = false
   btn.textContent = originalLabel
   showToast(t('profile.accountDeleted'))

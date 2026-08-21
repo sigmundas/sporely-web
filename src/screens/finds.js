@@ -26,6 +26,7 @@ import { openPreferredCamera } from '../camera-actions.js'
 import { normalizeObservationVisibility } from '../visibility.js'
 import { buildPeopleCard, loadPeopleSocialState, wireAvatarFallback, wirePeopleCardActions } from './people.js'
 import { AUTH_STATE, getAuthState } from '../auth-state.js'
+import { beginReauthentication } from '../reauth.js'
 
 // Field-offline UX (Stage C polish): when the app is revealed with a cached
 // identity but no authoritative session for this launch, Finds must NOT run
@@ -1044,6 +1045,14 @@ export function initFinds() {
   document.getElementById('finds-fab')
     .addEventListener('click', openPreferredCamera)
 
+  // The reauth note (and its button) is re-created by every list re-render,
+  // so bind the recovery action by delegation on the stable list container.
+  document.getElementById('finds-list')?.addEventListener('click', e => {
+    if (e.target?.closest?.('#finds-reauth-btn')) {
+      beginReauthentication(state.user?.email || '')
+    }
+  })
+
   // Search bar
   const searchBtn   = document.getElementById('finds-search-btn')
   const searchBar   = document.getElementById('finds-search-bar')
@@ -1427,8 +1436,12 @@ function _findsOfflineInfoHtml(hasQueueCards) {
   const icon = `<svg class="finds-offline-note-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
   const mode = _findsAuthMode()
   if (mode === 'reauth') {
-    // Backend reachable, session missing — not "offline". Single-line state.
-    return `<div class="finds-offline-note" role="status" aria-live="polite">${icon}<div class="finds-offline-note-text"><div class="finds-offline-note-title">${_esc(t('finds.offlineReauthBody'))}</div></div></div>`
+    // Backend reachable, session missing — not "offline". The note carries
+    // the recovery action itself (same beginReauthentication seam as the
+    // Profile sheet and Home banner). The plain-offline branch below must
+    // NEVER get this CTA — CACHED is a connectivity condition, not a
+    // credentials condition.
+    return `<div class="finds-offline-note" role="status" aria-live="polite">${icon}<div class="finds-offline-note-text"><div class="finds-offline-note-title">${_esc(t('auth.sessionExpired'))}</div><div class="finds-offline-note-body">${_esc(t('finds.offlineReauthBody'))}</div><button type="button" class="btn-primary finds-reauth-btn" id="finds-reauth-btn">${_esc(t('auth.signInAgain'))}</button></div></div>`
   }
   const body = hasQueueCards ? t('finds.offlineQueuedBody') : t('finds.offlineEmptyBody')
   return `<div class="finds-offline-note" role="status" aria-live="polite">${icon}<div class="finds-offline-note-text"><div class="finds-offline-note-title">${_esc(t('finds.offlineTitle'))}</div><div class="finds-offline-note-body">${_esc(body)}</div></div></div>`

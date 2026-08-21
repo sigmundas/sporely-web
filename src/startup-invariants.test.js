@@ -121,9 +121,19 @@ test('cached-plan fallback path does NOT overwrite the persisted plan (uses NETW
   assert.match(mainSource, /CLOUD_PLAN_SOURCE\.NETWORK/)
 })
 
-test('cached boot classifier: explicit auth rejection MUST NOT enter cached mode', () => {
+test('cached boot classifier: explicit auth rejection MUST NOT enter cached (offline) mode', () => {
   assert.match(mainSource, /_isExplicitAuthRejection\(/)
-  assert.match(mainSource, /cached_boot_skipped_auth_reject/)
+  // Reauth-recovery fix: a server-confirmed rejection with trusted same-user
+  // local data reveals AUTHENTICATED_REAUTH_REQUIRED (Sign in again surface)
+  // — never AUTHENTICATED_CACHED, and never a silent fall-through that hides
+  // queued local work behind the bare login overlay.
+  assert.match(mainSource, /cached_boot_auth_reject_reauth/)
+  const bootBody = _extractCachedBootBody()
+  const rejectIdx = bootBody.indexOf('cached_boot_auth_reject_reauth')
+  assert.ok(rejectIdx > 0)
+  const rejectBranch = bootBody.slice(rejectIdx, bootBody.indexOf('return true', rejectIdx))
+  assert.match(rejectBranch, /AUTHENTICATED_REAUTH_REQUIRED/)
+  assert.doesNotMatch(rejectBranch, /AUTHENTICATED_CACHED/)
 })
 
 test('background revalidation: online + visibilitychange are wired', () => {

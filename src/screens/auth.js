@@ -1,5 +1,6 @@
 import { supabase } from '../supabase.js'
 import { getSharedAuthSession, seedSharedAuthSession } from '../auth-session.js'
+import { performExplicitSignOut } from '../auth-signout.js'
 import { getLocale, setLocale, t } from '../i18n.js'
 import { isAndroidApp, isNativeApp } from '../platform.js'
 import {
@@ -365,7 +366,12 @@ function _getPasswordResetRedirectUrl() {
 
 async function _waitForSession(maxAttempts = 5, delayMs = 150) {
   for (let i = 0; i < maxAttempts; i++) {
-    const session = await getSharedAuthSession({ refresh: true })
+    // getSharedAuthSession now surfaces refresh errors as throws; right
+    // after a fresh sign-in a transient failure must keep the retry loop
+    // alive, not abort the whole flow on the first attempt.
+    let session = null
+    try { session = await getSharedAuthSession({ refresh: true }) }
+    catch (_) { session = null }
     if (session?.user) return session
     if (i < maxAttempts - 1) {
       await new Promise(resolve => setTimeout(resolve, delayMs))
@@ -642,7 +648,7 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
     clearPasswordRecoveryHint()
     history.replaceState(null, '', '/')
     switchToLogin()
-    await supabase.auth.signOut().catch(error => {
+    await performExplicitSignOut().catch(error => {
       console.warn('Sign-out while leaving password reset did not finish cleanly:', error)
     })
   })
@@ -854,7 +860,7 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
         clearPasswordRecoveryHint()
         switchToLogin('', true)
         await _withTimeout(
-          supabase.auth.signOut(),
+          performExplicitSignOut(),
           5000,
           'Sign-out is taking longer than expected.'
         ).catch(error => {
@@ -874,11 +880,39 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
 // ── Overlay helpers ───────────────────────────────────────────────────────────
 
 export function showAuthOverlay() {
+  _setReauthCancelVisible(false)
   document.getElementById('auth-overlay').style.display = 'flex'
   document.getElementById('app-shell').style.display    = 'none'
 }
 
 export function hideAuthOverlay() {
+  _setReauthCancelVisible(false)
   document.getElementById('auth-overlay').style.display = 'none'
   document.getElementById('app-shell').style.display    = 'block'
+}
+
+// REAUTH_REQUIRED recovery variant: same overlay, plus a non-destructive
+// "Not now" escape back to the cached shell. Shown ONLY on this path — the
+// ordinary UNAUTHENTICATED overlay has no shell to return to, so plain
+// showAuthOverlay()/hideAuthOverlay() always hide the cancel action.
+export function showAuthOverlayForReauth() {
+  document.getElementById('auth-overlay').style.display = 'flex'
+  document.getElementById('app-shell').style.display    = 'none'
+  _setReauthCancelVisible(true)
+}
+
+function _setReauthCancelVisible(visible) {
+  const cancel = document.getElementById('auth-reauth-cancel')
+  if (!cancel) return
+  cancel.style.display = visible ? 'block' : 'none'
+  if (!visible) return
+  const link = cancel.querySelector('a')
+  if (link) link.textContent = t('auth.reauthNotNow')
+  if (cancel.dataset.bound !== 'true') {
+    cancel.dataset.bound = 'true'
+    link?.addEventListener('click', e => {
+      e.preventDefault()
+      hideAuthOverlay()
+    })
+  }
 }

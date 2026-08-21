@@ -205,8 +205,15 @@ test('COMPLETE transition is the authoritative upload trigger (same user, cached
   assert.match(chunk, /AUTHENTICATED_REAUTH_REQUIRED/)
   assert.match(chunk, /sameUser/)
   assert.match(chunk, /wasCached && sameUser/)
-  // Refreshes Finds automatically on reconnect while visible.
-  assert.match(src, /state\.currentScreen === 'finds'[\s\S]{0,200}requestFindsRefresh/)
+  // Reconciles Finds automatically on reconnect — UNCONDITIONALLY, not gated
+  // on `state.currentScreen` (the transition can fire while the Profile
+  // sheet / login overlay is on top; device QA showed the stale reauth note
+  // surviving until manual tab interaction).
+  assert.match(chunk, /requestFindsRefresh\(0\)/)
+  assert.doesNotMatch(chunk, /currentScreen/)
+  // Header identity repaints on the same transition (post-COMPLETE, so the
+  // capability gate allows the authenticated avatar path).
+  assert.match(chunk, /refreshHeaderProfileButtons\(\)/)
 })
 
 test('all connectivity signals converge on ONE deduped revalidation entry point', () => {

@@ -5,7 +5,7 @@
 // screens, no window mutations, no timers at module load. main.js
 // re-exports what it needs.
 
-import { SUPABASE_ORIGIN } from './supabase.js'
+import { SUPABASE_ORIGIN, SUPABASE_PUBLISHABLE_KEY } from './supabase.js'
 
 // Classify an error thrown while resolving a Supabase session.
 //
@@ -85,11 +85,14 @@ export function isTransportSessionError(err) {
   return false
 }
 
-// Minimum reachability probe (Stage B1). Sends a small anonymous GET to
-// Supabase's `/auth/v1/health` with a short timeout, `no-store`, no auth
-// headers. Any well-formed HTTP response with status < 500 means the hop
-// reached the Supabase auth server (== reachable). Transport error /
-// timeout / DNS / TLS / 5xx all classify as unreachable.
+// Minimum reachability probe (Stage B1). Sends a small GET to Supabase's
+// `/auth/v1/health` with a short timeout, `no-store`, and ONLY the
+// publishable `apikey` header — never the user's access token or any other
+// auth header (an anonymous request 401s at the API gateway; the classifier
+// tolerated that, but the request should simply be well-formed). Any
+// well-formed HTTP response with status < 500 means the hop reached the
+// Supabase auth server (== reachable). Transport error / timeout / DNS /
+// TLS / 5xx all classify as unreachable.
 //
 // This is used to distinguish two failure modes that look identical to
 // `supabase.auth.getSession()`:
@@ -102,6 +105,7 @@ export async function probeBackendReachability({
   timeoutMs = 3000,
   fetchImpl = (typeof fetch !== 'undefined' ? fetch : null),
   origin = SUPABASE_ORIGIN,
+  apikey = SUPABASE_PUBLISHABLE_KEY,
 } = {}) {
   if (typeof fetchImpl !== 'function') return 'unreachable'
   if (!origin) return 'unreachable'
@@ -121,6 +125,7 @@ export async function probeBackendReachability({
       method: 'GET',
       cache: 'no-store',
       signal: controller?.signal,
+      ...(apikey ? { headers: { apikey } } : {}),
     })
     const status = Number(response?.status || 0)
     if (status >= 500 && status < 600) return 'unreachable'

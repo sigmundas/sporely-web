@@ -7,11 +7,12 @@ import './theme.js'   // applies saved theme immediately, no flash
 import { mark as _bootMark, measure as _bootMeasure } from './boot-timings.js'
 _bootMark('js-init-start')
 
-import { supabase, SUPABASE_ORIGIN } from './supabase.js'
+import { supabase, SUPABASE_ORIGIN, hadEarlyBootSignOut, stopEarlyAuthEventCapture } from './supabase.js'
 import { isExplicitAuthRejection, isTransportSessionError, probeBackendReachability } from './auth-classification.js'
 import { getLocale, initI18n, onLocaleChange, setLocale, t } from './i18n.js'
 import { state } from './state.js'
 import { clearSharedAuthSessionCache, getSharedAuthSession, seedSharedAuthSession } from './auth-session.js'
+import { consumeExplicitSignOutRequest, performExplicitSignOut } from './auth-signout.js'
 import { recordClientActivity, shouldRecordOnVisibility } from './client-activity.js'
 
 function _fireClientActivity() {
@@ -32,6 +33,7 @@ import {
   showAuthOverlay,
   hideAuthOverlay,
   handleUrlHashError,
+  showAuthOverlayForReauth,
   switchToLogin,
   switchToResetPassword,
 } from './screens/auth.js'
@@ -46,6 +48,7 @@ import { initImportReview, openNativeCamera, renderSessions, restoreImportSessio
 import { clearImportSessions, clearImportSessionsStrict, loadImportSessions } from './import-store.js'
 import { clearReviewDraftStrict, loadReviewDraft } from './review-draft-store.js'
 import { forceCloseProfileOverlay, initProfile, loadProfile, openProfileOverlay, refreshHeaderProfileButtons, renderCachedHeaderProfileButtons } from './screens/profile.js'
+import { setReauthHandler } from './reauth.js'
 import { AUTH_STATE, getAuthState, isUserAlreadyResolved, setAuthState, subscribeAuthState } from './auth-state.js'
 import { requireCloudMutation } from './capabilities.js'
 import { fetchProfileWithSignupRetry, isProfileComplete } from './profile-completion.js'
@@ -218,10 +221,22 @@ _bindOfflineIndicatorToAuthState()
 
 // Field-offline reconnect: when the auth capability transitions from a
 // cached / reauth-required reveal state to AUTHENTICATED_COMPLETE for the
-// same user, drain the sync queue and refresh Finds (if visible). This is
-// the authoritative trigger — raw `online` events cannot upload because
-// sync-queue.js gates triggerSync() on canPerformCloudMutation(). Duplicate
-// starts are prevented by triggerSync()'s in-flight guard.
+// same user, drain the sync queue and reconcile the screens that rendered
+// offline/reauth shells. This is the authoritative trigger — raw `online`
+// events cannot upload because sync-queue.js gates triggerSync() on
+// canPerformCloudMutation(). Duplicate starts are prevented by
+// triggerSync()'s in-flight guard.
+//
+// Screen reconciliation is deliberately NOT gated on `state.currentScreen`:
+// during Finds → Profile → login overlay → same-user reauth the transition
+// fires while another surface is on top, and the stale REAUTH/offline
+// rendering would otherwise persist until the user poked a tab. The Finds
+// DOM exists regardless of the active screen, and `loadFinds()` guards
+// itself with a sequence counter, so refreshing it here is race-safe.
+// The header identity refresh runs HERE — after COMPLETE — because the
+// in-place revalidation's own header call executes while the state is still
+// CACHED/REAUTH, where the capability gate forces the cache-only initials
+// render (device QA: avatar stayed initials until Profile was opened).
 let _lastAuthCompleteUserId = null
 let _reconnectSubscribeBound = false
 function _bindReconnectTriggerToAuthState() {
@@ -242,9 +257,8 @@ function _bindReconnectTriggerToAuthState() {
         if (shouldTriggerReconnect) {
           console.info('[sync] reconnect trigger (auth COMPLETE transition)')
           try { void triggerSync() } catch (err) { console.warn('reconnect triggerSync failed:', err) }
-          if (state.currentScreen === 'finds') {
-            try { requestFindsRefresh(0) } catch (err) { console.warn('reconnect requestFindsRefresh failed:', err) }
-          }
+          try { requestFindsRefresh(0) } catch (err) { console.warn('reconnect requestFindsRefresh failed:', err) }
+          void refreshHeaderProfileButtons().catch(err => console.warn('reconnect header refresh failed:', err))
         }
       }
       prev = nextState
@@ -995,6 +1009,13 @@ async function _revalidateCachedRevealInPlace(user) {
 
   setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: user.id })
   _setOfflineIndicator(false)
+  // The REAUTH_REQUIRED recovery flow signs in over the visible cached shell
+  // via the auth overlay; a successful same-user reauth lands here, so the
+  // overlay must be dismissed. No-op when it was never shown. Guarded so a
+  // background revalidation can never dismiss an in-progress password reset.
+  if (document.getElementById('reset-password-form')?.style.display !== 'block') {
+    hideAuthOverlay()
+  }
   _authLog('in_place_revalidation_completed', {})
 
   void (async () => {
@@ -1149,7 +1170,7 @@ async function _resolveAndRouteForUser(user) {
           })
         } catch (err) { console.warn('refreshHeaderProfileButtons after setup failed:', err) }
       },
-      onSetupSignOut: async () => { await supabase.auth.signOut() },
+      onSetupSignOut: async () => { await performExplicitSignOut() },
     })
     // openProfileOverlay resolved => Profile setup DOM is mounted and its
     // `loadProfile()` has run for user B. Verify once more before dropping
@@ -1338,7 +1359,7 @@ function _showProfileResolutionError(user, error) {
   }
   const onSignOut = async () => {
     _hideProfileResolutionError()
-    try { await supabase.auth.signOut() }
+    try { await performExplicitSignOut() }
     catch (err) { console.warn('Sign-out from resolution error failed:', err) }
   }
   // Replace nodes to wipe prior click handlers — this button is bound per
@@ -1598,12 +1619,29 @@ async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError =
     return false
   }
 
-  // Server-confirmed rejection must not enter cached mode; the server has
-  // said "no". Only transport failures / "no session locally" fall through
-  // to cached — never `navigator.onLine` as authority.
+  // Boot-time diagnostics: auth-js `initialize()` may have removed a stored
+  // session and emitted SIGNED_OUT before main.js subscribed (non-retryable
+  // refresh rejection — e.g. rotation race). Distinguish that from "no
+  // session was ever stored" so the limbo is explainable next time.
+  const earlySignOut = hadEarlyBootSignOut()
+
+  // Server-confirmed rejection: the session is genuinely unrecoverable, but
+  // this device holds trusted SAME-USER local data (owner === snapshot,
+  // checked above) which may include queued observations. Reveal the cached
+  // shell in AUTHENTICATED_REAUTH_REQUIRED — capability gates keep all cloud
+  // ops blocked, and the Profile sheet surfaces "Sign in again". Falling
+  // through to the bare login overlay here would hide local work and give a
+  // rejection the same UX as a fresh install. A rejection implies the server
+  // answered, so it doubles as a reachability proof — no probe needed.
   if (sessionError && _isExplicitAuthRejection(sessionError)) {
-    _authLog('cached_boot_skipped_auth_reject', { code: _safeErrorCode(sessionError) })
-    return false
+    _authLog('cached_boot_auth_reject_reauth', { code: _safeErrorCode(sessionError), earlySignOut })
+    await _revealTrustedCachedShell({
+      snapshot,
+      targetState: AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED,
+      reachability: 'reachable',
+      reason: 'auth-rejected',
+    })
+    return true
   }
 
   // Reachability probe drives the state selection. Do it BEFORE any DOM
@@ -1614,7 +1652,7 @@ async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError =
   try { reachability = await probe() }
   catch (_) { reachability = 'unreachable' }
   _bootMark('reachability-probe-completed', { reachability })
-  _authLog('reachability_probe', { hasHashError: !!hasHashError, reachability, sessionThrown: !!sessionError })
+  _authLog('reachability_probe', { hasHashError: !!hasHashError, reachability, sessionThrown: !!sessionError, earlySignOut })
 
   const targetState = reachability === 'reachable'
     ? AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED
@@ -1629,7 +1667,7 @@ async function _tryCachedAuthenticatedBoot({ sessionError = null, hasHashError =
     snapshot,
     targetState,
     reachability,
-    reason: sessionError ? 'transport-error' : 'no-session',
+    reason: sessionError ? 'transport-error' : (earlySignOut ? 'session-removed-at-init' : 'no-session'),
   })
   // Both 'revealed' and 'stale' count as handled: a stale reveal means a
   // newer online transition is now in charge — do NOT fall through to the
@@ -1921,9 +1959,14 @@ async function _attemptCachedRevalidation(source, { force = false } = {}) {
     if (sessionError) {
       if (_isExplicitAuthRejection(sessionError)) {
         _authLog('cached_revalidation_auth_rejected', { code: _safeErrorCode(sessionError) })
-        // Server said no — kick a real sign-out so the SIGNED_OUT handler
-        // performs the normal purge (which will also clear the snapshot).
-        try { await supabase.auth.signOut() } catch (err) { console.warn('signOut after cached revalidation rejection failed:', err) }
+        // Server said no — the session is unrecoverable. Do NOT sign out
+        // here: signOut fires the SIGNED_OUT purge (drafts, snapshot, owner
+        // marker, caches) and would silently destroy observations queued
+        // while in cached/limbo mode. Pin AUTHENTICATED_REAUTH_REQUIRED
+        // instead — capability gates keep every cloud op blocked, and the
+        // Profile sheet surfaces the explicit "Sign in again" recovery
+        // action. A rejection implies the server answered → reachable.
+        _syncCachedStateWithReachability(current.userId, 'reachable')
         return
       }
       _authLog('cached_revalidation_transport_failed', { code: _safeErrorCode(sessionError) })
@@ -1955,6 +1998,28 @@ async function _attemptCachedRevalidation(source, { force = false } = {}) {
   } finally {
     _cachedRevalidationInFlight = false
   }
+}
+
+// A SIGNED_OUT may only be downgraded to REAUTH_REQUIRED (instead of the
+// full purge) when EVERY trust marker agrees on one user: a valid snapshot,
+// the local-data-owner marker, the live auth state, and the in-memory user.
+// Any mismatch fails closed to the ordinary purge path — never retain data
+// across an ambiguous identity boundary.
+function _isInternalSessionLossForTrustedUser() {
+  const current = getAuthState()
+  const authedStates = new Set([
+    AUTH_STATE.AUTHENTICATED_COMPLETE,
+    AUTH_STATE.AUTHENTICATED_CACHED,
+    AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED,
+  ])
+  if (!authedStates.has(current.state)) return false
+  let snapshot = null
+  try { snapshot = readLastValidatedAccount() } catch (_) { return false }
+  if (!snapshot?.userId) return false
+  const owner = getLocalDataOwner()
+  return owner === snapshot.userId
+    && current.userId === snapshot.userId
+    && state.user?.id === snapshot.userId
 }
 
 function _syncCachedStateWithReachability(userId, reachability) {
@@ -2008,6 +2073,21 @@ async function init() {
     }, skipDraftRestore)
     authUiInitialized = true
   }
+
+  // REAUTH_REQUIRED recovery: every "Sign in again" surface (Profile sheet,
+  // Home banner, Finds notice) routes through the single
+  // `beginReauthentication()` seam in reauth.js, whose handler is injected
+  // here. Authenticate FIRST — never signOut() — so queued observations,
+  // drafts, and the trusted same-user snapshot survive. A successful
+  // sign-in fires SIGNED_IN → resolveAuthenticatedSessionOnce → same-user
+  // in-place revalidation → AUTHENTICATED_COMPLETE (queue drain + screen
+  // reconciliation bound to that transition). A different-user sign-in
+  // takes the existing full account-transition boundary unchanged.
+  setReauthHandler(prefillEmail => {
+    ensureAuthUiInitialized(true)
+    switchToLogin(prefillEmail || state.user?.email || '')
+    showAuthOverlayForReauth()
+  })
 
   clearSharedAuthSessionCache()
 
@@ -2090,6 +2170,24 @@ async function init() {
       return
     }
     if (event === 'SIGNED_OUT') {
+      // Classify BEFORE purging: auth-js emits SIGNED_OUT on its own when it
+      // removes an unrecoverable stored session (non-retryable refresh
+      // rejection — rotation race / server-side revocation), with no app
+      // code asking to sign out. Purging on that event would destroy
+      // observations/drafts queued while cached/limbo. Only an explicit
+      // app-initiated sign-out keeps the full purge semantics; internal
+      // session loss for the trusted same-user shell pins REAUTH_REQUIRED
+      // so the Profile sheet's "Sign in again" recovery applies.
+      const explicitSignOut = consumeExplicitSignOutRequest()
+      if (!explicitSignOut && _isInternalSessionLossForTrustedUser()) {
+        const current = getAuthState()
+        clearSharedAuthSessionCache()
+        _resolvedUsers.delete(current.userId)
+        setAuthState({ state: AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED, userId: current.userId })
+        _setOfflineIndicator(false)
+        _authLog('signed_out_internal_session_loss', { fromState: current.state })
+        return
+      }
       // Captured before in-memory state is cleared so the Home cache purge
       // below targets the right user even after _clearInMemoryUserState.
       const signedOutUserId = state.user?.id || getLocalDataOwner() || null
@@ -2169,6 +2267,9 @@ async function init() {
     }, 0)
   })
   _authStateSubscription = subscription
+  // The app's subscription is live — the early-boot capture window (events
+  // emitted during auth-js initialize(), before this line) is over.
+  stopEarlyAuthEventCapture()
 
   window.addEventListener('pagehide', () => {
     _authStateSubscription?.unsubscribe?.()

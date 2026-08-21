@@ -104,10 +104,16 @@ export function canUseOAuthLink(overrideState) {
 export function canBeginLoginOAuth(overrideState) {
   const stateValue = _currentAuthState(overrideState)
   if (stateValue === AUTH_STATE.UNAUTHENTICATED) return ALLOWED
+  // AUTHENTICATED_REAUTH_REQUIRED is the one authenticated state whose ONLY
+  // exit is a fresh sign-in: the backend is reachable but the stored session
+  // is unrecoverable. The Profile sheet's "Sign in again" recovery action
+  // starts the ordinary login pipeline here; a successful same-user sign-in
+  // takes the in-place revalidation path (no purge), a different user takes
+  // the full account-transition boundary.
+  if (stateValue === AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED) return ALLOWED
   if (stateValue === AUTH_STATE.RESOLVING) return _denied(CAPABILITY_REASON.RESOLVING)
-  // If we are already in any AUTHENTICATED_* variant, starting a fresh Login
-  // OAuth flow is not the right action — the app UI should route through the
-  // cached identity's Reconnect surface instead.
+  // Any other AUTHENTICATED_* variant already has a live or recoverable
+  // session — starting a fresh Login OAuth flow is not the right action.
   return _denied(CAPABILITY_REASON.REAUTH_REQUIRED)
 }
 

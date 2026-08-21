@@ -615,7 +615,12 @@ async function _requestArtsorakelResponse(preparedItems, options = {}) {
   const postOptions = { ...options, location }
 
   if (proxyBaseUrl) {
-    const session = await getSharedAuthSession()
+    // getSharedAuthSession surfaces refresh errors as throws; identify keeps
+    // its pre-existing fallback (attempt the request without an auth header)
+    // instead of rejecting before any fetch is dispatched.
+    let session = null
+    try { session = await getSharedAuthSession() }
+    catch (_) { session = null }
     if (session?.access_token) {
       proxyHeaders = { Authorization: `Bearer ${session.access_token}` }
     }

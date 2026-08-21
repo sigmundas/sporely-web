@@ -155,14 +155,37 @@ test('probe: uses `/auth/v1/health` on the configured Supabase origin', async ()
   assert.match(calls[0], /\/auth\/v1\/health$/)
 })
 
-test('probe: HEAD/GET uses no-store and does not attach any auth headers', async () => {
+test('probe: GET uses no-store and identifies itself with ONLY the publishable apikey header', async () => {
   const seen = []
   await probeBackendReachability({
+    apikey: 'sb_publishable_test_key',
     fetchImpl: async (url, options) => { seen.push(options); return { status: 200 } },
   })
   assert.equal(seen.length, 1)
   const options = seen[0]
   assert.equal(options.method, 'GET')
   assert.equal(options.cache, 'no-store')
-  assert.equal(options.headers, undefined, 'must not carry any auth headers')
+  assert.deepEqual(options.headers, { apikey: 'sb_publishable_test_key' })
+})
+
+test('probe: NEVER sends the user access token or any Authorization header', async () => {
+  const seen = []
+  await probeBackendReachability({
+    fetchImpl: async (url, options) => { seen.push(options); return { status: 200 } },
+  })
+  const headers = seen[0]?.headers || {}
+  const headerNames = Object.keys(headers).map(h => h.toLowerCase())
+  assert.ok(!headerNames.includes('authorization'), 'must not carry an Authorization header')
+  assert.deepEqual(headerNames.filter(h => h !== 'apikey'), [], 'apikey is the ONLY header the probe may send')
+  // Default apikey comes from the publishable-key export — a public value.
+  assert.match(String(headers.apikey || ''), /^sb_publishable_/)
+})
+
+test('probe: an empty apikey falls back to a headerless request (fail open on config, closed on auth)', async () => {
+  const seen = []
+  await probeBackendReachability({
+    apikey: '',
+    fetchImpl: async (url, options) => { seen.push(options); return { status: 200 } },
+  })
+  assert.equal(seen[0].headers, undefined)
 })

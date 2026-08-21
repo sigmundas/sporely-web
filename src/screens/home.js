@@ -11,7 +11,9 @@ import { openPhotoImportPicker } from './import_review.js'
 import { openFinds } from './finds.js'
 import { imageHtml as _imageHtml, wireImageFallback as _wireImageFallback } from '../image-helpers.js'
 import { mark as _bootMark } from '../boot-timings.js'
-import { AUTH_STATE, getAuthState } from '../auth-state.js'
+import { AUTH_STATE, getAuthState, subscribeAuthState } from '../auth-state.js'
+import { requiresReauthentication } from '../capabilities.js'
+import { beginReauthentication } from '../reauth.js'
 import { readHomeCache, writeHomeCache } from '../home-cache.js'
 
 function _isDebugCommentQueryEnabled() {
@@ -70,6 +72,22 @@ function _isMissingMentionPreviewSupport(error) {
 // trigger the network. Startup owns exactly one `refreshHome()` — kicking off
 // another one from `initHome()` would double-hydrate every launch.
 export function initHome() {
+  // Session-recovery banner (REAUTH_REQUIRED only). Toggled by the auth-state
+  // lifecycle itself — NOT by screen navigation — so it appears on the reveal
+  // into REAUTH_REQUIRED and disappears automatically on the transition to
+  // COMPLETE (or on sign-out) without the user touching anything. Cached Home
+  // content below it is never blanked. Plain-offline AUTHENTICATED_CACHED
+  // must NOT show the sign-in CTA — that state is a connectivity condition,
+  // not a credentials condition.
+  document.getElementById('home-reauth-btn')?.addEventListener('click', () => {
+    beginReauthentication(state.user?.email || '')
+  })
+  syncHomeSessionNotice()
+  // Deliberately never unsubscribed: initHome() runs exactly once per page
+  // lifetime (boot step), and the banner must keep tracking auth transitions
+  // for as long as the app lives — including across sign-out/sign-in.
+  try { subscribeAuthState(() => syncHomeSessionNotice()) } catch (err) { console.warn('home session-notice subscription failed:', err) }
+
   document.getElementById('home-fab').addEventListener('click', () => openPreferredCamera('home-fab'))
   document.getElementById('ac-camera')?.addEventListener('click', () => openPreferredCamera('ac-camera'))
   document.getElementById('ac-import').addEventListener('click', () => openPhotoImportPicker())
@@ -95,6 +113,23 @@ export function initHome() {
     warningOverlay.style.display = 'none'
     browseInput?.click()
   })
+}
+
+// Show/hide the Home session-expired banner from the CURRENT auth state.
+// Only touches the banner element — cached Home sections are left intact.
+export function syncHomeSessionNotice() {
+  const banner = document.getElementById('home-reauth-banner')
+  if (!banner) return
+  const reauth = requiresReauthentication()
+  if (reauth) {
+    const title = document.getElementById('home-reauth-title')
+    const body = document.getElementById('home-reauth-body')
+    const btn = document.getElementById('home-reauth-btn')
+    if (title) title.textContent = t('auth.sessionExpired')
+    if (body) body.textContent = t('home.sessionExpiredBody')
+    if (btn) btn.textContent = t('auth.signInAgain')
+  }
+  banner.style.display = reauth ? '' : 'none'
 }
 
 function _syncCameraAction() {

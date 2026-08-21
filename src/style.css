@@ -5273,6 +5273,41 @@ html.light .ai-id-dot.is-complete::before {
 }
 .profile-setup-signout-btn:hover { color: var(--text-primary); }
 
+/* REAUTH_REQUIRED recovery banner (Stage: reauth escape hatch). Compact
+   state at the top of the Profile sheet: session expired + sign-in action. */
+.profile-reauth-banner {
+  background: var(--accent-bg, rgba(45, 156, 96, 0.12));
+  color: var(--text-primary);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 14px;
+  line-height: 1.35;
+  border: 1px solid var(--border);
+}
+.profile-reauth-title { font-weight: 600; margin-bottom: 2px; }
+.profile-reauth-body { color: var(--text-dim); font-size: 13px; margin-bottom: 10px; }
+.profile-reauth-btn { width: 100%; padding: 9px; }
+
+/* Home session-recovery banner (REAUTH_REQUIRED only) — same visual family
+   as the Profile banner, rendered above the cached Home content. */
+.home-reauth-banner {
+  background: var(--accent-bg, rgba(45, 156, 96, 0.12));
+  color: var(--text-primary);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 14px;
+  line-height: 1.35;
+  border: 1px solid var(--border);
+}
+.home-reauth-title { font-weight: 600; margin-bottom: 2px; }
+.home-reauth-body { color: var(--text-dim); font-size: 13px; margin-bottom: 10px; }
+.home-reauth-btn { width: 100%; padding: 9px; }
+
+/* Finds session-recovery action inside the reauth note. */
+.finds-reauth-btn { width: 100%; padding: 9px; margin-top: 10px; }
+
 /* Delete-account confirmation. Sits above #profile-overlay (1300) so the
    modal is clickable and its accompanying toasts (1800) remain visible. */
 .delete-account-overlay {

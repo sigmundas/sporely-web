@@ -47,8 +47,20 @@ export async function getSharedAuthSession(options = {}) {
   }
 
   const sessionPromise = supabase.auth.getSession()
-    .then(({ data }) => {
+    .then(({ data, error }) => {
       const session = data?.session || null
+      // supabase-js reports refresh failures via the `error` channel WITHOUT
+      // throwing (auth-js __loadSession returns { session: null, error }).
+      // Swallowing it here made every downstream `_isExplicitAuthRejection`
+      // gate dead code: a server-confirmed revocation was indistinguishable
+      // from "no session stored". Surface it as a throw so callers can
+      // classify auth-reject vs transport. A session alongside an error is
+      // still a usable session — never discard it.
+      if (error && !session) {
+        state.session = null
+        state.at = 0
+        throw error
+      }
       state.session = session
       state.at = Date.now()
       return session

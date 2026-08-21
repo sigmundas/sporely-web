@@ -156,6 +156,11 @@
         <p class="auth-switch"><span id="signup-switch-prefix">Already have one?</span> <a href="#" id="show-login">Sign in</a></p>
       </form>
 
+      <!-- Reauth-only escape: visible only when the overlay is opened from the
+           Profile sheet's "Sign in again" recovery action. Returns to the
+           cached shell without destroying anything. -->
+      <p class="auth-switch" id="auth-reauth-cancel" style="display:none"><a href="#">Not now</a></p>
+
       <!-- Install hint (mobile only, injected by JS) -->
       <div class="auth-install-hint" id="auth-install-hint" style="display:none">
         <div class="auth-install-icon" id="auth-install-icon"></div>
@@ -249,6 +254,14 @@
       </div>
 
       <div class="home-content">
+        <!-- Session-recovery banner: shown ONLY in AUTHENTICATED_REAUTH_REQUIRED
+             (backend reachable, session unrecoverable). Cached Home content
+             below stays fully visible; plain-offline CACHED never shows it. -->
+        <div class="home-reauth-banner" id="home-reauth-banner" style="display:none" role="status" aria-live="polite">
+          <div class="home-reauth-title" id="home-reauth-title">Session expired</div>
+          <div class="home-reauth-body" id="home-reauth-body">Sign in again to sync observations and refresh your account.</div>
+          <button type="button" class="btn-primary home-reauth-btn" id="home-reauth-btn">Sign in again</button>
+        </div>
         <div class="action-grid">
           <div class="action-card" id="ac-camera">
             <div class="action-card-icon">
@@ -1007,6 +1020,11 @@
         </div>
 
         <div class="profile-body">
+          <div class="profile-reauth-banner" id="profile-reauth-banner" style="display:none">
+            <div class="profile-reauth-title" id="profile-reauth-title">Session expired</div>
+            <div class="profile-reauth-body" id="profile-reauth-body">Sign in again to sync your observations.</div>
+            <button type="button" class="btn-primary profile-reauth-btn" id="profile-reauth-btn">Sign in again</button>
+          </div>
           <div class="profile-setup-banner" id="profile-setup-banner" style="display:none">Choose a username and display name to finish creating your account.</div>
           <button type="button" class="profile-setup-signout-btn" id="profile-setup-signout-btn" style="display:none">Use another account</button>
           <div class="profile-identity">
