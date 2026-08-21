@@ -3,7 +3,9 @@ const supabaseKey = process.env.SUPABASE_PUBLISHABLE_KEY ||
   process.env.SUPABASE_ANON_KEY ||
   process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
   process.env.VITE_SUPABASE_ANON_KEY
-const heartbeatTable = process.env.SUPABASE_HEARTBEAT_TABLE || 'profiles'
+// `profiles` is not publicly selectable under the publishable key; the
+// heartbeat must read a public view. Matches the workflow's env value.
+const heartbeatTable = process.env.SUPABASE_HEARTBEAT_TABLE || 'public_profiles'
 
 if (!supabaseUrl) {
   console.error('SUPABASE_URL is required.')
