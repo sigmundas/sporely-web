@@ -19,6 +19,169 @@ It should not be used as the current task plan. Current tasks belong in `PLAN.md
 
 ## Planning History
 
+### 2026-08 — Startup performance and offline foundation (shipped in v0.7.2)
+
+Multi-stage rework of the cold-start path, adding an offline identity
+foundation, a cache-first Home, centralized capability gating, a persistent
+media blob cache, a live-reconnect pipeline, and field-offline UX polish.
+Merged to `main` across the commits below and released as `v0.7.2`
+(`46c9f6a`). Full working notes are archived from the previous
+`PLAN-startup.md`; the plan file now retains only Stage C (not started) and
+the outstanding manual device-QA checklists.
+
+Commits (chronological):
+
+- `12b7586` — plan seeded on `startup-perf-and-offline` branch.
+- `230c990` — Stage A: cold-start cleanup (lazy SocialLogin, self-hosted
+  fonts, one Home hydration, reveal-before-hydrate, boot-timings).
+- `8956744` — Stage B1: offline identity foundation (last-validated-account
+  record, `AUTHENTICATED_CACHED` / `AUTHENTICATED_REAUTH_REQUIRED` states,
+  reachability probe, Offline pill, cached-header render).
+- `d3638cf` — Stage B2a: user-scoped Home read-model cache (IndexedDB
+  `sporely-home-cache`, per-section fetch/render split, stale-while-revalidate,
+  cache-before-fresh ordering).
+- `517bb92` — Stage B2b: centralized capability gating (`src/capabilities.js`,
+  `canPerformCloudMutation`, `bypassCapabilityGate` narrow-usage rule).
+- `f9e94a8`, `6cf54d2`, `a043f74` — hotfix: Artsorakel identify via
+  Cloudflare Worker + observation lat/lon plumbed into the request; merged
+  onto the startup branch.
+- `aaaabca` — merge of `startup-perf-and-offline` into `main`
+  (Stage A + B1 + B2a + B2b + Artsorakel hotfix; package `0.7.1`).
+- Stage B "final completion" (persistent media blob cache in
+  `src/media-cache.js` and `src/protected-media.js`, offline-indicator matrix
+  correction, `mergeCloudPlanForOfflineFallback` guard) and the post-review
+  audit round (cached-boot avatar no-network invariant, capability-gated
+  public-thumbnail fallback in `image-helpers.js`, non-image / oversized
+  split in `_extractImageBlob`, removal of `__sporely*` globals) landed on
+  `main` between `aaaabca` and `f9de96f`.
+- `f9de96f` — B3 regression fix: public-thumbnail CORS handling in the
+  Capacitor WebView; `_fetchAndCache` now fails OPEN for public media
+  (falls back to direct `img.src = publicUrl` under COMPLETE) with
+  protected media still fail-closed; `cloudflare/r2-upload-worker/cors.json`
+  origin allowlist mirrored from `wrangler.toml` (bucket policy apply is
+  out-of-band).
+- Device-QA regression fix: `_tryCachedFallbackAfterProfileFetchFailure`
+  narrows the post-failure cached fallback so a persisted-local-session
+  offline cold start reveals the cached shell instead of the blocking
+  "Could not load your profile" error; `_revealTrustedCachedShell`
+  extraction gives both the B1 no-session and the fallback paths a single
+  trusted reveal.
+- `38dcacb` — Field-offline UX and live CACHED reconnect recovery:
+  Finds shows queued items as recognizable offline cards with per-capability
+  wording; GPS fresh-fix timeout raised to 30 s; native `@capacitor/network`
+  bound; single `requestConnectivityRevalidation(reason)` entry point with
+  `_cachedRevalidationInFlight` dedupe; CACHED watchdog (visible +
+  same-user only) as backstop; QA round 2 (connectivity-loss downgrade,
+  local-first Save, per-item queue insert-attempt marker so multi-item
+  queues cannot collapse into one remote observation); QA round 3
+  (`navigator.onLine` removed from `_runSyncQueue`, pull-to-refresh as a
+  manual recovery signal, chip precedence, GPS second-capture supervisor);
+  QA round 4 (backend probe demoted from wake-up dependency to authority,
+  wake-up listeners bound at module init).
+- `862af60` — QA round 5: live CACHED reconnect no-op fix.
+  Root cause: `resolveAuthenticatedSessionOnce` deduped solely on
+  `_resolvedUsers.has(userId)`, so a same-user refreshed session handed in
+  while the state was still `AUTHENTICATED_CACHED` returned `{status:'noop'}`
+  and `_revalidateCachedRevealInPlace` never ran. Fix: `isTerminallyResolvedAuthState`
+  (COMPLETE / INCOMPLETE only) and `isUserAlreadyResolved(userId, resolved, currentAuth)`
+  in `src/auth-state.js`; the resolver dedupe now delegates. `_resolvedUsers`
+  is not a terminal signal on its own — any dedupe that trusts it MUST also
+  require the current auth state to be terminally resolved, or same-user
+  reconnects silently no-op.
+- `46c9f6a` — Release `v0.7.2`.
+
+Invariants and gotchas to preserve across future work in this area:
+
+- **Write-gate invariant.** `AUTHENTICATED_CACHED` and
+  `AUTHENTICATED_REAUTH_REQUIRED` mean "the shell is revealed with a cached
+  identity but the server has NOT confirmed the current session this launch".
+  Every Supabase INSERT / UPDATE / DELETE / RPC / Edge / Storage call site
+  MUST gate on `AUTHENTICATED_COMPLETE`. The canonical predicate is
+  `isAuthorizedForAuthenticatedNetworkOps(state)` — it returns `true` for
+  COMPLETE only. `canPerformCloudMutation()` / `canUseAuthenticatedNetwork()`
+  in `src/capabilities.js` are the user-facing wrappers. `navigator.onLine`
+  is banned as an auth authority (structural test in
+  `src/startup-invariants.test.js`).
+- **`bypassCapabilityGate` hard constraint.** The flag on `searchTaxaV2`
+  and `runIdentifyProviderOperation` is an escape hatch around the offline
+  guarantee. Allowed callers: (a) the module's own definition site, and
+  (b) `*.test.js` files. It MUST NOT appear anywhere under `src/screens/**`
+  or any other user-triggered handler. Two invariants in
+  `src/capability-gates.test.js` enforce this via grep-style scans.
+- **Terminal-resolution invariant (QA round 5 root cause).**
+  `_resolvedUsers` in `main.js` records users the online resolution pipeline
+  reached a terminal destination for at least once this process lifetime.
+  It is NOT sufficient on its own to prove the user is currently in a
+  terminally resolved state — the process can move through CACHED /
+  REAUTH_REQUIRED and back without leaving/re-entering the set. Any dedupe
+  that trusts this set MUST also require the current auth state to be
+  terminally resolved (`isTerminallyResolvedAuthState`).
+- **Cached-boot ownership guard.** Cached boot requires
+  `readLastValidatedAccount().userId === getLocalDataOwner()`; any mismatch
+  (including "no owner marker at all" on a fresh install) fails closed.
+- **Snapshot never carries credentials.** The write path enumerates
+  accepted fields so a careless caller cannot smuggle
+  `access_token` / `refresh_token` / `session` into the record. Supabase
+  remains authoritative for its credentials.
+- **Cloud-plan merge rule.** `mergeCloudPlanForOfflineFallback` is the sole
+  assignment rule: NETWORK replaces; CACHED accepted unless current is
+  NETWORK; FALLBACK accepted only if nothing better is known. Prevents a
+  silent Pro-to-Free downgrade offline.
+- **Cache-before-fresh Home ordering.** On COMPLETE cold boot the cached
+  Home render is sequenced strictly BEFORE the single network refresh, and
+  the on-boot cache read is capped at ~300 ms so a slow IndexedDB forfeits
+  the cached paint instead of delaying a healthy refresh. Offline boots
+  keep the store's 4 s default.
+- **Per-section merge-preserve on cache write.** Sections that refresh
+  successfully update; failed sections keep their previous cached value;
+  nothing is written when every section failed. A temporary network failure
+  cannot destroy a good offline cache.
+- **Cached-boot / REAUTH does zero Home Supabase hydration.**
+  `refreshHomeSafe` / `refreshHome` are gated on these two states and
+  re-render from cache instead of touching the network.
+- **Media cache identity is durable-only.** Cache key is
+  `v1|<userId>|<mediaKind>|<privacyScope>|<mediaKey>|<variant>`; never
+  derived from signed URLs, worker tokens, or bearer headers. Public and
+  protected records for the same observation live under different keys and
+  never alias. 64 MiB LRU cap, 5 MiB per entry.
+- **Public media fails OPEN; protected media fails CLOSED.** In COMPLETE, a
+  public fetch failure (CORS `TypeError`, transport, non-OK, non-image)
+  falls back to a direct `img.src = publicUrl` assignment (gated on
+  `canUseAuthenticatedNetwork()` re-checked at assignment time — a mid-flight
+  state flip suppresses the fallback). Protected `401 / 403 / 404` evict the
+  cache entry before painting placeholder; protected failures never fall
+  back to a public URL.
+- **Explicit sign-out clears the snapshot BEFORE the draft purge**, so a
+  purge failure cannot preserve a bootable offline identity. The local-data
+  owner marker still moves only after a successful purge (so the next boot
+  retries cleanup), and cached boot fails closed on the missing snapshot.
+- **Cached-mode watchdog is CACHED-only, foreground-only, ~15 s**, backend
+  probe is the authority (native connectivity is a wake-up hint only). Never
+  polls in COMPLETE or REAUTH_REQUIRED. Stops instantly on state exit /
+  hide / sign-out / account transition.
+- **Local-first Save invariant.** Nothing between Save start and the
+  committed queue write performs network I/O. Post-save `refreshHome` /
+  `openFinds` run in their own try/catch; a transport failure there logs a
+  warning but never surfaces the "Could not queue observation" toast — that
+  toast is reserved for genuine LOCAL persistence failures.
+- **Multi-item queue integrity.** Remote-observation recovery is gated on a
+  persisted `syncInsertAttemptedAt`; a per-pass `claimedRemoteIds` set (seeded
+  from every item's persisted `remoteObservationId`) prevents one queue item
+  from adopting another's freshly-inserted remote row. Ambiguity resolves
+  toward a fresh insert, never toward collapsing two local observations into
+  one remote row.
+- **Persistent public-thumbnail caching requires the R2 bucket CORS policy**
+  at `cloudflare/r2-upload-worker/cors.json` to be applied out-of-band
+  (`npx wrangler r2 bucket cors set sporely-media --file …`) and the CDN
+  cache purged. Until deployed, COMPLETE renders use the direct-src fallback
+  and offline boots show placeholders for public thumbnails. LAN-dev origins
+  (`https://192.168.x.x:5173`) cannot be listed in R2 CORS (exact origins
+  only); the fail-open fallback keeps images displayable there.
+
+Deferred to Stage C (see `PLAN-startup.md`): persisted remote My Finds
+dataset, observation-detail read cache, offline maps, broader field cache
+beyond queued items.
+
 ### 2026-07-22 — Review save freeze fixed + observation locations now pin to capture time
 
 - Incident: saving from the review screen could freeze the app behind the
