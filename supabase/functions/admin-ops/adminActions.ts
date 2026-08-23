@@ -769,7 +769,7 @@ async function loadTombstoneSelection(
   requestBody: Record<string, unknown> | null,
   env: Record<string, string | undefined>,
 ) {
-  const restoreWindowDays = getRestoreWindowDays(env, requestBody)
+  const restoreWindowDays = getRestoreWindowDays(env)
   const restoreCutoffAt = getPurgeCutoffAt(restoreWindowDays)
   const limit = normalizePositiveInteger(requestBody?.limit, PURGE_CANDIDATE_LIMIT)
   const observationId = normalizeText(requestBody?.observation_id)
@@ -1292,10 +1292,15 @@ function buildTombstoneScopeLabel(options: { observationId: string; storagePath:
   return 'all'
 }
 
-function getRestoreWindowDays(env: Record<string, string | undefined>, requestBody: Record<string, unknown> | null = null) {
-  const explicit = normalizePositiveInteger(requestBody?.restore_window_days, DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS)
-  const envValue = normalizePositiveInteger(env.ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS, DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS)
-  return explicit ?? envValue ?? DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS
+export function getRestoreWindowDays(
+  env: Record<string, string | undefined>,
+  _getEnvValue?: (env: Record<string, string | undefined>) => string | undefined,
+) {
+  const getter = _getEnvValue ?? ((e) => e.ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS)
+  const raw = getter(env)
+  const parsed = Number.parseInt(String(raw ?? '').trim(), 10)
+  if (Number.isFinite(parsed) && parsed > 0) return parsed
+  return DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS
 }
 
 function getPurgeCutoffAt(restoreWindowDays: number) {

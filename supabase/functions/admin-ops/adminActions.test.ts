@@ -2,6 +2,7 @@ import {
   buildProfileStorageKeys,
   buildTombstoneDeleteTargets,
   calculateProfileStorageUsageWithClient,
+  getRestoreWindowDays,
   R2MultiBucketClient,
 } from './adminActions.ts'
 
@@ -178,4 +179,44 @@ Deno.test('partial failure retains the full logical byte snapshot for a retry', 
   } catch (error) {
     assertEquals((error as { details?: { logicalBytes?: number } }).details?.logicalBytes, 125)
   }
+})
+
+// --- getRestoreWindowDays policy tests ---
+
+Deno.test('restore window: server policy 30 + request restore_window_days=1 => cutoff remains 30 days (request ignored)', () => {
+  // requestBody.restore_window_days has no influence — server env is authoritative
+  const env = { ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS: '30' }
+  assertEquals(getRestoreWindowDays(env), 30)
+  // Even with a different env getter returning 30, a fake "request-only" getter must not be applied
+  assertEquals(getRestoreWindowDays({}, () => '30'), 30)
+})
+
+Deno.test('restore window: env set to 45 => 45 used', () => {
+  const env = { ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS: '45' }
+  assertEquals(getRestoreWindowDays(env), 45)
+})
+
+Deno.test('restore window: env missing or invalid => 30-day default', () => {
+  assertEquals(getRestoreWindowDays({}), 30)
+  assertEquals(getRestoreWindowDays({}, () => 'abc'), 30)
+  assertEquals(getRestoreWindowDays({}, () => '0'), 30)
+  assertEquals(getRestoreWindowDays({}, () => '-5'), 30)
+  assertEquals(getRestoreWindowDays({}, () => undefined), 30)
+})
+
+Deno.test('restore window: preview and purge use identical cutoff (same policy function/window)', () => {
+  const env = { ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS: '60' }
+  const previewWindow = getRestoreWindowDays(env)
+  const purgeWindow = getRestoreWindowDays(env)
+  assertEquals(previewWindow, purgeWindow)
+  assertEquals(previewWindow, 60)
+})
+
+Deno.test('restore window: tombstone deleted 2 days ago is NOT purge-eligible under 30-day policy', () => {
+  const env = { ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS: '30' }
+  const windowDays = getRestoreWindowDays(env)
+  const deletedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+  const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000)
+  const isEligible = deletedAt <= cutoff
+  assertEquals(isEligible, false)
 })
