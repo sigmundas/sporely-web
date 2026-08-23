@@ -2,7 +2,7 @@
  * Tests for pure exported functions from admin-ops/adminActions.ts
  * Run with: deno test --allow-env supabase/tests/adminActions.test.ts
  */
-import { assertEquals, assertMatch, assertNotEquals } from 'jsr:@std/assert@^1'
+import { assertEquals, assertMatch, assertNotEquals, assertThrows } from 'jsr:@std/assert@^1'
 
 // Import pure exported functions
 import {
@@ -13,6 +13,9 @@ import {
   buildIssueSummary,
   buildMediaRowContext,
   buildProfileStorageKeys,
+  isValidTombstoneUuid,
+  resolveTombstoneLimit,
+  buildTombstoneScopeLabel,
 } from '../functions/admin-ops/adminActions.ts'
 
 // ---------------------------------------------------------------------------
@@ -156,22 +159,107 @@ Deno.test('buildMediaRowContext: returns object with image_status field', () => 
 })
 
 // ---------------------------------------------------------------------------
-// UUID validation logic (tested via scope label behavior)
-// The following tests document the expected behavior of user_id validation
-// in loadTombstoneSelection. Since loadTombstoneSelection requires a DB client,
-// these tests verify the UUID regex pattern used there.
+// isValidTombstoneUuid — exercises the real exported validator
 // ---------------------------------------------------------------------------
 
-Deno.test('UUID regex: valid UUID matches', () => {
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-  assertEquals(UUID_RE.test('123e4567-e89b-12d3-a456-426614174000'), true)
-  assertEquals(UUID_RE.test('00000000-0000-0000-0000-000000000000'), true)
+Deno.test('isValidTombstoneUuid: accepts a well-formed v4 UUID', () => {
+  assertEquals(isValidTombstoneUuid('123e4567-e89b-12d3-a456-426614174000'), true)
 })
 
-Deno.test('UUID regex: invalid UUID does not match', () => {
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-  assertEquals(UUID_RE.test('not-a-uuid'), false)
-  assertEquals(UUID_RE.test(''), false)
-  assertEquals(UUID_RE.test('123e4567-e89b-12d3-a456'), false)
-  assertEquals(UUID_RE.test('123e4567-e89b-12d3-a456-42661417400Z'), false)
+Deno.test('isValidTombstoneUuid: accepts all-zeros UUID', () => {
+  assertEquals(isValidTombstoneUuid('00000000-0000-0000-0000-000000000000'), true)
+})
+
+Deno.test('isValidTombstoneUuid: rejects non-UUID string', () => {
+  assertEquals(isValidTombstoneUuid('not-a-uuid'), false)
+})
+
+Deno.test('isValidTombstoneUuid: rejects empty string', () => {
+  assertEquals(isValidTombstoneUuid(''), false)
+})
+
+Deno.test('isValidTombstoneUuid: rejects short UUID', () => {
+  assertEquals(isValidTombstoneUuid('123e4567-e89b-12d3-a456'), false)
+})
+
+Deno.test('isValidTombstoneUuid: rejects UUID with invalid character Z', () => {
+  assertEquals(isValidTombstoneUuid('123e4567-e89b-12d3-a456-42661417400Z'), false)
+})
+
+// ---------------------------------------------------------------------------
+// resolveTombstoneLimit — exercises the real exported clamp helper
+// ---------------------------------------------------------------------------
+
+Deno.test('resolveTombstoneLimit: null body → 500 (default max)', () => {
+  assertEquals(resolveTombstoneLimit(null), 500)
+})
+
+Deno.test('resolveTombstoneLimit: missing limit → 500', () => {
+  assertEquals(resolveTombstoneLimit({}), 500)
+})
+
+Deno.test('resolveTombstoneLimit: 0 → 500 (default)', () => {
+  assertEquals(resolveTombstoneLimit({ limit: 0 }), 500)
+})
+
+Deno.test('resolveTombstoneLimit: negative → 500 (default)', () => {
+  assertEquals(resolveTombstoneLimit({ limit: -1 }), 500)
+})
+
+Deno.test('resolveTombstoneLimit: non-numeric string → 500 (default)', () => {
+  assertEquals(resolveTombstoneLimit({ limit: 'abc' }), 500)
+})
+
+Deno.test('resolveTombstoneLimit: 25 → 25', () => {
+  assertEquals(resolveTombstoneLimit({ limit: 25 }), 25)
+})
+
+Deno.test('resolveTombstoneLimit: 500 → 500 (at max)', () => {
+  assertEquals(resolveTombstoneLimit({ limit: 500 }), 500)
+})
+
+Deno.test('resolveTombstoneLimit: 1000 → 500 (clamped)', () => {
+  assertEquals(resolveTombstoneLimit({ limit: 1000 }), 500)
+})
+
+Deno.test('resolveTombstoneLimit: "1e9" string → 1 (parseInt truncates scientific notation, then clamp)', () => {
+  // parseInt("1e9", 10) === 1; min(1, 500) === 1 — caller gets a tiny batch, never exceeds max
+  assertEquals(resolveTombstoneLimit({ limit: '1e9' }), 1)
+})
+
+// ---------------------------------------------------------------------------
+// buildTombstoneScopeLabel — exercises the real exported label builder
+// ---------------------------------------------------------------------------
+
+Deno.test('buildTombstoneScopeLabel: no filters → "all"', () => {
+  assertEquals(buildTombstoneScopeLabel({ observationId: '', storagePath: '', queryText: '' }), 'all')
+})
+
+Deno.test('buildTombstoneScopeLabel: user only → "user:UUID"', () => {
+  const uid = '123e4567-e89b-12d3-a456-426614174000'
+  assertEquals(buildTombstoneScopeLabel({ userId: uid, observationId: '', storagePath: '', queryText: '' }), `user:${uid}`)
+})
+
+Deno.test('buildTombstoneScopeLabel: user + observation → combined label', () => {
+  const uid = '123e4567-e89b-12d3-a456-426614174000'
+  const oid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  assertEquals(
+    buildTombstoneScopeLabel({ userId: uid, observationId: oid, storagePath: '', queryText: '' }),
+    `user:${uid}/observation:${oid}`,
+  )
+})
+
+Deno.test('buildTombstoneScopeLabel: user + query → user label only (query secondary)', () => {
+  const uid = '123e4567-e89b-12d3-a456-426614174000'
+  const label = buildTombstoneScopeLabel({ userId: uid, observationId: '', storagePath: '', queryText: 'foo' })
+  assertMatch(label, /user:/)
+  assertMatch(label, /query:foo/)
+})
+
+Deno.test('buildTombstoneScopeLabel: observation only (no user) → observation label', () => {
+  const oid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  assertEquals(
+    buildTombstoneScopeLabel({ observationId: oid, storagePath: '', queryText: '' }),
+    `observation:${oid}`,
+  )
 })

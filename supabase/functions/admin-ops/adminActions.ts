@@ -771,14 +771,18 @@ async function loadTombstoneSelection(
 ) {
   const restoreWindowDays = getRestoreWindowDays(env)
   const restoreCutoffAt = getPurgeCutoffAt(restoreWindowDays)
-  const limit = Math.min(normalizePositiveInteger(requestBody?.limit, PURGE_CANDIDATE_LIMIT), PURGE_CANDIDATE_LIMIT)
+  const limit = resolveTombstoneLimit(requestBody)
   const userId = normalizeText(requestBody?.user_id)
   const observationId = normalizeText(requestBody?.observation_id)
   const storagePath = normalizeText(requestBody?.storage_path)
   const queryText = normalizeText(requestBody?.query)
 
-  if (userId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) {
+  if (userId && !isValidTombstoneUuid(userId)) {
     throw actionError(400, 'invalid_user_id', 'user_id must be a valid UUID')
+  }
+
+  if (observationId && !isValidTombstoneUuid(observationId)) {
+    throw actionError(400, 'invalid_observation_id', 'observation_id must be a valid UUID')
   }
 
   let query = adminClient
@@ -1296,7 +1300,15 @@ function buildTombstoneSearchText(row: any) {
   ].join(' ')).toLowerCase()
 }
 
-function buildTombstoneScopeLabel(options: { userId?: string; observationId: string; storagePath: string; queryText: string }) {
+export function isValidTombstoneUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+}
+
+export function resolveTombstoneLimit(requestBody: Record<string, unknown> | null): number {
+  return Math.min(normalizePositiveInteger(requestBody?.limit, PURGE_CANDIDATE_LIMIT), PURGE_CANDIDATE_LIMIT)
+}
+
+export function buildTombstoneScopeLabel(options: { userId?: string; observationId: string; storagePath: string; queryText: string }) {
   const parts: string[] = []
   if (options.userId) parts.push(`user:${options.userId}`)
   if (options.observationId) parts.push(`observation:${options.observationId}`)
