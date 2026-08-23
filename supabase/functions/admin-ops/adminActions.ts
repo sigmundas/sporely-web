@@ -1625,6 +1625,11 @@ function normalizePositiveInteger(value: unknown, fallback: number) {
   return fallback
 }
 
+/** Exported for testing the commit-path reason gate in recalculateProfileStorageUsage. */
+export function validateRecalculateReason(value: unknown): { ok: boolean; code?: string; message?: string } {
+  return requireNonEmptyText(value, 'Reason is required')
+}
+
 function requireNonEmptyText(value: unknown, message: string): { ok: true; value: string } | { ok: false; code: string; message: string } {
   const text = normalizeText(value)
   if (!text) {
