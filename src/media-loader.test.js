@@ -410,6 +410,84 @@ test('release before completion prevents late paint', async () => {
   assert.equal(img.src, '')
 })
 
+test('same-user token refresh preserves a ready protected thumbnail without refetching', async () => {
+  const { loader, requests, revoked } = harness({
+    capability: { allowed: true },
+    responses: [imageResponse()],
+  })
+  const img = stubElement()
+  await loader.bindCacheable(img, protectedIdentity, { protectedUrl: 'https://upload.example/m/1/thumb' })
+  const readyUrl = img.src
+
+  loader.handleSessionChange('TOKEN_REFRESHED', {
+    access_token: 'fresh-token',
+    user: { id: 'user-a' },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(img.src, readyUrl)
+  assert.deepEqual(revoked, [])
+  assert.equal(requests.length, 1)
+})
+
+test('token refresh retries a stale in-flight protected thumbnail and only the fresh request paints', async () => {
+  let resolveStaleResponse
+  let fetchCount = 0
+  const staleResponse = new Promise(resolve => { resolveStaleResponse = resolve })
+  const { loader, requests, created } = harness({
+    capability: { allowed: true },
+    fetchImpl: async () => {
+      fetchCount += 1
+      if (fetchCount === 1) return staleResponse
+      return imageResponse()
+    },
+  })
+  const img = stubElement()
+  const initialLoad = loader.bindCacheable(img, protectedIdentity, {
+    protectedUrl: 'https://upload.example/m/1/thumb',
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(requests.length, 1)
+
+  loader.handleSessionChange('TOKEN_REFRESHED', {
+    access_token: 'fresh-token',
+    user: { id: 'user-a' },
+  })
+  resolveStaleResponse(imageResponse({ status: 401 }))
+  await initialLoad
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(requests.length, 2)
+  assert.equal(requests[1].opts.headers.Authorization, 'Bearer fresh-token')
+  assert.equal(created.length, 1, 'the stale request never creates an object URL')
+  assert.equal(img.src, 'blob:sim-1')
+})
+
+test('account switch during an in-flight protected thumbnail prevents the stale paint', async () => {
+  let resolveResponse
+  const responsePromise = new Promise(resolve => { resolveResponse = resolve })
+  const { loader, requests, created } = harness({
+    capability: { allowed: true },
+    fetchImpl: async () => responsePromise,
+  })
+  const img = stubElement()
+  const initialLoad = loader.bindCacheable(img, protectedIdentity, {
+    protectedUrl: 'https://upload.example/m/1/thumb',
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(requests.length, 1)
+
+  loader.handleSessionChange('SIGNED_IN', {
+    access_token: 'user-b-token',
+    user: { id: 'user-b' },
+  })
+  resolveResponse(imageResponse())
+  await initialLoad
+
+  assert.equal(created.length, 0)
+  assert.equal(img.src, '')
+})
+
 test('protected 401 evicts the cache entry', async () => {
   const { loader, backend } = harness({
     capability: { allowed: true },
@@ -466,7 +544,7 @@ test('session change (account switch) invalidates existing bindings; A URL not r
   const firstUrl = img.src
   assert.ok(firstUrl.startsWith('blob:'))
 
-  loader.handleSessionChange({ access_token: 'user-b-token', user: { id: 'user-b' } })
+  loader.handleSessionChange('SIGNED_IN', { access_token: 'user-b-token', user: { id: 'user-b' } })
   assert.deepEqual(revoked, [firstUrl])
   assert.equal(img.src, '')
 })

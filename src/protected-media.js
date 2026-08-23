@@ -30,8 +30,9 @@
 //     not keep serving stale bytes for a resource we no longer own.
 //     Protected media stays fail-closed in every failure mode — it never
 //     falls back to any public URL.
-//   * Session change / account switch revokes every current object URL and
-//     forgets bindings so A's URL cannot be reused for B.
+//   * Sign-out / account switch revokes every current object URL and forgets
+//     bindings so A's URL cannot be reused for B. Same-user auth notifications
+//     preserve already-painted media (including routine token refreshes).
 //
 // The loader still exposes `bindProtectedMedia(element, source, options)` for
 // backwards compatibility, but the new preferred entry point is
@@ -148,7 +149,7 @@ export class ProtectedMediaLoader {
     return this._loadCacheable(binding)
   }
 
-  async _loadCacheable(binding) {
+  async _loadCacheable(binding, suppliedSession = undefined) {
     const requestGeneration = ++binding.requestGeneration
     const sessionGeneration = this._sessionGeneration
     const identity = binding.identity
@@ -175,7 +176,7 @@ export class ProtectedMediaLoader {
     // 3. Deduplicate concurrent remote fetches by cacheKey. Multiple DOM
     //    elements bound to the same identity share one round trip.
     const existing = this._inFlight.get(binding.cacheKey)
-    const workPromise = existing || this._inFlight.set(binding.cacheKey, this._fetchAndCache(binding))
+    const workPromise = existing || this._inFlight.set(binding.cacheKey, this._fetchAndCache(binding, suppliedSession))
     let outcome
     try { outcome = await workPromise }
     catch (_) { outcome = null }
@@ -208,7 +209,7 @@ export class ProtectedMediaLoader {
   //     trust over the browser's own <img> resolution). Account-isolation
   //     refusals and EVERY protected-path failure keep this false so
   //     protected media stays fail-closed.
-  async _fetchAndCache(binding) {
+  async _fetchAndCache(binding, suppliedSession = undefined) {
     // Chooses a byte-fetch strategy: protected identities require the
     // authenticated worker URL (Bearer header); public identities try the
     // public URL first. Never persists the transport URL — only the blob.
@@ -217,7 +218,7 @@ export class ProtectedMediaLoader {
     // A session-read failure must not break PUBLIC display (pre-Stage-B the
     // public <img> path never consulted the session at all). Protected media
     // still fails closed below because it requires token + userId.
-    try { session = await this._getSession() } catch (_) { session = null }
+    try { session = suppliedSession === undefined ? await this._getSession() : suppliedSession } catch (_) { session = null }
     const token = _accessToken(session)
     const userId = _userId(session)
     if (identity?.userId && userId && identity.userId !== userId) {
@@ -385,6 +386,10 @@ export class ProtectedMediaLoader {
 
     try {
       const session = suppliedSession === undefined ? await this._getSession() : suppliedSession
+      // The binding may have been released while its session lookup was in
+      // flight (notably when an auth event establishes a different account).
+      // Do not issue an authorized request for an unverifiable stale owner.
+      if (!this._stillCurrent(binding, requestGeneration, sessionGeneration)) return null
       const token = _accessToken(session)
       const userId = _userId(session)
       if (!token || !userId) throw new Error('Protected media requires an authenticated session.')
@@ -431,39 +436,72 @@ export class ProtectedMediaLoader {
     }
   }
 
-  handleSessionChange(session) {
+  handleSessionChange(event, session) {
     const nextUserId = _userId(session)
     const hasSession = !!_accessToken(session) && !!nextUserId
+    const unverifiableLegacyBindings = hasSession && !this._knownUserId
+      ? [...this._bindings.values()].filter(binding => binding.mode === 'legacy-protected')
+      : []
+    const hasBindingForAnotherUser = hasSession && [...this._bindings.values()].some(binding => {
+      const bindingUserId = String(binding.identity?.userId || '').trim()
+      return bindingUserId && bindingUserId !== nextUserId
+    })
+    const isAccountSwitch = hasSession && (
+      (this._knownUserId && this._knownUserId !== nextUserId)
+      || hasBindingForAnotherUser
+    )
 
-    if (!hasSession || (this._knownUserId && this._knownUserId !== nextUserId)) {
+    if (event === 'SIGNED_OUT' || !hasSession || isAccountSwitch) {
       // Sign-out or account switch. Every current binding must be revoked;
       // A's object URLs must never be reused for B.
       this._sessionGeneration += 1
       this.dispose()
-      this._knownUserId = hasSession ? nextUserId : null
+      this._knownUserId = event === 'SIGNED_OUT' ? null : (hasSession ? nextUserId : null)
       return
     }
 
-    // Same-user token refresh. Bump generation to invalidate in-flight
-    // operations, revoke and requeue.
-    this._sessionGeneration += 1
+    // A legacy binding has no durable user identity. If its session lookup
+    // has not established `_knownUserId` before an auth notification arrives,
+    // we cannot prove that it belongs to the reported principal. Release only
+    // those unverifiable bindings; verified ready same-user media stays put.
+    for (const binding of unverifiableLegacyBindings) this.release(binding.element)
+
+    // INITIAL_SESSION, repeated SIGNED_IN, TOKEN_REFRESHED and USER_UPDATED
+    // can all describe the same principal. They are credential/profile
+    // notifications, not an identity boundary: keep every already-painted
+    // object/direct URL in place so routine refreshes cannot flicker the UI.
     this._knownUserId = nextUserId
-    const bindings = [...this._bindings.values()]
-    for (const binding of bindings) {
-      binding.requestGeneration += 1
-      if (binding.objectUrl) {
-        this._revokeObjectURL(binding.objectUrl)
-        binding.objectUrl = null
+
+    // A refreshed token can rescue a protected request that is still loading
+    // or previously failed. Invalidate only that unpainted binding and retry
+    // it with the session delivered by auth-js. Public media and ready
+    // protected media remain untouched. The old request is generation-guarded
+    // and therefore cannot paint after this retry starts.
+    if (event !== 'TOKEN_REFRESHED') return
+    for (const binding of this._bindings.values()) {
+      const isProtected = binding.mode === 'legacy-protected'
+        || binding.identity?.privacyScope === MEDIA_PRIVACY_SCOPE.PROTECTED
+      if (!isProtected || binding.objectUrl) continue
+      const retryGeneration = ++binding.requestGeneration
+      if (binding.mode === 'legacy-protected') {
+        void this._loadLegacyProtected(binding, session)
+      } else {
+        const retry = () => {
+          if (this._bindings.get(binding.element) !== binding) return
+          if (binding.requestGeneration !== retryGeneration || binding.objectUrl) return
+          void this._loadCacheable(binding, session)
+        }
+        const pending = this._inFlight.get(binding.cacheKey)
+        // Let the old acquisition settle first. Its registry cleanup was
+        // registered when it started, so the retry cannot rejoin the stale
+        // token's promise or race an old 401 cache eviction.
+        if (pending) pending.then(
+          () => queueMicrotask(retry),
+          () => queueMicrotask(retry),
+        )
+        else queueMicrotask(retry)
       }
-      binding.element.removeAttribute?.('src')
     }
-    queueMicrotask(() => {
-      for (const binding of bindings) {
-        if (this._bindings.get(binding.element) !== binding) continue
-        if (binding.mode === 'legacy-protected') this._loadLegacyProtected(binding, session)
-        else this._loadCacheable(binding)
-      }
-    })
   }
 
   dispose() {
@@ -514,8 +552,8 @@ export function releaseProtectedMediaWithin(root) {
   protectedMediaLoader.releaseWithin(root)
 }
 
-export function notifyProtectedMediaSessionChange(session) {
-  protectedMediaLoader.handleSessionChange(session)
+export function notifyProtectedMediaSessionChange(event, session) {
+  protectedMediaLoader.handleSessionChange(event, session)
 }
 
 // Test-only accessor to the default loader singleton so orchestration tests

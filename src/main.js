@@ -2261,7 +2261,7 @@ async function init() {
   // calls. Only copies the event onto a queue and returns immediately so the
   // auth lock is released.
   const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-    notifyProtectedMediaSessionChange(session)
+    notifyProtectedMediaSessionChange(event, session)
     setTimeout(() => {
       enqueueAuthEvent(event, session, _handleDeferredAuthEvent)
     }, 0)

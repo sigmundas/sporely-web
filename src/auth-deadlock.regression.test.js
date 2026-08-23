@@ -63,6 +63,7 @@ test('direct listener does not call Supabase or profile resolution', () => {
 
 test('direct listener defers processing via setTimeout macrotask', () => {
   const body = extractDirectListener()
+  assert.match(body, /notifyProtectedMediaSessionChange\(event,\s*session\)/)
   assert.match(body, /setTimeout\(/)
   assert.match(body, /enqueueAuthEvent\(/)
 })

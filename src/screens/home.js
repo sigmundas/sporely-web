@@ -14,7 +14,7 @@ import { mark as _bootMark } from '../boot-timings.js'
 import { AUTH_STATE, getAuthState, subscribeAuthState } from '../auth-state.js'
 import { requiresReauthentication } from '../capabilities.js'
 import { beginReauthentication } from '../reauth.js'
-import { readHomeCache, writeHomeCache } from '../home-cache.js'
+import { clearHomeCache, readHomeCache, writeHomeCache } from '../home-cache.js'
 
 function _isDebugCommentQueryEnabled() {
   try {
@@ -167,6 +167,12 @@ function _isHomeNetworkGated() {
 // instead of replacing it with an inline error (Stage B2a error semantics).
 let _renderedForUserId = null
 const _renderedSections = new Set()
+// Every cache read / network hydration owns a generation. A later Home load
+// (including a load for another account) invalidates the earlier one before
+// it may touch the DOM. This also prevents a slow first refresh from replacing
+// a newer refresh after navigation back to Home.
+let _homeRenderGeneration = 0
+let _homeCachePersistQueue = Promise.resolve()
 
 function _sectionTrackingUserId() {
   return state.user?.id || null
@@ -189,6 +195,7 @@ function _hasRenderedSection(section) {
 // "this section already has content" flags cannot suppress error states for
 // the next account.
 export function resetHomeSectionTracking() {
+  _homeRenderGeneration += 1
   _renderedForUserId = null
   _renderedSections.clear()
 }
@@ -210,6 +217,7 @@ export function renderHomeModel(model) {
 export async function renderHomeFromCache(userId, { emptyStatesWhenMissing = true, timeoutMs } = {}) {
   const uid = String(userId || '').trim()
   if (!uid) return false
+  const generation = ++_homeRenderGeneration
   _bootMark('home-cache-read-started')
   let cached = null
   try {
@@ -223,8 +231,9 @@ export async function renderHomeFromCache(userId, { emptyStatesWhenMissing = tru
     console.warn('Home cache read failed:', err)
   }
   _bootMark('home-cache-read-completed', { hit: !!cached })
-  // Never render one user's cache while another user is current.
-  if (state.user?.id && state.user.id !== uid) return false
+  // Never let an older cache read overwrite a newer cache/network render, or
+  // render one user's cache while another user is current.
+  if (generation !== _homeRenderGeneration || state.user?.id !== uid) return false
   if (cached?.model) {
     renderHomeModel(cached.model)
     _bootMark('home-cache-rendered', { ageMs: cached.ageMs ?? -1 })
@@ -292,6 +301,7 @@ const _HOME_SECTIONS = [
 // While the auth state is cached/offline, this performs ZERO network calls
 // and re-renders from the local cache instead.
 export async function refreshHomeSafe() {
+  const generation = ++_homeRenderGeneration
   _syncCameraAction()
 
   if (_isHomeNetworkGated()) {
@@ -309,9 +319,21 @@ export async function refreshHomeSafe() {
   _bootMark('home-network-refresh-started')
 
   const settled = await Promise.allSettled([
-    ..._HOME_SECTIONS.map(section => section.fetch()),
-    checkSyncStatus(),
+    ..._HOME_SECTIONS.map(section => section.fetch(uid)),
+    checkSyncStatus({ generation, userId: uid }),
   ])
+
+  // Another navigation/refresh or account transition superseded this load.
+  // Its results are still allowed to finish, but must not mutate or persist
+  // Home state. Returning an empty settled set also keeps refreshHome() from
+  // surfacing errors from an obsolete request.
+  const auth = getAuthState()
+  if (
+    generation !== _homeRenderGeneration
+    || state.user?.id !== uid
+    || auth.state !== AUTH_STATE.AUTHENTICATED_COMPLETE
+    || auth.userId !== uid
+  ) return []
 
   const freshSections = {}
   _HOME_SECTIONS.forEach((section, i) => {
@@ -344,7 +366,7 @@ export async function refreshHomeSafe() {
 
   // Persist in the background; a cache write must never delay or fail the
   // refresh itself.
-  void _persistFreshHomeSections(uid, freshSections).catch(err => {
+  void _persistFreshHomeSections(uid, freshSections, generation).catch(err => {
     console.warn('Home cache persist failed:', err)
   })
 
@@ -357,23 +379,38 @@ export async function refreshHomeSafe() {
 //     temporary network failure can never destroy a good offline cache.
 //   * Writes are userId-gated and require AUTHENTICATED_COMPLETE — a
 //     cached/offline session never overwrites the persisted model.
-async function _persistFreshHomeSections(userId, freshSections) {
-  const keys = Object.keys(freshSections || {})
-  if (!keys.length) return
-  const auth = getAuthState()
-  if (auth.state !== AUTH_STATE.AUTHENTICATED_COMPLETE) return
-  if (auth.userId !== userId || state.user?.id !== userId) return
+async function _persistFreshHomeSections(userId, freshSections, generation = _homeRenderGeneration) {
+  const persist = async () => {
+    const keys = Object.keys(freshSections || {})
+    if (!keys.length || generation !== _homeRenderGeneration) return
+    const auth = getAuthState()
+    if (auth.state !== AUTH_STATE.AUTHENTICATED_COMPLETE) return
+    if (auth.userId !== userId || state.user?.id !== userId) return
 
-  const persistable = {}
-  if (freshSections.recentFinds) persistable.recentFinds = _persistableRecentFinds(freshSections.recentFinds)
-  if (freshSections.friendRequests) persistable.friendRequests = _persistableFriendRequests(freshSections.friendRequests)
-  if (freshSections.recentComments) persistable.recentComments = _persistableRecentComments(freshSections.recentComments)
-  if (freshSections.stats) persistable.stats = freshSections.stats
+    const persistable = {}
+    if (freshSections.recentFinds) persistable.recentFinds = _persistableRecentFinds(freshSections.recentFinds)
+    if (freshSections.friendRequests) persistable.friendRequests = _persistableFriendRequests(freshSections.friendRequests)
+    if (freshSections.recentComments) persistable.recentComments = _persistableRecentComments(freshSections.recentComments)
+    if (freshSections.stats) persistable.stats = freshSections.stats
 
-  const existing = await readHomeCache(userId)
-  const model = { ...(existing?.model || {}), ...persistable }
-  const ok = await writeHomeCache(userId, model)
-  if (ok) _bootMark('home-cache-write-completed', { sections: keys.length })
+    const existing = await readHomeCache(userId)
+    if (generation !== _homeRenderGeneration || state.user?.id !== userId) return
+    const model = { ...(existing?.model || {}), ...persistable }
+    const ok = await writeHomeCache(userId, model)
+    // An account transition can win while IndexedDB is committing. Ensure a
+    // delayed write cannot resurrect the prior account's purged Home cache.
+    if (state.user?.id !== userId) {
+      await clearHomeCache(userId)
+      return
+    }
+    if (ok) _bootMark('home-cache-write-completed', { sections: keys.length })
+  }
+
+  // Preserve invocation order. If refresh B supersedes A while A is already
+  // writing, B runs after A and is therefore the final cache state.
+  const queued = _homeCachePersistQueue.catch(() => {}).then(persist)
+  _homeCachePersistQueue = queued
+  return queued
 }
 
 // ── Persistable transforms ────────────────────────────────────────────────────
@@ -441,21 +478,22 @@ function _persistableRecentComments(model) {
 
 // ── Mixed feed ────────────────────────────────────────────────────────────────
 
-async function fetchRecentFindsModel() {
-  if (!state.user) return { items: [], profiles: {} }
+async function fetchRecentFindsModel(userId = state.user?.id) {
+  const uid = String(userId || '').trim()
+  if (!uid) return { items: [], profiles: {} }
 
   // Fetch mine and friends' latest by upload/created time in parallel
   const [myRes, friendRes] = await Promise.all([
     supabase
       .from('observations')
       .select('id, user_id, date, created_at, genus, species, common_name, gps_latitude, gps_longitude, location, visibility')
-      .eq('user_id', state.user.id)
+      .eq('user_id', uid)
       .order('created_at', { ascending: false })
       .limit(3),
     supabase
       .from('observations_friend_view')
       .select('id, user_id, date, created_at, genus, species, common_name, gps_latitude, gps_longitude, location, visibility')
-      .neq('user_id', state.user.id)
+      .neq('user_id', uid)
       .order('created_at', { ascending: false })
       .limit(3),
   ])
@@ -472,13 +510,154 @@ async function fetchRecentFindsModel() {
 
   if (!combined.length) return { items: [], profiles: {} }
 
-  const profileMap = await _loadProfileMap(combined)
+  const profileMap = await _loadProfileMap(combined, uid)
   const imageUrls = await fetchFirstImages(combined.map(o => o.id), { variant: 'medium' })
 
   return {
     items: combined.map(obs => ({ ...obs, image: imageUrls[obs.id] || null })),
     profiles: profileMap,
   }
+}
+
+export function recentFindMediaIdentityForTests(source) {
+  if (!source) return 'none'
+  const key = String(source.key || '').trim()
+  const protectedUrl = String(source.protectedUrl || '').trim()
+  const primaryUrl = String(source.primaryUrl || '').trim()
+  if (key) {
+    const scope = protectedUrl ? 'protected' : primaryUrl ? 'public' : 'unavailable'
+    return `${scope}|key:${key}`
+  }
+  if (protectedUrl) return `protected-url:${protectedUrl}`
+  return primaryUrl ? `direct-url:${primaryUrl}` : 'none'
+}
+
+function _recentFindRowHtml(obs, profileMap) {
+  const latin       = formatScientificName(obs.genus || '', obs.species || '')
+  const displayName = obs.common_name || latin || t('home.unidentified')
+  const subtitle    = obs.common_name && latin ? latin : null
+  const isIdentified = !!(latin || obs.common_name)
+  const loc    = obs.location || (
+    obs.gps_latitude && obs.gps_longitude
+      ? `${obs.gps_latitude.toFixed(2)}°N, ${obs.gps_longitude.toFixed(2)}°E`
+      : '—'
+  )
+  const thumb = _imageHtml(
+    obs.image,
+    'find-thumb',
+    '<div class="find-thumb-placeholder">🍄</div>',
+  )
+  const dot = `<div class="find-owner-dot ${obs._owner}"></div>`
+  const authorLabel = _homeAuthorLabel(obs, profileMap)
+  const mediaIdentity = encodeURIComponent(recentFindMediaIdentityForTests(obs.image))
+
+  return `<div class="find-row" data-id="${obs.id}" data-home-media-identity="${mediaIdentity}" style="cursor:pointer">
+    <div class="find-thumb-wrap">${thumb}</div>
+    <div class="find-meta">
+      <div class="find-common${isIdentified ? '' : ' unidentified'}" style="display:flex;align-items:center;gap:5px">${dot}${displayName}</div>
+      <div class="find-meta-line">
+        ${subtitle ? `<div class="find-latin">${subtitle}</div>` : '<div class="find-latin find-latin--empty"></div>'}
+        ${authorLabel ? `<div class="find-owner-name">${authorLabel}</div>` : ''}
+      </div>
+      <div class="find-location">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+        ${loc}
+      </div>
+    </div>
+  </div>`
+}
+
+function _syncRecentFindImageData(currentThumb, nextThumb) {
+  const currentImage = currentThumb?.querySelector?.('img')
+  const nextImage = nextThumb?.querySelector?.('img')
+  if (!currentImage || !nextImage) return false
+
+  const transportNames = [
+    'mediaProtectedUrl',
+    'mediaPublicUrl',
+    'mediaFallbackUrl',
+    'protectedMediaUrl',
+    'fallbackSrc',
+  ]
+  const transportChanged = transportNames.some(name => (
+    String(currentImage.dataset?.[name] || '') !== String(nextImage.dataset?.[name] || '')
+  ))
+
+  // Transport URLs can be refreshed while the stable key remains the same.
+  // Keep the resolved src/blob on the live image, but retain the newest data
+  // attributes for any later fallback or diagnostic use.
+  for (const name of [
+    'mediaCache',
+    'mediaKind',
+    'mediaScope',
+    'mediaKey',
+    'mediaVariant',
+    'mediaProtectedUrl',
+    'mediaPublicUrl',
+    'mediaFallbackUrl',
+    'protectedMediaUrl',
+    'fallbackSrc',
+  ]) {
+    if (nextImage.dataset?.[name] !== undefined) currentImage.dataset[name] = nextImage.dataset[name]
+    else if (currentImage.dataset) delete currentImage.dataset[name]
+  }
+  return { currentImage, transportChanged }
+}
+
+// Test-visible reconciliation seam. Existing rows and their already-resolved
+// thumbnail elements survive when both observation id and media identity are
+// unchanged. New/replaced rows are returned so only those images are wired.
+export function reconcileRecentFindRowsForTests(list, nextRows) {
+  const existingById = new Map(
+    [...list.querySelectorAll('.find-row[data-id]')]
+      .map(row => [String(row.dataset.id || ''), row]),
+  )
+  const reconciled = []
+  const needsImageWiring = []
+
+  for (const nextRow of nextRows) {
+    const existing = existingById.get(String(nextRow.dataset.id || ''))
+    const sameMedia = existing
+      && existing.dataset.homeMediaIdentity === nextRow.dataset.homeMediaIdentity
+    const currentThumb = existing?.querySelector?.('.find-thumb-wrap')
+    const nextThumb = nextRow.querySelector?.('.find-thumb-wrap')
+
+    const syncedImage = sameMedia && _syncRecentFindImageData(currentThumb, nextThumb)
+    if (syncedImage) {
+      const currentMeta = existing.querySelector?.('.find-meta')
+      const nextMeta = nextRow.querySelector?.('.find-meta')
+      if (currentMeta && nextMeta) currentMeta.replaceWith(nextMeta)
+      existing.dataset.homeMediaIdentity = nextRow.dataset.homeMediaIdentity
+      reconciled.push(existing)
+      const { currentImage, transportChanged } = syncedImage
+      const hasFreshTransport = currentImage?.dataset?.mediaPublicUrl
+        || currentImage?.dataset?.mediaProtectedUrl
+      const loaderState = currentImage?.dataset?.protectedMediaState
+      if (
+        hasFreshTransport
+        && (loaderState === 'unavailable' || (loaderState === 'loading' && transportChanged))
+      ) {
+        needsImageWiring.push(existing)
+      }
+    } else {
+      reconciled.push(nextRow)
+      needsImageWiring.push(nextRow)
+    }
+  }
+
+  list.replaceChildren(...reconciled)
+  return needsImageWiring
+}
+
+const _recentFindClickRoots = new WeakSet()
+
+function _bindRecentFindClicks(list) {
+  if (_recentFindClickRoots.has(list)) return
+  _recentFindClickRoots.add(list)
+  list.addEventListener('click', event => {
+    const row = event.target?.closest?.('.find-row[data-id]')
+    if (row && list.contains(row)) openFindDetail(row.dataset.id)
+  })
 }
 
 function renderRecentFinds(model) {
@@ -493,61 +672,29 @@ function renderRecentFinds(model) {
     return
   }
 
-  list.innerHTML = items.map(obs => {
-    const latin       = formatScientificName(obs.genus || '', obs.species || '')
-    const displayName = obs.common_name || latin || t('home.unidentified')
-    const subtitle    = obs.common_name && latin ? latin : null
-    const isIdentified = !!(latin || obs.common_name)
-    const loc    = obs.location || (
-      obs.gps_latitude && obs.gps_longitude
-        ? `${obs.gps_latitude.toFixed(2)}°N, ${obs.gps_longitude.toFixed(2)}°E`
-        : '—'
-    )
-    const thumb = _imageHtml(
-      obs.image,
-      'find-thumb',
-      '<div class="find-thumb-placeholder">🍄</div>',
-    )
-    const dot = `<div class="find-owner-dot ${obs._owner}"></div>`
-    const authorLabel = _homeAuthorLabel(obs, profileMap)
-
-    return `<div class="find-row" data-id="${obs.id}" style="cursor:pointer">
-      <div class="find-thumb-wrap">${thumb}</div>
-      <div class="find-meta">
-        <div class="find-common${isIdentified ? '' : ' unidentified'}" style="display:flex;align-items:center;gap:5px">${dot}${displayName}</div>
-        <div class="find-meta-line">
-          ${subtitle ? `<div class="find-latin">${subtitle}</div>` : '<div class="find-latin find-latin--empty"></div>'}
-          ${authorLabel ? `<div class="find-owner-name">${authorLabel}</div>` : ''}
-        </div>
-        <div class="find-location">
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-          ${loc}
-        </div>
-      </div>
-    </div>`
-  }).join('')
-
-  list.querySelectorAll('.find-row[data-id]').forEach(row => {
-    row.addEventListener('click', () => openFindDetail(row.dataset.id))
-  })
-  _wireImageFallback(list)
+  const staging = document.createElement('div')
+  staging.innerHTML = items.map(obs => _recentFindRowHtml(obs, profileMap)).join('')
+  const needsImageWiring = reconcileRecentFindRowsForTests(list, [...staging.children])
+  _bindRecentFindClicks(list)
+  needsImageWiring.forEach(row => _wireImageFallback(row))
   _markSectionRendered('recentFinds')
 }
 
-async function fetchFriendRequestsModel() {
-  if (!state.user) return { pending: [], accepted: [], profiles: {} }
+async function fetchFriendRequestsModel(userId = state.user?.id) {
+  const uid = String(userId || '').trim()
+  if (!uid) return { pending: [], accepted: [], profiles: {} }
 
   const { data: requests, error } = await supabase
     .from('friendships')
     .select('id, requester_id, addressee_id, status, created_at, updated_at')
-    .eq('addressee_id', state.user.id)
+    .eq('addressee_id', uid)
     .eq('status', 'pending')
     .order('created_at', { ascending: false })
 
   const { data: acceptedRows, error: acceptedError } = await supabase
     .from('friendships')
     .select('id, requester_id, addressee_id, status, created_at, updated_at')
-    .eq('requester_id', state.user.id)
+    .eq('requester_id', uid)
     .eq('status', 'accepted')
     .order('updated_at', { ascending: false })
 
@@ -557,7 +704,7 @@ async function fetchFriendRequestsModel() {
   }
 
   const pending = requests || []
-  const accepted = _filterUnseenAcceptedFriendNotifications(acceptedRows || [])
+  const accepted = _filterUnseenAcceptedFriendNotifications(acceptedRows || [], uid)
   if (!pending.length && !accepted.length) {
     return { pending: [], accepted: [], profiles: {} }
   }
@@ -664,13 +811,13 @@ function _renderFriendAcceptedRow(req, profileMap) {
   `
 }
 
-function _acceptedFriendSeenKey() {
-  return `sporely-seen-friend-accepted:${state.user?.id || ''}`
+function _acceptedFriendSeenKey(userId = state.user?.id) {
+  return `sporely-seen-friend-accepted:${userId || ''}`
 }
 
-function _loadSeenAcceptedFriendIds() {
+function _loadSeenAcceptedFriendIds(userId) {
   try {
-    const raw = globalThis.localStorage?.getItem(_acceptedFriendSeenKey())
+    const raw = globalThis.localStorage?.getItem(_acceptedFriendSeenKey(userId))
     const parsed = raw ? JSON.parse(raw) : []
     return new Set(Array.isArray(parsed) ? parsed.map(id => String(id || '').trim()).filter(Boolean) : [])
   } catch {
@@ -678,14 +825,14 @@ function _loadSeenAcceptedFriendIds() {
   }
 }
 
-function _saveSeenAcceptedFriendIds(ids) {
+function _saveSeenAcceptedFriendIds(ids, userId) {
   try {
-    globalThis.localStorage?.setItem(_acceptedFriendSeenKey(), JSON.stringify([...ids]))
+    globalThis.localStorage?.setItem(_acceptedFriendSeenKey(userId), JSON.stringify([...ids]))
   } catch {}
 }
 
-function _filterUnseenAcceptedFriendNotifications(rows) {
-  const seen = _loadSeenAcceptedFriendIds()
+function _filterUnseenAcceptedFriendNotifications(rows, userId = state.user?.id) {
+  const seen = _loadSeenAcceptedFriendIds(userId)
   const unseen = []
   let changed = false
   for (const row of rows || []) {
@@ -696,7 +843,7 @@ function _filterUnseenAcceptedFriendNotifications(rows) {
     seen.add(rowId)
     changed = true
   }
-  if (changed) _saveSeenAcceptedFriendIds(seen)
+  if (changed) _saveSeenAcceptedFriendIds(seen, userId)
   return unseen
 }
 
@@ -796,11 +943,13 @@ async function _handleFriendRequestAction(requestId, userId, action) {
   }
 }
 
-async function fetchRecentCommentsModel() {
-  if (!state.user) return { items: [], authors: {}, observations: {}, images: {} }
+async function fetchRecentCommentsModel(userId = state.user?.id) {
+  const uid = String(userId || '').trim()
+  if (!uid) return { items: [], authors: {}, observations: {}, images: {} }
+  const requestingUser = state.user?.id === uid ? state.user : { id: uid }
 
   _debugCommentQuery('latest comments view query', {
-    userId: state.user.id,
+    userId: uid,
     limit: 5,
     intent: 'load latest visible comments',
   })
@@ -816,7 +965,7 @@ async function fetchRecentCommentsModel() {
   let mentionData = []
   if (_canLoadMentionPreview()) {
     _debugCommentQuery('mention preview view query', {
-      userId: state.user.id,
+      userId: uid,
       limit: 3,
       intent: 'load comments that mention the current user',
       filter: 'mentioned_user_ids contains auth user id',
@@ -826,7 +975,7 @@ async function fetchRecentCommentsModel() {
       const { data: mentionedRows, error: mentionError } = await supabase
         .from('comments_community_view')
         .select('id, body, created_at, user_id, observation_id, mentioned_user_ids')
-        .contains('mentioned_user_ids', [state.user.id])
+        .contains('mentioned_user_ids', [uid])
         .order('created_at', { ascending: false })
         .limit(3)
       if (mentionError) throw mentionError
@@ -835,7 +984,7 @@ async function fetchRecentCommentsModel() {
       if (_isMissingMentionPreviewSupport(mentionError)) {
         _markMentionPreviewUnavailable()
         _debugCommentQuery('mention preview unavailable; skipping future mention lookups', {
-          userId: state.user.id,
+          userId: uid,
           message: String(mentionError?.message || mentionError || ''),
         })
       } else {
@@ -855,7 +1004,7 @@ async function fetchRecentCommentsModel() {
 
   if (!combined.length) return { items: [], authors: {}, observations: {}, images: {} }
 
-  const authorMap = await fetchCommentAuthorMap(combined, state.user)
+  const authorMap = await fetchCommentAuthorMap(combined, requestingUser)
 
   const obsIds = [...new Set(combined.filter(c => c.observation_id).map(c => c.observation_id))]
   let obsMap = {}
@@ -930,8 +1079,8 @@ function renderRecentComments(model) {
 
 // ── Quick stats ───────────────────────────────────────────────────────────────
 
-async function fetchStatsModel() {
-  const uid = state.user?.id
+async function fetchStatsModel(userId = state.user?.id) {
+  const uid = String(userId || '').trim()
   if (!uid) return { observations: null, species: null, sporeMeasurements: null }
 
   const [obsRes, spRes, sporeRes] = await Promise.all([
@@ -974,7 +1123,7 @@ function renderStats(model) {
 // state remains owned by the local sync queue (sync-queue.js), never by the
 // Home cache.
 
-async function checkSyncStatus() {
+async function checkSyncStatus({ generation = _homeRenderGeneration, userId = state.user?.id } = {}) {
   const tag = document.getElementById('header-sync-tag')
   // Status-chip precedence (QA round 3): only AUTHENTICATED_COMPLETE may show
   // the Sync tag. In cached/reauth modes the Offline pill owns the header
@@ -986,9 +1135,18 @@ async function checkSyncStatus() {
   }
   try {
     const { error } = await supabase.from('observations').select('id').limit(1)
+    const auth = getAuthState()
+    if (
+      generation !== _homeRenderGeneration
+      || state.user?.id !== userId
+      || auth.state !== AUTH_STATE.AUTHENTICATED_COMPLETE
+      || auth.userId !== userId
+    ) return
     if (!error && tag) tag.style.display = 'flex'
   } catch {
-    if (tag) tag.style.display = 'none'
+    if (generation === _homeRenderGeneration && state.user?.id === userId && tag) {
+      tag.style.display = 'none'
+    }
   }
 }
 
@@ -1007,10 +1165,10 @@ function _initials(value) {
     .join('') || '?'
 }
 
-async function _loadProfileMap(observations) {
+async function _loadProfileMap(observations, ownerUserId = state.user?.id) {
   const userIds = [...new Set((observations || [])
     .map(obs => obs.user_id)
-    .filter(uid => uid && uid !== state.user?.id))]
+    .filter(uid => uid && uid !== ownerUserId))]
 
   if (!userIds.length) return {}
 

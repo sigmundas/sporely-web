@@ -27,6 +27,7 @@ import { normalizeObservationVisibility } from '../visibility.js'
 import { buildPeopleCard, loadPeopleSocialState, wireAvatarFallback, wirePeopleCardActions } from './people.js'
 import { AUTH_STATE, getAuthState } from '../auth-state.js'
 import { beginReauthentication } from '../reauth.js'
+import { currentAccountGeneration } from '../account-transition.js'
 
 // Field-offline UX (Stage C polish): when the app is revealed with a cached
 // identity but no authoritative session for this launch, Finds must NOT run
@@ -68,6 +69,8 @@ let _isRefreshing = false
 let _queuedRefreshTimer = null
 let _findsDropdownOpenKey = null
 let _loadFindsSeq = 0
+let _findsRenderPromise = Promise.resolve(false)
+let _findsInitialRenderLoadSeq = 0
 let _findsTargetCardLoadedUserId = null
 let _findsTargetCardLoadingUserId = null
 let _findsTargetCardLoadPromise = null
@@ -87,6 +90,24 @@ const OBSERVATION_SCOPES = new Set(['mine', 'feed', 'friends', 'public'])
 const FINDS_PRIMARY_SCOPES = new Set(['mine', 'feed'])
 const FINDS_MINE_SCOPES = new Set(['private', 'friends', 'public'])
 const FINDS_FEED_SCOPES = new Set(['species', 'friends', 'public'])
+
+export function createFindsRenderGuard() {
+  let sequence = 0
+  return {
+    begin() {
+      sequence += 1
+      return sequence
+    },
+    invalidate() {
+      sequence += 1
+    },
+    isCurrent(renderSequence) {
+      return renderSequence === sequence
+    },
+  }
+}
+
+const _findsRenderGuard = createFindsRenderGuard()
 
 function _createPagingState() {
   return {
@@ -1357,6 +1378,11 @@ export async function loadFinds() {
   const list = document.getElementById('finds-list')
   if (!state.user) return
   const loadSeq = ++_loadFindsSeq
+  _findsInitialRenderLoadSeq = loadSeq
+  let shouldCheckForMore = false
+  // Image lookups from a previous load may still be in flight. Invalidate
+  // them before painting the loading shell so they cannot put old cards back.
+  _findsRenderGuard.invalidate()
   const primaryScope = _findsPrimaryScope()
   const currentScope = _currentScope()
   _resetPagingState(currentScope)
@@ -1364,36 +1390,46 @@ export async function loadFinds() {
 
   _setFindsCache(currentScope, [])
 
-  // Field-offline: never start a remote loader that can't complete, and
-  // never show "Loading…" merely because the server is unreachable.
-  if (_isOfflineFindsMode()) {
-    return _renderFindsOfflineShell(list, { loadSeq, primaryScope, currentScope })
-  }
+  try {
+    // Field-offline: never start a remote loader that can't complete, and
+    // never show "Loading…" merely because the server is unreachable.
+    if (_isOfflineFindsMode()) {
+      return await _renderFindsOfflineShell(list, { loadSeq, primaryScope, currentScope })
+    }
 
-  if (list) {
-    list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
-  }
-  const screen = document.getElementById('screen-finds')
-  if (screen && _pendingScrollRestore === null) {
-    screen.scrollTop = 0
-  }
+    if (list) {
+      list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
+    }
+    const screen = document.getElementById('screen-finds')
+    if (screen && _pendingScrollRestore === null) {
+      screen.scrollTop = 0
+    }
 
-  _syncScopeControls()
-  _syncStatusSelect()
-  _syncSortSelect()
+    _syncScopeControls()
+    _syncStatusSelect()
+    _syncSortSelect()
 
-  if (currentScope === 'user') {
-    await _loadUserPage(state.findsTargetUserId, { loadSeq, reset: true })
-  } else if (primaryScope === 'mine') {
-    await _loadMinePage({ loadSeq, reset: true })
-  } else {
-    await _loadFeedSelectionPage({ loadSeq, reset: true })
+    if (currentScope === 'user') {
+      await _loadUserPage(state.findsTargetUserId, { loadSeq, reset: true })
+    } else if (primaryScope === 'mine') {
+      await _loadMinePage({ loadSeq, reset: true })
+    } else {
+      await _loadFeedSelectionPage({ loadSeq, reset: true })
+    }
+
+    await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
+    if (loadSeq !== _loadFindsSeq) return
+    await _applyFilter()
+    if (loadSeq !== _loadFindsSeq) return
+    shouldCheckForMore = true
+  } finally {
+    if (_findsInitialRenderLoadSeq === loadSeq) {
+      _findsInitialRenderLoadSeq = 0
+    }
+    if (shouldCheckForMore && loadSeq === _loadFindsSeq) {
+      void _maybeLoadMoreFinds()
+    }
   }
-
-  await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
-  if (loadSeq !== _loadFindsSeq) return
-  _applyFilter()
-  void _maybeLoadMoreFinds()
 }
 
 async function _renderFindsOfflineShell(list, { loadSeq, primaryScope, currentScope } = {}) {
@@ -1425,7 +1461,7 @@ async function _renderFindsOfflineShell(list, { loadSeq, primaryScope, currentSc
   // _renderCards/_renderBySpecies as part of the async grid paint —
   // painting here would be wiped by the image-promise re-render). With no
   // queued items the render functions show the note alone.
-  _applyFilter()
+  await _applyFilter()
 }
 
 // Compact informational state for offline/reauth Finds. Rendered ABOVE the
@@ -1783,6 +1819,17 @@ async function _loadCurrentFindsPage({ reset = false } = {}) {
 }
 
 async function _maybeLoadMoreFinds() {
+  if (state.currentScreen !== 'finds' || _isRefreshing || _findsInitialRenderLoadSeq) return
+
+  // Paging state is initialized before thumbnail lookup/rendering completes.
+  // Always measure the rendered list, never the short loading shell. If a
+  // filter/view change starts another render while we wait, follow that one.
+  while (true) {
+    const pendingRender = _findsRenderPromise
+    await pendingRender
+    if (pendingRender === _findsRenderPromise) break
+  }
+
   if (state.currentScreen !== 'finds' || _isRefreshing) return
 
   const currentScope = _currentScope()
@@ -1801,7 +1848,8 @@ async function _maybeLoadMoreFinds() {
   if (loaded) {
     await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
     if (loadSeq !== _loadFindsSeq) return
-    _applyFilter()
+    await _applyFilter()
+    if (loadSeq !== _loadFindsSeq) return
     void _maybeLoadMoreFinds()
   }
 }
@@ -1819,8 +1867,20 @@ function _sortTs(obs) {
   return Number.isFinite(ts) ? ts : 0
 }
 
+function _isCurrentFindsRender(list, renderContext) {
+  return _findsRenderGuard.isCurrent(renderContext?.renderSequence)
+    && renderContext?.accountGeneration === currentAccountGeneration()
+    && list === document.getElementById('finds-list')
+}
+
 function _applyFilter() {
   const list     = document.getElementById('finds-list')
+  if (!list) return Promise.resolve(false)
+  const renderSequence = _findsRenderGuard.begin()
+  const renderContext = {
+    renderSequence,
+    accountGeneration: currentAccountGeneration(),
+  }
   const primaryScope = _findsPrimaryScope()
   const currentScope = _currentScope()
   const mineScope = _findsSecondaryScope('mine')
@@ -1860,18 +1920,19 @@ function _applyFilter() {
   // search needs server-side filtering and is out of scope for this pass.
   const data = q ? filtered.filter(obs => _matches(obs, q)) : filtered
 
-  if (_findsSort() === 'species') {
-    _renderBySpecies(list, data, { variant: state.findsView })
-    return
-  }
+  const renderPromise = _findsSort() === 'species'
+    ? _renderBySpecies(list, data, { variant: state.findsView, renderContext })
+    : state.findsView === 'two'
+      ? _renderCards(list, data, { variant: 'two', isFriends: isFriendsScope, renderContext })
+      : state.findsView === 'three'
+        ? _renderCards(list, data, { variant: 'three', isFriends: isFriendsScope, renderContext })
+        : _renderCards(list, data, { variant: 'cards', isFriends: isFriendsScope, renderContext })
 
-  if (state.findsView === 'two') {
-    _renderCards(list, data, { variant: 'two', isFriends: isFriendsScope })
-  } else if (state.findsView === 'three') {
-    _renderCards(list, data, { variant: 'three', isFriends: isFriendsScope })
-  } else {
-    _renderCards(list, data, { variant: 'cards', isFriends: isFriendsScope })
-  }
+  _findsRenderPromise = Promise.resolve(renderPromise).catch(err => {
+    console.warn('Finds render failed:', err)
+    return false
+  })
+  return _findsRenderPromise
 }
 
 function _pendingImageSource(obs) {
@@ -2138,23 +2199,25 @@ async function _attachFindsRedlistTags(observations, loadSeq = _loadFindsSeq) {
   }
 }
 
-function _renderBySpecies(list, data, options = {}) {
+async function _renderBySpecies(list, data, options = {}) {
   const variant = options.variant || 'cards'
+  const renderContext = options.renderContext
   const q = (state.searchQuery || '').trim()
   const currentScope = _currentScope()
   if (!data.length) {
+    if (!_isCurrentFindsRender(list, renderContext)) return false
     // Field-offline: compact offline note instead of the generic empty text.
     if (_isOfflineFindsMode()) {
       list.innerHTML = _findsOfflineInfoHtml(false)
-      return
+      return true
     }
     if (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user') {
       list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
-      return
+      return true
     }
     const emptyText = _emptyFindsText(q)
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
-    return
+    return true
   }
 
   // Group by species key, preserving first-seen insertion order
@@ -2175,11 +2238,16 @@ function _renderBySpecies(list, data, options = {}) {
 
   const allObs = groups.flatMap(([, g]) => g.items).filter(o => !o._pendingSync)
   const imageVariant = variant === 'cards' ? 'medium' : 'small'
-  const imagePromise = variant === 'cards'
-    ? fetchCardImages(allObs.map(o => o.id), { variant: imageVariant })
-    : fetchFirstImages(allObs.map(o => o.id), { variant: imageVariant })
+  let imageData = {}
+  try {
+    imageData = (await (variant === 'cards'
+      ? fetchCardImages(allObs.map(o => o.id), { variant: imageVariant })
+      : fetchFirstImages(allObs.map(o => o.id), { variant: imageVariant }))) || {}
+  } catch (err) {
+    console.warn('Finds images failed:', err)
+  }
+  if (!_isCurrentFindsRender(list, renderContext)) return false
 
-  imagePromise.then(imageData => {
     // Offline note first, then queue cards below it.
     let html = _findsOfflineInfoHtml(true)
     html += '<div class="finds-grid-outer">'
@@ -2303,22 +2371,30 @@ function _renderBySpecies(list, data, options = {}) {
     })
     _wireDeleteButtons(list)
     wireImageFallback(list)
-  })
+    return true
 }
 
 // ── Render: tiles ─────────────────────────────────────────────────────────────
 
-function _renderTiles(list, data) {
+async function _renderTiles(list, data, options = {}) {
+  const renderContext = options.renderContext
   const q = (state.searchQuery || '').trim()
   const currentScope = _currentScope()
   if (!data.length) {
+    if (!_isCurrentFindsRender(list, renderContext)) return false
     const emptyText = _emptyFindsText(q)
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
-    return
+    return true
   }
 
+  let imageUrls = {}
+  try {
+    imageUrls = (await fetchFirstImages(data.filter(obs => !obs._pendingSync).map(o => o.id), { variant: 'small' })) || {}
+  } catch (err) {
+    console.warn('Finds images failed:', err)
+  }
+  if (!_isCurrentFindsRender(list, renderContext)) return false
 
-  fetchFirstImages(data.filter(obs => !obs._pendingSync).map(o => o.id), { variant: 'small' }).then(imageUrls => {
     let html = '<div class="find-tiles-grid">'
     data.forEach(obs => {
       const name = obs.common_name
@@ -2349,23 +2425,25 @@ function _renderTiles(list, data) {
       })
     })
     wireImageFallback(list)
-  })
+    return true
 }
 
 // ── Render: cards ─────────────────────────────────────────────────────────────
 
-function _renderCards(list, data, options) {
+async function _renderCards(list, data, options) {
   const variant = options?.variant || 'cards'
   const isFriends = !!options?.isFriends
+  const renderContext = options?.renderContext
   const q = (state.searchQuery || '').trim()
   const currentScope = _currentScope()
   if (!data.length) {
+    if (!_isCurrentFindsRender(list, renderContext)) return false
     // Field-offline: the compact offline note replaces the generic empty
     // text — never "No observations yet" while the app cannot load remote
     // Finds.
     if (_isOfflineFindsMode()) {
       list.innerHTML = _findsOfflineInfoHtml(false)
-      return
+      return true
     }
     // Reconnect race: a sync pass is finalizing queue items right now; the
     // queue card is already gone but the follow-up refresh (SYNC_SUCCESS /
@@ -2373,21 +2451,26 @@ function _renderCards(list, data, options) {
     // loading state instead of flashing "No observations yet".
     if (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user') {
       list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
-      return
+      return true
     }
     const emptyText = _emptyFindsText(q, { isFriends, capture: true })
     list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
-    return
+    return true
   }
 
 
   const nonPending = data.filter(obs => !obs._pendingSync).map(o => o.id)
   const imageVariant = variant === 'cards' ? 'medium' : 'small'
-  const imagePromise = variant === 'cards'
-    ? fetchCardImages(nonPending, { variant: imageVariant })
-    : fetchFirstImages(nonPending, { variant: imageVariant })
+  let imageData = {}
+  try {
+    imageData = (await (variant === 'cards'
+      ? fetchCardImages(nonPending, { variant: imageVariant })
+      : fetchFirstImages(nonPending, { variant: imageVariant }))) || {}
+  } catch (err) {
+    console.warn('Finds images failed:', err)
+  }
+  if (!_isCurrentFindsRender(list, renderContext)) return false
 
-  imagePromise.then(imageData => {
     // Group by date
     const groups = []
     const seen   = {}
@@ -2543,5 +2626,5 @@ function _renderCards(list, data, options) {
     })
     _wireDeleteButtons(list)
     wireImageFallback(list)
-  })
+    return true
 }

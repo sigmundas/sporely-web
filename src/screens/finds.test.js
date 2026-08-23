@@ -6,6 +6,7 @@ import {
   applyFindsMineStatus,
   classifyDraftAge,
   compareFindsByScientificName,
+  createFindsRenderGuard,
   getFindsFeedSourcePagingState,
   getFindsEffectiveStatusFilter,
   getFindsScopeOptions,
@@ -53,6 +54,36 @@ function makeClassList(initial = []) {
     },
   }
 }
+
+test('finds render guard rejects older async renders after a new render or load starts', async () => {
+  const guard = createFindsRenderGuard()
+  const commits = []
+  let finishFirst
+  let finishSecond
+  const firstImages = new Promise(resolve => { finishFirst = resolve })
+  const secondImages = new Promise(resolve => { finishSecond = resolve })
+  const commitAfterImages = async (renderSequence, images) => {
+    const value = await images
+    if (guard.isCurrent(renderSequence)) commits.push(value)
+  }
+
+  const firstRender = guard.begin()
+  const firstCommit = commitAfterImages(firstRender, firstImages)
+  const secondRender = guard.begin()
+  const secondCommit = commitAfterImages(secondRender, secondImages)
+
+  assert.equal(guard.isCurrent(firstRender), false)
+  assert.equal(guard.isCurrent(secondRender), true)
+
+  finishSecond('new cards')
+  await secondCommit
+  finishFirst('stale cards')
+  await firstCommit
+  assert.deepEqual(commits, ['new cards'])
+
+  guard.invalidate()
+  assert.equal(guard.isCurrent(secondRender), false)
+})
 
 function makeFindsElement(initial = {}) {
   const { classList: classListValues = [], ...rest } = initial

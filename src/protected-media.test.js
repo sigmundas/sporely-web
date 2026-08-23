@@ -81,28 +81,44 @@ test('logout revokes object URLs and drops the previous principal bindings', asy
   const img = element()
   await loader.bind(img, 'https://upload.sporely.no/m/4962/full?v=7')
 
-  loader.handleSessionChange(null)
+  loader.handleSessionChange('SIGNED_OUT', null)
   assert.deepEqual(revoked, ['blob:protected-1'])
   assert.equal(img.src, '')
 
-  loader.handleSessionChange({ access_token: 'next-token', user: { id: 'user-b' } })
+  loader.handleSessionChange('SIGNED_IN', { access_token: 'next-token', user: { id: 'user-b' } })
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(requests.length, 1)
   assert.equal(img.src, '')
 })
 
-test('token refresh revokes and refetches with the new bearer token', async () => {
-  const { loader, requests, revoked } = createHarness()
+for (const event of ['INITIAL_SESSION', 'SIGNED_IN', 'TOKEN_REFRESHED', 'USER_UPDATED']) {
+  test(`same-user ${event} preserves a ready object URL without refetching`, async () => {
+    const { loader, requests, revoked } = createHarness()
+    const img = element()
+    await loader.bind(img, 'https://upload.sporely.no/m/4962/full?v=7')
+    const readyUrl = img.src
+
+    loader.handleSessionChange(event, { access_token: 'refreshed-token', user: { id: 'user-a' } })
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepEqual(revoked, [])
+    assert.equal(requests.length, 1)
+    assert.equal(img.src, readyUrl)
+  })
+}
+
+test('token refresh retries an unavailable protected binding with the new bearer token', async () => {
+  const { loader, requests } = createHarness([imageResponse({ status: 401 }), imageResponse()])
   const img = element()
   await loader.bind(img, 'https://upload.sporely.no/m/4962/full?v=7')
+  assert.equal(img.src, '')
 
-  loader.handleSessionChange({ access_token: 'refreshed-token', user: { id: 'user-a' } })
+  loader.handleSessionChange('TOKEN_REFRESHED', { access_token: 'refreshed-token', user: { id: 'user-a' } })
   await new Promise(resolve => setImmediate(resolve))
 
-  assert.deepEqual(revoked, ['blob:protected-1'])
   assert.equal(requests.length, 2)
   assert.equal(requests[1].options.headers.Authorization, 'Bearer refreshed-token')
-  assert.equal(img.src, 'blob:protected-2')
+  assert.equal(img.src, 'blob:protected-1')
 })
 
 test('direct account switch revokes and does not reuse the previous principal binding', async () => {
@@ -110,11 +126,40 @@ test('direct account switch revokes and does not reuse the previous principal bi
   const img = element()
   await loader.bind(img, 'https://upload.sporely.no/m/4962/full?v=7')
 
-  loader.handleSessionChange({ access_token: 'user-b-token', user: { id: 'user-b' } })
+  loader.handleSessionChange('SIGNED_IN', { access_token: 'user-b-token', user: { id: 'user-b' } })
   await new Promise(resolve => setImmediate(resolve))
 
   assert.deepEqual(revoked, ['blob:protected-1'])
   assert.equal(requests.length, 1)
+  assert.equal(img.src, '')
+})
+
+test('account switch invalidates a legacy bind whose in-flight session owner is still unknown', async () => {
+  let resolveSession
+  const sessionPromise = new Promise(resolve => { resolveSession = resolve })
+  const requests = []
+  const loader = new ProtectedMediaLoader({
+    capabilityCheck: () => ({ allowed: true }),
+    getSession: async () => sessionPromise,
+    fetch: async (url, options) => {
+      requests.push({ url, options })
+      return imageResponse()
+    },
+    createObjectURL: () => 'blob:must-not-paint',
+    revokeObjectURL: () => {},
+  })
+  const img = element()
+  const pending = loader.bind(img, 'https://upload.sporely.no/m/4962/full?v=7')
+  await Promise.resolve()
+
+  loader.handleSessionChange('SIGNED_IN', {
+    access_token: 'user-b-token',
+    user: { id: 'user-b' },
+  })
+  resolveSession({ access_token: 'user-a-token', user: { id: 'user-a' } })
+  await pending
+
+  assert.equal(requests.length, 0, 'stale A request is suppressed before network access')
   assert.equal(img.src, '')
 })
 
