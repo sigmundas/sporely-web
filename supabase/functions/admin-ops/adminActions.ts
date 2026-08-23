@@ -1463,110 +1463,73 @@ function formatBytes(value: unknown) {
   return `${bytes < 0 ? '-' : ''}${formatted} ${units[unitIndex]}`
 }
 
-function buildImageIssueFlags(row: Record<string, unknown>, forceDeleted: boolean) {
-  const flags: string[] = []
-  const metadataOnlyMicroscope = isMetadataOnlyMicroscopeRow(row)
+export function buildImageIssueFlags(row: Record<string, unknown>, forceDeleted: boolean, restoreWindowDays: number = DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS): string[] {
+  const storage_path = row?.storage_path
+  const image_type = row?.image_type
 
-  if (row?.purged_at) {
-    return ['purged']
+  // 1. Purged
+  if (row?.purged_at) return ['permanently_removed']
+
+  // 2. Microscope anchor (metadata-only)
+  if (image_type === 'microscope' && !storage_path) return []
+
+  const tombstoned = forceDeleted || Boolean(row?.deleted_at)
+
+  // 3. Active missing storage_path
+  if (!tombstoned && isBlank(storage_path)) return ['active_media_missing']
+
+  if (tombstoned) {
+    // 4. Purge failed
+    if (!isBlank(row?.purge_error) && !row?.purged_at) return ['purge_failed']
+
+    // 5 & 6. No purge error
+    if (isBlank(row?.purge_error) && !row?.purged_at) {
+      const cutoffDate = new Date(Date.now() - restoreWindowDays * 24 * 60 * 60 * 1000)
+      const deletedAtDate = new Date(String(row?.deleted_at ?? ''))
+      const deletedAtValid = Number.isFinite(deletedAtDate.getTime())
+      if (deletedAtValid && deletedAtDate <= cutoffDate) return ['reclaimable_deleted_media']
+      return ['deleted_media_in_restore_window']
+    }
   }
 
-  if (forceDeleted || row?.deleted_at) {
-    flags.push('deleted')
-  }
+  // 7. Active with storage_path but missing stored_bytes
+  if (!tombstoned && !isBlank(storage_path) && isBlank(row?.stored_bytes)) return ['size_metadata_unavailable']
 
-  if (!isBlank(row?.purge_error)) {
-    flags.push('purge_error')
-  }
-
-  if (!metadataOnlyMicroscope && isBlank(row?.storage_path)) {
-    flags.push('missing_storage_path')
-  }
-
-  if (!metadataOnlyMicroscope && isBlank(row?.original_storage_path)) {
-    flags.push('missing_original_storage_path')
-  }
-
-  if (!metadataOnlyMicroscope && (isBlank(row?.source_width) || isBlank(row?.source_height))) {
-    flags.push('missing_source_dimensions')
-  }
-
-  if (!metadataOnlyMicroscope && (isBlank(row?.stored_width) || isBlank(row?.stored_height))) {
-    flags.push('missing_stored_dimensions')
-  }
-
-  if (!metadataOnlyMicroscope && isBlank(row?.stored_bytes)) {
-    flags.push('missing_stored_bytes')
-  }
-
-  return [...new Set(flags)]
+  // 8. Healthy
+  return []
 }
 
-function buildMediaIssueSeverity(row: Record<string, unknown>, forceDeleted: boolean) {
-  if (row?.purged_at) {
-    return 'info'
+export function buildMediaIssueSeverity(row: Record<string, unknown>, forceDeleted: boolean, restoreWindowDays: number = DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS): string | null {
+  const flags = buildImageIssueFlags(row, forceDeleted, restoreWindowDays)
+  const flag = flags[0]
+  switch (flag) {
+    case 'permanently_removed': return null
+    case undefined: return null
+    case 'active_media_missing': return 'critical'
+    case 'purge_failed': return 'warning'
+    case 'reclaimable_deleted_media': return 'warning'
+    case 'deleted_media_in_restore_window': return 'info'
+    case 'size_metadata_unavailable': return 'info'
+    default: return null
   }
-
-  if (forceDeleted || row?.deleted_at) {
-    return 'warning'
-  }
-
-  if (isMetadataOnlyMicroscopeRow(row)) {
-    return null
-  }
-
-  if (isBlank(row?.storage_path)) {
-    return 'critical'
-  }
-
-  if (
-    isBlank(row?.source_width) ||
-    isBlank(row?.source_height) ||
-    isBlank(row?.stored_width) ||
-    isBlank(row?.stored_height) ||
-    isBlank(row?.stored_bytes)
-  ) {
-    return 'warning'
-  }
-
-  if (isBlank(row?.original_storage_path)) {
-    return 'info'
-  }
-
-  return null
 }
 
 function isMetadataOnlyMicroscopeRow(row: Record<string, unknown>) {
   return isBlank(row?.storage_path) && normalizeText(row?.image_type) === 'microscope'
 }
 
-function buildIssueSummary(flags: string[]) {
+export function buildIssueSummary(flags: string[]): string {
   if (!flags.length) return '—'
-
-  return flags
-    .map(flag => {
-      switch (flag) {
-        case 'deleted':
-          return 'tombstoned'
-        case 'purged':
-          return 'purged from r2'
-        case 'purge_error':
-          return 'purge error'
-        case 'missing_storage_path':
-          return 'missing storage path'
-        case 'missing_original_storage_path':
-          return 'missing original storage path'
-        case 'missing_source_dimensions':
-          return 'missing source dimensions'
-        case 'missing_stored_dimensions':
-          return 'missing stored dimensions'
-        case 'missing_stored_bytes':
-          return 'missing stored bytes'
-        default:
-          return flag.replaceAll('_', ' ')
-      }
-    })
-    .join(', ')
+  const flag = flags[0]
+  switch (flag) {
+    case 'permanently_removed': return 'Permanently removed — purged from cloud storage.'
+    case 'active_media_missing': return 'Active media missing — storage path is unrecorded. Verify or re-upload.'
+    case 'purge_failed': return 'Cleanup failed — the file could not be permanently removed. Retry or inspect the purge error.'
+    case 'reclaimable_deleted_media': return 'Ready to reclaim — recovery period has elapsed; physical storage can be permanently removed.'
+    case 'deleted_media_in_restore_window': return 'Deleted media — recovery period. Cloud file retained temporarily for recovery.'
+    case 'size_metadata_unavailable': return 'Size metadata unavailable — the storage object may still be healthy. Verify storage usage to check actual R2 size.'
+    default: return String(flag).replaceAll('_', ' ')
+  }
 }
 
 export function buildMediaRowContext(
@@ -1595,8 +1558,8 @@ export function buildMediaRowContext(
   const thumbnailPath = normalizeMediaKey(row?.thumbnail_path) || deriveThumbPath(fullSizePath)
   const fullSizeUrl = buildMediaPublicUrl(options.mediaPublicBaseUrl, fullSizePath)
   const thumbnailUrl = buildMediaPublicUrl(options.mediaPublicBaseUrl, thumbnailPath)
-  const issueFlags = buildImageIssueFlags(row, options.forceDeleted === true)
-  const issueSeverity = buildMediaIssueSeverity(row, options.forceDeleted === true)
+  const issueFlags = buildImageIssueFlags(row, options.forceDeleted === true, DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS)
+  const issueSeverity = buildMediaIssueSeverity(row, options.forceDeleted === true, DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS)
   const issueSummary = buildIssueSummary(issueFlags)
   const imageStatus = row?.purged_at ? 'purged' : (options.forceDeleted || row?.deleted_at ? 'deleted' : 'active')
 

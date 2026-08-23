@@ -1,4 +1,7 @@
 import {
+  buildImageIssueFlags,
+  buildIssueSummary,
+  buildMediaIssueSeverity,
   buildProfileStorageKeys,
   buildTombstoneDeleteTargets,
   calculateProfileStorageUsageWithClient,
@@ -227,4 +230,69 @@ Deno.test('restore window: tombstone deleted 2 days ago is NOT purge-eligible un
   const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000)
   const isEligible = deletedAt <= cutoff
   assertEquals(isEligible, false)
+})
+
+Deno.test('buildImageIssueFlags / buildMediaIssueSeverity / buildIssueSummary — new taxonomy', () => {
+  // Drift guard — exports exist
+  assertEquals(typeof buildImageIssueFlags, 'function')
+  assertEquals(typeof buildMediaIssueSeverity, 'function')
+  assertEquals(typeof buildIssueSummary, 'function')
+
+  // 1. Purged row
+  assertEquals(buildImageIssueFlags({ purged_at: '2026-01-01', deleted_at: '2026-01-01', storage_path: null }, false), ['permanently_removed'])
+  assertEquals(buildMediaIssueSeverity({ purged_at: '2026-01-01' }, false), null)
+
+  // 2. Microscope anchor
+  assertEquals(buildImageIssueFlags({ image_type: 'microscope', storage_path: null }, false), [])
+  assertEquals(buildMediaIssueSeverity({ image_type: 'microscope', storage_path: null }, false), null)
+
+  // 3. Active non-microscope missing storage_path
+  assertEquals(buildImageIssueFlags({ storage_path: null, image_type: null, deleted_at: null }, false), ['active_media_missing'])
+  assertEquals(buildMediaIssueSeverity({ storage_path: null, image_type: null, deleted_at: null }, false), 'critical')
+
+  // 4. Active non-microscope missing storage_path with explicit non-microscope type
+  assertEquals(buildImageIssueFlags({ storage_path: null, image_type: 'closeup', deleted_at: null }, false), ['active_media_missing'])
+
+  // 5. Purge failed
+  assertEquals(buildImageIssueFlags({ deleted_at: '2026-01-01', purge_error: 'timeout', purged_at: null, storage_path: 'obs/x.jpg' }, false), ['purge_failed'])
+  assertEquals(buildMediaIssueSeverity({ deleted_at: '2026-01-01', purge_error: 'timeout', purged_at: null }, false), 'warning')
+
+  // 6. Tombstoned expired (reclaimable) — 60 days ago, 30-day window
+  const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()
+  assertEquals(buildImageIssueFlags({ deleted_at: sixtyDaysAgo, purge_error: null, purged_at: null, storage_path: 'obs/x.jpg' }, false, 30), ['reclaimable_deleted_media'])
+  assertEquals(buildMediaIssueSeverity({ deleted_at: sixtyDaysAgo, purge_error: null, purged_at: null }, false, 30), 'warning')
+
+  // 7. Tombstoned in restore window (deleted 10 days ago, 30-day window)
+  const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString()
+  assertEquals(buildImageIssueFlags({ deleted_at: tenDaysAgo, purge_error: null, purged_at: null, storage_path: 'obs/x.jpg' }, false, 30), ['deleted_media_in_restore_window'])
+  assertEquals(buildMediaIssueSeverity({ deleted_at: tenDaysAgo, purge_error: null, purged_at: null }, false, 30), 'info')
+
+  // 8. Restore window parameterization
+  assertEquals(buildImageIssueFlags({ deleted_at: sixtyDaysAgo, purge_error: null, purged_at: null, storage_path: 'obs/x.jpg' }, false, 30), ['reclaimable_deleted_media'])
+  assertEquals(buildImageIssueFlags({ deleted_at: sixtyDaysAgo, purge_error: null, purged_at: null, storage_path: 'obs/x.jpg' }, false, 90), ['deleted_media_in_restore_window'])
+
+  // 9. Size metadata unavailable
+  assertEquals(buildImageIssueFlags({ storage_path: 'obs/x.jpg', stored_bytes: null, deleted_at: null }, false), ['size_metadata_unavailable'])
+  assertEquals(buildMediaIssueSeverity({ storage_path: 'obs/x.jpg', stored_bytes: null, deleted_at: null }, false), 'info')
+
+  // 10. Missing source dimensions alone — NO flags
+  assertEquals(buildImageIssueFlags({ storage_path: 'obs/x.jpg', source_width: null, source_height: null, stored_bytes: 1024, deleted_at: null }, false), [])
+
+  // 11. Missing stored dimensions alone — NO flags
+  assertEquals(buildImageIssueFlags({ storage_path: 'obs/x.jpg', stored_width: null, stored_height: null, stored_bytes: 1024, deleted_at: null }, false), [])
+
+  // 12. Missing original_storage_path alone — NO flags
+  assertEquals(buildImageIssueFlags({ storage_path: 'obs/x.jpg', original_storage_path: null, stored_bytes: 1024, deleted_at: null }, false), [])
+
+  // 13. Issue summary strings
+  assertEquals(buildIssueSummary(['active_media_missing']), 'Active media missing — storage path is unrecorded. Verify or re-upload.')
+  assertEquals(buildIssueSummary(['purge_failed']), 'Cleanup failed — the file could not be permanently removed. Retry or inspect the purge error.')
+  assertEquals(buildIssueSummary(['reclaimable_deleted_media']), 'Ready to reclaim — recovery period has elapsed; physical storage can be permanently removed.')
+  assertEquals(buildIssueSummary([]), '—')
+
+  // 14. getRestoreWindowDays env parameterization
+  const twentyDaysAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString()
+  assertEquals(buildImageIssueFlags({ deleted_at: twentyDaysAgo, purge_error: null, purged_at: null, storage_path: 'obs/x.jpg' }, false, 30), ['deleted_media_in_restore_window'])
+  assertEquals(buildImageIssueFlags({ deleted_at: twentyDaysAgo, purge_error: null, purged_at: null, storage_path: 'obs/x.jpg' }, false, 45), ['deleted_media_in_restore_window'])
+  assertEquals(buildImageIssueFlags({ deleted_at: sixtyDaysAgo, purge_error: null, purged_at: null, storage_path: 'obs/x.jpg' }, false, 45), ['reclaimable_deleted_media'])
 })

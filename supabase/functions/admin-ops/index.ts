@@ -3,7 +3,7 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { corsHeaders } from 'npm:@supabase/supabase-js/cors'
-import { buildMediaRowContext, getTombstonePurgeStats, handleAdminAction } from './adminActions.ts'
+import { buildImageIssueFlags, buildIssueSummary, buildMediaIssueSeverity, buildMediaRowContext, getRestoreWindowDays, getTombstonePurgeStats, handleAdminAction } from './adminActions.ts'
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
 const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
@@ -137,7 +137,7 @@ Deno.serve(async req => {
     const enrichedReports = recentReports.map(row =>
       enrichReportRow(row, profilesById, emailsById),
     )
-    const mediaIssueSummary = await buildMediaIssueSummary(adminClient, counts, warnings)
+    const mediaIssueSummary = await buildMediaIssueSummary(adminClient, counts, warnings, Deno.env.toObject())
 
     return json({
       generated_at: new Date().toISOString(),
@@ -156,6 +156,10 @@ Deno.serve(async req => {
         media_issue_critical: mediaIssueSummary.critical,
         media_issue_warning: mediaIssueSummary.warning,
         media_issue_info: mediaIssueSummary.info,
+        media_issue_purge_failed: mediaIssueSummary.purge_failed,
+        media_issue_reclaimable_now: mediaIssueSummary.reclaimable_now,
+        media_issue_in_restore_window: mediaIssueSummary.in_restore_window,
+        media_issue_size_metadata_missing: mediaIssueSummary.size_metadata_missing,
       },
       top_storage_users: enrichedTopStorageUsers,
       storage_by_user: enrichedTopStorageUsers,
@@ -271,48 +275,55 @@ async function buildTopStorageUsers(adminClient, warnings) {
   }))
 }
 
-async function buildMediaIssueSummary(adminClient, counts, warnings) {
-  const [warningActiveRows, infoRows] = await Promise.all([
+async function buildMediaIssueSummary(adminClient: any, counts: any, warnings: string[], env: Record<string, string>) {
+  const restoreWindowDays = getRestoreWindowDays(env ?? {})
+  const cutoffIso = new Date(Date.now() - restoreWindowDays * 24 * 60 * 60 * 1000).toISOString()
+
+  const [purgeFailedCount, reclaimableCount, inWindowCount, sizeMissingCount] = await Promise.all([
     countExact(
       adminClient,
       'observation_images',
-      query =>
-        query
-          .is('deleted_at', null)
-          .not('storage_path', 'is', null)
-          .or(
-            'source_width.is.null,source_height.is.null,stored_width.is.null,stored_height.is.null,stored_bytes.is.null',
-          ),
+      (query: any) => query.not('deleted_at', 'is', null).is('purged_at', null).not('purge_error', 'is', null),
       warnings,
-      'media_issue_warning_active',
+      'media_purge_failed',
     ),
     countExact(
       adminClient,
       'observation_images',
-      query =>
-        query
-          .is('deleted_at', null)
-          .not('storage_path', 'is', null)
-          .is('original_storage_path', null)
-          .not('source_width', 'is', null)
-          .not('source_height', 'is', null)
-          .not('stored_width', 'is', null)
-          .not('stored_height', 'is', null)
-          .not('stored_bytes', 'is', null),
+      (query: any) => query.not('deleted_at', 'is', null).is('purged_at', null).is('purge_error', null).lte('deleted_at', cutoffIso),
       warnings,
-      'media_issue_info',
+      'media_reclaimable',
+    ),
+    countExact(
+      adminClient,
+      'observation_images',
+      (query: any) => query.not('deleted_at', 'is', null).is('purged_at', null).is('purge_error', null).gt('deleted_at', cutoffIso),
+      warnings,
+      'media_in_restore_window',
+    ),
+    countExact(
+      adminClient,
+      'observation_images',
+      (query: any) => query.is('deleted_at', null).not('storage_path', 'is', null).is('stored_bytes', null),
+      warnings,
+      'media_size_missing',
     ),
   ])
 
   const critical = counts.rows_missing_storage_path ?? null
-  const warning = sumNullableCounts(counts.tombstoned_observation_images, warningActiveRows)
-  const total = sumNullableCounts(critical, warning, infoRows)
+  const warning = sumNullableCounts(purgeFailedCount, reclaimableCount)
+  const info = sumNullableCounts(inWindowCount, sizeMissingCount)
+  const total = sumNullableCounts(critical, warning, info)
 
   return {
     total,
     critical,
     warning,
-    info: infoRows,
+    info,
+    purge_failed: purgeFailedCount,
+    reclaimable_now: reclaimableCount,
+    in_restore_window: inWindowCount,
+    size_metadata_missing: sizeMissingCount,
   }
 }
 
@@ -593,112 +604,6 @@ function rowUserIds(row) {
   }
 
   return ids
-}
-
-function buildImageIssueFlags(row, forceDeleted) {
-  const flags: string[] = []
-  const metadataOnlyMicroscope = isMetadataOnlyMicroscopeRow(row)
-
-  if (row?.purged_at) {
-    return ['purged']
-  }
-
-  if (forceDeleted || row?.deleted_at) {
-    flags.push('deleted')
-  }
-
-  if (!isBlank(row?.purge_error)) {
-    flags.push('purge_error')
-  }
-
-  if (!metadataOnlyMicroscope && isBlank(row?.storage_path)) {
-    flags.push('missing_storage_path')
-  }
-
-  if (!metadataOnlyMicroscope && isBlank(row?.original_storage_path)) {
-    flags.push('missing_original_storage_path')
-  }
-
-  if (!metadataOnlyMicroscope && (isBlank(row?.source_width) || isBlank(row?.source_height))) {
-    flags.push('missing_source_dimensions')
-  }
-
-  if (!metadataOnlyMicroscope && (isBlank(row?.stored_width) || isBlank(row?.stored_height))) {
-    flags.push('missing_stored_dimensions')
-  }
-
-  if (!metadataOnlyMicroscope && isBlank(row?.stored_bytes)) {
-    flags.push('missing_stored_bytes')
-  }
-
-  return [...new Set(flags)]
-}
-
-function buildMediaIssueSeverity(row, forceDeleted) {
-  if (row?.purged_at) {
-    return 'info'
-  }
-
-  if (forceDeleted || row?.deleted_at) {
-    return 'warning'
-  }
-
-  if (isMetadataOnlyMicroscopeRow(row)) {
-    return null
-  }
-
-  if (isBlank(row?.storage_path)) {
-    return 'critical'
-  }
-
-  if (
-    isBlank(row?.source_width) ||
-    isBlank(row?.source_height) ||
-    isBlank(row?.stored_width) ||
-    isBlank(row?.stored_height) ||
-    isBlank(row?.stored_bytes)
-  ) {
-    return 'warning'
-  }
-
-  if (isBlank(row?.original_storage_path)) {
-    return 'info'
-  }
-
-  return null
-}
-
-function isMetadataOnlyMicroscopeRow(row) {
-  return isBlank(row?.storage_path) && String(row?.image_type ?? '').trim() === 'microscope'
-}
-
-function buildIssueSummary(flags) {
-  if (!flags.length) return '—'
-
-  return flags
-    .map(flag => {
-      switch (flag) {
-        case 'deleted':
-          return 'tombstoned'
-        case 'purged':
-          return 'purged from r2'
-        case 'purge_error':
-          return 'purge error'
-        case 'missing_storage_path':
-          return 'missing storage path'
-        case 'missing_original_storage_path':
-          return 'missing original storage path'
-        case 'missing_source_dimensions':
-          return 'missing source dimensions'
-        case 'missing_stored_dimensions':
-          return 'missing stored dimensions'
-        case 'missing_stored_bytes':
-          return 'missing stored bytes'
-        default:
-          return flag.replaceAll('_', ' ')
-      }
-    })
-    .join(', ')
 }
 
 function compareImageIssueRows(left, right) {
