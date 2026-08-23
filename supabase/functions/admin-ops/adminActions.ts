@@ -113,7 +113,7 @@ async function previewPurgeTombstonedImages(context: AdminActionContext): Promis
       action: 'preview_purge_tombstoned_images',
       restore_window_days: selection.restoreWindowDays,
       restore_cutoff_at: selection.restoreCutoffAt,
-      selection: selection.scope,
+      selection: { label: selection.scope, user_id: selection.scopeUserId },
       counts,
       rows: preview,
       truncated: selection.truncated,
@@ -132,7 +132,7 @@ async function purgeExpiredTombstonedImages(context: AdminActionContext): Promis
   const beforeSnapshot = {
     restore_window_days: selection.restoreWindowDays,
     restore_cutoff_at: selection.restoreCutoffAt,
-    selection: selection.scope,
+    selection: { label: selection.scope, user_id: selection.scopeUserId },
     counts: summarizeTombstoneRows(previewRows),
     rows: previewRows,
     truncated: selection.truncated,
@@ -771,10 +771,15 @@ async function loadTombstoneSelection(
 ) {
   const restoreWindowDays = getRestoreWindowDays(env)
   const restoreCutoffAt = getPurgeCutoffAt(restoreWindowDays)
-  const limit = normalizePositiveInteger(requestBody?.limit, PURGE_CANDIDATE_LIMIT)
+  const limit = Math.min(normalizePositiveInteger(requestBody?.limit, PURGE_CANDIDATE_LIMIT), PURGE_CANDIDATE_LIMIT)
+  const userId = normalizeText(requestBody?.user_id)
   const observationId = normalizeText(requestBody?.observation_id)
   const storagePath = normalizeText(requestBody?.storage_path)
   const queryText = normalizeText(requestBody?.query)
+
+  if (userId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) {
+    throw actionError(400, 'invalid_user_id', 'user_id must be a valid UUID')
+  }
 
   let query = adminClient
     .from('observation_images')
@@ -784,6 +789,10 @@ async function loadTombstoneSelection(
     .not('deleted_at', 'is', null)
     .order('deleted_at', { ascending: true })
     .limit(limit)
+
+  if (userId) {
+    query = query.eq('user_id', userId)
+  }
 
   if (observationId) {
     query = query.eq('observation_id', observationId)
@@ -806,11 +815,13 @@ async function loadTombstoneSelection(
     return true
   })
 
+  const scopeLabel = buildTombstoneScopeLabel({ userId, observationId, storagePath, queryText })
   return {
     rows: filteredRows,
     restoreWindowDays,
     restoreCutoffAt: restoreCutoffAt.toISOString(),
-    scope: buildTombstoneScopeLabel({ observationId, storagePath, queryText }),
+    scope: scopeLabel,
+    scopeUserId: userId || null,
     truncated: Array.isArray(data) ? data.length >= limit : false,
   }
 }
@@ -1285,11 +1296,14 @@ function buildTombstoneSearchText(row: any) {
   ].join(' ')).toLowerCase()
 }
 
-function buildTombstoneScopeLabel(options: { observationId: string; storagePath: string; queryText: string }) {
-  if (options.observationId) return `observation:${options.observationId}`
-  if (options.storagePath) return `storage_path:${options.storagePath}`
-  if (options.queryText) return `query:${options.queryText}`
-  return 'all'
+function buildTombstoneScopeLabel(options: { userId?: string; observationId: string; storagePath: string; queryText: string }) {
+  const parts: string[] = []
+  if (options.userId) parts.push(`user:${options.userId}`)
+  if (options.observationId) parts.push(`observation:${options.observationId}`)
+  else if (options.storagePath) parts.push(`storage_path:${options.storagePath}`)
+  else if (options.queryText) parts.push(`query:${options.queryText}`)
+  if (!parts.length) return 'all'
+  return parts.join('/')
 }
 
 export function getRestoreWindowDays(
