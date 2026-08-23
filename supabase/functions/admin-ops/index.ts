@@ -3,7 +3,7 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { corsHeaders } from 'npm:@supabase/supabase-js/cors'
-import { buildImageIssueFlags, buildIssueSummary, buildMediaIssueSeverity, buildMediaRowContext, getRestoreWindowDays, getTombstonePurgeStats, handleAdminAction } from './adminActions.ts'
+import { attachMediaStorageBreakdown, buildImageIssueFlags, buildIssueSummary, buildMediaIssueSeverity, buildMediaRowContext, fetchMediaStorageBreakdown, getRestoreWindowDays, getTombstonePurgeStats, handleAdminAction } from './adminActions.ts'
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
 const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
@@ -114,6 +114,17 @@ Deno.serve(async req => {
     const tombstonePurgeStats = await getTombstonePurgeStats(adminClient, Deno.env.toObject())
     const requestRestoreWindowDays = getRestoreWindowDays(Deno.env.toObject())
 
+    // Stage 3: per-user media storage breakdown — single RPC for all top-storage users.
+    // Cutoff derived from the same requestRestoreWindowDays (single source of truth).
+    const breakdownCutoffIso = new Date(Date.now() - requestRestoreWindowDays * 24 * 60 * 60 * 1000).toISOString()
+    const topStorageUserIds = topStorageUsers.map(u => String(u.id ?? '').trim()).filter(Boolean)
+    const mediaStorageBreakdownByUser = await fetchMediaStorageBreakdown(
+      adminClient,
+      topStorageUserIds,
+      breakdownCutoffIso,
+      warnings,
+    )
+
     const userIds = collectUserIds([
       topStorageUsers,
       tombstonedImages,
@@ -126,8 +137,9 @@ Deno.serve(async req => {
       fetchEmailsByIds(adminClient, userIds, warnings),
     ])
 
-    const enrichedTopStorageUsers = topStorageUsers.map(row =>
-      enrichStorageUserRow(row, emailsById),
+    const enrichedTopStorageUsers = attachMediaStorageBreakdown(
+      topStorageUsers.map(row => enrichStorageUserRow(row, emailsById)),
+      mediaStorageBreakdownByUser,
     )
     const enrichedTombstonedImages = tombstonedImages.map(row =>
       enrichImageRow(row, profilesById, emailsById, true, requestRestoreWindowDays),

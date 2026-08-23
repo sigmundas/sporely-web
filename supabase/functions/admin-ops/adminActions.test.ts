@@ -1,11 +1,14 @@
 import {
+  attachMediaStorageBreakdown,
   buildImageIssueFlags,
   buildIssueSummary,
   buildMediaIssueSeverity,
   buildProfileStorageKeys,
   buildTombstoneDeleteTargets,
   calculateProfileStorageUsageWithClient,
+  fetchMediaStorageBreakdown,
   getRestoreWindowDays,
+  MediaStorageBreakdown,
   R2MultiBucketClient,
 } from './adminActions.ts'
 
@@ -308,4 +311,126 @@ Deno.test('buildImageIssueFlags — forceDeleted=true with deleted_at=null conse
   const row = { storage_path: 'obs/x.jpg', deleted_at: null, purge_error: null, purged_at: null }
   assertEquals(buildImageIssueFlags(row, true, 30), ['deleted_media_in_restore_window'])
   assertEquals(buildMediaIssueSeverity(row, true, 30), 'info')
+})
+
+// ---------------------------------------------------------------------------
+// Stage 3: attachMediaStorageBreakdown and fetchMediaStorageBreakdown tests
+// ---------------------------------------------------------------------------
+
+Deno.test('attachMediaStorageBreakdown — breakdown row attaches to correct user', () => {
+  const users = [
+    { id: 'user-1', storage_used_bytes: 100 },
+    { id: 'user-2', storage_used_bytes: 200 },
+  ]
+  const breakdown: MediaStorageBreakdown = {
+    active_rows: 5,
+    metadata_only_anchor_rows: 1,
+    deleted_retained_rows: 2,
+    reclaimable_rows: 1,
+    restore_window_rows: 1,
+    purge_error_rows: 0,
+    purged_rows: 3,
+    active_recorded_primary_bytes: 9000,
+    deleted_retained_recorded_primary_bytes: 2000,
+    reclaimable_recorded_primary_bytes: 1000,
+    restore_window_recorded_primary_bytes: 1000,
+    active_unknown_primary_size_rows: 0,
+    deleted_retained_unknown_primary_size_rows: 0,
+  }
+  const byUser = new Map([['user-1', breakdown]])
+  const result = attachMediaStorageBreakdown(users, byUser)
+
+  assertEquals(result[0].media_storage, breakdown)
+  assertEquals(result[1].media_storage, null)
+  // Existing fields unchanged
+  assertEquals(result[0].storage_used_bytes, 100)
+  assertEquals(result[1].storage_used_bytes, 200)
+})
+
+Deno.test('attachMediaStorageBreakdown — missing row for user yields media_storage null, no crash', () => {
+  const users = [{ id: 'user-x', image_count: 0 }]
+  const result = attachMediaStorageBreakdown(users, new Map())
+  assertEquals(result[0].media_storage, null)
+  assertEquals(result[0].image_count, 0)
+})
+
+Deno.test('attachMediaStorageBreakdown — empty user list returns empty array', () => {
+  const result = attachMediaStorageBreakdown([], new Map())
+  assertEquals(result, [])
+})
+
+Deno.test('fetchMediaStorageBreakdown — rpc error pushes warning and returns empty map', async () => {
+  const warnings: string[] = []
+  const fakeClient = {
+    rpc: (_name: string, _params: unknown) =>
+      Promise.resolve({ data: null, error: { message: 'RPC unavailable' } }),
+  }
+  const result = await fetchMediaStorageBreakdown(
+    fakeClient,
+    ['user-1'],
+    new Date().toISOString(),
+    warnings,
+  )
+  assertEquals(result.size, 0)
+  assertEquals(warnings.length, 1)
+  assertEquals(warnings[0].startsWith('media_storage_breakdown:'), true)
+})
+
+Deno.test('fetchMediaStorageBreakdown — successful rpc maps rows to correct user IDs', async () => {
+  const warnings: string[] = []
+  const rpcRow = {
+    user_id: 'user-abc',
+    active_rows: 3,
+    metadata_only_anchor_rows: 0,
+    deleted_retained_rows: 1,
+    reclaimable_rows: 0,
+    restore_window_rows: 1,
+    purge_error_rows: 0,
+    purged_rows: 2,
+    active_recorded_primary_bytes: 5000,
+    deleted_retained_recorded_primary_bytes: null,
+    reclaimable_recorded_primary_bytes: null,
+    restore_window_recorded_primary_bytes: null,
+    active_unknown_primary_size_rows: 1,
+    deleted_retained_unknown_primary_size_rows: 1,
+  }
+  const fakeClient = {
+    rpc: (_name: string, _params: unknown) =>
+      Promise.resolve({ data: [rpcRow], error: null }),
+  }
+  const result = await fetchMediaStorageBreakdown(
+    fakeClient,
+    ['user-abc'],
+    new Date().toISOString(),
+    warnings,
+  )
+  assertEquals(warnings.length, 0)
+  assertEquals(result.size, 1)
+  const row = result.get('user-abc')!
+  assertEquals(row.active_rows, 3)
+  assertEquals(row.active_recorded_primary_bytes, 5000)
+  assertEquals(row.deleted_retained_recorded_primary_bytes, null)
+  assertEquals(row.active_unknown_primary_size_rows, 1)
+})
+
+Deno.test('fetchMediaStorageBreakdown — empty userIds returns empty map without calling rpc', async () => {
+  const warnings: string[] = []
+  let rpcCalled = false
+  const fakeClient = {
+    rpc: () => { rpcCalled = true; return Promise.resolve({ data: [], error: null }) },
+  }
+  const result = await fetchMediaStorageBreakdown(fakeClient, [], new Date().toISOString(), warnings)
+  assertEquals(result.size, 0)
+  assertEquals(rpcCalled, false)
+  assertEquals(warnings.length, 0)
+})
+
+Deno.test('cutoff derivation — breakdown cutoff uses same window as tombstone purge preview', () => {
+  // Both compute: Date.now() - windowDays * 24 * 60 * 60 * 1000
+  // Confirm getRestoreWindowDays returns the same value both times (no side-effects)
+  const env = { ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS: '45' }
+  const window1 = getRestoreWindowDays(env)
+  const window2 = getRestoreWindowDays(env)
+  assertEquals(window1, window2)
+  assertEquals(window1, 45)
 })

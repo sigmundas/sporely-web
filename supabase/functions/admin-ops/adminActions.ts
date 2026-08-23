@@ -1924,3 +1924,85 @@ function toDate(value: unknown) {
   const date = new Date(String(value ?? ''))
   return Number.isFinite(date.getTime()) ? date : null
 }
+
+// ---------------------------------------------------------------------------
+// Stage 3: per-user media storage breakdown
+// ---------------------------------------------------------------------------
+
+export type MediaStorageBreakdown = {
+  active_rows: number | null
+  metadata_only_anchor_rows: number | null
+  deleted_retained_rows: number | null
+  reclaimable_rows: number | null
+  restore_window_rows: number | null
+  purge_error_rows: number | null
+  purged_rows: number | null
+  active_recorded_primary_bytes: number | null
+  deleted_retained_recorded_primary_bytes: number | null
+  reclaimable_recorded_primary_bytes: number | null
+  restore_window_recorded_primary_bytes: number | null
+  active_unknown_primary_size_rows: number | null
+  deleted_retained_unknown_primary_size_rows: number | null
+}
+
+/**
+ * Calls admin_media_storage_breakdown RPC once for all supplied user IDs and
+ * returns a Map<userId, MediaStorageBreakdown>. On RPC error, pushes a warning
+ * and returns an empty map (callers must tolerate absent rows).
+ */
+export async function fetchMediaStorageBreakdown(
+  adminClient: any,
+  userIds: string[],
+  cutoffIso: string,
+  warnings: string[],
+): Promise<Map<string, MediaStorageBreakdown>> {
+  const result = new Map<string, MediaStorageBreakdown>()
+  if (userIds.length === 0) return result
+
+  const { data, error } = await adminClient.rpc('admin_media_storage_breakdown', {
+    p_user_ids: userIds,
+    p_restore_cutoff_at: cutoffIso,
+  })
+
+  if (error) {
+    warnings.push(`media_storage_breakdown: ${error.message}`)
+    return result
+  }
+
+  for (const row of data ?? []) {
+    const id = String(row.user_id ?? '').trim()
+    if (!id) continue
+    result.set(id, {
+      active_rows: row.active_rows ?? null,
+      metadata_only_anchor_rows: row.metadata_only_anchor_rows ?? null,
+      deleted_retained_rows: row.deleted_retained_rows ?? null,
+      reclaimable_rows: row.reclaimable_rows ?? null,
+      restore_window_rows: row.restore_window_rows ?? null,
+      purge_error_rows: row.purge_error_rows ?? null,
+      purged_rows: row.purged_rows ?? null,
+      active_recorded_primary_bytes: row.active_recorded_primary_bytes ?? null,
+      deleted_retained_recorded_primary_bytes: row.deleted_retained_recorded_primary_bytes ?? null,
+      reclaimable_recorded_primary_bytes: row.reclaimable_recorded_primary_bytes ?? null,
+      restore_window_recorded_primary_bytes: row.restore_window_recorded_primary_bytes ?? null,
+      active_unknown_primary_size_rows: row.active_unknown_primary_size_rows ?? null,
+      deleted_retained_unknown_primary_size_rows: row.deleted_retained_unknown_primary_size_rows ?? null,
+    })
+  }
+
+  return result
+}
+
+/**
+ * Pure function: attaches media_storage breakdown to each top-storage-user row.
+ * Users without a matching row in the breakdown map receive media_storage: null.
+ * The input rows are not mutated; enriched copies are returned.
+ */
+export function attachMediaStorageBreakdown<T extends { id: string }>(
+  users: T[],
+  breakdownByUser: Map<string, MediaStorageBreakdown>,
+): (T & { media_storage: MediaStorageBreakdown | null })[] {
+  return users.map(user => ({
+    ...user,
+    media_storage: breakdownByUser.get(String(user.id ?? '').trim()) ?? null,
+  }))
+}
