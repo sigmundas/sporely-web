@@ -296,3 +296,16 @@ Deno.test('buildImageIssueFlags / buildMediaIssueSeverity / buildIssueSummary �
   assertEquals(buildImageIssueFlags({ deleted_at: twentyDaysAgo, purge_error: null, purged_at: null, storage_path: 'obs/x.jpg' }, false, 45), ['deleted_media_in_restore_window'])
   assertEquals(buildImageIssueFlags({ deleted_at: sixtyDaysAgo, purge_error: null, purged_at: null, storage_path: 'obs/x.jpg' }, false, 45), ['reclaimable_deleted_media'])
 })
+
+Deno.test('buildImageIssueFlags — case-insensitive microscope match', () => {
+  // 'Microscope' with capital M must be treated as the anchor, not flagged active_media_missing
+  assertEquals(buildImageIssueFlags({ image_type: 'Microscope', storage_path: null }, false), [])
+  assertEquals(buildMediaIssueSeverity({ image_type: 'Microscope', storage_path: null }, false), null)
+})
+
+Deno.test('buildImageIssueFlags — forceDeleted=true with deleted_at=null conservatively in-window', () => {
+  // No deleted_at timestamp available; conservative: treat as in restore window
+  const row = { storage_path: 'obs/x.jpg', deleted_at: null, purge_error: null, purged_at: null }
+  assertEquals(buildImageIssueFlags(row, true, 30), ['deleted_media_in_restore_window'])
+  assertEquals(buildMediaIssueSeverity(row, true, 30), 'info')
+})

@@ -112,6 +112,7 @@ Deno.serve(async req => {
       buildDatabaseHealth(adminClient, warnings),
     ])
     const tombstonePurgeStats = await getTombstonePurgeStats(adminClient, Deno.env.toObject())
+    const requestRestoreWindowDays = getRestoreWindowDays(Deno.env.toObject())
 
     const userIds = collectUserIds([
       topStorageUsers,
@@ -129,10 +130,10 @@ Deno.serve(async req => {
       enrichStorageUserRow(row, emailsById),
     )
     const enrichedTombstonedImages = tombstonedImages.map(row =>
-      enrichImageRow(row, profilesById, emailsById, true),
+      enrichImageRow(row, profilesById, emailsById, true, requestRestoreWindowDays),
     )
     const enrichedMediaIssueRows = mediaIssueRows.map(row =>
-      enrichImageRow(row, profilesById, emailsById, false),
+      enrichImageRow(row, profilesById, emailsById, false, requestRestoreWindowDays),
     )
     const enrichedReports = recentReports.map(row =>
       enrichReportRow(row, profilesById, emailsById),
@@ -283,7 +284,7 @@ async function buildMediaIssueSummary(adminClient: any, counts: any, warnings: s
     countExact(
       adminClient,
       'observation_images',
-      (query: any) => query.not('deleted_at', 'is', null).is('purged_at', null).not('purge_error', 'is', null),
+      (query: any) => query.not('deleted_at', 'is', null).is('purged_at', null).not('purge_error', 'is', null).neq('purge_error', ''),
       warnings,
       'media_purge_failed',
     ),
@@ -455,13 +456,13 @@ function enrichStorageUserRow(row, emailsById) {
   }
 }
 
-function enrichImageRow(row, profilesById, emailsById, forceDeleted) {
+function enrichImageRow(row, profilesById, emailsById, forceDeleted, restoreWindowDays: number = 30) {
   const userId = String(row.user_id ?? '').trim()
   const profile = profilesById.get(userId) ?? null
   const email = emailsById.get(userId) ?? row.owner_email ?? null
   const username = profile?.username ?? row.owner_username ?? null
   const displayName = profile?.display_name ?? row.owner_display_name ?? null
-  const issueFlags = buildImageIssueFlags(row, forceDeleted)
+  const issueFlags = buildImageIssueFlags(row, forceDeleted, restoreWindowDays)
   const ownerLabel = buildUserLabel(userId, username, displayName, email)
 
   return {
@@ -477,7 +478,7 @@ function enrichImageRow(row, profilesById, emailsById, forceDeleted) {
     image_status: row.purged_at ? 'purged' : (forceDeleted || row.deleted_at ? 'deleted' : 'active'),
     issue_flags: issueFlags,
     issue_summary: buildIssueSummary(issueFlags),
-    issue_severity: buildMediaIssueSeverity(row, forceDeleted),
+    issue_severity: buildMediaIssueSeverity(row, forceDeleted, restoreWindowDays),
     derived_thumb_path: deriveThumbPath(row.storage_path ?? row.original_storage_path),
   }
 }

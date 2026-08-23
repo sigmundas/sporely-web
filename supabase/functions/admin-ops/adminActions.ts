@@ -1465,7 +1465,7 @@ function formatBytes(value: unknown) {
 
 export function buildImageIssueFlags(row: Record<string, unknown>, forceDeleted: boolean, restoreWindowDays: number = DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS): string[] {
   const storage_path = row?.storage_path
-  const image_type = row?.image_type
+  const image_type = normalizeText(row?.image_type).toLowerCase()
 
   // 1. Purged
   if (row?.purged_at) return ['permanently_removed']
@@ -1540,6 +1540,7 @@ export function buildMediaRowContext(
     observation?: Record<string, unknown> | null
     ownerProfile?: Record<string, unknown> | null
     ownerEmail?: string | null
+    restoreWindowDays?: number
   } = {},
 ) {
   const observation = normalizeRecord(options.observation ?? row?.observation ?? row?.observations)
@@ -1558,8 +1559,9 @@ export function buildMediaRowContext(
   const thumbnailPath = normalizeMediaKey(row?.thumbnail_path) || deriveThumbPath(fullSizePath)
   const fullSizeUrl = buildMediaPublicUrl(options.mediaPublicBaseUrl, fullSizePath)
   const thumbnailUrl = buildMediaPublicUrl(options.mediaPublicBaseUrl, thumbnailPath)
-  const issueFlags = buildImageIssueFlags(row, options.forceDeleted === true, DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS)
-  const issueSeverity = buildMediaIssueSeverity(row, options.forceDeleted === true, DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS)
+  const restoreWindowDays = typeof options.restoreWindowDays === 'number' ? options.restoreWindowDays : DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS
+  const issueFlags = buildImageIssueFlags(row, options.forceDeleted === true, restoreWindowDays)
+  const issueSeverity = buildMediaIssueSeverity(row, options.forceDeleted === true, restoreWindowDays)
   const issueSummary = buildIssueSummary(issueFlags)
   const imageStatus = row?.purged_at ? 'purged' : (options.forceDeleted || row?.deleted_at ? 'deleted' : 'active')
 
