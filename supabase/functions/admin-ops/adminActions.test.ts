@@ -4,6 +4,7 @@ import {
   buildIssueSummary,
   buildMediaIssueSeverity,
   buildProfileStorageKeys,
+  buildRestoreCutoffIso,
   buildTombstoneDeleteTargets,
   calculateProfileStorageUsageWithClient,
   fetchMediaStorageBreakdown,
@@ -433,4 +434,34 @@ Deno.test('cutoff derivation — breakdown cutoff uses same window as tombstone 
   const window2 = getRestoreWindowDays(env)
   assertEquals(window1, window2)
   assertEquals(window1, 45)
+})
+
+Deno.test('buildRestoreCutoffIso — derives ISO string from window days via same formula', () => {
+  const windowDays = 30
+  const before = Date.now()
+  const cutoff = buildRestoreCutoffIso(windowDays)
+  const after = Date.now()
+  const cutoffMs = new Date(cutoff).getTime()
+
+  // The cutoff must be within the expected range
+  const expectedMs = before - windowDays * 24 * 60 * 60 * 1000
+  const toleranceMs = after - before + 5 // allow a few ms for test execution
+  if (Math.abs(cutoffMs - expectedMs) > toleranceMs + 1000) {
+    throw new Error(`buildRestoreCutoffIso(30) produced ${cutoff}, expected ~${new Date(expectedMs).toISOString()}`)
+  }
+
+  // Using getRestoreWindowDays → buildRestoreCutoffIso must produce the same window as
+  // used in the snapshot handler (index.ts calls both through the same path).
+  const env = { ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS: '45' }
+  const days = getRestoreWindowDays(env)
+  const cutoff45 = buildRestoreCutoffIso(days)
+  // Cutoff should be ~45 days ago — check it is between 44d and 46d ago
+  const now = Date.now()
+  const ms45 = new Date(cutoff45).getTime()
+  const diff = now - ms45
+  const days44 = 44 * 24 * 60 * 60 * 1000
+  const days46 = 46 * 24 * 60 * 60 * 1000
+  if (diff < days44 || diff > days46) {
+    throw new Error(`buildRestoreCutoffIso(45) out of range: diff=${diff}ms`)
+  }
 })

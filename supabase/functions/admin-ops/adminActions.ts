@@ -1929,6 +1929,14 @@ function toDate(value: unknown) {
 // Stage 3: per-user media storage breakdown
 // ---------------------------------------------------------------------------
 
+/**
+ * Derives the restore-window cutoff ISO string from a window in days.
+ * Extracted so both the snapshot handler and unit tests use the same formula.
+ */
+export function buildRestoreCutoffIso(windowDays: number): string {
+  return new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString()
+}
+
 export type MediaStorageBreakdown = {
   active_rows: number | null
   metadata_only_anchor_rows: number | null

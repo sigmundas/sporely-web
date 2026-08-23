@@ -47,11 +47,12 @@ AS $$
         AND oi.storage_path <> ''
     )::bigint AS active_rows,
 
-    -- metadata_only_anchor: no storage path, image_type = 'microscope' (case-insensitive),
-    -- not deleted — counted separately, never as byte-backed
+    -- metadata_only_anchor: blank/absent storage path, image_type = 'microscope'
+    -- (case-insensitive), not deleted — counted separately, never as byte-backed.
+    -- Treats both NULL and '' as "no storage path" to match Stage 2 classifier semantics.
     COUNT(*) FILTER (
       WHERE oi.deleted_at IS NULL
-        AND oi.storage_path IS NULL
+        AND (oi.storage_path IS NULL OR oi.storage_path = '')
         AND lower(oi.image_type) = 'microscope'
     )::bigint AS metadata_only_anchor_rows,
 
@@ -131,7 +132,7 @@ AS $$
         AND oi.stored_bytes IS NULL
     )::bigint AS deleted_retained_unknown_primary_size_rows
 
-  FROM unnest(p_user_ids) AS u(user_id)
+  FROM (SELECT DISTINCT uid AS user_id FROM unnest(p_user_ids) AS uid) AS u
   LEFT JOIN public.observation_images oi
          ON oi.user_id = u.user_id
   GROUP BY u.user_id;
@@ -141,7 +142,9 @@ COMMENT ON FUNCTION public.admin_media_storage_breakdown(uuid[], timestamptz) IS
   'Cheap DB-side estimate of recorded primary-image bytes per user. '
   'Not physical R2 usage; the on-demand recalculation path (full/thumb/original/mosaic classes via R2 HEAD) is the exact measurement. '
   'stored_bytes NULLs are excluded from sums and counted separately in unknown_primary_size_rows columns. '
-  'Returns one row per requested user_id (including zero-image users). '
+  'metadata_only_anchor_rows counts microscope rows with NULL or blank storage_path (matches Stage 2 classifier). '
+  'Duplicate UUIDs in p_user_ids are deduplicated before joining. '
+  'Returns one row per distinct requested user_id (including zero-image users). '
   'Service-role only; not callable by anon or authenticated roles.';
 
 REVOKE ALL ON FUNCTION public.admin_media_storage_breakdown(uuid[], timestamptz) FROM PUBLIC;

@@ -3,7 +3,7 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { corsHeaders } from 'npm:@supabase/supabase-js/cors'
-import { attachMediaStorageBreakdown, buildImageIssueFlags, buildIssueSummary, buildMediaIssueSeverity, buildMediaRowContext, fetchMediaStorageBreakdown, getRestoreWindowDays, getTombstonePurgeStats, handleAdminAction } from './adminActions.ts'
+import { attachMediaStorageBreakdown, buildImageIssueFlags, buildIssueSummary, buildMediaIssueSeverity, buildMediaRowContext, buildRestoreCutoffIso, fetchMediaStorageBreakdown, getRestoreWindowDays, getTombstonePurgeStats, handleAdminAction } from './adminActions.ts'
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
 const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
@@ -116,8 +116,8 @@ Deno.serve(async req => {
 
     // Stage 3: per-user media storage breakdown — single RPC for all top-storage users.
     // Cutoff derived from the same requestRestoreWindowDays (single source of truth).
-    const breakdownCutoffIso = new Date(Date.now() - requestRestoreWindowDays * 24 * 60 * 60 * 1000).toISOString()
-    const topStorageUserIds = topStorageUsers.map(u => String(u.id ?? '').trim()).filter(Boolean)
+    const breakdownCutoffIso = buildRestoreCutoffIso(requestRestoreWindowDays)
+    const topStorageUserIds = Array.from(new Set(topStorageUsers.map(u => String(u.id ?? '').trim()).filter(Boolean)))
     const mediaStorageBreakdownByUser = await fetchMediaStorageBreakdown(
       adminClient,
       topStorageUserIds,

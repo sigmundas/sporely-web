@@ -7,31 +7,36 @@ DO $$
 DECLARE
   user_a     uuid := '00000000-0000-4000-8000-0000000bd001';
   user_b     uuid := '00000000-0000-4000-8000-0000000bd002';
+  user_empty uuid := '00000000-0000-4000-8000-0000000bd003';
   obs_a      bigint;
   obs_b      bigint;
 
   -- cutoff_past  = 60 days ago (rows deleted before this are reclaimable)
   cutoff_past   timestamptz := now() - interval '60 days';
-  -- cutoff_recent = 1 day ago (all recent deletes still in restore window)
+  -- cutoff_recent = 1 day ago (all seeded deletes are older → all reclaimable)
   cutoff_recent timestamptz := now() - interval '1 day';
 
-  row_a  record;
-  row_b  record;
-  row_a2 record;
+  row_a   record;
+  row_b   record;
+  row_a2  record;
+  row_dup record;
+  row_empty record;
 BEGIN
   -- -----------------------------------------------------------------------
   -- Seed users + profiles
   -- -----------------------------------------------------------------------
   INSERT INTO auth.users (id, aud, role, email, raw_user_meta_data, created_at, updated_at)
   VALUES
-    (user_a, 'authenticated', 'authenticated', 'breakdown-a@example.test', '{}'::jsonb, now(), now()),
-    (user_b, 'authenticated', 'authenticated', 'breakdown-b@example.test', '{}'::jsonb, now(), now())
+    (user_a,     'authenticated', 'authenticated', 'breakdown-a@example.test',     '{}'::jsonb, now(), now()),
+    (user_b,     'authenticated', 'authenticated', 'breakdown-b@example.test',     '{}'::jsonb, now(), now()),
+    (user_empty, 'authenticated', 'authenticated', 'breakdown-empty@example.test', '{}'::jsonb, now(), now())
   ON CONFLICT (id) DO NOTHING;
 
   INSERT INTO public.profiles (id, display_name, is_admin, is_banned)
   VALUES
-    (user_a, 'BreakdownA', false, false),
-    (user_b, 'BreakdownB', false, false)
+    (user_a,     'BreakdownA',     false, false),
+    (user_b,     'BreakdownB',     false, false),
+    (user_empty, 'BreakdownEmpty', false, false)
   ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name;
 
   -- -----------------------------------------------------------------------
@@ -48,25 +53,30 @@ BEGIN
   -- -----------------------------------------------------------------------
   -- user_a rows
   --
-  --  #  what                                 deleted_at         purged_at  stored_bytes  purge_error
-  --  1  active byte-backed                   NULL               NULL       1000          NULL
-  --  2  microscope anchor (no storage_path)  NULL               NULL       NULL          NULL
-  --  3  deleted, inside window (5 days ago)  5d ago             NULL       2000          NULL
-  --  4  deleted, expired (90 days ago)       90d ago            NULL       3000          NULL
-  --  5  purge_error tombstone (non-blank)    95d ago            NULL       500           'timeout'
-  --  6  blank purge_error (must NOT count)   95d ago            NULL       400           ''
-  --  7  purged                               100d ago           95d ago    9999          NULL
-  --  8  active, stored_bytes NULL (unknown)  NULL               NULL       NULL          NULL
-  --  9  deleted, stored_bytes NULL (unknown) 5d ago             NULL       NULL          NULL
+  --  #   what                                     deleted_at     purged_at  stored_bytes  purge_error  storage_path
+  --  1   active byte-backed                       NULL           NULL       1000          NULL         present
+  --  2   microscope anchor (NULL storage_path)    NULL           NULL       NULL          NULL         NULL
+  --  2b  microscope anchor (BLANK storage_path)   NULL           NULL       NULL          NULL         ''
+  --  3   deleted, inside window (5 days ago)      5d ago         NULL       2000          NULL         present
+  --  4   deleted, expired (90 days ago)           90d ago        NULL       3000          NULL         present
+  --  5   purge_error tombstone (non-blank)        95d ago        NULL       500           'timeout'    present
+  --  6   blank purge_error (must NOT count)       95d ago        NULL       400           ''           present
+  --  7   purged                                   100d ago       95d ago    9999          NULL         present
+  --  8   active, stored_bytes NULL (unknown)      NULL           NULL       NULL          NULL         present
+  --  9   deleted, stored_bytes NULL (unknown)     5d ago         NULL       NULL          NULL         present
   -- -----------------------------------------------------------------------
 
   -- 1: active byte-backed
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, stored_bytes, image_type, deleted_at, purged_at, purge_error)
   VALUES (obs_a, user_a, user_a::text || '/active1.webp', 1000, 'field', NULL, NULL, NULL);
 
-  -- 2: metadata_only microscope anchor
+  -- 2: metadata_only microscope anchor (storage_path IS NULL)
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, stored_bytes, image_type, deleted_at, purged_at, purge_error)
   VALUES (obs_a, user_a, NULL, NULL, 'microscope', NULL, NULL, NULL);
+
+  -- 2b: metadata_only microscope anchor (storage_path = '' — blank string, must also land in anchor bucket)
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, stored_bytes, image_type, deleted_at, purged_at, purge_error)
+  VALUES (obs_a, user_a, '', NULL, 'microscope', NULL, NULL, NULL);
 
   -- 3: deleted, inside restore window (5 days ago > cutoff_past 60 days ago)
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, stored_bytes, image_type, deleted_at, purged_at, purge_error)
@@ -115,7 +125,7 @@ BEGIN
 
   -- -----------------------------------------------------------------------
   -- Test 1: active byte-backed row counted with bytes
-  -- active_rows: rows 1 and 8 = 2
+  -- active_rows: rows 1 and 8 = 2 (row 2/2b are anchors, not active)
   -- active_recorded_primary_bytes: only row 1 = 1000 (row 8 has NULL bytes)
   -- -----------------------------------------------------------------------
   IF row_a.active_rows <> 2 THEN
@@ -126,11 +136,12 @@ BEGIN
   END IF;
 
   -- -----------------------------------------------------------------------
-  -- Test 2: metadata_only_anchor_rows — row 2 (microscope, no storage_path)
-  --         must NOT appear in active_rows and must NOT contribute bytes
+  -- Test 2: metadata_only_anchor_rows
+  -- row 2 (NULL storage_path, microscope) + row 2b ('' storage_path, microscope) = 2
+  -- must NOT appear in active_rows, no bytes contributed
   -- -----------------------------------------------------------------------
-  IF row_a.metadata_only_anchor_rows <> 1 THEN
-    RAISE EXCEPTION 'Test 2 FAIL: metadata_only_anchor_rows expected 1, got %', row_a.metadata_only_anchor_rows;
+  IF row_a.metadata_only_anchor_rows <> 2 THEN
+    RAISE EXCEPTION 'Test 2 FAIL: metadata_only_anchor_rows expected 2 (NULL + blank storage_path), got %', row_a.metadata_only_anchor_rows;
   END IF;
 
   -- -----------------------------------------------------------------------
@@ -165,13 +176,20 @@ BEGIN
   END IF;
 
   -- -----------------------------------------------------------------------
-  -- Test 6: purged_rows, and purged bytes NOT in retained sums
+  -- Test 6: purged_rows and exact deleted_retained counts / bytes
+  -- purged_rows = 1 (row 7)
+  -- deleted_retained_rows = rows 3+4+5+6+9 = 5 (purged row 7 excluded)
+  -- deleted_retained_recorded_primary_bytes = 2000+3000+500+400 = 5900
+  --   (row 9 has NULL bytes so excluded from sum; row 7 purged so excluded)
   -- -----------------------------------------------------------------------
   IF row_a.purged_rows <> 1 THEN
     RAISE EXCEPTION 'Test 6 FAIL: purged_rows expected 1, got %', row_a.purged_rows;
   END IF;
-  IF coalesce(row_a.deleted_retained_recorded_primary_bytes, 0) >= 9999 THEN
-    RAISE EXCEPTION 'Test 6 FAIL: purged bytes (9999) must not appear in deleted_retained_recorded_primary_bytes, got %',
+  IF row_a.deleted_retained_rows <> 5 THEN
+    RAISE EXCEPTION 'Test 6 FAIL: deleted_retained_rows expected 5, got %', row_a.deleted_retained_rows;
+  END IF;
+  IF row_a.deleted_retained_recorded_primary_bytes <> 5900 THEN
+    RAISE EXCEPTION 'Test 6 FAIL: deleted_retained_recorded_primary_bytes expected 5900, got %',
       row_a.deleted_retained_recorded_primary_bytes;
   END IF;
 
@@ -188,7 +206,7 @@ BEGIN
   END IF;
 
   -- -----------------------------------------------------------------------
-  -- Test 8: user isolation — user_b sees only its own row
+  -- Test 8: user isolation — user_b sees only its own 1 active row
   -- -----------------------------------------------------------------------
   IF row_b.active_rows <> 1 THEN
     RAISE EXCEPTION 'Test 8 FAIL: user_b active_rows expected 1, got %', row_b.active_rows;
@@ -202,16 +220,14 @@ BEGIN
 
   -- -----------------------------------------------------------------------
   -- Test 9: moving p_restore_cutoff_at flips rows between reclaimable/window
-  -- cutoff_recent (1 day ago): all seeded deletes are older than 1 day → all reclaimable
+  -- cutoff_recent = now() - 1 day.
+  -- All user_a deleted rows (5d, 90d, 95d, 95d, 5d) have deleted_at older than 1 day
+  -- → all <= cutoff_recent → reclaimable=5, restore_window=0.
   -- -----------------------------------------------------------------------
   SELECT * INTO row_a2
     FROM public.admin_media_storage_breakdown(ARRAY[user_a], cutoff_recent)
    WHERE user_id = user_a;
 
-  -- cutoff_recent = now() - 1 day.
-  -- reclaimable: deleted_at <= cutoff_recent (i.e., deleted more than 1 day ago).
-  -- All user_a deleted rows (3:5d, 4:90d, 5:95d, 6:95d, 9:5d) satisfy this → reclaimable=5.
-  -- restore_window: deleted_at > cutoff_recent (deleted LESS than 1 day ago) → 0 rows.
   IF row_a2.reclaimable_rows <> 5 THEN
     RAISE EXCEPTION 'Test 9 FAIL: with cutoff_recent reclaimable_rows expected 5, got %', row_a2.reclaimable_rows;
   END IF;
@@ -236,12 +252,58 @@ BEGIN
   END IF;
 
   -- -----------------------------------------------------------------------
+  -- Test 11: blank storage_path microscope anchor → metadata_only_anchor_rows,
+  --          not active_rows (already verified via metadata_only_anchor_rows=2 above,
+  --          but explicit active_rows check makes the invariant visible)
+  -- -----------------------------------------------------------------------
+  IF row_a.active_rows <> 2 THEN
+    RAISE EXCEPTION 'Test 11 FAIL: blank-path microscope row must not appear in active_rows, active_rows=%', row_a.active_rows;
+  END IF;
+
+  -- -----------------------------------------------------------------------
+  -- Test 12: duplicate UUID in p_user_ids → single row, non-inflated counts
+  -- -----------------------------------------------------------------------
+  SELECT * INTO row_dup
+    FROM public.admin_media_storage_breakdown(ARRAY[user_b, user_b, user_b], cutoff_past)
+   WHERE user_id = user_b;
+
+  IF (SELECT count(*) FROM public.admin_media_storage_breakdown(ARRAY[user_b, user_b], cutoff_past)) <> 1 THEN
+    RAISE EXCEPTION 'Test 12 FAIL: duplicate UUID in p_user_ids must return exactly 1 row';
+  END IF;
+  IF row_dup.active_rows <> 1 THEN
+    RAISE EXCEPTION 'Test 12 FAIL: duplicate UUID must not inflate counts, active_rows=%', row_dup.active_rows;
+  END IF;
+  IF row_dup.active_recorded_primary_bytes <> 5000 THEN
+    RAISE EXCEPTION 'Test 12 FAIL: duplicate UUID must not inflate bytes, active_recorded_primary_bytes=%', row_dup.active_recorded_primary_bytes;
+  END IF;
+
+  -- -----------------------------------------------------------------------
+  -- Test 13: zero-image user → one row returned with zero counts / NULL sums
+  -- -----------------------------------------------------------------------
+  SELECT * INTO row_empty
+    FROM public.admin_media_storage_breakdown(ARRAY[user_a, user_empty], cutoff_past)
+   WHERE user_id = user_empty;
+
+  IF row_empty IS NULL THEN
+    RAISE EXCEPTION 'Test 13 FAIL: zero-image user must return a row';
+  END IF;
+  IF row_empty.active_rows <> 0 THEN
+    RAISE EXCEPTION 'Test 13 FAIL: zero-image user active_rows expected 0, got %', row_empty.active_rows;
+  END IF;
+  IF row_empty.metadata_only_anchor_rows <> 0 THEN
+    RAISE EXCEPTION 'Test 13 FAIL: zero-image user metadata_only_anchor_rows expected 0, got %', row_empty.metadata_only_anchor_rows;
+  END IF;
+  IF row_empty.active_recorded_primary_bytes IS NOT NULL THEN
+    RAISE EXCEPTION 'Test 13 FAIL: zero-image user active_recorded_primary_bytes expected NULL, got %', row_empty.active_recorded_primary_bytes;
+  END IF;
+
+  -- -----------------------------------------------------------------------
   -- Cleanup
   -- -----------------------------------------------------------------------
   DELETE FROM public.observation_images WHERE user_id IN (user_a, user_b);
   DELETE FROM public.observations WHERE id IN (obs_a, obs_b);
-  DELETE FROM public.profiles WHERE id IN (user_a, user_b);
-  DELETE FROM auth.users WHERE id IN (user_a, user_b);
+  DELETE FROM public.profiles WHERE id IN (user_a, user_b, user_empty);
+  DELETE FROM auth.users WHERE id IN (user_a, user_b, user_empty);
 
-  RAISE NOTICE 'admin_media_storage_breakdown_test passed (10 assertions)';
+  RAISE NOTICE 'admin_media_storage_breakdown_test passed (13 assertions)';
 END $$;
