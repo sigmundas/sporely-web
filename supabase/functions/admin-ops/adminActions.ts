@@ -1296,10 +1296,13 @@ export function getRestoreWindowDays(
   env: Record<string, string | undefined>,
   _getEnvValue?: (env: Record<string, string | undefined>) => string | undefined,
 ) {
-  const getter = _getEnvValue ?? ((e) => e.ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS)
-  const raw = getter(env)
-  const parsed = Number.parseInt(String(raw ?? '').trim(), 10)
-  if (Number.isFinite(parsed) && parsed > 0) return parsed
+  const getter = typeof _getEnvValue === 'function' ? _getEnvValue : (e: Record<string, string | undefined>) => e.ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS
+  const raw = String(getter(env) ?? '').trim()
+  // Strict digits only: parseInt would truncate values like "1e2" to 1 and
+  // silently shorten the destructive purge window.
+  if (!/^\d+$/.test(raw)) return DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS
+  const parsed = Number.parseInt(raw, 10)
+  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed
   return DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS
 }
 

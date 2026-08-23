@@ -183,12 +183,16 @@ Deno.test('partial failure retains the full logical byte snapshot for a retry', 
 
 // --- getRestoreWindowDays policy tests ---
 
-Deno.test('restore window: server policy 30 + request restore_window_days=1 => cutoff remains 30 days (request ignored)', () => {
-  // requestBody.restore_window_days has no influence — server env is authoritative
+Deno.test('restore window: request restore_window_days cannot shorten the server policy', () => {
+  // The signature no longer accepts request input; passing a request-shaped
+  // object where requestBody used to go must not change the result.
   const env = { ADMIN_TOMBSTONE_RESTORE_WINDOW_DAYS: '30' }
   assertEquals(getRestoreWindowDays(env), 30)
-  // Even with a different env getter returning 30, a fake "request-only" getter must not be applied
-  assertEquals(getRestoreWindowDays({}, () => '30'), 30)
+  const withRequestShapedArg = getRestoreWindowDays as unknown as (
+    env: Record<string, string | undefined>,
+    extra?: unknown,
+  ) => number
+  assertEquals(withRequestShapedArg(env, { restore_window_days: 1 }), 30)
 })
 
 Deno.test('restore window: env set to 45 => 45 used', () => {
@@ -202,6 +206,10 @@ Deno.test('restore window: env missing or invalid => 30-day default', () => {
   assertEquals(getRestoreWindowDays({}, () => '0'), 30)
   assertEquals(getRestoreWindowDays({}, () => '-5'), 30)
   assertEquals(getRestoreWindowDays({}, () => undefined), 30)
+  // Non-strict numeric strings must not truncate into a shorter window
+  assertEquals(getRestoreWindowDays({}, () => '1e2'), 30)
+  assertEquals(getRestoreWindowDays({}, () => '30.5'), 30)
+  assertEquals(getRestoreWindowDays({}, () => ' 45 '), 45)
 })
 
 Deno.test('restore window: preview and purge use identical cutoff (same policy function/window)', () => {
