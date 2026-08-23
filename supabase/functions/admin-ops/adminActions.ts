@@ -535,10 +535,8 @@ async function recalculateProfileStorageUsage(context: AdminActionContext): Prom
     return actionFailureResponse(400, profileId.code, profileId.message)
   }
 
+  // reason: only required for commit (not dry-run); parse early, validate after dry-run check
   const reason = requireNonEmptyText(context.requestBody?.reason, 'Reason is required')
-  if (!reason.ok) {
-    return actionFailureResponse(400, reason.code, reason.message)
-  }
 
   const profile = await loadSingleRow(context.adminClient, 'profiles', 'id', profileId.value, [
     'id',
@@ -597,6 +595,10 @@ async function recalculateProfileStorageUsage(context: AdminActionContext): Prom
         result,
       },
     }
+  }
+
+  if (!reason.ok) {
+    return actionFailureResponse(400, reason.code, reason.message)
   }
 
   const { data, error } = await context.adminClient.rpc('reconcile_profile_storage_usage', {
