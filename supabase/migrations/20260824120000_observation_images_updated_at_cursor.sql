@@ -10,10 +10,11 @@
 --    deleted_at, purged_at; falls back to now() only if all three are NULL).
 --    captured_at is client-supplied and is not used.
 -- 3. Trigger: trg_05_observation_images_set_updated_at (BEFORE INSERT OR UPDATE)
---    forces NEW.updated_at := now() for untrusted callers. Trusted roles
---    (postgres/service_role/supabase_admin) may supply explicit values for
---    backfill and admin work. Alphabetically between trg_01_ and trg_zz_; no
---    dependency on guard triggers; only mutates NEW — no DML, no recursion.
+--    forces NEW.updated_at := now() unconditionally for EVERY role, including
+--    service_role/postgres. The historical backfill runs before the trigger is
+--    created, so no role-based bypass exists after the migration completes.
+--    Alphabetically between trg_01_ and trg_zz_; no dependency on guard
+--    triggers; only mutates NEW — no DML, no recursion.
 -- 4. Index: (user_id, updated_at, id) for the desktop keyset probe.
 
 BEGIN;
@@ -26,14 +27,13 @@ ALTER TABLE public.observation_images
   ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone;
 
 COMMENT ON COLUMN public.observation_images.updated_at IS
-  'Server-maintained change cursor. Set to now() by trigger on every INSERT or '
-  'UPDATE from a non-trusted caller. Trusted roles (postgres/service_role/'
-  'supabase_admin) may supply explicit values for backfill. Used by desktop '
+  'Server-maintained change cursor. Set to now() by trigger on EVERY INSERT or '
+  'UPDATE, regardless of caller role — service-role/admin writes (purge '
+  'finalization, ban cascades) advance it too. Historical values come only from '
+  'the migration backfill, which ran before the trigger existed. Used by desktop '
   'clients for incremental pull via keyset: user_id=? AND updated_at>ts (or '
-  'equal with id tiebreak), ORDER BY updated_at, id. Known asymmetry: trusted-'
-  'role writes that do not set updated_at explicitly (e.g. purge finalization, '
-  'ban-cascade media_version bumps) do NOT advance this cursor; desktop clients '
-  'cover those via the periodic full child safety scan.';
+  'equal with id tiebreak), ORDER BY updated_at, id. Hard DELETEs leave no '
+  'cursor trace; desktop covers those via the periodic full child safety scan.';
 
 -- =============================================================
 -- 2. Backfill using historical server timestamps only.
@@ -68,8 +68,8 @@ ALTER TABLE public.observation_images
   ALTER COLUMN updated_at SET DEFAULT now();
 
 -- =============================================================
--- 4. Trigger function: force updated_at := now() for non-trusted
---    callers on both INSERT and UPDATE.
+-- 4. Trigger function: force updated_at := now() unconditionally
+--    for every role on both INSERT and UPDATE.
 --    NOT SECURITY DEFINER — runs as the invoking role.
 --    Only mutates NEW; no DML; no recursion risk.
 -- =============================================================
@@ -79,25 +79,21 @@ CREATE OR REPLACE FUNCTION public._observation_images_set_updated_at()
   LANGUAGE plpgsql
   SET search_path = public
 AS $$
-DECLARE
-  is_trusted boolean := current_user IN ('postgres', 'service_role', 'supabase_admin');
 BEGIN
-  -- Trusted roles (backfill, admin) may supply explicit values.
-  -- Untrusted callers always receive the server clock — never a client-supplied value.
-  IF NOT is_trusted THEN
-    NEW.updated_at := now();
-  ELSIF NEW.updated_at IS NULL THEN
-    -- Even trusted callers should not insert a NULL.
-    NEW.updated_at := now();
-  END IF;
+  -- Unconditional for every role: the cursor's correctness depends on the row
+  -- changing, not on who changed it. Service-role/admin writes (purge
+  -- finalization, ban cascades, repair tools) must advance the cursor too.
+  -- The historical backfill runs BEFORE this trigger is created, so no
+  -- role-based bypass is needed or provided.
+  NEW.updated_at := now();
   RETURN NEW;
 END;
 $$;
 
 COMMENT ON FUNCTION public._observation_images_set_updated_at() IS
-  'BEFORE INSERT OR UPDATE trigger function. Forces updated_at := now() for '
-  'non-trusted callers. Trusted roles (postgres/service_role/supabase_admin) '
-  'may supply explicit timestamps for backfill or admin operations. Mutates '
+  'BEFORE INSERT OR UPDATE trigger function. Forces updated_at := now() '
+  'unconditionally for every role — no trusted-role exemption. Historical '
+  'backfill values were written before this trigger was created. Mutates '
   'NEW only — no DML, no recursion.';
 
 DROP TRIGGER IF EXISTS trg_05_observation_images_set_updated_at

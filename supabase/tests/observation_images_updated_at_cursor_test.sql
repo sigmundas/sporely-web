@@ -72,10 +72,13 @@ BEGIN
 
   -- ---------------------------------------------------------------
   -- Test 2: UPDATE (as untrusted authenticated role) advances updated_at.
-  --         Wind updated_at back to old_ts as trusted postgres, then
-  --         update as authenticated. Trigger must force now().
+  --         Wind updated_at back to old_ts with trg_05 disabled (the trigger
+  --         is unconditional for every role, including postgres), then update
+  --         as authenticated. Trigger must force now().
   -- ---------------------------------------------------------------
+  ALTER TABLE public.observation_images DISABLE TRIGGER trg_05_observation_images_set_updated_at;
   UPDATE public.observation_images SET updated_at = old_ts WHERE id = img_id;
+  ALTER TABLE public.observation_images ENABLE TRIGGER trg_05_observation_images_set_updated_at;
   SET LOCAL request.jwt.claims TO '{"sub": "00000000-0000-0000-0000-00000000c0b1", "role": "authenticated"}';
   SET LOCAL ROLE authenticated;
   UPDATE public.observation_images SET notes = 'update test' WHERE id = img_id;
@@ -89,7 +92,9 @@ BEGIN
   -- ---------------------------------------------------------------
   -- Test 3: Soft delete (set deleted_at) advances updated_at
   -- ---------------------------------------------------------------
+  ALTER TABLE public.observation_images DISABLE TRIGGER trg_05_observation_images_set_updated_at;
   UPDATE public.observation_images SET updated_at = old_ts WHERE id = img_id;
+  ALTER TABLE public.observation_images ENABLE TRIGGER trg_05_observation_images_set_updated_at;
   SET LOCAL request.jwt.claims TO '{"sub": "00000000-0000-0000-0000-00000000c0b1", "role": "authenticated"}';
   SET LOCAL ROLE authenticated;
   UPDATE public.observation_images SET deleted_at = now() WHERE id = img_id;
@@ -103,7 +108,9 @@ BEGIN
   -- ---------------------------------------------------------------
   -- Test 4: Metadata-only UPDATE (sort_order) advances updated_at
   -- ---------------------------------------------------------------
+  ALTER TABLE public.observation_images DISABLE TRIGGER trg_05_observation_images_set_updated_at;
   UPDATE public.observation_images SET updated_at = old_ts, deleted_at = NULL WHERE id = img_id;
+  ALTER TABLE public.observation_images ENABLE TRIGGER trg_05_observation_images_set_updated_at;
   SET LOCAL request.jwt.claims TO '{"sub": "00000000-0000-0000-0000-00000000c0b1", "role": "authenticated"}';
   SET LOCAL ROLE authenticated;
   UPDATE public.observation_images SET sort_order = 5 WHERE id = img_id;
@@ -116,13 +123,16 @@ BEGIN
 
   -- ---------------------------------------------------------------
   -- Test 5: Backfill uses historical timestamps, not migration-now.
-  --         Trusted role inserts with explicit old timestamps; value
-  --         must be preserved (not overwritten with now()).
+  --         The migration writes updated_at BEFORE the trigger exists, so we
+  --         simulate that ordering: with trg_05 disabled, write the backfill
+  --         expression's value directly; it must be preserved. (There is no
+  --         longer any role-based path to do this with the trigger active.)
   -- ---------------------------------------------------------------
   explicit_created := '2023-06-01 10:00:00+00';
   explicit_deleted := '2023-06-15 12:00:00+00';
   expected_updated := GREATEST(explicit_created, explicit_deleted);
 
+  ALTER TABLE public.observation_images DISABLE TRIGGER trg_05_observation_images_set_updated_at;
   INSERT INTO public.observation_images (
     observation_id, user_id, storage_path, image_type,
     created_at, deleted_at, updated_at
@@ -131,11 +141,12 @@ BEGIN
     '00000000-0000-0000-0000-00000000c0b1/cursor-test/backfill-sim.jpg', 'field',
     explicit_created, explicit_deleted, expected_updated
   ) RETURNING id INTO img2_id;
+  ALTER TABLE public.observation_images ENABLE TRIGGER trg_05_observation_images_set_updated_at;
 
   SELECT updated_at INTO actual_updated FROM public.observation_images WHERE id = img2_id;
   IF actual_updated IS DISTINCT FROM expected_updated THEN
     RAISE EXCEPTION
-      'Test 5 FAILED: trusted explicit updated_at not preserved — expected %, got %',
+      'Test 5 FAILED: backfill-order write not preserved — expected %, got %',
       expected_updated, actual_updated;
   END IF;
   IF actual_updated >= now() - interval '1 second' THEN
@@ -253,15 +264,23 @@ BEGIN
       'Test 10 FAILED: _observation_images_set_updated_at must NOT be SECURITY DEFINER';
   END IF;
 
-  -- Function source must contain the trusted-role branch and the unconditional
-  -- assignment for untrusted callers. We verify the key guard phrase.
+  -- Function must be unconditional: no role branching of any kind. The cursor
+  -- depends on the row changing, not on who changed it.
+  IF EXISTS (
+    SELECT 1 FROM pg_proc
+    WHERE proname = '_observation_images_set_updated_at'
+      AND (prosrc LIKE '%current_user%' OR prosrc LIKE '%auth.uid%' OR prosrc LIKE '%session_user%')
+  ) THEN
+    RAISE EXCEPTION
+      'Test 10 FAILED: _observation_images_set_updated_at must not branch on caller role';
+  END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_proc
     WHERE proname = '_observation_images_set_updated_at'
-      AND prosrc LIKE '%current_user IN%postgres%service_role%supabase_admin%'
+      AND prosrc LIKE '%NEW.updated_at := now()%'
   ) THEN
     RAISE EXCEPTION
-      'Test 10 FAILED: trusted-role branch not found in _observation_images_set_updated_at source';
+      'Test 10 FAILED: unconditional NEW.updated_at := now() assignment not found';
   END IF;
 
   -- Column must be NOT NULL (clients cannot pass NULL to clear it).
@@ -275,13 +294,64 @@ BEGIN
     RAISE EXCEPTION 'Test 10 FAILED: observation_images.updated_at is nullable — must be NOT NULL';
   END IF;
 
-  RAISE NOTICE 'Test 10 passed: trigger is BEFORE INSERT|UPDATE, not SECURITY DEFINER, contains trusted-role guard, column is NOT NULL';
+  RAISE NOTICE 'Test 10 passed: trigger is BEFORE INSERT|UPDATE, not SECURITY DEFINER, unconditional (no role branch), column is NOT NULL';
+
+  -- ---------------------------------------------------------------
+  -- Test 11: service_role metadata UPDATE (not mentioning updated_at)
+  --          advances updated_at.
+  --          Clear jwt claims left by earlier tests so auth.uid() is NULL,
+  --          matching how PostgREST executes genuine service-role requests.
+  -- ---------------------------------------------------------------
+  SET LOCAL request.jwt.claims TO '';
+  ALTER TABLE public.observation_images DISABLE TRIGGER trg_05_observation_images_set_updated_at;
+  UPDATE public.observation_images SET updated_at = old_ts WHERE id = img_id;
+  ALTER TABLE public.observation_images ENABLE TRIGGER trg_05_observation_images_set_updated_at;
+  SET LOCAL ROLE service_role;
+  UPDATE public.observation_images SET notes = 'service-role metadata write' WHERE id = img_id;
+  RESET ROLE;
+  SELECT updated_at INTO t_after FROM public.observation_images WHERE id = img_id;
+  IF t_after <= old_ts THEN
+    RAISE EXCEPTION 'Test 11 FAILED: service_role UPDATE did not advance updated_at (got %)', t_after;
+  END IF;
+  RAISE NOTICE 'Test 11 passed: service_role metadata UPDATE advances updated_at';
+
+  -- ---------------------------------------------------------------
+  -- Test 12: service_role UPDATE explicitly setting an old updated_at
+  --          still gets a fresh server timestamp.
+  -- ---------------------------------------------------------------
+  SET LOCAL ROLE service_role;
+  UPDATE public.observation_images SET updated_at = old_ts, notes = 'spoof attempt' WHERE id = img_id;
+  RESET ROLE;
+  SELECT updated_at INTO t_after FROM public.observation_images WHERE id = img_id;
+  IF t_after <= old_ts THEN
+    RAISE EXCEPTION 'Test 12 FAILED: service_role explicit old updated_at was persisted (got %)', t_after;
+  END IF;
+  RAISE NOTICE 'Test 12 passed: service_role cannot persist an explicit stale updated_at';
+
+  -- ---------------------------------------------------------------
+  -- Test 13: service_role INSERT with explicit historical updated_at
+  --          cannot create a stale cursor row.
+  -- ---------------------------------------------------------------
+  SET LOCAL ROLE service_role;
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, updated_at
+  ) VALUES (
+    obs_id, fixture_user,
+    '00000000-0000-0000-0000-00000000c0b1/cursor-test/stale-insert.jpg', 'field',
+    old_ts
+  ) RETURNING id INTO img2_id;
+  RESET ROLE;
+  SELECT updated_at INTO t_after FROM public.observation_images WHERE id = img2_id;
+  IF t_after <= old_ts THEN
+    RAISE EXCEPTION 'Test 13 FAILED: service_role INSERT created a stale cursor row (got %)', t_after;
+  END IF;
+  RAISE NOTICE 'Test 13 passed: service_role INSERT cannot create a stale cursor row';
 
   -- ---------------------------------------------------------------
   -- Cleanup
   -- ---------------------------------------------------------------
   DELETE FROM auth.users WHERE id IN (fixture_user, other_user);
-  RAISE NOTICE 'observation_images_updated_at_cursor_test: all 10 assertions passed';
+  RAISE NOTICE 'observation_images_updated_at_cursor_test: all 13 assertions passed';
 
 EXCEPTION
   WHEN OTHERS THEN
