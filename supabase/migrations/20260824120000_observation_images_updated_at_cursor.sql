@@ -30,12 +30,24 @@ COMMENT ON COLUMN public.observation_images.updated_at IS
   'UPDATE from a non-trusted caller. Trusted roles (postgres/service_role/'
   'supabase_admin) may supply explicit values for backfill. Used by desktop '
   'clients for incremental pull via keyset: user_id=? AND updated_at>ts (or '
-  'equal with id tiebreak), ORDER BY updated_at, id.';
+  'equal with id tiebreak), ORDER BY updated_at, id. Known asymmetry: trusted-'
+  'role writes that do not set updated_at explicitly (e.g. purge finalization, '
+  'ban-cascade media_version bumps) do NOT advance this cursor; desktop clients '
+  'cover those via the periodic full child safety scan.';
 
 -- =============================================================
 -- 2. Backfill using historical server timestamps only.
 --    GREATEST() ignores NULLs; COALESCE catches the all-NULL edge.
 -- =============================================================
+
+-- The parent-touch trigger (trg_observation_images_touch_observation_updated_at)
+-- is a row-level AFTER UPDATE trigger with no column list, so without disabling
+-- it this backfill would stamp observations.updated_at = migration-now for every
+-- observation that has images, forcing a fleet-wide observation re-pull. The
+-- transaction already holds an exclusive lock from the ALTER TABLE, so a
+-- temporary DISABLE is safe and unobservable to concurrent sessions.
+ALTER TABLE public.observation_images
+  DISABLE TRIGGER trg_observation_images_touch_observation_updated_at;
 
 UPDATE public.observation_images
 SET updated_at = COALESCE(
@@ -43,6 +55,9 @@ SET updated_at = COALESCE(
   now()
 )
 WHERE updated_at IS NULL;
+
+ALTER TABLE public.observation_images
+  ENABLE TRIGGER trg_observation_images_touch_observation_updated_at;
 
 -- =============================================================
 -- 3. Enforce NOT NULL now that all rows have a value.
