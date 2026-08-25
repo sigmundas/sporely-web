@@ -1,0 +1,21 @@
+-- Remove the dead public.enable_spatial_ref_sys_rls() helper.
+--
+-- Background:
+--   * The helper was created in the baseline live schema as a SECURITY DEFINER
+--     function owned by postgres, with EXECUTE granted to anon, authenticated,
+--     and service_role.
+--   * Its body runs `ALTER TABLE public.spatial_ref_sys ENABLE ROW LEVEL
+--     SECURITY` and creates a permissive SELECT policy. Since PostGIS moved
+--     spatial_ref_sys to be owned by supabase_admin, postgres can no longer
+--     run those statements, so the helper always errors when invoked. It is
+--     unused by any client, RPC, trigger, or migration.
+--   * It is nonetheless a publicly-executable SECURITY DEFINER admin helper,
+--     which the Supabase security advisor flags.
+--
+-- This migration only drops that helper. It does NOT attempt to enable RLS or
+-- change grants on public.spatial_ref_sys — those require supabase_admin and
+-- must be handled by the platform / a support ticket. The
+-- `rls_disabled_in_public` advisor finding for public.spatial_ref_sys is
+-- expected to remain after this migration.
+
+DROP FUNCTION IF EXISTS public.enable_spatial_ref_sys_rls();
