@@ -24,7 +24,7 @@ import {
   normalizeIdentifyService,
 } from '../ai-identification.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
-import { deleteObservationMedia, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, insertObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath, fetchObservationImageRows } from '../images.js'
+import { deleteObservationMedia, verifyWorkerObjectExists, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, reserveObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath, fetchObservationImageRows, getVariantPath } from '../images.js'
 import { bindProtectedMedia } from '../protected-media.js'
 import { classifyDraftAge, loadFinds, openFinds } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
@@ -4243,7 +4243,7 @@ async function _addPhotosToObservation(files) {
       const sortOrder = nextSortOrder + i
 
       const preparedImage = await prepareImageVariants(file, uploadPolicy)
-      let cropMeta
+      const cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })
       const storagePath = buildObservationImageStoragePath({
         userId,
         observationId: obsId,
@@ -4251,26 +4251,92 @@ async function _addPhotosToObservation(files) {
         timestamp: Date.now(),
         extension: imageExtensionForBlob(preparedImage.uploadBlob),
       })
-      await uploadPreparedObservationImageVariants(preparedImage, storagePath, {
-        uploadPolicy,
-        userId,
-        observationId: obsId,
+      const reservedRow = await reserveObservationImage({
+        observation_id: obsId,
+        user_id: userId,
+        storage_path: storagePath,
+        image_type: 'field',
+        sort_order: sortOrder,
+        ...preparedImage.uploadMeta,
+        storage_exif_safe: preparedImage.uploadMeta?.storage_exif_safe === true,
+        ...cropMeta,
       })
-
       try {
-        cropMeta = await createImageCropMeta(preparedImage.uploadBlob, { preseed: true })
-        await insertObservationImage({
-          observation_id: obsId,
-          user_id: userId,
-          storage_path: storagePath,
-          image_type: 'field',
-          sort_order: sortOrder,
-          ...preparedImage.uploadMeta,
-          storage_exif_safe: preparedImage.uploadMeta?.storage_exif_safe === true,
-          ...cropMeta,
+        await uploadPreparedObservationImageVariants(preparedImage, storagePath, {
+          uploadPolicy,
+          userId,
+          observationId: obsId,
+          imageId: reservedRow.id,
         })
       } catch (err) {
-        await deleteObservationMedia([storagePath]).catch(() => {})
+        if (String(err?.message || '').includes('Worker upload failed (4')) {
+          // Definite server rejection (4xx) — clean up any bytes already written
+          // (full was written before thumb failed, or neither was written — both
+          // cases are safe because deleteObservationMedia is 404-tolerant) then
+          // remove the reserved row so the next add-photo attempt starts fresh.
+          await deleteObservationMedia([storagePath]).catch(() => {})
+          await supabase.from('observation_images').delete().eq('id', reservedRow.id).catch(() => {})
+        } else {
+          // Ambiguous failure (network error, 5xx): the worker may or may not have
+          // accepted the bytes. Verify via HEAD request so we can make a real decision.
+          //
+          // err.variant tells us which upload was in-flight:
+          //   'full'  — full was ambiguous; thumb never started.
+          //   'thumb' — full confirmed (err.completedVariants includes 'full'); thumb ambiguous.
+          //
+          // To declare "landed" ALL expected objects must be explicitly present (true).
+          // If any probe returns explicitly false (media_not_found) AND all others are
+          // confirmed present → treat as partial upload: clean up bytes + row.
+          // If any probe throws (unknown) → retain row conservatively.
+          const failedVariant = err.variant || 'full'
+          const thumbPath = err.thumbPath || getVariantPath(storagePath, 'thumb')
+
+          // Determine which paths need probing.
+          // completedVariants contains variants whose PUT got a 2xx before this error.
+          const completedVariants = Array.isArray(err.completedVariants) ? err.completedVariants : []
+          const pathsToProbe = []
+          // The ambiguous (failed) variant always needs probing.
+          const ambiguousPath = failedVariant === 'thumb' ? thumbPath : storagePath
+          pathsToProbe.push({ path: ambiguousPath, variant: failedVariant })
+          // For full ambiguous failure, thumb never started — only probe full.
+          // For thumb ambiguous failure, full completed (2xx) but we still re-verify it
+          // to make the "all present" determination conservative.
+          if (failedVariant === 'thumb' && completedVariants.includes('full')) {
+            pathsToProbe.push({ path: storagePath, variant: 'full' })
+          }
+
+          const probeResults = {}
+          let probeThrew = false
+          for (const { path, variant: probeVariant } of pathsToProbe) {
+            try {
+              probeResults[probeVariant] = await verifyWorkerObjectExists(path)
+            } catch (_verifyErr) {
+              probeThrew = true
+              probeResults[probeVariant] = null
+            }
+          }
+
+          // "All landed" = every probed path returned true.
+          const allLanded = !probeThrew && pathsToProbe.every(({ variant: v }) => probeResults[v] === true)
+          // "Definitively absent" = at least one probe returned false AND none threw.
+          const anyDefinitelyAbsent = !probeThrew && pathsToProbe.some(({ variant: v }) => probeResults[v] === false)
+
+          if (allLanded) {
+            // Upload succeeded despite the network error — retain the row.
+            // Fall through and re-throw so the caller still sees the error.
+          } else if (anyDefinitelyAbsent) {
+            // At least one object is definitively absent. Clean up any present bytes
+            // and remove the reserved row.
+            const pathsToDelete = pathsToProbe
+              .filter(({ variant: v }) => probeResults[v] === true)
+              .map(({ path }) => path)
+            if (pathsToDelete.length > 0) {
+              await deleteObservationMedia(pathsToDelete).catch(() => {})
+            }
+            await supabase.from('observation_images').delete().eq('id', reservedRow.id).catch(() => {})
+          }
+          // probeThrew or all probes null → retain row conservatively.
+        }
         throw err
       }
 
@@ -4278,30 +4344,9 @@ async function _addPhotosToObservation(files) {
         await syncObservationMediaKeys(obsId, storagePath, { sortOrder: 0 })
       }
 
-      const { data: insertedRows } = await supabase
-        .from('observation_images')
-        .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom')
-        .eq('observation_id', obsId)
-        .eq('sort_order', sortOrder)
-        .is('deleted_at', null)
-        .order('id', { ascending: false })
-        .limit(1)
-      const insertedRow = insertedRows?.[0] || {
-        id: `new-${sortOrder}-${Date.now()}`,
-        storage_path: storagePath,
-        sort_order: sortOrder,
-        image_type: 'field',
-        ai_crop_x1: cropMeta?.aiCropRect?.x1 ?? null,
-        ai_crop_y1: cropMeta?.aiCropRect?.y1 ?? null,
-        ai_crop_x2: cropMeta?.aiCropRect?.x2 ?? null,
-        ai_crop_y2: cropMeta?.aiCropRect?.y2 ?? null,
-        ai_crop_source_w: cropMeta?.aiCropSourceW ?? null,
-        ai_crop_source_h: cropMeta?.aiCropSourceH ?? null,
-        ai_crop_is_custom: cropMeta?.aiCropIsCustom === true,
-      }
       const [originalSource] = await resolveMediaSources([storagePath], { variant: 'original' })
       const [displaySource] = await resolveMediaSources([storagePath], { variant: 'medium' })
-      _appendDetailGalleryImage(insertedRow, displaySource, displaySource, { originalSource })
+      _appendDetailGalleryImage(reservedRow, displaySource, displaySource, { originalSource })
     }
 
     showToast(`${files.length} photo(s) added.`)

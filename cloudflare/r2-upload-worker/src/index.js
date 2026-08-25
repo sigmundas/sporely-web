@@ -15,7 +15,7 @@ import {
 
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
-const DEFAULT_ALLOWED_METHODS = 'GET, PUT, DELETE, OPTIONS, POST'
+const DEFAULT_ALLOWED_METHODS = 'GET, HEAD, PUT, DELETE, OPTIONS, POST'
 const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
   'Content-Type',
@@ -98,7 +98,11 @@ export default {
       if (error && typeof error.details === 'object' && error.details) {
         payload.details = error.details
       }
-      return jsonResponse(payload, status, request, env)
+      const resp = jsonResponse(payload, status, request, env)
+      // Always expose the error code in a header so HEAD callers can read it
+      // without a response body (HEAD responses have no body per HTTP spec).
+      resp.headers.set('X-Sporely-Error-Code', String(error?.code || 'request_failed'))
+      return resp
     }
   },
 }
@@ -173,6 +177,10 @@ async function handleRequest(request, env, ctx) {
 
   if (request.method === 'GET' && url.pathname.startsWith('/upload/')) {
     return handleDownload(request, env, ctx, url)
+  }
+
+  if (request.method === 'HEAD' && url.pathname.startsWith('/upload/')) {
+    return handleHead(request, env, ctx, url)
   }
 
   if (request.method === 'DELETE' && url.pathname.startsWith('/upload/')) {
@@ -784,6 +792,55 @@ async function handleDownload(request, env, ctx, url) {
     status: 200,
     headers,
   })
+}
+
+async function handleHead(request, env, ctx, url) {
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const authHeader = request.headers.get('Authorization')
+  const token = parseBearerToken(authHeader)
+  const claims = await verifySupabaseJwt(token, env, ctx)
+
+  const key = normalizeObjectKey(url.pathname.slice('/upload/'.length))
+  if (!key) {
+    throw httpError(400, 'invalid_key', 'Missing download key')
+  }
+  if (!await canReadMediaKey(env, claims, key)) {
+    throw httpError(403, 'key_not_allowed', 'Download key is not available to the authenticated user')
+  }
+
+  // Authorization resolved — now check existence via bucket head (no bytes).
+  const located = await findMediaObjectHead(env, key)
+  if (!located) {
+    throw httpError(404, 'media_not_found', 'Media object was not found')
+  }
+
+  const headers = corsHeaders(request, env, origin)
+  headers.set('Cache-Control', 'private, no-store')
+
+  return new Response(null, {
+    status: 200,
+    headers,
+  })
+}
+
+/**
+ * Like findMediaObject but uses bucket.head() instead of bucket.get() to avoid
+ * fetching bytes. Returns { role } if found, null if absent in all buckets.
+ */
+async function findMediaObjectHead(env, key, preferredRole = null) {
+  const candidates = candidateReadBuckets(env, preferredRole)
+  if (!candidates.length) {
+    throw httpError(500, 'missing_bucket', 'No R2 bucket bindings are configured')
+  }
+  for (const target of candidates) {
+    const object = await target.bucket.head(key)
+    if (object) return { role: target.role }
+  }
+  return null
 }
 
 async function handleDelete(request, env, ctx, url) {

@@ -1,6 +1,6 @@
 import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
-import { insertObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, imageExtensionForMimeType, buildObservationImageStoragePath, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
+import { reserveObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, deleteObservationMedia, imageExtensionForMimeType, buildObservationImageStoragePath, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
 import { saveIdentificationRun } from './ai-identification.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
@@ -433,6 +433,7 @@ function _normalizeQueuedImages(imageEntries) {
       uploadMeta: entry?.uploadMeta || null,
       variants: thumbBlob ? { thumb: thumbBlob } : (entry?.variants || null),
       variantMeta: entry?.variantMeta || null,
+      reservedImageId: entry?.reservedImageId ?? null,
     }
   }).filter(entry => isBlob(entry.blob) || isBlob(entry.uploadBlob))
 }
@@ -465,6 +466,7 @@ async function _serializeQueuedImageForStorage(image) {
     variantTypes: thumb ? { thumb: thumb.type } : null,
     variantSizes: thumb ? { thumb: thumb.size } : null,
     variantMeta: image?.variantMeta || null,
+    reservedImageId: image?.reservedImageId ?? null,
   }
 }
 
@@ -1099,25 +1101,60 @@ async function _runSyncQueue() {
           extension: ext,
         })
 
-        const uploadMeta = await uploadPreparedObservationImageVariants(preparedImage, path, {
-          uploadPolicy,
-          uploadOrigin: 'web',
-          userId: authUserId,
-          observationId: obsId,
-        })
-        await insertObservationImage({
-          observation_id: obsId,
-          user_id: authUserId,
-          storage_path: path,
-          image_type: 'field',
-          sort_order: i,
-          aiCropRect: image.aiCropRect,
-          aiCropSourceW: image.aiCropSourceW,
-          aiCropSourceH: image.aiCropSourceH,
-          aiCropIsCustom: image.aiCropIsCustom === true,
-          ...uploadMeta,
-          storage_exif_safe: uploadMeta?.storage_exif_safe === true,
-        })
+        let reservedImageId = Number.isInteger(image.reservedImageId) && image.reservedImageId > 0 ? image.reservedImageId : null
+        if (!reservedImageId) {
+          const reservedRow = await reserveObservationImage({
+            observation_id: obsId,
+            user_id: authUserId,
+            storage_path: path,
+            image_type: 'field',
+            sort_order: i,
+            aiCropRect: image.aiCropRect,
+            aiCropSourceW: image.aiCropSourceW,
+            aiCropSourceH: image.aiCropSourceH,
+            aiCropIsCustom: image.aiCropIsCustom === true,
+            ...preparedImage.uploadMeta,
+            storage_exif_safe: preparedImage.uploadMeta?.storage_exif_safe === true,
+          })
+          reservedImageId = reservedRow.id
+          // Persist so retry reuses the same row. If the existing slot is a
+          // raw Blob (legacy queue shape), serialize preparedImage first —
+          // spreading a Blob yields {} and would silently lose the bytes.
+          const serializedForReserve = await _serializeQueuedImageForStorage(preparedImage)
+          await _updateQueueItem(item.id, current => {
+            if (!current) return current
+            const entries = [...(current.imageEntries || current.imageBlobs || [])]
+            const base = isBlob(entries[i]) ? serializedForReserve : (entries[i] || {})
+            entries[i] = { ...base, reservedImageId }
+            return { ...current, imageEntries: entries }
+          })
+        }
+        try {
+          await uploadPreparedObservationImageVariants(preparedImage, path, {
+            uploadPolicy,
+            uploadOrigin: 'web',
+            userId: authUserId,
+            observationId: obsId,
+            imageId: reservedImageId,
+          })
+        } catch (uploadErr) {
+          if (String(uploadErr?.message || '').includes('Worker upload failed (4')) {
+            // Definite server rejection (4xx) — clean up any partial bytes
+            // (deleteObservationMedia is 404-tolerant so safe when nothing was written)
+            // then remove the reserved row so the next retry gets a fresh reservation.
+            await deleteObservationMedia([path]).catch(() => {})
+            await supabase.from('observation_images').delete().eq('id', reservedImageId).catch(() => {})
+            const serializedForClear = await _serializeQueuedImageForStorage(preparedImage).catch(() => null)
+            await _updateQueueItem(item.id, current => {
+              if (!current) return current
+              const entries = [...(current.imageEntries || current.imageBlobs || [])]
+              const base = isBlob(entries[i]) ? (serializedForClear || {}) : (entries[i] || {})
+              entries[i] = { ...base, reservedImageId: null }
+              return { ...current, imageEntries: entries }
+            }).catch(() => {})
+          }
+          throw uploadErr
+        }
         await syncObservationMediaKeys(obsId, path, { sortOrder: i })
 
         completedImageIndexes.add(i)

@@ -165,6 +165,8 @@ export function buildWorkerUploadHeaders({
   if (sourceHeight !== null) headers['X-Sporely-Source-Height'] = String(sourceHeight)
   if (storedWidth !== null) headers['X-Sporely-Stored-Width'] = String(storedWidth)
   if (storedHeight !== null) headers['X-Sporely-Stored-Height'] = String(storedHeight)
+  const imageId = options?.imageId
+  if (Number.isInteger(imageId) && imageId > 0) headers['X-Sporely-Image-Id'] = String(imageId)
 
   return headers
 }
@@ -368,6 +370,42 @@ async function _uploadViaWorker(path, blob, options = {}) {
     const detail = uploadDetails.bodyText || uploadDetails.statusText || 'Upload failed'
     throw new Error(`Worker upload failed (${uploadDetails.status}): ${detail}`)
   }
+}
+
+async function _headViaWorker(path) {
+  const normalizedPath = normalizeMediaKey(path)
+  if (!normalizedPath) return false
+
+  const session = await getSharedAuthSession()
+  const accessToken = session?.access_token
+  if (!accessToken) throw new Error('Missing authenticated session for media HEAD')
+
+  const mediaUploadBaseUrl = getMediaUploadBaseUrl()
+  if (!mediaUploadBaseUrl) throw new Error('Media upload worker is not configured')
+
+  const response = await fetch(`${mediaUploadBaseUrl}/upload/${_encodeObjectKey(normalizedPath)}`, {
+    method: 'HEAD',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  })
+
+  if (response.ok) return true
+
+  if (response.status === 404) {
+    // Distinguish route-not-found (not_found) from object-not-found (media_not_found).
+    // HEAD responses have no body per HTTP spec, so we read the X-Sporely-Error-Code
+    // header that the worker emits on all error responses.
+    const errorCode = response.headers.get('X-Sporely-Error-Code') || 'unknown'
+
+    if (errorCode === 'media_not_found') return false
+    // Route-level 404 (not_found) or unrecognized — treat as throw so the caller
+    // retains the row conservatively.
+    throw new Error(`Worker HEAD returned unexpected 404: ${errorCode}`)
+  }
+
+  // 401, 403, 5xx, or any other unexpected status is ambiguous.
+  throw new Error(`Worker HEAD failed: ${response.status}`)
 }
 
 async function _deleteViaWorker(path) {
@@ -997,16 +1035,31 @@ export async function uploadPreparedObservationImageVariants(preparedImage, stor
     uploadMeta: preparedImage.uploadMeta || null,
     uploadVariant: 'full',
     uploadOrigin: options?.uploadOrigin || 'web',
+    imageId: options?.imageId ?? null,
   }
 
-  await _uploadToStorage(normalizedPath, preparedImage.uploadBlob, uploadOptions)
+  try {
+    await _uploadToStorage(normalizedPath, preparedImage.uploadBlob, uploadOptions)
+  } catch (err) {
+    err.variant = 'full'
+    err.completedVariants = []
+    throw err
+  }
+
   if (preparedImage.variants?.thumb) {
     const thumbPath = getVariantPath(normalizedPath, 'thumb')
-    await _uploadToStorage(thumbPath, preparedImage.variants.thumb, {
-      ...uploadOptions,
-      uploadVariant: 'thumb',
-      uploadMeta: thumbMeta || preparedImage.uploadMeta || null,
-    })
+    try {
+      await _uploadToStorage(thumbPath, preparedImage.variants.thumb, {
+        ...uploadOptions,
+        uploadVariant: 'thumb',
+        uploadMeta: thumbMeta || preparedImage.uploadMeta || null,
+      })
+    } catch (err) {
+      err.variant = 'thumb'
+      err.completedVariants = ['full']
+      err.thumbPath = thumbPath
+      throw err
+    }
   }
   return preparedImage.uploadMeta
 }
@@ -1128,6 +1181,18 @@ export function buildMediaDeleteTargets(imageRows = [], standalonePaths = []) {
     if (key) targets.add(key)
   }
   return [...targets].filter(Boolean)
+}
+
+/**
+ * Verify whether a storage object actually exists on the upload worker.
+ * Returns true if definitely present, false if definitely absent (404), or
+ * throws if the result is ambiguous (network error, unexpected status).
+ * Safe to call even if no bytes have been written — a 404 is a clean no-op.
+ */
+export async function verifyWorkerObjectExists(storagePath) {
+  const normalizedPath = normalizeMediaKey(storagePath)
+  if (!normalizedPath) return false
+  return _headViaWorker(normalizedPath)
 }
 
 export async function deleteObservationMedia(imageRows, options = {}) {
@@ -1396,6 +1461,53 @@ export async function insertObservationImage(observationImage) {
     throw fallbackError
   }
   return false
+}
+
+export async function reserveObservationImage(observationImage) {
+  const cropRect = normalizeAiCropRect(observationImage?.aiCropRect)
+  const cropSourceW = observationImage?.aiCropSourceW ?? null
+  const cropSourceH = observationImage?.aiCropSourceH ?? null
+  const aiCropIsCustom = observationImage?.aiCropIsCustom === true
+  const payload = {
+    observation_id: observationImage?.observation_id,
+    user_id: observationImage?.user_id,
+    storage_path: normalizeMediaKey(observationImage?.storage_path),
+    image_type: observationImage?.image_type || 'field',
+    sort_order: observationImage?.sort_order ?? 0,
+    ai_crop_x1: cropRect?.x1 ?? null,
+    ai_crop_y1: cropRect?.y1 ?? null,
+    ai_crop_x2: cropRect?.x2 ?? null,
+    ai_crop_y2: cropRect?.y2 ?? null,
+    ai_crop_source_w: cropSourceW,
+    ai_crop_source_h: cropSourceH,
+    ai_crop_is_custom: aiCropIsCustom,
+    upload_mode: observationImage?.upload_mode || null,
+    source_width: observationImage?.source_width ?? null,
+    source_height: observationImage?.source_height ?? null,
+    stored_width: observationImage?.stored_width ?? null,
+    stored_height: observationImage?.stored_height ?? null,
+    stored_bytes: observationImage?.stored_bytes ?? null,
+    storage_exif_safe: observationImage?.storage_exif_safe === true,
+  }
+  const { data, error } = await supabase
+    .from('observation_images')
+    .insert(payload)
+    .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom')
+    .single()
+  if (!error) return data
+  if (_isMissingColumnError(error, 'ai_crop_is_custom')) {
+    _warnMissingAiCropCustomFallback('reserveObservationImage', error, { payload })
+    const payloadWithoutCustom = { ...payload }
+    delete payloadWithoutCustom.ai_crop_is_custom
+    const { data: retryData, error: retryError } = await supabase
+      .from('observation_images')
+      .insert(payloadWithoutCustom)
+      .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h')
+      .single()
+    if (!retryError) return retryData
+    throw retryError
+  }
+  throw error
 }
 
 export async function updateObservationImageCrop(imageId, cropData) {

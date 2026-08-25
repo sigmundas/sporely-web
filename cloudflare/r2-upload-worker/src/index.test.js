@@ -2439,3 +2439,166 @@ test('POST /artsorakel/media omits both coordinates when only one is supplied or
     }
   } finally { upstream.restore() }
 })
+
+// ── HEAD /upload/<key> tests ─────────────────────────────────────
+
+function buildHeadRequest(key, token, origin = 'https://localhost') {
+  return new Request(`https://upload.sporely.no/upload/${key}`, {
+    method: 'HEAD',
+    headers: {
+      Origin: origin,
+      Authorization: `Bearer ${token}`,
+    },
+  })
+}
+
+function makeHeadEnv(bucketEntries = {}, overrides = {}) {
+  const bucket = makeTrackedBucket(bucketEntries)
+  return {
+    ...TEST_ENV,
+    SUPABASE_JWT_SECRET: 'worker-test-secret',
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    MEDIA_STORAGE_MODE: 'legacy',
+    MEDIA_BUCKET: bucket,
+    ...overrides,
+    _bucket: bucket,
+  }
+}
+
+test('HEAD /upload/<key>: authorized HEAD on existing object → 200 no body', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const env = makeHeadEnv({ 'user-123/obs/0_000.webp': { size: 1234 } })
+  env.SUPABASE_JWT_SECRET = jwtSecret
+
+  const res = await worker.fetch(buildHeadRequest('user-123/obs/0_000.webp', token), env, {})
+
+  assert.equal(res.status, 200)
+  // HEAD responses must not have a body
+  const text = await res.text()
+  assert.equal(text, '')
+  assert.equal(res.headers.get('Cache-Control'), 'private, no-store')
+})
+
+test('HEAD /upload/<key>: authorized HEAD on missing object → 404 media_not_found via header', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const env = makeHeadEnv({} /* empty bucket */)
+  env.SUPABASE_JWT_SECRET = jwtSecret
+
+  const res = await worker.fetch(buildHeadRequest('user-123/obs/0_000.webp', token), env, {})
+
+  assert.equal(res.status, 404)
+  assert.equal(res.headers.get('X-Sporely-Error-Code'), 'media_not_found')
+})
+
+test('HEAD /upload/<key>: unauthenticated HEAD (no bearer) → 401', async () => {
+  const env = makeHeadEnv({ 'user-123/obs/0_000.webp': { size: 100 } })
+
+  const res = await worker.fetch(
+    new Request('https://upload.sporely.no/upload/user-123/obs/0_000.webp', {
+      method: 'HEAD',
+      headers: { Origin: 'https://localhost' },
+      // no Authorization header
+    }),
+    env,
+    {},
+  )
+
+  assert.equal(res.status, 401)
+  assert.equal(res.headers.get('X-Sporely-Error-Code'), 'missing_token')
+})
+
+test('HEAD /upload/<key>: foreign owner key → 403 (no existence disclosure)', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()  // sub = user-123
+  const env = makeHeadEnv({ 'other-user/obs/0_000.webp': { size: 100 } })
+  env.SUPABASE_JWT_SECRET = jwtSecret
+
+  // canReadMediaKey queries Supabase to check ownership; return empty arrays
+  // to confirm user-123 does not own the key under other-user/.
+  const restoreFetch = installMockFetchStage2([
+    ['/rest/v1/observation_images', () => ({ body: [] })],
+    ['/rest/v1/observations', () => ({ body: [] })],
+  ])
+  try {
+    const res = await worker.fetch(buildHeadRequest('other-user/obs/0_000.webp', token), env, {})
+
+    assert.equal(res.status, 403)
+    // Must not reveal existence
+    assert.notEqual(res.headers.get('X-Sporely-Error-Code'), 'media_not_found')
+  } finally {
+    restoreFetch()
+  }
+})
+
+test('HEAD /upload/<key>: route-level 404 (unknown path) returns not_found code', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const env = makeHeadEnv({})
+  env.SUPABASE_JWT_SECRET = jwtSecret
+
+  const res = await worker.fetch(
+    new Request('https://upload.sporely.no/nonexistent-route', {
+      method: 'HEAD',
+      headers: {
+        Origin: 'https://localhost',
+        Authorization: `Bearer ${token}`,
+      },
+    }),
+    env,
+    {},
+  )
+
+  assert.equal(res.status, 404)
+  assert.equal(res.headers.get('X-Sporely-Error-Code'), 'not_found')
+})
+
+test('HEAD /upload/<key>: HEAD is included in allowed methods', async () => {
+  const res = await worker.fetch(
+    new Request('https://upload.sporely.no/upload/user-123/obs/0.webp', {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://localhost',
+        'Access-Control-Request-Method': 'HEAD',
+      },
+    }),
+    { ...TEST_ENV },
+    {},
+  )
+
+  assert.equal(res.status, 204)
+  const methods = headerList(res.headers.get('Access-Control-Allow-Methods'))
+  assert.ok(methods.includes('head'), 'HEAD must be in Access-Control-Allow-Methods')
+})
+
+test('HEAD /upload/<key>: works for legacy bucket in legacy mode', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacyBucket = makeTrackedBucket({ 'user-123/obs/0.webp': { size: 500 } })
+  const env = {
+    ...TEST_ENV,
+    SUPABASE_JWT_SECRET: jwtSecret,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    MEDIA_STORAGE_MODE: 'legacy',
+    MEDIA_BUCKET: legacyBucket,
+  }
+
+  const res = await worker.fetch(buildHeadRequest('user-123/obs/0.webp', token), env, {})
+  assert.equal(res.status, 200)
+  assert.ok(legacyBucket.events.some(e => e.op === 'head'))
+})
+
+test('HEAD /upload/<key>: works for private bucket in private mode', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const privateBucket = makeTrackedBucket({ 'user-123/obs/0.webp': { size: 500 } })
+  const env = {
+    ...TEST_ENV,
+    SUPABASE_JWT_SECRET: jwtSecret,
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    MEDIA_STORAGE_MODE: 'private',
+    PRIVATE_MEDIA_BUCKET: privateBucket,
+  }
+
+  const res = await worker.fetch(buildHeadRequest('user-123/obs/0.webp', token), env, {})
+  assert.equal(res.status, 200)
+  assert.ok(privateBucket.events.some(e => e.op === 'head'))
+})

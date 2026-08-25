@@ -2,13 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { supabase } from './supabase.js'
+import { seedSharedAuthSession, clearSharedAuthSessionCache } from './auth-session.js'
 import {
   buildMediaDeleteTargets,
+  buildWorkerUploadHeaders,
   ensureImageIdentitySelect,
   fetchCardImages,
   fetchFirstImages,
   fetchObservationImageRows,
   resolveMediaSources,
+  verifyWorkerObjectExists,
 } from './images.js'
 
 test('buildMediaDeleteTargets includes full, thumb, exact original, and exact mosaic identities', () => {
@@ -361,4 +364,152 @@ test('a row missing id does not collapse other rows', async () => {
     assert.ok(observationIds.has(902))
     assert.ok(rows.length >= 2, `expected at least the two well-formed rows to survive, got ${rows.length}`)
   })
+})
+
+test('buildWorkerUploadHeaders emits X-Sporely-Image-Id for a valid positive integer', () => {
+  const headers = buildWorkerUploadHeaders({
+    blob: new Blob(['x'], { type: 'image/webp' }),
+    accessToken: 'tok',
+    options: { imageId: 42 },
+  })
+  assert.equal(headers['X-Sporely-Image-Id'], '42')
+})
+
+test('buildWorkerUploadHeaders omits X-Sporely-Image-Id when imageId is absent', () => {
+  const headers = buildWorkerUploadHeaders({
+    blob: new Blob(['x'], { type: 'image/webp' }),
+    accessToken: 'tok',
+    options: {},
+  })
+  assert.equal(headers['X-Sporely-Image-Id'], undefined)
+})
+
+test('buildWorkerUploadHeaders omits X-Sporely-Image-Id when imageId is 0', () => {
+  const headers = buildWorkerUploadHeaders({
+    blob: new Blob(['x'], { type: 'image/webp' }),
+    accessToken: 'tok',
+    options: { imageId: 0 },
+  })
+  assert.equal(headers['X-Sporely-Image-Id'], undefined)
+})
+
+test('buildWorkerUploadHeaders omits X-Sporely-Image-Id when imageId is -1', () => {
+  const headers = buildWorkerUploadHeaders({
+    blob: new Blob(['x'], { type: 'image/webp' }),
+    accessToken: 'tok',
+    options: { imageId: -1 },
+  })
+  assert.equal(headers['X-Sporely-Image-Id'], undefined)
+})
+
+test('buildWorkerUploadHeaders omits X-Sporely-Image-Id when imageId is a string', () => {
+  const headers = buildWorkerUploadHeaders({
+    blob: new Blob(['x'], { type: 'image/webp' }),
+    accessToken: 'tok',
+    options: { imageId: '42' },
+  })
+  assert.equal(headers['X-Sporely-Image-Id'], undefined)
+})
+
+// ── verifyWorkerObjectExists / _headViaWorker tri-state tests ────────────────
+
+function withHeadFakeFetch(statusCode, headers = {}, restoreAfter) {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (_url, _init) => {
+    return new Response('', {
+      status: statusCode,
+      headers: { 'Content-Type': 'application/json', ...headers },
+    })
+  }
+  return () => { globalThis.fetch = originalFetch }
+}
+
+test('verifyWorkerObjectExists: HEAD 200 → true', async () => {
+  globalThis.__SPORLEY_TEST_ENV__ = { VITE_MEDIA_UPLOAD_BASE_URL: 'https://upload.sporely.no' }
+  seedSharedAuthSession({ access_token: 'fake-token' })
+  const restore = withHeadFakeFetch(200)
+  try {
+    const result = await verifyWorkerObjectExists('user/obs/0.webp')
+    assert.equal(result, true)
+  } finally {
+    restore()
+    clearSharedAuthSessionCache()
+    delete globalThis.__SPORLEY_TEST_ENV__
+  }
+})
+
+test('verifyWorkerObjectExists: HEAD 404 with media_not_found → false', async () => {
+  globalThis.__SPORLEY_TEST_ENV__ = { VITE_MEDIA_UPLOAD_BASE_URL: 'https://upload.sporely.no' }
+  seedSharedAuthSession({ access_token: 'fake-token' })
+  const restore = withHeadFakeFetch(404, { 'X-Sporely-Error-Code': 'media_not_found' })
+  try {
+    const result = await verifyWorkerObjectExists('user/obs/0.webp')
+    assert.equal(result, false)
+  } finally {
+    restore()
+    clearSharedAuthSessionCache()
+    delete globalThis.__SPORLEY_TEST_ENV__
+  }
+})
+
+test('verifyWorkerObjectExists: HEAD 404 with not_found (route error) → throws', async () => {
+  globalThis.__SPORLEY_TEST_ENV__ = { VITE_MEDIA_UPLOAD_BASE_URL: 'https://upload.sporely.no' }
+  seedSharedAuthSession({ access_token: 'fake-token' })
+  const restore = withHeadFakeFetch(404, { 'X-Sporely-Error-Code': 'not_found' })
+  try {
+    await assert.rejects(
+      () => verifyWorkerObjectExists('user/obs/0.webp'),
+      /unexpected 404/,
+    )
+  } finally {
+    restore()
+    clearSharedAuthSessionCache()
+    delete globalThis.__SPORLEY_TEST_ENV__
+  }
+})
+
+test('verifyWorkerObjectExists: HEAD 401 → throws', async () => {
+  globalThis.__SPORLEY_TEST_ENV__ = { VITE_MEDIA_UPLOAD_BASE_URL: 'https://upload.sporely.no' }
+  seedSharedAuthSession({ access_token: 'fake-token' })
+  const restore = withHeadFakeFetch(401, { 'X-Sporely-Error-Code': 'missing_token' })
+  try {
+    await assert.rejects(
+      () => verifyWorkerObjectExists('user/obs/0.webp'),
+      /Worker HEAD failed: 401/,
+    )
+  } finally {
+    restore()
+    clearSharedAuthSessionCache()
+    delete globalThis.__SPORLEY_TEST_ENV__
+  }
+})
+
+test('verifyWorkerObjectExists: missing token → throws', async () => {
+  globalThis.__SPORLEY_TEST_ENV__ = { VITE_MEDIA_UPLOAD_BASE_URL: 'https://upload.sporely.no' }
+  clearSharedAuthSessionCache()
+  // Seed a null session so getSharedAuthSession returns null quickly without hitting Supabase
+  seedSharedAuthSession(null)
+  try {
+    await assert.rejects(
+      () => verifyWorkerObjectExists('user/obs/0.webp'),
+      /Missing authenticated session/,
+    )
+  } finally {
+    clearSharedAuthSessionCache()
+    delete globalThis.__SPORLEY_TEST_ENV__
+  }
+})
+
+test('verifyWorkerObjectExists: missing base URL → throws', async () => {
+  globalThis.__SPORLEY_TEST_ENV__ = { VITE_MEDIA_UPLOAD_BASE_URL: '' }
+  seedSharedAuthSession({ access_token: 'fake-token' })
+  try {
+    await assert.rejects(
+      () => verifyWorkerObjectExists('user/obs/0.webp'),
+      /not configured/,
+    )
+  } finally {
+    clearSharedAuthSessionCache()
+    delete globalThis.__SPORLEY_TEST_ENV__
+  }
 })
