@@ -9,6 +9,12 @@ This is the shared sync specification for `sporely` (desktop) and `sporely-web` 
 
 Any change to sync behavior must update both copies in the same work item.
 
+This contract is the behavioral specification. For implementation
+navigation — entry points, canonical function ownership, cloud-write and
+destructive boundaries, and the staged refactoring plan — see
+[`cloud-sync-architecture.md`](cloud-sync-architecture.md) (desktop
+repository only).
+
 ## Purpose
 
 Sporely is local-first on desktop and cloud-connected across desktop, web, and Android. Sync should copy shared observation and scientific data without silently destroying local files, cloud photos, or work from another device.
@@ -55,6 +61,18 @@ Plain English comes first; technical terms are in parentheses.
 11. **All clients share the same state meanings.** Desktop, web, Android, cloud functions, and media workers must distinguish active, measurement-only, broken, and deleted images consistently.
 12. **Identity repair is checkbox-independent.** A local row with a lost `cloud_id` must be reconciled with the matching remote row by `desktop_id` regardless of the current gallery checkbox. Repair restores identity; it does not upload bytes. Recovery of identity for an unchecked image lets the byte gate correctly refuse re-uploads and lets a pending tombstone complete instead of creating a duplicate.
 13. **The legacy `artsobs_publish_excluded_image_ids_<obs>` setting is publication-only.** Its values must never automatically tombstone or otherwise remove cloud media. They may surface as audit hints in a later stage but never independently drive cloud-side change.
+14. **A partial remote collection is never authoritative remote state.** PostgREST (and any bounded API) can silently cap a response at the server row limit while returning HTTP 200. A truncated collection must never be used to conclude that rows are absent, to compute deletions, or to drive any diff against local state.
+15. **Bounded or paginated remote reads must be exhausted successfully before absence may be interpreted as deletion.** If any page fails, the whole read fails — the client must raise, not return the pages fetched so far. Absence of a row is meaningful only after a complete, successful paginated read of the relevant scope.
+16. **Incomplete remote data must never be stored as a sync snapshot.** The known-good baseline may only be persisted from a complete, successful remote read (and after all required child work succeeds). A snapshot recorded from truncated data poisons every future three-way comparison for that observation.
+17. **PostgREST pagination must use deterministic ordering.** Every paginated bulk read must include an explicit `order=` clause with a unique tie-breaker (`id.asc`); offset-based paging over an unstable order can silently skip or duplicate rows across pages.
+18. **Download from Cloud is a strict zero-cloud-write mode.** A pull-only run must complete with `cloud_writes_completed == 0` and an empty blocked-write list. Every write path — PATCH, POST, DELETE, RPC mutations, storage upload, storage removal, and identity write-backs — is out of scope for this mode.
+19. **Pull-only write blocking is defense in depth, not expected control flow.** The fail-closed pull-only client wrapper exists to catch mistakes, not to be exercised. Pull-side code must gate its own writes at the source; any blocked write attempt recorded during a Download-from-Cloud run is a defect to fix at the source, not a handled event. New client writer methods must be added to the pull-only blocklist; new read methods join the allowlist only as an explicit, reviewed choice.
+20. **The local `cloud_id` is the primary direct local→cloud observation identity.** Once it verifies against an existing same-owner cloud row, that row is the push target. The remote `desktop_id` is the reverse cloud→local link and an identity recovery mechanism — never the primary lookup.
+21. **A missing remote `desktop_id` must never cause object creation when a verified local `cloud_id` already identifies the remote object.** Download from Cloud legitimately creates local rows with `cloud_id` set while the remote `desktop_id` remains NULL until a future normal (write-enabled) sync heals the reverse link. Resolving push identity by reverse link alone creates duplicate cloud observations.
+22. **Direct and reverse identity links resolving to different objects is an identity conflict, not permission to create a third object.** The same applies to an ambiguous reverse-link match (multiple rows carrying one `desktop_id`). The push must fail safely — no update of either candidate, no creation, no snapshot — and the local observation stays dirty/retryable for review.
+23. **Observation creation (POST) is a last resort.** It is allowed only after direct identity verification and reverse-link recovery both find no target. "Lookup failed" never automatically means "create" while the local row carries a direct cloud identity.
+24. **No no-op cloud writes on sync paths.** `observation_images.updated_at` is trigger-bumped on EVERY update, for every role, regardless of whether values changed — so a value-identical PATCH is a real child-change cursor event, not a harmless idempotent write. Before any cloud write in a sync path, check whether the target value already matches and skip the request if so. (Live incident 2026-08-24: unconditional `desktop_id` relink PATCHes during pull rewrote ~2 500 image rows per sync and created a self-sustaining full child re-pull echo loop.)
+25. **The child-change cursor must commit the true `MAX(updated_at, id)` tuple over every inspected row, with numeric id ordering.** Row ids compare numerically, never as strings (`'10000' > '9999'`), and the strict filter and the advancement comparison must use identical ordering. The cursor advances only after `pull_all` succeeds; a failed pull leaves the cursor untouched so the changes are re-detected next sync.
 
 ## Storage of desired cloud image-byte state
 
@@ -63,7 +81,7 @@ Local SQLite is authoritative:
 - `images.cloud_id` — the current cloud identity link (if any).
 - `image_tombstones` — durable explicit-deletion intent.
 - `settings["sporely_cloud_image_storage_excluded_ids_<obs>"]` — the per-observation set of local image ids the user has excluded from Sporely Cloud image storage.
-- `settings["sporely_cloud_image_storage_intent_ids_<obs>"]` — the per-observation storage-intent ledger. Only membership in this ledger proves an explicit decision (excluded or desired) exists for that image. Absence from the excluded set alone proves nothing.
+- `settings["sporely_cloud_image_storage_intent_ids_<obs>"]` — the per-observation storage-intent ledger. Only membership in this ledger proves an explicit decision (excluded or desired) exists for that image. Absence from the excluded set alone proves nothing — it may mean "explicitly desired" or "never decided." The observation-level init sentinel is retired; late-imported microscope frames must not inherit a stale "already initialized" flag.
 - `settings["sporely_cloud_image_promotion_pending_<obs>_<img>"]` — a local pending marker written *before* the anchor-promotion reservation PATCH. Its presence together with a non-NULL remote `storage_path` marks the Worker key as UNCONFIRMED (reserved but not yet proven to hold bytes) and must not be trusted as proof of bytes.
 
 The canonical byte-storage predicate is `cloud_image_bytes_desired(observation_id, image_id)`:
@@ -76,9 +94,10 @@ The canonical byte-storage predicate is `cloud_image_bytes_desired(observation_i
 
 A linked metadata-only anchor (valid `cloud_id`, remote `storage_path` NULL) whose bytes become desired is promoted on its existing row rather than by creating a new row:
 
-- The Worker media key is reserved via an owner-scoped conditional PATCH with filter `storage_path=is.null` (writing a candidate key only when the remote row is still NULL), guarded by the local pending marker written *before* the PATCH.
-- On upload failure the partial R2 objects are removed and the key is released via `storage_path=eq.<exact reserved key>`, so a competing writer's key is never clobbered.
-- A non-NULL `storage_path` combined with a live promotion-pending marker means UNCONFIRMED — web clients must tolerate 404s on media keys during the reservation window and treat such keys as not-yet-available rather than as broken media.
+- The Worker media key is reserved via an owner-scoped conditional PATCH with filter `storage_path=is.null` — writing a candidate key only when the remote row is still NULL. The write is guarded by the local pending marker written *before* the PATCH.
+- On successful reservation the upload proceeds; on confirmed upload the marker is cleared.
+- On upload failure the partial R2 objects are removed and the key is released via a second owner-scoped conditional PATCH with filter `storage_path=eq.<exact reserved key>`, so a competing writer's key is never clobbered.
+- A non-NULL `storage_path` combined with a live promotion-pending marker means UNCONFIRMED and must not be treated as bytes present. Once the marker is cleared, `storage_path` is authoritative again.
 
 `SporelyCloudClient.upload_image_file` and `SporelyCloudClient.upload_original_image_file` refuse to send bytes when the predicate returns `False`, raising `CloudImageBytesNotDesiredError`. Recovery flows opt in by passing `recovery_authorized=True`.
 
@@ -224,6 +243,35 @@ The gallery checkbox and context-menu command share this lifecycle:
 - Ask whether to accept the deletion, restore cloud data from local files, or remain local-only.
 - Do not repeatedly re-upload without a user decision.
 
+## Child-change detection (`updated_at` cursor)
+
+Child rows (`observation_images`, `spore_measurements`) can change in the
+cloud without their parent observation changing, which the observation-level
+fast path would otherwise miss. Detection works as follows:
+
+- **Server side** (migration `20260824120000`): `observation_images.updated_at`
+  is set to `now()` by a `BEFORE INSERT OR UPDATE` trigger unconditionally,
+  for every role — service-role and admin writes advance it too. Historical
+  values come only from the migration backfill. A covering index
+  `(user_id, updated_at, id)` supports the keyset probe.
+- **Desktop probe**: each sync reads rows with `updated_at >= cursor_ts`
+  (paginated, ordered `updated_at.asc,id.asc`) and applies a strict
+  client-side tuple filter: a row counts as changed only when
+  `(updated_at, id) > (cursor_ts, cursor_id)`, with ids compared
+  numerically. Measurements use the same scheme on their own leg.
+- **Forced pulls**: parent observations of changed child rows are passed to
+  `pull_all` as forced ids, bypassing the unchanged-observation pruning for
+  exactly those observations — never a blanket `full_pull`.
+- **Cursor persistence**: the per-leg `(ts, id)` cursor (v2) is stored in
+  desktop app settings and advances to the maximum inspected tuple only
+  after `pull_all` succeeds.
+- **Consequence — rule 24**: because the trigger stamps every UPDATE, any
+  no-op PATCH the desktop issues during pull becomes next sync's "change".
+  Sync-path writes must be skipped when the remote value already matches
+  (e.g. `desktop_id` relink is guarded by an equality check).
+- Hard DELETEs leave no cursor trace; they are covered by the periodic full
+  child safety scan, not by the probe.
+
 ## Retry-safe sequencing
 
 Image upload should proceed as:
@@ -291,6 +339,46 @@ A follow-up prevented automatic re-upload after this conversion. It stopped an o
 
 Reported examples include Mica cap, Boletales, and *Mycena haematopus*. These are audit starting points, not a complete list.
 
+## Incident: truncated bulk reads, August 2026
+
+A bulk image-metadata fetch issued one unpaginated PostgREST GET for the
+image rows of many observations at once. The server silently capped the
+response at its row limit (1000 rows) while returning HTTP 200, so the
+client treated a truncated collection as the complete remote state. Effects:
+
+- newly pulled observations whose image rows fell past the cap appeared to
+  have zero images;
+- the diff against local state produced false "cloud removed local image
+  files" conflicts.
+
+The repair made `_get_paginated` the canonical bulk reader: explicit
+`limit`/`offset` paging until a short page, a mandatory deterministic
+`order=` clause with `id.asc` tie-breaker, and hard failure (no partial
+result) when any page errors. Batched `in.(…)` queries additionally
+paginate each batch — batching bounds URL length and is not a substitute
+for pagination. Safety rules 14–17 encode the lessons; regression tests
+live in `tests/test_cloud_download_only.py` (desktop), including the guard
+that a page failure can never yield a page-1-only snapshot.
+
+## Incident: duplicate cloud observations after pull-only import, August 2026
+
+Observations imported by Download from Cloud carry a valid local `cloud_id`
+while the remote `desktop_id` remains NULL (pull-only performs zero cloud
+writes, so the reverse link is deliberately not written back). The desktop
+push path resolved identity only by the reverse link: when such an
+observation later became dirty, the `desktop_id` lookup found nothing, the
+client POSTed a new cloud observation, and the caller overwrote the correct
+local `cloud_id` with the duplicate's id. The next pull then saw the original
+cloud row as unlinked and imported it as a second local observation. Fourteen
+duplicate cloud observations were created before the defect was found.
+
+The repair established a canonical push-identity resolver: a verified local
+`cloud_id` is the primary identity (PATCH, never POST); the reverse
+`desktop_id` link is recovery-only and must match uniquely; disagreement or
+ambiguity fails safely and keeps the observation retryable. Safety rules
+20–23 encode the lessons; regression tests live in
+`tests/test_observation_push_identity.py` (desktop).
+
 ## Repair plan
 
 ### Phase 0 — stop further damage (shipped)
@@ -337,7 +425,8 @@ Stage 1 implemented on desktop:
 - `SporelyCloudClient.upload_image_file` and `SporelyCloudClient.upload_original_image_file` refuse to send bytes for an image the user has unchecked, raising `CloudImageBytesNotDesiredError`. The gate fails closed on missing identity: normal-path callers must pass valid `observation_id` and `image_id`; recovery flows opt in by passing `recovery_authorized=True` (the only intentional exception, waiving the identity requirement for auditability).
 - `_push_images_for_observation` guards the two byte-upload call sites and the `prepare_images_cb=None` fallback branch with the same predicate.
 - Identity repair (`_associate_persisted_cloud_images`) is decoupled from the checkbox and works by unambiguous `desktop_id` match.
-- A non-destructive initializer `_initialize_cloud_image_storage_desired_state_for_observation` seeds the storage-excluded set on the first sync path (invoked at the top of `_push_images_for_observation`, immediately after pending image tombstones are pushed, before any candidate filtering or byte-upload boundary) — not on gallery open — so background/headless sync cannot upload the full local microscope set for an observation the user has never viewed. UI still calls the same initializer for display consistency but is not required for correctness. Rules: uploaded images stay desired; delete-pending / deleted images are excluded; local-only field images stay desired; local-only microscope images use a sparse per-magnification default when no image in the group already has a cloud identity.
+- A non-destructive initializer `_initialize_cloud_image_storage_desired_state_for_observation` seeds the storage-excluded set on the first sync path (invoked at the top of `_push_images_for_observation`, immediately after pending image tombstones are pushed, before any candidate filtering or byte-upload boundary) — not on gallery open — so background/headless sync cannot upload the full local microscope set for an observation the user has never viewed. It is now a thin alias of `_ensure_cloud_image_storage_intent_initialized`, the canonical per-image intent-ledger entry point (see "Storage of desired cloud image-byte state" above). UI still calls the same initializer for display consistency but is not required for correctness. Per-image seeding rules follow the ledger semantics: uploaded images stay desired; delete-pending / deleted images are excluded; local-only field images stay desired; each local-only microscope image is decided on its own — the retired group-freeze rule (per-magnification sparse default gated on whether any image in the group already had a cloud identity) is gone.
+- Byte-upload ordering invariant: `cloud_image_bytes_desired` is absence-based and does not consult the ledger, so every byte-upload path MUST run `_ensure_cloud_image_storage_intent_initialized` before evaluating desiredness. Currently enforced by convention at push start (`_push_images_for_observation`) and at the dirty scan.
 - Legacy Artsobs publication exclusions are not migrated into the new set.
 - The reason enum split: `PENDING_REASON_EXCLUDED` remains for internal `excluded_ids` arguments; the new `PENDING_REASON_NOT_DESIRED_BY_USER` reports gallery-desired-state rejects.
 
