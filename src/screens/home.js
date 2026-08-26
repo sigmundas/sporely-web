@@ -1151,7 +1151,7 @@ async function checkSyncStatus({ generation = _homeRenderGeneration, userId = st
 }
 
 function _esc(str) {
-  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
 function _initials(value) {
