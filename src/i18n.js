@@ -310,6 +310,10 @@ const messages = {
     'profile.pendingRequests': 'Pending Requests',
     'profile.friends': 'Friends',
     'profile.noFriends': 'No friends yet.',
+    'profile.blockedUsers': 'Blocked users',
+    'profile.noBlockedUsers': 'No blocked users.',
+    'profile.unblock': 'Unblock',
+    'profile.unblocked': 'User unblocked',
     'profile.inviteFriends': 'Invite friends',
     'invite.text': 'Check out Sporely, a field app for documenting your finds.',
     'profile.signOut': 'Sign out',
@@ -795,6 +799,10 @@ const messages = {
     'profile.pendingRequests': 'Ventende forespørsler',
     'profile.friends': 'Venner',
     'profile.noFriends': 'Ingen venner ennå.',
+    'profile.blockedUsers': 'Blokkerte brukere',
+    'profile.noBlockedUsers': 'Ingen blokkerte brukere.',
+    'profile.unblock': 'Fjern blokkering',
+    'profile.unblocked': 'Bruker fjernet fra blokkeringsliste',
     'profile.inviteFriends': 'Inviter venner',
     'invite.text': 'Sjekk ut Sporely, en felt-app for å dokumentere funn.',
     'profile.signOut': 'Logg ut',
@@ -1266,6 +1274,10 @@ const messages = {
     'profile.pendingRequests': 'Väntande förfrågningar',
     'profile.friends': 'Vänner',
     'profile.noFriends': 'Inga vänner ännu.',
+    'profile.blockedUsers': 'Blockerade användare',
+    'profile.noBlockedUsers': 'Inga blockerade användare.',
+    'profile.unblock': 'Avblockera',
+    'profile.unblocked': 'Användare avblockerad',
     'profile.inviteFriends': 'Bjud in vänner',
     'invite.text': 'Kolla in Sporely, en fält-app för att dokumentera fynd.',
     'profile.signOut': 'Logga ut',
@@ -1737,6 +1749,10 @@ const messages = {
     'profile.pendingRequests': 'Ausstehende Anfragen',
     'profile.friends': 'Freunde',
     'profile.noFriends': 'Noch keine Freunde.',
+    'profile.blockedUsers': 'Blockierte Nutzer',
+    'profile.noBlockedUsers': 'Keine blockierten Nutzer.',
+    'profile.unblock': 'Entsperren',
+    'profile.unblocked': 'Nutzer entsperrt',
     'profile.inviteFriends': 'Freunde einladen',
     'invite.text': 'Schau dir Sporely an, eine Feld-App zur Dokumentation deiner Funde.',
     'profile.signOut': 'Abmelden',
@@ -2169,7 +2185,8 @@ export function applyStaticTranslations() {
   setText('#profile-title', 'profile.title')
   setText('#profile-save-btn', 'profile.saveProfile')
   setText('#profile-pending-title', 'profile.pendingRequests')
-  setText('#profile-friends-title', 'profile.friends')
+  setText('#friends-tab', 'profile.friends')
+  setText('#blocked-tab', 'profile.blockedUsers')
   setText('#profile-cloud-plan-header', 'profile.cloudStorage')
   setText('#profile-cloud-upload-key', 'profile.uploads')
   setText('#profile-cloud-usage-key', 'profile.storage')
@@ -2182,6 +2199,8 @@ export function applyStaticTranslations() {
   setAria('#profile-close-btn', 'common.close')
   const friendsEmpty = document.querySelector('#friends-list > div')
   if (friendsEmpty) friendsEmpty.textContent = t('profile.noFriends')
+  const blockedEmpty = document.querySelector('#blocked-list > div')
+  if (blockedEmpty) blockedEmpty.textContent = t('profile.noBlockedUsers')
 
   setText('.avatar-crop-header', 'avatar.cropPhoto')
   setText('.avatar-crop-hint', 'avatar.hint')

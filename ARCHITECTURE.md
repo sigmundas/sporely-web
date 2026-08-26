@@ -84,7 +84,7 @@ sporely-web/
         ├── capture.js      Camera (getUserMedia), shutter, batch capture
         ├── review.js       Review one captured observation batch, save to Supabase
         ├── import_review.js Import/group photos, native EXIF/GPS handling, save flow
-        └── profile.js      Profile editing, avatar crop/upload, friends, delete-account action
+        └── profile.js      Profile editing, avatar crop/upload, friends + blocked-users management, delete-account action
 ```
 
 ---
@@ -185,7 +185,7 @@ AI crop metadata is stored per image and only affects Artsorakel requests. Galle
 - The detail screen uses the community view for read-only browsing and the base table for owner writes and reruns.
 
 ### Moderation / UGC Compliance
-- `user_blocks` — Enforces one-way user blocking for feed filtering (`blocker_id`, `blocked_id`).
+- `user_blocks` — Enforces one-way user blocking for feed filtering (`blocker_id`, `blocked_id`). The profile screen's "Friends | Blocked users" pill lists the caller's blocks (names resolved via the `get_blocked_user_profiles` RPC, since `public_profiles` hides blocked pairs) and unblocks via RLS-guarded DELETE.
 - `reports` — Tracks user-reported objectionable content (`observation_id`, `comment_id`, `reason`).
 - These tables, alongside `profiles.is_banned`, are required for Google Play Store User Generated Content (UGC) compliance. RLS and Views (e.g. `observations_community_view`) automatically filter out blocked or banned content.
 

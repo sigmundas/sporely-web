@@ -58,6 +58,15 @@ export function initProfile() {
     btn.disabled = false
     btn.textContent = originalLabel
   })
+  document.getElementById('friends-blocked-tabs')?.addEventListener('click', e => {
+    const btn = e.target.closest('.scope-tab[data-tab]')
+    if (!btn) return
+    const tab = btn.dataset.tab
+    document.querySelectorAll('#friends-blocked-tabs .scope-tab').forEach(b => b.classList.toggle('active', b === btn))
+    document.getElementById('friends-panel').style.display = tab === 'friends' ? '' : 'none'
+    document.getElementById('blocked-panel').style.display  = tab === 'blocked'  ? '' : 'none'
+    if (tab === 'blocked') _loadBlocked()
+  })
   document.getElementById('delete-account-btn').addEventListener('click', _deleteAccount)
   document.getElementById('profile-save-btn').addEventListener('click', _saveProfile)
   document.getElementById('profile-username')?.addEventListener('input', _syncProfileSaveEnabled)
@@ -1215,6 +1224,64 @@ async function _removeFriend(friendUserId) {
   loadProfile()
 }
 
+// ── Blocked users list ────────────────────────────────────────────────────────
+
+async function _loadBlocked() {
+  const uid = state.user?.id
+  if (!uid) return
+
+  const list = document.getElementById('blocked-list')
+
+  const { data: rows, error } = await supabase.rpc('get_blocked_user_profiles')
+
+  if (error) {
+    list.innerHTML = `<div style="color:var(--text-dim);font-size:13px">${_esc(error.message)}</div>`
+    return
+  }
+
+  if (!rows?.length) {
+    list.innerHTML = `<div style="color:var(--text-dim);font-size:13px">${t('profile.noBlockedUsers')}</div>`
+    return
+  }
+
+  list.innerHTML = rows.map(_blockedUserRowHtml).join('')
+
+  list.querySelectorAll('.friend-remove-btn').forEach(btn => {
+    btn.addEventListener('click', () => _unblockUser(btn.dataset.id))
+  })
+}
+
+function _blockedUserRowHtml(row) {
+  const label = row.username ? `@${row.username}` : (row.display_name || t('common.unknown'))
+  const initial = label.replace('@', '')[0]?.toUpperCase() || '?'
+  const avatarHtml = row.avatar_url
+    ? `<img src="${_esc(row.avatar_url)}" alt="" class="friend-avatar" style="object-fit:cover;border-radius:50%">`
+    : `<div class="friend-avatar">${_esc(initial)}</div>`
+  return `<div class="friend-row">
+    ${avatarHtml}
+    <div class="friend-email">${_esc(label)}</div>
+    <button class="friend-remove-btn" data-id="${_esc(row.blocked_id)}">${t('profile.unblock')}</button>
+  </div>`
+}
+
+export function blockedUserRowHtmlForTests(row) {
+  return _blockedUserRowHtml(row)
+}
+
+async function _unblockUser(blockedId) {
+  if (!requireCloudMutation({ showToast }).allowed) return
+  const uid = state.user?.id
+  if (!uid) return
+  const { error } = await supabase
+    .from('user_blocks')
+    .delete()
+    .eq('blocker_id', uid)
+    .eq('blocked_id', blockedId)
+  if (error) { showToast(t('common.errorPrefix', { message: error.message })); return }
+  showToast(t('profile.unblocked'))
+  _loadBlocked()
+}
+
 async function _deleteAccount() {
   const email = state.user?.email || 'this account'
   const confirmed = await _confirmDeleteAccount(email)
@@ -1306,5 +1373,5 @@ function _confirmDeleteAccount(email) {
 }
 
 function _esc(str) {
-  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }

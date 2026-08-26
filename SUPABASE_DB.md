@@ -58,6 +58,12 @@ This repository owns the W2–W5 cloud and web implementation described there.
 - `user_blocks`
   - Enforces one-way user blocking for feed filtering
   - Columns: `blocker_id` (uuid), `blocked_id` (uuid), `created_at`
+  - RLS: blocker inserts/deletes own rows; both blocker and blocked can SELECT. Unblock is a plain DELETE (used by the web Profile "Blocked users" tab)
+- `get_blocked_user_profiles()` (RPC)
+  - Returns `blocked_id`, `username`, `display_name`, `avatar_url`, block `created_at` for the caller's own `user_blocks` rows only (`blocker_id = auth.uid()`)
+  - Exists because `public_profiles` / `read_public_profiles` hides blocked pairs, so a blocker could not otherwise resolve names in their own block list
+  - `SECURITY DEFINER`, `search_path = 'public'`, granted to `authenticated` / `service_role` only (anon cannot execute). Accepted residual disclosure: shows current identity of blocked users even if banned or blocking back, so the user can recognize whom to unblock
+  - Added by `20260824140000_get_blocked_user_profiles_rpc.sql`; consumed by the web Profile "Friends | Blocked users" pill (`src/screens/profile.js`)
 - `reports`
   - Tracks user-reported objectionable content for admin review
   - Columns: `id`, `reporter_id` (uuid), `reported_user_id` (uuid), `observation_id` (nullable FK), `comment_id` (nullable FK), `reason` (text), `status` (enum: 'pending'/'reviewed'/'resolved'), `created_at`

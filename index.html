@@ -1091,8 +1091,16 @@
           </div>
 
           <div class="profile-section">
-            <div class="profile-section-title" id="profile-friends-title">Friends</div>
-            <div id="friends-list"><div style="color:var(--text-dim);font-size:13px">No friends yet.</div></div>
+            <div class="scope-tabs" id="friends-blocked-tabs" style="margin-bottom:12px">
+              <button class="scope-tab active" id="friends-tab" data-tab="friends"></button>
+              <button class="scope-tab" id="blocked-tab" data-tab="blocked"></button>
+            </div>
+            <div id="friends-panel">
+              <div id="friends-list"><div style="color:var(--text-dim);font-size:13px">No friends yet.</div></div>
+            </div>
+            <div id="blocked-panel" style="display:none">
+              <div id="blocked-list"><div style="color:var(--text-dim);font-size:13px">No blocked users.</div></div>
+            </div>
           </div>
 
           <div class="profile-section" id="pending-section" style="display:none">
