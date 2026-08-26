@@ -180,26 +180,26 @@ BEGIN
   );
 
   -- ── Mosaics for version ordering test ───────────────────────────────
-  -- Three mosaics: version=1, version=2, version=2 (higher id → wins).
+  -- Three mosaics: version=1, version=2, version=3 (highest version wins).
   INSERT INTO public.spore_measurement_mosaics
-    (observation_id, user_id, storage_key, width_px, height_px, version,
+    (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version,
      tile_width_px, tile_height_px, common_crop_width_um, common_crop_height_um,
      media_version, canonical_bucket)
-  VALUES (mosaic_obs_id, owner_id, 'private/mosaic-v1.jpg', 800, 400, 1, 64, 64, 10.0, 8.0, 1, 'private')
+  VALUES (mosaic_obs_id, owner_id, 'private/mosaic-v1.jpg', 800, 400, 64, 1, 64, 64, 10.0, 8.0, 1, 'private')
   RETURNING id INTO mosaic_id_v1;
 
   INSERT INTO public.spore_measurement_mosaics
-    (observation_id, user_id, storage_key, width_px, height_px, version,
+    (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version,
      tile_width_px, tile_height_px, common_crop_width_um, common_crop_height_um,
      media_version, canonical_bucket)
-  VALUES (mosaic_obs_id, owner_id, 'private/mosaic-v2.jpg', 1200, 600, 2, 64, 64, 10.0, 8.0, 2, 'private')
+  VALUES (mosaic_obs_id, owner_id, 'private/mosaic-v2.jpg', 1200, 600, 64, 2, 64, 64, 10.0, 8.0, 2, 'private')
   RETURNING id INTO mosaic_id_v2;
 
   INSERT INTO public.spore_measurement_mosaics
-    (observation_id, user_id, storage_key, width_px, height_px, version,
+    (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version,
      tile_width_px, tile_height_px, common_crop_width_um, common_crop_height_um,
      media_version, canonical_bucket)
-  VALUES (mosaic_obs_id, owner_id, 'private/mosaic-v2b.jpg', 1600, 800, 2, 64, 64, 10.0, 8.0, 3, 'private')
+  VALUES (mosaic_obs_id, owner_id, 'private/mosaic-v2b.jpg', 1600, 800, 64, 3, 64, 64, 10.0, 8.0, 3, 'private')
   RETURNING id INTO mosaic_id_v2b;
 
   IF mosaic_id_v2b <= mosaic_id_v2 THEN
@@ -276,8 +276,10 @@ BEGIN
     RAISE EXCEPTION 'M13: observation with no measurements did not return sporeMeasurementCount = 0';
   END IF;
 
-  -- M8: latest mosaic selected by version DESC, id DESC tiebreak.
-  -- mosaic_id_v2b has version=2 and the higher id — it must win over mosaic_id_v2 (same version, lower id).
+  -- M8: latest mosaic selected by version DESC.
+  -- mosaic_id_v2b has version=3 — it must win over mosaic_id_v2 (version=2) and mosaic_id_v1 (version=1).
+  -- (The unique constraint on (observation_id, version) prevents duplicate versions, so id tiebreaking
+  -- cannot be tested within a single observation; version DESC ordering is the effective selection rule.)
   SELECT "sporeMosaic" INTO mosaic_json
   FROM public.get_observation_microscopy_presentations(ARRAY[mosaic_obs_id])
   WHERE "observationId" = mosaic_obs_id;
@@ -288,12 +290,12 @@ BEGIN
 
   IF (mosaic_json->>'mosaicId')::bigint IS DISTINCT FROM mosaic_id_v2b THEN
     RAISE EXCEPTION
-      'M8: wrong mosaic selected. Expected id=% (version=2, higher id), got mosaicId=%',
+      'M8: wrong mosaic selected. Expected id=% (version=3, highest), got mosaicId=%',
       mosaic_id_v2b, mosaic_json->>'mosaicId';
   END IF;
 
-  IF (mosaic_json->>'version')::int <> 2 THEN
-    RAISE EXCEPTION 'M8b: mosaic version should be 2, got %', mosaic_json->>'version';
+  IF (mosaic_json->>'version')::int <> 3 THEN
+    RAISE EXCEPTION 'M8b: mosaic version should be 3, got %', mosaic_json->>'version';
   END IF;
 
   IF (mosaic_json->>'mosaicMediaUrl') IS NULL THEN

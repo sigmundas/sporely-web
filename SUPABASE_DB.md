@@ -181,6 +181,12 @@ zero existing observations with resolved stable taxonomy-v2 identity. See
   - Context filters are trimmed + lowercased on both sides; empty/whitespace filters mean "no restriction". Every non-empty filter must match the SAME summary row on the server (cross-row satisfaction is not possible).
   - `SECURITY DEFINER`, `search_path = 'public'`, granted to `anon` / `authenticated` / `service_role`. `contributor_label` comes from `community_contributor_label(user_id, author)` — the raw UUID is never exposed.
   - Backward-compatible: older callers can invoke `get_public_observation_spore_summaries(ARRAY[...])` with only the first argument; the four filter args default to NULL.
+- `get_observation_microscopy_presentations(p_observation_ids bigint[])` (RPC)
+  - Batch read contract for mobile microscopy presentation: one row per authorized observation with `observationId`, `sporeMeasurementCount`, `sporeSummary` (allowlisted JSON — no `id`/`user_id`/`observation_id`/`context_hash`/timestamps), and `sporeMosaic` (latest mosaic by `version DESC, id DESC`; media URL via `build_worker_mosaic_url`, never `storage_key`).
+  - Access: owners see their own draft/private observations; non-owners need `NOT is_draft` + `can_read_observation`. The three spore fields are additionally gated by `can_access_spore_data` — the row is still returned with those fields NULL when spore data is denied, and private spore aggregates are never computed for denied callers (`spore_accessible_obs` CTE).
+  - Input: ids are deduped; more than 200 distinct ids raises an explicit error (no silent truncation).
+  - `SECURITY DEFINER`, `search_path = 'public'`, PUBLIC revoked, granted to `anon` / `authenticated` / `service_role`.
+  - Added by `20260824130000_observation_microscopy_presentations_rpc.sql`; tests in `supabase/tests/observation_microscopy_presentations_test.sql`.
 
 Full staged design and progress notes: [sporely-py/docs/spore-statistics-species-profiles.md](../sporely-py/docs/spore-statistics-species-profiles.md).
 - `search_people_directory(p_query text DEFAULT NULL, p_limit int DEFAULT 24)`
