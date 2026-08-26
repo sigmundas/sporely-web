@@ -163,6 +163,21 @@ BEGIN
     RAISE EXCEPTION 'viewer commented on a banned owner observation';
   END IF;
 
+  -- Forged user_id: viewer (authenticated as viewer_id) attempts to insert a
+  -- comment on the accessible public observation but supplies visible_owner_id
+  -- as the acting user. The auth.uid() = user_id half of
+  -- phase7_comments_insert_visible must deny this.
+  insert_denied := false;
+  BEGIN
+    INSERT INTO public.comments (observation_id, user_id, body)
+    VALUES (visible_observation_id, visible_owner_id, 'Must be denied: forged user_id');
+  EXCEPTION WHEN insufficient_privilege THEN
+    insert_denied := true;
+  END;
+  IF NOT insert_denied THEN
+    RAISE EXCEPTION 'viewer inserted a comment with a forged user_id for another user';
+  END IF;
+
   SELECT count(*) INTO row_count
   FROM public.comments
   WHERE id IN (private_comment_id, blocked_comment_id, banned_comment_id, hidden_comment_id);
