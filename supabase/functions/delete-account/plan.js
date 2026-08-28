@@ -45,19 +45,24 @@
 //  15. delete_comments           — comments.user_id.
 //  16. delete_spore_annotations  — spore_annotations.user_id.
 //  17. delete_spore_measurements — spore_measurements.user_id.
-//  18. delete_observation_images — observation_images.user_id
+//  18. delete_reference_library_for_account — atomically mark reference
+//                                   mutations closed and delete the owner's
+//                                   normalized reference graph through the
+//                                   service-role-only RPC of the same name.
+//  19. delete_observation_images — observation_images.user_id
 //                                   (R2 objects already gone at step 3).
-//  19. delete_observations       — observations.user_id.
-//  20. delete_calibrations       — calibrations.user_id.
-//  21. delete_profile            — profiles.id.
-//  22. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
+//  20. delete_observations       — observations.user_id.
+//  21. delete_calibrations       — calibrations.user_id.
+//  22. delete_profile            — profiles.id.
+//  23. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
 //                                   a failure in any earlier stage leaves
 //                                   the auth session intact for retry.
 //
-// IDEMPOTENCY: every DB stage uses `WHERE user_id = uid` (or matching
-// column). A retry after partial success matches zero rows and succeeds.
-// R2 worker DELETE with 404 must be treated as success. auth.admin
-// deleteUser with "user_not_found" is treated as success.
+// IDEMPOTENCY: ordinary DB stages use `WHERE user_id = uid` (or matching
+// column). The reference-library RPC is itself retry-safe: it preserves the
+// deletion marker and a repeated child-first delete matches zero rows. R2
+// worker DELETE with 404 must be treated as success. auth.admin deleteUser
+// with "user_not_found" is treated as success.
 
 /**
  * @typedef {{ data: any, error: { message: string, code?: string } | null }} StructuredResult
@@ -279,6 +284,25 @@ export const STAGES = Object.freeze([
   _simpleDelete('delete_comments', 'comments', 'user_id'),
   _simpleDelete('delete_spore_annotations', 'spore_annotations', 'user_id'),
   _simpleDelete('delete_spore_measurements', 'spore_measurements', 'user_id'),
+  {
+    name: 'delete_reference_library_for_account',
+    apply: async ctx => {
+      try {
+        // This service-role-only RPC takes the same per-owner advisory lock
+        // as the mutation RPCs, persists an account-deletion marker, and
+        // removes the complete normalized graph in one transaction. The
+        // marker prevents a still-authenticated client from recreating rows
+        // between this stage and delete_auth_user.
+        await requireSuccess(
+          'rpc delete_reference_library_for_account',
+          ctx.admin.rpc('delete_reference_library_for_account', { p_user_id: ctx.uid }),
+        )
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
   _simpleDelete('delete_observation_images', 'observation_images', 'user_id'),
   _simpleDelete('delete_observations', 'observations', 'user_id'),
   _simpleDelete('delete_calibrations', 'calibrations', 'user_id'),

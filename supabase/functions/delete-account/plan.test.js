@@ -33,6 +33,7 @@ const EXPECTED_ORDER = [
   'delete_comments',
   'delete_spore_annotations',
   'delete_spore_measurements',
+  'delete_reference_library_for_account',
   'delete_observation_images',
   'delete_observations',
   'delete_calibrations',
@@ -62,6 +63,14 @@ test('mosaic_media_snapshot precedes BOTH delete_r2_media AND delete_mosaics', (
   assert.ok(snapshotIdx >= 0 && r2Idx >= 0 && mosaicsIdx >= 0)
   assert.ok(snapshotIdx < r2Idx, 'must snapshot before we ask the worker to delete R2 keys')
   assert.ok(snapshotIdx < mosaicsIdx, 'must snapshot before the mosaic rows are gone')
+})
+
+test('reference-library RPC runs before observations and auth', () => {
+  const references = STAGES.findIndex(s => s.name === 'delete_reference_library_for_account')
+  const observations = STAGES.findIndex(s => s.name === 'delete_observations')
+  const auth = STAGES.findIndex(s => s.name === 'delete_auth_user')
+  assert.ok(references >= 0)
+  assert.ok(references < observations && observations < auth)
 })
 
 // ── Structural: source-level guarantee that every DB call uses requireSuccess
@@ -285,6 +294,43 @@ test('runDeletionPlan: staged failure at every stage leaves auth user alive', as
     const authCall = admin._calls.find(c => c.op === 'deleteUser')
     assert.equal(authCall, undefined, `${stageName}: auth.admin.deleteUser must NOT run after failure`)
   }
+})
+
+test('runDeletionPlan: reference-library RPC failure stops before observations and auth', async () => {
+  const admin = fakeAdmin({
+    rpcResponses: {
+      delete_reference_library_for_account: () => ({ data: null, error: { message: 'reference delete failed' } }),
+    },
+  })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  assert.equal(result.ok, false)
+  assert.equal(result.stage, 'delete_reference_library_for_account')
+  assert.match(result.error, /reference delete failed/)
+  assert.equal(admin._calls.some(c => c.table === 'observations' && c.op === 'delete'), false)
+  assert.equal(admin._calls.find(c => c.op === 'deleteUser'), undefined)
+})
+
+test('reference-library deletion calls the service-role RPC with the account uid', async () => {
+  const admin = fakeAdmin()
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  assert.equal(result.ok, true)
+  const calls = admin._calls.filter(
+    c => c.table === '<rpc>' && c.op === 'delete_reference_library_for_account',
+  )
+  assert.deepEqual(calls.map(c => c.params), [{ p_user_id: UID }])
+})
+
+test('reference-library deletion is retry-safe at the plan boundary', async () => {
+  const admin = fakeAdmin()
+  const worker = fakeWorker()
+  const first = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const second = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  assert.equal(first.ok, true)
+  assert.equal(second.ok, true)
+  assert.equal(
+    admin._calls.filter(c => c.table === '<rpc>' && c.op === 'delete_reference_library_for_account').length,
+    2,
+  )
 })
 
 test('runDeletionPlan: media_snapshot failure prevents downstream deletes', async () => {
