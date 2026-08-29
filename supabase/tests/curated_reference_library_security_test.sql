@@ -65,8 +65,9 @@ BEGIN
       JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
        AND (p.proname LIKE '%curated_reference%' OR p.proname LIKE 'reference_curation%')
+       AND p.oid <> 'public.report_curated_reference_set(uuid,integer,text,text,uuid)'::regprocedure
   ) THEN
-    RAISE EXCEPTION 'Stage 6a exposed an unexpected public curated RPC';
+    RAISE EXCEPTION 'Stage 6b exposed an unexpected curated RPC';
   END IF;
 
   FOREACH table_name IN ARRAY ARRAY[
