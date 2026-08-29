@@ -47,7 +47,7 @@ BEGIN
     '63000000-0000-4000-8000-000000000301', 1,
     '62000000-0000-4000-8000-000000000301',
     '61000000-0000-4000-8000-000000000301', 1, 1, 1,
-    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1}'::jsonb,
+    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1,"citation_key":null,"type":"other","authors":[],"editors":[],"title":"Fixture","short_citation":"Fixture","full_citation":"Fixture."}'::jsonb,
     repeat('b', 64), actor_id
   );
   INSERT INTO private.curated_reference_publication_taxa
@@ -81,6 +81,9 @@ BEGIN
                  WHERE id = '61000000-0000-4000-8000-000000000301')
      OR NOT EXISTS (SELECT 1 FROM private.curated_reference_publications
                     WHERE curated_measurement_set_id = '63000000-0000-4000-8000-000000000301'
+                      AND bundle_revision = 1)
+     OR NOT EXISTS (SELECT 1 FROM private.curated_reference_citation_exports
+                    WHERE curated_measurement_set_id = '63000000-0000-4000-8000-000000000301'
                       AND bundle_revision = 1) THEN
     RAISE EXCEPTION 'curated evidence was deleted with the account';
   END IF;
@@ -88,7 +91,10 @@ BEGIN
   DELETE FROM auth.users WHERE id = actor_id;
   IF NOT EXISTS (SELECT 1 FROM private.curated_reference_publications
                  WHERE curated_measurement_set_id = '63000000-0000-4000-8000-000000000301'
-                   AND bundle_revision = 1) THEN
+                   AND bundle_revision = 1)
+     OR NOT EXISTS (SELECT 1 FROM private.curated_reference_citation_exports
+                    WHERE curated_measurement_set_id = '63000000-0000-4000-8000-000000000301'
+                      AND bundle_revision = 1) THEN
     RAISE EXCEPTION 'curated evidence was deleted with the auth account';
   END IF;
 END

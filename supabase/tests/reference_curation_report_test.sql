@@ -51,7 +51,7 @@ BEGIN
     content_hash, published_by
   ) VALUES (
     set_id, 1, treatment_id, work_id, 1, 1, 1,
-    1, '{"schema_version":1}', 1, '{"schema_version":1}', repeat('b', 64), curator
+    1, '{"schema_version":1}', 1, '{"schema_version":1,"citation_key":null,"type":"other","authors":[],"editors":[],"title":"Fixture","short_citation":"Fixture","full_citation":"Fixture."}', repeat('b', 64), curator
   );
   INSERT INTO private.curated_reference_publication_taxa
     (curated_measurement_set_id, bundle_revision, sporely_taxon_id, canonical_name)

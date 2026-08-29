@@ -47,7 +47,7 @@ BEGIN
       '63000000-0000-4000-8000-000000000201', 1,
       '62000000-0000-4000-8000-000000000201',
       '61000000-0000-4000-8000-000000000201', 4, 3, 1,
-      1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1}'::jsonb,
+      1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1,"citation_key":null,"type":"other","authors":[],"editors":[],"title":"Fixture","short_citation":"Fixture","full_citation":"Fixture."}'::jsonb,
       repeat('9', 64), actor_id
     );
     RAISE EXCEPTION 'publication accepted stale graph revisions';
@@ -62,7 +62,7 @@ BEGIN
     '63000000-0000-4000-8000-000000000201', 1,
     '62000000-0000-4000-8000-000000000201',
     '61000000-0000-4000-8000-000000000201', 4, 3, 2,
-    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1}'::jsonb,
+    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1,"citation_key":null,"type":"other","authors":[],"editors":[],"title":"Fixture","short_citation":"Fixture","full_citation":"Fixture."}'::jsonb,
     repeat('a', 64), actor_id
   );
   INSERT INTO private.curated_reference_publication_taxa
@@ -118,7 +118,7 @@ BEGIN
       '63000000-0000-4000-8000-000000000201', 3,
       '62000000-0000-4000-8000-000000000201',
       '61000000-0000-4000-8000-000000000201', 4, 3, 2,
-      1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1}'::jsonb,
+      1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1,"citation_key":null,"type":"other","authors":[],"editors":[],"title":"Fixture","short_citation":"Fixture","full_citation":"Fixture."}'::jsonb,
       repeat('d', 64), actor_id
     );
     RAISE EXCEPTION 'out-of-order publication revision was accepted';
@@ -138,7 +138,7 @@ BEGIN
     '63000000-0000-4000-8000-000000000201', 2,
     '62000000-0000-4000-8000-000000000201',
     '61000000-0000-4000-8000-000000000201', 4, 3, 2,
-    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1}'::jsonb,
+    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1,"citation_key":null,"type":"other","authors":[],"editors":[],"title":"Fixture","short_citation":"Fixture","full_citation":"Fixture."}'::jsonb,
     repeat('a', 64), actor_id
   );
   INSERT INTO private.curated_reference_publication_taxa
@@ -165,7 +165,7 @@ BEGIN
     '63000000-0000-4000-8000-000000000202', 1,
     '62000000-0000-4000-8000-000000000201',
     '61000000-0000-4000-8000-000000000201', 1, 3, 2,
-    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1}'::jsonb,
+    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1,"citation_key":null,"type":"other","authors":[],"editors":[],"title":"Fixture","short_citation":"Fixture","full_citation":"Fixture."}'::jsonb,
     repeat('c', 64), actor_id
   );
   BEGIN
@@ -187,7 +187,7 @@ BEGIN
     '63000000-0000-4000-8000-000000000203', 1,
     '62000000-0000-4000-8000-000000000201',
     '61000000-0000-4000-8000-000000000201', 1, 3, 2,
-    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1}'::jsonb,
+    1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1,"citation_key":null,"type":"other","authors":[],"editors":[],"title":"Fixture","short_citation":"Fixture","full_citation":"Fixture."}'::jsonb,
     repeat('e', 64), actor_id
   );
   UPDATE private.curated_reference_measurement_sets

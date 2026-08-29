@@ -347,7 +347,7 @@ BEGIN
       '63000000-0000-4000-8000-000000000022', 1,
       '62000000-0000-4000-8000-000000000001',
       '61000000-0000-4000-8000-000000000001', 1, 1, 2,
-      1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1}'::jsonb,
+      1, '{"schema_version":1}'::jsonb, 1, '{"schema_version":1,"citation_key":null,"type":"other","authors":[],"editors":[],"title":"Fixture","short_citation":"Fixture","full_citation":"Fixture."}'::jsonb,
       repeat('f', 64)
     );
     INSERT INTO private.curated_reference_publication_taxa
