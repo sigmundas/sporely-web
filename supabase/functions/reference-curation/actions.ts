@@ -1,3 +1,5 @@
+import { handleReferenceCurationRead } from './reads.ts'
+
 type RpcClient = {
   rpc: (
     name: string,
@@ -29,6 +31,7 @@ const MUTATION_ACTIONS = new Set([
 ])
 
 const LIFECYCLE_ACTIONS = new Set(['publish', 'deprecate', 'supersede', 'withdraw'])
+const READ_ACTIONS = new Set(['capabilities', 'queue', 'detail'])
 
 const MUTATION_KEYS = new Set([
   'action',
@@ -91,6 +94,7 @@ export async function handleReferenceCurationAction(
 ): Promise<ActionResponse> {
   const action = typeof context.requestBody.action === 'string' ? context.requestBody.action : ''
 
+  if (READ_ACTIONS.has(action)) return handleReferenceCurationRead(context)
   if (action === 'duplicate_warnings') {
     return handleDuplicateWarnings(context)
   }
