@@ -145,7 +145,8 @@ BEGIN
   -- Simulate Stage 6c review transitions solely to exercise the Stage 6b
   -- append-only owner response contract.
   UPDATE private.reference_curation_submissions
-     SET status = 'in_review', row_version = row_version + 1
+     SET status = 'in_review', claimed_by = owner_a,
+         claimed_at = pg_catalog.clock_timestamp(), row_version = row_version + 1
    WHERE id = v_submission_id;
   UPDATE private.reference_curation_submissions
      SET status = 'changes_requested', row_version = row_version + 1
