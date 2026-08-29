@@ -65,9 +65,13 @@ BEGIN
       JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
        AND (p.proname LIKE '%curated_reference%' OR p.proname LIKE 'reference_curation%')
-       AND p.oid <> 'public.report_curated_reference_set(uuid,integer,text,text,uuid)'::regprocedure
+       AND p.oid NOT IN (
+         'public.report_curated_reference_set(uuid,integer,text,text,uuid)'::regprocedure,
+         'public.search_public_curated_reference_sets(integer,integer,timestamp with time zone,uuid)'::regprocedure,
+         'public.get_public_curated_reference_set(uuid,integer)'::regprocedure
+       )
   ) THEN
-    RAISE EXCEPTION 'Stage 6b exposed an unexpected curated RPC';
+    RAISE EXCEPTION 'unexpected curated RPC exposed outside the staged contract';
   END IF;
 
   FOREACH table_name IN ARRAY ARRAY[
