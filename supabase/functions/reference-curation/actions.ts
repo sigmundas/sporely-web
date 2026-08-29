@@ -28,6 +28,8 @@ const MUTATION_ACTIONS = new Set([
   'edit_draft',
 ])
 
+const LIFECYCLE_ACTIONS = new Set(['publish', 'deprecate', 'supersede', 'withdraw'])
+
 const MUTATION_KEYS = new Set([
   'action',
   'request_id',
@@ -44,6 +46,15 @@ const DUPLICATE_WARNING_KEYS = new Set([
   'target_id',
   'candidate_revision',
   'candidate_content_hash',
+])
+
+const LIFECYCLE_KEYS = new Set([
+  'action',
+  'request_id',
+  'target_id',
+  'expected_row_version',
+  'reason',
+  'payload',
 ])
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -71,6 +82,8 @@ const KNOWN_DOMAIN_STATUSES = new Set([
   'invalid_state',
   'stale_candidate',
   'candidate_unavailable',
+  'stale_graph',
+  'invalid_successor',
 ])
 
 export async function handleReferenceCurationAction(
@@ -80,6 +93,9 @@ export async function handleReferenceCurationAction(
 
   if (action === 'duplicate_warnings') {
     return handleDuplicateWarnings(context)
+  }
+  if (LIFECYCLE_ACTIONS.has(action)) {
+    return handleLifecycleAction(context, action)
   }
   if (!MUTATION_ACTIONS.has(action)) {
     return failure(400, 'unknown_action', 'Unknown action')
@@ -126,6 +142,53 @@ export async function handleReferenceCurationAction(
   })
 }
 
+async function handleLifecycleAction(context: ActionContext, action: string): Promise<ActionResponse> {
+  if (
+    !hasExactlyAllowedKeys(context.requestBody, LIFECYCLE_KEYS) ||
+    !hasAllKeys(context.requestBody, LIFECYCLE_KEYS) ||
+    !isUuid(context.actorUserId) ||
+    !isUuid(context.actorSessionId) ||
+    !isUuid(context.requestBody.request_id) ||
+    !isUuid(context.requestBody.target_id) ||
+    !isPositiveSafeInteger(context.requestBody.expected_row_version) ||
+    !hasNonEmptyReason(context.requestBody.reason) ||
+    !isNullableBoundedReason(context.requestBody.reason) ||
+    !isPayload(context.requestBody.payload) ||
+    !isLifecyclePayload(action, context.requestBody.target_id, context.requestBody.payload)
+  ) {
+    return failure(400, 'invalid_payload', 'Invalid request payload')
+  }
+
+  const payload = normalizeLifecyclePayload(action, context.requestBody.payload)
+
+  return callRpc(context.adminClient, 'mutate_reference_curation_lifecycle', {
+    p_actor_user_id: context.actorUserId,
+    p_actor_session_id: context.actorSessionId,
+    p_request_id: context.requestBody.request_id,
+    p_action: action,
+    p_target_id: context.requestBody.target_id,
+    p_expected_row_version: context.requestBody.expected_row_version,
+    p_reason: context.requestBody.reason,
+    p_payload: payload,
+  }, action)
+}
+
+function normalizeLifecyclePayload(
+  action: string,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  if (action === 'deprecate' || action === 'withdraw') return payload
+  const normalized: Record<string, unknown> = {
+    ...payload,
+    expected_taxon_assignments: (payload.expected_taxon_assignments as Array<Record<string, unknown>>)
+      .map((assignment) => ({ ...assignment, id: (assignment.id as string).toLowerCase() })),
+  }
+  if (Object.hasOwn(payload, 'predecessor_id')) {
+    normalized.predecessor_id = (payload.predecessor_id as string).toLowerCase()
+  }
+  return normalized
+}
+
 async function handleDuplicateWarnings(context: ActionContext): Promise<ActionResponse> {
   if (
     !hasExactlyAllowedKeys(context.requestBody, DUPLICATE_WARNING_KEYS) ||
@@ -152,6 +215,7 @@ async function callRpc(
   adminClient: RpcClient,
   name: string,
   args: Record<string, unknown>,
+  lifecycleAction?: string,
 ): Promise<ActionResponse> {
   let result: Awaited<ReturnType<RpcClient['rpc']>>
   try {
@@ -171,7 +235,7 @@ async function callRpc(
   if (status >= 400) {
     return failure(status, domainStatus, publicMessageForStatus(domainStatus))
   }
-  const publicResult = validatePublicRpcResult(name, result.data)
+  const publicResult = validatePublicRpcResult(name, result.data, lifecycleAction)
   if (!publicResult) {
     return failure(500, 'curation_operation_failed', 'Curation operation failed')
   }
@@ -200,7 +264,8 @@ function httpStatusForDomainStatus(status: string): number {
   }
   if (
     status === 'conflict' || status === 'idempotency_conflict' ||
-    status === 'invalid_state' || status === 'stale_candidate' || status === 'candidate_unavailable'
+    status === 'invalid_state' || status === 'stale_candidate' || status === 'candidate_unavailable' ||
+    status === 'stale_graph' || status === 'invalid_successor'
   ) {
     return 409
   }
@@ -220,7 +285,8 @@ function publicMessageForStatus(status: string): string {
   }
   if (
     status === 'conflict' || status === 'idempotency_conflict' ||
-    status === 'invalid_state' || status === 'stale_candidate' || status === 'candidate_unavailable'
+    status === 'invalid_state' || status === 'stale_candidate' || status === 'candidate_unavailable' ||
+    status === 'stale_graph' || status === 'invalid_successor'
   ) {
     return 'The resource changed; refresh and retry'
   }
@@ -299,6 +365,50 @@ function isActionPayload(
   if (action === 'accept_to_draft') return isAcceptPayload(payload)
   if (action === 'edit_draft') return isDraftEditPayload(payload, expectedRowVersion)
   return false
+}
+
+function isLifecyclePayload(action: string, targetId: unknown, payload: Record<string, unknown>): boolean {
+  if (action === 'deprecate' || action === 'withdraw') return Object.keys(payload).length === 0
+  const common = new Set([
+    'expected_work_row_version',
+    'expected_treatment_row_version',
+    'expected_taxon_assignments',
+  ])
+  const lineage = new Set(['predecessor_id', 'expected_predecessor_row_version'])
+  const allowed = action === 'supersede' || action === 'publish' ? new Set([...common, ...lineage]) : common
+  if (!hasExactlyAllowedKeys(payload, allowed) || !hasAllKeys(payload, common)) return false
+  if (
+    !isPositiveSafeInteger(payload.expected_work_row_version) ||
+    !isPositiveSafeInteger(payload.expected_treatment_row_version) ||
+    !isExpectedTaxonAssignments(payload.expected_taxon_assignments)
+  ) return false
+  if (action === 'publish') {
+    const hasPredecessor = Object.hasOwn(payload, 'predecessor_id')
+    const hasPredecessorVersion = Object.hasOwn(payload, 'expected_predecessor_row_version')
+    return hasPredecessor === hasPredecessorVersion && (!hasPredecessor || (
+      isUuid(payload.predecessor_id) && payload.predecessor_id !== targetId &&
+      isPositiveSafeInteger(payload.expected_predecessor_row_version)
+    ))
+  }
+  return isUuid(payload.predecessor_id) && payload.predecessor_id !== targetId &&
+    isPositiveSafeInteger(payload.expected_predecessor_row_version)
+}
+
+function isExpectedTaxonAssignments(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) return false
+  let previousId = ''
+  for (const assignment of value) {
+    if (
+      !isRecord(assignment) ||
+      !hasExactlyAllowedKeys(assignment, new Set(['id', 'row_version'])) ||
+      !hasAllKeys(assignment, new Set(['id', 'row_version'])) ||
+      !isUuid(assignment.id) ||
+      !isPositiveSafeInteger(assignment.row_version) ||
+      assignment.id <= previousId
+    ) return false
+    previousId = assignment.id
+  }
+  return true
 }
 
 function isAcceptPayload(payload: Record<string, unknown>): boolean {
@@ -409,7 +519,11 @@ function isBoundedNonEmptyString(value: unknown, maximumLength: number): value i
   return typeof value === 'string' && value.trim().length > 0 && value.length <= maximumLength
 }
 
-function validatePublicRpcResult(name: string, data: Record<string, unknown>): Record<string, unknown> | null {
+function validatePublicRpcResult(
+  name: string,
+  data: Record<string, unknown>,
+  lifecycleAction?: string,
+): Record<string, unknown> | null {
   if (new TextEncoder().encode(JSON.stringify(data)).byteLength > MAX_RESPONSE_BYTES) return null
   if (name === 'get_reference_curation_duplicate_warnings') {
     if (
@@ -422,6 +536,24 @@ function validatePublicRpcResult(name: string, data: Record<string, unknown>): R
         isRecord(warning) && hasExactlyAllowedKeys(warning, new Set(['kind', 'curated_work_id'])) &&
         typeof warning.kind === 'string' && allowedKinds.has(warning.kind) && isUuid(warning.curated_work_id)
       )
+    ) return null
+    return data
+  }
+
+  if (name === 'mutate_reference_curation_lifecycle') {
+    const required = lifecycleAction === 'supersede'
+      ? new Set(['status', 'target_id', 'predecessor_id', 'bundle_revision'])
+      : lifecycleAction === 'publish'
+      ? new Set(['status', 'target_id', 'bundle_revision'])
+      : new Set(['status', 'target_id'])
+    if (
+      !hasExactlyAllowedKeys(data, required) || !hasAllKeys(data, required) ||
+      !isUuid(data.target_id)
+    ) return null
+    if (lifecycleAction === 'supersede' && !isUuid(data.predecessor_id)) return null
+    if (
+      (lifecycleAction === 'publish' || lifecycleAction === 'supersede') &&
+      !isPositiveSafeInteger(data.bundle_revision)
     ) return null
     return data
   }

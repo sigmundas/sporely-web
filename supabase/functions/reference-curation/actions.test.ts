@@ -124,8 +124,8 @@ Deno.test('only the five Stage 6c mutation actions route to the mutation RPC', a
   }
 })
 
-Deno.test('publisher and report actions are rejected before any RPC call', async () => {
-  for (const action of ['publish', 'deprecate', 'supersede', 'withdraw', 'resolve_report']) {
+Deno.test('unsupported report actions are rejected before any RPC call', async () => {
+  for (const action of ['resolve_report']) {
     const adminClient = fakeAdminClient()
     const response = await handleReferenceCurationAction({
       actorUserId: ACTOR_ID,
