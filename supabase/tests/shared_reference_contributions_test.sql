@@ -182,6 +182,14 @@ BEGIN
   IF result->>'status' <> 'updated' THEN
     RAISE EXCEPTION 'privacy moderation did not hide contribution: %', result;
   END IF;
+  RESET ROLE;
+  IF NOT EXISTS (
+    SELECT 1 FROM private.shared_reference_policy_events e
+     WHERE e.contribution_id=contribution_1
+       AND e.event_type='takedown_hidden' AND e.reason='privacy'
+  ) THEN
+    RAISE EXCEPTION 'immediate takedown was not operationally logged';
+  END IF;
   SET LOCAL ROLE authenticated;
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub',user_1::text,'role','authenticated')::text,true);
