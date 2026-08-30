@@ -74,6 +74,24 @@ Plain English comes first; technical terms are in parentheses.
 24. **No no-op cloud writes on sync paths.** `observation_images.updated_at` is trigger-bumped on EVERY update, for every role, regardless of whether values changed — so a value-identical PATCH is a real child-change cursor event, not a harmless idempotent write. Before any cloud write in a sync path, check whether the target value already matches and skip the request if so. (Live incident 2026-08-24: unconditional `desktop_id` relink PATCHes during pull rewrote ~2 500 image rows per sync and created a self-sustaining full child re-pull echo loop.)
 25. **The child-change cursor must commit the true `MAX(updated_at, id)` tuple over every inspected row, with numeric id ordering.** Row ids compare numerically, never as strings (`'10000' > '9999'`), and the strict filter and the advancement comparison must use identical ordering. The cursor advances only after `pull_all` succeeds; a failed pull leaves the cursor untouched so the changes are re-detected next sync.
 
+## Owner-private curated fork provenance
+
+Stage 6k stores an immutable owner-only mapping from exact curated catalogue
+identity `(curated_measurement_set_id, bundle_revision)` to a fresh personal
+work → treatment → measurement-set graph. The mapping also records the exact
+positive taxonomy-v3 assignment and the desktop fingerprint of the validated
+frozen public envelope. The authenticated `sync_reference_curated_fork` RPC
+derives ownership from `auth.uid()`, validates the immutable publication/taxon
+assignment and same-owner graph, and treats an identical retry as `no_change`;
+any disagreement is a conflict. Direct writes are denied and owner SELECT is
+RLS-scoped. Curated IDs are never attached to observations and the mapping is
+never part of a public projection.
+
+Desktop sync pushes this mapping only after its personal graph has converged.
+Pull reads it only after that graph and reconstructs local frozen provenance
+through the exact public revision API. Download-from-Cloud permits those reads
+but blocks the provenance writer.
+
 ## Storage of desired cloud image-byte state
 
 Local SQLite is authoritative:
