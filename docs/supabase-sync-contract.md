@@ -92,6 +92,12 @@ Pull reads it only after that graph and reconstructs local frozen provenance
 through the exact public revision API. Download-from-Cloud permits those reads
 but blocks the provenance writer.
 
+The owner feed is a complete, deterministically paginated collection. Desktop
+reconciliation accepts up to 10,000 mappings and 64 MiB of encoded response
+data per account; exceeding either bound fails the complete read without
+returning a partial collection. There is no smaller undocumented 100-row
+transport cap from which absence could be inferred.
+
 ## Storage of desired cloud image-byte state
 
 Local SQLite is authoritative:
