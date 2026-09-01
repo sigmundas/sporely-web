@@ -91,6 +91,19 @@ export function canPerformCloudMutation(overrideState) {
   return canUseAuthenticatedNetwork(overrideState)
 }
 
+// Completing the mandatory profile setup is the one authenticated write that
+// must be available before the profile is complete: it atomically writes
+// `profile_completed_at`, which is what advances the auth-state machine.
+// This deliberately does not broaden the ordinary cloud-mutation capability.
+export function canCompleteProfileSetup(overrideState) {
+  const stateValue = _currentAuthState(overrideState)
+  if (
+    stateValue === AUTH_STATE.AUTHENTICATED_INCOMPLETE
+    || stateValue === AUTH_STATE.AUTHENTICATED_COMPLETE
+  ) return ALLOWED
+  return _denied(_reasonForState(stateValue))
+}
+
 // OAuth "connect this account to Google / iNaturalist" — this is a linking
 // action that requires the authenticated pipeline. Sign-in from the Login
 // screen (UNAUTHENTICATED state) is NOT gated here; see canBeginLoginOAuth.
@@ -135,6 +148,17 @@ export function requiresReauthentication(overrideState) {
 // through the toast module — Node tests inject a stub.
 export function requireCloudMutation({ showToast, overrideState, silent = false } = {}) {
   const capability = canPerformCloudMutation(overrideState)
+  if (capability.allowed) return { allowed: true }
+  if (!silent && typeof showToast === 'function') {
+    try { showToast(capability.message) } catch (err) { console.warn('capability toast failed:', err) }
+  }
+  return capability
+}
+
+// Profile setup uses the same failure-closed toast behavior as ordinary cloud
+// writes, while relying on its intentionally narrower capability above.
+export function requireProfileSetupCompletion({ showToast, overrideState, silent = false } = {}) {
+  const capability = canCompleteProfileSetup(overrideState)
   if (capability.allowed) return { allowed: true }
   if (!silent && typeof showToast === 'function') {
     try { showToast(capability.message) } catch (err) { console.warn('capability toast failed:', err) }

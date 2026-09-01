@@ -12,6 +12,7 @@ import {
   canPerformLocalOperation,
   CAPABILITY_REASON,
 } from './capabilities.js'
+import * as capabilities from './capabilities.js'
 import { AUTH_STATE, setAuthState, _resetAuthStateForTests } from './auth-state.js'
 
 // The capability messages are pulled from the i18n bundle. We assert on the
@@ -120,4 +121,26 @@ describe('capabilities — Stage B2b', () => {
     const reauthMsg = canPerformCloudMutation().message
     assert.notEqual(offlineMsg, reauthMsg, 'offline vs. reauth messages must be distinguishable')
   })
+
+  it('profile setup alone may write while the account is incomplete', () => {
+    // Removing the incomplete-state exception would deadlock onboarding:
+    // saveProfileSetup is the operation that persists profile_completed_at.
+    setAuthState({ state: AUTH_STATE.AUTHENTICATED_INCOMPLETE, userId: 'u1' })
+    assert.equal(typeof capabilities.canCompleteProfileSetup, 'function')
+    assert.equal(capabilities.canCompleteProfileSetup().allowed, true)
+    assert.equal(canPerformCloudMutation().allowed, false)
+  })
+
+  for (const [stateValue, reason] of [
+    [AUTH_STATE.AUTHENTICATED_CACHED, CAPABILITY_REASON.OFFLINE],
+    [AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED, CAPABILITY_REASON.REAUTH_REQUIRED],
+    [AUTH_STATE.RESOLVING, CAPABILITY_REASON.RESOLVING],
+    [AUTH_STATE.UNAUTHENTICATED, CAPABILITY_REASON.UNAUTHENTICATED],
+  ]) {
+    it(`profile setup remains blocked in ${stateValue}`, () => {
+      setAuthState({ state: stateValue, userId: stateValue === AUTH_STATE.UNAUTHENTICATED ? null : 'u1' })
+      assert.equal(typeof capabilities.canCompleteProfileSetup, 'function')
+      assertDenied(capabilities.canCompleteProfileSetup(), reason)
+    })
+  }
 })

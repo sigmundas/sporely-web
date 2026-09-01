@@ -9,7 +9,7 @@ import { isPickerCancel, nativePickedPhotoToFile, PICKER_OPTIONS_AVATAR, pickIma
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { isProfileComplete, saveProfileEdit, saveProfileSetup } from '../profile-completion.js'
 import { runProfileSetupCompletion, runSetupSignOut } from '../profile-setup-flow.js'
-import { canUseAuthenticatedNetwork, requireCloudMutation, requiresReauthentication } from '../capabilities.js'
+import { canUseAuthenticatedNetwork, requireCloudMutation, requireProfileSetupCompletion, requiresReauthentication } from '../capabilities.js'
 import { beginReauthentication } from '../reauth.js'
 import { readLastValidatedAccount } from '../last-validated-account.js'
 import { performExplicitSignOut } from '../auth-signout.js'
@@ -640,17 +640,17 @@ async function _saveProfile() {
     return
   }
 
-  // Stage B2b: profile save is a remote profiles.update. Local-only
-  // preferences (settings-overlay) remain editable offline; this remote
-  // write is gated.
-  if (!requireCloudMutation({ showToast }).allowed) {
+  const { allowed, persisted, error } = await saveProfileMutation({
+    setup: _profileSetupMode,
+    client: supabase,
+    userId: state.user.id,
+    fields: { username, display_name, bio },
+    showToast,
+  })
+  if (!allowed) {
     btn.disabled = false
     return
   }
-
-  // Setup save stamps `profile_completed_at`; ordinary edits leave it alone.
-  const saver = _profileSetupMode ? saveProfileSetup : saveProfileEdit
-  const { persisted, error } = await saver(supabase, state.user.id, { username, display_name, bio })
 
   if (error) {
     btn.disabled = false
@@ -701,6 +701,21 @@ async function _saveProfile() {
     avatar_url: persisted?.avatar_url || document.getElementById('profile-avatar-img')?.getAttribute('src') || '',
   })
   showToast(t('profile.saved'))
+}
+
+// Profile setup is the sole exception to the normal remote-mutation rule:
+// its atomic save writes profile_completed_at, allowing auth state to advance
+// from AUTHENTICATED_INCOMPLETE. Every ordinary profile edit remains gated by
+// requireCloudMutation.
+export async function saveProfileMutation({ setup, client, userId, fields, showToast }) {
+  const capability = setup
+    ? requireProfileSetupCompletion({ showToast })
+    : requireCloudMutation({ showToast })
+  if (!capability.allowed) return { ...capability, persisted: null, error: null }
+
+  const saver = setup ? saveProfileSetup : saveProfileEdit
+  const { persisted, error } = await saver(client, userId, fields)
+  return { allowed: true, persisted, error }
 }
 
 

@@ -145,11 +145,13 @@ describe('capability gates — static verification for DOM-bound handlers', () =
     assert.match(avatarFn, /requireCloudMutation\(/)
   })
 
-  it('profile.js gates account delete and profile save', () => {
+  it('profile.js gates account delete and selects the setup-only gate only for setup saves', () => {
     const src = readFileSync(path.join(process.cwd(), 'src/screens/profile.js'), 'utf8')
     const del = src.slice(src.indexOf('async function _deleteAccount'), src.indexOf('async function _deleteAccount') + 1000)
     assert.match(del, /requireCloudMutation\(/)
-    assert.match(src, /if \(!requireCloudMutation\(\{ showToast \}\)\.allowed\) \{\n +btn\.disabled = false/)
+    const save = src.slice(src.indexOf('export async function saveProfileMutation'), src.indexOf('// ── Avatar crop'))
+    assert.match(save, /setup\s*\?\s*requireProfileSetupCompletion\(\{ showToast \}\)/)
+    assert.match(save, /:\s*requireCloudMutation\(\{ showToast \}\)/)
   })
 
   it('find_detail.js gates _sendComment / _blockObservationAuthor / _reportObservation', () => {
