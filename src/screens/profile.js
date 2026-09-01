@@ -9,7 +9,7 @@ import { isPickerCancel, nativePickedPhotoToFile, PICKER_OPTIONS_AVATAR, pickIma
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { isProfileComplete, saveProfileEdit, saveProfileSetup } from '../profile-completion.js'
 import { runProfileSetupCompletion, runSetupSignOut } from '../profile-setup-flow.js'
-import { canUseAuthenticatedNetwork, requireCloudMutation, requireProfileSetupCompletion, requiresReauthentication } from '../capabilities.js'
+import { canCompleteProfileSetup, canUseAuthenticatedNetwork, requireCloudMutation, requireProfileSetupCompletion, requiresReauthentication } from '../capabilities.js'
 import { beginReauthentication } from '../reauth.js'
 import { readLastValidatedAccount } from '../last-validated-account.js'
 import { performExplicitSignOut } from '../auth-signout.js'
@@ -311,14 +311,25 @@ function _initProfileDragEvents() {
 
 export async function loadProfile() {
   _applyReauthBannerUi()
-  // CACHED / REAUTH_REQUIRED: zero authenticated network from the Profile
-  // sheet. Render the cached snapshot summary instead of firing doomed
-  // PostgREST reads that leave blank fields looking like live server data.
-  if (!canUseAuthenticatedNetwork()?.allowed) {
+  // Profile setup is the narrow incomplete-state exception: it needs only
+  // its own profiles row before saveProfileSetup can write completion. Every
+  // ordinary Profile visit retains the COMPLETE-only network gate.
+  const capability = _profileAccessCapability()
+  if (!capability.allowed) {
     _renderProfileFromCachedSnapshot()
     return
   }
+  if (_profileSetupMode) {
+    await _loadProfileData({ setup: true })
+    return
+  }
   await Promise.all([_loadProfileData(), _loadFriends(), _loadPending()])
+}
+
+function _profileAccessCapability() {
+  return _profileSetupMode
+    ? canCompleteProfileSetup()
+    : canUseAuthenticatedNetwork()
 }
 
 // REAUTH_REQUIRED banner + gated-field state. The banner is reauth-only
@@ -339,11 +350,17 @@ function _applyReauthBannerUi() {
       if (btn) btn.textContent = t('profile.signInAgain')
     }
   }
-  const gated = !canUseAuthenticatedNetwork()?.allowed
+  const gated = !_profileAccessCapability().allowed
   for (const id of ['profile-username', 'profile-fullname', 'profile-bio', 'profile-save-btn']) {
     const el = document.getElementById(id)
     if (el) el.disabled = gated
   }
+  // Avatar changes remain ordinary cloud writes. Mandatory setup must not
+  // advertise an optional action that is intentionally unavailable there.
+  const avatarBtn = document.getElementById('profile-avatar-btn')
+  if (avatarBtn) avatarBtn.disabled = gated || _profileSetupMode
+  const avatarCircle = document.getElementById('profile-avatar-circle')
+  if (avatarCircle) avatarCircle.style.pointerEvents = _profileSetupMode ? 'none' : ''
   if (!gated) _syncProfileSaveEnabled()
 }
 
@@ -585,7 +602,7 @@ export async function refreshHeaderProfileButtons(profile = null) {
 
 // ── Profile data (username, full_name, avatar) ────────────────────────────────
 
-async function _loadProfileData() {
+async function _loadProfileData({ setup = false } = {}) {
   const uid = state.user?.id
   if (!uid) return
   const { data } = await supabase
@@ -593,12 +610,14 @@ async function _loadProfileData() {
     .select('username, display_name, bio, avatar_url')
     .eq('id', uid)
     .single()
-  // Stage B final: a FALLBACK plan (network failure default) must NEVER
-  // replace a known-good CACHED/NETWORK plan; that would silently downgrade
-  // an offline Pro user to Free while Settings/Profile is open. Route every
-  // assignment through the merge helper.
-  const nextPlan = await fetchCloudPlanProfile(uid)
-  state.cloudPlan = mergeCloudPlanForOfflineFallback(state.cloudPlan, nextPlan)
+  if (!setup) {
+    // Stage B final: a FALLBACK plan (network failure default) must NEVER
+    // replace a known-good CACHED/NETWORK plan; that would silently downgrade
+    // an offline Pro user to Free while Settings/Profile is open. Route every
+    // assignment through the merge helper.
+    const nextPlan = await fetchCloudPlanProfile(uid)
+    state.cloudPlan = mergeCloudPlanForOfflineFallback(state.cloudPlan, nextPlan)
+  }
   if (!data) {
     _renderCloudPlan(state.cloudPlan)
     return
@@ -612,8 +631,8 @@ async function _loadProfileData() {
   document.getElementById('profile-email-display').textContent = state.user?.email || ''
   const initials = _initials(normalizedUsername || state.user?.email || '')
   document.getElementById('profile-avatar-initials').textContent = initials
-  await refreshHeaderProfileButtons({ ...data, username: normalizedUsername })
-  if (data.avatar_url) {
+  if (!setup) await refreshHeaderProfileButtons({ ...data, username: normalizedUsername })
+  if (!setup && data.avatar_url) {
     const shown = await _setProfileAvatarSource({ uid, preferredUrl: data.avatar_url })
     if (shown) {
       _renderCloudPlan(state.cloudPlan)

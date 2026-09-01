@@ -23,6 +23,16 @@ export function hideSlidingOverlay({
   const active = globalThis.document?.activeElement || null
   const needsFocusShift = _isFocusWithinOverlay(overlay, active)
 
+  // `showSlidingOverlay` always sets display:block before the opening class
+  // is applied. If neither is true, CSS already has the overlay hidden; do
+  // not queue a transitionend callback that could hide a later re-open.
+  const isOpen = overlay.classList?.contains?.(openClass) === true
+  const isVisible = isOpen || overlay.style?.display === 'block'
+  if (!isVisible) {
+    overlay.style.display = 'none'
+    return needsFocusShift
+  }
+
   if (needsFocusShift) {
     const resolvedOpener = opener && globalThis.document?.contains?.(opener)
       ? opener

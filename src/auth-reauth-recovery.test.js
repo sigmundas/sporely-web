@@ -228,10 +228,13 @@ test('Profile sheet: reauth banner exists, is gated on requiresReauthentication,
 
 test('Profile sheet: gated states render the cached snapshot instead of firing authenticated reads', () => {
   const body = _extractFunctionBody(profileSource, 'export async function loadProfile(')
-  const gateIdx = body.indexOf('canUseAuthenticatedNetwork()')
+  const gateIdx = body.indexOf('_profileAccessCapability()')
   const fetchIdx = body.indexOf('_loadProfileData()')
   assert.ok(gateIdx > 0 && fetchIdx > gateIdx, 'capability gate must run before any profile network read')
   assert.match(body, /_renderProfileFromCachedSnapshot\(\)/)
+  const modeCapability = _extractFunctionBody(profileSource, 'function _profileAccessCapability(')
+  assert.match(modeCapability, /canCompleteProfileSetup\(\)/)
+  assert.match(modeCapability, /canUseAuthenticatedNetwork\(\)/)
   // Cached render must be same-user only (privacy: no cross-account leak).
   const cachedBody = _extractFunctionBody(profileSource, 'function _renderProfileFromCachedSnapshot(')
   assert.match(cachedBody, /snapshot\.userId === uid/)
