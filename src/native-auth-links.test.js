@@ -13,6 +13,15 @@ test('isSupabaseCallbackUrl accepts the exact HTTPS callback', () => {
   assert.equal(isSupabaseCallbackUrl('https://app.sporely.no/auth/callback?flow=signup&code=x'), true)
 })
 
+test('isSupabaseCallbackUrl accepts only the exact debug custom callback', () => {
+  assert.equal(isSupabaseCallbackUrl('com.sporelab.sporely.debug://auth?flow=signup&code=x'), true)
+  assert.equal(isSupabaseCallbackUrl('com.sporelab.sporely.debug://auth/?code=x'), true)
+  assert.equal(isSupabaseCallbackUrl('com.sporelab.sporely://auth?code=x'), false)
+  assert.equal(isSupabaseCallbackUrl('com.sporelab.sporely.debug://evil?code=x'), false)
+  assert.equal(isSupabaseCallbackUrl('com.sporelab.sporely.debug://auth/not-here?code=x'), false)
+  assert.equal(isSupabaseCallbackUrl('com.sporelab.sporely.debugx://auth?code=x'), false)
+})
+
 test('isSupabaseCallbackUrl rejects wrong scheme, host, or path', () => {
   assert.equal(isSupabaseCallbackUrl('http://app.sporely.no/auth/callback?code=x'), false)
   assert.equal(isSupabaseCallbackUrl('https://evil.example/auth/callback?code=x'), false)

@@ -3,6 +3,7 @@ import { getSharedAuthSession, seedSharedAuthSession } from '../auth-session.js'
 import { performExplicitSignOut } from '../auth-signout.js'
 import { getLocale, setLocale, t } from '../i18n.js'
 import { isAndroidApp, isNativeApp } from '../platform.js'
+import { isSupabaseCallbackUrl } from '../native-auth-links.js'
 import {
   GoogleSignInCancelledError,
   GoogleSignInConfigError,
@@ -27,9 +28,41 @@ setNativeBridge(acquireNativeTurnstileToken)
 const SUPABASE_OAUTH_CALLBACK_PATH = '/auth/callback'
 const SUPABASE_OAUTH_FALLBACK_ORIGIN = 'https://app.sporely.no'
 const SUPABASE_EMAIL_CONFIRM_REDIRECT = 'https://app.sporely.no/auth/callback?flow=signup'
+const DEBUG_SIGNUP_EMAIL_CONFIRM_REDIRECT = 'com.sporelab.sporely.debug://auth?flow=signup'
 const PASSWORD_RESET_WEB_ORIGIN = 'https://app.sporely.no'
 
-export function getSignupEmailRedirectUrl() {
+function _isLoopbackOrigin(origin) {
+  try {
+    const { hostname } = new URL(origin)
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
+  } catch (_) {
+    return false
+  }
+}
+
+async function _getNativeAppInfo() {
+  if (!isNativeApp() || !isAndroidApp() || !globalThis.window?.Capacitor?.Plugins?.App) return null
+  try {
+    const mod = await import('@capacitor/app')
+    return await Promise.resolve(mod?.App?.getInfo?.())
+  } catch (_) {
+    return null
+  }
+}
+
+export async function getSignupEmailRedirectUrl({
+  origin = globalThis.location?.origin || SUPABASE_OAUTH_FALLBACK_ORIGIN,
+  isNativeAndroid = isNativeApp() && isAndroidApp(),
+  getNativeAppInfo = _getNativeAppInfo,
+} = {}) {
+  if (isNativeAndroid) {
+    try {
+      const appInfo = await getNativeAppInfo()
+      if (appInfo?.id === 'com.sporelab.sporely.debug') return DEBUG_SIGNUP_EMAIL_CONFIRM_REDIRECT
+    } catch (_) { /* safe fallback below */ }
+    return SUPABASE_EMAIL_CONFIRM_REDIRECT
+  }
+  if (_isLoopbackOrigin(origin)) return new URL(`${SUPABASE_OAUTH_CALLBACK_PATH}?flow=signup`, origin).toString()
   return SUPABASE_EMAIL_CONFIRM_REDIRECT
 }
 const PERSIST_AUTH_DRAFTS = !!import.meta.env?.DEV
@@ -106,7 +139,8 @@ export function getSupabaseOAuthRedirectUrl(origin = globalThis.location?.origin
 export async function maybeHandleSupabaseOAuthCallback(input, options = {}) {
   const locationHref = globalThis.location?.href || `${SUPABASE_OAUTH_FALLBACK_ORIGIN}/`
   const url = new URL(input, locationHref)
-  if (url.pathname !== SUPABASE_OAUTH_CALLBACK_PATH) {
+  const isLocalCallback = _isLoopbackOrigin(url.origin) && url.pathname === SUPABASE_OAUTH_CALLBACK_PATH
+  if (!isSupabaseCallbackUrl(url.href) && !isLocalCallback) {
     return { handled: false, scrubUrl: false, status: 'ignored' }
   }
 
@@ -169,6 +203,16 @@ export async function maybeHandleSupabaseOAuthCallback(input, options = {}) {
       errorMessage: error?.message || t('auth.genericError'),
     }
   }
+}
+
+export async function signUpWithEmailConfirmation({ email, password, captchaToken, client = supabase, resolveRedirect = getSignupEmailRedirectUrl }) {
+  const emailRedirectTo = await resolveRedirect()
+  return client.auth.signUp({ email, password, options: { captchaToken, emailRedirectTo } })
+}
+
+export async function resendSignupEmailConfirmation({ email, client = supabase, resolveRedirect = getSignupEmailRedirectUrl }) {
+  const emailRedirectTo = await resolveRedirect()
+  return client.auth.resend({ type: 'signup', email, options: { emailRedirectTo } })
 }
 
 // Email waiting for confirmation (needed for resend)
@@ -454,11 +498,7 @@ function showResendPrompt(email) {
 }
 
 async function doResend(email) {
-  const { error } = await supabase.auth.resend({
-    type: 'signup',
-    email,
-    options: { emailRedirectTo: SUPABASE_EMAIL_CONFIRM_REDIRECT },
-  })
+  const { error } = await resendSignupEmailConfirmation({ email })
   if (error) {
     // "already confirmed" means they can just sign in
     if (error.message.toLowerCase().includes('already confirmed')) {
@@ -733,15 +773,7 @@ export function initAuth(onAuthenticated, skipDraftRestore = false) {
         }
         throw captchaError
       }
-      const signUpPayload = {
-        email,
-        password,
-        options: {
-          captchaToken,
-          emailRedirectTo: SUPABASE_EMAIL_CONFIRM_REDIRECT,
-        },
-      }
-      const { error } = await supabase.auth.signUp(signUpPayload)
+      const { error } = await signUpWithEmailConfirmation({ email, password, captchaToken })
       if (error) resetTurnstile('signup')
 
       if (error) {

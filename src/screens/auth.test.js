@@ -138,6 +138,18 @@ test('exchanges a Supabase OAuth code, seeds the shared session, and cleans the 
   }
 })
 
+test('exchanges a debug email-confirmation callback code through the existing PKCE flow', async () => {
+  const calls = []
+  const fakeSession = { user: { id: 'debug-user' } }
+  const result = await maybeHandleSupabaseOAuthCallback(
+    'com.sporelab.sporely.debug://auth?flow=signup&code=debug-code',
+    { supabaseClient: { auth: { async exchangeCodeForSession(code) { calls.push(code); return { data: { session: fakeSession }, error: null } } } } },
+  )
+  assert.equal(result.status, 'success')
+  assert.deepEqual(calls, ['debug-code'])
+  assert.deepEqual(result.session, fakeSession)
+})
+
 test('returns a clean error for provider-denied Supabase OAuth callbacks', async () => {
   clearSharedAuthSessionCache()
 

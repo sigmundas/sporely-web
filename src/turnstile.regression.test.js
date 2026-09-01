@@ -30,7 +30,7 @@ test('turnstile.js has no hardcoded production site key', () => {
 })
 
 test('signUp, signInWithPassword and resetPasswordForEmail all pass captchaToken', () => {
-  assert.match(authSource, /supabase\.auth\.signUp\([\s\S]*?captchaToken/,
+  assert.match(authSource, /signUpWithEmailConfirmation[\s\S]*?captchaToken/,
     'signUp must pass captchaToken')
   assert.match(authSource, /signInWithPassword\([\s\S]*?captchaToken/,
     'signInWithPassword must pass captchaToken')
@@ -38,14 +38,13 @@ test('signUp, signInWithPassword and resetPasswordForEmail all pass captchaToken
     'resetPasswordForEmail must pass captchaToken')
 })
 
-test('signUp passes emailRedirectTo pointing at the HTTPS App Link callback', () => {
-  // The payload constant carries emailRedirectTo:
-  assert.match(authSource, /signUpPayload\s*=\s*\{[\s\S]*?emailRedirectTo/)
-  assert.match(authSource, /https:\/\/app\.sporely\.no\/auth\/callback\?flow=signup/)
+test('signUp resolves emailRedirectTo through the shared environment-aware helper', () => {
+  assert.match(authSource, /signUpWithEmailConfirmation[\s\S]*?resolveRedirect/)
+  assert.match(authSource, /const emailRedirectTo = await resolveRedirect\(\)/)
 })
 
 test('resend also carries emailRedirectTo', () => {
-  assert.match(authSource, /supabase\.auth\.resend\([\s\S]*?emailRedirectTo/)
+  assert.match(authSource, /resendSignupEmailConfirmation[\s\S]*?emailRedirectTo/)
 })
 
 test('bridge never returns the Capacitor App proxy from an async function (thenable trap guard)', () => {

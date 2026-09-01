@@ -19,6 +19,8 @@ import { isNativeApp } from './platform.js'
 const CALLBACK_HOST = 'app.sporely.no'
 const CALLBACK_SCHEME = 'https:'
 const CALLBACK_PATH = '/auth/callback'
+const DEBUG_CALLBACK_SCHEME = 'com.sporelab.sporely.debug:'
+const DEBUG_CALLBACK_HOST = 'auth'
 
 let _listenerHandle = null
 let _handledOnce = new Set()   // URL fingerprints already processed (dedup)
@@ -26,9 +28,13 @@ let _handledOnce = new Set()   // URL fingerprints already processed (dedup)
 export function isSupabaseCallbackUrl(input) {
   try {
     const url = new URL(input)
-    return url.protocol === CALLBACK_SCHEME
+    const production = url.protocol === CALLBACK_SCHEME
       && url.host === CALLBACK_HOST
       && url.pathname === CALLBACK_PATH
+    const debug = url.protocol === DEBUG_CALLBACK_SCHEME
+      && url.host === DEBUG_CALLBACK_HOST
+      && (url.pathname === '' || url.pathname === '/')
+    return production || debug
   } catch (_) {
     return false
   }
