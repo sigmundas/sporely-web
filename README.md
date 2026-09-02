@@ -42,8 +42,11 @@ It is intentionally fairly direct. You take or import photos, review the observa
 If you want a bit more context without diving straight into the code:
 
 - database and policy notes: [SUPABASE_DB.md](SUPABASE_DB.md)
-- app/code structure: [ARCHITECTURE.md](ARCHITECTURE.md)
+- app/code structure: [ARCHITECTURE.md](ARCHITECTURE.md) (auth state machine, sign-out semantics, capability gate, live-reconnect pipeline)
+- outstanding device QA: [docs/manual-qa.md](docs/manual-qa.md) (includes the troubleshooting appendix for the "Session expired" banner)
 - image pipeline checklist and current flow notes: [docs/image-pipeline-phase1.md](docs/image-pipeline-phase1.md)
+
+> **Headline risk for v0.7.2:** the QA round 5 fix (commit `862af60` — the cached-reconnect no-op regression) shipped **without any device verification**. The exact failure mode the release exists to fix (live same-user reconnect from `AUTHENTICATED_CACHED`) has never been observed fixed on a device. `docs/manual-qa.md` item 1 is the mandatory first check. Additionally, `AUTHENTICATED_REAUTH_REQUIRED` — the only state that shows the user-visible "Session expired" copy — has never been entered on a device in any round; the `docs/manual-qa.md` troubleshooting appendix lists the relevant log lines.
 
 ## Local Development
 

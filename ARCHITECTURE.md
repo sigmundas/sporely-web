@@ -61,13 +61,24 @@ sporely-web/
 │           └── index.ts    Self-service account deletion (service-role Edge Function)
 ├── vite.config.js
 └── src/
-    ├── main.js             Entry point — hash parsing, session check, boot
-    ├── supabase.js         createClient (URL + publishable key)
+    ├── main.js             Entry point — hash parsing, session check, boot, deferred auth pipeline
+    ├── supabase.js         createClient (URL + publishable key); early-boot SIGNED_OUT capture
     ├── state.js            Single shared mutable object (no reactivity layer)
     ├── router.js           navigate(screen) — swaps .active class, starts/stops camera
     ├── map-loader.js       Lazy loads the map screen so Leaflet stays off the startup path
     ├── toast.js            showToast(msg) — timed overlay message
     ├── geo.js              Location service/state, watchPosition, session tokens, location-state events
+    ├── auth-state.js       6-state machine (RESOLVING / UNAUTHENTICATED / INCOMPLETE / COMPLETE / CACHED / REAUTH_REQUIRED)
+    ├── auth-classification.js Refresh-side reject classifier + /auth/v1/health reachability probe
+    ├── auth-session.js     getSharedAuthSession — 1 s in-memory session cache
+    ├── auth-signout.js     performExplicitSignOut + consumeExplicitSignOutRequest (purge seam)
+    ├── capabilities.js     canPerformCloudMutation / requiresReauthentication / capability gate
+    ├── reauth.js           beginReauthentication / setReauthHandler — single recovery seam
+    ├── last-validated-account.js B1 "device ever validated this identity online" snapshot (localStorage)
+    ├── local-data-owner.js Draft-store ownership marker (IndexedDB) — privacy boundary
+    ├── account-transition.js Monotonic generation token + A→B transition blocker overlay
+    ├── home-cache.js       Per-user Home read-model cache (IndexedDB) — stale-while-revalidate
+    ├── native-network.js   @capacitor/network monitor — OS-level wake-up hint for the revalidation pipeline
     ├── cloud-plan.js       Cloud plan lookup + effective upload policy helpers
     ├── settings.js         Local Settings preferences: camera, image resolution, sync history
     ├── images.js           Worker-backed image preparation, uploads + thumbnail variants, media URL helpers
@@ -76,15 +87,17 @@ sporely-web/
     ├── ai-crop-editor.js   Full-screen AI crop editor used by review/import flows
     ├── sync-queue.js       IndexedDB offline queue for captured observations + background-task sync drain
     ├── import-store.js     IndexedDB persistence for pending import sessions
+    ├── boot-timings.js     window.__sporelyBoot mark/measure registry — startup instrumentation
+    ├── debug-dashboard.js  In-app debug overlay bound to window.__sporelyBoot
     ├── style.css           All CSS (custom properties, no utility classes)
     └── screens/
-        ├── auth.js         Login, signup, resend confirmation, hash error handling
-        ├── home.js         Dashboard, recent finds from Supabase, sign-out
+        ├── auth.js         Login, signup, resend confirmation, hash error handling, reauth overlay
+        ├── home.js         Dashboard, recent finds from Supabase, sign-out, REAUTH banner
         ├── finds.js        Observation lists (Mine, Friends, Community, User) + Spores filter
         ├── capture.js      Camera (getUserMedia), shutter, batch capture
         ├── review.js       Review one captured observation batch, save to Supabase
         ├── import_review.js Import/group photos, native EXIF/GPS handling, save flow
-        └── profile.js      Profile editing, avatar crop/upload, friends + blocked-users management, delete-account action
+        └── profile.js      Profile editing, avatar crop/upload, friends + blocked-users management, delete-account action, REAUTH banner
 ```
 
 ---
@@ -97,6 +110,293 @@ sporely-web/
 
 All database requests go through the `supabase` client instance in `src/supabase.js`.
 Raw `fetch` is no longer used for Supabase — everything goes through the SDK.
+
+The client is created with `flowType: 'pkce'` and a custom `detectSessionInUrl` that
+suppresses the OAuth callback hash parse on `/auth/callback` paths; `autoRefreshToken`
+and `persistSession` are intentionally left at the supabase-js v2 defaults (both `true`).
+Any future change that disables them — e.g. switching to a non-localStorage backing —
+must update the auth state machine and the cached-boot classifier accordingly; the
+"stay logged in" UX relies on the background refresh timer that `autoRefreshToken: true`
+installs.
+
+`src/supabase.js` also runs an early `onAuthStateChange` capture at module load. `auth-js`
+calls `_recoverAndRefresh()` synchronously when the client is created, and a
+non-retryable refresh rejection can remove the stored session + emit `SIGNED_OUT` before
+`main.js` has had a chance to subscribe. The early capture buffer records event NAMES
+(never tokens / sessions) so the deferred boot classifier can detect
+`hadEarlyBootSignOut()` and route the launch into `AUTHENTICATED_REAUTH_REQUIRED` instead
+of `UNAUTHENTICATED`. This is the *login limbo* fix from the v0.7.2 release.
+
+---
+
+## Auth state machine
+
+The auth state lives in `src/auth-state.js`. It is a six-state enum (`AUTH_STATE`) with
+`getAuthState` / `setAuthState` / `subscribeAuthState` and two derived predicates:
+
+- `isAuthorizedForAuthenticatedNetworkOps(state)` — `true` only for
+  `AUTHENTICATED_COMPLETE`. Every authenticated RPC, write, and upload calls this (via
+  `canPerformCloudMutation()`) before dispatch.
+- `isTerminallyResolvedAuthState(state)` — `true` for `AUTHENTICATED_COMPLETE` and
+  `AUTHENTICATED_INCOMPLETE` only. The resolver's `_resolvedUsers` dedupe *combines* this
+  with `_resolvedUsers.has(userId)` to decide whether a same-user `SIGNED_IN` is a no-op;
+  CACHED and REAUTH_REQUIRED are intentionally NOT terminal so a live reconnect re-enters
+  the resolver and lifts the state back to COMPLETE (this is the round-5 fix, commit
+  `862af60`).
+
+### The six states
+
+| State | Meaning | UI surface | Authorizes network ops? |
+|---|---|---|---|
+| `RESOLVING` | Initial classification in flight | Auth overlay (or blank shell) | No |
+| `UNAUTHENTICATED` | No session, no usable local identity | Auth overlay (login / signup) | No |
+| `AUTHENTICATED_INCOMPLETE` | Signed in, profile setup not finished | Profile setup sheet over the app shell | No |
+| `AUTHENTICATED_COMPLETE` | Online, server-validated this launch | Full app | **Yes (only state)** |
+| `AUTHENTICATED_CACHED` | Device previously validated this identity online; current launch could not reach Supabase | Cached shell + Offline pill | No (capability gate denies) |
+| `AUTHENTICATED_REAUTH_REQUIRED` | Device previously validated this identity online; current launch reached Supabase but the local session is unrecoverable | Cached shell + REAUTH banner ("Session expired" / "Sign in again") | No (capability gate denies) |
+
+### Reachability probe vs session authority
+
+`src/auth-classification.js` runs two distinct things, and conflating them is the most
+common review error:
+
+1. **`isExplicitAuthRejection(err)`** — matches *refresh-side* signals only
+   (`invalid_grant`, `invalid refresh token`, `refresh_token_not_found`,
+   `refresh_token_already_used`, `refresh token expired`, `user_not_found`,
+   `session_not_found`). A bare `"JWT expired"` from the access token is deliberately
+   NOT included — supabase-js's `autoRefreshToken` timer refreshes access tokens in the
+   background; a bare access-token expiry is the normal "stay logged in" path, not a
+   "session expired" event. Treating it as a reject would deny cached boot on every
+   offline launch (this is the `auth-classification.test.js:39-42` regression guard).
+2. **`probeBackendReachability({ timeoutMs: 3000 })`** — a tiny anonymous GET to
+   `<project>/auth/v1/health` with the publishable `apikey` header, no tokens, `no-store`.
+   `< 500` → `reachable`. The probe is the *only* way `AUTHENTICATED_CACHED` and
+   `AUTHENTICATED_REAUTH_REQUIRED` are distinguished: same null session on the device,
+   two different answers from the probe. The probe is *never* the authority for the
+   session itself.
+
+### Cached-boot privacy boundary
+
+A cached reveal requires **two** local records to agree on the user:
+
+- `readLastValidatedAccount()` — a `localStorage` record of the last online resolution
+  for this device (`src/last-validated-account.js`).
+- `getLocalDataOwner()` — an IndexedDB marker of who owns the draft store
+  (`src/local-data-owner.js`).
+
+If either is missing, or the two disagree, the cached reveal fails closed:
+`clearLastValidatedAccount()` + `UNAUTHENTICATED`. This is the A→B privacy boundary — a
+user who clears the snapshot must not be able to silently boot into a different user's
+cached Home. See `src/offline-boot.test.js` for the contract and the
+`reauth-ux.test.js` / `auth-reauth-recovery.test.js` guards.
+
+### Deferred event pipeline
+
+supabase-js holds an internal auth lock while dispatching `onAuthStateChange`. Awaiting
+*any* Supabase API in the direct listener (`exchangeCodeForSession`, PostgREST, RPC,
+`signOut`, `getSession`, …) deadlocks that lock — the current event never returns and
+the next auth call hangs forever. The fix is enforced in `src/main.js`
+`enqueueAuthEvent` / `_handleDeferredAuthEvent` and pinned by
+`src/auth-deadlock.regression.test.js`: the direct callback is non-async, returns
+immediately, and enqueues onto a single promise chain. The deferred handler runs the
+resolve / sign-out / cached-revalidation pipeline outside the lock. **Do not**
+"simplify" this by inlining the handler — the deadlock is not a hypothetical (it was
+the bug that motivated the test).
+
+### Live-reconnect pipeline (cached → complete)
+
+When the app is in `AUTHENTICATED_CACHED` or `AUTHENTICATED_REAUTH_REQUIRED`, ten wake-up
+sources converge on a single deduped + throttled revalidation entry point in
+`src/main.js` `requestConnectivityRevalidation(reason, options)`:
+
+| Source | Reason string | File / line |
+|---|---|---|
+| Native `@capacitor/network` `networkStatusChange` false→true | `native-network-change` | `src/native-network.js:170-179` |
+| Native `App.resume` → `Network.getStatus()` | `native-resume-status` | `src/native-network.js:206-216` |
+| Native `visibilitychange`→visible → `Network.getStatus()` | `native-resume-status` | `src/native-network.js:196-204` |
+| Web `window 'online'` | `web-online` | `src/main.js:1897` |
+| Web `window 'focus'` | `focus` | `src/main.js:1901` |
+| Web `visibilitychange`→visible | `visibility` | `src/main.js:1905-1907` |
+| 15 s cached watchdog (foregrounded CACHED only) | `cached-watchdog` | `src/main.js:422-470` |
+| 5 s boot deferred re-probe (one-shot, only when initial reachability was `unreachable`) | `deferred-probe` | `src/main.js:1916-1920` |
+| Finds pull-to-refresh | `finds-pull-refresh` (user-initiated; bypasses throttle) | `src/main.js:312-320` |
+| Native `Network.getStatus()` polled check | `RESUME_STATUS` | `src/native-network.js:84-92` |
+
+`requestConnectivityRevalidation` is a no-op in COMPLETE (it only nudges `triggerSync()`;
+it does not re-run the resolve pipeline) and in any non-cached state other than COMPLETE.
+
+`_attemptCachedRevalidation(source, { force })` holds the `_cachedRevalidationInFlight`
+single-flight guard and the `CACHED_REVALIDATION_MIN_RETRY_MS = 12_000` automatic-attempt
+throttle. Only `USER_INITIATED_REVALIDATION_REASONS` (currently just `finds-pull-refresh`)
+and `options.force = true` bypass the throttle; the throttle is *never* bypassed for the
+auth/capability gates or the single-flight guard.
+
+`navigator.onLine`, `@capacitor/network` `connected`, and `networkStatusChange` are
+**wake-up hints only** — the *real* authority is the `probeBackendReachability()` result
+and the resulting `getSharedAuthSession({ refresh: true })` call. Device QA has proven
+twice that native connectivity state is not reliable enough to be a *prerequisite* for
+recovery (the round-4 regression). The 15 s cached watchdog runs an HTTP probe directly
+without consulting the OS status.
+
+---
+
+## Sign-out semantics
+
+There are exactly **two** sign-out paths and they must stay distinct. `src/auth-signout.js`
+is the seam that classifies them.
+
+### Explicit sign-out (user-initiated)
+
+Any code that wants to sign the user out — Logg ut in the Profile sheet, delete-account,
+password-reset flows, the "use another account" path on the setup screen, the
+resolution-error escape — **must** call `performExplicitSignOut()`. The function sets an
+`_explicitSignOutRequested` flag *before* the underlying `supabase.auth.signOut()` call,
+then awaits the promise. The deferred `SIGNED_OUT` handler consumes the flag.
+
+An explicit sign-out triggers the full purge:
+
+- `clearLastValidatedAccount()` — the B1 snapshot dies here, so the next launch cannot
+  boot offline.
+- `clearSharedAuthSessionCache()` — the 1 s in-memory session cache.
+- `_resolvedUsers.clear()` and `_resolutionInFlight.clear()` — the resolver dedupe memory.
+- `beginAccountTransition()` + `clearUserScopedUi()` — DOM is blanked synchronously before
+  any await, so no A's content can paint after this line.
+- `_purgeUserDrafts()` — IndexedDB observation draft store. If this fails, the owner
+  marker is preserved for the next-boot retry; the snapshot still dies immediately so
+  cached boot fails closed regardless.
+- `clearHomeCache(signedOutUserId)` and `clearMediaCacheForUser(signedOutUserId)` —
+  user-scoped Home read-model and media blob caches.
+- `forceCloseProfileOverlay()` and `_hideProfileResolutionError()`.
+
+A direct `supabase.auth.signOut()` call would skip the flag and be misclassified as
+internal session loss — the purge would never run, the user would still see a logged-in
+shell, and queued work would be wiped by the wrong path. **Do not** call
+`supabase.auth.signOut()` directly; route through `performExplicitSignOut()`.
+
+### Internal session loss (auth-js self-purge)
+
+`auth-js` also emits `SIGNED_OUT` on its own when it removes an unrecoverable stored
+session — typically a non-retryable refresh rejection (refresh-token rotation race,
+server-side revocation). This is the path the deferred handler at
+`src/main.js:2175-2184` intercepts via `_isInternalSessionLossForTrustedUser()`. It
+classifies the event before purging anything; if the trust invariants hold (snapshot
+exists, owner marker matches, user id matches the resolved state), it pins
+`AUTHENTICATED_REAUTH_REQUIRED` for the SAME user instead of purging. The capability
+gate blocks every cloud op, the Profile sheet surfaces the "Sign in again" recovery,
+queued observations and drafts survive, and the cached Home stays up — the user sees
+the banner, not a sign-out.
+
+The trust invariants are the same `last-validated-account` + `local-data-owner` pair
+used by `_tryCachedAuthenticatedBoot`. If either is missing, the path falls through to
+the full purge. This is the "always-online user" case: an internal session loss becomes
+a recovery prompt, not a data loss.
+
+### Recovery via `beginReauthentication`
+
+The shared recovery seam is `beginReauthentication(prefillEmail)` in `src/reauth.js`,
+injected once by `main.js` at init. The handler authenticates *without* signing out
+first. A successful same-user sign-in fires `SIGNED_IN` →
+`resolveAuthenticatedSessionOnce` → `_revalidateCachedRevealInPlace` →
+`AUTHENTICATED_COMPLETE` (the `isUserAlreadyResolved` round-5 fix). A different-user
+sign-in takes the existing full account-transition privacy boundary unchanged.
+
+`beginReauthentication` is a no-op outside `AUTHENTICATED_REAUTH_REQUIRED` — a stale
+button click can never open the login overlay over a live session, and a plain-offline
+CACHED user can never trigger the reauth overlay. This is enforced by
+`canBeginLoginOAuth()` in `src/capabilities.js` and pinned by `src/reauth-ux.test.js`.
+
+### Diagnostics
+
+If a user reports the "Session expired" banner, the only credential-free trace is
+`_authLog(...)` in `src/main.js` and the auth-classification log lines in
+`src/auth-classification.js`. The logger is structured (`[auth] ${phase} { extra }`)
+and never emits tokens, session objects, or auth payloads — this is enforced by
+`src/auth-reauth-recovery.test.js:259-267`. The relevant reason codes are:
+
+| Log line | What it means |
+|---|---|
+| `cached_boot_auth_reject_reauth` | Boot hit a server-confirmed refresh-side rejection → REAUTH_REQUIRED |
+| `cached_revalidation_auth_rejected` | Runtime revalidation hit the same → REAUTH_REQUIRED |
+| `signed_out_internal_session_loss` | Deferred `SIGNED_OUT` for a trusted same-user → REAUTH_REQUIRED (no purge) |
+| `reachability_probe` reachable=`true`/`false` | Reachability probe result at boot |
+| `cached_state_synced_with_reachability` | State flipped between CACHED and REAUTH_REQUIRED after a probe |
+| `cached_revalidation_no_user` | `getSession({ refresh: true })` returned null but no explicit error |
+| `cached_revalidation_transport_failed` | `getSession({ refresh: true })` threw a transport error |
+
+---
+
+## Capability gate
+
+`src/capabilities.js` is the centralized gate for every user-triggered action that
+ultimately requires a live Supabase session (writes, RPCs, Edge Functions, Storage
+uploads, AI, OAuth linking, iNaturalist, taxonomy search, etc.). Every call site MUST
+consult this module before dispatching the request. The guarantees:
+
+- **Single source of truth for "is this action allowed right now?"** — no call site can
+  drift its own auth check.
+- **Single, user-friendly message** — "Internet connection required." for offline,
+  "Sign in to reconnect." for reauth and unauthenticated, "Finish setting up your
+  account." for incomplete, "Please wait…" for resolving. Same wording across every
+  screen.
+- **No `navigator.onLine` dependency** — the capability is derived exclusively from the
+  auth state machine, so a stale browser `online` flag can never bypass the gate.
+
+`canPerformCloudMutation(overrideState?)` returns `{ allowed: true }` only when the
+current state is `AUTHENTICATED_COMPLETE`; otherwise it returns
+`{ allowed: false, reason, message }`. Call sites that want a toast on denial use
+`requireCloudMutation({ showToast, overrideState, silent })`.
+
+`requiresReauthentication(overrideState?)` is the predicate that `syncHomeSessionNotice`,
+the Profile sheet banner, the Finds reauth note, and `beginReauthentication` itself all
+consult. It is `true` only when the state is `AUTHENTICATED_REAUTH_REQUIRED` — never for
+plain-offline `AUTHENTICATED_CACHED`, never for `AUTHENTICATED_COMPLETE`, never for
+`UNAUTHENTICATED`. The `reauth-ux.test.js` suite pins this exactly.
+
+`isOfflineCachedMode(overrideState?)` is the corresponding predicate for the Offline
+pill. A REAUTH_REQUIRED user has a reachable backend, so the pill is hidden; the reauth
+banner is shown instead.
+
+There is a narrow `bypassCapabilityGate` rule for code paths that genuinely need to read
+while the user is in a cached / reauth shell (the user's own avatar in the header, the
+user's own protected media in the cache). See the `bypassCapabilityGate` references in
+`src/capability-gates.test.js` and the `ProtectedMediaLoader` docblock in
+`src/protected-media.js`. Do not introduce new bypasses; the rule is audited by
+`src/capability-gates.test.js`.
+
+---
+
+## Auth invariants (structural tests)
+
+The auth state machine, capability gate, recovery seam, deferred pipeline, and offline
+revalidation are pinned by structural tests because `main.js` is too DOM/Supabase-heavy
+to import in Node. Treat any change to these areas as failing these tests if not also
+updated:
+
+- `src/auth-reauth-recovery.test.js` — refresh-side error surfacing, early-boot SIGNED_OUT
+  capture, recovery banner UX, "no tokens in logs" guard.
+- `src/auth-classification.test.js` — `isExplicitAuthRejection` matches the refresh-side
+  tags only; bare `"JWT expired"` does NOT count.
+- `src/auth-state.test.js` — terminal-state predicate, `isUserAlreadyResolved` round-5
+  dedupe.
+- `src/auth-deadlock.regression.test.js` — the deferred event pipeline does not await
+  Supabase APIs in the direct callback.
+- `src/reauth-ux.test.js` — `beginReauthentication` is REAUTH-only; banner is REAUTH-only;
+  i18n keys exist in every supported locale.
+- `src/live-reconnect.test.js` — wake-up sources, the round-5 cached-reconnect no-op fix,
+  the resolver's state-aware dedupe, `_revalidateCachedRevealInPlace` routing.
+- `src/capability-gates.test.js` + `src/capabilities.test.js` — every call site respects
+  the gate; `bypassCapabilityGate` is narrow.
+- `src/startup-invariants.test.js` — boot ordering, one-time bindings,
+  `home-network-refresh-started` fires exactly once per recover.
+- `src/connectivity-loss.test.js` — COMPLETE→CACHED downgrade is same-user only, never
+  signs out, never touches queued work.
+- `src/offline-boot.test.js` — the cached-boot decision matrix.
+- `src/field-offline-ux.test.js` — watchdog interval / throttle math, single entry point
+  binding, native monitor wiring.
+
+If you touch the auth state machine, the capability gate, the sign-out classification,
+or the revalidation pipeline, run this list and update the test that pins the contract
+you are changing.
 
 ---
 

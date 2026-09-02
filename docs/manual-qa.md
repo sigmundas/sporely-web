@@ -127,3 +127,40 @@ the resolver). B1's seven scenarios were recorded as Android-verified before
 merge, except the persisted-valid-token airplane relaunch variant (later found
 broken and fixed — covered by item 6a) and the Offline-pill placement (covered
 by item 11).
+
+## Troubleshooting appendix — diagnosing the "Session expired" banner
+
+The "Session expired" / "Sign in again" copy on Home, the Profile sheet, and the Finds
+note appears **only** in `AUTHENTICATED_REAUTH_REQUIRED` (backend reachable, session
+unrecoverable). Plain-offline `AUTHENTICATED_CACHED` does not show it. If a user
+reports the banner, the only credential-free trace is the structured `_authLog(...)`
+output in `src/main.js` and the auth-classification log lines in `src/auth-classification.js`
+(logger is `[auth] ${phase} { extra }`; never emits tokens, session objects, or auth
+payloads — enforced by `src/auth-reauth-recovery.test.js:259-267`).
+
+The relevant reason codes, in priority order for triage:
+
+| Log line | What it means | Typical user-visible cause |
+|---|---|---|
+| `cached_boot_auth_reject_reauth` | Boot hit a server-confirmed refresh-side rejection → REAUTH_REQUIRED | Server-side refresh-token revocation (password change, admin action, 60-day idle hard-expire, PKCE rotation race), or the boot-time `_recoverAndRefresh()` removed the session and the early-boot capture buffer saw the SIGNED_OUT (`reason: 'session-removed-at-init'`) |
+| `cached_revalidation_auth_rejected` | Runtime revalidation hit the same → REAUTH_REQUIRED | Same as above, but happened *during* a CACHED/REAUTH→COMPLETE attempt; pinned instead of purging so queued work is preserved |
+| `signed_out_internal_session_loss` | Deferred `SIGNED_OUT` for a trusted same-user → REAUTH_REQUIRED (no purge) | auth-js self-purged a non-retryable refresh rejection for a user we already trusted via snapshot + owner marker |
+| `reachability_probe` reachable=`true` | Reachability probe at boot returned reachable | Backend is up; the device has a prior online resolution; the session layer is what failed. Almost always the first three rows above. |
+| `reachability_probe` reachable=`false` | Reachability probe at boot returned unreachable | The app landed in `AUTHENTICATED_CACHED` instead — the user should see the Offline pill, not the REAUTH banner. If the user reports seeing the REAUTH banner with this log, the cached-revalidation pipeline flipped state on a later probe. |
+| `cached_state_synced_with_reachability` | State flipped between CACHED and REAUTH_REQUIRED after a probe | The "back-and-forth" diagnostic — useful to see if a flaky network is making the user oscillate between the two cached-shell states |
+| `cached_revalidation_no_user` | `getSession({ refresh: true })` returned null but no explicit error | Server reachable, no session — usually a sign-out from another device |
+| `cached_revalidation_transport_failed` | `getSession({ refresh: true })` threw a transport error | Intermittent network during the probe; `_syncCachedStateWithReachability` reflects the probe result either way |
+
+For always-online users who report the banner "out of nowhere", the most common
+sequence in the v0.7.2 release is: PKCE refresh-token rotation — the auth-js `initialize()`
+on a tab/window focus or a forced supabase-js refresh replaces the old refresh token
+with a new one, and the old one becomes `refresh_token_already_used` on the server
+(included in `EXPLICIT_AUTH_REJECT_TAGS` deliberately). On a real device this is rare
+because the in-app supabase client and the persisted localStorage share the same
+rotation, but cross-tab / cross-device concurrency can produce it. The fix is the
+"Sign in again" recovery path — the local data is preserved.
+
+`docs/manual-qa.md:81` already notes that **`AUTHENTICATED_REAUTH_REQUIRED` has never
+been entered on a device in any round**. This is the most important open QA item for
+the offline/auth layer; it is the only state in the v0.7.2 release whose end-to-end
+behaviour has not been device-verified.
