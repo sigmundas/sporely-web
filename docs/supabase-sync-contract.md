@@ -1,5 +1,55 @@
 # Sporely Cloud Sync Contract and Repair Plan
 
+## Shared reference contributions
+
+A personal reference graph remains owner-private and owner-mutable. After an
+authenticated sync stores an active observation-reference use whose observation
+has an exact stable species identity, the server snapshots that source as an
+immutable, attributed shared-contribution revision. Discovery is keyed only by
+the exact `sporely_taxon_id`; DOI and other citation metadata are optional and
+never identity, deduplication, or merge keys. Other users have read-only access
+to the bounded public envelope and may copy it to fresh personal UUIDs.
+Public envelopes replace all three owner-private graph UUIDs with stable public
+contribution identities. Exact-taxon changes, use reassignment, soft detach,
+and hard deletion withdraw an orphaned contribution; a service-owned taxonomy
+resolution follows the same rule without requiring an end-user JWT subject.
+
+Plotting a normalized library reference for an active desktop observation is
+an explicit scientific use and must idempotently persist the existing frozen
+observation-reference association, creating it with role `compared` only when
+none exists. Plot visibility is display state and never attaches or detaches.
+Desktop exact identity is forwarded only from a stored positive
+`sporely_taxon_id` through the guarded selected-taxon RPC; names and citation
+text are never taxonomy evidence. Historical contribution backfill is limited
+to active owner-matched uses with a valid source graph and an already-stored
+species-level exact taxon, and is replay-safe.
+
+The `curated_*` names retained in older storage and client compatibility code
+are legacy implementation terminology, not scientific review or approval.
+Reviewer, publisher, and attestation policy are not prerequisites for sharing.
+Moderation may change public visibility for abuse, privacy, or legal reasons,
+but does not select a scientifically preferred contribution. Moderation state
+is independent of owner withdrawal, so an owner cannot reshare around a hide.
+Account deletion withdraws and anonymizes retained immutable history. Withdrawal
+hides catalogue discovery while previously frozen observation and Compare
+evidence continues to reproduce its exact revision.
+
+Production shared-reference policy uses a one-minute fixed window, allowing a
+short burst up to 60 requests per authenticated user or 30 requests per
+anonymous trusted-edge IP/session. Unauthenticated requests without the trusted
+edge identity share one fail-closed fallback bucket rather than trusting
+caller-supplied forwarding/session headers. Throttled responses are HTTP `429` with `Retry-After`;
+clients treat them as retryable and preserve local work. Catalogue pages
+default to 25 rows and accept at most 100. Scientific contribution revisions
+are immutable and retained indefinitely. Withdrawal, source deletion, and
+account deletion remove contributions from new discovery/use while retained
+history remains available to already-frozen observation and Compare evidence;
+account deletion anonymizes that history. Rate-limit/request-abuse metadata is
+retained for 30 days and operational policy logs for 90 days through a daily
+database job and the service-only retention routine. Abuse, privacy, or legal takedowns may hide a
+contribution immediately, with an initial-human-review target of five business
+days. These controls do not introduce scientific approval or attestation.
+
 Status: required behavior; Stage 1 landed; Stage 2 pending.
 
 This is the shared sync specification for `sporely` (desktop) and `sporely-web` (web, Android, Supabase, and cloud media). Keep an identical copy at:
@@ -129,6 +179,30 @@ observation/calibration counts do not absorb reference counts. Reference
 errors, conflicts, and dependency blocks are also surfaced through the
 existing top-level error channel. Typed errors and blocked outcomes retain the
 RPC domain status (for example, `invalid_payload` or `invalid_parent`).
+
+## Owner-private curated fork provenance
+
+Stage 6k stores an immutable owner-only mapping from exact curated catalogue
+identity `(curated_measurement_set_id, bundle_revision)` to a fresh personal
+work → treatment → measurement-set graph. The mapping also records the exact
+positive taxonomy-v3 assignment and the desktop fingerprint of the validated
+frozen public envelope. The authenticated `sync_reference_curated_fork` RPC
+derives ownership from `auth.uid()`, validates the immutable publication/taxon
+assignment and same-owner graph, and treats an identical retry as `no_change`;
+any disagreement is a conflict. Direct writes are denied and owner SELECT is
+RLS-scoped. Curated IDs are never attached to observations and the mapping is
+never part of a public projection.
+
+Desktop sync pushes this mapping only after its personal graph has converged.
+Pull reads it only after that graph and reconstructs local frozen provenance
+through the exact public revision API. Download-from-Cloud permits those reads
+but blocks the provenance writer.
+
+The owner feed is a complete, deterministically paginated collection. Desktop
+reconciliation accepts up to 10,000 mappings and 64 MiB of encoded response
+data per account; exceeding either bound fails the complete read without
+returning a partial collection. There is no smaller undocumented 100-row
+transport cap from which absence could be inferred.
 
 ## Storage of desired cloud image-byte state
 
