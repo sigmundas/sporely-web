@@ -102,4 +102,6 @@ REVOKE ALL ON FUNCTION
 
 SELECT private.backfill_historical_shared_reference_contributions();
 
+DROP FUNCTION private.backfill_historical_shared_reference_contributions();
+
 COMMIT;
