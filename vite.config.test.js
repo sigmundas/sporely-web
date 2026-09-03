@@ -16,6 +16,7 @@ function withTempCwd({ envLocal, shellKey }) {
     writeFileSync(join(dir, '.env.local'), envLocal, 'utf8')
   }
   mkdirSync(join(dir, 'auth'), { recursive: true })
+  mkdirSync(join(dir, 'oauth'), { recursive: true })
   process.chdir(dir)
   if (shellKey === undefined) delete process.env.VITE_TURNSTILE_SITE_KEY
   else process.env.VITE_TURNSTILE_SITE_KEY = shellKey
@@ -92,13 +93,14 @@ test('non-production modes do not enforce the site key', () => {
   }
 })
 
-test('multi-page rollup input still targets index.html and auth/turnstile-mobile.html', () => {
+test('multi-page rollup input targets index.html, auth/turnstile-mobile.html, and oauth/consent.html', () => {
   const ctx = withTempCwd({ envLocal: 'VITE_TURNSTILE_SITE_KEY=1x00000000000000000000AA\n', shellKey: undefined })
   try {
     const config = configFn({ mode: 'production', command: 'build' })
     const inputs = config.build.rollupOptions.input
     assert.match(inputs.main, /index\.html$/)
     assert.match(inputs.turnstileMobile, /auth\/turnstile-mobile\.html$/)
+    assert.match(inputs.oauthConsent, /oauth\/consent\.html$/)
     assert.equal(config.build.outDir, 'dist')
   } finally {
     ctx.restore()

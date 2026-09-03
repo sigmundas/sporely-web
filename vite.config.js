@@ -35,6 +35,7 @@ export default defineConfig(({ mode }) => {
         input: {
           main: resolve(projectRoot, 'index.html'),
           turnstileMobile: resolve(projectRoot, 'auth/turnstile-mobile.html'),
+          oauthConsent: resolve(projectRoot, 'oauth/consent.html'),
         },
       },
     },

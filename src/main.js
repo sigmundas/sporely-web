@@ -157,6 +157,32 @@ function _authLog(phase, extra = {}) {
   try { console.info(`[auth] ${phase}`, extra) } catch (_) {}
 }
 
+// After a successful interactive login, redirect to a pending OAuth consent
+// page if the user arrived here from /oauth/consent (no active session).
+// The consent page stored the authorization_id in sessionStorage before
+// redirecting; we consume it immediately (one use) and send the user back.
+// Returns a same-origin path string, or null if nothing is pending.
+//
+// Intentionally inlined rather than imported from oauth-consent.js: importing
+// that module would bundle the entire consent screen into the main app chunk.
+function _consumePendingOAuthConsentReturn() {
+  const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const KEY = 'sporely-oauth-consent-pending'
+  try {
+    const raw = globalThis.sessionStorage?.getItem(KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    const id = String(parsed?.id || '').trim()
+    const ts = Number(parsed?.ts || 0)
+    globalThis.sessionStorage.removeItem(KEY)
+    if (!id || !_UUID_RE.test(id)) return null
+    if (ts && (Date.now() - ts) > 10 * 60 * 1000) return null
+    return `/oauth/consent?authorization_id=${encodeURIComponent(id)}`
+  } catch (_) {
+    return null
+  }
+}
+
 function _safeErrorCode(err) {
   if (!err) return 'unknown'
   if (typeof err === 'string') return err.slice(0, 64)
@@ -2068,6 +2094,8 @@ async function init() {
       if (bootSession?.user) {
         try {
           await resolveAuthenticatedSessionOnce(bootSession, 'auth_form_submit')
+          const consentReturn = _consumePendingOAuthConsentReturn()
+          if (consentReturn) { window.location.href = consentReturn; return }
         } catch (_) { /* handled by profile-resolution error surface */ }
       }
     }, skipDraftRestore)
@@ -2163,6 +2191,8 @@ async function init() {
       _fireClientActivity()
       try {
         await resolveAuthenticatedSessionOnce(session, 'onAuthStateChange')
+        const consentReturn = _consumePendingOAuthConsentReturn()
+        if (consentReturn) { window.location.href = consentReturn; return }
       } catch {
         // resolveAuthenticatedSessionOnce already logged via safe phase log.
         // The profile-resolution error surface handles user-visible retry.
