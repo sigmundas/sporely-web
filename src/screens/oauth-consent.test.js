@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { initOAuthConsent, consumePendingOAuthConsentReturn } from './oauth-consent.js'
+import { initOAuthConsent } from './oauth-consent.js'
+import { consumePendingOAuthConsentReturn, isValidOAuthAuthorizationId } from '../oauth-consent-return.js'
 
 // ── DOM / Window helpers ──────────────────────────────────────────────────────
 
@@ -62,13 +63,22 @@ function makeSupabase({ session = null, sessionError = null, authDetails = null,
   }
 }
 
-const VALID_UUID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+const VALID_AUTHORIZATION_ID = 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6'
+const VALID_UUID = VALID_AUTHORIZATION_ID
 const DESKTOP_CLIENT_ID = 'b141fed6-e257-4de1-b784-3a28c777dadf'
 
 function makeAuthDetails(overrides = {}) {
   return {
-    client_id: DESKTOP_CLIENT_ID,
-    name: 'Sporely Desktop',
+    authorization_id: VALID_AUTHORIZATION_ID,
+    redirect_uri: 'http://127.0.0.1:8765/auth/callback',
+    client: {
+      id: DESKTOP_CLIENT_ID,
+      name: 'Sporely Desktop',
+      uri: 'https://sporely.no',
+      logo_uri: 'https://sporely.no/logo.png',
+    },
+    user: { id: 'user-123', email: 'test@example.com' },
+    scope: 'openid profile',
     ...overrides,
   }
 }
@@ -96,9 +106,9 @@ test('shows error for missing authorization_id', async () => {
   assert.equal(els['consent-ui'].style.display, 'none')
 })
 
-test('shows error for non-UUID authorization_id', async () => {
+test('rejects unsafe, path-like authorization_id', async () => {
   const { doc, els } = makeDom()
-  const win = makeWin('?authorization_id=not-a-uuid')
+  const win = makeWin('?authorization_id=not/a-safe-token')
   const sb = makeSupabase()
 
   const result = await initOAuthConsent({ supabase: sb, document: doc, window: win })
@@ -119,11 +129,31 @@ test('shows error for empty authorization_id param', async () => {
   assert.equal(result.error, 'missing')
 })
 
+test('rejects authorization_id with surrounding whitespace', async () => {
+  const { doc, els } = makeDom()
+  const win = makeWin(`?authorization_id=%20${VALID_AUTHORIZATION_ID}%20`)
+
+  const result = await initOAuthConsent({ supabase: makeSupabase(), document: doc, window: win })
+
+  assert.equal(result.status, 'invalid_param')
+  assert.equal(result.error, 'format')
+  assert.ok(els['consent-error'].textContent.includes('Invalid authorization_id'))
+})
+
+test('authorization_id validator accepts opaque Supabase token and rejects unsafe values', () => {
+  assert.equal(isValidOAuthAuthorizationId(VALID_AUTHORIZATION_ID), true)
+  assert.equal(isValidOAuthAuthorizationId(' leading-space'), false)
+  assert.equal(isValidOAuthAuthorizationId('unsafe/token'), false)
+  assert.equal(isValidOAuthAuthorizationId('unsafe?query'), false)
+  assert.equal(isValidOAuthAuthorizationId('unsafe\ncontrol'), false)
+  assert.equal(isValidOAuthAuthorizationId('a'.repeat(129)), false)
+})
+
 // ── No session → redirect to login ───────────────────────────────────────────
 
 test('redirects unauthenticated user to login and stores pending consent', async () => {
   const { doc } = makeDom()
-  const win = makeWin(`?authorization_id=${VALID_UUID}`)
+  const win = makeWin(`?authorization_id=${VALID_AUTHORIZATION_ID}`)
   const sb = makeSupabase({ session: null })
 
   const previousSessionStorage = globalThis.sessionStorage
@@ -138,11 +168,11 @@ test('redirects unauthenticated user to login and stores pending consent', async
     const result = await initOAuthConsent({ supabase: sb, document: doc, window: win, loginReturnTarget: 'https://app.sporely.no/' })
 
     assert.equal(result.status, 'redirect_to_login')
-    assert.equal(result.authorizationId, VALID_UUID)
+    assert.equal(result.authorizationId, VALID_AUTHORIZATION_ID)
     assert.equal(win._navHref.href, 'https://app.sporely.no/')
 
     const stored = JSON.parse(store['sporely-oauth-consent-pending'])
-    assert.equal(stored.id, VALID_UUID)
+    assert.equal(stored.id, VALID_AUTHORIZATION_ID)
     assert.ok(typeof stored.ts === 'number')
   } finally {
     globalThis.sessionStorage = previousSessionStorage
@@ -151,7 +181,7 @@ test('redirects unauthenticated user to login and stores pending consent', async
 
 test('redirects to origin root when no loginReturnTarget specified', async () => {
   const { doc } = makeDom()
-  const win = makeWin(`?authorization_id=${VALID_UUID}`)
+  const win = makeWin(`?authorization_id=${VALID_AUTHORIZATION_ID}`)
   const sb = makeSupabase({ session: null })
 
   const result = await initOAuthConsent({ supabase: sb, document: doc, window: win })
@@ -174,7 +204,7 @@ test('consumePendingOAuthConsentReturn returns null when nothing is stored', () 
 
 test('consumePendingOAuthConsentReturn returns consent path and clears store', () => {
   const prev = globalThis.sessionStorage
-  const store = { 'sporely-oauth-consent-pending': JSON.stringify({ id: VALID_UUID, ts: Date.now() }) }
+  const store = { 'sporely-oauth-consent-pending': JSON.stringify({ id: VALID_AUTHORIZATION_ID, ts: Date.now() }) }
   const removed = []
   globalThis.sessionStorage = {
     getItem: k => store[k] ?? null,
@@ -184,7 +214,7 @@ test('consumePendingOAuthConsentReturn returns consent path and clears store', (
   try {
     const path = consumePendingOAuthConsentReturn()
     assert.ok(path.startsWith('/oauth/consent?authorization_id='))
-    assert.ok(path.includes(encodeURIComponent(VALID_UUID)))
+    assert.ok(path.includes(encodeURIComponent(VALID_AUTHORIZATION_ID)))
     assert.ok(removed.includes('sporely-oauth-consent-pending'))
     // Consumed — second call returns null
     assert.equal(consumePendingOAuthConsentReturn(), null)
@@ -193,9 +223,26 @@ test('consumePendingOAuthConsentReturn returns consent path and clears store', (
   }
 })
 
-test('consumePendingOAuthConsentReturn returns null for invalid UUID in store', () => {
+test('consumePendingOAuthConsentReturn returns null for unsafe authorization_id in store', () => {
   const prev = globalThis.sessionStorage
-  const store = { 'sporely-oauth-consent-pending': JSON.stringify({ id: 'not-a-uuid', ts: Date.now() }) }
+  const store = { 'sporely-oauth-consent-pending': JSON.stringify({ id: 'not/a-safe-token', ts: Date.now() }) }
+  globalThis.sessionStorage = {
+    getItem: k => store[k] ?? null,
+    setItem: (k, v) => { store[k] = v },
+    removeItem: k => { delete store[k] },
+  }
+  try {
+    assert.equal(consumePendingOAuthConsentReturn(), null)
+  } finally {
+    globalThis.sessionStorage = prev
+  }
+})
+
+test('consumePendingOAuthConsentReturn rejects stored authorization_id with surrounding whitespace', () => {
+  const prev = globalThis.sessionStorage
+  const store = {
+    'sporely-oauth-consent-pending': JSON.stringify({ id: ` ${VALID_AUTHORIZATION_ID} `, ts: Date.now() }),
+  }
   globalThis.sessionStorage = {
     getItem: k => store[k] ?? null,
     setItem: (k, v) => { store[k] = v },
@@ -211,7 +258,7 @@ test('consumePendingOAuthConsentReturn returns null for invalid UUID in store', 
 test('consumePendingOAuthConsentReturn returns null for expired pending entry', () => {
   const prev = globalThis.sessionStorage
   const expiredTs = Date.now() - 11 * 60 * 1000  // 11 minutes ago
-  const store = { 'sporely-oauth-consent-pending': JSON.stringify({ id: VALID_UUID, ts: expiredTs }) }
+  const store = { 'sporely-oauth-consent-pending': JSON.stringify({ id: VALID_AUTHORIZATION_ID, ts: expiredTs }) }
   globalThis.sessionStorage = {
     getItem: k => store[k] ?? null,
     setItem: (k, v) => { store[k] = v },
@@ -266,12 +313,12 @@ test('shows expired error when authDetails is null', async () => {
   assert.ok(els['consent-error'].textContent.includes('expired or is invalid'))
 })
 
-test('shows unauthorized error for wrong client_id', async () => {
+test('shows unauthorized error for wrong client.id', async () => {
   const { doc, els } = makeDom()
   const win = makeWin(`?authorization_id=${VALID_UUID}`)
   const sb = makeSupabase({
     session: makeSession(),
-    authDetails: makeAuthDetails({ client_id: '00000000-0000-0000-0000-000000000000' }),
+    authDetails: makeAuthDetails({ client: { id: '00000000-0000-0000-0000-000000000000', name: 'Other client' } }),
   })
 
   const result = await initOAuthConsent({ supabase: sb, document: doc, window: win })
@@ -302,12 +349,12 @@ test('renders consent UI for authenticated user with valid authorization', async
   assert.equal(els['consent-client-name'].textContent, 'Sporely Desktop')
 })
 
-test('renders with client_name fallback when name is absent', async () => {
+test('renders the server-returned client.name', async () => {
   const { doc, els } = makeDom()
   const win = makeWin(`?authorization_id=${VALID_UUID}`)
   const sb = makeSupabase({
     session: makeSession(),
-    authDetails: makeAuthDetails({ name: undefined, client_name: 'Sporely Desktop Alt' }),
+    authDetails: makeAuthDetails({ client: { id: DESKTOP_CLIENT_ID, name: 'Sporely Desktop Alt' } }),
   })
 
   const result = await initOAuthConsent({ supabase: sb, document: doc, window: win })
@@ -561,11 +608,36 @@ test('re-entering initOAuthConsent with same authorization_id re-fetches details
   assert.equal(r2.status, 'ready')
 })
 
+test('already-consented authorization redirects immediately using redirect_url', async () => {
+  const { doc, els } = makeDom()
+  const win = makeWin(`?authorization_id=${VALID_AUTHORIZATION_ID}`)
+  const redirectUrl = 'http://127.0.0.1:8765/auth/callback?code=opaque-code&state=opaque-state'
+  const sb = makeSupabase({ session: makeSession(), authDetails: { redirect_url: redirectUrl } })
+
+  const result = await initOAuthConsent({ supabase: sb, document: doc, window: win })
+
+  assert.equal(result.status, 'already_consented')
+  assert.equal(win._navHref.href, redirectUrl)
+  assert.equal(els['consent-ui'].style.display, 'none')
+})
+
+test('already-consented authorization rejects an unsafe redirect_url', async () => {
+  const { doc, els } = makeDom()
+  const win = makeWin(`?authorization_id=${VALID_AUTHORIZATION_ID}`)
+  const sb = makeSupabase({ session: makeSession(), authDetails: { redirect_url: 'javascript:alert(1)' } })
+
+  const result = await initOAuthConsent({ supabase: sb, document: doc, window: win })
+
+  assert.equal(result.status, 'invalid_redirect')
+  assert.equal(win._navHref.href, '')
+  assert.ok(els['consent-error'].textContent.includes('Invalid redirect'))
+})
+
 // ── Security: error text has no HTML/token material ──────────────────────────
 
 test('error text does not contain HTML tags (uses textContent not innerHTML)', async () => {
   const { doc, els } = makeDom()
-  const win = makeWin('?authorization_id=not-a-uuid')
+  const win = makeWin('?authorization_id=not%2Fa-safe-token')
   const sb = makeSupabase()
 
   await initOAuthConsent({ supabase: sb, document: doc, window: win })
@@ -589,4 +661,28 @@ test('getAuthorizationDetails exception does not leak error details to DOM', asy
 
   assert.ok(!els['consent-error'].textContent.includes(sensitiveMessage),
     'raw Supabase error details must not appear in DOM')
+})
+
+test('authorization errors do not log raw sensitive details', async () => {
+  const { doc } = makeDom()
+  const win = makeWin(`?authorization_id=${VALID_AUTHORIZATION_ID}`)
+  const sensitiveMessage = 'authorization-code=never-log-this'
+  const sb = makeSupabase({
+    session: makeSession(),
+    authDetails: null,
+    detailsError: { message: sensitiveMessage, status: 500 },
+  })
+  const logs = []
+  const originalError = console.error
+  const originalWarn = console.warn
+  console.error = (...args) => { logs.push(args.join(' ')) }
+  console.warn = (...args) => { logs.push(args.join(' ')) }
+
+  try {
+    await initOAuthConsent({ supabase: sb, document: doc, window: win })
+    assert.ok(logs.every(entry => !entry.includes(sensitiveMessage)))
+  } finally {
+    console.error = originalError
+    console.warn = originalWarn
+  }
 })

@@ -12,43 +12,15 @@
 //   - No session token, auth code, or PKCE material is logged or placed in the DOM.
 //   - Redirect destinations are validated to use http: or https: only.
 //   - error/textContent only — no innerHTML on user-visible error elements.
-//   - The pending consent sessionStorage entry holds only the authorization_id UUID
+//   - The pending consent sessionStorage entry holds only the opaque authorization_id
 //     (no tokens), is consumed immediately on first use, and carries a TTL.
 
+import {
+  isValidOAuthAuthorizationId,
+  storePendingOAuthConsent,
+} from '../oauth-consent-return.js'
+
 const DESKTOP_CLIENT_ID = 'b141fed6-e257-4de1-b784-3a28c777dadf'
-const CONSENT_PENDING_KEY = 'sporely-oauth-consent-pending'
-const CONSENT_PENDING_TTL_MS = 10 * 60 * 1000
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-// ── Pending-consent sessionStorage helpers ────────────────────────────────────
-// Used by the consent page when the user needs to authenticate first.
-// Also consumed by main.js after a successful login to redirect back.
-
-function _storePendingConsent(authorizationId) {
-  try {
-    globalThis.sessionStorage?.setItem(
-      CONSENT_PENDING_KEY,
-      JSON.stringify({ id: authorizationId, ts: Date.now() })
-    )
-  } catch (_) {}
-}
-
-/** Reads, validates, clears, and returns `/oauth/consent?authorization_id=<id>`, or null. */
-export function consumePendingOAuthConsentReturn() {
-  try {
-    const raw = globalThis.sessionStorage?.getItem(CONSENT_PENDING_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
-    const id = String(parsed?.id || '').trim()
-    const ts = Number(parsed?.ts || 0)
-    globalThis.sessionStorage?.removeItem(CONSENT_PENDING_KEY)
-    if (!id || !UUID_RE.test(id)) return null
-    if (ts && (Date.now() - ts) > CONSENT_PENDING_TTL_MS) return null
-    return `/oauth/consent?authorization_id=${encodeURIComponent(id)}`
-  } catch (_) {
-    return null
-  }
-}
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 
@@ -138,13 +110,13 @@ export async function initOAuthConsent({
 
   // 1. Read and validate authorization_id
   const params          = new URLSearchParams(win?.location?.search || '')
-  const authorizationId = String(params.get('authorization_id') || '').trim()
+  const authorizationId = params.get('authorization_id') || ''
 
   if (!authorizationId) {
     _showError(doc, 'Missing authorization_id parameter.')
     return { status: 'invalid_param', error: 'missing' }
   }
-  if (!UUID_RE.test(authorizationId)) {
+  if (!isValidOAuthAuthorizationId(authorizationId)) {
     _showError(doc, 'Invalid authorization_id format.')
     return { status: 'invalid_param', error: 'format' }
   }
@@ -159,7 +131,7 @@ export async function initOAuthConsent({
   }
 
   if (!session) {
-    _storePendingConsent(authorizationId)
+    storePendingOAuthConsent(authorizationId)
     const target = loginReturnTarget || (win?.location?.origin ? `${win.location.origin}/` : '/')
     win.location.href = target
     return { status: 'redirect_to_login', authorizationId }
@@ -189,18 +161,27 @@ export async function initOAuthConsent({
     return { status: 'not_found' }
   }
 
-  // 4. Validate this is the first-party desktop client
-  if (authDetails.client_id !== DESKTOP_CLIENT_ID) {
+  // 4. An already-consented request returns only its redirect URL.
+  if ('redirect_url' in authDetails) {
+    if (!_navigateTo(win, authDetails.redirect_url)) {
+      _showError(doc, 'Invalid redirect destination.')
+      return { status: 'invalid_redirect' }
+    }
+    return { status: 'already_consented' }
+  }
+
+  // 5. Validate this is the first-party desktop client.
+  if (authDetails.client?.id !== DESKTOP_CLIENT_ID) {
     _showError(doc, 'Unauthorized OAuth client.')
     return { status: 'unauthorized_client' }
   }
 
-  // 5. Render consent UI
+  // 6. Render consent UI
   const userEmail  = session.user?.email || ''
-  const clientName = authDetails.name || authDetails.client_name || 'Sporely Desktop'
+  const clientName = authDetails.client?.name || 'Sporely Desktop'
   _showConsent(doc, { userEmail, clientName })
 
-  // 6. Wire up buttons
+  // 7. Wire up buttons
   const approveBtn = doc.getElementById('consent-approve')
   const denyBtn    = doc.getElementById('consent-deny')
 
