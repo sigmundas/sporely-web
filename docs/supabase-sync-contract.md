@@ -422,6 +422,59 @@ Deletion should proceed as:
 
 An interruption after any step must be recoverable by repeating sync.
 
+## Public spore mosaic after conflict resolution
+
+Normal `push_all` and the legacy whole-observation `resolve_conflict_keep_local`
+both call the canonical public-spore-mosaic helper
+(`_push_spore_mosaic_for_observation`) right after a measurement push. The
+per-item conflict resolver, `resolve_conflict_plan`, now does the same for a
+**reviewed local-to-cloud measurement upload**, including a verified partial
+retry where the upload already completed and only mosaic work remained:
+
+- The mosaic step runs once per plan, after every measurement push/import op
+  and before the snapshot → media-signature → synced finalization, whenever
+  this call (or a verified prior attempt carried forward on retry) completed
+  at least one `push_measurement`.
+- **Conservative asymmetry guard.** The mosaic helper selects an
+  observation-wide set of cloud-linked eligible measurements, so it cannot
+  prove that a partial local upload matches the full cloud-approved state.
+  `resolve_conflict_plan` therefore skips the mosaic step whenever either of
+  two independent checks finds unproven local/cloud divergence:
+  - the plan's merged accepted-asymmetry (new this round, carried from a
+    prior attempt on retry, or inherited from an earlier snapshot) contains
+    **any** retained local-only or cloud-only image or measurement entry —
+    not only ones affecting microscope geometry. A kept-local field photo
+    alongside an otherwise-clean upload therefore also skips the mosaic this
+    stage; narrowing the guard to microscope-relevant asymmetry only is
+    deferred.
+  - a **matched** cloud-linked measurement (or its owning cloud-linked
+    microscope image's render scale, or that image's `image_type`) still
+    differs from cloud after the plan applies, even when no plan item named
+    it. `finalize_sync_candidates` applies automatic items while manual
+    conflicts remain open (`_build_plan_from_automatic_decisions`), so a
+    genuine two-sided divergence reserved for the conflict dialog is never
+    recorded as accepted asymmetry — it simply isn't in the plan's `items`
+    at all. This check reuses the canonical measurement-match comparison
+    (`_measurement_payloads_match`) against the reconciled local/remote
+    state already read after the plan's writes, rather than a second
+    renderer or a new persisted eligibility format. The `image_type` check
+    exists because the mosaic SQL selects purely on the *local* image's
+    type: a local image already reclassified to `microscope` while the
+    cloud-approved counterpart still disagrees (or vice versa) must not let
+    that measurement's tile render from a classification the cloud side has
+    not agreed to.
+- Mosaic failures follow the existing best-effort policy: an auth or
+  temporarily-unavailable error aborts the resolution through the existing
+  partial-plan-error path (so a retry can revisit mosaic work without
+  replaying the completed measurement push); any other failure is logged and
+  does not block finalization.
+- Pure keep-local-only, field/image-only, and import-only (cloud-choice
+  measurement) resolutions never push a measurement, so they never trigger
+  mosaic work.
+- Import-only mosaic generation and mixed-asymmetry atlas generation (partial
+  local state safely merged into a public atlas) are out of scope for this
+  stage and remain future work.
+
 ## Public, Android, and owner display
 
 Public galleries should show only active rows with usable cloud files. That is correct for a deliberate measurement-only record, but not enough for diagnosis.
