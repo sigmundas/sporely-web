@@ -8,6 +8,7 @@ import {
   PRIVACY_SLOT_LIMIT_SYNC_ERROR_CODE,
   buildQueueStatusUpdate,
   classifyQueueSyncError,
+  classifySessionRefreshFailure,
   isImageTooLargeForPlanError,
   isPrivacySlotLimitError,
 } from './sync-queue.js'
@@ -292,4 +293,60 @@ test('sync queue: ambiguous (non-4xx) failure does not call deleteObservationMed
   const deleteInBranch = catchBlock.indexOf('await deleteObservationMedia([path])')
   assert.ok(deleteInBranch >= 0 && deleteInBranch < fourxxClose,
     'deleteObservationMedia must only be in the definite-4xx branch, not the ambiguous path')
+})
+
+test('classifySessionRefreshFailure labels a server-confirmed rejection as rejected, not transport', () => {
+  assert.equal(
+    classifySessionRefreshFailure(new Error('Invalid Refresh Token: Refresh Token Not Found')),
+    'rejected',
+  )
+})
+
+test('classifySessionRefreshFailure still labels a transport-shaped failure as transport', () => {
+  assert.equal(classifySessionRefreshFailure(new Error('Failed to fetch')), 'transport')
+  const serverError = new Error('Internal Server Error')
+  serverError.status = 503
+  assert.equal(classifySessionRefreshFailure(serverError), 'transport')
+})
+
+test('classifySessionRefreshFailure falls back to unknown for an unclassified error', () => {
+  assert.equal(classifySessionRefreshFailure(new Error('something else entirely')), 'unknown')
+})
+
+test('sync queue: empty-queue check runs before the auth session refresh in _runSyncQueue', () => {
+  const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
+  const fnStart = source.indexOf('async function _runSyncQueue()')
+  const fnBodyEnd = source.indexOf('\nexport async function triggerSync()')
+  assert.ok(fnStart >= 0 && fnBodyEnd > fnStart, 'must locate _runSyncQueue body')
+  const body = source.slice(fnStart, fnBodyEnd)
+
+  const readItemsIndex = body.indexOf('const items = await _readQueueItems()')
+  const emptyReturnIndex = body.indexOf('if (!items || !items.length) return', readItemsIndex)
+  const sessionFetchIndex = body.indexOf('await getSharedAuthSession({ refresh: true })')
+
+  assert.ok(readItemsIndex >= 0, '_readQueueItems() call must be present')
+  assert.ok(emptyReturnIndex > readItemsIndex, 'empty-queue return must follow the queue read')
+  assert.ok(sessionFetchIndex > emptyReturnIndex,
+    'getSharedAuthSession must not run until after the queue is confirmed non-empty — a native resume with nothing queued must not touch Supabase auth')
+
+  // The queue read/empty-check must not itself sit inside the try/catch that
+  // wraps the session fetch, confirming it is unconditional and prior.
+  const tryIndex = body.indexOf('try {', sessionFetchIndex - 20)
+  assert.ok(tryIndex > emptyReturnIndex, 'the queue-empty check must be outside and before the session-refresh try block')
+})
+
+test('sync queue: session-refresh catch block classifies the error instead of hardcoding (transport)', () => {
+  const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
+  const fnStart = source.indexOf('async function _runSyncQueue()')
+  const fnBodyEnd = source.indexOf('\nexport async function triggerSync()')
+  const body = source.slice(fnStart, fnBodyEnd)
+
+  const catchIndex = body.indexOf('} catch (err) {')
+  assert.ok(catchIndex >= 0, 'session-refresh catch block must exist')
+  const catchBlock = body.slice(catchIndex, catchIndex + 400)
+
+  assert.match(catchBlock, /classifySessionRefreshFailure\(err\)/,
+    'catch block must classify the error rather than assuming transport')
+  assert.doesNotMatch(catchBlock, /skipped — session refresh failed \(transport\):/,
+    'the (transport) suffix must no longer be hardcoded for every failure')
 })

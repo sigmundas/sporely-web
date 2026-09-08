@@ -1,5 +1,6 @@
 import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
+import { isExplicitAuthRejection, isTransportSessionError } from './auth-classification.js'
 import { reserveObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, deleteObservationMedia, imageExtensionForMimeType, buildObservationImageStoragePath, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
 import { saveIdentificationRun } from './ai-identification.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
@@ -187,6 +188,15 @@ export function classifyQueueSyncError(error) {
     isBlocked: false,
     isRetryable: true,
   }
+}
+
+// Classify a thrown getSharedAuthSession({ refresh: true }) failure inside
+// _runSyncQueue's sync pass for logging only — does not affect the pass's
+// skip/retry behavior, which is unchanged regardless of label.
+export function classifySessionRefreshFailure(err) {
+  if (isExplicitAuthRejection(err)) return 'rejected'
+  if (isTransportSessionError(err)) return 'transport'
+  return 'unknown'
 }
 
 export function buildQueueStatusUpdate(current, stage, extras = {}) {
@@ -796,6 +806,13 @@ async function _runSyncQueue() {
   if (!canSyncOnCurrentConnection()) return
   console.info('[sync] queue pass started')
 
+  // Local-only, no auth dependency: check there is anything queued before
+  // touching Supabase auth at all. A native resume while
+  // AUTHENTICATED_COMPLETE fires this pass unconditionally, so an empty
+  // queue must not cost a session refresh.
+  const items = await _readQueueItems()
+  if (!items || !items.length) return
+
   // Transport-safe: connectivity may vanish between the capability check and
   // this refresh (stale-COMPLETE race). A thrown "Failed to fetch" here must
   // not reject the sync pass — queued items stay untouched and the next
@@ -804,14 +821,12 @@ async function _runSyncQueue() {
   try {
     session = await getSharedAuthSession({ refresh: true })
   } catch (err) {
-    console.warn('Sync pass skipped — session refresh failed (transport):', err?.message || err)
+    const label = classifySessionRefreshFailure(err)
+    console.warn(`Sync pass skipped — session refresh failed (${label}):`, err?.message || err)
     return
   }
   if (!session?.user?.id) return
   const authUserId = _normalizeQueueUserId(session.user.id)
-
-  const items = await _readQueueItems()
-  if (!items || !items.length) return
 
   const pendingCount = items.filter(item => !_isBlockedQueueItem(item)).length
   if (pendingCount) {
