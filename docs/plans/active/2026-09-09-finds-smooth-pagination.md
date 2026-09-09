@@ -1,0 +1,927 @@
+# Sporely Finds smooth scrolling, search pagination, and thumbnail stability
+
+**Plan file target in repo:** `docs/plans/active/2026-09-09-finds-smooth-pagination.md`  
+**Repository:** `sporely-web`  
+**Prepared:** 2026-09-09  
+**Evidence baseline:** `main` at `a7de5e2c5aefa6ced99d91d8b6bdcf7fff6e68c3`  
+**Status:** ready for staged implementation with `sporely-sparring`
+
+---
+
+## 1. Goal
+
+Fix the Finds screen so that:
+
+1. normal infinite scrolling does not visibly stall at each page boundary;
+2. search is truly paginated over matching observations instead of filtering only the already-loaded page(s);
+3. loading another page never makes already-visible thumbnails disappear, flash white, or rehydrate;
+4. the next page is normally fetched before the user reaches the end;
+5. expensive secondary work is not needlessly serialized in front of rendering;
+6. Mine, Feed, user-target, offline queue, visibility/status filters, date/species sort, and the existing media-cache/auth safety rules continue to work.
+
+The desired user-visible behavior is continuous scrolling. Existing cards should remain visually inert while new cards appear below or are inserted into the correct group.
+
+---
+
+## 2. Observed symptoms
+
+### Normal scrolling
+
+Finds currently pauses close to the end of a loaded page before additional observations appear. On Android/WebView this is visible as a brief scroll stop.
+
+### Search
+
+A search such as `Cortinarius` behaves much worse. A small number of matches appear, then scrolling reaches the end almost immediately, another general page is fetched, the newly loaded rows are filtered client-side, and the process repeats.
+
+This creates the impression that Sporely is searching among the first page, then the second page, then the third page rather than paging through search results.
+
+### Thumbnail flash
+
+When another page is incorporated, already-visible image areas briefly become empty/white before the thumbnails return.
+
+The attached QA screenshots from 2026-09-09 show the same cards before and during this blank-image state.
+
+---
+
+## 3. Current implementation diagnosis
+
+The implementation evidence on the preparation baseline points to a combined pagination/render problem rather than an Android-specific image bug.
+
+### 3.1 Page size is 20
+
+`src/screens/finds.js` defines:
+
+```js
+const FINDS_PAGE_SIZE = 20
+const FINDS_LOAD_MORE_THRESHOLD = 240
+```
+
+The page size itself is not the root problem. Increasing it would only hide the boundary less frequently while making destructive rerenders more expensive.
+
+### 3.2 Search is client-side after paging
+
+`_applyFilter()` filters `_cache[...]` using `_matches(obs, q)` and includes the explicit comment:
+
+```js
+// Search still runs client-side against the loaded pages only. True global
+// search needs server-side filtering and is out of scope for this pass.
+```
+
+Therefore a search with many total matches but a low hit rate per general page repeatedly exhausts the visible filtered list and causes more general pages to be fetched.
+
+### 3.3 Load-more rerenders the whole currently loaded result set
+
+`_maybeLoadMoreFinds()` currently:
+
+1. loads another page;
+2. reloads profile data for the scope;
+3. calls `_applyFilter()`;
+4. recursively checks whether more data is required.
+
+`_applyFilter()` calls `_renderCards()` or `_renderBySpecies()` for the complete filtered cache.
+
+Those renderers fetch image metadata for all observations in the current rendered set and then commit with:
+
+```js
+list.innerHTML = html
+```
+
+That destroys the existing card/image DOM during ordinary pagination.
+
+### 3.4 The media loader explains the white-thumbnail frame
+
+`src/image-helpers.js` intentionally renders cacheable observation images without a remote `src`. `wireImageFallback()` binds those new elements to the cache-first media loader.
+
+`src/protected-media.js` owns the object URLs and releases bindings for removed elements. Its removal observer checks removed nodes after a microtask and releases media that remains disconnected.
+
+Therefore a full `innerHTML` replacement creates new `<img>` elements that have to be rebound and repainted from the cache. The brief interval before that paint matches the blank image state seen in device QA.
+
+### 3.5 The request/render path contains avoidable serial work
+
+A page load currently includes observation fetching, red-list enrichment, profile/social loading in relevant scopes, image metadata loading, full HTML generation, DOM replacement, and media hydration.
+
+The 240 px trigger gives this work almost no lead time.
+
+---
+
+## 4. Architecture constraints
+
+These are hard constraints for every stage.
+
+- Preserve the current capability/auth gates and field-offline behavior.
+- Do not bypass the cache-first media loader or reintroduce raw public thumbnail `src` URLs merely to hide flicker.
+- Do not weaken protected-media behavior.
+- Do not remove queued local observations from Mine or make offline search require network access.
+- Apply scope, visibility, draft/published status, user-target, and search predicates before server pagination wherever the server owns the rows.
+- Do not mix rows from two different search queries in one paging state.
+- Keep ordering deterministic with a stable tie-breaker.
+- Do not add a virtual-list framework or a DOM-diffing dependency for this repair.
+- Do not treat a larger page size as the fix.
+- Do not redesign the Finds UI.
+- Keep this work in `sporely-web`; no `sporely-py` or landing-site work is required unless fresh evidence proves otherwise.
+- A load-more operation must not remove and recreate already-rendered observation cards.
+- Full rerender remains acceptable for intentional state transitions such as changing scope, changing sort, changing view mode, or committing a new search result set. It is not acceptable for ordinary page append.
+
+---
+
+## 5. Sparring execution contract
+
+This plan is intended to be the active plan consumed by the existing `sporely-sparring` workflow.
+
+For each implementation stage:
+
+1. Start from a clean repository state and fresh `origin/main`.
+2. Run the normal deterministic sparring selector before opening the stage prompt or implementation files.
+3. The selected stage implementer owns only the bounded stage below.
+4. The implementer must update this active plan during the implementation pass with actual decisions, changed files, tests, and any deviations.
+5. Run focused proof first, then the relevant broader suite.
+6. A **fresh independent top-level reviewer** reviews the candidate commit/diff and the actual product code read-only. Do not replace this reviewer with a reviewer subagent.
+7. Treat the implementer's report as a claim, not evidence.
+8. Fix reviewer findings within the same stage and rerun proof.
+9. Create exactly one verified implementation commit for the stage.
+10. Record that commit SHA and verification result in this plan before moving to the next stage.
+
+The top-level stage owner retains integration, broader verification, user iteration, and final handoff. Bounded subagents may be used for implementation work packages, but they do not replace the final reviewer.
+
+If the working tree is dirty at handoff, do not present it as a verified result. Either clean it or identify an explicit candidate commit and review that commit.
+
+Final handoff should include base/head commit metadata, the active-plan state, stage reports, exact automated commands, and manual-device results. Do not paste huge diffs into the handoff.
+
+---
+
+# Stage 1 — Server-side search-aware pagination
+
+**Stage id:** `stage-finds-server-search-pagination`  
+**Primary goal:** make a Finds search page through matching server rows instead of filtering arbitrary pages after they arrive.
+
+## 1.1 Required behavior
+
+For authenticated online Finds:
+
+- normalize the current search text into a paging/query key;
+- apply the search predicate to each server query **before** `.range(...)`;
+- apply it consistently to:
+  - Mine (`observations`);
+  - public Feed (`observations_community_view`);
+  - Friends (`observations_friend_view`);
+  - Followed (`observations_follow_view`);
+  - user-target observations;
+- preserve the existing local `_matches()` filtering for queued/local observations so offline Mine remains searchable;
+- reset paging when the normalized search query changes;
+- prevent a response for an old search query from entering the new query's cache;
+- debounce network-backed search input so typing `Cortinarius` does not start eleven paginated resets/renders.
+
+Target debounce: approximately **200–300 ms**. The exact value is an implementation detail; use one value and test the behavior rather than spreading magic numbers.
+
+## 1.2 Search fields
+
+Preserve the current effective search surface unless a fresh schema constraint requires a documented exception:
+
+- `common_name`
+- `genus`
+- `species`
+- `location`
+- `notes`
+
+The implementation must safely encode arbitrary user text for the PostgREST/Supabase filter syntax. Do not interpolate an unescaped raw query into an `.or(...)` expression.
+
+If a direct PostgREST OR filter cannot be made robust without fragile parsing, stop and record that evidence in this plan before introducing a small server RPC. Do not silently narrow search semantics.
+
+## 1.3 Paging invariants
+
+Each paging state must be tied to the dimensions that determine its result set, at minimum:
+
+```text
+scope/source + target user where relevant + status/visibility filter + sort + normalized search query
+```
+
+A page loaded for query `corti` must never be appended after the state has changed to `cortinarius`.
+
+Offset advancement must reflect the server rows consumed by that specific filtered query.
+
+## 1.4 Search transition UX
+
+Do not paint the generic full-screen/list `Loading…` shell on every debounced search keystroke after results already exist.
+
+Preferred behavior:
+
+- typing may immediately narrow the currently cached cards locally;
+- after debounce, the authoritative server-search first page replaces the result set once ready;
+- stale async results are guarded by the existing load/render sequence mechanisms;
+- clearing search resets to the unfiltered server query cleanly.
+
+Do not preserve stale search results indefinitely if the server request fails; use the existing error UX.
+
+## 1.5 Stage 1 code surfaces
+
+Expected primary surfaces:
+
+```text
+src/screens/finds.js
+src/screens/finds.test.js
+```
+
+Possible small supporting test changes are allowed. A migration is not expected unless the direct-query approach is proven unsafe or incapable of preserving the existing search contract.
+
+## 1.6 Stage 1 automated proof
+
+At minimum add focused regressions proving:
+
+- Mine search predicate is applied before pagination.
+- Feed source search predicate is applied before pagination.
+- User-target search predicate is applied before pagination.
+- changing search text invalidates/reset paging state;
+- stale page responses cannot contaminate the new query;
+- queued/local observations can still be matched client-side;
+- special characters in search text cannot break the query expression or broaden it unexpectedly;
+- empty/whitespace search behaves as no server search filter.
+
+Run:
+
+```bash
+npm run check:node
+node --test src/screens/finds.test.js
+npm test
+npm run build
+git diff --check
+```
+
+## 1.7 Stage 1 reviewer questions
+
+The fresh reviewer must answer:
+
+- Is search genuinely before `.range(...)` for every online Finds source?
+- Can any source still scan arbitrary pages and client-filter them as the authoritative search?
+- Can an old debounced/in-flight query append into a new query?
+- Are visibility/RLS/auth semantics unchanged?
+- Does offline/local queue search still work?
+- Is user-provided search text safely encoded?
+- Did the stage introduce a hidden dependency on a larger page size?
+
+## 1.8 Stage 1 commit
+
+Suggested commit subject:
+
+```text
+fix: page Finds searches on the server
+```
+
+Record after verification:
+
+```text
+Stage 1 commit:
+Stage 1 reviewer:
+Stage 1 focused proof:
+Stage 1 broader proof:
+Stage 1 deviations/notes:
+```
+
+---
+
+# Stage 2 — Incremental load-more rendering and thumbnail preservation
+
+**Stage id:** `stage-finds-incremental-pagination-render`  
+**Depends on:** Stage 1 verified  
+**Primary goal:** ordinary pagination must add new results without destroying existing cards or rehydrating their media.
+
+## 2.1 Core invariant
+
+After a successful load-more, for every observation that was already rendered before the request:
+
+```text
+existing card DOM node survives
+existing <img> DOM node survives
+existing media binding/object URL survives
+existing visible pixels do not return to an empty placeholder state
+```
+
+This is the central regression target.
+
+## 2.2 Separate initial/full render from page append
+
+Refactor the rendering contract so the caller can distinguish:
+
+```text
+full result-set render
+vs.
+incremental page incorporation
+```
+
+A load-more path must not call the current full-data `list.innerHTML = html` behavior.
+
+It is acceptable for initial load and explicit display-mode transitions to use a full render.
+
+## 2.3 Page-load return contract
+
+Change the page-loading layer to expose the delta clearly enough that the render layer does not rediscover it from the full cache.
+
+A reasonable shape is conceptually:
+
+```js
+{
+  loaded: true,
+  rawRows: [...],
+  addedItems: [...],
+  hasMore: true
+}
+```
+
+The exact object shape is not prescribed, but `addedItems`/equivalent must be available.
+
+Deduped rows that were already in cache are not "added".
+
+## 2.4 Image metadata scope
+
+During load-more:
+
+```text
+fetchCardImages / fetchFirstImages
+```
+
+must receive only IDs required for newly rendered cards, not all IDs already visible in the list.
+
+Existing image elements must not be rewired merely because another page arrived.
+
+## 2.5 Date-sort incremental DOM
+
+For date sort:
+
+- append observations into the existing last date group when the date matches;
+- create a new date separator/group when the next page crosses a date boundary;
+- preserve current server ordering inside groups;
+- append before the stable bottom sentinel/footer;
+- update the "no more finds"/loading footer without rebuilding prior groups.
+
+The implementation should factor card markup so full render and incremental render do not drift into two independent versions of the UI.
+
+## 2.6 Species-sort incremental DOM
+
+Species sort cannot simply append all new groups to the bottom because a newly discovered species can sort alphabetically before an already-rendered species.
+
+Implement incremental group insertion:
+
+- derive the same `_speciesKey()` and scientific-name ordering used by the full renderer;
+- if a species group already exists, add only its new observation cards and update its observation count;
+- if it does not exist, insert the new group at its correct sorted position;
+- unidentified remains last;
+- do not replace existing species groups/cards to accomplish the insertion.
+
+Within an existing species group, newly loaded older observations may be appended after the existing observations if the paged server order is date-descending.
+
+## 2.7 View variants
+
+The invariant applies to:
+
+- single-column `cards`;
+- `two`;
+- `three`.
+
+Do not create three independent pagination engines. Share the card/group insertion logic as far as practical.
+
+The legacy `_renderTiles()` path only needs modification if fresh code inspection shows that current product navigation can still select it.
+
+## 2.8 Existing interaction behavior
+
+Newly inserted cards must receive the same behavior as initial cards:
+
+- open detail;
+- pending-sync handling;
+- delete button wiring;
+- image fallback/media binding;
+- red-list badge location;
+- author chip;
+- scroll restoration when entering/leaving detail.
+
+Avoid a repeated "query all cards and rebind all events" strategy. Wire the newly inserted fragment or use safe delegation on a stable ancestor where appropriate.
+
+## 2.9 Stage 2 automated proof
+
+Add focused proof for the incremental contract. Prefer pure/helper tests and the existing lightweight test style; do **not** add jsdom or another DOM framework solely for this change unless the existing environment cannot prove the behavior without it.
+
+Required assertions include:
+
+- a page delta contains only newly added observation IDs;
+- image metadata lookup for append receives only those IDs;
+- date-group append logic joins the existing terminal date group correctly;
+- a new date group is created exactly once at a boundary;
+- species-group insertion chooses the correct alphabetical position;
+- adding rows to an existing species group updates count without recreating the group;
+- no ordinary `_maybeLoadMoreFinds()` path performs a full list `innerHTML` replacement;
+- load-more does not re-run media wiring for pre-existing cards.
+
+If a lightweight fake-DOM harness can assert object identity, add:
+
+```text
+oldCardAfter === oldCardBefore
+oldImgAfter === oldImgBefore
+```
+
+Run:
+
+```bash
+npm run check:node
+node --test src/screens/finds.test.js src/images.test.js src/image-helpers.test.js src/media-loader.test.js
+npm test
+npm run build
+git diff --check
+```
+
+## 2.10 Stage 2 reviewer questions
+
+The fresh reviewer must answer:
+
+- Can any normal load-more path still replace the entire Finds list?
+- Are already-visible `<img>` elements left untouched?
+- Are image metadata calls delta-only?
+- Are event handlers correct for newly inserted cards without duplicating old handlers?
+- Do date and species grouping remain correct at page boundaries?
+- Can dedupe cause a group count mismatch?
+- Are pending queue cards and remote rows still merged safely?
+- Does the media loader remain the sole owner of cacheable image painting?
+
+## 2.11 Stage 2 commit
+
+Suggested commit subject:
+
+```text
+fix: append Finds pages without repainting existing cards
+```
+
+Record after verification:
+
+```text
+Stage 2 commit:
+Stage 2 reviewer:
+Stage 2 focused proof:
+Stage 2 broader proof:
+Stage 2 deviations/notes:
+```
+
+---
+
+# Stage 3 — Early prefetch and remove the load-more waterfall
+
+**Stage id:** `stage-finds-prefetch-and-enrichment`  
+**Depends on:** Stage 2 verified  
+**Primary goal:** start the next page early enough that the user normally never reaches an unloaded boundary, and stop low-priority enrichment from blocking card availability.
+
+## 3.1 Replace the 240 px late trigger
+
+Prefer an `IntersectionObserver` observing a stable bottom sentinel inside the Finds scroller.
+
+Recommended starting contract:
+
+```text
+root: #screen-finds
+rootMargin: approximately one viewport ahead, e.g. 1000px 0px
+threshold: 0
+```
+
+The exact root margin may be tuned after device QA.
+
+The sentinel must remain stable through incremental page insertion. New cards go before it.
+
+Keep a fallback for environments without `IntersectionObserver`, using a threshold derived from viewport height rather than the current fixed 240 px.
+
+Suggested fallback:
+
+```text
+max(800px, 1.25 * scroller.clientHeight)
+```
+
+Use one centralized helper/constant rather than duplicated values.
+
+## 3.2 Preserve single-flight behavior
+
+The current `paging.loadingMore` guard is important. The observer may fire repeatedly while the sentinel remains within the root margin.
+
+Ensure:
+
+- at most one page request per paging source is active;
+- after a successful append, the observer may immediately request another page only if the viewport/root margin still requires it;
+- `hasMore === false` stops the observer-driven loading cleanly;
+- query/scope reset cannot reuse an old observer completion.
+
+## 3.3 Restructure enrichment
+
+The current load-more path should not be:
+
+```text
+page
+→ red-list
+→ profile/social
+→ image metadata
+→ render
+```
+
+After observation rows are authoritative and merged, perform independent work in parallel where dependencies allow.
+
+Required policy:
+
+- **red-list enrichment must not block insertion of otherwise renderable cards**;
+- profile/social hydration should operate only on user IDs not already cached;
+- profile loading must merge into `_profileMap` rather than resetting all profiles on every page;
+- image metadata must remain delta-only from Stage 2;
+- patch late-arriving red-list badges in place without rebuilding the card;
+- if profile data is needed before author UI can be correct, profile and image metadata may be awaited together for the new fragment while red-list runs in the background.
+
+Do not make an already-rendered card wait again for enrichment when another page arrives.
+
+## 3.4 Failure behavior
+
+Secondary enrichment failure must not discard a successfully fetched observation page.
+
+- red-list failure: card remains, badge absent;
+- profile/social failure: preserve existing fallback author treatment;
+- image metadata failure: card remains with normal image placeholder;
+- next-page fetch failure: keep existing list untouched and allow the existing retry/error UX.
+
+## 3.5 Optional performance instrumentation
+
+A small development-only timing seam is allowed if useful for verification, but do not ship noisy production logging.
+
+Useful measurements:
+
+```text
+page fetch start → page rows available
+page rows available → new fragment inserted
+fragment inserted → image paint (sampled)
+```
+
+The goal is to verify architecture, not to invent a brittle universal millisecond SLA.
+
+## 3.6 Stage 3 automated proof
+
+Required focused coverage:
+
+- observer/fallback threshold requests before the physical bottom;
+- repeated observer callbacks cannot create overlapping page loads;
+- `hasMore=false` prevents further page requests;
+- profile hydration requests only new user IDs and preserves existing `_profileMap` entries;
+- red-list enrichment failure does not prevent page insertion;
+- stale query/scope completion cannot append after reset.
+
+Run:
+
+```bash
+npm run check:node
+node --test src/screens/finds.test.js src/images.test.js src/image-helpers.test.js src/media-loader.test.js
+npm test
+npm run build
+git diff --check
+```
+
+## 3.7 Stage 3 reviewer questions
+
+The fresh reviewer must answer:
+
+- Does prefetch begin materially before the user reaches the bottom?
+- Can observer churn create duplicate/concurrent pages?
+- Does any secondary enrichment still serialize unnecessarily in front of rendering?
+- Does profile hydration accidentally drop profiles from previous pages?
+- Can enrichment completion trigger a destructive rerender?
+- Do failures leave the existing list stable?
+- Are offline/auth capability boundaries unchanged?
+
+## 3.8 Stage 3 commit
+
+Suggested commit subject:
+
+```text
+perf: prefetch Finds pages and hydrate incrementally
+```
+
+Record after verification:
+
+```text
+Stage 3 commit:
+Stage 3 reviewer:
+Stage 3 focused proof:
+Stage 3 broader proof:
+Stage 3 deviations/notes:
+```
+
+---
+
+# 6. Final automated verification gate
+
+Run this only after all three implementation stages are individually reviewed and committed.
+
+From `sporely-web`:
+
+```bash
+git status --short
+git log --oneline --decorate -8
+
+npm run check:node
+node --test src/screens/finds.test.js src/images.test.js src/image-helpers.test.js src/media-loader.test.js
+npm test
+npm run build
+git diff --check
+```
+
+If the repository has new Finds-specific test files by this point, include them explicitly in the focused command before `npm test`.
+
+Then inspect the final stage range rather than trusting reports:
+
+```bash
+git diff --stat <BASE>..<HEAD>
+git diff --check <BASE>..<HEAD>
+git log --oneline <BASE>..<HEAD>
+```
+
+The final sparring reviewer should inspect the actual changed product code and tests at the candidate commits.
+
+---
+
+# 7. Manual device QA — run last
+
+Do not perform this in the middle of the implementation stages. Complete automated proof and independent review first, then test the integrated result on Android.
+
+Build/install with the project's normal environment:
+
+```bash
+npm run android:install
+```
+
+If installation is intentionally not available but an Android artifact still needs compilation proof:
+
+```bash
+npm run android:build:debug
+```
+
+## Scenario A — normal Feed scroll
+
+1. Open Finds → Feed → All, date sort, single-column cards.
+2. Start near the top with network available.
+3. Scroll continuously through at least three page boundaries.
+4. Watch an already-visible card while the next page arrives.
+
+Pass conditions:
+
+```text
+scroll does not stop at an unloaded boundary under normal network conditions
+existing visible thumbnails never turn white/empty
+existing cards do not jump or repaint
+new cards arrive below the existing content
+```
+
+## Scenario B — Cortinarius search
+
+1. Open search and enter `Cortinarius`.
+2. Wait for the debounced search request.
+3. Scroll continuously through at least two result pages if the dataset contains enough matches.
+
+Pass conditions:
+
+```text
+results page through matching observations
+the UI does not repeatedly scan visible batches of non-matching observations
+no repeated full-list thumbnail flash occurs
+page loading feels like ordinary infinite scroll rather than a stop/rebuild cycle
+```
+
+If there are fewer than two pages of Cortinarius in the selected scope, use another known common genus with enough observations and record the substitute.
+
+## Scenario C — rare search
+
+Search a taxon known to have only a handful of results.
+
+Pass conditions:
+
+```text
+the app reaches the true end cleanly
+it does not repeatedly fetch/render arbitrary general pages just to prove there are no more matches
+"No more finds" appears once authoritative paging is exhausted
+```
+
+## Scenario D — search churn
+
+Type progressively:
+
+```text
+C
+Co
+Cor
+Cort
+Cortinarius
+```
+
+Then quickly replace it with another query.
+
+Pass conditions:
+
+```text
+no old-query rows appear after the new query has committed
+no flicker caused by stale render completion
+no overlapping-page corruption
+```
+
+## Scenario E — sort and view variants
+
+With enough results loaded:
+
+1. switch Date ↔ Species;
+2. switch Cards ↔ Two ↔ Three;
+3. scroll another page in each relevant mode.
+
+Pass conditions:
+
+```text
+intentional mode changes may rerender once
+ordinary subsequent load-more remains non-destructive
+species groups remain correctly ordered
+species group counts remain correct
+```
+
+## Scenario F — Mine/status/visibility
+
+Verify Mine with:
+
+```text
+All
+Private
+Friends
+Public
+Drafts
+Published
+```
+
+Use only combinations exposed by the actual UI.
+
+Pass conditions:
+
+```text
+server paging respects the selected filter before pagination
+search does not leak rows outside the active visibility/status scope
+queued observations remain present where they were present before this work
+```
+
+## Scenario G — offline cached mode
+
+1. Establish the app normally.
+2. Enter the supported field-offline/cached state.
+3. Open Mine with queued local observations.
+4. Search text that matches and does not match queued observations.
+
+Pass conditions:
+
+```text
+queued/local search still works
+no network-only search is required to use the offline queue
+no auth/capability bypass was introduced
+cached media behavior remains unchanged
+```
+
+## Scenario H — detail round-trip
+
+1. Scroll well below the first page.
+2. Open an observation.
+3. Go back.
+
+Pass conditions:
+
+```text
+scroll position restores acceptably
+the return does not trigger a destructive full-list image flash
+the visible page does not unexpectedly reset to the top
+```
+
+## Scenario I — pull-to-refresh
+
+Pull to refresh after several pages have been loaded.
+
+Pass conditions:
+
+```text
+an explicit refresh may perform a full authoritative rerender
+the refreshed list is correct
+infinite scrolling still works after refresh
+auth/offline reconnect semantics remain unchanged
+```
+
+---
+
+# 8. Final acceptance criteria
+
+The work is complete only when all of the following are true.
+
+| Requirement | Required result |
+|---|---|
+| Online search pagination | Search predicate is server-side before page range for every Finds source |
+| Query isolation | No stale query page can enter a newer query |
+| Offline queue search | Still works client-side without a network requirement |
+| Normal load-more | Existing card and image nodes are not destroyed |
+| Thumbnail stability | Already-visible thumbnails do not blank/reload when a page arrives |
+| Image metadata | Load-more fetches metadata only for newly added observation IDs |
+| Date grouping | Correct across page boundaries |
+| Species grouping | Correct incremental insertion/counts without rebuilding old groups |
+| Prefetch | Starts roughly a viewport before the bottom, not at 240 px |
+| Concurrency | No duplicate/overlapping page loads |
+| Enrichment | Red-list work does not block otherwise renderable cards |
+| Profile cache | Previous page profiles are retained |
+| Failure behavior | Existing list stays intact on page/enrichment failure |
+| Auth/media safety | Capability gates and cache-first media model unchanged |
+| Automated verification | Focused tests + full `npm test` + `npm run build` + `git diff --check` pass |
+| Device QA | Scenarios A–I pass or any exception is recorded with reproducible evidence |
+
+---
+
+# 9. Explicit non-goals / follow-ups
+
+Do not expand this plan into any of the following unless new evidence proves one is required for correctness:
+
+```text
+virtualized list/windowing
+changing the media-cache storage model
+changing protected-media authorization
+general full-text-search infrastructure
+taxonomy-v2 search redesign
+map-screen search redesign
+Home-feed redesign
+raising FINDS_PAGE_SIZE as the main optimization
+new animation/skeleton design
+Cloudflare/media-worker changes
+```
+
+After this repair is verified, a separate later performance task may consider list virtualization if very large in-memory result sets eventually become a measurable problem. It is not part of this fix.
+
+---
+
+# 10. Recovery / resume notes
+
+Every implementation pass must keep this section current.
+
+Use this compact format:
+
+```text
+Current verified stage:
+Current verified commit:
+Current candidate/unverified work:
+Last focused proof:
+Last broader proof:
+Last reviewer result:
+Manual QA status:
+Known issue/blocker:
+Next exact action:
+```
+
+Initial state:
+
+```text
+Current verified stage: none
+Current verified commit: none
+Current candidate/unverified work: none
+Last focused proof: plan preparation only
+Last broader proof: plan preparation only
+Last reviewer result: not started
+Manual QA status: not started
+Known issue/blocker: none known
+Next exact action: run sporely-sparring selector and execute stage-finds-server-search-pagination
+```
+
+---
+
+# 11. Evidence pointers for the first implementer/reviewer
+
+Inspect these fresh from the selected candidate/base rather than relying on this document as authority:
+
+```text
+src/screens/finds.js
+  FINDS_PAGE_SIZE
+  FINDS_LOAD_MORE_THRESHOLD
+  _bindInfiniteScroll
+  loadFinds
+  _runPagedFindsQuery
+  _loadMinePage
+  _loadFeedSourcePage
+  _loadFeedSelectionPage
+  _loadUserPage
+  _maybeLoadMoreFinds
+  _matches
+  _applyFilter
+  _renderBySpecies
+  _renderCards
+
+src/images.js
+  fetchObservationImageRows
+  fetchFirstImages
+  fetchCardImages
+
+src/image-helpers.js
+  imageHtml
+  wireImageFallback
+
+src/protected-media.js
+  ProtectedMediaLoader.bindCacheable
+  ProtectedMediaLoader._loadCacheable
+  ProtectedMediaLoader.release
+  _observeRemovedMedia
+
+src/screens/finds.test.js
+src/images.test.js
+src/image-helpers.test.js
+src/media-loader.test.js
+```
+
+Preparation-time baseline facts are evidence, not implementation authority. If current `main` has changed before Stage 1 starts, update the plan with the new base and reconcile the stage against the fresh code before editing.
