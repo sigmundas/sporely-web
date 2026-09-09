@@ -1193,9 +1193,10 @@ Focused proof: `node --test src/screens/finds.test.js` — 45 pass, 0 fail
 Broader proof: `npm run check:node` (pass); `npm test` (1216 pass / 8 fail —
 same 8 pre-existing failures as every prior pass on this stage, none in
 `src/screens/finds.*`); `npm run build` (pass); `git diff --check` (clean).
-Committed: see the next candidate-stamping step for the exact SHA (base
-remains `7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1`, unchanged from the
-original stage prompt).
+Committed: 71dfde521ea19545c32ad9dbdead414ef2c9fa29 on
+feature/finds-server-search-pagination-revision (base
+`7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1`, unchanged from the original stage
+prompt).
 Manual tests 2–4 (slow-network mid-search cancel, offline queued search,
 literal special-character search) remain outstanding — not run, not assumed
 passing. This pass fixes only the third review's code-level finding.
