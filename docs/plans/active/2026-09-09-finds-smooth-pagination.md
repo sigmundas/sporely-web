@@ -324,6 +324,31 @@ assumed passing — proceeding to code review does not accept the stage; see
 section 10 for the exact wording.
 ```
 
+Stage 1 second correction pass (2026-09-09, human-gated — see section 10 for full detail):
+Fixed the two defects from the "Independent code review — second correction"
+section of the same-stage prompt: (1) the search-input handler now invalidates
+the render guard/paging state *before* starting the local narrowing render
+(previously `_applyFilter()` ran first, so the render's async image lookup
+was later discarded by the invalidation that landed after it began); (2) the
+debounce timer is now only (re)armed when an edit actually changed the
+normalized query — an equivalent edit (e.g. trailing whitespace) no longer
+arms a reload that would otherwise unconditionally reset paging back to page
+one. The input-event handler itself was factored into an exported test seam,
+`_handleFindsSearchInput`, so tests exercise the exact same wiring production
+uses rather than only the lower-level helpers.
+Focused proof: node --test src/screens/finds.test.js — 42 pass, 0 fail (2 new).
+Broader proof: npm run check:node (pass); npm test (1213 pass / 8 fail, same
+8 pre-existing failures as the Stage 1 baseline, none in src/screens/finds.*);
+npm run build (pass); git diff --check (clean).
+Committed: this commit; see the immediately following docs-only commit for
+the exact candidate SHA (established convention in this stage's history —
+mirrors 251f971→eec95e8 and e152401→7aa2273). Manual tests 2-4 (slow-network
+mid-search cancel, offline queued search, literal special-character search)
+remain outstanding, not run and not assumed passing — the two code defects
+above are fixed and proven by automated test, but that is not a substitute
+for those manual checks.
+```
+
 ---
 
 # Stage 2 — Incremental load-more rendering and thumbnail preservation
@@ -975,6 +1000,28 @@ Known issue/blocker: manual tests 2, 3, and 4 remain outstanding against the rea
 Next exact action: request fresh independent sporely-sparring code review of candidate e1524016d6e019d02fd482c7c06b1654a9d7a00c (candidate_pending_review). Outstanding manual tests 2-4 must still be run and recorded before the stage can be accepted, regardless of the code review's outcome.
 ```
 
+State after the Stage 1 second correction pass (fixes both defects from the
+"Independent code review — second correction" section; committed, awaiting
+fresh independent code review — NOT accepted):
+
+```text
+Current verified stage: none
+Current verified commit: none
+Current candidate/unverified work: see the docs-only follow-up commit immediately after this one for the exact SHA (base remains 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1, per the original stage prompt's immutable base)
+Last focused proof: node --test src/screens/finds.test.js (42 pass, 0 fail; 2 new tests added this pass)
+Last broader proof: npm run check:node (pass); npm test (1213 pass / 8 fail — same 8 pre-existing failures as the Stage 1 baseline, unrelated to Finds); npm run build (pass); git diff --check (clean)
+Last reviewer result: prior candidate e1524016d6e019d02fd482c7c06b1654a9d7a00c was "partly confirmed, not accepted" (second correction review, 2026-09-09); this newly corrected candidate has not yet been reviewed
+Manual QA status: unchanged from the prior pass — NOT passed, NOT accepted. Only manual test 1 is confirmed by the user. Manual tests 2 (slow-network mid-search cancel), 3 (offline queued search), and 4 (literal special-character search) remain outstanding, not run, not assumed passing.
+Known issue/blocker: manual tests 2-4 remain outstanding against the real app/device. The two code defects identified by the second correction review (render-guard invalidation ordering; unconditional debounce-timer arming on an equivalent edit) are fixed and covered by new automated tests; no further code defects are open at time of writing.
+Next exact action: request fresh independent sporely-sparring code review of the new candidate (see the docs-only follow-up commit for its SHA). Outstanding manual tests 2-4 must still be run and recorded before the stage can be accepted, regardless of the code review's outcome.
+```
+
+**Stage 1 second correction-pass notes for the reviewer:**
+
+1. **Render-guard invalidation ordering.** The search-input `input` handler (now factored into the exported `_handleFindsSearchInput(value)` test seam, called by the actual DOM listener) previously ran `_applyFilter()` — which captures the current render sequence via `_findsRenderGuard.begin()` — before `_invalidateFindsSearchPagingOnInput()` — which calls `_findsRenderGuard.invalidate()`. That ordering meant the very render just started for the new keystroke was immediately invalidated by the guard bump that landed right after it, so its async image lookup (`fetchCardImages`/`fetchFirstImages`) would later find `_isCurrentFindsRender(...)` false and discard the render (`_renderCards`/`_renderBySpecies`, the `await fetchCardImages(...)` guard check). Reordered so invalidation happens first; the local narrowing render now begins on the already-current (fresh) sequence and survives its own async image lookup. New test: `typing narrows cached cards locally and the render commits after debounce invalidation, including an async image lookup still pending` — holds the (faked) image-table query open past the point where the old ordering would have discarded the render, then releases it and asserts the narrowed HTML actually committed to `list.innerHTML`.
+2. **Debounce timer armed unconditionally.** `_scheduleFindsSearchReload()` previously ran on every keystroke regardless of whether `_invalidateFindsSearchPagingOnInput()` reported a real change. Because `_reloadFindsForSearch()` (the timer's callback) unconditionally resets paging to page one, an equivalent edit (e.g. trailing whitespace added/removed after the user had already scrolled through several pages) would still arm — or replace — the debounce timer and, once it fired, silently reset the user back to page one. `_scheduleFindsSearchReload` now takes the `pagingChanged` result from invalidation and returns immediately (leaving any already-pending timer untouched) when the edit was a normalized no-op. New test: `an equivalent normalized edit does not arm or disturb the debounce timer, so a page-one reload is not forced after browsing further pages` — loads two pages via scroll, then asserts a trailing-whitespace edit arms no timer and leaves paging untouched, while a subsequent real edit still arms exactly one timer and correctly resets to a fresh page one once fired.
+3. Both fixes touch only `src/screens/finds.js` (the input handler and the two helper functions it calls) and add two focused tests to `src/screens/finds.test.js`. `_applyFilter` was exported as a test seam (previously module-private) so the new render test can await its return value directly instead of polling for a side effect.
+
 **Stage 1 correction-pass notes for the reviewer (addresses the three findings from the 2026-09-09 review):**
 
 1. **On-input paging invalidation (finding 1).** Added `_invalidateFindsSearchPagingOnInput()` (exported test seam), called from the search-input `input` handler immediately, before `_scheduleFindsSearchReload()`'s debounce timer. Each paging state now carries a `searchKey` (the normalized query it is valid for, set by `_resetPagingState`). On every keystroke, if the newly normalized query differs from the current scope's `paging.searchKey`, this bumps `_loadFindsSeq` (so any older in-flight page fetch or enrichment awaiting a response is invalidated immediately, not just once the debounce eventually fires) and replaces the paging state with a fresh, un-initialized one tagged with the new query. Because the fresh paging state's `initialized` is `false`, the scroll-threshold load-more path (`_maybeLoadMoreFinds`) cannot fire against it at all until the debounced authoritative reload establishes a real first page — so a load-more can no longer reuse a stale offset against the new query text. A normalized-equivalent edit (e.g. added/trimmed whitespace) leaves `paging.searchKey` matching and is a no-op, per the review's explicit "equivalent normalized queries should not reset paging."
@@ -1052,3 +1099,20 @@ implementation session, stopping for a reviewed alternative if direct ILIKE
 cannot preserve arbitrary text. The correction is human-gated because input
 and debounce behavior are interactive; no manual results are claimed. Stage 2
 remains deferred. No product code was edited during review.
+
+
+### Independent code review of correction e152401 — 2026-09-09
+
+Partly confirmed, not accepted. Candidate/handoff identities now match;
+HEAD 7aa2273 adds plan documentation only. Focused tests independently rerun:
+`node --test src/screens/finds.test.js` — 40 pass, 0 fail. Post-enrichment
+sequence guards are present in Mine, Feed, and user-target loaders.
+
+Two defects remain in the actual input path: local narrowing starts before
+its own render guard is invalidated (nonempty renders are discarded after
+image awaits), and normalized-equivalent input still schedules a delayed
+page-one reset. Existing tests bypass those handler/timer interactions.
+The same-stage prompt now records exact code pointers and required regression
+scenarios under “Independent code review — second correction”. No product
+code changed in review. Manual tests 2–4 remain user-deferred and unconfirmed;
+Stage 2 remains pending. No security specialist is required for these fixes.

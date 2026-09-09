@@ -22,13 +22,16 @@ import {
   renderFindsRedlistTag,
   shouldHideFindsStatusControl,
   loadFinds,
+  _applyFilter,
   _getFindsCacheForTests,
   _getFindsPagingStateForTests,
+  _handleFindsSearchInput,
   _invalidateFindsSearchPagingOnInput,
   _maybeLoadMoreFinds,
   _matches,
   _reloadFindsForSearch,
   _runPagedFindsQuery,
+  _scheduleFindsSearchReload,
   _selectFindsDropdownValue,
 } from './finds.js'
 import { loadDetailObservation } from './find_detail.js'
@@ -748,6 +751,223 @@ test('clearing the search resets to the unfiltered server query', async () => {
     assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['701', '702'])
     assert.equal(_getFindsPagingStateForTests('user').searchKey, '')
   } finally {
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+  }
+})
+
+// Minimal fake `finds-list` element: a real settable `innerHTML` plus the
+// read-only DOM methods `_renderCards` calls after committing (`_wireDeleteButtons`,
+// `wireImageFallback`) so a full nonempty render can run to completion.
+function makeFindsListElement() {
+  return {
+    innerHTML: '',
+    querySelectorAll() { return [] },
+  }
+}
+
+// Combined fake PostgREST-shaped client for the two tests below: routes the
+// `observations` table through the same paging/search recording chain as
+// `makeFindsPagingClient` above, and routes every other table (the image
+// tables `fetchObservationImageRows` queries — `observation_images` and its
+// community view) through a `select().in().is().order()` chain that is
+// itself the awaited (thenable) value, matching how supabase-js query
+// builders behave. `imagesPending`, while set, holds every image-table
+// response open until `releaseImages()` is called, so a test can suspend a
+// render at its `await fetchCardImages(...)` point and resume it on demand.
+function makeFindsRenderClient(observationsResponses) {
+  const calls = []
+  let obsCallIndex = 0
+  let releaseImages
+  let imagesPending = null
+  return {
+    calls,
+    holdImages() {
+      imagesPending = new Promise(resolve => { releaseImages = resolve })
+    },
+    releaseImages() {
+      releaseImages?.()
+      imagesPending = null
+    },
+    client: {
+      from(table) {
+        if (table === 'observations') {
+          const chain = {
+            select() { return chain },
+            eq() { return chain },
+            neq() { return chain },
+            or(filter) { calls.push({ table, op: 'or', filter }); return chain },
+            order() { return chain },
+            range(from, to) {
+              calls.push({ table, op: 'range', from, to })
+              const idx = obsCallIndex++
+              return observationsResponses[Math.min(idx, observationsResponses.length - 1)]
+            },
+          }
+          return chain
+        }
+        calls.push({ table, op: 'image-query' })
+        const chain = {
+          select() { return chain },
+          in() { return chain },
+          is() { return chain },
+          order() { return chain },
+          then(resolve, reject) {
+            const result = { data: [], error: null }
+            return (imagesPending ? imagesPending.then(() => result) : Promise.resolve(result)).then(resolve, reject)
+          },
+        }
+        return chain
+      },
+    },
+  }
+}
+
+test('typing narrows cached cards locally and the render commits after debounce invalidation, including an async image lookup still pending', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  const list = makeFindsListElement()
+  globalThis.document = makeMinimalFindsDocument({
+    getElementById: id => (id === 'finds-list' ? list : undefined),
+  })
+
+  try {
+    const rows = [
+      { id: '901', user_id: 'user-a', common_name: 'cortinarius-1', top_redlist_category: 'LC' },
+      { id: '902', user_id: 'user-a', common_name: 'unrelated', top_redlist_category: 'LC' },
+    ]
+    const renderClient = makeFindsRenderClient([{ data: rows, error: null }])
+    supabase.from = renderClient.client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      currentScreen: 'finds',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a',
+      findsView: 'cards',
+      searchQuery: '',
+    })
+
+    await loadFinds()
+    assert.ok(list.innerHTML.includes('cortinarius-1') && list.innerHTML.includes('unrelated'), 'initial unfiltered render committed both rows')
+
+    // Typing narrows the already-cached rows locally. Hold the image lookup
+    // open so the render is suspended past the point where the old (buggy)
+    // ordering would have already discarded it via a later invalidation.
+    renderClient.holdImages()
+    const renderPromise = _handleFindsSearchInput('cortinarius')
+    await Promise.resolve(); await Promise.resolve()
+
+    renderClient.releaseImages()
+    const committed = await renderPromise
+    assert.equal(committed, true, 'the local narrowing render must commit, not be discarded')
+    assert.ok(list.innerHTML.includes('cortinarius-1'), 'the matching row rendered')
+    assert.ok(!list.innerHTML.includes('unrelated'), 'the non-matching row was narrowed out locally')
+  } finally {
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+  }
+})
+
+// Fake, controllable setTimeout/clearTimeout so the test can observe exactly
+// when the search-reload debounce timer is (re)armed vs. left alone, and can
+// fire it deterministically instead of waiting on a real 250ms timer.
+function installFakeFindsTimers() {
+  const previousSetTimeout = globalThis.setTimeout
+  const previousClearTimeout = globalThis.clearTimeout
+  let nextId = 1
+  const timers = new Map()
+  globalThis.setTimeout = (fn) => {
+    const id = nextId++
+    timers.set(id, fn)
+    return id
+  }
+  globalThis.clearTimeout = (id) => { timers.delete(id) }
+  return {
+    get pendingCount() { return timers.size },
+    fireAll() {
+      const pending = Array.from(timers.values())
+      timers.clear()
+      pending.forEach(fn => fn())
+    },
+    restore() {
+      globalThis.setTimeout = previousSetTimeout
+      globalThis.clearTimeout = previousClearTimeout
+    },
+  }
+}
+
+test('an equivalent normalized edit does not arm or disturb the debounce timer, so a page-one reload is not forced after browsing further pages', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  let nearBottom = false
+  globalThis.document = makeMinimalFindsDocument({
+    getElementById(id) {
+      if (id === 'screen-finds') {
+        return nearBottom
+          ? { scrollHeight: 1000, scrollTop: 850, clientHeight: 100, classList: { toggle() {} } }
+          : { scrollHeight: 1000, scrollTop: 0, clientHeight: 100, classList: { toggle() {} } }
+      }
+      return undefined
+    },
+  })
+  const timers = installFakeFindsTimers()
+
+  try {
+    const firstPage = Array.from({ length: 20 }, (_, i) => ({ id: String(100 + i), user_id: 'user-a', common_name: `corti-${i}`, top_redlist_category: 'LC' }))
+    const secondPage = Array.from({ length: 20 }, (_, i) => ({ id: String(200 + i), user_id: 'user-a', common_name: `corti-${20 + i}`, top_redlist_category: 'LC' }))
+    const freshPage = [{ id: '301', user_id: 'user-a', common_name: 'cortinarius-1', top_redlist_category: 'LC' }]
+    const { client, calls } = makeFindsPagingClient({
+      observations: [{ data: firstPage, error: null }, { data: secondPage, error: null }, { data: freshPage, error: null }],
+    })
+    supabase.from = client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      currentScreen: 'finds',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a',
+      searchQuery: 'corti',
+    })
+
+    await loadFinds()
+    assert.equal(_getFindsPagingStateForTests('user').nextOffset, 20)
+
+    // Browse further pages (unrelated to the search box) so paging state
+    // moves well past the first page.
+    nearBottom = true
+    state.currentScreen = 'finds'
+    await _maybeLoadMoreFinds()
+    assert.equal(_getFindsPagingStateForTests('user').nextOffset, 40, 'a second page was loaded via scroll, independent of search input')
+    const rangeCallsBeforeEdit = calls.filter(c => c.op === 'range' && c.table === 'observations').length
+
+    // An equivalent normalized edit (trailing whitespace) must not arm a
+    // reload timer at all.
+    _handleFindsSearchInput('corti ')
+    assert.equal(timers.pendingCount, 0, 'an equivalent edit must not schedule a debounce timer')
+    timers.fireAll()
+    await Promise.resolve()
+    assert.equal(_getFindsPagingStateForTests('user').nextOffset, 40, 'an equivalent edit must not reset paging back to page one')
+    assert.equal(calls.filter(c => c.op === 'range' && c.table === 'observations').length, rangeCallsBeforeEdit, 'an equivalent edit must not issue any additional query')
+
+    // A real text change must still arm exactly one timer, and firing it
+    // must run the authoritative reload from a fresh page one.
+    _handleFindsSearchInput('cortinarius')
+    assert.equal(timers.pendingCount, 1, 'a real query change must arm the debounce timer')
+    timers.fireAll()
+    for (let i = 0; i < 20 && _getFindsPagingStateForTests('user').nextOffset === 0; i++) {
+      await Promise.resolve()
+    }
+
+    assert.equal(_getFindsPagingStateForTests('user').searchKey, 'cortinarius')
+    assert.equal(_getFindsPagingStateForTests('user').nextOffset, 1)
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['301'])
+  } finally {
+    timers.restore()
     supabase.from = previousFrom
     Object.assign(state, previousState)
     globalThis.document = previousDocument

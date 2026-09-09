@@ -1113,10 +1113,7 @@ export function initFinds() {
   })
 
   searchInput.addEventListener('input', () => {
-    state.searchQuery = searchInput.value
-    _applyFilter()
-    _invalidateFindsSearchPagingOnInput()
-    _scheduleFindsSearchReload()
+    _handleFindsSearchInput(searchInput.value)
   })
 
   clearBtn.addEventListener('click', () => {
@@ -1492,13 +1489,36 @@ export function _invalidateFindsSearchPagingOnInput() {
 
 // Debounced so typing "Cortinarius" does not start eleven paginated
 // resets/renders (plan §1.1); ~250ms is within the plan's 200-300ms target.
-function _scheduleFindsSearchReload() {
+// Only (re)armed when this edit actually changed the normalized query
+// (pagingChanged); an equivalent edit (e.g. trailing whitespace) must not
+// reset an already-pending timer for a real prior change, nor arm a new
+// timer that would reload/reset paging for no query change (plan §1.1/§1.3
+// correction). Exported as a test seam.
+export function _scheduleFindsSearchReload(pagingChanged) {
+  if (!pagingChanged) return
   const timerHost = globalThis.window || globalThis
   _cancelFindsSearchDebounce()
   _findsSearchDebounceTimer = timerHost.setTimeout(() => {
     _findsSearchDebounceTimer = null
     void _reloadFindsForSearch()
   }, FINDS_SEARCH_DEBOUNCE_MS)
+}
+
+// The search input's 'input'-event handler, factored out as an exported test
+// seam so tests exercise the exact same ordering/gating production wires up
+// (plan §1.4 correction). Invalidating the render guard and paging state
+// BEFORE starting the local narrowing render below means that render's async
+// work (image lookups) captures the fresh render sequence, instead of being
+// discarded by an invalidation landing after it already began. Scheduling
+// the debounced reload only when this edit changed the normalized query
+// keeps an equivalent edit (e.g. trailing whitespace) from arming an
+// unnecessary reload/page-one reset.
+export function _handleFindsSearchInput(value) {
+  state.searchQuery = value
+  const pagingChanged = _invalidateFindsSearchPagingOnInput()
+  const renderPromise = _applyFilter()
+  _scheduleFindsSearchReload(pagingChanged)
+  return renderPromise
 }
 
 // A lighter-weight sibling of loadFinds() used only for a search-query
@@ -2070,7 +2090,8 @@ function _isCurrentFindsRender(list, renderContext) {
     && list === document.getElementById('finds-list')
 }
 
-function _applyFilter() {
+// Exported as a test seam (see finds.test.js).
+export function _applyFilter() {
   const list     = document.getElementById('finds-list')
   if (!list) return Promise.resolve(false)
   const renderSequence = _findsRenderGuard.begin()
