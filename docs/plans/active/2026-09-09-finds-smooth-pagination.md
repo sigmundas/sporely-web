@@ -269,11 +269,11 @@ fix: page Finds searches on the server
 Record after verification:
 
 ```text
-Stage 1 commit:
-Stage 1 reviewer:
-Stage 1 focused proof:
-Stage 1 broader proof:
-Stage 1 deviations/notes:
+Stage 1 commit: 251f971fdb785ac8d43bad43c0126c9fa6a7c5f2 on feature/finds-server-search-pagination (base 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1); pushed to origin; candidate pending fresh independent review
+Stage 1 reviewer: not started
+Stage 1 focused proof: node --test src/screens/finds.test.js — 34 pass, 0 fail
+Stage 1 broader proof: npm run check:node (pass); npm test (1205 pass / 8 fail, all 8 pre-existing on main at 7cd9e36 — confirmed via git stash rerun, none in src/screens/finds.*); npm run build (pass); git diff --check (clean)
+Stage 1 deviations/notes: see the Stage 1 implementation notes in section 10 (Recovery/resume notes) — summary: search predicate applied via one shared exported helper (applyFindsSearchFilter/_runPagedFindsQuery) reused by all three sources; debounced (~250ms) reload path (_reloadFindsForSearch) added alongside loadFinds() to satisfy the "narrow locally, then replace" UX without a full loading-shell repaint; _loadFeedSelectionPage gained an opt-in clearCache:false to support that; open question flagged for the reviewer regarding PostgREST's `*`→`%` ILIKE alias not being verified against a live server
 ```
 
 ---
@@ -879,6 +879,28 @@ Manual QA status: not started
 Known issue/blocker: none known
 Next exact action: run sporely-sparring selector and execute stage-finds-server-search-pagination
 ```
+
+State after Stage 1 implementation pass (not yet independently reviewed):
+
+```text
+Current verified stage: none (Stage 1 candidate pending fresh independent review)
+Current verified commit: none
+Current candidate/unverified work: 251f971fdb785ac8d43bad43c0126c9fa6a7c5f2 on feature/finds-server-search-pagination (base 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1)
+Last focused proof: node --test src/screens/finds.test.js (34 pass, 0 fail)
+Last broader proof: npm run check:node (pass); npm test (1205 pass / 8 fail — all 8 pre-existing on main at 7cd9e36, unrelated to Finds: supabase/functions/* and supabase/tests/adminActions.test.ts Deno edge-function tests, src/screens/map.test.js leaflet.css ESM extension error, src/live-reconnect.test.js QA3 assertion — verified via `git stash` + rerun on the unmodified tree before this pass); npm run build (pass); git diff --check (clean)
+Last reviewer result: not started
+Manual QA status: not applicable — Stage 1 is self-verifiable (unit/model-level only, no interactive/device-dependent surface)
+Known issue/blocker: PostgREST's documented `*`→`%` ILIKE-alias substitution point (raw filter value vs. post-unescape value) was not independently confirmed against a live PostgREST server; the implementation escapes `*` with the same backslash convention as `%`/`_` per Postgres's ILIKE default escape character, consistent with the confirmed PostgREST url_grammar reserved-character/quoting rules, but a residual edge case remains for a literal `*` in search text — see Stage 1 reviewer note below
+Next exact action: fresh independent sporely-sparring review of candidate 251f971 on feature/finds-server-search-pagination
+```
+
+**Stage 1 deviations / implementation notes for the reviewer:**
+
+- The search predicate is applied via one shared helper, `applyFindsSearchFilter(query, searchQuery)` (exported), called from inside `_runPagedFindsQuery` (also exported as a test seam) — before `_orderedFindsQuery(...).range(...)`. All three paging call sites (`_loadMinePage`, `_loadFeedSourcePage`, `_loadUserPage`) route through `_runPagedFindsQuery` unmodified, so the "before `.range()`" invariant holds structurally for all of them, not just by convention.
+- Search encoding (`buildFindsSearchOrFilter`, exported): the ILIKE pattern is built as `%<escaped>%`, escaping backslash first, then `%`, `_`, `*`; the whole pattern is then always wrapped in double quotes with `"`/`\` escaped for PostgREST's or()-list reserved characters (`,` `.` `:` `(` `)`), per PostgREST's url_grammar docs. This was verified against PostgREST's published docs (reserved-character list and quoted-value escaping rule), not against a live server — see the known issue/blocker above regarding `*`.
+- Debounce (~250ms, `FINDS_SEARCH_DEBOUNCE_MS`) triggers a new `_reloadFindsForSearch()` (exported test seam), a lighter sibling of `loadFinds()` that resets paging the same way but skips the cache clear + full "Loading…" shell, so already-rendered cards stay visible (narrowed locally by the existing `_applyFilter()`/`_matches()` path on every keystroke) until the debounced server result replaces them. It participates in the existing `_loadFindsSeq` guard, so a slow/stale in-flight query can never be appended once the query has moved on (regression-tested with a deliberately-delayed stale response).
+- `_loadFeedSelectionPage` gained a `clearCache` option (default `true`, unchanged for `loadFinds()`'s existing scope/status-change path) so the new search-reload path can pass `clearCache:false` and avoid a premature blank-list flash for Feed scope specifically.
+- `_matches()` is untouched; still used for offline/queued-item client-side search (regression-tested).
 
 ---
 
