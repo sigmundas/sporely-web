@@ -111,12 +111,17 @@ export function createFindsRenderGuard() {
 
 const _findsRenderGuard = createFindsRenderGuard()
 
-function _createPagingState() {
+function _createPagingState(searchKey = null) {
   return {
     nextOffset: 0,
     hasMore: true,
     loadingMore: false,
     initialized: false,
+    // The normalized search query this paging state's offset/cache are valid
+    // for (plan §1.3). A fresh paging state is always tagged with the query
+    // it was reset for, so a page fetched for one query can never be treated
+    // as belonging to another once the visible query moves on.
+    searchKey,
   }
 }
 
@@ -131,9 +136,9 @@ function _getPagingState(scope) {
   return _findsPaging[key]
 }
 
-function _resetPagingState(scope) {
+function _resetPagingState(scope, searchKey = null) {
   const key = _pagingScopeKey(scope)
-  _findsPaging[key] = _createPagingState()
+  _findsPaging[key] = _createPagingState(searchKey)
   return _findsPaging[key]
 }
 
@@ -169,6 +174,17 @@ export function _mergeFindsItems(scope, existingItems, incomingItems) {
 
 function _setFindsCache(scope, items) {
   _cache[_pagingScopeKey(scope)] = Array.isArray(items) ? items : []
+}
+
+// Test seams: expose the module-private cache/paging state read-only so
+// regressions can assert on actual resulting row IDs and paging offsets
+// (plan §1.6 correction) instead of only on query-builder call counts.
+export function _getFindsCacheForTests(scope) {
+  return _cache[_pagingScopeKey(scope)] || []
+}
+
+export function _getFindsPagingStateForTests(scope) {
+  return _getPagingState(scope)
 }
 
 function _findsFooterHtml(scope) {
@@ -1099,6 +1115,7 @@ export function initFinds() {
   searchInput.addEventListener('input', () => {
     state.searchQuery = searchInput.value
     _applyFilter()
+    _invalidateFindsSearchPagingOnInput()
     _scheduleFindsSearchReload()
   })
 
@@ -1393,7 +1410,7 @@ export async function loadFinds() {
   _findsRenderGuard.invalidate()
   const primaryScope = _findsPrimaryScope()
   const currentScope = _currentScope()
-  _resetPagingState(currentScope)
+  _resetPagingState(currentScope, _normalizeFindsSearchQuery(state.searchQuery))
   _closeFindsDropdowns()
 
   _setFindsCache(currentScope, [])
@@ -1448,6 +1465,31 @@ function _cancelFindsSearchDebounce() {
   }
 }
 
+// Runs synchronously on every 'input' event, ahead of the network debounce
+// below (plan §1.1/§1.3 correction). Typing changes the visible query
+// immediately, so any in-flight page fetch or enrichment started for the
+// previous text — including one still awaiting its response when this
+// keystroke lands — must stop being eligible to write into the cache, and
+// the current scope's paging offset must be tied to the new query right
+// away. Without this, a stale response for an old query could still be
+// merged during the debounce window, or a load-more triggered mid-debounce
+// could reuse the old offset against the new query text.
+// Exported as a test seam.
+export function _invalidateFindsSearchPagingOnInput() {
+  if (_isOfflineFindsMode()) return false
+  const normalized = _normalizeFindsSearchQuery(state.searchQuery)
+  const currentScope = _currentScope()
+  const paging = _getPagingState(currentScope)
+  // A normalized-equivalent edit (e.g. trailing whitespace added/removed)
+  // must not discard in-progress paging (plan correction: "equivalent
+  // normalized queries should not reset paging").
+  if (paging.searchKey === normalized) return false
+  _findsRenderGuard.invalidate()
+  ++_loadFindsSeq
+  _resetPagingState(currentScope, normalized)
+  return true
+}
+
 // Debounced so typing "Cortinarius" does not start eleven paginated
 // resets/renders (plan §1.1); ~250ms is within the plan's 200-300ms target.
 function _scheduleFindsSearchReload() {
@@ -1476,7 +1518,7 @@ export async function _reloadFindsForSearch() {
   _findsRenderGuard.invalidate()
   const primaryScope = _findsPrimaryScope()
   const currentScope = _currentScope()
-  _resetPagingState(currentScope)
+  _resetPagingState(currentScope, _normalizeFindsSearchQuery(state.searchQuery))
 
   try {
     if (currentScope === 'user') {
@@ -1628,11 +1670,24 @@ function _normalizeFindsSearchQuery(value) {
   return String(value || '').trim()
 }
 
-// Postgres ILIKE's default escape character is backslash, and PostgREST also
-// treats a bare `*` as an alias for the ILIKE wildcard `%` (to let callers
-// avoid percent-encoding `%25` in a URL). Escape backslash first, then `%`,
-// `_`, and `*`, so arbitrary user text is matched literally instead of as a
-// wildcard/escape sequence.
+// Postgres ILIKE's default escape character is backslash. Escape backslash
+// first, then `%` and `_`, so arbitrary user text matches literally instead
+// of as an ILIKE wildcard/escape sequence.
+//
+// `*` is a known, evidenced exception, NOT fixed by this escaping: PostgREST
+// v12.2.3 (src/PostgREST/Query/SqlFragment.hs, `T.map star` over the raw
+// ilike/like filter value, `star c = if c == '*' then '%' else c`)
+// unconditionally rewrites every `*` in the filter value to `%` before
+// Postgres ever sees it — independently of, and prior to, this backslash
+// escaping. So `\*` becomes `\%` at the SQL layer, which Postgres reads as an
+// escaped literal `%`, not a literal `*`. There is no client-side escape that
+// survives this rewrite, so a literal `*` in search text cannot be matched
+// exactly through a direct `.ilike()`/`.or()` filter. This does not broaden
+// or break the query (the backslash still prevents `*`/`%` from acting as a
+// wildcard) — it only means a literal-`*` search silently fails to find a
+// literal `*` (it would instead match a literal `%`, if one exists). See the
+// Stage 1 plan record for the accepted decision: keep this behavior and
+// document it rather than adding a search RPC/migration.
 function _escapeFindsIlikeText(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/[%_*]/g, match => `\\${match}`)
 }
@@ -1737,6 +1792,11 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
     const merged = _mergeFindsItems('mine', currentItems.length ? currentItems : queued, data)
     await _attachSporeFlags(merged)
     await _attachFindsRedlistTags(merged, loadSeq)
+    // Re-check after the awaited enrichment above: a newer search/scope
+    // change may have completed and already written the authoritative cache
+    // while this older request was still awaiting red-list data (plan §1.3
+    // correction) — an older request must never overwrite a newer result.
+    if (loadSeq !== _loadFindsSeq) return false
     _setFindsCache('mine', merged)
     paging.nextOffset += data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
@@ -1829,6 +1889,9 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
       const merged = _mergeFindsItems(cacheKey, currentItems, data)
       await _attachSporeFlags(merged)
       await _attachFindsRedlistTags(merged, loadSeq)
+      // See _loadMinePage's matching guard: an older request must not
+      // overwrite a newer completed search once awaited enrichment resolves.
+      if (loadSeq !== _loadFindsSeq) return false
       _setFindsCache(cacheKey, merged)
     }
     paging.lastData = data
@@ -1926,6 +1989,9 @@ async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
     const merged = _mergeFindsItems('user', reset ? [] : (_cache['user'] || []), data)
     await _attachSporeFlags(merged)
     await _attachFindsRedlistTags(merged, loadSeq)
+    // See _loadMinePage's matching guard: an older request must not
+    // overwrite a newer completed search once awaited enrichment resolves.
+    if (loadSeq !== _loadFindsSeq) return false
     _setFindsCache('user', merged)
     paging.nextOffset += data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
@@ -1944,7 +2010,10 @@ async function _loadCurrentFindsPage({ reset = false } = {}) {
   return _loadFeedSelectionPage({ loadSeq, reset })
 }
 
-async function _maybeLoadMoreFinds() {
+// Exported as a test seam so a "load-more fires while a search debounce is
+// pending" regression can drive the real scroll-threshold path rather than
+// re-deriving it (plan §1.3 correction).
+export async function _maybeLoadMoreFinds() {
   if (state.currentScreen !== 'finds' || _isRefreshing || _findsInitialRenderLoadSeq) return
 
   // Paging state is initialized before thumbnail lookup/rendering completes.

@@ -21,12 +21,18 @@ import {
   isFindsStatusControlDisabled,
   renderFindsRedlistTag,
   shouldHideFindsStatusControl,
+  loadFinds,
+  _getFindsCacheForTests,
+  _getFindsPagingStateForTests,
+  _invalidateFindsSearchPagingOnInput,
+  _maybeLoadMoreFinds,
   _matches,
   _reloadFindsForSearch,
   _runPagedFindsQuery,
   _selectFindsDropdownValue,
 } from './finds.js'
 import { loadDetailObservation } from './find_detail.js'
+import { resetObservationIdentificationsTableAvailabilityForTests } from '../ai-identification.js'
 import { state } from '../state.js'
 import { supabase } from '../supabase.js'
 
@@ -347,6 +353,12 @@ test('search predicate is applied before .range() for every source (Mine/Feed/us
 function makeFindsPagingClient(responsesByTable) {
   const calls = []
   const callIndexByTable = {}
+  const nextResponse = table => {
+    const index = callIndexByTable[table] || 0
+    callIndexByTable[table] = index + 1
+    const responses = responsesByTable[table] || []
+    return responses[Math.min(index, responses.length - 1)] || { data: [], error: null }
+  }
   return {
     calls,
     client: {
@@ -359,15 +371,34 @@ function makeFindsPagingClient(responsesByTable) {
           order(col, opts) { calls.push({ table, op: 'order', col, opts }); return chain },
           range(from, to) {
             calls.push({ table, op: 'range', from, to })
-            const index = callIndexByTable[table] || 0
-            callIndexByTable[table] = index + 1
-            const responses = responsesByTable[table] || []
-            return responses[Math.min(index, responses.length - 1)] || { data: [], error: null }
+            return nextResponse(table)
+          },
+          // Only used by the red-list enrichment lookup
+          // (loadObservationRedlistSummaries) in the tests below — it is a
+          // terminal call on its own table, like .range() is for observations.
+          in(col, vals) {
+            calls.push({ table, op: 'in', col, vals })
+            return nextResponse(table)
           },
         }
         return chain
       },
     },
+  }
+}
+
+// `loadFinds()` (unlike `_reloadFindsForSearch()`) also syncs the scope/
+// status/sort dropdown controls, which touch a few more read-only DOM
+// query methods. Extending the minimal `{ getElementById: () => undefined }`
+// stub used elsewhere in this file with harmless empty results for those
+// keeps `finds-list` (and everything else) absent, so `_applyFilter`'s
+// render step still no-ops exactly as it does with the plain stub.
+function makeMinimalFindsDocument(overrides = {}) {
+  return {
+    getElementById: () => undefined,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    ...overrides,
   }
 }
 
@@ -387,7 +418,41 @@ test('_matches keeps matching queued/local observations client-side, unchanged b
   assert.equal(_matches(queued, 'nonexistent'), false)
 })
 
-test('changing the search query resets paging and a stale in-flight response cannot be appended', async () => {
+// Minimal empty-queue IndexedDB stub (see src/import-store.test.js for the
+// fuller pattern this trims down) so `_loadMinePage`'s `getQueuedObservations`
+// call resolves to `[]` instead of touching a real IDB, without pulling
+// offline-queue behavior into these online-search-pagination tests.
+function installEmptyQueueIndexedDbStub() {
+  const previous = globalThis.indexedDB
+  globalThis.indexedDB = {
+    open() {
+      const request = {}
+      queueMicrotask(() => {
+        request.result = {
+          transaction() {
+            return {
+              objectStore() {
+                return {
+                  getAll() {
+                    const req = {}
+                    queueMicrotask(() => { req.result = []; req.onsuccess?.({ target: req }) })
+                    return req
+                  },
+                }
+              },
+            }
+          },
+          close() {},
+        }
+        request.onsuccess?.({ target: request })
+      })
+      return request
+    },
+  }
+  return () => { globalThis.indexedDB = previous }
+}
+
+test('changing the search query ties paging to the new query and a stale in-flight response cannot be appended (user-target)', async () => {
   const previousFrom = supabase.from
   const previousState = { ...state }
   const previousDocument = globalThis.document
@@ -401,11 +466,11 @@ test('changing the search query resets paging and a stale in-flight response can
     // Second call ("cortinarius", fired before the first resolves): a short
     // page (3 rows) that resolves immediately, so it is the authoritative
     // — and last-committed — response.
-    const staleRows = Array.from({ length: 20 }, (_, i) => ({ user_id: 'user-a', common_name: `stale-${i}` }))
+    const staleRows = Array.from({ length: 20 }, (_, i) => ({ id: String(900 + i), user_id: 'user-a', common_name: `stale-${i}`, top_redlist_category: 'LC' }))
     const freshRows = [
-      { user_id: 'user-a', common_name: 'fresh-1' },
-      { user_id: 'user-a', common_name: 'fresh-2' },
-      { user_id: 'user-a', common_name: 'fresh-3' },
+      { id: '801', user_id: 'user-a', common_name: 'fresh-1', top_redlist_category: 'LC' },
+      { id: '802', user_id: 'user-a', common_name: 'fresh-2', top_redlist_category: 'LC' },
+      { id: '803', user_id: 'user-a', common_name: 'fresh-3', top_redlist_category: 'LC' },
     ]
     const { client, calls } = makeFindsPagingClient({
       observations: [
@@ -433,18 +498,432 @@ test('changing the search query resets paging and a stale in-flight response can
     const secondOrCall = calls.filter(c => c.op === 'or' && c.table === 'observations')[1]
     assert.match(secondOrCall.filter, /cortinarius/, 'the second (authoritative) query used the new search text')
 
+    // The authoritative (fresh) response must already be the committed
+    // cache/paging state before the stale one is even released.
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['801', '802', '803'])
+    assert.equal(_getFindsPagingStateForTests('user').nextOffset, 3)
+    assert.equal(_getFindsPagingStateForTests('user').searchKey, 'cortinarius')
+
     resolveStale()
     await firstReload
 
-    // If the stale response had been allowed to land after the fresh one,
-    // it would leave 20 accumulated/replaced rows behind instead of 3.
+    // If the stale response had been allowed to land after the fresh one, it
+    // would leave 20 accumulated/replaced rows (ids 900-919) behind instead.
     const finalOrCalls = calls.filter(c => c.op === 'or' && c.table === 'observations')
     assert.equal(finalOrCalls.length, 2, 'no further queries were issued once the stale response resolved')
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['801', '802', '803'], 'the stale response must not have been appended once released')
+    assert.equal(_getFindsPagingStateForTests('user').nextOffset, 3, 'the stale response must not have advanced the current paging offset')
   } finally {
     supabase.from = previousFrom
     Object.assign(state, previousState)
     globalThis.document = previousDocument
   }
+})
+
+test('an equivalent normalized search edit (whitespace only) does not reset paging, but a real text change does', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  globalThis.document = makeMinimalFindsDocument()
+
+  try {
+    const page = Array.from({ length: 20 }, (_, i) => ({ id: String(100 + i), user_id: 'user-a', common_name: `corti-${i}`, top_redlist_category: 'LC' }))
+    const { client } = makeFindsPagingClient({ observations: [{ data: page, error: null }] })
+    supabase.from = client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      currentScreen: 'finds',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a',
+      searchQuery: 'corti',
+    })
+
+    await loadFinds()
+    const pagingAfterLoad = _getFindsPagingStateForTests('user')
+    assert.equal(pagingAfterLoad.nextOffset, 20)
+    assert.equal(pagingAfterLoad.searchKey, 'corti')
+
+    // Whitespace-only edit: normalizes to the same value already committed.
+    state.searchQuery = '  corti  '
+    const changed = _invalidateFindsSearchPagingOnInput()
+    assert.equal(changed, false, 'a normalized-equivalent edit must not report a change')
+    assert.equal(_getFindsPagingStateForTests('user'), pagingAfterLoad, 'paging state object must not be replaced for an equivalent query')
+    assert.equal(_getFindsPagingStateForTests('user').nextOffset, 20, 'offset must survive an equivalent-query edit')
+
+    // A real text change must invalidate immediately, ahead of the debounce.
+    state.searchQuery = 'cortinarius'
+    const reallyChanged = _invalidateFindsSearchPagingOnInput()
+    assert.equal(reallyChanged, true)
+    assert.notEqual(_getFindsPagingStateForTests('user'), pagingAfterLoad, 'a real query change must reset to a fresh paging state')
+    assert.equal(_getFindsPagingStateForTests('user').nextOffset, 0)
+    assert.equal(_getFindsPagingStateForTests('user').searchKey, 'cortinarius')
+  } finally {
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+  }
+})
+
+test('a load-more triggered while a search is still debouncing cannot use the old query offset against the new query text', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  // "screen-finds" starts far from its bottom so `loadFinds()`'s own
+  // fire-and-forget post-load `_maybeLoadMoreFinds()` check (which would
+  // otherwise race this test's own manual calls below and consume the
+  // second queued page prematurely) does not trigger; the test switches it
+  // to "near bottom" itself right before the load-more assertions it owns.
+  let nearBottom = false
+  globalThis.document = makeMinimalFindsDocument({
+    getElementById(id) {
+      if (id === 'screen-finds') {
+        return nearBottom
+          ? { scrollHeight: 1000, scrollTop: 850, clientHeight: 100, classList: { toggle() {} } }
+          : { scrollHeight: 1000, scrollTop: 0, clientHeight: 100, classList: { toggle() {} } }
+      }
+      return undefined
+    },
+  })
+
+  try {
+    const firstPage = Array.from({ length: 20 }, (_, i) => ({ id: String(200 + i), user_id: 'user-a', common_name: `corti-${i}`, top_redlist_category: 'LC' }))
+    const nextPageOfNewQuery = [
+      { id: '301', user_id: 'user-a', common_name: 'cortinarius-1', top_redlist_category: 'LC' },
+    ]
+    const { client, calls } = makeFindsPagingClient({
+      observations: [{ data: firstPage, error: null }, { data: nextPageOfNewQuery, error: null }],
+    })
+    supabase.from = client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      // Not 'finds' yet: `loadFinds()`'s own fire-and-forget post-load
+      // `_maybeLoadMoreFinds()` check bails out on this alone, so it cannot
+      // race this test's own manual load-more call below regardless of
+      // microtask interleaving (its first page has `hasMore: true`, so the
+      // scroll position alone would not have been a reliable guard).
+      currentScreen: 'not-finds-yet',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a',
+      searchQuery: 'corti',
+    })
+
+    await loadFinds()
+    assert.equal(_getFindsPagingStateForTests('user').nextOffset, 20)
+    assert.equal(_getFindsPagingStateForTests('user').hasMore, true)
+
+    // Typing narrows the visible query but the debounce has not fired yet.
+    state.searchQuery = 'cortinarius'
+    _invalidateFindsSearchPagingOnInput()
+    state.currentScreen = 'finds'
+    nearBottom = true
+
+    // A scroll-triggered load-more firing in this gap must not be able to
+    // reuse the old (offset 20) paging state against the new query text —
+    // the freshly reset paging state is not `initialized` yet, so the
+    // scroll-threshold path must not issue a request at all until the
+    // debounced authoritative reload (below) establishes a real first page.
+    await _maybeLoadMoreFinds()
+    const rangeCallsBeforeReload = calls.filter(c => c.op === 'range' && c.table === 'observations')
+    assert.equal(rangeCallsBeforeReload.length, 1, 'load-more must not fire against an un-initialized (query-changed) paging state')
+
+    // The debounce now fires the authoritative reload for the new query.
+    await _reloadFindsForSearch()
+    const rangeCallsAfterReload = calls.filter(c => c.op === 'range' && c.table === 'observations')
+    assert.equal(rangeCallsAfterReload.length, 2)
+    assert.equal(rangeCallsAfterReload[1].from, 0, 'the authoritative reload for the new query must start at offset 0, not the old offset 20')
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['301'])
+  } finally {
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+  }
+})
+
+test("an older request's awaited red-list enrichment cannot overwrite a newer completed search's cache", async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  globalThis.document = { getElementById: () => undefined }
+  resetObservationIdentificationsTableAvailabilityForTests()
+  let resolveStaleRedlist
+  const staleRedlistPromise = new Promise(resolve => { resolveStaleRedlist = resolve })
+
+  try {
+    // Stale ("first") rows have no red-list data yet, so loading them awaits
+    // a red-list lookup that we hold open below. Fresh ("second") rows
+    // already carry red-list data, so their load completes without any
+    // further network wait — it must win the cache regardless.
+    const staleRows = [
+      { id: '401', user_id: 'user-a', common_name: 'first-1' },
+      { id: '402', user_id: 'user-a', common_name: 'first-2' },
+    ]
+    const freshRows = [
+      { id: '501', user_id: 'user-a', common_name: 'second-1', top_redlist_category: 'LC' },
+    ]
+    const { client, calls } = makeFindsPagingClient({
+      observations: [{ data: staleRows, error: null }, { data: freshRows, error: null }],
+      observation_identifications_community_view: [staleRedlistPromise.then(() => ({ data: [], error: null }))],
+    })
+    supabase.from = client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      currentScreen: 'finds',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a',
+      searchQuery: 'first',
+    })
+
+    const firstReload = _reloadFindsForSearch()
+
+    // Let the stale (first) request run all the way up to the point where
+    // it is parked awaiting the still-open red-list lookup — i.e. past its
+    // own page-fetch loadSeq guard — before the query changes underneath
+    // it. Otherwise the second request's loadSeq bump would instead catch
+    // the stale request at its earlier (page-fetch) guard, never
+    // exercising the later (post-enrichment) guard this test targets.
+    while (!calls.some(c => c.op === 'in' && c.table === 'observation_identifications_community_view')) {
+      await Promise.resolve()
+    }
+
+    state.searchQuery = 'second'
+    const secondReload = _reloadFindsForSearch()
+    await secondReload
+
+    // The fresh request needed no red-list wait, so it is already committed.
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['501'])
+
+    const redlistCallsSoFar = calls.filter(c => c.op === 'in' && c.table === 'observation_identifications_community_view')
+    assert.equal(redlistCallsSoFar.length, 1, 'only the stale request should have needed a red-list lookup')
+
+    // Now let the stale request's red-list lookup resolve. Its own guard
+    // must stop it from overwriting the already-newer committed cache.
+    resolveStaleRedlist()
+    await firstReload
+
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['501'], "the stale request's late enrichment must not have overwritten the newer cache")
+  } finally {
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+    resetObservationIdentificationsTableAvailabilityForTests()
+  }
+})
+
+test('clearing the search resets to the unfiltered server query', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  globalThis.document = makeMinimalFindsDocument()
+
+  try {
+    const filteredRows = [{ id: '601', user_id: 'user-a', common_name: 'corti-1', top_redlist_category: 'LC' }]
+    const unfilteredRows = [
+      { id: '701', user_id: 'user-a', common_name: 'corti-1', top_redlist_category: 'LC' },
+      { id: '702', user_id: 'user-a', common_name: 'unrelated', top_redlist_category: 'LC' },
+    ]
+    const { client, calls } = makeFindsPagingClient({
+      observations: [{ data: filteredRows, error: null }, { data: unfilteredRows, error: null }],
+    })
+    supabase.from = client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      currentScreen: 'finds',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a',
+      searchQuery: 'corti',
+    })
+
+    await loadFinds()
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['601'])
+
+    state.searchQuery = ''
+    await _reloadFindsForSearch()
+
+    const orCalls = calls.filter(c => c.op === 'or' && c.table === 'observations')
+    assert.equal(orCalls.length, 1, 'clearing the search must not add a server search filter for the unfiltered reload')
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['701', '702'])
+    assert.equal(_getFindsPagingStateForTests('user').searchKey, '')
+  } finally {
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+  }
+})
+
+test('Mine, each Feed source (public/friends/followed), and user-target each apply the search predicate before paging their own table/view', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  const restoreIndexedDb = installEmptyQueueIndexedDbStub()
+  const previousStorageFrom = supabase.storage.from
+  // Feed-source rows are owned by a different user, so `_loadProfilesForScope`
+  // will look their profile/avatar up — stub storage so that stays local
+  // instead of making a real network call (see src/artsorakel.test.js for
+  // this same pattern).
+  supabase.storage.from = () => ({ createSignedUrls: async () => ({ data: [], error: null }) })
+  globalThis.document = makeMinimalFindsDocument()
+
+  try {
+    // Mine
+    {
+      const rows = [{ id: '1001', user_id: 'user-a', common_name: 'mine-match', top_redlist_category: 'LC' }]
+      const { client, calls } = makeFindsPagingClient({ observations: [{ data: rows, error: null }] })
+      supabase.from = client.from
+      Object.assign(state, {
+        user: { id: 'user-a' },
+        currentScreen: 'finds',
+        findsScopePrimary: 'mine',
+        findsMineScope: 'all',
+        findsStatusFilter: 'all',
+        findsTargetUserId: null,
+        searchQuery: 'mine-match',
+      })
+      await loadFinds()
+      const orIndex = calls.findIndex(c => c.op === 'or')
+      const rangeIndex = calls.findIndex(c => c.op === 'range')
+      assert.ok(orIndex !== -1 && orIndex < rangeIndex, 'Mine: search predicate must be applied before .range()')
+      assert.deepEqual(_getFindsCacheForTests('mine').map(o => o.id), ['1001'])
+    }
+
+    // Feed sources: public, friends, followed
+    const feedSources = [
+      { findsFeedScope: 'all', table: 'observations_community_view', row: { id: '2001', user_id: 'user-b', common_name: 'public-match', visibility: 'public', is_draft: false, top_redlist_category: 'LC' } },
+      { findsFeedScope: 'friends', table: 'observations_friend_view', row: { id: '2002', user_id: 'user-c', common_name: 'friends-match', is_draft: false, top_redlist_category: 'LC' } },
+      { findsFeedScope: 'followed', table: 'observations_follow_view', row: { id: '2003', user_id: 'user-d', common_name: 'followed-match', is_draft: false, top_redlist_category: 'LC' } },
+    ]
+    for (const { findsFeedScope, table, row } of feedSources) {
+      const { client, calls } = makeFindsPagingClient({ [table]: [{ data: [row], error: null }] })
+      supabase.from = client.from
+      Object.assign(state, {
+        user: { id: 'user-a' },
+        currentScreen: 'finds',
+        findsScopePrimary: 'feed',
+        findsFeedScope,
+        findsTargetUserId: null,
+        searchQuery: row.common_name,
+      })
+      await loadFinds()
+      const tableCalls = calls.filter(c => c.table === table)
+      const orIndex = tableCalls.findIndex(c => c.op === 'or')
+      const rangeIndex = tableCalls.findIndex(c => c.op === 'range')
+      assert.ok(orIndex !== -1 && orIndex < rangeIndex, `Feed ${findsFeedScope}: search predicate must be applied before .range() on ${table}`)
+      assert.deepEqual(_getFindsCacheForTests('feed').map(o => o.id), [row.id], `Feed ${findsFeedScope}: only the matching row from ${table} should be cached`)
+    }
+
+    // User-target (non-owner path uses observations_community_view)
+    {
+      const rows = [{ id: '3001', user_id: 'user-e', common_name: 'target-match', visibility: 'public', is_draft: false, top_redlist_category: 'LC' }]
+      const { client, calls } = makeFindsPagingClient({ observations_community_view: [{ data: rows, error: null }] })
+      supabase.from = client.from
+      Object.assign(state, {
+        user: { id: 'user-a' },
+        currentScreen: 'finds',
+        findsScopePrimary: 'mine',
+        findsTargetUserId: 'user-e',
+        searchQuery: 'target-match',
+      })
+      await loadFinds()
+      const orIndex = calls.findIndex(c => c.op === 'or')
+      const rangeIndex = calls.findIndex(c => c.op === 'range')
+      assert.ok(orIndex !== -1 && orIndex < rangeIndex, 'user-target: search predicate must be applied before .range()')
+      assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['3001'])
+    }
+  } finally {
+    supabase.from = previousFrom
+    supabase.storage.from = previousStorageFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+    restoreIndexedDb()
+  }
+})
+
+// Faithful pure-JS re-implementation of the exact three-stage pipeline a
+// filter value goes through in production, used to prove literal-character
+// matching semantics deterministically (no live server dependency in CI):
+//   1) this file's own quoting (`_quoteFindsFilterValue`, exercised via
+//      `buildFindsSearchOrFilter`) — reversed here the same way PostgREST's
+//      or()-list quoted-value grammar reverses it (unescape `\"` and `\\`);
+//   2) PostgREST v12.2.3's unconditional `T.map star` (`*` -> `%`) over the
+//      raw ilike/like filter value, applied before Postgres ever sees it;
+//   3) Postgres ILIKE with the default backslash escape character.
+// Stage 2/3 were independently confirmed against a live local PostgREST
+// instance (synthetic rows, ilike/or() queries) during this correction pass;
+// see the plan's Stage 1 record for the transcript.
+function _unquotePostgrestFilterValue(quoted) {
+  const inner = quoted.slice(1, -1)
+  let result = ''
+  for (let i = 0; i < inner.length; i++) {
+    if (inner[i] === '\\' && i + 1 < inner.length) {
+      result += inner[i + 1]
+      i++
+    } else {
+      result += inner[i]
+    }
+  }
+  return result
+}
+
+function _applyPostgrestStarSubstitution(value) {
+  return value.replace(/\*/g, '%')
+}
+
+function _matchesPostgresIlike(text, pattern) {
+  let regex = '^'
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if (ch === '\\' && i + 1 < pattern.length) {
+      regex += pattern[i + 1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      i++
+    } else if (ch === '%') {
+      regex += '.*'
+    } else if (ch === '_') {
+      regex += '.'
+    } else {
+      regex += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    }
+  }
+  regex += '$'
+  return new RegExp(regex, 'is').test(text)
+}
+
+function _simulateFindsSearchIlike(searchQuery, candidateText) {
+  const filter = buildFindsSearchOrFilter(searchQuery)
+  const quoted = filter.match(/\.ilike\.("(?:[^"\\]|\\.)*")/)[1]
+  const afterQuoting = _unquotePostgrestFilterValue(quoted)
+  const afterStarSubstitution = _applyPostgrestStarSubstitution(afterQuoting)
+  return _matchesPostgresIlike(candidateText, afterStarSubstitution)
+}
+
+test('special characters in search text match their literal counterpart without breaking or broadening the query', () => {
+  const cases = [
+    { label: 'percent', query: 'a%b', matches: 'xa%bx', notMatches: ['xaZZbx', 'xaQb'] },
+    { label: 'underscore', query: 'a_b', matches: 'xa_bx', notMatches: ['xaZbx'] },
+    { label: 'backslash', query: 'a\\b', matches: 'xa\\bx', notMatches: ['xabx'] },
+    { label: 'quote', query: 'a"b', matches: 'xa"bx', notMatches: ['xabx'] },
+    { label: 'comma', query: 'a,b', matches: 'xa,bx', notMatches: ['xabx'] },
+    { label: 'dot', query: 'a.b', matches: 'xa.bx', notMatches: ['xaZb'] },
+    { label: 'colon', query: 'a:b', matches: 'xa:bx', notMatches: ['xabx'] },
+    { label: 'parens', query: 'a(b)c', matches: 'xa(b)cx', notMatches: ['xabcx'] },
+  ]
+  for (const { label, query, matches, notMatches } of cases) {
+    assert.equal(_simulateFindsSearchIlike(query, matches), true, `${label}: must match its own literal text`)
+    for (const candidate of notMatches) {
+      assert.equal(_simulateFindsSearchIlike(query, candidate), false, `${label}: must not broaden to match "${candidate}"`)
+    }
+  }
+
+  // Documented, evidenced exception (plan Stage 1 record): PostgREST maps
+  // every `*` to `%` before Postgres ever applies the escape character, so a
+  // literal `*` cannot be matched through this filter surface. This must not
+  // break the query, and — critically — must not broaden it into a wildcard
+  // (a bare unescaped `*` would match everything; this must not).
+  assert.equal(_simulateFindsSearchIlike('*', 'contains a literal * star'), false, 'a literal * search must not find a literal * (documented PostgREST limitation)')
+  assert.equal(_simulateFindsSearchIlike('*', 'contains a literal % percent'), true, 'a literal * search resolves to matching a literal % instead, per the documented PostgREST star->percent substitution')
+  assert.equal(_simulateFindsSearchIlike('*', 'unrelated text'), false, 'a literal * search must not broaden into an unescaped wildcard matching everything')
 })
 
 test('finds sort helper keeps date as default and accepts species', () => {

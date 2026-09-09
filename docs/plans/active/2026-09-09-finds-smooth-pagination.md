@@ -269,11 +269,29 @@ fix: page Finds searches on the server
 Record after verification:
 
 ```text
-Stage 1 commit: 251f971fdb785ac8d43bad43c0126c9fa6a7c5f2 on feature/finds-server-search-pagination (base 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1); pushed to origin; candidate pending fresh independent review
-Stage 1 reviewer: not started
+Stage 1 commit: 251f971fdb785ac8d43bad43c0126c9fa6a7c5f2 on feature/finds-server-search-pagination (base 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1); pushed to origin; superseded by an uncommitted correction pass (see below) pending manual checks and fresh independent review
+Stage 1 reviewer: 2026-09-09 fresh sporely-sparring — partly confirmed; changes requested
 Stage 1 focused proof: node --test src/screens/finds.test.js — 34 pass, 0 fail
 Stage 1 broader proof: npm run check:node (pass); npm test (1205 pass / 8 fail, all 8 pre-existing on main at 7cd9e36 — confirmed via git stash rerun, none in src/screens/finds.*); npm run build (pass); git diff --check (clean)
 Stage 1 deviations/notes: see the Stage 1 implementation notes in section 10 (Recovery/resume notes) — summary: search predicate applied via one shared exported helper (applyFindsSearchFilter/_runPagedFindsQuery) reused by all three sources; debounced (~250ms) reload path (_reloadFindsForSearch) added alongside loadFinds() to satisfy the "narrow locally, then replace" UX without a full loading-shell repaint; _loadFeedSelectionPage gained an opt-in clearCache:false to support that; open question flagged for the reviewer regarding PostgREST's `*`→`%` ILIKE alias not being verified against a live server
+
+Stage 1 correction pass (2026-09-09, uncommitted, human-gated — see section 10 for full detail):
+Fixed: (1) on-input paging invalidation ahead of the network debounce, tied to
+the normalized query (`_invalidateFindsSearchPagingOnInput`); (2) a loadSeq
+recheck after awaited red-list enrichment, before the cache write, in all
+three loaders. Investigated and resolved as a documented, accepted limitation
+(user decision, not unilateral): PostgREST v12.2.3 unconditionally maps `*`
+to `%` before Postgres ever applies the ILIKE escape character (confirmed
+both from source and against a live local PostgREST instance with synthetic
+rows) — no client-side escaping can preserve a literal `*`; kept the existing
+escaping (documented in code) rather than adding an RPC/migration.
+Focused proof: node --test src/screens/finds.test.js — 40 pass, 0 fail (6 new).
+Broader proof: npm run check:node (pass); npm test (1211 pass / 8 fail, same
+8 pre-existing failures as the Stage 1 baseline, none in src/screens/finds.*);
+npm run build (pass); git diff --check (clean).
+Not committed: human-gated per the correction prompt (interactive
+search-input/debounce behavior) — awaiting the manual checks below, then a
+fresh independent sporely-sparring review of the new candidate.
 ```
 
 ---
@@ -902,6 +920,27 @@ Next exact action: fresh independent sporely-sparring review of candidate 251f97
 - `_loadFeedSelectionPage` gained a `clearCache` option (default `true`, unchanged for `loadFinds()`'s existing scope/status-change path) so the new search-reload path can pass `clearCache:false` and avoid a premature blank-list flash for Feed scope specifically.
 - `_matches()` is untouched; still used for offline/queued-item client-side search (regression-tested).
 
+State after the Stage 1 correction pass (uncommitted, awaiting manual checks then fresh independent review):
+
+```text
+Current verified stage: none
+Current verified commit: none
+Current candidate/unverified work: uncommitted local changes on feature/finds-server-search-pagination, on top of candidate 251f971 (base 7cd9e36) — src/screens/finds.js, src/screens/finds.test.js
+Last focused proof: node --test src/screens/finds.test.js (40 pass, 0 fail; 6 new tests added this pass)
+Last broader proof: npm run check:node (pass); npm test (1211 pass / 8 fail — same 8 pre-existing failures as the Stage 1 baseline, unrelated to Finds); npm run build (pass); git diff --check (clean)
+Last reviewer result: previous candidate 251f971 was "partly confirmed, changes requested" (2026-09-09); this correction pass has not yet been reviewed
+Manual QA status: partial — manual test 1 (search during scroll/typing across scopes) confirmed passing by the user. Manual tests 2 (slow-network mid-search cancel) and 3 (offline queued search) are explicitly deferred by the user ("make a note to test this later") — NOT yet confirmed. Manual test 4 (literal special-character search) was not addressed either. The user explicitly instructed committing now despite tests 2-4 being unconfirmed; this is a deliberate user override of the stage's human-gate, not an agent decision that these checks are unnecessary.
+Known issue/blocker: manual tests 2, 3, and 4 from the stage prompt remain unverified against the real app/device and must still be run before this correction pass can be treated as fully accepted. The `*`→`%` PostgREST ILIKE-alias question itself (see below) was investigated to a conclusive, evidenced answer and resolved by an explicit user decision (keep + document, no RPC) — that part is not open, only its manual confirmation (test 4) is outstanding.
+Next exact action: run manual tests 2, 3, and 4 from the stage prompt's "Manual tests" section (slow-network mid-search cancel, offline queued search, and literal special-character search including `*`), then request fresh independent sporely-sparring review of the commit made in this pass
+```
+
+**Stage 1 correction-pass notes for the reviewer (addresses the three findings from the 2026-09-09 review):**
+
+1. **On-input paging invalidation (finding 1).** Added `_invalidateFindsSearchPagingOnInput()` (exported test seam), called from the search-input `input` handler immediately, before `_scheduleFindsSearchReload()`'s debounce timer. Each paging state now carries a `searchKey` (the normalized query it is valid for, set by `_resetPagingState`). On every keystroke, if the newly normalized query differs from the current scope's `paging.searchKey`, this bumps `_loadFindsSeq` (so any older in-flight page fetch or enrichment awaiting a response is invalidated immediately, not just once the debounce eventually fires) and replaces the paging state with a fresh, un-initialized one tagged with the new query. Because the fresh paging state's `initialized` is `false`, the scroll-threshold load-more path (`_maybeLoadMoreFinds`) cannot fire against it at all until the debounced authoritative reload establishes a real first page — so a load-more can no longer reuse a stale offset against the new query text. A normalized-equivalent edit (e.g. added/trimmed whitespace) leaves `paging.searchKey` matching and is a no-op, per the review's explicit "equivalent normalized queries should not reset paging."
+2. **Post-enrichment cache-write guard (finding 2).** `_loadMinePage`, `_loadFeedSourcePage`, and `_loadUserPage` each already checked `loadSeq` before awaiting red-list enrichment; each now rechecks it again immediately after that await, before calling `_setFindsCache(...)`. An older request whose page fetch was still current when it started, but whose red-list lookup resolves after a newer search has already completed and written the cache, now no-ops instead of overwriting the newer result.
+3. **The `*`→`%` PostgREST ILIKE-alias question (finding 3) — investigated, not left open.** Confirmed via PostgREST v12.2.3 source (`src/PostgREST/Query/SqlFragment.hs`: `T.map star` over the raw ilike/like filter value, `star c = if c == '*' then '%' else c`, applied unconditionally before Postgres ever sees the value) and independently reproduced against this repo's own local Supabase/PostgREST instance with a throwaway synthetic-data table (dropped after verification, no migration/schema change): a literal `*` in search text cannot be preserved through this filter surface — `\*` becomes `\%` at the SQL layer, which Postgres reads as an escaped literal `%`, not `*`. This does not broaden or break the query (confirmed live: searching for `*` returned only rows containing a literal `%`, never an unrelated row) — it only means a literal-`*` search silently finds a literal `%` instead. Per the correction prompt's instruction not to decide this unilaterally, the user was asked and chose: keep the existing escaping and document the limitation (no RPC/migration). The code comment on `_escapeFindsIlikeText` now states this precisely with the source citation, and a new pure-JS test (`special characters in search text match their literal counterpart...`) faithfully re-implements the confirmed three-stage pipeline (this file's quoting → PostgREST's star substitution → Postgres ILIKE with backslash escape) to assert literal-match correctness for `%`, `_`, `\`, `"`, `,`, `.`, `:`, `(`, `)` and the documented non-broadening `*` exception, without depending on a live server in CI.
+4. **New/replaced tests** (`src/screens/finds.test.js`): the old single stale-response test (which only asserted call counts, per the review) is now several focused tests asserting actual resulting cache row IDs and paging offsets: query-change invalidation with real IDs; equivalent-vs-real query-change paging behavior; load-more racing a pending debounce; the enrichment-race guard (finding 2), using a real (mocked) red-list lookup held open with a controllable promise; clearing search; and Mine + all three Feed sources (public/friends/followed) + user-target each individually exercised through the real `loadFinds()` entry point against their own table/view (not just three labels calling the same low-level helper). Two small test-only seams were added to `finds.js`: `_getFindsCacheForTests`/`_getFindsPagingStateForTests` (read-only cache/paging inspection) and exporting `_maybeLoadMoreFinds` for the load-more-during-debounce test.
+
 ---
 
 # 11. Evidence pointers for the first implementer/reviewer
@@ -947,3 +986,28 @@ src/media-loader.test.js
 ```
 
 Preparation-time baseline facts are evidence, not implementation authority. If current `main` has changed before Stage 1 starts, update the plan with the new base and reconcile the stage against the fresh code before editing.
+
+
+## Independent Stage 1 review — 2026-09-09
+
+Reviewed candidate 251f971fdb785ac8d43bad43c0126c9fa6a7c5f2 against
+7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1. Current HEAD eec95e8 adds only
+plan bookkeeping; unrelated untracked docs/google-closed-testing-log.md was
+excluded. Handoff repo/stage/candidate and implementation session match.
+
+Verdict: partly confirmed, not accepted. Search is before range for all source
+builders, local matching and authorization predicates are unchanged, and the
+reviewer's focused run passes 34/34. Broader checks remain implementer-reported.
+Blocking findings: old paging remains live during debounce; awaited enrichment
+can complete a stale cache write; literal-star escaping contradicts upstream
+PostgREST v12.2.3's unconditional star-to-percent substitution (production
+version unconfirmed). Existing stale tests do not assert cache or offsets.
+
+The backend recorded changes_requested for the exact candidate. Correction
+instructions and required proof are in the existing stage-finds-server-search-pagination
+prompt, pinned to full HEAD eec95e89f6b12a063d19622c369b586db358c16d.
+Current verified stage/commit: none. Next action: correct Stage 1 in a fresh
+implementation session, stopping for a reviewed alternative if direct ILIKE
+cannot preserve arbitrary text. The correction is human-gated because input
+and debounce behavior are interactive; no manual results are claimed. Stage 2
+remains deferred. No product code was edited during review.
