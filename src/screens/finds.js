@@ -50,6 +50,7 @@ let _profileMap = {}
 let _pendingScrollRestore = null
 const FINDS_PAGE_SIZE = 20
 const FINDS_LOAD_MORE_THRESHOLD = 240
+const FINDS_SEARCH_DEBOUNCE_MS = 250
 const PULL_REFRESH_THRESHOLD = 72
 const PULL_REFRESH_MAX = 112
 const PULL_REFRESH_TOUCH_SLOP = 10
@@ -67,6 +68,7 @@ let _pullStartY = 0
 let _pullDistance = 0
 let _isRefreshing = false
 let _queuedRefreshTimer = null
+let _findsSearchDebounceTimer = null
 let _findsDropdownOpenKey = null
 let _loadFindsSeq = 0
 let _findsRenderPromise = Promise.resolve(false)
@@ -1089,18 +1091,23 @@ export function initFinds() {
       searchInput.value = ''
       state.searchQuery = ''
       _applyFilter()
+      _cancelFindsSearchDebounce()
+      void _reloadFindsForSearch()
     }
   })
 
   searchInput.addEventListener('input', () => {
     state.searchQuery = searchInput.value
     _applyFilter()
+    _scheduleFindsSearchReload()
   })
 
   clearBtn.addEventListener('click', () => {
     searchInput.value = ''
     state.searchQuery = ''
     _applyFilter()
+    _cancelFindsSearchDebounce()
+    void _reloadFindsForSearch()
     searchInput.focus()
   })
 
@@ -1377,6 +1384,7 @@ function _syncViewBtns() {
 export async function loadFinds() {
   const list = document.getElementById('finds-list')
   if (!state.user) return
+  _cancelFindsSearchDebounce()
   const loadSeq = ++_loadFindsSeq
   _findsInitialRenderLoadSeq = loadSeq
   let shouldCheckForMore = false
@@ -1415,6 +1423,68 @@ export async function loadFinds() {
       await _loadMinePage({ loadSeq, reset: true })
     } else {
       await _loadFeedSelectionPage({ loadSeq, reset: true })
+    }
+
+    await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
+    if (loadSeq !== _loadFindsSeq) return
+    await _applyFilter()
+    if (loadSeq !== _loadFindsSeq) return
+    shouldCheckForMore = true
+  } finally {
+    if (_findsInitialRenderLoadSeq === loadSeq) {
+      _findsInitialRenderLoadSeq = 0
+    }
+    if (shouldCheckForMore && loadSeq === _loadFindsSeq) {
+      void _maybeLoadMoreFinds()
+    }
+  }
+}
+
+function _cancelFindsSearchDebounce() {
+  const timerHost = globalThis.window || globalThis
+  if (_findsSearchDebounceTimer) {
+    timerHost.clearTimeout(_findsSearchDebounceTimer)
+    _findsSearchDebounceTimer = null
+  }
+}
+
+// Debounced so typing "Cortinarius" does not start eleven paginated
+// resets/renders (plan §1.1); ~250ms is within the plan's 200-300ms target.
+function _scheduleFindsSearchReload() {
+  const timerHost = globalThis.window || globalThis
+  _cancelFindsSearchDebounce()
+  _findsSearchDebounceTimer = timerHost.setTimeout(() => {
+    _findsSearchDebounceTimer = null
+    void _reloadFindsForSearch()
+  }, FINDS_SEARCH_DEBOUNCE_MS)
+}
+
+// A lighter-weight sibling of loadFinds() used only for a search-query
+// change: it resets paging the same way (so an old query's page can never be
+// appended once _loadFindsSeq has moved on) but skips the cache clear + full
+// "Loading…" shell, so already-rendered cards stay visible — narrowed
+// locally by _applyFilter() on 'input' — until this authoritative
+// server-search result replaces them (plan §1.4).
+// Exported as a test seam (see finds.test.js): drives the debounced
+// search-reload path directly, without waiting on real timers.
+export async function _reloadFindsForSearch() {
+  if (!state.user) return
+  if (_isOfflineFindsMode()) return
+  const loadSeq = ++_loadFindsSeq
+  _findsInitialRenderLoadSeq = loadSeq
+  let shouldCheckForMore = false
+  _findsRenderGuard.invalidate()
+  const primaryScope = _findsPrimaryScope()
+  const currentScope = _currentScope()
+  _resetPagingState(currentScope)
+
+  try {
+    if (currentScope === 'user') {
+      await _loadUserPage(state.findsTargetUserId, { loadSeq, reset: true })
+    } else if (primaryScope === 'mine') {
+      await _loadMinePage({ loadSeq, reset: true })
+    } else {
+      await _loadFeedSelectionPage({ loadSeq, reset: true, clearCache: false })
     }
 
     await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
@@ -1549,10 +1619,62 @@ function _orderedFindsQuery(query) {
     .order('id', { ascending: false })
 }
 
-async function _runPagedFindsQuery(makeQuery, columns, legacyColumns, offset) {
+// Field list preserved from the pre-Stage-1 client-side `_matches()` predicate
+// (plan §1.2). `_matches()` itself is kept as-is for offline/queued-item
+// filtering; this list is only the server-search surface.
+const FINDS_SEARCH_FIELDS = ['common_name', 'genus', 'species', 'location', 'notes']
+
+function _normalizeFindsSearchQuery(value) {
+  return String(value || '').trim()
+}
+
+// Postgres ILIKE's default escape character is backslash, and PostgREST also
+// treats a bare `*` as an alias for the ILIKE wildcard `%` (to let callers
+// avoid percent-encoding `%25` in a URL). Escape backslash first, then `%`,
+// `_`, and `*`, so arbitrary user text is matched literally instead of as a
+// wildcard/escape sequence.
+function _escapeFindsIlikeText(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/[%_*]/g, match => `\\${match}`)
+}
+
+// PostgREST's or()/and() filter-list syntax reserves `,` `.` `:` `(` `)`; a
+// value containing any of them must be wrapped in double quotes, and a
+// literal `"` or `\` inside that quoted value must itself be backslash-escaped
+// (PostgREST url_grammar "reserved characters" / quoted-value rules). Quoting
+// unconditionally (even when no reserved character is present) is valid and
+// avoids a second conditional escaping path.
+function _quoteFindsFilterValue(value) {
+  const escaped = String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return `"${escaped}"`
+}
+
+// Exported so the encoding can be exercised directly against arbitrary text
+// without a live PostgREST server (see finds.test.js).
+export function buildFindsSearchOrFilter(searchQuery) {
+  const normalized = _normalizeFindsSearchQuery(searchQuery)
+  if (!normalized) return ''
+  const pattern = `%${_escapeFindsIlikeText(normalized)}%`
+  const quoted = _quoteFindsFilterValue(pattern)
+  return FINDS_SEARCH_FIELDS.map(field => `${field}.ilike.${quoted}`).join(',')
+}
+
+// Applied inside each source's makeQuery callback via `_runPagedFindsQuery`,
+// before `.range(...)` — never as a post-filter over `pageRes.data` (plan
+// §1.1/§1.2). Empty/whitespace search leaves the query unchanged (no filter).
+export function applyFindsSearchFilter(query, searchQuery) {
+  const filter = buildFindsSearchOrFilter(searchQuery)
+  return filter ? query.or(filter) : query
+}
+
+// Exported as a test seam: Mine/Feed-source/user-target paging all route
+// through this one function, so proving the search predicate lands before
+// `.range(...)` here proves it for all three callers.
+export async function _runPagedFindsQuery(makeQuery, columns, legacyColumns, offset, searchQuery = state.searchQuery) {
   const { from, to } = _pageRange(offset)
   return _withPhase7Fallback(
-    selectedColumns => _orderedFindsQuery(makeQuery(selectedColumns)).range(from, to),
+    selectedColumns => _orderedFindsQuery(
+      applyFindsSearchFilter(makeQuery(selectedColumns), searchQuery),
+    ).range(from, to),
     columns,
     legacyColumns,
   )
@@ -1719,7 +1841,7 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
   }
 }
 
-async function _loadFeedSelectionPage({ loadSeq, reset = false } = {}) {
+async function _loadFeedSelectionPage({ loadSeq, reset = false, clearCache = true } = {}) {
   const paging = _getPagingState('feed')
   const scope = _findsSecondaryScope('feed')
   if (paging.loadingMore) return false
@@ -1732,7 +1854,11 @@ async function _loadFeedSelectionPage({ loadSeq, reset = false } = {}) {
       paging.nextOffset = 0
       paging.hasMore = true
       paging.initialized = false
-      _setFindsCache('feed', [])
+      // A debounced search reload passes clearCache:false so previously
+      // loaded cards stay visible (narrowed locally) until the authoritative
+      // server-search page below replaces `_cache['feed']` outright — see
+      // _reloadFindsForSearch (plan §1.4).
+      if (clearCache) _setFindsCache('feed', [])
     }
 
     const source = scope === 'all' ? 'public' : scope
@@ -1856,7 +1982,9 @@ async function _maybeLoadMoreFinds() {
 
 // ── Filter + dispatch ─────────────────────────────────────────────────────────
 
-function _matches(obs, q) {
+// Exported as a test seam: preserved unchanged by Stage 1 for offline/queued-
+// item filtering (plan §1.1) even though online search now runs server-side.
+export function _matches(obs, q) {
   return [obs.common_name, obs.genus, obs.species, obs.location, obs.notes, obs.uncertain ? 'uncertain id' : '']
     .some(f => f && f.toLowerCase().includes(q))
 }

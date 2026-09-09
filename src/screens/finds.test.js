@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import {
   applyFindsMineScope,
   applyFindsMineStatus,
+  applyFindsSearchFilter,
+  buildFindsSearchOrFilter,
   classifyDraftAge,
   compareFindsByScientificName,
   createFindsRenderGuard,
@@ -19,10 +21,14 @@ import {
   isFindsStatusControlDisabled,
   renderFindsRedlistTag,
   shouldHideFindsStatusControl,
+  _matches,
+  _reloadFindsForSearch,
+  _runPagedFindsQuery,
   _selectFindsDropdownValue,
 } from './finds.js'
 import { loadDetailObservation } from './find_detail.js'
 import { state } from '../state.js'
+import { supabase } from '../supabase.js'
 
 function makeClassList(initial = []) {
   const values = new Set(initial)
@@ -231,6 +237,214 @@ test('mine status is applied before paging when draft status is supported', () =
   calls.length = 0
   assert.equal(applyFindsMineStatus(query, 'published', false), query)
   assert.deepEqual(calls, [])
+})
+
+// ── Stage 1: server-side search-aware pagination ────────────────────────────
+
+test('empty or whitespace-only search applies no server search filter', () => {
+  assert.equal(buildFindsSearchOrFilter(''), '')
+  assert.equal(buildFindsSearchOrFilter('   '), '')
+  assert.equal(buildFindsSearchOrFilter(null), '')
+  assert.equal(buildFindsSearchOrFilter(undefined), '')
+
+  const calls = []
+  const query = { or(filter) { calls.push(filter); return this } }
+  assert.equal(applyFindsSearchFilter(query, '   '), query)
+  assert.deepEqual(calls, [], '.or() must not be called for an empty/whitespace query')
+})
+
+test('search filter covers the five preserved fields with a safely quoted ilike pattern', () => {
+  const filter = buildFindsSearchOrFilter('cortinarius')
+  assert.equal(
+    filter,
+    [
+      'common_name.ilike."%cortinarius%"',
+      'genus.ilike."%cortinarius%"',
+      'species.ilike."%cortinarius%"',
+      'location.ilike."%cortinarius%"',
+      'notes.ilike."%cortinarius%"',
+    ].join(','),
+  )
+
+  const calls = []
+  const query = { or(f) { calls.push(f); return this } }
+  applyFindsSearchFilter(query, '  Cortinarius  ')
+  assert.equal(calls.length, 1)
+  assert.match(calls[0], /^common_name\.ilike\."%Cortinarius%"/, 'query is trimmed but not case-folded')
+})
+
+test('search filter escapes PostgREST reserved characters and ilike wildcards without breaking or broadening the query', () => {
+  // `,` `.` `:` `(` `)` are PostgREST or()-list reserved characters; `%` `_`
+  // are ILIKE wildcards; `*` is PostgREST's ILIKE alias for `%`; `"` and `\`
+  // must survive the double-quoted value itself. A single or() filter string
+  // must still parse as exactly 5 comma-separated column conditions.
+  const raw = 'a,b.c:d(e)f%g_h*i"j\\k'
+  const filter = buildFindsSearchOrFilter(raw)
+
+  // Exactly 5 top-level conditions: one per FINDS_SEARCH_FIELDS entry. A
+  // naive split(',') would over-segment because the raw value itself
+  // contains a comma inside the quoted portion.
+  const topLevel = filter.match(/(?:common_name|genus|species|location|notes)\.ilike\./g)
+  assert.equal(topLevel.length, 5, `expected 5 field conditions, got: ${filter}`)
+
+  // The quoted pattern is escaped so that, after PostgREST unescapes the
+  // surrounding quotes, the literal ILIKE pattern is `%<ilike-escaped raw>%`.
+  const expectedIlikeEscaped = raw.replace(/\\/g, '\\\\').replace(/[%_*]/g, m => `\\${m}`)
+  const expectedPattern = `%${expectedIlikeEscaped}%`
+  const expectedQuoted = `"${expectedPattern.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+  assert.equal(filter, [
+    `common_name.ilike.${expectedQuoted}`,
+    `genus.ilike.${expectedQuoted}`,
+    `species.ilike.${expectedQuoted}`,
+    `location.ilike.${expectedQuoted}`,
+    `notes.ilike.${expectedQuoted}`,
+  ].join(','))
+
+  // The raw value's own commas/parens must not appear as unescaped top-level
+  // separators/grouping — every comma in `filter` other than the 4 field
+  // separators must be inside the quoted value.
+  const fieldSeparatorCount = 4
+  const totalCommas = (filter.match(/,/g) || []).length
+  assert.equal(totalCommas, fieldSeparatorCount + (raw.match(/,/g) || []).length * 5)
+})
+
+test('search predicate is applied before .range() for every source (Mine/Feed/user-target share one pipeline)', async () => {
+  const previousSearchQuery = state.searchQuery
+  try {
+    for (const [label, columns, legacyColumns] of [
+      ['mine', 'id, common_name', 'id'],
+      ['feed-source', 'id, common_name, location', 'id'],
+      ['user-target', 'id, common_name, notes', 'id'],
+    ]) {
+      const calls = []
+      const fakeQuery = {
+        eq() { calls.push('eq'); return this },
+        or(filter) { calls.push('or:' + filter); return this },
+        order() { calls.push('order'); return this },
+        range(from, to) { calls.push(`range:${from}-${to}`); return { data: [], error: null } },
+      }
+      state.searchQuery = 'corti'
+      await _runPagedFindsQuery(() => fakeQuery, columns, legacyColumns, 0)
+
+      const orIndex = calls.findIndex(c => c.startsWith('or:'))
+      const rangeIndex = calls.findIndex(c => c.startsWith('range:'))
+      assert.ok(orIndex !== -1, `${label}: expected a .or() search filter call`)
+      assert.ok(rangeIndex !== -1, `${label}: expected a .range() call`)
+      assert.ok(orIndex < rangeIndex, `${label}: search predicate must be applied before .range()`)
+      assert.match(calls[orIndex], /corti/, `${label}: filter must reference the normalized search text`)
+    }
+  } finally {
+    state.searchQuery = previousSearchQuery
+  }
+})
+
+// Fake PostgREST-shaped client for full-pipeline paging/search tests below.
+// Each `.from(table)` call returns its own recording chain; the terminal
+// `.range()` call looks up a response from `responsesByCallIndex[callIndex]`
+// (one entry per successive call against that table), which may be a plain
+// `{ data, error }` object or a Promise resolving to one — this lets a test
+// hold a page's response open (unresolved) to simulate an in-flight request.
+function makeFindsPagingClient(responsesByTable) {
+  const calls = []
+  const callIndexByTable = {}
+  return {
+    calls,
+    client: {
+      from(table) {
+        const chain = {
+          select(columns) { calls.push({ table, op: 'select', columns }); return chain },
+          eq(col, val) { calls.push({ table, op: 'eq', col, val }); return chain },
+          neq(col, val) { calls.push({ table, op: 'neq', col, val }); return chain },
+          or(filter) { calls.push({ table, op: 'or', filter }); return chain },
+          order(col, opts) { calls.push({ table, op: 'order', col, opts }); return chain },
+          range(from, to) {
+            calls.push({ table, op: 'range', from, to })
+            const index = callIndexByTable[table] || 0
+            callIndexByTable[table] = index + 1
+            const responses = responsesByTable[table] || []
+            return responses[Math.min(index, responses.length - 1)] || { data: [], error: null }
+          },
+        }
+        return chain
+      },
+    },
+  }
+}
+
+test('_matches keeps matching queued/local observations client-side, unchanged by server-side search', () => {
+  const queued = {
+    common_name: 'Fly agaric',
+    genus: 'Amanita',
+    species: 'muscaria',
+    location: 'Bymarka',
+    notes: 'bright red cap',
+    uncertain: false,
+    _pendingSync: true,
+  }
+  assert.equal(_matches(queued, 'fly agaric'), true)
+  assert.equal(_matches(queued, 'bymarka'), true)
+  assert.equal(_matches(queued, 'bright red'), true)
+  assert.equal(_matches(queued, 'nonexistent'), false)
+})
+
+test('changing the search query resets paging and a stale in-flight response cannot be appended', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  globalThis.document = { getElementById: () => undefined }
+  let resolveStale
+  const stalePromise = new Promise(resolve => { resolveStale = resolve })
+
+  try {
+    // First call ("corti"): a full page (20 rows) that never resolves until
+    // we release it below, simulating a slow in-flight request.
+    // Second call ("cortinarius", fired before the first resolves): a short
+    // page (3 rows) that resolves immediately, so it is the authoritative
+    // — and last-committed — response.
+    const staleRows = Array.from({ length: 20 }, (_, i) => ({ user_id: 'user-a', common_name: `stale-${i}` }))
+    const freshRows = [
+      { user_id: 'user-a', common_name: 'fresh-1' },
+      { user_id: 'user-a', common_name: 'fresh-2' },
+      { user_id: 'user-a', common_name: 'fresh-3' },
+    ]
+    const { client, calls } = makeFindsPagingClient({
+      observations: [
+        stalePromise.then(() => ({ data: staleRows, error: null })),
+        { data: freshRows, error: null },
+      ],
+    })
+    supabase.from = client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      currentScreen: 'finds',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a', // owner user-target path: no queued-item/profile network calls
+      searchQuery: 'corti',
+    })
+
+    const firstReload = _reloadFindsForSearch()
+    state.searchQuery = 'cortinarius'
+    const secondReload = _reloadFindsForSearch()
+    await secondReload
+
+    const rangeCallsAfterSecond = calls.filter(c => c.op === 'range' && c.table === 'observations')
+    assert.equal(rangeCallsAfterSecond.length, 2, 'both the stale and fresh queries must have been issued')
+    const secondOrCall = calls.filter(c => c.op === 'or' && c.table === 'observations')[1]
+    assert.match(secondOrCall.filter, /cortinarius/, 'the second (authoritative) query used the new search text')
+
+    resolveStale()
+    await firstReload
+
+    // If the stale response had been allowed to land after the fresh one,
+    // it would leave 20 accumulated/replaced rows behind instead of 3.
+    const finalOrCalls = calls.filter(c => c.op === 'or' && c.table === 'observations')
+    assert.equal(finalOrCalls.length, 2, 'no further queries were issued once the stale response resolved')
+  } finally {
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+  }
 })
 
 test('finds sort helper keeps date as default and accepts species', () => {
