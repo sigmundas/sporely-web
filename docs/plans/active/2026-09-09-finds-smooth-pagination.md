@@ -41,6 +41,32 @@ When another page is incorporated, already-visible image areas briefly become em
 
 The attached QA screenshots from 2026-09-09 show the same cards before and during this blank-image state.
 
+### Scroll position lost on detail return, once past page 1
+
+User-reported (2026-09-09): opening an observation from the list and going
+back (cancel, or the `<` back control) loses the scroll position, but only
+once the user had scrolled past the first 20 results (page 1). The list
+always lands back at the same fixed vertical position regardless of which
+item beyond page 20 was opened. Reproduces in plain (non-search) Finds too,
+not only search — this is not a Stage 1 regression.
+
+Root cause (confirmed by inspection, `src/screens/finds.js` /
+`src/screens/find_detail.js` at the current baseline): the detail screen's
+back handler unconditionally calls `loadFinds()`, which resets paging state
+(`_resetPagingState`) and clears the cache (`_setFindsCache(scope, [])`)
+before re-fetching — so only page 1 is re-fetched, discarding any
+already-loaded pages 2+. `_pendingScrollRestore` still holds the original
+(deeper) scroll offset, but the DOM only has page-1 height to scroll into,
+so the browser clamps the restore to the same fixed position every time.
+
+This is the same category of problem Stage 2 targets below (a full,
+destructive re-render/re-fetch discarding already-loaded pagination state)
+via a different call site (detail-return vs. ordinary load-more) — see the
+added Stage 2 scope note and acceptance criterion. Fixing it well needs the
+same underlying page-tracking/incremental-render infrastructure Stage 2
+builds; a standalone hotfix now would either duplicate that work or fight it
+once Stage 2 lands. Deferred to Stage 2 rather than fixed ahead of it.
+
 ---
 
 ## 3. Current implementation diagnosis
@@ -269,13 +295,13 @@ fix: page Finds searches on the server
 Record after verification:
 
 ```text
-Stage 1 commit: 251f971fdb785ac8d43bad43c0126c9fa6a7c5f2 on feature/finds-server-search-pagination (base 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1); pushed to origin; superseded by an uncommitted correction pass (see below) pending manual checks and fresh independent review
+Stage 1 commit: 251f971fdb785ac8d43bad43c0126c9fa6a7c5f2 on feature/finds-server-search-pagination (base 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1); pushed to origin; superseded by the correction pass below (commit e152401)
 Stage 1 reviewer: 2026-09-09 fresh sporely-sparring — partly confirmed; changes requested
 Stage 1 focused proof: node --test src/screens/finds.test.js — 34 pass, 0 fail
 Stage 1 broader proof: npm run check:node (pass); npm test (1205 pass / 8 fail, all 8 pre-existing on main at 7cd9e36 — confirmed via git stash rerun, none in src/screens/finds.*); npm run build (pass); git diff --check (clean)
 Stage 1 deviations/notes: see the Stage 1 implementation notes in section 10 (Recovery/resume notes) — summary: search predicate applied via one shared exported helper (applyFindsSearchFilter/_runPagedFindsQuery) reused by all three sources; debounced (~250ms) reload path (_reloadFindsForSearch) added alongside loadFinds() to satisfy the "narrow locally, then replace" UX without a full loading-shell repaint; _loadFeedSelectionPage gained an opt-in clearCache:false to support that; open question flagged for the reviewer regarding PostgREST's `*`→`%` ILIKE alias not being verified against a live server
 
-Stage 1 correction pass (2026-09-09, uncommitted, human-gated — see section 10 for full detail):
+Stage 1 correction pass (2026-09-09, human-gated — see section 10 for full detail):
 Fixed: (1) on-input paging invalidation ahead of the network debounce, tied to
 the normalized query (`_invalidateFindsSearchPagingOnInput`); (2) a loadSeq
 recheck after awaited red-list enrichment, before the cache write, in all
@@ -289,9 +315,13 @@ Focused proof: node --test src/screens/finds.test.js — 40 pass, 0 fail (6 new)
 Broader proof: npm run check:node (pass); npm test (1211 pass / 8 fail, same
 8 pre-existing failures as the Stage 1 baseline, none in src/screens/finds.*);
 npm run build (pass); git diff --check (clean).
-Not committed: human-gated per the correction prompt (interactive
-search-input/debounce behavior) — awaiting the manual checks below, then a
-fresh independent sporely-sparring review of the new candidate.
+Committed: e1524016d6e019d02fd482c7c06b1654a9d7a00c on feature/finds-server-search-pagination;
+pushed to origin; stage prompt reconciled to this SHA (status:
+candidate_pending_review) via workflow_transitions.py mark-candidate. Manual
+tests 2-4 (slow-network mid-search cancel, offline queued search, literal
+special-character search) are recorded as outstanding, not run and not
+assumed passing — proceeding to code review does not accept the stage; see
+section 10 for the exact wording.
 ```
 
 ---
@@ -301,6 +331,16 @@ fresh independent sporely-sparring review of the new candidate.
 **Stage id:** `stage-finds-incremental-pagination-render`  
 **Depends on:** Stage 1 verified  
 **Primary goal:** ordinary pagination must add new results without destroying existing cards or rehydrating their media.
+
+**Also in scope (user-reported 2026-09-09, see section 2 "Scroll position lost
+on detail return, once past page 1"):** the detail screen's back
+navigation calls `loadFinds()` unconditionally today, which clears the
+cache/paging state and re-fetches only page 1 — discarding pages 2+ and
+making scroll restoration land at the same fixed (page-1-height) position
+regardless of what was opened. This must be fixed as part of this stage: a
+detail-return round trip should re-render from the already-loaded pages
+rather than re-fetching page 1, so `_pendingScrollRestore` has real content
+to scroll back into. Reproduces in both plain and search Finds.
 
 ## 2.1 Core invariant
 
@@ -840,6 +880,7 @@ The work is complete only when all of the following are true.
 | Profile cache | Previous page profiles are retained |
 | Failure behavior | Existing list stays intact on page/enrichment failure |
 | Auth/media safety | Capability gates and cache-first media model unchanged |
+| Detail-return scroll restore | Returning from detail lands where the user left off, even past page 1, in both plain and search Finds (user-reported 2026-09-09) |
 | Automated verification | Focused tests + full `npm test` + `npm run build` + `git diff --check` pass |
 | Device QA | Scenarios A–I pass or any exception is recorded with reproducible evidence |
 
@@ -920,18 +961,18 @@ Next exact action: fresh independent sporely-sparring review of candidate 251f97
 - `_loadFeedSelectionPage` gained a `clearCache` option (default `true`, unchanged for `loadFinds()`'s existing scope/status-change path) so the new search-reload path can pass `clearCache:false` and avoid a premature blank-list flash for Feed scope specifically.
 - `_matches()` is untouched; still used for offline/queued-item client-side search (regression-tested).
 
-State after the Stage 1 correction pass (uncommitted, awaiting manual checks then fresh independent review):
+State after the Stage 1 correction pass (committed, candidate reconciled, awaiting outstanding manual checks and fresh independent code review — NOT accepted):
 
 ```text
 Current verified stage: none
 Current verified commit: none
-Current candidate/unverified work: uncommitted local changes on feature/finds-server-search-pagination, on top of candidate 251f971 (base 7cd9e36) — src/screens/finds.js, src/screens/finds.test.js
+Current candidate/unverified work: e1524016d6e019d02fd482c7c06b1654a9d7a00c on feature/finds-server-search-pagination (base 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1); pushed to origin; stage prompt reconciled to this SHA via workflow_transitions.py mark-candidate (status: candidate_pending_review)
 Last focused proof: node --test src/screens/finds.test.js (40 pass, 0 fail; 6 new tests added this pass)
 Last broader proof: npm run check:node (pass); npm test (1211 pass / 8 fail — same 8 pre-existing failures as the Stage 1 baseline, unrelated to Finds); npm run build (pass); git diff --check (clean)
-Last reviewer result: previous candidate 251f971 was "partly confirmed, changes requested" (2026-09-09); this correction pass has not yet been reviewed
-Manual QA status: partial — manual test 1 (search during scroll/typing across scopes) confirmed passing by the user. Manual tests 2 (slow-network mid-search cancel) and 3 (offline queued search) are explicitly deferred by the user ("make a note to test this later") — NOT yet confirmed. Manual test 4 (literal special-character search) was not addressed either. The user explicitly instructed committing now despite tests 2-4 being unconfirmed; this is a deliberate user override of the stage's human-gate, not an agent decision that these checks are unnecessary.
-Known issue/blocker: manual tests 2, 3, and 4 from the stage prompt remain unverified against the real app/device and must still be run before this correction pass can be treated as fully accepted. The `*`→`%` PostgREST ILIKE-alias question itself (see below) was investigated to a conclusive, evidenced answer and resolved by an explicit user decision (keep + document, no RPC) — that part is not open, only its manual confirmation (test 4) is outstanding.
-Next exact action: run manual tests 2, 3, and 4 from the stage prompt's "Manual tests" section (slow-network mid-search cancel, offline queued search, and literal special-character search including `*`), then request fresh independent sporely-sparring review of the commit made in this pass
+Last reviewer result: prior candidate 251f971 was "partly confirmed, changes requested" (2026-09-09); this corrected candidate (e152401) has not yet been reviewed
+Manual QA status: NOT passed, NOT accepted. Only manual test 1 (search during scroll/typing across scopes) is confirmed by the user. Manual tests 2 (slow-network mid-search cancel), 3 (offline queued search), and 4 (literal special-character search) are explicitly deferred by the user as outstanding — recorded here, not run, not assumed passing. The user explicitly directed committing candidate e152401 despite tests 2-4 being outstanding; this is a deliberate user decision to proceed to code review with those checks still open, not an agent judgment that they are unnecessary or an acceptance of the stage.
+Known issue/blocker: manual tests 2, 3, and 4 remain outstanding against the real app/device and must be run before this stage can be treated as fully accepted, independent of code review. The `*`→`%` PostgREST ILIKE-alias question itself was investigated to a conclusive, evidenced answer and resolved by an explicit user decision (keep + document, no RPC) — that part is not open; only its manual confirmation (test 4) is outstanding. Separately (not part of this stage's outstanding items): a user-reported detail-return scroll-restore bug was found and deferred to Stage 2 — see section 2 and the Stage 2 scope/acceptance-criteria notes; that plan edit is still uncommitted local-only documentation, correctly excluded from candidate e152401 by mark-candidate's excluded_local_paths check.
+Next exact action: request fresh independent sporely-sparring code review of candidate e1524016d6e019d02fd482c7c06b1654a9d7a00c (candidate_pending_review). Outstanding manual tests 2-4 must still be run and recorded before the stage can be accepted, regardless of the code review's outcome.
 ```
 
 **Stage 1 correction-pass notes for the reviewer (addresses the three findings from the 2026-09-09 review):**
