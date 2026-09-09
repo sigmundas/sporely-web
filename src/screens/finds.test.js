@@ -767,6 +767,22 @@ function makeFindsListElement() {
   }
 }
 
+// These render-ordering tests below drive `_reloadFindsForSearch()` directly
+// rather than through the real debounce timer, so the timer itself must be
+// neutralized — otherwise `_handleFindsSearchInput()` leaves a real ~250ms
+// `setTimeout` pending that fires after the test (and its `finally` restores
+// `globalThis.document`/`supabase.from`), corrupting later tests.
+function installNoopFindsTimers() {
+  const previousSetTimeout = globalThis.setTimeout
+  const previousClearTimeout = globalThis.clearTimeout
+  globalThis.setTimeout = () => 0
+  globalThis.clearTimeout = () => {}
+  return () => {
+    globalThis.setTimeout = previousSetTimeout
+    globalThis.clearTimeout = previousClearTimeout
+  }
+}
+
 // Combined fake PostgREST-shaped client for the two tests below: routes the
 // `observations` table through the same paging/search recording chain as
 // `makeFindsPagingClient` above, and routes every other table (the image
@@ -832,6 +848,7 @@ test('typing narrows cached cards locally and the render commits after debounce 
   globalThis.document = makeMinimalFindsDocument({
     getElementById: id => (id === 'finds-list' ? list : undefined),
   })
+  const restoreTimers = installNoopFindsTimers()
 
   try {
     const rows = [
@@ -866,6 +883,139 @@ test('typing narrows cached cards locally and the render commits after debounce 
     assert.ok(list.innerHTML.includes('cortinarius-1'), 'the matching row rendered')
     assert.ok(!list.innerHTML.includes('unrelated'), 'the non-matching row was narrowed out locally')
   } finally {
+    restoreTimers()
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+  }
+})
+
+test('a same-query debounced reload starting while its own authoritative page is still unresolved does not discard the in-flight local narrowing render; the authoritative response still replaces it once it resolves', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  const list = makeFindsListElement()
+  globalThis.document = makeMinimalFindsDocument({
+    getElementById: id => (id === 'finds-list' ? list : undefined),
+  })
+  const restoreTimers = installNoopFindsTimers()
+
+  try {
+    const initialRows = [
+      { id: '911', user_id: 'user-a', common_name: 'cortinarius-1', top_redlist_category: 'LC' },
+      { id: '912', user_id: 'user-a', common_name: 'unrelated', top_redlist_category: 'LC' },
+    ]
+    const freshRows = [
+      { id: '921', user_id: 'user-a', common_name: 'cortinarius-fresh', top_redlist_category: 'LC' },
+    ]
+    let resolveAuthoritative
+    const authoritativePromise = new Promise(resolve => { resolveAuthoritative = resolve })
+    const renderClient = makeFindsRenderClient([
+      { data: initialRows, error: null },
+      authoritativePromise.then(() => ({ data: freshRows, error: null })),
+    ])
+    supabase.from = renderClient.client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      currentScreen: 'finds',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a',
+      findsView: 'cards',
+      searchQuery: '',
+    })
+
+    await loadFinds()
+    assert.ok(list.innerHTML.includes('cortinarius-1') && list.innerHTML.includes('unrelated'), 'initial unfiltered render committed both rows')
+
+    // Typing begins the local narrowing render (held on its image lookup).
+    renderClient.holdImages()
+    const localRenderPromise = _handleFindsSearchInput('cortinarius')
+
+    // The debounce "fires" while the authoritative page's own server
+    // response is still unresolved — it must not discard the local render
+    // above (third review-pass correction).
+    const reloadPromise = _reloadFindsForSearch()
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+
+    // Releasing images now lets ONLY the local render's fetchCardImages
+    // resolve (the authoritative page itself is still held, so its own
+    // render has not begun yet) — it must commit the locally narrowed rows.
+    renderClient.releaseImages()
+    const localCommitted = await localRenderPromise
+    assert.equal(localCommitted, true, 'the local narrowing render must commit while the authoritative page is still unresolved')
+    assert.ok(list.innerHTML.includes('cortinarius-1'), 'the matching cached row rendered locally')
+    assert.ok(!list.innerHTML.includes('unrelated'), 'the non-matching cached row was narrowed out locally')
+
+    // Now let the authoritative page resolve; its own render must replace
+    // the local one.
+    resolveAuthoritative()
+    await reloadPromise
+    assert.ok(list.innerHTML.includes('cortinarius-fresh'), 'the authoritative response replaced the local result')
+    assert.ok(!list.innerHTML.includes('cortinarius-1'), 'the stale locally-narrowed row no longer appears once the authoritative response commits')
+  } finally {
+    restoreTimers()
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+  }
+})
+
+test('a local narrowing render whose image lookup resolves after the authoritative response already began rendering does not overwrite it', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  const list = makeFindsListElement()
+  globalThis.document = makeMinimalFindsDocument({
+    getElementById: id => (id === 'finds-list' ? list : undefined),
+  })
+  const restoreTimers = installNoopFindsTimers()
+
+  try {
+    const initialRows = [
+      { id: '931', user_id: 'user-a', common_name: 'cortinarius-cached-stale', top_redlist_category: 'LC' },
+      { id: '932', user_id: 'user-a', common_name: 'unrelated', top_redlist_category: 'LC' },
+    ]
+    const freshRows = [
+      { id: '941', user_id: 'user-a', common_name: 'cortinarius-fresh', top_redlist_category: 'LC' },
+    ]
+    // Unlike the previous test, the authoritative page's own server response
+    // resolves immediately here — only the shared image lookup is held, so
+    // the authoritative render reaches its own (later) render sequence
+    // before either render's image lookup resolves.
+    const renderClient = makeFindsRenderClient([
+      { data: initialRows, error: null },
+      { data: freshRows, error: null },
+    ])
+    supabase.from = renderClient.client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      currentScreen: 'finds',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a',
+      findsView: 'cards',
+      searchQuery: '',
+    })
+
+    await loadFinds()
+
+    renderClient.holdImages()
+    const localRenderPromise = _handleFindsSearchInput('cortinarius')
+    const reloadPromise = _reloadFindsForSearch()
+    // Let the authoritative reload run all the way up to its own (later)
+    // fetchCardImages call, which also blocks on the same held gate.
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+
+    renderClient.releaseImages()
+    const [localCommitted] = await Promise.all([localRenderPromise, reloadPromise])
+
+    assert.equal(localCommitted, false, 'the stale local render (older render sequence) must not commit once superseded')
+    assert.ok(list.innerHTML.includes('cortinarius-fresh'), 'the authoritative response committed')
+    assert.ok(!list.innerHTML.includes('cortinarius-cached-stale'), 'the late-resolving local render must not have overwritten the authoritative result')
+    assert.ok(!list.innerHTML.includes('unrelated'), 'the late-resolving local render must not have overwritten the authoritative result')
+  } finally {
+    restoreTimers()
     supabase.from = previousFrom
     Object.assign(state, previousState)
     globalThis.document = previousDocument
@@ -875,17 +1025,31 @@ test('typing narrows cached cards locally and the render commits after debounce 
 // Fake, controllable setTimeout/clearTimeout so the test can observe exactly
 // when the search-reload debounce timer is (re)armed vs. left alone, and can
 // fire it deterministically instead of waiting on a real 250ms timer.
+//
+// Only intercepts calls made with the debounce's own delay (250ms,
+// FINDS_SEARCH_DEBOUNCE_MS in finds.js) — every other delay passes through to
+// the real timer unmodified. This matters because unrelated background
+// timers (e.g. the imported `supabase` client's own session/connection
+// housekeeping) keep running for real during a test and are not otherwise
+// distinguishable from calls this test cares about; without this filter, one
+// of those unrelated real timers can coincidentally fire while this fake is
+// installed and inflate `pendingCount`, an occasional false failure with no
+// connection to search-debounce correctness.
 function installFakeFindsTimers() {
   const previousSetTimeout = globalThis.setTimeout
   const previousClearTimeout = globalThis.clearTimeout
   let nextId = 1
   const timers = new Map()
-  globalThis.setTimeout = (fn) => {
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    if (ms !== 250) return previousSetTimeout(fn, ms, ...rest)
     const id = nextId++
     timers.set(id, fn)
     return id
   }
-  globalThis.clearTimeout = (id) => { timers.delete(id) }
+  globalThis.clearTimeout = (id) => {
+    if (timers.has(id)) { timers.delete(id); return }
+    previousClearTimeout(id)
+  }
   return {
     get pendingCount() { return timers.size },
     fireAll() {
@@ -966,6 +1130,59 @@ test('an equivalent normalized edit does not arm or disturb the debounce timer, 
     assert.equal(_getFindsPagingStateForTests('user').searchKey, 'cortinarius')
     assert.equal(_getFindsPagingStateForTests('user').nextOffset, 1)
     assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['301'])
+  } finally {
+    timers.restore()
+    supabase.from = previousFrom
+    Object.assign(state, previousState)
+    globalThis.document = previousDocument
+  }
+})
+
+test('an equivalent normalized edit while a real-change timer is already pending leaves that same pending reload untouched', async () => {
+  const previousFrom = supabase.from
+  const previousState = { ...state }
+  const previousDocument = globalThis.document
+  globalThis.document = makeMinimalFindsDocument()
+  const timers = installFakeFindsTimers()
+
+  try {
+    const freshPage = [{ id: '401', user_id: 'user-a', common_name: 'cortinarius-1', top_redlist_category: 'LC' }]
+    const { client, calls } = makeFindsPagingClient({
+      observations: [{ data: [], error: null }, { data: freshPage, error: null }],
+    })
+    supabase.from = client.from
+
+    Object.assign(state, {
+      user: { id: 'user-a' },
+      currentScreen: 'finds',
+      findsScopePrimary: 'mine',
+      findsTargetUserId: 'user-a',
+      searchQuery: 'corti',
+    })
+
+    await loadFinds()
+
+    // A real query change arms the debounce timer.
+    _handleFindsSearchInput('cortinarius')
+    assert.equal(timers.pendingCount, 1, 'a real query change must arm the debounce timer')
+    const rangeCallsAfterRealChange = calls.filter(c => c.op === 'range' && c.table === 'observations').length
+
+    // A subsequent equivalent-normalized edit while that timer is still
+    // pending must leave it exactly as it was — not cancel it, not arm a
+    // second one, and not issue any query of its own.
+    _handleFindsSearchInput('cortinarius ')
+    assert.equal(timers.pendingCount, 1, 'an equivalent edit must not cancel or duplicate the already-pending real-change timer')
+    assert.equal(calls.filter(c => c.op === 'range' && c.table === 'observations').length, rangeCallsAfterRealChange, 'an equivalent edit must not issue a query of its own')
+
+    // Firing the (single, untouched) timer must still run exactly one
+    // authoritative reload, for the real changed query.
+    timers.fireAll()
+    for (let i = 0; i < 20 && _getFindsPagingStateForTests('user').nextOffset === 0; i++) {
+      await Promise.resolve()
+    }
+    assert.equal(_getFindsPagingStateForTests('user').searchKey, 'cortinarius')
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['401'])
+    assert.equal(calls.filter(c => c.op === 'range' && c.table === 'observations').length, rangeCallsAfterRealChange + 1, 'exactly one reload query fired')
   } finally {
     timers.restore()
     supabase.from = previousFrom

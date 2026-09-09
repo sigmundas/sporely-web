@@ -1116,3 +1116,88 @@ The same-stage prompt now records exact code pointers and required regression
 scenarios under “Independent code review — second correction”. No product
 code changed in review. Manual tests 2–4 remain user-deferred and unconfirmed;
 Stage 2 remains pending. No security specialist is required for these fixes.
+
+
+### Independent code review of candidate 09e6db1 — 2026-09-09
+
+Partly confirmed, not accepted. Reviewed base 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1
+through recorded candidate 09e6db1ab80b917cb2dcb11a567b090fd43b49b4 (implementation
+a65faca plus documentation follow-up); handoff and clean-tree identities match.
+The immediate input ordering and equivalent-edit timer gating fixes are present.
+Independent focused run: 42 pass / 0 fail. Broader checks remain implementer-reported.
+
+One overlap defect remains: the debounced reload invalidates the current local
+narrowing render when its image lookup exceeds the debounce interval. A read-only,
+in-memory adaptation of the existing render test held the second server response
+pending and started reload before releasing images: 41 pass / 1 fail, local
+render returned false. The normal test releases images before reload starts.
+Required correction and completion-order regressions are recorded under
+"Independent code review — third correction" in the same pending stage prompt.
+No product or test files were changed by this review.
+
+Current verified stage/commit: none. The shared record-result backend succeeded
+(exit 0; response status recorded, verdict partly_confirmed, accepted false).
+Stage remains open as changes_requested, expected_starting_head
+09e6db1ab80b917cb2dcb11a567b090fd43b49b4. Manual tests 2–4 remain deferred and
+unconfirmed; the prior recorded literal-star exception is not proof of literal
+matching. Next action: a fresh standard implementer session fixes the debounce /
+slow-image overlap within Stage 1, verifies both response orders, updates this
+plan, and captures its own handoff. Stage 2 remains pending. No security specialist
+is required for this client-only scheduling correction.
+
+### Stage 1 third correction pass (2026-09-09, human-gated)
+
+Fixes the overlap defect from "Independent code review of candidate 09e6db1"
+above: `_reloadFindsForSearch()` (`src/screens/finds.js`) invalidated the
+render guard and reset paging unconditionally on every call, even when the
+debounce fired for the exact same normalized query that
+`_invalidateFindsSearchPagingOnInput()` had already tied paging to at
+keystroke time. That redundant invalidation discarded the still-in-flight,
+same-query local narrowing render whenever its image lookup took longer than
+the debounce interval. Fixed by comparing the current paging state's
+`searchKey` against the normalized query before invalidating/resetting:
+skip both when they already match (the common debounce-fire case, preserving
+the local render), but still invalidate/reset when they genuinely differ
+(the clear/close paths, which set `state.searchQuery` directly without going
+through the input handler). A later, superseding render still naturally wins
+over an earlier one purely because `_findsRenderGuard.begin()` is itself
+monotonic — no explicit invalidate is needed for that half of the guarantee.
+
+New regression tests added to `src/screens/finds.test.js`, covering exactly
+what the review asked for:
+- a same-query debounced reload starting while its own authoritative page is
+  still unresolved does not discard the in-flight local narrowing render
+  (asserts the locally narrowed HTML actually commits while the authoritative
+  page is held open, then that the authoritative response replaces it once
+  released);
+- the inverse completion order — a local render whose image lookup resolves
+  only after the authoritative response has already begun rendering must not
+  overwrite it;
+- an equivalent normalized edit arriving while a real-change timer is already
+  pending must leave that timer untouched (the pre-existing test with a
+  similar title exercised only the "no timer was pending yet" case, per the
+  review's note).
+
+While writing these tests, the shared `installFakeFindsTimers()` test helper
+(used by the pre-existing timer test too) was found to have a latent,
+occasionally-flaky hazard unrelated to this fix: it intercepted every
+`setTimeout` call process-wide, including unrelated real background timers
+(observed: the imported `supabase` client's own connection housekeeping),
+which could coincidentally land in the fake's map and inflate its pending
+count. Narrowed it to only intercept calls made with the search debounce's
+own 250ms delay, passing every other delay through to the real timer
+unchanged; this is a test-harness robustness fix, not a product-code change.
+
+Focused proof: `node --test src/screens/finds.test.js` — 45 pass, 0 fail
+(3 new tests added this pass).
+Broader proof: `npm run check:node` (pass); `npm test` (1216 pass / 8 fail —
+same 8 pre-existing failures as every prior pass on this stage, none in
+`src/screens/finds.*`); `npm run build` (pass); `git diff --check` (clean).
+Committed: see the next candidate-stamping step for the exact SHA (base
+remains `7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1`, unchanged from the
+original stage prompt).
+Manual tests 2–4 (slow-network mid-search cancel, offline queued search,
+literal special-character search) remain outstanding — not run, not assumed
+passing. This pass fixes only the third review's code-level finding.
+Next exact action: fresh independent `sporely-sparring` review of the new
+candidate.

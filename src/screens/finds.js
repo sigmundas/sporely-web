@@ -1535,10 +1535,27 @@ export async function _reloadFindsForSearch() {
   const loadSeq = ++_loadFindsSeq
   _findsInitialRenderLoadSeq = loadSeq
   let shouldCheckForMore = false
-  _findsRenderGuard.invalidate()
   const primaryScope = _findsPrimaryScope()
   const currentScope = _currentScope()
-  _resetPagingState(currentScope, _normalizeFindsSearchQuery(state.searchQuery))
+  const normalized = _normalizeFindsSearchQuery(state.searchQuery)
+  const paging = _getPagingState(currentScope)
+  // The common case (debounce firing after a keystroke) already had its
+  // render guard invalidated and paging reset by
+  // _invalidateFindsSearchPagingOnInput() for this exact normalized query —
+  // invalidating again here would discard the still-in-flight, same-query
+  // local narrowing render (whose async image lookup may still be pending)
+  // for no reason, since nothing about the query has changed since. Only
+  // invalidate/reset here when this reload's query genuinely differs from
+  // what paging is already tied to (e.g. the clear/close paths, which set
+  // state.searchQuery directly without going through the input handler).
+  // A later, superseding render (this reload's own `_applyFilter()` below)
+  // still naturally wins over any earlier one purely by calling
+  // `_findsRenderGuard.begin()` again — no explicit invalidate is needed for
+  // that (third review-pass correction; plan §1.4).
+  if (paging.searchKey !== normalized) {
+    _findsRenderGuard.invalidate()
+    _resetPagingState(currentScope, normalized)
+  }
 
   try {
     if (currentScope === 'user') {

@@ -20,4 +20,8 @@ window instead.
 
 ## Changes Applied
 
-_(none logged yet)_
+### Day 5 (September 9, 2026)
+
+**Finds search pagination correction (Stage 1)** — see `docs/plans/active/2026-09-09-finds-smooth-pagination.md`
+- Fixed two search-input defects found by independent code review: the render-guard/paging invalidation ran after the local narrowing render started (discarding that render once its async image lookup resolved), and the debounce timer armed unconditionally even for a normalized-equivalent edit (letting it silently reset paging to page one).
+- Files changed: `src/screens/finds.js`, `src/screens/finds.test.js`.
