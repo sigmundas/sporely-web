@@ -340,9 +340,9 @@ Focused proof: node --test src/screens/finds.test.js — 42 pass, 0 fail (2 new)
 Broader proof: npm run check:node (pass); npm test (1213 pass / 8 fail, same
 8 pre-existing failures as the Stage 1 baseline, none in src/screens/finds.*);
 npm run build (pass); git diff --check (clean).
-Committed: this commit; see the immediately following docs-only commit for
-the exact candidate SHA (established convention in this stage's history —
-mirrors 251f971→eec95e8 and e152401→7aa2273). Manual tests 2-4 (slow-network
+Committed: a65faca616719e28df9f86b5cf7fbc87ff5b853d on feature/finds-server-search-pagination-revision
+(base 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1, the original stage prompt's
+immutable base). Manual tests 2-4 (slow-network
 mid-search cancel, offline queued search, literal special-character search)
 remain outstanding, not run and not assumed passing — the two code defects
 above are fixed and proven by automated test, but that is not a substitute
@@ -1007,13 +1007,13 @@ fresh independent code review — NOT accepted):
 ```text
 Current verified stage: none
 Current verified commit: none
-Current candidate/unverified work: see the docs-only follow-up commit immediately after this one for the exact SHA (base remains 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1, per the original stage prompt's immutable base)
+Current candidate/unverified work: a65faca616719e28df9f86b5cf7fbc87ff5b853d on feature/finds-server-search-pagination-revision (base remains 7cd9e36f61ab7a3a59cd2b52cedfe70ad31250c1, per the original stage prompt's immutable base)
 Last focused proof: node --test src/screens/finds.test.js (42 pass, 0 fail; 2 new tests added this pass)
 Last broader proof: npm run check:node (pass); npm test (1213 pass / 8 fail — same 8 pre-existing failures as the Stage 1 baseline, unrelated to Finds); npm run build (pass); git diff --check (clean)
 Last reviewer result: prior candidate e1524016d6e019d02fd482c7c06b1654a9d7a00c was "partly confirmed, not accepted" (second correction review, 2026-09-09); this newly corrected candidate has not yet been reviewed
 Manual QA status: unchanged from the prior pass — NOT passed, NOT accepted. Only manual test 1 is confirmed by the user. Manual tests 2 (slow-network mid-search cancel), 3 (offline queued search), and 4 (literal special-character search) remain outstanding, not run, not assumed passing.
 Known issue/blocker: manual tests 2-4 remain outstanding against the real app/device. The two code defects identified by the second correction review (render-guard invalidation ordering; unconditional debounce-timer arming on an equivalent edit) are fixed and covered by new automated tests; no further code defects are open at time of writing.
-Next exact action: request fresh independent sporely-sparring code review of the new candidate (see the docs-only follow-up commit for its SHA). Outstanding manual tests 2-4 must still be run and recorded before the stage can be accepted, regardless of the code review's outcome.
+Next exact action: request fresh independent sporely-sparring code review of candidate a65faca616719e28df9f86b5cf7fbc87ff5b853d. Outstanding manual tests 2-4 must still be run and recorded before the stage can be accepted, regardless of the code review's outcome.
 ```
 
 **Stage 1 second correction-pass notes for the reviewer:**
