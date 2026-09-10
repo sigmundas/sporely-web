@@ -19,13 +19,14 @@ import {
   formatFindsDateTimeLabel,
   normalizeFindsSort,
   isFindsStatusControlDisabled,
-  planFindsDateAppend,
+  compareFindsListOrder,
   planFindsSpeciesAppend,
   renderFindsRedlistTag,
   restoreFindsAfterDetailReturn,
   shouldHideFindsStatusControl,
   loadFinds,
   _applyFilter,
+  _findsInsertionAnchors,
   _mergeFindsItemsWithDelta,
   _getFindsCacheForTests,
   _getFindsPagingStateForTests,
@@ -506,8 +507,10 @@ test('changing the search query ties paging to the new query and a stale in-flig
     assert.match(secondOrCall.filter, /cortinarius/, 'the second (authoritative) query used the new search text')
 
     // The authoritative (fresh) response must already be the committed
-    // cache/paging state before the stale one is even released.
-    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['801', '802', '803'])
+    // cache/paging state before the stale one is even released. These fixtures
+    // carry no date/created_at, so the cache order is decided purely by the
+    // server's final `id` descending tie-breaker.
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['803', '802', '801'])
     assert.equal(_getFindsPagingStateForTests('user').nextOffset, 3)
     assert.equal(_getFindsPagingStateForTests('user').searchKey, 'cortinarius')
 
@@ -518,7 +521,7 @@ test('changing the search query ties paging to the new query and a stale in-flig
     // would leave 20 accumulated/replaced rows (ids 900-919) behind instead.
     const finalOrCalls = calls.filter(c => c.op === 'or' && c.table === 'observations')
     assert.equal(finalOrCalls.length, 2, 'no further queries were issued once the stale response resolved')
-    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['801', '802', '803'], 'the stale response must not have been appended once released')
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['803', '802', '801'], 'the stale response must not have been appended once released')
     assert.equal(_getFindsPagingStateForTests('user').nextOffset, 3, 'the stale response must not have advanced the current paging offset')
   } finally {
     supabase.from = previousFrom
@@ -752,7 +755,7 @@ test('clearing the search resets to the unfiltered server query', async () => {
 
     const orCalls = calls.filter(c => c.op === 'or' && c.table === 'observations')
     assert.equal(orCalls.length, 1, 'clearing the search must not add a server search filter for the unfiltered reload')
-    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['701', '702'])
+    assert.deepEqual(_getFindsCacheForTests('user').map(o => o.id), ['702', '701'])
     assert.equal(_getFindsPagingStateForTests('user').searchKey, '')
   } finally {
     supabase.from = previousFrom
@@ -2096,7 +2099,13 @@ function parseFakeAttrs(attrString) {
   const attrs = {}
   const re = /([a-zA-Z][a-zA-Z0-9-]*)(?:="([^"]*)")?/g
   let match
-  while ((match = re.exec(attrString || ''))) attrs[match[1]] = match[2] ?? ''
+  while ((match = re.exec(attrString || ''))) {
+    // A real HTML parser replaces U+0000 in attribute values with U+FFFD
+    // (HTML Standard, tokenizer "unexpected-null-character"). Modelling that
+    // is what makes a NUL-bearing `data-*` key observably unmatchable, which
+    // is exactly the defect the species "unidentified" sentinel had.
+    attrs[match[1]] = (match[2] ?? '').replace(/\0/g, '\uFFFD')
+  }
   return attrs
 }
 
@@ -2133,15 +2142,15 @@ function makeFakeNode(tag, attrs = {}) {
     dataset: {},
     classList: new Set(String(attrs.class || '').split(/\s+/).filter(Boolean)),
     children: [],
-    parent: null,
+    parentElement: null,
     textContent: '',
     listeners: [],
     addEventListener(type, handler) { node.listeners.push({ type, handler }) },
     remove() {
-      const siblings = node.parent?.children
+      const siblings = node.parentElement?.children
       const index = siblings ? siblings.indexOf(node) : -1
       if (index >= 0) siblings.splice(index, 1)
-      node.parent = null
+      node.parentElement = null
     },
     descendants() {
       const out = []
@@ -2160,14 +2169,14 @@ function makeFakeNode(tag, attrs = {}) {
     insertAdjacentHTML(position, html) {
       const parsed = parseFakeHtml(html)
       if (position === 'beforeend') {
-        for (const child of parsed) { child.parent = node; node.children.push(child) }
+        for (const child of parsed) { child.parentElement = node; node.children.push(child) }
         return
       }
       if (position === 'beforebegin') {
-        const siblings = node.parent?.children
+        const siblings = node.parentElement?.children
         if (!siblings) throw new Error('fake DOM: beforebegin on a detached node')
         const index = siblings.indexOf(node)
-        for (const child of parsed) child.parent = node.parent
+        for (const child of parsed) child.parentElement = node.parentElement
         siblings.splice(index, 0, ...parsed)
         return
       }
@@ -2184,7 +2193,7 @@ function makeFakeNode(tag, attrs = {}) {
     get: () => innerHtml,
     set(value) {
       innerHtml = String(value)
-      node.children = parseFakeHtml(innerHtml).map(child => { child.parent = node; return child })
+      node.children = parseFakeHtml(innerHtml).map(child => { child.parentElement = node; return child })
       node.innerHtmlWrites = (node.innerHtmlWrites || 0) + 1
     },
   })
@@ -2212,7 +2221,7 @@ function parseFakeHtml(html) {
     }
     const node = makeFakeNode(tag, parseFakeAttrs(attrString))
     const parent = stack[stack.length - 1]
-    node.parent = parent === root ? null : parent
+    node.parentElement = parent === root ? null : parent
     parent.children.push(node)
     if (!selfClosing && !FAKE_DOM_VOID_TAGS.has(tag.toLowerCase())) stack.push(node)
   }
@@ -2227,7 +2236,45 @@ function parseFakeHtml(html) {
 // `imageHtml` emits a plain `<img src=...>` — a real <img> element whose
 // identity the test can track, without dragging the cache-first media loader
 // into a unit test.
-function makeFindsAppendClient(observationPages, imageRowsByObsId) {
+function installQueueIndexedDbStub(queueItems) {
+  const previous = globalThis.indexedDB
+  globalThis.indexedDB = {
+    open() {
+      const request = {}
+      queueMicrotask(() => {
+        request.result = {
+          transaction() {
+            return {
+              objectStore() {
+                return {
+                  getAll() {
+                    const req = {}
+                    queueMicrotask(() => { req.result = [...queueItems]; req.onsuccess?.({ target: req }) })
+                    return req
+                  },
+                }
+              },
+            }
+          },
+          close() {},
+        }
+        request.onsuccess?.({ target: request })
+      })
+      return request
+    },
+  }
+  return () => { globalThis.indexedDB = previous }
+}
+
+// A gate the test arms only once the initial page has loaded, so the profile
+// lookup of a *subsequent* load-more can be held open mid-enrichment.
+function makeProfileGate() {
+  let resolve
+  const promise = new Promise(r => { resolve = r })
+  return { armed: false, promise, release: () => resolve() }
+}
+
+function makeFindsAppendClient(observationPages, imageRowsByObsId, profileGate = null) {
   const calls = []
   let pageIndex = 0
   const imageTables = new Set(['observation_images', 'observation_images_community_view'])
@@ -2256,7 +2303,13 @@ function makeFindsAppendClient(observationPages, imageRowsByObsId) {
           neq() { return chain },
           or(filter) { calls.push({ table, op: 'or', filter }); return chain },
           order() { return chain },
-          in(col, vals) { calls.push({ table, op: 'in', col, vals: [...vals] }); return { data: [], error: null } },
+          in(col, vals) {
+            calls.push({ table, op: 'in', col, vals: [...vals] })
+            if (profileGate?.armed && table === 'public_profiles') {
+              return profileGate.promise.then(() => ({ data: [], error: null }))
+            }
+            return { data: [], error: null }
+          },
           range(from, to) {
             calls.push({ table, op: 'range', from, to })
             const page = observationPages[Math.min(pageIndex, observationPages.length - 1)]
@@ -2299,11 +2352,11 @@ function appendImageRow(obsId) {
   }]
 }
 
-function installAppendHarness({ observationPages, imageRows, findsView = 'cards', findsSort = 'date' }) {
+function installAppendHarness({ observationPages, imageRows, findsView = 'cards', findsSort = 'date', queueItems = [], profileGate = null }) {
   const previousFrom = supabase.from
   const previousState = { ...state }
   const previousDocument = globalThis.document
-  const restoreIndexedDb = installEmptyQueueIndexedDbStub()
+  const restoreIndexedDb = installQueueIndexedDbStub(queueItems)
   const list = makeFakeNode('div', { id: 'finds-list' })
   const scroller = {
     scrollHeight: 1000,
@@ -2311,7 +2364,7 @@ function installAppendHarness({ observationPages, imageRows, findsView = 'cards'
     clientHeight: 100,
     classList: { toggle() {} },
   }
-  const { client, calls } = makeFindsAppendClient(observationPages, imageRows)
+  const { client, calls } = makeFindsAppendClient(observationPages, imageRows, profileGate)
   supabase.from = client.from
   globalThis.document = {
     getElementById(id) {
@@ -2375,26 +2428,38 @@ test('page delta reports only newly added observations and whether they extend t
   assert.equal(interleaved.appendedAtEnd, false, 'an interleaved row must not take the append path')
 })
 
-test('date-group append plan joins the existing terminal group and opens exactly one group per boundary', () => {
-  const plan = planFindsDateAppend('2026-09-03', [
-    { date: '2026-09-03' },
-    { date: '2026-09-03' },
-    { date: '2026-09-02' },
-    { date: '2026-09-02' },
-    { date: '2026-09-01' },
-  ])
-  assert.deepEqual(plan.map(c => [c.dateKey, c.items.length, c.isNewGroup]), [
-    ['2026-09-03', 2, false],
-    ['2026-09-02', 2, true],
-    ['2026-09-01', 1, true],
-  ])
+test('cached list order mirrors the server page order (date, created_at, id — all descending)', () => {
+  const rows = [
+    { id: '1', date: '2026-09-02', created_at: '2026-09-02T08:00:00Z', captured_at: '2026-09-02T23:00:00Z' },
+    { id: '2', date: '2026-09-03', created_at: '2026-09-03T08:00:00Z', captured_at: '2026-09-01T01:00:00Z' },
+    { id: '3', date: '2026-09-03', created_at: '2026-09-03T09:00:00Z', captured_at: '2026-09-03T09:00:00Z' },
+    { id: '4', date: '2026-09-03', created_at: '2026-09-03T09:00:00Z', captured_at: '2026-09-03T09:00:00Z' },
+  ]
+  const sorted = [...rows].sort(compareFindsListOrder)
+  assert.deepEqual(sorted.map(r => r.id), ['4', '3', '2', '1'],
+    'date desc, then created_at desc, then id desc — captured_at must not influence the order')
 
-  // A page that starts on a new date opens a group immediately, exactly once.
-  const boundary = planFindsDateAppend('2026-09-03', [{ date: '2026-09-02' }, { date: '2026-09-02' }])
-  assert.deepEqual(boundary.map(c => [c.dateKey, c.items.length, c.isNewGroup]), [['2026-09-02', 2, true]])
+  // Postgres orders DESC with NULLS FIRST; a row with no date must match that.
+  const withNullDate = [{ id: 'a', date: '2026-09-03' }, { id: 'b', date: null }]
+  assert.deepEqual([...withNullDate].sort(compareFindsListOrder).map(r => r.id), ['b', 'a'])
+})
 
-  // Nothing rendered yet: the first chunk is still a new group.
-  assert.equal(planFindsDateAppend(null, [{ date: '2026-09-02' }])[0].isNewGroup, true)
+test('insertion anchors place each added row before the next already-rendered row in the same section', () => {
+  const a = { id: 'a' }, b = { id: 'b' }, c = { id: 'c' }, d = { id: 'd' }
+  // Rendered: a, c. Added: b (between them) and d (at the end).
+  const anchors = _findsInsertionAnchors([a, b, c, d], new Set([b, d]))
+  assert.equal(anchors.get(b), c, 'an interleaved row anchors on the next rendered row')
+  assert.equal(anchors.get(d), null, 'a trailing row has no anchor and belongs at the end')
+
+  // Species grouping anchors within the item's own group, not the whole list.
+  const keyOf = item => item.group
+  const g = [
+    { id: '1', group: 'x' },
+    { id: '2', group: 'y' },
+    { id: '3', group: 'x' },
+  ]
+  const grouped = _findsInsertionAnchors(g, new Set([g[0]]), keyOf)
+  assert.equal(grouped.get(g[0]), g[2], 'the anchor is the next rendered row of the same species, skipping other groups')
 })
 
 test('species-group append plan inserts new groups alphabetically and grows existing groups without recreating them', () => {
@@ -2572,17 +2637,18 @@ test('ordinary load-more appends a species page in place: existing groups keep t
 
     assert.equal(list.innerHtmlWrites, writesAfterInitialRender, 'species load-more must not rebuild the whole list')
 
-    const groupKeys = list.querySelectorAll('.finds-grid[data-species-key]').map(g => g.dataset.speciesKey)
+    const groupKeys = list.querySelectorAll('.finds-grid[data-species-key]')
+      .map(g => decodeURIComponent(g.dataset.speciesKey))
     assert.deepEqual(groupKeys, ['amanita|muscaria|', 'boletus|edulis|', 'cortinarius|alboviolaceus|'],
       'the newly discovered species was inserted at its alphabetical position, not appended at the bottom')
 
     const boletusGridAfter = list.querySelectorAll('.finds-grid[data-species-key]')
-      .find(g => g.dataset.speciesKey === 'boletus|edulis|')
+      .find(g => decodeURIComponent(g.dataset.speciesKey) === 'boletus|edulis|')
     assert.equal(boletusGridAfter, boletusGridBefore, 'the existing species group element was reused, not recreated')
     assert.equal(boletusGridAfter.querySelectorAll('.find-card[data-id]').length, 11)
 
     const boletusMeta = list.querySelectorAll('.finds-species-meta[data-species-key]')
-      .find(m => m.dataset.speciesKey === 'boletus|edulis|')
+      .find(m => decodeURIComponent(m.dataset.speciesKey) === 'boletus|edulis|')
     assert.match(boletusMeta.innerHTML, /11/, 'the existing group observation count was updated in place')
 
     for (const [id, cardBefore] of cardByIdBefore) {
@@ -2716,6 +2782,248 @@ test('Feed load-more appends its page delta in place too (the feed selection lay
       [firstPage.map(o => o.id), secondPage.map(o => o.id)],
       'feed append looked up image metadata for the new ids only',
     )
+  } finally {
+    harness.restore()
+    supabase.storage.from = previousStorageFrom
+  }
+})
+
+
+test('a page that interleaves with an already-rendered queued observation is still inserted in place, at the right position', async () => {
+  // Regression for the ordering mismatch found in review: a queued/local
+  // observation is not on the server, so it can sit anywhere in the list. Here
+  // it sorts *below* the remote rows page two brings in, which makes the delta
+  // a non-suffix. That must still be incorporated by insertion, never by
+  // rebuilding the list. The first page's rows also carry a captured_at that
+  // disagrees with created_at, which used to drive the client order away from
+  // the server's page order entirely.
+  const firstPage = Array.from({ length: 20 }, (_, i) => ({
+    ...makeAppendObservation(1000 + i, {
+      date: '2026-09-03',
+      createdAt: `2026-09-03T${String(23 - i).padStart(2, '0')}:00:00Z`,
+      commonName: `first-${i}`,
+    }),
+    captured_at: `2026-07-0${(i % 9) + 1}T12:00:00Z`,
+  }))
+  const secondPage = [
+    makeAppendObservation(1100, { date: '2026-09-02', createdAt: '2026-09-02T09:00:00Z', commonName: 'second-0' }),
+    makeAppendObservation(1101, { date: '2026-09-02', createdAt: '2026-09-02T08:00:00Z', commonName: 'second-1' }),
+  ]
+  const imageRows = {}
+  for (const obs of [...firstPage, ...secondPage]) imageRows[obs.id] = appendImageRow(obs.id)
+
+  const queueItems = [{
+    id: 'q1',
+    userId: 'user-a',
+    ts: Date.parse('2026-08-01T10:00:00Z'),
+    obsPayload: {
+      date: '2026-08-01',
+      created_at: '2026-08-01T10:00:00Z',
+      common_name: 'queued-oldest',
+      visibility: 'public',
+      is_draft: false,
+    },
+    imageEntries: [],
+  }]
+
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, { data: secondPage, error: null }],
+    imageRows,
+    queueItems,
+  })
+  const { list, scroller } = harness
+
+  try {
+    await loadFinds()
+    const idsBefore = harness.cardIds()
+    assert.equal(idsBefore.length, 21, 'first page plus the queued observation rendered')
+    assert.equal(idsBefore[idsBefore.length - 1], 'queued-q1', 'the queued observation sorts last')
+    const writesBefore = list.innerHtmlWrites
+    const cardByIdBefore = new Map(
+      list.querySelectorAll('.find-card[data-id]').map(card => [card.dataset.id, card]),
+    )
+
+    scroller.scrollTop = 850
+    state.currentScreen = 'finds'
+    await _maybeLoadMoreFinds()
+
+    assert.equal(_getFindsCacheForTests('mine').map(o => o.id).slice(-1)[0], 'queued-q1',
+      'the delta is genuinely a non-suffix: the queued row still sorts after the new page')
+    assert.equal(list.innerHtmlWrites, writesBefore,
+      'a non-suffix delta must still be inserted, not rebuilt')
+
+    assert.deepEqual(
+      harness.cardIds(),
+      [...firstPage.map(o => o.id), '1100', '1101', 'queued-q1'],
+      'the new rows were inserted at their sorted position, above the older queued card',
+    )
+    for (const [id, cardBefore] of cardByIdBefore) {
+      assert.equal(
+        list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === id),
+        cardBefore,
+        `card ${id} is the same DOM node after the interleaved append`,
+      )
+    }
+    const grids = list.querySelectorAll('.finds-grid[data-date-key]')
+    assert.deepEqual(grids.map(g => g.dataset.dateKey), ['2026-09-03', '2026-09-02', '2026-08-01'],
+      'the new date group was opened between the existing ones, not at the bottom')
+    assert.deepEqual(
+      harness.imageIdBatches(),
+      [firstPage.map(o => o.id), secondPage.map(o => o.id)],
+      'image metadata is still delta-only, and the pending queued row is never looked up',
+    )
+  } finally {
+    harness.restore()
+  }
+})
+
+test('unidentified species groups survive the DOM round trip: rows append into the existing group and a new group inserts before it', async () => {
+  // Regression: `_speciesKey()`'s unidentified sentinel starts with U+0000,
+  // which an HTML parser rewrites to U+FFFD in an attribute value. Emitting
+  // the raw key made the group unmatchable, so every unidentified append fell
+  // back to a full destructive render.
+  // `_speciesKey()`'s sentinel, verbatim - a leading U+0000.
+  const UNIDENTIFIED_KEY = '\u0000unidentified'
+  const firstPage = [
+    ...Array.from({ length: 10 }, (_, i) => makeAppendObservation(1200 + i, {
+      date: '2026-09-03',
+      createdAt: `2026-09-03T${String(23 - i).padStart(2, '0')}:00:00Z`,
+      genus: 'Boletus',
+      species: 'edulis',
+    })),
+    ...Array.from({ length: 10 }, (_, i) => makeAppendObservation(1220 + i, {
+      date: '2026-09-03',
+      createdAt: `2026-09-03T${String(13 - i).padStart(2, '0')}:00:00Z`,
+    })),
+  ]
+  const secondPage = [
+    makeAppendObservation(1300, { date: '2026-09-02', createdAt: '2026-09-02T09:00:00Z', genus: 'Amanita', species: 'muscaria' }),
+    makeAppendObservation(1301, { date: '2026-09-02', createdAt: '2026-09-02T08:00:00Z', genus: 'Russula', species: 'emetica' }),
+    makeAppendObservation(1302, { date: '2026-09-02', createdAt: '2026-09-02T07:00:00Z' }),
+  ]
+  const imageRows = {}
+  for (const obs of [...firstPage, ...secondPage]) imageRows[obs.id] = appendImageRow(obs.id)
+
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, { data: secondPage, error: null }],
+    imageRows,
+    findsSort: 'species',
+  })
+  const { list, scroller } = harness
+  const groupKeys = () => list.querySelectorAll('.finds-grid[data-species-key]')
+    .map(g => decodeURIComponent(g.dataset.speciesKey))
+
+  try {
+    await loadFinds()
+    assert.deepEqual(groupKeys(), ['boletus|edulis|', UNIDENTIFIED_KEY],
+      'the unidentified key round-trips through the DOM attribute unchanged')
+    const writesBefore = list.innerHtmlWrites
+    const unidentifiedGridBefore = list.querySelectorAll('.finds-grid[data-species-key]')[1]
+    const cardByIdBefore = new Map(
+      list.querySelectorAll('.find-card[data-id]').map(card => [card.dataset.id, card]),
+    )
+
+    scroller.scrollTop = 850
+    state.currentScreen = 'finds'
+    await _maybeLoadMoreFinds()
+
+    assert.equal(list.innerHtmlWrites, writesBefore,
+      'appending into / before the unidentified group must not rebuild the list')
+    assert.deepEqual(groupKeys(), ['amanita|muscaria|', 'boletus|edulis|', 'russula|emetica|', UNIDENTIFIED_KEY],
+      'a new species inserted before the unidentified group, which stays last')
+
+    const unidentifiedGridAfter = list.querySelectorAll('.finds-grid[data-species-key]')
+      .find(g => decodeURIComponent(g.dataset.speciesKey) === UNIDENTIFIED_KEY)
+    assert.equal(unidentifiedGridAfter, unidentifiedGridBefore,
+      'the unidentified group element was reused, not recreated')
+    assert.equal(unidentifiedGridAfter.querySelectorAll('.find-card[data-id]').length, 11,
+      'the unidentified observation was appended into the existing group')
+    const unidentifiedMeta = list.querySelectorAll('.finds-species-meta[data-species-key]')
+      .find(m => decodeURIComponent(m.dataset.speciesKey) === UNIDENTIFIED_KEY)
+    assert.match(unidentifiedMeta.innerHTML, /11/, 'its observation count was updated in place')
+
+    for (const [id, cardBefore] of cardByIdBefore) {
+      assert.equal(
+        list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === id),
+        cardBefore,
+        `card ${id} survived the unidentified-group append`,
+      )
+    }
+  } finally {
+    harness.restore()
+  }
+})
+
+test('a second scroll cannot start another Feed page while the previous one is still being enriched and appended', async () => {
+  // Regression: the paging state's `loadingMore` is cleared when the fetch
+  // resolves, before profile enrichment and the delta append run. A scroll
+  // event in that window used to fetch and commit the following page first,
+  // producing out-of-order date groups.
+  const feedRow = (id, date, createdAt) => ({
+    ...makeAppendObservation(id, { date, createdAt, commonName: `feed-${id}` }),
+    user_id: 'user-b',
+  })
+  const page = (base, date) => Array.from({ length: 20 }, (_, i) =>
+    feedRow(base + i, date, `${date}T${String(23 - i).padStart(2, '0')}:00:00Z`))
+  const firstPage = page(1400, '2026-09-03')
+  const secondPage = page(1500, '2026-09-02')
+  const thirdPage = [feedRow(1600, '2026-09-01', '2026-09-01T09:00:00Z')]
+  const imageRows = {}
+  for (const obs of [...firstPage, ...secondPage, ...thirdPage]) imageRows[obs.id] = appendImageRow(obs.id)
+
+  const previousStorageFrom = supabase.storage.from
+  supabase.storage.from = () => ({ createSignedUrls: async () => ({ data: [], error: null }) })
+  const profileGate = makeProfileGate()
+  const harness = installAppendHarness({
+    observationPages: [
+      { data: firstPage, error: null },
+      { data: secondPage, error: null },
+      { data: thirdPage, error: null },
+    ],
+    imageRows,
+    profileGate,
+  })
+  const { list, scroller, calls } = harness
+  Object.assign(state, { findsScopePrimary: 'feed', findsScopeFeed: 'all' })
+  const observationRangeCalls = () => calls.filter(c => c.op === 'range').length
+
+  try {
+    await loadFinds()
+    assert.equal(list.querySelectorAll('.find-card[data-id]').length, 20)
+    const rangeCallsAfterFirstPage = observationRangeCalls()
+    profileGate.armed = true
+
+    scroller.scrollTop = 850
+    state.currentScreen = 'finds'
+
+    // Park a load-more at its profile lookup, after the page fetch has already
+    // resolved and cleared the paging state's own `loadingMore` guard.
+    const parked = _maybeLoadMoreFinds()
+    for (let i = 0; i < 30; i++) await Promise.resolve()
+    assert.equal(observationRangeCalls(), rangeCallsAfterFirstPage + 1, 'page two was fetched')
+    assert.equal(_getFindsPagingStateForTests('feed').loadingMore, false,
+      'the fetch guard is already released while enrichment is still pending — the window this test covers')
+
+    // A scroll event arriving in exactly that window must not start page three.
+    // Deliberately not awaited: without the guard this call parks on the same
+    // gate and would deadlock the test instead of failing an assertion.
+    const overlapping = _maybeLoadMoreFinds()
+    for (let i = 0; i < 30; i++) await Promise.resolve()
+    assert.equal(observationRangeCalls(), rangeCallsAfterFirstPage + 1,
+      'an overlapping load-more must not fetch the next page mid-append')
+
+    profileGate.release()
+    await Promise.all([parked, overlapping])
+    // The recursive follow-up check is fire-and-forget (`void`), so drain the
+    // queue until it has settled rather than racing it.
+    for (let i = 0; i < 300 && list.querySelectorAll('.find-card[data-id]').length < 41; i++) {
+      await Promise.resolve()
+    }
+
+    const grids = list.querySelectorAll('.finds-grid[data-date-key]')
+    assert.deepEqual(grids.map(g => g.dataset.dateKey), ['2026-09-03', '2026-09-02', '2026-09-01'],
+      'pages were incorporated in order, not interleaved')
+    assert.equal(list.querySelectorAll('.find-card[data-id]').length, 41)
   } finally {
     harness.restore()
     supabase.storage.from = previousStorageFrom

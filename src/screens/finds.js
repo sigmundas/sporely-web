@@ -72,6 +72,10 @@ let _findsSearchDebounceTimer = null
 let _findsDropdownOpenKey = null
 let _loadFindsSeq = 0
 let _findsRenderPromise = Promise.resolve(false)
+// Serializes a whole load-more operation (fetch → enrich → append), which
+// outlives the paging state's own `loadingMore` fetch guard. See
+// _maybeLoadMoreFinds.
+let _findsLoadMoreInFlight = false
 // Describes the list currently committed to the DOM by a full render, so an
 // incremental page append (plan §2.2) can tell whether it may extend that
 // exact list or must fall back to a full render. Cleared at the start of
@@ -160,13 +164,61 @@ export function _mergeFindsItems(scope, existingItems, incomingItems) {
   return _mergeFindsItemsWithDelta(scope, existingItems, incomingItems).merged
 }
 
+// The cached list order MUST mirror `_orderedFindsQuery` — `date` desc,
+// `created_at` desc, `id` desc — because that is the order the server pages
+// rows in. The merge previously sorted by `captured_at` first, a column the
+// server does not order by at all (and which `FEED_SELECT` does not even
+// fetch). The two orderings disagree whenever capture time and upload time
+// disagree, which meant a page-2 row could legitimately sort above a page-1
+// row: pagination boundaries did not match the visible list, and same-date
+// rows were no longer contiguous, so the date grouping merged non-adjacent
+// rows into one earlier group. Mirroring the server order fixes both, and is
+// what lets a page be incorporated positionally instead of destructively.
+//
+// Postgres orders DESC with NULLS FIRST, so a row without a `date` sorts
+// first here too. Queued/local rows have no `created_at` yet and fall back to
+// their queue timestamp.
+function _findsOrderTimestamp(obs) {
+  const raw = obs?.created_at || obs?._queuedAt || obs?.captured_at || obs?.date || 0
+  const ts = new Date(raw).getTime()
+  return Number.isFinite(ts) ? ts : 0
+}
+
+// Exported as a test seam: the incremental append path's correctness depends
+// on this comparator agreeing with the server's page order.
+export function compareFindsListOrder(first, second) {
+  const firstDate = String(first?.date || '')
+  const secondDate = String(second?.date || '')
+  if (firstDate !== secondDate) {
+    if (!firstDate) return -1
+    if (!secondDate) return 1
+    return firstDate < secondDate ? 1 : -1
+  }
+  const timeOrder = _findsOrderTimestamp(second) - _findsOrderTimestamp(first)
+  if (timeOrder) return timeOrder
+  // Final tie-breaker, mirroring `.order('id', { ascending: false })`.
+  // Observation ids are numeric, so compare them numerically when both are —
+  // a plain string compare would order '9' above '10' and disagree with the
+  // server for rows tied on both date and created_at.
+  const firstId = String(first?.id ?? '')
+  const secondId = String(second?.id ?? '')
+  if (firstId === secondId) return 0
+  const firstNum = Number(firstId)
+  const secondNum = Number(secondId)
+  if (firstId !== '' && secondId !== '' && Number.isFinite(firstNum) && Number.isFinite(secondNum)) {
+    if (firstNum !== secondNum) return secondNum - firstNum
+  }
+  return firstId < secondId ? 1 : -1
+}
+
 // Stage 2 page-load return contract (plan §2.3): the merge already knows which
 // incoming rows survived dedup, so the render layer must not have to
 // rediscover the delta by diffing the full cache. `added` holds exactly the
 // newly merged observations (deduped rows are not "added"); `appendedAtEnd`
-// records whether those rows landed as a contiguous suffix of the sorted
-// result, which is the only case the incremental date-append path can render
-// without reordering already-visible cards.
+// reports whether they happened to land as a contiguous suffix. The render
+// layer does NOT depend on that being true — it inserts each new card at its
+// own position — but it stays part of the contract because it is the
+// difference between an ordinary tail append and an interleaved page.
 export function _mergeFindsItemsWithDelta(scope, existingItems, incomingItems) {
   const merged = [...(existingItems || [])]
   const added = []
@@ -188,7 +240,7 @@ export function _mergeFindsItemsWithDelta(scope, existingItems, incomingItems) {
     added.push(item)
     if (itemId) seenIds.add(itemId)
   }
-  merged.sort((a, b) => _sortTs(b) - _sortTs(a))
+  merged.sort(compareFindsListOrder)
   const addedSet = new Set(added)
   const suffix = merged.slice(merged.length - added.length)
   const appendedAtEnd = added.length === 0
@@ -2141,6 +2193,13 @@ export async function _maybeLoadMoreFinds() {
   }
 
   if (state.currentScreen !== 'finds' || _isRefreshing) return
+  // The paging state's own `loadingMore` covers only the fetch: each loader
+  // clears it in its `finally`, before this function's profile enrichment and
+  // delta append have run. A scroll event landing in that window used to pass
+  // the guard, fetch the next page, and commit its delta ahead of the page
+  // still being incorporated — producing out-of-order date groups. The whole
+  // load → enrich → append operation is one critical section.
+  if (_findsLoadMoreInFlight) return
 
   const currentScope = _currentScope()
   const paging = _getPagingState(currentScope)
@@ -2153,18 +2212,29 @@ export async function _maybeLoadMoreFinds() {
   if (distanceFromBottom > FINDS_LOAD_MORE_THRESHOLD) return
 
   const loadSeq = _loadFindsSeq
-  const page = await _loadCurrentFindsPage({ reset: false })
-  if (loadSeq !== _loadFindsSeq) return
-  if (page?.loaded) {
-    await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
-    if (loadSeq !== _loadFindsSeq) return
-    // Ordinary pagination incorporates the page delta in place. It must never
-    // take the full-render path (`list.innerHTML = html`), which would destroy
-    // and rehydrate every already-visible card and thumbnail (plan §2.1).
-    await _appendFindsPage(page.addedItems || [], { appendedAtEnd: page.appendedAtEnd !== false })
-    if (loadSeq !== _loadFindsSeq) return
-    void _maybeLoadMoreFinds()
+  let shouldCheckForMore
+  _findsLoadMoreInFlight = true
+  try {
+    shouldCheckForMore = await _loadAndAppendNextFindsPage(loadSeq, currentScope)
+  } finally {
+    _findsLoadMoreInFlight = false
   }
+  if (shouldCheckForMore) void _maybeLoadMoreFinds()
+}
+
+// The serialized body of one load-more: fetch the page, hydrate profiles, then
+// incorporate the delta. Returns whether another page may be requested.
+async function _loadAndAppendNextFindsPage(loadSeq, currentScope) {
+  const page = await _loadCurrentFindsPage({ reset: false })
+  if (loadSeq !== _loadFindsSeq) return false
+  if (!page?.loaded) return false
+  await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
+  if (loadSeq !== _loadFindsSeq) return false
+  // Ordinary pagination incorporates the page delta in place. It must never
+  // take the full-render path (`list.innerHTML = html`), which would destroy
+  // and rehydrate every already-visible card and thumbnail (plan §2.1).
+  await _appendFindsPage(page.addedItems || [])
+  return loadSeq === _loadFindsSeq
 }
 
 // ── Filter + dispatch ─────────────────────────────────────────────────────────
@@ -2174,12 +2244,6 @@ export async function _maybeLoadMoreFinds() {
 export function _matches(obs, q) {
   return [obs.common_name, obs.genus, obs.species, obs.location, obs.notes, obs.uncertain ? 'uncertain id' : '']
     .some(f => f && f.toLowerCase().includes(q))
-}
-
-function _sortTs(obs) {
-  const primary = obs?.captured_at || obs?.created_at || obs?.date || obs?._queuedAt || 0
-  const ts = new Date(primary).getTime()
-  return Number.isFinite(ts) ? ts : 0
 }
 
 function _isCurrentFindsRender(list, renderContext) {
@@ -2238,6 +2302,11 @@ export function _filterFindsItems(items, context = _findsFilterContext()) {
   return q ? filtered.filter(obs => _matches(obs, q)) : filtered
 }
 
+function _currentFindsCache({ primaryScope, currentScope } = _findsFilterContext()) {
+  if (currentScope === 'user') return _cache['user'] || []
+  return primaryScope === 'mine' ? (_cache['mine'] || []) : (_cache['feed'] || [])
+}
+
 // Exported as a test seam (see finds.test.js).
 export function _applyFilter() {
   const list     = document.getElementById('finds-list')
@@ -2249,14 +2318,8 @@ export function _applyFilter() {
     accountGeneration: currentAccountGeneration(),
   }
   const context = _findsFilterContext()
-  const { primaryScope, currentScope, isFriendsScope } = context
-  const raw = currentScope === 'user'
-    ? (_cache['user'] || [])
-    : primaryScope === 'mine'
-      ? (_cache['mine'] || [])
-      : (_cache['feed'] || [])
-
-  const data = _filterFindsItems(raw, context)
+  const { isFriendsScope } = context
+  const data = _filterFindsItems(_currentFindsCache(context), context)
 
   const renderPromise = _findsSort() === 'species'
     ? _renderBySpecies(list, data, { variant: state.findsView, renderContext })
@@ -2596,57 +2659,128 @@ function _updateFindsFooter(list, scope) {
   if (html) list.insertAdjacentHTML('beforeend', html)
 }
 
-function _appendDateGroups(outer, items, { variant, imageData }) {
-  const plan = planFindsDateAppend(_renderedFindsView?.lastDateKey ?? null, items)
-  for (const chunk of plan) {
-    const cardsHtml = chunk.items
-      .map(obs => _findsCardHtml(obs, { variant, mode: 'date', imageData }))
-      .join('')
-    if (!chunk.isNewGroup) {
-      const grids = outer.querySelectorAll('.finds-grid[data-date-key]') || []
-      const lastGrid = grids[grids.length - 1]
-      if (lastGrid?.dataset?.dateKey === chunk.dateKey) {
-        lastGrid.insertAdjacentHTML('beforeend', cardsHtml)
-        continue
-      }
-      return false
-    }
-    outer.insertAdjacentHTML('beforeend', _findsDateGroupHtml(chunk.dateKey, variant, cardsHtml))
+// For each newly added item, the already-rendered item it must be inserted
+// before — or `null` when it belongs at the end of its section. `keyOf`
+// narrows the search to one section: date grouping anchors against the whole
+// list, species grouping anchors against the item's own species group, which
+// is the order the species renderer preserves inside a group.
+// Exported as a test seam.
+export function _findsInsertionAnchors(targetList, addedSet, keyOf = () => '') {
+  const anchors = new Map()
+  const nextRenderedByKey = new Map()
+  for (let i = targetList.length - 1; i >= 0; i--) {
+    const item = targetList[i]
+    const key = keyOf(item)
+    if (addedSet.has(item)) anchors.set(item, nextRenderedByKey.get(key) ?? null)
+    else nextRenderedByKey.set(key, item)
   }
-  if (_renderedFindsView && plan.length) {
-    _renderedFindsView.lastDateKey = plan[plan.length - 1].dateKey
+  return anchors
+}
+
+// Anchors are always cards that were already on screen before this append, so
+// one snapshot taken up front is both correct and cheaper than re-querying the
+// list for every inserted row.
+function _findsCardWrapSnapshot(list) {
+  const wraps = new Map()
+  for (const card of list.querySelectorAll('.find-card[data-id]') || []) {
+    const id = card?.dataset?.id
+    if (id == null || wraps.has(String(id))) continue
+    if (card.parentElement) wraps.set(String(id), card.parentElement)
+  }
+  return wraps
+}
+
+// Incorporate a date-sorted page. Because the cache order now mirrors the
+// server's (`compareFindsListOrder`), rows sharing a date are contiguous, so
+// every insertion resolves to one of three cases and never has to split an
+// existing group: insert before an anchor in the same date group, append to
+// an existing date group, or open a new date group immediately before the
+// anchor's group.
+function _appendDateGroups(cardWraps, outer, targetList, addedItems, { variant, imageData }) {
+  const addedSet = new Set(addedItems)
+  const anchors = _findsInsertionAnchors(targetList, addedSet)
+  for (const obs of addedItems) {
+    const dateKey = _findsDateKey(obs)
+    const cardHtml = _findsCardHtml(obs, { variant, mode: 'date', imageData })
+    const anchor = anchors.get(obs) ?? null
+
+    if (anchor && _findsDateKey(anchor) === dateKey) {
+      const anchorWrap = cardWraps.get(String(anchor.id))
+      if (!anchorWrap?.insertAdjacentHTML) return false
+      anchorWrap.insertAdjacentHTML('beforebegin', cardHtml)
+      continue
+    }
+
+    const grid = _findsGroupElement(outer, '.finds-grid[data-date-key]', 'dateKey', dateKey)
+    if (grid) {
+      grid.insertAdjacentHTML('beforeend', cardHtml)
+      continue
+    }
+
+    const groupHtml = _findsDateGroupHtml(dateKey, variant, cardHtml)
+    if (!anchor) {
+      outer.insertAdjacentHTML('beforeend', groupHtml)
+      continue
+    }
+    // Dates are contiguous and ordered, so the anchor is necessarily the
+    // first card of its own group: the new group goes before that separator.
+    const anchorSep = _findsGroupElement(
+      outer, '.finds-date-sep[data-date-key]', 'dateKey', _findsDateKey(anchor),
+    )
+    if (!anchorSep?.insertAdjacentHTML) return false
+    anchorSep.insertAdjacentHTML('beforebegin', groupHtml)
   }
   return true
 }
 
-function _appendSpeciesGroups(outer, items, { variant, imageData }) {
+// Incorporate a species-sorted page. A species group already on screen grows
+// in place (its count updated, its element reused); a newly discovered species
+// is inserted at its correct alphabetical position, with unidentified last.
+function _appendSpeciesGroups(cardWraps, outer, targetList, addedItems, { variant, imageData }) {
   const view = _renderedFindsView
-  const { groups, ops } = planFindsSpeciesAppend(view?.speciesGroups || [], items)
+  const addedSet = new Set(addedItems)
+  const anchors = _findsInsertionAnchors(targetList, addedSet, _speciesKey)
+  const { groups, ops } = planFindsSpeciesAppend(view?.speciesGroups || [], addedItems)
+
   for (const op of ops) {
-    const cardsHtml = op.items
-      .map(obs => _findsCardHtml(obs, { variant, mode: 'species', imageData }))
-      .join('')
     if (op.type === 'append') {
-      const grid = _findsGroupElement(outer, '.finds-grid[data-species-key]', 'speciesKey', op.key)
+      const grid = _findsGroupElement(
+        outer, '.finds-grid[data-species-key]', 'speciesKey', _findsSpeciesDomKey(op.key),
+      )
       if (!grid) return false
-      grid.insertAdjacentHTML('beforeend', cardsHtml)
-      const meta = _findsGroupElement(outer, '.finds-species-meta[data-species-key]', 'speciesKey', op.key)
+      for (const obs of op.items) {
+        const cardHtml = _findsCardHtml(obs, { variant, mode: 'species', imageData })
+        const anchor = anchors.get(obs) ?? null
+        const anchorWrap = anchor ? cardWraps.get(String(anchor.id)) : null
+        if (anchorWrap?.insertAdjacentHTML) anchorWrap.insertAdjacentHTML('beforebegin', cardHtml)
+        else grid.insertAdjacentHTML('beforeend', cardHtml)
+      }
+      const meta = _findsGroupElement(
+        outer, '.finds-species-meta[data-species-key]', 'speciesKey', _findsSpeciesDomKey(op.key),
+      )
       if (meta) meta.innerHTML = tp('finds.observationCount', op.count)
       continue
     }
+
+    const cardsHtml = op.items
+      .map(obs => _findsCardHtml(obs, { variant, mode: 'species', imageData }))
+      .join('')
     const groupHtml = _findsSpeciesGroupHtml(op.key, op.label, op.count, variant, cardsHtml)
-    const anchor = op.beforeKey === null
-      ? null
-      : _findsGroupElement(outer, '.finds-date-sep[data-species-key]', 'speciesKey', op.beforeKey)
-    if (anchor?.insertAdjacentHTML) anchor.insertAdjacentHTML('beforebegin', groupHtml)
-    else if (op.beforeKey === null) outer.insertAdjacentHTML('beforeend', groupHtml)
-    else return false
+    if (op.beforeKey === null) {
+      outer.insertAdjacentHTML('beforeend', groupHtml)
+      continue
+    }
+    const anchorSep = _findsGroupElement(
+      outer, '.finds-date-sep[data-species-key]', 'speciesKey', _findsSpeciesDomKey(op.beforeKey),
+    )
+    if (!anchorSep?.insertAdjacentHTML) return false
+    anchorSep.insertAdjacentHTML('beforebegin', groupHtml)
   }
   if (view) view.speciesGroups = groups
   return true
 }
 
-async function _renderFindsAppend(list, outer, items, { variant, sort, renderContext, currentScope }) {
+async function _renderFindsAppend(list, outer, targetList, items, { variant, sort, renderContext, currentScope }) {
   // Plan §2.4: metadata is fetched for the newly rendered cards only. Nothing
   // already on screen is looked up again or rewired.
   const imageVariant = variant === 'cards' ? 'medium' : 'small'
@@ -2661,12 +2795,14 @@ async function _renderFindsAppend(list, outer, items, { variant, sort, renderCon
   }
   if (!_isCurrentFindsRender(list, renderContext)) return false
 
+  const cardWraps = _findsCardWrapSnapshot(list)
   const inserted = sort === 'species'
-    ? _appendSpeciesGroups(outer, items, { variant, imageData })
-    : _appendDateGroups(outer, items, { variant, imageData })
+    ? _appendSpeciesGroups(cardWraps, outer, targetList, items, { variant, imageData })
+    : _appendDateGroups(cardWraps, outer, targetList, items, { variant, imageData })
 
-  // The DOM no longer matches what the append was planned against (a group
-  // element disappeared). Rebuild authoritatively rather than guess.
+  // The DOM no longer matches what the append was planned against (a group or
+  // anchor element is missing). Rebuild authoritatively rather than guess — the
+  // full render supersedes anything this pass had already inserted.
   if (!inserted) return _applyFilter()
 
   _updateFindsFooter(list, currentScope)
@@ -2675,13 +2811,13 @@ async function _renderFindsAppend(list, outer, items, { variant, sort, renderCon
 }
 
 // Incremental page incorporation (plan §2.2/§2.3). Adds only the rows in
-// `addedItems`; never assigns `list.innerHTML`. Falls back to the full
-// `_applyFilter()` render whenever the current DOM is not an extendable
-// grouped list — an empty/offline/loading state, a tiles render, a
-// scope/sort/view change since the last full render, or rows that do not
-// extend the end of the sorted result set.
+// `addedItems`, each at its own position in the current result order; never
+// assigns `list.innerHTML`. Falls back to the full `_applyFilter()` render
+// only when the current DOM is not an extendable grouped list — an
+// empty/offline/loading state, a tiles render, or a scope/sort/view change
+// since the last full render.
 // Exported as a test seam.
-export function _appendFindsPage(addedItems, { appendedAtEnd = true } = {}) {
+export function _appendFindsPage(addedItems) {
   const list = document.getElementById('finds-list')
   if (!list) return Promise.resolve(false)
   const context = _findsFilterContext()
@@ -2689,8 +2825,7 @@ export function _appendFindsPage(addedItems, { appendedAtEnd = true } = {}) {
   const variant = state.findsView === 'two' || state.findsView === 'three' ? state.findsView : 'cards'
   const view = _renderedFindsView
   const outer = list.querySelector?.('.finds-grid-outer') || null
-  if (!appendedAtEnd
-    || !view
+  if (!view
     || !outer
     || view.sort !== sort
     || view.variant !== variant
@@ -2706,11 +2841,14 @@ export function _appendFindsPage(addedItems, { appendedAtEnd = true } = {}) {
     return Promise.resolve(true)
   }
 
+  // The full current result order is what positions decide against; the added
+  // rows are a subset of it.
+  const targetList = _filterFindsItems(_currentFindsCache(context), context)
   const renderContext = {
     renderSequence: _findsRenderGuard.begin(),
     accountGeneration: currentAccountGeneration(),
   }
-  const renderPromise = _renderFindsAppend(list, outer, items, {
+  const renderPromise = _renderFindsAppend(list, outer, targetList, items, {
     variant,
     sort,
     renderContext,
@@ -2871,33 +3009,25 @@ function _findsDateGroupHtml(dateKey, variant, cardsHtml) {
       <div class="finds-grid finds-grid--${variant}" data-date-key="${_esc(dateKey)}">${cardsHtml}</div>`
 }
 
+// `_speciesKey()`'s "unidentified" sentinel starts with U+0000, and a browser's
+// HTML parser rewrites a literal NUL in an attribute value to U+FFFD. Writing
+// the raw key into `data-species-key` therefore produced an attribute that
+// could never match the key again, so every append touching the unidentified
+// group silently fell back to a full destructive render. Percent-encoding is
+// injective and DOM-safe, so the round trip holds for any key.
+function _findsSpeciesDomKey(key) {
+  return encodeURIComponent(String(key ?? ''))
+}
+
 function _findsSpeciesGroupHtml(key, label, count, variant, cardsHtml) {
-  return `<div class="finds-date-sep" data-species-key="${_esc(key)}">
+  const domKey = _esc(_findsSpeciesDomKey(key))
+  return `<div class="finds-date-sep" data-species-key="${domKey}">
         <div class="finds-date-line"></div>
         <span class="finds-date-label">${_esc(label)}</span>
         <div class="finds-date-line"></div>
       </div>
-      <div class="finds-species-meta" data-species-key="${_esc(key)}">${tp('finds.observationCount', count)}</div>
-      <div class="finds-grid finds-grid--${variant}" data-species-key="${_esc(key)}">${cardsHtml}</div>`
-}
-
-// Pure planner for a date-sorted append (plan §2.5). Server pages are
-// date-descending, so an added run either continues the currently terminal
-// date group or opens exactly one new group per date boundary it crosses.
-export function planFindsDateAppend(lastDateKey, addedItems) {
-  const plan = []
-  for (const obs of addedItems || []) {
-    const key = _findsDateKey(obs)
-    const tail = plan[plan.length - 1]
-    if (tail && tail.dateKey === key) {
-      tail.items.push(obs)
-      continue
-    }
-    // Only the first chunk can join the existing terminal group, and only
-    // when its date actually matches it; every later chunk is a boundary.
-    plan.push({ dateKey: key, items: [obs], isNewGroup: plan.length > 0 || key !== lastDateKey })
-  }
-  return plan
+      <div class="finds-species-meta" data-species-key="${domKey}">${tp('finds.observationCount', count)}</div>
+      <div class="finds-grid finds-grid--${variant}" data-species-key="${domKey}">${cardsHtml}</div>`
 }
 
 // Pure planner for a species-sorted append (plan §2.6). A newly discovered
@@ -3011,7 +3141,6 @@ async function _renderBySpecies(list, data, options = {}) {
       sort: 'species',
       variant,
       scope: currentScope,
-      lastDateKey: null,
       speciesGroups: groups.map(([key, group]) => ({
         key,
         label: group.label,
@@ -3150,7 +3279,6 @@ async function _renderCards(list, data, options) {
       sort: 'date',
       variant,
       scope: currentScope,
-      lastDateKey: groups.length ? groups[groups.length - 1].date : null,
       speciesGroups: null,
     }
     _restoreScroll()
