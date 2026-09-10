@@ -3029,3 +3029,102 @@ test('a second scroll cannot start another Feed page while the previous one is s
     supabase.storage.from = previousStorageFrom
   }
 })
+
+
+// A full render that commits while a load-more is parked on profile enrichment
+// renders straight off the cache — which already holds the in-flight page. The
+// delta must not then be inserted a second time. Both display transitions that
+// run `_applyFilter()` without touching `_loadFindsSeq` are covered: the sort
+// dropdown (`_selectFindsDropdownValue('sort', ...)` → `_setFindsSort` +
+// `_applyFilter`) and the view buttons (`_setFindsView` → `_applyFilter`).
+for (const transition of [
+  { label: 'sort change (Date → Species)', apply: () => { state.findsSort = 'species'; state.findsGroupBySpecies = true } },
+  { label: 'view change (Cards → Two)', apply: () => { state.findsView = 'two' } },
+]) {
+  test(`a ${transition.label} committing during page enrichment does not duplicate the in-flight delta`, async () => {
+    const feedRow = (id, date, createdAt) => ({
+      ...makeAppendObservation(id, { date, createdAt, genus: 'Boletus', species: 'edulis' }),
+      user_id: 'user-b',
+    })
+    const firstPage = Array.from({ length: 20 }, (_, i) =>
+      feedRow(1700 + i, '2026-09-03', `2026-09-03T${String(23 - i).padStart(2, '0')}:00:00Z`))
+    const secondPage = [feedRow(1800, '2026-09-02', '2026-09-02T09:00:00Z')]
+    const imageRows = {}
+    for (const obs of [...firstPage, ...secondPage]) imageRows[obs.id] = appendImageRow(obs.id)
+
+    const previousStorageFrom = supabase.storage.from
+    supabase.storage.from = () => ({ createSignedUrls: async () => ({ data: [], error: null }) })
+    const profileGate = makeProfileGate()
+    const harness = installAppendHarness({
+      observationPages: [{ data: firstPage, error: null }, { data: secondPage, error: null }],
+      imageRows,
+      profileGate,
+    })
+    const { list, scroller } = harness
+    Object.assign(state, { findsScopePrimary: 'feed', findsScopeFeed: 'all' })
+
+    try {
+      await loadFinds()
+      assert.equal(harness.cardIds().length, 20)
+      profileGate.armed = true
+
+      // Park the load-more at its profile lookup. The page is already in the
+      // cache at this point; only enrichment is outstanding.
+      scroller.scrollTop = 850
+      state.currentScreen = 'finds'
+      const parked = _maybeLoadMoreFinds()
+      for (let i = 0; i < 30; i++) await Promise.resolve()
+      assert.deepEqual(
+        _getFindsCacheForTests('feed').map(o => o.id).slice(-1),
+        ['1800'],
+        'the in-flight page is already in the cache while enrichment is pending',
+      )
+      assert.equal(harness.cardIds().length, 20, 'but it is not on screen yet')
+
+      // The user changes the display. This renders the whole cache — including
+      // the row the parked load-more is still carrying.
+      transition.apply()
+      await _applyFilter()
+      const idsAfterTransition = harness.cardIds()
+      assert.equal(idsAfterTransition.length, 21,
+        'the full render put the in-flight row on screen')
+      const cardsAfterTransition = new Map(
+        list.querySelectorAll('.find-card[data-id]').map(card => [card.dataset.id, card]),
+      )
+      const batchesAfterTransition = harness.imageIdBatches().length
+
+      // Now let the parked load-more finish.
+      profileGate.release()
+      await parked
+
+      const idsAfter = harness.cardIds()
+      assert.equal(new Set(idsAfter).size, idsAfter.length, 'every rendered card is a distinct observation')
+      assert.deepEqual(idsAfter, idsAfterTransition, 'the delta was not inserted a second time')
+
+      for (const [id, card] of cardsAfterTransition) {
+        const current = list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === id)
+        assert.equal(current, card, `card ${id} was not replaced`)
+        assert.equal(
+          card.listeners.filter(l => l.type === 'click').length,
+          1,
+          `card ${id} kept exactly one click handler — the resumed append must not rebind it`,
+        )
+      }
+
+      assert.equal(harness.imageIdBatches().length, batchesAfterTransition,
+        'no image metadata was re-fetched for a delta that is already on screen')
+
+      if (state.findsSort === 'species') {
+        const metas = list.querySelectorAll('.finds-species-meta[data-species-key]')
+        assert.equal(metas.length, 1)
+        // A node built by the full render carries its count as parsed text; the
+        // append path assigns `innerHTML` instead. Accept either.
+        assert.match(metas[0].innerHTML || metas[0].textContent, /21/,
+          'the species group count matches the rendered cards')
+      }
+    } finally {
+      harness.restore()
+      supabase.storage.from = previousStorageFrom
+    }
+  })
+}

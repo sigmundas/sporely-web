@@ -2677,6 +2677,15 @@ export function _findsInsertionAnchors(targetList, addedSet, keyOf = () => '') {
   return anchors
 }
 
+function _findsRenderedCardIds(list) {
+  const ids = new Set()
+  for (const card of list.querySelectorAll('.find-card[data-id]') || []) {
+    const id = card?.dataset?.id
+    if (id != null) ids.add(String(id))
+  }
+  return ids
+}
+
 // Anchors are always cards that were already on screen before this append, so
 // one snapshot taken up front is both correct and cheaper than re-querying the
 // list for every inserted row.
@@ -2833,10 +2842,24 @@ export function _appendFindsPage(addedItems) {
     return _applyFilter()
   }
 
+  // A page enters the cache before its caller finishes profile enrichment, and
+  // a sort / view / status change during that wait runs a full `_applyFilter()`
+  // straight off the cache — which already contains this delta. That render
+  // commits a list satisfying every check above (they compare the view against
+  // *current* state, not against state as of the fetch), so the delta would be
+  // inserted a second time: duplicate cards, inflated species counts, and a
+  // second click handler bound to the already-rendered card. Asking the DOM
+  // what it currently holds is the authoritative answer, and doing it here —
+  // before `_renderFindsAppend`'s image lookup — also keeps metadata from
+  // being re-fetched for rows that are already on screen.
+  const alreadyRendered = _findsRenderedCardIds(list)
   const items = _filterFindsItems(addedItems || [], context)
+    .filter(obs => !alreadyRendered.has(String(obs.id)))
   if (!items.length) {
-    // Nothing survived the active visibility/status/search predicates: the
-    // footer still has to reflect the new paging state.
+    // Nothing left to add: either nothing survived the active
+    // visibility/status/search predicates, or an intervening full render
+    // already put these rows on screen. Either way the footer still has to
+    // reflect the new paging state.
     _updateFindsFooter(list, context.currentScope)
     return Promise.resolve(true)
   }
