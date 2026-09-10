@@ -1,0 +1,21 @@
+project = "sporely-web"
+
+[repo]
+root = "."
+
+[commands]
+test = "npm test"
+build = "npm run build"
+lint = "npx eslint ."
+
+[agents.stage]
+provider = "claude-cli"
+
+[agents.sparring]
+provider = "codex-cli"
+
+[sparring]
+default_mode = "local-auto"
+
+[stage]
+self_check = true

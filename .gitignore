@@ -44,3 +44,6 @@ exports/public-geography-*.csv
 exports/admin-public-geography-*.csv
 exports/geocode-cache.json
 backups/
+
+# agent-sparring V2 per-stage working artifacts (project.toml/PROJECT.md are tracked)
+.sparring/stages/
