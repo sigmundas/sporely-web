@@ -1202,3 +1202,12 @@ literal special-character search) remain outstanding — not run, not assumed
 passing. This pass fixes only the third review's code-level finding.
 Next exact action: fresh independent `sporely-sparring` review of the new
 candidate.
+
+
+### Stage 1 final manual evidence and acceptance attempt — 2026-09-10
+
+User explicitly confirmed in the fresh sparring session: "Test 2 passes with that candidate", referring to 453c834d0e27604a3cb4bc20e6b95146c61e25c2. Test 2 is passed on this exact candidate; do not request it again. Previous manual dispositions for tests 1, 3 and 4 remain valid, including the deliberate literal-star limitation, not a claim of literal-star support. This supersedes earlier outstanding-manual-test statements above.
+
+Reviewer checked unchanged HEAD and clean working tree, inspected the third-correction product diff, and reran node --test src/screens/finds.test.js: 45 pass, 0 fail. Combined with the recorded prior code review, substantive verdict is Confirmed. Broader verification retains its prior recorded disposition; no new broader run is claimed. No product files changed.
+
+The shared workflow backend refused the confirmed receipt (exit 2): acceptance cannot be recorded from changes_requested while a revision is pending. Durable status did not move: changes_requested; expected_starting_head remains 453c834d0e27604a3cb4bc20e6b95146c61e25c2. Stage 1 is not mechanically accepted or archived, and Stage 2 has not been opened. Next action is documentation-only revision bookkeeping in the implementation session: preserve this evidence in a new candidate, stamp with mark_candidate, then fresh acceptance review. No further product fix or repeated manual test is requested. No specialist reviewer is needed for this documentation-only follow-up.
