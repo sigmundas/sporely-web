@@ -34,10 +34,12 @@ test('sliceBetweenAnchors returns the region between two anchors', () => {
 })
 
 test('sliceBetweenAnchors searches the end anchor after the start, not globally', () => {
-  // 'x' occurs before the start anchor; a global indexOf would invert the
-  // window and silently return ''. The region must be the later one.
-  const src = 'x-early START middle x-late END'
-  assert.equal(sliceBetweenAnchors(src, 'START', 'x-late', 'fake.js'), 'START middle ')
+  // The SAME end literal occurs both before and after the start anchor. A
+  // global indexOf would find the earlier 'END' at offset 0, invert the window
+  // and silently return ''. Only searching from after the start anchor yields
+  // the real region — so this case fails if the search offset is dropped.
+  const src = 'END START middle END'
+  assert.equal(sliceBetweenAnchors(src, 'START', 'END', 'fake.js'), 'START middle ')
 })
 
 test('sliceBetweenAnchors blames the end anchor when only the end is stale', () => {

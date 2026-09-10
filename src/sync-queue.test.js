@@ -188,12 +188,13 @@ test('sync queue no insertObservationImage after upload in upload loop', () => {
     'await uploadPreparedObservationImageVariants(preparedImage, path, {',
     './sync-queue.js',
   )
-  // insertObservationImage should not appear after the upload call
-  // NOTE: 'insertObservationImage' does not appear anywhere in sync-queue.js
-  // today (the call site was renamed to reserveObservationImage). This
-  // assertion is therefore vacuously true and no longer covers a live
-  // invariant — see stage report for details; left as-is per scope (no
-  // picking a new anchor to quietly restore coverage).
+  // insertObservationImage should not appear after the upload call.
+  // NOTE: 'await insertObservationImage(' is the FORBIDDEN substring here, not
+  // a slice anchor. It is absent from sync-queue.js today, and that absence is
+  // the invariant passing — the row is reserved before upload instead. The
+  // function still exists and is exported from images.js, so reintroducing a
+  // call here would fail this assertion. Do not mistake the absent literal for
+  // a stale anchor: the anchor is the upload call below, which is checked.
   const afterUpload = source.slice(uploadIndex)
   assert.ok(!afterUpload.includes('await insertObservationImage('), 'insertObservationImage should not be called after upload')
 })
