@@ -4,6 +4,11 @@ import assert from 'node:assert/strict'
 import { state } from '../state.js'
 import { LOCATION_STATE_CHANGED_EVENT } from '../geo.js'
 import { supabase } from '../supabase.js'
+import { registerCssLoader } from '../../test/register-css-loader.mjs'
+
+// `./map.js` imports Leaflet's stylesheets, which only Vite can resolve.
+// Register the stub loader before any `await import('./map.js')` below.
+registerCssLoader()
 
 const defaultLocationState = () => ({
   preference: 'ask',
