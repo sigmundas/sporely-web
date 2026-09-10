@@ -19,6 +19,8 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
+import { indexOfAnchor, sliceAfterAnchor, sliceBetweenAnchors } from './anchor-slice.js'
+
 import {
   NATIVE_NETWORK_LOSS_REASON,
   NATIVE_NETWORK_REASON,
@@ -145,9 +147,7 @@ test('L7/QA3: transient false/true burst — every event is a wake-up; downstrea
 
 test('handleConnectivityLost downgrades same user COMPLETE→CACHED behind identity gates', () => {
   const main = readSrc('main.js')
-  const idx = main.indexOf('export function handleConnectivityLost(')
-  assert.ok(idx > 0, 'main.js must export handleConnectivityLost')
-  const chunk = main.slice(idx, idx + 2400)
+  const chunk = sliceAfterAnchor(main, 'export function handleConnectivityLost(', 2400, 'main.js')
   // Gate 1: only a stale COMPLETE downgrades.
   assert.match(chunk, /AUTHENTICATED_COMPLETE/)
   // Gates 2-4: state.user, validated snapshot and local-data owner must all
@@ -171,9 +171,7 @@ test('native monitor is bound with BOTH callbacks; window offline is a loss hint
 
 test('no permanent COMPLETE poller: watchdog stays CACHED-only', () => {
   const main = readSrc('main.js')
-  const idx = main.indexOf('function _cachedWatchdogEligible()')
-  assert.ok(idx > 0)
-  const chunk = main.slice(idx, idx + 600)
+  const chunk = sliceAfterAnchor(main, 'function _cachedWatchdogEligible()', 600, 'main.js')
   assert.match(chunk, /!== AUTH_STATE\.AUTHENTICATED_CACHED\) return false/)
 })
 
@@ -181,9 +179,8 @@ test('no permanent COMPLETE poller: watchdog stays CACHED-only', () => {
 
 test('review Save performs no network I/O before the durable queue write', () => {
   const review = readSrc('screens/review.js')
-  const start = review.indexOf('async function saveObservationBatch()')
-  assert.ok(start > 0)
-  const enqueueIdx = review.indexOf("_reviewDependency('enqueueObservation')", start)
+  const start = indexOfAnchor(review, 'async function saveObservationBatch()', 'screens/review.js')
+  const enqueueIdx = indexOfAnchor(review, "_reviewDependency('enqueueObservation')", 'screens/review.js', start)
   assert.ok(enqueueIdx > start)
   const preQueue = review.slice(start, enqueueIdx)
   assert.equal(/supabase|fetchCloudPlanProfile|prepareImageVariants|refreshHome|openFinds\(/.test(preQueue), false,
@@ -192,33 +189,34 @@ test('review Save performs no network I/O before the durable queue write', () =>
 
 test('post-save refresh/navigation failures cannot surface as "Could not queue observation"', () => {
   const review = readSrc('screens/review.js')
-  const start = review.indexOf('async function saveObservationBatch()')
-  const enqueueIdx = review.indexOf("_reviewDependency('enqueueObservation')", start)
-  const catchIdx = review.indexOf("t('review.syncFailed'", start)
+  const start = indexOfAnchor(review, 'async function saveObservationBatch()', 'screens/review.js')
+  const enqueueIdx = indexOfAnchor(review, "_reviewDependency('enqueueObservation')", 'screens/review.js', start)
+  const catchIdx = indexOfAnchor(review, "t('review.syncFailed'", 'screens/review.js', start)
   assert.ok(catchIdx > enqueueIdx)
   const postQueue = review.slice(enqueueIdx, catchIdx)
   // refreshHome and openFinds each run inside their own try/catch so a
   // transport error after the durable write never reaches the outer catch.
-  const refreshIdx = postQueue.indexOf("_reviewDependency('refreshHome')")
-  const findsIdx = postQueue.indexOf("_reviewDependency('openFinds')")
-  assert.ok(refreshIdx > 0 && findsIdx > 0)
+  const postQueueLabel = 'screens/review.js (saveObservationBatch, between the enqueue and the outer catch)'
+  const refreshIdx = indexOfAnchor(postQueue, "_reviewDependency('refreshHome')", postQueueLabel)
+  const findsIdx = indexOfAnchor(postQueue, "_reviewDependency('openFinds')", postQueueLabel)
   assert.match(postQueue.slice(Math.max(0, refreshIdx - 250), refreshIdx), /try\s*\{/)
   assert.match(postQueue.slice(Math.max(0, findsIdx - 250), findsIdx), /try\s*\{/)
 })
 
 test('sync pass survives a transport failure during session refresh (stale-COMPLETE race)', () => {
   const queue = readSrc('sync-queue.js')
-  const idx = queue.indexOf('async function _runSyncQueue()')
-  const chunk = queue.slice(idx, idx + 1600)
+  const chunk = sliceAfterAnchor(queue, 'async function _runSyncQueue()', 1600, 'sync-queue.js')
   assert.match(chunk, /try\s*\{\s*\n\s*session = await getSharedAuthSession\(\{ refresh: true \}\)\s*\n\s*\} catch/)
 })
 
 test('enqueueObservation is IndexedDB-only (no supabase/network before the commit)', () => {
   const queue = readSrc('sync-queue.js')
-  const idx = queue.indexOf('async function _enqueueObservation(')
-  assert.ok(idx > 0)
-  const end = queue.indexOf('export async function getQueuedObservations', idx)
-  const chunk = queue.slice(idx, end)
+  const chunk = sliceBetweenAnchors(
+    queue,
+    'async function _enqueueObservation(',
+    'export async function getQueuedObservations',
+    'sync-queue.js',
+  )
   assert.equal(/supabase|fetch\(|getSharedAuthSession|fetchCloudPlanProfile/.test(chunk), false)
 })
 
@@ -248,12 +246,12 @@ test('recovery never resolves to a remote id claimed by another queue item', () 
 
 test('processor: attempt marker persists BEFORE the insert; new ids are claimed', () => {
   const queue = readSrc('sync-queue.js')
-  const loopIdx = queue.indexOf('for (const item of items) {')
-  assert.ok(loopIdx > 0)
+  const loopIdx = indexOfAnchor(queue, 'for (const item of items) {', 'sync-queue.js')
   const chunk = queue.slice(loopIdx)
-  const markerIdx = chunk.indexOf('syncInsertAttemptedAt: Date.now()')
-  const insertIdx = chunk.indexOf(".from('observations').insert(")
-  assert.ok(markerIdx > 0 && insertIdx > markerIdx, 'attempt marker must persist before the insert request')
+  const loopLabel = 'sync-queue.js (the `for (const item of items)` processing loop)'
+  const markerIdx = indexOfAnchor(chunk, 'syncInsertAttemptedAt: Date.now()', loopLabel)
+  const insertIdx = indexOfAnchor(chunk, ".from('observations').insert(", loopLabel)
+  assert.ok(insertIdx > markerIdx, 'attempt marker must persist before the insert request')
   assert.match(chunk, /obsId = obsData\.id\s*\n\s*claimedRemoteIds\.add\(obsId\)/)
   // Recovery is gated and claim-aware.
   assert.match(chunk, /if \(!obsId && shouldAttemptRemoteRecovery\(item\)\)/)
@@ -264,25 +262,23 @@ test('processor: attempt marker persists BEFORE the insert; new ids are claimed'
 
 test('J: finalization deletes ONLY the confirmed item, after remote proof', () => {
   const queue = readSrc('sync-queue.js')
-  const idx = queue.indexOf('async function _finalizeSyncedQueueItem(')
-  assert.ok(idx > 0)
-  const chunk = queue.slice(idx, idx + 1200)
+  const chunk = sliceAfterAnchor(queue, 'async function _finalizeSyncedQueueItem(', 1200, 'sync-queue.js')
   // Remote confirmation (parent row + full image count) precedes deletion.
-  const confirmIdx = chunk.indexOf('remoteState.observationExists')
-  const countIdx = chunk.indexOf('completedIndexes.length >= expectedImageCount')
-  const throwIdx = chunk.indexOf('Sync confirmation incomplete')
-  const deleteIdx = chunk.indexOf('_deleteQueueItem(item.id)')
-  assert.ok(confirmIdx > 0 && countIdx > 0 && throwIdx > 0 && deleteIdx > throwIdx,
-    'delete must follow the remote-confirmation throw guard')
+  const finalizeLabel = 'sync-queue.js (the first 1200 chars of _finalizeSyncedQueueItem)'
+  indexOfAnchor(chunk, 'remoteState.observationExists', finalizeLabel)
+  indexOfAnchor(chunk, 'completedIndexes.length >= expectedImageCount', finalizeLabel)
+  const throwIdx = indexOfAnchor(chunk, 'Sync confirmation incomplete', finalizeLabel)
+  const deleteIdx = indexOfAnchor(chunk, '_deleteQueueItem(item.id)', finalizeLabel)
+  assert.ok(deleteIdx > throwIdx, 'delete must follow the remote-confirmation throw guard')
   // Only the finalized item's own id is ever deleted (Q1 cannot delete Q2/Q3).
-  const loopChunk = queue.slice(queue.indexOf('for (const item of items) {'))
+  const loopChunk = queue.slice(indexOfAnchor(queue, 'for (const item of items) {', 'sync-queue.js'))
   const deleteCalls = loopChunk.match(/_deleteQueueItem\(([^)]*)\)/g) || []
   assert.deepEqual(deleteCalls, [], 'the processing loop must never delete directly — only _finalizeSyncedQueueItem may')
 })
 
 test('K2/K3: a retryable error halts the pass, retaining the failed and later items', () => {
   const queue = readSrc('sync-queue.js')
-  const loopChunk = queue.slice(queue.indexOf('for (const item of items) {'))
+  const loopChunk = queue.slice(indexOfAnchor(queue, 'for (const item of items) {', 'sync-queue.js'))
   // Retryable failures mark the item 'retrying' and break — later items stay
   // queued untouched; the scheduled retry pass resumes them (no duplicate
   // insert for finished items because their queue records are already gone).

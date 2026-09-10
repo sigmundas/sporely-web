@@ -13,6 +13,7 @@ import {
   isPrivacySlotLimitError,
 } from './sync-queue.js'
 import { resolveMediaSources, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
+import { indexOfAnchor, sliceAfterAnchor, sliceBetweenAnchors } from './anchor-slice.js'
 
 test('isPrivacySlotLimitError matches the privacy-cap server payload', () => {
   assert.equal(
@@ -142,25 +143,35 @@ test('legacy thumbnail-style media keys normalize to the canonical thumb path', 
 
 test('finds refresh renders local data before starting background sync', () => {
   const source = fs.readFileSync(new URL('./screens/finds.js', import.meta.url), 'utf8')
-  const refreshStart = source.indexOf('async function _refreshFindsFeed()')
-  const refreshEnd = source.indexOf('function _bindPullToRefresh()', refreshStart)
-
-  assert.ok(refreshStart >= 0)
-  assert.ok(refreshEnd > refreshStart)
-
-  const refreshBlock = source.slice(refreshStart, refreshEnd)
+  const refreshBlock = sliceBetweenAnchors(
+    source,
+    'async function _refreshFindsFeed()',
+    'function _bindPullToRefresh()',
+    './screens/finds.js',
+  )
   assert.match(refreshBlock, /await loadFinds\(\)/)
   assert.match(refreshBlock, /void triggerSync\(\)\.catch/)
-  assert.ok(refreshBlock.indexOf('await loadFinds()') < refreshBlock.indexOf('void triggerSync().catch'))
+  assert.ok(
+    indexOfAnchor(refreshBlock, 'await loadFinds()', './screens/finds.js (refresh block)')
+      < indexOfAnchor(refreshBlock, 'void triggerSync().catch', './screens/finds.js (refresh block)'),
+  )
 })
 
 test('sync queue reserves row before upload in the upload loop', () => {
   const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
-  const reserveIndex = source.indexOf('await reserveObservationImage({')
-  const uploadIndex = source.indexOf('await uploadPreparedObservationImageVariants(preparedImage, path, {')
-  const syncKeysIndex = source.indexOf('await syncObservationMediaKeys(obsId, path, { sortOrder: i })', uploadIndex)
+  const reserveIndex = indexOfAnchor(source, 'await reserveObservationImage({', './sync-queue.js')
+  const uploadIndex = indexOfAnchor(
+    source,
+    'await uploadPreparedObservationImageVariants(preparedImage, path, {',
+    './sync-queue.js',
+  )
+  const syncKeysIndex = indexOfAnchor(
+    source,
+    'await syncObservationMediaKeys(obsId, path, { sortOrder: i })',
+    './sync-queue.js',
+    uploadIndex,
+  )
 
-  assert.ok(reserveIndex >= 0, 'reserveObservationImage should be called in upload loop')
   assert.ok(uploadIndex > reserveIndex, 'upload should come after reserve')
   assert.ok(syncKeysIndex > uploadIndex, 'syncObservationMediaKeys should come after upload')
 })
@@ -172,9 +183,17 @@ test('sync queue reuses persisted reservedImageId', () => {
 
 test('sync queue no insertObservationImage after upload in upload loop', () => {
   const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
-  const uploadIndex = source.indexOf('await uploadPreparedObservationImageVariants(preparedImage, path, {')
-  assert.ok(uploadIndex >= 0)
+  const uploadIndex = indexOfAnchor(
+    source,
+    'await uploadPreparedObservationImageVariants(preparedImage, path, {',
+    './sync-queue.js',
+  )
   // insertObservationImage should not appear after the upload call
+  // NOTE: 'insertObservationImage' does not appear anywhere in sync-queue.js
+  // today (the call site was renamed to reserveObservationImage). This
+  // assertion is therefore vacuously true and no longer covers a live
+  // invariant — see stage report for details; left as-is per scope (no
+  // picking a new anchor to quietly restore coverage).
   const afterUpload = source.slice(uploadIndex)
   assert.ok(!afterUpload.includes('await insertObservationImage('), 'insertObservationImage should not be called after upload')
 })
@@ -187,11 +206,18 @@ test('sync queue repair path preserves resolved geography on observation inserts
 
 test('sync queue keeps old records compatible and persists new taxonomy identity after insert', () => {
   const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
-  const extractIndex = source.indexOf('takeQueuedTaxonomySelection(observationPayload)')
-  const insertIndex = source.indexOf("supabase.from('observations').insert(repairedPayload)")
-  const persistIndex = source.indexOf('persistObservationTaxonomySelection(obsId, queuedTaxonomySelection)')
+  const extractIndex = indexOfAnchor(source, 'takeQueuedTaxonomySelection(observationPayload)', './sync-queue.js')
+  const insertIndex = indexOfAnchor(
+    source,
+    "supabase.from('observations').insert(repairedPayload)",
+    './sync-queue.js',
+  )
+  const persistIndex = indexOfAnchor(
+    source,
+    'persistObservationTaxonomySelection(obsId, queuedTaxonomySelection)',
+    './sync-queue.js',
+  )
 
-  assert.ok(extractIndex > 0)
   assert.ok(insertIndex > extractIndex)
   assert.ok(persistIndex > insertIndex)
   assert.match(source, /if \(queuedTaxonomySelection\) \{/)
@@ -199,9 +225,12 @@ test('sync queue keeps old records compatible and persists new taxonomy identity
 
 test('find_detail direct upload reserves row before upload', () => {
   const source = fs.readFileSync(new URL('./screens/find_detail.js', import.meta.url), 'utf8')
-  const reserveIndex = source.indexOf('await reserveObservationImage({')
-  const uploadIndex = source.indexOf('await uploadPreparedObservationImageVariants(preparedImage, storagePath, {')
-  assert.ok(reserveIndex >= 0, 'reserveObservationImage should be called in find_detail direct upload')
+  const reserveIndex = indexOfAnchor(source, 'await reserveObservationImage({', './screens/find_detail.js')
+  const uploadIndex = indexOfAnchor(
+    source,
+    'await uploadPreparedObservationImageVariants(preparedImage, storagePath, {',
+    './screens/find_detail.js',
+  )
   assert.ok(uploadIndex > reserveIndex, 'upload should come after reserve in find_detail')
 })
 
@@ -210,19 +239,30 @@ test('find_detail direct upload reserves row before upload', () => {
 test('find_detail: definite 4xx deletes R2 bytes via deleteObservationMedia before removing row', () => {
   const source = fs.readFileSync(new URL('./screens/find_detail.js', import.meta.url), 'utf8')
   // On definite 4xx, bytes must be cleaned before the DB row is deleted
-  const deleteMediaIndex = source.indexOf('await deleteObservationMedia([storagePath])')
-  const deleteRowIndex = source.indexOf("supabase.from('observation_images').delete().eq('id', reservedRow.id)")
-  assert.ok(deleteMediaIndex >= 0, 'deleteObservationMedia([storagePath]) must be called on definite 4xx')
+  const deleteMediaIndex = indexOfAnchor(
+    source,
+    'await deleteObservationMedia([storagePath])',
+    './screens/find_detail.js',
+  )
+  const deleteRowIndex = indexOfAnchor(
+    source,
+    "supabase.from('observation_images').delete().eq('id', reservedRow.id)",
+    './screens/find_detail.js',
+  )
   assert.ok(deleteRowIndex > deleteMediaIndex, 'DB row delete must come after byte cleanup')
 })
 
 test('find_detail: definite 4xx cleanup is inside the 4xx branch', () => {
   const source = fs.readFileSync(new URL('./screens/find_detail.js', import.meta.url), 'utf8')
   // Both cleanup calls must appear inside the 'Worker upload failed (4' branch
-  const fourxxBranchStart = source.indexOf("includes('Worker upload failed (4')")
-  const deleteMediaIndex = source.indexOf('await deleteObservationMedia([storagePath])', fourxxBranchStart)
-  assert.ok(fourxxBranchStart >= 0 && deleteMediaIndex >= 0 && deleteMediaIndex > fourxxBranchStart,
-    'byte cleanup must be in the definite-4xx branch')
+  const fourxxBranchStart = indexOfAnchor(source, "includes('Worker upload failed (4')", './screens/find_detail.js')
+  const deleteMediaIndex = indexOfAnchor(
+    source,
+    'await deleteObservationMedia([storagePath])',
+    './screens/find_detail.js',
+    fourxxBranchStart,
+  )
+  assert.ok(deleteMediaIndex > fourxxBranchStart, 'byte cleanup must be in the definite-4xx branch')
 })
 
 test('find_detail: ambiguous failure invokes verifyWorkerObjectExists, not blind delete', () => {
@@ -231,8 +271,8 @@ test('find_detail: ambiguous failure invokes verifyWorkerObjectExists, not blind
   assert.ok(source.includes('verifyWorkerObjectExists(path)'),
     'find_detail must call verifyWorkerObjectExists on ambiguous failure')
   // Verify the ambiguous path does NOT unconditionally delete the row
-  const elseIndex = source.indexOf('} else {\n          // Ambiguous failure')
-  const verifyIndex = source.indexOf('verifyWorkerObjectExists(path)', elseIndex)
+  const elseIndex = indexOfAnchor(source, '} else {\n          // Ambiguous failure', './screens/find_detail.js')
+  const verifyIndex = indexOfAnchor(source, 'verifyWorkerObjectExists(path)', './screens/find_detail.js', elseIndex)
   assert.ok(verifyIndex > elseIndex, 'verifyWorkerObjectExists must be in the ambiguous-failure else branch')
 })
 
@@ -240,29 +280,31 @@ test('find_detail: full and thumb share the same storagePath (same image id via 
   const source = fs.readFileSync(new URL('./screens/find_detail.js', import.meta.url), 'utf8')
   // The reservedRow.id is passed as imageId to uploadPreparedObservationImageVariants which
   // uploads both full and thumb with that id in the X-Sporely-Image-Id header.
-  const reserveCallIndex = source.indexOf('await reserveObservationImage({')
-  const uploadCallIndex = source.indexOf('await uploadPreparedObservationImageVariants(preparedImage, storagePath, {')
-  const imageIdInUpload = source.indexOf('imageId: reservedRow.id', uploadCallIndex)
+  const reserveCallIndex = indexOfAnchor(source, 'await reserveObservationImage({', './screens/find_detail.js')
+  const uploadCallIndex = indexOfAnchor(
+    source,
+    'await uploadPreparedObservationImageVariants(preparedImage, storagePath, {',
+    './screens/find_detail.js',
+  )
+  const imageIdInUpload = indexOfAnchor(source, 'imageId: reservedRow.id', './screens/find_detail.js', uploadCallIndex)
   assert.ok(imageIdInUpload > uploadCallIndex, 'imageId: reservedRow.id must be passed to uploadPreparedObservationImageVariants')
   assert.ok(reserveCallIndex < uploadCallIndex, 'reservation precedes upload')
 })
 
 test('sync queue: definite 4xx cleans bytes via deleteObservationMedia then nulls reservedImageId', () => {
   const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
-  const fourxxBranchIndex = source.indexOf("includes('Worker upload failed (4')")
-  assert.ok(fourxxBranchIndex >= 0, 'sync-queue must have a definite-4xx branch after upload')
-  const deleteMediaIndex = source.indexOf('await deleteObservationMedia([path])', fourxxBranchIndex)
+  const fourxxBranchIndex = indexOfAnchor(source, "includes('Worker upload failed (4')", './sync-queue.js')
+  const deleteMediaIndex = indexOfAnchor(source, 'await deleteObservationMedia([path])', './sync-queue.js', fourxxBranchIndex)
   assert.ok(deleteMediaIndex > fourxxBranchIndex, 'deleteObservationMedia([path]) must be called on definite 4xx in sync-queue')
-  const nullReserveIndex = source.indexOf('reservedImageId: null', fourxxBranchIndex)
+  const nullReserveIndex = indexOfAnchor(source, 'reservedImageId: null', './sync-queue.js', fourxxBranchIndex)
   assert.ok(nullReserveIndex > fourxxBranchIndex, 'reservedImageId must be nulled on definite 4xx so retry gets a fresh reservation')
 })
 
 test('sync queue: retry reuses persisted reservedImageId (no second reservation)', () => {
   const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
   // Guard: the code checks reservedImageId before calling reserveObservationImage
-  const guardIndex = source.indexOf('image.reservedImageId')
-  const reserveIndex = source.indexOf('await reserveObservationImage({')
-  assert.ok(guardIndex >= 0 && reserveIndex > 0, 'code must guard reserveObservationImage with existing reservedImageId check')
+  const guardIndex = indexOfAnchor(source, 'image.reservedImageId', './sync-queue.js')
+  const reserveIndex = indexOfAnchor(source, 'await reserveObservationImage({', './sync-queue.js')
   // The guard must come before the reserve call
   assert.ok(guardIndex < reserveIndex, 'reservedImageId guard must precede reserveObservationImage call')
 })
@@ -272,26 +314,30 @@ test('sync queue: reservation merge is Blob-safe for legacy imageBlobs entries',
   // Both reservation merges (persist id after reserve; null id on 4xx) must
   // guard against spreading a raw Blob (which yields {} and silently loses
   // the bytes for legacy queue entries).
-  const persistMerge = source.indexOf('// Persist so retry reuses the same row')
-  assert.ok(persistMerge >= 0, 'persist-reservation merge must exist')
-  const persistWindow = source.slice(persistMerge, persistMerge + 800)
+  const persistWindow = sliceAfterAnchor(
+    source,
+    '// Persist so retry reuses the same row',
+    800,
+    './sync-queue.js',
+  )
   assert.match(persistWindow, /isBlob\(entries\[i\]\)/, 'persist merge must isBlob-guard the existing slot')
   assert.match(persistWindow, /_serializeQueuedImageForStorage\(preparedImage\)/, 'persist merge must fall back to serialized preparedImage when slot is a Blob')
 
-  const fourxxIdx = source.indexOf("includes('Worker upload failed (4')")
-  const fourxxWindow = source.slice(fourxxIdx, fourxxIdx + 1200)
+  const fourxxWindow = sliceAfterAnchor(source, "includes('Worker upload failed (4')", 1200, './sync-queue.js')
   assert.match(fourxxWindow, /isBlob\(entries\[i\]\)/, '4xx merge must isBlob-guard the existing slot')
 })
 
 test('sync queue: ambiguous (non-4xx) failure does not call deleteObservationMedia', () => {
   const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
   // deleteObservationMedia must only appear inside the definite-4xx branch
-  const catchBlock = source.slice(source.indexOf("includes('Worker upload failed (4')"))
+  const fourxxStart = indexOfAnchor(source, "includes('Worker upload failed (4')", './sync-queue.js')
+  const catchBlock = source.slice(fourxxStart)
   // The deleteObservationMedia call should be INSIDE the 4xx if block, before the closing brace
   // Verify it's not in an else/catch branch for ambiguous errors
-  const fourxxClose = catchBlock.indexOf('\n          }\n          throw uploadErr')
-  const deleteInBranch = catchBlock.indexOf('await deleteObservationMedia([path])')
-  assert.ok(deleteInBranch >= 0 && deleteInBranch < fourxxClose,
+  const catchLabel = './sync-queue.js (from the definite-4xx branch onwards)'
+  const fourxxClose = indexOfAnchor(catchBlock, '\n          }\n          throw uploadErr', catchLabel)
+  const deleteInBranch = indexOfAnchor(catchBlock, 'await deleteObservationMedia([path])', catchLabel)
+  assert.ok(deleteInBranch < fourxxClose,
     'deleteObservationMedia must only be in the definite-4xx branch, not the ambiguous path')
 })
 
@@ -315,35 +361,40 @@ test('classifySessionRefreshFailure falls back to unknown for an unclassified er
 
 test('sync queue: empty-queue check runs before the auth session refresh in _runSyncQueue', () => {
   const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
-  const fnStart = source.indexOf('async function _runSyncQueue()')
-  const fnBodyEnd = source.indexOf('\nexport async function triggerSync()')
-  assert.ok(fnStart >= 0 && fnBodyEnd > fnStart, 'must locate _runSyncQueue body')
-  const body = source.slice(fnStart, fnBodyEnd)
+  const body = sliceBetweenAnchors(
+    source,
+    'async function _runSyncQueue()',
+    '\nexport async function triggerSync()',
+    './sync-queue.js',
+  )
 
-  const readItemsIndex = body.indexOf('const items = await _readQueueItems()')
-  const emptyReturnIndex = body.indexOf('if (!items || !items.length) return', readItemsIndex)
-  const sessionFetchIndex = body.indexOf('await getSharedAuthSession({ refresh: true })')
+  const bodyLabel = './sync-queue.js (the _runSyncQueue body)'
+  const readItemsIndex = indexOfAnchor(body, 'const items = await _readQueueItems()', bodyLabel)
+  const emptyReturnIndex = indexOfAnchor(body, 'if (!items || !items.length) return', bodyLabel, readItemsIndex)
+  const sessionFetchIndex = indexOfAnchor(body, 'await getSharedAuthSession({ refresh: true })', bodyLabel)
 
-  assert.ok(readItemsIndex >= 0, '_readQueueItems() call must be present')
   assert.ok(emptyReturnIndex > readItemsIndex, 'empty-queue return must follow the queue read')
   assert.ok(sessionFetchIndex > emptyReturnIndex,
     'getSharedAuthSession must not run until after the queue is confirmed non-empty — a native resume with nothing queued must not touch Supabase auth')
 
   // The queue read/empty-check must not itself sit inside the try/catch that
   // wraps the session fetch, confirming it is unconditional and prior.
-  const tryIndex = body.indexOf('try {', sessionFetchIndex - 20)
+  // Clamp the lookback: the original intent is "the try block starts a
+  // little before the session fetch", not "search from a negative offset".
+  const tryIndex = indexOfAnchor(body, 'try {', bodyLabel, Math.max(0, sessionFetchIndex - 20))
   assert.ok(tryIndex > emptyReturnIndex, 'the queue-empty check must be outside and before the session-refresh try block')
 })
 
 test('sync queue: session-refresh catch block classifies the error instead of hardcoding (transport)', () => {
   const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
-  const fnStart = source.indexOf('async function _runSyncQueue()')
-  const fnBodyEnd = source.indexOf('\nexport async function triggerSync()')
-  const body = source.slice(fnStart, fnBodyEnd)
+  const body = sliceBetweenAnchors(
+    source,
+    'async function _runSyncQueue()',
+    '\nexport async function triggerSync()',
+    './sync-queue.js',
+  )
 
-  const catchIndex = body.indexOf('} catch (err) {')
-  assert.ok(catchIndex >= 0, 'session-refresh catch block must exist')
-  const catchBlock = body.slice(catchIndex, catchIndex + 400)
+  const catchBlock = sliceAfterAnchor(body, '} catch (err) {', 400, './sync-queue.js (the _runSyncQueue body)')
 
   assert.match(catchBlock, /classifySessionRefreshFailure\(err\)/,
     'catch block must classify the error rather than assuming transport')

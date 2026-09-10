@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
+import { indexOfAnchor, sliceBetweenAnchors } from '../anchor-slice.js'
+
 // Stage B2b: capability gate defaults to blocking non-COMPLETE states.
 import { AUTH_STATE, setAuthState } from '../auth-state.js'
 setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: 'test-user' })
@@ -377,13 +379,12 @@ function _seedReviewState({
 
 test('review service-tab clicks update the ai block without rebuilding the grid', () => {
   const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
-  const start = source.indexOf("tab.addEventListener('click', () => {")
-  const end = source.indexOf('// Wire the in-card uncertain toggle (replaces the static #review-uncertain)')
-
-  assert.ok(start >= 0)
-  assert.ok(end > start)
-
-  const block = source.slice(start, end)
+  const block = sliceBetweenAnchors(
+    source,
+    "tab.addEventListener('click', () => {",
+    '// Wire the in-card uncertain toggle (replaces the static #review-uncertain)',
+    'review.js',
+  )
   assert.match(block, /_renderReviewAiBlock\(\)/)
   assert.match(block, /shouldRunServiceFromTab\(serviceState\)/)
   assert.doesNotMatch(block, /buildReviewGrid\(\)/)
@@ -402,12 +403,12 @@ test('review crop hint switches to adjust copy and disappears once a custom crop
 
 test('review location events update metadata without rebuilding thumbnails', () => {
   const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
-  const listenerStart = source.indexOf('reviewLocationStateListener = () => {')
-  const listenerEnd = source.indexOf('currentWindow.addEventListener(LOCATION_STATE_CHANGED_EVENT', listenerStart)
-  assert.ok(listenerStart >= 0)
-  assert.ok(listenerEnd > listenerStart)
-
-  const listenerBlock = source.slice(listenerStart, listenerEnd)
+  const listenerBlock = sliceBetweenAnchors(
+    source,
+    'reviewLocationStateListener = () => {',
+    'currentWindow.addEventListener(LOCATION_STATE_CHANGED_EVENT',
+    'review.js',
+  )
   assert.match(listenerBlock, /_syncReviewLocationStateUi\(\)/)
   assert.doesNotMatch(listenerBlock, /buildReviewGrid\(\)/)
   assert.doesNotMatch(listenerBlock, /loadThumbnails\(/)
@@ -1165,18 +1166,20 @@ test('review ai flow keeps the setting-selected primary service and refreshes av
   assert.match(source, /const inaturalistSession = await _reviewDependency\('loadInaturalistSession'\)\(\)\s+const availabilityList = await _reviewDependency\('getAvailableIdentifyServices'\)\(\{\s+blobs: images,\s+inaturalistSession,/)
   assert.match(source, /if \(!reviewAiState\.activeService\) {\s+reviewAiState\.activeService = _resolveReviewPhotoIdServices\(reviewAiState\.availability\)\.primary\s+}/)
   assert.match(source, /if \(reviewAiRunController === runController\) {\s+reviewAiRunController = null\s+reviewAiState\.running = false\s+reviewAiState\.stale = false\s+reviewAiState\.requestedFingerprint = reviewAiState\.currentFingerprint\s+_renderReviewAiBlock\(\)/)
-  const controlsStart = source.indexOf('function _renderReviewAiControls()')
-  const controlsEnd = source.indexOf('async function _syncReviewAiAvailability()')
-  assert.ok(controlsStart >= 0)
-  assert.ok(controlsEnd > controlsStart)
-  const controlsBlock = source.slice(controlsStart, controlsEnd)
+  const controlsBlock = sliceBetweenAnchors(
+    source,
+    'function _renderReviewAiControls()',
+    'async function _syncReviewAiAvailability()',
+    'review.js',
+  )
   assert.match(controlsBlock, /review-redlist-summary/)
   assert.match(controlsBlock, /review-redlist-summary[\s\S]*data-identify-run-button/)
-  const gridStart = source.indexOf('const grid = document.getElementById(\'observation-grid\')')
-  const gridEnd = source.indexOf('function loadThumbnails(')
-  assert.ok(gridStart >= 0)
-  assert.ok(gridEnd > gridStart)
-  const gridBlock = source.slice(gridStart, gridEnd)
+  const gridBlock = sliceBetweenAnchors(
+    source,
+    'const grid = document.getElementById(\'observation-grid\')',
+    'function loadThumbnails(',
+    'review.js',
+  )
   assert.doesNotMatch(gridBlock, /review-redlist-summary/)
   assert.doesNotMatch(source, /chooseIdentifyComparisonActiveService/)
   assert.doesNotMatch(source, /comparison\.activeService/)
@@ -1312,21 +1315,23 @@ test('review keeps ai result state separate from manual taxon selection and queu
 test('review keeps ai results visible after taxon selection and scores follow the top probability first', () => {
   const source = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8')
 
-  const sharedTaxonStart = source.indexOf('function setSharedTaxon(')
-  const sharedTaxonEnd = source.indexOf('function applyTaxon(')
-  assert.ok(sharedTaxonStart >= 0)
-  assert.ok(sharedTaxonEnd > sharedTaxonStart)
-  const sharedTaxonBlock = source.slice(sharedTaxonStart, sharedTaxonEnd)
+  const sharedTaxonBlock = sliceBetweenAnchors(
+    source,
+    'function setSharedTaxon(',
+    'function applyTaxon(',
+    'review.js',
+  )
 
   assert.match(sharedTaxonBlock, /taxon-dropdown/)
   assert.doesNotMatch(sharedTaxonBlock, /data-identify-results/)
   assert.match(source, /resultsEl\.style\.display = ''/)
 
-  const probabilityStart = source.indexOf('export function getReviewServiceDisplayProbability')
-  const probabilityEnd = source.indexOf('// ── Grid build ────────────────────────────────────────────────────────────────')
-  assert.ok(probabilityStart >= 0)
-  assert.ok(probabilityEnd > probabilityStart)
-  const probabilityBlock = source.slice(probabilityStart, probabilityEnd)
+  const probabilityBlock = sliceBetweenAnchors(
+    source,
+    'export function getReviewServiceDisplayProbability',
+    '// ── Grid build ────────────────────────────────────────────────────────────────',
+    'review.js',
+  )
 
   assert.match(probabilityBlock, /getIdentifyTopProbability/)
   assert.match(probabilityBlock, /selectedProbabilityByService/)
@@ -1667,14 +1672,12 @@ test('the progress overlay is hidden whenever the save location sheet awaits a d
 
 test('save location sheet is mounted at the app root, outside any screen stacking context', () => {
   const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
-  const overlayIndex = html.indexOf('id="location-fix-overlay"')
-  const progressIndex = html.indexOf('id="import-progress"')
-  const screenReviewIndex = html.indexOf('id="screen-review"')
-  const nextScreenIndex = html.indexOf('id="screen-find-detail"')
+  const overlayIndex = indexOfAnchor(html, 'id="location-fix-overlay"', 'index.html')
+  const progressIndex = indexOfAnchor(html, 'id="import-progress"', 'index.html')
+  const screenReviewIndex = indexOfAnchor(html, 'id="screen-review"', 'index.html')
+  const nextScreenIndex = indexOfAnchor(html, 'id="screen-find-detail"', 'index.html')
 
-  assert.ok(overlayIndex > 0)
-  assert.ok(progressIndex > 0)
-  assert.ok(screenReviewIndex > 0 && nextScreenIndex > screenReviewIndex)
+  assert.ok(nextScreenIndex > screenReviewIndex)
   assert.ok(
     !(overlayIndex > screenReviewIndex && overlayIndex < nextScreenIndex),
     'sheet must not live inside #screen-review — .screen.active z-index:1 traps it below #import-progress',

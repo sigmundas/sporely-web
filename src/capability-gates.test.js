@@ -11,6 +11,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import * as fs from 'node:fs'
 import path from 'node:path'
 
+import { indexOfAnchor, sliceAfterAnchor, sliceBetweenAnchors } from './anchor-slice.js'
 import { AUTH_STATE, setAuthState, _resetAuthStateForTests } from './auth-state.js'
 import { searchTaxaV2 } from './taxonomy-v2.js'
 import { runIdentifyProviderOperation } from './ai-identification.js'
@@ -135,10 +136,10 @@ describe('capability gates — static verification for DOM-bound handlers', () =
 
   it('profile.js gates friend accept / decline / remove and avatar upload', () => {
     const src = readFileSync(path.join(process.cwd(), 'src/screens/profile.js'), 'utf8')
-    const acceptFn = src.slice(src.indexOf('async function _acceptRequest'), src.indexOf('async function _declineRequest'))
-    const declineFn = src.slice(src.indexOf('async function _declineRequest'), src.indexOf('async function _removeFriend'))
-    const removeFn = src.slice(src.indexOf('async function _removeFriend'), src.indexOf('async function _deleteAccount'))
-    const avatarFn = src.slice(src.indexOf('async function _uploadAvatar'), src.indexOf('async function _uploadAvatar') + 800)
+    const acceptFn = sliceBetweenAnchors(src, 'async function _acceptRequest', 'async function _declineRequest', 'screens/profile.js')
+    const declineFn = sliceBetweenAnchors(src, 'async function _declineRequest', 'async function _removeFriend', 'screens/profile.js')
+    const removeFn = sliceBetweenAnchors(src, 'async function _removeFriend', 'async function _deleteAccount', 'screens/profile.js')
+    const avatarFn = sliceAfterAnchor(src, 'async function _uploadAvatar', 800, 'screens/profile.js')
     assert.match(acceptFn, /requireCloudMutation\(/)
     assert.match(declineFn, /requireCloudMutation\(/)
     assert.match(removeFn, /requireCloudMutation\(/)
@@ -147,9 +148,9 @@ describe('capability gates — static verification for DOM-bound handlers', () =
 
   it('profile.js gates account delete and selects the setup-only gate only for setup saves', () => {
     const src = readFileSync(path.join(process.cwd(), 'src/screens/profile.js'), 'utf8')
-    const del = src.slice(src.indexOf('async function _deleteAccount'), src.indexOf('async function _deleteAccount') + 1000)
+    const del = sliceAfterAnchor(src, 'async function _deleteAccount', 1000, 'screens/profile.js')
     assert.match(del, /requireCloudMutation\(/)
-    const save = src.slice(src.indexOf('export async function saveProfileMutation'), src.indexOf('// ── Avatar crop'))
+    const save = sliceBetweenAnchors(src, 'export async function saveProfileMutation', '// ── Avatar crop', 'screens/profile.js')
     assert.match(save, /setup\s*\?\s*requireProfileSetupCompletion\(\{ showToast \}\)/)
     assert.match(save, /:\s*requireCloudMutation\(\{ showToast \}\)/)
   })
@@ -157,8 +158,7 @@ describe('capability gates — static verification for DOM-bound handlers', () =
   it('find_detail.js gates _sendComment / _blockObservationAuthor / _reportObservation', () => {
     const src = readFileSync(path.join(process.cwd(), 'src/screens/find_detail.js'), 'utf8')
     for (const fnName of ['_sendComment', '_blockObservationAuthor', '_reportObservation']) {
-      const idx = src.indexOf(`async function ${fnName}`)
-      assert.ok(idx > -1, `expected ${fnName} in find_detail.js`)
+      const idx = indexOfAnchor(src, `async function ${fnName}`, 'screens/find_detail.js')
       const slice = src.slice(idx, idx + 800)
       assert.match(slice, /requireCloudMutation\(/, `${fnName} must gate on capability`)
     }
@@ -166,16 +166,13 @@ describe('capability gates — static verification for DOM-bound handlers', () =
 
   it('main.js gates the iNat connect click handler', () => {
     const src = readFileSync(path.join(process.cwd(), 'src/main.js'), 'utf8')
-    const idx = src.indexOf('.inat-connect-btn\').forEach')
-    assert.ok(idx > -1, 'expected iNat connect handler wiring in main.js')
-    const slice = src.slice(idx, idx + 800)
+    const slice = sliceAfterAnchor(src, '.inat-connect-btn\').forEach', 800, 'main.js')
     assert.match(slice, /requireCloudMutation\(/)
   })
 
   it('sync-queue.js triggerSync gates before touching the queue', () => {
     const src = readFileSync(path.join(process.cwd(), 'src/sync-queue.js'), 'utf8')
-    const idx = src.indexOf('export async function triggerSync')
-    const slice = src.slice(idx, idx + 800)
+    const slice = sliceAfterAnchor(src, 'export async function triggerSync', 800, 'sync-queue.js')
     // The capability check must come BEFORE the isSyncing guard's success
     // path returns a promise that could touch the queue.
     assert.match(slice, /canPerformCloudMutation\(\)\.allowed/)
