@@ -45,6 +45,23 @@ function _stripComments(source) {
   return source.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
 }
 
+// Structural tests below anchor on a literal declaration and assert against a
+// fixed window after it. A rename makes `indexOf` return -1, and a naive
+// `slice(-1, N)` then yields '' — every assertion fails against an empty
+// string with no hint that the ANCHOR, not the behavior, is what broke.
+// Route anchored slices through this helper so a stale anchor fails loudly and
+// names itself.
+function _sliceAfterAnchor(source, anchor, length, label) {
+  const idx = source.indexOf(anchor)
+  assert.ok(
+    idx >= 0,
+    `stale test anchor: ${JSON.stringify(anchor)} no longer appears in ${label}. `
+    + 'The declaration was probably renamed or its signature changed — update the '
+    + 'anchor to match the current source, do not weaken the assertions below.',
+  )
+  return source.slice(idx, idx + length)
+}
+
 // ── Native OS status poll (watchdog backend) ────────────────────────────────
 
 function makeFakeNetwork({ initialConnected = false } = {}) {
@@ -176,17 +193,23 @@ test('QA3: main.js routes the pull-refresh event through the gated revalidation 
 
 test('QA3: Offline pill supersedes the header Sync tag (never both)', () => {
   const main = readSrc('main.js')
-  const idx = main.indexOf('function _setOfflineIndicator(')
-  const chunk = main.slice(idx, idx + 900)
+  const chunk = _sliceAfterAnchor(main, 'function _setOfflineIndicator(', 900, 'main.js')
   assert.match(chunk, /header-sync-tag/)
   assert.match(chunk, /display = 'none'/)
 
+  // `checkSyncStatus` takes options ({ generation, userId }); anchor on the
+  // declaration up to the opening paren so a signature change does not silently
+  // empty this window again.
   const home = readSrc('screens/home.js')
-  const syncIdx = home.indexOf('async function checkSyncStatus()')
-  const syncChunk = home.slice(syncIdx, syncIdx + 800)
+  const syncChunk = _sliceAfterAnchor(home, 'async function checkSyncStatus(', 800, 'screens/home.js')
   assert.match(syncChunk, /AUTHENTICATED_COMPLETE/)
-  assert.match(syncChunk, /display = 'none'/,
-    'non-COMPLETE states must hide the Sync tag (and skip the Supabase probe)')
+  // Pin the guard itself, not merely the presence of the constant: a
+  // non-COMPLETE state must hide the tag and return BEFORE the Supabase probe.
+  assert.match(
+    syncChunk,
+    /!==\s*AUTH_STATE\.AUTHENTICATED_COMPLETE\)\s*\{\s*if \(tag\) tag\.style\.display = 'none'\s*return/,
+    'non-COMPLETE states must hide the Sync tag (and skip the Supabase probe)',
+  )
 })
 
 // ── GPS: second consecutive capture session must not stay "Finding location…" ──
