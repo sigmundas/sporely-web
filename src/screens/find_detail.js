@@ -26,7 +26,7 @@ import {
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { deleteObservationMedia, verifyWorkerObjectExists, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, reserveObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath, fetchObservationImageRows, getVariantPath } from '../images.js'
 import { bindProtectedMedia } from '../protected-media.js'
-import { classifyDraftAge, loadFinds, openFinds } from './finds.js'
+import { classifyDraftAge, loadFinds, openFinds, restoreFindsAfterDetailReturn } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
@@ -2695,14 +2695,23 @@ async function _runDetailServiceComparison(service, galleryImgs, options = {}) {
   }
 }
 
-async function _goBack(event) {
-  if (event) event.preventDefault()
+// `options.reloadFinds` marks a return that actually changed the observation
+// set (save, delete), for which Finds must re-fetch authoritatively. A plain
+// back/cancel leaves the list untouched, so it re-enters the already-loaded
+// pages instead of resetting paging to page 1 — which is what used to clamp
+// scroll restoration to the same fixed position past page 1
+// (finds-smooth-pagination plan §2, Stage 2 scope note).
+async function _goBack(event, options = {}) {
+  if (event?.preventDefault) event.preventDefault()
+  let findsNeedsReload = options.reloadFinds === true
   if (detailImageCropDirty) {
     const cropError = await _persistDetailImageCrops()
     if (cropError) {
       showToast(t('detail.saveFailed', { message: String(cropError?.message || cropError || 'Unknown error') }))
       return
     }
+    // Crops changed the card thumbnails: the list must be re-fetched.
+    findsNeedsReload = true
   }
   if (returnScreenOverride) {
     const target = returnScreenOverride
@@ -2715,7 +2724,10 @@ async function _goBack(event) {
     return
   }
   const prev = goBack()
-  if (prev === 'finds') loadFinds()
+  if (prev === 'finds') {
+    if (findsNeedsReload) loadFinds()
+    else restoreFindsAfterDetailReturn()
+  }
 }
 
 function _resetForm() {
@@ -3652,7 +3664,7 @@ async function _save() {
   setLastSyncAt()
   showToast(t('detail.saved'))
   _loadPrivacySlotCount()
-  _goBack()
+  _goBack(null, { reloadFinds: true })
 }
 
 async function _delete() {
@@ -3697,7 +3709,7 @@ async function _delete() {
 
     setLastSyncAt()
     showToast(t('detail.deleted'))
-    _goBack()
+    _goBack(null, { reloadFinds: true })
   } catch (error) {
     showToast(t('detail.deleteFailed', { message: error.message }))
   } finally {

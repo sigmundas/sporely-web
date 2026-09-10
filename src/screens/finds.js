@@ -72,6 +72,13 @@ let _findsSearchDebounceTimer = null
 let _findsDropdownOpenKey = null
 let _loadFindsSeq = 0
 let _findsRenderPromise = Promise.resolve(false)
+// Describes the list currently committed to the DOM by a full render, so an
+// incremental page append (plan §2.2) can tell whether it may extend that
+// exact list or must fall back to a full render. Cleared at the start of
+// every `_applyFilter()` and re-established only when a grouped render
+// actually commits, so any empty/offline/loading/tiles state — or a render
+// discarded by the guard — leaves it null and forces the safe path.
+let _renderedFindsView = null
 let _findsInitialRenderLoadSeq = 0
 let _findsTargetCardLoadedUserId = null
 let _findsTargetCardLoadingUserId = null
@@ -150,7 +157,19 @@ function _pageRange(offset) {
 // Exported for tests (device-QA regression: remote-vs-remote likely-same
 // collapse hid all but the last of several queued-offline observations).
 export function _mergeFindsItems(scope, existingItems, incomingItems) {
+  return _mergeFindsItemsWithDelta(scope, existingItems, incomingItems).merged
+}
+
+// Stage 2 page-load return contract (plan §2.3): the merge already knows which
+// incoming rows survived dedup, so the render layer must not have to
+// rediscover the delta by diffing the full cache. `added` holds exactly the
+// newly merged observations (deduped rows are not "added"); `appendedAtEnd`
+// records whether those rows landed as a contiguous suffix of the sorted
+// result, which is the only case the incremental date-append path can render
+// without reordering already-visible cards.
+export function _mergeFindsItemsWithDelta(scope, existingItems, incomingItems) {
   const merged = [...(existingItems || [])]
+  const added = []
   const seenIds = new Set(merged.map(item => String(item?.id || '').trim()).filter(Boolean))
   for (const item of incomingItems || []) {
     if (!item) continue
@@ -166,10 +185,15 @@ export function _mergeFindsItems(scope, existingItems, incomingItems) {
       (existing?._pendingSync === true || item?._pendingSync === true)
       && _observationsLikelySame(existing, item))) continue
     merged.push(item)
+    added.push(item)
     if (itemId) seenIds.add(itemId)
   }
   merged.sort((a, b) => _sortTs(b) - _sortTs(a))
-  return merged
+  const addedSet = new Set(added)
+  const suffix = merged.slice(merged.length - added.length)
+  const appendedAtEnd = added.length === 0
+    || (suffix.length === added.length && suffix.every(item => addedSet.has(item)))
+  return { merged, added, appendedAtEnd }
 }
 
 function _setFindsCache(scope, items) {
@@ -1367,6 +1391,34 @@ export async function openFinds(scope = _currentScope(), options = {}) {
   await loadFinds()
 }
 
+// Returning from the detail screen without changing anything (plan §2, "Scroll
+// position lost on detail return, once past page 1"). The Finds screen is only
+// hidden — never unmounted — while detail is open, so the already-rendered
+// pages and the scroller's own position are still intact. Calling `loadFinds()`
+// here, as the back handler used to unconditionally do, reset paging, cleared
+// the cache and re-fetched only page 1, so a restore recorded deep in page 3+
+// was clamped to page-1 height and always landed at the same spot.
+//
+// Falls back to a full `loadFinds()` when there is nothing to return to (no
+// rendered cards, uninitialized paging, or an emptied cache).
+export function restoreFindsAfterDetailReturn() {
+  const list = document.getElementById('finds-list')
+  const currentScope = _currentScope()
+  const paging = _getPagingState(currentScope)
+  const hasRenderedCards = Boolean(list?.querySelector?.('.find-card[data-id]')
+    || list?.querySelector?.('.find-tile[data-id]'))
+  if (!list || !paging.initialized || !hasRenderedCards) {
+    _pendingScrollRestore = null
+    return loadFinds()
+  }
+  // `_pendingScrollRestore` was recorded when the card was opened. The
+  // scroller normally still holds that position, but reapplying it is what
+  // makes the restore explicit — and clearing it here keeps a stale offset
+  // from leaking into the next genuine render.
+  _restoreScroll()
+  return Promise.resolve(false)
+}
+
 export function requestFindsRefresh(delayMs = 120) {
   const timerHost = globalThis.window || globalThis
   if (_queuedRefreshTimer) {
@@ -1787,10 +1839,18 @@ export function applyFindsMineStatus(query, status, supportsDraftStatus = true) 
   return query
 }
 
+// Stage 2 (plan §2.3): every paging loader now returns the page delta
+// (`{ loaded, addedItems, appendedAtEnd, hasMore }`) instead of a bare
+// boolean, so `_maybeLoadMoreFinds` can render only the newly added rows.
+// `loaded` keeps the previous truthiness contract for existing callers.
+function _findsPageResult(loaded, addedItems = [], hasMore = false, appendedAtEnd = false) {
+  return { loaded, addedItems, hasMore, appendedAtEnd }
+}
+
 async function _loadMinePage({ loadSeq, reset = false } = {}) {
-  if (!state.user?.id) return false
+  if (!state.user?.id) return _findsPageResult(false)
   const paging = _getPagingState('mine')
-  if (paging.loadingMore) return false
+  if (paging.loadingMore) return _findsPageResult(false, [], paging.hasMore)
   paging.loadingMore = true
 
   const currentItems = reset ? [] : (_cache['mine'] || [])
@@ -1814,7 +1874,7 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
 
   try {
     const [queued, pageRes] = await Promise.all([queuedPromise, pagePromise])
-    if (loadSeq !== _loadFindsSeq) return false
+    if (loadSeq !== _loadFindsSeq) return _findsPageResult(false)
 
     const data = pageRes?.data || []
     const error = pageRes?.error || null
@@ -1823,22 +1883,26 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
       if (reset) _setFindsCache('mine', [])
       paging.hasMore = false
       paging.initialized = true
-      return false
+      return _findsPageResult(false)
     }
 
-    const merged = _mergeFindsItems('mine', currentItems.length ? currentItems : queued, data)
+    const { merged, added, appendedAtEnd } = _mergeFindsItemsWithDelta(
+      'mine',
+      currentItems.length ? currentItems : queued,
+      data,
+    )
     await _attachSporeFlags(merged)
     await _attachFindsRedlistTags(merged, loadSeq)
     // Re-check after the awaited enrichment above: a newer search/scope
     // change may have completed and already written the authoritative cache
     // while this older request was still awaiting red-list data (plan §1.3
     // correction) — an older request must never overwrite a newer result.
-    if (loadSeq !== _loadFindsSeq) return false
+    if (loadSeq !== _loadFindsSeq) return _findsPageResult(false)
     _setFindsCache('mine', merged)
     paging.nextOffset += data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
     paging.initialized = true
-    return true
+    return _findsPageResult(true, added, paging.hasMore, appendedAtEnd)
   } finally {
     paging.loadingMore = false
   }
@@ -1890,9 +1954,9 @@ function _feedSourceFilters(source, rows = []) {
 
 async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState = null, cacheKey = 'feed', updateCache = true } = {}) {
   const normalizedSource = source === 'species' ? 'followed' : String(source || '').trim().toLowerCase()
-  if (!['followed', 'friends', 'public'].includes(normalizedSource)) return { data: [], error: null, hasMore: false }
+  if (!['followed', 'friends', 'public'].includes(normalizedSource)) return { data: [], error: null, hasMore: false, loaded: false, addedItems: [], appendedAtEnd: false }
   const paging = pagingState || _getPagingState(cacheKey)
-  if (paging.loadingMore) return { data: [], error: null, hasMore: paging.hasMore }
+  if (paging.loadingMore) return { data: [], error: null, hasMore: paging.hasMore, loaded: false, addedItems: [], appendedAtEnd: false }
   paging.loadingMore = true
   const currentItems = reset ? [] : (_cache[cacheKey] || [])
   const pagePromise = _runPagedFindsQuery(
@@ -1904,7 +1968,7 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
 
   try {
     const pageRes = await pagePromise
-    if (loadSeq !== _loadFindsSeq) return false
+    if (loadSeq !== _loadFindsSeq) return { data: [], error: null, hasMore: false, loaded: false, addedItems: [], appendedAtEnd: false }
     const rawData = pageRes?.data || []
     const data = _feedSourceFilters(normalizedSource, rawData)
     const error = pageRes?.error || null
@@ -1919,23 +1983,28 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
       paging.hasMore = false
       paging.initialized = true
       paging.lastData = []
-      return { data: [], error, hasMore: false }
+      return { data: [], error, hasMore: false, loaded: false, addedItems: [], appendedAtEnd: false }
     }
 
+    let addedItems = []
+    let appendedAtEnd = false
     if (updateCache) {
-      const merged = _mergeFindsItems(cacheKey, currentItems, data)
+      const delta = _mergeFindsItemsWithDelta(cacheKey, currentItems, data)
+      const merged = delta.merged
+      addedItems = delta.added
+      appendedAtEnd = delta.appendedAtEnd
       await _attachSporeFlags(merged)
       await _attachFindsRedlistTags(merged, loadSeq)
       // See _loadMinePage's matching guard: an older request must not
       // overwrite a newer completed search once awaited enrichment resolves.
-      if (loadSeq !== _loadFindsSeq) return false
+      if (loadSeq !== _loadFindsSeq) return { data: [], error: null, hasMore: false, loaded: false, addedItems: [], appendedAtEnd: false }
       _setFindsCache(cacheKey, merged)
     }
     paging.lastData = data
     paging.nextOffset += rawData.length
     paging.hasMore = rawData.length === FINDS_PAGE_SIZE
     paging.initialized = true
-    return { data, error: null, hasMore: paging.hasMore }
+    return { data, error: null, hasMore: paging.hasMore, loaded: true, addedItems, appendedAtEnd }
   } finally {
     paging.loadingMore = false
   }
@@ -1944,7 +2013,7 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
 async function _loadFeedSelectionPage({ loadSeq, reset = false, clearCache = true } = {}) {
   const paging = _getPagingState('feed')
   const scope = _findsSecondaryScope('feed')
-  if (paging.loadingMore) return false
+  if (paging.loadingMore) return _findsPageResult(false, [], paging.hasMore)
   paging.loadingMore = true
 
   try {
@@ -1973,22 +2042,27 @@ async function _loadFeedSelectionPage({ loadSeq, reset = false, clearCache = tru
     if (loaded?.error) {
       paging.hasMore = false
       paging.initialized = true
-      return false
+      return _findsPageResult(false)
     }
     paging.mode = scope
     paging.nextOffset = sourcePaging.nextOffset
     paging.hasMore = sourcePaging.hasMore
     paging.initialized = sourcePaging.initialized
-    return true
+    return _findsPageResult(
+      loaded?.loaded !== false,
+      loaded?.addedItems || [],
+      paging.hasMore,
+      loaded?.appendedAtEnd === true,
+    )
   } finally {
     paging.loadingMore = false
   }
 }
 
 async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
-  if (!userId) return false
+  if (!userId) return _findsPageResult(false)
   const paging = _getPagingState('user')
-  if (paging.loadingMore) return false
+  if (paging.loadingMore) return _findsPageResult(false, [], paging.hasMore)
   paging.loadingMore = true
   const isOwner = String(userId || '') === String(state.user?.id || '')
   const pagePromise = _runPagedFindsQuery(
@@ -2008,7 +2082,7 @@ async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
 
   try {
     const pageRes = await pagePromise
-    if (loadSeq !== _loadFindsSeq) return false
+    if (loadSeq !== _loadFindsSeq) return _findsPageResult(false)
     const data = (pageRes?.data || []).filter(obs => {
       if (!obs) return false
       if (String(userId || '') === String(state.user?.id || '')) return true
@@ -2020,20 +2094,24 @@ async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
       if (reset) _setFindsCache('user', [])
       paging.hasMore = false
       paging.initialized = true
-      return false
+      return _findsPageResult(false)
     }
 
-    const merged = _mergeFindsItems('user', reset ? [] : (_cache['user'] || []), data)
+    const { merged, added, appendedAtEnd } = _mergeFindsItemsWithDelta(
+      'user',
+      reset ? [] : (_cache['user'] || []),
+      data,
+    )
     await _attachSporeFlags(merged)
     await _attachFindsRedlistTags(merged, loadSeq)
     // See _loadMinePage's matching guard: an older request must not
     // overwrite a newer completed search once awaited enrichment resolves.
-    if (loadSeq !== _loadFindsSeq) return false
+    if (loadSeq !== _loadFindsSeq) return _findsPageResult(false)
     _setFindsCache('user', merged)
     paging.nextOffset += data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
     paging.initialized = true
-    return true
+    return _findsPageResult(true, added, paging.hasMore, appendedAtEnd)
   } finally {
     paging.loadingMore = false
   }
@@ -2075,12 +2153,15 @@ export async function _maybeLoadMoreFinds() {
   if (distanceFromBottom > FINDS_LOAD_MORE_THRESHOLD) return
 
   const loadSeq = _loadFindsSeq
-  const loaded = await _loadCurrentFindsPage({ reset: false })
+  const page = await _loadCurrentFindsPage({ reset: false })
   if (loadSeq !== _loadFindsSeq) return
-  if (loaded) {
+  if (page?.loaded) {
     await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
     if (loadSeq !== _loadFindsSeq) return
-    await _applyFilter()
+    // Ordinary pagination incorporates the page delta in place. It must never
+    // take the full-render path (`list.innerHTML = html`), which would destroy
+    // and rehydrate every already-visible card and thumbnail (plan §2.1).
+    await _appendFindsPage(page.addedItems || [], { appendedAtEnd: page.appendedAtEnd !== false })
     if (loadSeq !== _loadFindsSeq) return
     void _maybeLoadMoreFinds()
   }
@@ -2107,31 +2188,31 @@ function _isCurrentFindsRender(list, renderContext) {
     && list === document.getElementById('finds-list')
 }
 
-// Exported as a test seam (see finds.test.js).
-export function _applyFilter() {
-  const list     = document.getElementById('finds-list')
-  if (!list) return Promise.resolve(false)
-  const renderSequence = _findsRenderGuard.begin()
-  const renderContext = {
-    renderSequence,
-    accountGeneration: currentAccountGeneration(),
-  }
+// The scope/visibility/status/search predicates the rendered list is derived
+// from, captured once so the full render and the incremental page-append path
+// (plan §2.2) apply exactly the same rules — the append path runs them over
+// only the newly added rows.
+function _findsFilterContext() {
   const primaryScope = _findsPrimaryScope()
   const currentScope = _currentScope()
   const mineScope = _findsSecondaryScope('mine')
   const feedScope = _findsSecondaryScope('feed')
-  const statusFilter = getFindsEffectiveStatusFilter(primaryScope, state.findsStatusFilter)
-  const raw = currentScope === 'user'
-    ? (_cache['user'] || [])
-    : primaryScope === 'mine'
-      ? (_cache['mine'] || [])
-      : (_cache['feed'] || [])
-  const q    = (state.searchQuery || '').toLowerCase().trim()
-  const isFriendsScope = primaryScope === 'mine'
-    ? mineScope === 'friends'
-    : feedScope === 'friends'
-  
-  let filtered = raw
+  return {
+    primaryScope,
+    currentScope,
+    mineScope,
+    feedScope,
+    statusFilter: getFindsEffectiveStatusFilter(primaryScope, state.findsStatusFilter),
+    q: (state.searchQuery || '').toLowerCase().trim(),
+    isFriendsScope: primaryScope === 'mine' ? mineScope === 'friends' : feedScope === 'friends',
+  }
+}
+
+// Exported as a test seam: the append path must provably narrow a page delta
+// with the identical predicates the full render uses.
+export function _filterFindsItems(items, context = _findsFilterContext()) {
+  const { primaryScope, currentScope, mineScope, statusFilter, q } = context
+  let filtered = Array.isArray(items) ? items : []
   if (currentScope === 'user') {
     filtered = filtered.filter(obs => {
       if (String(obs.user_id || '') !== String(state.findsTargetUserId || '')) return false
@@ -2151,9 +2232,31 @@ export function _applyFilter() {
   }
   filtered = filtered.filter(obs => matchesFindsStatus(obs, statusFilter))
 
-  // Search still runs client-side against the loaded pages only. True global
-  // search needs server-side filtering and is out of scope for this pass.
-  const data = q ? filtered.filter(obs => _matches(obs, q)) : filtered
+  // Online search is server-side since Stage 1; this client-side pass still
+  // narrows queued/local rows and keeps typing responsive before the
+  // debounced authoritative page arrives.
+  return q ? filtered.filter(obs => _matches(obs, q)) : filtered
+}
+
+// Exported as a test seam (see finds.test.js).
+export function _applyFilter() {
+  const list     = document.getElementById('finds-list')
+  if (!list) return Promise.resolve(false)
+  _renderedFindsView = null
+  const renderSequence = _findsRenderGuard.begin()
+  const renderContext = {
+    renderSequence,
+    accountGeneration: currentAccountGeneration(),
+  }
+  const context = _findsFilterContext()
+  const { primaryScope, currentScope, isFriendsScope } = context
+  const raw = currentScope === 'user'
+    ? (_cache['user'] || [])
+    : primaryScope === 'mine'
+      ? (_cache['mine'] || [])
+      : (_cache['feed'] || [])
+
+  const data = _filterFindsItems(raw, context)
 
   const renderPromise = _findsSort() === 'species'
     ? _renderBySpecies(list, data, { variant: state.findsView, renderContext })
@@ -2434,6 +2537,410 @@ async function _attachFindsRedlistTags(observations, loadSeq = _loadFindsSeq) {
   }
 }
 
+// ── Card wiring ───────────────────────────────────────────────────────────────
+
+function _wireFindsCardElement(card, lookup) {
+  card.addEventListener('click', () => {
+    const obs = lookup(card.dataset.id)
+    if (obs?._pendingSync) {
+      showToast(_pendingStatusText(obs))
+      return
+    }
+    _pendingScrollRestore = document.getElementById('screen-finds')?.scrollTop ?? null
+    openFindDetail(card.dataset.id)
+  })
+}
+
+function _wireFindsCards(root, data) {
+  const lookup = id => (data || []).find(item => String(item.id) === String(id))
+  root.querySelectorAll('.find-card[data-id]').forEach(card => _wireFindsCardElement(card, lookup))
+}
+
+// Wire ONLY the freshly inserted cards (plan §2.8: no "query all cards and
+// rebind all events" pass). One traversal builds an id→element map, then each
+// newly added observation binds its own card's click/delete/media handlers.
+// Pre-existing cards are never revisited, so their media bindings and object
+// URLs are left exactly as they are.
+function _wireAppendedFindsCards(list, items) {
+  const lookup = id => items.find(item => String(item.id) === String(id))
+  const byId = new Map()
+  for (const card of list.querySelectorAll('.find-card[data-id]')) {
+    const id = card?.dataset?.id
+    if (id == null) continue
+    if (!byId.has(String(id))) byId.set(String(id), card)
+  }
+  for (const obs of items) {
+    const card = byId.get(String(obs.id))
+    if (!card) continue
+    _wireFindsCardElement(card, lookup)
+    _wireDeleteButtons(card)
+    wireImageFallback(card)
+  }
+}
+
+// ── Incremental page append ───────────────────────────────────────────────────
+
+function _findsGroupElement(root, selector, datasetKey, value) {
+  for (const node of root.querySelectorAll(selector) || []) {
+    if (node?.dataset?.[datasetKey] === value) return node
+  }
+  return null
+}
+
+// The bottom sentinel/footer is rebuilt in place; prior groups are untouched
+// (plan §2.5).
+function _updateFindsFooter(list, scope) {
+  const html = _findsFooterHtml(scope)
+  const existing = list.querySelector?.('.finds-bottom-sentinel')
+  if (existing?.remove) existing.remove()
+  if (html) list.insertAdjacentHTML('beforeend', html)
+}
+
+function _appendDateGroups(outer, items, { variant, imageData }) {
+  const plan = planFindsDateAppend(_renderedFindsView?.lastDateKey ?? null, items)
+  for (const chunk of plan) {
+    const cardsHtml = chunk.items
+      .map(obs => _findsCardHtml(obs, { variant, mode: 'date', imageData }))
+      .join('')
+    if (!chunk.isNewGroup) {
+      const grids = outer.querySelectorAll('.finds-grid[data-date-key]') || []
+      const lastGrid = grids[grids.length - 1]
+      if (lastGrid?.dataset?.dateKey === chunk.dateKey) {
+        lastGrid.insertAdjacentHTML('beforeend', cardsHtml)
+        continue
+      }
+      return false
+    }
+    outer.insertAdjacentHTML('beforeend', _findsDateGroupHtml(chunk.dateKey, variant, cardsHtml))
+  }
+  if (_renderedFindsView && plan.length) {
+    _renderedFindsView.lastDateKey = plan[plan.length - 1].dateKey
+  }
+  return true
+}
+
+function _appendSpeciesGroups(outer, items, { variant, imageData }) {
+  const view = _renderedFindsView
+  const { groups, ops } = planFindsSpeciesAppend(view?.speciesGroups || [], items)
+  for (const op of ops) {
+    const cardsHtml = op.items
+      .map(obs => _findsCardHtml(obs, { variant, mode: 'species', imageData }))
+      .join('')
+    if (op.type === 'append') {
+      const grid = _findsGroupElement(outer, '.finds-grid[data-species-key]', 'speciesKey', op.key)
+      if (!grid) return false
+      grid.insertAdjacentHTML('beforeend', cardsHtml)
+      const meta = _findsGroupElement(outer, '.finds-species-meta[data-species-key]', 'speciesKey', op.key)
+      if (meta) meta.innerHTML = tp('finds.observationCount', op.count)
+      continue
+    }
+    const groupHtml = _findsSpeciesGroupHtml(op.key, op.label, op.count, variant, cardsHtml)
+    const anchor = op.beforeKey === null
+      ? null
+      : _findsGroupElement(outer, '.finds-date-sep[data-species-key]', 'speciesKey', op.beforeKey)
+    if (anchor?.insertAdjacentHTML) anchor.insertAdjacentHTML('beforebegin', groupHtml)
+    else if (op.beforeKey === null) outer.insertAdjacentHTML('beforeend', groupHtml)
+    else return false
+  }
+  if (view) view.speciesGroups = groups
+  return true
+}
+
+async function _renderFindsAppend(list, outer, items, { variant, sort, renderContext, currentScope }) {
+  // Plan §2.4: metadata is fetched for the newly rendered cards only. Nothing
+  // already on screen is looked up again or rewired.
+  const imageVariant = variant === 'cards' ? 'medium' : 'small'
+  const nonPending = items.filter(obs => !obs._pendingSync).map(obs => obs.id)
+  let imageData = {}
+  try {
+    imageData = (await (variant === 'cards'
+      ? fetchCardImages(nonPending, { variant: imageVariant })
+      : fetchFirstImages(nonPending, { variant: imageVariant }))) || {}
+  } catch (err) {
+    console.warn('Finds images failed:', err)
+  }
+  if (!_isCurrentFindsRender(list, renderContext)) return false
+
+  const inserted = sort === 'species'
+    ? _appendSpeciesGroups(outer, items, { variant, imageData })
+    : _appendDateGroups(outer, items, { variant, imageData })
+
+  // The DOM no longer matches what the append was planned against (a group
+  // element disappeared). Rebuild authoritatively rather than guess.
+  if (!inserted) return _applyFilter()
+
+  _updateFindsFooter(list, currentScope)
+  _wireAppendedFindsCards(list, items)
+  return true
+}
+
+// Incremental page incorporation (plan §2.2/§2.3). Adds only the rows in
+// `addedItems`; never assigns `list.innerHTML`. Falls back to the full
+// `_applyFilter()` render whenever the current DOM is not an extendable
+// grouped list — an empty/offline/loading state, a tiles render, a
+// scope/sort/view change since the last full render, or rows that do not
+// extend the end of the sorted result set.
+// Exported as a test seam.
+export function _appendFindsPage(addedItems, { appendedAtEnd = true } = {}) {
+  const list = document.getElementById('finds-list')
+  if (!list) return Promise.resolve(false)
+  const context = _findsFilterContext()
+  const sort = _findsSort()
+  const variant = state.findsView === 'two' || state.findsView === 'three' ? state.findsView : 'cards'
+  const view = _renderedFindsView
+  const outer = list.querySelector?.('.finds-grid-outer') || null
+  if (!appendedAtEnd
+    || !view
+    || !outer
+    || view.sort !== sort
+    || view.variant !== variant
+    || view.scope !== context.currentScope) {
+    return _applyFilter()
+  }
+
+  const items = _filterFindsItems(addedItems || [], context)
+  if (!items.length) {
+    // Nothing survived the active visibility/status/search predicates: the
+    // footer still has to reflect the new paging state.
+    _updateFindsFooter(list, context.currentScope)
+    return Promise.resolve(true)
+  }
+
+  const renderContext = {
+    renderSequence: _findsRenderGuard.begin(),
+    accountGeneration: currentAccountGeneration(),
+  }
+  const renderPromise = _renderFindsAppend(list, outer, items, {
+    variant,
+    sort,
+    renderContext,
+    currentScope: context.currentScope,
+  })
+  _findsRenderPromise = Promise.resolve(renderPromise).catch(err => {
+    console.warn('Finds append render failed:', err)
+    return false
+  })
+  return _findsRenderPromise
+}
+
+// ── Shared card markup ────────────────────────────────────────────────────────
+
+// One source of truth for a Finds card, used by the full renderers and by the
+// incremental page-append path (plan §2.5: "factor card markup so full render
+// and incremental render do not drift into two independent versions").
+//
+// `mode` is the active grouping: 'date' reproduces `_renderCards`' layout
+// (author line + visibility icons) and 'species' reproduces
+// `_renderBySpecies`' layout (neither). Those two differences, plus the
+// always-present meta row in species/cards, are the only ways the two
+// pre-existing card templates differed; they are preserved exactly so this
+// refactor changes no rendered output.
+const FINDS_PENDING_SYNC_ICON = `<svg class="find-card-vis-icon find-card-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
+const FINDS_PRIVATE_ICON = `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`
+const FINDS_FRIENDS_ICON = `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
+const FINDS_SPORES_ICON = `<svg class="find-card-vis-icon" style="stroke: var(--amber);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>`
+
+function _findsCardHtml(obs, { variant = 'cards', mode = 'date', imageData = {} } = {}) {
+  const latin = formatScientificName(obs.genus || '', obs.species || '')
+  const isUnknown = !latin && !obs.common_name
+  const displayName = obs.common_name || latin || t('finds.unidentified')
+  const uncertainPrefix = _uncertainPrefix(obs)
+  const nameHtml = isUnknown
+    ? `<span class="find-card-name unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
+    : obs.common_name && latin
+      ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
+      : obs.common_name
+        ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name}</span>`
+        : `<span class="find-card-name">${uncertainPrefix}<em class="find-card-scientific">${latin}</em></span>`
+  const compactNameHtml = isUnknown
+    ? `<span class="find-card-name find-card-name--compact unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
+    : `<span class="find-card-name find-card-name--compact">${uncertainPrefix}${displayName}</span>`
+
+  const loc = obs.location || (obs.gps_latitude && obs.gps_longitude
+    ? `${obs.gps_latitude.toFixed(3)}° N, ${obs.gps_longitude.toFixed(3)}° E`
+    : null)
+
+  const authorMeta = mode === 'date' && obs.user_id !== state.user?.id
+    ? `<div class="find-card-author">${_esc(_authorHandle(obs))}</div>`
+    : ''
+
+  const visibility = normalizeObservationVisibility(obs.visibility)
+  const statusIcon = obs._pendingSync
+    ? FINDS_PENDING_SYNC_ICON
+    : mode === 'date'
+      ? (visibility === 'private' ? FINDS_PRIVATE_ICON : visibility === 'friends' ? FINDS_FRIENDS_ICON : '')
+      : ''
+  const sporesIcon = obs.has_spores ? FINDS_SPORES_ICON : ''
+  const metaLead = _findsCardMetaLeadHtml(obs, loc)
+  const metaRowHtml = `<div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>`
+  const hasMetaRow = Boolean(metaLead || statusIcon || sporesIcon)
+  const pendingClass = obs._pendingSync ? ' find-card--pending' : ''
+
+  if (variant === 'two') {
+    const photoInner = imageHtml(
+      obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
+      '',
+      'find-card-photo-placeholder'
+    )
+    return `<div class="find-card-wrap find-card-wrap--two">
+            <div class="find-card find-card--two${pendingClass}" data-id="${obs.id}">
+              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+              <div class="find-card-body find-card-body--two">
+                ${compactNameHtml}
+                ${authorMeta}
+                ${hasMetaRow ? metaRowHtml : ''}
+              </div>
+            </div>
+          </div>`
+  }
+
+  if (variant === 'three') {
+    const photoInner = imageHtml(
+      obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
+      '',
+      'find-card-photo-placeholder'
+    )
+    return `<div class="find-card-wrap find-card-wrap--three">
+            <div class="find-card find-card--three${pendingClass}" data-id="${obs.id}">
+              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
+              <div class="find-card-body find-card-body--three">
+                ${compactNameHtml}
+                ${obs._pendingSync ? `<div class="find-card-loc">${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
+              </div>
+            </div>
+          </div>`
+  }
+
+  // Single-column cards view — polaroid layout with up to 2 photos
+  const cardImg = imageData[obs.id]
+  const photoCount = obs._pendingSync ? (obs._pendingPhotoCount || 0) : (cardImg?.count || 0)
+  const countBadge = photoCount > 1
+    ? `<span class="find-card-photo-count">(${photoCount})</span>`
+    : ''
+  const photoWrapInner = obs._pendingSync
+    ? imageHtml(_pendingImageSource(obs), '', 'find-card-photo-placeholder')
+    : cardImg?.second
+      ? `<div class="find-card-polaroid">
+                <div class="find-card-polaroid-frame">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                <div class="find-card-polaroid-frame">${imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+              </div>`
+      : cardImg?.first
+        ? `<div class="find-card-polaroid find-card-polaroid--single">
+                  <div class="find-card-polaroid-frame find-card-polaroid-frame--single">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
+                </div>`
+        : imageHtml(cardImg, '', 'find-card-photo-placeholder')
+
+  // Species grouping historically always emitted the meta row for the
+  // single-column card; date grouping emitted it only when it had content.
+  // Preserved rather than unified so this refactor is visually inert.
+  const showMetaRow = mode === 'species' ? true : hasMetaRow
+
+  return `<div class="find-card-wrap">
+          <div class="find-card${pendingClass}" data-id="${obs.id}">
+            <div class="find-card-photo-wrap">${photoWrapInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
+            <div class="find-card-body">
+              <div class="find-card-name-row">${nameHtml}${countBadge}</div>
+              ${authorMeta}
+              ${showMetaRow ? metaRowHtml : ''}
+            </div>
+          </div>
+        </div>`
+}
+
+// ── Group markup + incremental grouping plans ─────────────────────────────────
+
+function _findsDateKey(obs) {
+  return obs?.date || '—'
+}
+
+function _findsDateLabel(dateKey) {
+  return dateKey !== '—'
+    ? formatDate(new Date(dateKey + 'T12:00:00'), { day: 'numeric', month: 'long', year: 'numeric' })
+    : '—'
+}
+
+// `data-date-key` / `data-species-key` exist so the append path can find the
+// terminal date group or an existing species group without re-deriving the
+// grouping from the DOM text.
+function _findsDateGroupHtml(dateKey, variant, cardsHtml) {
+  return `<div class="finds-date-sep" data-date-key="${_esc(dateKey)}">
+        <div class="finds-date-line"></div>
+        <span class="finds-date-label">${_findsDateLabel(dateKey)}</span>
+        <div class="finds-date-line"></div>
+      </div>
+      <div class="finds-grid finds-grid--${variant}" data-date-key="${_esc(dateKey)}">${cardsHtml}</div>`
+}
+
+function _findsSpeciesGroupHtml(key, label, count, variant, cardsHtml) {
+  return `<div class="finds-date-sep" data-species-key="${_esc(key)}">
+        <div class="finds-date-line"></div>
+        <span class="finds-date-label">${_esc(label)}</span>
+        <div class="finds-date-line"></div>
+      </div>
+      <div class="finds-species-meta" data-species-key="${_esc(key)}">${tp('finds.observationCount', count)}</div>
+      <div class="finds-grid finds-grid--${variant}" data-species-key="${_esc(key)}">${cardsHtml}</div>`
+}
+
+// Pure planner for a date-sorted append (plan §2.5). Server pages are
+// date-descending, so an added run either continues the currently terminal
+// date group or opens exactly one new group per date boundary it crosses.
+export function planFindsDateAppend(lastDateKey, addedItems) {
+  const plan = []
+  for (const obs of addedItems || []) {
+    const key = _findsDateKey(obs)
+    const tail = plan[plan.length - 1]
+    if (tail && tail.dateKey === key) {
+      tail.items.push(obs)
+      continue
+    }
+    // Only the first chunk can join the existing terminal group, and only
+    // when its date actually matches it; every later chunk is a boundary.
+    plan.push({ dateKey: key, items: [obs], isNewGroup: plan.length > 0 || key !== lastDateKey })
+  }
+  return plan
+}
+
+// Pure planner for a species-sorted append (plan §2.6). A newly discovered
+// species can sort alphabetically before groups that are already on screen,
+// so each new group gets an explicit insertion anchor (`beforeKey`) instead
+// of being appended at the bottom. `\x00unidentified` always stays last.
+export function planFindsSpeciesAppend(existingGroups, addedItems) {
+  const groups = (existingGroups || []).map(group => ({ ...group }))
+  const byKey = new Map(groups.map(group => [group.key, group]))
+  const ops = []
+
+  const incoming = new Map()
+  for (const obs of addedItems || []) {
+    const key = _speciesKey(obs)
+    if (!incoming.has(key)) incoming.set(key, [])
+    incoming.get(key).push(obs)
+  }
+
+  for (const [key, items] of incoming) {
+    const existing = byKey.get(key)
+    if (existing) {
+      existing.count += items.length
+      ops.push({ type: 'append', key, items, count: existing.count })
+      continue
+    }
+    const representative = items[0]
+    const label = _speciesLabel(representative)
+    let index = groups.length
+    if (key !== '\x00unidentified') {
+      index = groups.findIndex(group => group.key === '\x00unidentified'
+        || compareFindsByScientificName(representative, group.representative) < 0)
+      if (index === -1) index = groups.length
+    }
+    const beforeKey = index < groups.length ? groups[index].key : null
+    const group = { key, label, representative, count: items.length }
+    groups.splice(index, 0, group)
+    byKey.set(key, group)
+    ops.push({ type: 'insert', key, label, items, count: items.length, beforeKey })
+  }
+
+  return { groups, ops }
+}
+
 async function _renderBySpecies(list, data, options = {}) {
   const variant = options.variant || 'cards'
   const renderContext = options.renderContext
@@ -2487,123 +2994,34 @@ async function _renderBySpecies(list, data, options = {}) {
     let html = _findsOfflineInfoHtml(true)
     html += '<div class="finds-grid-outer">'
 
-    for (const [, group] of groups) {
-      const count = group.items.length
-      html += `<div class="finds-date-sep">
-        <div class="finds-date-line"></div>
-        <span class="finds-date-label">${_esc(group.label)}</span>
-        <div class="finds-date-line"></div>
-      </div>
-      <div class="finds-species-meta">${tp('finds.observationCount', count)}</div>
-      <div class="finds-grid finds-grid--${variant}">`
-
-      for (const obs of group.items) {
-        const latin = formatScientificName(obs.genus || '', obs.species || '')
-        const isUnknown = !latin && !obs.common_name
-        const displayName = obs.common_name || latin || t('finds.unidentified')
-        const uncertainPrefix = _uncertainPrefix(obs)
-        const nameHtml = isUnknown
-          ? `<span class="find-card-name unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
-          : obs.common_name && latin
-            ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
-            : obs.common_name
-              ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name}</span>`
-              : `<span class="find-card-name">${uncertainPrefix}<em class="find-card-scientific">${latin}</em></span>`
-        const compactNameHtml = isUnknown
-          ? `<span class="find-card-name find-card-name--compact unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
-          : `<span class="find-card-name find-card-name--compact">${uncertainPrefix}${displayName}</span>`
-        const loc = obs.location || (obs.gps_latitude && obs.gps_longitude
-          ? `${obs.gps_latitude.toFixed(3)}° N, ${obs.gps_longitude.toFixed(3)}° E`
-          : null)
-        const statusIcon = obs._pendingSync
-          ? `<svg class="find-card-vis-icon find-card-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
-          : ''
-        const sporesIcon = obs.has_spores
-          ? `<svg class="find-card-vis-icon" style="stroke: var(--amber);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>`
-          : ''
-        const metaLead = _findsCardMetaLeadHtml(obs, loc)
-
-        if (variant === 'two') {
-          const photoInner = imageHtml(
-            obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
-            '',
-            'find-card-photo-placeholder'
-          )
-          html += `<div class="find-card-wrap find-card-wrap--two">
-            <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
-              <div class="find-card-body find-card-body--two">
-                ${compactNameHtml}
-                ${metaLead || statusIcon || sporesIcon ? `<div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
-              </div>
-            </div>
-          </div>`
-          continue
-        }
-
-        if (variant === 'three') {
-          const photoInner = imageHtml(
-            obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
-            '',
-            'find-card-photo-placeholder'
-          )
-          html += `<div class="find-card-wrap find-card-wrap--three">
-            <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
-              <div class="find-card-body find-card-body--three">
-                ${compactNameHtml}
-                ${obs._pendingSync ? `<div class="find-card-loc">${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
-              </div>
-            </div>
-          </div>`
-          continue
-        }
-
-        const cardImg = imageData[obs.id]
-        const photoCount = obs._pendingSync ? (obs._pendingPhotoCount || 0) : (cardImg?.count || 0)
-        const countBadge = photoCount > 1
-          ? `<span class="find-card-photo-count">(${photoCount})</span>`
-          : ''
-        const photoWrapInner = obs._pendingSync
-          ? imageHtml(_pendingImageSource(obs), '', 'find-card-photo-placeholder')
-          : cardImg?.second
-            ? `<div class="find-card-polaroid">
-                <div class="find-card-polaroid-frame">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
-                <div class="find-card-polaroid-frame">${imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
-              </div>`
-            : cardImg?.first
-              ? `<div class="find-card-polaroid find-card-polaroid--single">
-                  <div class="find-card-polaroid-frame find-card-polaroid-frame--single">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
-                </div>`
-              : imageHtml(cardImg, '', 'find-card-photo-placeholder')
-
-        html += `<div class="find-card-wrap">
-          <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-            <div class="find-card-photo-wrap">${photoWrapInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
-            <div class="find-card-body">
-              <div class="find-card-name-row">${nameHtml}${countBadge}</div>
-              <div class="find-card-loc">${metaLead}${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>
-            </div>
-          </div>
-        </div>`
-      }
-
-      html += '</div>'
+    for (const [key, group] of groups) {
+      html += _findsSpeciesGroupHtml(
+        key,
+        group.label,
+        group.items.length,
+        variant,
+        group.items.map(obs => _findsCardHtml(obs, { variant, mode: 'species', imageData })).join(''),
+      )
     }
 
     html += '</div>'
     html += _findsFooterHtml(currentScope)
     list.innerHTML = html
+    _renderedFindsView = {
+      sort: 'species',
+      variant,
+      scope: currentScope,
+      lastDateKey: null,
+      speciesGroups: groups.map(([key, group]) => ({
+        key,
+        label: group.label,
+        representative: group.representative,
+        count: group.items.length,
+      })),
+    }
     _restoreScroll()
 
-    list.querySelectorAll('.find-card[data-id]').forEach(card => {
-      card.addEventListener('click', () => {
-        const obs = data.find(item => String(item.id) === String(card.dataset.id))
-        if (obs?._pendingSync) { showToast(_pendingStatusText(obs)); return }
-        _pendingScrollRestore = document.getElementById('screen-finds')?.scrollTop ?? null
-        openFindDetail(card.dataset.id)
-      })
-    })
+    _wireFindsCards(list, data)
     _wireDeleteButtons(list)
     wireImageFallback(list)
     return true
@@ -2710,7 +3128,7 @@ async function _renderCards(list, data, options) {
     const groups = []
     const seen   = {}
     data.forEach(obs => {
-      const key = obs.date || '—'
+      const key = _findsDateKey(obs)
       if (!seen[key]) { seen[key] = []; groups.push({ date: key, items: seen[key] }) }
       seen[key].push(obs)
     })
@@ -2719,146 +3137,25 @@ async function _renderCards(list, data, options) {
     let html = _findsOfflineInfoHtml(true)
     html += '<div class="finds-grid-outer">'
     groups.forEach(({ date, items }) => {
-      const dateLabel = date !== '—'
-        ? formatDate(new Date(date + 'T12:00:00'), { day: 'numeric', month: 'long', year: 'numeric' })
-        : '—'
-      html += `<div class="finds-date-sep">
-        <div class="finds-date-line"></div>
-        <span class="finds-date-label">${dateLabel}</span>
-        <div class="finds-date-line"></div>
-      </div>
-      <div class="finds-grid finds-grid--${variant}">`
-
-      items.forEach(obs => {
-        const latin     = formatScientificName(obs.genus || '', obs.species || '')
-        const isUnknown = !latin && !obs.common_name
-        const displayName = obs.common_name || latin || t('finds.unidentified')
-        const uncertainPrefix = _uncertainPrefix(obs)
-        const nameHtml  = isUnknown
-          ? `<span class="find-card-name unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
-          : obs.common_name && latin
-            ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
-            : obs.common_name
-              ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name}</span>`
-              : `<span class="find-card-name">${uncertainPrefix}<em class="find-card-scientific">${latin}</em></span>`
-        const compactNameHtml = isUnknown
-          ? `<span class="find-card-name find-card-name--compact unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
-          : `<span class="find-card-name find-card-name--compact">${uncertainPrefix}${displayName}</span>`
-
-        const loc = obs.location || (
-          obs.gps_latitude && obs.gps_longitude
-            ? `${obs.gps_latitude.toFixed(3)}° N, ${obs.gps_longitude.toFixed(3)}° E`
-            : null
-        )
-        const authorHandle = _authorHandle(obs)
-        const authorMeta = obs.user_id === state.user?.id
-          ? ''
-          : `<div class="find-card-author">${_esc(authorHandle)}</div>`
-
-        const statusIcon = obs._pendingSync
-          ? `<svg class="find-card-vis-icon find-card-status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.8-8.62A6 6 0 0 0 5 13a4 4 0 0 0 .8 7.92H17.5"/><path d="m4 4 16 16"/></svg>`
-          : normalizeObservationVisibility(obs.visibility) === 'private'
-            ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`
-            : normalizeObservationVisibility(obs.visibility) === 'friends'
-              ? `<svg class="find-card-vis-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
-              : ''
-        const sporesIcon = obs.has_spores
-          ? `<svg class="find-card-vis-icon" style="stroke: var(--amber);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>`
-          : ''
-        const metaLead = _findsCardMetaLeadHtml(obs, loc)
-
-        if (variant === 'two') {
-          const photoInner = imageHtml(
-            obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
-            '',
-            'find-card-photo-placeholder'
-          )
-          html += `<div class="find-card-wrap find-card-wrap--two">
-            <div class="find-card find-card--two${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
-              <div class="find-card-body find-card-body--two">
-                ${compactNameHtml}
-                ${authorMeta}
-                ${metaLead || statusIcon || sporesIcon ? `<div class="find-card-loc">
-                  ${metaLead}
-                  ${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}
-                </div>` : ''}
-              </div>
-            </div>
-          </div>`
-          return
-        }
-
-        if (variant === 'three') {
-          const photoInner = imageHtml(
-            obs._pendingSync ? _pendingImageSource(obs) : imageData[obs.id],
-            '',
-            'find-card-photo-placeholder'
-          )
-          html += `<div class="find-card-wrap find-card-wrap--three">
-            <div class="find-card find-card--three${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-              <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
-              <div class="find-card-body find-card-body--three">
-                ${compactNameHtml}
-                ${obs._pendingSync ? `<div class="find-card-loc">${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}</div>` : ''}
-              </div>
-            </div>
-          </div>`
-          return
-        }
-
-        // Single-column cards view — polaroid layout with up to 2 photos
-        const cardImg = imageData[obs.id]
-        const photoCount = obs._pendingSync ? (obs._pendingPhotoCount || 0) : (cardImg?.count || 0)
-        const countBadge = photoCount > 1
-          ? `<span class="find-card-photo-count">(${photoCount})</span>`
-          : ''
-        const photoWrapInner = obs._pendingSync
-          ? imageHtml(_pendingImageSource(obs), '', 'find-card-photo-placeholder')
-          : cardImg?.second
-            ? `<div class="find-card-polaroid">
-                <div class="find-card-polaroid-frame">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
-                <div class="find-card-polaroid-frame">${imageHtml(cardImg.second, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
-              </div>`
-            : cardImg?.first
-              ? `<div class="find-card-polaroid find-card-polaroid--single">
-                  <div class="find-card-polaroid-frame find-card-polaroid-frame--single">${imageHtml(cardImg.first, 'find-card-polaroid-img', 'find-card-polaroid-empty')}</div>
-                </div>`
-              : imageHtml(cardImg, '', 'find-card-photo-placeholder')
-
-        html += `<div class="find-card-wrap">
-          <div class="find-card${obs._pendingSync ? ' find-card--pending' : ''}" data-id="${obs.id}">
-            <div class="find-card-photo-wrap">${photoWrapInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
-            <div class="find-card-body">
-              <div class="find-card-name-row">${nameHtml}${countBadge}</div>
-              ${authorMeta}
-              ${metaLead || statusIcon || sporesIcon ? `<div class="find-card-loc">
-                ${metaLead}
-                ${sporesIcon}${statusIcon}${_deleteQueueBtn(obs)}
-              </div>` : ''}
-            </div>
-          </div>
-        </div>`
-      })
-
-      html += '</div>'
+      html += _findsDateGroupHtml(
+        date,
+        variant,
+        items.map(obs => _findsCardHtml(obs, { variant, mode: 'date', imageData })).join(''),
+      )
     })
     html += '</div>'
     html += _findsFooterHtml(currentScope)
     list.innerHTML = html
+    _renderedFindsView = {
+      sort: 'date',
+      variant,
+      scope: currentScope,
+      lastDateKey: groups.length ? groups[groups.length - 1].date : null,
+      speciesGroups: null,
+    }
     _restoreScroll()
 
-    list.querySelectorAll('.find-card[data-id]').forEach(card => {
-      card.addEventListener('click', () => {
-        const obs = data.find(item => String(item.id) === String(card.dataset.id))
-        if (obs?._pendingSync) {
-          showToast(_pendingStatusText(obs))
-          return
-        }
-        _pendingScrollRestore = document.getElementById('screen-finds')?.scrollTop ?? null
-        openFindDetail(card.dataset.id)
-      })
-    })
+    _wireFindsCards(list, data)
     _wireDeleteButtons(list)
     wireImageFallback(list)
     return true
