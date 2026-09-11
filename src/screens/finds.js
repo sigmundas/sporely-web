@@ -2336,7 +2336,7 @@ export function _applyFilter() {
     // renderers, so a list built online cannot be reconciled into an offline
     // one (or back) without losing or keeping that note wrongly.
     && view.offline === _isOfflineFindsMode()
-    && _findsRenderedOrderMatches(list, data)
+    && _findsRenderedOrderMatches(list, _findsDisplayOrder(data, sort))
 
   const renderSequence = _findsRenderGuard.begin()
   const renderContext = {
@@ -2720,9 +2720,21 @@ function _findsRenderedCardIds(list) {
   return ids
 }
 
+// The order cards actually appear in, which is NOT the cache order under
+// species sort: the species renderer regroups the date-ordered result set into
+// alphabetically ordered species groups. Comparing DOM order against the raw
+// cache order rejected every species list whose alphabetical group order
+// differed from its date order — i.e. almost all of them — and fell back to a
+// full destructive render.
+function _findsDisplayOrder(data, sort) {
+  if (sort !== 'species') return data
+  return _findsSpeciesGroupsFor(data).flatMap(group => group.items)
+}
+
 // Reconciliation may only extend/trim the list in place; it must never be used
 // to silently reorder it. The cards currently on screen that survive into the
-// new result set have to already be in the new set's order.
+// new result set have to already be in that set's display order — which also
+// catches a species group whose position would move.
 function _findsRenderedOrderMatches(list, targetList) {
   const targetIds = new Set(targetList.map(obs => String(obs.id)))
   const renderedIds = new Set()

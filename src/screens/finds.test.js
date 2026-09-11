@@ -3339,3 +3339,140 @@ test('species-sorted search narrowing prunes emptied groups and updates the surv
     restoreTimers()
   }
 })
+
+// Species sort regroups the date-ordered result set into alphabetically
+// ordered species groups, so DOM order is not cache order. These fixtures make
+// the two disagree on purpose — newest observation is Russula, oldest surviving
+// one is Amanita — which is what an order check against the raw cache order
+// gets wrong. The earlier species regression retained a single group, so it
+// could not tell the two orders apart.
+function makeSpeciesOrderRows() {
+  const speciesRow = (id, date, genus, species, commonName, notes) => ({
+    ...makeAppendObservation(id, { date, createdAt: `${date}T12:00:00Z`, genus, species, commonName }),
+    notes,
+  })
+  return {
+    // Newest by date, last alphabetically.
+    russula: speciesRow(2200, '2026-09-03', 'Russula', 'emetica', 'Kremle', 'corti marker'),
+    // Older by date, first alphabetically.
+    amanita: speciesRow(2201, '2026-09-02', 'Amanita', 'muscaria', 'Fluesopp', 'corti marker'),
+    // Does not match the search; removed by the local narrowing.
+    boletus: speciesRow(2202, '2026-09-01', 'Boletus', 'edulis', 'Steinsopp', 'no match here'),
+    // Arrives only with the authoritative page; sorts between the survivors.
+    cortinarius: speciesRow(2203, '2026-09-04', 'Cortinarius', 'alboviolaceus', 'Silkeslorsopp', 'corti marker'),
+  }
+}
+
+test('species-sorted narrowing reconciles in place when alphabetical group order disagrees with date order', async () => {
+  const rows = makeSpeciesOrderRows()
+  const firstPage = [rows.russula, rows.amanita, rows.boletus]
+  const imageRows = {}
+  for (const obs of Object.values(rows)) imageRows[obs.id] = appendImageRow(obs.id)
+
+  const restoreTimers = installNoopFindsTimers()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }],
+    imageRows,
+    findsSort: 'species',
+  })
+  const { list } = harness
+  const groupKeys = () => list.querySelectorAll('.finds-grid[data-species-key]')
+    .map(g => decodeURIComponent(g.dataset.speciesKey))
+
+  try {
+    await loadFinds()
+    // The cache is date-ordered (Russula, Amanita, Boletus) while the DOM is
+    // alphabetical — the disagreement this test exists for.
+    assert.deepEqual(_getFindsCacheForTests('mine').map(o => o.id), ['2200', '2201', '2202'])
+    assert.deepEqual(harness.cardIds(), ['2201', '2202', '2200'])
+    assert.deepEqual(groupKeys(), ['amanita|muscaria|fluesopp', 'boletus|edulis|steinsopp', 'russula|emetica|kremle'])
+
+    const writesBefore = list.innerHtmlWrites
+    const batchesBefore = harness.imageIdBatches()
+    const cardsBefore = new Map(
+      list.querySelectorAll('.find-card[data-id]').map(card => [card.dataset.id, card]),
+    )
+    const imgsBefore = new Map([...cardsBefore].map(([id, card]) => [id, card.querySelector('img')]))
+
+    await _handleFindsSearchInput('corti')
+
+    assert.equal(list.innerHtmlWrites, writesBefore,
+      'narrowing a multi-species list must not rebuild it, even though DOM order is not cache order')
+    assert.deepEqual(harness.cardIds(), ['2201', '2200'], 'the non-matching row was removed')
+    assert.deepEqual(groupKeys(), ['amanita|muscaria|fluesopp', 'russula|emetica|kremle'],
+      'the emptied middle group was pruned and the survivors kept their positions')
+
+    for (const id of ['2200', '2201']) {
+      const card = list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === id)
+      assert.equal(card, cardsBefore.get(id), `card ${id} is the same DOM node`)
+      assert.equal(card.querySelector('img'), imgsBefore.get(id), `the <img> in card ${id} is the same DOM node`)
+      assert.equal(card.listeners.filter(l => l.type === 'click').length, 1, `card ${id} was not re-wired`)
+    }
+    assert.deepEqual(harness.imageIdBatches(), batchesBefore, 'no metadata lookup for surviving rows')
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+test('the authoritative species search page reconciles in place across a disagreeing order, inserting a new group between survivors', async () => {
+  const rows = makeSpeciesOrderRows()
+  const firstPage = [rows.russula, rows.amanita, rows.boletus]
+  // The authoritative page for "corti": both survivors plus a species that
+  // sorts alphabetically between them but is the newest by date.
+  const serverPage = [rows.cortinarius, rows.russula, rows.amanita]
+  const imageRows = {}
+  for (const obs of Object.values(rows)) imageRows[obs.id] = appendImageRow(obs.id)
+
+  const restoreTimers = installNoopFindsTimers()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, { data: serverPage, error: null }],
+    imageRows,
+    findsSort: 'species',
+  })
+  const { list } = harness
+  const groupKeys = () => list.querySelectorAll('.finds-grid[data-species-key]')
+    .map(g => decodeURIComponent(g.dataset.speciesKey))
+
+  try {
+    await loadFinds()
+    const writesAfterInitialRender = list.innerHtmlWrites
+    const cardsBefore = new Map(
+      list.querySelectorAll('.find-card[data-id]').map(card => [card.dataset.id, card]),
+    )
+    const imgsBefore = new Map([...cardsBefore].map(([id, card]) => [id, card.querySelector('img')]))
+
+    await _handleFindsSearchInput('corti')
+    assert.deepEqual(harness.cardIds(), ['2201', '2200'])
+    const batchesAfterNarrowing = harness.imageIdBatches()
+
+    await _reloadFindsForSearch()
+
+    assert.equal(list.innerHtmlWrites, writesAfterInitialRender,
+      'the authoritative species page must not rebuild the list either')
+    assert.deepEqual(_getFindsCacheForTests('mine').map(o => o.id), ['2203', '2200', '2201'],
+      'the cache is date-ordered')
+    assert.deepEqual(harness.cardIds(), ['2201', '2203', '2200'],
+      'but the new species group was inserted at its alphabetical position, between the survivors')
+    assert.deepEqual(groupKeys(), [
+      'amanita|muscaria|fluesopp',
+      'cortinarius|alboviolaceus|silkeslorsopp',
+      'russula|emetica|kremle',
+    ])
+
+    for (const id of ['2200', '2201']) {
+      const card = list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === id)
+      assert.equal(card, cardsBefore.get(id), `card ${id} survived both reconciliations as the same node`)
+      assert.equal(card.querySelector('img'), imgsBefore.get(id), `the <img> in card ${id} survived too`)
+      assert.equal(card.listeners.filter(l => l.type === 'click').length, 1, `card ${id} was not re-wired`)
+    }
+    assert.deepEqual(
+      harness.imageIdBatches().slice(batchesAfterNarrowing.length),
+      [[rows.cortinarius.id]],
+      'metadata was looked up for the inserted row only',
+    )
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
