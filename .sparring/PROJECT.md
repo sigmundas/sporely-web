@@ -217,3 +217,40 @@ Guidance: Haiku maps, Sonnet works, Opus diagnoses hard failures. Do not chain
 planner → implementer → reviewer by default. If a subagent's result is
 incomplete rather than wrong, resume it instead of spawning a fresh one, and
 pass the failure evidence up when escalating.
+
+## Subagent policy
+
+Default: do the stage directly in the top-level implementation session.
+
+Do not delegate implementation work merely because subagents are available.
+The stage agent is the single implementation owner and should retain the
+cross-file and cross-step context of the stage.
+
+Subagents may be used only when they provide a concrete advantage:
+
+- read-only exploration of a genuinely large/unfamiliar code area;
+- a specialist investigation requiring isolated expertise;
+- a clearly independent work package explicitly permitted by the stage brief.
+
+Do not use subagents for:
+- ordinary code search;
+- single-file or tightly coupled edits;
+- splitting one coherent feature into pieces;
+- independent "review" of implementation -- agent-sparring already provides
+  the independent sparring pass;
+- convenience or token conservation alone.
+
+No nested delegation.
+No concurrent implementation writers in the same worktree.
+
+If a subagent is used, the stage handoff must state:
+- which subagent was used;
+- its exact task;
+- whether it was read-only or edited files;
+- the configured/runtime model if actually known;
+- what result was incorporated.
+
+If model or runtime information is not exposed, say "unknown"; do not infer it.
+
+The top-level stage agent remains responsible for inspecting all delegated
+work, integrating it, running verification, and making the candidate commit.
