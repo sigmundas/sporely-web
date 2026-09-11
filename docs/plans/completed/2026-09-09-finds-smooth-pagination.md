@@ -1,10 +1,10 @@
 # Sporely Finds smooth scrolling, search pagination, and thumbnail stability
 
-**Plan file target in repo:** `docs/plans/active/2026-09-09-finds-smooth-pagination.md`  
+**Plan file target in repo:** `docs/plans/completed/2026-09-09-finds-smooth-pagination.md` (was `docs/plans/active/` until closed 2026-09-11)  
 **Repository:** `sporely-web`  
 **Prepared:** 2026-09-09  
 **Evidence baseline:** `main` at `a7de5e2c5aefa6ced99d91d8b6bdcf7fff6e68c3`  
-**Status:** ready for staged implementation with `agent-sparring` (`sparring run-loop`)
+**Status:** completed 2026-09-11 — all three stages accepted, released in v0.7.6 (`71ff5ed`); see the closing entry at the end of section 10
 
 ---
 
@@ -1498,4 +1498,73 @@ Last reviewer result: sparring NEEDS_YOU on 8d3276f with no further implementati
 Manual QA status: Stage 3 device QA PASSED on 8d3276f (user-reported, 2026-09-11). Stage 2 PASSED on 683e843; Stage 1 confirmed on d20aef3.
 Known issue/blocker: none
 Next exact action: run the section 6 final automated verification gate on the accepted HEAD, walk the section 8 acceptance table, then decide the merge of feature/sparring-v2-pilot to main (a deliberate human checkpoint)
+```
+
+### Plan closed — final gate at released main, moved to completed — 2026-09-11
+
+All three stages were accepted and shipped: the user fast-forwarded `main` to
+the Stage 3 acceptance revision `bb3df00`, released `71ff5ed` (v0.7.6,
+versionCode 283), and pushed `origin/main`. The Google closed-testing log
+entry for day 7 (`1898891`) records Stages 2 and 3.
+
+**Section 6 final gate, run at `main` HEAD `1898891` in a writable
+environment** (the only product-tree change since the accepted 8d3276f is the
+v0.7.6 version bump in `package.json`, `package-lock.json` and
+`android/app/build.gradle`):
+
+```text
+git status --short                          clean, branch main
+npm run check:node                          pass
+node --test finds/images/image-helpers/media-loader   139 tests, 139 pass, 0 fail
+npm test                                    1302 tests, 1260 pass, 6 fail, 36 skipped
+                                            — exactly the six known Deno edge-function
+                                            suites node --test cannot load
+npm run build                               pass
+git diff --check                            clean
+git diff --check 7cd9e36..1898891           clean (Stage 1 base → released HEAD)
+git diff --stat 7cd9e36..1898891 -- src/    13 files, +5793 / −1143, 34 commits
+```
+
+Product code changed across the whole plan: `src/screens/finds.js`,
+`src/screens/find_detail.js`, `src/i18n.js`, `src/style.css`, `src/anchor-slice.js`;
+the rest of the range is tests (`finds.test.js` and the test-anchor hardening
+touching `anchor-slice`, `capability-gates`, `connectivity-loss`,
+`live-reconnect`, `map`, `review`, `sync-queue` tests).
+
+**Section 8 acceptance table walk.** Every row is covered by an accepted stage
+whose candidate passed device QA: Stage 1 rows (server-side search predicate,
+query isolation, offline queue search) by 8e5077b with device confirmation on
+d20aef3; Stage 2 rows (normal load-more, thumbnail stability, search-typing
+thumbnail stability, image metadata, date and species grouping, detail-return
+scroll restore) by 683e843; Stage 3 rows (prefetch, empty state vs. initial
+load, boundary wait UX, concurrency, enrichment, profile cache, failure
+behavior) by 8d3276f. Auth/media safety: capability gates and the cache-first
+media model were not touched by any stage (sparring confirmed for each
+candidate). Automated verification: the gate above.
+
+**Device QA exception, recorded per the section 8 rule.** Scenarios A–I have
+each passed on at least one accepted candidate, but D (search churn) and F
+(Mine/status/visibility) were last exercised on the Stage 2 candidate 683e843
+and were not re-run on 8d3276f. Stage 3 changed only the prefetch trigger,
+enrichment ordering, the initial-load empty-state guard and the footer
+indicator; it did not touch the search-input path or the filter predicates, and
+the Stage 3 run covered A, B, C, E, G, H and I on the same build. Accepted as an
+exception on that reasoning; if a search-churn or filter regression is ever
+reported on v0.7.6 or later, this is the first place to look.
+
+**Not done, by design.** No device/WebView versions were recorded for any QA
+run. The 1000 px prefetch root margin and 64 px boundary distance remain at
+their starting values; tuning them is a follow-up only if field use shows the
+boundary is still reached. Section 9 non-goals stand.
+
+```text
+Current verified stage: all three (Stage 1 8e5077b, Stage 2 683e843, Stage 3 8d3276f)
+Current verified commit: main 1898891 (release 71ff5ed v0.7.6 plus the closed-testing log)
+Current candidate/unverified work: none
+Last focused proof: 139 pass, 0 fail at 1898891
+Last broader proof: npm test 1302 / 1260 pass / 6 fail (known Deno suites) / 36 skipped; build pass; git diff --check clean at 1898891
+Last reviewer result: agent-sparring NEEDS_YOU on 8d3276f resolved by device QA; no open findings
+Manual QA status: A–I passed across accepted candidates; D and F exception recorded above
+Known issue/blocker: none
+Next exact action: none — plan closed and moved to docs/plans/completed/
 ```

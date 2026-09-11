@@ -27,7 +27,7 @@ opt-in count was not re-checked for this entry.
 
 ### Day 7 (September 11, 2026)
 
-**Finds prefetch and incremental hydration (Stage 3)** — see `docs/plans/active/2026-09-09-finds-smooth-pagination.md`, sections 3.0–3.8
+**Finds prefetch and incremental hydration (Stage 3)** — see `docs/plans/completed/2026-09-09-finds-smooth-pagination.md`, sections 3.0–3.8
 - The next Finds page is now requested about one viewport ahead through an `IntersectionObserver` on a stable bottom sentinel, instead of 240 px from the bottom, so fast scrolling normally never reaches an unloaded boundary. A viewport-derived scroll fallback covers WebViews without the observer.
 - Red-list badges and author profiles no longer block a page from rendering; they arrive in the background and are patched into existing cards. Profile hydration now merges instead of rebuilding, so earlier pages keep their authors.
 - The Finds empty state can no longer flash before the first authoritative page has returned (transient observed during Stage 2 device QA).
@@ -45,6 +45,6 @@ opt-in count was not re-checked for this entry.
 
 ### Day 5 (September 9, 2026)
 
-**Finds search pagination correction (Stage 1)** — see `docs/plans/active/2026-09-09-finds-smooth-pagination.md`
+**Finds search pagination correction (Stage 1)** — see `docs/plans/completed/2026-09-09-finds-smooth-pagination.md`
 - Fixed two search-input defects found by independent code review: the render-guard/paging invalidation ran after the local narrowing render started (discarding that render once its async image lookup resolved), and the debounce timer armed unconditionally even for a normalized-equivalent edit (letting it silently reset paging to page one).
 - Files changed: `src/screens/finds.js`, `src/screens/finds.test.js`.
