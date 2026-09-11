@@ -1256,3 +1256,27 @@ Manual QA status: B pass; D paste-variant pass; D typed-variant FAILS (double th
 Known issue/blocker: per-keystroke double thumbnail flicker — open Stage 2 defect, must be fixed and re-sparred before Stage 2 acceptance
 Next exact action: correction turn in the same stage (sparring run-stage / run-loop on stage-finds-incremental-pagination-render) to make search narrowing and the authoritative search replacement non-destructive for surviving cards; new commit, fresh sparring, then remaining device QA A/C/D-typed/E/F/G/H/I before freeze/accept
 ```
+
+
+### Stage 2 correction turn — search transitions reconciled in place, new candidate 683e843, NEEDS_YOU — 2026-09-11
+
+The user's device verdict was recorded as a SEND_BACK and `sparring run-loop` was run on the stage (2 cycles, 1 send-back). The stage agent resumed its existing session; the sparring agent (codex-cli, read-only) reviewed each candidate independently.
+
+- `d8461fc` — fix: reconcile Finds search transitions in place instead of rebuilding. Keystroke local narrowing and the debounced authoritative replacement now keep surviving card/`<img>`/media nodes and remove or insert only the delta, with image-metadata lookup restricted to inserted ids. Sparring sent it back: in Species sort the survivor-order gate compared date-ordered cache data against the alphabetically grouped DOM, so any list where those orders disagree fell through to the full rebuild and both flickers survived. Reproduced in memory with Russula/Amanita survivors plus a non-matching Boletus. The existing species regression retained only one group and masked this.
+- `683e843` — fix: compare survivors against display order, not cache order. The gate now derives Species display order via the shared species grouping helper before comparing. Two new regressions retain two species whose date and alphabetical orders disagree and assert surviving card/image identity and delta-only metadata lookup for both the local narrowing and the authoritative page (which inserts a new species group between survivors). Both are red against the un-fixed comparison.
+
+Both correction commits touch only `src/screens/finds.js` and `src/screens/finds.test.js`; they are pushed to `origin/feature/sparring-v2-pilot`. d20aef3 remains the frozen previous candidate in `state.json`; 683e843 has not been frozen (the worktree carries an unrelated dirty `.gitignore`, and device QA precedes freeze/accept).
+
+Sparring verdict on 683e843: NEEDS_YOU, device/manual check. Independent read-only checks: focused suite 127 pass / 0 fail; ESLint 0 errors / 51 warnings; whitespace clean; full suite 1290 tests / 1232 pass / 22 fail (six known Deno suites plus 16 EPERM fixture failures specific to the read-only sandbox). Implementer (writable): `npm test` 1290 / 1248 pass / 6 fail (known Deno suites), `npm run build` pass. Independently rerun in this session: focused suite 127 pass / 0 fail, `npx eslint .` 0 errors.
+
+```text
+Current verified stage: Stage 1 (accepted 8e5077b; search-pagination behavior confirmed on device on d20aef3)
+Current verified commit: 8e5077bf13927f68798471cacfc40973f3f60eed
+Current candidate/unverified work: Stage 2 candidate 683e8439c6ee5d4555df65957cb8a7e97ab357a1 on feature/sparring-v2-pilot (pushed, not frozen, NOT accepted); d20aef3 frozen as previous/rejected candidate
+Last focused proof: node --test finds/images/image-helpers/media-loader — 127 pass, 0 fail (implementer, sparring, and this session agree)
+Last broader proof: npm test 1290 / 1248 pass / 6 fail (known Deno suites) and npm run build pass in the implementer's writable environment; unconfirmed by the read-only sparring run
+Last reviewer result: NEEDS_YOU on 683e843 — no further implementation correction identified; device QA required
+Manual QA status: on 683e843 nothing run yet. On d20aef3: B pass, D paste-variant pass (Stage 1 evidence only). Required on 683e843: D typed variant in Date and Species sort (the flicker itself), A, C, E, F, G, H, I, with device/WebView version recorded
+Known issue/blocker: none open in code; Stage 2 acceptance blocked on device QA
+Next exact action: user runs device scenarios on 683e843; then sparring freeze-candidate + accept-candidate on that exact SHA (requires a clean worktree, so the unrelated .gitignore edit must be committed or set aside first)
+```
