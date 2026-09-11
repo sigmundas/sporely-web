@@ -783,11 +783,30 @@ perf: prefetch Finds pages and hydrate incrementally
 Record after verification:
 
 ```text
-Stage 3 commit:
-Stage 3 reviewer:
-Stage 3 focused proof:
-Stage 3 broader proof:
-Stage 3 deviations/notes:
+Stage 3 commit: 8d3276f93112f4318ba5ce7451896e877da4fbbf on feature/sparring-v2-pilot
+  (base f9bc3689653d72913a3ce9b433a8d2b24b43b18f), preceded on the same branch by
+  c149c86; accepted at the documentation revision that records the passing device
+  QA (product tree identical to 8d3276f — `git diff 8d3276f..HEAD -- src/` empty)
+Stage 3 reviewer: agent-sparring (codex-cli, read-only) across two cycles —
+  c149c86 sent back (stale observer reports bypassed the geometry gate; boundary
+  indicator latched on scroll-away), 8d3276f NEEDS_YOU with no further
+  implementation finding, device QA required
+Stage 3 focused proof: node --test src/screens/finds.test.js src/images.test.js
+  src/image-helpers.test.js src/media-loader.test.js — 139 pass, 0 fail
+  (implementer, sparring and the acceptance session agree)
+Stage 3 broader proof: npm run check:node (pass); npm test 1302 tests / 1260 pass /
+  6 fail / 36 skipped — the six known Deno edge-function suites node --test cannot
+  load; npm run build (pass); npx eslint . (0 errors, 51 warnings);
+  git diff --check f9bc368..8d3276f (clean)
+Stage 3 device QA: PASSED on 8d3276f, 2026-09-11 — the user checked out 8d3276f,
+  ran the Stage 3 device scenarios and reported "All tests pass". Device/WebView
+  version not recorded. The 1000 px root margin and 64 px boundary distance stay
+  at their starting values; no tuning was requested.
+Stage 3 deviations/notes: none in scope. Stage 2 rendering was not touched. The
+  IntersectionObserver is a trigger only; single-flight remains owned by the
+  unchanged `paging.loadingMore` guard and the load → enrich → append critical
+  section. A full loadFinds() remains the one place `_profileMap` is rebuilt;
+  page appends merge into it.
 ```
 
 ---
@@ -1448,4 +1467,35 @@ Last reviewer result: NEEDS_YOU on 8d3276f — no implementation correction iden
 Manual QA status: nothing run on 8d3276f. Required: section 7 scenarios A, B, C, E, G, H, I; plus repeated cold Feed loads (empty text must never precede the authoritative result) and deliberately outrunning prefetch on a slow connection (subtle inline footer only; hides on scroll-away, returns at the boundary, clears on arrival/end/error without moving visible cards). Record device/WebView version. The 1000 px root margin and 64 px boundary distance are tunable from this evidence.
 Known issue/blocker: none open in code; Stage 3 acceptance blocked on device QA. Unrelated dirty .sparring/PROJECT.md blocks freeze-candidate until committed or set aside.
 Next exact action: user installs 8d3276f (npm run android:install) and runs the device scenarios above; then sparring freeze-candidate + accept-candidate on exactly 8d3276f with a clean worktree; then plan section 6 final gate
+```
+
+### Stage 3 device QA passed and Stage 3 accepted — 2026-09-11
+
+The user committed the pending `.sparring/PROJECT.md` subagent policy as
+`6af7df0` (docs: define sparring subagent policy), checked out candidate
+`8d3276f93112f4318ba5ce7451896e877da4fbbf` detached, ran the Stage 3 device
+scenarios on it, and reported "All tests pass". That is the user's own
+attribution of the result to Stage 3 on exactly 8d3276f. It closes the Stage 3
+acceptance-table rows in section 8: earlier prefetch, single-flight, non-blocking
+enrichment, "Empty state vs. initial load" (3.0.1) and "Boundary wait UX"
+(3.1.1). Device/WebView version was not recorded; no tuning of the 1000 px root
+margin or 64 px boundary distance was requested.
+
+Acceptance is recorded against the documentation revision that carries this
+entry, following the Stage 1 and Stage 2 pattern. Its product tree is
+byte-identical to 8d3276f — `git diff 8d3276f..HEAD -- src/` is empty; the only
+differences are `.sparring/PROJECT.md` and this plan file. The exact frozen SHA
+is held in `.sparring/stages/stage-finds-prefetch-and-enrichment/state.json`,
+which is intentionally gitignored.
+
+```text
+Current verified stage: Stage 3 (accepted 2026-09-11; product tree identical to 8d3276f)
+Current verified commit: the documentation revision recording this QA; product code 8d3276f93112f4318ba5ce7451896e877da4fbbf on feature/sparring-v2-pilot
+Current candidate/unverified work: none — all three stages accepted; final gate (section 6) and final acceptance (section 8) not yet run
+Last focused proof: node --test finds/images/image-helpers/media-loader — 139 pass, 0 fail
+Last broader proof: npm test 1302 / 1260 pass / 6 fail (known Deno suites) / 36 skipped; npm run build pass; npx eslint . 0 errors, 51 warnings
+Last reviewer result: sparring NEEDS_YOU on 8d3276f with no further implementation finding; resolved by the passing device QA above
+Manual QA status: Stage 3 device QA PASSED on 8d3276f (user-reported, 2026-09-11). Stage 2 PASSED on 683e843; Stage 1 confirmed on d20aef3.
+Known issue/blocker: none
+Next exact action: run the section 6 final automated verification gate on the accepted HEAD, walk the section 8 acceptance table, then decide the merge of feature/sparring-v2-pilot to main (a deliberate human checkpoint)
 ```
