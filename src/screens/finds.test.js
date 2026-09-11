@@ -26,7 +26,12 @@ import {
   shouldHideFindsStatusControl,
   loadFinds,
   _applyFilter,
+  _awaitFindsBackgroundEnrichmentForTests,
   _findsInsertionAnchors,
+  _findsPrefetchDistancePx,
+  _findsShouldPrefetch,
+  _getFindsProfileMapForTests,
+  _handleFindsScroll,
   _mergeFindsItemsWithDelta,
   _getFindsCacheForTests,
   _getFindsPagingStateForTests,
@@ -38,6 +43,7 @@ import {
   _runPagedFindsQuery,
   _scheduleFindsSearchReload,
   _selectFindsDropdownValue,
+  _setFindsIntersectionObserverForTests,
 } from './finds.js'
 import { loadDetailObservation } from './find_detail.js'
 import { resetObservationIdentificationsTableAvailabilityForTests } from '../ai-identification.js'
@@ -2135,12 +2141,34 @@ function matchesFakeSelector(node, selector) {
   return true
 }
 
+// DOMTokenList-shaped class list for fake nodes: the production sentinel
+// update uses `classList.add/remove`, the selector matcher uses `has`.
+function makeFakeClassList(initial = []) {
+  const values = new Set(initial)
+  return {
+    add(...names) { names.filter(Boolean).forEach(name => values.add(name)) },
+    remove(...names) { names.filter(Boolean).forEach(name => values.delete(name)) },
+    toggle(name, force) {
+      const next = force === undefined ? !values.has(name) : Boolean(force)
+      if (next) values.add(name)
+      else values.delete(name)
+      return next
+    },
+    has(name) { return values.has(name) },
+    contains(name) { return values.has(name) },
+    get size() { return values.size },
+    get length() { return values.size },
+    forEach(fn) { values.forEach(fn) },
+    [Symbol.iterator]() { return values[Symbol.iterator]() },
+  }
+}
+
 function makeFakeNode(tag, attrs = {}) {
   const node = {
     tagName: String(tag).toUpperCase(),
     attrs,
     dataset: {},
-    classList: new Set(String(attrs.class || '').split(/\s+/).filter(Boolean)),
+    classList: makeFakeClassList(String(attrs.class || '').split(/\s+/).filter(Boolean)),
     children: [],
     parentElement: null,
     textContent: '',
@@ -2274,10 +2302,16 @@ function makeProfileGate() {
   return { armed: false, promise, release: () => resolve() }
 }
 
-function makeFindsAppendClient(observationPages, imageRowsByObsId, profileGate = null) {
+// `redlist` (optional) answers the red-list lookup's `.in('observation_id',
+// ids)` for `observation_identifications_community_view`: `(ids) => response`
+// where the response may be a `{ data, error }` object, a Promise of one, or a
+// rejected Promise (transport failure). `profilesById` (optional) supplies
+// `public_profiles` rows keyed by user id, so hydration can be asserted on.
+function makeFindsAppendClient(observationPages, imageRowsByObsId, profileGate = null, { redlist = null, profilesById = null } = {}) {
   const calls = []
   let pageIndex = 0
   const imageTables = new Set(['observation_images', 'observation_images_community_view'])
+  const REDLIST_TABLE = 'observation_identifications_community_view'
   return {
     calls,
     imageIdCalls: calls.filter.bind(calls),
@@ -2305,8 +2339,13 @@ function makeFindsAppendClient(observationPages, imageRowsByObsId, profileGate =
           order() { return chain },
           in(col, vals) {
             calls.push({ table, op: 'in', col, vals: [...vals] })
-            if (profileGate?.armed && table === 'public_profiles') {
-              return profileGate.promise.then(() => ({ data: [], error: null }))
+            if (table === REDLIST_TABLE && redlist) return redlist([...vals])
+            if (table === 'public_profiles') {
+              const rows = profilesById
+                ? [...vals].map(id => profilesById[id]).filter(Boolean).map(row => ({ ...row }))
+                : []
+              if (profileGate?.armed) return profileGate.promise.then(() => ({ data: rows, error: null }))
+              return { data: rows, error: null }
             }
             return { data: [], error: null }
           },
@@ -2352,24 +2391,26 @@ function appendImageRow(obsId) {
   }]
 }
 
-function installAppendHarness({ observationPages, imageRows, findsView = 'cards', findsSort = 'date', queueItems = [], profileGate = null }) {
+function installAppendHarness({ observationPages, imageRows, findsView = 'cards', findsSort = 'date', queueItems = [], profileGate = null, redlist = null, profilesById = null }) {
   const previousFrom = supabase.from
   const previousState = { ...state }
   const previousDocument = globalThis.document
   const restoreIndexedDb = installQueueIndexedDbStub(queueItems)
   const list = makeFakeNode('div', { id: 'finds-list' })
+  const toast = makeFakeNode('div', { id: 'toast' })
   const scroller = {
     scrollHeight: 1000,
     scrollTop: 0,
     clientHeight: 100,
     classList: { toggle() {} },
   }
-  const { client, calls } = makeFindsAppendClient(observationPages, imageRows, profileGate)
+  const { client, calls } = makeFindsAppendClient(observationPages, imageRows, profileGate, { redlist, profilesById })
   supabase.from = client.from
   globalThis.document = {
     getElementById(id) {
       if (id === 'finds-list') return list
       if (id === 'screen-finds') return scroller
+      if (id === 'toast') return toast
       return undefined
     },
     querySelector: () => null,
@@ -2959,14 +3000,16 @@ test('a second scroll cannot start another Feed page while the previous one is s
   // resolves, before profile enrichment and the delta append run. A scroll
   // event in that window used to fetch and commit the following page first,
   // producing out-of-order date groups.
-  const feedRow = (id, date, createdAt) => ({
+  const feedRow = (id, date, createdAt, userId = 'user-b') => ({
     ...makeAppendObservation(id, { date, createdAt, commonName: `feed-${id}` }),
-    user_id: 'user-b',
+    user_id: userId,
   })
-  const page = (base, date) => Array.from({ length: 20 }, (_, i) =>
-    feedRow(base + i, date, `${date}T${String(23 - i).padStart(2, '0')}:00:00Z`))
+  const page = (base, date, userId) => Array.from({ length: 20 }, (_, i) =>
+    feedRow(base + i, date, `${date}T${String(23 - i).padStart(2, '0')}:00:00Z`, userId))
   const firstPage = page(1400, '2026-09-03')
-  const secondPage = page(1500, '2026-09-02')
+  // Stage 3 hydrates only authors not already cached, so page two has to
+  // introduce a new author for its profile lookup to be issued (and parked).
+  const secondPage = page(1500, '2026-09-02', 'user-c')
   const thirdPage = [feedRow(1600, '2026-09-01', '2026-09-01T09:00:00Z')]
   const imageRows = {}
   for (const obs of [...firstPage, ...secondPage, ...thirdPage]) imageRows[obs.id] = appendImageRow(obs.id)
@@ -3042,13 +3085,15 @@ for (const transition of [
   { label: 'view change (Cards → Two)', apply: () => { state.findsView = 'two' } },
 ]) {
   test(`a ${transition.label} committing during page enrichment does not duplicate the in-flight delta`, async () => {
-    const feedRow = (id, date, createdAt) => ({
+    const feedRow = (id, date, createdAt, userId = 'user-b') => ({
       ...makeAppendObservation(id, { date, createdAt, genus: 'Boletus', species: 'edulis' }),
-      user_id: 'user-b',
+      user_id: userId,
     })
     const firstPage = Array.from({ length: 20 }, (_, i) =>
       feedRow(1700 + i, '2026-09-03', `2026-09-03T${String(23 - i).padStart(2, '0')}:00:00Z`))
-    const secondPage = [feedRow(1800, '2026-09-02', '2026-09-02T09:00:00Z')]
+    // A new author on page two: Stage 3 hydrates only uncached user IDs, so
+    // this is what makes the profile lookup (and the gate) happen at all.
+    const secondPage = [feedRow(1800, '2026-09-02', '2026-09-02T09:00:00Z', 'user-c')]
     const imageRows = {}
     for (const obs of [...firstPage, ...secondPage]) imageRows[obs.id] = appendImageRow(obs.id)
 
@@ -3474,5 +3519,450 @@ test('the authoritative species search page reconciles in place across a disagre
   } finally {
     harness.restore()
     restoreTimers()
+  }
+})
+
+// ── Stage 3: prefetch, single-flight, incremental enrichment (plan §3.6) ──────
+
+async function settleMicrotasks(rounds = 30) {
+  for (let i = 0; i < rounds; i++) await Promise.resolve()
+}
+
+async function settleUntil(predicate, rounds = 300) {
+  for (let i = 0; i < rounds && !predicate(); i++) await Promise.resolve()
+}
+
+function heldResponse() {
+  let release
+  const promise = new Promise(resolve => { release = resolve })
+  return { promise, release }
+}
+
+function makeIntersectionObserverStub() {
+  const instances = []
+  class StubIntersectionObserver {
+    constructor(callback, options) {
+      this.callback = callback
+      this.options = options
+      this.observed = []
+      this.observeCalls = 0
+      instances.push(this)
+    }
+    observe(el) {
+      this.observeCalls += 1
+      if (!this.observed.includes(el)) this.observed.push(el)
+    }
+    unobserve(el) {
+      this.observed = this.observed.filter(node => node !== el)
+    }
+    disconnect() {
+      this.observed = []
+    }
+    fire(isIntersecting = true) {
+      this.callback(this.observed.map(target => ({ isIntersecting, target })), this)
+    }
+  }
+  return { StubIntersectionObserver, instances }
+}
+
+function stage3Page(base, count, date, extra = {}) {
+  return Array.from({ length: count }, (_, i) => ({
+    ...makeAppendObservation(base + i, {
+      date,
+      createdAt: `${date}T${String(23 - i).padStart(2, '0')}:00:00Z`,
+      commonName: `s3-${base + i}`,
+    }),
+    ...extra,
+  }))
+}
+
+function stage3ImageRows(...pages) {
+  const imageRows = {}
+  for (const obs of pages.flat()) imageRows[obs.id] = appendImageRow(obs.id)
+  return imageRows
+}
+
+test('prefetch distance: one root margin with an observer, a viewport-derived threshold without — both far ahead of the retired 240px trigger', () => {
+  assert.equal(_findsPrefetchDistancePx({ clientHeight: 100 }, { hasObserver: true }), 1000)
+  assert.equal(_findsPrefetchDistancePx({ clientHeight: 100 }, { hasObserver: false }), 800, 'fallback floor')
+  assert.equal(_findsPrefetchDistancePx({ clientHeight: 800 }, { hasObserver: false }), 1000, '1.25 viewports once that exceeds the floor')
+
+  // 700px of content still below the viewport: the old 240px trigger stayed
+  // silent here; the fallback threshold requests the page.
+  assert.equal(_findsShouldPrefetch({ scrollHeight: 1000, scrollTop: 200, clientHeight: 100 }, { hasObserver: false }), true)
+  assert.equal(_findsShouldPrefetch({ scrollHeight: 1000, scrollTop: 0, clientHeight: 100 }, { hasObserver: false }), false,
+    '900px away is beyond the fallback threshold')
+  assert.equal(_findsShouldPrefetch({ scrollHeight: 1000, scrollTop: 0, clientHeight: 100 }, { hasObserver: true }), true,
+    'but inside the observer root margin')
+})
+
+test('the prefetch observer watches the stable bottom sentinel, repeated callbacks never overlap page loads, and hasMore=false stops it', async () => {
+  const firstPage = stage3Page(3000, 20, '2026-09-03')
+  const secondPage = stage3Page(3100, 5, '2026-09-02')
+  const secondHeld = heldResponse()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, secondHeld.promise],
+    imageRows: stage3ImageRows(firstPage, secondPage),
+  })
+  const { list, scroller, calls } = harness
+  // A tall list: 4200px of content below the viewport, so nothing is within
+  // the 1000px root margin until the test says so.
+  Object.assign(scroller, { scrollHeight: 5000, clientHeight: 800, scrollTop: 0 })
+  const { StubIntersectionObserver, instances } = makeIntersectionObserverStub()
+  _setFindsIntersectionObserverForTests(StubIntersectionObserver)
+  const rangeCalls = () => calls.filter(c => c.op === 'range').length
+
+  try {
+    await loadFinds()
+    const writesAfterInitialRender = list.innerHtmlWrites
+    assert.equal(harness.cardIds().length, 20)
+    assert.equal(rangeCalls(), 1, 'far from the bottom, the post-load check requests nothing')
+
+    assert.equal(instances.length, 1, 'exactly one observer is created')
+    const observer = instances[0]
+    assert.equal(observer.options.root, scroller, 'rooted at #screen-finds')
+    assert.equal(observer.options.rootMargin, '1000px 0px', 'plan §3.1 recommended starting margin')
+    assert.equal(observer.options.threshold, 0)
+    const sentinel = list.querySelector('.finds-bottom-sentinel')
+    assert.ok(sentinel, 'a grouped render always closes with the sentinel')
+    assert.deepEqual(observer.observed, [sentinel], 'the observer watches the sentinel in the list')
+
+    // 1040px of content is still below the viewport — well before the
+    // physical bottom — when the observer reports the sentinel inside its
+    // 1000px margin (trailing scroller padding legitimately makes the raw
+    // scroll geometry read slightly longer than the sentinel's own distance).
+    // The observer is the authority for its own trigger: a geometry-only gate
+    // would refuse here and, since the observer only reports *changes*, never
+    // get a second chance. It keeps reporting while the sentinel sits inside.
+    scroller.scrollTop = 3160
+    observer.fire(true)
+    observer.fire(true)
+    observer.fire(true)
+    await settleMicrotasks()
+    assert.equal(rangeCalls(), 2, 'one page request for three observer callbacks')
+    _handleFindsScroll()
+    await settleMicrotasks()
+    assert.equal(rangeCalls(), 2, 'a scroll event during the fetch does not start another')
+    assert.equal(sentinel.classList.contains('finds-bottom-sentinel--loading'), false,
+      'a prefetch running ahead of the user shows no indicator')
+
+    secondHeld.release({ data: secondPage, error: null })
+    await settleUntil(() => harness.cardIds().length === 25)
+    await settleMicrotasks()
+    assert.equal(harness.cardIds().length, 25, 'the prefetched page was appended')
+    assert.equal(list.innerHtmlWrites, writesAfterInitialRender, 'no destructive rerender')
+    assert.equal(list.querySelector('.finds-bottom-sentinel'), sentinel, 'the sentinel survived the append as the same node')
+    assert.equal(list.querySelectorAll('.finds-bottom-sentinel').length, 1)
+    assert.ok(observer.observeCalls >= 2, 'the observer was re-armed after the append so a still-visible sentinel reports again')
+    assert.deepEqual(observer.observed, [sentinel])
+
+    assert.equal(_getFindsPagingStateForTests('mine').hasMore, false)
+    observer.fire(true)
+    await settleMicrotasks()
+    assert.equal(rangeCalls(), 2, 'hasMore=false: the observer cannot request another page')
+    assert.equal(sentinel.classList.contains('finds-bottom-sentinel--done'), true)
+  } finally {
+    _setFindsIntersectionObserverForTests(undefined)
+    harness.restore()
+  }
+})
+
+test('profile hydration requests only authors not already cached and merges into the existing profile map', async () => {
+  const feedRow = (id, date, hour, userId) => ({
+    ...makeAppendObservation(id, { date, createdAt: `${date}T${String(hour).padStart(2, '0')}:00:00Z`, commonName: `feed-${id}` }),
+    user_id: userId,
+  })
+  const firstPage = Array.from({ length: 20 }, (_, i) => feedRow(3200 + i, '2026-09-03', 23 - i, 'user-b'))
+  const secondPage = [
+    feedRow(3300, '2026-09-02', 9, 'user-c'),
+    feedRow(3301, '2026-09-02', 8, 'user-b'),
+    feedRow(3302, '2026-09-02', 7, 'user-c'),
+  ]
+  const previousStorageFrom = supabase.storage.from
+  supabase.storage.from = () => ({ createSignedUrls: async () => ({ data: [], error: null }) })
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, { data: secondPage, error: null }],
+    imageRows: stage3ImageRows(firstPage, secondPage),
+    profilesById: {
+      'user-b': { id: 'user-b', username: 'bea', display_name: 'Bea', avatar_url: null },
+      'user-c': { id: 'user-c', username: 'cee', display_name: 'Cee', avatar_url: null },
+    },
+  })
+  const { list, scroller, calls } = harness
+  Object.assign(state, { findsScopePrimary: 'feed', findsScopeFeed: 'all' })
+  const profileRequests = () => calls.filter(c => c.table === 'public_profiles' && c.op === 'in').map(c => c.vals)
+
+  try {
+    await loadFinds()
+    assert.deepEqual(profileRequests(), [['user-b']])
+    const cachedB = _getFindsProfileMapForTests()['user-b']
+    assert.equal(cachedB?.username, 'bea')
+
+    scroller.scrollTop = 850
+    await _maybeLoadMoreFinds()
+    assert.equal(harness.cardIds().length, 23)
+    assert.deepEqual(profileRequests(), [['user-b'], ['user-c']], 'the second page asked only for its new author')
+
+    const map = _getFindsProfileMapForTests()
+    assert.equal(map['user-b'], cachedB, "the first page's author entry was preserved, not rebuilt")
+    assert.equal(map['user-c']?.username, 'cee', 'the new author was merged in')
+
+    const cardC = list.querySelectorAll('.find-card[data-id]').find(card => card.dataset.id === '3300')
+    assert.equal(cardC.querySelector('.find-card-author').textContent, '@cee', 'the new card rendered the hydrated handle')
+    const cardB = list.querySelectorAll('.find-card[data-id]').find(card => card.dataset.id === '3301')
+    assert.equal(cardB.querySelector('.find-card-author').textContent, '@bea', 'a cached author still resolves on a later page')
+  } finally {
+    harness.restore()
+    supabase.storage.from = previousStorageFrom
+  }
+})
+
+test('a red-list lookup failure neither blocks nor discards the fetched page: cards insert without a badge', async () => {
+  resetObservationIdentificationsTableAvailabilityForTests()
+  const firstPage = stage3Page(3400, 20, '2026-09-03')
+  const secondPage = stage3Page(3500, 3, '2026-09-02', { top_redlist_category: undefined })
+  const warnings = []
+  const previousWarn = console.warn
+  console.warn = (...args) => { warnings.push(args.map(String).join(' ')) }
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, { data: secondPage, error: null }],
+    imageRows: stage3ImageRows(firstPage, secondPage),
+    redlist: () => Promise.reject(new Error('red-list service unavailable')),
+  })
+  const { list, scroller } = harness
+
+  try {
+    await loadFinds()
+    const writesAfterInitialRender = list.innerHtmlWrites
+    scroller.scrollTop = 850
+    await _maybeLoadMoreFinds()
+    assert.equal(harness.cardIds().length, 23, 'the page was inserted regardless of the red-list failure')
+    await _awaitFindsBackgroundEnrichmentForTests()
+    assert.equal(harness.cardIds().length, 23)
+    assert.equal(list.innerHtmlWrites, writesAfterInitialRender, 'enrichment failure caused no rerender')
+    for (const obs of secondPage) {
+      const card = list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === obs.id)
+      assert.ok(card, `card ${obs.id} is on screen`)
+      assert.equal(card.querySelector('.ai-result-row-redlist'), null, `card ${obs.id} simply has no badge`)
+    }
+    assert.ok(warnings.some(w => w.includes('red-list')), 'the failure was logged, not thrown')
+  } finally {
+    console.warn = previousWarn
+    harness.restore()
+    resetObservationIdentificationsTableAvailabilityForTests()
+  }
+})
+
+test('late-arriving red-list badges are patched into the existing card in place, never by rebuilding it', async () => {
+  resetObservationIdentificationsTableAvailabilityForTests()
+  const firstPage = stage3Page(3600, 20, '2026-09-03')
+  const secondPage = stage3Page(3700, 2, '2026-09-02', { top_redlist_category: undefined })
+  const redlistHeld = heldResponse()
+  const redlistRequests = []
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, { data: secondPage, error: null }],
+    imageRows: stage3ImageRows(firstPage, secondPage),
+    redlist: ids => {
+      redlistRequests.push(ids)
+      return redlistHeld.promise.then(() => ({
+        data: [{
+          observation_id: '3700',
+          results: null,
+          top_redlist_category: 'VU',
+          top_redlist_source: 'Artsdatabanken',
+          created_at: '2026-09-01T00:00:00Z',
+          updated_at: null,
+        }],
+        error: null,
+      }))
+    },
+  })
+  const { list, scroller } = harness
+
+  try {
+    await loadFinds()
+    const writesAfterInitialRender = list.innerHtmlWrites
+    scroller.scrollTop = 850
+    await _maybeLoadMoreFinds()
+    assert.equal(harness.cardIds().length, 22, 'cards inserted while the red-list lookup is still open')
+    assert.deepEqual(redlistRequests, [['3700', '3701']], 'only the badgeless new rows were looked up')
+
+    const card = list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === '3700')
+    const img = card.querySelector('img')
+    assert.equal(card.querySelector('.ai-result-row-redlist'), null, 'no badge yet')
+
+    redlistHeld.release()
+    await _awaitFindsBackgroundEnrichmentForTests()
+
+    const cardAfter = list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === '3700')
+    assert.equal(cardAfter, card, 'the card is the same DOM node')
+    assert.equal(cardAfter.querySelector('img'), img, 'its <img> is the same DOM node')
+    const badge = cardAfter.querySelector('.ai-result-row-redlist')
+    assert.ok(badge, 'the badge was patched in')
+    assert.equal(badge.textContent, 'VU')
+    assert.ok(cardAfter.querySelector('.find-card-photo-wrap').children.includes(badge), 'inside the photo wrap, where the template puts it')
+    const other = list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === '3701')
+    assert.equal(other.querySelector('.ai-result-row-redlist'), null, 'a row without a summary stays badgeless')
+    assert.equal(list.innerHtmlWrites, writesAfterInitialRender, 'enrichment completion never rerenders the list')
+    assert.equal(_getFindsCacheForTests('mine').find(o => o.id === '3700').top_redlist_category, 'VU',
+      'the cached row carries the badge for any later full render')
+  } finally {
+    harness.restore()
+    resetObservationIdentificationsTableAvailabilityForTests()
+  }
+})
+
+test('a page fetched before a query reset cannot be appended after it', async () => {
+  const firstPage = stage3Page(3800, 20, '2026-09-03')
+  const secondPage = stage3Page(3900, 5, '2026-09-02')
+  const secondHeld = heldResponse()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, secondHeld.promise],
+    imageRows: stage3ImageRows(firstPage, secondPage),
+  })
+  const { list, scroller, calls } = harness
+  const rangeCalls = () => calls.filter(c => c.op === 'range').length
+
+  try {
+    await loadFinds()
+    const writesAfterInitialRender = list.innerHtmlWrites
+    scroller.scrollTop = 850
+    const parked = _maybeLoadMoreFinds()
+    await settleMicrotasks()
+    assert.equal(rangeCalls(), 2, 'page two is in flight')
+
+    // The user types: paging is reset and tied to the new query before the
+    // old page's response arrives.
+    state.searchQuery = 'zzz'
+    assert.equal(_invalidateFindsSearchPagingOnInput(), true)
+
+    secondHeld.release({ data: secondPage, error: null })
+    await parked
+    await settleMicrotasks()
+
+    assert.equal(harness.cardIds().length, 20, 'the stale page was not appended')
+    assert.deepEqual(_getFindsCacheForTests('mine').map(o => o.id), firstPage.map(o => o.id), 'the cache was not touched')
+    assert.equal(list.innerHtmlWrites, writesAfterInitialRender)
+    const paging = _getFindsPagingStateForTests('mine')
+    assert.equal(paging.initialized, false, 'the fresh paging state still awaits its own first page')
+    assert.equal(paging.nextOffset, 0)
+    assert.equal(paging.searchKey, 'zzz')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('the empty state is never rendered before the initial authoritative load returns, and is rendered once it returns zero rows', async () => {
+  const firstHeld = heldResponse()
+  const harness = installAppendHarness({ observationPages: [firstHeld.promise], imageRows: {} })
+  const { list } = harness
+
+  try {
+    const load = loadFinds()
+    await settleMicrotasks()
+    assert.ok(list.querySelector('.finds-loading-state'), 'the loading shell is up while page one is in flight')
+
+    // A concurrent render off the (still empty) cache — a view toggle, a sync
+    // event, a status change — must not turn that into an empty state.
+    await _applyFilter()
+    assert.ok(list.querySelector('.finds-loading-state'), 'a render during the in-flight load keeps the loading shell')
+    assert.equal(list.querySelector('.finds-empty-state'), null, 'no empty state before the first authoritative page')
+    assert.equal(_getFindsPagingStateForTests('mine').initialized, false)
+
+    firstHeld.release({ data: [], error: null })
+    await load
+    assert.equal(_getFindsPagingStateForTests('mine').initialized, true)
+    assert.ok(list.querySelector('.finds-empty-state'), 'zero authoritative rows: the empty state renders')
+    assert.equal(list.querySelector('.finds-loading-state'), null)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('the inline "loading more" line appears only while the user waits at the boundary, and clears when the page lands', async () => {
+  const firstPage = stage3Page(4000, 20, '2026-09-03')
+  const secondPage = stage3Page(4100, 5, '2026-09-02')
+  const secondHeld = heldResponse()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, secondHeld.promise],
+    imageRows: stage3ImageRows(firstPage, secondPage),
+  })
+  const { list, scroller, calls } = harness
+  const rangeCalls = () => calls.filter(c => c.op === 'range').length
+
+  try {
+    await loadFinds()
+    const writesAfterInitialRender = list.innerHtmlWrites
+    const cardsBefore = new Map(list.querySelectorAll('.find-card[data-id]').map(card => [card.dataset.id, card]))
+    const sentinel = list.querySelector('.finds-bottom-sentinel')
+    assert.ok(sentinel)
+    assert.equal(sentinel.textContent, '', 'idle sentinel has no text')
+    assert.equal(sentinel.classList.contains('finds-bottom-sentinel--loading'), false)
+
+    // Prefetch begins 700px ahead of the bottom (fallback threshold 800px):
+    // the user has not reached the boundary, so nothing is shown.
+    scroller.scrollTop = 200
+    const load = _maybeLoadMoreFinds()
+    await settleMicrotasks()
+    assert.equal(rangeCalls(), 2, 'page two is being prefetched')
+    assert.equal(sentinel.classList.contains('finds-bottom-sentinel--loading'), false,
+      'a prefetch the user has not caught up with shows no indicator')
+
+    // The user out-runs the prefetch and reaches the end of the loaded list.
+    scroller.scrollTop = 900
+    _handleFindsScroll()
+    assert.equal(sentinel.classList.contains('finds-bottom-sentinel--loading'), true, 'waiting at the boundary: indicator on')
+    assert.equal(sentinel.textContent, 'Loading more finds…')
+    assert.equal(list.querySelector('.finds-bottom-sentinel'), sentinel, 'the indicator reuses the sentinel node')
+    assert.equal(list.querySelectorAll('.finds-bottom-sentinel').length, 1, 'one slot, no competing status element')
+    await settleMicrotasks()
+    assert.equal(rangeCalls(), 2, 'reaching the boundary did not start a second request')
+
+    secondHeld.release({ data: secondPage, error: null })
+    await load
+    await settleUntil(() => harness.cardIds().length === 25)
+    assert.equal(harness.cardIds().length, 25)
+    assert.equal(sentinel.classList.contains('finds-bottom-sentinel--loading'), false, 'cleared on append')
+    assert.equal(sentinel.classList.contains('finds-bottom-sentinel--done'), true, 'and hasMore=false reads as done')
+    assert.equal(sentinel.textContent, 'No more finds')
+    assert.equal(list.querySelector('.finds-bottom-sentinel'), sentinel, 'still the same node')
+    assert.equal(list.innerHtmlWrites, writesAfterInitialRender, 'no full rerender')
+    for (const [id, card] of cardsBefore) {
+      assert.equal(list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === id), card, `card ${id} untouched`)
+    }
+  } finally {
+    harness.restore()
+  }
+})
+
+test('the inline "loading more" line clears on a next-page error and the list stays untouched', async () => {
+  const firstPage = stage3Page(4200, 20, '2026-09-03')
+  const secondHeld = heldResponse()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, secondHeld.promise],
+    imageRows: stage3ImageRows(firstPage),
+  })
+  const { list, scroller } = harness
+
+  try {
+    await loadFinds()
+    const writesAfterInitialRender = list.innerHtmlWrites
+    const sentinel = list.querySelector('.finds-bottom-sentinel')
+
+    // Already at the boundary when the request starts.
+    scroller.scrollTop = 900
+    const load = _maybeLoadMoreFinds()
+    await settleMicrotasks()
+    assert.equal(sentinel.classList.contains('finds-bottom-sentinel--loading'), true)
+
+    secondHeld.release({ data: null, error: { message: 'boom' } })
+    await load
+    assert.equal(sentinel.classList.contains('finds-bottom-sentinel--loading'), false, 'cleared on error')
+    assert.equal(harness.cardIds().length, 20, 'the existing list is untouched')
+    assert.equal(list.innerHtmlWrites, writesAfterInitialRender)
+    assert.equal(_getFindsPagingStateForTests('mine').hasMore, false)
+    assert.equal(globalThis.document.getElementById('toast').textContent, 'Could not load finds', 'the existing error UX owns the failure')
+  } finally {
+    harness.restore()
   }
 })

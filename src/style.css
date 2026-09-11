@@ -1323,12 +1323,21 @@ html, body {
 }
 
 .finds-loading-state,
-.finds-bottom-sentinel {
+.finds-bottom-sentinel--loading,
+.finds-bottom-sentinel--done {
   padding: 16px 14px 18px;
   color: var(--text-dim);
   font-size: 12px;
   text-align: center;
   font-family: 'DM Mono', monospace;
+}
+
+/* Stable bottom sentinel: always closes a grouped Finds list so the prefetch
+   observer has a fixed target and new cards insert above it. Idle it takes
+   (almost) no space; the loading/done modifiers above give it the footer
+   treatment. Text changes never move the cards above it. */
+.finds-bottom-sentinel {
+  min-height: 1px;
 }
 
 /* Field-offline Finds: compact secondary informational note. Rendered AFTER

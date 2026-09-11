@@ -47,9 +47,28 @@ function _isOfflineFindsMode() {
 
 const _cache = {}   // scope → array of observations
 let _profileMap = {}
+// User IDs already asked for in this profile-cache generation, whether or not
+// a public profile row came back. Prevents re-requesting a user with no
+// public profile on every page; reset together with `_profileMap`.
+let _profileMapRequested = new Set()
 let _pendingScrollRestore = null
 const FINDS_PAGE_SIZE = 20
-const FINDS_LOAD_MORE_THRESHOLD = 240
+// Plan §3.1: prefetch the next page roughly one viewport ahead. The
+// IntersectionObserver root margin is the plan's recommended starting value
+// and is explicitly tunable after device QA. Environments without
+// IntersectionObserver fall back to a viewport-derived scroll threshold; both
+// are resolved through `_findsPrefetchDistancePx` so no value is duplicated.
+const FINDS_PREFETCH_ROOT_MARGIN_PX = 1000
+const FINDS_PREFETCH_FALLBACK_MIN_PX = 800
+const FINDS_PREFETCH_FALLBACK_VIEWPORTS = 1.25
+// Plan §3.1.1: the inline "Loading more finds…" line is shown only while the
+// user is actually waiting at the loaded boundary — the end of the list is
+// within this many pixels of the viewport bottom — never for a prefetch that
+// lands before they arrive.
+const FINDS_BOUNDARY_WAIT_PX = 64
+const FINDS_SENTINEL_CLASS = 'finds-bottom-sentinel'
+const FINDS_SENTINEL_LOADING_CLASS = 'finds-bottom-sentinel--loading'
+const FINDS_SENTINEL_DONE_CLASS = 'finds-bottom-sentinel--done'
 const FINDS_SEARCH_DEBOUNCE_MS = 250
 const PULL_REFRESH_THRESHOLD = 72
 const PULL_REFRESH_MAX = 112
@@ -76,6 +95,19 @@ let _findsRenderPromise = Promise.resolve(false)
 // outlives the paging state's own `loadingMore` fetch guard. See
 // _maybeLoadMoreFinds.
 let _findsLoadMoreInFlight = false
+// True only while a load-more is in flight AND the user has reached the loaded
+// boundary (plan §3.1.1). Drives the inline sentinel indicator; cleared in
+// `_maybeLoadMoreFinds`'s finally so it can never outlive the request.
+let _findsWaitingAtBoundary = false
+// Plan §3.1: one IntersectionObserver on the stable bottom sentinel. Created
+// lazily against `#screen-finds`; `undefined` override means "use the
+// platform constructor", `null` forces the scroll fallback (test seam).
+let _findsPrefetchObserver = null
+let _findsObservedSentinel = null
+let _findsIntersectionObserverOverride = undefined
+// Background enrichment tasks (red-list badges) still running; a test seam
+// awaits them so late-arriving badges can be asserted deterministically.
+const _findsBackgroundEnrichment = new Set()
 // Describes the list currently committed to the DOM by a full render, so an
 // incremental page append (plan §2.2) can tell whether it may extend that
 // exact list or must fall back to a full render. Cleared at the start of
@@ -263,16 +295,41 @@ export function _getFindsPagingStateForTests(scope) {
   return _getPagingState(scope)
 }
 
-function _findsFooterHtml(scope) {
+export function _getFindsProfileMapForTests() {
+  return _profileMap
+}
+
+// Awaits every background (non-blocking) enrichment task currently running,
+// so a test can assert on late-arriving red-list badges deterministically.
+export function _awaitFindsBackgroundEnrichmentForTests() {
+  return Promise.all([..._findsBackgroundEnrichment])
+}
+
+function _resetFindsProfileCache() {
+  _profileMap = {}
+  _profileMapRequested = new Set()
+}
+
+// The bottom sentinel is a single stable element that always closes a grouped
+// list (plan §3.1): new cards are inserted before it, the prefetch observer
+// watches it, and the footer states below are expressed as modifier classes
+// plus text on that one node rather than by adding/removing elements
+// (plan §3.1.1: one slot, no competing status element).
+function _findsSentinelState(scope) {
   const paging = _getPagingState(scope)
-  if (!paging.initialized) return ''
-  if (paging.loadingMore) {
-    return `<div class="finds-bottom-sentinel finds-bottom-sentinel--loading">${_esc(t('common.loading'))}</div>`
+  if (!paging.initialized) return { modifier: '', text: '' }
+  if (_findsLoadMoreInFlight && _findsWaitingAtBoundary) {
+    return { modifier: FINDS_SENTINEL_LOADING_CLASS, text: t('finds.loadingMore') }
   }
   if (!paging.hasMore && (_cache[_pagingScopeKey(scope)] || []).length) {
-    return `<div class="finds-bottom-sentinel finds-bottom-sentinel--done">No more finds</div>`
+    return { modifier: FINDS_SENTINEL_DONE_CLASS, text: 'No more finds' }
   }
-  return ''
+  return { modifier: '', text: '' }
+}
+
+function _findsFooterHtml(scope) {
+  const { modifier, text } = _findsSentinelState(scope)
+  return `<div class="${FINDS_SENTINEL_CLASS}${modifier ? ` ${modifier}` : ''}">${_esc(text)}</div>`
 }
 
 function _normalizeScope(scope) {
@@ -1131,10 +1188,12 @@ function _bindInfiniteScroll() {
   if (!screen || screen.dataset.infiniteScrollBound === 'true') return
   screen.dataset.infiniteScrollBound = 'true'
 
+  _ensureFindsPrefetchObserver(screen)
+
   let scheduled = false
   const checkBottom = () => {
     scheduled = false
-    void _maybeLoadMoreFinds()
+    _handleFindsScroll()
   }
 
   screen.addEventListener('scroll', () => {
@@ -1142,6 +1201,119 @@ function _bindInfiniteScroll() {
     scheduled = true
     window.requestAnimationFrame(checkBottom)
   }, { passive: true })
+}
+
+// ── Prefetch geometry and observer (plan §3.1) ────────────────────────────────
+
+function _findsIntersectionObserverCtor() {
+  if (_findsIntersectionObserverOverride !== undefined) return _findsIntersectionObserverOverride
+  return typeof globalThis.IntersectionObserver === 'function' ? globalThis.IntersectionObserver : null
+}
+
+function _findsPrefetchObserverAvailable() {
+  return _findsIntersectionObserverCtor() !== null
+}
+
+// Test seam: inject a stub IntersectionObserver constructor (`null` forces the
+// scroll fallback, `undefined` restores the platform lookup). Any observer
+// built against a previous document is dropped.
+export function _setFindsIntersectionObserverForTests(ctor) {
+  _findsIntersectionObserverOverride = ctor
+  _findsPrefetchObserver?.disconnect?.()
+  _findsPrefetchObserver = null
+  _findsObservedSentinel = null
+}
+
+function _findsDistanceFromBottom(scroller) {
+  const scrollHeight = Number(scroller?.scrollHeight) || 0
+  const scrollTop = Number(scroller?.scrollTop) || 0
+  const clientHeight = Number(scroller?.clientHeight) || 0
+  return scrollHeight - (scrollTop + clientHeight)
+}
+
+// The single source of the prefetch lead distance. With IntersectionObserver
+// it is the observer's root margin; without it, a viewport-derived threshold
+// (`max(800px, 1.25 × viewport)`) replaces the old fixed 240 px. Exported as a
+// test seam.
+export function _findsPrefetchDistancePx(scroller, { hasObserver = _findsPrefetchObserverAvailable() } = {}) {
+  if (hasObserver) return FINDS_PREFETCH_ROOT_MARGIN_PX
+  const clientHeight = Number(scroller?.clientHeight) || 0
+  return Math.max(FINDS_PREFETCH_FALLBACK_MIN_PX, FINDS_PREFETCH_FALLBACK_VIEWPORTS * clientHeight)
+}
+
+// Exported as a test seam.
+export function _findsShouldPrefetch(scroller, options = {}) {
+  return _findsDistanceFromBottom(scroller) <= _findsPrefetchDistancePx(scroller, options)
+}
+
+function _findsUserAtBoundary(scroller) {
+  return _findsDistanceFromBottom(scroller) <= FINDS_BOUNDARY_WAIT_PX
+}
+
+function _ensureFindsPrefetchObserver(scroller) {
+  if (_findsPrefetchObserver) return _findsPrefetchObserver
+  const Observer = _findsIntersectionObserverCtor()
+  if (!Observer || !scroller) return null
+  _findsPrefetchObserver = new Observer(entries => {
+    if ((entries || []).some(entry => entry?.isIntersecting)) {
+      void _maybeLoadMoreFinds({ fromObserver: true })
+    }
+  }, {
+    root: scroller,
+    rootMargin: `${FINDS_PREFETCH_ROOT_MARGIN_PX}px 0px`,
+    threshold: 0,
+  })
+  return _findsPrefetchObserver
+}
+
+// Point the observer at whatever sentinel the list currently holds. A full
+// render replaces the node (`list.innerHTML = …`), an incremental append keeps
+// it; either way this is idempotent and cheap, so it runs after every render
+// commit. Exported as a test seam.
+export function _syncFindsSentinelObserver() {
+  const doc = globalThis.document
+  if (!doc?.getElementById) return false
+  const scroller = doc.getElementById('screen-finds')
+  const observer = _ensureFindsPrefetchObserver(scroller)
+  if (!observer) return false
+  const list = doc.getElementById('finds-list')
+  const sentinel = list?.querySelector?.(`.${FINDS_SENTINEL_CLASS}`) || null
+  if (sentinel === _findsObservedSentinel) return true
+  if (_findsObservedSentinel) observer.unobserve(_findsObservedSentinel)
+  _findsObservedSentinel = sentinel
+  if (sentinel) observer.observe(sentinel)
+  return true
+}
+
+// IntersectionObserver reports *changes*: if the sentinel is still inside the
+// root margin after an append (a short page, a compact view), no new callback
+// would ever arrive. Re-observing queues a fresh initial notification with the
+// sentinel's current state, which is exactly the "request another page only if
+// the viewport still requires it" check plan §3.2 asks for.
+function _rearmFindsSentinelObserver() {
+  if (!_findsPrefetchObserver || !_findsObservedSentinel) return false
+  _findsPrefetchObserver.unobserve(_findsObservedSentinel)
+  _findsPrefetchObserver.observe(_findsObservedSentinel)
+  return true
+}
+
+// The rAF-throttled scroll handler body. With an observer available it only
+// maintains the boundary indicator (and, as a safety net, asks for a page when
+// the user is at the very end); without one it is the prefetch trigger.
+// Exported as a test seam.
+export function _handleFindsScroll() {
+  const scroller = document.getElementById('screen-finds')
+  if (!scroller) return
+  const atBoundary = _findsUserAtBoundary(scroller)
+  if (_findsLoadMoreInFlight && atBoundary) _setFindsLoadingMoreIndicator(true)
+  if (!_findsPrefetchObserverAvailable() || atBoundary) void _maybeLoadMoreFinds()
+}
+
+function _setFindsLoadingMoreIndicator(visible) {
+  if (_findsWaitingAtBoundary === visible) return
+  _findsWaitingAtBoundary = visible
+  const list = globalThis.document?.getElementById?.('finds-list')
+  if (list) _updateFindsFooter(list, _currentScope(), { insert: false })
 }
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
@@ -1515,6 +1687,10 @@ export async function loadFinds() {
   _closeFindsDropdowns()
 
   _setFindsCache(currentScope, [])
+  // A full (re)load is an authoritative fresh start for author data too, as
+  // it always was: profile hydration is incremental from here on (plan §3.3),
+  // so this is the one place the map is allowed to be rebuilt.
+  _resetFindsProfileCache()
 
   try {
     // Field-offline: never start a remote loader that can't complete, and
@@ -1745,54 +1921,60 @@ async function _attachSporeFlags(observations) {
   })
 }
 
+// Plan §3.3: hydrate only the user IDs not already asked for and MERGE into
+// `_profileMap`. Earlier pages' authors are never dropped by a later page, and
+// a page whose authors are all cached costs no request at all. Plan §3.4: a
+// failure leaves the map as it was (fallback author treatment for the new
+// rows only) and never propagates into the page load.
 async function _loadProfilesForScope(data, loadSeq = _loadFindsSeq) {
   if (loadSeq !== _loadFindsSeq) return false
   const userIds = [...new Set((data || [])
-    .map(obs => obs.user_id)
-    .filter(uid => uid && uid !== state.user?.id))]
+    .map(obs => obs?.user_id)
+    .filter(uid => uid && uid !== state.user?.id && !_profileMapRequested.has(uid)))]
 
-  if (!userIds.length) {
+  if (!userIds.length) return true
+
+  try {
+    const [profilesRes, relationships] = await Promise.all([
+      supabase
+        .from('public_profiles')
+        .select('id, username, display_name, avatar_url')
+        .in('id', userIds),
+      loadPeopleSocialState(userIds),
+    ])
+
     if (loadSeq !== _loadFindsSeq) return false
-    _profileMap = {}
+
+    const { data: profiles, error } = profilesRes
+    if (error) {
+      console.warn('Could not load observation profiles:', error.message)
+      return false
+    }
+
+    const paths = userIds.map(uid => `${uid}/avatar.jpg`)
+    const { data: signedData } = await supabase.storage.from('avatars').createSignedUrls(paths, 3600)
+    if (loadSeq !== _loadFindsSeq) return false
+    const signedMap = {}
+    if (signedData) {
+      signedData.forEach(item => {
+        if (item.signedUrl) signedMap[item.path.split('/')[0]] = item.signedUrl
+      })
+    }
+
+    for (const uid of userIds) _profileMapRequested.add(uid)
+    for (const profile of profiles || []) {
+      if (!profile?.id) continue
+      if (signedMap[profile.id]) profile.avatar_url = signedMap[profile.id]
+      _profileMap[profile.id] = {
+        ...profile,
+        relationship: relationships?.[profile.id] || { friendStatus: null, following: false },
+      }
+    }
     return true
-  }
-
-  const [profilesRes, relationships] = await Promise.all([
-    supabase
-      .from('public_profiles')
-      .select('id, username, display_name, avatar_url')
-      .in('id', userIds),
-    loadPeopleSocialState(userIds),
-  ])
-
-  if (loadSeq !== _loadFindsSeq) return false
-
-  const { data: profiles, error } = profilesRes
-  if (error) {
-    console.warn('Could not load observation profiles:', error.message)
-    _profileMap = {}
+  } catch (err) {
+    console.warn('Could not load observation profiles:', err?.message || err)
     return false
   }
-  
-  const paths = userIds.map(uid => `${uid}/avatar.jpg`)
-  const { data: signedData } = await supabase.storage.from('avatars').createSignedUrls(paths, 3600)
-  if (loadSeq !== _loadFindsSeq) return false
-  const signedMap = {}
-  if (signedData) {
-    signedData.forEach(item => {
-      if (item.signedUrl) signedMap[item.path.split('/')[0]] = item.signedUrl
-    })
-  }
-
-  if (loadSeq !== _loadFindsSeq) return false
-  _profileMap = Object.fromEntries((profiles || []).map(profile => {
-    if (signedMap[profile.id]) profile.avatar_url = signedMap[profile.id]
-    return [profile.id, {
-      ...profile,
-      relationship: relationships?.[profile.id] || { friendStatus: null, following: false },
-    }]
-  }))
-  return true
 }
 
 function _orderedFindsQuery(query) {
@@ -1944,16 +2126,18 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
       data,
     )
     await _attachSporeFlags(merged)
-    await _attachFindsRedlistTags(merged, loadSeq)
-    // Re-check after the awaited enrichment above: a newer search/scope
-    // change may have completed and already written the authoritative cache
-    // while this older request was still awaiting red-list data (plan §1.3
-    // correction) — an older request must never overwrite a newer result.
+    // Re-check after the await above: a newer search/scope change may have
+    // completed and already written the authoritative cache while this older
+    // request was still yielding (plan §1.3 correction) — an older request
+    // must never overwrite a newer result.
     if (loadSeq !== _loadFindsSeq) return _findsPageResult(false)
     _setFindsCache('mine', merged)
     paging.nextOffset += data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
     paging.initialized = true
+    // Plan §3.3: red-list badges never block card insertion; they are patched
+    // in once they arrive.
+    _scheduleFindsRedlistEnrichment(added, loadSeq)
     return _findsPageResult(true, added, paging.hasMore, appendedAtEnd)
   } finally {
     paging.loadingMore = false
@@ -2046,9 +2230,8 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
       addedItems = delta.added
       appendedAtEnd = delta.appendedAtEnd
       await _attachSporeFlags(merged)
-      await _attachFindsRedlistTags(merged, loadSeq)
       // See _loadMinePage's matching guard: an older request must not
-      // overwrite a newer completed search once awaited enrichment resolves.
+      // overwrite a newer completed search once the await above resolves.
       if (loadSeq !== _loadFindsSeq) return { data: [], error: null, hasMore: false, loaded: false, addedItems: [], appendedAtEnd: false }
       _setFindsCache(cacheKey, merged)
     }
@@ -2056,6 +2239,7 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
     paging.nextOffset += rawData.length
     paging.hasMore = rawData.length === FINDS_PAGE_SIZE
     paging.initialized = true
+    if (updateCache) _scheduleFindsRedlistEnrichment(addedItems, loadSeq)
     return { data, error: null, hasMore: paging.hasMore, loaded: true, addedItems, appendedAtEnd }
   } finally {
     paging.loadingMore = false
@@ -2155,14 +2339,14 @@ async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
       data,
     )
     await _attachSporeFlags(merged)
-    await _attachFindsRedlistTags(merged, loadSeq)
     // See _loadMinePage's matching guard: an older request must not
-    // overwrite a newer completed search once awaited enrichment resolves.
+    // overwrite a newer completed search once the await above resolves.
     if (loadSeq !== _loadFindsSeq) return _findsPageResult(false)
     _setFindsCache('user', merged)
     paging.nextOffset += data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
     paging.initialized = true
+    _scheduleFindsRedlistEnrichment(added, loadSeq)
     return _findsPageResult(true, added, paging.hasMore, appendedAtEnd)
   } finally {
     paging.loadingMore = false
@@ -2180,7 +2364,14 @@ async function _loadCurrentFindsPage({ reset = false } = {}) {
 // Exported as a test seam so a "load-more fires while a search debounce is
 // pending" regression can drive the real scroll-threshold path rather than
 // re-deriving it (plan §1.3 correction).
-export async function _maybeLoadMoreFinds() {
+//
+// `fromObserver` marks a call made by the IntersectionObserver callback: the
+// observer has already established that the sentinel is inside the prefetch
+// margin, so the scroll-geometry gate is skipped for it (the two measure the
+// same thing, but only the observer is guaranteed to fire again). Every other
+// caller — scroll fallback, post-load check, post-append recursion — is gated
+// by `_findsShouldPrefetch`.
+export async function _maybeLoadMoreFinds({ fromObserver = false } = {}) {
   if (state.currentScreen !== 'finds' || _isRefreshing || _findsInitialRenderLoadSeq) return
 
   // Paging state is initialized before thumbnail lookup/rendering completes.
@@ -2208,32 +2399,52 @@ export async function _maybeLoadMoreFinds() {
   const scroller = document.getElementById('screen-finds')
   if (!scroller) return
 
-  const distanceFromBottom = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight)
-  if (distanceFromBottom > FINDS_LOAD_MORE_THRESHOLD) return
+  if (!fromObserver && !_findsShouldPrefetch(scroller)) return
 
   const loadSeq = _loadFindsSeq
   let shouldCheckForMore
   _findsLoadMoreInFlight = true
   try {
-    shouldCheckForMore = await _loadAndAppendNextFindsPage(loadSeq, currentScope)
+    // Plan §3.1.1: only a user already at the loaded boundary sees the inline
+    // indicator; a prefetch that started a viewport ahead shows nothing (the
+    // scroll handler switches it on if they arrive while this is in flight).
+    if (_findsUserAtBoundary(scroller)) _setFindsLoadingMoreIndicator(true)
+    shouldCheckForMore = await _loadAndAppendNextFindsPage(loadSeq)
   } finally {
     _findsLoadMoreInFlight = false
+    // Clears the indicator on error, on `hasMore === false` and on a page
+    // that appended nothing; the append path itself already re-rendered the
+    // slot, so this is a no-op there.
+    _setFindsLoadingMoreIndicator(false)
   }
-  if (shouldCheckForMore) void _maybeLoadMoreFinds()
+  if (!shouldCheckForMore) return
+  // Plan §3.2: another page only if the viewport still requires it. With an
+  // observer, re-arming yields a fresh intersection report; without one the
+  // recursion re-measures the scroll geometry.
+  if (!_rearmFindsSentinelObserver()) void _maybeLoadMoreFinds()
 }
 
-// The serialized body of one load-more: fetch the page, hydrate profiles, then
-// incorporate the delta. Returns whether another page may be requested.
-async function _loadAndAppendNextFindsPage(loadSeq, currentScope) {
+// The serialized body of one load-more: fetch the page, hydrate the new
+// authors, then incorporate the delta. Returns whether another page may be
+// requested. Red-list enrichment was already started in the background by the
+// loader and never blocks the append (plan §3.3).
+async function _loadAndAppendNextFindsPage(loadSeq) {
   const page = await _loadCurrentFindsPage({ reset: false })
   if (loadSeq !== _loadFindsSeq) return false
   if (!page?.loaded) return false
-  await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
+  const addedItems = page.addedItems || []
+  // Only the freshly added rows can introduce authors that are not cached yet;
+  // `_loadProfilesForScope` skips the ones already hydrated for earlier pages.
+  await _loadProfilesForScope(addedItems, loadSeq)
   if (loadSeq !== _loadFindsSeq) return false
+  // The rows are about to be inserted, so the footer the append rebuilds must
+  // read idle, not "loading" — the DOM flips in the same synchronous step the
+  // cards land in, never before.
+  _findsWaitingAtBoundary = false
   // Ordinary pagination incorporates the page delta in place. It must never
   // take the full-render path (`list.innerHTML = html`), which would destroy
   // and rehydrate every already-visible card and thumbnail (plan §2.1).
-  await _appendFindsPage(page.addedItems || [])
+  await _appendFindsPage(addedItems)
   return loadSeq === _loadFindsSeq
 }
 
@@ -2366,8 +2577,36 @@ export function _applyFilter() {
   _findsRenderPromise = Promise.resolve(renderPromise).catch(err => {
     console.warn('Finds render failed:', err)
     return false
-  })
+  }).then(_afterFindsRenderCommit)
   return _findsRenderPromise
+}
+
+// Runs after every render promise settles (full render, reconcile, append):
+// whatever sentinel the list now holds is the one the prefetch observer must
+// watch. Passes the render result through untouched.
+function _afterFindsRenderCommit(result) {
+  try {
+    _syncFindsSentinelObserver()
+  } catch (err) {
+    console.warn('Finds sentinel observer sync failed:', err)
+  }
+  return result
+}
+
+// Plan §3.0.1: an un-initialized paging state is not evidence of an empty
+// result set. Until the authoritative first page for the current paging state
+// has returned, the empty branch of every renderer paints the loading shell
+// instead of the empty text. This is a state distinction, not a timer.
+function _findsInitialLoadPending(currentScope) {
+  return !_getPagingState(currentScope).initialized
+}
+
+function _findsLoadingShellHtml() {
+  return `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
+}
+
+function _findsEmptyStateHtml(text) {
+  return `<div class="finds-empty-state" style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(text)}</div>`
 }
 
 function _pendingImageSource(obs) {
@@ -2634,6 +2873,61 @@ async function _attachFindsRedlistTags(observations, loadSeq = _loadFindsSeq) {
   }
 }
 
+// Plan §3.3/§3.4: red-list enrichment runs off the critical path. The loader
+// commits the page and returns; this task looks the badges up in the
+// background and, when they arrive, mutates the cached rows (so any later
+// render includes them) and patches the badge into cards already on screen —
+// never by rebuilding the card. A failure logs and leaves the cards badgeless;
+// a query/scope reset in the meantime makes the completion a no-op.
+function _scheduleFindsRedlistEnrichment(items, loadSeq) {
+  const pending = (Array.isArray(items) ? items : [])
+    .filter(obs => obs && !obs._pendingSync && !_findsRedlistSummary(obs))
+  if (!pending.length) return Promise.resolve(false)
+  const task = (async () => {
+    try {
+      await _attachFindsRedlistTags(pending, loadSeq)
+      if (loadSeq !== _loadFindsSeq) return false
+      _patchFindsRedlistBadges(pending)
+      return true
+    } catch (err) {
+      console.warn('Finds red-list enrichment failed:', err)
+      return false
+    }
+  })()
+  _findsBackgroundEnrichment.add(task)
+  task.finally(() => _findsBackgroundEnrichment.delete(task)).catch(() => {})
+  return task
+}
+
+// In-place badge patch for cards/tiles already rendered. The badge is an
+// absolutely positioned child of the photo wrap, so appending it there is
+// layout-identical to the position the card template emits it at.
+// Exported as a test seam.
+export function _patchFindsRedlistBadges(items) {
+  const list = globalThis.document?.getElementById?.('finds-list')
+  if (!list?.querySelectorAll) return 0
+  const byId = new Map()
+  for (const obs of Array.isArray(items) ? items : []) {
+    if (obs && _findsRedlistSummary(obs)) byId.set(String(obs.id), obs)
+  }
+  if (!byId.size) return 0
+  let patched = 0
+  const hosts = [
+    ...(list.querySelectorAll('.find-card[data-id]') || []),
+    ...(list.querySelectorAll('.find-tile[data-id]') || []),
+  ]
+  for (const card of hosts) {
+    const obs = byId.get(String(card?.dataset?.id ?? ''))
+    if (!obs) continue
+    const wrap = card.querySelector?.('.find-card-photo-wrap') || card.querySelector?.('.find-tile-photo')
+    if (!wrap?.insertAdjacentHTML) continue
+    wrap.querySelector?.('.ai-result-row-redlist')?.remove?.()
+    wrap.insertAdjacentHTML('beforeend', renderFindsRedlistTag(obs))
+    patched += 1
+  }
+  return patched
+}
+
 // ── Card wiring ───────────────────────────────────────────────────────────────
 
 function _wireFindsCardElement(card, lookup) {
@@ -2684,13 +2978,19 @@ function _findsGroupElement(root, selector, datasetKey, value) {
   return null
 }
 
-// The bottom sentinel/footer is rebuilt in place; prior groups are untouched
-// (plan §2.5).
-function _updateFindsFooter(list, scope) {
-  const html = _findsFooterHtml(scope)
-  const existing = list.querySelector?.('.finds-bottom-sentinel')
-  if (existing?.remove) existing.remove()
-  if (html) list.insertAdjacentHTML('beforeend', html)
+// The bottom sentinel/footer is updated in place; prior groups are untouched
+// (plan §2.5) and the sentinel node itself survives every incremental append
+// (plan §3.1), so the prefetch observer keeps watching the same element.
+function _updateFindsFooter(list, scope, { insert = true } = {}) {
+  const existing = list.querySelector?.(`.${FINDS_SENTINEL_CLASS}`)
+  if (!existing) {
+    if (insert) list.insertAdjacentHTML('beforeend', _findsFooterHtml(scope))
+    return
+  }
+  const { modifier, text } = _findsSentinelState(scope)
+  existing.classList?.remove?.(FINDS_SENTINEL_LOADING_CLASS, FINDS_SENTINEL_DONE_CLASS)
+  if (modifier) existing.classList?.add?.(modifier)
+  existing.textContent = text
 }
 
 // For each newly added item, the already-rendered item it must be inserted
@@ -3053,7 +3353,7 @@ export function _appendFindsPage(addedItems) {
   _findsRenderPromise = Promise.resolve(renderPromise).catch(err => {
     console.warn('Finds append render failed:', err)
     return false
-  })
+  }).then(_afterFindsRenderCommit)
   return _findsRenderPromise
 }
 
@@ -3297,12 +3597,12 @@ async function _renderBySpecies(list, data, options = {}) {
       list.innerHTML = _findsOfflineInfoHtml(false)
       return true
     }
-    if (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user') {
-      list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
+    if (_findsInitialLoadPending(currentScope)
+      || (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user')) {
+      list.innerHTML = _findsLoadingShellHtml()
       return true
     }
-    const emptyText = _emptyFindsText(q)
-    list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
+    list.innerHTML = _findsEmptyStateHtml(_emptyFindsText(q))
     return true
   }
 
@@ -3365,8 +3665,11 @@ async function _renderTiles(list, data, options = {}) {
   const currentScope = _currentScope()
   if (!data.length) {
     if (!_isCurrentFindsRender(list, renderContext)) return false
-    const emptyText = _emptyFindsText(q)
-    list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
+    if (_findsInitialLoadPending(currentScope)) {
+      list.innerHTML = _findsLoadingShellHtml()
+      return true
+    }
+    list.innerHTML = _findsEmptyStateHtml(_emptyFindsText(q))
     return true
   }
 
@@ -3428,16 +3731,18 @@ async function _renderCards(list, data, options) {
       list.innerHTML = _findsOfflineInfoHtml(false)
       return true
     }
+    // Plan §3.0.1: the initial authoritative load for this paging state has
+    // not returned yet — an empty cache is not an empty result.
     // Reconnect race: a sync pass is finalizing queue items right now; the
     // queue card is already gone but the follow-up refresh (SYNC_SUCCESS /
     // QUEUE_EVENT) will render the freshly synced observation. Show the
     // loading state instead of flashing "No observations yet".
-    if (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user') {
-      list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
+    if (_findsInitialLoadPending(currentScope)
+      || (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user')) {
+      list.innerHTML = _findsLoadingShellHtml()
       return true
     }
-    const emptyText = _emptyFindsText(q, { isFriends, capture: true })
-    list.innerHTML = `<div style="padding: 24px 14px; color: var(--text-dim); font-size: 13px; text-align: center;">${_esc(emptyText)}</div>`
+    list.innerHTML = _findsEmptyStateHtml(_emptyFindsText(q, { isFriends, capture: true }))
     return true
   }
 
