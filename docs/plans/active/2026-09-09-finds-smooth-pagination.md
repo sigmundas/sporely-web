@@ -367,6 +367,15 @@ detail-return round trip should re-render from the already-loaded pages
 rather than re-fetching page 1, so `_pendingScrollRestore` has real content
 to scroll back into. Reproduces in both plain and search Finds.
 
+**Also in scope (user device QA 2026-09-11 on candidate d20aef3):** each
+individually typed search character causes two quick thumbnail flickers of
+the already-visible cards. The user classified this as Stage 2
+non-destructive/incremental rendering work and an open Stage 2 acceptance
+criterion, not a Stage 1 failure. The search-narrowing path (keystroke
+`_applyFilter()` local narrowing, then the debounced authoritative
+`_reloadFindsForSearch()` replacement) must preserve surviving card, `<img>`
+and media-binding nodes the same way the load-more path does (2.1 invariant).
+
 ## 2.1 Core invariant
 
 After a successful load-more, for every observation that was already rendered before the request:
@@ -896,6 +905,7 @@ The work is complete only when all of the following are true.
 | Offline queue search | Still works client-side without a network requirement |
 | Normal load-more | Existing card and image nodes are not destroyed |
 | Thumbnail stability | Already-visible thumbnails do not blank/reload when a page arrives |
+| Search-typing thumbnail stability | Typing a search character does not flicker/reload already-visible thumbnails, neither on local narrowing nor when the debounced authoritative page replaces it (user-reported 2026-09-11, Stage 2) |
 | Image metadata | Load-more fetches metadata only for newly added observation IDs |
 | Date grouping | Correct across page boundaries |
 | Species grouping | Correct incremental insertion/counts without rebuilding old groups |
@@ -1225,3 +1235,24 @@ Shared record-result succeeded with exit 0, verdict confirmed, accepted true, st
 Stage 1 is accepted; next stage is finds-incremental-pagination-render, specified in section 2 above and .sparring/prompts/sporely-web/stage-finds-incremental-pagination-render.md. Continue on feature/finds-server-search-pagination-revision from the exact expected_starting_head in that prompt; this supersedes section 5.1's fresh origin/main instruction for this continuation. Do not reset to main or replay Stage 1. The accepted manual results remain valid for Stage 1.
 
 Stage 2 owns incremental page deltas, date/species grouping and new-card-only media/event wiring across cards/two/three, plus preserving loaded pages and scroll position on unchanged detail return. Stage 3 trigger/prefetch/enrichment changes remain deferred. Verification is human-gated because scrolling, newly inserted card interactions, and detail-return behavior change: finish automated proof, update this plan and generate the implementation handoff, then leave product changes uncommitted for the stage-specific manual checks and fresh independent review. The pending prompt provides current symbol pointers and exact automated commands; the selector must select it before implementation.
+
+
+### Stage 2 candidate d20aef3 — human device QA, Stage 1 behavior verified, Stage 2 still open — 2026-09-11
+
+Stage 2 now runs through agent-sparring as `stage-finds-incremental-pagination-render` on `feature/sparring-v2-pilot`. Candidate `d20aef3a335d8cd0c92ccebf9325d5bea00e241e` (base `1059821b366b190a37e77fb6eadb3dd7e4518a5d`) is frozen and pushed; the independent sparring verdict on it was NEEDS_YOU (implementation findings resolved, device QA required).
+
+The user ran device QA on that candidate and reported: broad search (`Cortinarius`, scenario B) scrolls smoothly with no pagination hitch; replacing the query by pasting `Mycena` (scenario D, paste variant) is smooth with no stale-result or race behavior. **This closes and verifies the Stage 1 search-pagination behavior on device.** It does not bear on Stage 2's own acceptance.
+
+Open Stage 2 defect from the same run: each individually typed search character causes two quick thumbnail flickers. The user classified it explicitly as Stage 2 non-destructive/incremental rendering work and an open Stage 2 acceptance criterion, not a Stage 1 failure. Likely mechanism by inspection (unconfirmed on device): the keystroke `_applyFilter()` local narrowing and the debounced `_reloadFindsForSearch()` authoritative replacement are both full `innerHTML` renders that rebind every thumbnail; Stage 2's incremental machinery covers only `_appendFindsPage`. Section 2 scope and the section 8 acceptance table were updated accordingly.
+
+```text
+Current verified stage: Stage 1 (accepted 8e5077b; search-pagination behavior also confirmed on device on d20aef3, 2026-09-11)
+Current verified commit: 8e5077bf13927f68798471cacfc40973f3f60eed
+Current candidate/unverified work: Stage 2 candidate d20aef3 on feature/sparring-v2-pilot — frozen, NOT accepted
+Last focused proof: node --test finds/images/image-helpers/media-loader (122 pass, 0 fail; sparring rerun matched)
+Last broader proof: npm test 1275 tests / 1233 pass / 6 fail (known Deno suites) in the implementer's writable environment; unconfirmed by the read-only sparring run
+Last reviewer result: NEEDS_YOU on d20aef3 — implementation findings resolved, device QA required
+Manual QA status: B pass; D paste-variant pass; D typed-variant FAILS (double thumbnail flicker per keystroke); A, C, E, F, G, H, I not yet run on this candidate
+Known issue/blocker: per-keystroke double thumbnail flicker — open Stage 2 defect, must be fixed and re-sparred before Stage 2 acceptance
+Next exact action: correction turn in the same stage (sparring run-stage / run-loop on stage-finds-incremental-pagination-render) to make search narrowing and the authoritative search replacement non-destructive for surviving cards; new commit, fresh sparring, then remaining device QA A/C/D-typed/E/F/G/H/I before freeze/accept
+```
