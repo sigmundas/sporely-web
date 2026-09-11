@@ -47,3 +47,9 @@ backups/
 
 # agent-sparring V2 per-stage working artifacts (project.toml/PROJECT.md are tracked)
 .sparring/stages/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
