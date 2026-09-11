@@ -4,7 +4,7 @@
 **Repository:** `sporely-web`  
 **Prepared:** 2026-09-09  
 **Evidence baseline:** `main` at `a7de5e2c5aefa6ced99d91d8b6bdcf7fff6e68c3`  
-**Status:** ready for staged implementation with `sporely-sparring`
+**Status:** ready for staged implementation with `agent-sparring` (`sparring run-loop`)
 
 ---
 
