@@ -3128,3 +3128,214 @@ for (const transition of [
     }
   })
 }
+
+// ── Stage 2: search transitions are incremental too ──────────────────────────
+//
+// Device QA on 2026-09-11 reported two quick thumbnail flickers per typed
+// search character. Both were full `list.innerHTML = html` renders: the
+// immediate local narrowing from `_handleFindsSearchInput`, and the ~250 ms
+// debounced authoritative reconciliation in `_reloadFindsForSearch`. The plan
+// §2.1 invariant applies to these transitions exactly as it does to load-more.
+
+function makeSearchReconcileRows() {
+  const row = (id, date, createdAt, commonName) => makeAppendObservation(id, {
+    date,
+    createdAt,
+    commonName,
+  })
+  return {
+    // Matches "corti"; stays through both steps.
+    kept: row(2000, '2026-09-03', '2026-09-03T12:00:00Z', 'cortinarius-kept'),
+    // Matches "corti" locally, but the authoritative page does not return it.
+    droppedByServer: row(2001, '2026-09-02', '2026-09-02T12:00:00Z', 'cortinarius-dropped'),
+    // Do not match "corti"; removed by the local narrowing.
+    narrowedOut: [
+      row(2002, '2026-09-01', '2026-09-01T12:00:00Z', 'unrelated-a'),
+      row(2003, '2026-09-01', '2026-09-01T11:00:00Z', 'unrelated-b'),
+      row(2004, '2026-09-01', '2026-09-01T10:00:00Z', 'unrelated-c'),
+    ],
+    // Only the authoritative page knows about this one.
+    fromServer: row(2005, '2026-09-03', '2026-09-03T11:00:00Z', 'cortinarius-new'),
+  }
+}
+
+test('typing a search character narrows the list in place: surviving cards and their <img> nodes are untouched and never looked up again', async () => {
+  const rows = makeSearchReconcileRows()
+  const firstPage = [rows.kept, rows.droppedByServer, ...rows.narrowedOut]
+  const imageRows = {}
+  for (const obs of [...firstPage, rows.fromServer]) imageRows[obs.id] = appendImageRow(obs.id)
+
+  const restoreTimers = installNoopFindsTimers()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }],
+    imageRows,
+  })
+  const { list } = harness
+
+  try {
+    await loadFinds()
+    assert.deepEqual(harness.cardIds(), firstPage.map(o => o.id), 'all five rows rendered unfiltered')
+    const writesBefore = list.innerHtmlWrites
+    const batchesBefore = harness.imageIdBatches()
+    const survivingIds = [rows.kept.id, rows.droppedByServer.id]
+    const cardsBefore = new Map(
+      list.querySelectorAll('.find-card[data-id]').map(card => [card.dataset.id, card]),
+    )
+    const imgsBefore = new Map(
+      [...cardsBefore].map(([id, card]) => [id, card.querySelector('img')]),
+    )
+    for (const id of survivingIds) assert.ok(imgsBefore.get(id), `card ${id} rendered a real <img>`)
+
+    await _handleFindsSearchInput('corti')
+
+    assert.equal(list.innerHtmlWrites, writesBefore,
+      'local search narrowing must not rebuild the list — this is flicker 1')
+    assert.deepEqual(harness.cardIds(), survivingIds, 'only the matching rows remain')
+
+    for (const id of survivingIds) {
+      const card = list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === id)
+      assert.equal(card, cardsBefore.get(id), `card ${id} is the same DOM node after narrowing`)
+      assert.equal(card.querySelector('img'), imgsBefore.get(id),
+        `the <img> inside card ${id} is the same DOM node after narrowing`)
+      // `_wireAppendedFindsCards` binds click, delete and media handlers
+      // together, so an unchanged click-handler count is direct evidence that
+      // the surviving card was not re-wired — its media binding included.
+      assert.equal(card.listeners.filter(l => l.type === 'click').length, 1,
+        `card ${id} was not re-wired`)
+    }
+
+    assert.deepEqual(harness.imageIdBatches(), batchesBefore,
+      'narrowing inserts no cards, so no image metadata is looked up at all')
+    assert.deepEqual(
+      list.querySelectorAll('.finds-grid[data-date-key]').map(g => g.dataset.dateKey),
+      ['2026-09-03', '2026-09-02'],
+      'the group whose every card was narrowed out was removed, separator included',
+    )
+    assert.equal(list.querySelectorAll('.finds-date-sep[data-date-key]').length, 2)
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+test('the debounced authoritative search page reconciles in place: overlapping rows keep their nodes, only new rows are inserted and looked up', async () => {
+  const rows = makeSearchReconcileRows()
+  const firstPage = [rows.kept, rows.droppedByServer, ...rows.narrowedOut]
+  // The authoritative server page for "corti": keeps one locally-narrowed row,
+  // drops another, and brings one the client had never seen.
+  const serverPage = [rows.kept, rows.fromServer]
+  const imageRows = {}
+  for (const obs of [...firstPage, rows.fromServer]) imageRows[obs.id] = appendImageRow(obs.id)
+
+  const restoreTimers = installNoopFindsTimers()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, { data: serverPage, error: null }],
+    imageRows,
+  })
+  const { list } = harness
+
+  try {
+    await loadFinds()
+    const writesAfterInitialRender = list.innerHtmlWrites
+    const keptCardBefore = list.querySelectorAll('.find-card[data-id]')
+      .find(c => c.dataset.id === rows.kept.id)
+    const keptImgBefore = keptCardBefore.querySelector('img')
+
+    // Step 1: the keystroke narrows locally.
+    await _handleFindsSearchInput('corti')
+    assert.deepEqual(harness.cardIds(), [rows.kept.id, rows.droppedByServer.id])
+    const batchesAfterNarrowing = harness.imageIdBatches()
+
+    // Step 2: the debounce fires and the authoritative page arrives.
+    await _reloadFindsForSearch()
+
+    assert.equal(list.innerHtmlWrites, writesAfterInitialRender,
+      'the authoritative search page must not rebuild the list either — this is flicker 2')
+    assert.deepEqual(harness.cardIds(), [rows.kept.id, rows.fromServer.id],
+      'the row the server did not return was removed and the new row inserted in order')
+
+    const keptCardAfter = list.querySelectorAll('.find-card[data-id]')
+      .find(c => c.dataset.id === rows.kept.id)
+    assert.equal(keptCardAfter, keptCardBefore,
+      'the row present both locally and in the authoritative page kept its DOM node')
+    assert.equal(keptCardAfter.querySelector('img'), keptImgBefore, 'and its <img> node')
+    assert.equal(keptCardAfter.listeners.filter(l => l.type === 'click').length, 1,
+      'and was not re-wired')
+
+    assert.deepEqual(
+      harness.imageIdBatches().slice(batchesAfterNarrowing.length),
+      [[rows.fromServer.id]],
+      'image metadata was looked up for the inserted row only, not for the surviving one',
+    )
+    assert.deepEqual(
+      list.querySelectorAll('.finds-grid[data-date-key]').map(g => g.dataset.dateKey),
+      ['2026-09-03'],
+      'the emptied group was pruned and the new row joined the surviving group',
+    )
+    assert.equal(list.querySelectorAll('.finds-grid[data-date-key]')[0]
+      .querySelectorAll('.find-card[data-id]').length, 2)
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+test('species-sorted search narrowing prunes emptied groups and updates the surviving group count in place', async () => {
+  // `_speciesKey()` includes the common name, so the match/non-match
+  // distinction has to come from another searched field or every row would be
+  // its own species group.
+  const speciesRow = (id, createdAt, genus, species, commonName, notes) => ({
+    ...makeAppendObservation(id, { date: '2026-09-03', createdAt, genus, species, commonName }),
+    notes,
+  })
+  const firstPage = [
+    speciesRow(2100, '2026-09-03T12:00:00Z', 'Boletus', 'edulis', 'Steinsopp', 'corti one'),
+    speciesRow(2101, '2026-09-03T11:00:00Z', 'Boletus', 'edulis', 'Steinsopp', 'corti two'),
+    speciesRow(2102, '2026-09-03T10:00:00Z', 'Boletus', 'edulis', 'Steinsopp', 'nothing here'),
+    speciesRow(2103, '2026-09-03T09:00:00Z', 'Amanita', 'muscaria', 'Fluesopp', 'nothing here'),
+  ]
+  const imageRows = {}
+  for (const obs of firstPage) imageRows[obs.id] = appendImageRow(obs.id)
+
+  const restoreTimers = installNoopFindsTimers()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }],
+    imageRows,
+    findsSort: 'species',
+  })
+  const { list } = harness
+  const groupKeys = () => list.querySelectorAll('.finds-grid[data-species-key]')
+    .map(g => decodeURIComponent(g.dataset.speciesKey))
+
+  try {
+    await loadFinds()
+    assert.deepEqual(groupKeys(), ['amanita|muscaria|fluesopp', 'boletus|edulis|steinsopp'])
+    const writesBefore = list.innerHtmlWrites
+    const survivingCards = new Map(
+      list.querySelectorAll('.find-card[data-id]')
+        .filter(c => c.dataset.id === '2100' || c.dataset.id === '2101')
+        .map(c => [c.dataset.id, c]),
+    )
+
+    await _handleFindsSearchInput('corti')
+
+    assert.equal(list.innerHtmlWrites, writesBefore, 'species narrowing must not rebuild the list')
+    assert.deepEqual(harness.cardIds(), ['2100', '2101'])
+    assert.deepEqual(groupKeys(), ['boletus|edulis|steinsopp'], 'the emptied species group was pruned')
+    assert.equal(list.querySelectorAll('.finds-species-meta[data-species-key]').length, 1,
+      'its count line went with it')
+    const meta = list.querySelectorAll('.finds-species-meta[data-species-key]')[0]
+    assert.match(meta.innerHTML || meta.textContent, /2/,
+      'the surviving group count was updated in place')
+    for (const [id, card] of survivingCards) {
+      assert.equal(
+        list.querySelectorAll('.find-card[data-id]').find(c => c.dataset.id === id),
+        card,
+        `card ${id} survived the species narrowing untouched`,
+      )
+    }
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})

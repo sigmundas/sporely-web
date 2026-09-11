@@ -2311,23 +2311,57 @@ function _currentFindsCache({ primaryScope, currentScope } = _findsFilterContext
 export function _applyFilter() {
   const list     = document.getElementById('finds-list')
   if (!list) return Promise.resolve(false)
-  _renderedFindsView = null
+  const context = _findsFilterContext()
+  const { isFriendsScope } = context
+  const data = _filterFindsItems(_currentFindsCache(context), context)
+
+  // Re-deriving the result set does not mean the list has to be rebuilt. When
+  // the currently rendered list is the same kind of list (same scope, sort and
+  // view) and its surviving cards are already in the new order, reconcile it in
+  // place instead: search narrowing, the debounced authoritative search page and
+  // status-filter changes all keep their untouched thumbnails. A genuine display
+  // transition, an empty result, or a list that is not an extendable grouped
+  // render still takes the full-render path, which plan §4 explicitly allows.
+  const sort = _findsSort()
+  const variant = state.findsView === 'two' || state.findsView === 'three' ? state.findsView : 'cards'
+  const view = _renderedFindsView
+  const outer = list.querySelector?.('.finds-grid-outer') || null
+  const canReconcile = Boolean(view)
+    && Boolean(outer)
+    && data.length > 0
+    && view.sort === sort
+    && view.variant === variant
+    && view.scope === context.currentScope
+    // The offline note is painted outside `.finds-grid-outer` by the full
+    // renderers, so a list built online cannot be reconciled into an offline
+    // one (or back) without losing or keeping that note wrongly.
+    && view.offline === _isOfflineFindsMode()
+    && _findsRenderedOrderMatches(list, data)
+
   const renderSequence = _findsRenderGuard.begin()
   const renderContext = {
     renderSequence,
     accountGeneration: currentAccountGeneration(),
   }
-  const context = _findsFilterContext()
-  const { isFriendsScope } = context
-  const data = _filterFindsItems(_currentFindsCache(context), context)
 
-  const renderPromise = _findsSort() === 'species'
-    ? _renderBySpecies(list, data, { variant: state.findsView, renderContext })
-    : state.findsView === 'two'
-      ? _renderCards(list, data, { variant: 'two', isFriends: isFriendsScope, renderContext })
-      : state.findsView === 'three'
-        ? _renderCards(list, data, { variant: 'three', isFriends: isFriendsScope, renderContext })
-        : _renderCards(list, data, { variant: 'cards', isFriends: isFriendsScope, renderContext })
+  let renderPromise
+  if (canReconcile) {
+    renderPromise = _reconcileFindsList(list, outer, data, {
+      variant,
+      sort,
+      currentScope: context.currentScope,
+      renderContext,
+    })
+  } else {
+    _renderedFindsView = null
+    renderPromise = sort === 'species'
+      ? _renderBySpecies(list, data, { variant: state.findsView, renderContext })
+      : state.findsView === 'two'
+        ? _renderCards(list, data, { variant: 'two', isFriends: isFriendsScope, renderContext })
+        : state.findsView === 'three'
+          ? _renderCards(list, data, { variant: 'three', isFriends: isFriendsScope, renderContext })
+          : _renderCards(list, data, { variant: 'cards', isFriends: isFriendsScope, renderContext })
+  }
 
   _findsRenderPromise = Promise.resolve(renderPromise).catch(err => {
     console.warn('Finds render failed:', err)
@@ -2686,6 +2720,24 @@ function _findsRenderedCardIds(list) {
   return ids
 }
 
+// Reconciliation may only extend/trim the list in place; it must never be used
+// to silently reorder it. The cards currently on screen that survive into the
+// new result set have to already be in the new set's order.
+function _findsRenderedOrderMatches(list, targetList) {
+  const targetIds = new Set(targetList.map(obs => String(obs.id)))
+  const renderedIds = new Set()
+  const renderedOrder = []
+  for (const card of list.querySelectorAll('.find-card[data-id]') || []) {
+    const id = String(card?.dataset?.id ?? '')
+    if (!id) continue
+    renderedIds.add(id)
+    if (targetIds.has(id)) renderedOrder.push(id)
+  }
+  const expected = targetList.map(obs => String(obs.id)).filter(id => renderedIds.has(id))
+  return renderedOrder.length === expected.length
+    && renderedOrder.every((id, index) => id === expected[index])
+}
+
 // Anchors are always cards that were already on screen before this append, so
 // one snapshot taken up front is both correct and cheaper than re-querying the
 // list for every inserted row.
@@ -2811,11 +2863,119 @@ async function _renderFindsAppend(list, outer, targetList, items, { variant, sor
 
   // The DOM no longer matches what the append was planned against (a group or
   // anchor element is missing). Rebuild authoritatively rather than guess — the
-  // full render supersedes anything this pass had already inserted.
-  if (!inserted) return _applyFilter()
+  // full render supersedes anything this pass had already inserted. Clearing
+  // the view is what forces `_applyFilter()` down its full-render path instead
+  // of reconciling against a list it has just been told not to trust.
+  if (!inserted) {
+    _renderedFindsView = null
+    return _applyFilter()
+  }
 
   _updateFindsFooter(list, currentScope)
   _wireAppendedFindsCards(list, items)
+  return true
+}
+
+// A group whose last card was just removed leaves its separator (and, for
+// species sort, its count line) behind. Drop the whole scaffolding.
+function _pruneEmptyFindsGroups(outer, sort) {
+  const isSpecies = sort === 'species'
+  const datasetKey = isSpecies ? 'speciesKey' : 'dateKey'
+  const gridSelector = isSpecies ? '.finds-grid[data-species-key]' : '.finds-grid[data-date-key]'
+  const scaffolding = isSpecies
+    ? ['.finds-date-sep[data-species-key]', '.finds-species-meta[data-species-key]']
+    : ['.finds-date-sep[data-date-key]']
+  for (const grid of [...(outer.querySelectorAll(gridSelector) || [])]) {
+    if ((grid.querySelectorAll('.find-card[data-id]') || []).length) continue
+    const key = grid.dataset?.[datasetKey]
+    for (const selector of scaffolding) {
+      _findsGroupElement(outer, selector, datasetKey, key)?.remove?.()
+    }
+    grid.remove?.()
+  }
+}
+
+// Bring the rendered list to `targetList` by removing the cards that dropped
+// out and inserting the ones that came in — leaving every card that appears in
+// both exactly as it is (plan §2.1, applied to search transitions rather than
+// only to load-more).
+//
+// This is what the two search paths need. Typing a character narrows the cached
+// list locally, and ~250 ms later the authoritative server page reconciles it
+// again; both used to be full `list.innerHTML = html` renders, so every visible
+// thumbnail was destroyed and rebound twice per keystroke — the double flicker
+// reported from device QA on 2026-09-11.
+//
+// Returns false if an insertion could not be placed, in which case the caller
+// rebuilds. Removals are deliberately performed in the same synchronous block
+// as insertions, after the image lookup, so the list never shows a half-applied
+// state.
+async function _reconcileFindsList(list, outer, targetList, { variant, sort, currentScope, renderContext }) {
+  const targetIds = new Set(targetList.map(obs => String(obs.id)))
+  const renderedIds = _findsRenderedCardIds(list)
+  const survivors = targetList.filter(obs => renderedIds.has(String(obs.id)))
+  const additions = targetList.filter(obs => !renderedIds.has(String(obs.id)))
+  const removedIds = [...renderedIds].filter(id => !targetIds.has(id))
+
+  // Metadata is fetched for the inserted cards only; a surviving card is never
+  // looked up again, and a pure narrowing performs no lookup at all (and so no
+  // await, leaving no window in which the list is partially updated).
+  let imageData = {}
+  if (additions.length) {
+    const imageVariant = variant === 'cards' ? 'medium' : 'small'
+    const nonPending = additions.filter(obs => !obs._pendingSync).map(obs => obs.id)
+    try {
+      imageData = (await (variant === 'cards'
+        ? fetchCardImages(nonPending, { variant: imageVariant })
+        : fetchFirstImages(nonPending, { variant: imageVariant }))) || {}
+    } catch (err) {
+      console.warn('Finds images failed:', err)
+    }
+    if (!_isCurrentFindsRender(list, renderContext)) return false
+  }
+
+  if (removedIds.length) {
+    const wraps = _findsCardWrapSnapshot(list)
+    for (const id of removedIds) wraps.get(id)?.remove?.()
+    _pruneEmptyFindsGroups(outer, sort)
+  }
+
+  // The append planner below reads `_renderedFindsView.speciesGroups`, so it
+  // has to describe the post-removal list before anything is inserted.
+  if (sort === 'species') {
+    const previousCounts = new Map((_renderedFindsView?.speciesGroups || []).map(group => [group.key, group.count]))
+    const groups = _findsSpeciesGroupsFor(survivors).map(group => ({
+      key: group.key,
+      label: group.label,
+      representative: group.representative,
+      count: group.items.length,
+    }))
+    for (const group of groups) {
+      if (previousCounts.get(group.key) === group.count) continue
+      const meta = _findsGroupElement(
+        outer, '.finds-species-meta[data-species-key]', 'speciesKey', _findsSpeciesDomKey(group.key),
+      )
+      if (meta) meta.innerHTML = tp('finds.observationCount', group.count)
+    }
+    if (_renderedFindsView) _renderedFindsView.speciesGroups = groups
+  }
+
+  if (additions.length) {
+    const cardWraps = _findsCardWrapSnapshot(list)
+    const inserted = sort === 'species'
+      ? _appendSpeciesGroups(cardWraps, outer, targetList, additions, { variant, imageData })
+      : _appendDateGroups(cardWraps, outer, targetList, additions, { variant, imageData })
+    if (!inserted) {
+      // The DOM no longer matches what this pass was planned against. Rebuild
+      // authoritatively; clearing the view forces the full-render path.
+      _renderedFindsView = null
+      return _applyFilter()
+    }
+    _wireAppendedFindsCards(list, additions)
+  }
+
+  _updateFindsFooter(list, currentScope)
+  _restoreScroll()
   return true
 }
 
@@ -2838,7 +2998,8 @@ export function _appendFindsPage(addedItems) {
     || !outer
     || view.sort !== sort
     || view.variant !== variant
-    || view.scope !== context.currentScope) {
+    || view.scope !== context.currentScope
+    || view.offline !== _isOfflineFindsMode()) {
     return _applyFilter()
   }
 
@@ -3053,6 +3214,24 @@ function _findsSpeciesGroupHtml(key, label, count, variant, cardsHtml) {
       <div class="finds-grid finds-grid--${variant}" data-species-key="${domKey}">${cardsHtml}</div>`
 }
 
+// Group by species key (first-seen insertion order within a group), then order
+// the groups: identified alphabetically by scientific name, unidentified last.
+// Shared by the full species renderer and by reconciliation, so the two cannot
+// disagree about what the group structure should be.
+function _findsSpeciesGroupsFor(data) {
+  const groupMap = new Map()
+  for (const obs of data || []) {
+    const key = _speciesKey(obs)
+    if (!groupMap.has(key)) groupMap.set(key, { key, label: _speciesLabel(obs), representative: obs, items: [] })
+    groupMap.get(key).items.push(obs)
+  }
+  return [...groupMap.values()].sort((a, b) => {
+    if (a.key === '\x00unidentified') return 1
+    if (b.key === '\x00unidentified') return -1
+    return compareFindsByScientificName(a.representative, b.representative)
+  })
+}
+
 // Pure planner for a species-sorted append (plan §2.6). A newly discovered
 // species can sort alphabetically before groups that are already on screen,
 // so each new group gets an explicit insertion anchor (`beforeKey`) instead
@@ -3115,23 +3294,9 @@ async function _renderBySpecies(list, data, options = {}) {
     return true
   }
 
-  // Group by species key, preserving first-seen insertion order
-  const groupMap = new Map()
-  for (const obs of data) {
-    const key = _speciesKey(obs)
-    if (!groupMap.has(key)) groupMap.set(key, { label: _speciesLabel(obs), representative: obs, items: [] })
-    groupMap.get(key).items.push(obs)
-  }
+  const groups = _findsSpeciesGroupsFor(data)
 
-  // Sort groups: identified first (alphabetically), unidentified last
-  const groups = [...groupMap.entries()]
-    .sort(([ka, a], [kb, b]) => {
-      if (ka === '\x00unidentified') return 1
-      if (kb === '\x00unidentified') return -1
-      return compareFindsByScientificName(a.representative, b.representative)
-    })
-
-  const allObs = groups.flatMap(([, g]) => g.items).filter(o => !o._pendingSync)
+  const allObs = groups.flatMap(g => g.items).filter(o => !o._pendingSync)
   const imageVariant = variant === 'cards' ? 'medium' : 'small'
   let imageData = {}
   try {
@@ -3147,9 +3312,9 @@ async function _renderBySpecies(list, data, options = {}) {
     let html = _findsOfflineInfoHtml(true)
     html += '<div class="finds-grid-outer">'
 
-    for (const [key, group] of groups) {
+    for (const group of groups) {
       html += _findsSpeciesGroupHtml(
-        key,
+        group.key,
         group.label,
         group.items.length,
         variant,
@@ -3164,8 +3329,9 @@ async function _renderBySpecies(list, data, options = {}) {
       sort: 'species',
       variant,
       scope: currentScope,
-      speciesGroups: groups.map(([key, group]) => ({
-        key,
+      offline: _isOfflineFindsMode(),
+      speciesGroups: groups.map(group => ({
+        key: group.key,
         label: group.label,
         representative: group.representative,
         count: group.items.length,
@@ -3302,6 +3468,7 @@ async function _renderCards(list, data, options) {
       sort: 'date',
       variant,
       scope: currentScope,
+      offline: _isOfflineFindsMode(),
       speciesGroups: null,
     }
     _restoreScroll()
