@@ -2307,7 +2307,9 @@ function makeProfileGate() {
 // where the response may be a `{ data, error }` object, a Promise of one, or a
 // rejected Promise (transport failure). `profilesById` (optional) supplies
 // `public_profiles` rows keyed by user id, so hydration can be asserted on.
-function makeFindsAppendClient(observationPages, imageRowsByObsId, profileGate = null, { redlist = null, profilesById = null } = {}) {
+// `imageGate` (optional, same shape as `makeProfileGate()`): while armed, every
+// image-metadata lookup waits on it, which keeps a render pending mid-flight.
+function makeFindsAppendClient(observationPages, imageRowsByObsId, profileGate = null, { redlist = null, profilesById = null, imageGate = null } = {}) {
   const calls = []
   let pageIndex = 0
   const imageTables = new Set(['observation_images', 'observation_images_community_view'])
@@ -2326,7 +2328,9 @@ function makeFindsAppendClient(observationPages, imageRowsByObsId, profileGate =
             then(resolve) {
               const lastIn = [...calls].reverse().find(c => c.table === table && c.op === 'in')
               const rows = (lastIn?.vals || []).flatMap(id => imageRowsByObsId[id] || [])
-              return Promise.resolve({ data: rows, error: null }).then(resolve)
+              const result = { data: rows, error: null }
+              const ready = imageGate?.armed ? imageGate.promise.then(() => result) : Promise.resolve(result)
+              return ready.then(resolve)
             },
           }
           return chain
@@ -2391,7 +2395,7 @@ function appendImageRow(obsId) {
   }]
 }
 
-function installAppendHarness({ observationPages, imageRows, findsView = 'cards', findsSort = 'date', queueItems = [], profileGate = null, redlist = null, profilesById = null }) {
+function installAppendHarness({ observationPages, imageRows, findsView = 'cards', findsSort = 'date', queueItems = [], profileGate = null, redlist = null, profilesById = null, imageGate = null }) {
   const previousFrom = supabase.from
   const previousState = { ...state }
   const previousDocument = globalThis.document
@@ -2404,7 +2408,7 @@ function installAppendHarness({ observationPages, imageRows, findsView = 'cards'
     clientHeight: 100,
     classList: { toggle() {} },
   }
-  const { client, calls } = makeFindsAppendClient(observationPages, imageRows, profileGate, { redlist, profilesById })
+  const { client, calls } = makeFindsAppendClient(observationPages, imageRows, profileGate, { redlist, profilesById, imageGate })
   supabase.from = client.from
   globalThis.document = {
     getElementById(id) {
@@ -3962,6 +3966,172 @@ test('the inline "loading more" line clears on a next-page error and the list st
     assert.equal(list.innerHtmlWrites, writesAfterInitialRender)
     assert.equal(_getFindsPagingStateForTests('mine').hasMore, false)
     assert.equal(globalThis.document.getElementById('toast').textContent, 'Could not load finds', 'the existing error UX owns the failure')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('an observer notification that waited across a query reset cannot bypass the geometry gate for the new query', async () => {
+  // Every render in this scenario reconciles in place, so the sentinel node
+  // survives throughout: the only thing that marks the parked notification as
+  // stale is the paging generation it was issued in.
+  const published = stage3Page(4300, 10, '2026-09-03')
+  const drafts = stage3Page(4320, 10, '2026-09-03', { is_draft: true })
+  const firstPage = [...published, ...drafts]
+  const zzzPage = stage3Page(4400, 20, '2026-09-02', { common_name: 'zzz find' })
+  const zzzSecondPage = stage3Page(4500, 5, '2026-09-01', { common_name: 'zzz find' })
+  const imageGate = makeProfileGate()
+  const harness = installAppendHarness({
+    observationPages: [
+      { data: firstPage, error: null },
+      { data: zzzPage, error: null },
+      { data: zzzSecondPage, error: null },
+    ],
+    imageRows: stage3ImageRows(firstPage, zzzPage, zzzSecondPage),
+    imageGate,
+  })
+  const { list, scroller, calls } = harness
+  Object.assign(scroller, { scrollHeight: 5000, clientHeight: 800, scrollTop: 0 })
+  const { StubIntersectionObserver, instances } = makeIntersectionObserverStub()
+  _setFindsIntersectionObserverForTests(StubIntersectionObserver)
+  const rangeCalls = () => calls.filter(c => c.op === 'range').length
+
+  try {
+    await loadFinds()
+    assert.equal(rangeCalls(), 1)
+    assert.equal(harness.cardIds().length, 20)
+    const observer = instances[0]
+    const sentinel = list.querySelector('.finds-bottom-sentinel')
+
+    // Status filter Published → All: the first reconcile only removes cards,
+    // the second re-inserts the drafts and is held at its image lookup. No
+    // load is in flight, so the observer's report is accepted and parks
+    // behind that pending render.
+    state.findsStatusFilter = 'published'
+    await _applyFilter()
+    assert.equal(harness.cardIds().length, 10)
+    imageGate.armed = true
+    state.findsStatusFilter = 'all'
+    const pendingRender = _applyFilter()
+    observer.fire(true)
+
+    // While it waits, the user types: paging is reset and the reload for
+    // "zzz" reconciles a fresh, initialized first page in place.
+    state.searchQuery = 'zzz'
+    assert.equal(_invalidateFindsSearchPagingOnInput(), true)
+    const reloadZ = _reloadFindsForSearch()
+    await settleMicrotasks()
+    assert.equal(rangeCalls(), 2)
+    imageGate.release()
+    await pendingRender
+    await reloadZ
+    await settleMicrotasks(60)
+
+    assert.deepEqual(harness.cardIds(), zzzPage.map(o => o.id), 'the list shows the zzz page')
+    assert.equal(list.querySelector('.finds-bottom-sentinel'), sentinel, 'the sentinel node survived every reconcile')
+    assert.deepEqual(observer.observed, [sentinel])
+    assert.equal(_getFindsPagingStateForTests('mine').initialized, true)
+    assert.equal(_getFindsPagingStateForTests('mine').hasMore, true)
+    assert.equal(rangeCalls(), 2, 'the stale notification did not request a second zzz page (4200px away)')
+    assert.equal(harness.cardIds().length, 20)
+  } finally {
+    _setFindsIntersectionObserverForTests(undefined)
+    harness.restore()
+  }
+})
+
+test('an observer notification for a sentinel that a full render has since replaced is ignored', async () => {
+  const firstPage = stage3Page(4600, 20, '2026-09-03')
+  const secondPage = stage3Page(4700, 5, '2026-09-02')
+  const imageGate = makeProfileGate()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, { data: secondPage, error: null }],
+    imageRows: stage3ImageRows(firstPage, secondPage),
+    imageGate,
+  })
+  const { list, scroller, calls } = harness
+  Object.assign(scroller, { scrollHeight: 5000, clientHeight: 800, scrollTop: 0 })
+  const { StubIntersectionObserver, instances } = makeIntersectionObserverStub()
+  _setFindsIntersectionObserverForTests(StubIntersectionObserver)
+  const rangeCalls = () => calls.filter(c => c.op === 'range').length
+
+  try {
+    await loadFinds()
+    const observer = instances[0]
+    const oldSentinel = list.querySelector('.finds-bottom-sentinel')
+    assert.deepEqual(observer.observed, [oldSentinel])
+
+    // Notification issued for the current sentinel, parked behind a full
+    // render that replaces that sentinel before the notification proceeds.
+    imageGate.armed = true
+    state.findsView = 'two'
+    const pendingRender = _applyFilter()
+    observer.fire(true)
+    imageGate.release()
+    await pendingRender
+    await settleMicrotasks(60)
+
+    const newSentinel = list.querySelector('.finds-bottom-sentinel')
+    assert.ok(newSentinel)
+    assert.notEqual(newSentinel, oldSentinel, 'the full render replaced the sentinel node')
+    assert.deepEqual(observer.observed, [newSentinel], 'the observer moved to the new sentinel')
+    assert.equal(rangeCalls(), 1, 'the notification bound to the replaced sentinel did not request a page (geometry: 4200px away)')
+
+    // A late report naming the old node as its target is dropped outright.
+    observer.callback([{ isIntersecting: true, target: oldSentinel }], observer)
+    await settleMicrotasks(60)
+    assert.equal(rangeCalls(), 1)
+
+    // Whereas a genuine report for the sentinel now in the list still loads.
+    observer.fire(true)
+    await settleUntil(() => harness.cardIds().length === 25)
+    assert.equal(rangeCalls(), 2)
+    assert.equal(harness.cardIds().length, 25)
+  } finally {
+    _setFindsIntersectionObserverForTests(undefined)
+    harness.restore()
+  }
+})
+
+test('the inline "loading more" line follows the user off and back onto the boundary while the same request is pending', async () => {
+  const firstPage = stage3Page(4800, 20, '2026-09-03')
+  const secondPage = stage3Page(4900, 5, '2026-09-02')
+  const secondHeld = heldResponse()
+  const harness = installAppendHarness({
+    observationPages: [{ data: firstPage, error: null }, secondHeld.promise],
+    imageRows: stage3ImageRows(firstPage, secondPage),
+  })
+  const { list, scroller, calls } = harness
+  const rangeCalls = () => calls.filter(c => c.op === 'range').length
+  const loadingShown = () => list.querySelector('.finds-bottom-sentinel').classList.contains('finds-bottom-sentinel--loading')
+
+  try {
+    await loadFinds()
+    const sentinel = list.querySelector('.finds-bottom-sentinel')
+
+    scroller.scrollTop = 900
+    const load = _maybeLoadMoreFinds()
+    await settleMicrotasks()
+    assert.equal(rangeCalls(), 2)
+    assert.equal(loadingShown(), true, 'at the boundary: on')
+
+    scroller.scrollTop = 200
+    _handleFindsScroll()
+    assert.equal(loadingShown(), false, 'scrolled 700px back up: off')
+    assert.equal(sentinel.textContent, '')
+
+    scroller.scrollTop = 900
+    _handleFindsScroll()
+    assert.equal(loadingShown(), true, 'back at the boundary: on again')
+    assert.equal(sentinel.textContent, 'Loading more finds…')
+    await settleMicrotasks()
+    assert.equal(rangeCalls(), 2, 'toggling the indicator never issued another request')
+
+    secondHeld.release({ data: secondPage, error: null })
+    await load
+    await settleUntil(() => harness.cardIds().length === 25)
+    assert.equal(loadingShown(), false, 'cleared when the page landed')
+    assert.equal(list.querySelector('.finds-bottom-sentinel'), sentinel)
   } finally {
     harness.restore()
   }

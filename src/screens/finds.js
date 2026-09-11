@@ -1255,9 +1255,16 @@ function _ensureFindsPrefetchObserver(scroller) {
   const Observer = _findsIntersectionObserverCtor()
   if (!Observer || !scroller) return null
   _findsPrefetchObserver = new Observer(entries => {
-    if ((entries || []).some(entry => entry?.isIntersecting)) {
-      void _maybeLoadMoreFinds({ fromObserver: true })
-    }
+    // A notification is only meaningful for the sentinel currently in the
+    // list and the paging generation it was issued in. Both are captured here
+    // and re-validated inside `_maybeLoadMoreFinds` after it has waited for
+    // pending renders, so a report from a replaced sentinel, or one that sat
+    // across a query/scope reset, can never bypass the geometry gate for a
+    // context it was not observing.
+    const sentinel = _findsObservedSentinel
+    if (!sentinel) return
+    if (!(entries || []).some(entry => entry?.isIntersecting && entry.target === sentinel)) return
+    void _maybeLoadMoreFinds({ fromObserver: true, observerSentinel: sentinel, observerLoadSeq: _loadFindsSeq })
   }, {
     root: scroller,
     rootMargin: `${FINDS_PREFETCH_ROOT_MARGIN_PX}px 0px`,
@@ -1305,7 +1312,10 @@ export function _handleFindsScroll() {
   const scroller = document.getElementById('screen-finds')
   if (!scroller) return
   const atBoundary = _findsUserAtBoundary(scroller)
-  if (_findsLoadMoreInFlight && atBoundary) _setFindsLoadingMoreIndicator(true)
+  // Both directions: the indicator follows the user while the request is in
+  // flight — on when they reach the boundary, off again if they scroll back
+  // up past it — rather than latching until the page lands.
+  if (_findsLoadMoreInFlight) _setFindsLoadingMoreIndicator(atBoundary)
   if (!_findsPrefetchObserverAvailable() || atBoundary) void _maybeLoadMoreFinds()
 }
 
@@ -2368,10 +2378,13 @@ async function _loadCurrentFindsPage({ reset = false } = {}) {
 // `fromObserver` marks a call made by the IntersectionObserver callback: the
 // observer has already established that the sentinel is inside the prefetch
 // margin, so the scroll-geometry gate is skipped for it (the two measure the
-// same thing, but only the observer is guaranteed to fire again). Every other
-// caller — scroll fallback, post-load check, post-append recursion — is gated
-// by `_findsShouldPrefetch`.
-export async function _maybeLoadMoreFinds({ fromObserver = false } = {}) {
+// same thing, but only the observer is guaranteed to fire again). That
+// authority is bound to `observerSentinel` and `observerLoadSeq`: if, by the
+// time pending renders have settled, the list holds a different sentinel or
+// paging has moved to a new generation, the notification is stale and the
+// call falls back to the geometry gate like every other caller — scroll
+// fallback, post-load check, post-append recursion.
+export async function _maybeLoadMoreFinds({ fromObserver = false, observerSentinel = null, observerLoadSeq = null } = {}) {
   if (state.currentScreen !== 'finds' || _isRefreshing || _findsInitialRenderLoadSeq) return
 
   // Paging state is initialized before thumbnail lookup/rendering completes.
@@ -2383,7 +2396,9 @@ export async function _maybeLoadMoreFinds({ fromObserver = false } = {}) {
     if (pendingRender === _findsRenderPromise) break
   }
 
-  if (state.currentScreen !== 'finds' || _isRefreshing) return
+  // Re-validated after the wait: an initial load or search reload may have
+  // started while pending renders settled.
+  if (state.currentScreen !== 'finds' || _isRefreshing || _findsInitialRenderLoadSeq) return
   // The paging state's own `loadingMore` covers only the fetch: each loader
   // clears it in its `finally`, before this function's profile enrichment and
   // delta append have run. A scroll event landing in that window used to pass
@@ -2399,7 +2414,11 @@ export async function _maybeLoadMoreFinds({ fromObserver = false } = {}) {
   const scroller = document.getElementById('screen-finds')
   if (!scroller) return
 
-  if (!fromObserver && !_findsShouldPrefetch(scroller)) return
+  const observerIsCurrent = fromObserver
+    && observerLoadSeq === _loadFindsSeq
+    && observerSentinel !== null
+    && observerSentinel === _findsObservedSentinel
+  if (!observerIsCurrent && !_findsShouldPrefetch(scroller)) return
 
   const loadSeq = _loadFindsSeq
   let shouldCheckForMore
