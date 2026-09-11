@@ -542,11 +542,33 @@ fix: append Finds pages without repainting existing cards
 Record after verification:
 
 ```text
-Stage 2 commit:
-Stage 2 reviewer:
-Stage 2 focused proof:
-Stage 2 broader proof:
-Stage 2 deviations/notes:
+Stage 2 commit: 683e8439c6ee5d4555df65957cb8a7e97ab357a1 on feature/sparring-v2-pilot
+  (base 1059821b366b190a37e77fb6eadb3dd7e4518a5d), preceded on the same branch by
+  b609404, 654502f, d20aef3 and d8461fc; accepted at the documentation revision
+  that records the passing device QA (product tree identical to 683e843)
+Stage 2 reviewer: agent-sparring (codex-cli, read-only) across four cycles —
+  b609404 / 654502f / d20aef3 sent back, d8461fc sent back (species survivor-order
+  gate), 683e843 NEEDS_YOU with no further implementation finding, device QA required
+Stage 2 focused proof: node --test src/screens/finds.test.js src/images.test.js
+  src/image-helpers.test.js src/media-loader.test.js — 127 pass, 0 fail
+  (implementer, sparring and the acceptance session agree)
+Stage 2 broader proof: npm run check:node (pass); npm test 1290 tests / 1248 pass /
+  6 fail / 36 skipped — the six known Deno edge-function suites node --test cannot
+  load; npm run build (pass); npx eslint . (0 errors, 51 warnings);
+  git diff --check (clean)
+Stage 2 device QA: PASSED on 683e843, 2026-09-11 — the user ran the Stage 2 device
+  scenarios and reported the double thumbnail flicker gone and Stage 2 behavior
+  verified. Two non-blocking UX observations were carried into Stage 3 rather than
+  reopening Stage 2: a transient empty-state frame on initial Feed load, and the
+  still-reachable page boundary under fast scrolling. See "Stage 2 accepted" in
+  section 10 and Stage 3 sections 3.0 and 3.1.1.
+Stage 2 deviations/notes: search transitions were not in the stage's original scope.
+  The per-keystroke double thumbnail flicker found during device QA on d20aef3 was
+  classified by the user as Stage 2 incremental-render work, so d8461fc and 683e843
+  extended the non-destructive contract from the load-more path to the keystroke
+  local-narrowing render and the debounced authoritative replacement. Both reconcile
+  in place against a survivor-order gate; 683e843 corrected that gate to compare
+  against display order (species grouping) rather than cache order.
 ```
 
 ---
@@ -556,6 +578,46 @@ Stage 2 deviations/notes:
 **Stage id:** `stage-finds-prefetch-and-enrichment`  
 **Depends on:** Stage 2 verified  
 **Primary goal:** start the next page early enough that the user normally never reaches an unloaded boundary, and stop low-priority enrichment from blocking card availability.
+
+## 3.0 Carried-in observations from Stage 2 device QA (2026-09-11, candidate 683e843)
+
+Both were observed by the user during the passing Stage 2 device QA run. Neither
+blocked Stage 2 acceptance; both are Stage 3 work by explicit user direction. Do
+not treat either as a Stage 2 regression.
+
+### 3.0.1 Empty state must never precede the initial authoritative load
+
+On one initial Feed load the user briefly saw the empty-state text ("No
+results" / "go find some" or similar) during the roughly 0.5–1 s load, where
+`Loading` was expected. **The user could not reproduce it afterwards — record it
+as an observed transient, not as a reproducible defect.** It is real enough to
+fix by invariant rather than by chasing the repro.
+
+Required invariant:
+
+```text
+the Finds empty state must never render before the initial authoritative
+load for the current paging state has completed
+```
+
+An un-initialized or in-flight paging state is not evidence of an empty result
+set. The empty state is only correct once an authoritative first page has
+returned zero rows. Implement this as a state distinction (not-yet-loaded vs.
+loaded-and-empty) rather than a timing delay or a spinner-minimum-duration hack.
+
+This interacts with Stage 3's enrichment restructuring, which changes when a
+first page becomes renderable, so fix it inside Stage 3 rather than before it.
+
+### 3.0.2 Fast scrolling can still reach the loaded boundary
+
+Scrolling fairly quickly, the user still reached the end of the loaded 20 and
+waited briefly for the next page. This is exactly the condition section 3.1's
+earlier prefetch exists to remove, and the preferred fix remains earlier
+prefetch, not a bigger page size (section 9 non-goal) and not a new loading
+design.
+
+Earlier prefetch cannot be guaranteed to win against arbitrary fling velocity.
+For the residual case where the user does out-run it, see section 3.1.1.
 
 ## 3.1 Replace the 240 px late trigger
 
@@ -582,6 +644,35 @@ max(800px, 1.25 * scroller.clientHeight)
 ```
 
 Use one centralized helper/constant rather than duplicated values.
+
+## 3.1.1 Residual boundary UX when the user out-runs prefetch
+
+Prefetch is the fix; this is the fallback for when it loses. If the user does
+reach the end of the loaded results before the next page arrives, show a
+**subtle inline bottom indicator** — a small "Loading more finds…" line or
+spinner in the existing bottom footer/sentinel area, in the normal flow of the
+list.
+
+Required, per explicit user direction:
+
+```text
+inline, at the bottom of the list, in normal flow
+subtle — consistent with the existing footer treatment
+NOT a toast, popup, overlay, snackbar or modal
+```
+
+Constraints:
+
+- it occupies the stable bottom sentinel/footer region Stage 2 and section 3.1
+  already rely on, and must not disturb the sentinel's stability or the
+  non-destructive append contract;
+- it must not cause a layout jump that moves already-visible cards;
+- it replaces/reuses the existing "no more finds"/footer slot rather than adding
+  a second competing status element;
+- it must disappear cleanly on append, on `hasMore === false`, and on error
+  (existing error UX owns the failure case);
+- it must not appear for prefetch that completes before the user arrives — only
+  when the user is actually waiting at the boundary.
 
 ## 3.2 Preserve single-flight behavior
 
@@ -651,7 +742,13 @@ Required focused coverage:
 - `hasMore=false` prevents further page requests;
 - profile hydration requests only new user IDs and preserves existing `_profileMap` entries;
 - red-list enrichment failure does not prevent page insertion;
-- stale query/scope completion cannot append after reset.
+- stale query/scope completion cannot append after reset;
+- the empty state is not rendered while the initial authoritative load for the
+  current paging state is un-initialized or in flight, and is rendered once that
+  load returns zero rows (section 3.0.1);
+- the inline bottom "loading more" indicator appears only while the user is
+  waiting at an actual boundary, and is cleared on append, on `hasMore === false`
+  and on error (section 3.1.1).
 
 Run:
 
@@ -910,6 +1007,8 @@ The work is complete only when all of the following are true.
 | Date grouping | Correct across page boundaries |
 | Species grouping | Correct incremental insertion/counts without rebuilding old groups |
 | Prefetch | Starts roughly a viewport before the bottom, not at 240 px |
+| Empty state vs. initial load | The empty state never renders before the initial authoritative load for the current paging state has completed (user-observed transient 2026-09-11, Stage 3) |
+| Boundary wait UX | If prefetch is out-run, a subtle inline bottom "Loading more finds…" indicator shows in the footer/sentinel region — never a toast or popup (user direction 2026-09-11, Stage 3) |
 | Concurrency | No duplicate/overlapping page loads |
 | Enrichment | Red-list work does not block otherwise renderable cards |
 | Profile cache | Previous page profiles are retained |
@@ -1279,4 +1378,51 @@ Last reviewer result: NEEDS_YOU on 683e843 — no further implementation correct
 Manual QA status: on 683e843 nothing run yet. On d20aef3: B pass, D paste-variant pass (Stage 1 evidence only). Required on 683e843: D typed variant in Date and Species sort (the flicker itself), A, C, E, F, G, H, I, with device/WebView version recorded
 Known issue/blocker: none open in code; Stage 2 acceptance blocked on device QA
 Next exact action: user runs device scenarios on 683e843; then sparring freeze-candidate + accept-candidate on that exact SHA (requires a clean worktree, so the unrelated .gitignore edit must be committed or set aside first)
+```
+
+
+### Stage 2 device QA passed and Stage 2 accepted — 2026-09-11
+
+The user ran the Stage 2 device QA scenarios on candidate
+`683e8439c6ee5d4555df65957cb8a7e97ab357a1` and reported them passing: the
+per-keystroke double thumbnail flicker that blocked d20aef3 is gone, and the
+user states "I consider the Stage 2 behavior verified." This is the user's own
+attribution of the result to Stage 2, and it closes the Stage 2 acceptance
+criteria in section 8 that cover non-destructive load-more, thumbnail
+stability, search-typing thumbnail stability, and detail-return scroll restore.
+
+Acceptance was recorded against the documentation revision that carries this
+entry. Its product tree is byte-identical to 683e843 — `git diff 683e843..HEAD
+-- src/` is empty, and the only difference is this plan file — following the
+same documentation-revision pattern used to accept Stage 1 at 8e5077b. The
+exact frozen SHA is held in
+`.sparring/stages/stage-finds-incremental-pagination-render/state.json`, which
+is intentionally gitignored.
+
+Two UX observations from the same run were **carried into Stage 3 by explicit
+user direction, without changing Stage 2 code**:
+
+1. **Transient empty state on initial Feed load.** The user briefly saw the
+   empty-state text during the roughly 0.5–1 s initial Feed load where
+   `Loading` was expected, and could not reproduce it afterwards. Recorded as an
+   observed transient, non-blocking. The desired invariant — the empty state
+   must never render before the initial authoritative load has completed — is
+   now Stage 3 section 3.0.1 and an acceptance-table row.
+2. **Fast scrolling can still reach the loaded boundary.** Scrolling quickly
+   still reaches the end of the loaded 20 and waits briefly. Earlier prefetch
+   (section 3.1) remains the preferred fix. If the user nevertheless out-runs
+   prefetch, the fallback is a subtle inline bottom "Loading more finds…"
+   indicator in the footer/sentinel region — explicitly not a toast or popup.
+   Recorded as Stage 3 section 3.1.1 and an acceptance-table row.
+
+```text
+Current verified stage: Stage 2 (accepted 2026-09-11; product tree identical to 683e843)
+Current verified commit: the documentation revision recording this QA; product code 683e8439c6ee5d4555df65957cb8a7e97ab357a1 on feature/sparring-v2-pilot
+Current candidate/unverified work: none — Stage 3 not started
+Last focused proof: node --test finds/images/image-helpers/media-loader — 127 pass, 0 fail
+Last broader proof: npm test 1290 / 1248 pass / 6 fail (known Deno suites); npm run build pass; npx eslint . 0 errors, 51 warnings
+Last reviewer result: sparring NEEDS_YOU on 683e843 with no further implementation finding; resolved by the passing device QA above
+Manual QA status: Stage 2 device QA PASSED on 683e843 (user-reported, 2026-09-11). Stage 1 search-pagination behavior remains separately confirmed on d20aef3.
+Known issue/blocker: none blocking. Two non-blocking UX observations carried into Stage 3 (sections 3.0.1 and 3.1.1) — do not fix them by reopening Stage 2.
+Next exact action: author the bounded Stage 3 prompt (stage-finds-prefetch-and-enrichment) against the accepted Stage 2 HEAD, including the two carried-in observations, then run the agent-sparring stage loop
 ```
