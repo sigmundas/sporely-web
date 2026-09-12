@@ -7,6 +7,7 @@ import android.provider.MediaStore;
 import androidx.core.content.FileProvider;
 import androidx.exifinterface.media.ExifInterface;
 import androidx.activity.result.ActivityResult;
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -15,6 +16,8 @@ import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import org.json.JSONArray;
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 
 @CapacitorPlugin(name = "NativeCamera")
 public class NativeCameraPlugin extends Plugin {
@@ -94,8 +97,10 @@ public class NativeCameraPlugin extends Plugin {
 
     /**
      * Best-effort removal of stranded captures older than maxAgeMs (default 48h). Only
-     * sporely-native-* files in cache/native-camera are considered. Never rejects on
-     * per-file failures; counters are returned for debugging.
+     * sporely-native-* files in cache/native-camera are considered. Captures listed in
+     * protectedPaths (still referenced by a persisted review draft) are kept regardless of
+     * age; every protected entry is re-validated natively. Never rejects on per-file
+     * failures; counters are returned for debugging.
      */
     @PluginMethod
     public void pruneStaleCaptures(PluginCall call) {
@@ -103,11 +108,21 @@ public class NativeCameraPlugin extends Plugin {
         long maxAgeMs = maxAgeMsValue != null && maxAgeMsValue >= 0
             ? maxAgeMsValue.longValue()
             : NativeCaptureStorage.DEFAULT_STALE_AFTER_MS;
-        NativeCaptureStorage.PruneResult result = NativeCaptureStorage.pruneStaleCaptures(getContext(), maxAgeMs);
+        List<String> protectedPaths = new ArrayList<>();
+        JSArray protectedArray = call.getArray("protectedPaths");
+        if (protectedArray != null) {
+            for (int i = 0; i < protectedArray.length(); i++) {
+                String value = protectedArray.optString(i, null);
+                if (value != null) protectedPaths.add(value);
+            }
+        }
+        NativeCaptureStorage.PruneResult result = NativeCaptureStorage.pruneStaleCaptures(getContext(), maxAgeMs, protectedPaths);
         JSObject ret = new JSObject();
         ret.put("scanned", result.scanned);
         ret.put("deleted", result.deleted);
         ret.put("retained", result.retained);
+        ret.put("protectedRetained", result.protectedRetained);
+        ret.put("protectedIgnored", result.protectedIgnored);
         ret.put("skipped", result.skipped);
         ret.put("failed", result.failed);
         call.resolve(ret);

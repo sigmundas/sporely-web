@@ -17,8 +17,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
+import java.util.Collection;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -147,22 +150,47 @@ final class NativeCaptureStorage {
         int retained;
         int skipped;
         int failed;
+        /** Stale-by-age captures kept because a live draft still references them. */
+        int protectedRetained;
+        /** Protected entries ignored because they were not valid captures inside the capture dir. */
+        int protectedIgnored;
     }
 
     /**
-     * Deletes native-camera capture files older than {@code maxAgeMs}. Only files whose name
-     * matches the Sporely capture pattern are considered; directories and unrelated files are
-     * left alone. Never throws.
+     * Deletes native-camera capture files older than {@code maxAgeMs}, except those named in
+     * {@code protectedPaths} (captures a persisted review draft still references). Only files
+     * whose name matches the Sporely capture pattern are considered; directories and unrelated
+     * files are left alone. Never throws.
      */
-    static PruneResult pruneStaleCaptures(Context context, long maxAgeMs) {
-        return pruneStaleCaptures(captureDir(context), maxAgeMs, System.currentTimeMillis());
+    static PruneResult pruneStaleCaptures(Context context, long maxAgeMs, Collection<String> protectedPaths) {
+        return pruneStaleCaptures(captureDir(context), maxAgeMs, System.currentTimeMillis(), protectedPaths);
     }
 
-    static PruneResult pruneStaleCaptures(File dir, long maxAgeMs, long nowMs) {
+    /**
+     * Resolves caller-supplied protected paths (captures still referenced by a persisted
+     * review draft) to file names. Each entry is validated exactly like a delete target: it
+     * must be a Sporely capture name inside {@code dir}. Anything else is ignored, so a
+     * malformed or foreign path can neither exempt nor affect any file.
+     */
+    static Set<String> resolveProtectedNames(File dir, Collection<String> protectedPaths, PruneResult result) {
+        Set<String> names = new HashSet<>();
+        if (protectedPaths == null) return names;
+        for (String raw : protectedPaths) {
+            try {
+                names.add(resolveCaptureFile(dir, raw).getName());
+            } catch (IOException | RuntimeException ex) {
+                if (result != null) result.protectedIgnored += 1;
+            }
+        }
+        return names;
+    }
+
+    static PruneResult pruneStaleCaptures(File dir, long maxAgeMs, long nowMs, Collection<String> protectedPaths) {
         PruneResult result = new PruneResult();
         long cutoff = nowMs - Math.max(0L, maxAgeMs);
         try {
             if (dir == null || !dir.isDirectory()) return result;
+            Set<String> protectedNames = resolveProtectedNames(dir, protectedPaths, result);
             File[] entries = dir.listFiles();
             if (entries == null) return result;
             for (File entry : entries) {
@@ -174,6 +202,10 @@ final class NativeCaptureStorage {
                 long modified = entry.lastModified();
                 if (modified <= 0 || modified >= cutoff) {
                     result.retained += 1;
+                    continue;
+                }
+                if (protectedNames.contains(entry.getName())) {
+                    result.protectedRetained += 1;
                     continue;
                 }
                 if (entry.delete()) {

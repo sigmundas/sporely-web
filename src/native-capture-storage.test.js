@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   NATIVE_CAPTURE_STALE_AFTER_MS,
+  collectProtectedNativeCapturePaths,
   finalizeNativeCaptureSources,
   isNativeCameraCapturePath,
   nativeCaptureSourcePathForPhoto,
@@ -63,7 +64,7 @@ function createFakePlugin({ files = [], exportFails = () => false, deleteFails =
     },
     async pruneStaleCaptures(args) {
       calls.push(['prune', args])
-      return { scanned: 0, deleted: 0, retained: 0, skipped: 0, failed: 0 }
+      return { scanned: 0, deleted: 0, retained: 0, protectedRetained: 0, protectedIgnored: 0, skipped: 0, failed: 0 }
     },
   }
 }
@@ -204,10 +205,12 @@ test('finalize with no sources is a no-op that never touches the plugin', async 
 
 // ── G. orphan prune wiring ───────────────────────────────────────────────────
 
+const _noDraft = async () => null
+
 test('prune requests the 48h cutoff and swallows plugin failures', async () => {
   const plugin = createFakePlugin()
-  const result = await pruneStaleNativeCaptures({ plugin, force: true })
-  assert.deepEqual(plugin.calls, [['prune', { maxAgeMs: NATIVE_CAPTURE_STALE_AFTER_MS }]])
+  const result = await pruneStaleNativeCaptures({ plugin, force: true, loadReviewDraft: _noDraft })
+  assert.deepEqual(plugin.calls, [['prune', { maxAgeMs: NATIVE_CAPTURE_STALE_AFTER_MS, protectedPaths: [] }]])
   assert.equal(NATIVE_CAPTURE_STALE_AFTER_MS, 48 * 60 * 60 * 1000)
   assert.equal(result.deleted, 0)
 
@@ -218,7 +221,7 @@ test('prune requests the 48h cutoff and swallows plugin failures', async () => {
   const warnings = []
   console.warn = (...args) => warnings.push(args)
   try {
-    const failed = await pruneStaleNativeCaptures({ plugin: failing, force: true })
+    const failed = await pruneStaleNativeCaptures({ plugin: failing, force: true, loadReviewDraft: _noDraft })
     assert.equal(failed, null)
     assert.equal(warnings.length, 1)
   } finally {
@@ -228,7 +231,59 @@ test('prune requests the 48h cutoff and swallows plugin failures', async () => {
 
 test('prune is skipped off Android unless forced', async () => {
   const plugin = createFakePlugin()
-  const result = await pruneStaleNativeCaptures({ plugin })
+  const result = await pruneStaleNativeCaptures({ plugin, loadReviewDraft: _noDraft })
   assert.equal(result, null)
   assert.deepEqual(plugin.calls, [])
+})
+
+// ── draft-referenced captures are protected from the age-based prune ─────────
+
+test('captures referenced by the persisted review draft are passed as protected paths', async () => {
+  const loadReviewDraft = async () => ({
+    photos: [
+      { nativeSourcePath: CAPTURE_A },
+      { nativeSourcePath: `file://${CAPTURE_B}` },
+      { nativeSourcePath: CAPTURE_A },          // duplicate
+      { nativeSourcePath: SYSTEM_CAM },         // not a Sporely Cam capture
+      { nativeSourcePath: PICKER },
+      { nativeSourcePath: null },
+      {},
+    ],
+  })
+  assert.deepEqual(await collectProtectedNativeCapturePaths({ loadReviewDraft }), [CAPTURE_A, CAPTURE_B])
+
+  const plugin = createFakePlugin()
+  await pruneStaleNativeCaptures({ plugin, force: true, loadReviewDraft })
+  assert.deepEqual(plugin.calls, [['prune', {
+    maxAgeMs: NATIVE_CAPTURE_STALE_AFTER_MS,
+    protectedPaths: [CAPTURE_A, CAPTURE_B],
+  }]])
+})
+
+test('no draft → nothing protected; age-based cleanup runs as the orphan fallback', async () => {
+  assert.deepEqual(await collectProtectedNativeCapturePaths({ loadReviewDraft: _noDraft }), [])
+  assert.deepEqual(await collectProtectedNativeCapturePaths({ loadReviewDraft: async () => ({ photos: [] }) }), [])
+  const plugin = createFakePlugin()
+  await pruneStaleNativeCaptures({ plugin, force: true, loadReviewDraft: _noDraft })
+  assert.equal(plugin.calls.length, 1)
+  assert.deepEqual(plugin.calls[0][1].protectedPaths, [])
+})
+
+test('a failed draft read skips the prune entirely instead of deleting unprotected', async () => {
+  const plugin = createFakePlugin()
+  const previousWarn = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args)
+  try {
+    const result = await pruneStaleNativeCaptures({
+      plugin,
+      force: true,
+      loadReviewDraft: async () => { throw new Error('IndexedDB blocked') },
+    })
+    assert.equal(result, null)
+    assert.deepEqual(plugin.calls, [], 'native prune must not run without draft protection')
+    assert.equal(warnings.length, 1)
+  } finally {
+    console.warn = previousWarn
+  }
 })

@@ -150,6 +150,18 @@ export async function updateReviewDraftFields(fields) {
 
 export async function loadReviewDraft() {
   try {
+    return await loadReviewDraftStrict()
+  } catch (err) {
+    console.warn('loadReviewDraft failed:', err)
+    return null
+  }
+}
+
+// Strict variant: resolves null only when there is no usable draft and throws
+// on read failure. Callers that must fail conservatively (native-capture
+// prune protection) need to tell "no draft" apart from "could not read".
+export async function loadReviewDraftStrict() {
+  {
     const db = await _open()
     const tx = db.transaction(STORE, 'readonly')
     const records = await new Promise((res, rej) => {
@@ -198,9 +210,6 @@ export async function loadReviewDraft() {
         }
       }),
     }
-  } catch (err) {
-    console.warn('loadReviewDraft failed:', err)
-    return null
   }
 }
 

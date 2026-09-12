@@ -8,6 +8,8 @@ import static org.junit.Assert.fail;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.Arrays;
+import java.util.Collections;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -43,7 +45,7 @@ public class NativeCaptureStorageTest {
         File nestedOld = writeFile(nested, "sporely-native-1500000000000_zz99zz.jpg", 200 * HOUR);
 
         NativeCaptureStorage.PruneResult result = NativeCaptureStorage.pruneStaleCaptures(
-            captureDir, NativeCaptureStorage.DEFAULT_STALE_AFTER_MS, System.currentTimeMillis());
+            captureDir, NativeCaptureStorage.DEFAULT_STALE_AFTER_MS, System.currentTimeMillis(), Collections.emptyList());
 
         assertTrue(recent.exists());
         assertFalse(stale.exists());
@@ -60,9 +62,55 @@ public class NativeCaptureStorageTest {
     @Test
     public void pruneMissingDirectoryIsNoop() {
         NativeCaptureStorage.PruneResult result = NativeCaptureStorage.pruneStaleCaptures(
-            new File(cacheRoot, "does-not-exist"), NativeCaptureStorage.DEFAULT_STALE_AFTER_MS, System.currentTimeMillis());
+            new File(cacheRoot, "does-not-exist"), NativeCaptureStorage.DEFAULT_STALE_AFTER_MS, System.currentTimeMillis(), null);
         assertEquals(0, result.scanned);
         assertEquals(0, result.deleted);
+        assertEquals(0, result.failed);
+    }
+
+    @Test
+    public void pruneKeepsStaleCapturesReferencedByADraft() throws IOException {
+        File referenced = writeFile(captureDir, "sporely-native-1600000000000_dr4ft1.jpg", 72 * HOUR);
+        File referencedFileUri = writeFile(captureDir, "sporely-native-1600000000001_dr4ft2.jpg", 72 * HOUR);
+        File orphan = writeFile(captureDir, "sporely-native-1600000000002_orph4n.jpg", 72 * HOUR);
+        File recent = writeFile(captureDir, "sporely-native-1700000000000_rec3nt.jpg", 1 * HOUR);
+
+        NativeCaptureStorage.PruneResult result = NativeCaptureStorage.pruneStaleCaptures(
+            captureDir, NativeCaptureStorage.DEFAULT_STALE_AFTER_MS, System.currentTimeMillis(),
+            Arrays.asList(referenced.getAbsolutePath(), "file://" + referencedFileUri.getAbsolutePath()));
+
+        assertTrue(referenced.exists());
+        assertTrue(referencedFileUri.exists());
+        assertFalse(orphan.exists());
+        assertTrue(recent.exists());
+        assertEquals(2, result.protectedRetained);
+        assertEquals(1, result.deleted);
+        assertEquals(1, result.retained);
+        assertEquals(0, result.protectedIgnored);
+    }
+
+    @Test
+    public void malformedProtectedPathsCannotExemptOrDeleteArbitraryFiles() throws IOException {
+        File stale = writeFile(captureDir, "sporely-native-1600000000000_st4le1.jpg", 72 * HOUR);
+        File outsideLookalike = writeFile(cacheRoot, "sporely-native-1600000000000_st4le1.jpg", 72 * HOUR);
+        File systemCam = writeFile(cacheRoot, "system_cam_9.jpg", 72 * HOUR);
+
+        NativeCaptureStorage.PruneResult result = NativeCaptureStorage.pruneStaleCaptures(
+            captureDir, NativeCaptureStorage.DEFAULT_STALE_AFTER_MS, System.currentTimeMillis(),
+            Arrays.asList(
+                outsideLookalike.getAbsolutePath(),              // same name, outside the capture dir
+                new File(captureDir, "../system_cam_9.jpg").getPath(), // traversal
+                "/etc/passwd",
+                "",
+                null));
+
+        // A protected entry outside the capture dir does not exempt the same-named stale
+        // capture inside it, and nothing outside the directory is touched either way.
+        assertFalse(stale.exists());
+        assertTrue(outsideLookalike.exists());
+        assertTrue(systemCam.exists());
+        assertEquals(5, result.protectedIgnored);
+        assertEquals(1, result.deleted);
         assertEquals(0, result.failed);
     }
 

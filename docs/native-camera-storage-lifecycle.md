@@ -67,18 +67,41 @@ Key files:
 ## Orphan cleanup
 
 `pruneStaleNativeCaptures()` runs ~4 s after `initSettings()` on Android (fire
-and forget, never awaited, failures only `console.warn`). It calls
-`NativeCamera.pruneStaleCaptures({ maxAgeMs: 48h })`, which deletes only
-`sporely-native-*` regular files in `cache/native-camera` whose `lastModified`
-is older than 48 h. Recent unreferenced files are kept on purpose. There is no
-"wipe the directory on upgrade" migration; existing stale files age out.
+and forget, never awaited, failures only `console.warn`). Steps:
+
+1. `collectProtectedNativeCapturePaths()` reads the persisted review draft
+   (`loadReviewDraftStrict`) and collects every `photo.nativeSourcePath` that
+   classifies as a Sporely Cam capture. A restored draft must still be able to
+   export/delete its own sources on Save, however old it is.
+   **If the draft cannot be read, the prune is skipped** for this launch rather
+   than running unprotected.
+2. `NativeCamera.pruneStaleCaptures({ maxAgeMs: 48h, protectedPaths })` deletes
+   only `sporely-native-*` regular files in `cache/native-camera` whose
+   `lastModified` is older than 48 h **and** whose name is not in the protected
+   set. Native code re-validates every protected entry with the same guard as a
+   delete target (capture name, canonical path inside the capture dir); invalid
+   entries are counted as `protectedIgnored` and can neither exempt nor affect
+   any file.
+
+Recent unreferenced files are kept on purpose (age fallback only for true
+orphans). Pruning is never coupled to cloud state. There is no "wipe the
+directory on upgrade" migration; existing stale files age out.
+
+### Which persisted state can reference a capture
+
+| Persisted state | Stores `nativeSourcePath`? | Prune protection |
+| --- | --- | --- |
+| Review draft (`review-draft-store.js`) | Yes (per photo) | Protected |
+| Import sessions (`import-store.js`) | No: blob bytes + metadata only, and `_addFilesToSession` never records the path | Not protectable; the session already owns the bytes, so the capture is a true orphan once added |
 
 ## Paths not covered (documented, not silently changed)
 
 - **Import review: "add Sporely Cam photo to an import group"**
-  (`import_review.js` `_openCameraForSession`). Sessions are persisted in the
-  import store with a different durability contract; sources are not tracked
-  there and age out via the 48 h prune.
+  (`import_review.js` `_openCameraForSession`). The capture's bytes are copied
+  into the import session, which is persisted without any native source path,
+  so the cache file is not a restorable reference: it is an orphan by
+  construction and ages out via the 48 h prune. Deleting it right after the
+  session is persisted would be safe but is a separate decision (see PLAN.md).
 - **Find detail: "add photo to existing observation"**
   (`find_detail.js` `_addPhotosToObservation`). Uploads directly to Supabase/R2
   without the queue; sources are not tracked and age out via the prune.
@@ -102,8 +125,11 @@ is older than 48 h. Recent unreferenced files are kept on purpose. There is no
    copies, no leftover capture files.
 4. **Kill the app before Save.** Take photos, force-stop from Settings, relaunch.
    Expect: the restored draft still shows the photos; the capture files are
-   still present (younger than 48 h) after the startup prune; Save then cleans
-   them up (and exports if ON).
+   still present after the startup prune; Save then cleans them up (and exports
+   if ON). Optional: age the files past 48 h with
+   `adb shell run-as com.sporelab.sporely touch -d '3 days ago' cache/native-camera/<file>`
+   before relaunching; the draft-referenced files must still survive the prune
+   (`Native capture prune:` log shows `protectedRetained`).
 5. **Offline Save.** Airplane mode → take photos → Save. Expect: "Queued 1
    observation" toast; cache files deleted (gallery copy written if ON);
    upload resumes from the queue when back online.

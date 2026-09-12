@@ -18,6 +18,7 @@
 import { registerPlugin } from '@capacitor/core'
 import { isAndroidApp } from './platform.js'
 import { getSaveOriginalsToPhone } from './settings.js'
+import { loadReviewDraftStrict } from './review-draft-store.js'
 
 export const NATIVE_CAPTURE_DIR_NAME = 'native-camera'
 export const NATIVE_CAPTURE_FILE_PREFIX = 'sporely-native-'
@@ -121,14 +122,39 @@ export async function finalizeNativeCaptureSources(paths, options = {}) {
   return summary
 }
 
+// Native-camera sources still referenced by persisted, restorable state. These
+// must survive the age-based prune: a review draft restored after >48h still
+// expects to export/delete its own sources on Save.
+//
+// Only the review draft persists nativeSourcePath. Import sessions persist
+// blob bytes and metadata only (import-store.js), so a Sporely Cam capture
+// added to an import group has no restorable reference and is a true orphan
+// once its bytes are in the import store.
+export async function collectProtectedNativeCapturePaths(options = {}) {
+  const load = options.loadReviewDraft || loadReviewDraftStrict
+  const draft = await load()
+  const photos = Array.isArray(draft?.photos) ? draft.photos : []
+  return [...new Set(photos.map(nativeCaptureSourcePathForPhoto).filter(Boolean))]
+}
+
 // Best-effort startup/resume pruning of stranded native-camera files (crash
 // or abandoned review). Android only; never throws; never blocks boot.
+// Captures referenced by the persisted review draft are passed to native code
+// as protected; native re-validates every entry. If the draft cannot be read
+// the prune is skipped entirely — never delete potentially live captures.
 export async function pruneStaleNativeCaptures(options = {}) {
   if (!options.force && !isAndroidApp()) return null
   const plugin = options.plugin || _plugin()
   const maxAgeMs = Number.isFinite(options.maxAgeMs) ? options.maxAgeMs : NATIVE_CAPTURE_STALE_AFTER_MS
+  let protectedPaths
   try {
-    const result = await plugin.pruneStaleCaptures({ maxAgeMs })
+    protectedPaths = await collectProtectedNativeCapturePaths(options)
+  } catch (err) {
+    console.warn('Native capture prune skipped: could not read draft state:', err)
+    return null
+  }
+  try {
+    const result = await plugin.pruneStaleCaptures({ maxAgeMs, protectedPaths })
     if (result && (result.deleted > 0 || result.failed > 0)) {
       console.info('Native capture prune:', result)
     }
