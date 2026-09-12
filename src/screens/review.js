@@ -62,6 +62,11 @@ import {
   createDefaultObservationPayload,
 } from '../observation-defaults.js'
 import { clearReviewDraft, saveReviewDraft, updateReviewDraftFields } from '../review-draft-store.js'
+import {
+  finalizeNativeCaptureSources,
+  nativeCaptureSourcePathForPhoto,
+  nativeCaptureSourcePathFromNativePhoto,
+} from '../native-capture-storage.js'
 import { normalizeObservationGeography } from '../observation-geography.js'
 
 const reviewAiState = {
@@ -103,6 +108,7 @@ let reviewDraftFieldSyncTimer = null
 
 const reviewDefaultDependencies = {
   enqueueObservation,
+  finalizeNativeCaptureSources,
   refreshHome,
   openFinds,
   requestFreshLocation,
@@ -2175,6 +2181,26 @@ function _localDate(ts) {
   return `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}`
 }
 
+// Post-enqueue only. Exports (per setting) and deletes the Sporely Cam cache
+// sources of the just-saved photos. Never throws: the observation is already
+// saved, so any failure here is at most a warning toast.
+async function _finalizeReviewNativeCaptures(photos) {
+  const sourcePaths = (photos || [])
+    .map(nativeCaptureSourcePathForPhoto)
+    .filter(Boolean)
+  if (!sourcePaths.length) return null
+  try {
+    const summary = await _reviewDependency('finalizeNativeCaptureSources')(sourcePaths)
+    if (summary?.exportFailed > 0) {
+      showToast(t('review.originalNotSavedToPhone'))
+    }
+    return summary
+  } catch (err) {
+    console.warn('Native capture finalize failed (observation is queued):', err)
+    return null
+  }
+}
+
 async function saveObservationBatch() {
   if (!state.user) { showToast(t('review.notSignedIn')); return }
   if (!state.capturedPhotos.length) { showToast(t('review.noPhotosToSync')); return }
@@ -2240,6 +2266,11 @@ async function saveObservationBatch() {
       photoCount: photos.length,
       imageEntryCount: imageEntries.length,
     })
+    // The queue now durably owns the image bytes. Only from here on may the
+    // private Sporely Cam cache JPEGs be exported to the gallery (setting
+    // "Save originals to phone") and deleted. Gallery export is secondary:
+    // its failure never fails or rolls back the save, only warns.
+    await _finalizeReviewNativeCaptures(photos)
     _disposeReviewDebugPreviewUrls()
     state.capturedPhotos = []
     state.reviewContext = null
@@ -2430,6 +2461,8 @@ async function _addFilesToReview(files, options = {}) {
       aiCropSourceH: processed.meta?.aiCropSourceH ?? null,
       aiCropIsCustom: processed.meta?.aiCropIsCustom === true,
       taxon: state.capturedPhotos[0]?.taxon || null,
+      // Sporely Cam only; null for picker imports and the system camera.
+      nativeSourcePath: nativeCaptureSourcePathFromNativePhoto(item.nativePhoto),
     }
     state.capturedPhotos.push(newPhoto)
     doneCount++

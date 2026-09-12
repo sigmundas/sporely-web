@@ -56,6 +56,63 @@ public class NativeCameraPlugin extends Plugin {
         }
     }
 
+    // ── Capture storage lifecycle (called by JS only after durable enqueue) ──
+
+    /**
+     * Copies a Sporely Cam capture (original bytes, EXIF/GPS intact) into the photo library
+     * under Pictures/Sporely via MediaStore. Only files inside cache/native-camera with the
+     * sporely-native-* name are accepted.
+     */
+    @PluginMethod
+    public void exportCaptureToGallery(PluginCall call) {
+        String path = call.getString("path");
+        try {
+            Uri uri = NativeCaptureStorage.exportCaptureToGallery(getContext(), path);
+            JSObject ret = new JSObject();
+            ret.put("uri", uri.toString());
+            call.resolve(ret);
+        } catch (UnsupportedOperationException ex) {
+            call.reject(ex.getMessage(), "UNSUPPORTED");
+        } catch (Exception ex) {
+            call.reject("Could not save original to the phone: " + ex.getMessage(), "EXPORT_FAILED", ex);
+        }
+    }
+
+    /** Deletes one Sporely Cam capture from cache/native-camera. Refuses any other path. */
+    @PluginMethod
+    public void deleteCapture(PluginCall call) {
+        String path = call.getString("path");
+        try {
+            boolean deleted = NativeCaptureStorage.deleteCapture(getContext(), path);
+            JSObject ret = new JSObject();
+            ret.put("deleted", deleted);
+            call.resolve(ret);
+        } catch (Exception ex) {
+            call.reject("Could not delete capture: " + ex.getMessage(), "DELETE_FAILED", ex);
+        }
+    }
+
+    /**
+     * Best-effort removal of stranded captures older than maxAgeMs (default 48h). Only
+     * sporely-native-* files in cache/native-camera are considered. Never rejects on
+     * per-file failures; counters are returned for debugging.
+     */
+    @PluginMethod
+    public void pruneStaleCaptures(PluginCall call) {
+        Double maxAgeMsValue = call.getDouble("maxAgeMs");
+        long maxAgeMs = maxAgeMsValue != null && maxAgeMsValue >= 0
+            ? maxAgeMsValue.longValue()
+            : NativeCaptureStorage.DEFAULT_STALE_AFTER_MS;
+        NativeCaptureStorage.PruneResult result = NativeCaptureStorage.pruneStaleCaptures(getContext(), maxAgeMs);
+        JSObject ret = new JSObject();
+        ret.put("scanned", result.scanned);
+        ret.put("deleted", result.deleted);
+        ret.put("retained", result.retained);
+        ret.put("skipped", result.skipped);
+        ret.put("failed", result.failed);
+        call.resolve(ret);
+    }
+
     @PluginMethod
     public void openSystemCamera(PluginCall call) {
         Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);

@@ -99,6 +99,9 @@ export async function saveReviewDraft(draft) {
         aiCropSourceW: photo.aiCropSourceW ?? null,
         aiCropSourceH: photo.aiCropSourceH ?? null,
         aiCropIsCustom: photo.aiCropIsCustom === true,
+        // Sporely Cam cache source, kept so a restored draft still exports/
+        // deletes the private JPEG when the user eventually saves.
+        nativeSourcePath: typeof photo.nativeSourcePath === 'string' ? photo.nativeSourcePath : null,
       })),
       blobs: await Promise.all(entries.map(({ blob }) => blob.arrayBuffer())),
       blobTypes: entries.map(({ blob }) => _blobType(blob)),
@@ -191,6 +194,7 @@ export async function loadReviewDraft() {
           aiCropSourceW: meta.aiCropSourceW ?? null,
           aiCropSourceH: meta.aiCropSourceH ?? null,
           aiCropIsCustom: meta.aiCropIsCustom === true,
+          nativeSourcePath: typeof meta.nativeSourcePath === 'string' ? meta.nativeSourcePath : null,
         }
       }),
     }

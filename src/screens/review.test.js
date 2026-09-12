@@ -24,6 +24,7 @@ import {
 import { LOCATION_STATE_CHANGED_EVENT, beginCaptureLocationSession, endCaptureLocationSession } from '../geo.js'
 import { state } from '../state.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
+import { __setNativeCaptureStoragePluginForTests } from '../native-capture-storage.js'
 
 function _makeElement(id, tagName = 'div') {
   const listeners = {}
@@ -1996,6 +1997,279 @@ test('review pill shows one no-location state and a captured fix is never overwr
     assert.equal(env.document.getElementById('review-gps-pill').dataset.gpsState, 'fix')
     assert.equal(env.document.getElementById('review-gps-pill').dataset.gpsAction, undefined)
   } finally {
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+// ── Sporely Cam cache lifecycle around Save ──────────────────────────────────
+// Native-camera JPEGs (cache/native-camera/sporely-native-*.jpg) are working
+// storage. They may only be exported to the gallery / deleted AFTER
+// enqueueObservation() has durably persisted the image bytes.
+
+const NATIVE_CACHE = '/data/user/0/com.sporelab.sporely/cache/native-camera'
+const NATIVE_SRC_1 = `${NATIVE_CACHE}/sporely-native-1757600000000_a1b2c3.jpg`
+const NATIVE_SRC_2 = `${NATIVE_CACHE}/sporely-native-1757600001000_d4e5f6.jpg`
+
+function _createLocalStorageStub() {
+  const store = new Map()
+  return {
+    getItem(key) { return store.has(key) ? store.get(key) : null },
+    setItem(key, value) { store.set(String(key), String(value)) },
+    removeItem(key) { store.delete(String(key)) },
+    clear() { store.clear() },
+  }
+}
+
+function _seedNativeCameraReview(liveFix) {
+  _seedReviewState({
+    liveFix,
+    user: { id: 'user-1' },
+    location: { preference: 'enabled', capability: 'supported', permission: 'granted', status: 'fix' },
+  })
+  const first = state.capturedPhotos[0]
+  state.capturedPhotos = [
+    { ...first, nativeSourcePath: NATIVE_SRC_1 },
+    { ...first, blob: new Blob(['photo-2']), aiBlob: new Blob(['photo-2']), ts: new Date(first.ts.getTime() + 1000), nativeSourcePath: NATIVE_SRC_2 },
+  ]
+  state.batchCount = 2
+}
+
+function _createFakeNativeCapturePlugin(files, { exportFails = () => false } = {}) {
+  const cache = new Set(files)
+  const gallery = []
+  const calls = []
+  return {
+    cache,
+    gallery,
+    calls,
+    async exportCaptureToGallery({ path }) {
+      calls.push(['export', path])
+      if (exportFails(path)) throw new Error('MediaStore refused')
+      gallery.push(path)
+      return { uri: 'content://media/external/images/media/1' }
+    },
+    async deleteCapture({ path }) {
+      calls.push(['delete', path])
+      cache.delete(path)
+      return { deleted: true }
+    },
+  }
+}
+
+test('Save with originals OFF: enqueue first, then native sources are deleted without gallery export', async () => {
+  const snapshot = _snapshotReviewState()
+  const localStorage = _createLocalStorageStub()
+  const env = _installReviewGlobals({ localStorage })
+  const plugin = _createFakeNativeCapturePlugin([NATIVE_SRC_1, NATIVE_SRC_2])
+  const order = []
+  let enqueuedImages = null
+
+  try {
+    _seedNativeCameraReview({ lat: 60.1, lon: 10.2, accuracy: 4, altitude: 12, timestamp: 1710000000600 })
+    __setNativeCaptureStoragePluginForTests({
+      ...plugin,
+      async exportCaptureToGallery(args) { order.push('export'); return plugin.exportCaptureToGallery(args) },
+      async deleteCapture(args) { order.push('delete'); return plugin.deleteCapture(args) },
+    })
+    __setReviewTestHooks({
+      requestFreshLocation: async () => null,
+      enqueueObservation: async (_payload, imageEntries) => {
+        // Sources must still exist while the queue write happens.
+        assert.equal(plugin.cache.size, 2)
+        enqueuedImages = imageEntries
+        order.push('enqueue')
+      },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => plugin.cache.size === 0, 50)
+
+    assert.equal(enqueuedImages.length, 2)
+    assert.deepEqual(order, ['enqueue', 'delete', 'delete'])
+    assert.deepEqual(plugin.gallery, [])
+    assert.deepEqual(plugin.calls, [['delete', NATIVE_SRC_1], ['delete', NATIVE_SRC_2]])
+    assert.deepEqual(state.capturedPhotos, [])
+    assert.doesNotMatch(env.document.getElementById('toast').textContent, /could not be saved to your phone/)
+  } finally {
+    __setNativeCaptureStoragePluginForTests(null)
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('Save with originals ON: each original is exported after enqueue and before its source is deleted', async () => {
+  const snapshot = _snapshotReviewState()
+  const localStorage = _createLocalStorageStub()
+  localStorage.setItem('sporely-save-originals-to-phone', '1')
+  const env = _installReviewGlobals({ localStorage })
+  const plugin = _createFakeNativeCapturePlugin([NATIVE_SRC_1, NATIVE_SRC_2])
+  const order = []
+
+  try {
+    _seedNativeCameraReview({ lat: 60.1, lon: 10.2, accuracy: 4, altitude: 12, timestamp: 1710000000600 })
+    __setNativeCaptureStoragePluginForTests({
+      ...plugin,
+      async exportCaptureToGallery(args) { order.push(`export:${args.path}`); return plugin.exportCaptureToGallery(args) },
+      async deleteCapture(args) { order.push(`delete:${args.path}`); return plugin.deleteCapture(args) },
+    })
+    __setReviewTestHooks({
+      requestFreshLocation: async () => null,
+      enqueueObservation: async () => {
+        assert.equal(plugin.cache.size, 2)
+        assert.deepEqual(plugin.gallery, [], 'nothing reaches the gallery before durable enqueue')
+        order.push('enqueue')
+      },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => plugin.cache.size === 0, 50)
+
+    assert.deepEqual(order, [
+      'enqueue',
+      `export:${NATIVE_SRC_1}`, `delete:${NATIVE_SRC_1}`,
+      `export:${NATIVE_SRC_2}`, `delete:${NATIVE_SRC_2}`,
+    ])
+    // Gallery export uses the original native source path, not an upload blob.
+    assert.deepEqual(plugin.gallery, [NATIVE_SRC_1, NATIVE_SRC_2])
+    assert.doesNotMatch(env.document.getElementById('toast').textContent, /could not be saved to your phone/)
+  } finally {
+    __setNativeCaptureStoragePluginForTests(null)
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('failed enqueue retains native sources and never exports to the gallery', async () => {
+  const snapshot = _snapshotReviewState()
+  const localStorage = _createLocalStorageStub()
+  localStorage.setItem('sporely-save-originals-to-phone', '1')
+  const env = _installReviewGlobals({ localStorage })
+  const plugin = _createFakeNativeCapturePlugin([NATIVE_SRC_1, NATIVE_SRC_2])
+  const previousConsoleError = console.error
+  let enqueueAttempts = 0
+
+  try {
+    console.error = () => {}
+    _seedNativeCameraReview({ lat: 60.1, lon: 10.2, accuracy: 4, altitude: 12, timestamp: 1710000000600 })
+    __setNativeCaptureStoragePluginForTests(plugin)
+    __setReviewTestHooks({
+      requestFreshLocation: async () => null,
+      enqueueObservation: async () => {
+        enqueueAttempts += 1
+        throw new Error('quota exceeded')
+      },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => enqueueAttempts === 1, 50)
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.equal(plugin.cache.size, 2, 'native sources must survive a failed queue write')
+    assert.deepEqual(plugin.calls, [])
+    assert.deepEqual(plugin.gallery, [])
+    assert.equal(state.capturedPhotos.length, 2, 'the review session is preserved')
+    assert.match(env.document.getElementById('toast').textContent, /Could not queue observation/)
+  } finally {
+    console.error = previousConsoleError
+    __setNativeCaptureStoragePluginForTests(null)
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('gallery export failure keeps the save, warns, and still frees the cache source', async () => {
+  const snapshot = _snapshotReviewState()
+  const localStorage = _createLocalStorageStub()
+  localStorage.setItem('sporely-save-originals-to-phone', '1')
+  const env = _installReviewGlobals({ localStorage })
+  const plugin = _createFakeNativeCapturePlugin([NATIVE_SRC_1, NATIVE_SRC_2], {
+    exportFails: path => path === NATIVE_SRC_2,
+  })
+  const previousConsoleWarn = console.warn
+  let enqueued = false
+  let openedFinds = false
+
+  try {
+    console.warn = () => {}
+    _seedNativeCameraReview({ lat: 60.1, lon: 10.2, accuracy: 4, altitude: 12, timestamp: 1710000000600 })
+    __setNativeCaptureStoragePluginForTests(plugin)
+    __setReviewTestHooks({
+      requestFreshLocation: async () => null,
+      enqueueObservation: async () => { enqueued = true },
+      refreshHome: async () => {},
+      openFinds: async () => { openedFinds = true },
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => openedFinds, 50)
+
+    assert.equal(enqueued, true)
+    assert.deepEqual(plugin.gallery, [NATIVE_SRC_1])
+    assert.equal(plugin.cache.size, 0, 'a failed optional gallery copy must not leave cache garbage')
+    assert.deepEqual(state.capturedPhotos, [], 'the observation save completed')
+    assert.match(env.document.getElementById('toast').textContent, /could not be saved to your phone/)
+  } finally {
+    console.warn = previousConsoleWarn
+    __setNativeCaptureStoragePluginForTests(null)
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('Save without native sources (web capture / imports) never calls the native lifecycle', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  let finalizeCalls = 0
+  let savedPayload = null
+
+  try {
+    _seedReviewState({
+      liveFix: { lat: 60.1, lon: 10.2, accuracy: 4, altitude: 12, timestamp: 1710000000600 },
+      user: { id: 'user-1' },
+      location: { preference: 'enabled', capability: 'supported', permission: 'granted', status: 'fix' },
+    })
+    __setReviewTestHooks({
+      requestFreshLocation: async () => null,
+      enqueueObservation: async payload => { savedPayload = payload },
+      finalizeNativeCaptureSources: async () => { finalizeCalls += 1; return null },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => savedPayload !== null)
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.equal(finalizeCalls, 0)
+  } finally {
+    __setReviewTestHooks(null)
     _restoreReviewState(snapshot)
     env.restore()
   }

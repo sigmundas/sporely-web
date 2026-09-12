@@ -105,7 +105,10 @@ import {
   setPhotoGapMinutes,
   getUseSystemCamera,
   setUseSystemCamera,
+  getSaveOriginalsToPhone,
+  setSaveOriginalsToPhone,
 } from './settings.js'
+import { pruneStaleNativeCaptures } from './native-capture-storage.js'
 import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel, isAndroidNativeApp } from './camera-actions.js'
 import { getPlatform, isAndroidApp } from './platform.js'
 import { registerNativeAuthLinkListener } from './native-auth-links.js'
@@ -690,6 +693,24 @@ function initSettings() {
     })
   })
 
+  // Android only: "Save originals to phone" (gallery copy of saved Sporely
+  // Cam originals). Hidden elsewhere; the setting has no effect off-Android.
+  const saveOriginalsRow = document.getElementById('settings-save-originals-row')
+  const saveOriginalsHint = document.getElementById('settings-save-originals-hint')
+  const showSaveOriginals = isAndroidApp()
+  if (saveOriginalsRow) saveOriginalsRow.style.display = showSaveOriginals ? 'flex' : 'none'
+  if (saveOriginalsHint) saveOriginalsHint.style.display = showSaveOriginals ? '' : 'none'
+  document.getElementById('settings-save-originals-toggle')?.addEventListener('change', event => {
+    setSaveOriginalsToPhone(!!event.currentTarget.checked)
+    _syncSettingsUI()
+  })
+
+  // Best-effort prune of stranded Sporely Cam cache files (>48h). Deferred
+  // off the boot path and never awaited; failures only log.
+  if (isAndroidApp()) {
+    setTimeout(() => { void pruneStaleNativeCaptures() }, 4000)
+  }
+
   document.querySelectorAll('.settings-default-visibility-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       setDefaultVisibility(btn.dataset.defaultVisibility)
@@ -760,6 +781,9 @@ function _syncSettingsUI() {
     btn.classList.toggle('active', btn.dataset.cameraApp === (useSystemCamera ? 'native' : 'sporely'))
   })
   const acCameraLabel = document.querySelector('#ac-camera .action-card-label')
+
+  const saveOriginalsToggle = document.getElementById('settings-save-originals-toggle')
+  if (saveOriginalsToggle) saveOriginalsToggle.checked = getSaveOriginalsToPhone()
 
   const photoIdMode = getPhotoIdMode()
   document.querySelectorAll('.settings-photo-id-mode-btn').forEach(btn => {
