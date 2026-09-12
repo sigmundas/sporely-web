@@ -2491,6 +2491,36 @@ test('HEAD /upload/<key>: authorized HEAD on missing object → 404 media_not_fo
   assert.equal(res.headers.get('X-Sporely-Error-Code'), 'media_not_found')
 })
 
+test('HEAD /upload/<key>: missing-object 404 exposes X-Sporely-Error-Code through CORS for an allowed Origin', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const env = makeHeadEnv({} /* empty bucket */)
+  env.SUPABASE_JWT_SECRET = jwtSecret
+
+  // Capacitor Android WebView origin. Without Access-Control-Expose-Headers the
+  // browser hides the custom header and the client's _headViaWorker() would see
+  // "unknown" and conservatively throw instead of treating the object as absent.
+  const res = await worker.fetch(buildHeadRequest('user-123/obs/0_000.webp', token, 'https://localhost'), env, {})
+
+  assert.equal(res.status, 404)
+  assert.equal(res.headers.get('X-Sporely-Error-Code'), 'media_not_found')
+  assert.equal(res.headers.get('Access-Control-Allow-Origin'), 'https://localhost')
+  const exposed = String(res.headers.get('Access-Control-Expose-Headers') || '')
+    .split(',')
+    .map(value => value.trim().toLowerCase())
+  assert.ok(exposed.includes('x-sporely-error-code'), `Expose-Headers was: ${res.headers.get('Access-Control-Expose-Headers')}`)
+})
+
+test('successful responses also carry Access-Control-Expose-Headers (set centrally in corsHeaders)', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const env = makeHeadEnv({ 'user-123/obs/0_000.webp': { size: 1234 } })
+  env.SUPABASE_JWT_SECRET = jwtSecret
+
+  const res = await worker.fetch(buildHeadRequest('user-123/obs/0_000.webp', token), env, {})
+
+  assert.equal(res.status, 200)
+  assert.match(res.headers.get('Access-Control-Expose-Headers') || '', /X-Sporely-Error-Code/i)
+})
+
 test('HEAD /upload/<key>: unauthenticated HEAD (no bearer) → 401', async () => {
   const env = makeHeadEnv({ 'user-123/obs/0_000.webp': { size: 100 } })
 

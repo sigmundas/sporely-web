@@ -39,6 +39,12 @@ const DEFAULT_ALLOWED_HEADER_NAMES = DEFAULT_ALLOWED_HEADERS
   .split(',')
   .map(value => value.trim())
   .filter(Boolean)
+// Response headers browser JS may read. X-Sporely-Error-Code is how HEAD
+// callers (which get no body) tell `media_not_found` from a route-level 404;
+// without exposure `response.headers.get(...)` is null cross-origin.
+const DEFAULT_EXPOSED_HEADERS = [
+  'X-Sporely-Error-Code',
+].join(', ')
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
 const ARTS_MAX_DIST = 0.006
 const NOMINATIM_INTERVAL_MS = 1000
@@ -2073,6 +2079,7 @@ function corsHeaders(request, env, resolvedOrigin = null) {
   }
   headers.set('Access-Control-Allow-Methods', DEFAULT_ALLOWED_METHODS)
   headers.set('Access-Control-Allow-Headers', resolveAllowedHeaders(request))
+  headers.set('Access-Control-Expose-Headers', DEFAULT_EXPOSED_HEADERS)
   headers.set('Access-Control-Max-Age', '86400')
   return headers
 }
