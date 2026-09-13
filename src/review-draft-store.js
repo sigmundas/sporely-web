@@ -99,6 +99,9 @@ export async function saveReviewDraft(draft) {
         aiCropSourceW: photo.aiCropSourceW ?? null,
         aiCropSourceH: photo.aiCropSourceH ?? null,
         aiCropIsCustom: photo.aiCropIsCustom === true,
+        // Sporely Cam cache source, kept so a restored draft still exports/
+        // deletes the private JPEG when the user eventually saves.
+        nativeSourcePath: typeof photo.nativeSourcePath === 'string' ? photo.nativeSourcePath : null,
       })),
       blobs: await Promise.all(entries.map(({ blob }) => blob.arrayBuffer())),
       blobTypes: entries.map(({ blob }) => _blobType(blob)),
@@ -147,6 +150,18 @@ export async function updateReviewDraftFields(fields) {
 
 export async function loadReviewDraft() {
   try {
+    return await loadReviewDraftStrict()
+  } catch (err) {
+    console.warn('loadReviewDraft failed:', err)
+    return null
+  }
+}
+
+// Strict variant: resolves null only when there is no usable draft and throws
+// on read failure. Callers that must fail conservatively (native-capture
+// prune protection) need to tell "no draft" apart from "could not read".
+export async function loadReviewDraftStrict() {
+  {
     const db = await _open()
     const tx = db.transaction(STORE, 'readonly')
     const records = await new Promise((res, rej) => {
@@ -191,12 +206,10 @@ export async function loadReviewDraft() {
           aiCropSourceW: meta.aiCropSourceW ?? null,
           aiCropSourceH: meta.aiCropSourceH ?? null,
           aiCropIsCustom: meta.aiCropIsCustom === true,
+          nativeSourcePath: typeof meta.nativeSourcePath === 'string' ? meta.nativeSourcePath : null,
         }
       }),
     }
-  } catch (err) {
-    console.warn('loadReviewDraft failed:', err)
-    return null
   }
 }
 

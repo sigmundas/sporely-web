@@ -641,3 +641,96 @@ test('Native camera capturePhotos options include GPS from the live session fix'
   assert.equal(options.gps.altitude, sessionFix.altitude)
   assert.equal(options.gps.accuracy, sessionFix.accuracy)
 })
+
+// ── Sporely Cam cache source tracking ────────────────────────────────────────
+
+const _NATIVE_CACHE_DIR = '/data/user/0/com.sporelab.sporely/cache/native-camera'
+
+function _installIdentityPhotoPipeline() {
+  __setNativePhotoPipelineForTests({
+    async nativePickedPhotoToFile(photo, index) {
+      return new File([new Blob([`bytes-${index}`], { type: 'image/jpeg' })], photo.name || `p${index}.jpg`, {
+        type: 'image/jpeg',
+        lastModified: Date.now(),
+      })
+    },
+    async processFile(file) {
+      return { blob: file, aiBlob: file, meta: { aiCropRect: null, aiCropSourceW: 4000, aiCropSourceH: 3000, aiCropIsCustom: false } }
+    },
+  })
+}
+
+test('Sporely Cam captures carry their private cache source path into review, one per photo', async () => {
+  const sessionFix = { lat: 63.42, lon: 10.4, accuracy: 5, altitude: 30, timestamp: Date.now() }
+  _makeRuntime({ watchId: 717, deliverFix: sessionFix })
+  initCapture()
+  initCaptureLocationSheet()
+  setLocationPreference('enabled')
+
+  const pathA = `${_NATIVE_CACHE_DIR}/sporely-native-1757600000000_a1b2c3.jpg`
+  const pathB = `${_NATIVE_CACHE_DIR}/sporely-native-1757600001000_d4e5f6.jpg`
+  __setNativeCameraForTests(_makeNativeCameraMock({
+    result: {
+      photos: [
+        { name: 'sporely-native-1757600000000_a1b2c3.jpg', mimeType: 'image/jpeg', path: pathA, originalPath: pathA },
+        { name: 'sporely-native-1757600001000_d4e5f6.jpg', mimeType: 'image/jpeg', path: pathB, originalPath: pathB },
+      ],
+    },
+  }))
+  _installIdentityPhotoPipeline()
+
+  await openNativeCamera()
+
+  assert.equal(state.currentScreen, 'review')
+  assert.deepEqual(state.capturedPhotos.map(photo => photo.nativeSourcePath), [pathA, pathB])
+  await new Promise(resolve => setTimeout(resolve, 20))
+})
+
+test('System camera photos are not tracked as Sporely Cam cache sources', async () => {
+  _makeRuntime({ watchId: 718 })
+  initCapture()
+  initCaptureLocationSheet()
+  setLocationPreference('enabled')
+  setUseSystemCamera(true)
+
+  const systemPath = '/data/user/0/com.sporelab.sporely/cache/system_cam_123.jpg'
+  __setNativeCameraForTests(_makeNativeCameraMock({
+    result: { photos: [{ name: 'system_cam_123.jpg', mimeType: 'image/jpeg', path: systemPath, originalPath: systemPath }] },
+  }))
+  _installIdentityPhotoPipeline()
+
+  try {
+    await openNativeCamera()
+    assert.equal(state.currentScreen, 'review')
+    assert.equal(state.capturedPhotos.length, 1)
+    assert.equal(state.capturedPhotos[0].nativeSourcePath, null)
+  } finally {
+    setUseSystemCamera(false)
+  }
+  await new Promise(resolve => setTimeout(resolve, 20))
+})
+
+test('Cancelled Sporely Cam session leaves no photos, no sources, and never touches the gallery', async () => {
+  _makeRuntime({ watchId: 719 })
+  initCapture()
+  initCaptureLocationSheet()
+  setLocationPreference('enabled')
+
+  const nativeCamera = _makeNativeCameraMock({ error: _makeSyncPickerCancel() })
+  nativeCamera.exportCaptureToGallery = async () => { throw new Error('must not be called') }
+  nativeCamera.deleteCapture = async () => { throw new Error('must not be called') }
+  let galleryCalls = 0
+  const guarded = new Proxy(nativeCamera, {
+    get(target, prop) {
+      if (prop === 'exportCaptureToGallery' || prop === 'deleteCapture') galleryCalls += 1
+      return target[prop]
+    },
+  })
+  __setNativeCameraForTests(guarded)
+
+  await openNativeCamera()
+
+  assert.equal(state.currentScreen, 'home')
+  assert.deepEqual(state.capturedPhotos, [])
+  assert.equal(galleryCalls, 0)
+})

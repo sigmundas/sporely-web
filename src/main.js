@@ -40,7 +40,7 @@ import {
 } from './screens/auth.js'
 import { initHome, refreshHome, refreshHomeSafe, renderHomeFromCache, resetHomeSectionTracking } from './screens/home.js'
 import { clearAllHomeCaches, clearHomeCache } from './home-cache.js'
-import { initFinds, loadFinds, requestFindsRefresh, CONNECTIVITY_REVALIDATION_REQUEST_EVENT } from './screens/finds.js'
+import { initFinds, loadFinds, requestFindsRefresh, revalidateActiveFinds, CONNECTIVITY_REVALIDATION_REQUEST_EVENT } from './screens/finds.js'
 import { initCapture } from './screens/capture.js'
 import { buildReviewGrid, initReview, restoreReviewDraft } from './screens/review.js'
 import { initFindDetail } from './screens/find_detail.js'
@@ -105,7 +105,10 @@ import {
   setPhotoGapMinutes,
   getUseSystemCamera,
   setUseSystemCamera,
+  getSaveOriginalsToPhone,
+  setSaveOriginalsToPhone,
 } from './settings.js'
+import { pruneStaleNativeCaptures } from './native-capture-storage.js'
 import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel, isAndroidNativeApp } from './camera-actions.js'
 import { getPlatform, isAndroidApp } from './platform.js'
 import { registerNativeAuthLinkListener } from './native-auth-links.js'
@@ -285,8 +288,8 @@ _bindReconnectTriggerToAuthState()
 //     holds the single `_cachedRevalidationInFlight` guard (one probe +
 //     one session refresh per burst) and routes same-user recovery through
 //     `resolveAuthenticatedSessionOnce` (per-user in-flight map).
-//   * AUTHENTICATED_COMPLETE → nothing to revalidate; the signal is only a
-//     nudge for the sync queue. `triggerSync()` self-dedupes an active pass
+//   * AUTHENTICATED_COMPLETE → revalidate active stale/failed Finds and
+//     nudge the sync queue. `triggerSync()` self-dedupes an active pass
 //     and re-checks `canPerformCloudMutation()` — device connectivity can
 //     never bypass the capability gate.
 //   * every other state (RESOLVING / UNAUTHENTICATED / INCOMPLETE) → no-op.
@@ -303,6 +306,7 @@ function requestConnectivityRevalidation(reason, options = {}) {
   if (current.state === AUTH_STATE.AUTHENTICATED_COMPLETE) {
     console.info('[sync] reconnect trigger (already COMPLETE — queue nudge)')
     try { void triggerSync() } catch (err) { console.warn('connectivity sync nudge failed:', err) }
+    revalidateActiveFinds(CACHED_REVALIDATION_MIN_RETRY_MS)
     return
   }
   void _attemptCachedRevalidation(reason, options)
@@ -690,6 +694,24 @@ function initSettings() {
     })
   })
 
+  // Android only: "Save originals to phone" (gallery copy of saved Sporely
+  // Cam originals). Hidden elsewhere; the setting has no effect off-Android.
+  const saveOriginalsRow = document.getElementById('settings-save-originals-row')
+  const saveOriginalsHint = document.getElementById('settings-save-originals-hint')
+  const showSaveOriginals = isAndroidApp()
+  if (saveOriginalsRow) saveOriginalsRow.style.display = showSaveOriginals ? 'flex' : 'none'
+  if (saveOriginalsHint) saveOriginalsHint.style.display = showSaveOriginals ? '' : 'none'
+  document.getElementById('settings-save-originals-toggle')?.addEventListener('change', event => {
+    setSaveOriginalsToPhone(!!event.currentTarget.checked)
+    _syncSettingsUI()
+  })
+
+  // Best-effort prune of stranded Sporely Cam cache files (>48h). Deferred
+  // off the boot path and never awaited; failures only log.
+  if (isAndroidApp()) {
+    setTimeout(() => { void pruneStaleNativeCaptures() }, 4000)
+  }
+
   document.querySelectorAll('.settings-default-visibility-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       setDefaultVisibility(btn.dataset.defaultVisibility)
@@ -760,6 +782,9 @@ function _syncSettingsUI() {
     btn.classList.toggle('active', btn.dataset.cameraApp === (useSystemCamera ? 'native' : 'sporely'))
   })
   const acCameraLabel = document.querySelector('#ac-camera .action-card-label')
+
+  const saveOriginalsToggle = document.getElementById('settings-save-originals-toggle')
+  if (saveOriginalsToggle) saveOriginalsToggle.checked = getSaveOriginalsToPhone()
 
   const photoIdMode = getPhotoIdMode()
   document.querySelectorAll('.settings-photo-id-mode-btn').forEach(btn => {
@@ -1885,8 +1910,8 @@ let _deferredReprobeScheduled = false
 // restore) had NO `online`/`focus`/`visibility` wake-ups at all; recovery
 // depended entirely on the native plugin event (unreliable on device) and
 // the status-gated round-3 watchdog. Bound at module init instead, once.
-// All wake-ups converge on the same deduped + throttled entry point; a
-// wake-up in a non-cached state is a no-op (or a COMPLETE queue nudge).
+// All wake-ups converge on the same deduped + throttled entry point.
+// COMPLETE wake-ups also revalidate active stale/failed Finds.
 function _bindRevalidationWakeupListeners() {
   if (_cachedRevalidationListenersBound) return
   _cachedRevalidationListenersBound = true

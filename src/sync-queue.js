@@ -1,7 +1,7 @@
 import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
 import { isExplicitAuthRejection, isTransportSessionError } from './auth-classification.js'
-import { reserveObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, deleteObservationMedia, imageExtensionForMimeType, buildObservationImageStoragePath, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
+import { verifyWorkerObjectExists, getVariantPath, reserveObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, deleteObservationMedia, imageExtensionForMimeType, buildObservationImageStoragePath, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
 import { saveIdentificationRun } from './ai-identification.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
@@ -620,7 +620,12 @@ export function hasActiveSyncPass() {
 }
 const _cloudPlanCache = new Map()
 
-async function _fetchRemoteObservationState(observationId) {
+function _queuedImageReservation(rows, image, index) {
+  return rows.find(row => Number(row.sort_order) === index
+    && (!image.reservedImageId || row.id === image.reservedImageId)) || null
+}
+
+async function _fetchRemoteObservationState(observationId, queuedImages) {
   if (!observationId) {
     return {
       observationExists: false,
@@ -649,11 +654,20 @@ async function _fetchRemoteObservationState(observationId) {
 
   const observation = Array.isArray(observationRows) ? observationRows[0] || null : null
   const rows = Array.isArray(imageRows) ? imageRows : []
-  const completedIndexes = rows
-    .map(row => Number(row?.sort_order))
-    .filter(index => Number.isInteger(index) && index >= 0)
+  const completedIndexes = []
+  for (const [index, image] of queuedImages.entries()) {
+    const row = _queuedImageReservation(rows, image, index)
+    // Unprepared legacy entries have unknown variants: prepare/re-upload them.
+    // A prepared full-only entry, however, does not require a thumbnail.
+    if (!row?.storage_path || !isBlob(image.uploadBlob)) continue
+    if (!await verifyWorkerObjectExists(row.storage_path)) continue
+    if (image.variants?.thumb
+      && !await verifyWorkerObjectExists(getVariantPath(row.storage_path, 'thumb'))) continue
+    completedIndexes.push(index)
+  }
 
-  const firstRow = rows.find(row => Number(row?.sort_order) === 0 && row?.storage_path)
+  const firstRow = completedIndexes.includes(0)
+    ? _queuedImageReservation(rows, queuedImages[0], 0) : null
   if (observation && firstRow && (!observation.image_key || !observation.thumb_key)) {
     await syncObservationMediaKeys(observationId, firstRow.storage_path, { sortOrder: 0 })
   }
@@ -672,7 +686,7 @@ async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'loc
     syncImageCount: expectedImageCount,
   })
 
-  const remoteState = await _fetchRemoteObservationState(obsId)
+  const remoteState = await _fetchRemoteObservationState(obsId, queuedImages)
   const confirmed = remoteState.observationExists
     && remoteState.completedIndexes.length >= expectedImageCount
 
@@ -1043,13 +1057,13 @@ async function _runSyncQueue() {
       }
 
       // 2. Reconcile against remote state so a stale local queue can heal itself.
-      const completedImageIndexes = new Set(
-        Array.isArray(item.completedImageIndexes) ? item.completedImageIndexes : []
-      )
+      // Old clients persisted reservation-only indexes. Rebuild from verified
+      // objects instead of trusting those local completion hints.
+      const completedImageIndexes = new Set()
       await _setQueueSyncStatus(item.id, 'reconciling', {
         syncImageCount: queuedImages.length,
       })
-      const remoteState = await _fetchRemoteObservationState(obsId)
+      const remoteState = await _fetchRemoteObservationState(obsId, queuedImages)
       remoteState.completedIndexes.forEach(index => completedImageIndexes.add(index))
       if (completedImageIndexes.size >= queuedImages.length) {
         await _persistQueuedObservationIdentifications({
@@ -1105,10 +1119,12 @@ async function _runSyncQueue() {
           }
           await _persistPreparedQueuedImage(item.id, i, preparedImage)
         }
+        queuedImages[i] = preparedImage
 
         const blobType = preparedImage.uploadBlob?.type || preparedImage.uploadType || ''
         const ext = imageExtensionForMimeType(blobType)
-        const path = buildObservationImageStoragePath({
+        const remoteReservation = _queuedImageReservation(remoteState.imageRows, image, i)
+        const path = remoteReservation?.storage_path || buildObservationImageStoragePath({
           userId: authUserId,
           observationId: obsId,
           sortOrder: i,
@@ -1117,6 +1133,8 @@ async function _runSyncQueue() {
         })
 
         let reservedImageId = Number.isInteger(image.reservedImageId) && image.reservedImageId > 0 ? image.reservedImageId : null
+        // Also recover a reservation whose response/local ID write was lost.
+        reservedImageId = remoteReservation?.id || reservedImageId
         if (!reservedImageId) {
           const reservedRow = await reserveObservationImage({
             observation_id: obsId,

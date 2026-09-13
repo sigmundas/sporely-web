@@ -140,6 +140,7 @@ const messages = {
     'review.syncing': 'Adding to sync queue…',
     'review.synced': 'Queued 1 observation with {count} ✓',
     'review.syncFailed': 'Could not queue observation: {message}',
+    'review.originalNotSavedToPhone': 'Find saved, but the original photo could not be saved to your phone.',
     'review.uploadedComplete': 'Uploaded observation with {count} photo(s) ✓',
     'detail.backHome': 'Home',
     'detail.backFinds': 'Finds',
@@ -400,6 +401,8 @@ const messages = {
     'settings.camera': 'Camera',
     'settings.cameraApp': 'Camera App',
     'settings.cameraAppHint': 'With Sporely Cam, you can take multiple photos in one go.',
+    'settings.saveOriginalsToPhone': 'Save originals to phone',
+    'settings.saveOriginalsToPhoneHint': "Keep a copy of photos from saved finds in your phone's photo library. These can be backed up by services such as Google Photos.",
     'settings.photoIdModeBoth': 'Both',
     'settings.sporely': 'Sporely',
     'settings.native': 'Native',
@@ -616,6 +619,7 @@ const messages = {
     'review.syncing': 'Legger til i synkøen…',
     'review.synced': 'Satte 1 observasjon med {count} i kø ✓',
     'review.syncFailed': 'Kunne ikke legge observasjonen i kø: {message}',
+    'review.originalNotSavedToPhone': 'Funnet er lagret, men originalbildet kunne ikke lagres på telefonen.',
     'review.uploadedComplete': 'Observasjonen er lastet opp med {count} bilde(r) ✓',
     'detail.backHome': 'Hjem',
     'detail.backFinds': 'Funn',
@@ -876,6 +880,8 @@ const messages = {
     'settings.camera': 'Kamera',
     'settings.cameraApp': 'Kamera-app',
     'settings.cameraAppHint': 'Med Sporely Cam kan du ta flere bilder på én gang.',
+    'settings.saveOriginalsToPhone': 'Lagre originaler på telefonen',
+    'settings.saveOriginalsToPhoneHint': 'Behold en kopi av bildene fra lagrede funn i telefonens bildegalleri. Disse kan sikkerhetskopieres av tjenester som Google Foto.',
     'settings.photoIdModeBoth': 'Begge',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
@@ -1092,6 +1098,7 @@ const messages = {
     'review.syncing': 'Lägger till i synkkön…',
     'review.synced': 'Köade 1 observation med {count} ✓',
     'review.syncFailed': 'Kunde inte köa observationen: {message}',
+    'review.originalNotSavedToPhone': 'Fyndet sparades, men originalbilden kunde inte sparas på telefonen.',
     'review.uploadedComplete': 'Observationen är uppladdad med {count} bild(er) ✓',
     'detail.backHome': 'Hem',
     'detail.backFinds': 'Fynd',
@@ -1352,6 +1359,8 @@ const messages = {
     'settings.camera': 'Kamera',
     'settings.cameraApp': 'Kamera-app',
     'settings.cameraAppHint': 'Med Sporely Cam kan du ta flera bilder på en gång.',
+    'settings.saveOriginalsToPhone': 'Spara original på telefonen',
+    'settings.saveOriginalsToPhoneHint': 'Behåll en kopia av bilderna från sparade fynd i telefonens bildgalleri. Dessa kan säkerhetskopieras av tjänster som Google Foto.',
     'settings.photoIdModeBoth': 'Båda',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
@@ -1568,6 +1577,7 @@ const messages = {
     'review.syncing': 'Füge zur Sync-Warteschlange hinzu…',
     'review.synced': '1 Beobachtung mit {count} in die Warteschlange gestellt ✓',
     'review.syncFailed': 'Beobachtung konnte nicht in die Warteschlange gestellt werden: {message}',
+    'review.originalNotSavedToPhone': 'Fund gespeichert, aber das Originalfoto konnte nicht auf dem Handy gespeichert werden.',
     'review.uploadedComplete': 'Beobachtung mit {count} Bild(ern) hochgeladen ✓',
     'detail.backHome': 'Start',
     'detail.backFinds': 'Funde',
@@ -1828,6 +1838,8 @@ const messages = {
     'settings.camera': 'Kamera',
     'settings.cameraApp': 'Kamera-App',
     'settings.cameraAppHint': 'Mit Sporely Cam kannst du mehrere Fotos auf einmal aufnehmen.',
+    'settings.saveOriginalsToPhone': 'Originale auf dem Handy speichern',
+    'settings.saveOriginalsToPhoneHint': 'Behalte eine Kopie der Fotos gespeicherter Funde in der Fotogalerie deines Handys. Diese können von Diensten wie Google Fotos gesichert werden.',
     'settings.photoIdModeBoth': 'Beide',
     'settings.sporely': 'Sporely',
     'settings.native': 'System',
@@ -2241,6 +2253,8 @@ export function applyStaticTranslations() {
   setText('#settings-camera-label', 'settings.camera')
   setText('#settings-camera-app-label', 'settings.cameraApp')
   setText('#settings-camera-app-hint', 'settings.cameraAppHint')
+  setText('#settings-save-originals-label', 'settings.saveOriginalsToPhone')
+  setText('#settings-save-originals-hint', 'settings.saveOriginalsToPhoneHint')
   setText('.settings-camera-app-btn[data-camera-app="sporely"]', 'settings.sporely')
   setText('.settings-camera-app-btn[data-camera-app="native"]', 'settings.native')
   setText('#settings-default-visibility-label', 'settings.defaultVisibility')

@@ -4,6 +4,7 @@ const DEFAULT_VISIBILITY_KEY = 'sporely-default-visibility'
 const DEFAULT_ID_SERVICE_KEY = 'sporely-default-id-service'
 const PHOTO_ID_MODE_KEY = 'sporely-photo-id-mode'
 const USE_SYSTEM_CAMERA_KEY = 'sporely-use-system-camera'
+const SAVE_ORIGINALS_TO_PHONE_KEY = 'sporely-save-originals-to-phone'
 const LOCATION_PREFERENCE_KEY = 'sporely-location-preference'
 const LAST_SYNC_AT_KEY = 'sporely-last-sync-at'
 const ARTSORAKEL_MAX_EDGE_KEY = 'sporely-artsorakel-max-edge'
@@ -287,6 +288,24 @@ export function getUseSystemCamera() {
 export function setUseSystemCamera(enabled) {
   try {
     localStorage.setItem(USE_SYSTEM_CAMERA_KEY, enabled ? '1' : '0')
+  } catch (_) {}
+}
+
+// Android only: keep a user-owned copy of each saved Sporely Cam original in
+// the phone's photo library (MediaStore, Pictures/Sporely). Default OFF. This
+// is a gallery copy the user's own backup services may pick up — Sporely does
+// not provide the backup itself.
+export function getSaveOriginalsToPhone() {
+  try {
+    return localStorage.getItem(SAVE_ORIGINALS_TO_PHONE_KEY) === '1'
+  } catch (_) {
+    return false
+  }
+}
+
+export function setSaveOriginalsToPhone(enabled) {
+  try {
+    localStorage.setItem(SAVE_ORIGINALS_TO_PHONE_KEY, enabled ? '1' : '0')
   } catch (_) {}
 }
 

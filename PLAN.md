@@ -172,6 +172,15 @@ Definition of done:
 
 ## Near-term active tasks
 
+### Android Sporely Cam storage lifecycle
+
+- [ ] Device QA for `feature/native-camera-originals-lifecycle` (setting
+      "Save originals to phone", post-enqueue cache cleanup, 48 h orphan prune).
+      Checklist and design: `docs/native-camera-storage-lifecycle.md`.
+- [ ] Decide whether the untracked paths listed in that doc (import-group
+      camera add, find-detail add-photo) should also delete their native source
+      after their own durable step, or keep relying on the 48 h prune.
+
 ### Map
 
 - [ ] Add a legend dropdown to the map page.

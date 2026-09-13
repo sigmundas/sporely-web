@@ -5,6 +5,7 @@ import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
 import { searchTaxa, formatDisplayName, createManualTaxon } from '../artsorakel.js';
 import { enqueueObservation } from '../sync-queue.js';
+import { nativeCaptureSourcePathFromNativePhoto } from '../native-capture-storage.js';
 import { canPerformCloudMutation } from '../capabilities.js';
 import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
@@ -1720,6 +1721,9 @@ async function _handleNativePhotoResultAsLive(result) {
     aiCropSourceW: entry.meta?.aiCropSourceW ?? null,
     aiCropSourceH: entry.meta?.aiCropSourceH ?? null,
     aiCropIsCustom: entry.meta?.aiCropIsCustom === true,
+    // Sporely Cam only (null for the system camera): the private cache JPEG
+    // that review Save exports/deletes once the queue owns the bytes.
+    nativeSourcePath: nativeCaptureSourcePathFromNativePhoto(photos[index]),
     _nativePhotoIndex: index,
   }))
   state.batchCount = state.capturedPhotos.length
