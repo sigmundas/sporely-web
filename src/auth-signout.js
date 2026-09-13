@@ -17,6 +17,12 @@
 // the deferred SIGNED_OUT handler can classify the event. A direct
 // `supabase.auth.signOut()` call would be misclassified as internal session
 // loss and skip the privacy purge.
+//
+// Supabase defaults signOut() to the GLOBAL scope, which revokes every
+// device/browser session for the user. In-app "Sign out" is expected to
+// affect this client only, so local scope is the safe default. Callers may
+// still explicitly request another supported scope for a deliberately
+// account-wide security action.
 import { supabase } from './supabase.js'
 
 let _explicitSignOutRequested = false
@@ -26,7 +32,7 @@ export async function performExplicitSignOut(options) {
   // the app: main.js defers every onAuthStateChange callback by one
   // macrotask (setTimeout 0), and the deferred handler consumes the flag.
   _explicitSignOutRequested = true
-  return supabase.auth.signOut(options)
+  return supabase.auth.signOut(options || { scope: 'local' })
 }
 
 // One-shot consume by the deferred SIGNED_OUT handler. If an explicit
