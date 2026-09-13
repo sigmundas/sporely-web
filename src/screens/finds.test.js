@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   applyFindsMineScope,
@@ -25,6 +26,7 @@ import {
   restoreFindsAfterDetailReturn,
   shouldHideFindsStatusControl,
   loadFinds,
+  revalidateActiveFinds,
   _applyFilter,
   _awaitFindsBackgroundEnrichmentForTests,
   _findsInsertionAnchors,
@@ -48,6 +50,7 @@ import {
 import { loadDetailObservation } from './find_detail.js'
 import { resetObservationIdentificationsTableAvailabilityForTests } from '../ai-identification.js'
 import { state } from '../state.js'
+import { AUTH_STATE, getAuthState, setAuthState } from '../auth-state.js'
 import { supabase } from '../supabase.js'
 
 function makeClassList(initial = []) {
@@ -3862,6 +3865,7 @@ test('the empty state is never rendered before the initial authoritative load re
   const { list } = harness
 
   try {
+    state.user = { id: 'fresh-empty-account' }
     const load = loadFinds()
     await settleMicrotasks()
     assert.ok(list.querySelector('.finds-loading-state'), 'the loading shell is up while page one is in flight')
@@ -3964,7 +3968,7 @@ test('the inline "loading more" line clears on a next-page error and the list st
     assert.equal(sentinel.classList.contains('finds-bottom-sentinel--loading'), false, 'cleared on error')
     assert.equal(harness.cardIds().length, 20, 'the existing list is untouched')
     assert.equal(list.innerHtmlWrites, writesAfterInitialRender)
-    assert.equal(_getFindsPagingStateForTests('mine').hasMore, false)
+    assert.equal(_getFindsPagingStateForTests('mine').hasMore, true, 'failure does not establish end of data')
     assert.equal(globalThis.document.getElementById('toast').textContent, 'Could not load finds', 'the existing error UX owns the failure')
   } finally {
     harness.restore()
@@ -4135,4 +4139,268 @@ test('the inline "loading more" line follows the user off and back onto the boun
   } finally {
     harness.restore()
   }
+})
+
+for (const scope of ['mine', 'feed', 'user']) {
+  test(`${scope}: failed replacement retains committed rows and retry commits an authoritative empty page`, async () => {
+    const rows = stage3Page(9000, 2, '2026-09-03')
+    const failedReplacement = heldResponse()
+    const harness = installAppendHarness({ observationPages: [
+      { data: rows, error: null },
+      failedReplacement.promise,
+      { data: [], error: null },
+    ], imageRows: {} })
+    if (scope === 'feed') { state.findsScopePrimary = 'feed'; state.findsFeedScope = 'all'; rows.forEach(row => { row.user_id = 'other' }) }
+    if (scope === 'user') state.findsTargetUserId = 'user-a'
+    try {
+      await loadFinds()
+      assert.equal(_getFindsCacheForTests(scope).length, 2)
+      harness.scroller.scrollTop = 100
+      const refresh = loadFinds()
+      await settleMicrotasks()
+      assert.equal(_getFindsCacheForTests(scope).length, 2, 'committed cache survives the in-flight replacement')
+      assert.equal(harness.cardIds().length, 2, 'visible cards remain during refresh')
+      assert.equal(harness.scroller.scrollTop, 100)
+      failedReplacement.release({ data: null, error: { message: 'Temporary network failure' } })
+      await refresh
+      assert.equal(_getFindsCacheForTests(scope).length, 2, 'failed replacement must preserve committed rows')
+      assert.equal(harness.cardIds().length, 2)
+      assert.equal(harness.list.querySelector('.finds-empty-state'), null)
+      assert.equal(_getFindsPagingStateForTests(scope).initialized, false)
+      assert.equal(_getFindsPagingStateForTests(scope).hasMore, true)
+      await loadFinds()
+      assert.equal(_getFindsCacheForTests(scope).length, 0)
+      assert.equal(_getFindsPagingStateForTests(scope).initialized, true)
+      assert.ok(harness.list.querySelector('.finds-empty-state'))
+    } finally { harness.restore() }
+  })
+}
+
+for (const findsView of ['cards', 'two', 'three', 'species']) {
+  test(`initial failure shows retry, never authoritative empty (${findsView})`, async () => {
+    const rows = stage3Page(9100, 2, '2026-09-03')
+    const harness = installAppendHarness({ findsView, findsSort: findsView === 'species' ? 'species' : 'date', observationPages: [
+      { data: null, error: { message: 'Failed to fetch' } }, { data: rows, error: null },
+    ], imageRows: {} })
+    state.user = { id: `fresh-${findsView}` }
+    rows.forEach(row => { row.user_id = state.user.id })
+    try {
+      await loadFinds()
+      const paging = _getFindsPagingStateForTests('mine')
+      assert.equal(paging.initialized, false)
+      assert.equal(paging.hasMore, true)
+      assert.equal(paging.nextOffset, 0)
+      assert.ok(harness.list.querySelector('.finds-error-state'))
+      assert.match(harness.list.innerHTML, /id="finds-retry-btn"/)
+      assert.equal(harness.list.querySelector('.finds-empty-state'), null)
+      await loadFinds()
+      assert.deepEqual(_getFindsCacheForTests('mine').map(o => o.id), rows.map(o => o.id))
+      assert.equal(_getFindsPagingStateForTests('mine').error, null)
+      assert.equal(_getFindsPagingStateForTests('mine').initialized, true)
+      assert.equal(harness.list.querySelector('.finds-error-state'), null)
+    } finally { harness.restore() }
+  })
+}
+
+test('failed search replacement preserves known data, shows retry for no local match, and retries at offset zero', async () => {
+  const rows = stage3Page(9200, 2, '2026-09-03')
+  const harness = installAppendHarness({ observationPages: [
+    { data: rows, error: null }, { data: null, error: { message: 'Transient auth error' } },
+    { data: [{ ...rows[0], common_name: 'zzz' }], error: null },
+  ], imageRows: {} })
+  try {
+    await loadFinds()
+    state.searchQuery = 'zzz'
+    _invalidateFindsSearchPagingOnInput()
+    await _applyFilter()
+    await _reloadFindsForSearch()
+    assert.deepEqual(_getFindsCacheForTests('mine').map(o => o.id), rows.map(o => o.id))
+    assert.ok(harness.list.querySelector('.finds-error-state'))
+    assert.equal(harness.list.querySelector('.finds-empty-state'), null)
+    await _reloadFindsForSearch()
+    assert.equal(_getFindsPagingStateForTests('mine').initialized, true)
+    assert.deepEqual(harness.cardIds(), [rows[0].id])
+    assert.deepEqual(harness.calls.filter(c => c.op === 'range').map(c => c.from), [0, 0, 0])
+  } finally { harness.restore() }
+})
+
+test('rejected transport promise preserves rows and page-2 failure retries the same offset', async () => {
+  const rows = stage3Page(9300, 20, '2026-09-03')
+  const held = heldResponse()
+  const harness = installAppendHarness({ observationPages: [
+    { data: rows, error: null }, held.promise.then(() => { throw new Error('transport rejected') }),
+    { data: stage3Page(9400, 2, '2026-09-02'), error: null },
+  ], imageRows: {} })
+  try {
+    await loadFinds()
+    harness.scroller.scrollTop = 900
+    const failedPage = _maybeLoadMoreFinds()
+    held.release()
+    await failedPage
+    assert.equal(harness.cardIds().length, 20)
+    assert.equal(_getFindsPagingStateForTests('mine').nextOffset, 20)
+    assert.equal(_getFindsPagingStateForTests('mine').hasMore, true)
+    assert.equal(_getFindsPagingStateForTests('mine').initialized, true)
+    await _maybeLoadMoreFinds()
+    assert.equal(harness.cardIds().length, 22)
+    assert.equal(_getFindsPagingStateForTests('mine').error, null)
+    assert.deepEqual(harness.calls.filter(c => c.op === 'range').map(c => c.from), [0, 20, 20])
+  } finally { harness.restore() }
+})
+
+test('COMPLETE wake-ups coalesce, recover failed Finds, and skip fresh or inactive screens', async () => {
+  const previousAuth = getAuthState()
+  const previousWindow = globalThis.window
+  const timers = new Map()
+  let nextTimer = 1
+  globalThis.window = {
+    setTimeout(fn, delay) { const id = nextTimer++; timers.set(id, { fn, delay }); return id },
+    clearTimeout(id) { timers.delete(id) },
+  }
+  const rows = stage3Page(9500, 2, '2026-09-03')
+  const held = heldResponse()
+  const harness = installAppendHarness({ observationPages: [
+    { data: null, error: { message: 'Temporary failure' } }, held.promise,
+  ], imageRows: {} })
+  state.user = { id: 'wake-up-account' }
+  rows.forEach(row => { row.user_id = state.user.id })
+  setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: state.user.id })
+  try {
+    await loadFinds()
+    assert.ok(harness.list.querySelector('.finds-error-state'))
+    // Execute the actual main.js entry point with its collaborators injected,
+    // avoiding booting the application merely to test event routing.
+    const source = readFileSync(new URL('../main.js', import.meta.url), 'utf8')
+    const entry = source.match(/function requestConnectivityRevalidation\(reason, options = \{\}\) \{[\s\S]*?\n\}/)[0]
+    let syncNudges = 0
+    let authAttempts = 0
+    const requestConnectivity = new Function('getAuthState', 'AUTH_STATE', 'triggerSync',
+      'revalidateActiveFinds', '_attemptCachedRevalidation', 'CACHED_REVALIDATION_MIN_RETRY_MS',
+      `${entry}; return requestConnectivityRevalidation`)(getAuthState, AUTH_STATE,
+      () => { syncNudges++ }, revalidateActiveFinds, () => { authAttempts++ }, 12_000)
+    for (const reason of ['native-resume-status', 'native-network-change', 'web-online', 'focus', 'visibility']) {
+      for (let i = 0; i < 4; i++) requestConnectivity(reason)
+    }
+    assert.equal(syncNudges, 20, 'existing queue nudges remain unchanged')
+    assert.equal(authAttempts, 0, 'COMPLETE does not rerun cached auth recovery')
+    assert.equal(timers.size, 1)
+    const [id, timer] = [...timers][0]
+    timers.delete(id)
+    const recovery = timer.fn()
+    await settleMicrotasks()
+    assert.equal(revalidateActiveFinds(), false, 'in-flight request is shared')
+    held.release({ data: rows, error: null })
+    await recovery
+    assert.deepEqual(harness.cardIds(), rows.map(o => o.id))
+    assert.equal(timers.size, 0, 'successful in-flight wake-up needs no follow-up')
+    assert.equal(revalidateActiveFinds(), false, 'fresh result')
+    _getFindsPagingStateForTests('mine').completedAt = Date.now() - 61_000
+    state.currentScreen = 'home'
+    assert.equal(revalidateActiveFinds(), false, 'inactive screen')
+    state.currentScreen = 'finds'
+    assert.equal(revalidateActiveFinds(), true, 'stale active screen')
+    assert.equal(timers.size, 1)
+    const [lastId, lastTimer] = [...timers][0]
+    timers.delete(lastId)
+    state.currentScreen = 'home'
+    const callsBeforeLeaving = harness.calls.filter(c => c.op === 'range').length
+    await lastTimer.fn()
+    assert.equal(harness.calls.filter(c => c.op === 'range').length, callsBeforeLeaving,
+      'trailing wake-up rechecks the active screen before fetching')
+  } finally {
+    harness.restore()
+    globalThis.window = previousWindow
+    setAuthState(previousAuth)
+  }
+})
+
+for (const authMode of [AUTH_STATE.AUTHENTICATED_CACHED, AUTH_STATE.AUTHENTICATED_REAUTH_REQUIRED]) {
+  test(`${authMode}: Finds uses the offline shell without remote queries; COMPLETE loads normally`, async () => {
+    const previousAuth = getAuthState()
+    const harness = installAppendHarness({ observationPages: [
+      { data: stage3Page(9600, 2, '2026-09-03'), error: null },
+    ], imageRows: {} })
+    try {
+      setAuthState({ state: authMode, userId: state.user.id })
+      await loadFinds()
+      assert.equal(revalidateActiveFinds(), false)
+      assert.equal(harness.calls.filter(c => c.op === 'range').length, 0)
+      assert.equal(harness.list.querySelector('.finds-empty-state'), null)
+      assert.match(harness.list.innerHTML, /finds-offline/)
+      setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: state.user.id })
+      await loadFinds()
+      assert.equal(harness.cardIds().length, 2)
+    } finally { harness.restore(); setAuthState(previousAuth) }
+  })
+}
+
+test('wake-up during a failed request schedules one bounded retry and repeated fast failures do not storm', async () => {
+  const previousAuth = getAuthState()
+  const previousWindow = globalThis.window
+  const timers = new Map()
+  let timerId = 0
+  globalThis.window = {
+    setTimeout(fn, delay) { timers.set(++timerId, { fn, delay }); return timerId },
+    clearTimeout(id) { timers.delete(id) },
+  }
+  const held = heldResponse()
+  const harness = installAppendHarness({ observationPages: [held.promise,
+    { data: null, error: { message: 'still unavailable' } },
+    { data: [], error: null },
+  ], imageRows: {} })
+  setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: state.user.id })
+  try {
+    const load = loadFinds()
+    await settleMicrotasks()
+    for (let i = 0; i < 10; i++) revalidateActiveFinds()
+    assert.equal(timers.size, 0)
+    held.release({ data: null, error: { message: 'failed on resume' } })
+    await load
+    assert.equal(timers.size, 1, 'wake-up is not lost when the active load fails')
+    let [id, timer] = [...timers][0]
+    timers.delete(id)
+    await timer.fn()
+    for (let i = 0; i < 20; i++) revalidateActiveFinds()
+    assert.equal(timers.size, 1)
+    ;[id, timer] = [...timers][0]
+    assert.ok(timer.delay >= 11_000, 'fast failures use the existing 12-second retry policy')
+    timers.delete(id)
+    await timer.fn()
+    assert.equal(revalidateActiveFinds(), false)
+    assert.equal(timers.size, 0)
+  } finally {
+    harness.restore()
+    globalThis.window = previousWindow
+    setAuthState(previousAuth)
+  }
+})
+
+test('failed initial remote load still integrates queued observations', async () => {
+  const queued = { id: 'failure-queue', userId: 'queued-failure-account',
+    obsPayload: stage3Page(9700, 1, '2026-09-03')[0], imageEntries: [] }
+  const harness = installAppendHarness({ observationPages: [
+    { data: null, error: { message: 'remote unavailable' } },
+  ], queueItems: [queued], imageRows: {} })
+  state.user = { id: 'queued-failure-account' }
+  try {
+    await loadFinds()
+    assert.equal(_getFindsPagingStateForTests('mine').initialized, false)
+    assert.ok(_getFindsCacheForTests('mine').some(row => row.id === `queued-${queued.id}`))
+    assert.equal(harness.list.querySelector('.finds-empty-state'), null)
+  } finally { harness.restore() }
+})
+
+test('retained cache cannot cross account boundaries after a failed load', async () => {
+  const harness = installAppendHarness({ observationPages: [
+    { data: stage3Page(9800, 2, '2026-09-03'), error: null },
+    { data: null, error: { message: 'unavailable' } },
+  ], imageRows: {} })
+  try {
+    await loadFinds()
+    state.user = { id: 'different-account' }
+    await loadFinds()
+    assert.deepEqual(_getFindsCacheForTests('mine'), [])
+    assert.ok(harness.list.querySelector('.finds-error-state'))
+    assert.equal(harness.cardIds().length, 0)
+  } finally { harness.restore() }
 })

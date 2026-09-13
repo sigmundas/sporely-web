@@ -40,7 +40,7 @@ import {
 } from './screens/auth.js'
 import { initHome, refreshHome, refreshHomeSafe, renderHomeFromCache, resetHomeSectionTracking } from './screens/home.js'
 import { clearAllHomeCaches, clearHomeCache } from './home-cache.js'
-import { initFinds, loadFinds, requestFindsRefresh, CONNECTIVITY_REVALIDATION_REQUEST_EVENT } from './screens/finds.js'
+import { initFinds, loadFinds, requestFindsRefresh, revalidateActiveFinds, CONNECTIVITY_REVALIDATION_REQUEST_EVENT } from './screens/finds.js'
 import { initCapture } from './screens/capture.js'
 import { buildReviewGrid, initReview, restoreReviewDraft } from './screens/review.js'
 import { initFindDetail } from './screens/find_detail.js'
@@ -288,8 +288,8 @@ _bindReconnectTriggerToAuthState()
 //     holds the single `_cachedRevalidationInFlight` guard (one probe +
 //     one session refresh per burst) and routes same-user recovery through
 //     `resolveAuthenticatedSessionOnce` (per-user in-flight map).
-//   * AUTHENTICATED_COMPLETE → nothing to revalidate; the signal is only a
-//     nudge for the sync queue. `triggerSync()` self-dedupes an active pass
+//   * AUTHENTICATED_COMPLETE → revalidate active stale/failed Finds and
+//     nudge the sync queue. `triggerSync()` self-dedupes an active pass
 //     and re-checks `canPerformCloudMutation()` — device connectivity can
 //     never bypass the capability gate.
 //   * every other state (RESOLVING / UNAUTHENTICATED / INCOMPLETE) → no-op.
@@ -306,6 +306,7 @@ function requestConnectivityRevalidation(reason, options = {}) {
   if (current.state === AUTH_STATE.AUTHENTICATED_COMPLETE) {
     console.info('[sync] reconnect trigger (already COMPLETE — queue nudge)')
     try { void triggerSync() } catch (err) { console.warn('connectivity sync nudge failed:', err) }
+    revalidateActiveFinds(CACHED_REVALIDATION_MIN_RETRY_MS)
     return
   }
   void _attemptCachedRevalidation(reason, options)
@@ -1909,8 +1910,8 @@ let _deferredReprobeScheduled = false
 // restore) had NO `online`/`focus`/`visibility` wake-ups at all; recovery
 // depended entirely on the native plugin event (unreliable on device) and
 // the status-gated round-3 watchdog. Bound at module init instead, once.
-// All wake-ups converge on the same deduped + throttled entry point; a
-// wake-up in a non-cached state is a no-op (or a COMPLETE queue nudge).
+// All wake-ups converge on the same deduped + throttled entry point.
+// COMPLETE wake-ups also revalidate active stale/failed Finds.
 function _bindRevalidationWakeupListeners() {
   if (_cachedRevalidationListenersBound) return
   _cachedRevalidationListenersBound = true

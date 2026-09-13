@@ -45,7 +45,11 @@ function _isOfflineFindsMode() {
 }
 
 
-const _cache = {}   // scope → array of observations
+const _cache = {}   // scope → last successfully committed observations
+const _cacheIdentity = {}
+const FINDS_REVALIDATE_STALE_MS = 60_000
+let _lastFindsWakeupAt = 0
+let _findsWakeupPending = false
 let _profileMap = {}
 // User IDs already asked for in this profile-cache generation, whether or not
 // a public profile row came back. Prevents re-requesting a user with no
@@ -159,7 +163,10 @@ function _createPagingState(searchKey = null) {
     nextOffset: 0,
     hasMore: true,
     loadingMore: false,
+    // Only a successful authoritative first page initializes this generation.
     initialized: false,
+    error: null,
+    completedAt: 0,
     // The normalized search query this paging state's offset/cache are valid
     // for (plan §1.3). A fresh paging state is always tagged with the query
     // it was reset for, so a page fetched for one query can never be treated
@@ -280,7 +287,15 @@ export function _mergeFindsItemsWithDelta(scope, existingItems, incomingItems) {
   return { merged, added, appendedAtEnd }
 }
 
+function _findsCacheIdentity(scope) {
+  // Search can narrow the committed rows locally; account/target/source cannot.
+  return JSON.stringify([state.user?.id, scope === 'user' ? state.findsTargetUserId : null,
+    scope === 'user' ? null : _findsSecondaryScope(scope),
+    scope === 'mine' ? state.findsStatusFilter : null])
+}
+
 function _setFindsCache(scope, items) {
+  _cacheIdentity[_pagingScopeKey(scope)] = _findsCacheIdentity(scope)
   _cache[_pagingScopeKey(scope)] = Array.isArray(items) ? items : []
 }
 
@@ -1345,6 +1360,7 @@ export function initFinds() {
   // The reauth note (and its button) is re-created by every list re-render,
   // so bind the recovery action by delegation on the stable list container.
   document.getElementById('finds-list')?.addEventListener('click', e => {
+    if (e.target?.closest?.('#finds-retry-btn')) requestFindsRefresh(0)
     if (e.target?.closest?.('#finds-reauth-btn')) {
       beginReauthentication(state.user?.email || '')
     }
@@ -1653,14 +1669,57 @@ export function restoreFindsAfterDetailReturn() {
   return Promise.resolve(false)
 }
 
-export function requestFindsRefresh(delayMs = 120) {
+// Wake-ups are event-driven, never polling. Fresh successful results and any
+// scheduled/in-flight replacement coalesce the native/browser event burst.
+export function revalidateActiveFinds(minRetryMs = 12_000) {
+  if (getAuthState()?.state !== AUTH_STATE.AUTHENTICATED_COMPLETE
+    || state.currentScreen !== 'finds' || !state.user
+    || _queuedRefreshTimer || _findsSearchDebounceTimer || _isRefreshing) return false
+  if (_findsInitialRenderLoadSeq || _findsLoadMoreInFlight) {
+    _findsWakeupPending = true
+    return false
+  }
+  const paging = _getPagingState(_currentScope())
+  if (paging.loadingMore) return false
+  if (!paging.error && paging.initialized
+    && Date.now() - paging.completedAt < FINDS_REVALIDATE_STALE_MS) return false
+  // A trailing, coalesced retry also covers a restore signal arriving just
+  // after a fast failure. Reuse the refresh timer rather than dropping it.
+  const now = Date.now()
+  const delay = Math.max(120, _lastFindsWakeupAt + minRetryMs - now)
+  requestFindsRefresh(delay, { revalidate: true })
+  return true
+}
+
+function _flushFindsWakeup() {
+  if (!_findsWakeupPending) return
+  _findsWakeupPending = false
+  revalidateActiveFinds()
+}
+
+export function requestFindsRefresh(delayMs = 120, { revalidate = false } = {}) {
   const timerHost = globalThis.window || globalThis
   if (_queuedRefreshTimer) {
     timerHost.clearTimeout(_queuedRefreshTimer)
   }
   _queuedRefreshTimer = timerHost.setTimeout(() => {
     _queuedRefreshTimer = null
-    void loadFinds()
+    if (revalidate) {
+      // The screen/capability can change during a trailing retry, or another
+      // refresh can already have recovered it. Recheck before remote work.
+      if (getAuthState()?.state !== AUTH_STATE.AUTHENTICATED_COMPLETE
+        || state.currentScreen !== 'finds' || !state.user) return
+      if (_findsInitialRenderLoadSeq || _findsLoadMoreInFlight) {
+        _findsWakeupPending = true
+        return
+      }
+      if (_findsSearchDebounceTimer || _isRefreshing) return
+      const paging = _getPagingState(_currentScope())
+      if (!paging.error && paging.initialized
+        && Date.now() - paging.completedAt < FINDS_REVALIDATE_STALE_MS) return
+      _lastFindsWakeupAt = Date.now()
+    }
+    return loadFinds()
   }, Math.max(0, Number(delayMs) || 0))
 }
 
@@ -1696,11 +1755,10 @@ export async function loadFinds() {
   _resetPagingState(currentScope, _normalizeFindsSearchQuery(state.searchQuery))
   _closeFindsDropdowns()
 
-  _setFindsCache(currentScope, [])
-  // A full (re)load is an authoritative fresh start for author data too, as
-  // it always was: profile hydration is incremental from here on (plan §3.3),
-  // so this is the one place the map is allowed to be rebuilt.
-  _resetFindsProfileCache()
+  if (_cacheIdentity[currentScope] !== _findsCacheIdentity(currentScope)) {
+    _setFindsCache(currentScope, [])
+  }
+  const hasCommittedRows = (_cache[currentScope] || []).length > 0
 
   try {
     // Field-offline: never start a remote loader that can't complete, and
@@ -1709,11 +1767,11 @@ export async function loadFinds() {
       return await _renderFindsOfflineShell(list, { loadSeq, primaryScope, currentScope })
     }
 
-    if (list) {
+    if (list && !hasCommittedRows) {
       list.innerHTML = `<div class="finds-loading-state">${_esc(t('common.loading'))}</div>`
     }
     const screen = document.getElementById('screen-finds')
-    if (screen && _pendingScrollRestore === null) {
+    if (screen && !hasCommittedRows && _pendingScrollRestore === null) {
       screen.scrollTop = 0
     }
 
@@ -1729,6 +1787,10 @@ export async function loadFinds() {
       await _loadFeedSelectionPage({ loadSeq, reset: true })
     }
 
+    if (loadSeq !== _loadFindsSeq) return
+    if (_getPagingState(currentScope).initialized && !_getPagingState(currentScope).error) {
+      _resetFindsProfileCache()
+    }
     await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
     if (loadSeq !== _loadFindsSeq) return
     await _applyFilter()
@@ -1737,6 +1799,7 @@ export async function loadFinds() {
   } finally {
     if (_findsInitialRenderLoadSeq === loadSeq) {
       _findsInitialRenderLoadSeq = 0
+      _flushFindsWakeup()
     }
     if (shouldCheckForMore && loadSeq === _loadFindsSeq) {
       void _maybeLoadMoreFinds()
@@ -1813,8 +1876,8 @@ export function _handleFindsSearchInput(value) {
 
 // A lighter-weight sibling of loadFinds() used only for a search-query
 // change: it resets paging the same way (so an old query's page can never be
-// appended once _loadFindsSeq has moved on) but skips the cache clear + full
-// "Loading…" shell, so already-rendered cards stay visible — narrowed
+// appended once _loadFindsSeq has moved on) but skips the loading shell and
+// control synchronization, so already-rendered cards stay visible — narrowed
 // locally by _applyFilter() on 'input' — until this authoritative
 // server-search result replaces them (plan §1.4).
 // Exported as a test seam (see finds.test.js): drives the debounced
@@ -1844,8 +1907,8 @@ export async function _reloadFindsForSearch() {
   // that (third review-pass correction; plan §1.4).
   if (paging.searchKey !== normalized) {
     _findsRenderGuard.invalidate()
-    _resetPagingState(currentScope, normalized)
   }
+  _resetPagingState(currentScope, normalized)
 
   try {
     if (currentScope === 'user') {
@@ -1853,7 +1916,7 @@ export async function _reloadFindsForSearch() {
     } else if (primaryScope === 'mine') {
       await _loadMinePage({ loadSeq, reset: true })
     } else {
-      await _loadFeedSelectionPage({ loadSeq, reset: true, clearCache: false })
+      await _loadFeedSelectionPage({ loadSeq, reset: true })
     }
 
     await _loadProfilesForScope(_cache[currentScope] || [], loadSeq)
@@ -1864,6 +1927,7 @@ export async function _reloadFindsForSearch() {
   } finally {
     if (_findsInitialRenderLoadSeq === loadSeq) {
       _findsInitialRenderLoadSeq = 0
+      _flushFindsWakeup()
     }
     if (shouldCheckForMore && loadSeq === _loadFindsSeq) {
       void _maybeLoadMoreFinds()
@@ -2065,7 +2129,7 @@ export async function _runPagedFindsQuery(makeQuery, columns, legacyColumns, off
     ).range(from, to),
     columns,
     legacyColumns,
-  )
+  ).catch(error => ({ data: null, error }))
 }
 
 export function applyFindsMineScope(query, scope) {
@@ -2098,7 +2162,7 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
   paging.loadingMore = true
 
   const currentItems = reset ? [] : (_cache['mine'] || [])
-  const queuedPromise = reset ? getQueuedObservations(state.user.id) : Promise.resolve([])
+  const queuedPromise = reset ? getQueuedObservations(state.user.id).catch(() => []) : Promise.resolve([])
   const pagePromise = _runPagedFindsQuery(
     columns => {
       const scopedQuery = applyFindsMineScope(
@@ -2113,7 +2177,7 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
     },
     MINE_SELECT,
     MINE_SELECT_LEGACY,
-    paging.nextOffset,
+    reset ? 0 : paging.nextOffset,
   )
 
   try {
@@ -2124,10 +2188,9 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
     const error = pageRes?.error || null
     if (error) {
       showToast(t('finds.couldNotLoad'))
-      if (reset) _setFindsCache('mine', [])
-      paging.hasMore = false
-      paging.initialized = true
-      return _findsPageResult(false)
+      if (reset && queued.length) _setFindsCache('mine', _mergeFindsItems('mine', _cache.mine || [], queued))
+      paging.error = error
+      return _findsPageResult(false, [], paging.hasMore)
     }
 
     const { merged, added, appendedAtEnd } = _mergeFindsItemsWithDelta(
@@ -2142,9 +2205,11 @@ async function _loadMinePage({ loadSeq, reset = false } = {}) {
     // must never overwrite a newer result.
     if (loadSeq !== _loadFindsSeq) return _findsPageResult(false)
     _setFindsCache('mine', merged)
-    paging.nextOffset += data.length
+    paging.nextOffset = (reset ? 0 : paging.nextOffset) + data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
     paging.initialized = true
+    paging.error = null
+    paging.completedAt = Date.now()
     // Plan §3.3: red-list badges never block card insertion; they are patched
     // in once they arrive.
     _scheduleFindsRedlistEnrichment(added, loadSeq)
@@ -2209,7 +2274,7 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
     _feedSourceQuery(normalizedSource),
     _feedSourceSelect(normalizedSource),
     _feedSourceLegacySelect(normalizedSource),
-    paging.nextOffset,
+    reset ? 0 : paging.nextOffset,
   )
 
   try {
@@ -2225,11 +2290,8 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
       } else {
         console.warn(`Failed to fetch ${normalizedSource} feed:`, message || error)
       }
-      if (updateCache && reset) _setFindsCache(cacheKey, [])
-      paging.hasMore = false
-      paging.initialized = true
-      paging.lastData = []
-      return { data: [], error, hasMore: false, loaded: false, addedItems: [], appendedAtEnd: false }
+      paging.error = error
+      return { data: [], error, hasMore: paging.hasMore, loaded: false, addedItems: [], appendedAtEnd: false }
     }
 
     let addedItems = []
@@ -2246,9 +2308,11 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
       _setFindsCache(cacheKey, merged)
     }
     paging.lastData = data
-    paging.nextOffset += rawData.length
+    paging.nextOffset = (reset ? 0 : paging.nextOffset) + rawData.length
     paging.hasMore = rawData.length === FINDS_PAGE_SIZE
     paging.initialized = true
+    paging.error = null
+    paging.completedAt = Date.now()
     if (updateCache) _scheduleFindsRedlistEnrichment(addedItems, loadSeq)
     return { data, error: null, hasMore: paging.hasMore, loaded: true, addedItems, appendedAtEnd }
   } finally {
@@ -2256,7 +2320,7 @@ async function _loadFeedSourcePage(source, { loadSeq, reset = false, pagingState
   }
 }
 
-async function _loadFeedSelectionPage({ loadSeq, reset = false, clearCache = true } = {}) {
+async function _loadFeedSelectionPage({ loadSeq, reset = false } = {}) {
   const paging = _getPagingState('feed')
   const scope = _findsSecondaryScope('feed')
   if (paging.loadingMore) return _findsPageResult(false, [], paging.hasMore)
@@ -2269,11 +2333,6 @@ async function _loadFeedSelectionPage({ loadSeq, reset = false, clearCache = tru
       paging.nextOffset = 0
       paging.hasMore = true
       paging.initialized = false
-      // A debounced search reload passes clearCache:false so previously
-      // loaded cards stay visible (narrowed locally) until the authoritative
-      // server-search page below replaces `_cache['feed']` outright — see
-      // _reloadFindsForSearch (plan §1.4).
-      if (clearCache) _setFindsCache('feed', [])
     }
 
     const source = scope === 'all' ? 'public' : scope
@@ -2286,10 +2345,12 @@ async function _loadFeedSelectionPage({ loadSeq, reset = false, clearCache = tru
       updateCache: true,
     })
     if (loaded?.error) {
-      paging.hasMore = false
-      paging.initialized = true
+      paging.error = loaded.error
       return _findsPageResult(false)
     }
+    if (loadSeq !== _loadFindsSeq || !loaded.loaded) return _findsPageResult(false)
+    paging.error = null
+    paging.completedAt = sourcePaging.completedAt
     paging.mode = scope
     paging.nextOffset = sourcePaging.nextOffset
     paging.hasMore = sourcePaging.hasMore
@@ -2323,7 +2384,7 @@ async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
         .eq('user_id', userId)),
     MINE_SELECT,
     MINE_SELECT_LEGACY,
-    paging.nextOffset,
+    reset ? 0 : paging.nextOffset,
   )
 
   try {
@@ -2337,10 +2398,8 @@ async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
     const error = pageRes?.error || null
     if (error) {
       showToast(t('finds.couldNotLoad'))
-      if (reset) _setFindsCache('user', [])
-      paging.hasMore = false
-      paging.initialized = true
-      return _findsPageResult(false)
+      paging.error = error
+      return _findsPageResult(false, [], paging.hasMore)
     }
 
     const { merged, added, appendedAtEnd } = _mergeFindsItemsWithDelta(
@@ -2353,9 +2412,11 @@ async function _loadUserPage(userId, { loadSeq, reset = false } = {}) {
     // overwrite a newer completed search once the await above resolves.
     if (loadSeq !== _loadFindsSeq) return _findsPageResult(false)
     _setFindsCache('user', merged)
-    paging.nextOffset += data.length
+    paging.nextOffset = (reset ? 0 : paging.nextOffset) + data.length
     paging.hasMore = data.length === FINDS_PAGE_SIZE
     paging.initialized = true
+    paging.error = null
+    paging.completedAt = Date.now()
     _scheduleFindsRedlistEnrichment(added, loadSeq)
     return _findsPageResult(true, added, paging.hasMore, appendedAtEnd)
   } finally {
@@ -2431,6 +2492,7 @@ export async function _maybeLoadMoreFinds({ fromObserver = false, observerSentin
     shouldCheckForMore = await _loadAndAppendNextFindsPage(loadSeq)
   } finally {
     _findsLoadMoreInFlight = false
+    _flushFindsWakeup()
     // Clears the indicator on error, on `hasMore === false` and on a page
     // that appended nothing; the append path itself already re-rendered the
     // slot, so this is a no-op there.
@@ -2618,6 +2680,14 @@ function _afterFindsRenderCommit(result) {
 // instead of the empty text. This is a state distinction, not a timer.
 function _findsInitialLoadPending(currentScope) {
   return !_getPagingState(currentScope).initialized
+}
+
+function _findsPendingStateHtml(scope) {
+  if (_getPagingState(scope).error) {
+    return `<div class="finds-error-state" role="status">${_esc(t('finds.couldNotLoad'))}
+      <button id="finds-retry-btn" type="button" class="btn-primary">${_esc(t('capture.tryAgain'))}</button></div>`
+  }
+  return _findsLoadingShellHtml()
 }
 
 function _findsLoadingShellHtml() {
@@ -3618,7 +3688,7 @@ async function _renderBySpecies(list, data, options = {}) {
     }
     if (_findsInitialLoadPending(currentScope)
       || (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user')) {
-      list.innerHTML = _findsLoadingShellHtml()
+      list.innerHTML = _findsPendingStateHtml(currentScope)
       return true
     }
     list.innerHTML = _findsEmptyStateHtml(_emptyFindsText(q))
@@ -3685,7 +3755,7 @@ async function _renderTiles(list, data, options = {}) {
   if (!data.length) {
     if (!_isCurrentFindsRender(list, renderContext)) return false
     if (_findsInitialLoadPending(currentScope)) {
-      list.innerHTML = _findsLoadingShellHtml()
+      list.innerHTML = _findsPendingStateHtml(currentScope)
       return true
     }
     list.innerHTML = _findsEmptyStateHtml(_emptyFindsText(q))
@@ -3758,7 +3828,7 @@ async function _renderCards(list, data, options) {
     // loading state instead of flashing "No observations yet".
     if (_findsInitialLoadPending(currentScope)
       || (hasActiveSyncPass() && _findsPrimaryScope() === 'mine' && currentScope !== 'user')) {
-      list.innerHTML = _findsLoadingShellHtml()
+      list.innerHTML = _findsPendingStateHtml(currentScope)
       return true
     }
     list.innerHTML = _findsEmptyStateHtml(_emptyFindsText(q, { isFriends, capture: true }))

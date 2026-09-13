@@ -166,7 +166,9 @@ test('every signOut in src/ routes through the explicit seam (a raw call would b
 
 test('performExplicitSignOut flags the request; the flag is one-shot and persists across a thrown signOut', async () => {
   let shouldThrow = false
-  globalThis.__sporelySupabaseClient__.auth.signOut = async () => {
+  const receivedOptions = []
+  globalThis.__sporelySupabaseClient__.auth.signOut = async options => {
+    receivedOptions.push(options)
     if (shouldThrow) throw new Error('network down')
     return { error: null }
   }
@@ -174,8 +176,12 @@ test('performExplicitSignOut flags the request; the flag is one-shot and persist
   _resetExplicitSignOutForTests()
   assert.equal(consumeExplicitSignOutRequest(), false)
   await performExplicitSignOut()
+  assert.deepEqual(receivedOptions, [{ scope: 'local' }], 'ordinary sign-out must not revoke sessions on other clients')
   assert.equal(consumeExplicitSignOutRequest(), true)
   assert.equal(consumeExplicitSignOutRequest(), false, 'flag must be one-shot')
+  await performExplicitSignOut({ scope: 'global' })
+  assert.deepEqual(receivedOptions.at(-1), { scope: 'global' }, 'an intentional account-wide sign-out remains available')
+  assert.equal(consumeExplicitSignOutRequest(), true)
   shouldThrow = true
   await assert.rejects(() => performExplicitSignOut())
   assert.equal(consumeExplicitSignOutRequest(), true, 'a thrown explicit signOut must still honor the sign-out intent on the next SIGNED_OUT')

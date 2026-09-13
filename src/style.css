@@ -1322,6 +1322,7 @@ html, body {
   border-color: color-mix(in srgb, var(--green-accent) 35%, var(--border));
 }
 
+.finds-error-state,
 .finds-loading-state,
 .finds-bottom-sentinel--loading,
 .finds-bottom-sentinel--done {

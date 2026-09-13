@@ -25,6 +25,16 @@ opt-in count was not re-checked for this entry.
 
 ## Changes Applied
 
+### Day 9 (September 13, 2026)
+
+**Cross-client logout no longer revokes Android sessions — implemented locally; release and device QA not yet recorded**
+
+- Closed-testing investigation: logging out of `app.sporely.no` also caused the Android app to request sign-in after its access token next refreshed. The supplied Android console showed a transient DNS outage but no `SIGNED_OUT` event; the causal action was the web logout.
+- Cause: Sporely's shared explicit-sign-out seam called `supabase.auth.signOut()` without a scope. Supabase defaults that call to global scope, revoking the user's sessions on every device/browser.
+- Fix: ordinary in-app logout now passes `{ scope: 'local' }`, so it only ends the session in the current browser or native WebView. An explicit caller can still request `{ scope: 'global' }` for a deliberate account-wide security action. Account deletion already deletes the Auth user server-side and therefore revokes all sessions.
+- Regression coverage: the auth recovery suite now asserts the ordinary local scope and preserves the intentional-global escape hatch. Focused auth tests, ESLint, `git diff --check`, and full `npm test` passed.
+- Files changed: `src/auth-signout.js`, `src/auth-reauth-recovery.test.js`. No release identifier or device QA recorded yet.
+
 ### Day 8 (September 12, 2026)
 
 **Durable upload queue media-loss fix — implemented locally; release and device QA not yet recorded**
