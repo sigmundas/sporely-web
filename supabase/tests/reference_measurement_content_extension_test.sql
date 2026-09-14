@@ -286,10 +286,12 @@ $$;
 
 RESET ROLE;
 
--- Existing version-1 snapshot builders are unaffected by rows that carry the
--- extension: the canonical snapshot of the enhanced row equals the snapshot of
--- its legacy twin, stays schema_version 1, exposes no extension key and
--- validates as before. The private validators stay unreachable for end users.
+-- Snapshot builders are undisturbed by rows that carry the extension: every
+-- ordinary snapshot field and measurement value of the enhanced row still
+-- equals its legacy twin's, and both snapshots validate. Since Stage 3D the
+-- versions differ by design (the twin emits 1, the enhanced row emits 2); the
+-- version-2 shape itself is owned by reference_snapshot_v2_test.sql. The
+-- private validators stay unreachable for end users.
 DO $$
 DECLARE
   owner_a constant uuid := '00000000-0000-4000-8000-00000000a3c1';
@@ -306,14 +308,36 @@ BEGIN
   END IF;
   snapshot_enhanced := private.reference_canonical_snapshot(owner_a, enhanced_id);
   snapshot_twin := private.reference_canonical_snapshot(owner_a, twin_id);
-  IF snapshot_enhanced IS NULL OR (snapshot_enhanced->>'schema_version') <> '1'
-     OR snapshot_enhanced ? 'measurement_details'
-     OR snapshot_enhanced->'measurements' ? 'q_core_min'
-     OR (snapshot_enhanced - 'reference_measurement_set_id') IS DISTINCT FROM (snapshot_twin - 'reference_measurement_set_id') THEN
-    RAISE EXCEPTION 'v1 canonical snapshot changed for an enhanced row: % vs %', snapshot_enhanced, snapshot_twin;
+  -- Stage 3D replaced this stage's boundary. The canonical snapshot is now
+  -- version-aware, so the enhanced row emits version 2 while its legacy twin
+  -- still emits the exact version-1 snapshot it emitted before either stage.
+  -- What Stage 3C owns is unchanged and still asserted here: the extension
+  -- columns do not disturb any ordinary snapshot value.
+  IF snapshot_twin IS NULL OR (snapshot_twin->>'schema_version') <> '1'
+     OR snapshot_twin ? 'measurement_details'
+     OR snapshot_twin->'measurements' ? 'q_core_min' THEN
+    RAISE EXCEPTION 'v1 canonical snapshot changed for a legacy row: %', snapshot_twin;
+  END IF;
+  IF snapshot_enhanced IS NULL OR (snapshot_enhanced->>'schema_version') <> '2'
+     OR NOT snapshot_enhanced ? 'measurement_details'
+     OR NOT (snapshot_enhanced->'measurements') ?& ARRAY['q_core_min','q_core_max'] THEN
+    RAISE EXCEPTION 'enhanced row must emit a version-2 snapshot: %', snapshot_enhanced;
+  END IF;
+  IF (snapshot_enhanced - 'reference_measurement_set_id' - 'schema_version' - 'measurement_details'
+        - 'measurements')
+     IS DISTINCT FROM
+     (snapshot_twin - 'reference_measurement_set_id' - 'schema_version' - 'measurements') THEN
+    RAISE EXCEPTION 'the extension disturbed an ordinary snapshot field: % vs %', snapshot_enhanced, snapshot_twin;
+  END IF;
+  IF (snapshot_enhanced->'measurements') - 'q_core_min' - 'q_core_max'
+     IS DISTINCT FROM (snapshot_twin->'measurements') THEN
+    RAISE EXCEPTION 'the extension disturbed an ordinary measurement value: % vs %', snapshot_enhanced, snapshot_twin;
   END IF;
   IF NOT private.reference_snapshot_valid(snapshot_enhanced, work_id, treatment_id, enhanced_id, 6) THEN
-    RAISE EXCEPTION 'v1 snapshot of an enhanced row no longer validates: %', snapshot_enhanced;
+    RAISE EXCEPTION 'the snapshot of an enhanced row no longer validates: %', snapshot_enhanced;
+  END IF;
+  IF NOT private.reference_snapshot_valid(snapshot_twin, work_id, treatment_id, twin_id, 6) THEN
+    RAISE EXCEPTION 'the v1 snapshot of a legacy row no longer validates: %', snapshot_twin;
   END IF;
   IF has_function_privilege('authenticated',
        'private.reference_measurement_content_valid(public.reference_measurement_sets)', 'EXECUTE')
