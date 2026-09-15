@@ -6,20 +6,47 @@ import { supabase } from '../supabase.js'
 import { formatDate, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { formatDisplayName, formatScientificName } from '../artsorakel.js'
-import { navigate } from '../router.js'
+import { navigate, goBack } from '../router.js'
 import { openFindDetail } from './find_detail.js'
 import { LOCATION_STATE_CHANGED_EVENT } from '../geo.js'
 import { esc as _esc } from '../esc.js'
+import { normalizeCoordinatePair } from '../observation-shapes.js'
 
 let map          = null
 let markerLayer  = null
 let fuzzedCircleLayer = null
 let locationLayer = null
+let pickerLayer  = null
+const _markersById = new Map()
 const _mapData   = { mine: [], friends: [], feed: [], public: [] }   // cached for re-filtering
 const OBSERVATION_SCOPES = new Set(['mine', 'feed', 'friends', 'public'])
 const MAP_TIME_SCOPES = new Set(['all', 'day', 'week', 'month'])
 const MAP_SELECT = 'id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain, location_precision'
 const MAP_SELECT_LEGACY = 'id, user_id, gps_latitude, gps_longitude, genus, species, common_name, date, location, uncertain'
+
+// The map screen has three modes, all on the same Leaflet instance: ordinary
+// browsing, "focus this find" (browse, zoomed to one observation with its
+// popup open), and "pick a location" (the browse markers stay as context, but
+// the viewport centre is the value being edited).
+const FOCUS_ZOOM = 16
+
+// Scopes a find that is not the viewer's own can appear in, tried in this
+// order until one actually yields the marker. A friend's find is usually in
+// `friends`, a stranger's in `public`, and `follow` catches the rest.
+const NON_OWNER_FOCUS_SCOPES = ['friends', 'public', 'feed']
+
+// The observation `focusObservationOnMap()` asked for, consumed by the next
+// `loadMap()`. Held rather than applied immediately because the data the
+// marker comes from is fetched by that load.
+let _pendingFocus = null
+// The find the map is currently focused on, which is what the "Back to find"
+// control returns to. Survives filter changes; cleared when the map screen is
+// entered afresh (see `beginMapScreenVisit()`).
+let _focusReturn = null
+// `null` when not picking. `origin` is the location the Find had when the
+// picker opened — rendered as a subdued marker so the user can see how far
+// they have moved — and may be null for a Find that had no coordinates.
+let _locationPicker = null
 
 function _normalizeScope(scope) {
   if (scope === 'community') return 'public'
@@ -167,6 +194,236 @@ async function _withLocationPrecisionFallback(makeQuery) {
   return result
 }
 
+// ── Focus one observation ─────────────────────────────────────────────────────
+
+/**
+ * The scopes that could hold a focus target, best guess first.
+ *
+ * The viewer's own find is only ever in `mine`. For anyone else's the map has
+ * to go looking: the scope the Find detail screen was reached through is not
+ * necessarily one the map can load it in, so the caller walks this list until
+ * a marker turns up.
+ *
+ * @param {{ ownerId?: string|null }} focus
+ * @param {string|null|undefined} viewerId
+ * @returns {string[]} at least one scope
+ */
+export function resolveMapFocusScopes(focus = {}, viewerId = null) {
+  const ownerId = focus?.ownerId ? String(focus.ownerId) : ''
+  const isOwn = !!ownerId && !!viewerId && ownerId === String(viewerId)
+  return isOwn ? ['mine'] : [...NON_OWNER_FOCUS_SCOPES]
+}
+
+/**
+ * Open the observations map zoomed to one find, with its marker selected.
+ *
+ * @param {{ id: string|number, lat: unknown, lon: unknown, ownerId?: string|null }} target
+ */
+export function focusObservationOnMap(target = {}) {
+  const id = String(target?.id ?? '').trim()
+  if (!id) return
+  const coords = normalizeCoordinatePair(target.lat, target.lon)
+
+  const scopes = resolveMapFocusScopes(target, state.user?.id)
+  state.observationScope = scopes[0]
+  // The default "past month" would hide any find older than 30 days, which is
+  // exactly the find someone looks up on the map.
+  state.mapTimeScope = 'all'
+  // A leftover species filter would drop the focused marker before it is ever
+  // looked up; focusing is a direct request for one find, not a search.
+  state.searchQuery = ''
+
+  _pendingFocus = {
+    id,
+    lat: coords?.lat ?? null,
+    lon: coords?.lon ?? null,
+    remainingScopes: scopes.slice(1),
+  }
+  navigate('map')
+}
+
+function _applyPendingFocus() {
+  const focus = _pendingFocus
+  if (!focus || !map) return
+
+  const marker = _markersById.get(focus.id)
+  if (!marker && focus.remainingScopes.length) {
+    // Wrong scope: this find is someone else's and the first guess did not
+    // hold it. Switch the map's own filter to the next scope that could and
+    // load again — the list shrinks every pass, so this terminates.
+    state.observationScope = focus.remainingScopes.shift()
+    void loadMap()
+    return
+  }
+
+  _pendingFocus = null
+  _focusReturn = focus.id
+  _syncMapFocusBar()
+
+  if (marker) {
+    // `zoomToShowLayer` un-clusters the marker first; without it `openPopup()`
+    // on a clustered marker opens nothing.
+    if (typeof markerLayer?.zoomToShowLayer === 'function') {
+      markerLayer.zoomToShowLayer(marker, () => marker.openPopup?.())
+      return
+    }
+    if (Number.isFinite(focus.lat) && Number.isFinite(focus.lon)) {
+      map.setView([focus.lat, focus.lon], FOCUS_ZOOM)
+    }
+    marker.openPopup?.()
+    return
+  }
+
+  // No scope held it (blocked author, a draft, a view that does not carry it).
+  // Centring on the coordinates the detail screen already showed is still the
+  // right answer, and adds no information the viewer did not have.
+  if (Number.isFinite(focus.lat) && Number.isFinite(focus.lon)) {
+    map.setView([focus.lat, focus.lon], FOCUS_ZOOM)
+  }
+}
+
+/**
+ * Called when the map screen is entered, as opposed to reloaded by one of its
+ * own filters. Arriving fresh ends any previous focus, so the "Back to find"
+ * control does not linger from an earlier visit; arriving *as* a focus keeps
+ * the pending target intact.
+ */
+export function beginMapScreenVisit() {
+  if (!_pendingFocus) _focusReturn = null
+}
+
+function _syncMapFocusBar() {
+  const bar = document.getElementById('map-focus-bar')
+  const showing = !!_focusReturn && !isMapLocationPickerActive()
+  if (bar) bar.style.display = showing ? 'flex' : 'none'
+  const label = document.getElementById('map-focus-back-label')
+  if (label) label.textContent = t('map.backToFind')
+}
+
+function _returnToFocusedFind() {
+  if (!_focusReturn) return
+  _focusReturn = null
+  _syncMapFocusBar()
+  goBack()
+}
+
+// ── Pick a location ───────────────────────────────────────────────────────────
+
+/**
+ * Open the map in location-picker mode.
+ *
+ * The map pans under a fixed centre crosshair; nothing is written until the
+ * user confirms, and `onSave` is the only path that reports a coordinate back.
+ *
+ * @param {object} options
+ * @param {unknown} [options.lat] starting latitude (the Find's current one)
+ * @param {unknown} [options.lon] starting longitude
+ * @param {(coords: { lat: number, lon: number }) => unknown} options.onSave
+ */
+export function openMapLocationPicker({ lat, lon, onSave } = {}) {
+  const origin = normalizeCoordinatePair(lat, lon)
+  _locationPicker = {
+    origin,
+    centred: false,
+    onSave: typeof onSave === 'function' ? onSave : null,
+  }
+  _pendingFocus = null
+  navigate('map')
+}
+
+export function isMapLocationPickerActive() {
+  return _locationPicker !== null
+}
+
+function _exitLocationPicker() {
+  _locationPicker = null
+  pickerLayer?.clearLayers()
+  _syncLocationPickerUi()
+  goBack()
+}
+
+/**
+ * Read the viewport centre and hand it to the caller that opened the picker.
+ *
+ * This is the only write path: panning alone changes nothing.
+ */
+function _confirmLocationPicker() {
+  if (!_locationPicker || !map) return
+  const centre = map.getCenter?.()
+  const coords = normalizeCoordinatePair(centre?.lat, centre?.lng)
+  const onSave = _locationPicker.onSave
+  if (!coords) {
+    _exitLocationPicker()
+    return
+  }
+  _exitLocationPicker()
+  onSave?.(coords)
+}
+
+function _renderPickerOrigin() {
+  if (!pickerLayer) return
+  pickerLayer.clearLayers()
+  const origin = _locationPicker?.origin
+  if (!origin) return
+
+  const icon = L.divIcon({
+    className: '',
+    html: '<div class="map-pin map-pin--previous"></div>',
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+  })
+  L.marker([origin.lat, origin.lon], { icon, interactive: false }).addTo(pickerLayer)
+}
+
+function _syncLocationPickerUi() {
+  const picking = isMapLocationPickerActive()
+
+  const overlay = document.getElementById('map-picker-bar')
+  if (overlay) overlay.style.display = picking ? 'flex' : 'none'
+  const crosshair = document.getElementById('map-picker-crosshair')
+  if (crosshair) crosshair.style.display = picking ? 'block' : 'none'
+
+  // While picking, Cancel and Save are the only ways out, so the browse
+  // chrome would only be in the way. `_show()` reasserts the nav on every
+  // navigation, so hiding it here cannot strand the user.
+  const browseChrome = [
+    document.querySelector('#screen-map .map-overlay-top'),
+    document.getElementById('map-fab'),
+    document.getElementById('map-locate-btn'),
+    document.getElementById('bottom-nav'),
+  ]
+  for (const el of browseChrome) {
+    if (el) el.style.display = picking ? 'none' : ''
+  }
+
+  const hint = document.getElementById('map-picker-hint')
+  if (hint) hint.textContent = t('map.pickLocationHint')
+  const cancelBtn = document.getElementById('map-picker-cancel-btn')
+  if (cancelBtn) cancelBtn.textContent = t('common.cancel')
+  const saveBtn = document.getElementById('map-picker-save-btn')
+  if (saveBtn) saveBtn.textContent = t('map.saveLocation')
+}
+
+function _applyLocationPicker() {
+  if (!isMapLocationPickerActive()) return
+  _renderPickerOrigin()
+  // Only on the way in: re-centring on a later render would throw away the pan
+  // the user has already made.
+  if (_locationPicker.centred || !map) return
+  _locationPicker.centred = true
+
+  const origin = _locationPicker.origin
+  if (origin) {
+    map.setView([origin.lat, origin.lon], FOCUS_ZOOM)
+    return
+  }
+  // A Find with no coordinates at all: the device's own position is the most
+  // useful starting guess, and the map's default view otherwise.
+  if (_hasValidLocation()) {
+    map.setView([state.location.fix.lat, state.location.fix.lon], FOCUS_ZOOM)
+  }
+}
+
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
 export function initMap() {
@@ -200,11 +457,15 @@ export function initMap() {
   }).addTo(map)
   fuzzedCircleLayer = L.layerGroup().addTo(map)
   locationLayer = L.layerGroup().addTo(map)
+  pickerLayer = L.layerGroup().addTo(map)
   map.setView([62.5, 15], 5)
   map.on('zoomend', _syncFuzzedCircleVisibility)
   _syncFuzzedCircleVisibility()
 
   document.getElementById('map-locate-btn')?.addEventListener('click', _centerOnCurrentLocation)
+  document.getElementById('map-focus-back-btn')?.addEventListener('click', _returnToFocusedFind)
+  document.getElementById('map-picker-cancel-btn')?.addEventListener('click', () => _exitLocationPicker())
+  document.getElementById('map-picker-save-btn')?.addEventListener('click', _confirmLocationPicker)
   window.addEventListener(LOCATION_STATE_CHANGED_EVENT, _renderCurrentLocation)
 
   // Scope toggle
@@ -274,7 +535,14 @@ export function initMap() {
 
 export async function loadMap() {
   requestAnimationFrame(() => map?.invalidateSize())
-  if (!state.user) return
+  _syncLocationPickerUi()
+  _syncMapFocusBar()
+  if (!state.user) {
+    // The picker has to reach its start position even when there is no signed-in
+    // user to load observations for.
+    _applyLocationPicker()
+    return
+  }
   const currentScope = _currentScope()
   _syncMapScopeBtns()
   _syncMapTimeBtns()
@@ -393,6 +661,7 @@ function _matchesMap(obs, q) {
 function _applyMapFilter() {
   markerLayer.clearLayers()
   fuzzedCircleLayer?.clearLayers()
+  _markersById.clear()
   const q = (state.searchQuery || '').toLowerCase().trim()
   const currentScope = _currentScope()
 
@@ -401,6 +670,18 @@ function _applyMapFilter() {
   _addMarkers(filtered)
   _renderCurrentLocation()
   _syncFuzzedCircleVisibility()
+
+  // Both focus and picking own the viewport: fitting to the whole result set
+  // would immediately pull the map away from the find or the coordinate being
+  // edited.
+  if (isMapLocationPickerActive()) {
+    _applyLocationPicker()
+    return
+  }
+  if (_pendingFocus) {
+    _applyPendingFocus()
+    return
+  }
 
   // Fit bounds
   const latlngs = filtered
@@ -458,12 +739,19 @@ function _addMarkers(observations) {
         </div>
       `)
 
-    const marker = L.marker([obs.gps_latitude, obs.gps_longitude], { icon }).bindPopup(popup)
+    // While picking a location the other finds are context only: a tap that
+    // opened a popup — and from there the detail screen — would strand the
+    // half-finished edit behind another screen.
+    const marker = L.marker([obs.gps_latitude, obs.gps_longitude], {
+      icon,
+      interactive: !isMapLocationPickerActive(),
+    }).bindPopup(popup)
     marker.on('popupopen', () => {
       const btn = document.querySelector(`.map-popup-btn[data-id="${obs.id}"]`)
       if (btn) btn.addEventListener('click', () => openFindDetail(obs.id))
     })
     marker.addTo(markerLayer)
+    _markersById.set(String(obs.id), marker)
     if (obs.location_precision === 'fuzzed') {
       L.circle([obs.gps_latitude, obs.gps_longitude], {
         radius: 600,

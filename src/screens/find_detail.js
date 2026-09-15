@@ -1,5 +1,5 @@
 import { supabase } from '../supabase.js'
-import { formatDate, formatTime, getLocale, getTaxonomyLanguage, t } from '../i18n.js'
+import { formatDate, formatTime, getIntlLocale, getLocale, getTaxonomyLanguage, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
@@ -26,7 +26,7 @@ import {
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { deleteObservationMedia, verifyWorkerObjectExists, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, reserveObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath, fetchObservationImageRows, getVariantPath } from '../images.js'
 import { bindProtectedMedia } from '../protected-media.js'
-import { classifyDraftAge, loadFinds, openFinds, restoreFindsAfterDetailReturn } from './finds.js'
+import { classifyDraftAge, invalidateFindsCardImages, loadFinds, openFinds, restoreFindsAfterDetailReturn } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
@@ -47,7 +47,9 @@ import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePi
 import { setCaptureCompleteHandler } from './capture.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
 import { prepareImageBlobForUpload } from '../image_crop.js'
-import { isBlob } from '../observation-shapes.js'
+import { isBlob, normalizeCoordinatePair } from '../observation-shapes.js'
+import { focusObservationOnMapScreen, openMapLocationPickerScreen } from '../map-loader.js'
+import { buildExternalMapUrl, MAP_LINK_SERVICES } from '../map-links.js'
 import { persistObservationTaxonomySelection, taxonomySelectionForTaxon } from '../taxonomy-v2.js'
 
 let currentObs    = null
@@ -67,7 +69,7 @@ let detailFriendship = null
 let detailFollowState = { user: false, observation: false, taxon: false, genus: false }
 let detailPrivacySlotCount = null
 let detailLoadGeneration = 0
-let detailLatestMicroscopy = { available: false, capturedAt: null }
+let detailSporeSummaries = { available: false, rows: [] }
 const detailAiState = {
   running: false,
   runningByService: {},
@@ -896,26 +898,49 @@ async function _loadDetailObservationImages(obsId, { isOwner = false } = {}) {
   return []
 }
 
-export async function loadOwnerLatestMicroscopeCapturedAt({ client = supabase, observationId, isOwner }) {
-  if (!isOwner || !observationId) return { available: false, capturedAt: null }
+const DETAIL_SPORE_SUMMARY_SELECT = [
+  'n_spores',
+  'n_paired',
+  'n_length',
+  'length_p05_um',
+  'length_p95_um',
+  'width_p05_um',
+  'width_p95_um',
+  'q_p05',
+  'q_p95',
+  'computed_at',
+].join(', ')
+
+// Structured per-observation spore statistics, written by the desktop app into
+// public.observation_spore_summaries. Owners read their own rows directly, which
+// also covers drafts; everyone else goes through the SECURITY DEFINER RPC so the
+// observation's visibility and separate spore-data visibility gates apply.
+export async function loadObservationSporeSummaries({ client = supabase, observationId, isOwner }) {
+  const numericId = Number(observationId)
+  if (!Number.isFinite(numericId) || numericId <= 0) return { available: false, rows: [] }
   try {
-    const { data, error } = await client.rpc('get_observation_latest_microscope_captured_at', {
-      p_observation_id: observationId,
-    })
+    const { data, error } = isOwner
+      ? await client
+          .from('observation_spore_summaries')
+          .select(DETAIL_SPORE_SUMMARY_SELECT)
+          .eq('observation_id', numericId)
+      : await client.rpc('get_public_observation_spore_summaries', {
+          p_observation_ids: [numericId],
+        })
     if (error) {
-      console.warn('Optional Last microscopy metadata is unavailable:', {
+      console.warn('Optional spore statistics are unavailable:', {
         observationId,
         code: error?.code || null,
       })
-      return { available: false, capturedAt: null }
+      return { available: false, rows: [] }
     }
-    return { available: true, capturedAt: data || null }
+    return { available: true, rows: Array.isArray(data) ? data : [] }
   } catch (error) {
-    console.warn('Optional Last microscopy metadata could not be loaded:', {
+    console.warn('Optional spore statistics could not be loaded:', {
       observationId,
       message: error?.message || String(error),
     })
-    return { available: false, capturedAt: null }
+    return { available: false, rows: [] }
   }
 }
 
@@ -935,23 +960,75 @@ export function microscopeCapturePresentation(row, isOwner) {
   return formatted || t('detail.captureTimeUnknown')
 }
 
-export function lastMicroscopyPresentation(imageRows, latestMicroscopy, isOwner) {
-  if (!isOwner || !latestMicroscopy?.available) return null
-  if (!(imageRows || []).some(row => row?.image_type === 'microscope')) return null
-  return formatMicroscopeCapturedAt(latestMicroscopy.capturedAt) || t('common.unknown')
+// Absent measurements must stay absent: Number(null) and Number('') are 0, which
+// would print a real-looking 0.0 µm range for an unmeasured width.
+function _finiteMeasurement(value) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(numeric) ? numeric : null
 }
 
-function _renderLatestMicroscopy() {
-  const rowEl = document.getElementById('detail-last-microscopy')
-  const labelEl = document.getElementById('detail-last-microscopy-label')
-  const valueEl = document.getElementById('detail-last-microscopy-val')
+// One summary row per measurement context (dried KOH DIC vs fresh water
+// brightfield, …). Percentiles from different preparations are not comparable,
+// so the tagline shows the best-supported single context rather than an average
+// across incomparable ranges.
+export function pickSporeSummaryRow(rows) {
+  const usable = (rows || []).filter(row => (
+    _finiteMeasurement(row?.length_p05_um) !== null
+    && _finiteMeasurement(row?.length_p95_um) !== null
+  ))
+  if (!usable.length) return null
+  return usable.reduce((best, row) => {
+    const rank = candidate => [
+      _finiteMeasurement(candidate?.n_paired) || 0,
+      _finiteMeasurement(candidate?.n_spores) || 0,
+      String(candidate?.computed_at || ''),
+    ]
+    const [bestPaired, bestSpores, bestComputedAt] = rank(best)
+    const [rowPaired, rowSpores, rowComputedAt] = rank(row)
+    if (rowPaired !== bestPaired) return rowPaired > bestPaired ? row : best
+    if (rowSpores !== bestSpores) return rowSpores > bestSpores ? row : best
+    return rowComputedAt > bestComputedAt ? row : best
+  })
+}
+
+function _formatSporeRange(low, high) {
+  const lowValue = _finiteMeasurement(low)
+  const highValue = _finiteMeasurement(high)
+  if (lowValue === null || highValue === null) return ''
+  const format = new Intl.NumberFormat(getIntlLocale(), {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })
+  return `${format.format(lowValue)}–${format.format(highValue)}`
+}
+
+// Literature notation, length × width, matching the desktop app's short spore
+// line: the 5th–95th percentile spread, never min–max.
+export function formatSporeStatsShort(row) {
+  const length = _formatSporeRange(row?.length_p05_um, row?.length_p95_um)
+  if (!length) return ''
+  const width = _formatSporeRange(row?.width_p05_um, row?.width_p95_um)
+  const q = _formatSporeRange(row?.q_p05, row?.q_p95)
+  const count = _finiteMeasurement(row?.n_spores) || _finiteMeasurement(row?.n_length)
+  const parts = [`${width ? `${length} × ${width}` : length} µm`]
+  if (q) parts.push(`Q = ${q}`)
+  if (count) parts.push(`n = ${Math.round(count)}`)
+  return parts.join(' · ')
+}
+
+export function sporeStatsPresentation(sporeSummaries) {
+  if (!sporeSummaries?.available) return null
+  return formatSporeStatsShort(pickSporeSummaryRow(sporeSummaries.rows)) || null
+}
+
+function _renderSporeStats() {
+  const rowEl = document.getElementById('detail-spore-stats')
+  const labelEl = document.getElementById('detail-spore-stats-label')
+  const valueEl = document.getElementById('detail-spore-stats-val')
   if (!rowEl || !valueEl) return
-  if (labelEl) labelEl.textContent = t('detail.lastMicroscopy')
-  const presentation = lastMicroscopyPresentation(
-    detailImageRows,
-    detailLatestMicroscopy,
-    currentObsIsOwner,
-  )
+  if (labelEl) labelEl.textContent = t('detail.sporeStats')
+  const presentation = sporeStatsPresentation(detailSporeSummaries)
   rowEl.style.display = presentation ? 'flex' : 'none'
   if (!presentation) {
     valueEl.textContent = ''
@@ -960,15 +1037,15 @@ function _renderLatestMicroscopy() {
   valueEl.textContent = presentation
 }
 
-async function _refreshOwnerLatestMicroscopy(observationId, generation = detailLoadGeneration) {
-  const result = await loadOwnerLatestMicroscopeCapturedAt({
+async function _refreshSporeStats(observationId, generation = detailLoadGeneration) {
+  const result = await loadObservationSporeSummaries({
     client: supabase,
     observationId,
     isOwner: currentObsIsOwner,
   })
   if (generation !== detailLoadGeneration || String(currentObs?.id) !== String(observationId)) return
-  detailLatestMicroscopy = result
-  _renderLatestMicroscopy()
+  detailSporeSummaries = result
+  _renderSporeStats()
 }
 
 function _buildDetailAiSelectionPatch(selectionState = {}) {
@@ -1072,6 +1149,9 @@ async function _persistDetailImageCrops() {
     return rejected.reason
   }
   detailImageCropDirty = false
+  // Crops change what the card thumbnails render, so the list cannot reconcile
+  // around these cards either.
+  invalidateFindsCardImages(currentObs.id)
   return null
 }
 
@@ -1111,6 +1191,8 @@ export function initFindDetail() {
     })
   }
 
+  _initDetailLocationActions()
+
   const runBtn = document.querySelector('[data-identify-run-button]')
   if (runBtn) {
     wireIdentifyRunButtonPressFeedback(runBtn)
@@ -1118,13 +1200,26 @@ export function initFindDetail() {
   }
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
     tab.addEventListener('click', () => {
-      const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
-      const serviceState = detailAiState.resultsByService?.[service] || null
-      const canView = _hasStoredAiResult(serviceState) || serviceState?.status === 'running'
-      if (tab.disabled || !canView) return
-      _setDetailAiActiveService(service)
+      if (!_detailAiTabIsActivatable(tab)) return
+      _setDetailAiActiveService(normalizeIdentifyService(tab.dataset.identifyServiceTab))
     })
   })
+  const aiTabList = document.getElementById('detail-ai-service-tabs')
+  if (aiTabList) {
+    aiTabList.addEventListener('keydown', event => {
+      const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+      if (!step) return
+      const tabs = Array.from(aiTabList.querySelectorAll('[data-identify-service-tab]'))
+      const currentTab = event.target?.closest?.('[data-identify-service-tab]') || null
+      const currentIndex = currentTab ? tabs.indexOf(currentTab) : -1
+      if (currentIndex < 0) return
+      const nextTab = tabs[(currentIndex + step + tabs.length) % tabs.length]
+      if (!nextTab || nextTab === currentTab || !_detailAiTabIsActivatable(nextTab)) return
+      event.preventDefault()
+      _setDetailAiActiveService(normalizeIdentifyService(nextTab.dataset.identifyServiceTab))
+      nextTab.focus()
+    })
+  }
   document.getElementById('detail-author')?.addEventListener('click', () => {
     void _openAuthorFinds()
   })
@@ -1189,7 +1284,7 @@ export async function openFindDetail(obsId, options = {}) {
   detailAiState.stale = false
   detailImageCropDirty = false
   detailLocationLookup = null
-  detailLatestMicroscopy = { available: false, capturedAt: null }
+  detailSporeSummaries = { available: false, rows: [] }
 
   // Update back button label — state.currentScreen is still the previous screen at this point
   const prevLabel = {
@@ -1285,6 +1380,7 @@ export async function openFindDetail(obsId, options = {}) {
     })
     coordsEl.style.display = obs.gps_latitude ? 'block' : 'none'
   }
+  _syncDetailLocationActions()
 
   // Set visibility radio
   const vis = normalizeVisibility(obs.visibility, 'public')
@@ -1304,14 +1400,14 @@ export async function openFindDetail(obsId, options = {}) {
   _loadPrivacySlotCount()
 
   const imagePromise = _loadDetailObservationImages(obsId, { isOwner: currentObsIsOwner })
-  const latestMicroscopyPromise = loadOwnerLatestMicroscopeCapturedAt({
+  const sporeSummariesPromise = loadObservationSporeSummaries({
     client: supabase,
     observationId: obsId,
     isOwner: currentObsIsOwner,
   })
-  const [imgData, latestMicroscopy] = await Promise.all([imagePromise, latestMicroscopyPromise])
+  const [imgData, sporeSummaries] = await Promise.all([imagePromise, sporeSummariesPromise])
   if (loadGeneration !== detailLoadGeneration || String(currentObs?.id) !== String(obsId)) return
-  detailLatestMicroscopy = latestMicroscopy
+  detailSporeSummaries = sporeSummaries
 
   const gallery = document.getElementById('detail-gallery')
   _clearDetailThumbCropObserver()
@@ -1426,7 +1522,7 @@ export async function openFindDetail(obsId, options = {}) {
     })
   }
 
-  _renderLatestMicroscopy()
+  _renderSporeStats()
 
   if (currentObsIsOwner) {
     const addCardContainer = document.createElement('div')
@@ -1646,7 +1742,8 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
           await supabase.from('observations').update({ image_key: null, thumb_key: null }).eq('id', currentObs.id)
         }
         container.remove()
-        _refreshOwnerLatestMicroscopy(currentObs.id)
+        invalidateFindsCardImages(currentObs.id)
+        _refreshSporeStats(currentObs.id)
         _markDetailAiStale()
       } catch (err) {
         console.error('Failed to delete image:', err)
@@ -2165,6 +2262,16 @@ function _buildDetailAiCachedResults(rows = [], currentFingerprintByService = {}
   return byService
 }
 
+// A provider tab can only be switched to when there is something to show in
+// the panel. Shared by pointer activation and arrow-key navigation so both
+// agree on which tabs are reachable.
+function _detailAiTabIsActivatable(tab) {
+  if (!tab || tab.disabled) return false
+  const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+  const serviceState = detailAiState.resultsByService?.[service] || null
+  return _hasStoredAiResult(serviceState) || serviceState?.status === 'running'
+}
+
 function _renderDetailAiTabs() {
   const photoIdServices = _resolveDetailPhotoIdServices(detailAiState.availability)
   const runBtn = document.querySelector('[data-identify-run-button]')
@@ -2200,6 +2307,11 @@ function _renderDetailAiTabs() {
     tab.classList.toggle('has-error', state.status === 'error')
     tab.disabled = state.isDisabled
     tab.setAttribute('aria-disabled', String(state.isDisabled))
+    // Roving tabindex: only the find-detail tablist is a real ARIA tablist.
+    if (tab.closest('#detail-ai-service-tabs')) {
+      tab.setAttribute('aria-selected', String(state.active))
+      tab.tabIndex = state.active ? 0 : -1
+    }
     const icon = tab.querySelector('.ai-id-service-tab-icon, .ai-id-dot')
     if (icon) {
       icon.outerHTML = _detailAiServiceIconHtml(state)
@@ -2231,56 +2343,59 @@ function _renderDetailAiResults() {
     const result = detailAiState.resultsByService[activeService] || null
     const showLocalStaleWarning = Boolean(detailAiState.localInputsChanged || detailAiState.stale)
     resultsEl.dataset.identifyService = activeService
+    // One panel serves both tabs, so point its label at whichever tab owns it.
+    const activeTabId = document.querySelector(`#detail-ai-service-tabs [data-identify-service-tab="${activeService}"]`)?.id
+    if (activeTabId) resultsEl.setAttribute('aria-labelledby', activeTabId)
     const staleNote = document.querySelector('[data-identify-stale-note]')
     if (staleNote) staleNote.style.display = showLocalStaleWarning ? '' : 'none'
     if (detailAiState.runningByService?.[activeService]) {
       resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
-      resultsEl.style.display = 'block'
+      resultsEl.style.display = ''
       return
     }
     if (result?.status === 'running') {
       resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
-      resultsEl.style.display = 'block'
+      resultsEl.style.display = ''
       return
     }
     const nonOwnerEmptyMessage = _tf('detail.noStoredAiResults', 'No stored AI results are available for this observation.')
     if (!result || result?.status === 'idle') {
       const isReadOnlyViewer = Boolean(currentObs?.id) && !currentObsIsOwner
       resultsEl.innerHTML = `<div class="ai-results-empty">${isReadOnlyViewer ? nonOwnerEmptyMessage : _tf('review.runAiIdPrompt', 'Run AI Photo ID to get suggestions.')}</div>`
-      resultsEl.style.display = 'block'
+      resultsEl.style.display = ''
       return
     }
     if (!result?.predictions?.length) {
       if (showLocalStaleWarning && result?.status === 'stale') {
         resultsEl.innerHTML = `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
-        resultsEl.style.display = 'block'
+        resultsEl.style.display = ''
         return
       }
       if (result?.status === 'unavailable') {
         resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
-        resultsEl.style.display = 'block'
+        resultsEl.style.display = ''
         return
       }
       if (result?.status === 'error' || (result?.status === 'stale' && result.errorMessage)) {
         resultsEl.innerHTML = `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
-        resultsEl.style.display = 'block'
+        resultsEl.style.display = ''
         return
       }
       if (result?.status === 'no_match') {
         resultsEl.innerHTML = `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`
-        resultsEl.style.display = 'block'
+        resultsEl.style.display = ''
         return
       }
       const emptyMessage = currentObs?.id && !currentObsIsOwner
         ? nonOwnerEmptyMessage
         : (t('review.noMatch') || 'No match')
       resultsEl.innerHTML = `<div class="ai-results-empty">${emptyMessage}</div>`
-      resultsEl.style.display = 'block'
+      resultsEl.style.display = ''
       return
     }
 
     resultsEl.innerHTML = renderIdentifyResultRows(activeService, result.predictions)
-    resultsEl.style.display = 'block'
+    resultsEl.style.display = ''
     const selectedPrediction = detailAiState.selectedService === activeService
       ? (detailAiState.selectedPredictionByService?.[activeService] || detailAiState.selectedPrediction || null)
       : null
@@ -2744,6 +2859,9 @@ function _resetForm() {
   document.getElementById('detail-habitat').value     = ''
   const coordsEl = document.getElementById('detail-coords')
   if (coordsEl) { coordsEl.innerHTML = ''; coordsEl.style.display = 'none' }
+  const locationActions = document.getElementById('detail-location-actions')
+  if (locationActions) locationActions.style.display = 'none'
+  _closeDetailLocationMenu()
   document.getElementById('detail-notes').value       = ''
   document.getElementById('detail-uncertain').checked = false
   _setDetailHeader({ fallbackName: t('detail.unknownSpecies') })
@@ -2858,6 +2976,211 @@ function _renderDetailLocationDropdown(show) {
     }
     item.addEventListener('mousedown', handleSelect)
     item.addEventListener('touchstart', handleSelect, { passive: false })
+  })
+}
+
+// ── Location actions: view on map, edit the point, open in an external map ────
+
+/**
+ * Which location action a Find offers: `'edit'` once it has usable
+ * coordinates, `'set'` when it has none at all.
+ *
+ * @param {object|null} obs
+ * @returns {'edit' | 'set'}
+ */
+export function detailLocationActionMode(obs) {
+  return normalizeCoordinatePair(obs?.gps_latitude, obs?.gps_longitude) ? 'edit' : 'set'
+}
+
+/**
+ * The `observations` patch for a hand-placed location, or `null` for a
+ * coordinate the app would refuse to render anyway.
+ *
+ * Accuracy and altitude both described the old position and neither can be
+ * recovered for the new one: OpenStreetMap's reverse geocoder carries no
+ * elevation, and the app has no other elevation source. Clearing them is
+ * honest; carrying them over would attach a precise-looking "± 4 m, 109 m ASL"
+ * to a point the user placed by eye somewhere else entirely.
+ *
+ * @param {unknown} lat
+ * @param {unknown} lon
+ * @returns {{ gps_latitude: number, gps_longitude: number, gps_accuracy: null, gps_altitude: null } | null}
+ */
+export function buildDetailLocationPatch(lat, lon) {
+  const coords = normalizeCoordinatePair(lat, lon)
+  if (!coords) return null
+  return {
+    gps_latitude: coords.lat,
+    gps_longitude: coords.lon,
+    gps_accuracy: null,
+    gps_altitude: null,
+  }
+}
+
+function _detailLocationCoords(obs = currentObs) {
+  return normalizeCoordinatePair(obs?.gps_latitude, obs?.gps_longitude)
+}
+
+function _closeDetailLocationMenu() {
+  const menu = document.getElementById('detail-location-open-menu')
+  const btn = document.getElementById('detail-location-open-btn')
+  if (menu) menu.style.display = 'none'
+  if (btn) btn.setAttribute('aria-expanded', 'false')
+}
+
+function _syncDetailLocationActions(isOwner = currentObsIsOwner) {
+  const row = document.getElementById('detail-location-actions')
+  if (!row) return
+
+  const coords = _detailLocationCoords()
+  const mode = detailLocationActionMode(currentObs)
+  // Only the owner can move a Find; everyone else gets the read-only actions,
+  // and a Find with neither coordinates nor an owner viewing it has none.
+  const showEdit = isOwner && !!currentObs
+  const showCoordActions = !!coords
+  const visible = showEdit || showCoordActions
+
+  row.style.display = visible ? 'flex' : 'none'
+  _closeDetailLocationMenu()
+  if (!visible) return
+
+  const mapBtn = document.getElementById('detail-map-btn')
+  if (mapBtn) {
+    mapBtn.style.display = showCoordActions ? '' : 'none'
+    mapBtn.textContent = t('detail.showOnMap')
+  }
+
+  const editBtn = document.getElementById('detail-edit-location-btn')
+  if (editBtn) {
+    editBtn.style.display = showEdit ? '' : 'none'
+    editBtn.textContent = mode === 'edit' ? t('detail.editLocation') : t('detail.setLocation')
+  }
+
+  const openWrap = document.getElementById('detail-location-open-wrap')
+  if (openWrap) openWrap.style.display = showCoordActions ? '' : 'none'
+  const openLabel = document.getElementById('detail-location-open-label')
+  if (openLabel) openLabel.textContent = t('detail.openIn')
+}
+
+function _openFindOnMap() {
+  const coords = _detailLocationCoords()
+  if (!currentObs || !coords) return
+  _closeDetailLocationMenu()
+  void focusObservationOnMapScreen({
+    id: currentObs.id,
+    lat: coords.lat,
+    lon: coords.lon,
+    ownerId: currentObs.user_id || null,
+  })
+}
+
+function _openDetailLocationPicker() {
+  if (!currentObs || !currentObsIsOwner) {
+    if (currentObs) showToast(t('detail.onlyOwnerEdit'))
+    return
+  }
+  if (!requireCloudMutation({ showToast }).allowed) return
+
+  _closeDetailLocationMenu()
+  const coords = _detailLocationCoords()
+  const observationId = currentObs.id
+  void openMapLocationPickerScreen({
+    lat: coords?.lat,
+    lon: coords?.lon,
+    // Runs only when the user confirms in the picker; panning away and
+    // cancelling never reaches this.
+    onSave: picked => { void _persistDetailLocation(observationId, picked) },
+  })
+}
+
+async function _persistDetailLocation(observationId, picked) {
+  // The detail screen is still mounted behind the map, but guard anyway: the
+  // picker is asynchronous and the user could have opened another Find.
+  if (!currentObs || String(currentObs.id) !== String(observationId)) return
+  if (!currentObsIsOwner) return
+
+  const patch = buildDetailLocationPatch(picked?.lat, picked?.lon)
+  if (!patch) {
+    showToast(t('detail.locationSaveFailed', { message: t('detail.locationInvalid') }))
+    return
+  }
+
+  const { error } = await supabase
+    .from('observations')
+    .update(patch)
+    .eq('id', observationId)
+    .eq('user_id', state.user.id)
+
+  if (error) {
+    showToast(t('detail.locationSaveFailed', { message: error.message }))
+    return
+  }
+
+  currentObs.gps_latitude = patch.gps_latitude
+  currentObs.gps_longitude = patch.gps_longitude
+  currentObs.gps_accuracy = null
+  currentObs.gps_altitude = null
+
+  const coordsEl = document.getElementById('detail-coords')
+  if (coordsEl) {
+    coordsEl.innerHTML = buildGpsMetaHtml({
+      lat: currentObs.gps_latitude,
+      lon: currentObs.gps_longitude,
+      altitude: currentObs.gps_altitude,
+      accuracy: currentObs.gps_accuracy,
+    })
+    coordsEl.style.display = 'block'
+  }
+  _syncDetailLocationActions()
+  // The place name suggestions belonged to the old point. Re-running the
+  // lookup replaces an auto-applied name and leaves a hand-typed one alone.
+  _startDetailLocationLookup(currentObs)
+  setLastSyncAt()
+  showToast(t('detail.locationSaved'))
+}
+
+function _openDetailLocationInService(service) {
+  const coords = _detailLocationCoords()
+  if (!coords) return
+  const url = buildExternalMapUrl(service, {
+    lat: coords.lat,
+    lon: coords.lon,
+    isOwner: currentObsIsOwner,
+    locationPrecision: currentObs?.location_precision,
+  })
+  if (!url) return
+  _closeDetailLocationMenu()
+  window.open(url, '_blank', 'noopener')
+}
+
+function _initDetailLocationActions() {
+  document.getElementById('detail-map-btn')?.addEventListener('click', _openFindOnMap)
+  document.getElementById('detail-edit-location-btn')?.addEventListener('click', _openDetailLocationPicker)
+
+  const openBtn = document.getElementById('detail-location-open-btn')
+  const openWrap = document.getElementById('detail-location-open-wrap')
+  const menu = document.getElementById('detail-location-open-menu')
+  if (openBtn && menu) {
+    openBtn.addEventListener('click', event => {
+      event.stopPropagation()
+      const isOpening = menu.style.display === 'none'
+      menu.style.display = isOpening ? 'block' : 'none'
+      openBtn.setAttribute('aria-expanded', String(isOpening))
+      if (!isOpening) return
+      const closeMenu = ev => {
+        if (openWrap?.contains(ev.target)) return
+        _closeDetailLocationMenu()
+        document.removeEventListener('click', closeMenu)
+      }
+      setTimeout(() => document.addEventListener('click', closeMenu), 0)
+    })
+  }
+  MAP_LINK_SERVICES.forEach(service => {
+    menu?.querySelector(`[data-map-service="${service}"]`)
+      ?.addEventListener('click', event => {
+        event.stopPropagation()
+        _openDetailLocationInService(service)
+      })
   })
 }
 
@@ -3408,6 +3731,7 @@ function _applyOwnershipMode(isOwner) {
 
   const currentLocationBtn = document.getElementById('detail-current-location-btn')
   if (currentLocationBtn) currentLocationBtn.style.display = 'none'
+  _syncDetailLocationActions(isOwner)
 
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.disabled = !isOwner
@@ -4359,6 +4683,9 @@ async function _addPhotosToObservation(files) {
       const [originalSource] = await resolveMediaSources([storagePath], { variant: 'original' })
       const [displaySource] = await resolveMediaSources([storagePath], { variant: 'medium' })
       _appendDetailGalleryImage(reservedRow, displaySource, displaySource, { originalSource })
+      // Per photo, not once at the end: a later photo failing must not leave
+      // the finds card painting the pre-add thumbnail for the ones that landed.
+      invalidateFindsCardImages(obsId)
     }
 
     showToast(`${files.length} photo(s) added.`)

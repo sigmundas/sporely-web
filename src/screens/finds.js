@@ -119,6 +119,14 @@ const _findsBackgroundEnrichment = new Set()
 // actually commits, so any empty/offline/loading/tiles state — or a render
 // discarded by the guard — leaves it null and forces the safe path.
 let _renderedFindsView = null
+// Observations whose card thumbnails no longer match the database — photos
+// added or deleted in the detail screen, crops persisted. A reconcile leaves
+// every surviving card's DOM untouched (that is the point: no thumbnail
+// flicker while typing a search), so without this the list keeps painting the
+// pre-edit photo and count badge even after `loadFinds()` re-fetched the rows.
+// Ids recorded here force the next render of a list containing them onto the
+// full-render path, which re-fetches card images.
+const _staleFindsImageIds = new Set()
 let _findsInitialRenderLoadSeq = 0
 let _findsTargetCardLoadedUserId = null
 let _findsTargetCardLoadingUserId = null
@@ -1651,6 +1659,32 @@ export async function openFinds(scope = _currentScope(), options = {}) {
 //
 // Falls back to a full `loadFinds()` when there is nothing to return to (no
 // rendered cards, uninitialized paging, or an emptied cache).
+// Called by the detail screen whenever an observation's images changed there.
+// The next render of a list holding one of these cards must rebuild it rather
+// than reconcile around it, because reconcile never re-fetches images for a
+// card that is already on screen.
+export function invalidateFindsCardImages(obsIds) {
+  const ids = Array.isArray(obsIds) ? obsIds : [obsIds]
+  let recorded = false
+  for (const id of ids) {
+    const key = String(id ?? '').trim()
+    if (!key) continue
+    _staleFindsImageIds.add(key)
+    recorded = true
+  }
+  return recorded
+}
+
+// Exported as a test seam.
+export function _getStaleFindsImageIdsForTests() {
+  return [..._staleFindsImageIds]
+}
+
+function _renderedStaleFindsImageIds(list) {
+  if (!_staleFindsImageIds.size || !list) return []
+  return [..._findsRenderedCardIds(list)].filter(id => _staleFindsImageIds.has(id))
+}
+
 export function restoreFindsAfterDetailReturn() {
   const list = document.getElementById('finds-list')
   const currentScope = _currentScope()
@@ -1661,6 +1695,10 @@ export function restoreFindsAfterDetailReturn() {
     _pendingScrollRestore = null
     return loadFinds()
   }
+  // Photos added or removed in the detail screen are persisted immediately,
+  // with or without a save, so a rendered card whose images changed there is
+  // wrong on screen right now and has to be rebuilt.
+  if (_renderedStaleFindsImageIds(list).length) return loadFinds()
   // `_pendingScrollRestore` was recorded when the card was opened. The
   // scroller normally still holds that position, but reapplying it is what
   // makes the restore explicit — and clearing it here keeps a stale offset
@@ -2628,6 +2666,10 @@ export function _applyFilter() {
     // renderers, so a list built online cannot be reconciled into an offline
     // one (or back) without losing or keeping that note wrongly.
     && view.offline === _isOfflineFindsMode()
+    // A card whose images changed elsewhere must not survive a reconcile: the
+    // reconcile path fetches images for inserted cards only, so the stale
+    // thumbnail and photo-count badge would be carried over untouched.
+    && _renderedStaleFindsImageIds(list).length === 0
     && _findsRenderedOrderMatches(list, _findsDisplayOrder(data, sort))
 
   const renderSequence = _findsRenderGuard.begin()
@@ -2655,9 +2697,22 @@ export function _applyFilter() {
           : _renderCards(list, data, { variant: 'cards', isFriends: isFriendsScope, renderContext })
   }
 
+  // Which invalidations this render answers: a full render re-fetches images
+  // for every card it paints, a reconcile only for the ones it inserts. They
+  // are dropped once the render actually commits — a render discarded by the
+  // guard has painted nothing, so its ids must stay stale for the next one.
+  const consumedStaleImageIds = canReconcile
+    ? data.map(obs => String(obs.id))
+    : [..._staleFindsImageIds]
+
   _findsRenderPromise = Promise.resolve(renderPromise).catch(err => {
     console.warn('Finds render failed:', err)
     return false
+  }).then(committed => {
+    if (committed) {
+      for (const id of consumedStaleImageIds) _staleFindsImageIds.delete(id)
+    }
+    return committed
   }).then(_afterFindsRenderCommit)
   return _findsRenderPromise
 }

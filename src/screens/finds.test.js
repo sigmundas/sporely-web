@@ -9,6 +9,7 @@ import {
   buildFindsSearchOrFilter,
   classifyDraftAge,
   compareFindsByScientificName,
+  invalidateFindsCardImages,
   createFindsRenderGuard,
   getFindsFeedSourcePagingState,
   getFindsEffectiveStatusFilter,
@@ -33,6 +34,7 @@ import {
   _findsPrefetchDistancePx,
   _findsShouldPrefetch,
   _getFindsProfileMapForTests,
+  _getStaleFindsImageIdsForTests,
   _handleFindsScroll,
   _mergeFindsItemsWithDelta,
   _getFindsCacheForTests,
@@ -3326,6 +3328,109 @@ test('the debounced authoritative search page reconciles in place: overlapping r
     )
     assert.equal(list.querySelectorAll('.finds-grid[data-date-key]')[0]
       .querySelectorAll('.find-card[data-id]').length, 2)
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+// Editing an observation in the detail screen — adding photos, deleting one,
+// persisting crops — changes what its card must paint, but the row order does
+// not change, so the reload the detail screen runs on the way back used to
+// reconcile: every surviving card kept its DOM, and the card went on showing
+// the single pre-edit thumbnail. Reported from device QA on 2026-09-13.
+test('a card whose images changed in the detail screen is rebuilt on reload, not reconciled around', async () => {
+  const edited = makeAppendObservation(2400, { date: '2026-09-03', createdAt: '2026-09-03T12:00:00Z' })
+  const untouched = makeAppendObservation(2401, { date: '2026-09-03', createdAt: '2026-09-03T11:00:00Z' })
+  const page = { data: [edited, untouched], error: null }
+  const imageRows = {
+    [edited.id]: appendImageRow(edited.id),
+    [untouched.id]: appendImageRow(untouched.id),
+  }
+
+  const restoreTimers = installNoopFindsTimers()
+  const harness = installAppendHarness({
+    observationPages: [page, page],
+    imageRows,
+  })
+  const { list } = harness
+
+  try {
+    await loadFinds()
+    const writesBefore = list.innerHtmlWrites
+    const batchesBefore = harness.imageIdBatches().length
+    const editedCardBefore = list.querySelectorAll('.find-card[data-id]')
+      .find(card => card.dataset.id === edited.id)
+    assert.equal(editedCardBefore.querySelectorAll('img').length, 1, 'one photo before the edit')
+
+    // The detail screen adds a second photo and records the invalidation.
+    imageRows[edited.id] = [
+      ...imageRows[edited.id],
+      {
+        ...appendImageRow(edited.id)[0],
+        id: `img-${edited.id}-2`,
+        sort_order: 1,
+        full_media_url: `https://media.example.test/${edited.id}-b.jpg`,
+      },
+    ]
+    assert.equal(invalidateFindsCardImages(edited.id), true)
+
+    // What `_goBack(null, { reloadFinds: true })` runs after the save.
+    await loadFinds()
+
+    assert.ok(list.innerHtmlWrites > writesBefore,
+      'the reload rebuilt the list instead of reconciling around the stale card')
+    assert.deepEqual(
+      [...(harness.imageIdBatches().slice(batchesBefore).at(-1) || [])].sort(),
+      [edited.id, untouched.id].sort(),
+      'images were looked up again for the rendered cards',
+    )
+    const editedCardAfter = list.querySelectorAll('.find-card[data-id]')
+      .find(card => card.dataset.id === edited.id)
+    assert.equal(editedCardAfter.querySelectorAll('img').length, 2,
+      'the card paints the added photo alongside the original')
+    assert.deepEqual(_getStaleFindsImageIdsForTests(), [],
+      'the invalidation was consumed by the render that answered it')
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+// The photos are persisted as they upload, with or without a save, so leaving
+// the detail screen by Back has to repaint the card too — the scroll-only
+// restore would leave the stale thumbnail on screen.
+test('returning from the detail screen reloads Finds when a rendered card holds a stale thumbnail', async () => {
+  const edited = makeAppendObservation(2410, { date: '2026-09-03', createdAt: '2026-09-03T12:00:00Z' })
+  const page = { data: [edited], error: null }
+  const imageRows = { [edited.id]: appendImageRow(edited.id) }
+
+  const restoreTimers = installNoopFindsTimers()
+  const harness = installAppendHarness({
+    observationPages: [page, page, page],
+    imageRows,
+  })
+  const { list } = harness
+
+  try {
+    await loadFinds()
+    const writesAfterInitialRender = list.innerHtmlWrites
+
+    // Back with nothing changed: scroll restore only, no rebuild.
+    await restoreFindsAfterDetailReturn()
+    assert.equal(list.innerHtmlWrites, writesAfterInitialRender,
+      'an untouched return must not rebuild the list')
+
+    imageRows[edited.id] = []
+    invalidateFindsCardImages(edited.id)
+    await restoreFindsAfterDetailReturn()
+
+    assert.ok(list.innerHtmlWrites > writesAfterInitialRender,
+      'a return after the detail screen changed the images reloads the list')
+    const card = list.querySelectorAll('.find-card[data-id]')
+      .find(node => node.dataset.id === edited.id)
+    assert.equal(card.querySelectorAll('img').length, 0,
+      'the deleted photo is gone from the card')
   } finally {
     harness.restore()
     restoreTimers()
