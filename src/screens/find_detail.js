@@ -2886,9 +2886,15 @@ export function detailLocationActionMode(obs) {
  * The `observations` patch for a hand-placed location, or `null` for a
  * coordinate the app would refuse to render anyway.
  *
+ * Accuracy and altitude both described the old position and neither can be
+ * recovered for the new one: OpenStreetMap's reverse geocoder carries no
+ * elevation, and the app has no other elevation source. Clearing them is
+ * honest; carrying them over would attach a precise-looking "± 4 m, 109 m ASL"
+ * to a point the user placed by eye somewhere else entirely.
+ *
  * @param {unknown} lat
  * @param {unknown} lon
- * @returns {{ gps_latitude: number, gps_longitude: number, gps_accuracy: null } | null}
+ * @returns {{ gps_latitude: number, gps_longitude: number, gps_accuracy: null, gps_altitude: null } | null}
  */
 export function buildDetailLocationPatch(lat, lon) {
   const coords = normalizeCoordinatePair(lat, lon)
@@ -2896,9 +2902,8 @@ export function buildDetailLocationPatch(lat, lon) {
   return {
     gps_latitude: coords.lat,
     gps_longitude: coords.lon,
-    // A point placed by hand has no GPS accuracy. Keeping the old "± 4 m"
-    // would claim a precision this coordinate does not have.
     gps_accuracy: null,
+    gps_altitude: null,
   }
 }
 
@@ -3004,6 +3009,7 @@ async function _persistDetailLocation(observationId, picked) {
   currentObs.gps_latitude = patch.gps_latitude
   currentObs.gps_longitude = patch.gps_longitude
   currentObs.gps_accuracy = null
+  currentObs.gps_altitude = null
 
   const coordsEl = document.getElementById('detail-coords')
   if (coordsEl) {

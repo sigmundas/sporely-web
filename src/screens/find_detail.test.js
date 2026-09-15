@@ -996,15 +996,23 @@ test('the location action is Edit when a find has coordinates and Set when it ha
   assert.equal(detailLocationActionMode({ gps_latitude: 0, gps_longitude: 0 }), 'set')
 })
 
-test('a hand-placed location drops the GPS accuracy it can no longer claim', () => {
+// Accuracy and altitude both belonged to the old position, and neither can be
+// recovered for the new one — OpenStreetMap's reverse geocoder carries no
+// elevation. Keeping them would label a point placed by eye with a precise
+// "± 4 m, 109 m ASL".
+test('a hand-placed location drops the accuracy and altitude it can no longer claim', () => {
   const patch = buildDetailLocationPatch(63.441122, 10.401234)
   assert.deepEqual(patch, {
     gps_latitude: 63.441122,
     gps_longitude: 10.401234,
     gps_accuracy: null,
+    gps_altitude: null,
   })
   // Nothing else may ride along: the picker moves the point and only the point.
-  assert.deepEqual(Object.keys(patch).sort(), ['gps_accuracy', 'gps_latitude', 'gps_longitude'])
+  assert.deepEqual(
+    Object.keys(patch).sort(),
+    ['gps_accuracy', 'gps_altitude', 'gps_latitude', 'gps_longitude'],
+  )
 })
 
 test('coordinates the app would refuse to render produce no patch at all', () => {

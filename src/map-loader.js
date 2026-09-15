@@ -15,6 +15,9 @@ async function ensureMapModule() {
 
 export async function loadMapScreen() {
   const module = await ensureMapModule()
+  // Only the router calls this, so it marks entering the screen as opposed to
+  // the map reloading itself after one of its own filters changed.
+  module.beginMapScreenVisit()
   return module.loadMap()
 }
 

@@ -30,10 +30,19 @@ const MAP_SELECT_LEGACY = 'id, user_id, gps_latitude, gps_longitude, genus, spec
 // the viewport centre is the value being edited).
 const FOCUS_ZOOM = 16
 
+// Scopes a find that is not the viewer's own can appear in, tried in this
+// order until one actually yields the marker. A friend's find is usually in
+// `friends`, a stranger's in `public`, and `follow` catches the rest.
+const NON_OWNER_FOCUS_SCOPES = ['friends', 'public', 'feed']
+
 // The observation `focusObservationOnMap()` asked for, consumed by the next
 // `loadMap()`. Held rather than applied immediately because the data the
 // marker comes from is fetched by that load.
 let _pendingFocus = null
+// The find the map is currently focused on, which is what the "Back to find"
+// control returns to. Survives filter changes; cleared when the map screen is
+// entered afresh (see `beginMapScreenVisit()`).
+let _focusReturn = null
 // `null` when not picking. `origin` is the location the Find had when the
 // picker opened — rendered as a subdued marker so the user can see how far
 // they have moved — and may be null for a Find that had no coordinates.
@@ -188,26 +197,21 @@ async function _withLocationPrecisionFallback(makeQuery) {
 // ── Focus one observation ─────────────────────────────────────────────────────
 
 /**
- * Pick the scope and time window that can actually contain a focus target.
+ * The scopes that could hold a focus target, best guess first.
  *
- * The map's own filters would otherwise hide the very find the user asked to
- * see: a summer find is outside the default "past month", and someone else's
- * find is not in "mine". Time always widens to `all`; scope only changes when
- * we know the observation is the viewer's own, because for anyone else's find
- * the current scope (feed/friends/public) is the one it was reached through.
+ * The viewer's own find is only ever in `mine`. For anyone else's the map has
+ * to go looking: the scope the Find detail screen was reached through is not
+ * necessarily one the map can load it in, so the caller walks this list until
+ * a marker turns up.
  *
  * @param {{ ownerId?: string|null }} focus
  * @param {string|null|undefined} viewerId
- * @param {string} currentScope
- * @returns {{ scope: string, timeScope: 'all' }}
+ * @returns {string[]} at least one scope
  */
-export function resolveMapFocusScope(focus = {}, viewerId = null, currentScope = 'mine') {
+export function resolveMapFocusScopes(focus = {}, viewerId = null) {
   const ownerId = focus?.ownerId ? String(focus.ownerId) : ''
   const isOwn = !!ownerId && !!viewerId && ownerId === String(viewerId)
-  return {
-    scope: isOwn ? 'mine' : _normalizeScope(currentScope),
-    timeScope: 'all',
-  }
+  return isOwn ? ['mine'] : [...NON_OWNER_FOCUS_SCOPES]
 }
 
 /**
@@ -220,23 +224,42 @@ export function focusObservationOnMap(target = {}) {
   if (!id) return
   const coords = normalizeCoordinatePair(target.lat, target.lon)
 
-  const { scope, timeScope } = resolveMapFocusScope(target, state.user?.id, _currentScope())
-  state.observationScope = scope
-  state.mapTimeScope = timeScope
+  const scopes = resolveMapFocusScopes(target, state.user?.id)
+  state.observationScope = scopes[0]
+  // The default "past month" would hide any find older than 30 days, which is
+  // exactly the find someone looks up on the map.
+  state.mapTimeScope = 'all'
   // A leftover species filter would drop the focused marker before it is ever
   // looked up; focusing is a direct request for one find, not a search.
   state.searchQuery = ''
 
-  _pendingFocus = { id, lat: coords?.lat ?? null, lon: coords?.lon ?? null }
+  _pendingFocus = {
+    id,
+    lat: coords?.lat ?? null,
+    lon: coords?.lon ?? null,
+    remainingScopes: scopes.slice(1),
+  }
   navigate('map')
 }
 
 function _applyPendingFocus() {
   const focus = _pendingFocus
   if (!focus || !map) return
-  _pendingFocus = null
 
   const marker = _markersById.get(focus.id)
+  if (!marker && focus.remainingScopes.length) {
+    // Wrong scope: this find is someone else's and the first guess did not
+    // hold it. Switch the map's own filter to the next scope that could and
+    // load again — the list shrinks every pass, so this terminates.
+    state.observationScope = focus.remainingScopes.shift()
+    void loadMap()
+    return
+  }
+
+  _pendingFocus = null
+  _focusReturn = focus.id
+  _syncMapFocusBar()
+
   if (marker) {
     // `zoomToShowLayer` un-clusters the marker first; without it `openPopup()`
     // on a clustered marker opens nothing.
@@ -251,13 +274,37 @@ function _applyPendingFocus() {
     return
   }
 
-  // No marker: the find is outside the scope the viewer can load on the map
-  // (blocked author, draft, a view that does not carry it). Centring on the
-  // coordinates the detail screen already showed is still the right answer,
-  // and adds no information the viewer did not have.
+  // No scope held it (blocked author, a draft, a view that does not carry it).
+  // Centring on the coordinates the detail screen already showed is still the
+  // right answer, and adds no information the viewer did not have.
   if (Number.isFinite(focus.lat) && Number.isFinite(focus.lon)) {
     map.setView([focus.lat, focus.lon], FOCUS_ZOOM)
   }
+}
+
+/**
+ * Called when the map screen is entered, as opposed to reloaded by one of its
+ * own filters. Arriving fresh ends any previous focus, so the "Back to find"
+ * control does not linger from an earlier visit; arriving *as* a focus keeps
+ * the pending target intact.
+ */
+export function beginMapScreenVisit() {
+  if (!_pendingFocus) _focusReturn = null
+}
+
+function _syncMapFocusBar() {
+  const bar = document.getElementById('map-focus-bar')
+  const showing = !!_focusReturn && !isMapLocationPickerActive()
+  if (bar) bar.style.display = showing ? 'flex' : 'none'
+  const label = document.getElementById('map-focus-back-label')
+  if (label) label.textContent = t('map.backToFind')
+}
+
+function _returnToFocusedFind() {
+  if (!_focusReturn) return
+  _focusReturn = null
+  _syncMapFocusBar()
+  goBack()
 }
 
 // ── Pick a location ───────────────────────────────────────────────────────────
@@ -416,6 +463,7 @@ export function initMap() {
   _syncFuzzedCircleVisibility()
 
   document.getElementById('map-locate-btn')?.addEventListener('click', _centerOnCurrentLocation)
+  document.getElementById('map-focus-back-btn')?.addEventListener('click', _returnToFocusedFind)
   document.getElementById('map-picker-cancel-btn')?.addEventListener('click', () => _exitLocationPicker())
   document.getElementById('map-picker-save-btn')?.addEventListener('click', _confirmLocationPicker)
   window.addEventListener(LOCATION_STATE_CHANGED_EVENT, _renderCurrentLocation)
@@ -488,6 +536,7 @@ export function initMap() {
 export async function loadMap() {
   requestAnimationFrame(() => map?.invalidateSize())
   _syncLocationPickerUi()
+  _syncMapFocusBar()
   if (!state.user) {
     // The picker has to reach its start position even when there is no signed-in
     // user to load observations for.

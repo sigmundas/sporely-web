@@ -2909,6 +2909,31 @@ html, body {
   pointer-events: auto;
 }
 
+/* "Back to find" while the map is focused on one observation, so arriving
+   from the Find detail screen is not a one-way trip. */
+.map-focus-bar {
+  align-self: flex-start;
+  pointer-events: auto;
+}
+.map-focus-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px 7px 10px;
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  background: rgba(13, 17, 9, 0.88);
+  backdrop-filter: blur(8px);
+  color: var(--text-primary);
+  font-family: 'Outfit', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+html.light .map-focus-back-btn {
+  background: rgba(255, 255, 255, 0.92);
+}
+
 /* Location picker: the marker stays put in the viewport centre and the map
    moves under it, so the crosshair must not intercept drags. */
 .map-picker-crosshair {
@@ -2934,6 +2959,9 @@ html, body {
   background: rgba(13, 17, 9, 0.92);
   backdrop-filter: blur(10px);
   border-top: 1px solid var(--border);
+}
+html.light .map-picker-bar {
+  background: rgba(255, 255, 255, 0.95);
 }
 .map-picker-hint {
   font-size: 12px;
@@ -4339,40 +4367,33 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
   margin-top: 8px;
 }
 
-/* Map / Edit location / Open-in row under the Find's coordinates. */
+/* Map / Edit location / Open-in, the last row of the Location data box. The
+   buttons share the app's standard secondary-button styling so they follow the
+   light/dark theme with everything else. */
 .detail-location-actions {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
-  flex-wrap: wrap;
-  padding: 8px 0 2px;
+  padding: 12px 14px;
+}
+.detail-location-actions > .location-action-btn,
+.detail-location-actions > .location-open-wrap {
+  flex: 1 1 0;
+  min-width: 0;
 }
 .location-action-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-family: 'Outfit', sans-serif;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 5px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
   white-space: nowrap;
-  transition: border-color 0.15s, color 0.15s;
-}
-.location-action-btn:hover {
-  border-color: var(--green-accent);
-  color: var(--green-accent);
 }
 .location-open-wrap {
   position: relative;
-  margin-left: auto;
 }
 .location-open-menu {
-  width: 180px;
+  width: 190px;
   right: 0;
   left: auto;
 }

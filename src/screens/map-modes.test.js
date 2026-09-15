@@ -41,6 +41,21 @@ const OTHER_FIND = {
 }
 
 let observations = [OWN_FIND, OTHER_FIND]
+// When set, rows are served per scope so a test can make one scope hold the
+// find and the others come back empty.
+let scopeResults = null
+
+const SCOPE_BY_TABLE = {
+  observations: 'mine',
+  observations_friend_view: 'friends',
+  observations_follow_view: 'feed',
+  observations_community_view: 'public',
+}
+
+function _rowsForTable(table) {
+  if (!scopeResults) return observations
+  return scopeResults[SCOPE_BY_TABLE[table]] || []
+}
 let elements = new Map()
 let mapInstances = []
 let clusterGroups = []
@@ -184,6 +199,7 @@ const clusterLayer = () => clusterGroups[clusterGroups.length - 1]
 
 let mapModule = null
 let loadMapScreen = null
+let loadMap = null
 
 before(async () => {
   const window = {
@@ -216,13 +232,14 @@ before(async () => {
   _setGlobalProperty('cancelAnimationFrame', () => {})
 
   const originalFrom = supabase.from
-  supabase.from = () => {
+  supabase.from = table => {
     const chain = {
       select() { return chain },
       eq() { return chain },
+      neq() { return chain },
       not() { return chain },
       gte() { return chain },
-      then(resolve) { resolve({ data: observations, error: null }) },
+      then(resolve) { resolve({ data: _rowsForTable(table), error: null }) },
     }
     return chain
   }
@@ -245,6 +262,7 @@ before(async () => {
   // Initialise through the loader, the same seam the router and the Find
   // detail screen use, so `initMap()` runs exactly once for this file.
   ;({ loadMapScreen } = await import('../map-loader.js'))
+  ;({ loadMap } = mapModule)
   await loadMapScreen()
 })
 
@@ -259,22 +277,18 @@ async function _settle() {
   for (let i = 0; i < 3; i += 1) await new Promise(resolve => setTimeout(resolve, 0))
 }
 
-test('focus widens the time window and only claims the scope for the viewer\'s own find', () => {
-  const { resolveMapFocusScope } = mapModule
+test('the scopes a focus target could live in start from who owns it', () => {
+  const { resolveMapFocusScopes } = mapModule
 
   assert.deepEqual(
-    resolveMapFocusScope({ ownerId: 'user-1' }, 'user-1', 'public'),
-    { scope: 'mine', timeScope: 'all' },
+    resolveMapFocusScopes({ ownerId: 'user-1' }, 'user-1'),
+    ['mine'],
     'the viewer\'s own find is only ever in the "mine" scope',
   )
-  assert.deepEqual(
-    resolveMapFocusScope({ ownerId: 'user-2' }, 'user-1', 'friends'),
-    { scope: 'friends', timeScope: 'all' },
-    'someone else\'s find keeps the scope it was reached through',
-  )
-  // Always `all`: the default "past month" would silently hide any find older
-  // than 30 days, which is exactly the find a user wants to look up.
-  assert.equal(resolveMapFocusScope({}, null, 'mine').timeScope, 'all')
+  // Someone else's find: the map does not know which of its scopes can load
+  // it, so it gets an ordered list to walk rather than one guess.
+  assert.deepEqual(resolveMapFocusScopes({ ownerId: 'user-2' }, 'user-1'), ['friends', 'public', 'feed'])
+  assert.deepEqual(resolveMapFocusScopes({}, null), ['friends', 'public', 'feed'])
 })
 
 test('focusing a find selects its marker instead of fitting the map to every marker', async () => {
@@ -300,13 +314,41 @@ test('focusing a find selects its marker instead of fitting the map to every mar
   assert.equal(activeMap().fitBoundsCalls.length, fitsBefore, 'focus owns the viewport, so no fit-to-all')
 })
 
-test('focusing a find the map cannot load still centres on the coordinates the viewer already had', async () => {
+// Opening a friend's or a stranger's find from its detail screen must switch
+// the map's own scope filter to one that can actually load it — otherwise the
+// map arrives on "Mine" and the find is simply not there.
+test('focusing someone else\'s find walks the scope filter until the find is loadable', async () => {
+  const { focusObservationOnMap } = mapModule
+  state.observationScope = 'mine'
+  clusterLayer().zoomToShowLayerCalls.length = 0
+
+  // Only the "public" scope returns this find; "friends" comes back empty.
+  scopeResults = { friends: [], public: [OTHER_FIND], feed: [], mine: [] }
+  try {
+    focusObservationOnMap({
+      id: OTHER_FIND.id,
+      lat: OTHER_FIND.gps_latitude,
+      lon: OTHER_FIND.gps_longitude,
+      ownerId: 'user-2',
+    })
+    await _settle()
+
+    assert.equal(state.observationScope, 'public', 'the map filter moved to the scope holding the find')
+    const opened = clusterLayer().zoomToShowLayerCalls
+    assert.equal(opened.length, 1, 'the find was found and selected after the switch')
+    assert.deepEqual(opened[0].coords, [OTHER_FIND.gps_latitude, OTHER_FIND.gps_longitude])
+  } finally {
+    scopeResults = null
+  }
+})
+
+test('focusing a find no scope can load still centres on the coordinates the viewer already had', async () => {
   const { focusObservationOnMap } = mapModule
   const before = activeMap().setViewCalls.length
   const fitsBefore = activeMap().fitBoundsCalls.length
   clusterLayer().zoomToShowLayerCalls.length = 0
 
-  focusObservationOnMap({ id: 9999, lat: 59.91, lon: 10.75, ownerId: 'user-1' })
+  focusObservationOnMap({ id: 9999, lat: 59.91, lon: 10.75, ownerId: 'user-2' })
   await _settle()
 
   assert.equal(clusterLayer().zoomToShowLayerCalls.length, 0, 'there was no marker to select')
@@ -314,6 +356,33 @@ test('focusing a find the map cannot load still centres on the coordinates the v
   assert.ok(activeMap().setViewCalls.length > before)
   assert.deepEqual(last.coords, [59.91, 10.75])
   assert.equal(activeMap().fitBoundsCalls.length, fitsBefore)
+})
+
+// Arriving on the map from a Find used to be a one-way trip: the map screen
+// has no back control of its own.
+test('a focused map offers a way back to the find, and drops it on a later plain visit', async () => {
+  const { focusObservationOnMap, beginMapScreenVisit } = mapModule
+  state.observationScope = 'mine'
+
+  focusObservationOnMap({ id: OWN_FIND.id, lat: OWN_FIND.gps_latitude, lon: OWN_FIND.gps_longitude, ownerId: 'user-1' })
+  await _settle()
+  assert.equal(el('map-focus-bar').style.display, 'flex', 'the back control is offered while focused')
+
+  // Changing a map filter reloads the map but must not strand the user.
+  await loadMap()
+  assert.equal(el('map-focus-bar').style.display, 'flex', 'a filter change keeps the way back')
+
+  el('map-focus-back-btn').click()
+  await _settle()
+  assert.equal(el('map-focus-bar').style.display, 'none', 'taking the way back retires it')
+
+  // Reaching the map the ordinary way afterwards must not resurrect it.
+  focusObservationOnMap({ id: OWN_FIND.id, lat: OWN_FIND.gps_latitude, lon: OWN_FIND.gps_longitude, ownerId: 'user-1' })
+  await _settle()
+  assert.equal(el('map-focus-bar').style.display, 'flex')
+  beginMapScreenVisit()
+  await loadMap()
+  assert.equal(el('map-focus-bar').style.display, 'none', 'a fresh visit to the map is not a focused one')
 })
 
 test('the location picker starts at the find, shows the previous point, and cancels without reporting a coordinate', async () => {

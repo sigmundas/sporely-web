@@ -291,6 +291,7 @@ const messages = {
     'map.pastMonth': 'Past month',
     'map.pickLocationHint': 'Pan and zoom the map to place the marker.',
     'map.saveLocation': 'Save location',
+    'map.backToFind': 'Back to find',
     'scope.mine': 'Mine',
     'scope.feed': 'Feed',
     'scope.friends': 'Friends',
@@ -779,6 +780,7 @@ const messages = {
     'map.pastMonth': 'Siste måned',
     'map.pickLocationHint': 'Dra og zoom kartet for å plassere markøren.',
     'map.saveLocation': 'Lagre sted',
+    'map.backToFind': 'Tilbake til funnet',
     'scope.mine': 'Mine',
     'scope.feed': 'Feed',
     'scope.friends': 'Venner',
@@ -1267,6 +1269,7 @@ const messages = {
     'map.pastMonth': 'Senaste månad',
     'map.pickLocationHint': 'Dra och zooma kartan för att placera markören.',
     'map.saveLocation': 'Spara plats',
+    'map.backToFind': 'Tillbaka till fyndet',
     'scope.mine': 'Mina',
     'scope.feed': 'Flöde',
     'scope.friends': 'Vänner',
@@ -1755,6 +1758,7 @@ const messages = {
     'map.pastMonth': 'Letzter Monat',
     'map.pickLocationHint': 'Karte verschieben und zoomen, um den Marker zu setzen.',
     'map.saveLocation': 'Ort speichern',
+    'map.backToFind': 'Zurück zum Fund',
     'scope.mine': 'Meine',
     'scope.feed': 'Feed',
     'scope.friends': 'Freunde',
@@ -2209,6 +2213,7 @@ export function applyStaticTranslations() {
   setText('#map-picker-hint', 'map.pickLocationHint')
   setText('#map-picker-cancel-btn', 'common.cancel')
   setText('#map-picker-save-btn', 'map.saveLocation')
+  setText('#map-focus-back-label', 'map.backToFind')
   setText('#comments-section .comments-title', 'comments.title')
   setText('#comment-send-btn', 'comments.send')
   setText('#detail-delete-btn', 'common.delete')
