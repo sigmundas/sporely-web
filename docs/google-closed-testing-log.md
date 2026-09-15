@@ -25,6 +25,18 @@ opt-in count was not re-checked for this entry.
 
 ## Changes Applied
 
+### Day 11 (September 15, 2026)
+
+**Editable Find location on the existing map — candidate on branch, release and device QA not yet recorded**
+
+- Closed-testing context: a Find's coordinates normally come from photo GPS, which is wrong whenever the specimen was photographed later at home rather than where it was collected. Testers had no way to correct the point.
+- Find detail's Location data box gained a final action row: **Map**, **Edit location** (**Set location** when the Find has no coordinates at all), and one compact **Open** menu for Google Maps, Mapy.com and OpenStreetMap — deliberately one menu rather than three permanent service buttons. Editing is owner-only; the read-only actions appear for any viewer of a Find that has coordinates.
+- No second mapping UI: the existing observations map gained two modes on the same Leaflet instance. *Focus* opens zoomed to the find with its marker un-clustered and its popup open, widens the time filter to `all` (the default "past month" hides exactly the find being looked up), and walks scope candidates — friends, then public, then feed — until one actually loads it, moving the map's own scope pill with it. A "Back to find" pill returns to the detail screen; it survives map filter changes but is dropped on a later plain visit to the map. *Pick* fixes a crosshair at the viewport centre and pans the map underneath it, starting at the Find's current point and drawing that point as a subdued reference marker. Nothing is written until Save location; Cancel reports nothing, and other markers go non-interactive while picking so a stray tap cannot strand the edit behind another screen.
+- Confirming the picker persists `gps_latitude`/`gps_longitude` immediately, the way photos added in this screen already do, and clears `gps_accuracy` and `gps_altitude`. Both described the old position and neither can be recovered for the new one: OpenStreetMap's reverse geocoder carries no elevation, so filling altitude back in would mean sending coordinates to a further third-party elevation service. No schema or migration change.
+- Privacy: external-map links are built only from the coordinates the viewer already sees, and carry nothing else — no species, no observation id. An obscured find stays obscured for anyone but its owner: the link is clamped to the same 2-decimal grid the database views fuzz to, and opens centred at a coarse zoom with no pin, so ~1 km of uncertainty is not presented as an exact spot. Owners keep a precise pin on their own find, which is what makes the feature usable for navigating back to a site.
+- Tests: 48 focused tests pass across `src/map-links.test.js` (new), `src/screens/map-modes.test.js` (new), `src/screens/map.test.js` and `src/screens/find_detail.test.js`, verified against the frozen candidate in a clean worktree. Full `npm test` on the working tree: **1,328 passed, 36 skipped, 6 failed** — the same six Deno test files Node cannot load, as on Day 8. Production build succeeds and Leaflet stays in its own lazily-loaded chunk.
+- Branch `feature/find-location-editing`, commits `92b239a`, `7cde5cf`. Files changed: `index.html`, `src/map-links.js` (new), `src/map-loader.js`, `src/screens/map.js`, `src/screens/find_detail.js`, `src/i18n.js`, `src/style.css`, plus the tests above. Not merged, released, or device-verified.
+
 ### Day 9 (September 13, 2026)
 
 **Cross-client logout no longer revokes Android sessions — implemented locally; release and device QA not yet recorded**
