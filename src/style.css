@@ -102,6 +102,15 @@
   --red:          #c05848;
   --red-dim:      rgba(192,88,72,0.2);
   --white:        #eef4ec;
+  /* AI provider tab group (find detail). The fused tab/panel surface is one
+     step apart from the idle tab surface in both themes, but the direction
+     flips: raised is lighter than idle in dark mode and darker in light. */
+  --ai-tab-surface-raised: var(--card-raised);
+  --ai-tab-surface-idle:   var(--card);
+  --ai-tab-border:         var(--border);
+  --ai-tab-indicator:      var(--green-accent);
+  --ai-tab-idle-label:     var(--text-secondary);
+  --ai-row-surface:        rgba(255,255,255,0.07);
   /* Button tokens (dark mode) */
   --btn-bg:       #aecdc3;
   --btn-text:     #131313;
@@ -3945,6 +3954,122 @@ html.light .review-gps-pill {
   border: 1px dashed var(--border);
   border-radius: 10px;
 }
+
+/* ── Fused provider tabs + result panel (find detail) ──────────────────────
+   The two provider buttons and the result list share one surface: the
+   selected tab's bottom edge opens into the panel, so the list reads as the
+   contents of that tab. Scoped to `.is-fused-tabs` so the review and
+   import-review screens keep their standalone-pill layout.
+
+   Surfaces are driven by the --ai-tab-* tokens, not literals, because the
+   light/dark relationship inverts: the raised surface is darker than the idle
+   tab in light mode and lighter in dark mode. The tab row is lifted above the
+   panel with z-index so the panel's -1px overlap tucks underneath instead of
+   painting over the unselected tab's bottom border. */
+.detail-ai-stack.is-fused-tabs {
+  gap: 16px;
+}
+.detail-ai-stack.is-fused-tabs .detail-ai-service-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  width: 100%;
+  position: relative;
+  z-index: 1;
+}
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab {
+  flex: 1 1 0;
+  justify-content: space-between;
+  gap: 7px;
+  padding: 12px 13px;
+  background: var(--ai-tab-surface-idle);
+  border: 1px solid var(--ai-tab-border);
+  border-radius: 0;
+  color: var(--ai-tab-idle-label);
+  box-shadow: none;
+}
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab:first-child {
+  border-radius: 10px 0 0 0;
+}
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab:last-child {
+  border-radius: 0 10px 0 0;
+  margin-left: -1px;
+}
+/* Selected tab: shares the panel surface, loses its bottom edge into the
+   panel, and carries the active indicator bar. The bottom border stays in
+   the box (transparent) rather than being removed, so switching tabs never
+   changes the row's height. */
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab.is-active {
+  position: relative;
+  z-index: 2;
+  background: var(--ai-tab-surface-raised);
+  border-color: var(--ai-tab-border);
+  border-bottom-color: transparent;
+  color: var(--text-primary);
+  box-shadow: inset 0 3px 0 0 var(--ai-tab-indicator);
+}
+/* Neutralize the standalone-pill decoration rings; the shared surface and
+   indicator bar carry selection state here. */
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab.is-used,
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab.has-results {
+  border-color: var(--ai-tab-border);
+  box-shadow: none;
+}
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab.is-active.is-used,
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab.is-active.has-results {
+  border-color: var(--ai-tab-border);
+  border-bottom-color: transparent;
+  box-shadow: inset 0 3px 0 0 var(--ai-tab-indicator);
+}
+/* Error/slow keep their existing edge colour, which pairs with the status icon. */
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab.has-error {
+  border-color: rgba(192, 88, 72, 0.45);
+}
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab.is-slow {
+  border-color: rgba(240, 194, 77, 0.55);
+}
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab.is-active.has-error,
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab.is-active.is-slow {
+  border-bottom-color: transparent;
+}
+.detail-ai-stack.is-fused-tabs .ai-id-service-tab:focus-visible {
+  outline: 2px solid var(--ai-tab-indicator);
+  outline-offset: -4px;
+}
+.detail-ai-stack.is-fused-tabs .detail-ai-results-shell {
+  margin-top: -1px;
+  padding: 8px;
+  gap: 6px;
+  background: var(--ai-tab-surface-raised);
+  border: 1px solid var(--ai-tab-border);
+  border-top: none;
+  border-radius: 0 0 11px 11px;
+}
+/* The row stack is a flex column so the 6px rhythm comes from one gap rather
+   than per-row margins. _renderDetailAiResults must not pin display:block. */
+.detail-ai-stack.is-fused-tabs .detail-ai-results {
+  gap: 6px;
+}
+/* Taxon rows sit one step lighter than the panel, so they need no border of
+   their own to read as separate cards. */
+.detail-ai-stack.is-fused-tabs .ai-result-row {
+  padding: 11px 13px;
+  background: var(--ai-row-surface);
+  border: 0;
+  border-radius: 8px;
+}
+/* Re-assert hover and selection at this scope: dropping the row border raised
+   the base rules' specificity above the ones that used to paint these states. */
+.detail-ai-stack.is-fused-tabs .ai-result-row:hover {
+  background: color-mix(in srgb, var(--ai-row-surface) 94%, var(--text-primary));
+}
+.detail-ai-stack.is-fused-tabs .ai-result-row.is-selected {
+  background: color-mix(in srgb, var(--ai-tab-indicator) 14%, var(--ai-row-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ai-tab-indicator) 45%, transparent);
+}
+.detail-ai-stack.is-fused-tabs .ai-result-row-meta {
+  gap: 8px;
+}
 .settings-photo-id-mode-grid {
   width: min(100%, 320px);
   display: grid;
@@ -4967,6 +5092,15 @@ html.light {
   --red-dim:       rgba(220,38,38,0.10);
   /* Keep white as true white for surfaces that must stay white (toggle thumb etc) */
   --white:         #ffffff;
+  /* AI provider tab group — the raised surface goes darker than the idle tab
+     here, the reverse of dark mode, and the taxon row sits one step lighter
+     than the panel it rests on. */
+  --ai-tab-surface-raised: #eef0ea;
+  --ai-tab-surface-idle:   #fafaf7;
+  --ai-tab-border:         #dfe3d8;
+  --ai-tab-indicator:      #2b4a33;
+  --ai-tab-idle-label:     #5f5f57;
+  --ai-row-surface:        #ffffff;
 }
 
 /* App shell — lighter shadow on light bg */
@@ -5325,6 +5459,18 @@ html.light .ai-id-dot.is-complete::before {
   -webkit-overflow-scrolling: touch;
   padding-top: 10px;
   padding-bottom: 16px;
+}
+/* Find-detail cards run on an 18px gutter, so the AI Photo ID button, the tab
+   bar and the result panel all start and end on the same edges. */
+#screen-find-detail .detail-field {
+  padding: 18px;
+}
+/* The two toggles are one stack: gap owns the rhythm, not per-row margins. */
+#screen-find-detail .detail-toggle-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 18px;
 }
 .detail-footer {
   flex-shrink: 0;

@@ -68,12 +68,19 @@ function makeTab(service, active = false) {
   const score = { textContent: '', style: {} }
   const label = { insertAdjacentHTML() {} }
   return {
+    id: `detail-ai-tab-${service}`,
     dataset: { identifyServiceTab: service },
     classList: new MockClassList(active ? ['is-active'] : []),
     disabled: false,
+    tabIndex: -1,
     attributes: {},
     setAttribute(name, value) {
       this.attributes[name] = String(value)
+    },
+    // The find-detail tabs are a real ARIA tablist; the review screens reuse
+    // the same classes outside one, so the renderer checks for the ancestor.
+    closest(selector) {
+      return selector === '#detail-ai-service-tabs' ? { id: 'detail-ai-service-tabs' } : null
     },
     querySelector(selector) {
       if (selector === '.ai-id-service-tab-icon, .ai-id-dot') return icon
@@ -90,6 +97,10 @@ function makeResultsEl() {
     innerHTML: '',
     style: {},
     dataset: {},
+    attributes: {},
+    setAttribute(name, value) {
+      this.attributes[name] = String(value)
+    },
     querySelectorAll(selector) {
       if (selector === '[data-identify-result]') return items
       return []
@@ -144,6 +155,10 @@ function withDocument({ tabs = [], resultsEl = makeResultsEl(), staleNote = { st
     querySelector(selector) {
       if (selector === '[data-identify-run-button]') return runBtn
       if (selector === '[data-identify-stale-note]') return staleNote
+      const scopedTab = /^#detail-ai-service-tabs \[data-identify-service-tab="(.+)"\]$/.exec(selector)
+      if (scopedTab) {
+        return tabs.find(tab => tab.dataset.identifyServiceTab === scopedTab[1]) || null
+      }
       return null
     },
     getElementById(id) {
@@ -670,6 +685,173 @@ test('stored results remain clickable even when the current availability says un
   } finally {
     restore()
   }
+})
+
+test('the provider tabs and result panel form one fused, keyboard-navigable tablist', () => {
+  const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+
+  // One container holds both provider buttons and the result panel, so the
+  // list reads as the contents of the selected tab.
+  const tabGroup = /<div class="detail-ai-tabgroup">([\s\S]*?)<div class="detail-follow-row">/.exec(html)
+  assert.ok(tabGroup, 'expected a detail-ai-tabgroup wrapper in the find detail markup')
+  assert.match(tabGroup[1], /data-identify-service-tab="artsorakel"/)
+  assert.match(tabGroup[1], /data-identify-service-tab="inat"/)
+  assert.match(tabGroup[1], /class="detail-ai-results-shell"/)
+  assert.match(html, /class="detail-ai-stack is-fused-tabs"/)
+  // The run button stays outside the fused surface.
+  assert.doesNotMatch(
+    /<div class="detail-ai-controls">([\s\S]*?)<\/div>/.exec(html)[1],
+    /data-identify-service-tab/,
+  )
+
+  // Real tab semantics, not styled buttons.
+  assert.match(html, /id="detail-ai-service-tabs" role="tablist"/)
+  assert.match(html, /id="detail-ai-tab-artsorakel" role="tab" aria-selected="true" aria-controls="detail-ai-results" tabindex="0"/)
+  assert.match(html, /id="detail-ai-tab-inat" role="tab" aria-selected="false" aria-controls="detail-ai-results" tabindex="-1"/)
+  assert.match(html, /id="detail-ai-results"[^>]*role="tabpanel"[^>]*aria-labelledby="detail-ai-tab-artsorakel"/)
+
+  // Left/right arrow navigation, gated by the same reachability rule as clicks.
+  assert.match(source, /event\.key === 'ArrowRight' \? 1 : event\.key === 'ArrowLeft' \? -1 : 0/)
+  assert.match(source, /!_detailAiTabIsActivatable\(nextTab\)/)
+  assert.match(source, /if \(!_detailAiTabIsActivatable\(tab\)\) return/)
+})
+
+test('rendering the provider tabs keeps aria-selected, roving tabindex and the panel label in sync', () => {
+  resetDetailState()
+  const tabs = [
+    makeTab('artsorakel', true),
+    makeTab('inat'),
+  ]
+  const resultsEl = makeResultsEl()
+  const restore = withDocument({ tabs, resultsEl })
+
+  try {
+    detailAiState.availability = {
+      artsorakel: { available: true, reason: '' },
+      inat: { available: true, reason: '' },
+    }
+    detailAiState.resultsByService = {
+      artsorakel: { service: 'artsorakel', status: 'success', predictions: [{ scientificName: 'Hebeloma crustuliniforme', probability: 0.55 }] },
+      inat: { service: 'inat', status: 'success', predictions: [{ scientificName: 'Hebeloma mesophaeum', probability: 0.39 }] },
+    }
+
+    _renderDetailAiTabs()
+    _renderDetailAiResults()
+    assert.equal(tabs[0].attributes['aria-selected'], 'true')
+    assert.equal(tabs[1].attributes['aria-selected'], 'false')
+    assert.equal(tabs[0].tabIndex, 0)
+    assert.equal(tabs[1].tabIndex, -1)
+    assert.equal(resultsEl.attributes['aria-labelledby'], 'detail-ai-tab-artsorakel')
+
+    _setDetailAiActiveService('inat')
+    assert.equal(tabs[0].attributes['aria-selected'], 'false')
+    assert.equal(tabs[1].attributes['aria-selected'], 'true')
+    assert.equal(tabs[0].tabIndex, -1)
+    assert.equal(tabs[1].tabIndex, 0)
+    assert.equal(resultsEl.attributes['aria-labelledby'], 'detail-ai-tab-inat')
+  } finally {
+    restore()
+  }
+})
+
+const FUSED_CSS = (() => {
+  const css = fs.readFileSync(new URL('../style.css', import.meta.url), 'utf8')
+  const start = css.indexOf('.detail-ai-stack.is-fused-tabs {')
+  const block = start >= 0 ? css.slice(start, css.indexOf('.settings-photo-id-mode-grid', start)) : ''
+  const tokens = name => {
+    const scope = css.slice(css.indexOf(name), css.indexOf('}', css.indexOf(name)))
+    return Object.fromEntries(
+      Array.from(scope.matchAll(/(--[a-z0-9-]+):\s*([^;]+);/g)).map(([, k, v]) => [k, v.trim()]),
+    )
+  }
+  // Rough perceptual ordering is enough to assert "which surface is lighter".
+  const lightness = hex => {
+    const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+  return { css, block, dark: tokens(':root {'), light: tokens('html.light {'), lightness }
+})()
+
+test('the fused tab surfaces are theme tokens, so light and dark invert correctly', () => {
+  assert.ok(FUSED_CSS.block, 'expected a fused-tab block in style.css')
+  const { block, dark, light, lightness } = FUSED_CSS
+
+  // Selected tab and panel share the raised surface; the idle tab sits one step away.
+  assert.match(block, /\.ai-id-service-tab\.is-active \{[\s\S]*?background: var\(--ai-tab-surface-raised\)/)
+  assert.match(block, /\.detail-ai-results-shell \{[\s\S]*?background: var\(--ai-tab-surface-raised\)/)
+  assert.match(block, /\.ai-id-service-tab \{[\s\S]*?background: var\(--ai-tab-surface-idle\)/)
+  assert.match(block, /\.ai-result-row \{[\s\S]*?background: var\(--ai-row-surface\)/)
+  // The panel opens into the selected tab rather than closing itself off.
+  assert.match(block, /border-top: none/)
+  assert.match(block, /border-bottom-color: transparent/)
+  assert.match(block, /inset 0 3px 0 0 var\(--ai-tab-indicator\)/)
+  // No literal colours in the component: themes come from the tokens alone.
+  assert.doesNotMatch(
+    block.replace(/rgba\(192, 88, 72, 0\.45\)|rgba\(240, 194, 77, 0\.55\)/g, ''),
+    /#[0-9a-fA-F]{3,8}\b/,
+  )
+
+  // Both themes must define the whole set, or one theme silently falls back.
+  const names = [
+    '--ai-tab-surface-raised',
+    '--ai-tab-surface-idle',
+    '--ai-tab-border',
+    '--ai-tab-indicator',
+    '--ai-tab-idle-label',
+    '--ai-row-surface',
+  ]
+  for (const name of names) {
+    assert.ok(dark[name], `:root is missing ${name}`)
+    assert.ok(light[name], `html.light is missing ${name}`)
+  }
+
+  // The inversion itself: in light mode the raised surface is DARKER than the
+  // idle tab, and in dark mode it is lighter (inherited from the surface ramp).
+  assert.ok(
+    lightness(light['--ai-tab-surface-raised']) < lightness(light['--ai-tab-surface-idle']),
+    'light mode: the raised tab/panel surface should be darker than the idle tab',
+  )
+  assert.equal(dark['--ai-tab-surface-raised'], 'var(--card-raised)')
+  assert.equal(dark['--ai-tab-surface-idle'], 'var(--card)')
+  assert.ok(
+    lightness(dark['--card-raised']) > lightness(dark['--card']),
+    'dark mode: --card-raised should be lighter than --card',
+  )
+  // The taxon row is one step lighter than the panel it rests on.
+  assert.equal(light['--ai-row-surface'], '#ffffff')
+  assert.match(dark['--ai-row-surface'], /^rgba\(255,255,255,/)
+})
+
+test('the fused tab group keeps its spacing on one shared gutter and flex gaps', () => {
+  const { css, block } = FUSED_CSS
+
+  // Card gutter: the button, tab bar and panel all span the same content width,
+  // so they can only share edges if the card owns the horizontal padding.
+  assert.match(css, /#screen-find-detail \.detail-field \{\s*padding: 18px;/)
+  assert.match(block, /\.detail-ai-stack\.is-fused-tabs \{\s*gap: 16px;/)
+  assert.match(block, /\.ai-id-service-tab \{[\s\S]*?gap: 7px;[\s\S]*?padding: 12px 13px;/)
+  assert.match(block, /\.detail-ai-results-shell \{[\s\S]*?padding: 8px;[\s\S]*?gap: 6px;/)
+  assert.match(block, /\.detail-ai-results \{\s*gap: 6px;/)
+  assert.match(block, /\.ai-result-row \{\s*padding: 11px 13px;/)
+  assert.match(block, /\.ai-result-row-meta \{\s*gap: 8px;/)
+  // Stacks use flex + gap, not per-element margins.
+  assert.match(css, /#screen-find-detail \.detail-toggle-stack \{[\s\S]*?gap: 12px;[\s\S]*?margin-top: 18px;/)
+})
+
+test('the result list is never pinned to display:block, so its flex gap applies', () => {
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+
+  // A `display: block` inline style silently discards the row stack's gap.
+  assert.doesNotMatch(source, /resultsEl\.style\.display = 'block'/)
+  assert.match(source, /resultsEl\.style\.display = ''/)
+
+  const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
+  const toggles = /<div class="detail-toggle-stack">([\s\S]*?)\n {12}<\/div>/.exec(html)
+  assert.ok(toggles, 'expected the two toggles to share one flex stack')
+  assert.match(toggles[1], /id="detail-uncertain"/)
+  assert.match(toggles[1], /id="detail-draft"/)
+  assert.doesNotMatch(toggles[1], /margin-top/)
 })
 
 test('detail ai run path stays disabled for non-owners and starts from a safe reset state', () => {

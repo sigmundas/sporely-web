@@ -1200,13 +1200,26 @@ export function initFindDetail() {
   }
   document.querySelectorAll('[data-identify-service-tab]').forEach(tab => {
     tab.addEventListener('click', () => {
-      const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
-      const serviceState = detailAiState.resultsByService?.[service] || null
-      const canView = _hasStoredAiResult(serviceState) || serviceState?.status === 'running'
-      if (tab.disabled || !canView) return
-      _setDetailAiActiveService(service)
+      if (!_detailAiTabIsActivatable(tab)) return
+      _setDetailAiActiveService(normalizeIdentifyService(tab.dataset.identifyServiceTab))
     })
   })
+  const aiTabList = document.getElementById('detail-ai-service-tabs')
+  if (aiTabList) {
+    aiTabList.addEventListener('keydown', event => {
+      const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+      if (!step) return
+      const tabs = Array.from(aiTabList.querySelectorAll('[data-identify-service-tab]'))
+      const currentTab = event.target?.closest?.('[data-identify-service-tab]') || null
+      const currentIndex = currentTab ? tabs.indexOf(currentTab) : -1
+      if (currentIndex < 0) return
+      const nextTab = tabs[(currentIndex + step + tabs.length) % tabs.length]
+      if (!nextTab || nextTab === currentTab || !_detailAiTabIsActivatable(nextTab)) return
+      event.preventDefault()
+      _setDetailAiActiveService(normalizeIdentifyService(nextTab.dataset.identifyServiceTab))
+      nextTab.focus()
+    })
+  }
   document.getElementById('detail-author')?.addEventListener('click', () => {
     void _openAuthorFinds()
   })
@@ -2249,6 +2262,16 @@ function _buildDetailAiCachedResults(rows = [], currentFingerprintByService = {}
   return byService
 }
 
+// A provider tab can only be switched to when there is something to show in
+// the panel. Shared by pointer activation and arrow-key navigation so both
+// agree on which tabs are reachable.
+function _detailAiTabIsActivatable(tab) {
+  if (!tab || tab.disabled) return false
+  const service = normalizeIdentifyService(tab.dataset.identifyServiceTab)
+  const serviceState = detailAiState.resultsByService?.[service] || null
+  return _hasStoredAiResult(serviceState) || serviceState?.status === 'running'
+}
+
 function _renderDetailAiTabs() {
   const photoIdServices = _resolveDetailPhotoIdServices(detailAiState.availability)
   const runBtn = document.querySelector('[data-identify-run-button]')
@@ -2284,6 +2307,11 @@ function _renderDetailAiTabs() {
     tab.classList.toggle('has-error', state.status === 'error')
     tab.disabled = state.isDisabled
     tab.setAttribute('aria-disabled', String(state.isDisabled))
+    // Roving tabindex: only the find-detail tablist is a real ARIA tablist.
+    if (tab.closest('#detail-ai-service-tabs')) {
+      tab.setAttribute('aria-selected', String(state.active))
+      tab.tabIndex = state.active ? 0 : -1
+    }
     const icon = tab.querySelector('.ai-id-service-tab-icon, .ai-id-dot')
     if (icon) {
       icon.outerHTML = _detailAiServiceIconHtml(state)
@@ -2315,56 +2343,59 @@ function _renderDetailAiResults() {
     const result = detailAiState.resultsByService[activeService] || null
     const showLocalStaleWarning = Boolean(detailAiState.localInputsChanged || detailAiState.stale)
     resultsEl.dataset.identifyService = activeService
+    // One panel serves both tabs, so point its label at whichever tab owns it.
+    const activeTabId = document.querySelector(`#detail-ai-service-tabs [data-identify-service-tab="${activeService}"]`)?.id
+    if (activeTabId) resultsEl.setAttribute('aria-labelledby', activeTabId)
     const staleNote = document.querySelector('[data-identify-stale-note]')
     if (staleNote) staleNote.style.display = showLocalStaleWarning ? '' : 'none'
     if (detailAiState.runningByService?.[activeService]) {
       resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
-      resultsEl.style.display = 'block'
+      resultsEl.style.display = ''
       return
     }
     if (result?.status === 'running') {
       resultsEl.innerHTML = `<div class="ai-results-empty">${t('common.loading')}</div>`
-      resultsEl.style.display = 'block'
+      resultsEl.style.display = ''
       return
     }
     const nonOwnerEmptyMessage = _tf('detail.noStoredAiResults', 'No stored AI results are available for this observation.')
     if (!result || result?.status === 'idle') {
       const isReadOnlyViewer = Boolean(currentObs?.id) && !currentObsIsOwner
       resultsEl.innerHTML = `<div class="ai-results-empty">${isReadOnlyViewer ? nonOwnerEmptyMessage : _tf('review.runAiIdPrompt', 'Run AI Photo ID to get suggestions.')}</div>`
-      resultsEl.style.display = 'block'
+      resultsEl.style.display = ''
       return
     }
     if (!result?.predictions?.length) {
       if (showLocalStaleWarning && result?.status === 'stale') {
         resultsEl.innerHTML = `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
-        resultsEl.style.display = 'block'
+        resultsEl.style.display = ''
         return
       }
       if (result?.status === 'unavailable') {
         resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
-        resultsEl.style.display = 'block'
+        resultsEl.style.display = ''
         return
       }
       if (result?.status === 'error' || (result?.status === 'stale' && result.errorMessage)) {
         resultsEl.innerHTML = `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
-        resultsEl.style.display = 'block'
+        resultsEl.style.display = ''
         return
       }
       if (result?.status === 'no_match') {
         resultsEl.innerHTML = `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`
-        resultsEl.style.display = 'block'
+        resultsEl.style.display = ''
         return
       }
       const emptyMessage = currentObs?.id && !currentObsIsOwner
         ? nonOwnerEmptyMessage
         : (t('review.noMatch') || 'No match')
       resultsEl.innerHTML = `<div class="ai-results-empty">${emptyMessage}</div>`
-      resultsEl.style.display = 'block'
+      resultsEl.style.display = ''
       return
     }
 
     resultsEl.innerHTML = renderIdentifyResultRows(activeService, result.predictions)
-    resultsEl.style.display = 'block'
+    resultsEl.style.display = ''
     const selectedPrediction = detailAiState.selectedService === activeService
       ? (detailAiState.selectedPredictionByService?.[activeService] || detailAiState.selectedPrediction || null)
       : null
