@@ -1,5 +1,5 @@
 import { supabase } from '../supabase.js'
-import { formatDate, formatTime, getLocale, getTaxonomyLanguage, t } from '../i18n.js'
+import { formatDate, formatTime, getIntlLocale, getLocale, getTaxonomyLanguage, t } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate, goBack } from '../router.js'
 import { showToast } from '../toast.js'
@@ -69,7 +69,7 @@ let detailFriendship = null
 let detailFollowState = { user: false, observation: false, taxon: false, genus: false }
 let detailPrivacySlotCount = null
 let detailLoadGeneration = 0
-let detailLatestMicroscopy = { available: false, capturedAt: null }
+let detailSporeSummaries = { available: false, rows: [] }
 const detailAiState = {
   running: false,
   runningByService: {},
@@ -898,26 +898,49 @@ async function _loadDetailObservationImages(obsId, { isOwner = false } = {}) {
   return []
 }
 
-export async function loadOwnerLatestMicroscopeCapturedAt({ client = supabase, observationId, isOwner }) {
-  if (!isOwner || !observationId) return { available: false, capturedAt: null }
+const DETAIL_SPORE_SUMMARY_SELECT = [
+  'n_spores',
+  'n_paired',
+  'n_length',
+  'length_p05_um',
+  'length_p95_um',
+  'width_p05_um',
+  'width_p95_um',
+  'q_p05',
+  'q_p95',
+  'computed_at',
+].join(', ')
+
+// Structured per-observation spore statistics, written by the desktop app into
+// public.observation_spore_summaries. Owners read their own rows directly, which
+// also covers drafts; everyone else goes through the SECURITY DEFINER RPC so the
+// observation's visibility and separate spore-data visibility gates apply.
+export async function loadObservationSporeSummaries({ client = supabase, observationId, isOwner }) {
+  const numericId = Number(observationId)
+  if (!Number.isFinite(numericId) || numericId <= 0) return { available: false, rows: [] }
   try {
-    const { data, error } = await client.rpc('get_observation_latest_microscope_captured_at', {
-      p_observation_id: observationId,
-    })
+    const { data, error } = isOwner
+      ? await client
+          .from('observation_spore_summaries')
+          .select(DETAIL_SPORE_SUMMARY_SELECT)
+          .eq('observation_id', numericId)
+      : await client.rpc('get_public_observation_spore_summaries', {
+          p_observation_ids: [numericId],
+        })
     if (error) {
-      console.warn('Optional Last microscopy metadata is unavailable:', {
+      console.warn('Optional spore statistics are unavailable:', {
         observationId,
         code: error?.code || null,
       })
-      return { available: false, capturedAt: null }
+      return { available: false, rows: [] }
     }
-    return { available: true, capturedAt: data || null }
+    return { available: true, rows: Array.isArray(data) ? data : [] }
   } catch (error) {
-    console.warn('Optional Last microscopy metadata could not be loaded:', {
+    console.warn('Optional spore statistics could not be loaded:', {
       observationId,
       message: error?.message || String(error),
     })
-    return { available: false, capturedAt: null }
+    return { available: false, rows: [] }
   }
 }
 
@@ -937,23 +960,75 @@ export function microscopeCapturePresentation(row, isOwner) {
   return formatted || t('detail.captureTimeUnknown')
 }
 
-export function lastMicroscopyPresentation(imageRows, latestMicroscopy, isOwner) {
-  if (!isOwner || !latestMicroscopy?.available) return null
-  if (!(imageRows || []).some(row => row?.image_type === 'microscope')) return null
-  return formatMicroscopeCapturedAt(latestMicroscopy.capturedAt) || t('common.unknown')
+// Absent measurements must stay absent: Number(null) and Number('') are 0, which
+// would print a real-looking 0.0 µm range for an unmeasured width.
+function _finiteMeasurement(value) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(numeric) ? numeric : null
 }
 
-function _renderLatestMicroscopy() {
-  const rowEl = document.getElementById('detail-last-microscopy')
-  const labelEl = document.getElementById('detail-last-microscopy-label')
-  const valueEl = document.getElementById('detail-last-microscopy-val')
+// One summary row per measurement context (dried KOH DIC vs fresh water
+// brightfield, …). Percentiles from different preparations are not comparable,
+// so the tagline shows the best-supported single context rather than an average
+// across incomparable ranges.
+export function pickSporeSummaryRow(rows) {
+  const usable = (rows || []).filter(row => (
+    _finiteMeasurement(row?.length_p05_um) !== null
+    && _finiteMeasurement(row?.length_p95_um) !== null
+  ))
+  if (!usable.length) return null
+  return usable.reduce((best, row) => {
+    const rank = candidate => [
+      _finiteMeasurement(candidate?.n_paired) || 0,
+      _finiteMeasurement(candidate?.n_spores) || 0,
+      String(candidate?.computed_at || ''),
+    ]
+    const [bestPaired, bestSpores, bestComputedAt] = rank(best)
+    const [rowPaired, rowSpores, rowComputedAt] = rank(row)
+    if (rowPaired !== bestPaired) return rowPaired > bestPaired ? row : best
+    if (rowSpores !== bestSpores) return rowSpores > bestSpores ? row : best
+    return rowComputedAt > bestComputedAt ? row : best
+  })
+}
+
+function _formatSporeRange(low, high) {
+  const lowValue = _finiteMeasurement(low)
+  const highValue = _finiteMeasurement(high)
+  if (lowValue === null || highValue === null) return ''
+  const format = new Intl.NumberFormat(getIntlLocale(), {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })
+  return `${format.format(lowValue)}–${format.format(highValue)}`
+}
+
+// Literature notation, length × width, matching the desktop app's short spore
+// line: the 5th–95th percentile spread, never min–max.
+export function formatSporeStatsShort(row) {
+  const length = _formatSporeRange(row?.length_p05_um, row?.length_p95_um)
+  if (!length) return ''
+  const width = _formatSporeRange(row?.width_p05_um, row?.width_p95_um)
+  const q = _formatSporeRange(row?.q_p05, row?.q_p95)
+  const count = _finiteMeasurement(row?.n_spores) || _finiteMeasurement(row?.n_length)
+  const parts = [`${width ? `${length} × ${width}` : length} µm`]
+  if (q) parts.push(`Q = ${q}`)
+  if (count) parts.push(`n = ${Math.round(count)}`)
+  return parts.join(' · ')
+}
+
+export function sporeStatsPresentation(sporeSummaries) {
+  if (!sporeSummaries?.available) return null
+  return formatSporeStatsShort(pickSporeSummaryRow(sporeSummaries.rows)) || null
+}
+
+function _renderSporeStats() {
+  const rowEl = document.getElementById('detail-spore-stats')
+  const labelEl = document.getElementById('detail-spore-stats-label')
+  const valueEl = document.getElementById('detail-spore-stats-val')
   if (!rowEl || !valueEl) return
-  if (labelEl) labelEl.textContent = t('detail.lastMicroscopy')
-  const presentation = lastMicroscopyPresentation(
-    detailImageRows,
-    detailLatestMicroscopy,
-    currentObsIsOwner,
-  )
+  if (labelEl) labelEl.textContent = t('detail.sporeStats')
+  const presentation = sporeStatsPresentation(detailSporeSummaries)
   rowEl.style.display = presentation ? 'flex' : 'none'
   if (!presentation) {
     valueEl.textContent = ''
@@ -962,15 +1037,15 @@ function _renderLatestMicroscopy() {
   valueEl.textContent = presentation
 }
 
-async function _refreshOwnerLatestMicroscopy(observationId, generation = detailLoadGeneration) {
-  const result = await loadOwnerLatestMicroscopeCapturedAt({
+async function _refreshSporeStats(observationId, generation = detailLoadGeneration) {
+  const result = await loadObservationSporeSummaries({
     client: supabase,
     observationId,
     isOwner: currentObsIsOwner,
   })
   if (generation !== detailLoadGeneration || String(currentObs?.id) !== String(observationId)) return
-  detailLatestMicroscopy = result
-  _renderLatestMicroscopy()
+  detailSporeSummaries = result
+  _renderSporeStats()
 }
 
 function _buildDetailAiSelectionPatch(selectionState = {}) {
@@ -1196,7 +1271,7 @@ export async function openFindDetail(obsId, options = {}) {
   detailAiState.stale = false
   detailImageCropDirty = false
   detailLocationLookup = null
-  detailLatestMicroscopy = { available: false, capturedAt: null }
+  detailSporeSummaries = { available: false, rows: [] }
 
   // Update back button label — state.currentScreen is still the previous screen at this point
   const prevLabel = {
@@ -1312,14 +1387,14 @@ export async function openFindDetail(obsId, options = {}) {
   _loadPrivacySlotCount()
 
   const imagePromise = _loadDetailObservationImages(obsId, { isOwner: currentObsIsOwner })
-  const latestMicroscopyPromise = loadOwnerLatestMicroscopeCapturedAt({
+  const sporeSummariesPromise = loadObservationSporeSummaries({
     client: supabase,
     observationId: obsId,
     isOwner: currentObsIsOwner,
   })
-  const [imgData, latestMicroscopy] = await Promise.all([imagePromise, latestMicroscopyPromise])
+  const [imgData, sporeSummaries] = await Promise.all([imagePromise, sporeSummariesPromise])
   if (loadGeneration !== detailLoadGeneration || String(currentObs?.id) !== String(obsId)) return
-  detailLatestMicroscopy = latestMicroscopy
+  detailSporeSummaries = sporeSummaries
 
   const gallery = document.getElementById('detail-gallery')
   _clearDetailThumbCropObserver()
@@ -1434,7 +1509,7 @@ export async function openFindDetail(obsId, options = {}) {
     })
   }
 
-  _renderLatestMicroscopy()
+  _renderSporeStats()
 
   if (currentObsIsOwner) {
     const addCardContainer = document.createElement('div')
@@ -1655,7 +1730,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
         }
         container.remove()
         invalidateFindsCardImages(currentObs.id)
-        _refreshOwnerLatestMicroscopy(currentObs.id)
+        _refreshSporeStats(currentObs.id)
         _markDetailAiStale()
       } catch (err) {
         console.error('Failed to delete image:', err)

@@ -2628,16 +2628,17 @@ html, body {
   white-space: nowrap;
   grid-column: 1 / -1;
 }
-.detail-last-microscopy {
+.detail-spore-stats {
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 4px;
   color: var(--text-dim);
   font-family: 'DM Mono', monospace;
   font-size: 12px;
 }
-.detail-last-microscopy > :first-child {
+.detail-spore-stats > :first-child {
   color: var(--text-secondary);
 }
 .detail-top-row {
