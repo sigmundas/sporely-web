@@ -47,7 +47,9 @@ import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePi
 import { setCaptureCompleteHandler } from './capture.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
 import { prepareImageBlobForUpload } from '../image_crop.js'
-import { isBlob } from '../observation-shapes.js'
+import { isBlob, normalizeCoordinatePair } from '../observation-shapes.js'
+import { focusObservationOnMapScreen, openMapLocationPickerScreen } from '../map-loader.js'
+import { buildExternalMapUrl, MAP_LINK_SERVICES } from '../map-links.js'
 import { persistObservationTaxonomySelection, taxonomySelectionForTaxon } from '../taxonomy-v2.js'
 
 let currentObs    = null
@@ -1111,6 +1113,8 @@ export function initFindDetail() {
     })
   }
 
+  _initDetailLocationActions()
+
   const runBtn = document.querySelector('[data-identify-run-button]')
   if (runBtn) {
     wireIdentifyRunButtonPressFeedback(runBtn)
@@ -1285,6 +1289,7 @@ export async function openFindDetail(obsId, options = {}) {
     })
     coordsEl.style.display = obs.gps_latitude ? 'block' : 'none'
   }
+  _syncDetailLocationActions()
 
   // Set visibility radio
   const vis = normalizeVisibility(obs.visibility, 'public')
@@ -2744,6 +2749,9 @@ function _resetForm() {
   document.getElementById('detail-habitat').value     = ''
   const coordsEl = document.getElementById('detail-coords')
   if (coordsEl) { coordsEl.innerHTML = ''; coordsEl.style.display = 'none' }
+  const locationActions = document.getElementById('detail-location-actions')
+  if (locationActions) locationActions.style.display = 'none'
+  _closeDetailLocationMenu()
   document.getElementById('detail-notes').value       = ''
   document.getElementById('detail-uncertain').checked = false
   _setDetailHeader({ fallbackName: t('detail.unknownSpecies') })
@@ -2858,6 +2866,205 @@ function _renderDetailLocationDropdown(show) {
     }
     item.addEventListener('mousedown', handleSelect)
     item.addEventListener('touchstart', handleSelect, { passive: false })
+  })
+}
+
+// ── Location actions: view on map, edit the point, open in an external map ────
+
+/**
+ * Which location action a Find offers: `'edit'` once it has usable
+ * coordinates, `'set'` when it has none at all.
+ *
+ * @param {object|null} obs
+ * @returns {'edit' | 'set'}
+ */
+export function detailLocationActionMode(obs) {
+  return normalizeCoordinatePair(obs?.gps_latitude, obs?.gps_longitude) ? 'edit' : 'set'
+}
+
+/**
+ * The `observations` patch for a hand-placed location, or `null` for a
+ * coordinate the app would refuse to render anyway.
+ *
+ * @param {unknown} lat
+ * @param {unknown} lon
+ * @returns {{ gps_latitude: number, gps_longitude: number, gps_accuracy: null } | null}
+ */
+export function buildDetailLocationPatch(lat, lon) {
+  const coords = normalizeCoordinatePair(lat, lon)
+  if (!coords) return null
+  return {
+    gps_latitude: coords.lat,
+    gps_longitude: coords.lon,
+    // A point placed by hand has no GPS accuracy. Keeping the old "± 4 m"
+    // would claim a precision this coordinate does not have.
+    gps_accuracy: null,
+  }
+}
+
+function _detailLocationCoords(obs = currentObs) {
+  return normalizeCoordinatePair(obs?.gps_latitude, obs?.gps_longitude)
+}
+
+function _closeDetailLocationMenu() {
+  const menu = document.getElementById('detail-location-open-menu')
+  const btn = document.getElementById('detail-location-open-btn')
+  if (menu) menu.style.display = 'none'
+  if (btn) btn.setAttribute('aria-expanded', 'false')
+}
+
+function _syncDetailLocationActions(isOwner = currentObsIsOwner) {
+  const row = document.getElementById('detail-location-actions')
+  if (!row) return
+
+  const coords = _detailLocationCoords()
+  const mode = detailLocationActionMode(currentObs)
+  // Only the owner can move a Find; everyone else gets the read-only actions,
+  // and a Find with neither coordinates nor an owner viewing it has none.
+  const showEdit = isOwner && !!currentObs
+  const showCoordActions = !!coords
+  const visible = showEdit || showCoordActions
+
+  row.style.display = visible ? 'flex' : 'none'
+  _closeDetailLocationMenu()
+  if (!visible) return
+
+  const mapBtn = document.getElementById('detail-map-btn')
+  if (mapBtn) {
+    mapBtn.style.display = showCoordActions ? '' : 'none'
+    mapBtn.textContent = t('detail.showOnMap')
+  }
+
+  const editBtn = document.getElementById('detail-edit-location-btn')
+  if (editBtn) {
+    editBtn.style.display = showEdit ? '' : 'none'
+    editBtn.textContent = mode === 'edit' ? t('detail.editLocation') : t('detail.setLocation')
+  }
+
+  const openWrap = document.getElementById('detail-location-open-wrap')
+  if (openWrap) openWrap.style.display = showCoordActions ? '' : 'none'
+  const openLabel = document.getElementById('detail-location-open-label')
+  if (openLabel) openLabel.textContent = t('detail.openIn')
+}
+
+function _openFindOnMap() {
+  const coords = _detailLocationCoords()
+  if (!currentObs || !coords) return
+  _closeDetailLocationMenu()
+  void focusObservationOnMapScreen({
+    id: currentObs.id,
+    lat: coords.lat,
+    lon: coords.lon,
+    ownerId: currentObs.user_id || null,
+  })
+}
+
+function _openDetailLocationPicker() {
+  if (!currentObs || !currentObsIsOwner) {
+    if (currentObs) showToast(t('detail.onlyOwnerEdit'))
+    return
+  }
+  if (!requireCloudMutation({ showToast }).allowed) return
+
+  _closeDetailLocationMenu()
+  const coords = _detailLocationCoords()
+  const observationId = currentObs.id
+  void openMapLocationPickerScreen({
+    lat: coords?.lat,
+    lon: coords?.lon,
+    // Runs only when the user confirms in the picker; panning away and
+    // cancelling never reaches this.
+    onSave: picked => { void _persistDetailLocation(observationId, picked) },
+  })
+}
+
+async function _persistDetailLocation(observationId, picked) {
+  // The detail screen is still mounted behind the map, but guard anyway: the
+  // picker is asynchronous and the user could have opened another Find.
+  if (!currentObs || String(currentObs.id) !== String(observationId)) return
+  if (!currentObsIsOwner) return
+
+  const patch = buildDetailLocationPatch(picked?.lat, picked?.lon)
+  if (!patch) {
+    showToast(t('detail.locationSaveFailed', { message: t('detail.locationInvalid') }))
+    return
+  }
+
+  const { error } = await supabase
+    .from('observations')
+    .update(patch)
+    .eq('id', observationId)
+    .eq('user_id', state.user.id)
+
+  if (error) {
+    showToast(t('detail.locationSaveFailed', { message: error.message }))
+    return
+  }
+
+  currentObs.gps_latitude = patch.gps_latitude
+  currentObs.gps_longitude = patch.gps_longitude
+  currentObs.gps_accuracy = null
+
+  const coordsEl = document.getElementById('detail-coords')
+  if (coordsEl) {
+    coordsEl.innerHTML = buildGpsMetaHtml({
+      lat: currentObs.gps_latitude,
+      lon: currentObs.gps_longitude,
+      altitude: currentObs.gps_altitude,
+      accuracy: currentObs.gps_accuracy,
+    })
+    coordsEl.style.display = 'block'
+  }
+  _syncDetailLocationActions()
+  // The place name suggestions belonged to the old point. Re-running the
+  // lookup replaces an auto-applied name and leaves a hand-typed one alone.
+  _startDetailLocationLookup(currentObs)
+  setLastSyncAt()
+  showToast(t('detail.locationSaved'))
+}
+
+function _openDetailLocationInService(service) {
+  const coords = _detailLocationCoords()
+  if (!coords) return
+  const url = buildExternalMapUrl(service, {
+    lat: coords.lat,
+    lon: coords.lon,
+    isOwner: currentObsIsOwner,
+    locationPrecision: currentObs?.location_precision,
+  })
+  if (!url) return
+  _closeDetailLocationMenu()
+  window.open(url, '_blank', 'noopener')
+}
+
+function _initDetailLocationActions() {
+  document.getElementById('detail-map-btn')?.addEventListener('click', _openFindOnMap)
+  document.getElementById('detail-edit-location-btn')?.addEventListener('click', _openDetailLocationPicker)
+
+  const openBtn = document.getElementById('detail-location-open-btn')
+  const openWrap = document.getElementById('detail-location-open-wrap')
+  const menu = document.getElementById('detail-location-open-menu')
+  if (openBtn && menu) {
+    openBtn.addEventListener('click', event => {
+      event.stopPropagation()
+      const isOpening = menu.style.display === 'none'
+      menu.style.display = isOpening ? 'block' : 'none'
+      openBtn.setAttribute('aria-expanded', String(isOpening))
+      if (!isOpening) return
+      const closeMenu = ev => {
+        if (openWrap?.contains(ev.target)) return
+        _closeDetailLocationMenu()
+        document.removeEventListener('click', closeMenu)
+      }
+      setTimeout(() => document.addEventListener('click', closeMenu), 0)
+    })
+  }
+  MAP_LINK_SERVICES.forEach(service => {
+    menu?.querySelector(`[data-map-service="${service}"]`)
+      ?.addEventListener('click', event => {
+        event.stopPropagation()
+        _openDetailLocationInService(service)
+      })
   })
 }
 
@@ -3408,6 +3615,7 @@ function _applyOwnershipMode(isOwner) {
 
   const currentLocationBtn = document.getElementById('detail-current-location-btn')
   if (currentLocationBtn) currentLocationBtn.style.display = 'none'
+  _syncDetailLocationActions(isOwner)
 
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.disabled = !isOwner

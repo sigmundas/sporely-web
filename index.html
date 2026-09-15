@@ -744,6 +744,29 @@
               </div>
             </div>
             <div id="detail-coords" style="display:none;"></div>
+            <div class="detail-location-actions" id="detail-location-actions" style="display:none">
+              <button type="button" class="location-action-btn" id="detail-map-btn">Map</button>
+              <button type="button" class="location-action-btn" id="detail-edit-location-btn">Edit location</button>
+              <div class="location-open-wrap" id="detail-location-open-wrap">
+                <button type="button" class="location-action-btn" id="detail-location-open-btn" aria-haspopup="true" aria-expanded="false">
+                  <span id="detail-location-open-label">Open</span>
+                  <svg class="follow-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                </button>
+                <div class="follow-menu location-open-menu" id="detail-location-open-menu" style="display:none">
+                  <button type="button" class="follow-menu-item" data-map-service="google">
+                    <span class="follow-menu-title">Google Maps</span>
+                  </button>
+                  <div class="follow-menu-div"></div>
+                  <button type="button" class="follow-menu-item" data-map-service="mapy">
+                    <span class="follow-menu-title">Mapy.com</span>
+                  </button>
+                  <div class="follow-menu-div"></div>
+                  <button type="button" class="follow-menu-item" data-map-service="osm">
+                    <span class="follow-menu-title">OpenStreetMap</span>
+                  </button>
+                </div>
+              </div>
+            </div>
             <div class="field-meta-row">
               <span class="field-meta-key" id="detail-location-precision-label">Obscure location</span>
               <div class="field-meta-val">
@@ -864,6 +887,20 @@
         </div>
       </div>
       <div id="map-container"></div>
+      <div class="map-picker-crosshair" id="map-picker-crosshair" style="display:none" aria-hidden="true">
+        <svg width="46" height="46" viewBox="0 0 46 46" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="23" cy="23" r="9"/>
+          <path d="M23 2v8M23 36v8M2 23h8M36 23h8"/>
+          <circle cx="23" cy="23" r="1.6" fill="currentColor" stroke="none"/>
+        </svg>
+      </div>
+      <div class="map-picker-bar" id="map-picker-bar" style="display:none">
+        <div class="map-picker-hint" id="map-picker-hint">Pan and zoom the map to place the marker.</div>
+        <div class="map-picker-actions">
+          <button type="button" class="btn-secondary btn-sm" id="map-picker-cancel-btn">Cancel</button>
+          <button type="button" class="btn-primary btn-sm" id="map-picker-save-btn">Save location</button>
+        </div>
+      </div>
       <button class="map-locate-btn" id="map-locate-btn" aria-label="Current location" title="Current location">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M12 2v3"/>

@@ -13,6 +13,8 @@ import {
   _renderDetailAiResults,
   _renderDetailAiTabs,
   _setDetailAiActiveService,
+  buildDetailLocationPatch,
+  detailLocationActionMode,
   detailAiState,
   formatMicroscopeCapturedAt,
   loadOwnerLatestMicroscopeCapturedAt,
@@ -979,4 +981,35 @@ test('helper predicates distinguish stored results from idle states', () => {
   assert.equal(_hasAiRunResult({ status: 'error' }), true)
   assert.equal(_hasAiRunResult({ status: 'stale' }), true)
   assert.equal(_hasAiRunResult({ status: 'unavailable' }), true)
+})
+
+// A Find usually arrives with photo-GPS coordinates, but the photo may have
+// been taken at home hours later, so the location it carries can be wrong for
+// the collection site. The detail screen therefore offers "Edit location" on a
+// Find that has coordinates and "Set location" on one that has none.
+test('the location action is Edit when a find has coordinates and Set when it has none', () => {
+  assert.equal(detailLocationActionMode({ gps_latitude: 63.43, gps_longitude: 10.39 }), 'edit')
+  assert.equal(detailLocationActionMode({ gps_latitude: null, gps_longitude: null }), 'set')
+  assert.equal(detailLocationActionMode({}), 'set')
+  assert.equal(detailLocationActionMode(null), 'set')
+  // Null Island is the shape a missing EXIF fix takes, not a real location.
+  assert.equal(detailLocationActionMode({ gps_latitude: 0, gps_longitude: 0 }), 'set')
+})
+
+test('a hand-placed location drops the GPS accuracy it can no longer claim', () => {
+  const patch = buildDetailLocationPatch(63.441122, 10.401234)
+  assert.deepEqual(patch, {
+    gps_latitude: 63.441122,
+    gps_longitude: 10.401234,
+    gps_accuracy: null,
+  })
+  // Nothing else may ride along: the picker moves the point and only the point.
+  assert.deepEqual(Object.keys(patch).sort(), ['gps_accuracy', 'gps_latitude', 'gps_longitude'])
+})
+
+test('coordinates the app would refuse to render produce no patch at all', () => {
+  assert.equal(buildDetailLocationPatch(null, null), null)
+  assert.equal(buildDetailLocationPatch(0, 0), null)
+  assert.equal(buildDetailLocationPatch(91, 10), null)
+  assert.equal(buildDetailLocationPatch('north', 'east'), null)
 })

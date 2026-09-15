@@ -2909,6 +2909,51 @@ html, body {
   pointer-events: auto;
 }
 
+/* Location picker: the marker stays put in the viewport centre and the map
+   moves under it, so the crosshair must not intercept drags. */
+.map-picker-crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2000;
+  color: var(--green-accent);
+  pointer-events: none;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55));
+}
+.map-picker-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2001;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px calc(var(--safe-bottom) + 16px);
+  background: rgba(13, 17, 9, 0.92);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid var(--border);
+}
+.map-picker-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+.map-picker-actions {
+  display: flex;
+  gap: 10px;
+}
+.map-picker-actions button {
+  flex: 1;
+}
+/* The location the Find had before editing, kept visible as a reference. */
+.map-pin--previous {
+  background: var(--text-dim);
+  opacity: 0.55;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25), 0 2px 6px rgba(0, 0, 0, 0.6);
+}
+
 /* Custom dark marker pin */
 .map-pin {
   width: 18px; height: 18px; border-radius: 50%;
@@ -4292,6 +4337,44 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
 }
 .detail-location-btn {
   margin-top: 8px;
+}
+
+/* Map / Edit location / Open-in row under the Find's coordinates. */
+.detail-location-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 0 2px;
+}
+.location-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s;
+}
+.location-action-btn:hover {
+  border-color: var(--green-accent);
+  color: var(--green-accent);
+}
+.location-open-wrap {
+  position: relative;
+  margin-left: auto;
+}
+.location-open-menu {
+  width: 180px;
+  right: 0;
+  left: auto;
 }
 
 .review-actions {

@@ -163,6 +163,13 @@ const messages = {
     'detail.identifyAI': 'Identify with Artsorakel',
     'detail.location': 'Location',
     'detail.currentLocation': 'Current location',
+    'detail.showOnMap': 'Map',
+    'detail.editLocation': 'Edit location',
+    'detail.setLocation': 'Set location',
+    'detail.openIn': 'Open',
+    'detail.locationSaved': 'Location updated.',
+    'detail.locationSaveFailed': 'Could not save the location: {message}',
+    'detail.locationInvalid': 'those coordinates are not usable',
     'detail.habitat': 'Habitat',
     'detail.notes': 'Notes',
     'detail.idNeeded': 'Uncertain ID',
@@ -282,6 +289,8 @@ const messages = {
     'map.past24h': 'Past 24h',
     'map.pastWeek': 'Past week',
     'map.pastMonth': 'Past month',
+    'map.pickLocationHint': 'Pan and zoom the map to place the marker.',
+    'map.saveLocation': 'Save location',
     'scope.mine': 'Mine',
     'scope.feed': 'Feed',
     'scope.friends': 'Friends',
@@ -642,6 +651,13 @@ const messages = {
     'detail.identifyAI': 'Identifiser med Artsorakel',
     'detail.location': 'Sted',
     'detail.currentLocation': 'Nåværende sted',
+    'detail.showOnMap': 'Kart',
+    'detail.editLocation': 'Endre sted',
+    'detail.setLocation': 'Angi sted',
+    'detail.openIn': 'Åpne',
+    'detail.locationSaved': 'Stedet er oppdatert.',
+    'detail.locationSaveFailed': 'Kunne ikke lagre stedet: {message}',
+    'detail.locationInvalid': 'koordinatene kan ikke brukes',
     'detail.habitat': 'Habitat',
     'detail.notes': 'Notater',
     'detail.idNeeded': 'Usikker ID',
@@ -761,6 +777,8 @@ const messages = {
     'map.past24h': 'Siste 24 t',
     'map.pastWeek': 'Siste uke',
     'map.pastMonth': 'Siste måned',
+    'map.pickLocationHint': 'Dra og zoom kartet for å plassere markøren.',
+    'map.saveLocation': 'Lagre sted',
     'scope.mine': 'Mine',
     'scope.feed': 'Feed',
     'scope.friends': 'Venner',
@@ -1121,6 +1139,13 @@ const messages = {
     'detail.identifyAI': 'Identifiera med Artsorakel',
     'detail.location': 'Plats',
     'detail.currentLocation': 'Nuvarande plats',
+    'detail.showOnMap': 'Karta',
+    'detail.editLocation': 'Ändra plats',
+    'detail.setLocation': 'Ange plats',
+    'detail.openIn': 'Öppna',
+    'detail.locationSaved': 'Platsen har uppdaterats.',
+    'detail.locationSaveFailed': 'Det gick inte att spara platsen: {message}',
+    'detail.locationInvalid': 'koordinaterna går inte att använda',
     'detail.habitat': 'Habitat',
     'detail.notes': 'Anteckningar',
     'detail.idNeeded': 'Osäker ID',
@@ -1240,6 +1265,8 @@ const messages = {
     'map.past24h': 'Senaste 24 h',
     'map.pastWeek': 'Senaste vecka',
     'map.pastMonth': 'Senaste månad',
+    'map.pickLocationHint': 'Dra och zooma kartan för att placera markören.',
+    'map.saveLocation': 'Spara plats',
     'scope.mine': 'Mina',
     'scope.feed': 'Flöde',
     'scope.friends': 'Vänner',
@@ -1600,6 +1627,13 @@ const messages = {
     'detail.identifyAI': 'Mit Artsorakel bestimmen',
     'detail.location': 'Ort',
     'detail.currentLocation': 'Aktueller Ort',
+    'detail.showOnMap': 'Karte',
+    'detail.editLocation': 'Ort ändern',
+    'detail.setLocation': 'Ort festlegen',
+    'detail.openIn': 'Öffnen',
+    'detail.locationSaved': 'Ort aktualisiert.',
+    'detail.locationSaveFailed': 'Der Ort konnte nicht gespeichert werden: {message}',
+    'detail.locationInvalid': 'diese Koordinaten sind unbrauchbar',
     'detail.habitat': 'Habitat',
     'detail.notes': 'Notizen',
     'detail.idNeeded': 'Unsichere ID',
@@ -1719,6 +1753,8 @@ const messages = {
     'map.past24h': 'Letzte 24 Std.',
     'map.pastWeek': 'Letzte Woche',
     'map.pastMonth': 'Letzter Monat',
+    'map.pickLocationHint': 'Karte verschieben und zoomen, um den Marker zu setzen.',
+    'map.saveLocation': 'Ort speichern',
     'scope.mine': 'Meine',
     'scope.feed': 'Feed',
     'scope.friends': 'Freunde',
@@ -2165,6 +2201,14 @@ export function applyStaticTranslations() {
   setText('#detail-uncertain-label', 'detail.idNeeded')
   setText('#detail-draft-label', 'detail.draft')
   setText('#detail-current-location-btn', 'detail.currentLocation')
+  setText('#detail-map-btn', 'detail.showOnMap')
+  // The edit/set split depends on whether the Find has coordinates, so the
+  // detail screen re-labels this button when it renders a Find.
+  setText('#detail-edit-location-btn', 'detail.editLocation')
+  setText('#detail-location-open-label', 'detail.openIn')
+  setText('#map-picker-hint', 'map.pickLocationHint')
+  setText('#map-picker-cancel-btn', 'common.cancel')
+  setText('#map-picker-save-btn', 'map.saveLocation')
   setText('#comments-section .comments-title', 'comments.title')
   setText('#comment-send-btn', 'comments.send')
   setText('#detail-delete-btn', 'common.delete')
