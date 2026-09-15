@@ -26,7 +26,7 @@ import {
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { deleteObservationMedia, verifyWorkerObjectExists, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, reserveObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath, fetchObservationImageRows, getVariantPath } from '../images.js'
 import { bindProtectedMedia } from '../protected-media.js'
-import { classifyDraftAge, loadFinds, openFinds, restoreFindsAfterDetailReturn } from './finds.js'
+import { classifyDraftAge, invalidateFindsCardImages, loadFinds, openFinds, restoreFindsAfterDetailReturn } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
@@ -1074,6 +1074,9 @@ async function _persistDetailImageCrops() {
     return rejected.reason
   }
   detailImageCropDirty = false
+  // Crops change what the card thumbnails render, so the list cannot reconcile
+  // around these cards either.
+  invalidateFindsCardImages(currentObs.id)
   return null
 }
 
@@ -1651,6 +1654,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
           await supabase.from('observations').update({ image_key: null, thumb_key: null }).eq('id', currentObs.id)
         }
         container.remove()
+        invalidateFindsCardImages(currentObs.id)
         _refreshOwnerLatestMicroscopy(currentObs.id)
         _markDetailAiStale()
       } catch (err) {
@@ -4573,6 +4577,9 @@ async function _addPhotosToObservation(files) {
       const [originalSource] = await resolveMediaSources([storagePath], { variant: 'original' })
       const [displaySource] = await resolveMediaSources([storagePath], { variant: 'medium' })
       _appendDetailGalleryImage(reservedRow, displaySource, displaySource, { originalSource })
+      // Per photo, not once at the end: a later photo failing must not leave
+      // the finds card painting the pre-add thumbnail for the ones that landed.
+      invalidateFindsCardImages(obsId)
     }
 
     showToast(`${files.length} photo(s) added.`)
