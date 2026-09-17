@@ -39,16 +39,27 @@ jobs:
           VITE_GOOGLE_WEB_CLIENT_ID: ${{ secrets.VITE_GOOGLE_WEB_CLIENT_ID }}
         run: npm run check:google:web-client-id
 
+      - name: Check media upload base URL is available
+        env:
+          VITE_MEDIA_UPLOAD_BASE_URL: ${{ vars.VITE_MEDIA_UPLOAD_BASE_URL }}
+        run: npm run check:media:upload-base-url
+
       - name: Build web assets
         env:
           VITE_GOOGLE_WEB_CLIENT_ID: ${{ secrets.VITE_GOOGLE_WEB_CLIENT_ID }}
           VITE_TURNSTILE_SITE_KEY: ${{ vars.VITE_TURNSTILE_SITE_KEY }}
+          VITE_MEDIA_UPLOAD_BASE_URL: ${{ vars.VITE_MEDIA_UPLOAD_BASE_URL }}
         run: npm run build
 
       - name: Verify built bundle contains the Google Web Client ID
         env:
           VITE_GOOGLE_WEB_CLIENT_ID: ${{ secrets.VITE_GOOGLE_WEB_CLIENT_ID }}
         run: npm run verify:build:google-web-client-id
+
+      - name: Verify built bundle contains the media upload base URL
+        env:
+          VITE_MEDIA_UPLOAD_BASE_URL: ${{ vars.VITE_MEDIA_UPLOAD_BASE_URL }}
+        run: npm run verify:build:media-upload-base-url
 
       - name: Sync Capacitor Android
         run: npx cap sync android
