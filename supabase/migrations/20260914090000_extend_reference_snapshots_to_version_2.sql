@@ -10,29 +10,42 @@
 -- migration 20260913120000.
 --
 -- Deploy order. 20260913120000 is already applied in production; this
--- migration is the only pending one in the pair.
+-- migration is the only pending one in the pair, and it stays pending.
 --
--- The invariant to protect is that no version-2 snapshot may reach a desktop
--- that cannot read one. That is governed by when the first *enhanced row*
--- appears, not by when this migration is applied, so this migration may be
--- applied before any desktop release:
+-- Do NOT treat the desktop rollout gates as a structural guarantee that no
+-- version-2 snapshot can be generated once this migration is applied. They are
+-- not. private.reference_canonical_snapshot has a second caller that is
+-- independent of observation attachment:
 --
---   * reference_canonical_snapshot emits version 2 only for an enhanced row
---     (measurement_details_json, q_core_min or q_core_max non-NULL).
---   * An enhanced row can only be written through
---     public.sync_reference_measurement_set_unthrottled, which requires all
---     three extension keys to be present; `authenticated` holds only SELECT on
---     public.reference_measurement_sets, and no edge function or web client
---     writes those columns.
---   * A payload carrying none of the three keys leaves them NULL, so every
---     client released before the Stage 3C adapter can only create legacy rows.
+--   * private.share_reference_contribution_for_owner
+--     (20260830183210 line 262) builds the canonical snapshot and persists it
+--     inside shared_reference_contribution_revisions.envelope_json. Its
+--     entry point public.share_reference_contribution is granted to
+--     `authenticated`, and the envelope is then returned verbatim by
+--     public.search_public_reference_contributions and
+--     public.get_public_reference_contribution, both granted to `anon`.
+--   * envelope_json is bounded only by jsonb type and size. It carries no
+--     schema_version CHECK, and this migration does not add one or make those
+--     two reader RPCs version-aware.
 --
--- Therefore, until a desktop release carries the Stage 3C writer and the
--- activation gates open, no enhanced row exists, this migration emits no
--- version-2 snapshot, and every existing snapshot, attachment and curated
--- publication keeps its exact version-1 representation. The real gate on
--- version-2 emission is the minimum-supported-reader-version gate in
--- sporely-py (references/measurement_content_gates.py), which ships closed.
+-- So once this migration is applied, an authenticated owner holding an
+-- enhanced measurement set can publish a version-2 snapshot into a publicly
+-- searchable envelope without going through the observation-attachment path
+-- that references/measurement_content_gates.py guards. The
+-- minimum-supported-reader-version gate does not cover that route.
+--
+-- Intended sequence (the reason this migration is not deployed early):
+--
+--   1. Merge the reconciled web branch, so local migration history contains
+--      the already-applied 20260913120000 and stops disagreeing with remote.
+--   2. Leave this migration pending. Merging applies nothing.
+--   3. Release desktop reader support with both rollout gates closed.
+--   4. Only once the reader rollout criterion is satisfied, run the production
+--      preflight and the SQL/staging tests, then apply this migration.
+--
+-- The shared-contribution envelope needs its own version decision before or
+-- with step 4: either a schema_version gate on envelope_json and the two anon
+-- readers, or an explicit acceptance that sharing emits version 2.
 --
 -- The converse ordering was a hard constraint and is already satisfied:
 -- 20260913120000 had to be applied *before* any desktop release carrying the

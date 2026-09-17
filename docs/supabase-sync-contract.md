@@ -209,6 +209,20 @@ closed: while it is closed the desktop refuses to attach, refresh onto, or
 adopt an enhanced measurement set instead of freezing a lossy version-1
 snapshot of it.
 
+That gate covers observation attachment only, and is not a structural bar on
+version-2 generation. `private.share_reference_contribution_for_owner` is a
+second caller of `private.reference_canonical_snapshot`: its entry point
+`public.share_reference_contribution` is granted to `authenticated`, and the
+resulting snapshot is stored in
+`shared_reference_contribution_revisions.envelope_json` and returned verbatim
+by `public.search_public_reference_contributions` and
+`public.get_public_reference_contribution`, both granted to `anon`. That
+envelope is bounded only by jsonb type and size and carries no
+`schema_version` CHECK. Sharing an enhanced measurement set therefore
+publishes a version-2 snapshot on a route the desktop gate does not see, so
+the shared-contribution path needs its own version decision before snapshot
+version 2 is enabled in production.
+
 Observation-use pull imports the frozen `snapshot_json` exactly as stored.
 Three-way reconciliation may automatically combine only disjoint role/note
 edits. Identity, measurement-set, selected-time, revision, or snapshot
