@@ -23,11 +23,56 @@ pagination plan's three stages are all accepted on `feature/sparring-v2-pilot`
 and device-verified by the developer; the track is reported as all good. Tester
 opt-in count was not re-checked for this entry.
 
+**As of 2026-09-17:** day 13 of 14 by the count above. Tester opt-in count was
+not re-checked for this entry.
+
+## Release record
+
+Tags on `main`, from `git tag` and `android/app/build.gradle` at each tag. Tags
+`v0.7.7` and `v0.7.8` were never created, and commit `5d3e26b` — whose message
+reads "v0.7.7 (versionCode 284)" — in fact set versionName `0.7.8` /
+versionCode 285. Version-bump commit messages in this history therefore cannot
+be trusted; read the gradle file at the tag. Which artifact was actually
+promoted to the Play closed-testing track — the CI-built AAB or a locally built
+one — is not recorded here for any of these releases.
+
+| Tag | versionCode | Tagged | Commit | Contents |
+| --- | --- | --- | --- | --- |
+| `v0.7.9` | 286 | 2026-09-13 | `e873234` | Day 8 durable upload-queue media-loss fix, Sporely Cam originals/cache lifecycle, Day 9 local-scope logout |
+| `v0.7.10` | 287 | 2026-09-15 | `6d035a7` | Day 11 editable Find location and external map links, spore statistics in Find detail, AI result tabs accessibility |
+| `v0.7.11` | 288 | 2026-09-17 | `7fdf128` | Day 13 release-build media upload URL fix |
+
 ## Changes Applied
+
+### Day 13 (September 17, 2026)
+
+**Release builds compiled with an empty media upload URL — fixed, released as v0.7.11 (versionCode 288)**
+
+- Closed-testing context: media uploads failed in the release build. `upload.sporely.no` and the R2 worker were healthy; the client was never asking for them.
+- Cause: `VITE_MEDIA_UPLOAD_BASE_URL` existed as a GitHub Actions repository variable, but `.github/workflows/release-android.yml` never passed it into the build step's `env:`. GitHub does not export repository variables into the runner shell, so Vite compiled `getMediaUploadBaseUrl()` down to an empty string. The client then refuses the Supabase Storage fallback by design — *"Media upload worker is not configured; refusing Supabase Storage fallback because R2 is canonical"* — so every upload failed at runtime while CI reported a successful build and shipped a signed APK/AAB.
+- Scope: the release workflow has never passed this variable, and the R2-only refusal landed in `6f3b415` (2026-05-30). Any release artifact produced by the workflow since then has an empty upload base URL baked in. Locally built releases (`npm run android:build:release`) were unaffected, because `loadEnv` picks the value up from the developer's `.env.local` — which is why earlier history records uploads working from the APK.
+- Fix: the variable is now passed to *Build web assets*, and two guards mirror the existing Google Web Client ID pattern so this class of failure cannot ship silently again. `check:media:upload-base-url` runs before the build and fails on a missing, malformed, or non-HTTPS value; `verify:build:media-upload-base-url` runs after the build and fails unless the literal appears in a `dist/assets/*.js` bundle. The pre-check alone is not sufficient — it only proves the variable reached the step, not that Vite baked it in. Both also run in `npm run android:sync`, so local release builds get the same protection.
+- Verification: pre-check passes with the real value and exits 1 for unset, malformed, and `http://` values; a production build baked the URL into `dist/assets/main-*.js` and the post-build verifier found it. No production code changed — workflow, two new scripts, and `package.json` only.
+- Commit `7fdf128` on `main`, tagged `v0.7.11`. Files changed: `.github/workflows/release-android.yml`, `scripts/check-media-upload-base-url.mjs` (new), `scripts/verify-build-media-upload-base-url.mjs` (new), `package.json`, `package-lock.json`, `android/app/build.gradle`.
+- Open: whether the v0.7.9 and v0.7.10 artifacts on the closed-testing track were CI-built, and therefore whether testers on those versions could upload media at all. Play Console rollout and device QA for v0.7.11 are not recorded here.
 
 ### Day 11 (September 15, 2026)
 
-**Editable Find location on the existing map — candidate on branch, release and device QA not yet recorded**
+**Spore statistics replace the Last microscopy date in Find detail — released as v0.7.10 (versionCode 287)**
+
+- Logged retroactively on 2026-09-17; this change shipped in `v0.7.10` but was never entered here at the time.
+- Find detail's microscopy data box no longer shows a bare "Last microscopy date". A new `detail.sporeStats` row ("Spores" / "Sporer" / "Sporen") presents spore measurement statistics instead, which is what a tester actually needs when comparing a collection against a key.
+- Commit `69f5899`. Files changed: `index.html`, `src/i18n.js`, `src/screens/find_detail.js`, `src/screens/find_detail.test.js`, `src/style.css`. Test counts and device QA for this change were not recorded at the time and are not reconstructed here.
+
+**AI result tabs accessibility — released as v0.7.10 (versionCode 287)**
+
+- Logged retroactively on 2026-09-17; this change shipped in `v0.7.10` but was never entered here at the time.
+- The Artsorakel / iNaturalist service switcher in Find detail's AI Photo ID box became a real ARIA tablist: `role="tablist"` with an `aria-label`, `role="tab"` buttons carrying `aria-selected` and `aria-controls`, roving `tabindex` so only the selected tab is in the tab order, and the results container as a labelled `role="tabpanel"`. The run button and tab group were also restructured into a fused stack.
+- Commit `6d035a7` (the `v0.7.10` tag points at this commit). Files changed: `index.html`, `src/screens/find_detail.js`, `src/screens/find_detail.test.js`, `src/style.css`. Test counts and device QA for this change were not recorded at the time and are not reconstructed here.
+
+**Editable Find location on the existing map — released as v0.7.10 (versionCode 287)**
+
+- Release status corrected on 2026-09-17. The entry below was written against the frozen branch candidate and said "not merged, released, or device-verified"; the work was in fact merged and shipped in `v0.7.10`, together with a follow-up commit `1fadfad` ("map link and edit gps") that the original entry does not mention. Device QA remains unrecorded.
 
 - Closed-testing context: a Find's coordinates normally come from photo GPS, which is wrong whenever the specimen was photographed later at home rather than where it was collected. Testers had no way to correct the point.
 - Find detail's Location data box gained a final action row: **Map**, **Edit location** (**Set location** when the Find has no coordinates at all), and one compact **Open** menu for Google Maps, Mapy.com and OpenStreetMap — deliberately one menu rather than three permanent service buttons. Editing is owner-only; the read-only actions appear for any viewer of a Find that has coordinates.
@@ -35,11 +80,13 @@ opt-in count was not re-checked for this entry.
 - Confirming the picker persists `gps_latitude`/`gps_longitude` immediately, the way photos added in this screen already do, and clears `gps_accuracy` and `gps_altitude`. Both described the old position and neither can be recovered for the new one: OpenStreetMap's reverse geocoder carries no elevation, so filling altitude back in would mean sending coordinates to a further third-party elevation service. No schema or migration change.
 - Privacy: external-map links are built only from the coordinates the viewer already sees, and carry nothing else — no species, no observation id. An obscured find stays obscured for anyone but its owner: the link is clamped to the same 2-decimal grid the database views fuzz to, and opens centred at a coarse zoom with no pin, so ~1 km of uncertainty is not presented as an exact spot. Owners keep a precise pin on their own find, which is what makes the feature usable for navigating back to a site.
 - Tests: 48 focused tests pass across `src/map-links.test.js` (new), `src/screens/map-modes.test.js` (new), `src/screens/map.test.js` and `src/screens/find_detail.test.js`, verified against the frozen candidate in a clean worktree. Full `npm test` on the working tree: **1,328 passed, 36 skipped, 6 failed** — the same six Deno test files Node cannot load, as on Day 8. Production build succeeds and Leaflet stays in its own lazily-loaded chunk.
-- Branch `feature/find-location-editing`, commits `92b239a`, `7cde5cf`. Files changed: `index.html`, `src/map-links.js` (new), `src/map-loader.js`, `src/screens/map.js`, `src/screens/find_detail.js`, `src/i18n.js`, `src/style.css`, plus the tests above. Not merged, released, or device-verified.
+- Branch `feature/find-location-editing`, commits `92b239a`, `7cde5cf`. Files changed: `index.html`, `src/map-links.js` (new), `src/map-loader.js`, `src/screens/map.js`, `src/screens/find_detail.js`, `src/i18n.js`, `src/style.css`, plus the tests above. Merged to `main` and released in `v0.7.10`; see the correction above. Device QA still not recorded.
 
 ### Day 9 (September 13, 2026)
 
-**Cross-client logout no longer revokes Android sessions — implemented locally; release and device QA not yet recorded**
+**Cross-client logout no longer revokes Android sessions — released as v0.7.9 (versionCode 286)**
+
+- Release status corrected on 2026-09-17: this fix shipped in `v0.7.9`, tagged the same day. Commits `2983e77` and `64a18fb`. Device QA remains unrecorded.
 
 - Closed-testing investigation: logging out of `app.sporely.no` also caused the Android app to request sign-in after its access token next refreshed. The supplied Android console showed a transient DNS outage but no `SIGNED_OUT` event; the causal action was the web logout.
 - Cause: Sporely's shared explicit-sign-out seam called `supabase.auth.signOut()` without a scope. Supabase defaults that call to global scope, revoking the user's sessions on every device/browser.
@@ -49,7 +96,9 @@ opt-in count was not re-checked for this entry.
 
 ### Day 8 (September 12, 2026)
 
-**Durable upload queue media-loss fix — implemented locally; release and device QA not yet recorded**
+**Durable upload queue media-loss fix — released as v0.7.9 (versionCode 286)**
+
+- Release status corrected on 2026-09-17: this fix shipped in `v0.7.9`, tagged 2026-09-13, as commit `4ea8a5d`. Device QA remains unrecorded.
 
 - Confirmed production evidence: observation **1253, Hebeloma crustuliniforme**, has image rows at sort orders 0 and 1; observation **1260, Amanita rubescens**, has rows at 0, 1 and 2. Observation media keys are populated, but the corresponding `media.sporely.no` objects return 404. Both users saw local thumbnails, successfully ran AI Photo ID, and pressed Save. 1253 had poor reception; 1260 had good reception but the app was closed shortly after Save.
 - Source diagnosis: Save awaits the durable IndexedDB queue write before clearing captured photos. The upload loop reserves an `observation_images` row before uploading bytes. Reconciliation incorrectly treated each reservation's sort order as completed media, and finalization repeated that row-count assumption before deleting the local queue. An interruption after reservation commits and before all expected variants exist—including between full and thumbnail uploads—could therefore discard the only durable image bytes on retry.
@@ -66,7 +115,9 @@ opt-in count was not re-checked for this entry.
 - Tests: worker suite 92 passed (two new: missing-object HEAD returns 404 + `media_not_found` and exposes the header for an allowed Origin; success responses carry the expose header). Client `images.test.js` HEAD tri-state tests 29 passed.
 - Deployed with `npx wrangler deploy` from `cloudflare/r2-upload-worker`; the previously stuck queue item retried successfully on the device without a new Android build. Branch `fix/r2-worker-expose-error-code-header`, commit `b5107aa`. Files changed: `cloudflare/r2-upload-worker/src/index.js`, `cloudflare/r2-upload-worker/src/index.test.js`.
 
-**Android: "Save originals to phone" setting and Sporely Cam cache lifecycle — candidate on branch, device QA pending**
+**Android: "Save originals to phone" setting and Sporely Cam cache lifecycle — released as v0.7.9 (versionCode 286)**
+
+- Release status corrected on 2026-09-17. The entry below records the version bump as "v0.7.7, versionCode 284" and says the work was not released. Both parts are wrong: commit `5d3e26b`, despite its own commit message, actually set versionName `0.7.8` / versionCode 285, and no `v0.7.7` or `v0.7.8` tag was ever created. The branch merged to `main` as `e873234`, where `2983e77` had already bumped to `0.7.9` / versionCode 286, and shipped under the `v0.7.9` tag. Device QA remains unrecorded.
 - Sporely Cam captures in `cache/native-camera/sporely-native-*.jpg` were never removed after Save (~200 MB accumulated in a week on one device). New lifecycle: `enqueueObservation()` succeeds → optional MediaStore copy of the original JPEG (EXIF/GPS intact) to `Pictures/Sporely` when the new Android-only setting is ON (default OFF) → private cache source deleted. Enqueue failure retains the source; gallery-export failure keeps the save, shows a toast, and still frees the source.
 - Startup prune removes `sporely-native-*` files older than 48 h, but captures referenced by the persisted review draft are passed as protected paths and re-validated natively; if the draft cannot be read the prune is skipped. Cancelled-session cleanup unchanged; no upgrade wipe.
 - Tests: 1,285 Node tests passed (the same 6 Deno files fail under Node as above); 6 JUnit tests for the native guards. Design, uncovered paths and the device QA checklist: `docs/native-camera-storage-lifecycle.md`.
