@@ -165,8 +165,14 @@ still create a legacy row, retry unchanged, delete or restore, but any other
 change to a row whose extension is non-NULL, and any successor of such a row,
 is rejected with `invalid_payload`; a payload carrying some but not all keys is
 rejected everywhere. Every content change is validated row-level (finite
-positive values, ordered pairs, details structure and the 4096-byte limit; an
-unknown future `schema_version` is stored opaquely). Owner reads and RPC rows
+positive values, ordered pairs, details structure and the 4096-byte limit).
+The server accepts only a details `schema_version` it knows — `{1}` at this
+deployment — and refuses any other with `invalid_payload` rather than storing
+it opaquely, because `private.public_reference_snapshot` forwards
+`measurement_details` verbatim to the reader RPCs granted to `anon`. Opaque
+acceptance of a future version is a desktop-side rule for content that already
+came from a trusted server, not a server rule; a later version is enabled by
+extending that set together with its structural rules. Owner reads and RPC rows
 return the three columns, so a pre-extension server's rows are rejected by the
 desktop as missing canonical fields, and a stored baseline that predates the
 extension is read with the three keys as `null`. Pull reconciliation treats the

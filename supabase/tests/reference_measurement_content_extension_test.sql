@@ -202,12 +202,21 @@ BEGIN
     RAISE EXCEPTION 'aware re-enhancement failed: %', result;
   END IF;
 
-  -- 7. A future details version survives opaquely (authoritative mode).
+  -- 7. An unknown future details version is refused, not stored opaquely
+  --    (contract section 9 item 7: the server accepts only schema_version
+  --    values it knows, {1} at this deployment). Opaque acceptance is a
+  --    desktop-side rule for content that already came from a trusted server;
+  --    on the server it would publish unvalidated client JSON, because
+  --    private.public_reference_snapshot forwards measurement_details verbatim
+  --    to RPCs granted to anon.
   future := '{"schema_version":2,"metrics":{"length":{"core_range":{"kind":"percentile_interval","percentile_bounds":[5,95]},"population":{"kind":"specimen_means","n":12}}},"provenance":{"basis":"verbatim"}}'::jsonb;
   result := public.sync_reference_measurement_set(
     base || jsonb_build_object('id', future_id, 'measurement_details_json', future, 'q_core_min', null, 'q_core_max', null), 0);
-  IF result->>'status' <> 'created' OR result->'row'->'measurement_details_json' <> future THEN
-    RAISE EXCEPTION 'future-version details were not stored opaquely: %', result;
+  IF result->>'status' <> 'invalid_payload' THEN
+    RAISE EXCEPTION 'future-version details were not refused: %', result;
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.reference_measurement_sets WHERE id = future_id) THEN
+    RAISE EXCEPTION 'future-version details wrote a row';
   END IF;
 
   -- 8. Row-level validation rejections on create (section 9 item 7). Each
@@ -244,9 +253,19 @@ BEGIN
     enhanced || jsonb_build_object('measurement_details_json', jsonb_set(details, '{metrics,length,median}', '{"value":9.5,"lower":9.0,"upper":13.9,"kind":"reported_range"}')),
     enhanced || jsonb_build_object('measurement_details_json', jsonb_set(details, '{metrics,length,mean_interval}', '{"lower":13.7,"upper":8.9,"kind":"reported_range"}')),
     enhanced || jsonb_build_object('measurement_details_json', '[1,2]'::jsonb),
-    -- size: a future-version object above the 4096-byte canonical limit
+    -- an unknown version is refused whatever its size, and refused before the
+    -- 4096-byte canonical limit is consulted. The size rule now survives only
+    -- as defence in depth: a structurally valid version-1 object is bounded to
+    -- three metrics of five fixed keys with no free-form string, so it cannot
+    -- approach 4096 bytes, and no oversized object can reach the size check
+    -- without first failing the structure or version rules.
     enhanced || jsonb_build_object('measurement_details_json',
-      jsonb_build_object('schema_version', 2, 'blob', repeat('x', 4200)))
+      jsonb_build_object('schema_version', 2, 'blob', repeat('x', 4200))),
+    -- an unknown version is refused at its smallest, too
+    enhanced || jsonb_build_object('measurement_details_json',
+      jsonb_build_object('schema_version', 3, 'metrics', details->'metrics')),
+    enhanced || jsonb_build_object('measurement_details_json',
+      jsonb_build_object('schema_version', 0, 'metrics', details->'metrics'))
   ];
   case_index := 0;
   FOREACH candidate IN ARRAY rejections LOOP

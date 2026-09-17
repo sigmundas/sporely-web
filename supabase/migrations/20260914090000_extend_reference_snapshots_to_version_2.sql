@@ -9,10 +9,36 @@
 -- canonical encoding, measured with private.reference_jsonb_compact_text from
 -- migration 20260913120000.
 --
--- Deploy order: the desktop readers of rollout step 1 ship before this
--- migration is applied. Nothing here emits version 2 for a legacy row, so
--- every existing snapshot, attachment and curated publication keeps its exact
--- version-1 representation.
+-- Deploy order. 20260913120000 is already applied in production; this
+-- migration is the only pending one in the pair.
+--
+-- The invariant to protect is that no version-2 snapshot may reach a desktop
+-- that cannot read one. That is governed by when the first *enhanced row*
+-- appears, not by when this migration is applied, so this migration may be
+-- applied before any desktop release:
+--
+--   * reference_canonical_snapshot emits version 2 only for an enhanced row
+--     (measurement_details_json, q_core_min or q_core_max non-NULL).
+--   * An enhanced row can only be written through
+--     public.sync_reference_measurement_set_unthrottled, which requires all
+--     three extension keys to be present; `authenticated` holds only SELECT on
+--     public.reference_measurement_sets, and no edge function or web client
+--     writes those columns.
+--   * A payload carrying none of the three keys leaves them NULL, so every
+--     client released before the Stage 3C adapter can only create legacy rows.
+--
+-- Therefore, until a desktop release carries the Stage 3C writer and the
+-- activation gates open, no enhanced row exists, this migration emits no
+-- version-2 snapshot, and every existing snapshot, attachment and curated
+-- publication keeps its exact version-1 representation. The real gate on
+-- version-2 emission is the minimum-supported-reader-version gate in
+-- sporely-py (references/measurement_content_gates.py), which ships closed.
+--
+-- The converse ordering was a hard constraint and is already satisfied:
+-- 20260913120000 had to be applied *before* any desktop release carrying the
+-- Stage 3C adapter, because that adapter sends all three keys on every
+-- measurement-set payload and a pre-migration server rejects each one through
+-- the unknown-keys allowlist. It is applied, and no such desktop has shipped.
 --
 -- Scope note: private.curated_reference_measurement_sets has no extension
 -- columns and private.reference_curated_snapshot names its columns
@@ -22,6 +48,84 @@
 -- carrying enhanced content through curated storage is separate work.
 
 BEGIN;
+
+-- Bound the details schema_version to the set the server knows, {1}.
+--
+-- 20260913120000 accepted any other integer version opaquely and returned
+-- true without inspecting the object. That is deliberately corrected here,
+-- in the same migration that first exposes the object, because this migration
+-- makes private.public_reference_snapshot preserve measurement_details and
+-- forward it verbatim to the reader RPCs granted to anon. Leaving the opaque
+-- branch in place would publish arbitrary client-supplied JSON, bounded only
+-- by the 4096-byte size limit. Contract section 9 item 7: "The server accepts
+-- only schema_version values it knows (1 at first deployment)".
+--
+-- Opaque acceptance of a future version remains a desktop-side rule (contract
+-- section 3, UnsupportedMeasurementDetails), where the object has already come
+-- from a trusted server. It is not a server rule. A later version is enabled
+-- by extending the set below together with that version's structural rules.
+--
+-- The body is otherwise byte-identical to 20260913120000, which stays applied
+-- and unedited; only the version branch changes. This also makes the
+-- corresponding non-1 branch of private.reference_measurement_content_valid
+-- unreachable, so that function needs no replacement: it consults
+-- reference_measurement_details_valid first and now fails there.
+CREATE OR REPLACE FUNCTION private.reference_measurement_details_valid(p_details jsonb)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE SET search_path = '' AS $$
+DECLARE v_version jsonb; v_metrics jsonb; v_body jsonb; v_metric text; v_median jsonb;
+BEGIN
+  IF p_details IS NULL THEN RETURN true; END IF;
+  IF pg_catalog.jsonb_typeof(p_details) <> 'object' THEN RETURN false; END IF;
+  v_version := p_details->'schema_version';
+  IF v_version IS NULL OR pg_catalog.jsonb_typeof(v_version) <> 'number'
+     OR (v_version#>>'{}')::numeric <> pg_catalog.trunc((v_version#>>'{}')::numeric) THEN
+    RETURN false;
+  END IF;
+  -- Supported details schema versions: {1}. Compared as numeric so that a
+  -- version outside integer range is rejected rather than raising on cast.
+  IF (v_version#>>'{}')::numeric <> 1 THEN RETURN false; END IF;
+  IF NOT (p_details ?& ARRAY['schema_version','metrics'])
+     OR private.reference_payload_has_unknown_keys(p_details, ARRAY['schema_version','metrics']) THEN
+    RETURN false;
+  END IF;
+  v_metrics := p_details->'metrics';
+  IF pg_catalog.jsonb_typeof(v_metrics) <> 'object' OR v_metrics = '{}'::jsonb
+     OR private.reference_payload_has_unknown_keys(v_metrics, ARRAY['length','width','q']) THEN
+    RETURN false;
+  END IF;
+  FOR v_metric, v_body IN SELECT e.key, e.value FROM pg_catalog.jsonb_each(v_metrics) e LOOP
+    IF pg_catalog.jsonb_typeof(v_body) <> 'object' OR v_body = '{}'::jsonb
+       OR private.reference_payload_has_unknown_keys(
+            v_body, ARRAY['outer_range','core_range','mean_interval','median','sd']) THEN
+      RETURN false;
+    END IF;
+    IF (v_body ? 'outer_range')
+       AND NOT private.reference_range_descriptor_valid(v_body->'outer_range', ARRAY['reported_extremes']) THEN
+      RETURN false;
+    END IF;
+    IF (v_body ? 'core_range')
+       AND NOT private.reference_range_descriptor_valid(
+             v_body->'core_range',
+             ARRAY['unspecified','typical_range','reported_range','percentile_interval']) THEN
+      RETURN false;
+    END IF;
+    IF (v_body ? 'mean_interval')
+       AND NOT private.reference_interval_statistic_valid(v_body->'mean_interval') THEN
+      RETURN false;
+    END IF;
+    IF v_body ? 'median' THEN
+      v_median := v_body->'median';
+      IF NOT (private.reference_scalar_statistic_valid(v_median, true)
+              OR private.reference_interval_statistic_valid(v_median)) THEN
+        RETURN false;
+      END IF;
+    END IF;
+    IF (v_body ? 'sd') AND NOT private.reference_scalar_statistic_valid(v_body->'sd', false) THEN
+      RETURN false;
+    END IF;
+  END LOOP;
+  RETURN true;
+END $$;
 
 -- Version-keyed exact key sets. A snapshot is validated at exactly one shape;
 -- an unknown version fails rather than being read as version 1, and a

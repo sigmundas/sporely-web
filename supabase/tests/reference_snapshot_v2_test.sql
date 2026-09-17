@@ -50,10 +50,10 @@ DECLARE
   treatment_id constant uuid := '24000000-0000-4000-8000-000000000001';
   legacy_id constant uuid := '34000000-0000-4000-8000-00000000d001';
   enhanced_id constant uuid := '34000000-0000-4000-8000-00000000d002';
-  future_id constant uuid := '34000000-0000-4000-8000-00000000d003';
+  details_only_id constant uuid := '34000000-0000-4000-8000-00000000d003';
   result jsonb;
   details jsonb;
-  future jsonb;
+  details_only jsonb;
 BEGIN
   result := public.sync_reference_work(jsonb_build_object(
     'id', work_id, 'type', 'book', 'title', 'Hebeloma source', 'short_label', 'Author 2026',
@@ -72,7 +72,12 @@ BEGIN
         'core_range', jsonb_build_object('kind', 'percentile_interval',
                                          'percentile_bounds', jsonb_build_array(5, 95)),
         'sd', jsonb_build_object('value', 0.696))));
-  future := '{"schema_version": 7, "metrics": {"length": {"unknown_future_key": 1}}}'::jsonb;
+  -- Valid version 1, but carrying no descriptor that requires a column pair,
+  -- so the row is enhanced by its details alone.
+  details_only := jsonb_build_object(
+    'schema_version', 1,
+    'metrics', jsonb_build_object(
+      'width', jsonb_build_object('sd', jsonb_build_object('value', 0.323))));
 
   result := public.sync_reference_measurement_set(jsonb_build_object(
     'id', legacy_id, 'taxon_treatment_id', treatment_id, 'character', 'spore_size',
@@ -89,12 +94,15 @@ BEGIN
     'measurement_details_json', details, 'q_core_min', 1.36, 'q_core_max', 2.19), 0);
   IF result->>'status' <> 'created' THEN RAISE EXCEPTION 'enhanced create failed: %', result; END IF;
 
-  -- Enhanced through an unsupported future details version, with no q_core pair.
+  -- Enhanced by its details alone, with no q_core pair.
   result := public.sync_reference_measurement_set(jsonb_build_object(
-    'id', future_id, 'taxon_treatment_id', treatment_id, 'character', 'spore_size',
-    'data_kind', 'range', 'raw_text', 'future', 'revision', 1,
-    'measurement_details_json', future, 'q_core_min', NULL, 'q_core_max', NULL), 0);
-  IF result->>'status' <> 'created' THEN RAISE EXCEPTION 'future create failed: %', result; END IF;
+    'id', details_only_id, 'taxon_treatment_id', treatment_id, 'character', 'spore_size',
+    'data_kind', 'range', 'raw_text', 'details only', 'length_min', 8.5,
+    'length_max', 12.5, 'revision', 1,
+    'measurement_details_json', details_only, 'q_core_min', NULL, 'q_core_max', NULL), 0);
+  IF result->>'status' <> 'created' THEN
+    RAISE EXCEPTION 'details-only create failed: %', result;
+  END IF;
 END
 $$;
 
@@ -108,12 +116,13 @@ DECLARE
   treatment_id constant uuid := '24000000-0000-4000-8000-000000000001';
   legacy_id constant uuid := '34000000-0000-4000-8000-00000000d001';
   enhanced_id constant uuid := '34000000-0000-4000-8000-00000000d002';
-  future_id constant uuid := '34000000-0000-4000-8000-00000000d003';
+  details_only_id constant uuid := '34000000-0000-4000-8000-00000000d003';
   details jsonb;
-  future jsonb;
+  details_only jsonb;
+  unknown_version_snapshot jsonb;
   legacy_snapshot jsonb;
   enhanced_snapshot jsonb;
-  future_snapshot jsonb;
+  details_only_snapshot jsonb;
   downgraded jsonb;
   projected jsonb;
   oversized jsonb;
@@ -126,12 +135,15 @@ BEGIN
         'core_range', jsonb_build_object('kind', 'percentile_interval',
                                          'percentile_bounds', jsonb_build_array(5, 95)),
         'sd', jsonb_build_object('value', 0.696))));
-  future := '{"schema_version": 7, "metrics": {"length": {"unknown_future_key": 1}}}'::jsonb;
+  details_only := jsonb_build_object(
+    'schema_version', 1,
+    'metrics', jsonb_build_object(
+      'width', jsonb_build_object('sd', jsonb_build_object('value', 0.323))));
 
   -- 1. The emit rule follows the row, not a setting.
   legacy_snapshot := private.reference_canonical_snapshot(owner_a, legacy_id);
   enhanced_snapshot := private.reference_canonical_snapshot(owner_a, enhanced_id);
-  future_snapshot := private.reference_canonical_snapshot(owner_a, future_id);
+  details_only_snapshot := private.reference_canonical_snapshot(owner_a, details_only_id);
   IF legacy_snapshot->>'schema_version' <> '1' THEN
     RAISE EXCEPTION 'legacy row must still emit version 1: %', legacy_snapshot;
   END IF;
@@ -152,15 +164,15 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'measurements must stay numeric-or-null: %', enhanced_snapshot;
   END IF;
-  -- A future details version travels unchanged and is never reinterpreted; a
-  -- row enhanced only by its details still carries both q_core keys, as null.
-  IF future_snapshot->>'schema_version' <> '2'
-     OR future_snapshot->'measurement_details' <> future THEN
-    RAISE EXCEPTION 'a future details version must survive unchanged: %', future_snapshot;
+  -- A row enhanced only by its details still emits version 2 and carries both
+  -- q_core keys, as null.
+  IF details_only_snapshot->>'schema_version' <> '2'
+     OR details_only_snapshot->'measurement_details' <> details_only THEN
+    RAISE EXCEPTION 'a details-only row must emit version 2: %', details_only_snapshot;
   END IF;
-  IF NOT (future_snapshot->'measurements') ?& ARRAY['q_core_min','q_core_max']
-     OR jsonb_typeof(future_snapshot->'measurements'->'q_core_min') <> 'null' THEN
-    RAISE EXCEPTION 'a version-2 snapshot must always carry both q_core keys: %', future_snapshot;
+  IF NOT (details_only_snapshot->'measurements') ?& ARRAY['q_core_min','q_core_max']
+     OR jsonb_typeof(details_only_snapshot->'measurements'->'q_core_min') <> 'null' THEN
+    RAISE EXCEPTION 'a version-2 snapshot must always carry both q_core keys: %', details_only_snapshot;
   END IF;
 
   -- 2. The validator is version-keyed in both directions.
@@ -170,8 +182,22 @@ BEGIN
   IF private.reference_snapshot_valid(enhanced_snapshot, work_id, treatment_id, enhanced_id, 1) IS NOT TRUE THEN
     RAISE EXCEPTION 'the canonical version-2 snapshot must validate';
   END IF;
-  IF private.reference_snapshot_valid(future_snapshot, work_id, treatment_id, future_id, 1) IS NOT TRUE THEN
-    RAISE EXCEPTION 'an opaque future details version must still validate';
+  IF private.reference_snapshot_valid(details_only_snapshot, work_id, treatment_id, details_only_id, 1) IS NOT TRUE THEN
+    RAISE EXCEPTION 'the canonical details-only version-2 snapshot must validate';
+  END IF;
+  -- An unknown details version must not be validated, and therefore must not
+  -- reach anon. The RPC already refuses to store one, so this synthesises the
+  -- snapshot directly to prove the read path is guarded independently: it is
+  -- private.public_reference_snapshot that would otherwise forward
+  -- measurement_details verbatim to the anon-granted public readers.
+  unknown_version_snapshot := jsonb_set(
+    details_only_snapshot, '{measurement_details,schema_version}', '7'::jsonb);
+  IF private.reference_snapshot_valid(
+       unknown_version_snapshot, work_id, treatment_id, details_only_id, 1) IS TRUE THEN
+    RAISE EXCEPTION 'an unknown details version must not validate';
+  END IF;
+  IF private.public_reference_snapshot(unknown_version_snapshot, details_only_id, 1) IS NOT NULL THEN
+    RAISE EXCEPTION 'an unknown details version must not be published to anon';
   END IF;
   IF private.reference_snapshot_valid(
        legacy_snapshot || jsonb_build_object('measurement_details', 'null'::jsonb),
@@ -214,11 +240,17 @@ BEGIN
        work_id, treatment_id, enhanced_id, 1) IS NOT TRUE THEN
     RAISE EXCEPTION 'a version-2 snapshot with a null details object is valid';
   END IF;
+  -- Rejected for its unknown version, which is now consulted before the
+  -- 4096-byte canonical limit. The size rule is retained as defence in depth
+  -- but is no longer independently reachable: a structurally valid version-1
+  -- details object is three metrics of five fixed keys with no free-form
+  -- string, so it cannot approach 4096 bytes, and anything large enough to
+  -- trip the limit fails the structure or version rules first.
   oversized := jsonb_build_object('schema_version', 7, 'padding', repeat('x', 5000));
   IF private.reference_snapshot_valid(
        jsonb_set(enhanced_snapshot, '{measurement_details}', oversized),
        work_id, treatment_id, enhanced_id, 1) IS TRUE THEN
-    RAISE EXCEPTION 'details beyond 4096 canonical bytes must be rejected';
+    RAISE EXCEPTION 'an oversized unknown-version details object must be rejected';
   END IF;
 
   -- 3. The public projection preserves the extension and never invents one.
