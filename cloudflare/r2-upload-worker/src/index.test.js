@@ -2489,6 +2489,49 @@ test('HEAD /upload/<key>: authorized HEAD on missing object → 404 media_not_fo
 
   assert.equal(res.status, 404)
   assert.equal(res.headers.get('X-Sporely-Error-Code'), 'media_not_found')
+  // The header only reaches browser/WebView JavaScript if CORS exposes it.
+  // Without this the client sees a 404 with a null error code and treats the
+  // failure as ambiguous, head-of-line blocking the upload queue.
+  assert.ok(
+    headerList(res.headers.get('Access-Control-Expose-Headers')).includes('x-sporely-error-code'),
+    'missing-object 404 must expose X-Sporely-Error-Code to cross-origin JS',
+  )
+})
+
+test('HEAD /upload/<key>: error responses expose the error code header for every allowed origin', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+
+  for (const origin of ['https://localhost', 'https://app.sporely.no']) {
+    const env = makeHeadEnv({} /* empty bucket */)
+    env.SUPABASE_JWT_SECRET = jwtSecret
+
+    const res = await worker.fetch(
+      buildHeadRequest('user-123/obs/0_000.webp', token, origin),
+      env,
+      {},
+    )
+
+    assert.equal(res.status, 404)
+    assert.equal(res.headers.get('Access-Control-Allow-Origin'), origin)
+    assert.equal(res.headers.get('X-Sporely-Error-Code'), 'media_not_found')
+    assert.ok(
+      headerList(res.headers.get('Access-Control-Expose-Headers')).includes('x-sporely-error-code'),
+      `origin ${origin} must receive Access-Control-Expose-Headers`,
+    )
+  }
+})
+
+test('HEAD /upload/<key>: successful HEAD also exposes the error code header', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const env = makeHeadEnv({ 'user-123/obs/0_000.webp': { size: 1234 } })
+  env.SUPABASE_JWT_SECRET = jwtSecret
+
+  const res = await worker.fetch(buildHeadRequest('user-123/obs/0_000.webp', token), env, {})
+
+  assert.equal(res.status, 200)
+  assert.ok(
+    headerList(res.headers.get('Access-Control-Expose-Headers')).includes('x-sporely-error-code'),
+  )
 })
 
 test('HEAD /upload/<key>: unauthenticated HEAD (no bearer) → 401', async () => {
@@ -2506,6 +2549,9 @@ test('HEAD /upload/<key>: unauthenticated HEAD (no bearer) → 401', async () =>
 
   assert.equal(res.status, 401)
   assert.equal(res.headers.get('X-Sporely-Error-Code'), 'missing_token')
+  assert.ok(
+    headerList(res.headers.get('Access-Control-Expose-Headers')).includes('x-sporely-error-code'),
+  )
 })
 
 test('HEAD /upload/<key>: foreign owner key → 403 (no existence disclosure)', async () => {
@@ -2525,6 +2571,10 @@ test('HEAD /upload/<key>: foreign owner key → 403 (no existence disclosure)', 
     assert.equal(res.status, 403)
     // Must not reveal existence
     assert.notEqual(res.headers.get('X-Sporely-Error-Code'), 'media_not_found')
+    assert.equal(res.headers.get('X-Sporely-Error-Code'), 'key_not_allowed')
+    assert.ok(
+      headerList(res.headers.get('Access-Control-Expose-Headers')).includes('x-sporely-error-code'),
+    )
   } finally {
     restoreFetch()
   }
@@ -2548,7 +2598,12 @@ test('HEAD /upload/<key>: route-level 404 (unknown path) returns not_found code'
   )
 
   assert.equal(res.status, 404)
+  // A route-level 404 must stay distinguishable from a missing object: the
+  // client only treats media_not_found as "safe to re-upload".
   assert.equal(res.headers.get('X-Sporely-Error-Code'), 'not_found')
+  assert.ok(
+    headerList(res.headers.get('Access-Control-Expose-Headers')).includes('x-sporely-error-code'),
+  )
 })
 
 test('HEAD /upload/<key>: HEAD is included in allowed methods', async () => {
@@ -2567,6 +2622,9 @@ test('HEAD /upload/<key>: HEAD is included in allowed methods', async () => {
   assert.equal(res.status, 204)
   const methods = headerList(res.headers.get('Access-Control-Allow-Methods'))
   assert.ok(methods.includes('head'), 'HEAD must be in Access-Control-Allow-Methods')
+  assert.ok(
+    headerList(res.headers.get('Access-Control-Expose-Headers')).includes('x-sporely-error-code'),
+  )
 })
 
 test('HEAD /upload/<key>: works for legacy bucket in legacy mode', async () => {
