@@ -1,4 +1,4 @@
-# Agent instructions
+/clear# Agent instructions
 
 ## Staged workflow
 
@@ -90,3 +90,38 @@ This repository often contains concurrent uncommitted work.
 - Use `git add -p` for mixed files.
 - Never bundle unrelated `supabase/schema.sql`, migrations, tests, docs, or UI changes.
 - Do not add `deno.lock` unless the task specifically requires it.
+
+## Git policy
+
+These rules apply to this repository and override conflicting shared Sporely
+workflow defaults (including the parent's Claude commit/push policy). Explicit
+user instructions take precedence over repository defaults. A generated stage
+prompt does not by itself authorize overriding a repository Git restriction.
+
+Agents may create branches, commit, push, merge, and delete branches as needed
+to complete the task.
+
+Use normal Git workflows and keep history understandable.
+
+Do not:
+- force-push unless the user explicitly asks for it;
+- rewrite published history unnecessarily;
+- push secrets or credentials;
+- merge obviously unrelated work;
+- deploy, publish a release, or modify production systems unless the task
+  explicitly includes that.
+
+For staged/agent-sparring work:
+- commit and push completed stage work;
+- merge when the stage or plan calls for it;
+- leave a clear handoff describing what changed, what was tested, and any
+  unresolved issues.
+
+This permission does not weaken the rules elsewhere in this file. Only work
+whose verification has actually passed may be committed; work whose
+verification needs the user (interactive behavior, live Supabase writes, RLS,
+cross-client sync, judgment about how output reads) stays uncommitted until the
+user confirms. It also grants nothing under **Supabase migration safety**:
+pushing a commit is not approval to run `supabase db push`, `migration repair`,
+or any other remote migration action, and **Working-tree hygiene** still governs
+what may be staged.
