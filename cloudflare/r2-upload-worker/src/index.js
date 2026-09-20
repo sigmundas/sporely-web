@@ -16,6 +16,11 @@ import {
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
 const DEFAULT_ALLOWED_METHODS = 'GET, HEAD, PUT, DELETE, OPTIONS, POST'
+// Headers that browser/WebView JavaScript must be able to read off a
+// cross-origin worker response. Without this, fetch() hides X-Sporely-Error-Code
+// and callers cannot distinguish "object is absent" (media_not_found) from a
+// route/configuration 404 — see HEAD /upload/<key> resume handling in images.js.
+const DEFAULT_EXPOSED_HEADERS = 'X-Sporely-Error-Code'
 const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
   'Content-Type',
@@ -2073,6 +2078,7 @@ function corsHeaders(request, env, resolvedOrigin = null) {
   }
   headers.set('Access-Control-Allow-Methods', DEFAULT_ALLOWED_METHODS)
   headers.set('Access-Control-Allow-Headers', resolveAllowedHeaders(request))
+  headers.set('Access-Control-Expose-Headers', DEFAULT_EXPOSED_HEADERS)
   headers.set('Access-Control-Max-Age', '86400')
   return headers
 }
