@@ -28,6 +28,7 @@ import { buildPeopleCard, loadPeopleSocialState, wireAvatarFallback, wirePeopleC
 import { AUTH_STATE, getAuthState } from '../auth-state.js'
 import { beginReauthentication } from '../reauth.js'
 import { currentAccountGeneration } from '../account-transition.js'
+import { isObservationUnidentified } from '../observation-identity.js'
 
 // Field-offline UX (Stage C polish): when the app is revealed with a cached
 // identity but no authoritative session for this launch, Finds must NOT run
@@ -2930,7 +2931,10 @@ function _speciesKey(obs) {
   const genus = obs.genus || ''
   const species = obs.species || ''
   const common = obs.common_name || ''
-  if (!genus && !species && !common) return '\x00unidentified'
+  // Taxonomy-v2 closeout Stage 2 Part B: grouping uses the shared
+  // classifier so an unresolved external identity never lands in the
+  // unidentified group.
+  if (isObservationUnidentified(obs)) return '\x00unidentified'
   return `${genus}|${species}|${common}`.toLowerCase()
 }
 
@@ -3520,7 +3524,7 @@ const FINDS_SPORES_ICON = `<svg class="find-card-vis-icon" style="stroke: var(--
 
 function _findsCardHtml(obs, { variant = 'cards', mode = 'date', imageData = {} } = {}) {
   const latin = formatScientificName(obs.genus || '', obs.species || '')
-  const isUnknown = !latin && !obs.common_name
+  const isUnknown = isObservationUnidentified(obs)
   const displayName = obs.common_name || latin || t('finds.unidentified')
   const uncertainPrefix = _uncertainPrefix(obs)
   const nameHtml = isUnknown

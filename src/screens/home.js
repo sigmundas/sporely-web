@@ -15,6 +15,7 @@ import { AUTH_STATE, getAuthState, subscribeAuthState } from '../auth-state.js'
 import { requiresReauthentication } from '../capabilities.js'
 import { beginReauthentication } from '../reauth.js'
 import { clearHomeCache, readHomeCache, writeHomeCache } from '../home-cache.js'
+import { isObservationUnidentified } from '../observation-identity.js'
 
 function _isDebugCommentQueryEnabled() {
   try {
@@ -536,7 +537,10 @@ function _recentFindRowHtml(obs, profileMap) {
   const latin       = formatScientificName(obs.genus || '', obs.species || '')
   const displayName = obs.common_name || latin || t('home.unidentified')
   const subtitle    = obs.common_name && latin ? latin : null
-  const isIdentified = !!(latin || obs.common_name)
+  // Taxonomy-v2 closeout Stage 2 Part B: "unidentified" is the genuine
+  // no-name case only. A usable name whose external identifier has not
+  // resolved to a Sporely concept still renders as its name.
+  const isIdentified = !isObservationUnidentified(obs)
   const loc    = obs.location || (
     obs.gps_latitude && obs.gps_longitude
       ? `${obs.gps_latitude.toFixed(2)}°N, ${obs.gps_longitude.toFixed(2)}°E`

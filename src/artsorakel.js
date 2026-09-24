@@ -20,6 +20,63 @@ import { searchTaxaV2 } from './taxonomy-v2.js'
 const ARTSDATA_AI_URL = 'https://ai.artsdatabanken.no'
 const SPORELY_APP_NAME = 'Sporely'
 
+/**
+ * Sentinel vernacular string Artsorakel puts on a superseded record (and on
+ * its "please update the app" wrapper prediction).
+ */
+export const ARTSORAKEL_DEPRECATED_SENTINEL = '*** Utdatert versjon ***'
+
+/**
+ * Read a field from an Artsorakel candidate, looking at the candidate itself
+ * AND at its nested `taxon` object.
+ *
+ * Artsorakel returns candidates in two shapes, both observed in this
+ * repository's own fixtures:
+ *
+ *   A. `predictions[]` entries that hold everything under `taxon`;
+ *   B. `predictions[].taxa.items[]` entries that hold the interesting fields
+ *      at the top level — sometimes with a nested `taxon` carrying only the
+ *      vernacular name, sometimes with no `taxon` at all.
+ *
+ * Reading only one level loses data in the other shape. That is the defect
+ * behind the taxonomy-v2 closeout Stage 2 Part B incident: the normalizer
+ * used to bind `taxon = pred.taxon` whenever a nested `taxon` existed, so a
+ * shape-B candidate with `scientificName` and `scientific_name_id` at the top
+ * level and `{ vernacularName }` nested returned a null scientific name and a
+ * null identifier — which the observation save path then wrote over an
+ * existing identification.
+ */
+function _readCandidateField(candidate, keys) {
+  const nested = candidate?.taxon && typeof candidate.taxon === 'object'
+    ? candidate.taxon
+    : null
+  for (const source of [candidate, nested]) {
+    if (!source || typeof source !== 'object') continue
+    for (const key of keys) {
+      const value = source[key]
+      if (value === null || value === undefined) continue
+      if (typeof value === 'string' && !value.trim()) continue
+      return value
+    }
+  }
+  return null
+}
+
+/**
+ * Whether a candidate is a deprecated Artsorakel record.
+ *
+ * Checks the sentinel at BOTH nesting levels. The previous single-level check
+ * (`p?.taxon?.vernacularName`) could not match a flattened
+ * `predictions[].taxa.items[]` candidate whose vernacular sits at
+ * `p.vernacularName`, so a superseded record survived normalization.
+ */
+export function isDeprecatedArtsorakelCandidate(candidate) {
+  const vernacular = _readCandidateField(candidate, [
+    'vernacularName', 'vernacular_name',
+  ])
+  return String(vernacular || '').trim() === ARTSORAKEL_DEPRECATED_SENTINEL
+}
+
 function _roundArtsorakelCoordinate(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return null
@@ -352,14 +409,16 @@ function pickVernacular(taxon, lang) {
   return null
 }
 
-function pickUrl(pred, taxon) {
+function pickUrl(pred, taxon, resolvedTaxonId = null) {
   for (const obj of [pred, taxon]) {
     if (!obj) continue
     for (const key of ['infoURL', 'infoUrl', 'info_url', 'url', 'link', 'href', 'uri']) {
       if (typeof obj[key] === 'string' && obj[key].startsWith('http')) return obj[key]
     }
   }
-  const id = taxon.taxonId || taxon.id
+  // Prefer the identifier the normalizer actually resolved: for a flattened
+  // `taxa.items[]` candidate it sits at the top level, not under `taxon`.
+  const id = resolvedTaxonId || taxon.taxonId || taxon.id
   if (id) return `https://artsdatabanken.no/arter/takson/${id}`
   return 'https://artsdatabanken.no'
 }
@@ -378,14 +437,25 @@ function _normalizeArtsorakelPrediction(pred, langNorm, rank) {
   const taxon = pred?.taxon && typeof pred.taxon === 'object'
     ? pred.taxon
     : (pred && typeof pred === 'object' ? pred : {})
-  const scientificName = (taxon.scientificName || taxon.scientific_name || taxon.name || '').trim() || null
+  // Taxonomy-v2 closeout Stage 2 Part B: every field below is read from the
+  // candidate AND its nested `taxon`. A nested `taxon` must not shadow
+  // top-level data — see `_readCandidateField`.
+  const scientificName = String(_readCandidateField(pred, [
+    'scientificName', 'scientific_name', 'name',
+  ]) || '').trim() || null
   const vernacularName = pickVernacular(taxon, langNorm)
+    || String(_readCandidateField(pred, ['vernacularName', 'vernacular_name']) || '').trim()
+    || null
   const displayName = vernacularName && scientificName && vernacularName.toLowerCase() !== scientificName.toLowerCase()
     ? `${vernacularName} (${scientificName})`
     : vernacularName || scientificName || t('common.unknown')
-  const taxonId = taxon.taxonId || taxon.id || taxon.scientific_name_id || null
-  const speciesUrl = pickUrl(pred, taxon)
-  const redlistCategory = taxon.redListCategory || taxon.redListCategories?.NO || null
+  const taxonId = _readCandidateField(pred, [
+    'taxonId', 'id', 'scientific_name_id', 'scientificNameId', 'taxon_id',
+  ]) || null
+  const speciesUrl = pickUrl(pred, taxon, taxonId)
+  const redlistCategory = _readCandidateField(pred, ['redListCategory'])
+    || _readCandidateField(pred, ['redListCategories'])?.NO
+    || null
   const pictureUrl = pickPictureUrl(pred, taxon)
 
   return {
@@ -481,6 +551,9 @@ function _flattenArtsorakelPredictions(data) {
     if (items?.length) {
       for (const item of items) {
         if (!item || typeof item !== 'object') continue
+        // Reject a superseded record here, where the candidate's own shape is
+        // known, rather than only at the outer `predictions[]` level.
+        if (isDeprecatedArtsorakelCandidate(item)) continue
         const scientificId = String(
           item.scientific_name_id
           || item.scientificNameId
@@ -496,6 +569,7 @@ function _flattenArtsorakelPredictions(data) {
     }
 
     const fallback = { ...prediction }
+    if (isDeprecatedArtsorakelCandidate(fallback)) continue
     const fallbackTaxon = fallback.taxon && typeof fallback.taxon === 'object' ? fallback.taxon : null
     const scientificName = String(
       fallbackTaxon?.scientificName
@@ -729,7 +803,10 @@ export async function runArtsorakel(blob, lang = 'no', options = {}) {
 
 function _normalizePredictions(data, langNorm) {
   return _flattenArtsorakelPredictions(data)
-    .filter(p => p?.taxon?.vernacularName !== '*** Utdatert versjon ***')
+    // Applied to the candidate AFTER flattening, and at both nesting levels.
+    // The previous `p?.taxon?.vernacularName` check could not see the
+    // sentinel on a flattened `taxa.items[]` candidate.
+    .filter(pred => !isDeprecatedArtsorakelCandidate(pred))
     .map((pred, index) => _normalizeArtsorakelPrediction(pred, langNorm, index + 1))
 }
 

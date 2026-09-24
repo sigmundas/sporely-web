@@ -1854,6 +1854,16 @@ function _renderReviewAiResults() {
         vernacularName: pred.vernacularName || null,
         scientificName: pred.scientificName || null,
         displayName: pred.displayName,
+        // Taxonomy-v2 closeout Stage 2 Part B: carry the provider's own
+        // identifier. Without it `taxonomySelectionForTaxon` in
+        // `_buildReviewObservationPayload` saw nothing to preserve, so an
+        // Artsorakel `NBIC:53482` capture reached the queue with no external
+        // selection at all — the identifier survived only as
+        // `ai_selected_taxon_id` history and was never offered to
+        // `resolve_taxon_external_id_v2`. The identity boundary has to hold on
+        // the capture path too, not just on the detail screen.
+        taxonId: pred.taxonId || null,
+        providerCandidate: true,
       }
       reviewAiState.activeService = service
       reviewAiState.selectedTaxonSource = 'ai'

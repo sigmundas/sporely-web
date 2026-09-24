@@ -12,7 +12,13 @@ import { normalizeObservationVisibility, toCloudVisibility } from './visibility.
 import { debugImagePipeline } from './image-pipeline-debug.js'
 import { isBlob } from './observation-shapes.js'
 import { normalizeObservationGeography } from './observation-geography.js'
-import { persistObservationTaxonomySelection, takeQueuedTaxonomySelection } from './taxonomy-v2.js'
+import {
+  isProvenSporelySelection,
+  persistObservationIdentification,
+  persistObservationTaxonomySelection,
+  resolveExternalTaxonomySelection,
+  takeQueuedTaxonomySelection,
+} from './taxonomy-v2.js'
 import { canPerformCloudMutation } from './capabilities.js'
 
 const DB_NAME = 'sporely_sync'
@@ -625,6 +631,87 @@ function _queuedImageReservation(rows, image, index) {
     && (!image.reservedImageId || row.id === image.reservedImageId)) || null
 }
 
+
+/**
+ * Persist a queued taxonomy selection, preserving an unresolved external one.
+ *
+ * Taxonomy-v2 closeout Stage 2 Part B. This used to call
+ * `persistObservationTaxonomySelection` directly, which returns `false` for an
+ * unresolved external selection WITHOUT persisting anything — and the queue
+ * ignored the result. So a capture identified from an Artsorakel candidate
+ * reached the cloud with its `(source_system, namespace, external_id)` tuple
+ * silently dropped, exactly as the detail screen used to do.
+ *
+ * The identifier is now offered to `resolve_taxon_external_id_v2` first, then
+ * identity and provenance are written together through the atomic writer.
+ * `writeName` is false: the queued observation INSERT already wrote
+ * genus/species/common_name, and a row carrying a name with no bound identity
+ * is a coherent state — so no name/identity split is possible here.
+ */
+export async function _persistQueuedTaxonomyIdentity(observationId, selection, deps = {}) {
+  const resolveExternal = deps.resolveExternal || resolveExternalTaxonomySelection
+  const persistAtomic = deps.persistAtomic || persistObservationIdentification
+  const persistNarrow = deps.persistNarrow || persistObservationTaxonomySelection
+
+  let resolved = selection
+  if (!isProvenSporelySelection(selection)) {
+    try {
+      resolved = await resolveExternal(selection)
+    } catch (error) {
+      // A failed resolution ATTEMPT is a state, not grounds to discard the
+      // provider's identifier.
+      console.warn('[sync-queue] external taxonomy resolution threw; keeping unresolved', error)
+      resolved = selection
+    }
+  }
+
+  const atomic = await persistAtomic(observationId, {
+    selection: resolved,
+    writeName: false,
+  })
+  if (atomic.applied) return
+
+  // The atomic writer is not deployed on this backend.
+  //
+  // A selection carrying external provenance MUST NOT be finalized here. Two
+  // earlier drafts got this wrong:
+  //
+  //   * warning and returning normally let `_runSyncQueue` continue to
+  //     `_finalizeSyncedQueueItem`, which confirms only the observation and
+  //     media before deleting the queue item and reporting success — so the
+  //     preserved tuple was lost from durable queued state without ever
+  //     reaching the observation;
+  //   * routing "proven" selections to the narrow guarded RPC also caught
+  //     successfully RESOLVED external selections, persisting their Sporely ID
+  //     while silently dropping the `(source_system, namespace, external_id)`
+  //     tuple they are required to retain.
+  //
+  // Throwing puts the item into the queue's ordinary retryable-failure path:
+  // `classifyQueueSyncError` defaults to `isRetryable: true`, the item is kept
+  // with its already-persisted `remoteObservationId`, and a retry reuses that
+  // observation rather than creating a duplicate. The tuple stays in durable
+  // queued state until the atomic write actually succeeds.
+  if (_selectionHasExternalProvenance(resolved)) {
+    const error = new Error(
+      'Cannot persist the preserved external taxonomy identity: the atomic '
+      + 'identification writer is unavailable on this backend.',
+    )
+    error.identificationUnavailable = true
+    throw error
+  }
+
+  // Native-only: no tuple to lose, and the guarded RPC writes a single column,
+  // so this cannot split or drop anything.
+  await persistNarrow(observationId, resolved)
+}
+
+/** Whether a selection carries a `(source, namespace, external_id)` tuple. */
+function _selectionHasExternalProvenance(selection) {
+  return Boolean(
+    selection?.sourceSystem && selection?.namespace && selection?.externalId,
+  )
+}
+
 async function _fetchRemoteObservationState(observationId, queuedImages) {
   if (!observationId) {
     return {
@@ -1053,7 +1140,7 @@ async function _runSyncQueue() {
         await _setQueueSyncStatus(item.id, 'saving-taxonomy-identity', {
           syncImageCount: queuedImages.length,
         })
-        await persistObservationTaxonomySelection(obsId, queuedTaxonomySelection)
+        await _persistQueuedTaxonomyIdentity(obsId, queuedTaxonomySelection)
       }
 
       // 2. Reconcile against remote state so a stale local queue can heal itself.
