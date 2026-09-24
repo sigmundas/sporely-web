@@ -37,6 +37,7 @@ import {
   _getStaleFindsImageIdsForTests,
   _handleFindsScroll,
   _mergeFindsItemsWithDelta,
+  findsCardIdentityPresentation,
   _getFindsCacheForTests,
   _getFindsPagingStateForTests,
   _handleFindsSearchInput,
@@ -4508,4 +4509,232 @@ test('retained cache cannot cross account boundaries after a failed load', async
     assert.ok(harness.list.querySelector('.finds-error-state'))
     assert.equal(harness.cardIds().length, 0)
   } finally { harness.restore() }
+})
+
+// ── Survivor repaint after an identification ──────────────────────────────────
+//
+// Measured on 2026-09-24 against candidate 7bac6fd, with a fetch log in the
+// browser and a paired read of the authoritative row. Identifying an already
+// rendered observation as NBIC:53482 / Entoloma conferendum committed
+// correctly, `_goBack(null, { reloadFinds: true })` ran a real reset reload,
+// and that reload's response carried the name — yet the card went on saying
+// "Unidentified" until navigation forced a full render. The id and the list
+// position never change across an identification, so `_applyFilter` chose
+// `_reconcileFindsList`, which handled additions, removals and group counts
+// but left surviving cards untouched.
+
+function identificationRows(identified) {
+  // Same ids, same dates, so the order is identical before and after: the
+  // reconcile path is what must be exercised, not a reorder.
+  const target = makeAppendObservation(5300, {
+    date: '2026-09-20',
+    createdAt: '2026-09-20T10:00:00Z',
+    ...(identified
+      ? { genus: 'Entoloma', species: 'conferendum', commonName: 'stjernesporet rødspore' }
+      : {}),
+  })
+  const neighbour = makeAppendObservation(5301, {
+    date: '2026-09-20',
+    createdAt: '2026-09-20T09:00:00Z',
+    genus: 'Amanita',
+    species: 'muscaria',
+    commonName: 'rød fluesopp',
+  })
+  return [target, neighbour]
+}
+
+function findsCardById(list, id) {
+  return list.querySelectorAll('.find-card[data-id]').find(card => card.dataset.id === String(id))
+}
+
+function cardNameState(list, id) {
+  const name = findsCardById(list, id)?.querySelector('.find-card-name')
+  // The fake DOM keeps `textContent` per node, so the scientific name inside
+  // the nested <em> has to be gathered from the descendants as a real
+  // `textContent` would.
+  const text = name
+    ? [name.textContent, ...name.descendants().map(node => node.textContent)]
+      .join(' ').replace(/\s+/g, ' ').trim()
+    : ''
+  return { text, unidentified: Boolean(name?.classList.has('unidentified')) }
+}
+
+async function runIdentificationReconcile(beforeRows, afterRows, { findsView = 'cards', findsSort = 'date' } = {}) {
+  const imageRows = {}
+  for (const row of [...beforeRows, ...afterRows]) imageRows[row.id] = appendImageRow(row.id)
+  const restoreTimers = installNoopFindsTimers()
+  const harness = installAppendHarness({
+    observationPages: [{ data: beforeRows, error: null }, { data: afterRows, error: null }],
+    imageRows,
+    findsView,
+    findsSort,
+  })
+  return { harness, restoreTimers }
+}
+
+test('reconcile repaints a surviving card that gained an identification', async () => {
+  const { harness, restoreTimers } = await runIdentificationReconcile(
+    identificationRows(false), identificationRows(true))
+  const { list } = harness
+  try {
+    await loadFinds()
+    assert.deepEqual(cardNameState(list, 5300), { text: 'Unidentified', unidentified: true },
+      'the card starts out unidentified, as the stored row is')
+    const cardBefore = findsCardById(list, 5300)
+    const writesBefore = list.innerHtmlWrites
+
+    // What `_goBack(null, { reloadFinds: true })` runs after the identification.
+    await loadFinds()
+
+    assert.equal(list.innerHtmlWrites, writesBefore,
+      'the reload reconciled in place rather than rebuilding — the defect path')
+    assert.equal(findsCardById(list, 5300), cardBefore, 'the surviving card kept its node')
+    const after = cardNameState(list, 5300)
+    assert.equal(after.unidentified, false, 'the card no longer renders as unidentified')
+    assert.match(after.text, /stjernesporet rødspore/, 'the vernacular name is painted')
+    assert.match(after.text, /Entoloma conferendum/, 'the scientific name is painted')
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+test('reconcile repaints a survivor whose identification changed to a different name', async () => {
+  const renamed = identificationRows(true)
+  renamed[0] = { ...renamed[0], genus: 'Entoloma', species: 'sericeum', common_name: 'brun rødspore' }
+  const { harness, restoreTimers } = await runIdentificationReconcile(identificationRows(true), renamed)
+  const { list } = harness
+  try {
+    await loadFinds()
+    assert.match(cardNameState(list, 5300).text, /stjernesporet rødspore/)
+    const writesBefore = list.innerHtmlWrites
+
+    await loadFinds()
+
+    assert.equal(list.innerHtmlWrites, writesBefore, 'still reconciled in place')
+    const after = cardNameState(list, 5300)
+    assert.match(after.text, /brun rødspore/, 'the new vernacular replaced the old one')
+    assert.doesNotMatch(after.text, /stjernesporet/, 'no trace of the previous name remains')
+    assert.equal(after.unidentified, false)
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+test('reconcile repaints a survivor whose identification was cleared back to unidentified', async () => {
+  const { harness, restoreTimers } = await runIdentificationReconcile(
+    identificationRows(true), identificationRows(false))
+  const { list } = harness
+  try {
+    await loadFinds()
+    assert.equal(cardNameState(list, 5300).unidentified, false)
+    const writesBefore = list.innerHtmlWrites
+
+    await loadFinds()
+
+    assert.equal(list.innerHtmlWrites, writesBefore, 'still reconciled in place')
+    assert.deepEqual(cardNameState(list, 5300), { text: 'Unidentified', unidentified: true },
+      'clearing an identification repaints the card as unidentified')
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+test('a survivor whose identification did not change is not repainted', async () => {
+  const { harness, restoreTimers } = await runIdentificationReconcile(
+    identificationRows(true), identificationRows(true))
+  const { list } = harness
+  try {
+    await loadFinds()
+    const nameBefore = findsCardById(list, 5300).querySelector('.find-card-name')
+    const nameWritesBefore = nameBefore.innerHtmlWrites
+    const neighbourName = findsCardById(list, 5301).querySelector('.find-card-name')
+    const neighbourWritesBefore = neighbourName.innerHtmlWrites
+    const writesBefore = list.innerHtmlWrites
+
+    await loadFinds()
+
+    assert.equal(list.innerHtmlWrites, writesBefore, 'no full rebuild')
+    assert.equal(findsCardById(list, 5300).querySelector('.find-card-name'), nameBefore,
+      'the unchanged card kept its name node')
+    assert.equal(nameBefore.innerHtmlWrites, nameWritesBefore,
+      'an unchanged survivor is not rewritten — reconcile keeps its existing cost')
+    assert.equal(neighbourName.innerHtmlWrites, neighbourWritesBefore,
+      'an untouched neighbour is not rewritten either')
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+test('survivor repaint leaves additions, removals and ordering alone', async () => {
+  const before = identificationRows(false)
+  const inserted = makeAppendObservation(5302, {
+    date: '2026-09-20', createdAt: '2026-09-20T11:00:00Z', genus: 'Boletus', species: 'edulis',
+  })
+  // The target gains its identification, a row is added above it, and the
+  // neighbour disappears — all in the same reload.
+  const after = [inserted, identificationRows(true)[0]]
+  const { harness, restoreTimers } = await runIdentificationReconcile(before, after)
+  const { list } = harness
+  try {
+    await loadFinds()
+    assert.deepEqual(
+      list.querySelectorAll('.find-card[data-id]').map(c => c.dataset.id), ['5300', '5301'])
+
+    await loadFinds()
+
+    assert.deepEqual(
+      list.querySelectorAll('.find-card[data-id]').map(c => c.dataset.id), ['5302', '5300'],
+      'the addition was inserted, the removal dropped, and order follows the model')
+    assert.equal(cardNameState(list, 5300).unidentified, false,
+      'the survivor was still repainted alongside the structural changes')
+    assert.match(cardNameState(list, 5300).text, /stjernesporet rødspore/)
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+test('under species sort a changed survivor forces a full rebuild so grouping stays correct', async () => {
+  const { harness, restoreTimers } = await runIdentificationReconcile(
+    identificationRows(false), identificationRows(true), { findsSort: 'species' })
+  const { list } = harness
+  try {
+    await loadFinds()
+    const writesBefore = list.innerHtmlWrites
+
+    await loadFinds()
+
+    assert.ok(list.innerHtmlWrites > writesBefore,
+      'the name is the grouping key under species sort, so the list is rebuilt rather than patched')
+    assert.equal(cardNameState(list, 5300).unidentified, false)
+    assert.match(cardNameState(list, 5300).text, /stjernesporet rødspore/)
+  } finally {
+    harness.restore()
+    restoreTimers()
+  }
+})
+
+test('the card signature comes from the rendered markup, so detection cannot drift from rendering', () => {
+  const unidentified = findsCardIdentityPresentation({ id: 1 })
+  const identified = findsCardIdentityPresentation({
+    id: 1, genus: 'Entoloma', species: 'conferendum', common_name: 'stjernesporet rødspore',
+  })
+  const uncertain = findsCardIdentityPresentation({
+    id: 1, genus: 'Entoloma', species: 'conferendum', common_name: 'stjernesporet rødspore', uncertain: true,
+  })
+  assert.equal(unidentified.signature[0], 'u', 'unidentified is encoded in the first character')
+  assert.equal(identified.signature[0], 'i', 'identified is encoded in the first character')
+  assert.notEqual(identified.signature, uncertain.signature,
+    'the uncertain marker changes what is painted, so it changes the signature')
+  assert.notEqual(
+    identified.signature,
+    findsCardIdentityPresentation({ id: 1, genus: 'Entoloma', species: 'sericeum', common_name: 'brun rødspore' }).signature,
+    'a different name changes the signature',
+  )
+  assert.ok(identified.nameInnerHtml.includes('Entoloma conferendum'))
+  assert.ok(/^[ui][0-9a-z]+$/.test(identified.signature), 'the signature is attribute-safe')
 })
