@@ -37,6 +37,42 @@ The deferred migration touches no object that the four deployed migrations
 touch, and they touch none of its objects, so applying it later out of order
 is semantically safe.
 
+## Deploying other migrations while 20260914090000 is deferred
+
+The gap is recorded in `supabase/deploy-exceptions.json` (production project
+ref, deferred filename and its SHA-256). From `main`, a plain
+`supabase db push` refuses with "Found local migration files to be inserted
+before the last migration on remote database" and suggests `--include-all`.
+That suggestion would apply `20260914090000`. Do not follow it.
+
+Every later migration (Stage A's RLS migration first) is deployed from a
+temporary worktree of a committed ref that omits only the deferred files,
+using `scripts/supabase-deploy-tree.mjs`:
+
+1. `node scripts/supabase-deploy-tree.mjs prepare --allow <version> --ref <committed ref>`
+   creates a detached worktree of that commit and verifies the deferred file
+   is present, unrenamed, and unchanged before removing it there. It refuses
+   an allowlisted deferred version, a version with no file, or a Supabase
+   link other than the production ref. It copies the link metadata from your
+   checkout's `supabase/.temp/`.
+2. `node <tree>/scripts/supabase-deploy-tree.mjs check --tree <tree>` runs
+   `supabase migration list --linked` and `supabase db push --linked --dry-run`
+   in the tree. Both are read-only. It refuses unless:
+   - the tree is linked to the production project and is exactly its commit
+     minus the deferred files;
+   - no remote-only migration exists;
+   - the pending set and the dry-run set both equal the allowlist exactly;
+   - the deferred version appears in neither.
+   Outputs you captured yourself can be passed with `--list-file` and
+   `--dry-run-file`.
+3. Only after `check` passes, you run `supabase db push --linked` in the tree,
+   and confirm the CLI prompt lists exactly the allowlist. The helper never
+   runs this.
+4. `node <tree>/scripts/supabase-deploy-tree.mjs post-verify --tree <tree>`
+   requires local and remote to match exactly, with the deferred version
+   still absent. Then run the stage's own read-only verification and remove
+   the tree with the printed `git worktree remove` command.
+
 ## Deploying 20260914090000 later
 
 After both of its rollout gates are satisfied (released desktop readers accept
@@ -58,6 +94,11 @@ insert an older migration before the last applied one. Before running it:
 3. Run `supabase/tests/reference_snapshot_v2_test.sql` and
    `supabase/tests/reference_measurement_content_extension_test.sql` against a
    local replay of production history.
+
+That rollout is its own reviewed change: it removes the entry from
+`supabase/deploy-exceptions.json` in the same commit, which returns ordinary
+migrations to the plain `AGENTS.md` workflow. `scripts/supabase-deploy-tree.mjs`
+deliberately refuses to allowlist a deferred version.
 
 ## Evidence
 

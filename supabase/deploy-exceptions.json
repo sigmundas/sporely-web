@@ -1,0 +1,12 @@
+{
+  "productionProjectRef": "zkpjklzfwzefhjluvhfw",
+  "deferredMigrations": [
+    {
+      "version": "20260914090000",
+      "file": "20260914090000_extend_reference_snapshots_to_version_2.sql",
+      "sha256": "01972eb65f1660813f1568aa704ef5de158fad329f03ad9f1796cf85deaaf94c",
+      "reason": "Snapshot v2 rollout gates unmet: released desktop readers must accept snapshot v2 and the public shared-envelope version policy must be decided and implemented.",
+      "doc": "docs/deployments/2026-09-25-migration-order-exception.md"
+    }
+  ]
+}
