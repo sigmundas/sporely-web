@@ -79,11 +79,14 @@ BEGIN
   )
   RETURNING id INTO real_image_id;
 
-  -- Metadata-only microscope row: no storage_path.
+  -- Metadata-only microscope row: no storage_path. Marked public_microscopy
+  -- since this fixture's backing measurement (manual, below) is meant to be
+  -- publicly visible, matching the desktop owner-sync marker contract added
+  -- in 20260925120000_owner_sync_metadata_parents.sql.
   INSERT INTO public.observation_images (
-    observation_id, user_id, storage_path, image_type
+    observation_id, user_id, storage_path, image_type, metadata_purpose
   )
-  VALUES (obs_id, owner_user_id, NULL, 'microscope')
+  VALUES (obs_id, owner_user_id, NULL, 'microscope', 'public_microscopy')
   RETURNING id INTO meta_image_id;
 
   -- Field image without calibration — represents the common case for
