@@ -59,13 +59,15 @@ BEGIN
   )
   RETURNING id INTO metadata_obs_id;
 
+  -- Since 20260925120000 a measured public spore anchor carries the
+  -- 'public_microscopy' marker the desktop / backfill assign; NULL fails closed.
   INSERT INTO public.observation_images (
     observation_id, user_id, storage_path, image_type,
-    sample_type, sample_source, mount_medium, contrast, stain
+    sample_type, sample_source, mount_medium, contrast, stain, metadata_purpose
   )
   VALUES (
     metadata_obs_id, sample_user_id, NULL, 'microscope',
-    'fresh', 'context', 'water', 'DIC', 'Congo Red'
+    'fresh', 'context', 'water', 'DIC', 'Congo Red', 'public_microscopy'
   )
   RETURNING id INTO metadata_image_id;
 

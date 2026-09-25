@@ -107,6 +107,33 @@
 --    `authenticated` has no column list, so a non-owner has no path to set
 --    or update metadata_purpose on someone else's row.
 
+-- 9. Only the image owner's own child measurements count as evidence in
+--    both helpers and in the backfill (`m.user_id = i.user_id`).
+--    spore_measurements insert/update RLS checks `user_id = auth.uid()` but
+--    not ownership of image_id, so any signed-in user could otherwise insert
+--    one 'spore' row on someone else's parent and unlock its prep metadata.
+--    The underlying policy gap is older and also lets a foreign user inject
+--    points into existing public spore surfaces; fixing it changes existing
+--    behaviour and is proposed separately in
+--    docs/proposals/spore-measurement-image-ownership-rls.md.
+-- 10. Every function this migration redefines now filters publishable types
+--    only through is_public_microscopy_measurement_type(). The former inline
+--    filters came in two variants (with and without btrim); the single
+--    definition trims, so a whitespace-padded value such as ' spore ' now
+--    also counts at the formerly non-trimming sites — those are spores
+--    either way. Functions NOT redefined here still inline the set and must
+--    be routed through the function before cystidia can be published:
+--    get_community_spore_dataset, search_community_spore_datasets,
+--    community_spore_taxon_summary, get_person_stats (follow-up).
+-- 11. Compatibility: metadata-only parents created by desktop builds older
+--    than the owner-sync release carry NULL and are not public on any
+--    marker-gated surface (sporePoints and spore summaries included) until a
+--    newer desktop re-marks them. Rows existing when this migration runs are
+--    covered by the backfill (section 4).
+-- 12. The backfill UPDATE fires the observation_images updated_at and
+--    touch-observation triggers once, so desktops re-pull the affected
+--    observations' image metadata once after deployment.
+
 BEGIN;
 
 -- ---------------------------------------------------------------------------
@@ -201,6 +228,10 @@ AS $$
         SELECT 1
         FROM public.spore_measurements m
         WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
           AND m.length_um IS NOT NULL
           AND m.width_um IS NOT NULL
           AND public.is_public_microscopy_measurement_type(m.measurement_type)
@@ -210,8 +241,10 @@ $$;
 
 ALTER FUNCTION public.metadata_microscope_parent_is_public(bigint) OWNER TO postgres;
 REVOKE ALL ON FUNCTION public.metadata_microscope_parent_is_public(bigint) FROM PUBLIC;
+-- Every caller is a SECURITY DEFINER RPC running as its owner, so no
+-- client role needs to call this directly.
 GRANT EXECUTE ON FUNCTION public.metadata_microscope_parent_is_public(bigint)
-  TO anon, authenticated, service_role;
+  TO service_role;
 
 COMMENT ON FUNCTION public.metadata_microscope_parent_is_public(bigint) IS
   'Independently verifies that a storage_path-NULL microscope parent row is '
@@ -276,6 +309,7 @@ AS $$
             SELECT 1
             FROM public.spore_measurements m
             WHERE m.image_id = i.id
+              AND m.user_id = i.user_id  -- the image owner's own measurements only
               AND m.length_um IS NOT NULL
               AND m.width_um IS NOT NULL
               AND public.is_public_microscopy_measurement_type(m.measurement_type)
@@ -287,8 +321,10 @@ $$;
 
 ALTER FUNCTION public.metadata_microscope_parent_is_visible_to_reader(bigint) OWNER TO postgres;
 REVOKE ALL ON FUNCTION public.metadata_microscope_parent_is_visible_to_reader(bigint) FROM PUBLIC;
+-- Every caller is a SECURITY DEFINER RPC running as its owner, so no
+-- client role needs to call this directly.
 GRANT EXECUTE ON FUNCTION public.metadata_microscope_parent_is_visible_to_reader(bigint)
-  TO anon, authenticated, service_role;
+  TO service_role;
 
 COMMENT ON FUNCTION public.metadata_microscope_parent_is_visible_to_reader(bigint) IS
   'Reader-scoped variant of metadata_microscope_parent_is_public, used only '
@@ -318,6 +354,7 @@ WHERE i.storage_path IS NULL
     SELECT 1
     FROM public.spore_measurements m
     WHERE m.image_id = i.id
+      AND m.user_id = i.user_id
       AND m.length_um IS NOT NULL
       AND m.width_um IS NOT NULL
       AND public.is_public_microscopy_measurement_type(m.measurement_type)
@@ -487,9 +524,7 @@ AS $function$
               FROM public.spore_measurements m2
               WHERE m2.image_id = i.id
                 AND (
-                  m2.measurement_type IS NULL
-                  OR m2.measurement_type = ''
-                  OR lower(m2.measurement_type) IN ('manual', 'spore', 'spores')
+                  public.is_public_microscopy_measurement_type(m2.measurement_type)
                 )
             )
           )
@@ -507,9 +542,7 @@ AS $function$
         AND i.purged_at IS NULL
         AND (i.image_type IS NULL OR (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))))
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
     ) spore_stats ON true
     LEFT JOIN LATERAL (
@@ -580,9 +613,7 @@ AS $function$
         AND i.purged_at IS NULL
         AND (i.image_type IS NULL OR (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))))
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
     ) point_agg ON true
     LEFT JOIN LATERAL (
@@ -604,9 +635,7 @@ AS $function$
             FROM public.spore_measurements m3
             WHERE m3.image_id = i.id
               AND (
-                m3.measurement_type IS NULL
-                OR m3.measurement_type = ''
-                OR lower(m3.measurement_type) IN ('manual', 'spore', 'spores')
+                public.is_public_microscopy_measurement_type(m3.measurement_type)
               )
           )
       )
@@ -843,9 +872,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
               AND m.length_um IS NOT NULL
               AND m.width_um IS NOT NULL
               AND (
-                m.measurement_type IS NULL
-                OR btrim(m.measurement_type) = ''
-                OR lower(btrim(m.measurement_type)) IN ('manual', 'spore', 'spores')
+                public.is_public_microscopy_measurement_type(m.measurement_type)
               )
           )
         )
@@ -862,9 +889,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
         AND i.purged_at IS NULL
         AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND (
-          m.measurement_type IS NULL
-          OR btrim(m.measurement_type) = ''
-          OR lower(btrim(m.measurement_type)) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
         AND m.length_um IS NOT NULL
         AND m.width_um IS NOT NULL
@@ -936,9 +961,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
             AND (n.sample IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
             AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
             AND (
-              m.measurement_type IS NULL
-              OR btrim(m.measurement_type) = ''
-              OR lower(btrim(m.measurement_type)) IN ('manual', 'spore', 'spores')
+              public.is_public_microscopy_measurement_type(m.measurement_type)
             )
             AND m.length_um IS NOT NULL
             AND m.width_um IS NOT NULL
@@ -1042,9 +1065,7 @@ AS $$
         AND i.purged_at IS NULL
         AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
     ) spore_stats ON true
     LEFT JOIN LATERAL (
@@ -1306,9 +1327,7 @@ AS $$
         AND i.purged_at IS NULL
         AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
     ) spore_stats ON true
     LEFT JOIN LATERAL (
@@ -1635,9 +1654,7 @@ AS $$
         AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
     ) spore_counts ON spore_counts.spore_n > 0
     WHERE so.spore_data_visibility = 'public'
@@ -1654,9 +1671,7 @@ AS $$
     JOIN public.spore_measurements m ON m.image_id = i.id
       AND m.length_um IS NOT NULL
       AND (
-        m.measurement_type IS NULL
-        OR m.measurement_type = ''
-        OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+        public.is_public_microscopy_measurement_type(m.measurement_type)
       )
   ),
   -- Aggregate length stats over all qualifying measurements.
@@ -1719,9 +1734,7 @@ AS $$
         AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
     ) obs_stats ON true
   )
@@ -1982,9 +1995,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
             AND (i4.image_type = 'microscope' AND (i4.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i4.id)))
             AND m.length_um IS NOT NULL
             AND (
-              m.measurement_type IS NULL
-              OR m.measurement_type = ''
-              OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+              public.is_public_microscopy_measurement_type(m.measurement_type)
             )
         )
       ))
@@ -2044,9 +2055,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
         AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
     ) ELSE 0 END AS "sporeMeasurementCount"
   FROM candidate c
@@ -2488,9 +2497,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
             AND (i4.image_type = 'microscope' AND (i4.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i4.id)))
             AND m.length_um IS NOT NULL
             AND (
-              m.measurement_type IS NULL
-              OR m.measurement_type = ''
-              OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+              public.is_public_microscopy_measurement_type(m.measurement_type)
             )
         )
       ))
@@ -2528,9 +2535,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
             AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
             AND m.length_um IS NOT NULL
             AND (
-              m.measurement_type IS NULL
-              OR m.measurement_type = ''
-              OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+              public.is_public_microscopy_measurement_type(m.measurement_type)
             )
             -- Image-level prep filters (same conditions as filtered_obs EXISTS).
             AND (n.sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = n.sample_type)
@@ -2862,9 +2867,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
         AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
         AND (n.sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = n.sample_type)
         AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
@@ -2888,9 +2891,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
     JOIN public.spore_measurements m ON m.image_id = i.id
       AND m.length_um IS NOT NULL
       AND (
-        m.measurement_type IS NULL
-        OR m.measurement_type = ''
-        OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+        public.is_public_microscopy_measurement_type(m.measurement_type)
       )
   ),
   agg_len AS (
@@ -2970,9 +2971,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
           AND m.width_um  IS NOT NULL
           AND m.width_um > 0
           AND (
-            m.measurement_type IS NULL
-            OR m.measurement_type = ''
-            OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+            public.is_public_microscopy_measurement_type(m.measurement_type)
           )
       ) contrib ON contrib.n > 0
       WHERE i.observation_id = se.id
@@ -3000,9 +2999,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
         AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
         AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
         AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
@@ -3031,9 +3028,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
         AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
-          m.measurement_type IS NULL
-          OR m.measurement_type = ''
-          OR lower(m.measurement_type) IN ('manual', 'spore', 'spores')
+          public.is_public_microscopy_measurement_type(m.measurement_type)
         )
         AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
         AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
@@ -3063,9 +3058,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
             FROM public.spore_measurements m3
             WHERE m3.image_id = i.id
               AND (
-                m3.measurement_type IS NULL
-                OR m3.measurement_type = ''
-                OR lower(m3.measurement_type) IN ('manual', 'spore', 'spores')
+                public.is_public_microscopy_measurement_type(m3.measurement_type)
               )
           )
           AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
@@ -3346,9 +3339,7 @@ BEGIN
       AND oi.deleted_at IS NULL
       AND oi.purged_at IS NULL
       AND (
-        sm.measurement_type IS NULL
-        OR sm.measurement_type = ''
-        OR lower(sm.measurement_type) IN ('manual', 'spore', 'spores')
+        public.is_public_microscopy_measurement_type(sm.measurement_type)
       )
     GROUP BY oi.observation_id
   ),

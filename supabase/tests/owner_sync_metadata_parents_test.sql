@@ -16,6 +16,8 @@
 --   * The backfill correctly classifies pre-existing rows.
 --   * is_public_microscopy_measurement_type's truth table.
 --   * Non-owner cannot write metadata_purpose on someone else's row (RLS).
+--   * A foreign user's child measurement never unlocks someone else's
+--     parent (only the image owner's own measurements are evidence).
 --   * A byte-backed FIELD image (image_type <> 'microscope') never triggers
 --     hasMicroscopy / prep fields / the map-points microscopy filter /
 --     microscopy counts, even though it has bytes (regression coverage for
@@ -536,6 +538,25 @@ BEGIN
   -- is_public_microscopy_measurement_type: truth table.
   --------------------------------------------------------------------------
 
+
+  -- T38–T40: a foreign user's child measurement never unlocks someone
+  -- else's parent. spore_measurements insert RLS checks user_id =
+  -- auth.uid() but not ownership of image_id (a pre-existing gap, see
+  -- docs/proposals/spore-measurement-image-ownership-rls.md); this inserts
+  -- the row directly, as such a user could.
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
+  VALUES (img_marker_only, other_id, 7.0, 4.0, 'spore');
+  IF public.metadata_microscope_parent_is_public(img_marker_only) THEN
+    RAISE EXCEPTION 'T38: a foreign user''s spore row unlocked a cheilocystidia-only public_microscopy parent';
+  END IF;
+  IF public.metadata_microscope_parent_is_visible_to_reader(img_marker_only) THEN
+    RAISE EXCEPTION 'T39: a foreign user''s spore row made the parent visible to a non-owner reader';
+  END IF;
+  SELECT * INTO rpc_row FROM public.get_public_observation(obs_public);
+  IF rpc_row."sporeMeasurementCount" IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'T40: foreign spore row on a non-public parent changed public sporeMeasurementCount (got %)', rpc_row."sporeMeasurementCount";
+  END IF;
+
   IF NOT public.is_public_microscopy_measurement_type(NULL) THEN
     RAISE EXCEPTION 'T20: NULL measurement_type expected true';
   END IF;
@@ -617,6 +638,7 @@ BEGIN
     AND EXISTS (
       SELECT 1 FROM public.spore_measurements m
       WHERE m.image_id = i.id
+        AND m.user_id = i.user_id
         AND m.length_um IS NOT NULL
         AND m.width_um IS NOT NULL
         AND public.is_public_microscopy_measurement_type(m.measurement_type)
