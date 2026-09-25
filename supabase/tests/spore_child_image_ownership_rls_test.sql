@@ -276,6 +276,31 @@ BEGIN
   PERFORM pg_temp.expect_rows(user_a, format(
     'SELECT 1 FROM public.spore_measurements WHERE id = %s', meas_a), 1, 'M6e A reads own measurement');
 
+  -- ── 4b. Upserts (INSERT ... ON CONFLICT DO UPDATE, as PostgREST issues) ───
+  PERFORM pg_temp.expect_rows(user_b, format(
+    'INSERT INTO public.spore_measurements (image_id, user_id, desktop_id, length_um) VALUES (%s, %L, 9002, 8.0)',
+    img_b, user_b), 1, 'U0 B inserts desktop-keyed measurement on image B');
+  PERFORM pg_temp.expect_denied(user_b, format(
+    'INSERT INTO public.spore_measurements (image_id, user_id, desktop_id, length_um) VALUES (%s, %L, 9001, 8.0) '
+    'ON CONFLICT (desktop_id, user_id) WHERE desktop_id IS NOT NULL AND user_id IS NOT NULL '
+    'DO UPDATE SET image_id = EXCLUDED.image_id', img_a, user_b),
+    rls_meas, 'U1 B upserts a new row onto image A');
+  PERFORM pg_temp.expect_denied(user_b, format(
+    'INSERT INTO public.spore_measurements (image_id, user_id, desktop_id, length_um) VALUES (%s, %L, 9002, 8.0) '
+    'ON CONFLICT (desktop_id, user_id) WHERE desktop_id IS NOT NULL AND user_id IS NOT NULL '
+    'DO UPDATE SET image_id = EXCLUDED.image_id', img_a, user_b),
+    rls_meas, 'U2 B upserts own conflicting row with proposed image A');
+  PERFORM pg_temp.expect_denied(user_b, format(
+    'INSERT INTO public.spore_measurements (image_id, user_id, desktop_id, length_um) VALUES (%s, %L, 9002, 8.0) '
+    'ON CONFLICT (desktop_id, user_id) WHERE desktop_id IS NOT NULL AND user_id IS NOT NULL '
+    'DO UPDATE SET image_id = %s', img_b, user_b, img_a),
+    rls_meas, 'U3 B upserts own row on image B but DO UPDATE moves it to image A');
+  PERFORM pg_temp.expect_rows(user_b, format(
+    'INSERT INTO public.spore_measurements (image_id, user_id, desktop_id, length_um) VALUES (%s, %L, 9002, 8.5) '
+    'ON CONFLICT (desktop_id, user_id) WHERE desktop_id IS NOT NULL AND user_id IS NOT NULL '
+    'DO UPDATE SET length_um = EXCLUDED.length_um, image_id = EXCLUDED.image_id', img_b_owner_sync, user_b),
+    1, 'U4 B upserts own row onto own owner_sync image');
+
   -- ── 5. Anonymous cannot write ─────────────────────────────────────────────
   PERFORM pg_temp.expect_denied(NULL, format(
     'INSERT INTO public.spore_measurements (image_id, user_id, length_um) VALUES (%s, %L, 1.0)', img_a, user_a),
@@ -347,7 +372,7 @@ BEGIN
   PERFORM pg_temp.expect_rows(user_a, format(
     'DELETE FROM public.spore_annotations WHERE id = %s', ann_a), 1, 'D1 A deletes own annotation');
   PERFORM pg_temp.expect_rows(user_b, format(
-    'DELETE FROM public.spore_measurements WHERE image_id = %s AND user_id = %L', img_b_owner_sync, user_b),
+    'DELETE FROM public.spore_measurements WHERE image_id = %s AND user_id = %L AND desktop_id IS NULL', img_b_owner_sync, user_b),
     1, 'D2 B deletes own measurement');
 
   -- ── 8. Control: the pre-Stage-A policy admitted exactly these writes ─────
