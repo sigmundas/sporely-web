@@ -4,8 +4,9 @@
 -- Covers:
 --   * Multi-image aggregation returns the DISTINCT union of values.
 --   * Not_set / not set / unknown values are filtered out.
---   * Metadata-only microscope anchors (storage_path IS NULL) contribute
---     just like image-backed rows if they carry measurements.
+--   * Metadata-only microscope anchors (storage_path IS NULL) marked
+--     'public_microscopy' contribute just like image-backed rows if they
+--     carry public measurements.
 --   * Field images and microscope images without measurements are NOT
 --     counted, even when they carry mount/contrast/etc. values.
 --   * Empty results emit empty arrays, not NULLs (so the JSON shape is
@@ -179,13 +180,17 @@ BEGIN
   )
   RETURNING id INTO meta_obs_id;
 
+  -- Since 20260925120000 a no-byte parent is public only when marked
+  -- 'public_microscopy' AND it has verified public child data; NULL fails
+  -- closed. This fixture models a legitimate public spore anchor, so it
+  -- carries the marker the desktop / backfill assign.
   INSERT INTO public.observation_images (
     observation_id, user_id, storage_path, image_type,
-    contrast, mount_medium, stain, sample_type, sample_source
+    contrast, mount_medium, stain, sample_type, sample_source, metadata_purpose
   )
   VALUES (
     meta_obs_id, sample_user_id, NULL, 'microscope',
-    'DIC', 'KOH', 'Not_set', 'Fresh', 'hymenium'
+    'DIC', 'KOH', 'Not_set', 'Fresh', 'hymenium', 'public_microscopy'
   )
   RETURNING id INTO metadata_image_id;
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)

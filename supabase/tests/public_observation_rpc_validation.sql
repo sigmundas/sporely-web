@@ -2164,10 +2164,12 @@ BEGIN
   ) RETURNING id INTO context_split_dic_image_id;
 
   -- The drawable spores belong to a different, brightfield source image.
+-- Since 20260925120000 a measured public spore anchor carries the
+  -- 'public_microscopy' marker the desktop / backfill assign; NULL fails closed.
   INSERT INTO public.observation_images (
-    observation_id, user_id, storage_path, image_type, contrast
+    observation_id, user_id, storage_path, image_type, contrast, metadata_purpose
   ) VALUES (
-    context_split_id, visible_user_id, NULL, 'microscope', 'brightfield'
+    context_split_id, visible_user_id, NULL, 'microscope', 'brightfield', 'public_microscopy'
   ) RETURNING id INTO context_split_brightfield_image_id;
 
   INSERT INTO public.spore_measurements (
@@ -2229,9 +2231,9 @@ BEGIN
   ) RETURNING id INTO context_dic_id;
 
   INSERT INTO public.observation_images (
-    observation_id, user_id, storage_path, image_type, contrast, stain
+    observation_id, user_id, storage_path, image_type, contrast, stain, metadata_purpose
   ) VALUES (
-    context_dic_id, visible_user_id, NULL, 'microscope', 'DIC', 'Congo Red'
+    context_dic_id, visible_user_id, NULL, 'microscope', 'DIC', 'Congo Red', 'public_microscopy'
   ) RETURNING id INTO context_dic_image_id;
 
   INSERT INTO public.spore_measurements (
@@ -2254,9 +2256,11 @@ BEGIN
     context_dic_measurement_id, context_dic_mosaic_id, 0, 0, 128, 128
   );
 
-  -- Newer matching context, but without a measurement.  It remains valid
-  -- microscopy metadata for an unfiltered card, but must not supply metadata
-  -- for a DIC-filtered result that qualified through the older measured image.
+  -- Newer matching context, but without a measurement. It must not supply
+  -- metadata for a DIC-filtered result that qualified through the older
+  -- measured image. Since 20260925120000 it is not public microscopy at all
+  -- (no bytes, no marker, no verified public child), so it no longer supplies
+  -- the unfiltered card either.
   INSERT INTO public.observation_images (
     observation_id, user_id, storage_path, image_type, contrast, stain
   ) VALUES (
@@ -2281,8 +2285,8 @@ BEGIN
   SELECT * INTO rpc_row
   FROM public.search_public_observations()
   WHERE id = context_dic_id;
-  IF rpc_row."stainReagent" IS DISTINCT FROM 'Melzer' THEN
-    RAISE EXCEPTION 'Unfiltered search did not preserve newest metadata-only microscope image (stain=%)',
+  IF rpc_row."stainReagent" IS DISTINCT FROM 'Congo Red' THEN
+    RAISE EXCEPTION 'Unfiltered search surfaced an unmeasured, unmarked metadata-only image (stain=%)',
       rpc_row."stainReagent";
   END IF;
 
@@ -2296,15 +2300,15 @@ BEGIN
   ) RETURNING id INTO context_conjunction_id;
 
   INSERT INTO public.observation_images (
-    observation_id, user_id, storage_path, image_type, contrast, mount_medium
+    observation_id, user_id, storage_path, image_type, contrast, mount_medium, metadata_purpose
   ) VALUES (
-    context_conjunction_id, visible_user_id, NULL, 'microscope', 'DIC', 'water'
+    context_conjunction_id, visible_user_id, NULL, 'microscope', 'DIC', 'water', 'public_microscopy'
   ) RETURNING id INTO context_conjunction_dic_image_id;
 
   INSERT INTO public.observation_images (
-    observation_id, user_id, storage_path, image_type, contrast, mount_medium
+    observation_id, user_id, storage_path, image_type, contrast, mount_medium, metadata_purpose
   ) VALUES (
-    context_conjunction_id, visible_user_id, NULL, 'microscope', 'brightfield', 'KOH'
+    context_conjunction_id, visible_user_id, NULL, 'microscope', 'brightfield', 'KOH', 'public_microscopy'
   ) RETURNING id INTO context_conjunction_brightfield_image_id;
 
   INSERT INTO public.spore_measurements (

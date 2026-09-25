@@ -25,6 +25,9 @@ BEGIN
     (stranger_id, 'authenticated', 'authenticated', 'chronology-stranger@example.test', '{}'::jsonb, now(), now())
   ON CONFLICT (id) DO NOTHING;
 
+  -- Microscope images here are byte-backed: since 20260925120000 a no-byte
+  -- microscope row is public only with the public_microscopy marker and a
+  -- verified public child, and this test is about capture chronology.
   INSERT INTO public.profiles (id, username, display_name)
   VALUES
     (owner_id, 'chronology_owner', 'Chronology Owner'),
@@ -41,19 +44,19 @@ BEGIN
   RETURNING id INTO obs_id;
 
   INSERT INTO public.observation_images (
-    observation_id, user_id, image_type, captured_at, created_at, contrast
+    observation_id, user_id, storage_path, image_type, captured_at, created_at, contrast
   )
   VALUES (
-    obs_id, owner_id, 'microscope', '2026-07-01 00:00:00+00',
+    obs_id, owner_id, owner_id::text || '/micro-1.webp', 'microscope', '2026-07-01 00:00:00+00',
     '2026-08-09 00:00:00+00', 'uploaded-later'
   )
   RETURNING id INTO image_a;
 
   INSERT INTO public.observation_images (
-    observation_id, user_id, image_type, captured_at, created_at, contrast
+    observation_id, user_id, storage_path, image_type, captured_at, created_at, contrast
   )
   VALUES (
-    obs_id, owner_id, 'microscope', '2026-08-01 00:00:00+00',
+    obs_id, owner_id, owner_id::text || '/micro-2.webp', 'microscope', '2026-08-01 00:00:00+00',
     '2026-08-02 00:00:00+00', 'captured-later'
   )
   RETURNING id INTO image_b;
@@ -116,10 +119,10 @@ BEGIN
       created_at = '2026-08-05 00:00:00+00'
   WHERE id IN (image_a, image_b);
   INSERT INTO public.observation_images (
-    observation_id, user_id, image_type, captured_at, created_at, contrast
+    observation_id, user_id, storage_path, image_type, captured_at, created_at, contrast
   )
   VALUES (
-    obs_id, owner_id, 'microscope', '2026-08-01 00:00:00+00',
+    obs_id, owner_id, owner_id::text || '/micro-3.webp', 'microscope', '2026-08-01 00:00:00+00',
     '2026-08-05 00:00:00+00', 'id-tiebreak'
   )
   RETURNING id INTO image_c;
