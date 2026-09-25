@@ -213,15 +213,45 @@ test('sync queue keeps old records compatible and persists new taxonomy identity
     "supabase.from('observations').insert(repairedPayload)",
     './sync-queue.js',
   )
+  // Taxonomy-v2 closeout Stage 2 Part B renamed this call: the queue now goes
+  // through `_persistQueuedTaxonomyIdentity`, which resolves a preserved
+  // external identifier and writes identity + provenance atomically. The
+  // ordering property this test guards — identity is persisted AFTER the
+  // observation insert — is unchanged.
   const persistIndex = indexOfAnchor(
     source,
-    'persistObservationTaxonomySelection(obsId, queuedTaxonomySelection)',
+    '_persistQueuedTaxonomyIdentity(obsId, queuedTaxonomySelection)',
     './sync-queue.js',
   )
 
   assert.ok(insertIndex > extractIndex)
   assert.ok(persistIndex > insertIndex)
   assert.match(source, /if \(queuedTaxonomySelection\) \{/)
+
+  // The queue must not hand an unresolved external selection straight to the
+  // narrow selected-taxon RPC: that returns false without persisting the
+  // (source_system, namespace, external_id) tuple, and the queue used to
+  // ignore the result, silently dropping the provider's identifier. The
+  // helper's collaborators are injectable for testing, so assert on the
+  // defaults it binds rather than on the call sites.
+  assert.match(source, /persistAtomic = deps\.persistAtomic \|\| persistObservationIdentification/)
+  assert.match(source, /resolveExternal = deps\.resolveExternal \|\| resolveExternalTaxonomySelection/)
+
+  // An unavailable atomic writer must NOT return normally for a selection
+  // carrying external provenance: `_finalizeSyncedQueueItem` confirms only
+  // observation and media, so returning would delete the queue item and lose
+  // the tuple. Throwing routes it into the retryable path instead.
+  assert.match(source, /if \(_selectionHasExternalProvenance\(resolved\)\) \{/)
+  const provenanceGuardIndex = indexOfAnchor(
+    source, 'if (_selectionHasExternalProvenance(resolved)) {', './sync-queue.js',
+  )
+  const narrowFallbackIndex = indexOfAnchor(
+    source, 'await persistNarrow(observationId, resolved)', './sync-queue.js',
+  )
+  assert.ok(
+    narrowFallbackIndex > provenanceGuardIndex,
+    'the narrow-RPC fallback must be reachable only after the external-provenance guard',
+  )
 })
 
 test('find_detail direct upload reserves row before upload', () => {

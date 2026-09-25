@@ -1198,3 +1198,125 @@ test('runArtsorakelForMediaKeys omits coordinates when the pair is incomplete', 
     assert.equal('longitude' in payload, false)
   })
 })
+
+// ── Taxonomy-v2 closeout Stage 2 Part B — provider-response nesting ─────────
+
+test('a flattened taxa.items candidate keeps a top-level name and identifier', async () => {
+  // Defect 2, the stronger explanation for the `Entoloma conferendum`
+  // display failure. This is the response shape `sporely-py`'s
+  // `test_worker_parses_current_prediction_shape` documents as current: the
+  // item carries `scientificName` / `scientific_name_id` at the TOP level and
+  // a nested `taxon` holding only the vernacular name.
+  //
+  // The normalizer used to bind `taxon = pred.taxon` whenever a nested
+  // `taxon` existed and read the name and id from it alone, so both came back
+  // null — and `splitScientificName(null)` then wrote null genus, null
+  // species and null common_name over the identification.
+  await withHarness(async harness => {
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 800, 600)
+    harness.setFetch(async () => makeResponse({
+      jsonBody: {
+        predictions: [
+          {
+            probability: 1,
+            // The upgrade-nag wrapper that carries the sentinel itself.
+            taxon: { vernacularName: '*** Utdatert versjon ***' },
+            taxa: {
+              items: [
+                {
+                  probability: 0.93,
+                  scientificName: 'Entoloma conferendum',
+                  scientific_name_id: 'NBIC:53482',
+                  taxon: { vernacularName: 'stjernesporet rødspore' },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    }))
+
+    const [result] = await runArtsorakel(blob, 'no')
+    assert.equal(result.scientificName, 'Entoloma conferendum')
+    assert.equal(result.scientific_name, 'Entoloma conferendum')
+    assert.equal(result.taxonId, 'NBIC:53482')
+    assert.equal(result.taxon_id, 'NBIC:53482')
+    assert.equal(result.vernacularName, 'stjernesporet rødspore')
+    // And the consequence that matters: the name parses, so the save path
+    // cannot write nulls over an existing identification.
+    assert.deepEqual(splitScientificName(result.scientificName), ['Entoloma', 'conferendum'])
+  })
+})
+
+test('a deprecated flattened candidate is rejected like a nested one', async () => {
+  // Defect 1, required regression 1. The bare-item shape this repository's
+  // own `taxa.items[]` fixture uses: the sentinel sits at `p.vernacularName`,
+  // where the old single-level filter could not see it.
+  await withHarness(async harness => {
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 800, 600)
+    harness.setFetch(async () => makeResponse({
+      jsonBody: {
+        predictions: [
+          {
+            probability: 1,
+            taxa: {
+              items: [
+                {
+                  probability: 0.99,
+                  scientificName: 'Superseded record',
+                  scientific_name_id: 'NBIC:99999',
+                  vernacularName: '*** Utdatert versjon ***',
+                },
+                {
+                  probability: 0.91,
+                  scientificName: 'Fomitopsis pinicola',
+                  vernacularName: 'Rødrandkjuke',
+                  scientific_name_id: 'NBIC:11111',
+                },
+              ],
+            },
+          },
+        ],
+      },
+    }))
+
+    const results = await runArtsorakel(blob, 'no')
+    assert.equal(results.length, 1)
+    assert.equal(results[0].scientificName, 'Fomitopsis pinicola')
+    assert.equal(results[0].taxonId, 'NBIC:11111')
+  })
+})
+
+test('a top-level deprecated prediction is rejected in the fallback path too', async () => {
+  await withHarness(async harness => {
+    const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+    harness.setBlobDimensions(blob, 800, 600)
+    harness.setFetch(async () => makeResponse({
+      jsonBody: {
+        predictions: [
+          {
+            probability: 0.99,
+            scientificName: 'Superseded record',
+            scientific_name_id: 'NBIC:99999',
+            // Bare sentinel on a prediction with no `taxa.items`.
+            vernacularName: '*** Utdatert versjon ***',
+          },
+          {
+            probability: 0.74,
+            taxon: {
+              scientificName: 'Trametes versicolor',
+              vernacularName: 'Muslingkjuke',
+              taxonId: 'NBIC:12345',
+            },
+          },
+        ],
+      },
+    }))
+
+    const results = await runArtsorakel(blob, 'no')
+    assert.equal(results.length, 1)
+    assert.equal(results[0].scientificName, 'Trametes versicolor')
+  })
+})

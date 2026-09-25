@@ -294,8 +294,15 @@ function _normalizeInaturalistPrediction(prediction) {
   const taxon = prediction?.taxon && typeof prediction.taxon === 'object'
     ? prediction.taxon
     : prediction || {}
-  const scientificName = _scientificName(taxon)
+  // Taxonomy-v2 closeout Stage 2 Part B: the iNaturalist normalizer has the
+  // same flatten-then-read shape as the Artsorakel one, so a nested `taxon`
+  // must not shadow a name or id that the candidate carries at the top level.
+  // Falling back to the candidate keeps a usable name rather than producing
+  // a null that the observation save path could write over an existing
+  // identification.
+  const scientificName = _scientificName(taxon) || _scientificName(prediction || {})
   const vernacularName = _preferredCommonName(taxon)
+    || _preferredCommonName(prediction || {})
   const displayName = vernacularName && scientificName && vernacularName.toLowerCase() !== scientificName.toLowerCase()
     ? `${vernacularName} (${scientificName})`
     : vernacularName || scientificName || t('common.unknown')
@@ -304,14 +311,16 @@ function _normalizeInaturalistPrediction(prediction) {
     ? prediction.combined_score
     : (_isNumber(prediction?.vision_score) ? prediction.vision_score : prediction?.score)
 
+  const taxonIdValue = taxon.id ?? prediction?.taxon_id ?? prediction?.id ?? null
+
   return {
     service: ID_SERVICE_INATURALIST,
-    taxonId: taxon.id || null,
+    taxonId: taxonIdValue,
     probability: _toFraction(score),
     scientificName: scientificName || null,
     vernacularName: vernacularName || null,
     displayName,
-    adbUrl: taxon.id ? `https://www.inaturalist.org/taxa/${taxon.id}` : 'https://www.inaturalist.org',
+    adbUrl: taxonIdValue ? `https://www.inaturalist.org/taxa/${taxonIdValue}` : 'https://www.inaturalist.org',
     rawScore: score ?? null,
     taxon,
   }

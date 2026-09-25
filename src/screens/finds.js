@@ -28,6 +28,7 @@ import { buildPeopleCard, loadPeopleSocialState, wireAvatarFallback, wirePeopleC
 import { AUTH_STATE, getAuthState } from '../auth-state.js'
 import { beginReauthentication } from '../reauth.js'
 import { currentAccountGeneration } from '../account-transition.js'
+import { isObservationUnidentified } from '../observation-identity.js'
 
 // Field-offline UX (Stage C polish): when the app is revealed with a cached
 // identity but no authoritative session for this launch, Finds must NOT run
@@ -2930,7 +2931,10 @@ function _speciesKey(obs) {
   const genus = obs.genus || ''
   const species = obs.species || ''
   const common = obs.common_name || ''
-  if (!genus && !species && !common) return '\x00unidentified'
+  // Taxonomy-v2 closeout Stage 2 Part B: grouping uses the shared
+  // classifier so an unresolved external identity never lands in the
+  // unidentified group.
+  if (isObservationUnidentified(obs)) return '\x00unidentified'
   return `${genus}|${species}|${common}`.toLowerCase()
 }
 
@@ -2953,6 +2957,113 @@ export function compareFindsByScientificName(first = {}, second = {}) {
 
 function _uncertainPrefix(obs) {
   return obs?.uncertain ? '<span class="find-card-uncertain" aria-label="Uncertain ID">?</span> ' : ''
+}
+
+// FNV-1a, base36. Only ever used to compare a card's rendered identification
+// against a fresh model, so it needs to be stable, cheap and safe to put in an
+// attribute — not cryptographic.
+function _findsIdentityHash(text) {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(36)
+}
+
+/**
+ * Everything a card paints about an observation's identification, in one place.
+ *
+ * Both the initial render and the reconcile path's change detection read this,
+ * so the two cannot drift: the signature is derived from the very markup that
+ * gets painted, not from a second, parallel list of "fields that matter".
+ *
+ * Its first character encodes identified vs unidentified directly, so that
+ * transition can never be missed by a hash collision.
+ */
+export function findsCardIdentityPresentation(obs = {}) {
+  const latin = formatScientificName(obs.genus || '', obs.species || '')
+  const isUnknown = isObservationUnidentified(obs)
+  const displayName = obs.common_name || latin || t('finds.unidentified')
+  const uncertainPrefix = _uncertainPrefix(obs)
+  const nameInnerHtml = isUnknown
+    ? `${uncertainPrefix}${t('finds.unidentified')}`
+    : obs.common_name && latin
+      ? `${uncertainPrefix}${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em>`
+      : obs.common_name
+        ? `${uncertainPrefix}${obs.common_name}`
+        : `${uncertainPrefix}<em class="find-card-scientific">${latin}</em>`
+  const compactInnerHtml = isUnknown
+    ? `${uncertainPrefix}${t('finds.unidentified')}`
+    : `${uncertainPrefix}${displayName}`
+  const unknownClass = isUnknown ? ' unidentified' : ''
+  const nameHtml = `<span class="find-card-name${unknownClass}">${nameInnerHtml}</span>`
+  const compactNameHtml =
+    `<span class="find-card-name find-card-name--compact${unknownClass}">${compactInnerHtml}</span>`
+  const signature = `${isUnknown ? 'u' : 'i'}`
+    + _findsIdentityHash(`${nameHtml}\u001f${compactNameHtml}`)
+  return {
+    latin, isUnknown, displayName,
+    nameInnerHtml, compactInnerHtml, nameHtml, compactNameHtml,
+    signature,
+  }
+}
+
+/** The name element a card paints its identification into, for either layout. */
+function _findsCardNameElement(card) {
+  return card?.querySelector?.('.find-card-name') || null
+}
+
+/**
+ * Repaint surviving cards whose identification presentation changed.
+ *
+ * Taxonomy-v2 closeout: `_reconcileFindsList` handled additions, removals and
+ * group counts, but a card whose id was already rendered was left untouched.
+ * Identifying an observation changes neither its id nor its position, so the
+ * reconcile path was selected and the card went on showing "Unidentified"
+ * while the model behind it already held `Entoloma conferendum`. Measured on
+ * 2026-09-24: the authoritative row and the refreshed Finds page both carried
+ * the name, and only the DOM was stale, until navigation forced a full render.
+ *
+ * Only cards whose signature actually changed are touched, so reconcile keeps
+ * its existing cost for an unchanged list.
+ */
+function _findsChangedSurvivors(list, survivors) {
+  if (!survivors?.length) return []
+  const cards = new Map()
+  for (const card of list.querySelectorAll('.find-card[data-id]') || []) {
+    const id = card?.dataset?.id
+    if (id != null && !cards.has(String(id))) cards.set(String(id), card)
+  }
+
+  const changed = []
+  for (const obs of survivors) {
+    const card = cards.get(String(obs.id))
+    if (!card) continue
+    const presentation = findsCardIdentityPresentation(obs)
+    if (card.dataset.nameSig === presentation.signature) continue
+    changed.push({ obs, card, presentation })
+  }
+  return changed
+}
+
+function _repaintChangedFindsSurvivors(changed, variant) {
+  const compact = variant === 'two' || variant === 'three'
+  const repainted = []
+  for (const { obs, card, presentation } of changed) {
+    const nameEl = _findsCardNameElement(card)
+    if (!nameEl) continue
+    // Replace the element with the SAME markup `_findsCardHtml` would emit,
+    // rather than patching its innards and toggling classes separately. One
+    // builder, so a repainted card is indistinguishable from a freshly
+    // rendered one.
+    nameEl.insertAdjacentHTML(
+      'beforebegin', compact ? presentation.compactNameHtml : presentation.nameHtml)
+    nameEl.remove()
+    card.dataset.nameSig = presentation.signature
+    repainted.push(String(obs.id))
+  }
+  return repainted
 }
 
 function _findsRedlistSummary(obs = {}) {
@@ -3390,6 +3501,21 @@ async function _reconcileFindsList(list, outer, targetList, { variant, sort, cur
     if (!_isCurrentFindsRender(list, renderContext)) return false
   }
 
+  // A survivor whose identification changed must be repainted here: its id and
+  // position are unchanged, so nothing below would touch it and the card would
+  // keep its pre-identification text.
+  //
+  // Under species sort the name is also the grouping key, so a changed survivor
+  // belongs in a different group than the one it is rendered in. Rebuild
+  // authoritatively rather than patching a card into the wrong group — the same
+  // escape hatch the append planner uses below.
+  const changedSurvivors = _findsChangedSurvivors(list, survivors)
+  if (sort === 'species' && changedSurvivors.length) {
+    _renderedFindsView = null
+    return _applyFilter()
+  }
+  _repaintChangedFindsSurvivors(changedSurvivors, variant)
+
   if (removedIds.length) {
     const wraps = _findsCardWrapSnapshot(list)
     for (const id of removedIds) wraps.get(id)?.remove?.()
@@ -3519,20 +3645,11 @@ const FINDS_FRIENDS_ICON = `<svg class="find-card-vis-icon" viewBox="0 0 24 24" 
 const FINDS_SPORES_ICON = `<svg class="find-card-vis-icon" style="stroke: var(--amber);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="12" rx="4" ry="8" transform="rotate(30 12 12)"/></svg>`
 
 function _findsCardHtml(obs, { variant = 'cards', mode = 'date', imageData = {} } = {}) {
-  const latin = formatScientificName(obs.genus || '', obs.species || '')
-  const isUnknown = !latin && !obs.common_name
-  const displayName = obs.common_name || latin || t('finds.unidentified')
-  const uncertainPrefix = _uncertainPrefix(obs)
-  const nameHtml = isUnknown
-    ? `<span class="find-card-name unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
-    : obs.common_name && latin
-      ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em></span>`
-      : obs.common_name
-        ? `<span class="find-card-name">${uncertainPrefix}${obs.common_name}</span>`
-        : `<span class="find-card-name">${uncertainPrefix}<em class="find-card-scientific">${latin}</em></span>`
-  const compactNameHtml = isUnknown
-    ? `<span class="find-card-name find-card-name--compact unidentified">${uncertainPrefix}${t('finds.unidentified')}</span>`
-    : `<span class="find-card-name find-card-name--compact">${uncertainPrefix}${displayName}</span>`
+  // One source for what a card says about identification, shared with the
+  // reconcile path's survivor-change detection.
+  const identity = findsCardIdentityPresentation(obs)
+  const { latin, isUnknown, nameHtml, compactNameHtml } = identity
+  const identitySignatureAttr = ` data-name-sig="${identity.signature}"`
 
   const loc = obs.location || (obs.gps_latitude && obs.gps_longitude
     ? `${obs.gps_latitude.toFixed(3)}° N, ${obs.gps_longitude.toFixed(3)}° E`
@@ -3561,7 +3678,7 @@ function _findsCardHtml(obs, { variant = 'cards', mode = 'date', imageData = {} 
       'find-card-photo-placeholder'
     )
     return `<div class="find-card-wrap find-card-wrap--two">
-            <div class="find-card find-card--two${pendingClass}" data-id="${obs.id}">
+            <div class="find-card find-card--two${pendingClass}" data-id="${obs.id}"${identitySignatureAttr}>
               <div class="find-card-photo-wrap find-card-photo-wrap--two">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
               <div class="find-card-body find-card-body--two">
                 ${compactNameHtml}
@@ -3579,7 +3696,7 @@ function _findsCardHtml(obs, { variant = 'cards', mode = 'date', imageData = {} 
       'find-card-photo-placeholder'
     )
     return `<div class="find-card-wrap find-card-wrap--three">
-            <div class="find-card find-card--three${pendingClass}" data-id="${obs.id}">
+            <div class="find-card find-card--three${pendingClass}" data-id="${obs.id}"${identitySignatureAttr}>
               <div class="find-card-photo-wrap find-card-photo-wrap--three">${photoInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card observation-author-chip--compact' })}</div>
               <div class="find-card-body find-card-body--three">
                 ${compactNameHtml}
@@ -3614,7 +3731,7 @@ function _findsCardHtml(obs, { variant = 'cards', mode = 'date', imageData = {} 
   const showMetaRow = mode === 'species' ? true : hasMetaRow
 
   return `<div class="find-card-wrap">
-          <div class="find-card${pendingClass}" data-id="${obs.id}">
+          <div class="find-card${pendingClass}" data-id="${obs.id}"${identitySignatureAttr}>
             <div class="find-card-photo-wrap">${photoWrapInner}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--card' })}</div>
             <div class="find-card-body">
               <div class="find-card-name-row">${nameHtml}${countBadge}</div>

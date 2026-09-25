@@ -50,7 +50,14 @@ import { prepareImageBlobForUpload } from '../image_crop.js'
 import { isBlob, normalizeCoordinatePair } from '../observation-shapes.js'
 import { focusObservationOnMapScreen, openMapLocationPickerScreen } from '../map-loader.js'
 import { buildExternalMapUrl, MAP_LINK_SERVICES } from '../map-links.js'
-import { persistObservationTaxonomySelection, taxonomySelectionForTaxon } from '../taxonomy-v2.js'
+import {
+  TAXON_IDENTITY_COLUMNS,
+  externalTaxonomySelectionForCandidate,
+  isProvenSporelySelection,
+  persistObservationIdentification,
+  resolveExternalTaxonomySelection,
+  taxonomySelectionForTaxon,
+} from '../taxonomy-v2.js'
 
 let currentObs    = null
 let selectedTaxon = null
@@ -524,9 +531,9 @@ export function getDetailDraftExplanationLines(obs = currentObs, now = Date.now(
   return lines
 }
 
-const DETAIL_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision'
+const DETAIL_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility, is_draft, location_precision, selected_sporely_taxon_id, taxon_identity_state, taxon_identity_source_system, taxon_identity_namespace, taxon_identity_external_id, taxon_identity_raw_external_id'
 const DETAIL_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, gps_altitude, gps_accuracy, visibility'
-const DETAIL_VIEW_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, red_list_category, red_list_categories_json, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision'
+const DETAIL_VIEW_SELECT = 'id, user_id, date, created_at, captured_at, genus, species, common_name, ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, ai_selected_at, red_list_category, red_list_categories_json, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility, is_draft, location_precision, selected_sporely_taxon_id, taxon_identity_state, taxon_identity_source_system, taxon_identity_namespace, taxon_identity_external_id, taxon_identity_raw_external_id'
 const DETAIL_VIEW_SELECT_LEGACY = 'id, user_id, date, created_at, captured_at, genus, species, common_name, location, habitat, notes, uncertain, gps_latitude, gps_longitude, visibility'
 const DETAIL_AI_SELECTION_FIELDS = [
   'ai_selected_service',
@@ -543,6 +550,15 @@ const DETAIL_AI_SELECTION_TAXON_FIELDS = [
 const DETAIL_AI_SELECTION_REDLIST_FIELDS = [
   'red_list_category',
   'red_list_categories_json',
+]
+// Taxonomy-v2 closeout Stage 2 Part B. `selected_sporely_taxon_id` is read
+// (never written here — only set_observation_selected_taxon_v2 may write it)
+// so the client can tell a resolved identity from a preserved-but-unresolved
+// one. The provenance columns land in a separate additive migration, so every
+// read and write degrades gracefully while a deployment still lacks them.
+const DETAIL_TAXON_IDENTITY_FIELDS = [
+  'selected_sporely_taxon_id',
+  ...TAXON_IDENTITY_COLUMNS,
 ]
 const DETAIL_IMAGE_SELECT_WITH_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom'
 const DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h'
@@ -669,6 +685,16 @@ function _removeMissingObservationColumnsFromPatch(patch = {}, error = null, fie
 
 async function _withPhase7Fallback(makeQuery, columns, legacyColumns) {
   const result = await makeQuery(columns)
+  // Taxonomy-v2 closeout Stage 2 Part B: drop only the taxon-identity
+  // provenance columns when their migration is not deployed yet, rather than
+  // collapsing all the way to the legacy select and losing the AI-selection
+  // columns too.
+  if (_isMissingTaxonIdentityColumnError(result.error)) {
+    const withoutIdentity = _stripTaxonIdentityFieldsFromSelect(columns)
+    if (withoutIdentity && withoutIdentity !== columns) {
+      return _withPhase7Fallback(makeQuery, withoutIdentity, legacyColumns)
+    }
+  }
   if (_isPhase7ColumnError(result.error) || _isMissingObservationColumnError(result.error, DETAIL_AI_SELECTION_FIELDS)) {
     return makeQuery(legacyColumns)
   }
@@ -692,10 +718,8 @@ function _isMissingRedListColumnError(error) {
   return _isMissingObservationColumnError(error, DETAIL_AI_SELECTION_REDLIST_FIELDS)
 }
 
-function _stripRedListFieldsFromViewSelect(select = '') {
-  const dropSet = new Set(
-    DETAIL_AI_SELECTION_REDLIST_FIELDS.map(field => String(field).toLowerCase()),
-  )
+function _stripFieldsFromSelect(select = '', fields = []) {
+  const dropSet = new Set(Array.from(fields, field => String(field).toLowerCase()))
   return String(select || '')
     .split(',')
     .map(field => field.trim())
@@ -703,15 +727,41 @@ function _stripRedListFieldsFromViewSelect(select = '') {
     .join(', ')
 }
 
+function _stripRedListFieldsFromViewSelect(select = '') {
+  return _stripFieldsFromSelect(select, DETAIL_AI_SELECTION_REDLIST_FIELDS)
+}
+
+function _stripTaxonIdentityFieldsFromSelect(select = '') {
+  return _stripFieldsFromSelect(select, DETAIL_TAXON_IDENTITY_FIELDS)
+}
+
+function _isMissingTaxonIdentityColumnError(error) {
+  // Matched on the provenance columns only. `_isMissingObservationColumnError`
+  // does a bare substring match, and `selected_sporely_taxon_id` appears in
+  // unrelated messages (the write guard names it), so including it here would
+  // misclassify those as a missing column.
+  return _isMissingObservationColumnError(error, TAXON_IDENTITY_COLUMNS)
+}
+
 // Generic compatibility retry usable against any non-owner read view
 // (community_view, friend_view, ...) whose deployed projection may
 // briefly lag the frontend contract.
 async function _loadDetailViewWithCompatibility(makeQuery, viewSelect, viewLegacySelect) {
-  // 1) Full select including red_list_* AND ai_selected_*.
+  // 1) Full select including red_list_*, ai_selected_* AND the Stage 2
+  //    taxon-identity provenance columns.
   const primary = await makeQuery(viewSelect)
   if (primary.data || !primary.error) {
     // Success or benign no-row: no compatibility retry needed.
     return primary
+  }
+  // 1b) 42703 for the taxon-identity columns: their migration may not be
+  //     deployed yet. Drop only those and continue through the existing
+  //     fallback ladder with the resulting select.
+  if (_isMissingTaxonIdentityColumnError(primary.error)) {
+    const noIdentitySelect = _stripTaxonIdentityFieldsFromSelect(viewSelect)
+    if (noIdentitySelect && noIdentitySelect !== viewSelect) {
+      return _loadDetailViewWithCompatibility(makeQuery, noIdentitySelect, viewLegacySelect)
+    }
   }
   // 2) 42703 for red_list_*: retry dropping ONLY those two fields.
   if (_isMissingRedListColumnError(primary.error)) {
@@ -1048,7 +1098,158 @@ async function _refreshSporeStats(observationId, generation = detailLoadGenerati
   _renderSporeStats()
 }
 
-function _buildDetailAiSelectionPatch(selectionState = {}) {
+// A genus: initial capital, then letters or hyphens. Rejects `***`, numeric
+// codes and punctuation noise.
+const _GENUS_TOKEN = /^[A-Z][A-Za-zÀ-ÿ-]+$/
+// A specific epithet, including the group/infraspecific qualifiers
+// `splitScientificName` deliberately keeps attached (`conica coll.`,
+// `pseudoconica`). Must start with a letter.
+const _EPITHET_TOKEN = /^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ.\- ]*$/
+
+/**
+ * Split a provider scientific name into the columns an observation stores.
+ *
+ * Taxonomy-v2 closeout Stage 2 Part B. `splitScientificName` returns
+ * `[null, null]` for a single token, which used to mean a genus-only provider
+ * result (`Entoloma`, `Inocybe`) was stored ONLY in
+ * `ai_selected_scientific_name` — AI history, which the display classifier
+ * rightly ignores — so a freshly identified observation still rendered as
+ * unidentified. A genus is a valid identification level (the desktop client
+ * has always treated it as one), so a lone capitalised token is kept as the
+ * genus.
+ *
+ * Anything that is neither a binomial nor a plausible genus token yields
+ * `[null, null]`, and the callers below then refuse to overwrite existing
+ * values with those nulls.
+ */
+export function providerNameToIdentificationColumns(scientificName) {
+  const [genus, species] = splitScientificName(scientificName || '')
+  if (genus || species) {
+    // `splitScientificName` only splits on whitespace — it does not validate.
+    // `'*** Utdatert versjon ***'` parses to `['***', 'Utdatert']`, so a
+    // deprecated record that slipped through a filter would be written as an
+    // identification of genus `***`. Stage 2 Part B requires that a candidate
+    // "rejected as deprecated" not overwrite the identification either, so the
+    // tokens are validated before they are believed.
+    if (!_GENUS_TOKEN.test(String(genus || '')) || !_EPITHET_TOKEN.test(String(species || ''))) {
+      return [null, null]
+    }
+    return [genus, species]
+  }
+  const value = String(scientificName || '').trim()
+  if (!value || /\s/.test(value)) return [null, null]
+  if (!_GENUS_TOKEN.test(value)) return [null, null]
+  return [value, null]
+}
+
+/**
+ * Whether a PROVIDER candidate is accepted as the observation's identification.
+ *
+ * Name acceptance and identity acceptance are ONE decision. A provider
+ * candidate has no authoritative identity — its only claim to being the
+ * identification is its name — so if the name is not usable, the candidate is
+ * not the identification at all and its identifier must NOT be applied.
+ *
+ * An earlier draft split the two: `applyIdentificationCoherently` correctly
+ * declined to overwrite `Amanita muscaria` with an unusable candidate, but the
+ * identity transition then ran anyway, so the row kept A's name while binding
+ * (or clearing to) B's identity — a name and an identity belonging to
+ * different taxa.
+ *
+ * A rejected candidate is still recorded as provider HISTORY through the
+ * `ai_selected_*` columns. That is where an unaccepted suggestion belongs.
+ *
+ * A native Sporely selection is deliberately NOT subject to this gate: it
+ * carries proven identity, which IS the identification, and the three name
+ * columns are a best-effort projection of it.
+ */
+export function providerCandidateIsAcceptedAsIdentification(scientificName) {
+  const [genus] = providerNameToIdentificationColumns(scientificName)
+  return genus !== null && genus !== undefined && String(genus).trim() !== ''
+}
+
+/**
+ * Whether the AI-selection save path should run an identity transition.
+ *
+ * Exported so the COUPLING is the unit under test, not just the predicate:
+ * the finding this closes was entirely in the call site, which applied the
+ * candidate's identity even when the patch had deliberately kept the existing
+ * name.
+ */
+export function aiSelectionWarrantsIdentityTransition(selectedPrediction) {
+  if (!selectedPrediction) return false
+  return providerCandidateIsAcceptedAsIdentification(selectedPrediction.scientificName)
+}
+
+/**
+ * Whether the ordinary Save path should run an identity transition.
+ *
+ * `null` selection is an explicit clear and DOES warrant one. A native
+ * selection carries proven identity and always warrants one. A provider
+ * candidate warrants one only if its name was accepted.
+ */
+export function saveSelectionWarrantsIdentityTransition(selectedTaxon, identificationChanged) {
+  if (!identificationChanged) return false
+  if (!selectedTaxon) return true
+  if (selectedTaxon.providerCandidate !== true) return true
+  return providerCandidateIsAcceptedAsIdentification(selectedTaxon.scientificName)
+}
+
+/**
+ * Apply proposed identification columns as ONE coherent unit.
+ *
+ * An identification is not three independent fields. Taxonomy-v2 closeout
+ * Stage 2 Part B's rule is "a candidate that fails to parse, or is rejected as
+ * deprecated, must not overwrite an existing identification" — it is NOT
+ * "fill the gaps in the new taxon from the old one".
+ *
+ * An earlier draft merged field by field, which manufactured taxa that do not
+ * exist: an observation identified as `Amanita muscaria` / `Fly agaric`, plus a
+ * provider result named only `Entoloma`, produced
+ * `Entoloma muscaria` / `Fly agaric`. A missing component must never be
+ * inherited from a different taxon.
+ *
+ * So there are exactly two outcomes:
+ *
+ *   * the proposal carries a usable scientific name (a genus at minimum) — it
+ *     REPLACES genus, species and common_name together, including writing null
+ *     for the components this taxon does not have. That matches the behaviour
+ *     before Stage 2 for the usable-name case;
+ *   * the proposal carries no usable name — none of the three fields is
+ *     touched, so the existing identification survives intact.
+ *
+ * Used by both detail save paths, and by native picker selections as well as
+ * provider candidates.
+ */
+export function applyIdentificationCoherently(patch, proposed, existingObs = null) {
+  const hasUsableName = proposed.genus !== null && proposed.genus !== undefined
+    && String(proposed.genus).trim() !== ''
+  if (!hasUsableName) {
+    const existing = existingObs || {}
+    const existingIdentified = DETAIL_AI_SELECTION_TAXON_FIELDS.some(field => {
+      const value = existing[field]
+      return value !== null && value !== undefined && String(value).trim() !== ''
+    })
+    if (existingIdentified) {
+      // Nothing usable to store and something worth protecting: leave the
+      // identification completely alone.
+      for (const field of DETAIL_AI_SELECTION_TAXON_FIELDS) delete patch[field]
+      return patch
+    }
+    // Nothing to protect either — record the explicit "no identification" so a
+    // first-time selection still writes a definite state.
+    for (const field of DETAIL_AI_SELECTION_TAXON_FIELDS) patch[field] = null
+    return patch
+  }
+  for (const field of DETAIL_AI_SELECTION_TAXON_FIELDS) {
+    const value = proposed[field]
+    patch[field] = value === undefined || value === '' ? null : value
+  }
+  return patch
+}
+
+
+export function buildDetailAiSelectionPatch(selectionState = {}, existingObs = null) {
   const selectedPrediction = selectionState.selectedPrediction || null
   const selectedService = normalizeIdentifyService(
     selectionState.selectedService || selectedPrediction?.service || '',
@@ -1056,12 +1257,14 @@ function _buildDetailAiSelectionPatch(selectionState = {}) {
 
   if (!selectedPrediction || !selectedService) return null
 
-  const [genus, species] = splitScientificName(selectedPrediction?.scientificName || '')
+  const [genus, species] = providerNameToIdentificationColumns(
+    selectedPrediction?.scientificName,
+  )
   const commonName = selectedPrediction?.vernacularName || null
   const redListCategory = getPredictionRedlistCategory(selectedPrediction) || null
   const redListCategoriesMap = getPredictionRedlistCategoriesMap(selectedPrediction)
 
-  return {
+  const patch = {
     ai_selected_service: selectedService,
     ai_selected_taxon_id: selectedPrediction?.taxonId || null,
     ai_selected_scientific_name: selectedPrediction?.scientificName || null,
@@ -1073,13 +1276,180 @@ function _buildDetailAiSelectionPatch(selectionState = {}) {
     red_list_category: redListCategory,
     red_list_categories_json: redListCategoriesMap,
   }
+
+  // Taxonomy-v2 closeout Stage 2 Part B: a candidate that cannot be parsed
+  // must never clear an existing identification. This patch used to be
+  // applied unconditionally, so one malformed or unexpectedly-shaped provider
+  // candidate wrote null `genus`, null `species` and null `common_name` over
+  // a perfectly good identification — exactly the "renders as unidentified"
+  // condition.
+  return applyIdentificationCoherently(
+    patch,
+    { genus, species, common_name: commonName },
+    existingObs,
+  )
+}
+
+
+/**
+ * Apply an identification — bound concept, provenance and accepted name — as
+ * ONE atomic change.
+ *
+ * Used by BOTH detail save paths. Prefers
+ * `set_observation_identification_v2`, which writes all of it in a single
+ * statement, so a partial failure is impossible rather than merely
+ * compensated. Earlier drafts sequenced these writes and compensated on
+ * failure; compensation is itself a write that can fail, so the split was only
+ * ever narrowed.
+ *
+ * Falls back to the pre-atomic sequence only when that function is not
+ * deployed. There the `taxon_identity_*` columns are absent too (same
+ * migration series), so the fallback has a single identity write and the
+ * caller keeps the name in its own patch.
+ *
+ * Returns `{ nameWritten }` so the caller knows whether the name columns were
+ * already persisted and must not be written twice.
+ */
+async function _applyDetailIdentification({ selection, writeName, nameColumns, skip = false }) {
+  if (skip || !currentObs?.id) return { nameWritten: false }
+  const resolved = await _resolveSelectionForIdentification(selection)
+  const genus = writeName ? (nameColumns?.genus ?? null) : null
+  const species = writeName ? (nameColumns?.species ?? null) : null
+  const commonName = writeName ? (nameColumns?.common_name ?? null) : null
+
+  const atomic = await persistObservationIdentification(currentObs.id, {
+    selection: resolved,
+    writeName,
+    genus,
+    species,
+    commonName,
+  })
+  if (atomic.applied) {
+    currentObs = {
+      ...currentObs,
+      selected_sporely_taxon_id: atomic.selectedSporelyTaxonId,
+      ...(atomic.columns || Object.fromEntries(
+        TAXON_IDENTITY_COLUMNS.map(column => [column, null]),
+      )),
+      ...(writeName ? { genus, species, common_name: commonName } : {}),
+    }
+    return { nameWritten: Boolean(writeName) }
+  }
+
+  // FAIL CLOSED. There is no safe way to apply a coupled identification
+  // without the atomic function, and an earlier draft got this wrong twice
+  // over:
+  //
+  //   * it fell back to `set_observation_selected_taxon_v2` and then let the
+  //     caller write the name separately — the exact split this revision
+  //     exists to remove. A failing second write left the new identity beside
+  //     the old name;
+  //   * for an unresolved selection it cleared the existing binding and never
+  //     persisted the `(source_system, namespace, external_id)` tuple at all.
+  //
+  // The justification for that fallback was also wrong: the provenance columns
+  // arrive in 20260922120000 and this function in 20260922140000, so a backend
+  // can genuinely have the columns without the function — and PostgREST's
+  // schema cache can lag behind a deployed function. "No function" therefore
+  // does NOT imply "no columns", and nothing may be inferred from it.
+  //
+  // Refusing leaves the observation exactly as it was, which is the only
+  // outcome that cannot corrupt it. The caller surfaces this; the user retries
+  // once the migration is deployed.
+  throw new IdentificationUnavailableError()
+}
+
+/**
+ * The atomic identification writer is not available on this backend.
+ *
+ * Deliberately a distinct type so callers can refuse the coupled change
+ * without mistaking it for an ordinary write failure.
+ */
+export class IdentificationUnavailableError extends Error {
+  constructor() {
+    super(
+      'This version of the Sporely backend cannot save an identification '
+      + 'safely. The identification was left unchanged.',
+    )
+    this.name = 'IdentificationUnavailableError'
+    this.identificationUnavailable = true
+  }
+}
+
+/** Whether a patch actually carries accepted-name columns to write. */
+function _patchCarriesName(patch) {
+  return DETAIL_AI_SELECTION_TAXON_FIELDS.some(field => field in (patch || {}))
+}
+
+/** Offer a preserved external identifier to the resolver before binding. */
+async function _resolveSelectionForIdentification(selection) {
+  if (!selection || isProvenSporelySelection(selection)) return selection || null
+  try {
+    return await resolveExternalTaxonomySelection(selection)
+  } catch (error) {
+    // A failed resolution ATTEMPT is a state, not grounds to discard the
+    // provider's identifier.
+    console.warn('[detail] external taxonomy resolution threw; keeping unresolved', error)
+    return selection
+  }
+}
+
+function _isTaxonIdentityConstraintViolation(error) {
+  if (String(error?.code || '') === '23514') return true
+  const message = String(error?.message || error?.details || '').toLowerCase()
+  return message.includes('observations_taxon_identity')
+    || message.includes('observations_unresolved_identity_has_no_selection')
 }
 
 async function _persistDetailAiSelection(selectionState = {}) {
   if (!currentObs?.id || !state.user?.id || !currentObsIsOwner) return null
 
-  const patch = _buildDetailAiSelectionPatch(selectionState)
+  const patch = buildDetailAiSelectionPatch(selectionState, currentObs)
   if (!patch) return null
+
+  // Taxonomy-v2 closeout Stage 2 Part B: preserve the provider's own
+  // identifier. An Artsorakel candidate carries `NBIC:53482`; it is
+  // normalized to (nortaxa, nortaxa_taxon_id, 53482) under the declared
+  // namespace bridge, offered to `resolve_taxon_external_id_v2`, and
+  // persisted with the observation whether or not resolution succeeds. The
+  // identifier used to be dropped unparsed, so no resolution was ever
+  // attempted and the identity evidence was lost.
+  // Gated on name acceptance: if this candidate's name was not usable then
+  // `patch` deliberately kept the EXISTING identification, so applying this
+  // candidate's identity would pair one taxon's name with another's identity.
+  // The candidate's identifier is still recorded as provider history via the
+  // `ai_selected_*` columns in `patch`.
+  // Taxonomy-v2 closeout Stage 2 Part B: the identification — bound concept,
+  // provenance AND the accepted name — goes through the atomic RPC, so this
+  // path can no longer leave a successful identity change beside a failed name
+  // write. The remaining `ai_selected_*` / red-list columns are provider
+  // history and are genuinely independent, so they stay in the patch below.
+  const accepted = aiSelectionWarrantsIdentityTransition(selectionState.selectedPrediction)
+  try {
+    await _applyDetailIdentification({
+      selection: accepted
+        ? externalTaxonomySelectionForCandidate(selectionState.selectedPrediction)
+        : null,
+      // A rejected candidate must not touch the name, and must not move
+      // identity either — `selection: null` would be an explicit clear, so
+      // skip entirely.
+      writeName: accepted && _patchCarriesName(patch),
+      nameColumns: patch,
+      skip: !accepted,
+    })
+  } catch (identityError) {
+    if (!identityError?.identificationUnavailable) throw identityError
+    // Fail closed: the identification is left exactly as it was. The name
+    // columns are part of that coupled set, so they must NOT be written
+    // independently here — doing so is the split this revision removes.
+    // `ai_selected_*` provider history is genuinely independent and still
+    // records what the observer picked.
+    console.warn('[detail] identification not applied — atomic writer unavailable')
+    showToast(t('common.errorPrefix', { message: identityError.message }))
+  }
+  // Fields the atomic call already wrote must not be written twice; fields it
+  // REFUSED to write must not be written at all.
+  for (const field of DETAIL_AI_SELECTION_TAXON_FIELDS) delete patch[field]
 
   let updatePatch = { ...patch }
   let { error } = await supabase
@@ -2414,12 +2784,22 @@ function _renderDetailAiResults() {
       el.addEventListener('click', () => {
         if (Boolean(currentObs?.id) && !currentObsIsOwner) return
         const clickedPrediction = JSON.parse(el.dataset.identifyResult)
-        const [genus, specificEpithet] = splitScientificName(clickedPrediction.scientificName)
+        const [genus, specificEpithet] = providerNameToIdentificationColumns(
+          clickedPrediction.scientificName,
+        )
         selectedTaxon = {
           genus,
           specificEpithet,
           vernacularName: clickedPrediction.vernacularName || null,
           displayName: clickedPrediction.displayName,
+          // Taxonomy-v2 closeout Stage 2 Part B: carry the provider's own
+          // identifier and name. Without them `taxonomySelectionForTaxon`
+          // saw nothing to preserve, returned null, and the ordinary Save
+          // path then sent `p_sporely_taxon_id: null` — clearing whatever
+          // identity the observation already had.
+          taxonId: clickedPrediction.taxonId || null,
+          scientificName: clickedPrediction.scientificName || null,
+          providerCandidate: true,
         }
         detailAiState.selectedService = activeService
         detailAiState.selectedPrediction = clickedPrediction
@@ -2775,6 +3155,15 @@ async function _runDetailAiComparison(serviceOverride = null) {
       if (selectionState.selectedPrediction) {
         saveTasks.push(_persistDetailAiSelection(selectionState).catch(error => {
           console.warn('Failed to persist detail AI selection:', error)
+          // Taxonomy-v2 closeout Stage 2 Part B: this path's other failures
+          // are transient and stay a log line, but losing the provider's
+          // preserved external identifier is the exact outcome this stage
+          // exists to prevent. It must not be invisible to the observer.
+          if (_isTaxonIdentityConstraintViolation(error)) {
+            showToast(t('common.errorPrefix', {
+              message: String(error?.message || error || 'Unknown error'),
+            }))
+          }
           return null
         }))
       }
@@ -3882,9 +4271,20 @@ async function _save() {
   const selectedPrediction = detailAiState.selectedPrediction || detailAiState.selectedPredictionByService?.[detailAiState.selectedService] || null
 
   if (selectedTaxon) {
-    patch.genus       = selectedTaxon.genus            || null
-    patch.species     = selectedTaxon.specificEpithet  || null
-    patch.common_name = selectedTaxon.vernacularName   || null
+    // Taxonomy-v2 closeout Stage 2 Part B: the same preservation rule the
+    // AI-selection patch uses. These three assignments used to be
+    // unconditional `|| null`, so clicking a provider candidate whose name
+    // does not parse and then pressing Save erased an existing
+    // identification — a second, independent route to the same defect.
+    applyIdentificationCoherently(
+      patch,
+      {
+        genus: selectedTaxon.genus || null,
+        species: selectedTaxon.specificEpithet || null,
+        common_name: selectedTaxon.vernacularName || null,
+      },
+      currentObs,
+    )
     patch.ai_selected_service = detailAiState.selectedService || selectedPrediction?.service || null
     patch.ai_selected_taxon_id = selectedPrediction?.taxonId || null
     patch.ai_selected_scientific_name = selectedPrediction?.scientificName || null
@@ -3909,53 +4309,69 @@ async function _save() {
     patch.red_list_categories_json = null
   }
 
+  // Taxonomy-v2 closeout Stage 2 Part B: the identification — bound concept,
+  // provenance and accepted name — is applied as ONE atomic change before the
+  // rest of the observation patch. Earlier drafts sequenced these writes and
+  // tried to compensate on failure; compensation is itself a write that can
+  // fail, so the split was only ever narrowed, never closed.
+  //
+  // Name and identity remain one acceptance decision: a provider candidate
+  // whose name is unusable is not the identification, so neither its name nor
+  // its identity is applied. A native selection carries proven identity and is
+  // always accepted. Manual free text is an explicit clear of both.
+  const identificationChanged = Boolean(selectedTaxon) || taxonInputValue !== currentDisplayName
+  const identityWarranted = saveSelectionWarrantsIdentityTransition(
+    selectedTaxon, identificationChanged,
+  )
+
   let updatePatch = { ...patch }
-  let { error } = await supabase
-    .from('observations')
-    .update(updatePatch)
-    .eq('id', currentObs.id)
-    .eq('user_id', state.user.id)
-
-  if (error) {
-    const redlistFallback = _removeMissingObservationColumnsFromPatch(updatePatch, error, DETAIL_AI_SELECTION_REDLIST_FIELDS)
-    if (redlistFallback.removed) {
-      updatePatch = redlistFallback.patch
-      ;({ error } = await supabase
-        .from('observations')
-        .update(updatePatch)
-        .eq('id', currentObs.id)
-        .eq('user_id', state.user.id))
+  let error = null
+  try {
+    if (identityWarranted) {
+      const identification = await _applyDetailIdentification({
+        selection: taxonomySelectionForTaxon(selectedTaxon),
+        writeName: _patchCarriesName(patch),
+        nameColumns: patch,
+      })
+      if (identification.nameWritten) {
+        for (const field of DETAIL_AI_SELECTION_TAXON_FIELDS) delete updatePatch[field]
+      }
     }
+  } catch (identityError) {
+    // The identification was rejected and nothing was written: the RPC raises
+    // inside one function invocation, so its whole statement rolls back.
+    btn.disabled = false
+    showToast(t('detail.saveFailed', {
+      message: String(identityError?.message || identityError || 'Unknown error'),
+    }))
+    return
   }
 
-  if (error) {
-    const aiFallback = _removeMissingObservationColumnsFromPatch(updatePatch, error, [
-      ...DETAIL_AI_SELECTION_FIELDS,
-    ])
-    if (aiFallback.removed) {
-      updatePatch = aiFallback.patch
-      ;({ error } = await supabase
-        .from('observations')
-        .update(updatePatch)
-        .eq('id', currentObs.id)
-        .eq('user_id', state.user.id))
-    }
-  }
-
-  if (error) {
-    const legacyFallback = _removeMissingObservationColumnsFromPatch(
-      updatePatch,
-      error,
+  // The remaining columns are independent of identity (location, notes, GPS,
+  // provider history, red list). Compatibility retries drop only the columns an
+  // older deployment lacks.
+  {
+    let result = await supabase
+      .from('observations')
+      .update(updatePatch)
+      .eq('id', currentObs.id)
+      .eq('user_id', state.user.id)
+    for (const fields of [
+      DETAIL_AI_SELECTION_REDLIST_FIELDS,
+      DETAIL_AI_SELECTION_FIELDS,
       ['is_draft', 'location_precision'],
-    )
-    if (legacyFallback.removed) {
-      updatePatch = legacyFallback.patch
-      ;({ error } = await supabase
+    ]) {
+      if (!result.error) break
+      const fallback = _removeMissingObservationColumnsFromPatch(updatePatch, result.error, fields)
+      if (!fallback.removed) continue
+      updatePatch = fallback.patch
+      result = await supabase
         .from('observations')
         .update(updatePatch)
         .eq('id', currentObs.id)
-        .eq('user_id', state.user.id))
+        .eq('user_id', state.user.id)
     }
+    error = result.error
   }
 
   btn.disabled = false
@@ -3965,16 +4381,8 @@ async function _save() {
     return
   }
 
-  const identificationChanged = Boolean(selectedTaxon) || taxonInputValue !== currentDisplayName
-  if (identificationChanged) {
-    try {
-      await persistObservationTaxonomySelection(currentObs.id, taxonomySelectionForTaxon(selectedTaxon))
-    } catch (identityError) {
-      btn.disabled = false
-      showToast(t('detail.saveFailed', { message: identityError?.message || String(identityError) }))
-      return
-    }
-  }
+  // The identification was applied atomically above; nothing identity-related
+  // happens here.
 
   if (detailImageCropDirty) {
     const cropError = await _persistDetailImageCrops()
