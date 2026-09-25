@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReadStream } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,12 +38,25 @@ test('production taxonomy-v2 generator is local-only and uses bulk COPY', async 
   assert.doesNotMatch(source, /insert into public\.observations/i);
 });
 
+test('the release to import must be named explicitly and match the export', { skip: !existsSync(RELEASE_DIR) }, async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'taxonomy-v2-release-id-test-'));
+  try {
+    const output = path.join(tempDir, 'refused.sql');
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: RELEASE_DIR, output }), /release ID is required/);
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: RELEASE_DIR, output, releaseId: 'latest' }), /must look like tax-YYYY/);
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: RELEASE_DIR, output, releaseId: 'tax-2099.01.01-01' }), /release ID must be tax-2099\.01\.01-01/);
+    assert.equal(existsSync(output), false, 'a refused preparation writes nothing');
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('integration: generated full release payload imports, validates, activates, and protects legacy state', { skip: !integration }, async () => {
   const target = await discoverLocalTarget(REPO_ROOT);
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'taxonomy-v2-production-import-test-'));
   try {
     const output = path.join(tempDir, `${RELEASE_ID}-import.sql`);
-    const prepared = await prepareProductionReleaseImport({ releaseDir: RELEASE_DIR, output });
+    const prepared = await prepareProductionReleaseImport({ releaseDir: RELEASE_DIR, output, releaseId: RELEASE_ID });
     assert.equal(prepared.release_id, RELEASE_ID);
     assert.deepEqual(prepared.expected_table_counts, {
       concepts: 52917,

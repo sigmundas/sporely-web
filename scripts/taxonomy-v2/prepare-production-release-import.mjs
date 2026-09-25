@@ -6,7 +6,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const PROJECT_REF = 'zkpjklzfwzefhjluvhfw';
-const TARGET_RELEASE = 'tax-2026.08.01-01';
+// The release to import is named explicitly by the operator (--release-id)
+// and must match the export's own manifests; nothing is imported by default.
+const RELEASE_ID_PATTERN = /^tax-\d{4}\.\d{2}\.\d{2}-\d{2}$/;
 const IMPORTER_VERSION = 'taxonomy-v2-production-payload-1';
 const IMPORT_ADVISORY_LOCK = '846920026072413003';
 const DATASET_FILES = [
@@ -80,7 +82,8 @@ function chooseProbes(data) {
   };
 }
 
-async function verifyRelease(releaseDirectory) {
+async function verifyRelease(releaseDirectory, TARGET_RELEASE) {
+  assert(RELEASE_ID_PATTERN.test(String(TARGET_RELEASE ?? '')), `release ID must look like tax-YYYY.MM.DD-NN, got ${TARGET_RELEASE}`);
   const root = await realpath(releaseDirectory);
   const manifestPath = path.join(root, 'taxonomy_export_manifest.json');
   const manifestBytes = await readFile(manifestPath);
@@ -228,6 +231,7 @@ function protectedStateSql() {
 
 function preamble(verified) {
   const m = verified.metadata;
+  const TARGET_RELEASE = m.releaseId;
   const expectedRelations = [
     'taxonomy_v2_releases','taxonomy_v2_concepts','taxonomy_v2_taxa','taxonomy_v2_scientific_names',
     'taxonomy_v2_vernacular_names','taxonomy_v2_external_ids','taxonomy_v2_legacy_external_ids',
@@ -306,6 +310,7 @@ CREATE TEMP TABLE taxonomy_v2_stage(raw jsonb) ON COMMIT DROP;
 }
 
 function postamble(verified) {
+  const TARGET_RELEASE = verified.metadata.releaseId;
   const p = verified.probes;
   const counts = verified.rowCounts;
   return `
@@ -417,10 +422,11 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-export async function prepareProductionReleaseImport({ releaseDir, output } = {}) {
+export async function prepareProductionReleaseImport({ releaseDir, output, releaseId } = {}) {
   assert(releaseDir, 'release directory is required');
   assert(output, 'output path is required');
-  const verified = await verifyRelease(releaseDir);
+  assert(releaseId, 'release ID is required (--release-id)');
+  const verified = await verifyRelease(releaseDir, releaseId);
   const generated = await writePayload(verified, output);
   const expectedCounts = {
     concepts: verified.rowCounts['taxon.jsonl'],
@@ -435,7 +441,7 @@ export async function prepareProductionReleaseImport({ releaseDir, output } = {}
     active_releases: 1,
   };
   const command = `docker run --rm --env-file /path/to/private/production-db.env -v ${shellQuote(`${path.dirname(generated.path)}:/payload:ro`)} postgres:17 sh -c 'psql "$DATABASE_URL" --file=/payload/${path.basename(generated.path)}'`;
-  return { generated_sql_path: generated.path, sql_sha256: generated.sha256, sql_bytes: generated.bytes, release_id: TARGET_RELEASE, verified_release_hashes: verified.verifiedHashes, expected_table_counts: expectedCounts, containerised_psql_command: command };
+  return { generated_sql_path: generated.path, sql_sha256: generated.sha256, sql_bytes: generated.bytes, release_id: verified.metadata.releaseId, verified_release_hashes: verified.verifiedHashes, expected_table_counts: expectedCounts, containerised_psql_command: command };
 }
 
 function parseArgs(argv) {
@@ -443,6 +449,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--release-dir') options.releaseDir = argv[++i];
     else if (argv[i] === '--output') options.output = argv[++i];
+    else if (argv[i] === '--release-id') options.releaseId = argv[++i];
     else if (argv[i] === '--help' || argv[i] === '-h') options.help = true;
     else throw new Error(`unknown argument: ${argv[i]}`);
   }
@@ -452,7 +459,7 @@ function parseArgs(argv) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
-    console.log('usage: node scripts/taxonomy-v2/prepare-production-release-import.mjs --release-dir <directory> --output <outside-git.sql>');
+    console.log('usage: node scripts/taxonomy-v2/prepare-production-release-import.mjs --release-id <tax-YYYY.MM.DD-NN> --release-dir <directory> --output <outside-git.sql>');
     return;
   }
   const result = await prepareProductionReleaseImport(options);
