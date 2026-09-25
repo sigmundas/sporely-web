@@ -43,7 +43,7 @@
 --    is_public_microscopy_measurement_type() true) AND the image itself is
 --    not deleted/purged.
 -- 4. Every leaking site is patched to require
---      (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+--      (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
 --    in place of the bare `i.image_type = 'microscope'` eligibility test,
 --    alias-adjusted per site. All other conditions at each site are
 --    unchanged. Byte-backed rows (storage_path IS NOT NULL) take the first
@@ -67,19 +67,38 @@
 --    desktop client's server-readiness signal, so schema + all RPC fixes
 --    must ship together): existing storage_path-NULL, image_type
 --    'microscope', non-deleted/purged rows are marked 'public_microscopy'
---    when they already have qualifying spore data (length_um/width_um
---    present, is_public_microscopy_measurement_type() true) on an
---    observation with spore_data_visibility = 'public' — i.e. rows whose
---    measurement content was already being surfaced as public microscopy
---    data before this migration. The backfill deliberately does NOT also
---    require observation.visibility = 'public' / not-draft / not-banned /
---    not-blocked: those are per-request conditions re-evaluated by
---    metadata_microscope_parent_is_public() at read time regardless of the
---    marker, so under-restricting the backfill labeling is not a security
+--    whenever they already have qualifying spore data on them (a
+--    spore_measurements row with length_um and width_um both present,
+--    is_public_microscopy_measurement_type() true). The backfill
+--    deliberately does NOT also require observation.visibility = 'public' /
+--    not-draft / not-banned / not-blocked / spore_data_visibility =
+--    'public': those are per-request conditions re-evaluated by
+--    metadata_microscope_parent_is_public() (and, for
+--    get_observation_microscopy_presentations, by
+--    metadata_microscope_parent_is_visible_to_reader()) at read time
+--    regardless of the marker, so under-restricting the backfill labeling by
+--    the observation's current/possibly-draft visibility is not a security
 --    exposure — it only risks a label that read-time re-verification will
---    still correctly deny. All other legacy rows (including any
---    cheilocystidia-only anchors) are left with metadata_purpose = NULL.
--- 7. No RLS change: public.observation_images INSERT/UPDATE policies
+--    still correctly deny for a non-public/non-owner reader. Marking the row
+--    only requires that the row's own qualifying child measurement already
+--    exists, so a genuinely qualifying parent belonging to a currently
+--    non-public or draft observation is not left NULL forever. All other
+--    legacy rows (including any cheilocystidia-only anchors) are left with
+--    metadata_purpose = NULL.
+-- 7. public.metadata_microscope_parent_is_visible_to_reader(bigint): a
+--    second, reader-scoped SECURITY DEFINER helper used only by
+--    get_observation_microscopy_presentations, which (unlike every other
+--    RPC here) also serves the image owner and other authorized-but-not-
+--    owner readers on non-public observations. A metadata-only parent is
+--    visible to the current reader when they own the image, or — for a
+--    non-owner already authorized by that RPC's own upstream
+--    can_read_observation/can_access_spore_data checks — when
+--    metadata_purpose = 'public_microscopy' AND a qualifying child
+--    measurement exists. An owner_sync row is never visible under the
+--    non-owner branch, so friends/other authorized-but-non-owner readers
+--    never see it. metadata_microscope_parent_is_public itself is
+--    unchanged and stays strictly public-only for every other RPC.
+-- 8. No RLS change: public.observation_images INSERT/UPDATE policies
 --    (phase7_observation_images_insert_own /
 --    phase7_observation_images_update_own, most recently redefined in
 --    20260706100000 / 20260717120000) already gate every column, including
@@ -205,6 +224,85 @@ COMMENT ON FUNCTION public.metadata_microscope_parent_is_public(bigint) IS
   'true) on the image, which itself must not be deleted or purged.';
 
 -- ---------------------------------------------------------------------------
+-- 3b. Reader-scoped variant for get_observation_microscopy_presentations,
+--    which (unlike every other RPC this migration patches) also serves the
+--    image owner and other authorized-but-not-owner readers (friends) on
+--    non-public observations, via its own can_read_observation /
+--    can_access_spore_data checks upstream of this helper. This helper must
+--    NOT be substituted for metadata_microscope_parent_is_public above,
+--    which stays strictly public-only for every other RPC.
+--
+--    A storage_path-NULL metadata parent is visible to the calling reader
+--    when EITHER:
+--      (a) the caller is the image's owner (auth.uid() = i.user_id) — an
+--          owner_sync row must remain visible to its own owner, on their
+--          own private observation, regardless of metadata_purpose; OR
+--      (b) metadata_purpose = 'public_microscopy' AND a qualifying
+--          spore_measurements row exists — for a non-owner reader who was
+--          already authorized to read this observation's spore data by the
+--          caller's own upstream checks. The marker alone is still never
+--          sufficient: a non-owner reader additionally requires the
+--          verified qualifying child measurement, exactly as
+--          metadata_microscope_parent_is_public requires for the public
+--          case.
+--
+--    This helper deliberately does NOT re-derive observation-level
+--    visibility/spore-data-visibility itself: the caller (this RPC) has
+--    already restricted its query to observations the current reader may
+--    access, via spore_accessible_obs. An owner_sync row (metadata_purpose
+--    IS NULL or 'owner_sync') is NEVER visible under branch (b), so a
+--    friend/authorized-but-non-owner reader never sees it, only the owner
+--    does (branch a).
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION public.metadata_microscope_parent_is_visible_to_reader(p_image_id bigint)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND (
+        (auth.uid() IS NOT NULL AND auth.uid() = i.user_id)
+        OR (
+          i.metadata_purpose = 'public_microscopy'
+          AND EXISTS (
+            SELECT 1
+            FROM public.spore_measurements m
+            WHERE m.image_id = i.id
+              AND m.length_um IS NOT NULL
+              AND m.width_um IS NOT NULL
+              AND public.is_public_microscopy_measurement_type(m.measurement_type)
+          )
+        )
+      )
+  )
+$$;
+
+ALTER FUNCTION public.metadata_microscope_parent_is_visible_to_reader(bigint) OWNER TO postgres;
+REVOKE ALL ON FUNCTION public.metadata_microscope_parent_is_visible_to_reader(bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.metadata_microscope_parent_is_visible_to_reader(bigint)
+  TO anon, authenticated, service_role;
+
+COMMENT ON FUNCTION public.metadata_microscope_parent_is_visible_to_reader(bigint) IS
+  'Reader-scoped variant of metadata_microscope_parent_is_public, used only '
+  'by get_observation_microscopy_presentations. A storage_path-NULL '
+  'microscope parent is visible to the CURRENT caller when they own the '
+  'image, or (for a non-owner already authorized by the caller''s own '
+  'upstream checks) when metadata_purpose = ''public_microscopy'' AND a '
+  'qualifying spore_measurements row exists. Owner_sync rows are never '
+  'visible under the non-owner branch. Unlike '
+  'metadata_microscope_parent_is_public, this does not itself re-derive '
+  'observation-level public visibility, since the caller already restricts '
+  'to observations the reader may access.';
+
+-- ---------------------------------------------------------------------------
 -- 4. Backfill. See migration header for the exact backfill predicate and
 --    the reasoning for not also requiring observation-level public
 --    visibility at backfill time.
@@ -218,12 +316,6 @@ WHERE i.storage_path IS NULL
   AND i.purged_at IS NULL
   AND EXISTS (
     SELECT 1
-    FROM public.observations o
-    WHERE o.id = i.observation_id
-      AND o.spore_data_visibility = 'public'
-  )
-  AND EXISTS (
-    SELECT 1
     FROM public.spore_measurements m
     WHERE m.image_id = i.id
       AND m.length_um IS NOT NULL
@@ -235,10 +327,21 @@ WHERE i.storage_path IS NULL
 -- 5. Patched RPCs. Each CREATE OR REPLACE below reproduces the function's
 --    current live body (its last literal definition, with the dynamic
 --    ORDER BY chronology patch from 20260810130000 re-applied where that
---    patch touched it) with ONLY the leaking `image_type = 'microscope'`
+--    patch touched it) with ONLY the leaking bare `image_type = 'microscope'`
 --    eligibility test replaced per-alias by
---    `(alias.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(alias.id))`.
---    No other condition at any site is changed.
+--    `(alias.image_type = 'microscope' AND (alias.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(alias.id)))`
+--    — i.e. the new parent-eligibility clause is ANDed in alongside the
+--    original type check, never substituted for it. Wherever the original
+--    predicate at a site was already a disjunction/negation (e.g.
+--    `alias.image_type IS NULL OR ...`), that shape is preserved and only
+--    the `image_type = 'microscope'` branch gets the clause ANDed in. No
+--    other condition at any site is changed. The single exception is
+--    get_observation_microscopy_presentations near the end of this
+--    migration, which uses the separate reader-scoped
+--    metadata_microscope_parent_is_visible_to_reader() helper in place of
+--    metadata_microscope_parent_is_public() (see comment 7 above) because it
+--    also serves the image owner and other authorized non-owner readers on
+--    non-public observations.
 -- ---------------------------------------------------------------------------
 
 -- --- public._get_public_observation_stage2a(bigint)  [was public.get_public_observation(bigint); renamed by 20260809120000] ---
@@ -376,7 +479,7 @@ AS $function$
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
         AND (
-          (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+          (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
           OR (
             i.image_type IS NULL
             AND EXISTS (
@@ -402,7 +505,7 @@ AS $function$
       WHERE i.observation_id = c.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
-        AND (i.image_type IS NULL OR (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+        AND (i.image_type IS NULL OR (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))))
         AND (
           m.measurement_type IS NULL
           OR m.measurement_type = ''
@@ -475,7 +578,7 @@ AS $function$
       WHERE i.observation_id = c.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
-        AND (i.image_type IS NULL OR (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+        AND (i.image_type IS NULL OR (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))))
         AND (
           m.measurement_type IS NULL
           OR m.measurement_type = ''
@@ -495,7 +598,7 @@ AS $function$
         WHERE i.observation_id = c.id
           AND i.deleted_at IS NULL
           AND i.purged_at IS NULL
-          AND (i.image_type IS NULL OR (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+          AND (i.image_type IS NULL OR (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))))
           AND EXISTS (
             SELECT 1
             FROM public.spore_measurements m3
@@ -721,7 +824,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
       WHERE i.observation_id = c.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND (n.contrast IS NULL OR lower(btrim(coalesce(i.contrast, '')))     = lower(btrim(n.contrast)))
         AND (n.mount    IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = lower(btrim(n.mount)))
         AND (n.sample   IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
@@ -757,7 +860,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
       WHERE i.observation_id = c.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND (
           m.measurement_type IS NULL
           OR btrim(m.measurement_type) = ''
@@ -827,7 +930,7 @@ CREATE OR REPLACE FUNCTION "public"."search_public_observations"("p_limit" integ
           WHERE i.observation_id = e.id
             AND i.deleted_at IS NULL
             AND i.purged_at IS NULL
-            AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+            AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
             AND (n.contrast IS NULL OR lower(btrim(coalesce(i.contrast, ''))) = lower(btrim(n.contrast)))
             AND (n.mount IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = lower(btrim(n.mount)))
             AND (n.sample IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
@@ -937,7 +1040,7 @@ AS $$
       WHERE i.observation_id = o.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND (
           m.measurement_type IS NULL
           OR m.measurement_type = ''
@@ -950,7 +1053,7 @@ AS $$
       WHERE i.observation_id = o.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
       LIMIT 1
     ) latest_microscope_image ON true
@@ -1201,7 +1304,7 @@ AS $$
       WHERE i.observation_id = o.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND (
           m.measurement_type IS NULL
           OR m.measurement_type = ''
@@ -1214,7 +1317,7 @@ AS $$
       WHERE i.observation_id = o.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
       LIMIT 1
     ) latest_microscope_image ON true
@@ -1476,7 +1579,7 @@ AS $$
       WHERE i.observation_id = o.id
         AND i.deleted_at IS NULL
         AND i.purged_at  IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       LIMIT 1
     ) micro ON true
     WHERE o.visibility = 'public'::text
@@ -1529,7 +1632,7 @@ AS $$
       WHERE i.observation_id = so.id
         AND i.deleted_at IS NULL
         AND i.purged_at  IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
           m.measurement_type IS NULL
@@ -1547,7 +1650,7 @@ AS $$
       ON i.observation_id = se.id
       AND i.deleted_at IS NULL
       AND i.purged_at  IS NULL
-      AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+      AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
     JOIN public.spore_measurements m ON m.image_id = i.id
       AND m.length_um IS NOT NULL
       AND (
@@ -1613,7 +1716,7 @@ AS $$
       WHERE i.observation_id = se.id
         AND i.deleted_at IS NULL
         AND i.purged_at  IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
           m.measurement_type IS NULL
@@ -1835,28 +1938,28 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND public.public_normalized_specimen_condition(i2.sample_type) = n.sample_type
       ))
       AND (n.sample_source IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND public.public_normalized_sample_source(i2.sample_source, i2.sample_type) = n.sample_source
       ))
       AND (n.mount_reagent IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND lower(coalesce(i2.mount_medium, '')) = n.mount_reagent
       ))
       AND (n.contrast_method IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND lower(coalesce(i2.contrast, '')) = n.contrast_method
       ))
       -- p_has_microscopy = true: must have at least one non-deleted/purged microscope image.
@@ -1864,7 +1967,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
         SELECT 1 FROM public.observation_images i3
         WHERE i3.observation_id = o.id
           AND i3.deleted_at IS NULL AND i3.purged_at IS NULL
-          AND (i3.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i3.id))
+          AND (i3.image_type = 'microscope' AND (i3.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i3.id)))
       ))
       -- p_has_spores = true: spore_data_visibility must be public AND have
       -- at least one qualifying spore measurement.
@@ -1876,7 +1979,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
           JOIN public.spore_measurements m ON m.image_id = i4.id
           WHERE i4.observation_id = o.id
             AND i4.deleted_at IS NULL AND i4.purged_at IS NULL
-            AND (i4.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i4.id))
+            AND (i4.image_type = 'microscope' AND (i4.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i4.id)))
             AND m.length_um IS NOT NULL
             AND (
               m.measurement_type IS NULL
@@ -1929,7 +2032,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
       SELECT 1 FROM public.observation_images i
       WHERE i.observation_id = c.id
         AND i.deleted_at IS NULL AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
     )) AS "hasMicroscopy",
     -- sporeMeasurementCount: public measurements only.
     CASE WHEN c.spore_data_visibility = 'public' THEN (
@@ -1938,7 +2041,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_map_points"("p_species_slug" "te
       JOIN public.spore_measurements m ON m.image_id = i.id
       WHERE i.observation_id = c.id
         AND i.deleted_at IS NULL AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
           m.measurement_type IS NULL
@@ -1986,7 +2089,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_observation_facets"() RETURNS "j
       WHERE i.observation_id = o.id
         AND i.deleted_at IS NULL
         AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
       LIMIT 1
     ) latest_image ON true
@@ -2342,28 +2445,28 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = ao.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND public.public_normalized_specimen_condition(i2.sample_type) = n.sample_type
       ))
       AND (n.sample_source IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = ao.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND public.public_normalized_sample_source(i2.sample_source, i2.sample_type) = n.sample_source
       ))
       AND (n.mount_reagent IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = ao.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND lower(coalesce(i2.mount_medium, '')) = n.mount_reagent
       ))
       AND (n.contrast_method IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = ao.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND lower(coalesce(i2.contrast, '')) = n.contrast_method
       ))
       -- p_has_microscopy = true: must have at least one non-deleted/purged microscope image.
@@ -2371,7 +2474,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
         SELECT 1 FROM public.observation_images i3
         WHERE i3.observation_id = ao.id
           AND i3.deleted_at IS NULL AND i3.purged_at IS NULL
-          AND (i3.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i3.id))
+          AND (i3.image_type = 'microscope' AND (i3.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i3.id)))
       ))
       -- p_has_spores = true: public spore_data_visibility + at least one qualifying measurement.
       AND (n.has_spores IS NOT TRUE OR (
@@ -2382,7 +2485,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
           JOIN public.spore_measurements m ON m.image_id = i4.id
           WHERE i4.observation_id = ao.id
             AND i4.deleted_at IS NULL AND i4.purged_at IS NULL
-            AND (i4.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i4.id))
+            AND (i4.image_type = 'microscope' AND (i4.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i4.id)))
             AND m.length_um IS NOT NULL
             AND (
               m.measurement_type IS NULL
@@ -2412,7 +2515,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
         SELECT 1 FROM public.observation_images i
         WHERE i.observation_id = fo.id
           AND i.deleted_at IS NULL AND i.purged_at IS NULL
-          AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+          AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       )) AS has_microscopy,
       -- Spore measurement count (public only, prep-filtered).
       CASE
@@ -2422,7 +2525,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
           JOIN public.spore_measurements m ON m.image_id = i.id
           WHERE i.observation_id = fo.id
             AND i.deleted_at IS NULL AND i.purged_at IS NULL
-            AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+            AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
             AND m.length_um IS NOT NULL
             AND (
               m.measurement_type IS NULL
@@ -2470,7 +2573,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
       FROM all_obs ao
       JOIN public.observation_images i ON i.observation_id = ao.id
         AND i.deleted_at IS NULL AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       WHERE nullif(public.public_normalized_specimen_condition(i.sample_type), '') IS NOT NULL
       GROUP BY nullif(public.public_normalized_specimen_condition(i.sample_type), '')
     ) st
@@ -2483,7 +2586,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
       SELECT public.public_normalized_sample_source(i.sample_source, i.sample_type) AS sv,
              count(DISTINCT ao.id)::bigint AS cnt
       FROM all_obs ao JOIN public.observation_images i ON i.observation_id = ao.id
-       AND i.deleted_at IS NULL AND i.purged_at IS NULL AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+       AND i.deleted_at IS NULL AND i.purged_at IS NULL AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       WHERE public.public_normalized_sample_source(i.sample_source, i.sample_type) IS NOT NULL
       GROUP BY public.public_normalized_sample_source(i.sample_source, i.sample_type)
     ) ss
@@ -2505,7 +2608,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
       FROM all_obs ao
       JOIN public.observation_images i ON i.observation_id = ao.id
         AND i.deleted_at IS NULL AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       WHERE nullif(lower(btrim(coalesce(i.mount_medium, ''))), '') IS NOT NULL
       GROUP BY nullif(lower(btrim(coalesce(i.mount_medium, ''))), '')
     ) mr
@@ -2529,7 +2632,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_species_distribution_summary"("p
       FROM all_obs ao
       JOIN public.observation_images i ON i.observation_id = ao.id
         AND i.deleted_at IS NULL AND i.purged_at IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       WHERE nullif(btrim(coalesce(i.contrast, '')), '') IS NOT NULL
       GROUP BY nullif(btrim(coalesce(i.contrast, '')), '')
     ) cm
@@ -2705,28 +2808,28 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND public.public_normalized_specimen_condition(i2.sample_type) = n.sample_type
       ))
       AND (n.sample_source IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND public.public_normalized_sample_source(i2.sample_source, i2.sample_type) = n.sample_source
       ))
       AND (n.mount_reagent IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND lower(btrim(coalesce(i2.mount_medium, ''))) = n.mount_reagent
       ))
       AND (n.contrast_method IS NULL OR EXISTS (
         SELECT 1 FROM public.observation_images i2
         WHERE i2.observation_id = o.id
           AND i2.deleted_at IS NULL AND i2.purged_at IS NULL
-          AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id))
+          AND (i2.image_type = 'microscope' AND (i2.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i2.id)))
           AND lower(btrim(coalesce(i2.contrast, ''))) = n.contrast_method
       ))
   ),
@@ -2756,7 +2859,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       WHERE i.observation_id = to_id.id
         AND i.deleted_at IS NULL
         AND i.purged_at  IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
           m.measurement_type IS NULL
@@ -2777,7 +2880,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       ON i.observation_id = se.id
       AND i.deleted_at IS NULL
       AND i.purged_at  IS NULL
-      AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+      AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
       AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
       AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
       AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
@@ -2875,7 +2978,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       WHERE i.observation_id = se.id
         AND i.deleted_at IS NULL
         AND i.purged_at  IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND (se.filter_sample_type IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = se.filter_sample_type)
         AND (se.filter_sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = se.filter_sample_source)
         AND (se.filter_mount_reagent   IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = se.filter_mount_reagent)
@@ -2894,7 +2997,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       WHERE i.observation_id = se.id
         AND i.deleted_at IS NULL
         AND i.purged_at  IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
           m.measurement_type IS NULL
@@ -2925,7 +3028,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
       WHERE i.observation_id = se.id
         AND i.deleted_at IS NULL
         AND i.purged_at  IS NULL
-        AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
         AND m.length_um IS NOT NULL
         AND (
           m.measurement_type IS NULL
@@ -2954,7 +3057,7 @@ CREATE OR REPLACE FUNCTION "public"."get_public_spore_comparison_set"("p_species
         WHERE i.observation_id = se.id
           AND i.deleted_at IS NULL
           AND i.purged_at  IS NULL
-          AND (i.image_type IS NULL OR (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+          AND (i.image_type IS NULL OR (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))))
           AND EXISTS (
             SELECT 1
             FROM public.spore_measurements m3
@@ -3162,6 +3265,12 @@ $_$;
 
 
 -- --- public.get_observation_microscopy_presentations(bigint[])  [latest literal def: 20260824130000] ---
+-- NOTE: unlike every other function in this migration, the spore_counts CTE
+-- below uses metadata_microscope_parent_is_visible_to_reader(), not
+-- metadata_microscope_parent_is_public() — see comment 7 in the migration
+-- header. This RPC also serves the image owner and other authorized
+-- non-owner readers on non-public observations via its own upstream
+-- accessible_obs/spore_accessible_obs checks.
 
 CREATE OR REPLACE FUNCTION public.get_observation_microscopy_presentations(
   p_observation_ids bigint[]
@@ -3232,7 +3341,8 @@ BEGIN
     FROM public.spore_measurements sm
     JOIN public.observation_images oi ON oi.id = sm.image_id
     JOIN spore_accessible_obs sao ON sao.id = oi.observation_id
-    WHERE (oi.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(oi.id))
+    WHERE oi.image_type = 'microscope'
+      AND (oi.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_visible_to_reader(oi.id))
       AND oi.deleted_at IS NULL
       AND oi.purged_at IS NULL
       AND (
