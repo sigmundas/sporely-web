@@ -194,6 +194,34 @@ Read-only post-checks:
 - a `search_taxa_v2` probe;
 - the vernacular count: 10,645 rows for the release.
 
+**Statement timeout.** Production sessions default to `statement_timeout =
+2min`. The generator's command failed at `taxonomy_v2_validate_release` on
+the freshly loaded, uncommitted tables and rolled back completely. Run it with
+a session-only limit in front of the unchanged payload:
+
+```bash
+docker run --rm --env-file /path/to/private/production-db.env \
+  -v '<dir with the SQL>:/payload:ro' postgres:17 \
+  sh -c 'psql "$DATABASE_URL" -c "SET statement_timeout = 1800000" --file=/payload/tax-2026.09.26-02-import.sql'
+```
+
+The `DATABASE_URL` is the Session pooler string (port 5432), not the
+transaction pooler.
+
+### Execution record (2026-09-26)
+
+- **Pre-checks, read-only:** only `tax-2026.08.01-01`, active; one import run, succeeded; 52,917 concepts; no duplicates; `20260914090000` not applied (110 migrations, latest `20260925160000`); `53482` did not resolve.
+- **Attempt 1, 14:43–14:45Z, the generator's command as printed:** `ERROR: canceling statement due to statement timeout` in `taxonomy_v2_validate_release`; psql exit 3. A read-only check afterwards found production unchanged: no `tax-2026.09.26-02` rows, no import run, no idle transaction.
+- **Attempt 2, ≈14:48–15:03:00Z, with `SET statement_timeout = 1800000` and the same payload (SHA-256 `6ddb577d…`, re-verified):** `COMMIT`, psql exit 0. The activation step took about 12 minutes.
+- **Post-checks, read-only:**
+  - releases are `tax-2026.08.01-01: retired` and `tax-2026.09.26-02: active`, with exactly 1 active;
+  - `53482 → 7821` *Entoloma conferendum*, `52369 → 83668` *Conocybe rugosa*, and an unbridged id resolves to nothing;
+  - 52,917 concepts, with no duplicate concept ids or release taxa;
+  - both import runs succeeded and finished;
+  - `20260914090000` is still not applied;
+  - release rows are taxa 52,917, scientific names 57,770, vernacular 10,645, external 52,884, legacy 0, red list 2,262;
+  - `search_taxa_v2` finds *Cantharellus cibarius*, *Entoloma conferendum* and *Pholiotina rugosa* (→ 83668) first.
+
 ### Rollback
 
 Make `tax-2026.08.01-01` `ready` and activate it, as in the 09.23-01 rollback
