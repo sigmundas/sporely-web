@@ -91,7 +91,120 @@ Replay behavior is fail-closed:
 - the same release ID with different immutable hashes aborts;
 - a partial or invalid existing release aborts for manual recovery.
 
+## Release transition: `tax-2026.09.26-02` (desktop 0.9.24)
+
+Desktop 0.9.24 bundles `tax-2026.09.26-02`. It supersedes `tax-2026.09.23-01`,
+which was never imported to the cloud, so the transition is from the active
+`tax-2026.08.01-01`. The cloud must serve the new release before the desktop
+0.9.24 tag is released. This is a data import into the existing taxonomy-v2
+tables. It adds no migration and does not depend on the deferred
+`20260914090000_extend_reference_snapshots_to_version_2.sql`, which stays
+undeployed.
+
+### What changes
+
+Against the active `tax-2026.08.01-01`, the scoped release is purely additive:
+
+| Object | 08.01-01 | 09.26-02 |
+|---|---:|---:|
+| concepts / release taxa | 52,917 | 52,917 (identical set) |
+| scientific names | 57,769 | 57,770 (`Pholiotina rugosa` on 83668) |
+| vernacular names | 3,923 | 10,645 |
+| authoritative external IDs | 52,881 | 52,884 |
+| legacy namespace-lost IDs | 0 | 0 |
+| red-list assessments | 2,262 | 2,262 |
+
+- **External IDs:** the three new ones are the reviewed NorTaxa bridges of
+  09.23-01: `nortaxa/nortaxa_taxon_id/53482 → 7821` (*Entoloma conferendum*),
+  `52369 → 83668` and `58722 → 83668` (*Conocybe rugosa*).
+- **Vernacular names:** the new ones come from the desktop's legacy
+  enrichment: Swedish 1,577, English 1,020, French 1,144, Finnish 1,012,
+  German 719, Danish 650, Polish 423, Spanish 114, Portuguese 33 and
+  Italian 28, besides the Norwegian and Sámi names.
+- **Publishing IDs:** Artportalen and iNaturalist IDs stay desktop-only; the
+  scoped export suppresses the namespace-lost integer channel.
+- **Rollback:** no concept disappears, so observations bound under either
+  release remain members after a rollback.
+
+Known gap, unchanged from 08.01-01: species whose Norwegian names sit on a
+NorTaxa concept that was not merged with its COL namesake (for example
+*Cantharellus cibarius*, "kantarell") have no vernacular name in the cloud
+scope. It is tracked in sporely-py `docs/plans/INBOX.md`.
+
+### Build the release directory from tracked desktop files
+
+From `sporely-py` at the 0.9.24 release commit, the tracked bundle
+`database/reference_data/generated/taxonomy_v2/tax-2026.09.26-02.sqlite3.gz`
+(SQLite SHA-256 `9bf71b7e…8547d`) is the single source:
+
+```bash
+W=/tmp/taxonomy-v2/w1-tax-2026.09.26-02; R=/tmp/taxonomy-v2/global_macrofungi_tax-2026.09.26-02
+B=database/reference_data/generated/taxonomy_v2
+.venv/bin/python -c "from pathlib import Path; from database.taxonomy import cloud_export as ce; \
+ce.run_export(artifact_gz=Path('$B/tax-2026.09.26-02.sqlite3.gz'), manifest=Path('$B/manifest.json'), \
+output_dir=Path('$W'), policy_dir=Path('database/taxonomy/policies'), generated_at='2026-09-26T12:00:00Z')"
+.venv/bin/python database/taxonomy/macrofungi_scope.py \
+  --policy database/taxonomy/policies/global-macrofungi-scope.yml \
+  --source-gz $B/tax-2026.09.26-02.sqlite3.gz --w1-dir "$W" --output-dir "$R" \
+  --desktop "$R/desktop-tax-2026.09.26-02.sqlite3" --evidence /tmp/taxonomy-v2/scope-evidence.json \
+  --release-id tax-2026.09.26-02 --starting-revision 150e9eb
+```
+
+The export checks its own pinned counts (`PINNED_RELEASE_EXPECTATIONS` in
+`cloud_export.py`). The scoped desktop pack has SHA-256 `1886504f…15`.
+
+### Prepare, prove locally, and hand over
+
+```bash
+node scripts/taxonomy-v2/prepare-production-release-import.mjs \
+  --release-id tax-2026.09.26-02 --release-dir "$R" \
+  --output /tmp/taxonomy-v2/tax-2026.09.26-02-import.sql
+```
+
+Expected table counts: `{"concepts":52917,"taxa":52917,"scientific_names":57770,
+"vernacular_names":10645,"external_ids":52884,"legacy_external_ids":0,
+"redlist":2262,"releases":1,"import_runs":1,"active_releases":1}`. Built as
+above, the SQL has SHA-256
+`6ddb577d077a01647b5208d201d60737b786fe4d8c03b3f353bec194a547da1e`.
+
+Local proof (2026-09-26, disposable stack from `main` without the deferred
+migration). The stack imported `tax-2026.08.01-01`, then this payload, which
+activated `tax-2026.09.26-02` and retired `tax-2026.08.01-01`. The following
+were confirmed, as `anon` where an RPC was called:
+
+- row counts match the export (10,645 vernacular names);
+- `resolve_taxon_external_id_v2('nortaxa','nortaxa_taxon_id','53482')` returns 7821, `'52369'` returns 83668, and an unbridged id and `'7821'` return nothing;
+- `search_taxa_v2` finds *Conocybe rugosa*, *Entoloma conferendum*, *Pholiotina rugosa* and *Cantharellus cibarius* first;
+- observations are untouched;
+- a replay stops without changes;
+- the rollback drill below and a roll-forward both work.
+
+### Production activation (human operator, authorised window only)
+
+Same procedure as for 09.23-01 below: the single production write is the
+containerised `psql` printed by the generator, run against project
+`zkpjklzfwzefhjluvhfw` after verifying the SQL SHA-256. It loads, validates
+and activates `tax-2026.09.26-02` in one transaction and retires
+`tax-2026.08.01-01`. Codex and agents must not run it.
+
+Read-only post-checks:
+
+- exactly one active release, `tax-2026.09.26-02`;
+- the two `resolve_taxon_external_id_v2` probes above;
+- a `search_taxa_v2` probe;
+- the vernacular count: 10,645 rows for the release.
+
+### Rollback
+
+Make `tax-2026.08.01-01` `ready` and activate it, as in the 09.23-01 rollback
+below. That retires `tax-2026.09.26-02` without deleting it, and the same
+statement with the release IDs swapped rolls forward.
+
 ## Release transition: `tax-2026.09.23-01` (desktop 0.9.23)
+
+> **Superseded, never imported.** `tax-2026.09.23-01` was replaced by
+> `tax-2026.09.26-02` before its cloud activation. The section is kept for
+> its procedure, which the 09.26-02 section refers to.
 
 Desktop 0.9.23 bundles `tax-2026.09.23-01`. The cloud must serve the same
 release before that desktop tag is released. The generator takes the release
