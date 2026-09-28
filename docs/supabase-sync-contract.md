@@ -230,6 +230,24 @@ Plain English comes first; technical terms are in parentheses.
     must not persist a reduced identity-only shape. Refusing is the only
     outcome that cannot corrupt the row.
 
+    **Operator repair of historical unresolved identities (taxonomy v3
+    Stage 1B).** `private.taxon_identity_repair_apply` is the one server-side
+    identity writer outside the client RPCs. It is executable only by
+    `postgres` (an operator session, never a client role), considers only
+    `external_unresolved` rows, resolves each preserved tuple through
+    `resolve_taxon_external_id_v2` with the client's exactly-one-distinct-match
+    rule, and moves `selected_sporely_taxon_id` and the state to `sporely_v2`
+    in one statement. It never reads or writes name columns, and it keeps the
+    preserved tuple and raw provider value. The change bumps
+    `observations.updated_at`, so it reaches other clients as an ordinary
+    cloud-side identity change: web reads the row directly, and desktop's
+    three-way identity classification adopts it as `remote_only` when its
+    local identity still equals the baseline, and fails closed as a
+    `conflict` (nothing applied) when the owner changed the identification
+    locally. Desktop never pushes an unproven `external_unresolved` identity,
+    so a stale local copy cannot overwrite the repaired cloud row. Runbook:
+    `supabase/taxonomy-v3-unresolved-observation-repair-runbook.md`.
+
 ## Normalized reference graph
 
 The owner graph is ordered work → taxon treatment → measurement set →
