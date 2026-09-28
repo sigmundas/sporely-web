@@ -438,6 +438,18 @@ BEGIN
     JOIN public.observations o ON o.user_id = u.user_id AND o.id = u.observation_id
    WHERE o.taxon_identity_state = 'external_unresolved'
      FOR SHARE OF u;
+  -- Take the reference sources' row locks now, before the share helper's
+  -- advisory lock, so apply acquires them in the same order as an owner's
+  -- revision update and cannot deadlock against one.
+  PERFORM 1 FROM public.observation_reference_uses u
+    JOIN public.observations o ON o.user_id = u.user_id AND o.id = u.observation_id
+    JOIN public.reference_measurement_sets m
+      ON m.user_id = u.user_id AND m.id = u.reference_measurement_set_id
+    JOIN public.reference_taxon_treatments t ON t.user_id = m.user_id AND t.id = m.taxon_treatment_id
+    JOIN public.reference_works w ON w.user_id = t.user_id AND w.id = t.reference_work_id
+   WHERE o.taxon_identity_state = 'external_unresolved'
+     AND u.deleted_at IS NULL
+     FOR SHARE OF m, t, w;
 
   SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(p) ORDER BY p.observation_id), '[]'::jsonb)
     INTO v_plan
