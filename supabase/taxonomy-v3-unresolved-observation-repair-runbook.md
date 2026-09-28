@@ -34,7 +34,7 @@ audit tables.
    ```
 
    Review `release_id`, `candidate_count`, `outcome_counts`, `promotions` and
-   `ambiguous_or_error`. Keep `plan_sha256`. It hashes the active release plus
+   `flagged` (ambiguous, blocked and errored rows). Keep `plan_sha256`. It hashes the active release plus
    the exact promotion set (observation id, tuple, target concept).
 
 2. Apply with that hash:

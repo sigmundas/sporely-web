@@ -22,6 +22,14 @@
 --   * The tuple is used verbatim. No namespace bridge is applied here: the
 --     client already stored the bridged tuple, and inventing a hop server-side
 --     would be a second, unreviewed bridge.
+--   * A promotion that would change the effective taxon
+--     (`coalesce(selected, resolved)`) of an observation with live
+--     `observation_reference_uses` is BLOCKED (`blocked_reference_use`) and
+--     changes nothing. `private.refresh_shared_references_for_observation_taxon`
+--     deliberately does no work without an owner session, so an operator write
+--     would leave a public shared-reference contribution under the old taxon
+--     and create none under the new one. Those rows are reported for owner-side
+--     handling instead of being silently diverged.
 --   * Dry run is read-only and returns a report plus `plan_sha256`. Apply
 --     requires that hash, recomputes the plan under row locks, refuses if it
 --     differs, changes exactly the planned rows, and records an audit run.
@@ -58,7 +66,9 @@ CREATE TABLE private.taxon_identity_repair_items (
   namespace text NOT NULL,
   external_id text NOT NULL,
   raw_external_id text,
-  outcome text NOT NULL CHECK (outcome IN ('promote', 'no_match', 'ambiguous', 'error')),
+  outcome text NOT NULL CHECK (
+    outcome IN ('promote', 'no_match', 'ambiguous', 'blocked_reference_use', 'error')
+  ),
   match_count integer,
   sporely_taxon_id bigint,
   error_message text,
@@ -93,6 +103,8 @@ DECLARE
 BEGIN
   FOR v_obs IN
     SELECT o.id,
+           o.user_id,
+           o.resolved_sporely_taxon_id,
            o.taxon_identity_source_system,
            o.taxon_identity_namespace,
            o.taxon_identity_external_id,
@@ -119,7 +131,17 @@ BEGIN
              ) r
        WHERE r.taxon_id IS NOT NULL;
       match_count := v_count;
-      IF v_count = 1 THEN
+      IF v_count = 1 AND v_obs.resolved_sporely_taxon_id IS DISTINCT FROM v_taxon
+         AND EXISTS (
+           SELECT 1 FROM public.observation_reference_uses u
+            WHERE u.user_id = v_obs.user_id
+              AND u.observation_id = v_obs.id
+              AND u.deleted_at IS NULL
+         ) THEN
+        -- selected_sporely_taxon_id is NULL for every candidate (CHECK), so
+        -- the effective taxon changes exactly when resolved differs.
+        outcome := 'blocked_reference_use';
+      ELSIF v_count = 1 THEN
         outcome := 'promote';
         sporely_taxon_id := v_taxon;
       ELSIF v_count = 0 THEN
@@ -174,7 +196,7 @@ AS $$
              'match_count', (e->>'match_count')::integer,
              'error_message', e->>'error_message'
            ) ORDER BY (e->>'observation_id')::bigint), '[]'::jsonb) AS list
-      FROM rows WHERE e->>'outcome' IN ('ambiguous', 'error')
+      FROM rows WHERE e->>'outcome' IN ('ambiguous', 'blocked_reference_use', 'error')
   )
   SELECT pg_catalog.jsonb_build_object(
     'mode', p_mode,
@@ -187,10 +209,11 @@ AS $$
       'promote', (SELECT count(*) FROM rows WHERE e->>'outcome' = 'promote'),
       'no_match', (SELECT count(*) FROM rows WHERE e->>'outcome' = 'no_match'),
       'ambiguous', (SELECT count(*) FROM rows WHERE e->>'outcome' = 'ambiguous'),
+      'blocked_reference_use', (SELECT count(*) FROM rows WHERE e->>'outcome' = 'blocked_reference_use'),
       'error', (SELECT count(*) FROM rows WHERE e->>'outcome' = 'error')
     ),
     'promotions', promotions.list,
-    'ambiguous_or_error', flagged.list
+    'flagged', flagged.list
   )
   FROM promotions, flagged;
 $$;
@@ -253,14 +276,21 @@ BEGIN
       USING ERRCODE = '22023';
   END IF;
 
-  -- Hold the active release and every candidate still for the rest of the
-  -- transaction: no activation switch and no owner edit can interleave
-  -- between planning and the write.
+  -- Hold the active release, its bridges, every candidate and the
+  -- candidates' reference uses still for the rest of the transaction: no
+  -- activation switch, bridge edit, owner edit or reference-use change can
+  -- interleave between planning and the write. (A new use insert already
+  -- waits on the candidate row lock through its foreign key.)
   PERFORM 1 FROM public.taxonomy_v2_releases r WHERE r.status = 'active' FOR SHARE;
+  LOCK TABLE public.taxonomy_v2_external_ids IN SHARE MODE;
   v_release := private._taxon_identity_repair_active_release();
   PERFORM 1 FROM public.observations o
    WHERE o.taxon_identity_state = 'external_unresolved'
      FOR UPDATE;
+  PERFORM 1 FROM public.observation_reference_uses u
+    JOIN public.observations o ON o.user_id = u.user_id AND o.id = u.observation_id
+   WHERE o.taxon_identity_state = 'external_unresolved'
+     FOR SHARE OF u;
 
   SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(p) ORDER BY p.observation_id), '[]'::jsonb)
     INTO v_plan

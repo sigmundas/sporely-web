@@ -97,11 +97,40 @@ BEGIN
   ) OVERRIDING SYSTEM VALUE VALUES
     (v_obs_bound,v_owner,current_date,'private',false,'Fixtura','beta',v_amb_b,'sporely_v2');
 
+  -- Reference-use fixtures: 951000010 has a live use and no resolved taxon,
+  -- so promotion would change its effective taxon without the owner-session
+  -- shared-reference side effects -> blocked. 951000011 has a live use but is
+  -- already resolved to the target -> the effective taxon is unchanged and it
+  -- promotes.
+  INSERT INTO public.observations(
+    id,user_id,date,visibility,is_draft,genus,species,resolved_sporely_taxon_id,
+    taxon_identity_state,taxon_identity_source_system,taxon_identity_namespace,
+    taxon_identity_external_id,taxon_identity_raw_external_id
+  ) OVERRIDING SYSTEM VALUE VALUES
+    (951000010,v_owner,current_date,'private',false,'Crepidotus','cesatii',NULL,
+     'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057'),
+    (951000011,v_owner,current_date,'private',false,'Crepidotus','cesatii',v_ordinary,
+     'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057');
+  INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
+  VALUES (v_owner,'81000000-0000-4000-8000-00000001b001','article','[{"family":"Test"}]','Repair regression',2026,'Test 2026',1);
+  INSERT INTO public.reference_taxon_treatments(user_id,id,reference_work_id,taxon_id,name_as_published,revision)
+  VALUES (v_owner,'82000000-0000-4000-8000-00000001b001','81000000-0000-4000-8000-00000001b001','local-a','Crepidotus cesatii',1);
+  INSERT INTO public.reference_measurement_sets(
+    user_id,id,taxon_treatment_id,character,raw_text,data_kind,
+    length_core_min,length_core_max,width_core_min,width_core_max,revision
+  ) VALUES (v_owner,'83000000-0000-4000-8000-00000001b001','82000000-0000-4000-8000-00000001b001',
+            'spore_size','8-10 x 5-6 um','range',8,10,5,6,1);
+  INSERT INTO public.observation_reference_uses(
+    user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json
+  ) VALUES
+    (v_owner,'84000000-0000-4000-8000-00000001b001',951000010,'83000000-0000-4000-8000-00000001b001','compared',1,'{}'::jsonb),
+    (v_owner,'84000000-0000-4000-8000-00000001b002',951000011,'83000000-0000-4000-8000-00000001b001','compared',1,'{}'::jsonb);
+
   -- Backdate updated_at (bypassing its trigger) so the repair's bump is
   -- observable inside this single transaction, where now() is constant.
   ALTER TABLE public.observations DISABLE TRIGGER trg_observations_updated_at;
   UPDATE public.observations SET updated_at = '2000-01-01T00:00:00Z'
-   WHERE id BETWEEN 951000001 AND 951000009;
+   WHERE id BETWEEN 951000001 AND 951000011;
   ALTER TABLE public.observations ENABLE TRIGGER trg_observations_updated_at;
 END
 $$;
@@ -138,12 +167,12 @@ DECLARE
 BEGIN
   -- Snapshot every fixture row (all columns) so "unchanged" is total.
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_before
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000009;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
 
   -- ── Dry run is read-only ────────────────────────────────────────────────
   v_dry := private.taxon_identity_repair_dry_run();
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_after
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000009;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
   IF v_after IS DISTINCT FROM v_before THEN
     RAISE EXCEPTION 'dry run modified observations';
   END IF;
@@ -151,16 +180,17 @@ BEGIN
     RAISE EXCEPTION 'dry run wrote an audit run';
   END IF;
   IF v_dry->>'release_id' <> 'tax-2099.09.01-01'
-     OR (v_dry->'outcome_counts'->>'promote')::int <> 2
+     OR (v_dry->'outcome_counts'->>'promote')::int <> 3
      OR (v_dry->'outcome_counts'->>'ambiguous')::int <> 1
+     OR (v_dry->'outcome_counts'->>'blocked_reference_use')::int <> 1
      OR (v_dry->'outcome_counts'->>'no_match')::int <> 4
      OR (v_dry->'outcome_counts'->>'error')::int <> 0
-     OR (v_dry->>'candidate_count')::int <> 7 THEN
+     OR (v_dry->>'candidate_count')::int <> 9 THEN
     RAISE EXCEPTION 'unexpected dry-run classification: %', v_dry;
   END IF;
   SELECT array_agg((p->>'observation_id')::bigint ORDER BY (p->>'observation_id')::bigint)
     INTO v_planned FROM jsonb_array_elements(v_dry->'promotions') p;
-  IF v_planned IS DISTINCT FROM ARRAY[951000001,951000002]::bigint[] THEN
+  IF v_planned IS DISTINCT FROM ARRAY[951000001,951000002,951000011]::bigint[] THEN
     RAISE EXCEPTION 'unexpected promotion set: %', v_planned;
   END IF;
   IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_dry->'promotions') p
@@ -189,7 +219,7 @@ BEGIN
   END;
   IF NOT v_failed THEN RAISE EXCEPTION 'apply accepted a stale plan hash'; END IF;
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_after
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000009;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
   IF v_after IS DISTINCT FROM v_before
      OR EXISTS (SELECT 1 FROM private.taxon_identity_repair_runs) THEN
     RAISE EXCEPTION 'refused apply left changes behind';
@@ -198,14 +228,14 @@ BEGIN
   -- ── Apply with the dry run's hash ──────────────────────────────────────
   v_applied := private.taxon_identity_repair_apply(v_dry->>'plan_sha256');
   IF (v_applied - 'mode' - 'run_id' - 'promoted_count') IS DISTINCT FROM (v_dry - 'mode')
-     OR (v_applied->>'promoted_count')::int <> 2 THEN
+     OR (v_applied->>'promoted_count')::int <> 3 THEN
     RAISE EXCEPTION 'apply report differs from the dry run: % vs %', v_applied, v_dry;
   END IF;
 
   -- Exactly the planned rows changed, and only in the two identity columns
   -- plus the trigger-owned updated_at.
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_after
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000009;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
   SELECT array_agg(k::bigint ORDER BY k::bigint) INTO v_changed
     FROM jsonb_object_keys(v_before) k
    WHERE v_before->k IS DISTINCT FROM v_after->k;
@@ -235,10 +265,11 @@ BEGIN
 
   -- Audit: one run, one item per candidate, matching the report.
   IF (SELECT count(*) FROM private.taxon_identity_repair_runs) <> 1
-     OR (SELECT count(*) FROM private.taxon_identity_repair_items) <> 7
-     OR (SELECT count(*) FROM private.taxon_identity_repair_items WHERE outcome = 'promote') <> 2
+     OR (SELECT count(*) FROM private.taxon_identity_repair_items) <> 9
+     OR (SELECT count(*) FROM private.taxon_identity_repair_items WHERE outcome = 'promote') <> 3
+     OR (SELECT outcome FROM private.taxon_identity_repair_items WHERE observation_id = 951000010) <> 'blocked_reference_use'
      OR (SELECT plan_sha256 FROM private.taxon_identity_repair_runs) <> v_dry->>'plan_sha256'
-     OR (SELECT promoted_count FROM private.taxon_identity_repair_runs) <> 2 THEN
+     OR (SELECT promoted_count FROM private.taxon_identity_repair_runs) <> 3 THEN
     RAISE EXCEPTION 'audit does not match the applied run';
   END IF;
   IF (SELECT outcome FROM private.taxon_identity_repair_items WHERE observation_id = 951000006) <> 'ambiguous'
@@ -249,13 +280,13 @@ BEGIN
   -- ── Idempotent: a second run finds nothing and changes nothing ─────────
   v_dry2 := private.taxon_identity_repair_dry_run();
   IF (v_dry2->'outcome_counts'->>'promote')::int <> 0
-     OR (v_dry2->>'candidate_count')::int <> 5 THEN
+     OR (v_dry2->>'candidate_count')::int <> 6 THEN
     RAISE EXCEPTION 'second dry run not empty: %', v_dry2;
   END IF;
   v_before := v_after;
   v_second := private.taxon_identity_repair_apply(v_dry2->>'plan_sha256');
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_after
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000009;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
   IF v_after IS DISTINCT FROM v_before OR (v_second->>'promoted_count')::int <> 0 THEN
     RAISE EXCEPTION 'second apply changed something: %', v_second;
   END IF;
