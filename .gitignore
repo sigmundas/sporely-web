@@ -9,6 +9,7 @@ dist/
 .env.test.local
 .env.production.local
 *.text
+.sparring/intake/
 
 # Local Capacitor output
 android/.idea/
@@ -53,3 +54,5 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+.sparring/plans/
+supabase/.branches/
