@@ -20,6 +20,15 @@ approvals.
   'sporely_v2'` in one statement. The preserved tuple, the raw provider id and
   every name column (`genus`, `species`, `common_name`, `ai_selected_*`) are
   left untouched. The repair never reads name text.
+- Shared references follow the new identity in the same transaction. When a
+  promotion changes an observation's effective taxon and the observation has
+  live reference uses, apply withdraws the owner's public contribution under
+  the old taxon (unless another live use still carries it) and shares under the
+  new species, as the owner path does. An exception or unexpected share result
+  rolls back the whole run, identity writes included. `account_unavailable`
+  and `source_out_of_bounds` are recorded, not errors, because the owner path
+  cannot share those either. Every action is recorded in
+  `private.taxon_identity_repair_reference_actions`.
 
 ## Procedure
 
@@ -34,8 +43,9 @@ audit tables.
    ```
 
    Review `release_id`, `candidate_count`, `outcome_counts`, `promotions` and
-   `flagged` (ambiguous, blocked and errored rows). Keep `plan_sha256`. It hashes the active release plus
-   the exact promotion set (observation id, tuple, target concept).
+   `flagged` (ambiguous and errored rows). Keep `plan_sha256`. It hashes the
+   active release plus the exact promotion set (observation id, tuple, target
+   concept).
 
 2. Apply with that hash:
 
@@ -53,7 +63,9 @@ audit tables.
 
 3. Post-run audit: `private.taxon_identity_repair_runs` (one row per apply) and
    `private.taxon_identity_repair_items` (one row per inspected candidate, with
-   its outcome and match count).
+   its outcome and match count) and
+   `private.taxon_identity_repair_reference_actions` (one row per changed
+   shared-reference contribution set).
 
 4. Idempotence check: a fresh dry run must report `promote = 0`.
 

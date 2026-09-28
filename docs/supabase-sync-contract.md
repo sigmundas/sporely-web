@@ -238,7 +238,11 @@ Plain English comes first; technical terms are in parentheses.
     `resolve_taxon_external_id_v2` with the client's exactly-one-distinct-match
     rule, and moves `selected_sporely_taxon_id` and the state to `sporely_v2`
     in one statement. It never reads or writes name columns, and it keeps the
-    preserved tuple and raw provider value. The change bumps
+    preserved tuple and raw provider value. In the same transaction it
+    reconciles the owner's shared-reference contributions the way the owner
+    path does (withdraw under the old taxon unless another live use keeps it,
+    share under the new species), and any reconciliation failure rolls the
+    whole run back. The change bumps
     `observations.updated_at`, so it reaches other clients as an ordinary
     cloud-side identity change: web reads the row directly, and desktop's
     three-way identity classification adopts it as `remote_only` when its

@@ -97,19 +97,31 @@ BEGIN
   ) OVERRIDING SYSTEM VALUE VALUES
     (v_obs_bound,v_owner,current_date,'private',false,'Fixtura','beta',v_amb_b,'sporely_v2');
 
-  -- Reference-use fixtures: 951000010 has a live use and no resolved taxon,
-  -- so promotion would change its effective taxon without the owner-session
-  -- shared-reference side effects -> blocked. 951000011 has a live use but is
-  -- already resolved to the target -> the effective taxon is unchanged and it
-  -- promotes.
+  -- Shared-reference fixtures. 2099000003 is the old (W3-resolved) species.
+  --   951000010: resolved 2099000003, use of set A, a live public share under
+  --              2099000003 -> promotion must withdraw it and share under 620390.
+  --   951000011: resolved 620390 already, use of set B -> effective taxon is
+  --              unchanged; promotes with no reference action.
+  --   951000013: resolved 2099000003, use of set C; 951000012 (not a
+  --              candidate) also uses set C under 2099000003 -> the old share
+  --              is kept, and a new one is created under 620390.
+  INSERT INTO taxonomy_v3.registry_concept(
+    sporely_taxon_id,canonical_name,rank,scope_state,cache_state,first_materialized_from_release
+  ) VALUES
+    (v_ordinary,'Crepidotus cesatii','species','include','in_cache',v_rel),
+    (2099000003,'Fixtura gamma','species','include','in_cache',v_rel);
   INSERT INTO public.observations(
     id,user_id,date,visibility,is_draft,genus,species,resolved_sporely_taxon_id,
     taxon_identity_state,taxon_identity_source_system,taxon_identity_namespace,
     taxon_identity_external_id,taxon_identity_raw_external_id
   ) OVERRIDING SYSTEM VALUE VALUES
-    (951000010,v_owner,current_date,'private',false,'Crepidotus','cesatii',NULL,
+    (951000010,v_owner,current_date,'private',false,'Crepidotus','cesatii',2099000003,
      'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057'),
     (951000011,v_owner,current_date,'private',false,'Crepidotus','cesatii',v_ordinary,
+     'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057'),
+    (951000012,v_owner,current_date,'private',false,'Fixtura','gamma',2099000003,
+     NULL,NULL,NULL,NULL,NULL),
+    (951000013,v_owner,current_date,'private',false,'Crepidotus','cesatii',2099000003,
      'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057');
   INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
   VALUES (v_owner,'81000000-0000-4000-8000-00000001b001','article','[{"family":"Test"}]','Repair regression',2026,'Test 2026',1);
@@ -118,19 +130,38 @@ BEGIN
   INSERT INTO public.reference_measurement_sets(
     user_id,id,taxon_treatment_id,character,raw_text,data_kind,
     length_core_min,length_core_max,width_core_min,width_core_max,revision
-  ) VALUES (v_owner,'83000000-0000-4000-8000-00000001b001','82000000-0000-4000-8000-00000001b001',
-            'spore_size','8-10 x 5-6 um','range',8,10,5,6,1);
+  ) VALUES
+    (v_owner,'83000000-0000-4000-8000-00000001b00a','82000000-0000-4000-8000-00000001b001','spore_size','8-10 x 5-6 um','range',8,10,5,6,1),
+    (v_owner,'83000000-0000-4000-8000-00000001b00b','82000000-0000-4000-8000-00000001b001','spore_size','9-11 x 5-6 um','range',9,11,5,6,1),
+    (v_owner,'83000000-0000-4000-8000-00000001b00c','82000000-0000-4000-8000-00000001b001','spore_size','7-9 x 4-5 um','range',7,9,4,5,1);
   INSERT INTO public.observation_reference_uses(
     user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json
   ) VALUES
-    (v_owner,'84000000-0000-4000-8000-00000001b001',951000010,'83000000-0000-4000-8000-00000001b001','compared',1,'{}'::jsonb),
-    (v_owner,'84000000-0000-4000-8000-00000001b002',951000011,'83000000-0000-4000-8000-00000001b001','compared',1,'{}'::jsonb);
+    (v_owner,'84000000-0000-4000-8000-00000001b001',951000010,'83000000-0000-4000-8000-00000001b00a','compared',1,'{}'::jsonb),
+    (v_owner,'84000000-0000-4000-8000-00000001b002',951000011,'83000000-0000-4000-8000-00000001b00b','compared',1,'{}'::jsonb),
+    (v_owner,'84000000-0000-4000-8000-00000001b003',951000012,'83000000-0000-4000-8000-00000001b00c','compared',1,'{}'::jsonb),
+    (v_owner,'84000000-0000-4000-8000-00000001b004',951000013,'83000000-0000-4000-8000-00000001b00c','compared',1,'{}'::jsonb);
+  -- Make sure the old public shares exist (the use insert may already have
+  -- created them), and that nothing is shared under the new taxon yet.
+  IF (private.share_reference_contribution_for_owner(v_owner,'83000000-0000-4000-8000-00000001b00a',2099000003,1,1,1)->>'status')
+       NOT IN ('created','updated','no_change')
+     OR (private.share_reference_contribution_for_owner(v_owner,'83000000-0000-4000-8000-00000001b00c',2099000003,1,1,1)->>'status')
+       NOT IN ('created','updated','no_change') THEN
+    RAISE EXCEPTION 'seed: could not share the old contributions';
+  END IF;
+  IF (SELECT count(*) FROM private.shared_reference_contributions c
+       WHERE c.owner_id=v_owner AND c.sporely_taxon_id=2099000003 AND c.status='shared') <> 2
+     OR EXISTS (SELECT 1 FROM private.shared_reference_contributions c
+       WHERE c.owner_id=v_owner AND c.sporely_taxon_id=v_ordinary
+         AND c.source_measurement_set_id IN ('83000000-0000-4000-8000-00000001b00a','83000000-0000-4000-8000-00000001b00c')) THEN
+    RAISE EXCEPTION 'seed: unexpected contribution pre-state';
+  END IF;
 
   -- Backdate updated_at (bypassing its trigger) so the repair's bump is
   -- observable inside this single transaction, where now() is constant.
   ALTER TABLE public.observations DISABLE TRIGGER trg_observations_updated_at;
   UPDATE public.observations SET updated_at = '2000-01-01T00:00:00Z'
-   WHERE id BETWEEN 951000001 AND 951000011;
+   WHERE id BETWEEN 951000001 AND 951000013;
   ALTER TABLE public.observations ENABLE TRIGGER trg_observations_updated_at;
 END
 $$;
@@ -152,6 +183,60 @@ BEGIN
 END
 $$;
 
+-- ── Reconciliation failure rolls the whole apply back ────────────────────
+-- Each probe swaps the share helper for a failing stub inside a
+-- subtransaction, runs dry run + apply, checks nothing moved, then aborts the
+-- subtransaction (SQLSTATE P0R01) to restore the real helper.
+DO $$
+DECLARE
+  v_stub text;
+  v_dry jsonb;
+  v_obs_before jsonb;
+  v_contrib_before jsonb;
+  v_failed boolean;
+BEGIN
+  FOREACH v_stub IN ARRAY ARRAY[
+    'RAISE EXCEPTION ''stub share failure'';',
+    'RETURN pg_catalog.jsonb_build_object(''status'',''source_not_found_or_stale'');'
+  ] LOOP
+    BEGIN
+      EXECUTE format($f$
+        CREATE OR REPLACE FUNCTION private.share_reference_contribution_for_owner(
+          p_owner uuid, p_source_measurement_set_id uuid, p_sporely_taxon_id integer,
+          p_expected_work_revision integer, p_expected_treatment_revision integer,
+          p_expected_measurement_set_revision integer
+        ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $b$
+        BEGIN %s END $b$;$f$, v_stub);
+      SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_obs_before
+        FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000013;
+      SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) INTO v_contrib_before
+        FROM private.shared_reference_contributions c;
+      v_dry := private.taxon_identity_repair_dry_run();
+      v_failed := false;
+      BEGIN
+        PERFORM private.taxon_identity_repair_apply(v_dry->>'plan_sha256');
+      EXCEPTION WHEN OTHERS THEN
+        v_failed := true;
+      END;
+      IF NOT v_failed THEN
+        RAISE EXCEPTION 'apply succeeded despite a failing reconciliation (%)', v_stub;
+      END IF;
+      IF (SELECT jsonb_object_agg(o.id, to_jsonb(o)) FROM public.observations o
+           WHERE o.id BETWEEN 951000001 AND 951000013) IS DISTINCT FROM v_obs_before
+         OR (SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) FROM private.shared_reference_contributions c)
+           IS DISTINCT FROM v_contrib_before
+         OR EXISTS (SELECT 1 FROM private.taxon_identity_repair_runs)
+         OR EXISTS (SELECT 1 FROM private.taxon_identity_repair_reference_actions) THEN
+        RAISE EXCEPTION 'failed apply left changes behind (%)', v_stub;
+      END IF;
+      RAISE EXCEPTION 'probe done' USING ERRCODE = 'P0R01';
+    EXCEPTION WHEN SQLSTATE 'P0R01' THEN
+      NULL;
+    END;
+  END LOOP;
+END
+$$;
+
 DO $$
 DECLARE
   v_dry jsonb;
@@ -167,12 +252,12 @@ DECLARE
 BEGIN
   -- Snapshot every fixture row (all columns) so "unchanged" is total.
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_before
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000013;
 
   -- ── Dry run is read-only ────────────────────────────────────────────────
   v_dry := private.taxon_identity_repair_dry_run();
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_after
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000013;
   IF v_after IS DISTINCT FROM v_before THEN
     RAISE EXCEPTION 'dry run modified observations';
   END IF;
@@ -180,17 +265,16 @@ BEGIN
     RAISE EXCEPTION 'dry run wrote an audit run';
   END IF;
   IF v_dry->>'release_id' <> 'tax-2099.09.01-01'
-     OR (v_dry->'outcome_counts'->>'promote')::int <> 3
+     OR (v_dry->'outcome_counts'->>'promote')::int <> 5
      OR (v_dry->'outcome_counts'->>'ambiguous')::int <> 1
-     OR (v_dry->'outcome_counts'->>'blocked_reference_use')::int <> 1
      OR (v_dry->'outcome_counts'->>'no_match')::int <> 4
      OR (v_dry->'outcome_counts'->>'error')::int <> 0
-     OR (v_dry->>'candidate_count')::int <> 9 THEN
+     OR (v_dry->>'candidate_count')::int <> 10 THEN
     RAISE EXCEPTION 'unexpected dry-run classification: %', v_dry;
   END IF;
   SELECT array_agg((p->>'observation_id')::bigint ORDER BY (p->>'observation_id')::bigint)
     INTO v_planned FROM jsonb_array_elements(v_dry->'promotions') p;
-  IF v_planned IS DISTINCT FROM ARRAY[951000001,951000002,951000011]::bigint[] THEN
+  IF v_planned IS DISTINCT FROM ARRAY[951000001,951000002,951000010,951000011,951000013]::bigint[] THEN
     RAISE EXCEPTION 'unexpected promotion set: %', v_planned;
   END IF;
   IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_dry->'promotions') p
@@ -219,7 +303,7 @@ BEGIN
   END;
   IF NOT v_failed THEN RAISE EXCEPTION 'apply accepted a stale plan hash'; END IF;
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_after
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000013;
   IF v_after IS DISTINCT FROM v_before
      OR EXISTS (SELECT 1 FROM private.taxon_identity_repair_runs) THEN
     RAISE EXCEPTION 'refused apply left changes behind';
@@ -227,15 +311,17 @@ BEGIN
 
   -- ── Apply with the dry run's hash ──────────────────────────────────────
   v_applied := private.taxon_identity_repair_apply(v_dry->>'plan_sha256');
-  IF (v_applied - 'mode' - 'run_id' - 'promoted_count') IS DISTINCT FROM (v_dry - 'mode')
-     OR (v_applied->>'promoted_count')::int <> 3 THEN
+  IF (v_applied - 'mode' - 'run_id' - 'promoted_count' - 'reference_action_count')
+       IS DISTINCT FROM (v_dry - 'mode')
+     OR (v_applied->>'promoted_count')::int <> 5
+     OR (v_applied->>'reference_action_count')::int <> 2 THEN
     RAISE EXCEPTION 'apply report differs from the dry run: % vs %', v_applied, v_dry;
   END IF;
 
   -- Exactly the planned rows changed, and only in the two identity columns
   -- plus the trigger-owned updated_at.
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_after
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000013;
   SELECT array_agg(k::bigint ORDER BY k::bigint) INTO v_changed
     FROM jsonb_object_keys(v_before) k
    WHERE v_before->k IS DISTINCT FROM v_after->k;
@@ -265,11 +351,10 @@ BEGIN
 
   -- Audit: one run, one item per candidate, matching the report.
   IF (SELECT count(*) FROM private.taxon_identity_repair_runs) <> 1
-     OR (SELECT count(*) FROM private.taxon_identity_repair_items) <> 9
-     OR (SELECT count(*) FROM private.taxon_identity_repair_items WHERE outcome = 'promote') <> 3
-     OR (SELECT outcome FROM private.taxon_identity_repair_items WHERE observation_id = 951000010) <> 'blocked_reference_use'
+     OR (SELECT count(*) FROM private.taxon_identity_repair_items) <> 10
+     OR (SELECT count(*) FROM private.taxon_identity_repair_items WHERE outcome = 'promote') <> 5
      OR (SELECT plan_sha256 FROM private.taxon_identity_repair_runs) <> v_dry->>'plan_sha256'
-     OR (SELECT promoted_count FROM private.taxon_identity_repair_runs) <> 3 THEN
+     OR (SELECT promoted_count FROM private.taxon_identity_repair_runs) <> 5 THEN
     RAISE EXCEPTION 'audit does not match the applied run';
   END IF;
   IF (SELECT outcome FROM private.taxon_identity_repair_items WHERE observation_id = 951000006) <> 'ambiguous'
@@ -277,16 +362,43 @@ BEGIN
     RAISE EXCEPTION 'ambiguous row not audited as ambiguous';
   END IF;
 
+  -- Shared references followed the new identity.
+  IF (SELECT status FROM private.shared_reference_contributions
+       WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00a' AND sporely_taxon_id=2099000003) <> 'withdrawn'
+     OR (SELECT status FROM private.shared_reference_contributions
+       WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00a' AND sporely_taxon_id=620390) IS DISTINCT FROM 'shared'
+     OR (SELECT status FROM private.shared_reference_contributions
+       WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00c' AND sporely_taxon_id=2099000003) <> 'shared'
+     OR (SELECT status FROM private.shared_reference_contributions
+       WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00c' AND sporely_taxon_id=620390) IS DISTINCT FROM 'shared'
+     OR EXISTS (SELECT 1 FROM private.shared_reference_contributions
+       WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00b' AND status='withdrawn') THEN
+    RAISE EXCEPTION 'shared references not reconciled: %',
+      (SELECT jsonb_agg(jsonb_build_object('set',source_measurement_set_id,'taxon',sporely_taxon_id,'status',status))
+         FROM private.shared_reference_contributions WHERE owner_id='00000000-0000-4000-8000-00000001b001');
+  END IF;
+  IF (SELECT count(*) FROM private.taxon_identity_repair_reference_actions) <> 2
+     OR NOT EXISTS (SELECT 1 FROM private.taxon_identity_repair_reference_actions
+       WHERE observation_id=951000010 AND reference_measurement_set_id='83000000-0000-4000-8000-00000001b00a'
+         AND old_sporely_taxon_id=2099000003 AND new_sporely_taxon_id=620390
+         AND old_contribution='withdrawn' AND new_contribution='shared')
+     OR NOT EXISTS (SELECT 1 FROM private.taxon_identity_repair_reference_actions
+       WHERE observation_id=951000013 AND reference_measurement_set_id='83000000-0000-4000-8000-00000001b00c'
+         AND old_contribution='kept_by_other_use' AND new_contribution='shared') THEN
+    RAISE EXCEPTION 'reference actions not audited: %',
+      (SELECT jsonb_agg(to_jsonb(a)) FROM private.taxon_identity_repair_reference_actions a);
+  END IF;
+
   -- ── Idempotent: a second run finds nothing and changes nothing ─────────
   v_dry2 := private.taxon_identity_repair_dry_run();
   IF (v_dry2->'outcome_counts'->>'promote')::int <> 0
-     OR (v_dry2->>'candidate_count')::int <> 6 THEN
+     OR (v_dry2->>'candidate_count')::int <> 5 THEN
     RAISE EXCEPTION 'second dry run not empty: %', v_dry2;
   END IF;
   v_before := v_after;
   v_second := private.taxon_identity_repair_apply(v_dry2->>'plan_sha256');
   SELECT jsonb_object_agg(o.id, to_jsonb(o)) INTO v_after
-    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000011;
+    FROM public.observations o WHERE o.id BETWEEN 951000001 AND 951000013;
   IF v_after IS DISTINCT FROM v_before OR (v_second->>'promoted_count')::int <> 0 THEN
     RAISE EXCEPTION 'second apply changed something: %', v_second;
   END IF;
@@ -331,7 +443,10 @@ BEGIN
   SELECT string_agg(p.prosrc, E'\n') INTO v_src
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'private' AND p.proname LIKE '%taxon_identity_repair%';
-  IF v_src ~* '\m(genus|species|common_name|ai_selected_\w*|scientific_name)\M' THEN
+  -- `rank = 'species'` is a registry rank literal, not a name column, so the
+  -- species column is matched only as a qualified reference.
+  IF v_src ~* '\m(genus|common_name|ai_selected_\w*|scientific_name|species_guess)\M'
+     OR v_src ~* '\.species\M' THEN
     RAISE EXCEPTION 'repair functions reference name columns';
   END IF;
 END
