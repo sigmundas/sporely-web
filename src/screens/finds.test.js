@@ -4718,6 +4718,34 @@ test('under species sort a changed survivor forces a full rebuild so grouping st
   }
 })
 
+test('Kraghätting: the compact card shows only the vernacular by design; the full card keeps the scientific name', () => {
+  // Taxonomy v3 Stage 5. The captured Artsorakel candidate for NBIC:58766
+  // normalizes to scientificName 'Pholiotina vexans' and, in Swedish,
+  // vernacularName 'kraghätting' (see artsorakel.test.js). Saved, that is
+  // genus/species/common_name below. The compact (grid) card label is
+  // `common_name || latin`, so a vernacular-only label there is the
+  // established compact presentation for every named taxon, not a lost name.
+  const obs = {
+    id: 1,
+    genus: 'Pholiotina',
+    species: 'vexans',
+    common_name: 'kraghätting',
+    taxon_identity_state: 'external_unresolved',
+    taxon_identity_source_system: 'nortaxa',
+    taxon_identity_namespace: 'nortaxa_taxon_id',
+    taxon_identity_external_id: '58766',
+    taxon_identity_raw_external_id: 'NBIC:58766',
+  }
+  const presentation = findsCardIdentityPresentation(obs)
+  assert.equal(presentation.isUnknown, false)
+  assert.ok(presentation.nameInnerHtml.includes('kraghätting'))
+  assert.ok(presentation.nameInnerHtml.includes('<em class="find-card-scientific">Pholiotina vexans</em>'))
+  assert.equal(presentation.compactInnerHtml, 'kraghätting')
+  // Presentation reads identity; it never rewrites it.
+  assert.equal(obs.taxon_identity_state, 'external_unresolved')
+  assert.equal(obs.taxon_identity_raw_external_id, 'NBIC:58766')
+})
+
 test('the card signature comes from the rendered markup, so detection cannot drift from rendering', () => {
   const unidentified = findsCardIdentityPresentation({ id: 1 })
   const identified = findsCardIdentityPresentation({

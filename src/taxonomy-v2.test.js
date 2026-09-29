@@ -19,6 +19,13 @@ import {
   taxonomySelectionFromObservationRow,
 } from './taxonomy-v2.js'
 
+// Taxonomy v3 Stage 5. A clearly synthetic unresolved identifier. It replaces
+// NBIC:56449 (Gloeophyllum odoratum), which Stage 2 reconciled to Sporely
+// 11307. The digits exceed any NorTaxa/Artsnavnebase id and PostgreSQL integer
+// range, so no active taxonomy can bind it; it must stay unresolved.
+const SYNTHETIC_UNRESOLVED_LOCAL_ID = '9999999999'
+const SYNTHETIC_UNRESOLVED_NBIC_ID = `NBIC:${SYNTHETIC_UNRESOLVED_LOCAL_ID}`
+
 const COL_ONLY_ROW = {
   taxon_id: 167, parent_taxon_id: 166, taxon_rank: 'species',
   genus: 'Crystallocystidium', specific_epithet: 'albescens',
@@ -46,7 +53,7 @@ test('search normalizes canonical, alias, genus, vernacular and NorTaxa-backed r
     { ...COL_ONLY_ROW, taxon_id: 168, taxon_rank: 'genus', specific_epithet: '', canonical_scientific_name: 'Crystallocystidium', match_type: 'canonical_prefix' },
     { ...COL_ONLY_ROW, taxon_id: 169, matched_name: 'Ustilago maydis', match_type: 'scientific_alias_exact' },
     { ...COL_ONLY_ROW, taxon_id: 170, vernacular_name: 'grå torvvokssopp', vernacular_language: 'nb', matched_name: 'grå torvvokssopp', matched_language: 'nb', match_type: 'vernacular_exact' },
-    { ...COL_ONLY_ROW, taxon_id: 171, nortaxa_taxon_id: '56449', matched_name: 'NorTaxa name', match_type: 'scientific_alias_exact' },
+    { ...COL_ONLY_ROW, taxon_id: 171, nortaxa_taxon_id: SYNTHETIC_UNRESOLVED_LOCAL_ID, matched_name: 'NorTaxa name', match_type: 'scientific_alias_exact' },
   ]
   const calls = []
   const client = { rpc: async (name, args) => { calls.push({ name, args }); return { data: rows, error: null } } }
@@ -55,7 +62,7 @@ test('search normalizes canonical, alias, genus, vernacular and NorTaxa-backed r
   assert.equal(calls[0].args.lang, 'no')
   assert.deepEqual(results.map(result => result.matchType), ['canonical_exact', 'canonical_prefix', 'scientific_alias_exact', 'vernacular_exact', 'scientific_alias_exact'])
   assert.equal(results[1].specificEpithet, null)
-  assert.equal(results[4].nortaxaTaxonId, '56449')
+  assert.equal(results[4].nortaxaTaxonId, SYNTHETIC_UNRESOLVED_LOCAL_ID)
 })
 
 test('empty result never falls back and unavailable RPC fallback is capability-separated', async () => {
@@ -94,14 +101,14 @@ test('COL-only and genus selections are queued as client metadata, never provide
 test('manual free text does not manufacture canonical identity', () => {
   assert.equal(taxonomySelectionForTaxon({ manualEntry: true, scientificName: 'Unknown fungus' }), null)
   // A bare integer has no registry behind it, so it cannot become a selection.
-  assert.equal(taxonomySelectionForTaxon({ taxonId: '56449', scientificName: 'Amanita muscaria' }), null)
+  assert.equal(taxonomySelectionForTaxon({ taxonId: SYNTHETIC_UNRESOLVED_LOCAL_ID, scientificName: 'Amanita muscaria' }), null)
 })
 
 test('an Artsorakel NBIC: identifier is preserved instead of being discarded', () => {
   // EXPECTATION FLIP — taxonomy-v2 closeout Stage 2 Part B.
   //
   // This assertion used to read:
-  //   assert.equal(taxonomySelectionForTaxon({ taxonId: 'NBIC:56449', ... }), null)
+  //   assert.equal(taxonomySelectionForTaxon({ taxonId: 'NBIC:56449', ... }), null)  (historical)
   // which encoded the broken contract: the client held a namespaced external
   // identifier, never parsed it, and silently discarded the identity instead
   // of preserving it. Because nothing was preserved, nothing was ever offered
@@ -115,14 +122,22 @@ test('an Artsorakel NBIC: identifier is preserved instead of being discarded', (
   // the resolver tests further down, which already exercise both outcomes
   // against a stubbed RPC.
   const selection = taxonomySelectionForTaxon({
-    taxonId: 'NBIC:56449', scientificName: 'Amanita muscaria',
+    taxonId: SYNTHETIC_UNRESOLVED_NBIC_ID, scientificName: 'Amanita muscaria',
   })
   assert.equal(selection.capability, EXTERNAL_TAXONOMY_IDENTITY_CAPABILITY)
+  // Its digits never become a Sporely taxon id by numeric coincidence.
   assert.equal(selection.sporelyTaxonId, null)
   assert.equal(selection.sourceSystem, 'nortaxa')
   assert.equal(selection.namespace, 'nortaxa_taxon_id')
-  assert.equal(selection.externalId, '56449')
-  assert.equal(selection.rawExternalId, 'NBIC:56449')
+  assert.equal(selection.externalId, SYNTHETIC_UNRESOLVED_LOCAL_ID)
+  assert.equal(selection.rawExternalId, SYNTHETIC_UNRESOLVED_NBIC_ID)
+  assert.deepEqual(taxonIdentityPatchForSelection(selection), {
+    taxon_identity_state: 'external_unresolved',
+    taxon_identity_source_system: 'nortaxa',
+    taxon_identity_namespace: 'nortaxa_taxon_id',
+    taxon_identity_external_id: SYNTHETIC_UNRESOLVED_LOCAL_ID,
+    taxon_identity_raw_external_id: SYNTHETIC_UNRESOLVED_NBIC_ID,
+  })
   assert.equal(selection.scientificName, 'Amanita muscaria')
 })
 

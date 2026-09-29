@@ -192,3 +192,10 @@ test('the shared helper is what both save paths use', () => {
   )
   assert.deepEqual(fresh, { genus: 'Entoloma', species: null, common_name: null })
 })
+
+test('Kraghätting: the captured scientific name is stored as genus and species', () => {
+  // Taxonomy v3 Stage 5. The normalized Artsorakel candidate for NBIC:58766
+  // carries scientificName 'Pholiotina vexans'; the save path splits it into
+  // the stored columns, so no scientific name is lost between provider and row.
+  assert.deepEqual(providerNameToIdentificationColumns('Pholiotina vexans'), ['Pholiotina', 'vexans'])
+})

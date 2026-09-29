@@ -442,6 +442,59 @@ test('runArtsorakel keeps all real predictions and normalizes storage-friendly f
   })
 })
 
+// Taxonomy v3 Stage 5 (Kraghätting). This candidate is the raw
+// `predictions[0].taxa.items[0]` captured with `sporely-debug-artsorakel` from
+// app 0.7.13 on 2026-09-29, copied verbatim. Artsorakel did NOT omit the
+// scientific name: it arrives in all three fields the normalizer reads, so a
+// "kraghätting"-only label is not provider omission or a normalizer miss.
+const KRAGHATTING_CAPTURED_CANDIDATE = Object.freeze({
+  probability: 0.943238,
+  scientific_name: 'Pholiotina vexans',
+  scientific_name_id: 'NBIC:58766',
+  scientific_name_id_shared: 'GBIF:2529737',
+  scientific_name_shared: 'Pholiotina vexans',
+  scientificName: 'Pholiotina vexans',
+  name: 'Pholiotina vexans',
+  picture: null,
+  vernacularName: 'vrang ringerlehatt',
+  vernacularNames: {
+    nb: 'vrang ringerlehatt',
+    nn: 'vrang ringerlehatt',
+    sv: 'kraghätting',
+    nl: 'Manchetbreeksteeltje',
+    en: 'vexed conecap',
+  },
+  groupName: 'Sopper',
+  groupNames: {
+    nb: 'Sopper', nn: 'Soppar', en: 'Fungi', sv: 'Svampar', se: 'Guobbarat',
+    nl: 'Paddenstoelen en schimmels', es: 'Hongos',
+  },
+  redListCategories: { NO: 'LC' },
+  redListCategory: 'LC',
+  infoUrl: 'https://artsdatabanken.no/Taxon/96856',
+})
+
+test('the captured Kraghätting candidate keeps its scientific name and provider id', async () => {
+  for (const [lang, vernacular] of [['sv', 'kraghätting'], ['no', 'vrang ringerlehatt']]) {
+    await withHarness(async harness => {
+      const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+      harness.setBlobDimensions(blob, 800, 600)
+      harness.setFetch(async () => makeResponse({
+        jsonBody: { predictions: [{ taxa: { items: [structuredClone(KRAGHATTING_CAPTURED_CANDIDATE)] } }] },
+      }))
+
+      const [result] = await runArtsorakel(blob, lang)
+
+      assert.equal(result.scientificName, 'Pholiotina vexans', lang)
+      assert.equal(result.vernacularName, vernacular, lang)
+      assert.equal(result.displayName, `${vernacular} (Pholiotina vexans)`, lang)
+      // Identity is the provider's NBIC name id, untouched by the label.
+      assert.equal(result.taxonId, 'NBIC:58766', lang)
+      assert.equal(result.taxon_id, 'NBIC:58766', lang)
+    })
+  }
+})
+
 test('runArtsorakel preserves taxon.picture as picture_url and pictureUrl', async () => {
   await withHarness(async harness => {
     const blob = new Blob(['jpeg'], { type: 'image/jpeg' })

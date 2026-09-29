@@ -400,8 +400,10 @@ Rationale:
   observation. A badge would invite edits that the repair makes unnecessary, and
   a manual re-pick would replace the preserved provider identity.
 - The observation already shows the provider's name, and grouping uses
-  `isObservationUnidentified`, so an unresolved identity is never shown as
-  unidentified.
+  `isObservationUnidentified`, so an unresolved identity that carries a usable
+  name (genus, species or common name) is not shown as unidentified. An
+  observation with no usable name stays unidentified by design, whatever its
+  identity state.
 - An indicator would need the identity columns in the Finds list query and a new
   visual state across list, species and map views, for a condition that is
   expected to shrink as Stage 1A/1B bridges and later releases land.
@@ -409,3 +411,39 @@ Rationale:
 Revisit this if unresolved observations are shown to persist after the repair
 pass, or if a user-facing effect (for example, missing Red List or national
 names) is reported. Identity handling does not change in either case.
+
+### Kraghätting (NBIC:58766) label diagnosis
+
+The raw Artsorakel candidate was captured on 2026-09-29 with
+`sporely-debug-artsorakel` from app 0.7.13 at
+`predictions[0].taxa.items[0]`. It carries `Pholiotina vexans` in
+`scientificName`, `scientific_name` and `name`, `scientific_name_id`
+`NBIC:58766`, and vernaculars `nb` "vrang ringerlehatt" and `sv` "kraghätting".
+
+Mechanism, proven by regressions over that verbatim candidate:
+
+- Artsorakel did not omit the scientific name, and the normalizer did not miss
+  it. `_flattenArtsorakelPredictions` keeps the item and
+  `_normalizeArtsorakelPrediction` yields `scientificName` `Pholiotina vexans`,
+  `taxonId` `NBIC:58766` and, for Swedish, `displayName`
+  "kraghätting (Pholiotina vexans)" (`src/artsorakel.test.js`).
+- The save path stores genus `Pholiotina`, species `vexans` and common name
+  "kraghätting" (`src/screens/detail-identification-integrity.test.js`).
+- The full Finds card shows both names. The compact Finds card, like the Home
+  list, labels an observation `common_name || latin`, so it shows only
+  "kraghätting" (`src/screens/finds.test.js`). This is the established compact
+  presentation for every named taxon, not a lost name.
+
+No label fix was made: no evidence shows a defect in the normalizer or the
+save path, and changing the compact label policy would be a product decision
+for all taxa. Identity handling is unchanged.
+
+### NBIC:56449 regression fixture
+
+Stage 2 reconciled NBIC:56449 (Gloeophyllum odoratum; NorTaxa 56449,
+Sporely 626327, superseded by COL 3GBK2, Sporely 11307; sporely-py
+`c1bee1c934310d8132c16303bcf8adf3bb2ec1c7`). `src/taxonomy-v2.test.js`
+therefore uses the synthetic `NBIC:9999999999` instead. Its digits exceed any
+Artsnavnebase id and the PostgreSQL integer range, so no active taxonomy can
+bind it. The test still proves that it stays `external_unresolved` with full
+provenance and never becomes a Sporely taxon id through numeric coincidence.
