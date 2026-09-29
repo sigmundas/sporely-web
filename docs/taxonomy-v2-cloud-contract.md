@@ -443,7 +443,12 @@ for all taxa. Identity handling is unchanged.
 Stage 2 reconciled NBIC:56449 (Gloeophyllum odoratum; NorTaxa 56449,
 Sporely 626327, superseded by COL 3GBK2, Sporely 11307; sporely-py
 `c1bee1c934310d8132c16303bcf8adf3bb2ec1c7`). `src/taxonomy-v2.test.js`
-therefore uses the synthetic `NBIC:9999999999` instead. Its digits exceed any
-Artsnavnebase id and the PostgreSQL integer range, so no active taxonomy can
-bind it. The test still proves that it stays `external_unresolved` with full
-provenance and never becomes a Sporely taxon id through numeric coincidence.
+therefore uses the synthetic `NBIC:sporely-test-synthetic-unresolved`.
+Artsnavnebase scientific-name ids and NorTaxa `dwc:taxonID` values are
+all-digit integers, and `resolve_taxon_external_id_v2` compares the text
+identifier exactly, so a non-numeric local id cannot equal a real provider id.
+Having no numeric component, it is not bridged to `nortaxa_taxon_id` and stays
+`(artsorakel, nbic_scientific_name_id)`. The test sends it through an empty
+resolver response and asserts that it stays `external_unresolved` with full
+provenance. A separate test proves that a numeric `NBIC:7821` never becomes
+Sporely taxon 7821 when the resolver returns no match.
