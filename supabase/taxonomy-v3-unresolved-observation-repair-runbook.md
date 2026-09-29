@@ -69,8 +69,13 @@ audit tables.
 
 4. Idempotence check: a fresh dry run must report `promote = 0`.
 
-While apply runs, owners' saves of `external_unresolved` observations wait on
-the row locks. The apply is one short transaction, so run it at a quiet time.
+While apply runs, owners' saves wait on its row locks. Those locks cover
+`external_unresolved` observations, the measurement sets those candidates use,
+every use of those sets, and every observation that holds such a use. Holding
+them is what makes the "another live use still carries the old taxon" decision
+safe against a concurrent owner edit. A crossed lock order aborts one side
+with 40P01; an aborted apply changes nothing, and you rerun it after a fresh
+dry run. The apply is one short transaction, so run it at a quiet time.
 
 ## How the change reaches devices
 
@@ -86,4 +91,9 @@ identity is never pushed over it.
 supabase db reset --local
 docker exec -i supabase_db_zkpjklzfwzefhjluvhfw psql -U postgres -v ON_ERROR_STOP=1 -q \
   < supabase/tests/taxon_identity_repair_test.sql
+
+# Two-session race regression. It commits fixtures, so run it only right
+# after a reset:
+supabase db reset --local
+bash supabase/tests/taxon_identity_repair_concurrency_test.sh
 ```

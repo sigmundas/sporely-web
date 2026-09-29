@@ -438,18 +438,52 @@ BEGIN
     JOIN public.observations o ON o.user_id = u.user_id AND o.id = u.observation_id
    WHERE o.taxon_identity_state = 'external_unresolved'
      FOR SHARE OF u;
-  -- Take the reference sources' row locks now, before the share helper's
-  -- advisory lock, so apply acquires them in the same order as an owner's
-  -- revision update and cannot deadlock against one.
-  PERFORM 1 FROM public.observation_reference_uses u
-    JOIN public.observations o ON o.user_id = u.user_id AND o.id = u.observation_id
-    JOIN public.reference_measurement_sets m
-      ON m.user_id = u.user_id AND m.id = u.reference_measurement_set_id
+  -- Serialize the whole affected reference graph before any withdrawal
+  -- decision. Reconciliation asks whether ANOTHER observation still carries
+  -- the old taxon for a measurement set; that answer must not change under it.
+  --   1. The candidates' measurement sets FOR UPDATE: a new use of the set
+  --      (its foreign key takes FOR KEY SHARE on the set row) and an owner
+  --      revision update now wait for this run. Treatments and works are held
+  --      FOR SHARE.
+  --   2. Every use of those sets, live or deleted, on any observation, FOR
+  --      UPDATE: no use can be revived, deleted or moved meanwhile.
+  --   3. Every observation holding such a use FOR UPDATE: no owner can change
+  --      a co-user's identity (and so its effective taxon) meanwhile.
+  -- An owner transaction that already holds one of these rows makes this run
+  -- wait, then reconciliation reads its committed result. If lock orders
+  -- cross, Postgres aborts one side with 40P01; an aborted apply changes
+  -- nothing and is simply rerun after a fresh dry run.
+  PERFORM 1 FROM public.reference_measurement_sets m
     JOIN public.reference_taxon_treatments t ON t.user_id = m.user_id AND t.id = m.taxon_treatment_id
     JOIN public.reference_works w ON w.user_id = t.user_id AND w.id = t.reference_work_id
-   WHERE o.taxon_identity_state = 'external_unresolved'
-     AND u.deleted_at IS NULL
-     FOR SHARE OF m, t, w;
+   WHERE (m.user_id, m.id) IN (
+           SELECT u.user_id, u.reference_measurement_set_id
+             FROM public.observation_reference_uses u
+             JOIN public.observations o ON o.user_id = u.user_id AND o.id = u.observation_id
+            WHERE o.taxon_identity_state = 'external_unresolved'
+         )
+     FOR UPDATE OF m
+     FOR SHARE OF t, w;
+  PERFORM 1 FROM public.observation_reference_uses other_use
+   WHERE (other_use.user_id, other_use.reference_measurement_set_id) IN (
+           SELECT u.user_id, u.reference_measurement_set_id
+             FROM public.observation_reference_uses u
+             JOIN public.observations o ON o.user_id = u.user_id AND o.id = u.observation_id
+            WHERE o.taxon_identity_state = 'external_unresolved'
+         )
+     FOR UPDATE;
+  PERFORM 1 FROM public.observations co_obs
+   WHERE (co_obs.user_id, co_obs.id) IN (
+           SELECT other_use.user_id, other_use.observation_id
+             FROM public.observation_reference_uses other_use
+            WHERE (other_use.user_id, other_use.reference_measurement_set_id) IN (
+                    SELECT u.user_id, u.reference_measurement_set_id
+                      FROM public.observation_reference_uses u
+                      JOIN public.observations o ON o.user_id = u.user_id AND o.id = u.observation_id
+                     WHERE o.taxon_identity_state = 'external_unresolved'
+                  )
+         )
+     FOR UPDATE;
 
   SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(p) ORDER BY p.observation_id), '[]'::jsonb)
     INTO v_plan
