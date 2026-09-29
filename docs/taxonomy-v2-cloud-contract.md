@@ -384,3 +384,28 @@ Remaining blocker: **human-authorized read-only export required.** No
 production Supabase access, no production migration, no production
 observation writes, and no client cutover have been performed or
 authorized by this result.
+
+## Taxonomy v3 Stage 5: Finds and `external_unresolved`
+
+Decision (proposed 2026-09-29, subject to Stage 5 review): the Finds list does
+not show an indicator for `taxon_identity_state = 'external_unresolved'`. No UI
+change.
+
+Rationale:
+
+- `external_unresolved` describes a gap in authoritative bridge coverage, not
+  something the owner did wrong or can fix. Taxonomy-v3 decision 3 re-resolves
+  these observations through an explicit, idempotent operator repair pass from
+  the preserved source, namespace and external id, without the owner opening the
+  observation. A badge would invite edits that the repair makes unnecessary, and
+  a manual re-pick would replace the preserved provider identity.
+- The observation already shows the provider's name, and grouping uses
+  `isObservationUnidentified`, so an unresolved identity is never shown as
+  unidentified.
+- An indicator would need the identity columns in the Finds list query and a new
+  visual state across list, species and map views, for a condition that is
+  expected to shrink as Stage 1A/1B bridges and later releases land.
+
+Revisit this if unresolved observations are shown to persist after the repair
+pass, or if a user-facing effect (for example, missing Red List or national
+names) is reported. Identity handling does not change in either case.
