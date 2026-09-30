@@ -458,7 +458,7 @@ Sporely taxon 7821 when the resolver returns no match.
 Consumes the sporely-py Stage 3P `taxon.jsonl` contract
 (`database/taxonomy/docs/cloud-export-contract.md`, "National preferred
 scientific names", accepted candidate `f3e8211`). Migration
-`20260929130000_add_taxonomy_v2_national_scientific_names.sql` is additive:
+`20260930193100_add_taxonomy_v2_national_scientific_names.sql` is additive:
 
 - `taxonomy_v2_taxa` gains `preferred_scientific_name_{no,sv}` and, per
   country, `_source_system`, `_namespace`, `_external_id`. A check constraint

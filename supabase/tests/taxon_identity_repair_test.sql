@@ -1,5 +1,5 @@
 -- Regression for the Taxonomy v3 Stage 1B unresolved-observation repair
--- (20260929120000). Raw-assert convention: BEGIN/ROLLBACK, RAISE EXCEPTION on
+-- (20260930193000). Raw-assert convention: BEGIN/ROLLBACK, RAISE EXCEPTION on
 -- failure. Local fixtures only.
 --
 -- Fixture release `tax-2099.09.01-01` carries, as Stage 1A would emit:
