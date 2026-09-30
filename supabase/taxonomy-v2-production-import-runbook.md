@@ -384,8 +384,17 @@ concepts present in both releases.
   retired, `tax-2026.09.30-01` active; 3 of 3 import runs succeeded.
 - **Stage 1B dry run (read-only, against `tax-2026.09.30-01`):** 17 candidates;
   6 `promote`, 11 `no_match`, 0 ambiguous, 0 error; no promotion targets NorTaxa
-  56227; plan `b1a94448…cef377`. 2 of the 6 have live reference uses. Apply not
-  yet authorised.
+  56227; plan `b1a94448…cef377`. 2 of the 6 have live reference uses.
+- **Stage 1B apply, run 1 (owner-authorised):** committed; 6 promoted
+  (NorTaxa 54098 → 98342, 54228 → 13771, 55311 → 55368, 55999 → 23371,
+  58766 → 617026 ×2), 11 `no_match` left unresolved. Reference actions: 4, all
+  `old=none new=not_species`, so nothing was newly shared: 617026 and 55368
+  are species in the release but not in `taxonomy_v3.registry_concept`, which
+  the share eligibility (owner path and repair alike) requires. A fresh dry run
+  reports `promote = 0`.
+- **Follow-up:** share eligibility depends on the 209-concept v3 registry, not
+  the 52,917-concept release; species outside it cannot be shared by owners
+  either. Needs its own reviewed decision.
 
 ### Rollback
 
