@@ -2,7 +2,7 @@ import { formatTime, getLocale, getTaxonomyLanguage, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
-import { searchTaxa, formatDisplayName, createManualTaxon } from '../artsorakel.js'
+import { searchTaxa, formatTaxonLabel, createManualTaxon } from '../artsorakel.js'
 import {
   buildIdentifyFingerprint,
   debugPhotoId,
@@ -1213,7 +1213,7 @@ export function buildReviewGrid() {
   const reviewCount = document.getElementById('review-count')
   const sharedTaxon = photos.find(photo => photo.taxon)?.taxon || null
   const speciesLabel = sharedTaxon?.displayName
-    || (sharedTaxon ? formatDisplayName(sharedTaxon.genus, sharedTaxon.specificEpithet, sharedTaxon.vernacularName) : '')
+    || (sharedTaxon ? formatTaxonLabel(sharedTaxon) : '')
     || t('detail.unknownSpecies')
 
   if (reviewCount) {
@@ -1268,7 +1268,7 @@ export function buildReviewGrid() {
     html = `<div class="capture-session-empty" style="opacity:0.4;pointer-events:none">${t('review.noCaptures')}</div>`
   } else {
     const displayName = sharedTaxon
-      ? formatDisplayName(sharedTaxon.genus, sharedTaxon.specificEpithet, sharedTaxon.vernacularName)
+      ? formatTaxonLabel(sharedTaxon)
       : ''
     const firstTime = photos[0]?.ts
       ? formatTime(photos[0].ts, { hour: '2-digit', minute: '2-digit' })
@@ -1561,7 +1561,7 @@ function _syncReviewSpeciesLabel(taxon = null) {
   if (!reviewCount) return
   const currentTaxon = taxon || state.capturedPhotos.find(photo => photo.taxon)?.taxon || null
   reviewCount.textContent = currentTaxon?.displayName
-    || (currentTaxon ? formatDisplayName(currentTaxon.genus, currentTaxon.specificEpithet, currentTaxon.vernacularName) : '')
+    || (currentTaxon ? formatTaxonLabel(currentTaxon) : '')
     || t('detail.unknownSpecies')
 }
 

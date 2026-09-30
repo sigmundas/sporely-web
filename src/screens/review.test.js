@@ -23,6 +23,7 @@ import {
 } from './review.js'
 import { LOCATION_STATE_CHANGED_EVENT, beginCaptureLocationSession, endCaptureLocationSession } from '../geo.js'
 import { state } from '../state.js'
+import { normalizeTaxonomyV2Result } from '../taxonomy-v2.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
 import { __setNativeCaptureStoragePluginForTests } from '../native-capture-storage.js'
 
@@ -2270,6 +2271,34 @@ test('Save without native sources (web capture / imports) never calls the native
     assert.equal(finalizeCalls, 0)
   } finally {
     __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+// Taxonomy v3 Stage 3W: a grid rebuild (e.g. toggling uncertainty) must keep
+// the national display label, not rebuild it from the canonical genus/epithet.
+test('capture review rerender keeps the national display label; canonical fields persist', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  try {
+    _seedReviewState({ user: { id: 'user-1' } })
+    const taxon = normalizeTaxonomyV2Result({
+      taxon_id: 83668, genus: 'Conocybe', specific_epithet: 'rugosa', canonical_scientific_name: 'Conocybe rugosa',
+      vernacular_name: 'slank ringkjeglesopp', display_scientific_name: 'Pholiotina rugosa',
+    })
+    state.capturedPhotos[0].taxon = taxon
+    initReview()
+    buildReviewGrid()
+    buildReviewGrid()
+    await new Promise(resolve => setImmediate(resolve))
+    const html = env.document.getElementById('observation-grid').innerHTML
+    assert.match(html, /value="slank ringkjeglesopp \(Pholiotina rugosa\)"/)
+    assert.doesNotMatch(html, /Conocybe rugosa\)/)
+    assert.equal(env.document.getElementById('review-count').textContent, 'slank ringkjeglesopp (Pholiotina rugosa)')
+    assert.equal(state.capturedPhotos[0].taxon.scientificName, 'Conocybe rugosa')
+    assert.equal(state.capturedPhotos[0].taxon.genus, 'Conocybe')
+  } finally {
     _restoreReviewState(snapshot)
     env.restore()
   }

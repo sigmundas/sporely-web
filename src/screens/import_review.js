@@ -3,7 +3,7 @@ import { markCameraStep } from '../camera-timing.js';
 import { formatDate, formatTime, getLocale, getTaxonomyLanguage, t, tp, translateVisibility } from '../i18n.js';
 import { navigate } from '../router.js';
 import { showToast } from '../toast.js';
-import { searchTaxa, formatDisplayName, createManualTaxon } from '../artsorakel.js';
+import { searchTaxa, formatTaxonLabel, createManualTaxon } from '../artsorakel.js';
 import { enqueueObservation } from '../sync-queue.js';
 import { nativeCaptureSourcePathFromNativePhoto } from '../native-capture-storage.js';
 import { canPerformCloudMutation } from '../capabilities.js';
@@ -2360,7 +2360,7 @@ function _wireCard(sid) {
         const results = await searchTaxa(q, getTaxonomyLanguage());
         if (!results?.length) { dropdown.style.display = 'none'; dropdown.innerHTML = ''; return; }
         dropdown.innerHTML = results.map((r, i) => {
-          const display = formatDisplayName(r.genus, r.specificEpithet, r.vernacularName);
+          const display = formatTaxonLabel(r);
           return `<li data-idx="${i}">${escHtml(display)}</li>`;
         }).join('');
         dropdown.style.display = 'block';
@@ -2369,7 +2369,7 @@ function _wireCard(sid) {
             event.preventDefault();
             event.stopPropagation();
             const r = results[i];
-            const display = formatDisplayName(r.genus, r.specificEpithet, r.vernacularName);
+            const display = formatTaxonLabel(r);
             const session = sessionById(sid);
             if (session) {
               session.taxon = { ...r, displayName: display };

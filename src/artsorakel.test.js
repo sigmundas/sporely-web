@@ -21,7 +21,10 @@ import {
   runArtsorakelForBlobs,
   runArtsorakelForMediaKeys,
   splitScientificName,
+  formatTaxonLabel,
+  createManualTaxon,
 } from './artsorakel.js'
+import { normalizeTaxonomyV2Result } from './taxonomy-v2.js'
 
 const TEST_APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'
 
@@ -1372,4 +1375,16 @@ test('a top-level deprecated prediction is rejected in the fallback path too', a
     assert.equal(results.length, 1)
     assert.equal(results[0].scientificName, 'Trametes versicolor')
   })
+})
+
+// Taxonomy v3 Stage 3W: screens label a search result with the national
+// display name search_taxa_v2 chose; everything else keeps the canonical label.
+test('formatTaxonLabel uses the national display name and falls back to canonical', () => {
+  const row = { taxon_id: 83668, genus: 'Conocybe', specific_epithet: 'rugosa', canonical_scientific_name: 'Conocybe rugosa', vernacular_name: 'slank ringkjeglesopp' }
+  assert.equal(formatTaxonLabel(normalizeTaxonomyV2Result({ ...row, display_scientific_name: 'Pholiotina rugosa' })), 'slank ringkjeglesopp (Pholiotina rugosa)')
+  assert.equal(formatTaxonLabel(normalizeTaxonomyV2Result({ ...row, vernacular_name: null, display_scientific_name: 'Conocybe rugosa' })), 'Conocybe rugosa')
+  assert.equal(formatTaxonLabel(normalizeTaxonomyV2Result(row)), 'slank ringkjeglesopp (Conocybe rugosa)')
+  assert.equal(formatTaxonLabel({ genus: 'Entoloma', specificEpithet: 'conferendum', vernacularName: 'stjernesporet rødspore' }), 'stjernesporet rødspore (Entoloma conferendum)')
+  assert.equal(formatTaxonLabel(createManualTaxon('Some free text')), 'Some free text')
+  assert.equal(formatTaxonLabel(null), '')
 })

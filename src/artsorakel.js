@@ -373,6 +373,19 @@ export function formatDisplayName(genus, specificEpithet, vernacularName) {
   return sci
 }
 
+// Label for a taxon object from search (taxonomy v3 Stage 3W): prefer the
+// national display scientific name that search_taxa_v2 chose for the UI
+// language, else the canonical genus + epithet. Display only; callers keep
+// persisting the canonical fields.
+export function formatTaxonLabel(taxon) {
+  if (!taxon) return ''
+  const national = taxon.displayScientificName?.trim()
+  if (!national) return formatDisplayName(taxon.genus, taxon.specificEpithet, taxon.vernacularName)
+  const vern = taxon.vernacularName?.trim()
+  if (vern && vern.toLowerCase() !== national.toLowerCase()) return `${vern} (${national})`
+  return national
+}
+
 export function createManualTaxon(value) {
   const displayName = String(value || '').trim()
   if (!displayName) return null

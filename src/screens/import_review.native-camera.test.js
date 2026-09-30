@@ -734,3 +734,17 @@ test('Cancelled Sporely Cam session leaves no photos, no sources, and never touc
   assert.deepEqual(state.capturedPhotos, [])
   assert.equal(galleryCalls, 0)
 })
+
+// Taxonomy v3 Stage 3W: the import taxon dropdown and its selection label a
+// search result through formatTaxonLabel (national display name, canonical
+// fallback), never by rebuilding it from the canonical genus/epithet.
+test('import review taxon dropdown and selection use the national display label', async () => {
+  const fs = await import('node:fs')
+  const source = fs.readFileSync(new URL('./import_review.js', import.meta.url), 'utf8')
+  const start = source.indexOf('const results = await searchTaxa(q, getTaxonomyLanguage());')
+  assert.ok(start > 0)
+  const block = source.slice(start, source.indexOf('input.value = display;', start) + 1)
+  assert.equal((block.match(/const display = formatTaxonLabel\(r\);/g) || []).length, 2)
+  assert.match(block, /session\.taxon = \{ \.\.\.r, displayName: display \}/)
+  assert.doesNotMatch(block, /formatDisplayName\(/)
+})
