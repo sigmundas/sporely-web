@@ -1,6 +1,6 @@
 # Taxonomy v3: repair of historical `external_unresolved` observations
 
-Migration `20260929120000_add_unresolved_observation_identity_repair.sql`
+Migration `20260930193000_add_unresolved_observation_identity_repair.sql`
 adds an operator-only repair (plan `docs/plans/active/2026-09-27-taxonomy-v3.md`,
 Stage 1B). This runbook describes how to use it. **Running it against production
 needs its own explicit go-ahead** under the plan's "Production steps after

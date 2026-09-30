@@ -128,14 +128,17 @@ run a production write.
 ### Prerequisites (each its own go-ahead)
 
 1. This branch's two additive migrations are on `main` and deployed:
-   `20260929120000_add_unresolved_observation_identity_repair.sql` (Stage 1B)
-   and `20260929130000_add_taxonomy_v2_national_scientific_names.sql`
+   `20260930193000_add_unresolved_observation_identity_repair.sql` (Stage 1B)
+   and `20260930193100_add_taxonomy_v2_national_scientific_names.sql`
    (Stage 3W). The payload inserts the national-name columns and its preflight
    requires `taxonomy_v2_national_name_errors(text)`, so it aborts, changing
    nothing, if the Stage 3W migration is missing. While
    `supabase/deploy-exceptions.json` lists `20260914090000`, deploy them only
    through the deploy tree (`AGENTS.md`, steps 7–9) with
-   `--allow 20260929120000,20260929130000`; `20260914090000` stays undeployed.
+   `--allow 20260930193000,20260930193100`; `20260914090000` stays undeployed.
+   These two were committed as `20260929120000` / `20260929130000` and
+   retimed, unchanged, on 2026-09-30 to sort after the production hotfix
+   `20260930181742`; the Stage 1B/3W sparring records cite the old versions.
 2. Web and desktop: the web build carrying the Stage 3W label and the Stage 4W
    resolver ships after activation. Old web clients keep working in between
    (`search_taxa_v2` only gained trailing columns). As for 0.9.24, the cloud
@@ -220,8 +223,8 @@ current generator), then this payload, which committed, activated
 After the prerequisites, and immediately before the import in the same
 authorised window:
 
-1. `tax-2026.09.26-02` is the only active release; `20260929120000` and
-   `20260929130000` are applied and `20260914090000` is not; `nortaxa/58766`
+1. `tax-2026.09.26-02` is the only active release; `20260930193000` and
+   `20260930193100` are applied and `20260914090000` is not; `nortaxa/58766`
    does not resolve yet.
 2. **No cloud observation references a retiring concept** (plan "Production
    steps after Stage 6W", step 1; the Stage 2 check repeated before the

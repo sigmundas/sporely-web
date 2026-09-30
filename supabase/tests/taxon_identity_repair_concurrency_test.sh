@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Two-session regression for the Taxonomy v3 Stage 1B repair (20260929120000):
+# Two-session regression for the Taxonomy v3 Stage 1B repair (20260930193000):
 # a concurrent owner edit must not leave a public shared-reference
 # contribution under a taxon no live use carries any more.
 #
