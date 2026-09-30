@@ -91,6 +91,202 @@ Replay behavior is fail-closed:
 - the same release ID with different immutable hashes aborts;
 - a partial or invalid existing release aborts for manual recovery.
 
+## Release transition: `tax-2026.09.30-01` (taxonomy v3)
+
+`tax-2026.09.30-01` is the taxonomy-v3 release built and accepted in sporely-py
+Stage 6P (`9609542`, fingerprints in
+`database/taxonomy/evidence/taxonomy-v3/stage6p/release-candidate.json`). It
+replaces the active `tax-2026.09.26-02`. This section is preparation only:
+every production step below needs its own explicit go-ahead, and agents never
+run a production write.
+
+### What changes
+
+| Object | 09.26-02 | 09.30-01 |
+|---|---:|---:|
+| concepts / release taxa | 52,917 | 52,917 (identical set, identical canonical names) |
+| scientific names | 57,770 | 60,697 |
+| vernacular names | 10,645 | 13,760 |
+| authoritative external IDs | 52,884 | 56,959 |
+| of which `col_xr/col_usage_id` | 52,881 | 52,881 |
+| of which `nortaxa/nortaxa_taxon_id` | 3 | 3,256 |
+| of which `dyntaxa/dyntaxa_taxon_id` | 0 | 822 |
+| legacy namespace-lost IDs | 0 | 0 |
+| red-list assessments | 2,262 | 2,600 |
+| `preferred_scientific_name_no` / `_sv` | — | 1,992 / 822 |
+
+- **NorTaxa bridges:** the Stage 1A owner-approved `ordinary` manifest and the
+  Stage 2 reviewed supersessions. NorTaxa 56227 (*Craterellus tubaeformis*)
+  stays unresolved: its association was not approved.
+- **Dyntaxa bridges:** Stage 4P reviewed Dyntaxa ids, as full LSIDs
+  (`urn:lsid:dyntaxa.se:Taxon:<n>`); a bare number does not resolve.
+- **National names:** Stage 3P/4P display metadata; identity and
+  `canonical_scientific_name` are unchanged.
+- **Rollback:** the concept set is identical, so observations bound under
+  either release remain members after a rollback.
+
+### Prerequisites (each its own go-ahead)
+
+1. This branch's two additive migrations are on `main` and deployed:
+   `20260929120000_add_unresolved_observation_identity_repair.sql` (Stage 1B)
+   and `20260929130000_add_taxonomy_v2_national_scientific_names.sql`
+   (Stage 3W). The payload inserts the national-name columns and its preflight
+   requires `taxonomy_v2_national_name_errors(text)`, so it aborts, changing
+   nothing, if the Stage 3W migration is missing. While
+   `supabase/deploy-exceptions.json` lists `20260914090000`, deploy them only
+   through the deploy tree (`AGENTS.md`, steps 7–9) with
+   `--allow 20260929120000,20260929130000`; `20260914090000` stays undeployed.
+2. Web and desktop: the web build carrying the Stage 3W label and the Stage 4W
+   resolver ships after activation. Old web clients keep working in between
+   (`search_taxa_v2` only gained trailing columns). As for 0.9.24, the cloud
+   must serve `tax-2026.09.30-01` before the desktop release that bundles it.
+
+### Build the release directory from tracked desktop files
+
+From `sporely-py` at `9609542`, the tracked bundle
+`database/reference_data/generated/taxonomy_v2/tax-2026.09.30-01.sqlite3.gz`
+(gz SHA-256 `593cd537…0e907f`, SQLite `e4591d6b…95c20a`) is the single source.
+Use a scratch directory without symlinked components (on macOS `/private/tmp`,
+not `/tmp`; the exporter refuses symlinks):
+
+```bash
+W=/private/tmp/taxonomy-v2/w1-tax-2026.09.30-01; R=/private/tmp/taxonomy-v2/global_macrofungi_tax-2026.09.30-01
+B=database/reference_data/generated/taxonomy_v2
+.venv/bin/python -c "from pathlib import Path; from database.taxonomy import cloud_export as ce; \
+ce.run_export(artifact_gz=Path('$B/tax-2026.09.30-01.sqlite3.gz'), manifest=Path('$B/manifest.json'), \
+output_dir=Path('$W'), policy_dir=Path('database/taxonomy/policies'), generated_at='2026-09-30T12:00:00Z')"
+.venv/bin/python database/taxonomy/macrofungi_scope.py \
+  --policy database/taxonomy/policies/global-macrofungi-scope.yml \
+  --source-gz $B/tax-2026.09.30-01.sqlite3.gz --w1-dir "$W" --output-dir "$R" \
+  --desktop "$R/desktop-tax-2026.09.30-01.sqlite3" --evidence /private/tmp/taxonomy-v2/scope-evidence.json \
+  --release-id tax-2026.09.30-01 --starting-revision 79f18ae92ea8b7efad68377855dee85978e7684f
+(cd "$R" && shasum -a 256 taxonomy_export_manifest.json scope-manifest.json scoped-export.jsonl.gz desktop-tax-2026.09.30-01.sqlite3)
+```
+
+The files must equal the Stage 6P `global_macrofungi_scoped_export` record;
+stop if any differs:
+
+| File | SHA-256 |
+|---|---|
+| `taxonomy_export_manifest.json` | `ee55d0d38be12acc7cec94c402952a95d1b92b5c7f335ec34f0fb68b72a7e8ac` |
+| `scope-manifest.json` | `7ec0a202e0bd85096db70fc472a0fc21a9d496f586b1d68f517de159f45430ed` |
+| `scoped-export.jsonl.gz` | `556bef15037b152e32e36ff700e8b97c2f70abee62e804e57b06c3a5c36e729c` |
+| `desktop-tax-2026.09.30-01.sqlite3` | `1a5758d39c90071095ce5c0f44063761693667c2970afe4ecec7c726c85356a2` |
+
+The seven JSONL files are pinned in the manifest, which the generator checks
+row by row.
+
+### Prepare and hand over
+
+```bash
+node scripts/taxonomy-v2/prepare-production-release-import.mjs \
+  --release-id tax-2026.09.30-01 --release-dir "$R" \
+  --output /private/tmp/taxonomy-v2/tax-2026.09.30-01-import.sql
+```
+
+Expected table counts: `{"concepts":52917,"taxa":52917,"scientific_names":60697,
+"vernacular_names":13760,"external_ids":56959,"legacy_external_ids":0,
+"redlist":2600,"releases":1,"import_runs":1,"active_releases":1}`. Built as
+above from this branch's generator, the SQL has SHA-256
+`ed62423c5a44f0b7ed58c8de31961505135341e864b1159ca69fb764da89387f` (two
+independent generations were identical). The release row will record
+whole-export SHA-256 `c7bb4b98e8312096a4468e739bd4d13c52418804b821cf2ea5fa2b979f2cfc79`.
+Besides its representative searches, the payload proves before `COMMIT` that
+`urn:lsid:dyntaxa.se:Taxon:1` resolves to exactly 86889 (*Abortiporus
+biennis*) and the bare `1` resolves to nothing.
+
+Local proof (2026-09-30, disposable stack reset from this branch, which also
+applies the deferred `20260914090000`; the import touches none of its
+objects). The stack imported `tax-2026.09.26-02` (payload regenerated with the
+current generator), then this payload, which committed, activated
+`tax-2026.09.30-01` and retired `tax-2026.09.26-02`. Then:
+
+- `taxonomy-v3-tax-2026.09.30-01-post-activation-probes.sql` passed; with an
+  expected value altered it failed on that probe (display, resolver and count
+  variants tried);
+- a replay stopped with "identical completed release already installed";
+- the rollback drill below made `tax-2026.09.26-02` active (the probes then
+  failed on release state, as they must), and the roll-forward restored
+  `tax-2026.09.30-01`, after which the probes passed again;
+- `private.taxon_identity_repair_dry_run()` ran against the new release
+  (0 candidates on the empty local stack).
+
+### Production activation (human operator, authorised window only)
+
+After the prerequisites, verify project ref `zkpjklzfwzefhjluvhfw` and the SQL
+SHA-256 above, then run the unchanged payload with the session-only timeout
+the 09.26-02 activation needed (Session pooler, port 5432):
+
+```bash
+docker run --rm --env-file /path/to/private/production-db.env \
+  -v '/private/tmp/taxonomy-v2:/payload:ro' postgres:17 \
+  sh -c 'psql "$DATABASE_URL" -c "SET statement_timeout = 1800000" --file=/payload/tax-2026.09.30-01-import.sql'
+```
+
+Read-only pre-checks: `tax-2026.09.26-02` is the only active release;
+`20260929120000` and `20260929130000` are applied and `20260914090000` is not;
+`nortaxa/58766` does not resolve yet.
+
+### Post-activation probes (read-only)
+
+```bash
+docker run --rm --env-file /path/to/private/production-db.env \
+  -v "$PWD/supabase:/probes:ro" postgres:17 \
+  sh -c 'psql "$DATABASE_URL" --file=/probes/taxonomy-v3-tax-2026.09.30-01-post-activation-probes.sql'
+```
+
+The script runs in a `READ ONLY` transaction ending in `ROLLBACK` and raises on
+the first failure. It covers the regression table:
+
+| Species | Probes |
+|---|---|
+| *Entoloma conferendum* 7821 | NorTaxa 53482 and Dyntaxa Taxon:3957 → 7821; name, nb and sv vernacular searches |
+| *Pholiotina rugosa* 83668 | NorTaxa 52369, 58722 and Dyntaxa Taxon:3423 → 83668; `Pholiotina rugosa` and `Conocybe rugosa` find it; display Pholiotina rugosa in `no` and `sv` (sv from the approved Dyntaxa bridge, owner decision `ec231125b0c84fbea345900eba5f3c4f`), Conocybe rugosa in `en` |
+| *Craterellus tubaeformis* 620306 | NorTaxa 56227 unresolved; no national name; COL display; nb and sv vernacular searches |
+| *Conocybe vexans* / *Pholiotina vexans* 617026 | NorTaxa 58766 → 617026; "vrang ringerlehatt" finds it; display Pholiotina vexans in `no`, canonical Conocybe vexans in `sv` |
+| *Cantharellus cibarius* 168873 | NorTaxa 56210 → 168873; "kantarell" finds it |
+
+It also checks the release hashes and counts, that exactly one release is
+active, that the concept set and every canonical name equal those of
+`tax-2026.09.26-02`, that NorTaxa 56449 now resolves to 11307 (*Gloeophyllum
+odoratum*, reconciled in Stage 2), and that `nortaxa/7821` and a bare Dyntaxa
+number do not resolve.
+
+### Stage 1B repair of historical unresolved observations (after activation)
+
+Two further steps, each needing its own go-ahead, follow a passing probe run:
+
+1. **Production dry run:** `SELECT private.taxon_identity_repair_dry_run();`
+   as `postgres` (`supabase/taxonomy-v3-unresolved-observation-repair-runbook.md`,
+   step 1). Confirm `release_id` is `tax-2026.09.30-01`, and review
+   `outcome_counts`, `promotions` and `flagged`. No promotion may target a
+   NorTaxa 56227 row. Keep `plan_sha256`.
+2. **Repair:** `SELECT private.taxon_identity_repair_apply('<plan_sha256>');`
+   at a quiet time, then that runbook's post-run audit and the idempotence
+   check (a fresh dry run reports `promote = 0`).
+
+After a rollback, re-run the dry run before any apply: its plan hash covers the
+active release, so an apply planned against `tax-2026.09.30-01` is refused.
+Promotions already applied are not undone by a release rollback; they point at
+concepts present in both releases.
+
+### Rollback
+
+As for 09.26-02: make `tax-2026.09.26-02` `ready` and activate it, in one
+transaction:
+
+```sql
+BEGIN;
+UPDATE public.taxonomy_v2_releases SET status = 'ready'
+ WHERE release_id = 'tax-2026.09.26-02' AND status = 'retired';
+SELECT public.taxonomy_v2_activate_release('tax-2026.09.26-02');
+COMMIT;
+```
+
+That retires `tax-2026.09.30-01` without deleting it; the same statement with
+the IDs swapped rolls forward. The migrations are not rolled back: they are
+additive and `tax-2026.09.26-02` carries no national names.
+
 ## Release transition: `tax-2026.09.26-02` (desktop 0.9.24)
 
 Desktop 0.9.24 bundles `tax-2026.09.26-02`. It supersedes `tax-2026.09.23-01`,
