@@ -388,8 +388,9 @@ concepts present in both releases.
 - **Stage 1B apply, run 1 (owner-authorised):** committed; 6 promoted
   (NorTaxa 54098 → 98342, 54228 → 13771, 55311 → 55368, 55999 → 23371,
   58766 → 617026 ×2), 11 `no_match` left unresolved. Reference actions: 4, all
-  `old=none new=not_species` (the label `20260930213813` later split into
-  `not_registry_species`), so nothing was newly shared: 617026 and 55368
+  `old=none new=not_species` (these rows stay as recorded; from
+  `20260930213813` on, this case is labelled `not_registry_species`), so
+  nothing was newly shared: 617026 and 55368
   are species in the release but not in `taxonomy_v3.registry_concept`, which
   the share eligibility (owner path and repair alike) requires. A fresh dry run
   reports `promote = 0`.

@@ -97,6 +97,8 @@ identity is never pushed over it.
 supabase db reset --local
 docker exec -i supabase_db_zkpjklzfwzefhjluvhfw psql -U postgres -v ON_ERROR_STOP=1 -q \
   < supabase/tests/taxon_identity_repair_test.sql
+docker exec -i supabase_db_zkpjklzfwzefhjluvhfw psql -U postgres -v ON_ERROR_STOP=1 -q \
+  < supabase/tests/taxon_identity_repair_label_test.sql
 
 # Two-session race regression. It commits fixtures, so run it only right
 # after a reset:
