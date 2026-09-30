@@ -1,276 +1,352 @@
-# Stage 2: consent and visibility for shared reference contributions
+# Stage 2: consent and visibility for shared reference data
 
-Status: proposed, not started. Stage 2 of
-`docs/plans/active/2026-09-30-reference-share-eligibility.md`. An independent
-security review of this plan is required before implementation, and the owner
-decisions at the end come first. Stage 3 (widening eligibility) is out of
-scope.
+Status: proposed, revised after independent security review and general
+review of `ebb9416` (both "needs changes"; incorporated). Not started. It
+needs the owner decisions at the end, and a security review of each
+implementation candidate. Stage 2 of
+`docs/plans/active/2026-09-30-reference-share-eligibility.md`. Stage 3
+(widening eligibility) is out of scope.
 
 ## Goal
 
-A reference contribution becomes public only after its owner explicitly opts
-in to that contribution, and stays public only while the owner hasn't
-withdrawn it.
-- **Consent enforced everywhere:** the server enforces this on every path,
-  including old clients.
+Reference data (citation, measurement points, attribution) becomes public
+only after its owner explicitly opts in, and stops being public when they
+stop sharing.
+- **Enforced everywhere:** the server enforces this on every path, including
+  old clients.
 - **No automatic sharing from private or drafts:** private and draft
-  observations never create public contributions automatically.
-- **Observation visibility is not consent:** a public observation doesn't
-  count as consent.
+  observations never publish reference data automatically.
+- **Observation visibility is not consent:** a public observation is not
+  consent either.
 - **Eligibility unchanged:** it stays at the current registry species. 617026
   and 55368 stay private.
 
-## What is public today, and how it gets there
+## Two public surfaces, both without consent today
 
-A shared contribution is readable by anyone, signed in or not, through
-`public.search_public_reference_contributions` and
-`public.get_public_reference_contribution`
-(`supabase/migrations/20260830183210_add_shared_reference_contributions.sql:542-653`).
-The public landing site's species pages use both
-(`sporely-landing/src/lib/publicApi.ts:1214,1232`, `SpeciesPage.tsx`). The
-envelope carries:
-- the contributor's stable account id and username ("Sporely user" if blank
-  or containing `@`);
-- the full citation (work, authors, editors, publisher) and exports;
-- the measurement set, including projected raw points;
-- the species.
+**1. Shared contributions**
+(`supabase/migrations/20260830183210_add_shared_reference_contributions.sql`,
+cited as `:N`).
+- **How they're read:** by anyone, signed in or not, through
+  `search_public_reference_contributions` and
+  `get_public_reference_contribution`, now `*_unthrottled` behind rate-limit
+  wrappers (`20260830193144_configure_shared_reference_production_policy.sql:170-176`).
+- **Consumers:** the landing site's species pages
+  (`sporely-landing/src/lib/publicApi.ts:1214,1232`) and the desktop catalogue
+  and fork dialog (`sporely-py/database/curated_reference_forks.py:445`).
+- **Envelope contents:**
+  - `contributor.id`, the **raw auth user id** (`:173-176`), plus the
+    username label;
+  - the full citation and exports;
+  - the measurement set, with projected raw points;
+  - the species.
+- **Every revision number is served while the row is `shared`**
+  (`:622-652`).
 
-Revisions are immutable and kept indefinitely.
+**2. Observation references**
+(`20260828172243_…:118-202`). `search_public_observation_references` and
+`get_public_observation_references` return each use's `snapshot_json`
+(citation and measurement data) for every **public, non-draft observation**.
+No contribution and no consent is involved. This is "public observation
+equals consent", which the owner ruled out.
 
-Every path that creates or re-shares one runs without an owner action:
+### Paths that create, re-share or expose
 
-| Path | Trigger | Today |
+| Path | Where | Owner action today? |
 |---|---|---|
-| Reference-use sync | `observation_reference_use_shared_contribution_trg` (`:937-940`) → `refresh_shared_reference_for_use_row` (`:782-823`) → `share_reference_contribution_for_owner` (`:190-411`) | creates or re-shares on every insert/update of a use |
-| Source edits | `reference_measurement_set_…_trg`, `reference_treatment_…_trg`, `reference_work_…_trg` (`:942-952`) | a revision bump publishes a new public revision |
-| Taxon change | `observation_taxon_shared_contribution_trg` (`:954`) → `refresh_shared_references_for_observation_taxon` (`:825-889`) | withdraws under the old taxon and shares under the new one |
-| Stage 1B repair | `_taxon_identity_repair_reconcile_references` (`20260930213813`) | shares after a promotion |
-| Historical backfill | `20260831150330` | ran once at deploy; the function no longer exists |
-| Explicit RPC | `public.share_reference_contribution` (`:413-435`), granted to `authenticated` | the desktop has a wrapper (`sporely-py/utils/cloud_sync.py:16461`) that no UI calls |
+| Reference-use sync trigger | `:937-940` → `:892-935` → `refresh_shared_reference_for_use_row` `:782-823` → `share_reference_contribution_for_owner` `:190-411` | no |
+| Source-edit triggers (set `:726`, treatment and work `:751`) | revision bump publishes a new revision | no |
+| Taxon trigger | `:825-889`, `:954-956` | no |
+| Stage 1B reconcile | `20260930213813:74-147` (raises on unknown statuses) | operator |
+| Historical backfill | `20260831150330` (ran once; function dropped) | no |
+| Explicit RPC | `share_reference_contribution_unthrottled`; desktop wrapper `cloud_sync.py:16461`, called by no UI | none exists |
+| Observation references | `20260828172243:118-202` | no (public observation) |
+| Curation submission | separate workflow with its own explicit rights confirmation (`20260829145939:1057-1059`) | yes, unchanged |
 
-Neither path checks the observation's visibility or draft state. Re-sharing
-also clears `withdrawn_at` (`:382-387`), so **a withdrawn contribution
-silently comes back on the owner's next sync or edit**. Withdrawal exists
-(`public.withdraw_reference_contribution`, `:437-467`, owner-only), but no UI
-in either client calls it. The web app has no reference features at all.
-Only the desktop creates reference uses.
+More gaps in today's code:
+- **Reactivation:** re-sharing clears `withdrawn_at` (`:382-387`), so
+  withdrawal is undone by the next sync or edit.
+- **Owner-only withdrawal:** the use trigger returns early unless
+  `auth.uid()` is the owner (`:908-910`), so service-role detaches and
+  cascade deletes never withdraw.
+- **Draft changes:** no trigger watches `observations.is_draft`, `visibility`
+  or observation deletion.
+- **Locking:** no path but the share core takes the advisory lock
+  (`:229-232`), and the qualifying-use read (`:249-260`) doesn't lock uses or
+  observations.
+- **Moderation:** hiding an observation (`supabase/functions/admin-ops/adminActions.ts:444-451`)
+  doesn't hide the contributions it backs.
+- **No owner UI:** withdrawal exists but no client calls it. The web app has
+  no reference features; only the desktop creates reference uses.
 
 ## Design
 
 ### Consent record
 
-- **Unit:** consent covers one contribution key, `(owner_id,
-  source_measurement_set_id, sporely_taxon_id)`, the same key contributions
-  already use.
-  - *Per-account* would publish future sources and species the owner never
-    saw.
-  - *Per-set* breaks when a taxon changes.
-- **On the contribution row:** `consented_at`, `consent_version`, and
-  `consent_client` (`desktop`/`web`).
-  - Invariant: `CHECK (status <> 'shared' OR consented_at IS NOT NULL)`.
-  - Withdrawal sets `consented_at = NULL`.
-- **Audit:** `private.shared_reference_consent_events`, append-only, one row
-  per grant, withdrawal or system withdrawal: contribution, event, consent
-  version, client, time, reason. No copy of user data beyond the ids already
-  in the contribution row.
+- **Unit:** consent covers one key, `(owner_id, source_measurement_set_id,
+  sporely_taxon_id)`, the key contributions already use.
+- **New columns** on `private.shared_reference_contributions`:
+  - `consented_at`, `consent_version`, `consent_client` (the client is
+    informational and not trusted);
+  - `consent_first_revision`, the first revision of the current consent
+    period.
+- **CHECKs:**
+  - `status <> 'shared' OR consented_at IS NOT NULL`;
+  - `consented_at`, `consent_version` and `consent_first_revision` are all set
+    or all NULL.
+- **Withdrawal** clears all four. History lives in the event log.
+- **Event log:** `private.shared_reference_consent_events`, append-only,
+  postgres-only. It records the contribution id, event (`granted`,
+  `withdrawn_by_owner`, `withdrawn_by_system`), reason, consent version and
+  time. **No `owner_id`**, so account deletion leaves nothing to scrub. The
+  anonymise trigger (`:516-540`) records a system event.
 - **Consent texts:** `private.reference_share_consent_texts` (`version`,
-  `text_sha256`, `active`). The grant RPC accepts only the active version, and
-  clients show exactly that text. A wording change adds a version, so old
-  consent never covers new disclosure text.
+  `locale`, `text`, `text_sha256`, `active`). The text lists:
+  - what becomes public;
+  - that edits publish new revisions within the limits below;
+  - what stopping sharing cannot undo;
+  - the private-observation warning;
+  - a rights confirmation, as in curation;
+  - that copies other users make become their own sets, which they can share
+    under their own name.
+
+### Public reads serve only consented data
+
+- **Contributions:** both reads serve only rows with `status = 'shared' AND
+  consented_at IS NOT NULL`, and only revisions `>= consent_first_revision`.
+  Revisions from before a withdrawal, including revision 1 of today's two
+  unconsented rows, are never served again, even after the owner shares
+  again.
+- **Observation references:** they return a use's reference data only when
+  that use's set has a consented, shared contribution under the observation's
+  exact effective taxon. They serve that contribution's current revision, not
+  the private `snapshot_json`. Otherwise the reference data is omitted
+  (decision E).
+- **Contributor:** new revisions set `contributor.id` to NULL and keep only
+  the label. Both clients already accept a NULL id
+  (`curated_reference_forks.py:328-332`,
+  `sporely-landing/src/lib/publicCuratedReferences.ts:87`). See decision F.
 
 ### Granting
 
-- **New RPC:** `public.share_reference_contribution_with_consent(set_id,
-  taxon_id, expected revisions…, consent_version)`, granted to
-  `authenticated`, owner derived from `auth.uid()`. It is the only path that
-  can set `consented_at` or move a row to `shared`.
-- **Checks, all server-side:**
-  - the three source revisions match what the client displayed;
-  - active consent version;
-  - registry species (eligibility unchanged);
-  - at least one live use of that set on a **non-draft** observation of that
-    exact taxon;
-  - the account isn't banned or deleted.
+- **Structure:** a private core function takes a mode (`grant`/`refresh`).
+  The existing 6-argument `share_reference_contribution_for_owner` stays as a
+  wrapper that calls it in `refresh` mode, so every existing caller (listed
+  below) keeps its signature. Only `grant` may create a row, set consent, or
+  move a withdrawn row back to `shared` (which starts a new consent period).
+- **New owner RPC:** `public.share_reference_contribution_with_consent(set_id,
+  taxon_id, expected revisions…, consent_version, locale)`, rate-limited via
+  `consume_shared_reference_request`, granted to `authenticated`, owner from
+  `auth.uid()`. Checks, all under the locks below:
+  - the source revisions match what the client displayed;
+  - the consent version is active;
+  - the species is in the registry;
+  - there is at least one live use on a **qualifying** observation of that
+    exact taxon (decision B);
+  - the account isn't banned or deleted;
+  - `hidden_at` is never cleared.
+- **The old RPC:** `share_reference_contribution_unthrottled` returns
+  `consent_required` and changes nothing.
+- **Read RPCs:**
+  - `public.list_my_shared_reference_contributions()`, owner-only,
+    rate-limited, with status, species, current revision and dates;
+  - `public.get_reference_share_consent_text(locale)`, which returns the
+    active text.
 
-  The existing advisory and row locks (`:229-232,353-358`) cover the whole
-  check-and-write.
-- **The old RPC:** `public.share_reference_contribution` stays callable for
-  old clients but returns `consent_required` and never creates, re-shares or
-  revises anything.
+  Add all new RPCs to the desktop allowlist (`cloud_sync.py:2236-2240`) and to
+  `test_stage6l_cross_repository_contract.py`.
 
-### Automatic paths
+### Automatic paths: refresh or withdraw, never publish anew
 
-- **Never create or reactivate:** the use trigger, the source-edit triggers,
-  the taxon trigger and Stage 1B never create a contribution and never
-  reactivate a withdrawn one. `share_reference_contribution_for_owner` refuses
-  `consent_required` unless the row is `shared` with `consented_at` set.
-- **Source edits** on a consented, shared contribution publish a new revision
-  only while a qualifying non-draft use remains (decision C below).
-  Otherwise they withdraw.
-- **Losing the qualifying use:** when the last qualifying use goes away
-  (detached, observation deleted, turned into a draft, or the taxon changed),
-  the contribution is withdrawn and the event is recorded. A later return
-  does not re-share; that needs new consent.
-- **Taxon change:** withdraw under the old key as today. The new key needs its
-  own consent.
-- **Stage 1B:** records `consent_required` instead of sharing (next to
-  `not_registry_species` and `not_species`).
+- **Use, source and taxon triggers, and Stage 1B:** call `refresh` only. It
+  may add a revision to a row that is `shared` and consented, within the
+  revision limits below. Otherwise it does nothing or withdraws.
+- **Stage 1B reconcile:** changes in the same migration to record
+  `consent_required` rather than raising.
+- **Revision limits (decision C):** an automatic revision is published only
+  if the snapshot's data kinds stay within what `consent_version` disclosed:
+  the same snapshot schema version, and no new raw-point or free-text fields.
+  Otherwise the row is withdrawn with reason `consent_scope_exceeded`, and the
+  owner must opt in again. This covers the pending v2 snapshots in
+  `20260914090000`.
+- **Withdrawal on losing the qualifying use**, whoever makes the change:
+  - A new `private.withdraw_unqualified_contributions(owner, set)` withdraws
+    a shared row that has no qualifying use left and records a system event.
+  - Called from the use trigger (all callers, including service role and
+    cascade deletes), and from new triggers: `AFTER UPDATE OF is_draft,
+    visibility` and `AFTER DELETE` on `public.observations`.
+  - Moderation hide (`admin-ops/adminActions.ts:444-451`) only sets
+    `visibility = 'private'`. Under decision B's recommendation a private
+    observation still qualifies, so the admin action must also call a
+    postgres-only `private.withdraw_contributions_for_observation(id)` to
+    withdraw every contribution it backs, recorded with reason `moderation`.
+  - Never rate-limited, never inside an error-swallowing block.
+- **Locking:** every path that grants, refreshes or withdraws takes the same
+  advisory lock on `(owner_id, source_measurement_set_id)` first, then
+  re-reads uses and observations with `FOR SHARE`, then decides. This covers
+  the use, observation, source and taxon triggers, Stage 1B, grant and
+  withdraw. The withdraw RPC gains the advisory lock too; today it only locks
+  the row (`:450-451`).
 
-### Visibility
+### Visibility (decision B)
 
-- **Drafts:** never qualify, for granting or for keeping a contribution
-  shared.
-- **Private observations:** may back an **explicit** share (see decision B)
-  if the consent screen warns that the contribution will still publicly
-  reveal, under the owner's name, that they have identified this species,
-  even though the observation stays private. Automatic sharing from a private
-  observation is impossible, because nothing shares automatically any more.
+- **Drafts:** never qualify.
+- **Recommended:** explicit sharing is allowed from a private or
+  `friends` non-draft observation. The consent screen warns that the
+  contribution still reveals publicly, under the owner's label, that they have
+  identified this species.
+- **Alternative:** only public non-draft observations qualify.
 
-### Withdrawal
-
-- **Web and desktop** get a "My shared references" list showing status,
-  species, revision and shared date, with **Stop sharing**. It calls the
-  existing `withdraw_reference_contribution`.
-- **What withdrawal does:** public search and the envelope read stop at once;
-  a withdrawn row returns only a `{status: 'withdrawn'}` stub (`:627-638`).
-- **What it cannot undo**, stated in the consent text and in
-  `docs/supabase-sync-contract.md`:
-  - copies other users already made into their own references
-    (`sporely-py/database/curated_reference_forks.py`) belong to them, and
-    recalling them would mean editing other users' data;
-  - retained immutable revision rows, which are private and needed for frozen
-    evidence;
-  - anything cached by third parties while it was public.
-
-### Client changes
+### Owner UI
 
 - **Desktop (`sporely-py`):**
-  - a **Share publicly…** action on a reference set that is attached to an
-    eligible observation;
-  - a consent dialog showing the active consent text: what becomes public
-    (attribution, citation, measurement points, species), that edits publish
-    new revisions, what withdrawal cannot undo, and the private-observation
-    warning;
+  - "Share publicly…" on an attached reference set, with the consent dialog
+    showing the server text;
   - "My shared references" with Stop sharing.
 
-  Sync keeps working unchanged: an unconsented use simply stays private.
-- **Web (`src/`):** "My shared references" with Stop sharing. A share action
-  only if web ever gains reference features, which are out of scope.
-- **Contract:** update `docs/supabase-sync-contract.md:5-15`: sharing
-  requires explicit per-contribution consent; withdrawal is final until new
-  consent.
+  Sync is unchanged: it never calls share.
+- **Web (`src/`):** "My shared references" with Stop sharing (decision D).
+- **Stop sharing:** calls `withdraw_reference_contribution`. The UI and
+  consent text say what stopping cannot undo:
+  - copies other users already made (`curated_reference_forks.py:540-620`);
+  - retained private revision rows;
+  - anything cached by third parties.
 
-## The 2 existing contributions
+## Existing data
 
 Production, read-only, 2026-09-30:
-- **Owner and taxon:** both belong to 1 owner and are filed under taxon
-  34615, shared 2026-09-06, with 1 revision each. They are not hidden.
-- **Carrying observations:** one public, and one **public but draft**.
-- **Copies:** no other user's use or measurement set mentions either
-  contribution id, and there are no policy events.
+- **Contributions:** 2 shared contributions from 1 owner under taxon 34615,
+  shared 2026-09-06, 1 revision each, not hidden.
+- **Carrying observations:** one public and one **public but draft**.
+- **Copies:** no other user's use or set mentions either id.
 
-**Recommendation: withdraw both in the Stage 2 migration**, recorded as system
-withdrawal with reason `consent_missing`. Neither had consent, and one breaks
-the draft rule outright.
-- **Why this doesn't conflict with decision 4:** withdrawal reduces exposure
-  and manufactures no consent.
-- **Reversible for the owner:** they can re-share with one explicit opt-in.
-  Leaving the contributions public cannot be undone the same way.
-- **Needs authorization:** this is a production data write and needs explicit
-  authorization at deploy time (AGENTS.md "Production writes by agents"). The
-  migration's dry-run count must be exactly 2.
+**Recommendation: withdraw both** (decision A). In the Stage 2a migration, in
+one transaction:
+1. `LOCK TABLE`;
+2. replace the functions;
+3. `UPDATE … SET status = 'withdrawn', withdrawn_at = now() WHERE status =
+   'shared' AND consented_at IS NULL`, with system events reason
+   `consent_missing`;
+4. add the CHECKs.
 
-## Threats and privacy analysis
+The migration is count-agnostic, so local and CI resets work. The production
+preflight asserts exactly 2 before the push. This withdraws; it publishes
+nothing. With the revision rule above, re-sharing later never re-exposes
+revision 1. The deploy is a production data write and needs explicit
+authorization at deploy time.
 
-| Threat | Mitigation |
-|---|---|
-| Old or buggy client publishes without consent | Only the new RPC can grant, and every other path refuses `consent_required`. The consent version is checked server-side; no client flag is trusted |
-| A client calls the new RPC without showing the text | The RPC is the only proof. It needs the active version, matching displayed revisions and an authenticated owner. Residual risk: a modified client can still skip the dialog for its own owner's data. This is accepted, because the owner is the one consenting |
-| Withdrawn contribution comes back on sync or edit | Removed: nothing but the grant RPC sets `shared`. Tested |
-| Race between grant and withdraw | Same advisory and row lock order. The last committed action wins, and both are audited |
-| Edits publish content the owner didn't review | Disclosed in the consent text. Alternatively, require re-consent per revision (decision C) |
-| Species revealed from a private observation | Explicit consent with a warning (decision B), or forbid (B alternative) |
-| Draft observations | Never qualify, and losing the last qualifying use withdraws |
-| Banned, blocked or deleted accounts | Unchanged: `account_unavailable`, read filters, anonymisation (`:233-239,516,570-579`). Consent columns stay for audit after anonymisation |
-| Consent log reveals behaviour | The log is private, postgres-only, with no grants, and holds no data beyond ids |
-| Copies by other users | Cannot be recalled; disclosed before consent |
-| Sensitive species (for example *Psilocybe semilanceata*) | No widening in this stage, and explicit consent with a warning. Not relevant to the 2 existing contributions |
+## Implementation stages
 
-## Migration and rollout
+**2a: fail closed (server only).** Everything above except granting:
+- the consent columns, CHECKs, event log and texts table;
+- the reads restricted to consented data;
+- observation references gated;
+- contributor id NULL in new revisions;
+- all automatic paths refresh-only or withdraw;
+- withdrawal triggers and locking;
+- the old RPC returns `consent_required`;
+- the existing rows withdrawn.
 
-- **Server migration** (one, deployed via `scripts/supabase-deploy-tree.mjs`):
-  - consent columns and CHECK;
-  - the events table and the consent-texts table with version 1;
-  - the new RPC;
-  - `CREATE OR REPLACE` of `share_reference_contribution_for_owner`, the old
-    RPC, the three triggers' functions, `refresh_shared_reference_for_use_row`,
-    `refresh_shared_references_for_observation_taxon` and the Stage 1B
-    reconcile helper;
-  - `REVOKE ALL … FROM PUBLIC, anon, authenticated, service_role` on every new
-    private function.
-- **Data step:** withdraw the 2 existing rows, if approved (see above). The
-  CHECK is added after that step, so the migration can't fail on the existing
-  rows.
-- **Order:**
-  1. The server migration ships first. Old desktop builds keep syncing and
-     simply stop publishing.
-  2. Then the desktop release with the share dialog and list.
-  3. Then the web list.
-- **Landing site:** no change. Withdrawn rows disappear from its species pages.
-- **Rollback:** a full revert to the pre-Stage-2 function bodies is not
-  allowed. Those bodies re-share on the next sync, which would re-publish the
-  withdrawn rows without consent. Instead:
-  - a rollback migration may drop or disable the new grant RPC and the client
-    features;
-  - it must keep the consent gate in `share_reference_contribution_for_owner`,
-    so every path fails closed and nothing becomes public;
-  - the new columns and tables stay, since they are inert;
-  - the 2 withdrawn rows stay withdrawn.
+After 2a nothing becomes public, and old clients keep syncing.
 
-  This leaves sharing off, not back at automatic.
+**2b: opt-in.** The grant RPC, the list and consent-text RPCs, the desktop
+dialog and list, and the web list. Ships after 2a is deployed and verified.
+The desktop release that calls the new RPCs must not ship before the server
+has them.
+
+Each is its own candidate, reviewed and security-reviewed, deployed via
+`scripts/supabase-deploy-tree.mjs`.
+
+**Rollback:** never revert to the pre-2a bodies, since they re-share on the
+next sync. Rolling back 2b drops or disables the grant RPC and the client
+features and keeps 2a, so sharing is off. Rolling back 2a means a new
+migration that keeps the consent gate and the reads restricted. Columns and
+tables are inert and stay. Withdrawn rows stay withdrawn.
 
 ## Tests
 
-- **`supabase/tests/shared_reference_contributions_test.sql`:**
-  - use sync, source edit, taxon change and the old RPC each create nothing
-    without consent;
-  - the grant RPC shares only with the active version, matching revisions, a
-    registry species and a non-draft use;
-  - a draft-only use refuses;
-  - a private non-draft use is allowed or refused per decision B;
-  - withdraw, then sync, then edit: the contribution stays withdrawn;
-  - losing the last qualifying use withdraws;
-  - the audit events are exact;
-  - the CHECK invariant holds;
-  - execution surface: the grant RPC is callable by `authenticated` only, and
-    the helpers by nobody.
-- **`shared_reference_backfill_test.sql`:** replaying the old backfill logic
-  creates nothing without consent.
-- **`shared_reference_production_policy_test.sql`:** rate limits cover the new
-  RPC.
-- **`taxon_identity_repair_test.sql`, `taxon_identity_repair_label_test.sql`:**
-  a promotion records `consent_required` and shares nothing.
-- **Concurrency:** a grant/withdraw race and a grant/detach race, following the
-  pattern of `taxon_identity_repair_concurrency_test.sh`.
-- **Data step:** the withdrawal of existing rows touches exactly the
-  unconsented shared rows, and a second run touches none.
-- **Desktop (`sporely-py`):** the dialog renders the active text, the share
-  call passes the displayed revisions and version, the list withdraws, and
-  sync never calls share.
-- **Web:** the list renders and Stop sharing calls withdraw.
-- **Landing:** a withdrawn contribution is absent (existing
-  `CuratedReferencesSection.test.tsx`, `publicApi.curatedReferences.test.ts`).
+**2a**
+- In `supabase/tests/shared_reference_contributions_test.sql`:
+  - use sync, source edit, taxon change and the old RPC create nothing;
+  - a withdrawn row stays withdrawn through sync and edits;
+  - draft flip, visibility change, observation delete, service-role detach and
+    moderation hide each withdraw, with exact events;
+  - public reads serve only consented rows and revisions
+    `>= consent_first_revision`;
+  - `contributor.id` is NULL in new revisions;
+  - the CHECKs hold;
+  - the execution surface.
+- Observation references: public reads omit reference data without a
+  consented contribution (extend the existing observation-reference test, or
+  add one).
+- Data step: withdraws exactly the unconsented shared rows; a second run
+  changes nothing.
+- Update fixtures that expect automatic sharing:
+  - `taxon_identity_repair_test.sql:146-148,204`;
+  - `taxon_identity_repair_concurrency_test.sh:99-100`;
+  - `identification_v2_rpc_regression_test.sql:94-110`;
+  - `retired_resolution_repair_test.sql`;
+  - `taxon_identity_repair_label_test.sql` (records `consent_required`).
+- `shared_reference_backfill_test.sql`: backfill semantics create nothing.
+- Concurrency: detach, draft flip and taxon change, each racing a refresh,
+  following the pattern of `taxon_identity_repair_concurrency_test.sh`.
+- Landing: withdrawn rows and omitted observation references render
+  correctly (`CuratedReferencesSection.test.tsx`,
+  `publicApi.curatedReferences.test.ts`).
+
+**2b**
+- Grant succeeds only with:
+  - the active version and locale;
+  - matching revisions;
+  - a registry species;
+  - a qualifying use per decision B.
+- Grant never clears `hidden_at`.
+- Re-grant after withdrawal starts a new consent period, and the old
+  revisions stay unserved.
+- A revision beyond the consent scope withdraws.
+- Rate limits apply to the new RPCs
+  (`shared_reference_production_policy_test.sql`).
+- The list is owner-only.
+- Grant/withdraw and grant/draft races.
+- Desktop:
+  - the dialog shows the server text;
+  - the share call passes displayed revisions, version and locale;
+  - the list withdraws;
+  - sync never calls share;
+  - the allowlist contract test passes.
+- Web: the list and Stop sharing.
+
+## Threats
+
+| Threat | Mitigation |
+|---|---|
+| Old or buggy client publishes | Only `grant` publishes; every other path is refresh-only or withdraws; consent version checked server-side |
+| A client grants without showing the text | The RPC is the proof (active version, displayed revisions, the owner's own session). A modified client can skip the dialog only for its own owner's data. Accepted |
+| Reactivation or old revisions re-exposed | Only `grant` re-shares, and the reads start at `consent_first_revision` |
+| Grant races detach, draft or taxon change | One advisory lock per owner+set, then re-check with `FOR SHARE` |
+| Non-owner or cascade changes leave a share public | Withdrawal is caller-independent and not swallowed |
+| Edits publish more than was disclosed | The revision scope limit withdraws |
+| Public observation leaks reference data | Observation references gated on consent (decision E) |
+| Linking a share to the owner's other data | `contributor.id` NULL (decision F); warning in the consent text |
+| Draft, private or friends observations | Drafts never qualify; private and friends only by explicit share with a warning (B) |
+| Moderation hide of the backing observation | Treated as losing the qualifying use |
+| Account deletion | Existing anonymisation; the event log holds no owner id |
+| Copies by other users | Cannot be recalled; disclosed, including re-sharing under their name |
+| Consent-text drift | Versioned per locale; old consent never covers new text |
 
 ## Owner decisions needed
 
-- **A. The 2 existing contributions:** withdraw both in the migration
-  (recommended), or only the one carried by a draft observation?
-- **B. Private observations:** may they back an explicit share, with the
-  warning (recommended, since sharing is a separate action), or must the
-  observation be public?
-- **C. Source edits after consent:** publish new revisions automatically,
-  covered by the original consent and disclosed (recommended), or require
-  re-consent for every revision?
-- **D. Web:** a list with Stop sharing only (recommended, since web has no
-  reference features), or should this stage also add reference-sharing
-  features to web?
+- **A. The 2 existing contributions:** withdraw both in 2a (recommended). The
+  alternative, withdrawing only the draft-carried one, would leave an
+  unconsented row that breaks the new CHECK. Keeping it would need a
+  recorded consent that the owner never gave.
+- **B. Private and friends observations:** may they back an explicit share,
+  with the warning (recommended), or only public non-draft observations?
+- **C. Automatic revisions after consent:** allowed within the consent scope
+  limits (recommended), or re-consent for every revision?
+- **D. Web:** a list with Stop sharing only (recommended), or reference
+  features on web too?
+- **E. Observation references:** show reference data on public observations
+  only when a consented contribution backs it (recommended), or never show it
+  there?
+- **F. Contributor id:** remove the raw account id from new public envelopes
+  (recommended), or keep it and disclose it?
