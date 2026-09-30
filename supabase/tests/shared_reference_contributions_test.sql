@@ -1,6 +1,56 @@
--- Cross-user shared-reference contribution contract.
+-- Shared-reference contribution contract after Stage 2a (fail closed):
+-- nothing becomes public without a consented contribution.
+--
+-- Consented rows are seeded through the grant mode of the private core
+-- (private.reference_contribution_share_core), which only postgres can
+-- execute in 2a; the 2b consent RPC will be its only public entry point.
 
 BEGIN;
+
+CREATE FUNCTION pg_temp.claims(p_sub uuid, p_role text) RETURNS void
+LANGUAGE sql AS $$
+  SELECT set_config('request.jwt.claims',
+    CASE WHEN p_role IS NULL THEN ''
+         ELSE json_build_object('sub',p_sub::text,'role',p_role)::text END, true)
+$$;
+
+CREATE FUNCTION pg_temp.fixture_grant(p_owner uuid, p_set uuid, p_taxon integer, p_locale text DEFAULT 'en')
+RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE r record;
+BEGIN
+  SELECT w.revision AS w, t.revision AS t, m.revision AS m INTO r
+    FROM public.reference_measurement_sets m
+    JOIN public.reference_taxon_treatments t ON t.user_id=m.user_id AND t.id=m.taxon_treatment_id
+    JOIN public.reference_works w ON w.user_id=t.user_id AND w.id=t.reference_work_id
+   WHERE m.user_id=p_owner AND m.id=p_set;
+  RETURN private.reference_contribution_share_core(
+    'grant',p_owner,p_set,p_taxon,r.w,r.t,r.m,1,p_locale,'fixture');
+END
+$$;
+
+CREATE FUNCTION pg_temp.last_event_id() RETURNS bigint
+LANGUAGE sql AS $$ SELECT coalesce(max(id),0) FROM private.shared_reference_consent_events $$;
+
+-- Asserts the row is withdrawn with a cleared consent record and that exactly
+-- one event (the expected one) was written since p_after.
+CREATE FUNCTION pg_temp.assert_withdrawn(p_label text, p_id uuid, p_event text, p_after bigint)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE c private.shared_reference_contributions%ROWTYPE; v_events text[];
+BEGIN
+  SELECT * INTO c FROM private.shared_reference_contributions WHERE id=p_id;
+  IF c.status <> 'withdrawn' OR c.withdrawn_at IS NULL OR c.consented_at IS NOT NULL
+     OR c.consent_version IS NOT NULL OR c.consent_client IS NOT NULL
+     OR c.consent_first_revision IS NOT NULL OR c.consent_scope IS NOT NULL THEN
+    RAISE EXCEPTION '%: not withdrawn with a cleared consent record: %', p_label, to_jsonb(c);
+  END IF;
+  SELECT array_agg(e.event||':'||e.reason ORDER BY e.id) INTO v_events
+    FROM private.shared_reference_consent_events e
+   WHERE e.contribution_id=p_id AND e.id>p_after;
+  IF v_events IS DISTINCT FROM ARRAY[p_event] THEN
+    RAISE EXCEPTION '%: expected exactly event %, got %', p_label, p_event, v_events;
+  END IF;
+END
+$$;
 
 DO $$
 DECLARE
@@ -9,10 +59,17 @@ DECLARE
   taxon_id constant integer := 2100000901;
   other_taxon_id constant integer := 2100000902;
   genus_taxon_id constant integer := 2100000903;
+  set_1 constant uuid := '73000000-0000-4000-8000-000000000001';
+  set_2 constant uuid := '73000000-0000-4000-8000-000000000002';
+  use_1 constant uuid := '74000000-0000-4000-8000-000000000001';
+  use_3 constant uuid := '74000000-0000-4000-8000-000000000003';
   contribution_1 uuid;
   contribution_2 uuid;
   first_envelope jsonb;
   result jsonb;
+  v_after bigint;
+  v_rev integer;
+  v_case record;
 BEGIN
   INSERT INTO auth.users(id,aud,role,email,raw_user_meta_data,created_at,updated_at) VALUES
     (user_1,'authenticated','authenticated','shared-one@example.invalid','{}',now(),now()),
@@ -30,8 +87,10 @@ BEGIN
   INSERT INTO public.observations(
     id,user_id,date,visibility,is_draft,resolved_sporely_taxon_id
   ) OVERRIDING SYSTEM VALUE VALUES
-    (940000001,user_1,current_date,'private',false,taxon_id),
-    (940000002,user_2,current_date,'private',false,taxon_id);
+    (940000001,user_1,current_date,'public',false,taxon_id),
+    (940000002,user_2,current_date,'public',false,taxon_id),
+    (940000003,user_1,current_date,'public',false,taxon_id),
+    (940000004,user_1,current_date,'private',false,taxon_id);
 
   INSERT INTO public.reference_works(
     user_id,id,type,authors_json,title,year,doi,short_label,revision
@@ -53,25 +112,30 @@ BEGIN
     user_id,id,taxon_treatment_id,character,raw_text,data_kind,
     length_core_min,length_core_max,width_core_min,width_core_max,revision
   ) VALUES
-    (user_1,'73000000-0000-4000-8000-000000000001',
-     '72000000-0000-4000-8000-000000000001','spore_size','8–10 × 5–6 µm',
+    (user_1,set_1,'72000000-0000-4000-8000-000000000001','spore_size','8–10 × 5–6 µm',
      'range',8,10,5,6,1),
-    (user_2,'73000000-0000-4000-8000-000000000002',
-     '72000000-0000-4000-8000-000000000002','spore_size','9–11 × 9–12 µm',
+    (user_2,set_2,'72000000-0000-4000-8000-000000000002','spore_size','9–11 × 9–12 µm',
      'range',9,11,9,12,1);
   INSERT INTO public.observation_reference_uses(
     user_id,id,observation_id,reference_measurement_set_id,role,
     reference_revision,snapshot_json
   ) VALUES
-    (user_1,'74000000-0000-4000-8000-000000000001',940000001,
-     '73000000-0000-4000-8000-000000000001','compared',1,
-     private.reference_canonical_snapshot(user_1,'73000000-0000-4000-8000-000000000001')),
-    (user_2,'74000000-0000-4000-8000-000000000002',940000002,
-     '73000000-0000-4000-8000-000000000002','compared',1,
-     private.reference_canonical_snapshot(user_2,'73000000-0000-4000-8000-000000000002'));
+    (user_1,use_1,940000001,set_1,'compared',1,
+     private.reference_canonical_snapshot(user_1,set_1)),
+    (user_2,'74000000-0000-4000-8000-000000000002',940000002,set_2,'compared',1,
+     private.reference_canonical_snapshot(user_2,set_2)),
+    (user_1,use_3,940000003,set_1,'compared',1,
+     private.reference_canonical_snapshot(user_1,set_1)),
+    (user_1,'74000000-0000-4000-8000-000000000004',940000004,set_1,'compared',1,
+     private.reference_canonical_snapshot(user_1,set_1));
+  INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope) VALUES
+    (1,'en','fixture consent text',encode(sha256(convert_to('fixture consent text','UTF8')),'hex'),true,
+     '{"snapshot_schema_versions":[1,2],"data_kinds":["raw_points","free_text","measurement_details"]}'),
+    (1,'nb','fixture samtykke uten punkter',encode(sha256(convert_to('fixture samtykke uten punkter','UTF8')),'hex'),true,
+     '{"snapshot_schema_versions":[1],"data_kinds":["free_text"]}');
 
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('sub',user_1::text,'role','authenticated')::text,true);
+  -- ── 1. Use sync, the old RPC, source edits and taxon changes create nothing ──
+  PERFORM pg_temp.claims(user_1,'authenticated');
   SET LOCAL ROLE authenticated;
   SELECT public.sync_observation_reference_use(
     pg_catalog.jsonb_build_object(
@@ -81,267 +145,474 @@ BEGIN
       'reference_revision',u.reference_revision,'snapshot_json',u.snapshot_json
     ),u.row_version,'current'
   ) INTO result
-  FROM public.observation_reference_uses u
-  WHERE u.id='74000000-0000-4000-8000-000000000001';
+  FROM public.observation_reference_uses u WHERE u.id=use_1;
   IF result->>'status' <> 'updated' THEN
-    RAISE EXCEPTION 'user 1 synced use was not accepted: %', result;
+    RAISE EXCEPTION 'owner use sync was not accepted: %', result;
   END IF;
-  SELECT item->>'contribution_id',item INTO contribution_1,first_envelope
-    FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL) item;
-  IF contribution_1 IS NULL THEN
-    RAISE EXCEPTION 'synced exact-taxon use did not become discoverable';
+  result := public.share_reference_contribution(set_1,taxon_id,1,1,1);
+  IF result->>'status' <> 'consent_required' THEN
+    RAISE EXCEPTION 'old share RPC did not return consent_required: %', result;
   END IF;
-
-  -- A mismatched exact taxon is not inferred from names or citation metadata.
-  result := public.share_reference_contribution(
-    '73000000-0000-4000-8000-000000000001',other_taxon_id,1,1,1
-  );
-  IF result->>'status' <> 'exact_taxon_use_required' THEN
-    RAISE EXCEPTION 'unassociated taxon was shared: %', result;
-  END IF;
-
   RESET ROLE;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('sub',user_2::text,'role','authenticated')::text,true);
-  SET LOCAL ROLE authenticated;
-  IF (SELECT count(*) FROM public.search_public_reference_contributions(
-       taxon_id,50,NULL,NULL)) <> 1 THEN
-    RAISE EXCEPTION 'user 2 could not discover user 1 contribution';
-  END IF;
-  IF EXISTS (
-    SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL) item
-     WHERE item->'contributor'->>'label' <> 'shared_one'
-       OR item->'snapshot'->>'raw_text' <> '8–10 × 5–6 µm'
-       OR item::text LIKE '%940000001%'
-       OR item::text LIKE '%71000000-0000-4000-8000-000000000001%'
-       OR item::text LIKE '%72000000-0000-4000-8000-000000000001%'
-  ) THEN
-    RAISE EXCEPTION 'public contribution attribution/evidence/privacy projection failed';
-  END IF;
-  result := public.share_reference_contribution(
-    '73000000-0000-4000-8000-000000000001',taxon_id,1,1,1
-  );
-  IF result->>'status' <> 'exact_taxon_use_required' THEN
-    RAISE EXCEPTION 'user 2 could mutate user 1 contribution: %', result;
+  UPDATE public.reference_measurement_sets SET revision=revision, row_version=row_version+1
+   WHERE user_id=user_1 AND id=set_1;
+  UPDATE public.reference_works SET revision=revision WHERE user_id=user_1;
+  UPDATE public.observations SET resolved_sporely_taxon_id=other_taxon_id WHERE id=940000001;
+  UPDATE public.observations SET resolved_sporely_taxon_id=taxon_id WHERE id=940000001;
+  PERFORM pg_temp.claims(NULL,'service_role');
+  UPDATE public.observations SET resolved_sporely_taxon_id=other_taxon_id WHERE id=940000002;
+  UPDATE public.observations SET resolved_sporely_taxon_id=taxon_id WHERE id=940000002;
+  IF EXISTS (SELECT 1 FROM private.shared_reference_contributions)
+     OR EXISTS (SELECT 1 FROM private.shared_reference_consent_events) THEN
+    RAISE EXCEPTION 'an automatic path or the old RPC created a contribution';
   END IF;
 
-  -- User 2's independent copy has the same DOI but remains a separate record.
-  result := public.share_reference_contribution(
-    '73000000-0000-4000-8000-000000000002',taxon_id,1,1,1
-  );
+  -- ── 2. A consented contribution is public, without the raw account id ──
+  PERFORM pg_temp.claims(NULL,NULL);
+  result := pg_temp.fixture_grant(user_1,set_1,taxon_id);
   IF result->>'status' <> 'created' THEN
-    RAISE EXCEPTION 'user 2 fork was not independently shared: %', result;
+    RAISE EXCEPTION 'fixture grant failed: %', result;
   END IF;
-  contribution_2 := (result->'row'->>'contribution_id')::uuid;
-  IF contribution_2 = contribution_1
-     OR (SELECT count(*) FROM public.search_public_reference_contributions(
-          taxon_id,50,NULL,NULL)) <> 2 THEN
-    RAISE EXCEPTION 'matching DOI merged independent contributions';
-  END IF;
-  SET LOCAL ROLE service_role;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('role','service_role')::text,true);
-  UPDATE public.observations
-     SET resolved_sporely_taxon_id=other_taxon_id
-   WHERE id=940000002 AND user_id=user_2;
-  SET LOCAL ROLE authenticated;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('sub',user_2::text,'role','authenticated')::text,true);
-  IF EXISTS (
-       SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL) item
-        WHERE item->>'contribution_id'=contribution_2::text
-     ) OR NOT EXISTS (
-       SELECT 1 FROM public.search_public_reference_contributions(other_taxon_id,50,NULL,NULL) item
-        WHERE item->'contributor'->>'id'=user_2::text
-     ) THEN
-    RAISE EXCEPTION 'observation taxon change did not move exact-taxon discovery';
-  END IF;
-  SET LOCAL ROLE service_role;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('role','service_role')::text,true);
-  UPDATE public.observations
-     SET resolved_sporely_taxon_id=genus_taxon_id
-   WHERE id=940000002 AND user_id=user_2;
-  SET LOCAL ROLE authenticated;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('sub',user_2::text,'role','authenticated')::text,true);
-  IF EXISTS (
-       SELECT 1 FROM public.search_public_reference_contributions(other_taxon_id,50,NULL,NULL)
-     ) OR EXISTS (
-       SELECT 1 FROM public.search_public_reference_contributions(genus_taxon_id,50,NULL,NULL)
-     ) THEN
-    RAISE EXCEPTION 'non-species taxon remained shared or created a contribution';
-  END IF;
-
-  SET LOCAL ROLE service_role;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('role','service_role')::text,true);
-  result := public.moderate_shared_reference_contribution(
-    contribution_1,'hide','privacy'
-  );
-  IF result->>'status' <> 'updated' THEN
-    RAISE EXCEPTION 'privacy moderation did not hide contribution: %', result;
-  END IF;
-  RESET ROLE;
+  contribution_1 := (result->'row'->>'contribution_id')::uuid;
   IF NOT EXISTS (
-    SELECT 1 FROM private.shared_reference_policy_events e
-     WHERE e.contribution_id=contribution_1
-       AND e.event_type='takedown_hidden' AND e.reason='privacy'
-  ) THEN
-    RAISE EXCEPTION 'immediate takedown was not operationally logged';
+    SELECT 1 FROM private.shared_reference_consent_events e
+     WHERE e.contribution_id=contribution_1 AND e.event='granted' AND e.consent_version=1
+       AND e.locale='en' AND e.reason IS NULL
+       AND e.text_sha256=encode(sha256(convert_to('fixture consent text','UTF8')),'hex')
+  ) OR (SELECT consent_first_revision FROM private.shared_reference_contributions WHERE id=contribution_1) <> 1 THEN
+    RAISE EXCEPTION 'grant did not record the consent';
   END IF;
+  PERFORM pg_temp.claims(user_2,'authenticated');
   SET LOCAL ROLE authenticated;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('sub',user_1::text,'role','authenticated')::text,true);
-  result := public.withdraw_reference_contribution(contribution_1);
-  IF result->>'status' <> 'updated' THEN
-    RAISE EXCEPTION 'owner withdrawal overrode moderation: %', result;
+  SELECT item INTO first_envelope
+    FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL) item;
+  IF first_envelope->>'contribution_id' IS DISTINCT FROM contribution_1::text
+     OR first_envelope->'contributor'->'id' <> 'null'::jsonb
+     OR first_envelope->'contributor'->>'label' <> 'shared_one'
+     OR first_envelope->'snapshot'->>'raw_text' <> '8–10 × 5–6 µm'
+     OR first_envelope::text LIKE '%'||user_1::text||'%'
+     OR first_envelope::text LIKE '%940000001%'
+     OR first_envelope::text LIKE '%71000000-0000-4000-8000-000000000001%'
+     OR first_envelope::text LIKE '%72000000-0000-4000-8000-000000000001%' THEN
+    RAISE EXCEPTION 'public contribution attribution/privacy projection failed: %', first_envelope;
   END IF;
-  result := public.share_reference_contribution(
-    '73000000-0000-4000-8000-000000000001',taxon_id,1,1,1
-  );
-  IF result->>'status' <> 'updated' THEN
-    RAISE EXCEPTION 'hidden contribution update failed: %', result;
+  -- The old RPC cannot touch another owner's row either.
+  result := public.share_reference_contribution(set_1,taxon_id,1,1,1);
+  IF result->>'status' <> 'consent_required' THEN
+    RAISE EXCEPTION 'old RPC changed state for a non-owner: %', result;
   END IF;
-  IF EXISTS (
-       SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL) item
-        WHERE item->>'contribution_id'=contribution_1::text
-     ) OR EXISTS (
-       SELECT 1 FROM public.get_public_reference_contribution(contribution_1,1)
-     ) THEN
-    RAISE EXCEPTION 'moderated contribution remained publicly readable';
-  END IF;
-  SET LOCAL ROLE service_role;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('role','service_role')::text,true);
-  result := public.moderate_shared_reference_contribution(contribution_1,'restore',NULL);
-  SET LOCAL ROLE authenticated;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('sub',user_1::text,'role','authenticated')::text,true);
-  IF result->>'status' <> 'updated' OR NOT EXISTS (
-       SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL) item
-        WHERE item->>'contribution_id'=contribution_1::text
-     ) THEN
-    RAISE EXCEPTION 'moderation restore did not restore contribution visibility';
-  END IF;
-
-  SET LOCAL ROLE service_role;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('role','service_role')::text,true);
-  UPDATE public.observations
-     SET resolved_sporely_taxon_id=taxon_id
-   WHERE id=940000002 AND user_id=user_2;
-  SET LOCAL ROLE authenticated;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('sub',user_2::text,'role','authenticated')::text,true);
-  DELETE FROM public.observations WHERE id=940000002 AND user_id=user_2;
-  IF EXISTS (
-       SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL) item
-        WHERE item->>'contribution_id'=contribution_2::text
-     ) THEN
-    RAISE EXCEPTION 'hard-deleted last use left contribution discoverable';
-  END IF;
-
   RESET ROLE;
+
+  -- ── 3. Refresh adds revisions to a consented row, within scope ──
+  PERFORM pg_temp.claims(user_1,'authenticated');
   UPDATE public.reference_measurement_sets
      SET raw_text='8–11 × 5–6 µm',length_core_max=11,revision=2,row_version=row_version+1
-   WHERE user_id=user_1 AND id='73000000-0000-4000-8000-000000000001';
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('sub',user_1::text,'role','authenticated')::text,true);
-  SET LOCAL ROLE authenticated;
-  result := public.share_reference_contribution(
-    '73000000-0000-4000-8000-000000000001',taxon_id,1,1,2
-  );
-  IF result->>'status' <> 'updated' OR (result->'row'->>'revision')::integer <> 3 THEN
-    RAISE EXCEPTION 'edited contribution did not create a new revision: %', result;
+   WHERE user_id=user_1 AND id=set_1;
+  IF (SELECT current_revision FROM private.shared_reference_contributions WHERE id=contribution_1) <> 2
+     OR (SELECT item->'snapshot'->>'raw_text' FROM public.get_public_reference_contribution(contribution_1,2) item)
+        <> '8–11 × 5–6 µm'
+     OR (SELECT item FROM public.get_public_reference_contribution(contribution_1,1) item)
+        IS DISTINCT FROM first_envelope THEN
+    RAISE EXCEPTION 'consented refresh did not publish a new revision or rewrote history';
   END IF;
-  IF (SELECT item FROM public.get_public_reference_contribution(contribution_1,1) item)
-       IS DISTINCT FROM first_envelope THEN
-    RAISE EXCEPTION 'historical contribution revision was rewritten';
-  END IF;
-  RESET ROLE;
+  -- Oversized or unprojectable sources are not published and never block sync.
   UPDATE public.reference_works
-     SET title=repeat('x',513),authors_json='[]',year=NULL,
-         revision=2,row_version=row_version+1
+     SET title=repeat('x',513),authors_json='[]',year=NULL,revision=2,row_version=row_version+1
    WHERE user_id=user_1 AND id='71000000-0000-4000-8000-000000000001';
-  IF (SELECT current_revision FROM private.shared_reference_contributions
-       WHERE id=contribution_1) <> 3 THEN
-    RAISE EXCEPTION 'oversized fallback label was published or blocked owner sync';
+  IF (SELECT current_revision FROM private.shared_reference_contributions WHERE id=contribution_1) <> 2 THEN
+    RAISE EXCEPTION 'oversized fallback label was published';
   END IF;
   UPDATE public.reference_works
      SET title='Independent interpretation one, repaired',authors_json='[{"family":"Smith"}]',
          year=1998,revision=3,row_version=row_version+1
    WHERE user_id=user_1 AND id='71000000-0000-4000-8000-000000000001';
-  IF (SELECT current_revision FROM private.shared_reference_contributions
-       WHERE id=contribution_1) <> 4 THEN
-    RAISE EXCEPTION 'valid source repair did not refresh contribution';
+  IF (SELECT current_revision FROM private.shared_reference_contributions WHERE id=contribution_1) <> 3 THEN
+    RAISE EXCEPTION 'valid source repair did not refresh the consented contribution';
   END IF;
-  UPDATE public.reference_measurement_sets
-     SET raw_points_json='[{"length":8.2,"width":5.1,"q":1.61}]',
-         revision=3,row_version=row_version+1
-   WHERE user_id=user_1 AND id='73000000-0000-4000-8000-000000000001';
-  IF (SELECT current_revision FROM private.shared_reference_contributions
-       WHERE id=contribution_1) <> 5
-     OR NOT EXISTS (
-       SELECT 1 FROM public.get_public_reference_contribution(contribution_1,5) item
-        WHERE item->'snapshot'->'raw_points'->0->>'q'='1.61'
-     ) THEN
-    RAISE EXCEPTION 'valid raw-point q value was not preserved';
+  IF (SELECT count(*) FROM private.shared_reference_contribution_revisions r
+       WHERE r.contribution_id=contribution_1 AND r.envelope_json->'contributor'->'id' <> 'null'::jsonb) <> 0 THEN
+    RAISE EXCEPTION 'a new revision carries a contributor id';
   END IF;
-  UPDATE public.reference_measurement_sets
-     SET raw_points_json=(
-       SELECT pg_catalog.jsonb_agg(1) FROM pg_catalog.generate_series(1,10001)
-     ),revision=4,row_version=row_version+1
-   WHERE user_id=user_1 AND id='73000000-0000-4000-8000-000000000001';
-  IF (SELECT current_revision FROM private.shared_reference_contributions
-       WHERE id=contribution_1) <> 5 THEN
-    RAISE EXCEPTION 'oversized raw-point source was published or blocked owner sync';
+
+  -- ── 4. Another qualifying use keeps the row backed ──
+  v_after := pg_temp.last_event_id();
+  UPDATE public.observations SET is_draft=true WHERE id=940000003;
+  UPDATE public.observations SET is_draft=false WHERE id=940000003;
+  PERFORM pg_temp.claims(NULL,'service_role');
+  UPDATE public.observation_reference_uses SET deleted_at=now() WHERE id=use_3;
+  -- The private observation's use never backed it; detach it too so the
+  -- reasons below are unambiguous.
+  UPDATE public.observation_reference_uses SET deleted_at=now()
+   WHERE id='74000000-0000-4000-8000-000000000004';
+  IF (SELECT status FROM private.shared_reference_contributions WHERE id=contribution_1) <> 'shared'
+     OR pg_temp.last_event_id() <> v_after THEN
+    RAISE EXCEPTION 'a still-backed contribution was withdrawn';
   END IF;
-  PERFORM set_config('request.jwt.claims',
-    json_build_object('sub',user_1::text,'role','authenticated')::text,true);
+
+  -- ── 5. Every loss of the qualifying use withdraws, for every caller ──
+  -- Each case: act, assert withdrawn with one exact event, restore, check the
+  -- row stays withdrawn through the restore, a source edit and a use sync,
+  -- then re-grant (a new consent period) and check pre-consent revisions stay
+  -- unserved.
+  FOR v_case IN
+    SELECT * FROM (VALUES
+      (1,'draft flip','owner',
+       'UPDATE public.observations SET is_draft=true WHERE id=940000001',
+       'UPDATE public.observations SET is_draft=false WHERE id=940000001',
+       'observation_not_public'),
+      (2,'visibility to friends','owner',
+       'UPDATE public.observations SET visibility=''friends'' WHERE id=940000001',
+       'UPDATE public.observations SET visibility=''public'' WHERE id=940000001',
+       'observation_not_public'),
+      (3,'spore data private','owner',
+       'UPDATE public.observations SET spore_data_visibility=''private'' WHERE id=940000001',
+       'UPDATE public.observations SET spore_data_visibility=''public'' WHERE id=940000001',
+       'observation_not_public'),
+      (4,'moderation hide (service role)','service',
+       'UPDATE public.observations SET visibility=''private'',spore_data_visibility=''private'' WHERE id=940000001',
+       'UPDATE public.observations SET visibility=''public'',spore_data_visibility=''public'' WHERE id=940000001',
+       'observation_not_public'),
+      (5,'service-role detach','service',
+       'UPDATE public.observation_reference_uses SET deleted_at=now() WHERE id=''74000000-0000-4000-8000-000000000001''',
+       'UPDATE public.observation_reference_uses SET deleted_at=NULL WHERE id=''74000000-0000-4000-8000-000000000001''',
+       'use_detached'),
+      (6,'set deleted_at only, no user','none',
+       'UPDATE public.reference_measurement_sets SET deleted_at=now() WHERE id=''73000000-0000-4000-8000-000000000001''',
+       'UPDATE public.reference_measurement_sets SET deleted_at=NULL WHERE id=''73000000-0000-4000-8000-000000000001''',
+       'source_deleted'),
+      (7,'treatment deleted_at only, service role','service',
+       'UPDATE public.reference_taxon_treatments SET deleted_at=now() WHERE id=''72000000-0000-4000-8000-000000000001''',
+       'UPDATE public.reference_taxon_treatments SET deleted_at=NULL WHERE id=''72000000-0000-4000-8000-000000000001''',
+       'source_deleted'),
+      (8,'work deleted_at only, no user','none',
+       'UPDATE public.reference_works SET deleted_at=now() WHERE id=''71000000-0000-4000-8000-000000000001''',
+       'UPDATE public.reference_works SET deleted_at=NULL WHERE id=''71000000-0000-4000-8000-000000000001''',
+       'source_deleted'),
+      (9,'taxon change (service role)','service',
+       'UPDATE public.observations SET resolved_sporely_taxon_id=2100000902 WHERE id=940000001',
+       'UPDATE public.observations SET resolved_sporely_taxon_id=2100000901 WHERE id=940000001',
+       'taxon_changed')
+    ) AS c(n,label,caller,act,restore,reason)
+    ORDER BY n
+  LOOP
+    -- The public read wrappers are rate limited; this loop reads a lot.
+    DELETE FROM private.shared_reference_rate_buckets;
+    PERFORM pg_temp.claims(
+      CASE WHEN v_case.caller='owner' THEN user_1 END,
+      CASE v_case.caller WHEN 'owner' THEN 'authenticated' WHEN 'service' THEN 'service_role' END);
+    v_after := pg_temp.last_event_id();
+    EXECUTE v_case.act;
+    PERFORM pg_temp.assert_withdrawn(v_case.label, contribution_1,
+      'withdrawn_by_system:'||v_case.reason, v_after);
+    EXECUTE v_case.restore;
+    PERFORM pg_temp.claims(user_1,'authenticated');
+    UPDATE public.reference_measurement_sets SET revision=revision+1,row_version=row_version+1
+     WHERE user_id=user_1 AND id=set_1;
+    UPDATE public.observation_reference_uses SET snapshot_json=snapshot_json WHERE id=use_1;
+    IF (SELECT status FROM private.shared_reference_contributions WHERE id=contribution_1) <> 'withdrawn'
+       OR pg_temp.last_event_id() <> v_after + 1 THEN
+      RAISE EXCEPTION '%: a withdrawn row was re-shared by an automatic path', v_case.label;
+    END IF;
+    PERFORM pg_temp.claims(NULL,NULL);
+    result := pg_temp.fixture_grant(user_1,set_1,taxon_id);
+    SELECT current_revision INTO v_rev FROM private.shared_reference_contributions WHERE id=contribution_1;
+    IF result->>'status' <> 'updated'
+       OR (SELECT consent_first_revision FROM private.shared_reference_contributions WHERE id=contribution_1) <> v_rev
+       OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution(contribution_1,v_rev-1))
+       OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution(contribution_1,1))
+       OR NOT EXISTS (SELECT 1 FROM public.get_public_reference_contribution(contribution_1,v_rev))
+       OR (SELECT (item->>'revision')::integer FROM public.search_public_reference_contributions(
+             taxon_id,50,NULL,NULL) item WHERE item->>'contribution_id'=contribution_1::text) <> v_rev THEN
+      RAISE EXCEPTION '%: re-grant did not start a new consent period that hides older revisions: % % % % %',
+        v_case.label, result->>'status',
+        (SELECT consent_first_revision FROM private.shared_reference_contributions WHERE id=contribution_1),
+        v_rev,
+        (SELECT count(*) FROM public.get_public_reference_contribution(contribution_1,v_rev)),
+        (SELECT array_agg(item->>'revision') FROM public.search_public_reference_contributions(
+             taxon_id,50,NULL,NULL) item);
+    END IF;
+  END LOOP;
+
+  DELETE FROM private.shared_reference_rate_buckets;
+  -- ── 6. Hard-deleting the observation withdraws (cascaded use delete) ──
+  PERFORM pg_temp.claims(NULL,NULL);
+  result := pg_temp.fixture_grant(user_2,set_2,taxon_id);
+  contribution_2 := (result->'row'->>'contribution_id')::uuid;
+  v_after := pg_temp.last_event_id();
+  PERFORM pg_temp.claims(user_2,'authenticated');
+  DELETE FROM public.observations WHERE id=940000002 AND user_id=user_2;
+  PERFORM pg_temp.assert_withdrawn('observation delete', contribution_2,
+    'withdrawn_by_system:use_detached', v_after);
+
+  -- ── 7. Consent scope (decision C): an out-of-scope revision withdraws ──
+  PERFORM pg_temp.claims(user_1,'authenticated');
+  v_after := pg_temp.last_event_id();
   SET LOCAL ROLE authenticated;
   result := public.withdraw_reference_contribution(contribution_1);
+  RESET ROLE;
+  PERFORM pg_temp.assert_withdrawn('owner withdrawal', contribution_1,'withdrawn_by_owner:owner', v_after);
+  PERFORM pg_temp.claims(NULL,NULL);
+  result := pg_temp.fixture_grant(user_1,set_1,taxon_id,'nb');
   IF result->>'status' <> 'updated'
-     OR EXISTS (SELECT 1 FROM public.search_public_reference_contributions(
-          taxon_id,50,NULL,NULL) item WHERE item->>'contribution_id'=contribution_1::text)
-     OR (SELECT item->>'status' FROM public.get_public_reference_contribution(
-          contribution_1,1) item) <> 'withdrawn' THEN
-    RAISE EXCEPTION 'withdrawal lifecycle did not preserve a historical tombstone';
+     OR (SELECT consent_scope FROM private.shared_reference_contributions WHERE id=contribution_1)
+        <> '{"snapshot_schema_versions":[1],"data_kinds":["free_text"]}'::jsonb THEN
+    RAISE EXCEPTION 'narrow-scope fixture grant failed: %', result;
+  END IF;
+  v_after := pg_temp.last_event_id();
+  PERFORM pg_temp.claims(user_1,'authenticated');
+  UPDATE public.reference_measurement_sets
+     SET raw_points_json='[{"length":8.2,"width":5.1,"q":1.61}]',revision=revision+1,row_version=row_version+1
+   WHERE user_id=user_1 AND id=set_1;
+  PERFORM pg_temp.assert_withdrawn('consent scope exceeded', contribution_1,
+    'withdrawn_by_system:consent_scope_exceeded', v_after);
+  -- A grant whose content exceeds the text's scope is refused and changes nothing.
+  PERFORM pg_temp.claims(NULL,NULL);
+  v_after := pg_temp.last_event_id();
+  result := pg_temp.fixture_grant(user_1,set_1,taxon_id,'nb');
+  IF result->>'status' <> 'consent_scope_exceeded'
+     OR (SELECT status FROM private.shared_reference_contributions WHERE id=contribution_1) <> 'withdrawn'
+     OR pg_temp.last_event_id() <> v_after THEN
+    RAISE EXCEPTION 'grant beyond the consent text scope was not refused: %', result;
+  END IF;
+  -- Refresh without consent returns consent_required and changes nothing.
+  IF (private.share_reference_contribution_for_owner(user_1,set_1,taxon_id,1,1,1)->>'status') <> 'consent_required'
+     OR (private.reference_contribution_share_core('refresh',user_1,set_1,other_taxon_id)->>'status') <> 'consent_required'
+     OR EXISTS (SELECT 1 FROM private.shared_reference_contributions WHERE sporely_taxon_id=other_taxon_id) THEN
+    RAISE EXCEPTION 'refresh created or re-shared a row';
+  END IF;
+  -- Grant requires an active, unrevoked text version and a qualifying use.
+  UPDATE private.reference_share_consent_texts SET active=false WHERE locale='en';
+  IF (pg_temp.fixture_grant(user_1,set_1,taxon_id)->>'status') <> 'consent_text_unavailable' THEN
+    RAISE EXCEPTION 'grant accepted an inactive consent text';
+  END IF;
+  UPDATE private.reference_share_consent_texts SET active=true WHERE locale='en';
+  IF (pg_temp.fixture_grant(user_1,set_1,other_taxon_id)->>'status') <> 'qualifying_use_required' THEN
+    RAISE EXCEPTION 'grant accepted a taxon without a qualifying use';
+  END IF;
+
+  -- ── 8. Owner withdrawal RPC and the unchanged tombstone stub ──
+  UPDATE public.reference_measurement_sets SET raw_points_json=NULL,revision=revision+1,row_version=row_version+1
+   WHERE user_id=user_1 AND id=set_1;
+  result := pg_temp.fixture_grant(user_1,set_1,taxon_id);
+  SELECT current_revision INTO v_rev FROM private.shared_reference_contributions WHERE id=contribution_1;
+  PERFORM pg_temp.claims(user_2,'authenticated');
+  SET LOCAL ROLE authenticated;
+  IF (public.withdraw_reference_contribution(contribution_1)->>'status') <> 'forbidden' THEN
+    RAISE EXCEPTION 'a non-owner could withdraw';
+  END IF;
+  RESET ROLE;
+  PERFORM pg_temp.claims(user_1,'authenticated');
+  SET LOCAL ROLE authenticated;
+  IF (public.withdraw_reference_contribution(contribution_1)->>'status') <> 'updated'
+     OR (public.withdraw_reference_contribution(contribution_1)->>'status') <> 'no_change'
+     OR EXISTS (SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL))
+     OR (SELECT array_agg(k ORDER BY k) FROM public.get_public_reference_contribution(contribution_1,v_rev) item,
+           jsonb_object_keys(item) k) <> ARRAY['contribution_id','revision','status','withdrawn_at']
+     OR (SELECT item->>'status' FROM public.get_public_reference_contribution(contribution_1,1) item) <> 'withdrawn'
+     OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution(contribution_1,NULL)) THEN
+    RAISE EXCEPTION 'owner withdrawal lifecycle or tombstone stub changed';
+  END IF;
+  IF (public.share_reference_contribution(set_1,taxon_id,1,1,1)->>'status') <> 'consent_required' THEN
+    RAISE EXCEPTION 'old RPC re-shared a withdrawn row';
   END IF;
   RESET ROLE;
 
-  IF has_table_privilege('authenticated','private.shared_reference_contributions','UPDATE')
-     OR has_table_privilege('authenticated','private.shared_reference_contribution_revisions','SELECT')
-     OR has_function_privilege('anon',
-          'public.share_reference_contribution(uuid,integer,integer,integer,integer)','EXECUTE')
-     OR NOT has_function_privilege('authenticated',
-          'public.search_public_reference_contributions(integer,integer,timestamptz,uuid)','EXECUTE')
-     OR has_function_privilege('authenticated',
-          'public.moderate_shared_reference_contribution(uuid,text,text)','EXECUTE') THEN
-    RAISE EXCEPTION 'shared contribution least-privilege grants are incorrect';
+  DELETE FROM private.shared_reference_rate_buckets;
+  -- ── 9. Moderation hide is honoured, and restore does not bypass consent ──
+  PERFORM pg_temp.claims(NULL,NULL);
+  result := pg_temp.fixture_grant(user_1,set_1,taxon_id);
+  PERFORM pg_temp.claims(NULL,'service_role');
+  SET LOCAL ROLE service_role;
+  result := public.moderate_shared_reference_contribution(contribution_1,'hide','privacy');
+  RESET ROLE;
+  IF result->>'status' <> 'updated'
+     OR EXISTS (SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL))
+     OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution(contribution_1,NULL)) THEN
+    RAISE EXCEPTION 'hidden contribution remained public';
+  END IF;
+  SET LOCAL ROLE service_role;
+  result := public.moderate_shared_reference_contribution(contribution_1,'restore',NULL);
+  RESET ROLE;
+  IF NOT EXISTS (SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL)) THEN
+    RAISE EXCEPTION 'restore did not restore a consented contribution';
   END IF;
 
-  PERFORM public.delete_reference_library_for_account(user_2);
-  DELETE FROM public.profiles WHERE id=user_2;
+  -- ── 10. CHECK invariants ──
+  BEGIN
+    INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,status)
+    VALUES (user_2,gen_random_uuid(),taxon_id,'shared');
+    RAISE EXCEPTION 'a shared row without consent was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
+      status,withdrawn_at,consented_at,consent_version,consent_first_revision,consent_scope)
+    VALUES (user_2,gen_random_uuid(),taxon_id,'withdrawn',now(),now(),1,1,
+      '{"snapshot_schema_versions":[1],"data_kinds":[]}');
+    RAISE EXCEPTION 'a withdrawn row keeping consent was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
+      status,consented_at,consent_version)
+    VALUES (user_2,gen_random_uuid(),taxon_id,'shared',now(),1);
+    RAISE EXCEPTION 'a partial consent record was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
+      status,withdrawn_at,consent_client)
+    VALUES (user_2,gen_random_uuid(),taxon_id,'withdrawn',now(),'desktop');
+    RAISE EXCEPTION 'a consent client without consent was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
+      status,consented_at,consent_version,consent_first_revision,consent_scope)
+    VALUES (user_2,gen_random_uuid(),taxon_id,'shared',now(),1,1,'{"data_kinds":["everything"]}');
+    RAISE EXCEPTION 'an invalid consent scope was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    UPDATE private.shared_reference_contributions SET status='withdrawn',withdrawn_at=now()
+     WHERE id=contribution_1;
+    RAISE EXCEPTION 'a withdrawal that bypasses the helper kept consent';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    UPDATE private.shared_reference_consent_events SET reason='owner';
+    RAISE EXCEPTION 'consent events were updated';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    DELETE FROM private.shared_reference_consent_events;
+    RAISE EXCEPTION 'consent events were deleted';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM private.withdraw_shared_reference_contribution(contribution_1,'because');
+    RAISE EXCEPTION 'an unknown withdrawal reason was accepted';
+  EXCEPTION WHEN invalid_parameter_value THEN NULL;
+  END;
+  v_after := pg_temp.last_event_id();
+  IF private.withdraw_shared_reference_contribution(contribution_2,'owner') IS NOT FALSE
+     OR pg_temp.last_event_id() <> v_after THEN
+    RAISE EXCEPTION 'withdrawing an already withdrawn row wrote an event';
+  END IF;
+
+  -- ── 11. Account deletion withdraws through the helper and anonymises ──
+  v_after := pg_temp.last_event_id();
+  DELETE FROM public.profiles WHERE id=user_1;
   IF NOT EXISTS (
        SELECT 1 FROM private.shared_reference_contributions c
-        WHERE c.id=contribution_2 AND c.owner_id IS NULL
-          AND c.source_measurement_set_id IS NULL AND c.status='withdrawn'
-     ) OR NOT EXISTS (
+        WHERE c.id=contribution_1 AND c.owner_id IS NULL AND c.source_measurement_set_id IS NULL
+          AND c.status='withdrawn' AND c.consented_at IS NULL
+     ) OR EXISTS (
        SELECT 1 FROM private.shared_reference_contribution_revisions r
-        WHERE r.contribution_id=contribution_2
-          AND r.envelope_json->'contributor'->'id'='null'::jsonb
-          AND r.envelope_json->'contributor'->>'label'='Deleted user'
-  ) THEN
-    RAISE EXCEPTION 'account deletion did not retain anonymized contribution history';
+        WHERE r.contribution_id=contribution_1
+          AND (r.envelope_json->'contributor'->'id' <> 'null'::jsonb
+               OR r.envelope_json->'contributor'->>'label' <> 'Deleted user')
+     ) THEN
+    RAISE EXCEPTION 'account deletion did not withdraw and anonymise';
   END IF;
-  PERFORM public.delete_reference_library_for_account(user_1);
-  DELETE FROM public.profiles WHERE id=user_1;
-  IF (SELECT count(*) FROM private.shared_reference_contributions c
-       WHERE c.owner_id IS NULL AND c.sporely_taxon_id=taxon_id) < 2 THEN
-    RAISE EXCEPTION 'same-taxon histories collided during multi-account deletion';
+  IF (SELECT array_agg(e.event||':'||e.reason) FROM private.shared_reference_consent_events e
+       WHERE e.id > v_after) IS DISTINCT FROM ARRAY['withdrawn_by_system:account_deleted'] THEN
+    RAISE EXCEPTION 'account deletion did not record exactly one account_deleted event';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema='private' AND table_name='shared_reference_consent_events'
+       AND column_name ~ 'owner|user'
+  ) THEN
+    RAISE EXCEPTION 'the consent event log holds an account id';
+  END IF;
+END
+$$;
+
+-- ── 12. Execution surface ──
+DO $$
+DECLARE
+  v_role text;
+  v_fn regprocedure;
+BEGIN
+  FOREACH v_role IN ARRAY ARRAY['anon','authenticated','service_role','public'] LOOP
+    FOR v_fn IN
+      SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+       WHERE n.nspname='private' AND p.proname IN (
+         'reference_contribution_share_core','share_reference_contribution_for_owner',
+         'reference_set_has_qualifying_use','reference_qualifying_use_ids',
+         'withdraw_shared_reference_contribution','withdraw_unqualified_contributions',
+         'lock_shared_reference_key','reference_share_scope_valid',
+         'reference_share_snapshot_scope','reference_share_scope_within',
+         'withdraw_shared_references_for_observation','reject_shared_reference_consent_event_change',
+         'shared_reference_contribution_envelope','refresh_shared_reference_for_use_row',
+         'refresh_shared_reference_for_use','refresh_shared_references_for_measurement_set',
+         'refresh_shared_references_for_parent','refresh_shared_references_for_observation_taxon',
+         'anonymize_shared_reference_contributions_for_profile',
+         '_taxon_identity_repair_reconcile_references')
+    LOOP
+      IF has_function_privilege(v_role, v_fn, 'EXECUTE') THEN
+        RAISE EXCEPTION 'role % can execute %', v_role, v_fn;
+      END IF;
+    END LOOP;
+    IF has_function_privilege(v_role,'public.share_reference_contribution_unthrottled(uuid,integer,integer,integer,integer)','EXECUTE')
+       OR has_function_privilege(v_role,'public.withdraw_reference_contribution_unthrottled(uuid)','EXECUTE')
+       OR has_function_privilege(v_role,'public.search_public_reference_contributions_unthrottled(integer,integer,timestamptz,uuid)','EXECUTE')
+       OR has_function_privilege(v_role,'public.get_public_reference_contribution_unthrottled(uuid,integer)','EXECUTE')
+       OR has_table_privilege(v_role,'private.shared_reference_consent_events','SELECT,INSERT,UPDATE,DELETE')
+       OR has_table_privilege(v_role,'private.reference_share_consent_texts','SELECT,INSERT,UPDATE,DELETE')
+       OR has_table_privilege(v_role,'private.shared_reference_contributions','SELECT,INSERT,UPDATE,DELETE')
+       OR has_table_privilege(v_role,'private.shared_reference_contribution_revisions','SELECT,INSERT,UPDATE,DELETE') THEN
+      RAISE EXCEPTION 'role % reaches a private shared-reference object', v_role;
+    END IF;
+  END LOOP;
+  IF has_function_privilege('anon','public.share_reference_contribution(uuid,integer,integer,integer,integer)','EXECUTE')
+     OR NOT has_function_privilege('authenticated','public.search_public_reference_contributions(integer,integer,timestamptz,uuid)','EXECUTE')
+     OR has_function_privilege('authenticated','public.moderate_shared_reference_contribution(uuid,text,text)','EXECUTE') THEN
+    RAISE EXCEPTION 'shared contribution least-privilege grants are incorrect';
+  END IF;
+  -- 2a exposes no new public RPC.
+  IF EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+     WHERE n.nspname='public' AND p.proname ~ 'consent'
+  ) THEN
+    RAISE EXCEPTION '2a must not expose a consent RPC';
+  END IF;
+  -- New helpers: owned by postgres, empty search_path.
+  IF EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+     WHERE n.nspname='private' AND p.proname IN (
+         'reference_contribution_share_core','reference_set_has_qualifying_use',
+         'reference_qualifying_use_ids','withdraw_shared_reference_contribution',
+         'withdraw_unqualified_contributions','lock_shared_reference_key',
+         'reference_share_scope_valid','reference_share_snapshot_scope',
+         'reference_share_scope_within','withdraw_shared_references_for_observation',
+         'reject_shared_reference_consent_event_change')
+       AND (pg_get_userbyid(p.proowner) <> 'postgres'
+            OR NOT coalesce(p.proconfig @> ARRAY['search_path=""'],false))
+  ) OR (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+         WHERE n.nspname='private' AND p.proname IN (
+         'reference_contribution_share_core','reference_set_has_qualifying_use',
+         'reference_qualifying_use_ids','withdraw_shared_reference_contribution',
+         'withdraw_unqualified_contributions','lock_shared_reference_key',
+         'reference_share_scope_valid','reference_share_snapshot_scope',
+         'reference_share_scope_within','withdraw_shared_references_for_observation',
+         'reject_shared_reference_consent_event_change')) <> 11 THEN
+    RAISE EXCEPTION 'new private helpers are not owned by postgres with an empty search_path';
   END IF;
 END
 $$;
 
 ROLLBACK;
+
+-- Outside the fixture transaction: 2a ships no consent text and no shared row
+-- without consent.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM private.reference_share_consent_texts)
+     OR EXISTS (SELECT 1 FROM private.shared_reference_contributions
+                 WHERE status='shared' AND consented_at IS NULL) THEN
+    RAISE EXCEPTION '2a must ship no consent text and no unconsented share';
+  END IF;
+END
+$$;

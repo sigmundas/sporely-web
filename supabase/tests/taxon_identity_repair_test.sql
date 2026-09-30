@@ -98,13 +98,18 @@ BEGIN
     (v_obs_bound,v_owner,current_date,'private',false,'Fixtura','beta',v_amb_b,'sporely_v2');
 
   -- Shared-reference fixtures. 2099000003 is the old (W3-resolved) species.
-  --   951000010: resolved 2099000003, use of set A, a live public share under
-  --              2099000003 -> promotion must withdraw it and share under 620390.
+  -- Stage 2a: shares exist only through consent (fixture grants below), the
+  -- carrying observations are public (decision B), and the repair refreshes
+  -- but never creates.
+  --   951000010: resolved 2099000003, use of set A, a consented share under
+  --              2099000003 -> promotion withdraws it; nothing is created
+  --              under 620390 (consent_required).
   --   951000011: resolved 620390 already, use of set B -> effective taxon is
   --              unchanged; promotes with no reference action.
   --   951000013: resolved 2099000003, use of set C; 951000012 (not a
   --              candidate) also uses set C under 2099000003 -> the old share
-  --              is kept, and a new one is created under 620390.
+  --              is kept. 951000014 (not a candidate) already carries set C
+  --              under 620390 with a consented share -> refreshed, 'shared'.
   INSERT INTO taxonomy_v3.registry_concept(
     sporely_taxon_id,canonical_name,rank,scope_state,cache_state,first_materialized_from_release
   ) VALUES
@@ -115,14 +120,16 @@ BEGIN
     taxon_identity_state,taxon_identity_source_system,taxon_identity_namespace,
     taxon_identity_external_id,taxon_identity_raw_external_id
   ) OVERRIDING SYSTEM VALUE VALUES
-    (951000010,v_owner,current_date,'private',false,'Crepidotus','cesatii',2099000003,
+    (951000010,v_owner,current_date,'public',false,'Crepidotus','cesatii',2099000003,
      'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057'),
-    (951000011,v_owner,current_date,'private',false,'Crepidotus','cesatii',v_ordinary,
+    (951000011,v_owner,current_date,'public',false,'Crepidotus','cesatii',v_ordinary,
      'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057'),
-    (951000012,v_owner,current_date,'private',false,'Fixtura','gamma',2099000003,
+    (951000012,v_owner,current_date,'public',false,'Fixtura','gamma',2099000003,
      NULL,NULL,NULL,NULL,NULL),
-    (951000013,v_owner,current_date,'private',false,'Crepidotus','cesatii',2099000003,
-     'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057');
+    (951000013,v_owner,current_date,'public',false,'Crepidotus','cesatii',2099000003,
+     'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057'),
+    (951000014,v_owner,current_date,'public',false,'Crepidotus','cesatii',v_ordinary,
+     NULL,NULL,NULL,NULL,NULL);
   INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
   VALUES (v_owner,'81000000-0000-4000-8000-00000001b001','article','[{"family":"Test"}]','Repair regression',2026,'Test 2026',1);
   INSERT INTO public.reference_taxon_treatments(user_id,id,reference_work_id,taxon_id,name_as_published,revision)
@@ -140,20 +147,26 @@ BEGIN
     (v_owner,'84000000-0000-4000-8000-00000001b001',951000010,'83000000-0000-4000-8000-00000001b00a','compared',1,'{}'::jsonb),
     (v_owner,'84000000-0000-4000-8000-00000001b002',951000011,'83000000-0000-4000-8000-00000001b00b','compared',1,'{}'::jsonb),
     (v_owner,'84000000-0000-4000-8000-00000001b003',951000012,'83000000-0000-4000-8000-00000001b00c','compared',1,'{}'::jsonb),
-    (v_owner,'84000000-0000-4000-8000-00000001b004',951000013,'83000000-0000-4000-8000-00000001b00c','compared',1,'{}'::jsonb);
-  -- Make sure the old public shares exist (the use insert may already have
-  -- created them), and that nothing is shared under the new taxon yet.
-  IF (private.share_reference_contribution_for_owner(v_owner,'83000000-0000-4000-8000-00000001b00a',2099000003,1,1,1)->>'status')
-       NOT IN ('created','updated','no_change')
-     OR (private.share_reference_contribution_for_owner(v_owner,'83000000-0000-4000-8000-00000001b00c',2099000003,1,1,1)->>'status')
-       NOT IN ('created','updated','no_change') THEN
-    RAISE EXCEPTION 'seed: could not share the old contributions';
+    (v_owner,'84000000-0000-4000-8000-00000001b004',951000013,'83000000-0000-4000-8000-00000001b00c','compared',1,'{}'::jsonb),
+    (v_owner,'84000000-0000-4000-8000-00000001b005',951000014,'83000000-0000-4000-8000-00000001b00c','compared',1,'{}'::jsonb);
+  -- The use inserts share nothing; consented shares are seeded through the
+  -- (unexposed) grant mode, as the 2b consent RPC will.
+  IF EXISTS (SELECT 1 FROM private.shared_reference_contributions c WHERE c.owner_id=v_owner) THEN
+    RAISE EXCEPTION 'seed: a use insert shared without consent';
+  END IF;
+  INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope)
+  VALUES (1,'en','fixture consent text',encode(sha256(convert_to('fixture consent text','UTF8')),'hex'),true,
+          '{"snapshot_schema_versions":[1,2],"data_kinds":["raw_points","free_text","measurement_details"]}');
+  IF (private.reference_contribution_share_core('grant',v_owner,'83000000-0000-4000-8000-00000001b00a',2099000003,1,1,1,1,'en',NULL)->>'status') <> 'created'
+     OR (private.reference_contribution_share_core('grant',v_owner,'83000000-0000-4000-8000-00000001b00c',2099000003,1,1,1,1,'en',NULL)->>'status') <> 'created'
+     OR (private.reference_contribution_share_core('grant',v_owner,'83000000-0000-4000-8000-00000001b00c',v_ordinary::integer,1,1,1,1,'en',NULL)->>'status') <> 'created' THEN
+    RAISE EXCEPTION 'seed: could not grant the fixture contributions';
   END IF;
   IF (SELECT count(*) FROM private.shared_reference_contributions c
        WHERE c.owner_id=v_owner AND c.sporely_taxon_id=2099000003 AND c.status='shared') <> 2
      OR EXISTS (SELECT 1 FROM private.shared_reference_contributions c
        WHERE c.owner_id=v_owner AND c.sporely_taxon_id=v_ordinary
-         AND c.source_measurement_set_id IN ('83000000-0000-4000-8000-00000001b00a','83000000-0000-4000-8000-00000001b00c')) THEN
+         AND c.source_measurement_set_id = '83000000-0000-4000-8000-00000001b00a') THEN
     RAISE EXCEPTION 'seed: unexpected contribution pre-state';
   END IF;
 
@@ -197,7 +210,8 @@ DECLARE
 BEGIN
   FOREACH v_stub IN ARRAY ARRAY[
     'RAISE EXCEPTION ''stub share failure'';',
-    'RETURN pg_catalog.jsonb_build_object(''status'',''source_not_found_or_stale'');'
+    -- refresh never creates, so 'created' is an unexpected status and raises.
+    'RETURN pg_catalog.jsonb_build_object(''status'',''created'');'
   ] LOOP
     BEGIN
       EXECUTE format($f$
@@ -362,11 +376,13 @@ BEGIN
     RAISE EXCEPTION 'ambiguous row not audited as ambiguous';
   END IF;
 
-  -- Shared references followed the new identity.
+  -- Shared references followed the new identity: withdrawn where no
+  -- qualifying use is left, kept where one is, refreshed where consented,
+  -- and never created.
   IF (SELECT status FROM private.shared_reference_contributions
        WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00a' AND sporely_taxon_id=2099000003) <> 'withdrawn'
-     OR (SELECT status FROM private.shared_reference_contributions
-       WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00a' AND sporely_taxon_id=620390) IS DISTINCT FROM 'shared'
+     OR EXISTS (SELECT 1 FROM private.shared_reference_contributions
+       WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00a' AND sporely_taxon_id=620390)
      OR (SELECT status FROM private.shared_reference_contributions
        WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00c' AND sporely_taxon_id=2099000003) <> 'shared'
      OR (SELECT status FROM private.shared_reference_contributions
@@ -377,11 +393,19 @@ BEGIN
       (SELECT jsonb_agg(jsonb_build_object('set',source_measurement_set_id,'taxon',sporely_taxon_id,'status',status))
          FROM private.shared_reference_contributions WHERE owner_id='00000000-0000-4000-8000-00000001b001');
   END IF;
+  IF (SELECT array_agg(e.event||':'||e.reason ORDER BY e.id)
+        FROM private.shared_reference_consent_events e
+        JOIN private.shared_reference_contributions c ON c.id=e.contribution_id
+       WHERE c.source_measurement_set_id='83000000-0000-4000-8000-00000001b00a'
+         AND c.sporely_taxon_id=2099000003 AND e.event<>'granted')
+     IS DISTINCT FROM ARRAY['withdrawn_by_system:taxon_changed'] THEN
+    RAISE EXCEPTION 'old-taxon withdrawal did not record exactly one taxon_changed event';
+  END IF;
   IF (SELECT count(*) FROM private.taxon_identity_repair_reference_actions) <> 2
      OR NOT EXISTS (SELECT 1 FROM private.taxon_identity_repair_reference_actions
        WHERE observation_id=951000010 AND reference_measurement_set_id='83000000-0000-4000-8000-00000001b00a'
          AND old_sporely_taxon_id=2099000003 AND new_sporely_taxon_id=620390
-         AND old_contribution='withdrawn' AND new_contribution='shared')
+         AND old_contribution='withdrawn' AND new_contribution='consent_required')
      OR NOT EXISTS (SELECT 1 FROM private.taxon_identity_repair_reference_actions
        WHERE observation_id=951000013 AND reference_measurement_set_id='83000000-0000-4000-8000-00000001b00c'
          AND old_contribution='kept_by_other_use' AND new_contribution='shared') THEN
