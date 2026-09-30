@@ -107,17 +107,25 @@ More gaps in today's code:
   - `consent_first_revision`, the first revision of the current consent
     period.
 - **CHECKs:**
-  - `status <> 'shared' OR consented_at IS NOT NULL`;
-  - `consented_at`, `consent_version` and `consent_first_revision` are all set
-    or all NULL.
-- **Withdrawal** clears all four. History lives in the event log.
+  - `(status = 'shared') = (consented_at IS NOT NULL)`, both directions: a
+    withdrawn row can't keep consent, and a shared row can't lack it;
+  - `consented_at`, `consent_version`, `consent_first_revision` and
+    `consent_scope` are all set or all NULL.
+- **`consent_scope`** (jsonb): recorded at grant. It holds the snapshot schema
+  version and data kinds the consent covered, and must fit within the consent
+  text version's `scope`.
+- **Withdrawal** clears all five, and only through the single withdrawal
+  helper (see "2a specification"). History lives in the event log.
 - **Event log:** `private.shared_reference_consent_events`, append-only,
   postgres-only. It records the contribution id, event (`granted`,
   `withdrawn_by_owner`, `withdrawn_by_system`), reason, consent version and
-  time. **No `owner_id`**, so account deletion leaves nothing to scrub. The
-  anonymise trigger (`:516-540`) records a system event.
+  time, and for `granted` also locale and `text_sha256`. **No `owner_id`**, so
+  account deletion leaves nothing to scrub. The anonymise trigger
+  (`:516-540`) records a system event.
 - **Consent texts:** `private.reference_share_consent_texts` (`version`,
-  `locale`, `text`, `text_sha256`, `active`). The text lists:
+  `locale`, `text`, `text_sha256`, `active`, `revoked`, and `scope` jsonb: the
+  snapshot schema versions and data kinds that version discloses). The text
+  lists:
   - what becomes public;
   - that edits publish new revisions within the limits below;
   - what stopping sharing cannot undo;
@@ -133,11 +141,35 @@ More gaps in today's code:
   Revisions from before a withdrawal, including revision 1 of today's two
   unconsented rows, are never served again, even after the owner shares
   again.
-- **Observation references:** they return a use's reference data only when
-  that use's set has a consented, shared contribution under the observation's
-  exact effective taxon. They serve that contribution's current revision, not
-  the private `snapshot_json`. Otherwise the reference data is omitted
-  (decision E).
+  - **Stub, unchanged:** for a withdrawn row asked for an explicit existing
+    revision, `get_public_reference_contribution` keeps returning today's
+    `{contribution_id, revision, status: 'withdrawn', withdrawn_at}` stub
+    (`:628-640`). The landing site and desktop depend on it
+    (`sporely-landing/src/lib/publicCuratedReferences.ts:329-348,385`). It
+    carries no account data.
+  - **Pre-consent revision of a shared row:** returns no row, as for an
+    unknown revision.
+- **Observation references (decision E):** `search_public_observation_references`
+  keeps its output shape exactly (`use_id`, `role`, `reference_revision`,
+  `snapshot`, with `snapshot.reference_revision = reference_revision`). The
+  landing site requires this (`sporely-landing/src/lib/publicApi.ts:181-201`,
+  `publicReferenceSnapshot.ts:116`). It keeps serving the use's **frozen**
+  snapshot, which is the evidence recorded at use time. A use is included
+  only when all of these hold:
+  - the observation is public and not a draft, as today (`20260828172243:136-150`);
+  - a contribution for `(owner, set, observation's effective taxon)` has
+    `status = 'shared'`, consent set and `hidden_at IS NULL`;
+  - the owner isn't banned or in `reference_account_deletions`, and isn't
+    blocked with the caller (the same filter as the contribution reads);
+  - the use's `reference_revision` is at or above the source set revision the
+    contribution recorded at `consent_first_revision`, so the frozen content
+    comes from inside the consent period.
+
+  Everything else is omitted, and withdrawal therefore removes it.
+  Implementation verifies that `reference_revision` is the source set's
+  revision (`20260828143513:121,251-268`). If it isn't, the candidate must
+  stop and report rather than guess. `get_public_observation_references` is a
+  wrapper and needs no change.
 - **Contributor:** new revisions set `contributor.id` to NULL and keep only
   the label. Both clients already accept a NULL id
   (`curated_reference_forks.py:328-332`,
@@ -180,10 +212,9 @@ More gaps in today's code:
 - **Stage 1B reconcile:** changes in the same migration to record
   `consent_required` rather than raising.
 - **Revision limits (decision C):** an automatic revision is published only
-  if the snapshot's data kinds stay within what `consent_version` disclosed:
-  the same snapshot schema version, and no new raw-point or free-text fields.
-  Otherwise the row is withdrawn with reason `consent_scope_exceeded`, and the
-  owner must opt in again. This covers the pending v2 snapshots in
+  within the row's stored `consent_scope` (see "Consent-scope check").
+  Otherwise the row is withdrawn with `consent_scope_exceeded`, and the owner
+  must opt in again. This covers the pending v2 snapshots in
   `20260914090000`.
 - **Withdrawal on losing the qualifying use**, whoever makes the change:
   - A new `private.withdraw_unqualified_contributions(owner, set)` withdraws
@@ -197,12 +228,19 @@ More gaps in today's code:
     reason is `observation_not_public` whoever made the change. A test covers
     the service-role update the admin action performs.
   - Never rate-limited, never inside an error-swallowing block.
-- **Locking:** every path that grants, refreshes or withdraws takes the same
-  advisory lock on `(owner_id, source_measurement_set_id)` first, then
-  re-reads uses and observations with `FOR SHARE`, then decides. This covers
-  the use, observation, source and taxon triggers, Stage 1B, grant and
-  withdraw. The withdraw RPC gains the advisory lock too; today it only locks
-  the row (`:450-451`).
+- **Locking:**
+  - **The key:** every path that grants, refreshes or withdraws takes one
+    transaction advisory lock per `(owner_id, source_measurement_set_id)`.
+    This changes today's owner+set+taxon key (`:229-232`). When a path covers
+    several sets, it locks them in sorted set-id order.
+  - **Order in AFTER triggers:** there, the row locks are already held, so
+    the advisory lock comes after them.
+  - **Deciding:** each path decides by re-reading uses and observations under
+    READ COMMITTED **after** taking the advisory lock, with no `FOR SHARE`.
+    `FOR SHARE` would deadlock against concurrent use and visibility updates.
+  - **Coverage:** the use, observation, source and taxon triggers, Stage 1B,
+    grant, the owner withdraw RPC and anonymise. Today the withdraw RPC only
+    locks the row (`:450-451`).
 
 ### Visibility (decision B)
 
@@ -240,7 +278,7 @@ Production, read-only, 2026-09-30:
 - **Carrying observations:** one public and one **public but draft**.
 - **Copies:** no other user's use or set mentions either id.
 
-**Recommendation: withdraw both** (decision A). In the Stage 2a migration, in
+**Decided: withdraw both** (decision A). In the Stage 2a migration, in
 one transaction:
 1. `LOCK TABLE`;
 2. replace the functions;
@@ -254,6 +292,113 @@ preflight asserts exactly 2 before the push. This withdraws; it publishes
 nothing. With the revision rule above, re-sharing later never re-exposes
 revision 1. The deploy is a production data write and needs explicit
 authorization at deploy time.
+
+## 2a specification
+
+### One qualifying-use predicate
+
+`private.reference_set_has_qualifying_use(owner, set, taxon)` is true when all
+of these hold for some use:
+- the use is live (`deleted_at IS NULL`);
+- it is the owner's own use of that set;
+- its observation is `visibility = 'public'`, not a draft, and has
+  `spore_data_visibility = 'public'` (see below);
+- the observation's effective taxon equals `taxon`.
+
+Every place that decides "is this contribution still backed?" calls it,
+including the existing "kept by another use" checks in the taxon trigger
+(`:854-866`) and in Stage 1B's old-taxon branch (`20260930213813:65-74`).
+Today those checks ignore visibility and drafts.
+
+The `spore_data_visibility` rule is a conservative addition to decision B. The
+owner may relax it. Moderation sets it to private (`adminActions.ts:444-447`),
+and reference measurements sit next to the observation's spore data.
+
+### One withdrawal helper
+
+`private.withdraw_shared_reference_contribution(contribution_id, reason)` is
+the only statement that sets `status = 'withdrawn'`. It clears the consent
+columns, sets `withdrawn_at` and writes the event. The migration routes every
+existing withdrawal through it:
+- the use trigger (`:697`, `:916`);
+- the taxon trigger (`:874`);
+- Stage 1B's old-taxon branch (`20260930213813:77-83`);
+- anonymise (`:533`);
+- the owner withdraw RPC;
+- the data step;
+- `private.withdraw_unqualified_contributions(owner, set)`.
+
+Reasons: `owner`, `consent_missing`, `observation_not_public`,
+`use_detached`, `taxon_changed`, `consent_scope_exceeded`,
+`consent_text_revoked`, `account_deleted`.
+
+### Refresh result statuses
+
+These are returned by the core in `refresh` mode, and Stage 1B maps each one:
+- `updated`, `no_change`: a consented shared row was refreshed. Stage 1B
+  records `shared`.
+- `consent_required`: no consented shared row for the key. Stage 1B records
+  `consent_required`.
+- `consent_scope_exceeded`: the new snapshot falls outside `consent_scope`,
+  and the row was withdrawn. Stage 1B records it.
+- `withdrawn_unqualified`: no qualifying use remains, and the row was
+  withdrawn. Stage 1B records it.
+- `invalid_taxon`, `account_unavailable`, `source_out_of_bounds`,
+  `source_deleted`: unchanged meanings. Stage 1B records `not_registry_species`
+  or `not_species` for `invalid_taxon`, as Stage 1 did, and the others
+  verbatim.
+- Anything else raises, as today (`20260930213813:136-146`).
+
+### Consent-scope check (decision C)
+
+An automatic revision is compared with the row's `consent_scope`: the
+snapshot's schema version, and the set of data kinds present (raw points,
+free-text fields, measurement details). If either is outside that scope, the
+row is withdrawn with `consent_scope_exceeded`. Before 2b, no row can be
+consented, so in 2a this is reachable only through test fixtures that insert
+a consented row. The test lives in 2a.
+
+### What the 2a migration creates and replaces
+
+**Creates:**
+- the consent columns and CHECKs, `consent_scope`, the events table and the
+  texts table (no active version yet);
+- the grant/refresh core (grant mode not exposed until 2b);
+- `reference_set_has_qualifying_use`, `withdraw_shared_reference_contribution`
+  and `withdraw_unqualified_contributions`;
+- the observation trigger function, with `AFTER UPDATE OF is_draft,
+  visibility, spore_data_visibility` and `AFTER DELETE` triggers on
+  `public.observations`.
+
+**Replaces:**
+- the 6-argument `share_reference_contribution_for_owner`, as a refresh
+  wrapper;
+- `share_reference_contribution_unthrottled`, which returns
+  `consent_required`;
+- `withdraw_reference_contribution_unthrottled`;
+- `search_public_reference_contributions_unthrottled` and
+  `get_public_reference_contribution_unthrottled`;
+- `shared_reference_contribution_envelope`, to set `contributor.id` NULL;
+- `search_public_observation_references`;
+- `refresh_shared_reference_for_use` and `refresh_shared_reference_for_use_row`;
+- `refresh_shared_references_for_observation_taxon`;
+- the two source-edit trigger functions, for the lock key;
+- `_taxon_identity_repair_reconcile_references`;
+- `anonymize_shared_reference_contributions_for_profile`.
+
+**Must not replace:** the functions the hash-pinned deferred migration
+`20260914090000` redefines, or its later release would silently overwrite
+them:
+- `reference_measurement_details_valid`;
+- `reference_snapshot_valid`;
+- `reference_canonical_snapshot`;
+- `public_reference_snapshot`;
+- `reference_curated_public_envelope`;
+- `reference_curation_capture_candidate`.
+
+2a calls them, never redefines them. `moderate_shared_reference_contribution`
+is unchanged. Every new private function gets `REVOKE ALL … FROM PUBLIC, anon,
+authenticated, service_role`, `search_path = ''`, and is owned by postgres.
 
 ## Implementation stages
 
@@ -279,7 +424,9 @@ Each is its own candidate, reviewed and security-reviewed, deployed via
 
 **Rollback:** never revert to the pre-2a bodies, since they re-share on the
 next sync. Rolling back 2b drops or disables the grant RPC and the client
-features and keeps 2a, so sharing is off. Rolling back 2a means a new
+features and keeps 2a, so sharing is off. If a consent text version proves
+faulty, mark it `revoked`: every row consented under it is withdrawn with
+`consent_text_revoked`. Rolling back 2a means a new
 migration that keeps the consent gate and the reads restricted. Columns and
 tables are inert and stay. Withdrawn rows stay withdrawn.
 
@@ -308,8 +455,18 @@ tables are inert and stay. Withdrawn rows stay withdrawn.
   - `retired_resolution_repair_test.sql`;
   - `taxon_identity_repair_label_test.sql` (records `consent_required`).
 - `shared_reference_backfill_test.sql`: backfill semantics create nothing.
-- Concurrency: detach, draft flip and taxon change, each racing a refresh,
-  following the pattern of `taxon_identity_repair_concurrency_test.sh`.
+- Concurrency: detach, visibility or draft flip, and taxon change, each
+  racing a refresh, following the pattern of
+  `taxon_identity_repair_concurrency_test.sh`. The test fails on a deadlock
+  (40P01) or on a share that survives without a qualifying use.
+- Consent-scope check: a fixture-consented row withdraws with
+  `consent_scope_exceeded` on an out-of-scope revision.
+- Observation references: a use backed by a consented contribution is served
+  in landing's exact shape; hidden, banned, deleted and blocked owners, and
+  pre-consent revisions, are omitted. Add a landing test that a consented
+  reference renders.
+- Every withdrawal path leaves the consent columns NULL and exactly one event
+  (the bidirectional CHECK enforces the first).
 - Landing: withdrawn rows and omitted observation references render
   correctly (`CuratedReferencesSection.test.tsx`,
   `publicApi.curatedReferences.test.ts`).
