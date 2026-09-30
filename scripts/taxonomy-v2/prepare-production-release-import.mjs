@@ -75,13 +75,7 @@ function chooseProbes(data) {
     .filter(row => row.vernacular_name?.length >= 2 && ['nb', 'nn', 'no'].includes(row.language_code) && taxa.has(row.taxon_id))
     .sort((a, b) => a.vernacular_name.localeCompare(b.vernacular_name) || a.taxon_id - b.taxon_id)[0];
   assert(colOnly && nortaxaName && genus && alias && vernacular, 'release does not contain every required representative search probe');
-  // Taxonomy v3 Stage 4W: when the release carries Dyntaxa bridges, prove one
-  // resolves to exactly its concept after activation.
-  const dyntaxa = external
-    .filter(row => row.source_system === 'dyntaxa' && row.namespace === 'dyntaxa_taxon_id')
-    .sort((a, b) => a.external_id.localeCompare(b.external_id))[0];
   return {
-    dyntaxa: dyntaxa ? { externalId: dyntaxa.external_id, taxonId: dyntaxa.taxon_id } : null,
     colOnly: { query: colOnly.canonical_scientific_name, taxonId: colOnly.taxon_id, colUsageId: colByTaxon.get(colOnly.taxon_id) },
     nortaxa: { query: nortaxaName.scientific_name, taxonId: nortaxaName.taxon_id },
     alias: { query: alias.scientific_name, taxonId: alias.taxon_id },
@@ -162,6 +156,13 @@ async function verifyRelease(releaseDirectory, TARGET_RELEASE) {
     if (row.source_system === 'dyntaxa') assert(taxonIds.has(row.taxon_id), `Dyntaxa ${row.external_id} names concept ${row.taxon_id}, which is not in taxon.jsonl`);
   }
   const probes = chooseProbes(data);
+  // Taxonomy v3 Stage 4W: when the release carries Dyntaxa bridges, prove one
+  // resolves to exactly its concept after activation. Kept out of `probes`,
+  // whose entries are all search probes.
+  const dyntaxaBridge = data['taxon_external_id.jsonl']
+    .filter(row => row.source_system === 'dyntaxa' && row.namespace === 'dyntaxa_taxon_id')
+    .sort((a, b) => a.external_id.localeCompare(b.external_id))[0];
+  const dyntaxaProbe = dyntaxaBridge ? { externalId: dyntaxaBridge.external_id, taxonId: dyntaxaBridge.taxon_id } : null;
   const generatedAt = `${TARGET_RELEASE.slice(4, 14).replaceAll('.', '-')}T00:00:00Z`;
   const sourceManifest = {
     ...manifest,
@@ -180,7 +181,7 @@ async function verifyRelease(releaseDirectory, TARGET_RELEASE) {
     },
   };
   return {
-    root, manifest, releaseMetadata, files, data, rowCounts, authoritativeCounts, legacyCounts, probes,
+    root, manifest, releaseMetadata, files, data, rowCounts, authoritativeCounts, legacyCounts, probes, dyntaxaProbe,
     metadata: {
       releaseId: TARGET_RELEASE,
       taxonomySchemaVersion: 2,
@@ -330,6 +331,7 @@ CREATE TEMP TABLE taxonomy_v2_stage(raw jsonb) ON COMMIT DROP;
 function postamble(verified) {
   const TARGET_RELEASE = verified.metadata.releaseId;
   const p = verified.probes;
+  const d = verified.dyntaxaProbe;
   const counts = verified.rowCounts;
   return `
 DO $counts$
@@ -381,9 +383,9 @@ BEGIN
      OR NOT EXISTS (SELECT 1 FROM public.taxonomy_v2_scientific_names WHERE release_id=${sqlText(TARGET_RELEASE)} AND sporely_taxon_id=${p.nortaxa.taxonId} AND source='nortaxa') THEN RAISE EXCEPTION 'NorTaxa-backed name search probe failed'; END IF;
   IF NOT EXISTS (SELECT 1 FROM public.search_taxa_v2(${sqlText(p.alias.query)},'no',50) WHERE taxon_id=${p.alias.taxonId} AND match_type LIKE 'scientific_alias_%') THEN RAISE EXCEPTION 'scientific-alias search probe failed'; END IF;
   IF NOT EXISTS (SELECT 1 FROM public.search_taxa_v2(${sqlText(p.genus.query)},'no',50) WHERE taxon_id=${p.genus.taxonId} AND taxon_rank='genus') THEN RAISE EXCEPTION 'genus search probe failed'; END IF;
-${p.dyntaxa ? `  IF (SELECT count(DISTINCT taxon_id) FROM public.resolve_taxon_external_id_v2('dyntaxa','dyntaxa_taxon_id',${sqlText(p.dyntaxa.externalId)})) <> 1
-     OR NOT EXISTS (SELECT 1 FROM public.resolve_taxon_external_id_v2('dyntaxa','dyntaxa_taxon_id',${sqlText(p.dyntaxa.externalId)}) WHERE taxon_id=${p.dyntaxa.taxonId})
-     OR EXISTS (SELECT 1 FROM public.resolve_taxon_external_id_v2('dyntaxa','dyntaxa_taxon_id',${sqlText(p.dyntaxa.externalId.replace(/^.*:/u, ''))})) THEN RAISE EXCEPTION 'Dyntaxa resolver probe failed'; END IF;
+${d ? `  IF (SELECT count(DISTINCT taxon_id) FROM public.resolve_taxon_external_id_v2('dyntaxa','dyntaxa_taxon_id',${sqlText(d.externalId)})) <> 1
+     OR NOT EXISTS (SELECT 1 FROM public.resolve_taxon_external_id_v2('dyntaxa','dyntaxa_taxon_id',${sqlText(d.externalId)}) WHERE taxon_id=${d.taxonId})
+     OR EXISTS (SELECT 1 FROM public.resolve_taxon_external_id_v2('dyntaxa','dyntaxa_taxon_id',${sqlText(d.externalId.replace(/^.*:/u, ''))})) THEN RAISE EXCEPTION 'Dyntaxa resolver probe failed'; END IF;
 ` : ''}  IF NOT EXISTS (SELECT 1 FROM public.search_taxa_v2(${sqlText(p.vernacular.query)},${sqlText(p.vernacular.language)},50) WHERE taxon_id=${p.vernacular.taxonId} AND match_type LIKE 'vernacular_%') THEN RAISE EXCEPTION 'vernacular search probe failed'; END IF;
 END
 $searches$;
