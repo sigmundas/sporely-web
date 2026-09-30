@@ -25,6 +25,30 @@ const fields = {
   'taxon_redlist.jsonl': { taxon_id: 'positiveInteger', source_system: 'nonblankString', source_release: 'nonblankString', assessment_id: 'nonblankString', assessment_area: 'nonblankString', assessed_name_source: 'nonblankString', assessed_name_namespace: 'nonblankString', assessed_name_id: 'nonblankString', scientific_name_snapshot: 'nonblankString', authorship_snapshot: 'nullableString', taxon_rank_snapshot: 'nullableString', category_raw: 'nonblankString', category_code: 'nonblankString', category_is_downgraded: 'boolean', criteria: 'nullableString', expert_group: 'nullableString', assessment_url: 'nullableString' },
 };
 
+// Taxonomy v3 Stage 3P `taxon.jsonl` fields (sporely-py
+// database/taxonomy/docs/cloud-export-contract.md, "National preferred
+// scientific names"). Optional: an export compiled before Stage 3P omits the
+// provenance fields (and older ones the names), which means null. Per
+// country the name and its three provenance fields are all null or all set.
+export const NATIONAL_NAME_COUNTRIES = Object.freeze(['no', 'sv']);
+export const NATIONAL_NAME_FIELDS = Object.freeze(NATIONAL_NAME_COUNTRIES.flatMap(country => {
+  const name = `preferred_scientific_name_${country}`;
+  return [name, `${name}_source_system`, `${name}_namespace`, `${name}_external_id`];
+}));
+
+function validateNationalNames(file, line, value) {
+  for (const country of NATIONAL_NAME_COUNTRIES) {
+    const group = NATIONAL_NAME_FIELDS.filter(name => name.startsWith(`preferred_scientific_name_${country}`));
+    const present = group.map(name => value[name] ?? null);
+    for (const [index, field] of present.entries()) {
+      const type = index === 0 ? 'nonblankString' : 'nonblankTrimmedString';
+      if (field !== null && !validType(field, type)) throw new Error(`${file}:${line}: invalid nullable ${type} field ${group[index]}`);
+    }
+    const set = present.filter(field => field !== null).length;
+    if (set !== 0 && set !== group.length) throw new Error(`${file}:${line}: preferred_scientific_name_${country} has partial provenance`);
+  }
+}
+
 function validType(value, type) {
   if (type === 'string') return typeof value === 'string';
   if (type === 'nullableString') return value === null || typeof value === 'string';
@@ -43,6 +67,7 @@ function validateObject(file, line, value) {
     if (!(name in value)) throw new Error(`${file}:${line}: missing field ${name}`);
     if (!validType(value[name], type)) throw new Error(`${file}:${line}: invalid ${type} field ${name}`);
   }
+  if (file === 'taxon.jsonl') validateNationalNames(file, line, value);
 }
 
 function assertCountMap(value, label) {

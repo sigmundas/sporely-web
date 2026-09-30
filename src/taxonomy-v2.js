@@ -34,6 +34,11 @@ export function normalizeTaxonomyV2Result(row = {}) {
   const canonicalScientificName = cleanText(row.canonical_scientific_name)
     || [cleanText(row.genus), cleanText(row.specific_epithet)].filter(Boolean).join(' ')
   const vernacularName = cleanText(row.vernacular_name)
+  // Taxonomy v3 Stage 3W: search_taxa_v2 picks the national preferred
+  // scientific name for the UI language it was called with and falls back to
+  // the canonical name. Display only — scientificName, genus and epithet stay
+  // canonical because they are what a selection persists.
+  const displayScientificName = cleanText(row.display_scientific_name) || canonicalScientificName
   return {
     identityCapability: TAXONOMY_IDENTITY_CAPABILITY,
     sporelyTaxonId: cleanId(row.taxon_id),
@@ -43,6 +48,9 @@ export function normalizeTaxonomyV2Result(row = {}) {
     specificEpithet: cleanText(row.specific_epithet),
     canonicalScientificName,
     scientificName: canonicalScientificName,
+    displayScientificName,
+    preferredScientificNameNo: cleanText(row.preferred_scientific_name_no),
+    preferredScientificNameSv: cleanText(row.preferred_scientific_name_sv),
     family: cleanText(row.family),
     vernacularName,
     vernacularLanguage: cleanText(row.vernacular_language),
@@ -53,7 +61,7 @@ export function normalizeTaxonomyV2Result(row = {}) {
     matchedName: cleanText(row.matched_name),
     matchedLanguage: cleanText(row.matched_language),
     matchType: cleanText(row.match_type),
-    displayName: displayName(canonicalScientificName, vernacularName),
+    displayName: displayName(displayScientificName, vernacularName),
   }
 }
 

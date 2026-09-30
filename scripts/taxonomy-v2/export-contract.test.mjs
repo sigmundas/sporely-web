@@ -21,3 +21,23 @@ test('wrong release and schema fail', async()=>{ const r=await copyFixture(); tr
 test('invalid JSON reports filename and line', async()=>{ const r=await copyFixture(); try{await writeFile(path.join(r,'vernacular.jsonl'),'{bad}\n'); await buildFixtureManifest(r); await assert.rejects(preflightExport(r),/vernacular\.jsonl:1: invalid JSON/);}finally{await rm(r,{recursive:true});} });
 test('wrong field type reports field', async()=>{ const r=await copyFixture(); try{const p=path.join(r,'taxon.jsonl'); await writeFile(p,(await readFile(p,'utf8')).replace('"taxon_id":1','"taxon_id":"1"')); await buildFixtureManifest(r); await assert.rejects(preflightExport(r),/invalid positiveInteger field taxon_id/);}finally{await rm(r,{recursive:true});} });
 test('blank authoritative namespace fails', async()=>{ const r=await copyFixture(); try{const p=path.join(r,'taxon_external_id.jsonl'); await writeFile(p,(await readFile(p,'utf8')).replace('"namespace":"col_usage_id"','"namespace":""')); await buildFixtureManifest(r); await assert.rejects(preflightExport(r),/nonblankTrimmedString field namespace/);}finally{await rm(r,{recursive:true});} });
+
+async function withTaxonRows(mutate, check) {
+  const r = await copyFixture();
+  try {
+    const p = path.join(r, 'taxon.jsonl');
+    const rows = (await readFile(p, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+    mutate(rows);
+    await writeFile(p, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+    await buildFixtureManifest(r);
+    await check(r);
+  } finally { await rm(r, { recursive: true }); }
+}
+const stage3pNulls = Object.fromEntries(['no', 'sv'].flatMap(c => ['', '_source_system', '_namespace', '_external_id'].map(s => [`preferred_scientific_name_${c}${s}`, null])));
+const noName = { preferred_scientific_name_no: 'Fixture national', preferred_scientific_name_no_source_system: 'nortaxa', preferred_scientific_name_no_namespace: 'nortaxa_taxon_id', preferred_scientific_name_no_external_id: '52369' };
+
+test('Stage 3P taxon.jsonl with national name and provenance passes preflight', async()=>{ await withTaxonRows(rows=>{ rows.forEach(row=>Object.assign(row,stage3pNulls)); Object.assign(rows[0],noName); }, async r=>{ await preflightExport(r); }); });
+test('pre-3P export with names but no provenance fields passes when names are null', async()=>{ await withTaxonRows(rows=>rows.forEach(row=>Object.assign(row,{preferred_scientific_name_no:null,preferred_scientific_name_sv:null})), async r=>{ await preflightExport(r); }); });
+test('national name with partial provenance fails', async()=>{ await withTaxonRows(rows=>{ Object.assign(rows[0],stage3pNulls,noName,{preferred_scientific_name_no_external_id:null}); }, async r=>{ await assert.rejects(preflightExport(r),/preferred_scientific_name_no has partial provenance/); }); });
+test('national name without provenance fields fails', async()=>{ await withTaxonRows(rows=>{ rows[0].preferred_scientific_name_sv='Fixture sv'; }, async r=>{ await assert.rejects(preflightExport(r),/preferred_scientific_name_sv has partial provenance/); }); });
+test('blank national provenance fails', async()=>{ await withTaxonRows(rows=>{ Object.assign(rows[0],stage3pNulls,noName,{preferred_scientific_name_no_namespace:' nortaxa_taxon_id'}); }, async r=>{ await assert.rejects(preflightExport(r),/nonblankTrimmedString field preferred_scientific_name_no_namespace/); }); });

@@ -2,7 +2,7 @@
 import { basename, resolve } from 'node:path';
 import { createReadStream } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { preflightExport } from './lib/export-contract.mjs';
+import { NATIONAL_NAME_FIELDS, preflightExport } from './lib/export-contract.mjs';
 import { discoverLocalTarget, query, spawnSession } from './lib/docker-psql.mjs';
 
 export const IMPORTER_VERSION = 'w2b-importer-1';
@@ -41,8 +41,8 @@ const mappings = {
 insert into public.taxonomy_v2_concepts(sporely_taxon_id, first_seen_release_id)
 select (raw->>'taxon_id')::bigint, current_setting('w2b.release_id') from w2b_stage
 on conflict (sporely_taxon_id) do nothing;
-insert into public.taxonomy_v2_taxa(release_id,sporely_taxon_id,parent_sporely_taxon_id,genus,specific_epithet,family,canonical_scientific_name,taxon_rank,taxonomic_status,source_system,canonical_source_system,canonical_external_id)
-select current_setting('w2b.release_id'),(raw->>'taxon_id')::bigint,(raw->>'parent_taxon_id')::bigint,raw->>'genus',raw->>'specific_epithet',raw->>'family',raw->>'canonical_scientific_name',raw->>'taxon_rank',raw->>'taxonomic_status',raw->>'source_system',raw->>'canonical_source_system',raw->>'canonical_external_id' from w2b_stage;`,
+insert into public.taxonomy_v2_taxa(release_id,sporely_taxon_id,parent_sporely_taxon_id,genus,specific_epithet,family,canonical_scientific_name,taxon_rank,taxonomic_status,source_system,canonical_source_system,canonical_external_id,${NATIONAL_NAME_FIELDS.join(',')})
+select current_setting('w2b.release_id'),(raw->>'taxon_id')::bigint,(raw->>'parent_taxon_id')::bigint,raw->>'genus',raw->>'specific_epithet',raw->>'family',raw->>'canonical_scientific_name',raw->>'taxon_rank',raw->>'taxonomic_status',raw->>'source_system',raw->>'canonical_source_system',raw->>'canonical_external_id',${NATIONAL_NAME_FIELDS.map(f => `raw->>'${f}'`).join(',')} from w2b_stage;`,
   'scientific_name.jsonl': `insert into public.taxonomy_v2_scientific_names(release_id,sporely_taxon_id,language_code,scientific_name,is_preferred_name,source,alias_reason) select current_setting('w2b.release_id'),(raw->>'taxon_id')::bigint,raw->>'language_code',raw->>'scientific_name',(raw->>'is_preferred_name')::boolean,raw->>'source',raw->>'note' from w2b_stage;`,
   'vernacular.jsonl': `insert into public.taxonomy_v2_vernacular_names(release_id,sporely_taxon_id,language_code,vernacular_name,is_preferred_name,source) select current_setting('w2b.release_id'),(raw->>'taxon_id')::bigint,raw->>'language_code',raw->>'vernacular_name',(raw->>'is_preferred_name')::boolean,raw->>'source' from w2b_stage;`,
   'taxon_external_id.jsonl': `insert into public.taxonomy_v2_external_ids(release_id,sporely_taxon_id,source_system,namespace,external_id,id_role,is_preferred,external_name,note) select current_setting('w2b.release_id'),(raw->>'taxon_id')::bigint,raw->>'source_system',raw->>'namespace',raw->>'external_id',raw->>'id_role',(raw->>'is_preferred')::boolean,raw->>'external_name',raw->>'note' from w2b_stage;`,
@@ -100,6 +100,7 @@ values (${q(releaseId)},${m.taxonomy_schema_version},${m.export_schema_version},
     }
     await write(child.stdin, `update public.taxonomy_v2_releases set status='ready',loaded_at=clock_timestamp(),failure_message=null,failed_at=null where release_id=${q(releaseId)};
 do $$ declare result jsonb; begin result:=public.taxonomy_v2_validate_release(${q(releaseId)}); if not coalesce((result->>'ok')::boolean,false) then raise exception 'W2B validation failed: %',result; end if; end $$;
+do $$ declare errors jsonb; begin errors:=public.taxonomy_v2_national_name_errors(${q(releaseId)}); if pg_catalog.jsonb_array_length(errors)>0 then raise exception 'W2B national-name validation failed: %',errors; end if; end $$;
 update public.taxonomy_v2_import_runs set release_id=${q(releaseId)},status='succeeded',finished_at=clock_timestamp(),counts=${json({ row_counts: rowCounts, timings })} where id=${auditId};
 commit;
 \\echo W2B_COMMITTED

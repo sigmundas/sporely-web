@@ -404,3 +404,56 @@ test('manual free text still clears identity explicitly', () => {
     genus: null, specificEpithet: 'some free text', displayName: 'some free text',
   }), null)
 })
+
+// ── Taxonomy v3 Stage 3W: national preferred scientific names ───────────────
+
+const PHOLIOTINA_RUGOSA_ROW = Object.freeze({
+  taxon_id: 83668,
+  taxon_rank: 'species',
+  genus: 'Conocybe',
+  specific_epithet: 'rugosa',
+  canonical_scientific_name: 'Conocybe rugosa',
+  vernacular_name: 'slank ringkjeglesopp',
+  vernacular_language: 'nb',
+  canonical_source_system: 'col_xr',
+  canonical_external_id: 'COL-83668',
+  preferred_scientific_name_no: 'Pholiotina rugosa',
+  preferred_scientific_name_sv: null,
+})
+
+test('Stage 3W: Norwegian label shows the NorTaxa preferred name; identity stays canonical', () => {
+  const taxon = normalizeTaxonomyV2Result({ ...PHOLIOTINA_RUGOSA_ROW, display_scientific_name: 'Pholiotina rugosa' })
+  assert.equal(taxon.displayName, 'slank ringkjeglesopp (Pholiotina rugosa)')
+  assert.equal(taxon.displayScientificName, 'Pholiotina rugosa')
+  assert.equal(taxon.sporelyTaxonId, '83668')
+  assert.equal(taxon.canonicalScientificName, 'Conocybe rugosa')
+  assert.equal(taxon.scientificName, 'Conocybe rugosa')
+  assert.equal(taxon.genus, 'Conocybe')
+  assert.equal(taxon.specificEpithet, 'rugosa')
+  const selection = taxonomySelectionForTaxon(taxon)
+  assert.equal(JSON.stringify(selection).includes('Pholiotina'), false, 'selection persists canonical names only')
+})
+
+test('Stage 3W: Swedish label (no sv name, no sv vernacular) shows the canonical name', () => {
+  const taxon = normalizeTaxonomyV2Result({
+    ...PHOLIOTINA_RUGOSA_ROW, vernacular_name: null, vernacular_language: null,
+    display_scientific_name: 'Conocybe rugosa',
+  })
+  assert.equal(taxon.displayName, 'Conocybe rugosa')
+})
+
+test('Stage 3W: a row without a national name or from a pre-3W RPC falls back to canonical', () => {
+  const { preferred_scientific_name_no: _no, preferred_scientific_name_sv: _sv, ...pre3w } = PHOLIOTINA_RUGOSA_ROW
+  const taxon = normalizeTaxonomyV2Result(pre3w)
+  assert.equal(taxon.displayScientificName, 'Conocybe rugosa')
+  assert.equal(taxon.displayName, 'slank ringkjeglesopp (Conocybe rugosa)')
+})
+
+test('Stage 3W: searchTaxaV2 passes the UI language that chooses the display name', async () => {
+  const calls = []
+  const client = { rpc: async (name, args) => { calls.push([name, args]); return { data: [{ ...PHOLIOTINA_RUGOSA_ROW, display_scientific_name: 'Pholiotina rugosa' }], error: null } } }
+  const [result] = await searchTaxaV2('Pholiotina rugosa', 'nb_NO', { supabaseClient: client, bypassCapabilityGate: true })
+  assert.deepEqual(calls, [['search_taxa_v2', { q: 'Pholiotina rugosa', lang: 'no', lim: 20 }]])
+  assert.equal(result.sporelyTaxonId, '83668')
+  assert.equal(result.displayName, 'slank ringkjeglesopp (Pholiotina rugosa)')
+})

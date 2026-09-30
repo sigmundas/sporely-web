@@ -452,3 +452,39 @@ Having no numeric component, it is not bridged to `nortaxa_taxon_id` and stays
 resolver response and asserts that it stays `external_unresolved` with full
 provenance. A separate test proves that a numeric `NBIC:7821` never becomes
 Sporely taxon 7821 when the resolver returns no match.
+
+## Taxonomy v3 Stage 3W: national preferred scientific names
+
+Consumes the sporely-py Stage 3P `taxon.jsonl` contract
+(`database/taxonomy/docs/cloud-export-contract.md`, "National preferred
+scientific names", accepted candidate `f3e8211`). Migration
+`20260929130000_add_taxonomy_v2_national_scientific_names.sql` is additive:
+
+- `taxonomy_v2_taxa` gains `preferred_scientific_name_{no,sv}` and, per
+  country, `_source_system`, `_namespace`, `_external_id`. A check constraint
+  holds each group all-null or all-non-blank. They are display and search
+  metadata only: `sporely_taxon_id`, `canonical_scientific_name` and the
+  external-id tables are untouched, and `resolve_taxon_external_id_v2` never
+  reads them.
+- Import: preflight accepts the eight fields as optional (absent means null,
+  so pre-3P exports still load) and refuses partial provenance. Before a
+  release becomes `ready`, `taxonomy_v2_national_name_errors(release_id)`
+  (service-role only) must be empty: every name must be traced to an accepted
+  `authoritative_bridge:` row of `taxonomy_v2_external_ids` with the same
+  concept, identifier and `external_name`, and be a
+  `taxonomy_v2_scientific_names` row of the concept.
+- `search_taxa_v2(q, lang, lim)` keeps its arguments, existing columns,
+  matching and ranking, and appends `preferred_scientific_name_no`,
+  `preferred_scientific_name_sv` and `display_scientific_name`. The last is
+  the Norwegian name for `lang = 'no'`, the Swedish name for `lang = 'sv'`,
+  otherwise (or when null) `canonical_scientific_name`. `lang` is the web UI
+  language (`getTaxonomyLanguage()`), not a vernacular preference. Because
+  every national name is also a scientific-name row, search finds the concept
+  by either name through the existing alias branch.
+- Web label (`normalizeTaxonomyV2Result`): `displayName` uses
+  `display_scientific_name`, e.g. `slank ringkjeglesopp (Pholiotina rugosa)`
+  for 83668 in Norwegian and `Conocybe rugosa` in Swedish. `scientificName`,
+  `genus` and `specificEpithet` stay canonical because a selection persists
+  them; a pre-3W RPC response without the field falls back to canonical.
+  Stored observation names (Finds cards, detail headers of saved
+  observations) are not relabelled by this stage.
