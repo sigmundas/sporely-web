@@ -8,6 +8,11 @@
 -- in place of the direct public.is_blocked_between / public.are_friends calls
 -- that 20260930181144 reintroduced, and keeps its six taxonomy identity
 -- columns. CREATE OR REPLACE VIEW keeps the existing owner and grants.
+--
+-- Side effect on view options: CREATE OR REPLACE VIEW replaces reloptions.
+-- 20260812140000 rebuilt both views without a WITH clause, which cleared
+-- security_barrier; this definition (like 20260930181144) sets it again, so
+-- both views carry security_barrier = true from here on.
 
 
 CREATE OR REPLACE VIEW public.observations_community_view

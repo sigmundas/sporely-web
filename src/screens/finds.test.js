@@ -1947,6 +1947,32 @@ for (const [label, missingColumn] of [
   })
 }
 
+test('owner detail read drops only the identity fields when observations lacks selected_sporely_taxon_id', async () => {
+  const ownerRow = { id: 733, user_id: 'user-a', visibility: 'public', is_draft: false, genus: 'Amanita', species: 'muscaria' }
+  const { client, calls } = makeSequencedClient({
+    observations: [
+      {
+        data: null,
+        error: { code: '42703', message: 'column observations.selected_sporely_taxon_id does not exist' },
+      },
+      { data: ownerRow, error: null },
+    ],
+  })
+
+  const result = await loadDetailObservation(733, { client })
+
+  const ownerCalls = calls.filter(call => call.table === 'observations')
+  assert.equal(ownerCalls.length, 2)
+  const retryFields = selectedFields(ownerCalls[1].columns)
+  for (const field of DETAIL_TAXON_IDENTITY_FIELDS) {
+    assert.ok(!retryFields.includes(field), `owner retry must drop ${field}`)
+  }
+  assert.ok(retryFields.includes('ai_selected_service'), 'owner retry must keep the AI-selection fields')
+  assert.equal(calls.filter(call => call.table !== 'observations').length, 0)
+  assert.equal(result.outcome, 'observation')
+  assert.equal(result.source, 'observations')
+})
+
 for (const [label, error] of [
   [
     'the selected-taxon write guard',

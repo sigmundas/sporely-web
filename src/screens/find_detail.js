@@ -742,7 +742,7 @@ function _stripTaxonIdentityFieldsFromSelect(select = '') {
 // the column also appears in unrelated messages (the write guard names it).
 // Without this, a read view that lacks only this column (0.7.13 against the
 // pre-20260930181144 detail views) fails with a fatal 42703.
-const MISSING_SELECTED_TAXON_COLUMN_RE = /\bcolumn (?:[a-z0-9_]+\.)?selected_sporely_taxon_id does not exist\b|could not find the 'selected_sporely_taxon_id' column/
+const MISSING_SELECTED_TAXON_COLUMN_RE = /\bcolumn (?:[a-z0-9_]+\.)?selected_sporely_taxon_id does not exist\b/
 
 function _isMissingSelectedTaxonColumnError(error) {
   if (!error || String(error.code || '') !== '42703') return false
