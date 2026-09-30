@@ -19,6 +19,16 @@ import {
   readCachedMedia,
   writeCachedMedia,
 } from '../media-cache.js'
+import {
+  fetchMySharedReferenceContributions,
+  sharedReferencesEmptyHtml,
+  sharedReferencesErrorHtml,
+  sharedReferencesListHtml,
+  sharedReferencesLoadingHtml,
+  sharedReferencesRateLimitedHtml,
+  stopSharingWithConfirmation,
+  withdrawSharedReferenceContribution,
+} from '../shared-references.js'
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
@@ -323,7 +333,7 @@ export async function loadProfile() {
     await _loadProfileData({ setup: true })
     return
   }
-  await Promise.all([_loadProfileData(), _loadFriends(), _loadPending()])
+  await Promise.all([_loadProfileData(), _loadFriends(), _loadPending(), _loadSharedReferences()])
 }
 
 function _profileAccessCapability() {
@@ -1283,6 +1293,65 @@ async function _loadBlocked() {
   list.querySelectorAll('.friend-remove-btn').forEach(btn => {
     btn.addEventListener('click', () => _unblockUser(btn.dataset.id))
   })
+}
+
+async function _loadSharedReferences() {
+  const uid = state.user?.id
+  if (!uid) return
+  const list = document.getElementById('shared-references-list')
+  if (!list) return
+
+  list.innerHTML = sharedReferencesLoadingHtml()
+  const result = await fetchMySharedReferenceContributions()
+
+  if (result.kind === 'rate_limited') {
+    list.innerHTML = sharedReferencesRateLimitedHtml(result.retryAfterSeconds)
+    return
+  }
+  if (result.kind === 'error') {
+    list.innerHTML = sharedReferencesErrorHtml(result.message)
+    return
+  }
+
+  if (!result.contributions.length) {
+    list.innerHTML = sharedReferencesEmptyHtml()
+    return
+  }
+
+  list.innerHTML = sharedReferencesListHtml(result.contributions)
+  list.querySelectorAll('.shared-ref-stop-btn').forEach(btn => {
+    btn.addEventListener('click', () => _stopSharingReference(btn.dataset.contributionId, btn))
+  })
+}
+
+async function _stopSharingReference(contributionId, btn) {
+  const originalLabel = btn.textContent
+  const result = await stopSharingWithConfirmation(contributionId, {
+    guard: () => requireCloudMutation({ showToast }).allowed,
+    withdraw: id => {
+      btn.disabled = true
+      btn.textContent = t('sharedReferences.stopping')
+      return withdrawSharedReferenceContribution(id)
+    },
+  })
+  if (result.kind === 'cancelled' || result.kind === 'blocked') return
+
+  if (result.kind === 'ok') {
+    await _loadSharedReferences()
+    return
+  }
+
+  btn.disabled = false
+  btn.textContent = originalLabel
+  if (result.kind === 'rate_limited') {
+    showToast(t('sharedReferences.rateLimited', { seconds: result.retryAfterSeconds }))
+  } else if (result.kind === 'forbidden' || result.kind === 'not_found') {
+    // Someone else already changed this row (or it no longer exists) —
+    // refresh so the list reflects reality instead of the stale button.
+    await _loadSharedReferences()
+  } else {
+    showToast(t('sharedReferences.stopFailed', { message: result.message }))
+  }
 }
 
 function _blockedUserRowHtml(row) {

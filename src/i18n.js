@@ -328,6 +328,20 @@ const messages = {
     'profile.unblocked': 'User unblocked',
     'profile.inviteFriends': 'Invite friends',
     'invite.text': 'Check out Sporely, a field app for documenting your finds.',
+    'sharedReferences.sectionTitle': 'My shared references',
+    'sharedReferences.loading': 'Loading…',
+    'sharedReferences.empty': 'You haven’t shared any references yet.',
+    'sharedReferences.error': 'Could not load your shared references: {message}',
+    'sharedReferences.rateLimited': 'Too many requests. Try again in {seconds}s.',
+    'sharedReferences.statusShared': 'Shared',
+    'sharedReferences.statusWithdrawn': 'Stopped',
+    'sharedReferences.revisionLabel': 'Revision {revision}',
+    'sharedReferences.sharedAtLabel': 'Shared {date}',
+    'sharedReferences.stoppedAtLabel': 'Stopped {date}',
+    'sharedReferences.stopSharing': 'Stop sharing',
+    'sharedReferences.stopping': 'Stopping…',
+    'sharedReferences.stopConfirm': 'Stop sharing this reference?\n\nIt will be removed from public view in Sporely. This cannot undo copies other users have already made (those are their own reference sets, which they may keep and share under their own name), or anything others have already downloaded, saved or cited. Sporely keeps earlier versions privately as a record.',
+    'sharedReferences.stopFailed': 'Could not stop sharing: {message}',
     'profile.signOut': 'Sign out',
     'profile.deleteAccount': 'Delete account',
     'profile.changePhoto': 'Change photo',
@@ -831,6 +845,20 @@ const messages = {
     'profile.unblocked': 'Bruker fjernet fra blokkeringsliste',
     'profile.inviteFriends': 'Inviter venner',
     'invite.text': 'Sjekk ut Sporely, en felt-app for å dokumentere funn.',
+    'sharedReferences.sectionTitle': 'Mine delte referanser',
+    'sharedReferences.loading': 'Laster…',
+    'sharedReferences.empty': 'Du har ikke delt noen referanser ennå.',
+    'sharedReferences.error': 'Kunne ikke laste delte referanser: {message}',
+    'sharedReferences.rateLimited': 'For mange forespørsler. Prøv igjen om {seconds}s.',
+    'sharedReferences.statusShared': 'Delt',
+    'sharedReferences.statusWithdrawn': 'Stanset',
+    'sharedReferences.revisionLabel': 'Revisjon {revision}',
+    'sharedReferences.sharedAtLabel': 'Delt {date}',
+    'sharedReferences.stoppedAtLabel': 'Stanset {date}',
+    'sharedReferences.stopSharing': 'Slutt å dele',
+    'sharedReferences.stopping': 'Stanser…',
+    'sharedReferences.stopConfirm': 'Slutte å dele denne referansen?\n\nDen fjernes fra offentlig visning i Sporely. Dette kan ikke gjøre om kopier andre brukere allerede har laget (de er deres egne referansesett, som de kan beholde og dele under sitt eget navn), eller det andre allerede har lastet ned, lagret eller sitert. Sporely beholder tidligere versjoner privat som dokumentasjon.',
+    'sharedReferences.stopFailed': 'Kunne ikke stanse deling: {message}',
     'profile.signOut': 'Logg ut',
     'profile.deleteAccount': 'Slett konto',
     'profile.changePhoto': 'Bytt bilde',
@@ -2266,6 +2294,7 @@ export function applyStaticTranslations() {
   if (friendsEmpty) friendsEmpty.textContent = t('profile.noFriends')
   const blockedEmpty = document.querySelector('#blocked-list > div')
   if (blockedEmpty) blockedEmpty.textContent = t('profile.noBlockedUsers')
+  setText('#shared-references-title', 'sharedReferences.sectionTitle')
 
   setText('.avatar-crop-header', 'avatar.cropPhoto')
   setText('.avatar-crop-hint', 'avatar.hint')

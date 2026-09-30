@@ -13,6 +13,16 @@ general and security review; the production preflight (exactly 2
 unconsented shared rows) and deploy need explicit authorization. Landing
 null-contributor test on sporely-landing `feature/reference-sharing-consent-2a`.
 
+**2b server+web candidate (2026-10-01, not accepted, not deployed):** branch
+`feature/reference-sharing-consent-2b-server`, migration
+`20260930232633_add_reference_sharing_consent_grant.sql`: grant, owner list
+and consent-text RPCs; consent text v1 en/nb shipped **inactive** (owner must
+approve the wording, then activate in a separate step); the 2a review lows;
+web "My shared references" in the profile overlay. The grant records
+`consent_scope` from the granted snapshot. Desktop (sporely-py) is a separate
+later candidate, including the allowlist and
+`test_stage6l_cross_repository_contract.py`.
+
 ## Owner decisions (2026-10-01)
 
 - **A.** Withdraw both existing unconsented contributions in Stage 2a.

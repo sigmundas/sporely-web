@@ -96,6 +96,8 @@ BEGIN
   -- the grant mode of the private core, as the 2b consent RPC will do, so the
   -- withdrawal trigger has a real, consented chain to walk.
   -- An active consent text exists, so only the missing grant keeps this private.
+  -- The fixture text replaces the shipped, inactive version-1 texts.
+  DELETE FROM private.reference_share_consent_texts;
   INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope)
   VALUES (1,'en','fixture consent text',encode(sha256(convert_to('fixture consent text','UTF8')),'hex'),true,
           '{"snapshot_schema_versions":[1,2],"data_kinds":["raw_points","free_text","measurement_details"]}');

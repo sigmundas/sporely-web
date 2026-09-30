@@ -98,6 +98,8 @@ INSERT INTO public.observation_reference_uses(
   ('$OWNER','84000000-0000-4000-8000-00000001c002',953000002,'$S1','compared',1,'{}'),
   ('$OWNER','84000000-0000-4000-8000-00000001c003',953000003,'$S2','compared',1,'{}'),
   ('$OWNER','84000000-0000-4000-8000-00000001c004',953000004,'$S2','compared',1,'{}');
+-- The fixture text replaces the shipped, inactive version-1 texts.
+DELETE FROM private.reference_share_consent_texts;
 INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope)
 VALUES (1,'en','fixture consent text',encode(sha256(convert_to('fixture consent text','UTF8')),'hex'),true,
         '{"snapshot_schema_versions":[1,2],"data_kinds":["raw_points","free_text","measurement_details"]}');
