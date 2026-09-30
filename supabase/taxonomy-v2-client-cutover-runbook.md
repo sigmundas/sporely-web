@@ -46,7 +46,7 @@ Old clients remain readable and writable because no legacy column or RPC is remo
 
 Roll back the client deployment to the prior web bundle and Android release. Old clients continue using `search_taxa`; do not drop it. Leave the additive nullable column and RPC installed so already-selected links remain readable and queued upgraded clients do not fail destructively. If an emergency disable is required, revoke `set_observation_selected_taxon_v2` from `authenticated` after rolling clients back. Do not clear `resolved_sporely_taxon_id`, rewrite snapshots, or change the active release. Use a reviewed forward migration for any schema correction.
 
-## Production verification (human operator only)
+## Production verification (read-only; see `AGENTS.md`, "Production writes by agents")
 
 Run read-only checks first:
 
