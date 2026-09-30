@@ -260,8 +260,37 @@ authorised window:
    git -C ../sporely-py show 9609542:database/taxonomy/policies/concept_supersessions.yml | python3 -c "import json,sys,hashlib; d=json.load(sys.stdin); ids=sorted({r['superseded_sporely_taxon_id'] for r in d['supersessions'] if r['review_status']=='approved'}); print(len(ids), hashlib.sha256(''.join(f'{i}\n' for i in ids).encode()).hexdigest())"
    ```
 
-   None of these ids is in the cloud scope of either release, so the expected
-   count is zero; the check is what proves it.
+   None of these ids is in the searchable cloud scope of either release, but
+   that does not make the count zero: W3 `taxonomy_v3.resolution_link` rows
+   (and the `observations.resolved_sporely_taxon_id` values copied from them)
+   can point at any registry concept. The first production run (2026-09-30)
+   stopped with 0 selected, 36 resolved and 37 links (one link's observation
+   no longer exists), all on 19 retiring concepts. Those are cleared by the
+   repair below; after it, the expected result is "0 references".
+
+### Retired-concept resolution repair (before the import)
+
+Owner decision: repair then import, adding missing survivors to the registry
+from the active release. Migration `20260930202803` provides
+`private.retired_resolution_repair_dry_run()` and
+`private.retired_resolution_repair_apply(plan_sha256)`; operator detail is in
+`supabase/taxonomy-v3-retired-concept-resolution-repair-runbook.md`. Each step
+needs its own go-ahead:
+
+1. **Deploy** `20260930202803` through the deploy tree only
+   (`node scripts/supabase-deploy-tree.mjs prepare --allow 20260930202803 --ref <committed ref>`,
+   `check`, `supabase db push --linked` inside the tree, `post-verify`).
+2. **Read-only dry run** as `postgres`, inside `BEGIN TRANSACTION READ ONLY; … ROLLBACK;`.
+   Expect `release_id` `tax-2026.09.26-02`, `manifest_sha256`
+   `2585d08a…21a49`, `link_count` 37, `observation_count` 36,
+   `orphan_link_count` 1, 15 `registry_additions`, and `refusals` `[]`.
+3. **Present** the report (counts, per-pair table, registry additions) and
+   keep `plan_sha256`. Any refusal: STOP.
+4. **Apply** with that hash at a quiet time:
+   `SELECT private.retired_resolution_repair_apply('<plan_sha256>');`
+5. **Re-run** `taxonomy-v3-tax-2026.09.30-01-retiring-concept-check.sql`; it
+   must now report 0 references.
+6. Only then continue with the import below.
 
 ### Production activation (explicitly authorised, authorised window only)
 
