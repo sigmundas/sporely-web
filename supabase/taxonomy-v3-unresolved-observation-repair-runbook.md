@@ -29,6 +29,12 @@ approvals.
   and `source_out_of_bounds` are recorded, not errors, because the owner path
   cannot share those either. Every action is recorded in
   `private.taxon_identity_repair_reference_actions`.
+- Only taxonomy-v3 registry species can be shared. When the new taxon is not
+  one, `new_contribution` is `not_registry_species` if it is a species in the
+  active release (a species, just not a shareable anchor) and `not_species`
+  otherwise (migration `20260930213813`; before it, both were `not_species`).
+  Neither shares anything; see
+  `docs/plans/active/2026-09-30-reference-share-eligibility.md`.
 
 ## Procedure
 
@@ -91,6 +97,8 @@ identity is never pushed over it.
 supabase db reset --local
 docker exec -i supabase_db_zkpjklzfwzefhjluvhfw psql -U postgres -v ON_ERROR_STOP=1 -q \
   < supabase/tests/taxon_identity_repair_test.sql
+docker exec -i supabase_db_zkpjklzfwzefhjluvhfw psql -U postgres -v ON_ERROR_STOP=1 -q \
+  < supabase/tests/taxon_identity_repair_label_test.sql
 
 # Two-session race regression. It commits fixtures, so run it only right
 # after a reset:
