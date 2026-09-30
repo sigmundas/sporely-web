@@ -25,7 +25,9 @@
 --
 -- Rules:
 --   * `resolution_link` is authoritative; observations follow it in the same
---     transaction, exactly as `link_observations_to_resolution()` would.
+--     transaction, exactly as `link_observations_to_resolution()` would:
+--     `resolved_sporely_taxon_id` follows the link whatever the observation's
+--     (non-retired) `selected_sporely_taxon_id` is; the selection is untouched.
 --   * Only `resolved_sporely_taxon_id` moves. `resolution_state`,
 --     `resolution_method`, `resolution_release` and `manifest_semantic_sha256`
 --     are kept: the original mapping method is still how the observation was
@@ -475,8 +477,7 @@ BEGIN
     FROM pg_catalog.jsonb_array_elements(v_report->'items') i
    WHERE (i->>'observation_present')::boolean
      AND o.id::text = i->>'observation_id'
-     AND o.resolved_sporely_taxon_id = (i->>'superseded_sporely_taxon_id')::integer
-     AND o.selected_sporely_taxon_id IS NULL;
+     AND o.resolved_sporely_taxon_id = (i->>'superseded_sporely_taxon_id')::integer;
   GET DIAGNOSTICS v_n = ROW_COUNT;
   v_expected := (v_report->>'observation_count')::integer;
   IF v_n <> v_expected THEN

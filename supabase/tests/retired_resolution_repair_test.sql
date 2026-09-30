@@ -11,6 +11,8 @@
 --   962000004            -> 626910 (survivor 16099, missing from registry)
 --   962000099 (orphan)   -> 626910 (its observation row no longer exists)
 --   962000005            -> 18893 (a survivor; not a candidate)
+--   962000007            -> 626184 (survivor 69545) with a valid non-retired
+--                           selection 18893, which must stay untouched
 
 BEGIN;
 
@@ -63,7 +65,7 @@ BEGIN
     (69545,'Survivor s69545','species','include','in_cache',v_old);
 
   INSERT INTO taxonomy_v3.identification_snapshot(observation_id, original_scientific_name)
-  SELECT x::text, 'snapshot' FROM unnest(ARRAY[962000001,962000002,962000003,962000004,962000005,962000099]) x;
+  SELECT x::text, 'snapshot' FROM unnest(ARRAY[962000001,962000002,962000003,962000004,962000005,962000007,962000099]) x;
   INSERT INTO taxonomy_v3.resolution_link(
     observation_id,resolution_state,resolved_sporely_taxon_id,resolution_method,resolution_evidence
   ) VALUES
@@ -72,6 +74,7 @@ BEGIN
     ('962000003','resolved_exact',625083,'trusted_secondary_provider_mapping','[]'),
     ('962000004','resolved_exact',626910,'trusted_secondary_provider_mapping','[]'),
     ('962000005','resolved_exact',18893,'trusted_secondary_provider_mapping','[]'),
+    ('962000007','resolved_exact',626184,'trusted_secondary_provider_mapping','[]'),
     ('962000099','resolved_exact',626910,'trusted_secondary_provider_mapping','[]');
 
   INSERT INTO public.observations(
@@ -83,6 +86,10 @@ BEGIN
     (962000004,v_owner,current_date,'private',false,'Retired','d',626910),
     (962000005,v_owner,current_date,'private',false,'Inocybe','lacera',18893),
     (962000006,v_owner,current_date,'private',false,'Other','e',NULL);
+  INSERT INTO public.observations(
+    id,user_id,date,visibility,is_draft,genus,species,selected_sporely_taxon_id,resolved_sporely_taxon_id
+  ) OVERRIDING SYSTEM VALUE VALUES
+    (962000007,v_owner,current_date,'private',false,'Retired','g',18893,626184);
 
   -- Reference fixtures used only inside refusal sub-blocks.
   INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
@@ -97,7 +104,7 @@ BEGIN
 
   ALTER TABLE public.observations DISABLE TRIGGER trg_observations_updated_at;
   UPDATE public.observations SET updated_at = '2000-01-01T00:00:00Z'
-   WHERE id BETWEEN 962000001 AND 962000006;
+   WHERE id BETWEEN 962000001 AND 962000007;
   ALTER TABLE public.observations ENABLE TRIGGER trg_observations_updated_at;
 END
 $$;
@@ -129,7 +136,7 @@ BEGIN
   IF r->>'release_id' <> 'tax-2099.09.30-01'
      OR r->>'manifest_sha256' <> '2585d08a93b4f7ceff5a258e5f4362a1dbe8e68cf3ed925eca011f8a08021a49'
      OR r->>'plan_sha256' !~ '^[0-9a-f]{64}$'
-     OR (r->>'link_count')::int <> 5 OR (r->>'observation_count')::int <> 4
+     OR (r->>'link_count')::int <> 6 OR (r->>'observation_count')::int <> 5
      OR (r->>'orphan_link_count')::int <> 1
      OR r->'refusals' <> '[]'::jsonb
      OR jsonb_array_length(r->'per_pair') <> 19 THEN
@@ -248,6 +255,13 @@ BEGIN
   EXCEPTION WHEN invalid_parameter_value THEN
     IF SQLERRM NOT LIKE '%not the pinned 9609542 ledger manifest%' THEN RAISE; END IF;
   END;
+  BEGIN
+    EXECUTE replace(v_def, 'superseded-by-col-3MZFS', 'superseded-by-col-3MZFX');
+    PERFORM private.retired_resolution_repair_dry_run();
+    RAISE EXCEPTION 'tampered supersession_id was not refused' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN invalid_parameter_value THEN
+    IF SQLERRM NOT LIKE '%not the pinned 9609542 ledger manifest%' THEN RAISE; END IF;
+  END;
   IF private.retired_resolution_repair_dry_run()->>'manifest_sha256' IS NULL THEN
     RAISE EXCEPTION 'manifest not restored';
   END IF;
@@ -261,12 +275,12 @@ DECLARE
   v_run bigint := (r->>'run_id')::bigint;
   v_ev jsonb;
 BEGIN
-  IF (r->>'link_count')::int <> 5 OR r->>'plan_sha256' <> (SELECT v#>>'{}' FROM rr_state WHERE k='plan') THEN
+  IF (r->>'link_count')::int <> 6 OR (r->>'observation_count')::int <> 5 OR r->>'plan_sha256' <> (SELECT v#>>'{}' FROM rr_state WHERE k='plan') THEN
     RAISE EXCEPTION 'apply report wrong: %', r;
   END IF;
   IF EXISTS (
     SELECT 1 FROM (VALUES ('962000001',89218),('962000002',89218),('962000003',18893),
-                          ('962000004',16099),('962000099',16099),('962000005',18893)) x(o,t)
+                          ('962000004',16099),('962000099',16099),('962000005',18893),('962000007',69545)) x(o,t)
       LEFT JOIN taxonomy_v3.resolution_link l ON l.observation_id = x.o
      WHERE l.resolved_sporely_taxon_id IS DISTINCT FROM x.t
         OR l.resolution_state <> 'resolved_exact'
@@ -275,14 +289,15 @@ BEGIN
   END IF;
   IF EXISTS (
     SELECT 1 FROM (VALUES (962000001,89218),(962000002,89218),(962000003,18893),
-                          (962000004,16099),(962000005,18893)) x(o,t)
+                          (962000004,16099),(962000005,18893),(962000007,69545)) x(o,t)
       LEFT JOIN public.observations ob ON ob.id = x.o
-     WHERE ob.resolved_sporely_taxon_id IS DISTINCT FROM x.t OR ob.selected_sporely_taxon_id IS NOT NULL
+     WHERE ob.resolved_sporely_taxon_id IS DISTINCT FROM x.t
+        OR ob.selected_sporely_taxon_id IS DISTINCT FROM (CASE WHEN x.o = 962000007 THEN 18893 END)
         OR ob.genus IS DISTINCT FROM (CASE WHEN x.o = 962000005 THEN 'Inocybe' ELSE 'Retired' END)) THEN
     RAISE EXCEPTION 'observations not moved correctly';
   END IF;
   -- updated_at bumped on the moved rows only (owner sync sees the change).
-  IF (SELECT count(*) FROM public.observations WHERE id BETWEEN 962000001 AND 962000004 AND updated_at > '2000-01-02') <> 4
+  IF (SELECT count(*) FROM public.observations WHERE id IN (962000001,962000002,962000003,962000004,962000007) AND updated_at > '2000-01-02') <> 5
      OR (SELECT count(*) FROM public.observations WHERE id IN (962000005,962000006) AND updated_at > '2000-01-02') <> 0 THEN
     RAISE EXCEPTION 'updated_at bump wrong';
   END IF;
@@ -310,13 +325,13 @@ BEGIN
     RAISE EXCEPTION 'registry wrong';
   END IF;
   -- Audit.
-  IF (SELECT count(*) FROM private.retired_resolution_repair_items WHERE run_id=v_run) <> 5
+  IF (SELECT count(*) FROM private.retired_resolution_repair_items WHERE run_id=v_run) <> 6
      OR (SELECT observation_updated FROM private.retired_resolution_repair_items
           WHERE run_id=v_run AND observation_id='962000099') IS DISTINCT FROM false
-     OR (SELECT count(*) FROM private.retired_resolution_repair_items WHERE run_id=v_run AND observation_updated) <> 4
+     OR (SELECT count(*) FROM private.retired_resolution_repair_items WHERE run_id=v_run AND observation_updated) <> 5
      OR (SELECT count(*) FROM private.retired_resolution_repair_registry_additions WHERE run_id=v_run) <> 2
      OR NOT EXISTS (SELECT 1 FROM private.retired_resolution_repair_runs
-          WHERE run_id=v_run AND link_count=5 AND observation_count=4 AND orphan_link_count=1
+          WHERE run_id=v_run AND link_count=6 AND observation_count=5 AND orphan_link_count=1
             AND registry_added_count=2 AND release_id='tax-2099.09.30-01'
             AND manifest_sha256='2585d08a93b4f7ceff5a258e5f4362a1dbe8e68cf3ed925eca011f8a08021a49') THEN
     RAISE EXCEPTION 'audit wrong';
