@@ -168,7 +168,15 @@ More gaps in today's code:
   - **content proof:** the use's publicly projected snapshot
     (`public_reference_snapshot` of its `snapshot_json`) equals the snapshot
     inside some revision of that contribution numbered
-    `>= consent_first_revision`, compared as canonical jsonb.
+    `>= consent_first_revision`, after removing the four identity keys that
+    the envelope rewrites from **both** sides: `reference_work_id`,
+    `reference_treatment_id`, `reference_measurement_set_id` and
+    `reference_revision`. The envelope replaces the first three with
+    contribution-derived v5 ids and the last with the contribution revision
+    (`20260830183210:145-157`). The comparison uses jsonb `=`, the same rule
+    as the `current`-mode check (`20260828143513:784`), never text or a hash,
+    so `5.5` and `5.50` compare equal. The removed ids are implied by the
+    (owner, set) join.
 
   The revision number alone proves nothing. `reference_revision` is only the
   measurement set's revision (`20260828143513:378`), so citation and
@@ -259,9 +267,15 @@ More gaps in today's code:
     `FOR SHARE` on the set, treatment and work rows after its advisory lock
     (`20260830183210:266-283`). A source edit already holds that row when its
     trigger waits for the advisory lock, so they deadlock. The 2a core reads
-    source revisions without row locks and compares them with the expected
-    revisions. A mismatch returns `revision_mismatch`, and nothing is
-    published.
+    source rows without row locks.
+    - In **refresh** mode it ignores caller-supplied revisions. It reads the
+      current revisions itself **after** taking the advisory lock and
+      publishes those, so concurrent edits of a treatment, work or shared
+      treatment can't lose a revision.
+    - Only **grant** mode (2b) compares with the revisions the client
+      displayed, and returns `revision_mismatch` on a difference.
+  - **Multiple sets:** deleting or editing a treatment or work that several
+    sets use takes their advisory locks in sorted set-id order.
   - **Withdraw RPC order:** read the contribution's owner and set without a
     lock, check ownership, take the advisory lock, then lock the row and check
     again. That fixes today's row-lock-first order (`:450-451`).
@@ -280,8 +294,10 @@ effective taxon is the contribution's taxon.
   leaving `public`, or it becoming a draft withdraws the contributions it
   alone backed.
 - **Source deletion:** deleting the source set, treatment or work
-  withdraws. Today the source triggers return early on `deleted_at`
-  (`:737-740`) and the last revision stays public; 2a changes that.
+  withdraws, for **every caller**. Today the source triggers return early when
+  `auth.uid()` is NULL (`:736`, `:760`) and on `deleted_at` (`:737-740`), so
+  the last revision stays public. 2a removes both early returns for the
+  deletion branch, as for the use trigger.
 - **The consent text still says** that the share shows, under the owner's
   label, that they identified this species. The observation is public, so
   this adds little.
@@ -379,8 +395,11 @@ These are returned by the core in `refresh` mode, and Stage 1B maps each one:
   and the row was withdrawn. Stage 1B records it.
 - `withdrawn_unqualified`: no qualifying use remains, and the row was
   withdrawn. Stage 1B records it.
-- `revision_mismatch`: the source changed concurrently; nothing was
-  published. Stage 1B raises, since its whole run retries.
+- `revision_mismatch`: grant mode only (2b). Refresh mode never returns it,
+  because it reads revisions after the lock.
+- `source_not_found_or_stale`: the source set, treatment or work is missing
+  or deleted when refresh runs. The core withdraws with `source_deleted`
+  first. Stage 1B records its own `source_deleted` label.
 - `invalid_taxon`, `account_unavailable`, `source_out_of_bounds`: unchanged
   meanings. Stage 1B keeps today's labels: `not_registry_species` or
   `not_species` for `invalid_taxon` (Stage 1), and
