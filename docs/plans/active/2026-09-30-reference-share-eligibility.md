@@ -1,9 +1,28 @@
 # Shared-reference eligibility for species outside the taxonomy-v3 registry
 
-Status: proposed, reviewed (general and security review of `758478b`, both
-"needs changes"; this revision incorporates them). Not started. The owner
-decisions under "Open questions" come first. Nothing here has been applied to
+Status: decided 2026-09-30. Reviewed (general and security review of
+`758478b`, both "needs changes"; incorporated). The immediate scope is Stage 1,
+the label fix, only. Stage 2 (consent and visibility) and Stage 3 (any
+widening) are separate reviewed stages. Nothing here has been applied to
 production.
+
+## Owner decisions (2026-09-30)
+
+1. **No widening yet.** Automatic, attributed public sharing stays limited to
+   the current reviewed registry. Implement only the misleading-label fix now.
+2. **Opt-in.** Public reference-contribution sharing must become opt-in.
+   - Private or draft observations must never automatically create public
+     contributions.
+   - A public observation is not, by itself, consent to publish its citation,
+     measurement points and user attribution. Sharing an observation and
+     sharing a reference contribution are separate actions.
+3. **Row values.** If eligibility is later widened through on-demand registry
+   rows, they use `scope_state = 'not_evaluated'`. That value says why the row
+   exists without implying review. NULL would lose the state.
+4. **No publishing for owners.** Do not operator-publish contributions for
+   617026 or 55368. They stay private until the owners can explicitly opt in
+   after the consent and visibility work. An operator may repair identity but
+   must not manufacture consent for attributed public publication.
 
 ## Problem
 
@@ -142,46 +161,51 @@ corrected per review:
   identity conflict.
 - **Execution surface:** `REVOKE ALL … FROM PUBLIC, anon, authenticated,
   service_role` on the new helper, `search_path = ''`, postgres-owned.
-- **Consent gate (required):**
-  - an in-app notice before the first automatic share;
-  - a server-side per-account opt-in, or at least an opt-out, checked in
-    `share_reference_contribution_for_owner`;
-  - an owner decision on whether private and draft observations may share at
-    all.
+- **Consent gate (required, decided):** the Stage 2 opt-in. No contribution
+  is created without the owner's explicit opt-in, and private or draft
+  observations never share automatically.
 
 **B. Retarget FKs to `taxonomy_v2_concepts`.** Viable, since v2 concepts are
 cumulative. But it changes FKs on contributions and curated tables
 (`integer` to `bigint`), the public read joins and the backfill semantics,
 and it splits curated identity across two taxonomies. Not recommended.
 
-**Recommendation:**
-1. Now: do C.
-2. Separately, and first: fix the existing visibility/consent gap for today's
-   eligibility.
-3. Only after that, and only if the owner wants wider sharing: implement A′.
+**Decided:** C now (Stage 1). Close the consent and visibility gap next
+(Stage 2, opt-in). A′ only later, as its own reviewed stage, if still wanted.
+Its consent gate is then the Stage 2 opt-in, not a notice or opt-out.
 
 ## Plan
 
-### Stage 1 (C, small)
+### Stage 1 (C, immediate scope)
 
 - **Migration:** `CREATE OR REPLACE` the Stage 1B helper so the unanchored
   case records `not_registry_species` and a genuine non-species keeps
-  `not_species`. Deploy via the deploy tree.
+  `not_species`. No change to eligibility or exposure. Deploy via the deploy
+  tree.
 - **Tests:** `taxon_identity_repair_test.sql` (both labels).
+- **Existing audit rows:** the four `not_species` rows from Stage 1B run 1
+  stay as recorded. They are history; the plan and runbook record that they
+  meant "not in the registry".
 
-### Stage 2 (privacy baseline, before any widening)
+### Stage 2 (consent and visibility, separate reviewed stage)
 
-Needs owner decisions 1 and 2. Once decided:
-- add the consent flag and notice (web `src/` and desktop `sporely-py`);
-- apply the visibility rule in `share_reference_contribution_for_owner` and
-  the backfill semantics;
-- decide what happens to the 2 existing contributions under the new rule.
+Decided: opt-in (decisions 2 and 4). Needs its own plan and security review.
+- A server-side per-account or per-contribution opt-in, checked in
+  `share_reference_contribution_for_owner`, the automatic trigger path and
+  any backfill. No contribution is created or re-shared without it.
+- Private and draft observations never create or keep public contributions
+  automatically. Observation visibility is not consent.
+- An explicit owner share action and matching UI on web `src/` and desktop
+  `sporely-py`, with clear text on what becomes public.
+- Decide what happens to the 2 existing shared contributions, which were
+  created without opt-in.
+- 617026 and 55368 stay private until their owners opt in.
 
-Its own plan and security review.
+### Stage 3 (A′, optional, separate reviewed stage)
 
-### Stage 3 (A′, optional)
-
-As specified above. Tests in `supabase/tests/shared_reference_contributions_test.sql`:
+Only after Stage 2, and only if wider sharing is still wanted. Rows use
+`scope_state = 'not_evaluated'` (decision 3), and sharing requires the Stage 2
+opt-in. As specified above. Tests in `supabase/tests/shared_reference_contributions_test.sql`:
 - a release species not in the registry shares and creates exactly one row,
   with origin and audit;
 - the explicit RPC with no matching use creates **no** registry row;
@@ -212,10 +236,11 @@ option is chosen.
 
 ### The two blocked cases
 
-Waiting for the owners' next sync does not help: an unchanged payload returns
-`no_change`, and the taxon trigger skips unchanged ids (`:848-851`). They stay
-private until the owner edits them or a reviewed operator step shares them. Do
-that only after Stage 2 and the owner's decision.
+Decided: they stay private (decision 4). No operator step publishes them.
+Waiting for sync would not have helped anyway: an unchanged payload returns
+`no_change`, and the taxon trigger skips unchanged ids (`:848-851`). They can
+be shared only by their owners' explicit opt-in, once Stage 2 exists (and
+Stage 3, since neither species is in the registry).
 
 ### Rollback
 
@@ -233,17 +258,11 @@ that only after Stage 2 and the owner's decision.
 | Registry | absent | absent |
 | Today | Stage 1B's pre-check logged 3 × `not_species` and never called the share path; no contribution | 1 × `not_species`; no contribution |
 | After C | label becomes `not_registry_species` in future runs; still private | same |
-| After A′ (with consent) | an operator step (or the owner's next edit) creates row (617026, "Conocybe vexans", species, origin shared-reference, `tax-2026.09.30-01`) plus audit, then an attributed public contribution under *Conocybe vexans* | same for 55368. This is a sensitive species, and publishing it under the owner's name is exactly the exposure the consent gate must cover |
+| After Stages 2 and 3 | only if the owner opts in: the share creates row (617026, "Conocybe vexans", species, `not_evaluated`, origin shared-reference, `tax-2026.09.30-01`) plus audit, then an attributed public contribution under *Conocybe vexans* | same for 55368, only on the owner's opt-in. This is a sensitive species, and publishing it under the owner's name is exactly what the opt-in must cover |
 
-## Open questions for the owner
+## Open questions
 
-1. **Wider sharing:** should automatic, attributed public sharing reach
-   species beyond the reviewed registry at all? This decides C versus A′.
-2. **Consent and visibility:** opt-in, opt-out or notice only? And may private
-   or draft observations share? This applies today, whatever the answer to
-   question 1.
-3. **Row values (A′ only):** scope state for materialised rows:
-   `not_evaluated`, `review`, or NULL (which the installer can still fill in
-   later)? These values are permanent.
-4. **The two blocked cases:** anchor and share them through a reviewed
-   operator step after Stage 2, or leave them private?
+None for Stage 1. The four questions raised by the review are answered under
+"Owner decisions (2026-09-30)". Stage 2 will raise its own, such as the
+per-account versus per-contribution opt-in and what to do with the 2 existing
+contributions.
