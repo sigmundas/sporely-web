@@ -7,8 +7,12 @@
 # notes without changing its taxon, then holds its transaction open. Session 2
 # (operator) runs dry run + apply, promoting candidates A (set S1, with B) and
 # A2 (set S2, with B2) from X to Y. Apply must wait for session 1, then:
-#   * S1: X withdrawn (neither A nor B carries X any more), Y shared;
-#   * S2: X still shared (B2 genuinely still carries X), Y shared.
+#   * S1: X withdrawn (neither A nor B carries X any more);
+#   * S2: X still shared (B2 genuinely still carries X);
+#   * nothing is created under Y or Z (Stage 2a: automatic paths refresh
+#     consented rows or withdraw, never publish anew).
+# The X contributions are seeded consented through the core's grant mode, on
+# public observations (decision B).
 # Z differs from Y on purpose: if B moved to Y, the share helper's advisory
 # lock on (S1, Y) would serialize the sessions by accident. Without the graph
 # locks, session 2 reads B as X, records kept_by_other_use, and S1's X
@@ -71,12 +75,12 @@ INSERT INTO public.observations(
   taxon_identity_state,taxon_identity_source_system,taxon_identity_namespace,
   taxon_identity_external_id,taxon_identity_raw_external_id
 ) OVERRIDING SYSTEM VALUE VALUES
-  (953000001,'$OWNER',current_date,'private',false,'Crepidotus','cesatii',$X,
+  (953000001,'$OWNER',current_date,'public',false,'Crepidotus','cesatii',$X,
    'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057'),
-  (953000002,'$OWNER',current_date,'private',false,'Fixtura','delta',$X,NULL,NULL,NULL,NULL,NULL),
-  (953000003,'$OWNER',current_date,'private',false,'Crepidotus','cesatii',$X,
+  (953000002,'$OWNER',current_date,'public',false,'Fixtura','delta',$X,NULL,NULL,NULL,NULL,NULL),
+  (953000003,'$OWNER',current_date,'public',false,'Crepidotus','cesatii',$X,
    'external_unresolved','nortaxa','nortaxa_taxon_id','53057','NBIC:53057'),
-  (953000004,'$OWNER',current_date,'private',false,'Fixtura','delta',$X,NULL,NULL,NULL,NULL,NULL);
+  (953000004,'$OWNER',current_date,'public',false,'Fixtura','delta',$X,NULL,NULL,NULL,NULL,NULL);
 INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
 VALUES ('$OWNER','81000000-0000-4000-8000-00000001c001','article','[{"family":"Test"}]','Race regression',2026,'Test 2026',1);
 INSERT INTO public.reference_taxon_treatments(user_id,id,reference_work_id,taxon_id,name_as_published,revision)
@@ -94,11 +98,17 @@ INSERT INTO public.observation_reference_uses(
   ('$OWNER','84000000-0000-4000-8000-00000001c002',953000002,'$S1','compared',1,'{}'),
   ('$OWNER','84000000-0000-4000-8000-00000001c003',953000003,'$S2','compared',1,'{}'),
   ('$OWNER','84000000-0000-4000-8000-00000001c004',953000004,'$S2','compared',1,'{}');
+INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope)
+VALUES (1,'en','fixture consent text',encode(sha256(convert_to('fixture consent text','UTF8')),'hex'),true,
+        '{"snapshot_schema_versions":[1,2],"data_kinds":["raw_points","free_text","measurement_details"]}');
 DO \$\$
 BEGIN
-  IF (private.share_reference_contribution_for_owner('$OWNER','$S1',$X,1,1,1)->>'status') NOT IN ('created','updated','no_change')
-     OR (private.share_reference_contribution_for_owner('$OWNER','$S2',$X,1,1,1)->>'status') NOT IN ('created','updated','no_change') THEN
-    RAISE EXCEPTION 'seed: could not share the X contributions';
+  IF EXISTS (SELECT 1 FROM private.shared_reference_contributions WHERE owner_id='$OWNER') THEN
+    RAISE EXCEPTION 'seed: a use insert shared without consent';
+  END IF;
+  IF (private.reference_contribution_share_core('grant','$OWNER','$S1',$X,1,1,1,1,'en',NULL)->>'status') <> 'created'
+     OR (private.reference_contribution_share_core('grant','$OWNER','$S2',$X,1,1,1,1,'en',NULL)->>'status') <> 'created' THEN
+    RAISE EXCEPTION 'seed: could not grant the X contributions';
   END IF;
 END
 \$\$;
@@ -142,13 +152,16 @@ done
 
 wait "$S1_PID" || { cat /tmp/repair_race_s1.log; fail "owner session failed"; }
 wait "$S2_PID" || { cat /tmp/repair_race_s2.log; fail "apply failed"; }
+! grep -q "40P01\|deadlock" /tmp/repair_race_s1.log /tmp/repair_race_s2.log || fail "deadlock detected"
 
 [ "$(P -c "select taxon_identity_state from public.observations where id = 953000001")" = sporely_v2 ] || fail "A not promoted"
 [ "$(P -c "select taxon_identity_state from public.observations where id = 953000003")" = sporely_v2 ] || fail "A2 not promoted"
 [ "$(status $S1 $X)" = withdrawn ] || fail "S1 contribution under X is '$(status $S1 $X)', expected withdrawn (no live use carries X)"
-[ "$(status $S1 $Y)" = shared ] || fail "S1 contribution under Y is '$(status $S1 $Y)', expected shared"
-[ "$(status $S1 $Z)" = shared ] || fail "S1 contribution under Z is '$(status $S1 $Z)', expected shared (owner path)"
+[ "$(status $S1 $Y)" = none ] || fail "S1 contribution under Y is '$(status $S1 $Y)', expected none (refresh never creates)"
+[ "$(status $S1 $Z)" = none ] || fail "S1 contribution under Z is '$(status $S1 $Z)', expected none (refresh never creates)"
 [ "$(status $S2 $X)" = shared ] || fail "S2 contribution under X is '$(status $S2 $X)', expected shared (B2 still carries X)"
-[ "$(status $S2 $Y)" = shared ] || fail "S2 contribution under Y is '$(status $S2 $Y)', expected shared"
+[ "$(status $S2 $Y)" = none ] || fail "S2 contribution under Y is '$(status $S2 $Y)', expected none (refresh never creates)"
+[ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='shared' and not private.reference_set_has_qualifying_use(c.owner_id,c.source_measurement_set_id,c.sporely_taxon_id)")" = 0 ] \
+  || fail "a share survived without a qualifying use"
 [ "$WAITED" = yes ] || fail "apply did not wait for the concurrent owner transaction"
-echo "PASS: apply waited for the owner transaction; S1/X withdrawn, S2/X kept, Y shared for both, S1/Z shared"
+echo "PASS: apply waited for the owner transaction; S1/X withdrawn, S2/X kept, nothing created under Y or Z"

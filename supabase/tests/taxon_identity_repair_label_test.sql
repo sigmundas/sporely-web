@@ -9,6 +9,8 @@
 --     (the 617026 / 55368 case);
 --   * 'not_species' for a non-species in the active release, and for a species
 --     that only a retired release carries.
+--   * 'consent_required' (Stage 2a) for a registry species without a
+--     consented contribution: the repair refreshes, it never creates.
 -- In every case nothing is shared: eligibility is unchanged.
 
 BEGIN;
@@ -24,6 +26,8 @@ DECLARE
   v_obs_species constant bigint := 961000001;
   v_obs_genus constant bigint := 961000002;
   v_obs_retired constant bigint := 961000003;
+  v_registry constant bigint := 2099100004;  -- registry species, no consent
+  v_obs_registry constant bigint := 961000004;
   v_run bigint;
   v_actions jsonb;
 BEGIN
@@ -43,14 +47,18 @@ BEGIN
     (v_rel,2,1,1,'test','test',repeat('e',64),repeat('f',64),repeat('9',64),repeat('0',64),
      now(),'active','{}','{}','{}',0,'{}','{}');
   INSERT INTO public.taxonomy_v2_concepts(sporely_taxon_id,first_seen_release_id) VALUES
-    (v_species,v_rel),(v_genus,v_rel),(v_retired,v_old);
+    (v_species,v_rel),(v_genus,v_rel),(v_retired,v_old),(v_registry,v_rel);
   INSERT INTO public.taxonomy_v2_taxa(
     release_id,sporely_taxon_id,genus,specific_epithet,canonical_scientific_name,
     taxon_rank,canonical_source_system,canonical_external_id
   ) VALUES
     (v_rel,v_species,'Labela','species','Labela species','species','col_xr','LBL1'),
     (v_rel,v_genus,'Labela','','Labela','genus','col_xr','LBL2'),
-    (v_old,v_retired,'Labela','retirata','Labela retirata','species','col_xr','LBL3');
+    (v_old,v_retired,'Labela','retirata','Labela retirata','species','col_xr','LBL3'),
+    (v_rel,v_registry,'Labela','registrata','Labela registrata','species','col_xr','LBL4');
+  INSERT INTO taxonomy_v3.registry_concept(
+    sporely_taxon_id,canonical_name,rank,scope_state,cache_state,first_materialized_from_release
+  ) VALUES (v_registry,'Labela registrata','species','include','in_cache',v_rel);
 
   -- Promoted state: selected set, resolved NULL (effective taxon moved from
   -- nothing to the new concept), each with one live reference use.
@@ -59,7 +67,8 @@ BEGIN
   ) OVERRIDING SYSTEM VALUE VALUES
     (v_obs_species,v_owner,current_date,'private',false,'Labela','species',v_species,'sporely_v2'),
     (v_obs_genus,v_owner,current_date,'private',false,'Labela',NULL,v_genus,'sporely_v2'),
-    (v_obs_retired,v_owner,current_date,'private',false,'Labela','retirata',v_retired,'sporely_v2');
+    (v_obs_retired,v_owner,current_date,'private',false,'Labela','retirata',v_retired,'sporely_v2'),
+    (v_obs_registry,v_owner,current_date,'public',false,'Labela','registrata',v_registry,'sporely_v2');
   INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
   VALUES (v_owner,'81000000-0000-4000-8000-00000001c001','article','[{"family":"Test"}]','Label regression',2026,'Test 2026',1);
   INSERT INTO public.reference_taxon_treatments(user_id,id,reference_work_id,taxon_id,name_as_published,revision)
@@ -76,7 +85,8 @@ BEGIN
   ) VALUES
     (v_owner,'84000000-0000-4000-8000-00000001c001',v_obs_species,'83000000-0000-4000-8000-00000001c00a','compared',1,'{}'::jsonb),
     (v_owner,'84000000-0000-4000-8000-00000001c002',v_obs_genus,'83000000-0000-4000-8000-00000001c00b','compared',1,'{}'::jsonb),
-    (v_owner,'84000000-0000-4000-8000-00000001c003',v_obs_retired,'83000000-0000-4000-8000-00000001c00c','compared',1,'{}'::jsonb);
+    (v_owner,'84000000-0000-4000-8000-00000001c003',v_obs_retired,'83000000-0000-4000-8000-00000001c00c','compared',1,'{}'::jsonb),
+    (v_owner,'84000000-0000-4000-8000-00000001c004',v_obs_registry,'83000000-0000-4000-8000-00000001c00a','compared',1,'{}'::jsonb);
 
   INSERT INTO private.taxon_identity_repair_runs(
     release_id,plan_sha256,candidate_count,promoted_count,outcome_counts
@@ -85,7 +95,8 @@ BEGIN
 
   IF private._taxon_identity_repair_reconcile_references(v_run, v_obs_species) <> 1
      OR private._taxon_identity_repair_reconcile_references(v_run, v_obs_genus) <> 1
-     OR private._taxon_identity_repair_reconcile_references(v_run, v_obs_retired) <> 1 THEN
+     OR private._taxon_identity_repair_reconcile_references(v_run, v_obs_retired) <> 1
+     OR private._taxon_identity_repair_reconcile_references(v_run, v_obs_registry) <> 1 THEN
     RAISE EXCEPTION 'expected one reference action per observation';
   END IF;
 
@@ -94,7 +105,8 @@ BEGIN
   IF v_actions IS DISTINCT FROM jsonb_build_object(
        v_obs_species::text, 'not_registry_species',
        v_obs_genus::text, 'not_species',
-       v_obs_retired::text, 'not_species') THEN
+       v_obs_retired::text, 'not_species',
+       v_obs_registry::text, 'consent_required') THEN
     RAISE EXCEPTION 'unexpected reference-action labels: %', v_actions;
   END IF;
 

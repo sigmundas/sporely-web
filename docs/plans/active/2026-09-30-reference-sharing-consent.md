@@ -6,6 +6,13 @@ started. Order: re-review of this revision, then 2a (implement, review,
 security review, deploy, verify fail-closed), then 2b as a separately
 reviewed step.
 
+**2a candidate (2026-10-01, not accepted, not deployed):** branch
+`feature/reference-sharing-consent-2a`, migration
+`20260930224506_fail_closed_reference_sharing_consent.sql`. Awaiting
+general and security review; the production preflight (exactly 2
+unconsented shared rows) and deploy need explicit authorization. Landing
+null-contributor test on sporely-landing `feature/reference-sharing-consent-2a`.
+
 ## Owner decisions (2026-10-01)
 
 - **A.** Withdraw both existing unconsented contributions in Stage 2a.
