@@ -176,7 +176,11 @@ More gaps in today's code:
     (`20260830183210:145-157`). The comparison uses jsonb `=`, the same rule
     as the `current`-mode check (`20260828143513:784`), never text or a hash,
     so `5.5` and `5.50` compare equal. The removed ids are implied by the
-    (owner, set) join.
+    (owner, set) join. Strip the keys **after** projecting:
+    `public_reference_snapshot(u.snapshot_json, u.reference_measurement_set_id,
+    u.reference_revision)` returns NULL unless the embedded set id and revision
+    match the use's own columns (`reference_snapshot_valid`), which is what
+    binds the proof to that set.
 
   The revision number alone proves nothing. `reference_revision` is only the
   measurement set's revision (`20260828143513:378`), so citation and
@@ -274,6 +278,10 @@ More gaps in today's code:
       treatment can't lose a revision.
     - Only **grant** mode (2b) compares with the revisions the client
       displayed, and returns `revision_mismatch` on a difference.
+    - The snapshot, the recorded source revisions and the bounds come from
+      **one read**, since edits can still commit between unlocked
+      statements. The scope check runs on the **final** snapshot, after
+      `raw_points` is projected into it.
   - **Multiple sets:** deleting or editing a treatment or work that several
     sets use takes their advisory locks in sorted set-id order.
   - **Withdraw RPC order:** read the contribution's owner and set without a
@@ -294,10 +302,15 @@ effective taxon is the contribution's taxon.
   leaving `public`, or it becoming a draft withdraws the contributions it
   alone backed.
 - **Source deletion:** deleting the source set, treatment or work
-  withdraws, for **every caller**. Today the source triggers return early when
-  `auth.uid()` is NULL (`:736`, `:760`) and on `deleted_at` (`:737-740`), so
-  the last revision stays public. 2a removes both early returns for the
-  deletion branch, as for the use trigger.
+  withdraws, for **every caller**. Today two things prevent that:
+  - The source triggers fire only on `AFTER UPDATE OF revision`
+    (`:942-952`), so a service-role update that sets only `deleted_at` never
+    fires them. The owner's upsert RPCs always set `revision`, but service
+    role has `GRANT ALL` (`20260828143513:219-221`). 2a recreates the three
+    triggers as `AFTER UPDATE OF revision, deleted_at`.
+  - Their early return (`:736-740`, `:760-761`) is one `IF` with three
+    conditions: no signed-in user, a signed-in user who isn't the owner, and
+    `deleted_at` set. The deletion branch is gated by none of them.
 - **The consent text still says** that the share shows, under the owner's
   label, that they identified this species. The observation is public, so
   this adds little.
@@ -441,7 +454,9 @@ a consented row. The test lives in 2a.
 - `search_public_observation_references`;
 - `refresh_shared_reference_for_use` and `refresh_shared_reference_for_use_row`;
 - `refresh_shared_references_for_observation_taxon`;
-- the two source-edit trigger functions, for the lock key;
+- the two source-edit trigger functions: the lock key, a deletion branch
+  that withdraws for every caller, and no early return before that branch.
+  The three triggers are recreated as `AFTER UPDATE OF revision, deleted_at`;
 - `_taxon_identity_repair_reconcile_references`;
 - `anonymize_shared_reference_contributions_for_profile`.
 
@@ -527,7 +542,8 @@ tables are inert and stay. Withdrawn rows stay withdrawn.
   revision. A historical-import snapshot that isn't equal to a consented
   revision is omitted. A use on a public observation with private spore data
   is omitted even when another use keeps the contribution backed.
-- Source deletion (set, treatment or work) withdraws.
+- Source deletion (set, treatment or work) withdraws, including a
+  service-role update that sets only `deleted_at` with no user signed in.
 - Execution surface: no role has EXECUTE on the grant-mode core or any new
   private helper.
 - Observation references: a use backed by a consented contribution is served
