@@ -584,7 +584,7 @@ function _setDetailUnavailableSectionVisibility(visible) {
   }
 }
 
-function _renderDetailUnavailableState(message = 'Observation not found or not visible.', detail = 'This observation may be private, deleted, or no longer shared with you.') {
+export function _renderDetailUnavailableState(message = 'Observation not found or not visible.', detail = 'This observation may be private, deleted, or no longer shared with you.') {
   _setDetailUnavailableSectionVisibility(false)
 
   const commonEl = document.getElementById('detail-title-common')
@@ -595,9 +595,11 @@ function _renderDetailUnavailableState(message = 'Observation not found or not v
     latinEl.textContent = detail
     latinEl.style.display = detail ? 'block' : 'none'
   }
+  // The explanation is shown once, under the title; the read-only note stays
+  // hidden with the other sections.
   if (noteEl) {
-    noteEl.textContent = detail
-    noteEl.style.display = detail ? 'block' : 'none'
+    noteEl.textContent = ''
+    noteEl.style.display = 'none'
   }
 
   const dateEl = document.getElementById('detail-date')
@@ -614,7 +616,7 @@ function _renderDetailUnavailableState(message = 'Observation not found or not v
 // mismatch, network glitch or PostgREST fault. Show a neutral load-error
 // message instead — no DB details are leaked to the UI; those are logged
 // via console.warn upstream.
-function _renderDetailLoadErrorState() {
+export function _renderDetailLoadErrorState() {
   _renderDetailUnavailableState(
     t('detail.couldNotLoadObservation') || 'Could not load observation',
     t('detail.loadErrorRetryHint') || 'Something went wrong while loading this observation. Please try again later.',
@@ -735,12 +737,22 @@ function _stripTaxonIdentityFieldsFromSelect(select = '') {
   return _stripFieldsFromSelect(select, DETAIL_TAXON_IDENTITY_FIELDS)
 }
 
+// `selected_sporely_taxon_id` is matched only on the exact missing-column
+// shapes: `_isMissingObservationColumnError` does a bare substring match, and
+// the column also appears in unrelated messages (the write guard names it).
+// Without this, a read view that lacks only this column (0.7.13 against the
+// pre-20260930181144 detail views) fails with a fatal 42703.
+const MISSING_SELECTED_TAXON_COLUMN_RE = /\bcolumn (?:[a-z0-9_]+\.)?selected_sporely_taxon_id does not exist\b/
+
+function _isMissingSelectedTaxonColumnError(error) {
+  if (!error || String(error.code || '') !== '42703') return false
+  const message = String(error.message || '').toLowerCase()
+  return MISSING_SELECTED_TAXON_COLUMN_RE.test(message)
+}
+
 function _isMissingTaxonIdentityColumnError(error) {
-  // Matched on the provenance columns only. `_isMissingObservationColumnError`
-  // does a bare substring match, and `selected_sporely_taxon_id` appears in
-  // unrelated messages (the write guard names it), so including it here would
-  // misclassify those as a missing column.
   return _isMissingObservationColumnError(error, TAXON_IDENTITY_COLUMNS)
+    || _isMissingSelectedTaxonColumnError(error)
 }
 
 // Generic compatibility retry usable against any non-owner read view

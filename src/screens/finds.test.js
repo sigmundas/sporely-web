@@ -1855,6 +1855,150 @@ test('detail loader retries only when the missing column is red-list', async () 
   assert.equal(result.error?.code, '42703')
 })
 
+// 0.7.13 Find Detail: the non-owner detail views must carry the six taxonomy
+// identity fields (20260930181144 / 20260930181742), and a deployment whose
+// views still lack them must degrade instead of failing the whole read.
+const DETAIL_TAXON_IDENTITY_FIELDS = [
+  'selected_sporely_taxon_id',
+  'taxon_identity_state',
+  'taxon_identity_source_system',
+  'taxon_identity_namespace',
+  'taxon_identity_external_id',
+  'taxon_identity_raw_external_id',
+]
+
+function selectedFields(columns) {
+  return String(columns).split(',').map(field => field.trim())
+}
+
+for (const view of ['observations_community_view', 'observations_friend_view']) {
+  test(`detail loader reads ${view} with all six taxonomy identity fields in one query`, async () => {
+    const row = {
+      id: 730,
+      user_id: 'user-b',
+      visibility: view === 'observations_friend_view' ? 'friends' : 'public',
+      is_draft: false,
+      genus: 'Boletus',
+      species: 'edulis',
+      selected_sporely_taxon_id: 'sp-tx-1',
+      taxon_identity_state: 'sporely_v2',
+      taxon_identity_source_system: 'nbic',
+      taxon_identity_namespace: 'artsdatabanken',
+      taxon_identity_external_id: '12345',
+      taxon_identity_raw_external_id: '12345',
+    }
+    const { client, calls } = makeSequencedClient({
+      observations: [{ data: null, error: null }],
+      observations_community_view: [{ data: view === 'observations_community_view' ? row : null, error: null }],
+      observations_friend_view: [{ data: row, error: null }],
+    })
+
+    const result = await loadDetailObservation(730, { client })
+
+    const viewCalls = calls.filter(call => call.table === view)
+    assert.equal(viewCalls.length, 1, 'the current selection must succeed without a compatibility retry')
+    const fields = selectedFields(viewCalls[0].columns)
+    for (const field of DETAIL_TAXON_IDENTITY_FIELDS) {
+      assert.ok(fields.includes(field), `${view} detail read must select ${field}`)
+    }
+    assert.equal(result.outcome, 'observation')
+    assert.equal(result.source, view)
+    assert.equal(result.observation?.selected_sporely_taxon_id, 'sp-tx-1')
+    assert.equal(result.observation?.taxon_identity_state, 'sporely_v2')
+  })
+}
+
+for (const [label, missingColumn] of [
+  ['selected_sporely_taxon_id alone', 'selected_sporely_taxon_id'],
+  ['a taxonomy provenance column', 'taxon_identity_namespace'],
+]) {
+  test(`detail loader drops only the identity fields when a read view lacks ${label}`, async () => {
+    const publicRow = { id: 731, user_id: 'user-b', visibility: 'public', is_draft: false, genus: 'Amanita', species: 'muscaria' }
+    const { client, calls } = makeSequencedClient({
+      observations: [{ data: null, error: null }],
+      observations_community_view: [
+        {
+          data: null,
+          error: {
+            code: '42703',
+            message: `column observations_community_view.${missingColumn} does not exist`,
+          },
+        },
+        { data: publicRow, error: null },
+      ],
+      observations_friend_view: [{ data: null, error: null }],
+    })
+
+    const result = await loadDetailObservation(731, { client })
+
+    const communityCalls = calls.filter(call => call.table === 'observations_community_view')
+    assert.equal(communityCalls.length, 2)
+    const retryFields = selectedFields(communityCalls[1].columns)
+    for (const field of DETAIL_TAXON_IDENTITY_FIELDS) {
+      assert.ok(!retryFields.includes(field), `retry must drop ${field}`)
+    }
+    for (const field of ['ai_selected_service', 'red_list_category', 'is_draft', 'location_precision']) {
+      assert.ok(retryFields.includes(field), `retry must keep ${field}`)
+    }
+    assert.equal(calls.filter(call => call.table === 'observations_friend_view').length, 0)
+    assert.equal(result.outcome, 'observation')
+    assert.equal(result.source, 'observations_community_view')
+    assert.equal(result.observation?.id, 731)
+  })
+}
+
+test('owner detail read drops only the identity fields when observations lacks selected_sporely_taxon_id', async () => {
+  const ownerRow = { id: 733, user_id: 'user-a', visibility: 'public', is_draft: false, genus: 'Amanita', species: 'muscaria' }
+  const { client, calls } = makeSequencedClient({
+    observations: [
+      {
+        data: null,
+        error: { code: '42703', message: 'column observations.selected_sporely_taxon_id does not exist' },
+      },
+      { data: ownerRow, error: null },
+    ],
+  })
+
+  const result = await loadDetailObservation(733, { client })
+
+  const ownerCalls = calls.filter(call => call.table === 'observations')
+  assert.equal(ownerCalls.length, 2)
+  const retryFields = selectedFields(ownerCalls[1].columns)
+  for (const field of DETAIL_TAXON_IDENTITY_FIELDS) {
+    assert.ok(!retryFields.includes(field), `owner retry must drop ${field}`)
+  }
+  assert.ok(retryFields.includes('ai_selected_service'), 'owner retry must keep the AI-selection fields')
+  assert.equal(calls.filter(call => call.table !== 'observations').length, 0)
+  assert.equal(result.outcome, 'observation')
+  assert.equal(result.source, 'observations')
+})
+
+for (const [label, error] of [
+  [
+    'the selected-taxon write guard',
+    { code: 'P0001', message: 'public.observations.selected_sporely_taxon_id must be changed through set_observation_selected_taxon_v2' },
+  ],
+  [
+    'a permission error from a view predicate',
+    { code: '42501', message: 'permission denied for function is_blocked_between' },
+  ],
+]) {
+  test(`detail loader surfaces ${label} as an error without a compatibility retry`, async () => {
+    const { client, calls } = makeSequencedClient({
+      observations: [{ data: null, error: null }],
+      observations_community_view: [{ data: null, error }],
+      observations_friend_view: [{ data: null, error: null }],
+    })
+
+    const result = await loadDetailObservation(732, { client })
+
+    assert.equal(calls.filter(call => call.table === 'observations_community_view').length, 1)
+    assert.equal(calls.filter(call => call.table === 'observations_friend_view').length, 0)
+    assert.equal(result.outcome, 'error')
+    assert.equal(result.error?.code, error.code)
+  })
+}
+
 test('community view query error does not fall through to friend view', async () => {
   const { client, calls } = makeSequencedClient({
     observations: [{ data: null, error: null }],

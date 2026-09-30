@@ -32,6 +32,13 @@
 --      returns friend-visible observation images to the friend and
 --      hides them from strangers. No new bypass; existing
 --      `can_read_observation(...)` gating on the view is exercised.
+--   7. Taxonomy identity (20260930181144 / 20260930181742) — both
+--      views project the six identity fields the 0.7.13 detail read
+--      selects, gate on the caller-bound wrappers
+--      `current_user_is_blocked_with` / `current_user_is_friend_with`
+--      (never the postgres-only `is_blocked_between` / `are_friends`),
+--      and the exact 0.7.13 detail select succeeds for an
+--      authenticated caller on both views.
 --
 -- Design note: probes may raise `insufficient_privilege` when a role
 -- lacks SELECT on a locked-down table. That is a "did not leak" pass,
@@ -199,7 +206,10 @@ BEGIN
       'ai_selected_service', 'ai_selected_taxon_id',
       'ai_selected_scientific_name', 'ai_selected_probability',
       'ai_selected_at',
-      'red_list_category', 'red_list_categories_json'
+      'red_list_category', 'red_list_categories_json',
+      'selected_sporely_taxon_id', 'taxon_identity_state',
+      'taxon_identity_source_system', 'taxon_identity_namespace',
+      'taxon_identity_external_id', 'taxon_identity_raw_external_id'
     ];
     col text;
   BEGIN
@@ -244,6 +254,39 @@ BEGIN
     fail_msgs := array_append(fail_msgs,
       'A: observations_follow_view unexpectedly projects ai_selected_service (scope broadened without review)');
   END IF;
+
+  ------------------------------------------------------------------
+  -- Section A2: predicates use the caller-bound wrappers. The
+  --   postgres-only helpers in a view body make every authenticated
+  --   read fail with 42501 (the 20260930181144 regression).
+  ------------------------------------------------------------------
+  DECLARE
+    community_def text := pg_get_viewdef('public.observations_community_view'::regclass, true);
+    friend_def    text := pg_get_viewdef('public.observations_friend_view'::regclass, true);
+  BEGIN
+    IF position('current_user_is_blocked_with(' IN community_def) = 0 THEN
+      fail_msgs := array_append(fail_msgs,
+        'A2: observations_community_view does not filter blocked pairs through current_user_is_blocked_with');
+    END IF;
+    IF position('is_blocked_between(' IN community_def) > 0
+       OR position('are_friends(' IN community_def) > 0 THEN
+      fail_msgs := array_append(fail_msgs,
+        'A2: observations_community_view calls is_blocked_between/are_friends directly');
+    END IF;
+    IF position('current_user_is_friend_with(' IN friend_def) = 0 THEN
+      fail_msgs := array_append(fail_msgs,
+        'A2: observations_friend_view does not gate on current_user_is_friend_with');
+    END IF;
+    IF position('current_user_is_blocked_with(' IN friend_def) = 0 THEN
+      fail_msgs := array_append(fail_msgs,
+        'A2: observations_friend_view does not filter blocked pairs through current_user_is_blocked_with');
+    END IF;
+    IF position('is_blocked_between(' IN friend_def) > 0
+       OR position('are_friends(' IN friend_def) > 0 THEN
+      fail_msgs := array_append(fail_msgs,
+        'A2: observations_friend_view calls is_blocked_between/are_friends directly');
+    END IF;
+  END;
 
   ------------------------------------------------------------------
   -- Section B: red-list payload round-trip through the FRIEND view
@@ -530,6 +573,54 @@ BEGIN
   END IF;
 
   RESET ROLE;
+
+  ------------------------------------------------------------------
+  -- Section H: the exact 0.7.13 Find Detail selection
+  --   (DETAIL_VIEW_SELECT in src/screens/find_detail.js) succeeds for
+  --   an authenticated caller on both views: public row through the
+  --   community view, friends-only row through the friend view.
+  --   Errors are recorded, not raised, so the report names them.
+  ------------------------------------------------------------------
+  DECLARE
+    detail_view_select text := 'id, user_id, date, created_at, captured_at, genus, species, common_name, '
+      'ai_selected_service, ai_selected_taxon_id, ai_selected_scientific_name, ai_selected_probability, '
+      'ai_selected_at, red_list_category, red_list_categories_json, location, habitat, notes, uncertain, '
+      'gps_latitude, gps_longitude, visibility, is_draft, location_precision, selected_sporely_taxon_id, '
+      'taxon_identity_state, taxon_identity_source_system, taxon_identity_namespace, '
+      'taxon_identity_external_id, taxon_identity_raw_external_id';
+    probe record;
+    got_id bigint;
+  BEGIN
+    SET LOCAL ROLE authenticated;
+    PERFORM set_config('request.jwt.claims',
+      json_build_object('sub', friend_id::text, 'role','authenticated')::text, true);
+    PERFORM set_config('request.jwt.claim.sub', friend_id::text, true);
+
+    FOR probe IN
+      SELECT * FROM (VALUES
+        ('observations_community_view', obs_public_with_redlist),
+        ('observations_friend_view',    obs_friends_only)
+      ) AS t(view_name, obs_id)
+    LOOP
+      BEGIN
+        got_id := NULL;
+        EXECUTE format('SELECT id FROM (SELECT %s FROM public.%I WHERE id = $1) detail',
+                       detail_view_select, probe.view_name)
+          INTO got_id USING probe.obs_id;
+        IF got_id IS DISTINCT FROM probe.obs_id THEN
+          fail_msgs := array_append(fail_msgs,
+            format('H: 0.7.13 detail select on %s returned no row for observation %s',
+                   probe.view_name, probe.obs_id));
+        END IF;
+      EXCEPTION WHEN OTHERS THEN
+        fail_msgs := array_append(fail_msgs,
+          format('H: 0.7.13 detail select on %s failed: %s (%s)',
+                 probe.view_name, SQLERRM, SQLSTATE));
+      END;
+    END LOOP;
+
+    RESET ROLE;
+  END;
 
   ------------------------------------------------------------------
   -- Cleanup: drop the fixture rows so repeated runs stay isolated.
