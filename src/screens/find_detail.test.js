@@ -12,6 +12,8 @@ import {
   getDetailDraftExplanationLines,
   _renderDetailAiResults,
   _renderDetailAiTabs,
+  _renderDetailLoadErrorState,
+  _renderDetailUnavailableState,
   _setDetailAiActiveService,
   buildDetailLocationPatch,
   detailLocationActionMode,
@@ -1276,4 +1278,53 @@ test('coordinates the app would refuse to render produce no patch at all', () =>
   assert.equal(buildDetailLocationPatch(0, 0), null)
   assert.equal(buildDetailLocationPatch(91, 10), null)
   assert.equal(buildDetailLocationPatch('north', 'east'), null)
+})
+
+function withUnavailableStateDocument() {
+  const ids = [
+    'detail-title-common', 'detail-title-latin', 'detail-readonly-note',
+    'detail-author', 'detail-social-row', 'detail-gallery', 'detail-form',
+    'comments-section', 'detail-footer', 'detail-date', 'detail-time', 'detail-time-val',
+  ]
+  const elements = Object.fromEntries(ids.map(id => [id, { id, textContent: '', style: {} }]))
+  const previous = globalThis.document
+  globalThis.document = { getElementById: id => elements[id] || null }
+  const visibleText = () => ids
+    .map(id => elements[id])
+    .filter(el => el.style.display !== 'none')
+    .map(el => el.textContent)
+    .join('\n')
+  return { elements, visibleText, restore: () => { globalThis.document = previous } }
+}
+
+function occurrences(haystack, needle) {
+  return haystack.split(needle).length - 1
+}
+
+test('the load-error explanation renders exactly once', () => {
+  const { elements, visibleText, restore } = withUnavailableStateDocument()
+  try {
+    _renderDetailLoadErrorState()
+    const hint = 'Something went wrong while loading this observation. Please try again later.'
+    assert.equal(elements['detail-title-common'].textContent, 'Could not load observation')
+    assert.equal(occurrences(visibleText(), hint), 1)
+    assert.equal(occurrences(Object.values(elements).map(el => el.textContent).join('\n'), hint), 1)
+  } finally {
+    restore()
+  }
+})
+
+test('the not-found state keeps its message and explanation, each once', () => {
+  const { elements, visibleText, restore } = withUnavailableStateDocument()
+  try {
+    _renderDetailUnavailableState()
+    const text = visibleText()
+    assert.equal(elements['detail-title-common'].textContent, 'Observation not found or not visible.')
+    assert.equal(elements['detail-title-latin'].style.display, 'block')
+    assert.equal(occurrences(text, 'Observation not found or not visible.'), 1)
+    assert.equal(occurrences(text, 'This observation may be private, deleted, or no longer shared with you.'), 1)
+    assert.equal(elements['detail-readonly-note'].style.display, 'none')
+  } finally {
+    restore()
+  }
 })
