@@ -156,20 +156,30 @@ More gaps in today's code:
   `publicReferenceSnapshot.ts:116`). It keeps serving the use's **frozen**
   snapshot, which is the evidence recorded at use time. A use is included
   only when all of these hold:
-  - the observation is public and not a draft, as today (`20260828172243:136-150`);
-  - a contribution for `(owner, set, observation's effective taxon)` has
-    `status = 'shared'`, consent set and `hidden_at IS NULL`;
+  - **the use itself qualifies:** it passes the per-use conditions of
+    `reference_set_has_qualifying_use`. Its observation is public, not a
+    draft, has public `spore_data_visibility`, and has the contribution's
+    exact effective taxon. It is not enough that some other observation keeps
+    the contribution backed;
+  - a contribution for `(owner, set, that taxon)` has `status = 'shared'`,
+    consent set and `hidden_at IS NULL`;
   - the owner isn't banned or in `reference_account_deletions`, and isn't
     blocked with the caller (the same filter as the contribution reads);
-  - the use's `reference_revision` is at or above the source set revision the
-    contribution recorded at `consent_first_revision`, so the frozen content
-    comes from inside the consent period.
+  - **content proof:** the use's publicly projected snapshot
+    (`public_reference_snapshot` of its `snapshot_json`) equals the snapshot
+    inside some revision of that contribution numbered
+    `>= consent_first_revision`, compared as canonical jsonb.
+
+  The revision number alone proves nothing. `reference_revision` is only the
+  measurement set's revision (`20260828143513:378`), so citation and
+  treatment edits don't move it. And the desktop's historical-import push
+  accepts any valid snapshot without comparing it with the source
+  (`20260828143513:785`). Content equality proves that exactly this content
+  was consented. That also means it lies within `consent_scope`, since every
+  consented revision passed the scope check.
 
   Everything else is omitted, and withdrawal therefore removes it.
-  Implementation verifies that `reference_revision` is the source set's
-  revision (`20260828143513:121,251-268`). If it isn't, the candidate must
-  stop and report rather than guess. `get_public_observation_references` is a
-  wrapper and needs no change.
+  `get_public_observation_references` is a wrapper and needs no change.
 - **Contributor:** new revisions set `contributor.id` to NULL and keep only
   the label. Both clients already accept a NULL id
   (`curated_reference_forks.py:328-332`,
@@ -220,14 +230,21 @@ More gaps in today's code:
   - A new `private.withdraw_unqualified_contributions(owner, set)` withdraws
     a shared row that has no qualifying use left and records a system event.
   - Called from the use trigger (all callers, including service role and
-    cascade deletes), and from new triggers: `AFTER UPDATE OF is_draft,
-    visibility` and `AFTER DELETE` on `public.observations`.
+    cascade deletes), from new triggers `AFTER UPDATE OF is_draft,
+    visibility, spore_data_visibility` and `AFTER DELETE` on
+    `public.observations`, and from the source triggers on a `deleted_at`
+    change of the set, treatment or work (see "Source deletion").
   - Moderation hide (`admin-ops/adminActions.ts:444-451`) sets
     `visibility = 'private'`. Under decision B a private observation doesn't
     qualify, so the visibility trigger withdraws what it backs. The event
     reason is `observation_not_public` whoever made the change. A test covers
     the service-role update the admin action performs.
-  - Never rate-limited, never inside an error-swallowing block.
+  - Never rate-limited, never inside an error-swallowing block. Today
+    `refresh_shared_reference_for_use_row` wraps the share call in `EXCEPTION
+    WHEN OTHERS` (`:811-818`). In 2a only the **publish** part (adding a
+    revision) may stay best-effort. Withdrawal decisions and the helper run
+    outside that block, so a failure there aborts the transaction instead of
+    leaving a share public.
 - **Locking:**
   - **The key:** every path that grants, refreshes or withdraws takes one
     transaction advisory lock per `(owner_id, source_measurement_set_id)`.
@@ -238,19 +255,33 @@ More gaps in today's code:
   - **Deciding:** each path decides by re-reading uses and observations under
     READ COMMITTED **after** taking the advisory lock, with no `FOR SHARE`.
     `FOR SHARE` would deadlock against concurrent use and visibility updates.
+  - **No source row locks after the advisory lock.** Today the core takes
+    `FOR SHARE` on the set, treatment and work rows after its advisory lock
+    (`20260830183210:266-283`). A source edit already holds that row when its
+    trigger waits for the advisory lock, so they deadlock. The 2a core reads
+    source revisions without row locks and compares them with the expected
+    revisions. A mismatch returns `revision_mismatch`, and nothing is
+    published.
+  - **Withdraw RPC order:** read the contribution's owner and set without a
+    lock, check ownership, take the advisory lock, then lock the row and check
+    again. That fixes today's row-lock-first order (`:450-451`).
   - **Coverage:** the use, observation, source and taxon triggers, Stage 1B,
-    grant, the owner withdraw RPC and anonymise. Today the withdraw RPC only
-    locks the row (`:450-451`).
+    grant, the owner withdraw RPC and anonymise.
 
 ### Visibility (decision B)
 
-A qualifying use is a live use of the set on an observation with `visibility =
-'public'`, not a draft, not deleted, whose exact effective taxon is the
-contribution's taxon.
+A qualifying use is a live use of a **live** source set (set, treatment and
+work not deleted) on an observation with `visibility = 'public'` and
+`spore_data_visibility = 'public'`, not a draft, not deleted, whose exact
+effective taxon is the contribution's taxon.
 - **Ineligible:** private, `friends` and draft observations, even with
   explicit opt-in.
-- **Losing eligibility:** an observation leaving `public` or becoming a draft
-  withdraws the contributions it alone backed.
+- **Losing eligibility:** an observation leaving `public`, its spore data
+  leaving `public`, or it becoming a draft withdraws the contributions it
+  alone backed.
+- **Source deletion:** deleting the source set, treatment or work
+  withdraws. Today the source triggers return early on `deleted_at`
+  (`:737-740`) and the last revision stays public; 2a changes that.
 - **The consent text still says** that the share shows, under the owner's
   label, that they identified this species. The observation is public, so
   this adds little.
@@ -282,9 +313,8 @@ Production, read-only, 2026-09-30:
 one transaction:
 1. `LOCK TABLE`;
 2. replace the functions;
-3. `UPDATE … SET status = 'withdrawn', withdrawn_at = now() WHERE status =
-   'shared' AND consented_at IS NULL`, with system events reason
-   `consent_missing`;
+3. call `withdraw_shared_reference_contribution(id, 'consent_missing')` for
+   every row `WHERE status = 'shared' AND consented_at IS NULL`;
 4. add the CHECKs.
 
 The migration is count-agnostic, so local and CI resets work. The production
@@ -300,7 +330,8 @@ authorization at deploy time.
 `private.reference_set_has_qualifying_use(owner, set, taxon)` is true when all
 of these hold for some use:
 - the use is live (`deleted_at IS NULL`);
-- it is the owner's own use of that set;
+- it is the owner's own use of that set, and the set, its treatment and its
+  work are not deleted;
 - its observation is `visibility = 'public'`, not a draft, and has
   `spore_data_visibility = 'public'` (see below);
 - the observation's effective taxon equals `taxon`.
@@ -320,7 +351,8 @@ and reference measurements sit next to the observation's spore data.
 the only statement that sets `status = 'withdrawn'`. It clears the consent
 columns, sets `withdrawn_at` and writes the event. The migration routes every
 existing withdrawal through it:
-- the use trigger (`:697`, `:916`);
+- the use trigger (`:916`; the older body at `:697` is replaced later in the
+  same file and is dead);
 - the taxon trigger (`:874`);
 - Stage 1B's old-taxon branch (`20260930213813:77-83`);
 - anonymise (`:533`);
@@ -329,8 +361,12 @@ existing withdrawal through it:
 - `private.withdraw_unqualified_contributions(owner, set)`.
 
 Reasons: `owner`, `consent_missing`, `observation_not_public`,
-`use_detached`, `taxon_changed`, `consent_scope_exceeded`,
+`use_detached`, `source_deleted`, `taxon_changed`, `consent_scope_exceeded`,
 `consent_text_revoked`, `account_deleted`.
+
+The helper does nothing, and writes no event, when the row is already
+withdrawn. `consent_text_revoked` withdrawals are a reviewed operator step
+belonging to 2b, where consent texts first become active.
 
 ### Refresh result statuses
 
@@ -343,10 +379,14 @@ These are returned by the core in `refresh` mode, and Stage 1B maps each one:
   and the row was withdrawn. Stage 1B records it.
 - `withdrawn_unqualified`: no qualifying use remains, and the row was
   withdrawn. Stage 1B records it.
-- `invalid_taxon`, `account_unavailable`, `source_out_of_bounds`,
-  `source_deleted`: unchanged meanings. Stage 1B records `not_registry_species`
-  or `not_species` for `invalid_taxon`, as Stage 1 did, and the others
-  verbatim.
+- `revision_mismatch`: the source changed concurrently; nothing was
+  published. Stage 1B raises, since its whole run retries.
+- `invalid_taxon`, `account_unavailable`, `source_out_of_bounds`: unchanged
+  meanings. Stage 1B keeps today's labels: `not_registry_species` or
+  `not_species` for `invalid_taxon` (Stage 1), and
+  `not_shareable:<status>` for the other two (`20260930213813:141-143`).
+  `source_deleted` stays a Stage 1B label for a deleted source, found before
+  it calls the core; the core never returns it.
 - Anything else raises, as today (`20260930213813:136-146`).
 
 ### Consent-scope check (decision C)
@@ -461,6 +501,16 @@ tables are inert and stay. Withdrawn rows stay withdrawn.
   (40P01) or on a share that survives without a qualifying use.
 - Consent-scope check: a fixture-consented row withdraws with
   `consent_scope_exceeded` on an out-of-scope revision.
+- Concurrency: a source edit racing a use sync, and an owner withdraw racing
+  a refresh; no deadlock, no surviving unqualified share.
+- Observation references: a frozen snapshot whose citation or treatment
+  differs from every consented revision is omitted, even at the same set
+  revision. A historical-import snapshot that isn't equal to a consented
+  revision is omitted. A use on a public observation with private spore data
+  is omitted even when another use keeps the contribution backed.
+- Source deletion (set, treatment or work) withdraws.
+- Execution surface: no role has EXECUTE on the grant-mode core or any new
+  private helper.
 - Observation references: a use backed by a consented contribution is served
   in landing's exact shape; hidden, banned, deleted and blocked owners, and
   pre-consent revisions, are omitted. Add a landing test that a consented
@@ -500,7 +550,7 @@ tables are inert and stay. Withdrawn rows stay withdrawn.
 | Old or buggy client publishes | Only `grant` publishes; every other path is refresh-only or withdraws; consent version checked server-side |
 | A client grants without showing the text | The RPC is the proof (active version, displayed revisions, the owner's own session). A modified client can skip the dialog only for its own owner's data. Accepted |
 | Reactivation or old revisions re-exposed | Only `grant` re-shares, and the reads start at `consent_first_revision` |
-| Grant races detach, draft or taxon change | One advisory lock per owner+set, then re-check with `FOR SHARE` |
+| Grant races detach, draft, taxon change or a source edit | One advisory lock per owner+set, then a READ COMMITTED re-check with no `FOR SHARE`; source revisions compared, not row-locked |
 | Non-owner or cascade changes leave a share public | Withdrawal is caller-independent and not swallowed |
 | Edits publish more than was disclosed | The revision scope limit withdraws |
 | Public observation leaks reference data | Observation references gated on consent (decision E) |
