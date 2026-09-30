@@ -124,7 +124,9 @@ commits only if every assertion succeeds. Verify the printed output SHA-256
 through the operator's independent handoff before execution.
 
 The generator prints the exact containerised `psql` command. Its example uses
-`/path/to/private/production-db.env`; the human operator must create that
-untracked file with `DATABASE_URL`, independently verify project ref
-`zkpjklzfwzefhjluvhfw`, and execute only during the authorised window. Codex
-must not execute that command.
+`/path/to/private/production-db.env`; the operator must create that untracked
+file with `DATABASE_URL`. Independently verify project ref
+`zkpjklzfwzefhjluvhfw` and execute only during the authorised window.
+Production writes require explicit operator authorization. Once authorized, an
+agent may execute the exact guarded runbook command after all required
+prechecks pass (`AGENTS.md`, "Production writes by agents").

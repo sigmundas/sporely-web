@@ -73,9 +73,12 @@ docker run --rm \
   sh -c 'psql "$DATABASE_URL" --file=/payload/tax-2026.08.01-01-import.sql'
 ```
 
-The human operator must create the untracked environment file, verify project
-ref `zkpjklzfwzefhjluvhfw`, verify the SQL SHA-256, and execute only within the
-authorised window. Codex must not run this production command.
+The operator must create the untracked environment file. Before execution,
+verify project ref `zkpjklzfwzefhjluvhfw` and the SQL SHA-256, and execute only
+within the authorised window. Production writes require explicit operator
+authorization. Once authorized, an agent may execute the exact guarded runbook
+command after all required prechecks pass (`AGENTS.md`, "Production writes by
+agents").
 
 The transaction checks schema availability and replay state before inserting a
 `loading` release. Six bulk `COPY` streams load the tables in foreign-key-safe
@@ -96,9 +99,11 @@ Replay behavior is fail-closed:
 `tax-2026.09.30-01` is the taxonomy-v3 release built and accepted in sporely-py
 Stage 6P (`9609542`, fingerprints in
 `database/taxonomy/evidence/taxonomy-v3/stage6p/release-candidate.json`). It
-replaces the active `tax-2026.09.26-02`. This section is preparation only:
-every production step below needs its own explicit go-ahead, and agents never
-run a production write.
+replaces the active `tax-2026.09.26-02`. Every production step below needs
+its own explicit go-ahead. Production writes require explicit operator
+authorization. Once authorized, an agent may execute the exact guarded runbook
+command after all required prechecks pass (`AGENTS.md`, "Production writes by
+agents"). The read-only pre-checks and probes need no separate approval.
 
 ### What changes
 
@@ -258,7 +263,7 @@ authorised window:
    None of these ids is in the cloud scope of either release, so the expected
    count is zero; the check is what proves it.
 
-### Production activation (human operator, authorised window only)
+### Production activation (explicitly authorised, authorised window only)
 
 Only after both pre-checks pass, verify project ref `zkpjklzfwzefhjluvhfw` and
 the SQL SHA-256 above, then run the unchanged payload with the session-only

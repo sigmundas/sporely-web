@@ -27,6 +27,34 @@ explicitly asks for migration-history repair.
   deferred migration. The CLI suggests `--include-all` when it refuses a plain
   push; following that suggestion applies the deferred migration.
 
+### Production writes by agents
+
+Production writes are allowed for an agent only when all of the following are
+true:
+
+1. The user has explicitly authorized the specific production operation in the
+   current conversation.
+2. All repository-defined production prechecks and deployment guards have
+   passed.
+3. The operation uses the repository's approved deployment/runbook path
+   exactly; agents must not bypass or weaken safety tooling.
+4. The target production project/ref has been independently verified
+   immediately before execution.
+5. Migration history is consistent with the repository's deploy-tree rules.
+   Agents must never use `migration repair`, reorder applied migrations, or
+   otherwise rewrite production migration history unless the user gives
+   separate explicit instructions for that repair.
+6. For destructive, irreversible, or broad data-changing operations, stop and
+   present the exact operation and validation results before execution unless
+   the user already explicitly authorized that exact operation.
+
+Read-only production checks may be run without separate approval when required
+by an approved runbook.
+
+Do not interpret "agent" as a blanket prohibition on production writes. A
+guarded production write with explicit current-turn user authorization is
+permitted.
+
 ### Intentional migration-order gap
 
 `supabase/deploy-exceptions.json` lists migrations that are committed on
@@ -74,7 +102,7 @@ While that list is non-empty:
    `supabase db push --dry-run`
 
    While `supabase/deploy-exceptions.json` lists a deferred migration, do this
-   instead, from the user's terminal, with the exact approved versions:
+   instead, with the exact approved versions:
 
    `node scripts/supabase-deploy-tree.mjs prepare --allow <version[,version]> --ref <committed ref>`
    `node <deploy tree>/scripts/supabase-deploy-tree.mjs check --tree <deploy tree>`
@@ -88,9 +116,10 @@ While that list is non-empty:
 
    `supabase db push`
 
-   to deploy a normal repo-tracked migration. While the gap exists, the user
-   runs `supabase db push --linked` inside the deploy tree, and only after
-   `check` passed. Agents never run the real push.
+   to deploy a normal repo-tracked migration. While the gap exists, run
+   `supabase db push --linked` inside the deploy tree, and only after `check`
+   passed. An agent may run the real push only under "Production writes by
+   agents" above.
 
 9. After pushing, run `supabase migration list` again and verify the local and
    remote migration versions match exactly. While the gap exists, run
