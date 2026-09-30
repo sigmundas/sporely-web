@@ -457,3 +457,89 @@ test('Stage 3W: searchTaxaV2 passes the UI language that chooses the display nam
   assert.equal(result.sporelyTaxonId, '83668')
   assert.equal(result.displayName, 'slank ringkjeglesopp (Pholiotina rugosa)')
 })
+
+// ── Taxonomy v3 Stage 4W: Dyntaxa namespace and Swedish names ───────────────
+// Tuples and names from the sporely-py Stage 4P export contract ("Dyntaxa
+// rows") and its approved build evidence: 83668 is bridged to
+// urn:lsid:dyntaxa.se:Taxon:3423 with sv "Pholiotina rugosa"; 617026 has no
+// Dyntaxa bridge and no sv name.
+
+const DYNTAXA_83668 = Object.freeze({
+  capability: 'external-taxonomy-identifier',
+  sporelyTaxonId: null,
+  sourceSystem: 'dyntaxa',
+  namespace: 'dyntaxa_taxon_id',
+  externalId: 'urn:lsid:dyntaxa.se:Taxon:3423',
+  rawExternalId: 'urn:lsid:dyntaxa.se:Taxon:3423',
+  scientificName: 'Pholiotina rugosa',
+  taxonRank: 'species',
+})
+
+function resolverReturning(rows) {
+  const calls = []
+  return { calls, client: { rpc: async (name, args) => { calls.push([name, args]); return { data: rows, error: null } } } }
+}
+
+test('Stage 4W: a reviewed Dyntaxa LSID resolves to its concept through the namespaced tuple', async () => {
+  const { calls, client } = resolverReturning([{ taxon_id: 83668, id_role: 'accepted', is_preferred: false }])
+  const result = await resolveExternalTaxonomySelection(DYNTAXA_83668, { supabaseClient: client, bypassCapabilityGate: true })
+  assert.deepEqual(calls, [['resolve_taxon_external_id_v2', {
+    p_source_system: 'dyntaxa', p_namespace: 'dyntaxa_taxon_id', p_external_id: 'urn:lsid:dyntaxa.se:Taxon:3423',
+  }]])
+  assert.equal(result.sporelyTaxonId, '83668')
+  assert.equal(result.resolvedFromExternalId, true)
+  assert.equal(result.externalId, 'urn:lsid:dyntaxa.se:Taxon:3423')
+})
+
+test('Stage 4W: an unknown (unpublished or automatic) Dyntaxa LSID stays external_unresolved', async () => {
+  const { client } = resolverReturning([])
+  const result = await resolveExternalTaxonomySelection(DYNTAXA_83668, { supabaseClient: client, bypassCapabilityGate: true })
+  assert.deepEqual(result, DYNTAXA_83668)
+  assert.equal(taxonIdentityPatchForSelection(result).taxon_identity_state, 'external_unresolved')
+})
+
+test('Stage 4W: an ambiguous Dyntaxa LSID stays unresolved', async () => {
+  const { client } = resolverReturning([{ taxon_id: 83668 }, { taxon_id: 617026 }])
+  const result = await resolveExternalTaxonomySelection(DYNTAXA_83668, { supabaseClient: client, bypassCapabilityGate: true })
+  assert.deepEqual(result, DYNTAXA_83668)
+})
+
+test('Stage 4W: a Dyntaxa LSID or name text is never parsed into a provider identity', () => {
+  assert.equal(parsePrefixedExternalId('urn:lsid:dyntaxa.se:Taxon:3423'), null)
+  assert.equal(externalTaxonomySelectionForCandidate({ taxonId: 'urn:lsid:dyntaxa.se:Taxon:3423', scientificName: 'Pholiotina rugosa' }), null)
+  assert.equal(externalTaxonomySelectionForCandidate({ scientificName: 'Pholiotina rugosa' }), null)
+})
+
+test('Stage 4W: Swedish label shows the Stage 4P Dyntaxa preferred name', () => {
+  const taxon = normalizeTaxonomyV2Result({
+    ...PHOLIOTINA_RUGOSA_ROW, vernacular_name: null, vernacular_language: null,
+    preferred_scientific_name_sv: 'Pholiotina rugosa', display_scientific_name: 'Pholiotina rugosa',
+  })
+  assert.equal(taxon.displayName, 'Pholiotina rugosa')
+  assert.equal(taxon.preferredScientificNameSv, 'Pholiotina rugosa')
+  assert.equal(taxon.canonicalScientificName, 'Conocybe rugosa')
+  assert.equal(taxon.sporelyTaxonId, '83668')
+})
+
+test('Stage 4W: Swedish label shows a Dyntaxa vernacular beside the national name', () => {
+  const taxon = normalizeTaxonomyV2Result({
+    taxon_id: 7821, taxon_rank: 'species', genus: 'Entoloma', specific_epithet: 'conferendum',
+    canonical_scientific_name: 'Entoloma conferendum', vernacular_name: 'stjärnrödhätting', vernacular_language: 'sv',
+    canonical_source_system: 'col_xr', canonical_external_id: 'COL-7821',
+    preferred_scientific_name_no: 'Entoloma conferendum', preferred_scientific_name_sv: 'Entoloma conferendum',
+    display_scientific_name: 'Entoloma conferendum',
+  })
+  assert.equal(taxon.displayName, 'stjärnrödhätting (Entoloma conferendum)')
+})
+
+test('Stage 4W: a concept without a Stage 4P Swedish name falls back to canonical COL in Swedish', () => {
+  const taxon = normalizeTaxonomyV2Result({
+    taxon_id: 617026, taxon_rank: 'species', genus: 'Conocybe', specific_epithet: 'vexans',
+    canonical_scientific_name: 'Conocybe vexans', vernacular_name: null, vernacular_language: null,
+    canonical_source_system: 'col_xr', canonical_external_id: 'COL-617026',
+    preferred_scientific_name_no: 'Pholiotina vexans', preferred_scientific_name_sv: null,
+    display_scientific_name: 'Conocybe vexans',
+  })
+  assert.equal(taxon.displayName, 'Conocybe vexans')
+  assert.equal(taxon.preferredScientificNameSv, null)
+})

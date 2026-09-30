@@ -488,3 +488,36 @@ scientific names", accepted candidate `f3e8211`). Migration
   them; a pre-3W RPC response without the field falls back to canonical.
   Stored observation names (Finds cards, detail headers of saved
   observations) are not relabelled by this stage.
+
+## Taxonomy v3 Stage 4W: Dyntaxa namespace
+
+Consumes the sporely-py Stage 4P export contract
+(`database/taxonomy/docs/cloud-export-contract.md`, "Dyntaxa rows"; accepted
+candidate `79f18ae`). No schema change: `resolve_taxon_external_id_v2` matches
+the exact `(source_system, namespace, external_id)` tuple, so a Dyntaxa
+identity resolves as `('dyntaxa', 'dyntaxa_taxon_id',
+'urn:lsid:dyntaxa.se:Taxon:<n>')`. The bare number, a `TaxonName:` synonym
+LSID, an Artportalen number and name text never resolve.
+
+Only reviewed Dyntaxa bridges can reach the resolver. Both importers
+(`import-release.mjs` via `preflightExport`, and
+`prepare-production-release-import.mjs`) refuse an export in which any
+Dyntaxa row is not `dyntaxa/dyntaxa_taxon_id`, is not a full `Taxon:` LSID, is
+not `accepted` and non-preferred, lacks an `authoritative_bridge:` note, sits
+in the legacy-integer file, names a concept missing from `taxon.jsonl`, maps
+one LSID to two concepts, or gives one concept two Dyntaxa identities. If an
+ambiguous tuple were ever present, the web client still leaves it
+`external_unresolved` (exactly one distinct concept is required).
+
+The production preparation now also imports the Stage 3P national-name columns
+and requires `taxonomy_v2_national_name_errors` to be empty before activation.
+Before this stage it dropped them, which would have kept Stage 4P Swedish names
+out of production. When the release carries Dyntaxa rows, it also checks after
+activation that one Dyntaxa LSID resolves to exactly its concept.
+
+Swedish display needs no new web code. `search_taxa_v2` with `lang = 'sv'`
+shows `preferred_scientific_name_sv` (for example 83668 "Pholiotina rugosa"),
+and a concept without one (617026) shows canonical COL. Regressions:
+`supabase/tests/taxonomy_v2_dyntaxa_test.sql`, `src/taxonomy-v2.test.js`
+(Stage 4W), `scripts/taxonomy-v2/export-contract.test.mjs`,
+`scripts/taxonomy-v2/production-release-import.test.mjs`.

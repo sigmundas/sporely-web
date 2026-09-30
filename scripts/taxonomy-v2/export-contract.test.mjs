@@ -41,3 +41,31 @@ test('pre-3P export with names but no provenance fields passes when names are nu
 test('national name with partial provenance fails', async()=>{ await withTaxonRows(rows=>{ Object.assign(rows[0],stage3pNulls,noName,{preferred_scientific_name_no_external_id:null}); }, async r=>{ await assert.rejects(preflightExport(r),/preferred_scientific_name_no has partial provenance/); }); });
 test('national name without provenance fields fails', async()=>{ await withTaxonRows(rows=>{ rows[0].preferred_scientific_name_sv='Fixture sv'; }, async r=>{ await assert.rejects(preflightExport(r),/preferred_scientific_name_sv has partial provenance/); }); });
 test('blank national provenance fails', async()=>{ await withTaxonRows(rows=>{ Object.assign(rows[0],stage3pNulls,noName,{preferred_scientific_name_no_namespace:' nortaxa_taxon_id'}); }, async r=>{ await assert.rejects(preflightExport(r),/nonblankTrimmedString field preferred_scientific_name_no_namespace/); }); });
+
+// Taxonomy v3 Stage 4W: Stage 4P Dyntaxa rows, shaped exactly as sporely-py
+// cloud-export-contract.md "Dyntaxa rows" and its approved build evidence
+// (83668 -> urn:lsid:dyntaxa.se:Taxon:3423, accepted name Pholiotina rugosa).
+const dyntaxaBridge = { external_id: 'urn:lsid:dyntaxa.se:Taxon:3423', external_name: 'Pholiotina rugosa', id_role: 'accepted', is_preferred: false, namespace: 'dyntaxa_taxon_id', note: 'authoritative_bridge:manual_approved_exact', source_system: 'dyntaxa', taxon_id: 1 };
+async function withExternalRows(file, extra, check) {
+  const r = await copyFixture();
+  try {
+    const p = path.join(r, file);
+    await writeFile(p, (await readFile(p, 'utf8')) + extra.map(row => JSON.stringify(row)).join('\n') + '\n');
+    await buildFixtureManifest(r);
+    await check(r);
+  } finally { await rm(r, { recursive: true }); }
+}
+test('Stage 4P reviewed Dyntaxa bridge row passes preflight', async()=>{ await withExternalRows('taxon_external_id.jsonl',[dyntaxaBridge,{...dyntaxaBridge,external_id:'urn:lsid:dyntaxa.se:Taxon:3957',taxon_id:3}],async r=>{ await preflightExport(r); }); });
+for (const [label, row, pattern] of [
+  ['automatic (non-bridge) Dyntaxa row', { ...dyntaxaBridge, note: null }, /not an authoritative reviewed bridge/],
+  ['automatic-match note', { ...dyntaxaBridge, note: 'automatic_exact_name' }, /not an authoritative reviewed bridge/],
+  ['synonym TaxonName LSID', { ...dyntaxaBridge, external_id: 'urn:lsid:dyntaxa.se:TaxonName:3423' }, /Taxon:<n> LSID/],
+  ['bare Dyntaxa number', { ...dyntaxaBridge, external_id: '3423' }, /Taxon:<n> LSID/],
+  ['other Dyntaxa namespace', { ...dyntaxaBridge, namespace: 'dyntaxa_accepted_name_usage_id' }, /must be dyntaxa\/dyntaxa_taxon_id/],
+  ['Dyntaxa namespace under another system', { ...dyntaxaBridge, source_system: 'artportalen' }, /must be dyntaxa\/dyntaxa_taxon_id/],
+  ['preferred Dyntaxa row', { ...dyntaxaBridge, is_preferred: true }, /accepted and not preferred/],
+  ['synonym-role Dyntaxa row', { ...dyntaxaBridge, id_role: 'synonym' }, /accepted and not preferred/],
+]) test(`Dyntaxa ${label} fails preflight`, async()=>{ await withExternalRows('taxon_external_id.jsonl',[row],async r=>{ await assert.rejects(preflightExport(r),pattern); }); });
+test('Dyntaxa LSID on two concepts (ambiguous) fails preflight', async()=>{ await withExternalRows('taxon_external_id.jsonl',[dyntaxaBridge,{...dyntaxaBridge,taxon_id:3}],async r=>{ await assert.rejects(preflightExport(r),/ambiguous across concepts/); }); });
+test('two Dyntaxa identities on one concept fail preflight', async()=>{ await withExternalRows('taxon_external_id.jsonl',[dyntaxaBridge,{...dyntaxaBridge,external_id:'urn:lsid:dyntaxa.se:Taxon:3957'}],async r=>{ await assert.rejects(preflightExport(r),/more than one Dyntaxa identity/); }); });
+test('legacy integer Dyntaxa row fails preflight', async()=>{ await withExternalRows('taxon_external_id_legacy_integer.jsonl',[{ external_id: '3423', external_name: 'Pholiotina rugosa', id_role: 'accepted', is_preferred: false, note: null, source_system: 'dyntaxa', taxon_id: 1 }],async r=>{ await assert.rejects(preflightExport(r),/only as authoritative bridge rows/); }); });

@@ -154,3 +154,73 @@ test('integration: generated full release payload imports, validates, activates,
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+// Taxonomy v3 Stage 4W: the production preparation accepts Stage 4P Dyntaxa
+// bridge rows and Swedish names exactly as the sporely-py export contract
+// documents them, and refuses unreviewed or ambiguous Dyntaxa rows. Pure
+// file-level test on a synthetic production-format release; no database.
+const { createHash: stage4wHash } = await import('node:crypto');
+const { writeFile: stage4wWrite } = await import('node:fs/promises');
+const STAGE4W_RELEASE = 'tax-2026.09.30-01';
+const dyntaxaRow = { external_id: 'urn:lsid:dyntaxa.se:Taxon:3423', external_name: 'Pholiotina rugosa', id_role: 'accepted', is_preferred: false, namespace: 'dyntaxa_taxon_id', note: 'authoritative_bridge:manual_approved_exact', source_system: 'dyntaxa', taxon_id: 83668 };
+const national = (sv) => Object.fromEntries(['no', 'sv'].flatMap(c => ['', '_source_system', '_namespace', '_external_id'].map(s => [`preferred_scientific_name_${c}${s}`, null])).concat(sv ? [['preferred_scientific_name_sv', 'Pholiotina rugosa'], ['preferred_scientific_name_sv_source_system', 'dyntaxa'], ['preferred_scientific_name_sv_namespace', 'dyntaxa_taxon_id'], ['preferred_scientific_name_sv_external_id', 'urn:lsid:dyntaxa.se:Taxon:3423']] : []));
+async function stage4wRelease(externalExtra) {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stage4w-release-'));
+  const sha = bytes => stage4wHash('sha256').update(bytes).digest('hex');
+  const taxon = (id, genus, epithet, rank, extra = {}) => ({ canonical_external_id: `COL-${id}`, canonical_scientific_name: epithet ? `${genus} ${epithet}` : genus, canonical_source_system: 'col_xr', family: 'Bolbitiaceae', genus, parent_taxon_id: null, source_system: 'col_xr', specific_epithet: epithet, taxon_id: id, taxon_rank: rank, taxonomic_status: 'accepted', ...national(false), ...extra });
+  const data = {
+    'taxonomy_release.jsonl': [{ content_release_id: STAGE4W_RELEASE, taxonomy_schema_version: 2, scope_predicate_id: 'global_macrofungi_policy_v1', source_gz_sha256: 'a'.repeat(64) }],
+    'taxon.jsonl': [taxon(83668, 'Conocybe', 'rugosa', 'species', national(true)), taxon(617026, 'Conocybe', 'vexans', 'species'), taxon(900, 'Conocybe', '', 'genus')],
+    'scientific_name.jsonl': [{ taxon_id: 83668, language_code: 'sci', scientific_name: 'Pholiotina rugosa', is_preferred_name: false, source: 'dyntaxa', note: 'manual_approved_exact' }, { taxon_id: 83668, language_code: 'sci', scientific_name: 'Pholiotina rugosa', is_preferred_name: false, source: 'nortaxa', note: 'manual_approved_exact' }],
+    'vernacular.jsonl': [{ taxon_id: 83668, language_code: 'nb', vernacular_name: 'slank ringkjeglesopp', is_preferred_name: true, source: 'nortaxa' }],
+    'taxon_external_id.jsonl': [{ external_id: 'COL-83668', external_name: 'Conocybe rugosa', id_role: 'accepted', is_preferred: true, namespace: 'col_usage_id', note: null, source_system: 'col_xr', taxon_id: 83668 }, { external_id: 'COL-617026', external_name: 'Conocybe vexans', id_role: 'accepted', is_preferred: true, namespace: 'col_usage_id', note: null, source_system: 'col_xr', taxon_id: 617026 }, dyntaxaRow, ...externalExtra],
+    'taxon_external_id_legacy_integer.jsonl': [],
+    'taxon_redlist.jsonl': [],
+  };
+  const files = [];
+  let total = 0;
+  for (const [name, rows] of Object.entries(data)) {
+    const bytes = Buffer.from(rows.map(row => JSON.stringify(row) + '\n').join(''));
+    await stage4wWrite(path.join(root, name), bytes);
+    files.push({ name, bytes: bytes.length, sha256: sha(bytes), row_count: rows.length });
+    total += bytes.length;
+  }
+  const scope = Buffer.from(JSON.stringify({ release_id: STAGE4W_RELEASE, policy_sha256: 'p', source_hashes: { sqlite_gz_sha256: 'a'.repeat(64) } }));
+  await stage4wWrite(path.join(root, 'scope-manifest.json'), scope);
+  const archive = Buffer.from('archive');
+  await stage4wWrite(path.join(root, 'scoped-export.jsonl.gz'), archive);
+  await stage4wWrite(path.join(root, `desktop-${STAGE4W_RELEASE}.sqlite3`), 'sqlite');
+  await stage4wWrite(path.join(root, `desktop-${STAGE4W_RELEASE}.sqlite3.gz`), 'sqlite-gz');
+  await stage4wWrite(path.join(root, 'taxonomy_export_manifest.json'), JSON.stringify({ format: 'sporely-global-macrofungi-export-v1', release_id: STAGE4W_RELEASE, files, source_hashes: { sqlite_gz_sha256: 'a'.repeat(64) }, scope_manifest_sha256: sha(scope), policy_sha256: 'p', compressed_dataset_bytes: archive.length, compressed_dataset_sha256: sha(archive), uncompressed_dataset_bytes: total }));
+  return root;
+}
+
+test('Stage 4W: production preparation carries Dyntaxa bridges, Swedish names and a resolver probe', async () => {
+  const root = await stage4wRelease([]);
+  const out = await mkdtemp(path.join(os.tmpdir(), 'stage4w-out-'));
+  try {
+    const prepared = await prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE });
+    const sql = await readFile(prepared.generated_sql_path, 'utf8');
+    assert.match(sql, /"source_system":"dyntaxa"/);
+    assert.match(sql, /preferred_scientific_name_sv_external_id/);
+    assert.match(sql, /taxonomy_v2_national_name_errors\('tax-2026\.09\.30-01'\)/);
+    assert.match(sql, /to_regprocedure\('public\.taxonomy_v2_national_name_errors\(text\)'\) IS NULL/);
+    assert.match(sql, /resolve_taxon_external_id_v2\('dyntaxa','dyntaxa_taxon_id','urn:lsid:dyntaxa\.se:Taxon:3423'\)\) <> 1/);
+    assert.match(sql, /WHERE taxon_id=83668\)/);
+    assert.match(sql, /resolve_taxon_external_id_v2\('dyntaxa','dyntaxa_taxon_id','3423'\)/);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+for (const [label, extra, pattern] of [
+  ['an automatic Dyntaxa row', [{ ...dyntaxaRow, external_id: 'urn:lsid:dyntaxa.se:Taxon:1', taxon_id: 617026, note: 'automatic_exact_name' }], /not an authoritative reviewed bridge/],
+  ['an ambiguous Dyntaxa LSID', [{ ...dyntaxaRow, taxon_id: 617026 }], /ambiguous across concepts/],
+  ['a bare Dyntaxa number', [{ ...dyntaxaRow, external_id: '3957', taxon_id: 617026 }], /Taxon:<n> LSID/],
+  ['a Dyntaxa row on a missing concept', [{ ...dyntaxaRow, external_id: 'urn:lsid:dyntaxa.se:Taxon:3957', taxon_id: 424242 }], /not in taxon\.jsonl/],
+]) test(`Stage 4W: production preparation refuses ${label}`, async () => {
+  const root = await stage4wRelease(extra);
+  const out = await mkdtemp(path.join(os.tmpdir(), 'stage4w-out-'));
+  try {
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE }), pattern);
+    assert.equal(existsSync(path.join(out, 'import.sql')), false);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});

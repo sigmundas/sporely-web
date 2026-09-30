@@ -5,6 +5,8 @@ import { chmod, mkdir, open, readFile, realpath, stat, unlink } from 'node:fs/pr
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { createDyntaxaRowCollector, NATIONAL_NAME_FIELDS } from './lib/export-contract.mjs';
+
 const PROJECT_REF = 'zkpjklzfwzefhjluvhfw';
 // The release to import is named explicitly by the operator (--release-id)
 // and must match the export's own manifests; nothing is imported by default.
@@ -73,7 +75,13 @@ function chooseProbes(data) {
     .filter(row => row.vernacular_name?.length >= 2 && ['nb', 'nn', 'no'].includes(row.language_code) && taxa.has(row.taxon_id))
     .sort((a, b) => a.vernacular_name.localeCompare(b.vernacular_name) || a.taxon_id - b.taxon_id)[0];
   assert(colOnly && nortaxaName && genus && alias && vernacular, 'release does not contain every required representative search probe');
+  // Taxonomy v3 Stage 4W: when the release carries Dyntaxa bridges, prove one
+  // resolves to exactly its concept after activation.
+  const dyntaxa = external
+    .filter(row => row.source_system === 'dyntaxa' && row.namespace === 'dyntaxa_taxon_id')
+    .sort((a, b) => a.external_id.localeCompare(b.external_id))[0];
   return {
+    dyntaxa: dyntaxa ? { externalId: dyntaxa.external_id, taxonId: dyntaxa.taxon_id } : null,
     colOnly: { query: colOnly.canonical_scientific_name, taxonId: colOnly.taxon_id, colUsageId: colByTaxon.get(colOnly.taxon_id) },
     nortaxa: { query: nortaxaName.scientific_name, taxonId: nortaxaName.taxon_id },
     alias: { query: alias.scientific_name, taxonId: alias.taxon_id },
@@ -144,6 +152,15 @@ async function verifyRelease(releaseDirectory, TARGET_RELEASE) {
   const dangling = data['taxon.jsonl'].filter(row => row.parent_taxon_id != null && !taxonIds.has(row.parent_taxon_id));
   const authoritativeCounts = countMap(data['taxon_external_id.jsonl'], row => `${row.source_system}/${row.namespace}`);
   const legacyCounts = countMap(data['taxon_external_id_legacy_integer.jsonl'], row => row.source_system);
+  const dyntaxa = createDyntaxaRowCollector();
+  for (const name of ['taxon_external_id.jsonl', 'taxon_external_id_legacy_integer.jsonl']) {
+    data[name].forEach((row, index) => {
+      try { dyntaxa.add(name, index + 1, row); } catch (error) { throw new Error(`refuse: ${error.message}`); }
+    });
+  }
+  for (const row of data['taxon_external_id.jsonl']) {
+    if (row.source_system === 'dyntaxa') assert(taxonIds.has(row.taxon_id), `Dyntaxa ${row.external_id} names concept ${row.taxon_id}, which is not in taxon.jsonl`);
+  }
   const probes = chooseProbes(data);
   const generatedAt = `${TARGET_RELEASE.slice(4, 14).replaceAll('.', '-')}T00:00:00Z`;
   const sourceManifest = {
@@ -201,8 +218,8 @@ const insertMappings = {
 insert into public.taxonomy_v2_concepts(sporely_taxon_id, first_seen_release_id)
 select (raw->>'taxon_id')::bigint, current_setting('taxonomy_v2.release_id') from taxonomy_v2_stage
 on conflict (sporely_taxon_id) do nothing;
-insert into public.taxonomy_v2_taxa(release_id,sporely_taxon_id,parent_sporely_taxon_id,genus,specific_epithet,family,canonical_scientific_name,taxon_rank,taxonomic_status,source_system,canonical_source_system,canonical_external_id)
-select current_setting('taxonomy_v2.release_id'),(raw->>'taxon_id')::bigint,(raw->>'parent_taxon_id')::bigint,raw->>'genus',raw->>'specific_epithet',raw->>'family',raw->>'canonical_scientific_name',raw->>'taxon_rank',raw->>'taxonomic_status',raw->>'source_system',raw->>'canonical_source_system',raw->>'canonical_external_id' from taxonomy_v2_stage;`,
+insert into public.taxonomy_v2_taxa(release_id,sporely_taxon_id,parent_sporely_taxon_id,genus,specific_epithet,family,canonical_scientific_name,taxon_rank,taxonomic_status,source_system,canonical_source_system,canonical_external_id,${NATIONAL_NAME_FIELDS.join(',')})
+select current_setting('taxonomy_v2.release_id'),(raw->>'taxon_id')::bigint,(raw->>'parent_taxon_id')::bigint,raw->>'genus',raw->>'specific_epithet',raw->>'family',raw->>'canonical_scientific_name',raw->>'taxon_rank',raw->>'taxonomic_status',raw->>'source_system',raw->>'canonical_source_system',raw->>'canonical_external_id',${NATIONAL_NAME_FIELDS.map(field => `raw->>'${field}'`).join(',')} from taxonomy_v2_stage;`,
   'scientific_name.jsonl': `insert into public.taxonomy_v2_scientific_names(release_id,sporely_taxon_id,language_code,scientific_name,is_preferred_name,source,alias_reason) select current_setting('taxonomy_v2.release_id'),(raw->>'taxon_id')::bigint,raw->>'language_code',raw->>'scientific_name',(raw->>'is_preferred_name')::boolean,raw->>'source',raw->>'note' from taxonomy_v2_stage;`,
   'vernacular.jsonl': `insert into public.taxonomy_v2_vernacular_names(release_id,sporely_taxon_id,language_code,vernacular_name,is_preferred_name,source) select current_setting('taxonomy_v2.release_id'),(raw->>'taxon_id')::bigint,raw->>'language_code',raw->>'vernacular_name',(raw->>'is_preferred_name')::boolean,raw->>'source' from taxonomy_v2_stage;`,
   'taxon_external_id.jsonl': `insert into public.taxonomy_v2_external_ids(release_id,sporely_taxon_id,source_system,namespace,external_id,id_role,is_preferred,external_name,note) select current_setting('taxonomy_v2.release_id'),(raw->>'taxon_id')::bigint,raw->>'source_system',raw->>'namespace',raw->>'external_id',raw->>'id_role',(raw->>'is_preferred')::boolean,raw->>'external_name',raw->>'note' from taxonomy_v2_stage;`,
@@ -259,7 +276,8 @@ BEGIN
   ) OR to_regprocedure('public.taxonomy_v2_validate_release(text)') IS NULL
      OR to_regprocedure('public.taxonomy_v2_activate_release(text)') IS NULL
      OR to_regprocedure('public.search_taxa_v2(text,text,integer)') IS NULL
-     OR to_regprocedure('public.resolve_taxon_external_id_v2(text,text,text)') IS NULL THEN
+     OR to_regprocedure('public.resolve_taxon_external_id_v2(text,text,text)') IS NULL
+     OR to_regprocedure('public.taxonomy_v2_national_name_errors(text)') IS NULL THEN
     RAISE EXCEPTION 'taxonomy-v2 preflight: required schema objects are missing';
   END IF;
 
@@ -342,6 +360,8 @@ DECLARE v_result jsonb;
 BEGIN
   v_result := public.taxonomy_v2_validate_release(${sqlText(TARGET_RELEASE)});
   IF NOT coalesce((v_result->>'ok')::boolean,false) THEN RAISE EXCEPTION 'taxonomy-v2 validation failed: %',v_result; END IF;
+  v_result := public.taxonomy_v2_national_name_errors(${sqlText(TARGET_RELEASE)});
+  IF pg_catalog.jsonb_array_length(v_result) > 0 THEN RAISE EXCEPTION 'taxonomy-v2 national-name validation failed: %',v_result; END IF;
 END
 $validate$;
 
@@ -361,7 +381,10 @@ BEGIN
      OR NOT EXISTS (SELECT 1 FROM public.taxonomy_v2_scientific_names WHERE release_id=${sqlText(TARGET_RELEASE)} AND sporely_taxon_id=${p.nortaxa.taxonId} AND source='nortaxa') THEN RAISE EXCEPTION 'NorTaxa-backed name search probe failed'; END IF;
   IF NOT EXISTS (SELECT 1 FROM public.search_taxa_v2(${sqlText(p.alias.query)},'no',50) WHERE taxon_id=${p.alias.taxonId} AND match_type LIKE 'scientific_alias_%') THEN RAISE EXCEPTION 'scientific-alias search probe failed'; END IF;
   IF NOT EXISTS (SELECT 1 FROM public.search_taxa_v2(${sqlText(p.genus.query)},'no',50) WHERE taxon_id=${p.genus.taxonId} AND taxon_rank='genus') THEN RAISE EXCEPTION 'genus search probe failed'; END IF;
-  IF NOT EXISTS (SELECT 1 FROM public.search_taxa_v2(${sqlText(p.vernacular.query)},${sqlText(p.vernacular.language)},50) WHERE taxon_id=${p.vernacular.taxonId} AND match_type LIKE 'vernacular_%') THEN RAISE EXCEPTION 'vernacular search probe failed'; END IF;
+${p.dyntaxa ? `  IF (SELECT count(DISTINCT taxon_id) FROM public.resolve_taxon_external_id_v2('dyntaxa','dyntaxa_taxon_id',${sqlText(p.dyntaxa.externalId)})) <> 1
+     OR NOT EXISTS (SELECT 1 FROM public.resolve_taxon_external_id_v2('dyntaxa','dyntaxa_taxon_id',${sqlText(p.dyntaxa.externalId)}) WHERE taxon_id=${p.dyntaxa.taxonId})
+     OR EXISTS (SELECT 1 FROM public.resolve_taxon_external_id_v2('dyntaxa','dyntaxa_taxon_id',${sqlText(p.dyntaxa.externalId.replace(/^.*:/u, ''))})) THEN RAISE EXCEPTION 'Dyntaxa resolver probe failed'; END IF;
+` : ''}  IF NOT EXISTS (SELECT 1 FROM public.search_taxa_v2(${sqlText(p.vernacular.query)},${sqlText(p.vernacular.language)},50) WHERE taxon_id=${p.vernacular.taxonId} AND match_type LIKE 'vernacular_%') THEN RAISE EXCEPTION 'vernacular search probe failed'; END IF;
 END
 $searches$;
 
