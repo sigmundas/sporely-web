@@ -230,7 +230,15 @@ authorised window:
 
 1. `tax-2026.09.26-02` is the only active release; `20260930193000` and
    `20260930193100` are applied and `20260914090000` is not; `nortaxa/58766`
-   does not resolve yet.
+   does not resolve yet. `taxonomy-v3-tax-2026.09.30-01-precheck-1.sql` checks
+   all of these (READ ONLY, ends in ROLLBACK, raises `STOP` on a mismatch):
+
+   ```bash
+   docker run --rm --env-file /path/to/private/production-db.env \
+     -v "$PWD/supabase:/probes:ro" postgres:17 \
+     sh -c 'psql "$DATABASE_URL" --file=/probes/taxonomy-v3-tax-2026.09.30-01-precheck-1.sql'
+   ```
+
 2. **No cloud observation references a retiring concept** (plan "Production
    steps after Stage 6W", step 1; the Stage 2 check repeated before the
    supersessions ship):
@@ -346,6 +354,38 @@ After a rollback, re-run the dry run before any apply: its plan hash covers the
 active release, so an apply planned against `tax-2026.09.30-01` is refused.
 Promotions already applied are not undone by a release rollback; they point at
 concepts present in both releases.
+
+### Execution record (2026-09-30)
+
+- **Prerequisites:** `20260930193000` and `20260930193100` (retimed from
+  `20260929120000` / `20260929130000`, sporely-web PR #5) deployed through the
+  deploy tree at `39cd697`; `post-verify` passed. `20260914090000` not applied.
+- **Pre-check 2, first run (read-only):** STOP. `observations.selected` 0,
+  `observations.resolved` 36, `taxonomy_v3.resolution_link` 37 (one orphan
+  link). 19 retired Group-B NorTaxa-derived concepts, all
+  `trusted_secondary_provider_mapping` links with no release; none in
+  `taxonomy_v2_concepts`, so the "none is in the cloud scope" reasoning did not
+  cover them. Owner decision: repair, then import.
+- **Retired-concept resolution repair:** migration `20260930202803`
+  (PR #7, `56e6758`) deployed through the deploy tree; `post-verify` passed.
+  Dry run: no refusals, 37 links, 36 observations, 1 orphan, 15 registry
+  additions, manifest `2585d08a…21a49`, plan `a4461ad9…ef0498`. Apply, run 1,
+  committed with the same counts. Afterwards: pre-check 2 reported 0/0/0, a
+  fresh dry run found nothing, registry 194 → 209 concepts.
+- **Pre-checks, immediately before the import (psql, READ ONLY):** both passed
+  (`taxonomy-v3-tax-2026.09.30-01-precheck-1.sql` and the retiring-concept
+  check).
+- **Activation, 20:46:04–20:59:31Z:** payload SHA-256 `ed62423c…387f`
+  re-verified, run with `SET statement_timeout = 1800000` over the Session
+  pooler; `COMMIT`, psql exit 0.
+- **Post-activation probes:** passed (release state, counts, identity
+  continuity, 8 resolving and 3 unresolved ids, 17 search/display probes,
+  national names). Releases: `tax-2026.08.01-01` retired, `tax-2026.09.26-02`
+  retired, `tax-2026.09.30-01` active; 3 of 3 import runs succeeded.
+- **Stage 1B dry run (read-only, against `tax-2026.09.30-01`):** 17 candidates;
+  6 `promote`, 11 `no_match`, 0 ambiguous, 0 error; no promotion targets NorTaxa
+  56227; plan `b1a94448…cef377`. 2 of the 6 have live reference uses. Apply not
+  yet authorised.
 
 ### Rollback
 
