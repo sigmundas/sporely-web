@@ -1,9 +1,26 @@
 # Stage 2: consent and visibility for shared reference data
 
-Status: proposed, revised after independent security review and general
-review of `ebb9416` (both "needs changes"; incorporated). Not started. It
-needs the owner decisions at the end, and a security review of each
-implementation candidate. Stage 2 of
+Status: decided 2026-10-01. Revised after independent security review and
+general review of `ebb9416` (both "needs changes"; incorporated). Not
+started. Order: re-review of this revision, then 2a (implement, review,
+security review, deploy, verify fail-closed), then 2b as a separately
+reviewed step.
+
+## Owner decisions (2026-10-01)
+
+- **A.** Withdraw both existing unconsented contributions in Stage 2a.
+- **B.** Only **public, non-draft** observations may back a public reference
+  share. Private, friends-only and draft observations are ineligible, even
+  with explicit opt-in. Revisit separately later if needed.
+- **C.** Once shared, later revisions may publish automatically during the
+  same consent period, while they stay within the scope the consent text
+  described. A materially changed scope requires new consent.
+- **D.** Web gets "My shared references" and Stop sharing only. No reference
+  creation or editing on web in this stage.
+- **E.** Public observation reference data is shown only when backed by a
+  currently consented contribution. Withdrawal removes that exposure too.
+- **F.** Remove raw account ids from new public envelopes. Account linkage
+  stays private and server-side. Stage 2 of
 `docs/plans/active/2026-09-30-reference-share-eligibility.md`. Stage 3
 (widening eligibility) is out of scope.
 
@@ -174,11 +191,11 @@ More gaps in today's code:
   - Called from the use trigger (all callers, including service role and
     cascade deletes), and from new triggers: `AFTER UPDATE OF is_draft,
     visibility` and `AFTER DELETE` on `public.observations`.
-  - Moderation hide (`admin-ops/adminActions.ts:444-451`) only sets
-    `visibility = 'private'`. Under decision B's recommendation a private
-    observation still qualifies, so the admin action must also call a
-    postgres-only `private.withdraw_contributions_for_observation(id)` to
-    withdraw every contribution it backs, recorded with reason `moderation`.
+  - Moderation hide (`admin-ops/adminActions.ts:444-451`) sets
+    `visibility = 'private'`. Under decision B a private observation doesn't
+    qualify, so the visibility trigger withdraws what it backs. The event
+    reason is `observation_not_public` whoever made the change. A test covers
+    the service-role update the admin action performs.
   - Never rate-limited, never inside an error-swallowing block.
 - **Locking:** every path that grants, refreshes or withdraws takes the same
   advisory lock on `(owner_id, source_measurement_set_id)` first, then
@@ -189,12 +206,16 @@ More gaps in today's code:
 
 ### Visibility (decision B)
 
-- **Drafts:** never qualify.
-- **Recommended:** explicit sharing is allowed from a private or
-  `friends` non-draft observation. The consent screen warns that the
-  contribution still reveals publicly, under the owner's label, that they have
-  identified this species.
-- **Alternative:** only public non-draft observations qualify.
+A qualifying use is a live use of the set on an observation with `visibility =
+'public'`, not a draft, not deleted, whose exact effective taxon is the
+contribution's taxon.
+- **Ineligible:** private, `friends` and draft observations, even with
+  explicit opt-in.
+- **Losing eligibility:** an observation leaving `public` or becoming a draft
+  withdraws the contributions it alone backed.
+- **The consent text still says** that the share shows, under the owner's
+  label, that they identified this species. The observation is public, so
+  this adds little.
 
 ### Owner UI
 
@@ -326,27 +347,13 @@ tables are inert and stay. Withdrawn rows stay withdrawn.
 | Non-owner or cascade changes leave a share public | Withdrawal is caller-independent and not swallowed |
 | Edits publish more than was disclosed | The revision scope limit withdraws |
 | Public observation leaks reference data | Observation references gated on consent (decision E) |
-| Linking a share to the owner's other data | `contributor.id` NULL (decision F); warning in the consent text |
-| Draft, private or friends observations | Drafts never qualify; private and friends only by explicit share with a warning (B) |
-| Moderation hide of the backing observation | Treated as losing the qualifying use |
+| Linking a share to the owner's other data | `contributor.id` NULL (F); linkage stays server-side. The label is still public, and the backing observation is public by B |
+| Draft, private or friends observations | Never qualify, even with opt-in (B) |
+| Moderation hide of the backing observation | Sets visibility private, so the visibility trigger withdraws |
 | Account deletion | Existing anonymisation; the event log holds no owner id |
 | Copies by other users | Cannot be recalled; disclosed, including re-sharing under their name |
 | Consent-text drift | Versioned per locale; old consent never covers new text |
 
-## Owner decisions needed
+## Owner decisions
 
-- **A. The 2 existing contributions:** withdraw both in 2a (recommended). The
-  alternative, withdrawing only the draft-carried one, would leave an
-  unconsented row that breaks the new CHECK. Keeping it would need a
-  recorded consent that the owner never gave.
-- **B. Private and friends observations:** may they back an explicit share,
-  with the warning (recommended), or only public non-draft observations?
-- **C. Automatic revisions after consent:** allowed within the consent scope
-  limits (recommended), or re-consent for every revision?
-- **D. Web:** a list with Stop sharing only (recommended), or reference
-  features on web too?
-- **E. Observation references:** show reference data on public observations
-  only when a consented contribution backs it (recommended), or never show it
-  there?
-- **F. Contributor id:** remove the raw account id from new public envelopes
-  (recommended), or keep it and disclose it?
+All six are decided; see "Owner decisions (2026-10-01)" at the top.
