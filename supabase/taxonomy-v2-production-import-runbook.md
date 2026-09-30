@@ -208,24 +208,64 @@ current generator), then this payload, which committed, activated
 - the rollback drill below made `tax-2026.09.26-02` active (the probes then
   failed on release state, as they must), and the roll-forward restored
   `tax-2026.09.30-01`, after which the probes passed again;
+- `taxonomy-v3-tax-2026.09.30-01-retiring-concept-check.sql` passed (0
+  references); it refused an altered id list, and stopped when a scratch copy
+  of the observations table held one retired id in `selected_sporely_taxon_id`
+  or in `resolved_sporely_taxon_id`;
 - `private.taxon_identity_repair_dry_run()` ran against the new release
   (0 candidates on the empty local stack).
 
+### Read-only pre-checks (before the import; stop on any failure)
+
+After the prerequisites, and immediately before the import in the same
+authorised window:
+
+1. `tax-2026.09.26-02` is the only active release; `20260929120000` and
+   `20260929130000` are applied and `20260914090000` is not; `nortaxa/58766`
+   does not resolve yet.
+2. **No cloud observation references a retiring concept** (plan "Production
+   steps after Stage 6W", step 1; the Stage 2 check repeated before the
+   supersessions ship):
+
+   ```bash
+   docker run --rm --env-file /path/to/private/production-db.env \
+     -v "$PWD/supabase:/probes:ro" postgres:17 \
+     sh -c 'psql "$DATABASE_URL" --file=/probes/taxonomy-v3-tax-2026.09.30-01-retiring-concept-check.sql'
+   ```
+
+   The script carries the 1,353 `superseded_sporely_taxon_id` values of the
+   approved records in the pinned ledger (sporely-py
+   `database/taxonomy/policies/concept_supersessions.yml` at `9609542`,
+   SHA-256 `04a77c05…47033`) and refuses to run unless the list hashes to
+   `5fa0d85f…754b4`. It counts references in
+   `observations.selected_sporely_taxon_id`,
+   `observations.resolved_sporely_taxon_id` and
+   `taxonomy_v3.resolution_link.resolved_sporely_taxon_id`, in a `READ ONLY`
+   transaction ending in `ROLLBACK`, and prints counts only. The expected
+   result is the NOTICE "0 references". **Any reference raises `STOP`: do not
+   import.** Report the three counts and wait for a reviewed decision; do not
+   edit observations or the payload to get past it.
+
+   To re-derive the list from the ledger (1,353 ids and the hash above):
+
+   ```bash
+   git -C ../sporely-py show 9609542:database/taxonomy/policies/concept_supersessions.yml | python3 -c "import json,sys,hashlib; d=json.load(sys.stdin); ids=sorted({r['superseded_sporely_taxon_id'] for r in d['supersessions'] if r['review_status']=='approved'}); print(len(ids), hashlib.sha256(''.join(f'{i}\n' for i in ids).encode()).hexdigest())"
+   ```
+
+   None of these ids is in the cloud scope of either release, so the expected
+   count is zero; the check is what proves it.
+
 ### Production activation (human operator, authorised window only)
 
-After the prerequisites, verify project ref `zkpjklzfwzefhjluvhfw` and the SQL
-SHA-256 above, then run the unchanged payload with the session-only timeout
-the 09.26-02 activation needed (Session pooler, port 5432):
+Only after both pre-checks pass, verify project ref `zkpjklzfwzefhjluvhfw` and
+the SQL SHA-256 above, then run the unchanged payload with the session-only
+timeout the 09.26-02 activation needed (Session pooler, port 5432):
 
 ```bash
 docker run --rm --env-file /path/to/private/production-db.env \
   -v '/private/tmp/taxonomy-v2:/payload:ro' postgres:17 \
   sh -c 'psql "$DATABASE_URL" -c "SET statement_timeout = 1800000" --file=/payload/tax-2026.09.30-01-import.sql'
 ```
-
-Read-only pre-checks: `tax-2026.09.26-02` is the only active release;
-`20260929120000` and `20260929130000` are applied and `20260914090000` is not;
-`nortaxa/58766` does not resolve yet.
 
 ### Post-activation probes (read-only)
 
