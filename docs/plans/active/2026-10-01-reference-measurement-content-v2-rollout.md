@@ -173,6 +173,28 @@ for current production data). Landing opts in to v2 in Stage B.
 - Repo `sporely-web` (client). Implement v2 display on the surfaces from the
   Stage A inventory; declare capability per Stage M.
 - Review: general. Prod approval: yes (web deploy). Depends on A, M.
+- Stage A inventory (2026-10-01, read-only, `src/**` excluding tests, base
+  `8afc74f`): web has **no reader of reference snapshots, measurement
+  content or `envelope_json`**.
+  - `src/shared-references.js` (rendered by `src/screens/profile.js`): owner
+    list via `list_my_reference_sharing` and the owner RPCs
+    `stop_sharing_reference_set` / `share_reference_set_again`. Renders
+    status, revision, dates, `canonical_scientific_name`,
+    `source_short_label`, `source_raw_text` and the public observation count;
+    no snapshot, `measurements`, `measurement_details` or `schema_version`.
+    v2-safe as is (raw text is the source's own text).
+  - No call to `search_public_reference_contributions(_v2)`,
+    `get_public_reference_contribution(_v2)`,
+    `search/get_public_observation_references`, the reference sync RPCs, or
+    any `reference_*` / `observation_reference_uses` table.
+  - `src/screens/find_detail.js` spore summaries
+    (`observation_spore_summaries`, `get_public_observation_spore_summaries`)
+    are the observation's own measurements, not references.
+  - Consequence: Stage C has no display surface to change today. It reduces
+    to (a) the Stage M capability declaration, only if web ever calls a
+    reference sync/use-feed RPC, and (b) any future web reference UI must
+    call the public reads with `p_accept_snapshot_versions => '{1,2}'` only
+    once it renders mean intervals per the wording decision.
 
 ### Stage D — deploy the deferred migration
 
