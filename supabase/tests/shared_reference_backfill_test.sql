@@ -10,9 +10,11 @@ BEGIN
 END
 $$;
 
--- Stage 2a: replaying the backfill's semantics (every live exact-species use
--- on the owner path, through share_reference_contribution_for_owner) creates
--- nothing, even for a public, non-draft observation.
+-- Stage 2d (changed meaning; was Stage 2a "creates nothing"): replaying the
+-- backfill's semantics (every live exact-species use on the owner path,
+-- through share_reference_contribution_for_owner) creates one 'automatic'
+-- contribution for a public, non-draft, spore-public observation; with an
+-- opt-out for the set it answers opted_out and creates nothing.
 BEGIN;
 
 DO $$
@@ -22,6 +24,7 @@ DECLARE
   v_set constant uuid := '73000000-0000-4000-8000-00000000b201';
   v_candidate record;
   v_statuses text[] := '{}';
+  v_round integer;
 BEGIN
   INSERT INTO auth.users(id,aud,role,email,raw_user_meta_data,created_at,updated_at)
   VALUES (v_owner,'authenticated','authenticated','backfill-owner@example.invalid','{}',now(),now());
@@ -41,6 +44,12 @@ BEGIN
   VALUES (v_owner,'74000000-0000-4000-8000-00000000b201',940000201,v_set,'compared',1,
           private.reference_canonical_snapshot(v_owner,v_set));
 
+  INSERT INTO private.reference_share_opt_outs(owner_id,source_measurement_set_id) VALUES (v_owner,v_set);
+  FOR v_round IN 1..2 LOOP
+  v_statuses := '{}';
+  IF v_round = 2 THEN
+    DELETE FROM private.reference_share_opt_outs WHERE owner_id=v_owner;
+  END IF;
   FOR v_candidate IN
     SELECT DISTINCT u.user_id, u.reference_measurement_set_id, rc.sporely_taxon_id,
            w.revision AS w, t.revision AS t, m.revision AS m
@@ -57,12 +66,24 @@ BEGIN
       v_candidate.user_id,v_candidate.reference_measurement_set_id,v_candidate.sporely_taxon_id,
       v_candidate.w,v_candidate.t,v_candidate.m)->>'status');
   END LOOP;
-  IF cardinality(v_statuses) = 0 OR EXISTS (SELECT 1 FROM unnest(v_statuses) s WHERE s <> 'consent_required') THEN
-    RAISE EXCEPTION 'backfill replay did not answer consent_required: %', v_statuses;
+  IF v_round = 1 THEN
+    IF v_statuses IS DISTINCT FROM ARRAY['opted_out'] THEN
+      RAISE EXCEPTION 'opted-out replay did not answer opted_out: %', v_statuses;
+    END IF;
+    IF EXISTS (SELECT 1 FROM private.shared_reference_contributions c WHERE c.owner_id=v_owner) THEN
+      RAISE EXCEPTION 'opted-out replay created a contribution';
+    END IF;
+  ELSE
+    IF v_statuses IS DISTINCT FROM ARRAY['created'] THEN
+      RAISE EXCEPTION 'backfill replay did not answer created: %', v_statuses;
+    END IF;
+    IF (SELECT count(*) FROM private.shared_reference_contributions c
+         WHERE c.owner_id=v_owner AND c.status='shared' AND c.share_basis='automatic'
+           AND c.consented_at IS NULL AND c.shared_first_revision=1) <> 1 THEN
+      RAISE EXCEPTION 'backfill replay did not create one automatic contribution';
+    END IF;
   END IF;
-  IF EXISTS (SELECT 1 FROM private.shared_reference_contributions c WHERE c.owner_id=v_owner) THEN
-    RAISE EXCEPTION 'backfill replay created a contribution';
-  END IF;
+  END LOOP;
 END
 $$;
 

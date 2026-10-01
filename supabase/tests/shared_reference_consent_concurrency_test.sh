@@ -10,6 +10,14 @@
 #   owner withdraw  vs  refresh
 # and, for Stage 2b (20260930232633), the public grant RPC:
 #   grant  vs  owner withdraw / draft flip / account deletion / text revocation
+# and, for Stage 2d (20261001113007, shared by default):
+#   stop sharing  vs  refresh (source edit) / the core refresh the deploy
+#   step and every trigger call (on a system-withdrawn row it would re-share)
+#   share again  vs  stop sharing
+# Stage 2d changes the expected outcome of two existing races: a taxon change
+# (service role) now creates an automatic share under the new taxon
+# ('withdrawn,shared'), and a grant after the owner withdrawal is refused
+# (the withdrawal stopped the set: 'withdrawn' instead of 'shared').
 # The account-deletion race holds the profile row first (as a profile delete
 # does before its anonymise trigger takes the key locks), so a grant that
 # took the key lock before the profile row would deadlock.
@@ -67,7 +75,7 @@ VALUES ('$o','$s','72000000-0000-4000-8000-0000000e0001','spore_size','range','8
 INSERT INTO public.observation_reference_uses(user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json)
 VALUES ('$o','$u',$b,'$s','compared',1,private.reference_canonical_snapshot('$o','$s'));
 SQL
-  [ "$granted" = granted ] || return 0
+  [ "$granted" = ungranted ] && return 0
   P <<SQL
 DO \$\$ BEGIN
   IF (private.reference_contribution_share_core('grant','$o','$s',$T,1,1,1,1,'en',NULL)->>'status') <> 'created' THEN
@@ -75,6 +83,11 @@ DO \$\$ BEGIN
   END IF;
 END \$\$;
 SQL
+  case "$granted" in
+    sysw) P -c "SELECT private.lock_shared_reference_key('$o','$s'), private.withdraw_shared_reference_contribution(c.id,'use_detached') FROM private.shared_reference_contributions c WHERE c.owner_id='$o'" >/dev/null ;;
+    stopped) P -c "SELECT private.stop_sharing_reference_set_for_owner('$o','$s')" >/dev/null ;;
+  esac
+  return 0
 }
 
 # op <name> <k>: prints the SQL (claims included) for one operation.
@@ -94,6 +107,9 @@ op() {
     revoke) echo "SELECT 'revoked', private.revoke_reference_share_consent_text(1,'en');" ;;
     deleteacct) echo "DELETE FROM public.profiles WHERE id='$o';" ;;
     lockdeleteacct) echo "SELECT 1 FROM public.profiles WHERE id='$o' FOR UPDATE;" ;;
+    stop) echo "$as_owner SET LOCAL ROLE authenticated; SELECT 'stop-status', public.stop_sharing_reference_set('$s')->>'status'; RESET ROLE;" ;;
+    shareagain) echo "$as_owner SET LOCAL ROLE authenticated; SELECT 'again-status', public.share_reference_set_again('$s')->>'status'; RESET ROLE;" ;;
+    corerefresh) echo "SELECT 'core-status', private.reference_contribution_share_core('refresh','$o','$s',$T)->>'status';" ;;
     *) fail "unknown op $name" ;;
   esac
 }
@@ -120,6 +136,8 @@ op_after() {
 race() {
   local k=$1 first=$2 second=$3 expect=$4 seeded=${5:-granted} o
   o=$(owner "$k")
+  local ev0
+  ev0=$(P -c "select coalesce(max(id),0) from private.shared_reference_consent_events")
   seed "$k" "$seeded"
   local sql_a sql_b
   sql_a="BEGIN; $(op_resolved "$first" "$k") SELECT 'race-$k-A-holding', pg_sleep(2); $(op_after "$first" "$k") COMMIT;"
@@ -153,26 +171,31 @@ race() {
   # account_deleted event of this race's taxon/key instead.
   local anon=false
   case "$first$second" in *deleteacct*) anon=true ;; esac
-  got=$(P -c "select coalesce(string_agg(status,','),'none') from private.shared_reference_contributions c where c.owner_id='$o' or ($anon and c.owner_id is null and exists (select 1 from private.shared_reference_consent_events e where e.contribution_id=c.id and e.reason='account_deleted'))")
+  got=$(P -c "select coalesce(string_agg(status,',' order by sporely_taxon_id),'none') from private.shared_reference_contributions c where c.owner_id='$o' or ($anon and c.owner_id is null and exists (select 1 from private.shared_reference_consent_events e where e.contribution_id=c.id and e.reason='account_deleted' and e.id > $ev0))")
   [ "$got" = "$expect" ] || fail "race $k ($first then $second): contribution is '$got', expected '$expect'"
   [ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='shared' and not private.reference_set_has_qualifying_use(c.owner_id,c.source_measurement_set_id,c.sporely_taxon_id)")" = 0 ] \
     || fail "race $k ($first then $second): a share survived without a qualifying use"
-  [ "$(P -c "select count(*) from private.shared_reference_contributions c where (c.status='shared') <> (c.consented_at is not null)")" = 0 ] \
-    || fail "race $k: consent invariant broken"
+  [ "$(P -c "select count(*) from private.shared_reference_contributions c where (c.status='shared') <> (c.share_basis is not null)")" = 0 ] \
+    || fail "race $k: share-basis invariant broken"
+  [ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='shared' and private.reference_set_opted_out(c.owner_id,c.source_measurement_set_id)")" = 0 ] \
+    || fail "race $k: a share survived an opt-out"
   echo "ok race $k: $first then $second -> $got"
 }
 
 k=0
-for loss in detach visibility draft taxon; do
+for loss in detach visibility draft; do
   k=$((k+1)); race $k "$loss" refresh withdrawn
   k=$((k+1)); race $k refresh "$loss" withdrawn
 done
+k=$((k+1)); race $k taxon refresh withdrawn,shared
+k=$((k+1)); race $k refresh taxon withdrawn,shared
 k=$((k+1)); race $k refresh usesync shared
 k=$((k+1)); race $k usesync refresh shared
 k=$((k+1)); race $k withdraw refresh withdrawn
 k=$((k+1)); race $k refresh withdraw withdrawn
 # Stage 2b grant races.
-k=$((k+1)); race $k withdraw grant shared
+k=$((k+1)); race $k withdraw grant withdrawn
+grep -q "grant-status|opted_out" "$LOG.$k.b" || { cat "$LOG.$k.b"; fail "grant after the owner withdrawal was not refused as opted_out"; }
 k=$((k+1)); race $k grant withdraw withdrawn
 k=$((k+1)); race $k draft grant none ungranted
 k=$((k+1)); race $k grant draft withdrawn ungranted
@@ -193,8 +216,47 @@ k=$((k+1)); race $k revoke grant none ungranted
 grep -q "grant-status|consent_text_unavailable" "$LOG.$k.b" \
   || { cat "$LOG.$k.b"; fail "grant after revocation was not refused"; }
 
-# Every withdrawn row ends with exactly one withdrawal after its last grant
-# (the revocation races withdraw rows re-shared by earlier races again).
-[ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='withdrawn' and (select count(*) from private.shared_reference_consent_events e where e.contribution_id=c.id and e.event<>'granted' and e.id > coalesce((select max(g.id) from private.shared_reference_consent_events g where g.contribution_id=c.id and g.event='granted'),0)) <> 1")" = 0 ] \
-  || fail "a withdrawn contribution does not have exactly one withdrawal after its last grant"
-echo "PASS: $k races, both orders, no deadlock, no surviving unqualified share"
+# Stage 2d: account deletion against an automatic create through the core
+# (the deploy-refresh / trigger path). The core takes the profile row before
+# the key lock, so the delete's anonymise trigger cannot deadlock with it.
+k=$((k+1)); race $k lockdeleteacct corerefresh none ungranted
+grep -q "core-status|account_unavailable" "$LOG.$k.b" || { cat "$LOG.$k.b"; fail "core refresh after account deletion did not return account_unavailable"; }
+k=$((k+1)); race $k corerefresh deleteacct withdrawn ungranted
+grep -q "core-status|created" "$LOG.$k.a" || { cat "$LOG.$k.a"; fail "core refresh before account deletion did not create"; }
+# Stage 2d: stop sharing against refresh, both orders; on a system-withdrawn
+# row the core refresh would re-share, so stop must win either way.
+P -c "update private.reference_share_consent_texts set revoked=false, active=true where version=1 and locale='en'"
+opted() { P -c "select count(*) from private.reference_share_opt_outs where owner_id='$(owner "$1")'"; }
+k=$((k+1)); race $k stop refresh withdrawn
+[ "$(opted $k)" = 1 ] || fail "race $k: no opt-out"
+k=$((k+1)); race $k refresh stop withdrawn
+[ "$(opted $k)" = 1 ] || fail "race $k: no opt-out"
+k=$((k+1)); race $k stop corerefresh withdrawn sysw
+grep -q "core-status|opted_out" "$LOG.$k.b" || { cat "$LOG.$k.b"; fail "core refresh after stop was not refused as opted_out"; }
+k=$((k+1)); race $k corerefresh stop withdrawn sysw
+grep -q "core-status|updated" "$LOG.$k.a" || { cat "$LOG.$k.a"; fail "core refresh did not re-share the system-withdrawn row"; }
+grep -q "stop-status|updated" "$LOG.$k.b" || { cat "$LOG.$k.b"; fail "stop after the re-share did not report updated"; }
+# Share again against stop sharing, both orders, from a stopped set.
+# served <k>: species-page rows served plus observation references of the
+# race's observation (fail closed: both 0 after a stop).
+served() { P -c "select (select count(*) from private.shared_reference_contributions c where c.owner_id='$(owner "$1")' and private.reference_contribution_is_served(c.id)) + (select jsonb_array_length(public.get_public_observation_references($(obs_id "$1"))))"; }
+k=$((k+1)); race $k shareagain stop withdrawn stopped
+[ "$(opted $k)" = 1 ] || fail "race $k: stop after share again left no opt-out"
+[ "$(served $k)" = 0 ] || fail "race $k: still served after share again then stop"
+# From a system-withdrawn (not opted-out) set: share again re-shares, the
+# concurrent stop must still end withdrawn, opted out and unserved.
+k=$((k+1)); race $k shareagain stop withdrawn sysw
+[ "$(opted $k)" = 1 ] && [ "$(served $k)" = 0 ] || fail "race $k: share again then stop did not fail closed"
+grep -q "again-status|no_change" "$LOG.$k.a" || { cat "$LOG.$k.a"; fail "race $k: share again status"; }
+k=$((k+1)); race $k stop shareagain shared sysw
+[ "$(opted $k)" = 0 ] || fail "race $k: share again after stop left the opt-out"
+k=$((k+1)); race $k stop shareagain shared stopped
+[ "$(opted $k)" = 0 ] || fail "race $k: share again after stop left the opt-out"
+grep -q "again-status|updated" "$LOG.$k.b" || { cat "$LOG.$k.b"; fail "share again did not report updated"; }
+
+# Every withdrawn row ends with exactly one withdrawal after its last share
+# (grant or automatic; the revocation races withdraw rows re-shared by
+# earlier races again).
+[ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='withdrawn' and (select count(*) from private.shared_reference_consent_events e where e.contribution_id=c.id and e.event not in ('granted','shared_automatically') and e.id > coalesce((select max(g.id) from private.shared_reference_consent_events g where g.contribution_id=c.id and g.event in ('granted','shared_automatically')),0)) <> 1")" = 0 ] \
+  || fail "a withdrawn contribution does not have exactly one withdrawal after its last share"
+echo "PASS: $k races, both orders, no deadlock, no surviving unqualified or opted-out share"

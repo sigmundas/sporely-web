@@ -91,25 +91,17 @@ BEGIN
     user_id,id,taxon_treatment_id,character,raw_text,data_kind,
     length_core_min,length_core_max,width_core_min,width_core_max,revision
   ) VALUES (v_owner_id,v_set_id,v_treatment_id,'spore_size','8-10 x 5-6 um','range',8,10,5,6,1);
-  -- Inserting the use no longer shares anything (Stage 2a: nothing becomes
-  -- public without consent). A consented contribution is then seeded through
-  -- the grant mode of the private core, as the 2b consent RPC will do, so the
-  -- withdrawal trigger has a real, consented chain to walk.
-  -- An active consent text exists, so only the missing grant keeps this private.
-  -- The fixture text replaces the shipped, inactive version-1 texts.
-  DELETE FROM private.reference_share_consent_texts;
-  INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope)
-  VALUES (1,'en','fixture consent text',encode(sha256(convert_to('fixture consent text','UTF8')),'hex'),true,
-          '{"snapshot_schema_versions":[1,2],"data_kinds":["raw_points","free_text","measurement_details"]}');
+  -- Stage 2d (20261001113007, changed meaning: was "the use insert shares
+  -- nothing; a consented row is seeded by a grant"): the owner's use insert
+  -- shares the set automatically, which gives the withdrawal trigger a real
+  -- chain to walk.
   INSERT INTO public.observation_reference_uses(
     user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json
   ) VALUES (v_owner_id,v_use_id,v_obs_id,v_set_id,'supports_identification',1,'{}'::jsonb);
-  IF EXISTS (SELECT 1 FROM private.shared_reference_contributions WHERE owner_id=v_owner_id) THEN
-    RAISE EXCEPTION 'the use insert shared a contribution without consent';
-  END IF;
-  IF private.reference_contribution_share_core(
-       'grant',v_owner_id,v_set_id,v_taxon_a::integer,1,1,1,1,'en','test')->>'status' <> 'created' THEN
-    RAISE EXCEPTION 'seed failed: fixture grant did not create a consented contribution';
+  IF (SELECT share_basis FROM private.shared_reference_contributions
+       WHERE owner_id=v_owner_id AND source_measurement_set_id=v_set_id AND sporely_taxon_id=v_taxon_a)
+       IS DISTINCT FROM 'automatic' THEN
+    RAISE EXCEPTION 'seed failed: the use insert did not share the set automatically';
   END IF;
 
   SELECT id,status INTO v_contribution_id,v_contribution_status
@@ -119,7 +111,7 @@ BEGIN
     RAISE EXCEPTION 'seed failed: no contribution for A';
   END IF;
   IF v_contribution_status IS DISTINCT FROM 'shared' THEN
-    RAISE EXCEPTION 'seed failed: granted contribution is not shared (%)', v_contribution_status;
+    RAISE EXCEPTION 'seed failed: contribution is not shared (%)', v_contribution_status;
   END IF;
 
   -- The clear: A -> explicit NULL with replacement names, via the atomic RPC.
@@ -166,7 +158,7 @@ BEGIN
     RAISE EXCEPTION 'shared-reference contribution was not withdrawn after the clear (status=%)', v_contribution_status;
   END IF;
   IF (SELECT array_agg(event||':'||reason ORDER BY id) FROM private.shared_reference_consent_events
-       WHERE contribution_id=v_contribution_id AND event<>'granted') IS DISTINCT FROM ARRAY['withdrawn_by_system:taxon_changed'] THEN
+       WHERE contribution_id=v_contribution_id AND event NOT IN ('granted','shared_automatically')) IS DISTINCT FROM ARRAY['withdrawn_by_system:taxon_changed'] THEN
     RAISE EXCEPTION 'the clear did not record exactly one taxon_changed withdrawal event';
   END IF;
 
