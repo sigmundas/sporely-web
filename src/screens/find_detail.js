@@ -50,6 +50,7 @@ import { prepareImageBlobForUpload } from '../image_crop.js'
 import { isBlob, normalizeCoordinatePair } from '../observation-shapes.js'
 import { focusObservationOnMapScreen, openMapLocationPickerScreen } from '../map-loader.js'
 import { buildExternalMapUrl, MAP_LINK_SERVICES } from '../map-links.js'
+import { confirmPublishIfNeeded, loadExistingObservationFacts } from '../publish-notice.js'
 import {
   TAXON_IDENTITY_COLUMNS,
   externalTaxonomySelectionForCandidate,
@@ -4247,6 +4248,29 @@ function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackN
   }
 }
 
+// Species the observation will carry after this save, for the publish
+// notice's already-shared match. Unchanged identification: null here means
+// "use the stored identity". A proven Sporely selection is known; any other
+// identification change (provider candidate, free text) may be resolved or
+// cleared server-side, so it is unknown.
+export function detailTaxonAfterSave(selectedTaxon, identificationChanged) {
+  if (!identificationChanged) return null
+  const selection = selectedTaxon ? taxonomySelectionForTaxon(selectedTaxon) : null
+  if (isProvenSporelySelection(selection)) return { known: true, id: selection.sporelyTaxonId }
+  return { known: false }
+}
+
+function _restoreDetailPublishControls(obs) {
+  const draftInput = document.getElementById('detail-draft')
+  if (draftInput) draftInput.checked = obs.is_draft !== false
+  const visibility = normalizeVisibility(obs.visibility, 'public')
+  document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
+    radio.checked = radio.value === visibility
+    radio.closest('.scope-tab')?.classList.toggle('active', radio.checked)
+  })
+  _renderPrivacySlotNote()
+}
+
 async function _save() {
   if (!currentObs) return
   if (!currentObsIsOwner) {
@@ -4335,6 +4359,25 @@ async function _save() {
   const identityWarranted = saveSelectionWarrantsIdentityTransition(
     selectedTaxon, identificationChanged,
   )
+
+  // Publish notice: shown before anything is written whenever this save makes
+  // the observation public and not a draft. Cancel writes nothing and puts
+  // the draft/visibility controls back to the saved state.
+  const publishConfirmed = await confirmPublishIfNeeded(
+    { visibility: currentObs.visibility, is_draft: currentObs.is_draft },
+    patch,
+    { loadFacts: () => loadExistingObservationFacts({
+      client: supabase,
+      observationId: currentObs.id,
+      userId: state.user.id,
+      taxonAfterSave: detailTaxonAfterSave(selectedTaxon, identificationChanged),
+    }) },
+  )
+  if (!publishConfirmed) {
+    _restoreDetailPublishControls(currentObs)
+    btn.disabled = false
+    return
+  }
 
   let updatePatch = { ...patch }
   let error = null

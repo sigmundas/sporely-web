@@ -34,6 +34,7 @@ import { normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js'
 import { getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
+import { confirmPublishIfNeeded } from '../publish-notice.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { QUEUED_TAXONOMY_SELECTION_KEY, taxonomySelectionForTaxon } from '../taxonomy-v2.js'
 import { playIrisShutter } from '../iris-shutter.js'
@@ -436,9 +437,14 @@ export function initReview() {
     _scheduleReviewDraftFieldSync()
   })
   document.querySelectorAll('input[name="review-vis"]').forEach(radio => {
-    radio.addEventListener('change', event => {
+    radio.addEventListener('change', async event => {
       if (event.target.checked) {
-        state.captureDraft.visibility = normalizeVisibility(event.target.value, getDefaultVisibility())
+        const nextVisibility = normalizeVisibility(event.target.value, getDefaultVisibility())
+        if (!await _confirmReviewPublish({ visibility: nextVisibility })) {
+          _setReviewVisibilityRadio(state.captureDraft.visibility)
+          return
+        }
+        state.captureDraft.visibility = nextVisibility
         const group = event.target.closest('.scope-tabs')
         if (group) {
           group.querySelectorAll('.scope-tab').forEach(tab => tab.classList.remove('active'))
@@ -451,8 +457,13 @@ export function initReview() {
   })
   const draftToggle = document.getElementById('review-draft')
   if (draftToggle) {
-    draftToggle.addEventListener('change', event => {
-      state.captureDraft.is_draft = event.target.checked
+    draftToggle.addEventListener('change', async event => {
+      const nextDraft = event.target.checked
+      if (!await _confirmReviewPublish({ is_draft: nextDraft })) {
+        event.target.checked = state.captureDraft.is_draft !== false
+        return
+      }
+      state.captureDraft.is_draft = nextDraft
       _scheduleReviewDraftFieldSync()
     })
   }
@@ -1464,8 +1475,13 @@ function wireCardEvents() {
 
   const draftCard = document.getElementById('review-draft-card')
   if (draftCard) {
-    draftCard.addEventListener('change', event => {
-      state.captureDraft.is_draft = event.target.checked
+    draftCard.addEventListener('change', async event => {
+      const nextDraft = event.target.checked
+      if (!await _confirmReviewPublish({ is_draft: nextDraft })) {
+        event.target.checked = state.captureDraft.is_draft !== false
+        return
+      }
+      state.captureDraft.is_draft = nextDraft
     })
   }
 
@@ -2501,4 +2517,28 @@ function _setProgress(done, total, label) {
 function _hideProgress() {
   const overlay = document.getElementById('import-progress')
   if (overlay) overlay.style.display = 'none'
+}
+
+// Publish notice: a new capture has no attached references yet (they are
+// attached to cloud observations from desktop), so the already-shared fact is
+// known to be "none"; spore_data_visibility keeps its column default, public.
+function _reviewPublishState(overrides = {}) {
+  return {
+    visibility: normalizeVisibility(state.captureDraft?.visibility, getDefaultVisibility()),
+    is_draft: state.captureDraft?.is_draft !== false,
+    location_precision: state.captureDraft?.location_precision === 'fuzzed' ? 'fuzzed' : 'exact',
+    ...overrides,
+  }
+}
+
+export function _confirmReviewPublish(overrides, options) {
+  return confirmPublishIfNeeded(_reviewPublishState(), _reviewPublishState(overrides), options)
+}
+
+function _setReviewVisibilityRadio(visibility) {
+  const value = normalizeVisibility(visibility, getDefaultVisibility())
+  document.querySelectorAll('input[name="review-vis"]').forEach(radio => {
+    radio.checked = radio.value === value
+    radio.closest('.scope-tab')?.classList.toggle('active', radio.checked)
+  })
 }
