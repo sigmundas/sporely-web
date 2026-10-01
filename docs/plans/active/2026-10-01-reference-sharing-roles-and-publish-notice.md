@@ -60,56 +60,79 @@ holds the served-contribution filter. Its conditions:
 - the current revision exists and is `>= consent_first_revision`;
 - the 1 MiB envelope cap (`:946-951`).
 
-`search_public_reference_contributions_unthrottled`,
-`get_public_reference_contribution_unthrottled` and the new relationships read
-all call it, so they can't drift apart. Replacing those two read functions
-for this is allowed: they aren't on the `20260914090000` must-not-replace
-list.
+The `_v2` reads call it, and so does the shared-row path of today's reads
+before they are restricted, so the reads can't drift apart.
 
-### Roles: from publicly visible uses, through a separate RPC
+In `get_public_reference_contribution_unthrottled` (`20260930224506:972-1037`)
+it gates **only the shared-row path**. These stay exactly as they are:
+- the **withdrawn tombstone stub**, including for rows whose `owner_id` is
+  now NULL;
+- serving a **requested revision** from the current consent period, with the
+  1 MiB cap applied to that revision.
 
-- **Envelope and stored revisions stay unchanged.** No new field, so old
-  clients keep parsing every row.
+The helper must not change any of today's read behaviour. In particular,
+search keeps applying its 1 MiB cap across the **whole page**, not per row.
+All existing read tests pass unchanged.
+
+Replacing those two read functions is allowed: they aren't on the
+`20260914090000` must-not-replace list.
+
+### Roles: versioned reads that carry them (the version gate)
+
+Owner decision (2026-10-01): enforce that no client without labels can list a
+shared contribution. Today no request carries the client's version, so the
+gate is the **RPC version** instead.
+
 - **`private.reference_contribution_public_roles(contribution_id) → text[]`:**
   the sorted distinct roles of the owner's uses that
   `search_public_observation_references` would serve for that contribution.
   That means the same qualifying-use predicate **and** the same content proof
   against a consented revision. A use the public can't see never contributes
   a role.
-- **Public RPC:**
-  `public.search_public_reference_contribution_relationships(p_contribution_ids uuid[])
-  → jsonb[{contribution_id, roles}]`.
-  - **Execution surface:** a VOLATILE SECURITY DEFINER wrapper that calls
-    `consume_shared_reference_request`, as in `20260830193144`, and an
-    `_unthrottled` body revoked from PUBLIC, anon, authenticated and
-    service_role. Execute granted to anon and authenticated only.
-  - **Input:** NULL ids are rejected. The raw array length is bounded by
-    `catalogue_max_page_size` **before** de-duplicating.
-  - **Output:** an entry only for a served contribution with **at least one**
-    role. An unserved id, or a served one with no visible use, returns
-    nothing. No counts.
-  - **Live:** roles are derived at request time, so changing a role publishes
-    no new revision and doesn't touch `consent_scope`.
-- **Cost:** a species page view now uses two anonymous requests from the
-  per-minute budget. Acceptable; the plan records it.
+- **New reads:** `public.search_public_reference_contributions_v2` and
+  `public.get_public_reference_contribution_v2`.
+  - Same arguments, filters and limits as today.
+  - Each served shared row gains `relationship_roles` (text[]), derived live
+    at request time from the helper.
+  - A served row with no visible use returns `relationship_roles = []`, and
+    clients show no relationship label for it.
+  - Tombstones and in-period historical revisions in `get_v2` behave exactly
+    as in today's `get`.
+  - Rate-limited, VOLATILE SECURITY DEFINER wrappers around `_unthrottled`
+    bodies, as in `20260830193144`. Execute granted to anon and authenticated
+    only.
+- **Today's reads** (`search_public_reference_contributions`,
+  `get_public_reference_contribution`) **stop serving shared envelopes**:
+  - search returns no shared rows;
+  - get still returns the withdrawn tombstone stub, but never a shared
+    envelope or historical revision.
+
+  So the released desktop v0.9.24 and older builds, and any old cached
+  landing bundle, list no shared contributions, never unlabelled ones. Curated
+  publications served by other functions are unaffected.
+- **Exact keys:** the `relationship_roles` key exists only in `_v2`, so old
+  clients never receive a key they don't know. New clients add it to their
+  exact-key sets for `_v2` rows only.
+- **Live:** changing a role publishes no new revision and doesn't touch
+  `consent_scope`.
+- **Cost:** no extra request, since roles come inline.
 
 ### Label rule (landing and desktop)
 
 - **One label per role present**, joined: "Supports · Contradicts" in that
   order, then "Compared". Whenever `contradicts` is present, it is shown
   prominently, for example as a badge.
-- **No entry, an empty `roles`, or a failed call:** no relationship label,
-  never "supports".
+- **Empty `relationship_roles`:** no relationship label, never "supports".
 - **Locales:** landing no, sv, en and de; web en, nb_NO, sv_SE and de_DE;
   desktop nb_NO, sv_SE and de_DE.
 
 ### Landing
 
-- Fetch relationships for the contributions shown on the species page, and
-  in the compare tray for contributions added to it. Apply the label rule.
+- Switch the species page and the compare tray to the `_v2` reads, parse
+  `relationship_roles`, and apply the label rule.
 - Tests:
   - a contradicting fixture and a mixed one;
-  - a missing entry, empty roles and a failed call;
+  - empty roles;
   - the compare tray;
   - all four locales type-check.
 
@@ -118,9 +141,9 @@ list.
 - **Consent dialog:** for a `contradicts` use, the warning says it is
   published publicly, under the owner's name, for the observation's species,
   **marked as contradicting the identification**.
-- **Catalogue and fork dialog (required):** fetch relationships and apply the
-  label rule. Add the new RPC to `utils/cloud_sync.py`, block it during
-  Download from Cloud (`_PULL_ONLY_BLOCKED_CLIENT_METHODS`), and add it to
+- **Catalogue and fork dialog (required):** switch to the `_v2` reads, parse
+  `relationship_roles`, and apply the label rule. Update `utils/cloud_sync.py`
+  and its allowlists accordingly, and add the `_v2` names and signatures to
   `tests/test_stage6l_cross_repository_contract.py`.
 - **Moderation message:** the follow-up check runs after `created`,
   `updated` and `no_change`. It returns *unknown* in these cases:
@@ -168,8 +191,15 @@ exposure for each combination of visibility, `location_precision` and
   observation, with how you use it;
 - on desktop, that the change takes effect after the next sync.
 
-The server provides the "already shared" fact, from the owner's own
-contribution list for the observation's sets and taxon.
+The "already shared" fact comes from the owner's own
+`list_my_shared_reference_contributions`, matched against the observation's
+attached sets and the species **as it will be after this save**. Candidate 1
+therefore adds `source_measurement_set_id` to that list's output; it is the
+owner's own data. Before shipping, check that the 2b desktop list parser
+tolerates the extra key.
+- If the lookup fails or returns `rate_limited`, the notice still shows a
+  cautious line: "References you have shared may appear on this observation."
+- The line is never simply left out.
 
 **Behaviour:** a confirmation with Publish/Cancel. Cancel keeps the previous
 state. It is shown on every such change; no "don't show again".
@@ -177,7 +207,9 @@ state. It is shown on every such change; no "don't show again".
 **Tests:**
 - shown exactly on the publishing transitions;
 - Cancel keeps the state;
-- the already-shared line appears only when it applies;
+- the already-shared line appears only when it applies; a failed or
+  rate-limited lookup shows the cautious line; a species change in the same
+  save is matched;
 - the text matches the verified exposure.
 
 ### Consent text
@@ -198,10 +230,18 @@ The added wording, in en and nb:
 
 ## Candidates and order
 
-1. **Server** (sporely-web): the "is served" helper, the public-roles helper,
-   the relationships RPC, and the v1 text edit. Additive; deployed via the
-   deploy tree. General review and security review.
-2. **Landing:** labels on the species page and compare tray, after 1.
+1. **Server** (sporely-web):
+   - the "is served" helper and the public-roles helper;
+   - the `_v2` reads;
+   - today's reads restricted to tombstones;
+   - `source_measurement_set_id` in the owner list;
+   - the v1 text edit.
+
+   Deployed via the deploy tree, with general and security review. There are
+   0 shared contributions now, so restricting today's reads changes nothing
+   visible.
+2. **Landing:** `_v2` reads and labels on the species page and compare tray,
+   after 1.
 3. **Desktop** (PR #7 branch): the contradicts wording, required catalogue
    and fork labels, the moderation message and the publish notice.
 4. **Web publish notice** (sporely-web `src/`): all web paths above.
@@ -211,19 +251,24 @@ against the verified exposure.
 
 ## Tests (server)
 
-- **Served check:** the reads and the relationships RPC agree on served
+- **Served check:** the `_v2` reads agree with the served check on served
   versus unserved for each case: hidden, withdrawn, owner NULL, banned,
   deleted, blocked, a pre-consent current revision, and an oversize envelope.
+- **Unchanged in `get`:** the withdrawn tombstone stub, including owner NULL,
+  and an in-period historical revision are served exactly as before.
 - **Roles:**
   - only uses `search_public_observation_references` serves contribute;
   - a use whose snapshot fails the content proof contributes nothing;
   - private, draft, private-spore-data, deleted and other-taxon uses
     contribute nothing;
-  - a served contribution with no visible use returns no entry.
-- **RPC input:** NULL ids are refused; the bound applies to the raw length;
-  the rate limit applies; anon can call the wrapper.
-- **Execution surface:** no client role can execute `_unthrottled` or either
-  helper.
+  - a served contribution with no visible use returns `[]`.
+- **`_v2` reads:** they return exactly today's filters, limits and page cap,
+  plus `relationship_roles`, and tombstones and in-period revisions in
+  `get_v2` are unchanged. The rate limit applies, and anon can call them.
+- **Restricted reads:** today's search returns no shared rows, and today's
+  get returns tombstones only, never a shared envelope or revision.
+- **Execution surface:** no client role can execute the `_unthrottled`
+  bodies or either helper.
 - **Text edit:** it aborts when v1 is active, revoked or referenced; exactly
   2 rows change; `scope` is unchanged; `text_sha256` matches.
 
@@ -235,8 +280,8 @@ Consent text v1 is activated only when all of these hold:
 - the landing labels are deployed and verified in production;
 - the web publish notice is deployed;
 - the desktop release that includes candidate 3 exists (catalogue and fork
-  labels, publish notice), so no supported desktop shows a contradicting
-  contribution without a label;
+  labels through `_v2`, and the publish notice). Older desktops list no
+  shared contributions because today's reads are restricted;
 - the owner has re-read and approved the final en and nb wording, and the
   production `text_sha256` of each matches that approved text;
 - the owner's manual checks pass (the PR #7 list: unavailable state, a real
@@ -245,8 +290,9 @@ Consent text v1 is activated only when all of these hold:
 
 ## Rollback
 
-- **Server:** disable the relationships RPC. Clients then show no labels,
-  never "supports". The "is served" helper changes no behaviour, so it can
-  stay. Revert the v1 text with a new migration; it is still inactive.
+- **Server:** disable the `_v2` reads. Every client then lists no shared
+  contributions, which fails closed. Never re-open today's reads to shared
+  envelopes while any shared contribution exists. Revert the v1 text with a
+  new migration; it is still inactive.
 - **Clients:** revert normally. Without labels, the activation gate is not
   met.
