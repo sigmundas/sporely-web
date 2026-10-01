@@ -99,6 +99,22 @@ P -c "$AS_OWNER UPDATE public.reference_measurement_sets SET raw_text='8-11 um',
 [ "$(P -c "select count(*) from private.shared_reference_contributions where status='shared' and share_basis is distinct from 'consented'")" = 0 ] \
   || fail "a non-consented row is shared"
 
+# The core's refresh mode can still create when called directly (the
+# forward migration's deploy-refresh path, e.g. an operator re-running it).
+# Such an automatic row must not be served on either surface after the
+# rollback; the next rollback run withdraws it again.
+# The use's frozen snapshot is synced to the current source first, so the
+# content proof matches and only the share-basis check can refuse it.
+P -c "$AS_OWNER UPDATE public.observation_reference_uses SET snapshot_json=private.reference_canonical_snapshot('$O','$S_AUTO'), reference_revision=(SELECT revision FROM public.reference_measurement_sets WHERE user_id='$O' AND id='$S_AUTO') WHERE observation_id=985000001;" > /dev/null
+[ "$(P -c "select private.reference_contribution_share_core('refresh','$O','$S_AUTO',$T)->>'status'")" = updated ] \
+  || fail "fixture: direct core refresh did not re-share"
+[ "$(basis $S_AUTO)" = shared:automatic ] || fail "fixture: no automatic row"
+AID=$(P -c "select id from private.shared_reference_contributions where source_measurement_set_id='$S_AUTO'")
+[ "$(refs 985000001)" = 0 ] || fail "the rolled-back observation read served an automatic row"
+[ "$(P -c "select private.reference_contribution_is_served('$AID')")" = f ] || fail "the rolled-back species page served an automatic row"
+P -f - < "$ROLLBACK" > /dev/null
+[ "$(basis $S_AUTO)" = withdrawn:- ] || fail "a second rollback run did not withdraw the automatic row"
+
 # Idempotent.
 BEFORE=$(P -c "select md5(string_agg(to_jsonb(c)::text,'' order by id)) from private.shared_reference_contributions c")
 P -f - < "$ROLLBACK" > /dev/null

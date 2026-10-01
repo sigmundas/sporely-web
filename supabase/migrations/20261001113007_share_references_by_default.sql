@@ -250,9 +250,13 @@ BEGIN
     RETURN private.shared_reference_contribution_result('invalid_payload');
   END IF;
 
-  -- Lock order: the owner's profile row FOR KEY SHARE before the key lock,
-  -- as the grant, the opt-out writes and a profile delete take them, so an
-  -- automatic create cannot deadlock with an account deletion.
+  -- The owner's profile row FOR KEY SHARE before the key lock, the order of
+  -- the grant, the opt-out writes and a profile delete. This holds only for
+  -- callers that enter the core without the key lock (the deploy refresh,
+  -- share again, a direct call). The triggers and Stage 1B take the key lock
+  -- before calling the core, so on those paths this row lock comes second
+  -- and does not by itself rule out a wait cycle with a concurrent account
+  -- deletion; it only makes the insert's foreign-key check wait-free.
   PERFORM 1 FROM public.profiles p WHERE p.id = v_owner FOR KEY SHARE;
   PERFORM private.lock_shared_reference_key(v_owner, p_source_measurement_set_id);
 

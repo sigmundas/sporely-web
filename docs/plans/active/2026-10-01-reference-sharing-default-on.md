@@ -28,6 +28,11 @@ Desktop PR #7 (sporely-py) stays unmerged until the owner retests.
 4. **Informational publish notice.** It has a persistent "Don't show this
    again" checkbox. Once suppressed, transitions proceed without the modal,
    and Settings can turn the notice back on.
+5. **Moderation ("Both", 2026-10-01):** ship relying on the observation
+   hide (a moderator makes the observation private, which removes its
+   references from both surfaces) and the existing contribution hide, which
+   applies to the whole set. A per-reference or set-level moderator hide
+   (its own RPC and audit) is a separately reviewed follow-up stage.
 
 ## Exposure at deploy (production, read-only, 2026-10-01; re-run in the preflight)
 
@@ -126,9 +131,9 @@ Desktop PR #7 (sporely-py) stays unmerged until the owner retests.
     from before Stage 2a into opt-outs: taxon change, detach, source deletion
     and Stage 1B (`20260830183210:697,874,916`; `20260930193000:331`). That
     errs toward less exposure.
-  - **Repair withdrawals:** they are excluded when identifiable, through
-    `taxon_identity_repair_reference_actions` rows with
-    `old_contribution='withdrawn'`.
+  - **Repair withdrawals:** not excluded (security review of `145e25d`):
+    an event-less Stage 1B repair withdrawal becomes an opt-out like any
+    other event-less withdrawal, which errs toward less exposure.
   - **Preflight** lists the affected sets. Production has 2 withdrawn rows
     today, both with `withdrawn_by_system` events, so the backfill is expected
     to touch none.
@@ -311,7 +316,11 @@ Every candidate gets a general review and a security review.
   applying the migration on the same data); rollback
   `supabase/rollbacks/20261001113007_rollback.sql` (not a migration; its
   header says how to promote it), tested by
-  `supabase/tests/shared_reference_rollback_test.sh`.
+  `supabase/tests/shared_reference_rollback_test.sh` (also: an automatic row
+  created by a direct core call after the rollback is served nowhere).
+- The backfill is tested through the migration itself by
+  `supabase/tests/shared_reference_backfill_migration_test.sh` (reset to
+  `20261001091940`, fixtures, `supabase migration up --local`).
 - Verified locally: 71/72 SQL tests (`public_observation_point_prep_test.sql`
   fails at the base too); both concurrency scripts (30 races, plus
   account deletion vs automatic create) and the rollback script on fresh

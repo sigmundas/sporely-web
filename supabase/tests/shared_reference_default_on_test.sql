@@ -1,6 +1,8 @@
 -- Stage 2d (20261001113007_share_references_by_default.sql): references on
 -- public observations are shared by default.
---   A. the opt-out backfill (migration step 13, verbatim);
+--   A. opt-outs as the migration's backfill writes them (the backfill
+--      itself is tested through the migration by
+--      shared_reference_backfill_migration_test.sh);
 --   B. the deploy refresh (migration step 14, verbatim), count-agnostic,
 --      honouring opt-outs and hides, idempotent;
 --   C. every trigger creates; the observation trigger refreshes an
@@ -18,29 +20,6 @@ LANGUAGE sql AS $$
   SELECT set_config('request.jwt.claims',
     CASE WHEN p_role IS NULL THEN ''
          ELSE json_build_object('sub',p_sub::text,'role',p_role)::text END, true)
-$$;
-
--- Migration step 13, verbatim.
-CREATE FUNCTION pg_temp.backfill() RETURNS void LANGUAGE sql AS $$
-INSERT INTO private.reference_share_opt_outs(owner_id, source_measurement_set_id, opted_out_at)
-SELECT c.owner_id, c.source_measurement_set_id, pg_catalog.min(c.withdrawn_at)
-  FROM private.shared_reference_contributions c
- WHERE c.status = 'withdrawn'
-   AND c.owner_id IS NOT NULL
-   AND (
-     NOT EXISTS (
-       SELECT 1 FROM private.shared_reference_consent_events e
-        WHERE e.contribution_id = c.id AND e.event = 'withdrawn_by_system'
-     )
-     OR (
-       SELECT e.event FROM private.shared_reference_consent_events e
-        WHERE e.contribution_id = c.id
-          AND e.event IN ('withdrawn_by_owner','withdrawn_by_system')
-        ORDER BY e.id DESC LIMIT 1
-     ) = 'withdrawn_by_owner'
-   )
- GROUP BY c.owner_id, c.source_measurement_set_id
-ON CONFLICT (owner_id, source_measurement_set_id) DO NOTHING;
 $$;
 
 -- Migration step 14, verbatim (as a function).
@@ -193,22 +172,11 @@ BEGIN
   INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,status,current_revision,withdrawn_at)
   VALUES (NULL,NULL,t,'withdrawn',1,now());
 
-  -- ── A. Backfill ──
-  PERFORM pg_temp.backfill();
-  IF (SELECT array_agg(source_measurement_set_id ORDER BY source_measurement_set_id)
-        FROM private.reference_share_opt_outs)
-       IS DISTINCT FROM ARRAY[s_owner_pre2a,s_repair,s_owner_2a] THEN
-    RAISE EXCEPTION 'backfill opted out the wrong sets: %',
-      (SELECT array_agg(source_measurement_set_id) FROM private.reference_share_opt_outs);
-  END IF;
-  IF (SELECT opted_out_at FROM private.reference_share_opt_outs WHERE source_measurement_set_id=s_owner_pre2a)
-       > now()-interval '29 days' THEN
-    RAISE EXCEPTION 'backfill did not keep the withdrawal time';
-  END IF;
-  PERFORM pg_temp.backfill();
-  IF (SELECT count(*) FROM private.reference_share_opt_outs) <> 3 THEN
-    RAISE EXCEPTION 'backfill is not idempotent';
-  END IF;
+  -- ── A. Opt-outs as the backfill writes them (pre-2a owner, event-less
+  -- repair, latest-owner withdrawals) ──
+  INSERT INTO private.reference_share_opt_outs(owner_id,source_measurement_set_id,opted_out_at)
+  VALUES (o1,s_owner_pre2a,now()-interval '30 days'),(o1,s_repair,now()-interval '20 days'),
+         (o1,s_owner_2a,now()-interval '1 day');
 
   -- ── B. Deploy refresh ──
   PERFORM pg_temp.deploy_refresh();
