@@ -161,7 +161,8 @@ test('review precision: approximate -> exact on a public item re-confirms; Cance
   try {
     await _handleReviewObscuredChange({ target: obscured })
     assert.equal(dialog.calls.length, 1)
-    assert.ok(dialog.calls[0].exposed.includes(t('publishNotice.locationExact')))
+    assert.equal(dialog.calls[0].title, t('publishNotice.precisionTitle'))
+    assert.match(dialog.calls[0].intro, /^After the next sync, .*the exact location/)
     assert.equal(state.captureDraft.location_precision, 'fuzzed')
     assert.equal(obscured.checked, true)
     // exact -> fuzzed needs no notice
@@ -270,6 +271,7 @@ test('find detail save: Publish proceeds to the write; already-public save shows
   try {
     await __saveDetailForTests()
     assert.equal(dialog.calls.length, 1)
+    assert.match(dialog.calls[0].intro, /^After you save, /, 'detail edits write directly')
     assert.equal(db.writes.filter(w => w.table === 'observations').length, 1)
     dom.restore()
     dom = detailDom({ draft: false, visibility: 'public', obscured: false })
@@ -303,12 +305,12 @@ test('photo location caveat: approximate location unless every image is known sa
   assert.ok(seen[0].notes.includes(caveat))
 })
 
-test('comments are a signed-in line, not under "anyone"; hidden spore wording', () => {
+test('simplified notice: no comments line; hidden spore wording', () => {
   const m = buildPublishNoticeModel({ locationPrecision: 'exact', sporeDataVisibility: 'private', imagesExifSafe: true })
-  assert.ok(!m.exposed.includes(t('publishNotice.comments')))
-  assert.ok(m.notes.includes(t('publishNotice.comments')))
-  assert.ok(m.exposed.includes(t('publishNotice.microscopy')), 'microscope photos and prep stay public')
-  assert.match(t('publishNotice.sporeDataHidden'), /Microscope photos and preparation details are still public/)
+  assert.ok(!m.exposed.includes(t('publishNotice.sporeData')))
+  assert.ok(m.notes.includes('Spore measurements stay hidden.'))
+  assert.ok(m.exposed.includes(t('publishNotice.media')), 'microscope photos stay public')
+  assert.doesNotMatch([...m.exposed, ...m.notes].join('\n'), /comment/i)
 })
 
 // ── dialog ────────────────────────────────────────────────────────────────

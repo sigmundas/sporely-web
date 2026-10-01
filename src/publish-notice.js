@@ -34,23 +34,25 @@
 //   Comments: readable and writable by signed-in users only, when they can
 //     read the observation (phase7_comments_read TO authenticated,
 //     20260812120000).
-//   References (Stage 2d, plan 2026-10-01-reference-sharing-default-on.md):
-//     references on a public observation are public by default, as the
-//     attached version, and in the species-page listing under the owner's
-//     name; the owner can stop sharing a reference in My shared references.
-//     When an existing observation uses a stopped set, the notice adds
-//     "References you stopped sharing stay private." (omitted if unknown).
+//   References: attached references are shared by default; the owner can
+//     stop sharing one in My shared references. The notice says this once,
+//     generically.
+//
+// Wording (shared with desktop): new web observations are saved to the
+// IndexedDB queue (sync-queue.js) and reach the server on the next sync, so
+// they say "After the next sync"; find detail edits write to Supabase
+// directly, so they pass when: 'save' ("After you save").
 //
 // Stage 2d triggers not wired on web, because web has no such path: web has
 // no reference attach UI (attach-to-public), and web never edits
 // spore_data_visibility (spore data private -> public).
 //
-// "Don't show this again (on this device)" is stored per signed-in user in
+// "Don't show this again" is stored per signed-in user in
 // localStorage (settings.js getShowPublishNotice); Settings turns it back on.
-// When suppressed, every transition proceeds without the modal.
+// When suppressed, publishing proceeds without the modal; the precision
+// notice has no checkbox and always shows.
 import { esc } from './esc.js'
 import { t } from './i18n.js'
-import { fetchMyReferenceSharing, stoppedSetIds } from './shared-references.js'
 import { getShowPublishNotice, setShowPublishNotice } from './settings.js'
 import { state } from './state.js'
 
@@ -83,29 +85,46 @@ export function needsPublishNotice(previous, next) {
 /**
  * Pure: the notice's lines for the chosen settings and facts.
  *   imagesExifSafe: true (all images known safe) | false | undefined (unknown)
+ *   when: 'sync' (queued, default) | 'save' (written directly)
+ *   kind: 'publish' | 'precision' (already public, location more precise)
  */
-export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility, imagesExifSafe, usesStoppedReference }) {
+export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility, imagesExifSafe, when = 'sync', kind = 'publish' }) {
   // 'region'/'hidden' show less than fuzzed; the approximate text (and the
   // photo caveat) is the cautious description for them.
   const fuzzed = ['fuzzed', 'region', 'hidden'].includes(locationPrecision)
+  const whenText = t(when === 'save' ? 'publishNotice.whenSave' : 'publishNotice.whenSync')
+  const caveat = fuzzed && imagesExifSafe !== true ? [t('publishNotice.photoLocationCaveat')] : []
+  if (kind === 'precision') {
+    return {
+      title: t('publishNotice.precisionTitle'),
+      intro: t('publishNotice.precisionBody', {
+        when: whenText,
+        location: t(fuzzed ? 'publishNotice.precisionFuzzed' : 'publishNotice.precisionExact'),
+      }),
+      exposed: [],
+      notes: caveat,
+      confirm: t('publishNotice.precisionConfirm'),
+      suppressible: false,
+    }
+  }
   const exposed = [
-    fuzzed ? t('publishNotice.locationFuzzed') : t('publishNotice.locationExact'),
     t('publishNotice.details'),
-    t('publishNotice.ai'),
-    t('publishNotice.photos'),
-    t('publishNotice.microscopy'),
+    fuzzed ? t('publishNotice.locationFuzzed') : t('publishNotice.locationExact'),
+    t('publishNotice.media'),
   ]
   const sporeHidden = sporeDataVisibility != null && sporeDataVisibility !== 'public'
   if (!sporeHidden) exposed.push(t('publishNotice.sporeData'))
-  const notes = []
-  if (fuzzed && imagesExifSafe !== true) notes.push(t('publishNotice.photoLocationCaveat'))
+  const notes = [...caveat]
   if (sporeHidden) notes.push(t('publishNotice.sporeDataHidden'))
-  notes.push(t('publishNotice.comments'))
   notes.push(t('publishNotice.references'))
-  // Informational only: shown when the observation uses a set the owner
-  // stopped sharing; unknown (lookup failed) omits just this line.
-  if (usesStoppedReference === true) notes.push(t('publishNotice.referencesStopped'))
-  return { title: t('publishNotice.title'), intro: t('publishNotice.intro'), exposed, notes }
+  return {
+    title: t('publishNotice.title'),
+    intro: t('publishNotice.intro', { when: whenText }),
+    exposed,
+    notes,
+    confirm: t('publishNotice.publish'),
+    suppressible: true,
+  }
 }
 
 export function publishNoticeHtml(model) {
@@ -113,16 +132,16 @@ export function publishNoticeHtml(model) {
     <div class="publish-notice-title" id="publish-notice-title">${esc(model.title)}</div>
     <div class="publish-notice-body">
       <p>${esc(model.intro)}</p>
-      <ul>${model.exposed.map(line => `<li>${esc(line)}</li>`).join('')}</ul>
+      ${model.exposed.length ? `<ul>${model.exposed.map(line => `<li>${esc(line)}</li>`).join('')}</ul>` : ''}
       ${model.notes.map(line => `<p class="publish-notice-note">${esc(line)}</p>`).join('')}
     </div>
-    <label class="publish-notice-dont-show">
+    ${model.suppressible === false ? '' : `<label class="publish-notice-dont-show">
       <input type="checkbox" data-publish-notice-dont-show>
       <span>${esc(t('publishNotice.dontShowAgain'))}</span>
-    </label>
+    </label>`}
     <div class="publish-notice-actions">
       <button type="button" class="btn-secondary" data-publish-notice="cancel">${esc(t('publishNotice.cancel'))}</button>
-      <button type="button" class="btn-primary" data-publish-notice="publish">${esc(t('publishNotice.publish'))}</button>
+      <button type="button" class="btn-primary" data-publish-notice="publish">${esc(model.confirm || t('publishNotice.publish'))}</button>
     </div>
   </div>`
 }
@@ -182,16 +201,15 @@ function settle(run) {
  * leaves the matching fact unknown.
  */
 export async function loadExistingObservationFacts({ client, observationId, userId }) {
-  const facts = { sporeDataVisibility: undefined, imagesExifSafe: undefined, usesStoppedReference: undefined }
+  const facts = { sporeDataVisibility: undefined, imagesExifSafe: undefined }
   if (isOffline() || !client || observationId == null) return facts
-  const [row, images, stopped] = await Promise.all([
+  const [row, images] = await Promise.all([
     settle(() => client.from('observations')
       .select('spore_data_visibility')
       .eq('id', observationId).eq('user_id', userId).maybeSingle()),
     settle(() => client.from('observation_images')
       .select('storage_exif_safe')
       .eq('observation_id', observationId).eq('user_id', userId).is('deleted_at', null)),
-    settle(() => usesStoppedReferenceSet({ client, observationId, userId })),
   ])
   if (!row?.error && row?.data) {
     facts.sporeDataVisibility = row.data.spore_data_visibility ?? 'public'
@@ -199,26 +217,7 @@ export async function loadExistingObservationFacts({ client, observationId, user
   if (!images?.error && Array.isArray(images?.data)) {
     facts.imagesExifSafe = images.data.every(image => image?.storage_exif_safe === true)
   }
-  if (typeof stopped === 'boolean') facts.usesStoppedReference = stopped
   return facts
-}
-
-/**
- * true/false when known: does the observation use a reference set the owner
- * stopped sharing? Reads the owner's observation_reference_uses and, only if
- * any are attached, list_my_reference_sharing. undefined on any failure.
- */
-export async function usesStoppedReferenceSet({ client, observationId, userId }) {
-  const uses = await client.from('observation_reference_uses')
-    .select('reference_measurement_set_id')
-    .eq('observation_id', observationId).eq('user_id', userId).is('deleted_at', null)
-  if (uses?.error || !Array.isArray(uses?.data)) return undefined
-  const attached = uses.data.map(u => u?.reference_measurement_set_id).filter(Boolean)
-  if (!attached.length) return false
-  const listed = await fetchMyReferenceSharing(client)
-  if (listed.kind !== 'ok') return undefined
-  const stopped = stoppedSetIds(listed.sets)
-  return attached.some(id => stopped.has(id))
 }
 
 // A new web observation: spore data keeps its column default, and its photos
@@ -236,16 +235,21 @@ export async function confirmPublishIfNeeded(previous, next, {
   loadFacts = async () => NEW_OBSERVATION_FACTS,
   showDialog = showPublishNoticeDialog,
   userId = state.user?.id,
+  when = 'sync',
 } = {}) {
   if (!needsPublishNotice(previous, next)) return true
-  if (!getShowPublishNotice(userId)) return true
+  const publishing = isPublishingTransition(previous, next)
+  // Only the publish notice is suppressible; a more precise location on an
+  // already-public observation always asks (same as desktop).
+  if (publishing && !getShowPublishNotice(userId)) return true
   let facts
   try { facts = await loadFacts() } catch { facts = {} }
   const model = buildPublishNoticeModel({
     locationPrecision: next.location_precision,
     sporeDataVisibility: facts?.sporeDataVisibility,
     imagesExifSafe: facts?.imagesExifSafe,
-    usesStoppedReference: facts?.usesStoppedReference,
+    when,
+    kind: publishing ? 'publish' : 'precision',
   })
   return (await showDialog(model, undefined, {
     onDontShowAgain: () => setShowPublishNotice(userId, false),
