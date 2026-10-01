@@ -202,10 +202,13 @@ for current production data). Landing opts in to v2 in Stage B.
 - Apply `20260914090000` through `scripts/supabase-deploy-tree.mjs` and remove
   it from `supabase/deploy-exceptions.json` in the same commit, per
   `docs/deployments/2026-09-25-migration-order-exception.md`. Widen
-  `private.reference_automatic_share_scope()` to versions [1,2] in the
-  **same** migration/deploy that applies `20260914090000` (no companion
-  migration: in between, every automatic refresh of an enhanced set would
-  withdraw it with `snapshot_version_unsupported`).
+  `private.reference_automatic_share_scope()` to versions [1,2] in a
+  migration deployed **before** `20260914090000` (or earlier in the same
+  deploy), never after: `20260914090000` is SHA-pinned and cannot carry it,
+  and each migration file commits separately. Widening first is safe because
+  the canonical snapshot cannot emit v2 until `20260914090000` applies;
+  widening after would leave a window where every automatic refresh of an
+  enhanced set withdraws it with `snapshot_version_unsupported`.
 - Prerequisite: desktop public-read callers accept the
   `measurement_details_omitted` marker or opt in `{1,2}` (see Stage E/M).
 - Tests: `reference_snapshot_v2_test.sql`,
@@ -337,5 +340,15 @@ for current production data). Landing opts in to v2 in Stage B.
   - Desktop public reads: a marked envelope makes the whole
     `search_shared_reference_contributions` page raise (see inventory row).
     Harmless before Stage D (no v2 exists); a Stage E/M prerequisite of D.
-  - The Stage D plan now requires widening the automatic scope in the same
-    migration/deploy as `20260914090000`.
+  - The Stage D plan requires widening the automatic scope in a migration
+    deployed before `20260914090000` (or earlier in the same deploy), never
+    after (corrected in the security re-review follow-up below).
+- 2026-10-01: security re-review of `71583e4`: approved with two lows,
+  fixed in a new commit: (1) the rollback no longer refuses on events with
+  reason `snapshot_version_unsupported` (the events table is append-only, so
+  the refusal could become permanent); it restores the prior withdrawal
+  function but keeps the widened event reason CHECK (harmless superset),
+  documented in the rollback header; the rollback test's expected
+  fingerprint carries the widened CHECK. (2) Stage D wording corrected
+  (widen before `20260914090000`, never after). Rollback test and Stage A
+  SQL test pass after a local reset.

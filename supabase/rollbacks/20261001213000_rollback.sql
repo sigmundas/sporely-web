@@ -10,11 +10,13 @@
 --     public.get_public_observation_references (20260828172243);
 --   * private.reference_contribution_share_core and
 --     private._taxon_identity_repair_reconcile_references (20261001113007);
---   * private.withdraw_shared_reference_contribution and the consent-event
---     reason CHECK (20261001113007), without snapshot_version_unsupported;
+--   * private.withdraw_shared_reference_contribution (20261001113007), which
+--     no longer accepts reason snapshot_version_unsupported;
 -- with their prior owners, REVOKEs and GRANTs, and drops the four helpers.
--- Refuses (55000) while any event carries reason snapshot_version_unsupported:
--- such a row was withdrawn by Stage A and must be decided on explicitly.
+-- KEPT widened: the consent-event reason CHECK still allows
+-- snapshot_version_unsupported (a harmless superset). The events table is
+-- append-only (20260930224506), so events with that reason may exist and
+-- must stay valid; nothing writes the reason after the rollback.
 -- No data is written by the forward migration, so none is restored. A
 -- caller passing p_accept_snapshot_versions fails after the rollback
 -- (undefined function); every caller that omits it is unaffected.
@@ -29,25 +31,6 @@
 -- Never edit or delete 20261001213000 itself once applied.
 
 BEGIN;
-
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM private.shared_reference_consent_events
-              WHERE reason = 'snapshot_version_unsupported') THEN
-    RAISE EXCEPTION 'events with reason snapshot_version_unsupported exist; resolve them before rolling back'
-      USING ERRCODE = '55000';
-  END IF;
-END
-$$;
-
-ALTER TABLE private.shared_reference_consent_events
-  DROP CONSTRAINT shared_reference_consent_events_reason_check,
-  ADD CONSTRAINT shared_reference_consent_events_reason_check
-    CHECK (reason IS NULL OR reason IN (
-      'owner','consent_missing','observation_not_public','use_detached',
-      'source_deleted','taxon_changed','consent_scope_exceeded',
-      'consent_text_revoked','account_deleted','rollback'
-    ));
 
 CREATE OR REPLACE FUNCTION private.withdraw_shared_reference_contribution(
   p_contribution_id uuid,

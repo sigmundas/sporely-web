@@ -11,7 +11,10 @@
 # The rollback state must equal PRE_STAGE exactly: the fingerprint of a
 # reset without 20261001213000 (taken 2026-10-01 at base 8afc74f +
 # 20261001195524). Update it only if an earlier migration legitimately
-# redefines one of these functions.
+# redefines one of these functions. Exception: the consent-event reason
+# CHECK stays widened after the rollback (it keeps
+# snapshot_version_unsupported; the events table is append-only), so its
+# expected md5 is the forward one, not the pre-stage 408425d0...
 #
 # DDL is COMMITTED, so run it only against a freshly reset LOCAL database,
 # and reset afterwards:
@@ -33,7 +36,7 @@ private.reference_contribution_share_core(text,uuid,uuid,integer,integer,integer
 private.withdraw_shared_reference_contribution(uuid,text) postgres {postgres=X/postgres} false 4174c741e202e2b49c3b52b823a6f82c
 search_public_observation_references(bigint[]) postgres {postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres} true 4b67896a97fbaf0d5e860865a95fc0b5
 search_public_reference_contributions_v2(integer,integer,timestamp with time zone,uuid) postgres {postgres=X/postgres,anon=X/postgres,authenticated=X/postgres} true 99ac4cb9b1241c9a7b01d72c6f2a6c3e
-constraint reason_check 408425d04a2aedab89e548b9425e0b54'
+constraint reason_check 17636b6a79f4baca1ad8f38e8e058350'
 
 fingerprint() {
   P -c "
