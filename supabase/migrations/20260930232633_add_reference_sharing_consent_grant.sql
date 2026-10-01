@@ -1169,7 +1169,7 @@ If you share, anyone can see and download the following, without signing in:
 
 The reference also appears on your public observations that use it, with how you used it (compared, supports or contradicts the identification).
 
-Later edits: while you share, a changed version is published automatically only while it contains the same kinds of data as the version you shared. For example, if the version you shared had no measured points or no measurement details, adding them later stops sharing, and you are asked again. Earlier versions published while you share stay publicly available by version number until you stop.
+Later edits: while you share, a changed version is published automatically only while it contains no kinds of data beyond those in the version you shared. For example, if the version you shared had no measured points, or no measurement text or method details, adding them later stops sharing, and you are asked again. Earlier versions published while you share stay publicly available by version number until sharing stops.
 
 Sharing needs at least one of your public observations of this species that uses this reference. Sharing stops when none is left: when the observation is made private, friends-only or a draft, its spore data is made private, it is deleted, its species is changed, or the reference is removed from it; or when the reference set, treatment or work is deleted.
 
@@ -1190,7 +1190,7 @@ Hvis du deler, kan hvem som helst se og laste ned følgende, uten å logge inn:
 
 Referansen vises også på de offentlige observasjonene dine som bruker den, med hvordan du brukte den (sammenlignet, støtter eller motsier bestemmelsen).
 
-Senere endringer: mens du deler, publiseres en endret versjon automatisk bare så lenge den inneholder de samme typene data som versjonen du delte. Hvis for eksempel versjonen du delte ikke hadde målepunkter eller måledetaljer, og du legger dem til senere, stopper delingen, og du blir spurt på nytt. Tidligere versjoner som er publisert mens du deler, forblir offentlig tilgjengelige etter versjonsnummer til du slutter å dele.
+Senere endringer: mens du deler, publiseres en endret versjon automatisk bare så lenge den ikke inneholder andre typer data enn versjonen du delte. Hvis for eksempel versjonen du delte ikke hadde målepunkter, eller ingen målingstekst eller metodedetaljer, og du legger dem til senere, stopper delingen, og du blir spurt på nytt. Tidligere versjoner som er publisert mens du deler, forblir offentlig tilgjengelige etter versjonsnummer til delingen stopper.
 
 Deling krever minst én av dine offentlige observasjoner av denne arten som bruker denne referansen. Delingen stopper når ingen er igjen: når observasjonen blir privat, kun for venner eller et utkast, sporedataene blir private, den slettes, arten endres, eller referansen fjernes fra den; eller når referansesettet, behandlingen eller verket slettes.
 
