@@ -1214,6 +1214,9 @@ export async function loadObservationIdentifications(observationId, options = {}
       .select(PUBLIC_OBSERVATION_IDENTIFICATION_COLUMNS)
       .eq('observation_id', observationId)
       .order('created_at', { ascending: false })
+      // Non-owners get NULL created_at (time of day is private,
+      // 20261001195524); id keeps newest-first among tied rows.
+      .order('id', { ascending: false })
 
     if (communityRes.error) {
       if (_isMissingObservationIdentificationsTableError(communityRes.error)) {
@@ -1251,7 +1254,7 @@ export async function loadObservationRedlistSummaries(observationIds, options = 
   try {
     const readRows = table => client
       .from(table)
-      .select('observation_id, results, top_redlist_category, top_redlist_source, created_at, updated_at')
+      .select('id, observation_id, results, top_redlist_category, top_redlist_source, created_at, updated_at')
       .in('observation_id', ids)
 
     const communityRes = await readRows(OBSERVATION_IDENTIFICATIONS_COMMUNITY_VIEW)
@@ -1273,7 +1276,11 @@ export async function loadObservationRedlistSummaries(observationIds, options = 
     const summaries = new Map()
     const orderedRows = (Array.isArray(rows) ? rows : [])
       .map(row => _normalizeObservationIdentificationRow(row))
-      .sort((left, right) => _getObservationIdentificationTimestamp(right) - _getObservationIdentificationTimestamp(left))
+      .sort((left, right) => (
+        _getObservationIdentificationTimestamp(right) - _getObservationIdentificationTimestamp(left)
+        // Non-owner rows carry no timestamps; fall back to id (insert order).
+        || (Number(right.id) || 0) - (Number(left.id) || 0)
+      ))
 
     for (const row of orderedRows) {
       const observationId = _normalizeNullableText(row.observation_id)

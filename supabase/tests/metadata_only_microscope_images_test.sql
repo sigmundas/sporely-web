@@ -236,22 +236,16 @@ BEGIN
 
   -- ── search_public_species: representativeThumbUrl must not use NULL row ─────
 
-  IF EXISTS (
-    SELECT 1
-    FROM public.search_public_species(p_query := 'Metadatatestus')
-    WHERE "speciesSlug" = test_species_slug
-      AND ("representativeThumbUrl" IS NULL
-           OR "representativeThumbUrl" ILIKE '%null%')
-  ) THEN
-    RAISE EXCEPTION 'search_public_species representativeThumbUrl leaked null path for species %', test_species_slug;
-  END IF;
-
+  -- representativeThumbUrl is withheld (keys embed upload time,
+  -- 20261001195524); the worker URL must point at the real-storage image.
   IF NOT EXISTS (
     SELECT 1
-    FROM public.search_public_species(p_query := 'Metadatatestus')
-    WHERE "speciesSlug" = test_species_slug
-      AND "representativeThumbUrl" =
-        'https://media.sporely.no/' || owner_user_id::text || '/thumb_meta-real.webp'
+    FROM public.search_public_species(p_query := 'Metadatatestus') s
+    JOIN public.observation_images i
+      ON i.storage_path = owner_user_id::text || '/meta-real.webp'
+    WHERE s."speciesSlug" = test_species_slug
+      AND s."representativeThumbUrl" IS NULL
+      AND s."representativeThumbMediaUrl" = public.build_worker_media_url(i.id, 'thumb', i.media_version)
   ) THEN
     RAISE EXCEPTION 'search_public_species representativeThumbUrl did not point to the real-storage image';
   END IF;
@@ -259,8 +253,9 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM public.get_public_species(test_species_slug)
-    WHERE "representativeThumbUrl" IS NULL
-       OR "representativeThumbUrl" ILIKE '%null%'
+    WHERE "representativeThumbUrl" IS NOT NULL
+       OR "representativeThumbMediaUrl" IS NULL
+       OR "representativeThumbMediaUrl" ILIKE '%null%'
   ) THEN
     RAISE EXCEPTION 'get_public_species representativeThumbUrl leaked null path';
   END IF;

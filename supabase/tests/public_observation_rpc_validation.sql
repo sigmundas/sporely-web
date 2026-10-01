@@ -770,9 +770,10 @@ BEGIN
      OR rpc_row."imageType" IS DISTINCT FROM 'microscope'
      OR rpc_row."width" IS DISTINCT FROM 800
      OR rpc_row."height" IS DISTINCT FROM 600
-     OR rpc_row."thumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp'
-     OR rpc_row."previewUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp'
-     OR rpc_row."fullUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/public-exact.webp'
+     -- Legacy key URLs are withheld (keys embed upload time, 20261001195524).
+     OR rpc_row."thumbUrl" IS NOT NULL
+     OR rpc_row."previewUrl" IS NOT NULL
+     OR rpc_row."fullUrl" IS NOT NULL
      OR rpc_row."aiCropX1" IS DISTINCT FROM 0.12::double precision
      OR rpc_row."aiCropY1" IS DISTINCT FROM 0.15::double precision
      OR rpc_row."aiCropX2" IS DISTINCT FROM 0.62::double precision
@@ -793,8 +794,9 @@ BEGIN
      OR rpc_row."imageType" IS DISTINCT FROM 'microscope'
      OR rpc_row."width" IS DISTINCT FROM 800
      OR rpc_row."height" IS DISTINCT FROM 600
-     OR rpc_row."thumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-unsafe.webp'
-     OR rpc_row."previewUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-unsafe.webp'
+     -- Legacy key URLs are withheld (keys embed upload time, 20261001195524).
+     OR rpc_row."thumbUrl" IS NOT NULL
+     OR rpc_row."previewUrl" IS NOT NULL
      OR rpc_row."fullUrl" IS NOT NULL
      OR rpc_row."aiCropX1" IS DISTINCT FROM 0.22::double precision
      OR rpc_row."aiCropY1" IS DISTINCT FROM 0.23::double precision
@@ -1324,7 +1326,9 @@ BEGIN
       AND s."sporeMeasurementCount" = 4
       AND s."firstObservedOn" = DATE '2026-06-01'
       AND s."lastObservedOn" = DATE '2026-06-25'
-      AND s."representativeThumbUrl" = 'https://media.sporely.no/rpc/thumb_amanita-koh.webp'
+      -- Legacy key URL withheld (keys embed upload time, 20261001195524).
+      AND s."representativeThumbUrl" IS NULL
+      AND s."representativeThumbMediaUrl" LIKE 'https://upload.sporely.no/m/%/thumb?v=%'
   ) THEN
     RAISE EXCEPTION 'Expected public species summary for Amanita muscaria';
   END IF;
@@ -1414,7 +1418,8 @@ BEGIN
      OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 4
      OR rpc_row."firstObservedOn" IS DISTINCT FROM DATE '2026-06-01'
      OR rpc_row."lastObservedOn" IS DISTINCT FROM DATE '2026-06-25'
-     OR rpc_row."representativeThumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_amanita-koh.webp' THEN
+     OR rpc_row."representativeThumbUrl" IS NOT NULL
+     OR rpc_row."representativeThumbMediaUrl" NOT LIKE 'https://upload.sporely.no/m/%/thumb?v=%' THEN
     RAISE EXCEPTION 'Public species detail projection did not match expected safe fields';
   END IF;
 

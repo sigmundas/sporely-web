@@ -230,19 +230,36 @@ export function normalizeMediaKey(value) {
   return text.replace(/^\/+/, '')
 }
 
+// Storage keys are readable by their owner and stay valid forever, so they
+// must not carry the capture or upload time (time of day is private,
+// 20261001195524). The suffix is random; uniqueness comes from 122 random
+// bits, not from the clock. `random` is a test seam.
 export function buildObservationImageStoragePath({
   userId,
   observationId,
   sortOrder = 0,
-  timestamp = Date.now(),
   extension = 'jpg',
+  random = randomStorageKeySuffix,
 } = {}) {
   const normalizedUserId = normalizeMediaKey(userId)
   const normalizedObservationId = String(observationId || '').trim()
   const normalizedSortOrder = Number.isFinite(Number(sortOrder)) ? Number(sortOrder) : 0
-  const normalizedTimestamp = Number.isFinite(Number(timestamp)) ? Number(timestamp) : Date.now()
   const normalizedExtension = String(extension || '').trim().replace(/^\./, '') || 'jpg'
-  return `${normalizedUserId}/${normalizedObservationId}/${normalizedSortOrder}_${normalizedTimestamp}.${normalizedExtension}`
+  const suffix = String(random() || '').replace(/[^a-z0-9]/gi, '').toLowerCase()
+  if (suffix.length < 16) throw new Error('Storage key suffix is not random enough')
+  return `${normalizedUserId}/${normalizedObservationId}/${normalizedSortOrder}_${suffix}.${normalizedExtension}`
+}
+
+export function randomStorageKeySuffix() {
+  const cryptoApi = globalThis.crypto
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    return cryptoApi.randomUUID().replace(/-/g, '')
+  }
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    const bytes = cryptoApi.getRandomValues(new Uint8Array(16))
+    return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  }
+  throw new Error('Secure random source unavailable for storage keys')
 }
 
 export function assertObservationImageStoragePathUserPrefix(storagePath, userId, context = {}) {
@@ -1647,7 +1664,9 @@ export function resolveMediaSources(paths, options = {}) {
         ? (authorizedFullUrl || existingFullUrl)
         : (authorizedThumbUrl || existingThumbUrl || authorizedFullUrl || existingFullUrl)
       return {
-        key: '',
+        // Non-owner rows carry no storage key (20261001195524); an opaque
+        // image identity still lets the media cache key them.
+        key: _opaqueImageMediaKey(row),
         primaryUrl: protectedUrl ? null : (directUrl || null),
         fallbackUrl: null,
         protectedUrl: protectedUrl || null,
@@ -1700,6 +1719,15 @@ export function resolveMediaSources(paths, options = {}) {
       fallbackUrl,
     }
   })
+}
+
+function _opaqueImageMediaKey(row) {
+  const imageId = Number(row?.image_id ?? row?.imageId)
+  const version = Number(row?.media_version ?? row?.mediaVersion)
+  if (!Number.isInteger(imageId) || imageId <= 0) return ''
+  if (!Number.isInteger(version) || version < 1) return ''
+  if (!_firstAbsoluteMediaUrl(row?.full_media_url, row?.fullMediaUrl, row?.thumb_media_url, row?.thumbMediaUrl)) return ''
+  return `image:${imageId}:v${version}`
 }
 
 function _firstAbsoluteMediaUrl(...values) {

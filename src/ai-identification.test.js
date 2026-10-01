@@ -1097,6 +1097,7 @@ test('loadObservationIdentifications prefers the community view for visible obse
   resetObservationIdentificationsTableAvailabilityForTests()
   const calls = []
   const selections = []
+  const orders = []
   const rows = [
     {
       id: 'community-row-1',
@@ -1117,7 +1118,9 @@ test('loadObservationIdentifications prefers the community view for visible obse
       return {
         select(columns) { selections.push({ table, columns }); return this },
         eq() { return this },
-        order() {
+        order(column, options) {
+          orders.push({ column, ascending: options?.ascending })
+          if (column !== 'id') return this
           if (table === 'observation_identifications_community_view') {
             return Promise.resolve({ data: rows, error: null })
           }
@@ -1130,6 +1133,11 @@ test('loadObservationIdentifications prefers the community view for visible obse
   const loaded = await loadObservationIdentifications('obs-visible', { supabaseClient: client })
 
   assert.equal(calls[0], 'observation_identifications_community_view')
+  // created_at is NULL for non-owners; id is the newest-first tiebreak.
+  assert.deepEqual(orders, [
+    { column: 'created_at', ascending: false },
+    { column: 'id', ascending: false },
+  ])
   const selectedColumns = selections[0].columns.split(',').map(column => column.trim())
   for (const forbiddenColumn of [
     'user_id',
@@ -1194,6 +1202,22 @@ test('loadObservationRedlistSummaries keeps the newest redlist-bearing row per o
 
   assert.equal(summaries.get('101').topRedlistCategory, 'LC')
   assert.equal(summaries.get('102').topRedlistCategory, 'NT')
+})
+
+test('loadObservationRedlistSummaries orders timestamp-less non-owner rows by id', async () => {
+  // Non-owner rows from the community view carry NULL created_at/updated_at
+  // (time of day is private, 20261001195524); the higher id is the newer row.
+  resetObservationIdentificationsTableAvailabilityForTests()
+  const client = createSupabaseStub()
+  client.rows.push(
+    { id: 7, observation_id: 201, service: 'artsorakel', status: 'success', top_redlist_category: 'VU', results: [], created_at: null, updated_at: null },
+    { id: 9, observation_id: 201, service: 'artsorakel', status: 'success', top_redlist_category: 'EN', results: [], created_at: null, updated_at: null },
+    { id: 8, observation_id: 201, service: 'inat', status: 'success', top_redlist_category: 'NT', results: [], created_at: null, updated_at: null },
+  )
+
+  const summaries = await loadObservationRedlistSummaries([201], { supabaseClient: client })
+
+  assert.equal(summaries.get('201').topRedlistCategory, 'EN')
 })
 
 test('loadObservationRedlistSummaries skips queued placeholder observation ids', async () => {

@@ -1215,7 +1215,6 @@ async function _runSyncQueue() {
           userId: authUserId,
           observationId: obsId,
           sortOrder: i,
-          timestamp: item.ts,
           extension: ext,
         })
 
