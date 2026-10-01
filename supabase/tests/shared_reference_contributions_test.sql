@@ -187,7 +187,7 @@ BEGIN
   PERFORM pg_temp.claims(user_2,'authenticated');
   SET LOCAL ROLE authenticated;
   SELECT item INTO first_envelope
-    FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL) item;
+    FROM public.search_public_reference_contributions_v2(taxon_id,50,NULL,NULL) item;
   IF first_envelope->>'contribution_id' IS DISTINCT FROM contribution_1::text
      OR first_envelope->'contributor'->'id' <> 'null'::jsonb
      OR first_envelope->'contributor'->>'label' <> 'shared_one'
@@ -211,9 +211,9 @@ BEGIN
      SET raw_text='8–11 × 5–6 µm',length_core_max=11,revision=2,row_version=row_version+1
    WHERE user_id=user_1 AND id=set_1;
   IF (SELECT current_revision FROM private.shared_reference_contributions WHERE id=contribution_1) <> 2
-     OR (SELECT item->'snapshot'->>'raw_text' FROM public.get_public_reference_contribution(contribution_1,2) item)
+     OR (SELECT item->'snapshot'->>'raw_text' FROM public.get_public_reference_contribution_v2(contribution_1,2) item)
         <> '8–11 × 5–6 µm'
-     OR (SELECT item FROM public.get_public_reference_contribution(contribution_1,1) item)
+     OR (SELECT item FROM public.get_public_reference_contribution_v2(contribution_1,1) item)
         IS DISTINCT FROM first_envelope THEN
     RAISE EXCEPTION 'consented refresh did not publish a new revision or rewrote history';
   END IF;
@@ -320,17 +320,17 @@ BEGIN
     SELECT current_revision INTO v_rev FROM private.shared_reference_contributions WHERE id=contribution_1;
     IF result->>'status' <> 'updated'
        OR (SELECT consent_first_revision FROM private.shared_reference_contributions WHERE id=contribution_1) <> v_rev
-       OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution(contribution_1,v_rev-1))
-       OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution(contribution_1,1))
-       OR NOT EXISTS (SELECT 1 FROM public.get_public_reference_contribution(contribution_1,v_rev))
-       OR (SELECT (item->>'revision')::integer FROM public.search_public_reference_contributions(
+       OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution_v2(contribution_1,v_rev-1))
+       OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution_v2(contribution_1,1))
+       OR NOT EXISTS (SELECT 1 FROM public.get_public_reference_contribution_v2(contribution_1,v_rev))
+       OR (SELECT (item->>'revision')::integer FROM public.search_public_reference_contributions_v2(
              taxon_id,50,NULL,NULL) item WHERE item->>'contribution_id'=contribution_1::text) <> v_rev THEN
       RAISE EXCEPTION '%: re-grant did not start a new consent period that hides older revisions: % % % % %',
         v_case.label, result->>'status',
         (SELECT consent_first_revision FROM private.shared_reference_contributions WHERE id=contribution_1),
         v_rev,
-        (SELECT count(*) FROM public.get_public_reference_contribution(contribution_1,v_rev)),
-        (SELECT array_agg(item->>'revision') FROM public.search_public_reference_contributions(
+        (SELECT count(*) FROM public.get_public_reference_contribution_v2(contribution_1,v_rev)),
+        (SELECT array_agg(item->>'revision') FROM public.search_public_reference_contributions_v2(
              taxon_id,50,NULL,NULL) item);
     END IF;
   END LOOP;
@@ -407,7 +407,7 @@ BEGIN
   SET LOCAL ROLE authenticated;
   IF (public.withdraw_reference_contribution(contribution_1)->>'status') <> 'updated'
      OR (public.withdraw_reference_contribution(contribution_1)->>'status') <> 'no_change'
-     OR EXISTS (SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL))
+     OR EXISTS (SELECT 1 FROM public.search_public_reference_contributions_v2(taxon_id,50,NULL,NULL))
      OR (SELECT array_agg(k ORDER BY k) FROM public.get_public_reference_contribution(contribution_1,v_rev) item,
            jsonb_object_keys(item) k) <> ARRAY['contribution_id','revision','status','withdrawn_at']
      OR (SELECT item->>'status' FROM public.get_public_reference_contribution(contribution_1,1) item) <> 'withdrawn'
@@ -428,14 +428,14 @@ BEGIN
   result := public.moderate_shared_reference_contribution(contribution_1,'hide','privacy');
   RESET ROLE;
   IF result->>'status' <> 'updated'
-     OR EXISTS (SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL))
-     OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution(contribution_1,NULL)) THEN
+     OR EXISTS (SELECT 1 FROM public.search_public_reference_contributions_v2(taxon_id,50,NULL,NULL))
+     OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution_v2(contribution_1,NULL)) THEN
     RAISE EXCEPTION 'hidden contribution remained public';
   END IF;
   SET LOCAL ROLE service_role;
   result := public.moderate_shared_reference_contribution(contribution_1,'restore',NULL);
   RESET ROLE;
-  IF NOT EXISTS (SELECT 1 FROM public.search_public_reference_contributions(taxon_id,50,NULL,NULL)) THEN
+  IF NOT EXISTS (SELECT 1 FROM public.search_public_reference_contributions_v2(taxon_id,50,NULL,NULL)) THEN
     RAISE EXCEPTION 'restore did not restore a consented contribution';
   END IF;
 

@@ -54,7 +54,7 @@ BEGIN
   DELETE FROM private.shared_reference_rate_buckets;
   PERFORM pg_temp.as_user(NULL);
   FOR i IN 1..12 LOOP
-    IF EXISTS (SELECT 1 FROM public.get_public_reference_contribution(p_id,i) item
+    IF EXISTS (SELECT 1 FROM public.get_public_reference_contribution_v2(p_id,i) item
                 WHERE item->>'status'='shared') THEN
       v := v || i;
     END IF;
@@ -363,13 +363,15 @@ BEGIN
      OR EXISTS (SELECT 1 FROM jsonb_array_elements(r->'contributions') x
                  WHERE (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(x) k)
                        <> ARRAY['canonical_scientific_name','contribution_id','current_revision',
-                                'hidden_at','shared_at','source_raw_text','source_short_label',
-                                'sporely_taxon_id','status','withdrawal_reason','withdrawn_at'])
+                                'hidden_at','shared_at','source_measurement_set_id','source_raw_text',
+                                'source_short_label','sporely_taxon_id','status','withdrawal_reason',
+                                'withdrawn_at'])
      OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(r->'contributions') x
                      WHERE x->>'contribution_id'=v_id::text AND x->>'status'='shared'
                        AND x->>'canonical_scientific_name'='Amanita consentiens'
                        AND (x->>'sporely_taxon_id')::integer=t_species
-                       AND (x->>'current_revision')::integer=3 AND x->'withdrawn_at'='null'::jsonb)
+                       AND (x->>'current_revision')::integer=3 AND x->'withdrawn_at'='null'::jsonb
+                       AND x->>'source_measurement_set_id'=s_pub::text)
      OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(r->'contributions') x
                      WHERE x->>'contribution_id'=v_multi_id::text AND x->>'status'='withdrawn'
                        AND x->>'withdrawn_at' IS NOT NULL AND x->>'withdrawal_reason'='use_detached'
@@ -377,8 +379,8 @@ BEGIN
      OR EXISTS (SELECT 1 FROM jsonb_array_elements(r->'contributions') x
                  WHERE x->>'status'='shared' AND (x->'withdrawal_reason' <> 'null'::jsonb
                                                   OR x->'hidden_at' <> 'null'::jsonb))
-     OR r::text LIKE '%'||owner_a::text||'%'
-     OR r::text LIKE '%'||s_pub::text||'%' THEN
+     -- The owner's own set id is listed (Stage 2c); the account id never is.
+     OR r::text LIKE '%'||owner_a::text||'%' THEN
     RAISE EXCEPTION 'owner list wrong: %', r;
   END IF;
   -- B sees only B's row, never A's.

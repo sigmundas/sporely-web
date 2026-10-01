@@ -48,10 +48,10 @@ BEGIN
   RETURNING id INTO v_withdrawn;
 
   -- Reads never serve an unconsented shared row, even without the CHECK.
-  IF EXISTS (SELECT 1 FROM public.search_public_reference_contributions_unthrottled(v_taxon,100,NULL,NULL) item
+  IF EXISTS (SELECT 1 FROM private.search_public_reference_contributions_v2_unthrottled(v_taxon,100,NULL,NULL) item
               WHERE (item->>'contribution_id')::uuid = ANY(v_unconsented))
-     OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution_unthrottled(v_unconsented[1],1))
-     OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution_unthrottled(v_unconsented[1],NULL)) THEN
+     OR EXISTS (SELECT 1 FROM private.get_public_reference_contribution_v2_unthrottled(v_unconsented[1],1))
+     OR EXISTS (SELECT 1 FROM private.get_public_reference_contribution_v2_unthrottled(v_unconsented[1],NULL)) THEN
     RAISE EXCEPTION 'an unconsented shared row was served';
   END IF;
 

@@ -66,12 +66,12 @@ BEGIN
   IF private.shared_reference_rate_limit_actor() IS DISTINCT FROM v_actor_hash THEN
     RAISE EXCEPTION 'untrusted anonymous headers bypassed the shared fallback bucket';
   END IF;
-  IF (SELECT count(*) FROM public.search_public_reference_contributions(taxon_id,NULL,NULL,NULL)) <> 25
-     OR (SELECT count(*) FROM public.search_public_reference_contributions(taxon_id,100,NULL,NULL)) <> 30 THEN
+  IF (SELECT count(*) FROM public.search_public_reference_contributions_v2(taxon_id,NULL,NULL,NULL)) <> 25
+     OR (SELECT count(*) FROM public.search_public_reference_contributions_v2(taxon_id,100,NULL,NULL)) <> 30 THEN
     RAISE EXCEPTION 'catalogue default/max page policy was not applied';
   END IF;
   BEGIN
-    PERFORM * FROM public.search_public_reference_contributions(taxon_id,101,NULL,NULL);
+    PERFORM * FROM public.search_public_reference_contributions_v2(taxon_id,101,NULL,NULL);
     RAISE EXCEPTION 'catalogue accepted a page above 100';
   EXCEPTION WHEN SQLSTATE '22023' THEN NULL;
   END;
