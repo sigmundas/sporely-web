@@ -107,6 +107,8 @@ import {
   setUseSystemCamera,
   getSaveOriginalsToPhone,
   setSaveOriginalsToPhone,
+  getShowPublishNotice,
+  setShowPublishNotice,
 } from './settings.js'
 import { pruneStaleNativeCaptures } from './native-capture-storage.js'
 import { initCameraFallbackWarning, openPreferredCamera, setNativeCameraOpener, getEffectiveCameraLabel, isAndroidNativeApp } from './camera-actions.js'
@@ -706,6 +708,13 @@ function initSettings() {
     _syncSettingsUI()
   })
 
+  // Publish notice: per signed-in user, per device. Turning it back on
+  // re-enables a notice suppressed with "Don't show this again".
+  document.getElementById('settings-publish-notice-toggle')?.addEventListener('change', event => {
+    setShowPublishNotice(state.user?.id, !!event.currentTarget.checked)
+    _syncSettingsUI()
+  })
+
   // Best-effort prune of stranded Sporely Cam cache files (>48h). Deferred
   // off the boot path and never awaited; failures only log.
   if (isAndroidApp()) {
@@ -785,6 +794,11 @@ function _syncSettingsUI() {
 
   const saveOriginalsToggle = document.getElementById('settings-save-originals-toggle')
   if (saveOriginalsToggle) saveOriginalsToggle.checked = getSaveOriginalsToPhone()
+  const publishNoticeToggle = document.getElementById('settings-publish-notice-toggle')
+  if (publishNoticeToggle) {
+    publishNoticeToggle.checked = getShowPublishNotice(state.user?.id)
+    publishNoticeToggle.disabled = !state.user?.id
+  }
 
   const photoIdMode = getPhotoIdMode()
   document.querySelectorAll('.settings-photo-id-mode-btn').forEach(btn => {

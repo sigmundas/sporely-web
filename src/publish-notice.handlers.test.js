@@ -13,7 +13,6 @@ import {
   buildPublishNoticeModel,
   confirmPublishIfNeeded,
   needsPublishNotice,
-  resolveAlreadySharedFact,
   showPublishNoticeDialog,
 } from './publish-notice.js'
 import {
@@ -282,16 +281,6 @@ test('find detail save: Publish proceeds to the write; already-public save shows
 
 // ── rules ─────────────────────────────────────────────────────────────────
 
-test('spore visibility unknown with a match is unknown (cautious line)', () => {
-  const fact = resolveAlreadySharedFact({
-    attachedUses: [{ reference_measurement_set_id: 'set-1', role: 'compared' }],
-    taxonId: 42,
-    sporeDataVisibility: undefined,
-    contributions: { kind: 'ok', contributions: [{ status: 'shared', sporely_taxon_id: 42, source_measurement_set_id: 'set-1' }] },
-  })
-  assert.equal(fact.kind, 'unknown')
-})
-
 test('precision increase on a public item needs a notice; decrease does not', () => {
   const pub = { visibility: 'public', is_draft: false }
   assert.equal(needsPublishNotice({ ...pub, location_precision: 'fuzzed' }, { ...pub, location_precision: 'exact' }), true)
@@ -300,22 +289,22 @@ test('precision increase on a public item needs a notice; decrease does not', ()
 })
 
 test('photo location caveat: approximate location unless every image is known safe', async () => {
-  const model = safe => buildPublishNoticeModel({ locationPrecision: 'fuzzed', sporeDataVisibility: 'public', imagesExifSafe: safe, sharedFact: { kind: 'no' } })
+  const model = safe => buildPublishNoticeModel({ locationPrecision: 'fuzzed', sporeDataVisibility: 'public', imagesExifSafe: safe })
   const caveat = t('publishNotice.photoLocationCaveat')
   assert.ok(model(false).notes.includes(caveat))
   assert.ok(model(undefined).notes.includes(caveat), 'unknown shows the caveat')
   assert.ok(!model(true).notes.includes(caveat))
-  assert.ok(!buildPublishNoticeModel({ locationPrecision: 'exact', imagesExifSafe: false, sharedFact: { kind: 'no' } }).notes.includes(caveat))
+  assert.ok(!buildPublishNoticeModel({ locationPrecision: 'exact', imagesExifSafe: false }).notes.includes(caveat))
   const seen = []
   await confirmPublishIfNeeded({ visibility: 'private', is_draft: false }, { visibility: 'public', is_draft: false, location_precision: 'fuzzed' }, {
-    loadFacts: async () => ({ attachedUses: [], sporeDataVisibility: 'public', imagesExifSafe: false }),
+    loadFacts: async () => ({ sporeDataVisibility: 'public', imagesExifSafe: false }),
     showDialog: async m => { seen.push(m); return false },
   })
   assert.ok(seen[0].notes.includes(caveat))
 })
 
 test('comments are a signed-in line, not under "anyone"; hidden spore wording', () => {
-  const m = buildPublishNoticeModel({ locationPrecision: 'exact', sporeDataVisibility: 'private', imagesExifSafe: true, sharedFact: { kind: 'no' } })
+  const m = buildPublishNoticeModel({ locationPrecision: 'exact', sporeDataVisibility: 'private', imagesExifSafe: true })
   assert.ok(!m.exposed.includes(t('publishNotice.comments')))
   assert.ok(m.notes.includes(t('publishNotice.comments')))
   assert.ok(m.exposed.includes(t('publishNotice.microscopy')), 'microscope photos and prep stay public')
@@ -336,9 +325,11 @@ function fakeDialogDocument() {
     removeEventListener: type => { delete listeners[type] },
     createElement() {
       const buttons = {}
+      let html = ''
       const overlay = {
         removed: false,
-        set innerHTML(html) {
+        set innerHTML(value) {
+          html = value
           for (const action of ['cancel', 'publish']) {
             if (html.includes(`data-publish-notice="${action}"`)) {
               buttons[action] = { dataset: { publishNotice: action }, focus() { focused = this }, closest() { return this } }
@@ -347,7 +338,11 @@ function fakeDialogDocument() {
         },
         clickListener: null,
         addEventListener(type, fn) { if (type === 'click') this.clickListener = fn },
-        querySelector: sel => buttons[/"(\w+)"/.exec(sel)[1]] || null,
+        dontShow: { checked: false },
+        querySelector(sel) {
+          if (sel === '[data-publish-notice-dont-show]') return html.includes('data-publish-notice-dont-show') ? this.dontShow : null
+          return buttons[/"(\w+)"/.exec(sel)[1]] || null
+        },
         remove() { this.removed = true },
         buttons,
       }
@@ -359,7 +354,7 @@ function fakeDialogDocument() {
 
 test('dialog: Escape cancels, focus goes to Cancel and returns to the opener', async () => {
   const { doc, listeners, appended, opener } = fakeDialogDocument()
-  const model = buildPublishNoticeModel({ locationPrecision: 'exact', sharedFact: { kind: 'unknown' } })
+  const model = buildPublishNoticeModel({ locationPrecision: 'exact' })
   const pending = showPublishNoticeDialog(model, doc)
   const overlay = appended[0]
   assert.equal(focused, overlay.buttons.cancel)
@@ -373,10 +368,23 @@ test('dialog: Escape cancels, focus goes to Cancel and returns to the opener', a
 test('dialog: Publish button resolves true; Cancel button false', async () => {
   for (const [action, expected] of [['publish', true], ['cancel', false]]) {
     const { doc, appended } = fakeDialogDocument()
-    const pending = showPublishNoticeDialog(buildPublishNoticeModel({ locationPrecision: 'exact', sharedFact: { kind: 'no' } }), doc)
+    const pending = showPublishNoticeDialog(buildPublishNoticeModel({ locationPrecision: 'exact' }), doc)
     const overlay = appended[0]
     overlay.clickListener({ target: overlay.buttons[action] })
     assert.equal(await pending, expected)
+  }
+})
+
+test("dialog: Don't show this again is reported only on Publish", async () => {
+  for (const [action, checked, expectedCalls] of [['publish', true, 1], ['publish', false, 0], ['cancel', true, 0]]) {
+    const { doc, appended } = fakeDialogDocument()
+    let calls = 0
+    const pending = showPublishNoticeDialog(buildPublishNoticeModel({ locationPrecision: 'exact' }), doc, { onDontShowAgain: () => { calls += 1 } })
+    const overlay = appended[0]
+    overlay.dontShow.checked = checked
+    overlay.clickListener({ target: overlay.buttons[action] })
+    await pending
+    assert.equal(calls, expectedCalls, `${action} checked=${checked}`)
   }
 })
 

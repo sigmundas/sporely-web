@@ -34,20 +34,22 @@
 //   Comments: readable and writable by signed-in users only, when they can
 //     read the observation (phase7_comments_read TO authenticated,
 //     20260812120000).
-//   References: a use appears (search_public_observation_references,
-//     20260930224506) only when the owner's contribution for that set and the
-//     observation's species is status='shared' with consent, and the use is a
-//     qualifying use — which also requires spore_data_visibility='public'.
-//     Unshared attached references are never public.
+//   References (Stage 2d, plan 2026-10-01-reference-sharing-default-on.md):
+//     references on a public observation are public by default, as the
+//     attached version, and in the species-page listing under the owner's
+//     name; the owner can stop sharing a reference in My shared references.
+//
+// Stage 2d triggers not wired on web, because web has no such path: web has
+// no reference attach UI (attach-to-public), and web never edits
+// spore_data_visibility (spore data private -> public).
+//
+// "Don't show this again (on this device)" is stored per signed-in user in
+// localStorage (settings.js getShowPublishNotice); Settings turns it back on.
+// When suppressed, every transition proceeds without the modal.
 import { esc } from './esc.js'
 import { t } from './i18n.js'
-import { fetchMySharedReferenceContributions } from './shared-references.js'
-
-const ROLE_KEYS = {
-  compared: 'publishNotice.role.compared',
-  supports_identification: 'publishNotice.role.supports_identification',
-  contradicts: 'publishNotice.role.contradicts',
-}
+import { getShowPublishNotice, setShowPublishNotice } from './settings.js'
+import { state } from './state.js'
 
 function isPublic(obs) {
   return String(obs?.visibility || '').toLowerCase() === 'public' && obs?.is_draft === false
@@ -76,44 +78,10 @@ export function needsPublishNotice(previous, next) {
 }
 
 /**
- * Whether a reference the owner already shared will appear on this
- * observation after the save.
- *   attachedUses: [{ reference_measurement_set_id, role }] | null (unknown)
- *   taxonId: species after this save; undefined = unknown, null = none
- *   sporeDataVisibility: undefined/null = unknown
- *   contributions: fetchMySharedReferenceContributions() result | null
- * Returns { kind: 'yes', matches } | { kind: 'no' } | { kind: 'unknown' }.
- */
-export function resolveAlreadySharedFact({ attachedUses, taxonId, sporeDataVisibility, contributions }) {
-  if (Array.isArray(attachedUses) && attachedUses.length === 0) return { kind: 'no' }
-  if (sporeDataVisibility != null && sporeDataVisibility !== 'public') return { kind: 'no' }
-  if (!Array.isArray(attachedUses) || taxonId === undefined) return { kind: 'unknown' }
-  if (taxonId === null) return { kind: 'no' }
-  if (contributions?.kind !== 'ok') return { kind: 'unknown' }
-  const shared = contributions.contributions.filter(c => c?.status === 'shared')
-  if (!shared.length) return { kind: 'no' }
-  if (shared.some(c => !Object.prototype.hasOwnProperty.call(c, 'source_measurement_set_id'))) {
-    return { kind: 'unknown' }
-  }
-  const matches = []
-  for (const c of shared) {
-    if (String(c.sporely_taxon_id) !== String(taxonId)) continue
-    for (const use of attachedUses) {
-      if (String(use.reference_measurement_set_id) === String(c.source_measurement_set_id)) {
-        matches.push({ contribution: c, role: use.role })
-      }
-    }
-  }
-  // Without the spore-data setting a match may or may not qualify.
-  if (sporeDataVisibility == null && matches.length) return { kind: 'unknown' }
-  return matches.length ? { kind: 'yes', matches } : { kind: 'no' }
-}
-
-/**
  * Pure: the notice's lines for the chosen settings and facts.
  *   imagesExifSafe: true (all images known safe) | false | undefined (unknown)
  */
-export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility, imagesExifSafe, sharedFact }) {
+export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility, imagesExifSafe }) {
   // 'region'/'hidden' show less than fuzzed; the approximate text (and the
   // photo caveat) is the cautious description for them.
   const fuzzed = ['fuzzed', 'region', 'hidden'].includes(locationPrecision)
@@ -130,19 +98,7 @@ export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility
   if (fuzzed && imagesExifSafe !== true) notes.push(t('publishNotice.photoLocationCaveat'))
   if (sporeHidden) notes.push(t('publishNotice.sporeDataHidden'))
   notes.push(t('publishNotice.comments'))
-  notes.push(t('publishNotice.referencesPrivate'))
-  if (sharedFact?.kind === 'yes') {
-    for (const { contribution, role } of sharedFact.matches) {
-      const name = [contribution.canonical_scientific_name, contribution.source_short_label]
-        .filter(v => typeof v === 'string' && v.trim()).join(' · ')
-      notes.push(t('publishNotice.alreadyShared', {
-        name: name || t('publishNotice.unnamedReference'),
-        role: ROLE_KEYS[role] ? t(ROLE_KEYS[role]) : String(role || ''),
-      }))
-    }
-  } else if (sharedFact?.kind !== 'no') {
-    notes.push(t('publishNotice.mayAppear'))
-  }
+  notes.push(t('publishNotice.references'))
   return { title: t('publishNotice.title'), intro: t('publishNotice.intro'), exposed, notes }
 }
 
@@ -154,6 +110,10 @@ export function publishNoticeHtml(model) {
       <ul>${model.exposed.map(line => `<li>${esc(line)}</li>`).join('')}</ul>
       ${model.notes.map(line => `<p class="publish-notice-note">${esc(line)}</p>`).join('')}
     </div>
+    <label class="publish-notice-dont-show">
+      <input type="checkbox" data-publish-notice-dont-show>
+      <span>${esc(t('publishNotice.dontShowAgain'))}</span>
+    </label>
     <div class="publish-notice-actions">
       <button type="button" class="btn-secondary" data-publish-notice="cancel">${esc(t('publishNotice.cancel'))}</button>
       <button type="button" class="btn-primary" data-publish-notice="publish">${esc(t('publishNotice.publish'))}</button>
@@ -164,8 +124,9 @@ export function publishNoticeHtml(model) {
 /**
  * Shows the overlay; resolves true on Publish, false on Cancel, backdrop or
  * Escape. Focus moves to Cancel and returns to the previously focused element.
+ * On Publish with "Don't show this again" checked, calls onDontShowAgain().
  */
-export function showPublishNoticeDialog(model, doc = globalThis.document) {
+export function showPublishNoticeDialog(model, doc = globalThis.document, { onDontShowAgain } = {}) {
   return new Promise(resolve => {
     if (!doc?.body) { resolve(false); return }
     const previousFocus = doc.activeElement || null
@@ -182,9 +143,13 @@ export function showPublishNoticeDialog(model, doc = globalThis.document) {
     function finish(value) {
       if (done) return
       done = true
+      const dontShow = overlay.querySelector('[data-publish-notice-dont-show]')?.checked === true
       doc.removeEventListener('keydown', onKeydown, true)
       overlay.remove()
       previousFocus?.focus?.()
+      if (value && dontShow) {
+        try { onDontShowAgain?.() } catch (_) {}
+      }
       resolve(value)
     }
     overlay.addEventListener('click', event => {
@@ -208,63 +173,54 @@ function settle(run) {
 
 /**
  * Loads the owner's facts for an existing cloud observation. Every failure
- * leaves the matching fact unknown (never "no").
- *   taxonAfterSave: { known: false } | { known: true, id } (species change)
+ * leaves the matching fact unknown.
  */
-export async function loadExistingObservationFacts({ client, observationId, userId, taxonAfterSave = null }) {
-  const facts = {
-    attachedUses: null, taxonId: undefined, sporeDataVisibility: undefined,
-    imagesExifSafe: undefined, contributions: null,
-  }
+export async function loadExistingObservationFacts({ client, observationId, userId }) {
+  const facts = { sporeDataVisibility: undefined, imagesExifSafe: undefined }
   if (isOffline() || !client || observationId == null) return facts
-  const [uses, row, images, contributions] = await Promise.all([
-    settle(() => client.from('observation_reference_uses')
-      .select('reference_measurement_set_id, role')
-      .eq('observation_id', observationId).eq('user_id', userId).is('deleted_at', null)),
+  const [row, images] = await Promise.all([
     settle(() => client.from('observations')
-      .select('spore_data_visibility, selected_sporely_taxon_id, resolved_sporely_taxon_id')
+      .select('spore_data_visibility')
       .eq('id', observationId).eq('user_id', userId).maybeSingle()),
     settle(() => client.from('observation_images')
       .select('storage_exif_safe')
       .eq('observation_id', observationId).eq('user_id', userId).is('deleted_at', null)),
-    fetchMySharedReferenceContributions().catch(() => null),
   ])
-  if (!uses?.error && Array.isArray(uses?.data)) facts.attachedUses = uses.data
   if (!row?.error && row?.data) {
     facts.sporeDataVisibility = row.data.spore_data_visibility ?? 'public'
-    facts.taxonId = row.data.selected_sporely_taxon_id ?? row.data.resolved_sporely_taxon_id ?? null
   }
   if (!images?.error && Array.isArray(images?.data)) {
     facts.imagesExifSafe = images.data.every(image => image?.storage_exif_safe === true)
   }
-  if (taxonAfterSave) facts.taxonId = taxonAfterSave.known ? (taxonAfterSave.id ?? null) : undefined
-  facts.contributions = contributions
   return facts
 }
 
-// A new web observation: no references can be attached yet, spore data keeps
-// its column default, and its photos are re-encoded on upload (EXIF-safe).
+// A new web observation: spore data keeps its column default, and its photos
+// are re-encoded on upload (EXIF-safe).
 export const NEW_OBSERVATION_FACTS = Object.freeze({
-  attachedUses: [], sporeDataVisibility: 'public', imagesExifSafe: true,
+  sporeDataVisibility: 'public', imagesExifSafe: true,
 })
 
 /**
  * Asks for confirmation when previous -> next needs a notice. Resolves true
- * when no notice is needed or the owner chose Publish.
+ * when no notice is needed, the signed-in user suppressed it on this device,
+ * or the owner chose Publish.
  */
 export async function confirmPublishIfNeeded(previous, next, {
   loadFacts = async () => NEW_OBSERVATION_FACTS,
   showDialog = showPublishNoticeDialog,
+  userId = state.user?.id,
 } = {}) {
   if (!needsPublishNotice(previous, next)) return true
+  if (!getShowPublishNotice(userId)) return true
   let facts
   try { facts = await loadFacts() } catch { facts = {} }
-  const sharedFact = resolveAlreadySharedFact(facts || {})
   const model = buildPublishNoticeModel({
     locationPrecision: next.location_precision,
     sporeDataVisibility: facts?.sporeDataVisibility,
     imagesExifSafe: facts?.imagesExifSafe,
-    sharedFact,
   })
-  return (await showDialog(model)) === true
+  return (await showDialog(model, undefined, {
+    onDontShowAgain: () => setShowPublishNotice(userId, false),
+  })) === true
 }

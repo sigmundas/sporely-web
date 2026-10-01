@@ -291,6 +291,31 @@ export function setUseSystemCamera(enabled) {
   } catch (_) {}
 }
 
+// Publish notice ("Show what becomes public before publishing"), per signed-in
+// user and per device. Stored only when suppressed; no user id means shown.
+const PUBLISH_NOTICE_SUPPRESSED_KEY_PREFIX = 'sporely-publish-notice-suppressed:'
+
+export function publishNoticeSuppressedKey(userId) {
+  return `${PUBLISH_NOTICE_SUPPRESSED_KEY_PREFIX}${userId}`
+}
+
+export function getShowPublishNotice(userId) {
+  if (userId == null || userId === '') return true
+  try {
+    return localStorage.getItem(publishNoticeSuppressedKey(userId)) !== '1'
+  } catch (_) {
+    return true
+  }
+}
+
+export function setShowPublishNotice(userId, enabled) {
+  if (userId == null || userId === '') return
+  try {
+    if (enabled) localStorage.removeItem(publishNoticeSuppressedKey(userId))
+    else localStorage.setItem(publishNoticeSuppressedKey(userId), '1')
+  } catch (_) {}
+}
+
 // Android only: keep a user-owned copy of each saved Sporely Cam original in
 // the phone's photo library (MediaStore, Pictures/Sporely). Default OFF. This
 // is a gallery copy the user's own backup services may pick up — Sporely does
