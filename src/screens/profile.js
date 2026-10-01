@@ -20,14 +20,16 @@ import {
   writeCachedMedia,
 } from '../media-cache.js'
 import {
-  fetchMySharedReferenceContributions,
+  fetchMyReferenceSharing,
+  shareAgainGuarded,
+  shareReferenceSetAgain,
   sharedReferencesEmptyHtml,
   sharedReferencesErrorHtml,
   sharedReferencesListHtml,
   sharedReferencesLoadingHtml,
   sharedReferencesRateLimitedHtml,
   stopSharingWithConfirmation,
-  withdrawSharedReferenceContribution,
+  stopSharingReferenceSet,
 } from '../shared-references.js'
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
@@ -1302,7 +1304,7 @@ async function _loadSharedReferences() {
   if (!list) return
 
   list.innerHTML = sharedReferencesLoadingHtml()
-  const result = await fetchMySharedReferenceContributions()
+  const result = await fetchMyReferenceSharing()
 
   if (result.kind === 'rate_limited') {
     list.innerHTML = sharedReferencesRateLimitedHtml(result.retryAfterSeconds)
@@ -1313,30 +1315,36 @@ async function _loadSharedReferences() {
     return
   }
 
-  if (!result.contributions.length) {
+  if (!result.sets.length) {
     list.innerHTML = sharedReferencesEmptyHtml()
     return
   }
 
-  list.innerHTML = sharedReferencesListHtml(result.contributions)
+  list.innerHTML = sharedReferencesListHtml(result.sets)
   list.querySelectorAll('.shared-ref-stop-btn').forEach(btn => {
-    btn.addEventListener('click', () => _stopSharingReference(btn.dataset.contributionId, btn))
+    btn.addEventListener('click', () => _changeReferenceSharing(btn, 'stop'))
+  })
+  list.querySelectorAll('.shared-ref-share-again-btn').forEach(btn => {
+    btn.addEventListener('click', () => _changeReferenceSharing(btn, 'shareAgain'))
   })
 }
 
-async function _stopSharingReference(contributionId, btn) {
+async function _changeReferenceSharing(btn, action) {
+  const setId = btn.dataset.setId
   const originalLabel = btn.textContent
-  const result = await stopSharingWithConfirmation(contributionId, {
-    guard: () => requireCloudMutation({ showToast }).allowed,
-    withdraw: id => {
-      btn.disabled = true
-      btn.textContent = t('sharedReferences.stopping')
-      return withdrawSharedReferenceContribution(id)
-    },
-  })
+  const guard = () => requireCloudMutation({ showToast }).allowed
+  const busy = (label, run) => id => {
+    btn.disabled = true
+    btn.textContent = t(label)
+    return run(id)
+  }
+  const result = action === 'stop'
+    ? await stopSharingWithConfirmation(setId, { guard, stop: busy('sharedReferences.stopping', stopSharingReferenceSet) })
+    : await shareAgainGuarded(setId, { guard, shareAgain: busy('sharedReferences.sharingAgain', shareReferenceSetAgain) })
   if (result.kind === 'cancelled' || result.kind === 'blocked') return
 
-  if (result.kind === 'ok') {
+  if (result.kind === 'ok' || result.kind === 'not_found') {
+    // not_found: the set is gone — refresh so the list reflects reality.
     await _loadSharedReferences()
     return
   }
@@ -1345,12 +1353,8 @@ async function _stopSharingReference(contributionId, btn) {
   btn.textContent = originalLabel
   if (result.kind === 'rate_limited') {
     showToast(t('sharedReferences.rateLimited', { seconds: result.retryAfterSeconds }))
-  } else if (result.kind === 'forbidden' || result.kind === 'not_found') {
-    // Someone else already changed this row (or it no longer exists) —
-    // refresh so the list reflects reality instead of the stale button.
-    await _loadSharedReferences()
   } else {
-    showToast(t('sharedReferences.stopFailed', { message: result.message }))
+    showToast(t(action === 'stop' ? 'sharedReferences.stopFailed' : 'sharedReferences.shareAgainFailed', { message: result.message }))
   }
 }
 

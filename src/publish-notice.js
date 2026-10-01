@@ -38,6 +38,8 @@
 //     references on a public observation are public by default, as the
 //     attached version, and in the species-page listing under the owner's
 //     name; the owner can stop sharing a reference in My shared references.
+//     When an existing observation uses a stopped set, the notice adds
+//     "References you stopped sharing stay private." (omitted if unknown).
 //
 // Stage 2d triggers not wired on web, because web has no such path: web has
 // no reference attach UI (attach-to-public), and web never edits
@@ -48,6 +50,7 @@
 // When suppressed, every transition proceeds without the modal.
 import { esc } from './esc.js'
 import { t } from './i18n.js'
+import { fetchMyReferenceSharing, stoppedSetIds } from './shared-references.js'
 import { getShowPublishNotice, setShowPublishNotice } from './settings.js'
 import { state } from './state.js'
 
@@ -81,7 +84,7 @@ export function needsPublishNotice(previous, next) {
  * Pure: the notice's lines for the chosen settings and facts.
  *   imagesExifSafe: true (all images known safe) | false | undefined (unknown)
  */
-export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility, imagesExifSafe }) {
+export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility, imagesExifSafe, usesStoppedReference }) {
   // 'region'/'hidden' show less than fuzzed; the approximate text (and the
   // photo caveat) is the cautious description for them.
   const fuzzed = ['fuzzed', 'region', 'hidden'].includes(locationPrecision)
@@ -99,6 +102,9 @@ export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility
   if (sporeHidden) notes.push(t('publishNotice.sporeDataHidden'))
   notes.push(t('publishNotice.comments'))
   notes.push(t('publishNotice.references'))
+  // Informational only: shown when the observation uses a set the owner
+  // stopped sharing; unknown (lookup failed) omits just this line.
+  if (usesStoppedReference === true) notes.push(t('publishNotice.referencesStopped'))
   return { title: t('publishNotice.title'), intro: t('publishNotice.intro'), exposed, notes }
 }
 
@@ -176,15 +182,16 @@ function settle(run) {
  * leaves the matching fact unknown.
  */
 export async function loadExistingObservationFacts({ client, observationId, userId }) {
-  const facts = { sporeDataVisibility: undefined, imagesExifSafe: undefined }
+  const facts = { sporeDataVisibility: undefined, imagesExifSafe: undefined, usesStoppedReference: undefined }
   if (isOffline() || !client || observationId == null) return facts
-  const [row, images] = await Promise.all([
+  const [row, images, stopped] = await Promise.all([
     settle(() => client.from('observations')
       .select('spore_data_visibility')
       .eq('id', observationId).eq('user_id', userId).maybeSingle()),
     settle(() => client.from('observation_images')
       .select('storage_exif_safe')
       .eq('observation_id', observationId).eq('user_id', userId).is('deleted_at', null)),
+    settle(() => usesStoppedReferenceSet({ client, observationId, userId })),
   ])
   if (!row?.error && row?.data) {
     facts.sporeDataVisibility = row.data.spore_data_visibility ?? 'public'
@@ -192,7 +199,26 @@ export async function loadExistingObservationFacts({ client, observationId, user
   if (!images?.error && Array.isArray(images?.data)) {
     facts.imagesExifSafe = images.data.every(image => image?.storage_exif_safe === true)
   }
+  if (typeof stopped === 'boolean') facts.usesStoppedReference = stopped
   return facts
+}
+
+/**
+ * true/false when known: does the observation use a reference set the owner
+ * stopped sharing? Reads the owner's observation_reference_uses and, only if
+ * any are attached, list_my_reference_sharing. undefined on any failure.
+ */
+export async function usesStoppedReferenceSet({ client, observationId, userId }) {
+  const uses = await client.from('observation_reference_uses')
+    .select('reference_measurement_set_id')
+    .eq('observation_id', observationId).eq('user_id', userId).is('deleted_at', null)
+  if (uses?.error || !Array.isArray(uses?.data)) return undefined
+  const attached = uses.data.map(u => u?.reference_measurement_set_id).filter(Boolean)
+  if (!attached.length) return false
+  const listed = await fetchMyReferenceSharing(client)
+  if (listed.kind !== 'ok') return undefined
+  const stopped = stoppedSetIds(listed.sets)
+  return attached.some(id => stopped.has(id))
 }
 
 // A new web observation: spore data keeps its column default, and its photos
@@ -219,6 +245,7 @@ export async function confirmPublishIfNeeded(previous, next, {
     locationPrecision: next.location_precision,
     sporeDataVisibility: facts?.sporeDataVisibility,
     imagesExifSafe: facts?.imagesExifSafe,
+    usesStoppedReference: facts?.usesStoppedReference,
   })
   return (await showDialog(model, undefined, {
     onDontShowAgain: () => setShowPublishNotice(userId, false),
