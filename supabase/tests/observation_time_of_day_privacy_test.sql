@@ -26,6 +26,9 @@ DECLARE
   first_id  bigint;
   payload   text;
   secret_time constant text := '13:47';
+  -- Epoch ms of 2026-09-15 13:47:30 UTC, as embedded by Date.now() in keys.
+  key_epoch constant text := '1789393650123';
+  ident_id  bigint;
 BEGIN
   INSERT INTO auth.users (id, aud, role, email, raw_user_meta_data, created_at, updated_at)
   VALUES
@@ -48,14 +51,21 @@ BEGIN
   -- higher id; that is the order a non-owner must still see within the date.
   INSERT INTO public.observations (
     user_id, date, captured_at, created_at, ai_selected_at,
-    genus, species, visibility, is_draft
+    genus, species, visibility, is_draft, image_key, thumb_key
   )
   VALUES (
     owner_id, DATE '2026-09-15', TIMESTAMPTZ '2026-09-15 13:47:21+00',
     TIMESTAMPTZ '2026-09-15 13:47:30+00', TIMESTAMPTZ '2026-09-15 13:47:25+00',
-    'Timeprivacia', 'testii', 'public', false
+    'Timeprivacia', 'testii', 'public', false,
+    NULL, NULL
   )
   RETURNING id INTO obs_early;
+
+  -- Realistic key shape: <user>/<obs>/<sort>_<Date.now()>.<ext>.
+  UPDATE public.observations
+  SET image_key = owner_id::text || '/' || obs_early || '/0_' || key_epoch || '.webp',
+      thumb_key = owner_id::text || '/' || obs_early || '/thumb_0_' || key_epoch || '.webp'
+  WHERE id = obs_early;
 
   INSERT INTO public.observations (
     user_id, date, captured_at, created_at, ai_selected_at,
@@ -73,10 +83,21 @@ BEGIN
     captured_at, created_at
   )
   VALUES (
-    obs_early, owner_id, owner_id::text || '/time-privacy.webp', 'field', 0,
+    obs_early, owner_id, owner_id::text || '/' || obs_early || '/0_' || key_epoch || '.webp', 'field', 0,
     TIMESTAMPTZ '2026-09-15 13:47:21+00', TIMESTAMPTZ '2026-09-15 13:47:30+00'
   )
   RETURNING id INTO image_id;
+
+  INSERT INTO public.observation_identifications (
+    observation_id, user_id, service, request_fingerprint, results,
+    top_scientific_name, created_at, updated_at
+  )
+  VALUES (
+    obs_early, owner_id, 'artsorakel', 'time-privacy-req', '[]'::jsonb,
+    'Timeprivacia testii',
+    TIMESTAMPTZ '2026-09-15 13:47:40+00', TIMESTAMPTZ '2026-09-15 13:47:41+00'
+  )
+  RETURNING id INTO ident_id;
 
   FOREACH role_name IN ARRAY ARRAY['anon', 'viewer', 'owner']
   LOOP
@@ -144,6 +165,45 @@ BEGIN
         RAISE EXCEPTION '% found time of day in % payload: %', role_name, view_name, payload;
       END IF;
     END LOOP;
+
+    -- 1b) Identification timestamps: NULL for non-owners, real for the owner.
+    SELECT count(*) INTO row_count
+    FROM public.observation_identifications_community_view v WHERE v.id = ident_id;
+    IF row_count <> 1 THEN
+      RAISE EXCEPTION '% saw % identification rows (test setup broken)', role_name, row_count;
+    END IF;
+    SELECT to_jsonb(v)::text INTO payload
+    FROM public.observation_identifications_community_view v WHERE v.id = ident_id;
+    IF role_name = 'owner' THEN
+      SELECT v.created_at INTO got_ts
+      FROM public.observation_identifications_community_view v WHERE v.id = ident_id;
+      IF got_ts IS DISTINCT FROM TIMESTAMPTZ '2026-09-15 13:47:40+00' THEN
+        RAISE EXCEPTION 'owner lost identification created_at: %', got_ts;
+      END IF;
+    ELSIF position(secret_time IN payload) > 0 THEN
+      RAISE EXCEPTION '% can read identification time of day: %', role_name, payload;
+    END IF;
+
+    -- 1c) KNOWN EXPOSURE, NOT YET FIXED: image keys embed the upload epoch-ms.
+    --     Reported as a NOTICE so it stays visible without failing the suite;
+    --     turn into RAISE EXCEPTION once keys are hidden or re-keyed.
+    IF role_name <> 'owner' THEN
+      SELECT coalesce(string_agg(to_jsonb(r)::text, ' '), '') INTO payload
+      FROM public.search_public_observation_images(ARRAY[obs_early]) r;
+      IF position(key_epoch IN payload) > 0 THEN
+        RAISE NOTICE 'KNOWN EXPOSURE (pending): % reads upload epoch-ms via search_public_observation_images', role_name;
+      END IF;
+      SELECT coalesce(string_agg(to_jsonb(v)::text, ' '), '') INTO payload
+      FROM public.observations_community_view v WHERE v.id = obs_early;
+      IF position(key_epoch IN payload) > 0 THEN
+        RAISE NOTICE 'KNOWN EXPOSURE (pending): % reads upload epoch-ms via observations_community_view image_key/thumb_key', role_name;
+      END IF;
+      SELECT coalesce(string_agg(to_jsonb(v)::text, ' '), '') INTO payload
+      FROM public.observation_images_community_view v WHERE v.observation_id = obs_early;
+      IF position(key_epoch IN payload) > 0 THEN
+        RAISE NOTICE 'KNOWN EXPOSURE (pending): % reads upload epoch-ms via observation_images_community_view storage_path', role_name;
+      END IF;
+    END IF;
 
     -- 2) The date is still served, unshifted, and same-date order is stable
     --    on (date desc, created_at desc, id desc) - the sporely-web feed order.

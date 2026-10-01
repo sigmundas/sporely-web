@@ -235,4 +235,32 @@ SELECT oi.id,
            FROM profiles p
           WHERE ((p.id = o.user_id) AND (p.is_banned = true))))) AND (NOT current_user_is_blocked_with(o.user_id)));
 
+CREATE OR REPLACE VIEW public.observation_identifications_community_view WITH (security_barrier = true) AS
+SELECT oi.id,
+    oi.observation_id,
+    oi.service,
+    oi.status,
+    safe_results.results,
+    oi.top_scientific_name,
+    oi.top_vernacular_name,
+    oi.top_taxon_id,
+    oi.top_probability,
+    oi.top_species_url,
+    oi.top_redlist_category,
+    oi.top_redlist_status,
+    oi.top_redlist_source,
+    oi.created_at,
+    oi.updated_at
+   FROM ((observation_identifications oi
+     JOIN observations o ON ((o.id = oi.observation_id)))
+     CROSS JOIN LATERAL ( SELECT COALESCE(jsonb_agg(jsonb_strip_nulls(jsonb_build_object('rank', COALESCE((candidate.value -> 'rank'::text), to_jsonb((candidate.ordinality)::integer)), 'service', COALESCE((candidate.value -> 'service'::text), to_jsonb(oi.service)), 'taxon_id', COALESCE((candidate.value -> 'taxon_id'::text), (candidate.value -> 'taxonId'::text)), 'scientific_name', COALESCE((candidate.value -> 'scientific_name'::text), (candidate.value -> 'scientificName'::text)), 'vernacular_name', COALESCE((candidate.value -> 'vernacular_name'::text), (candidate.value -> 'vernacularName'::text)), 'probability', COALESCE((candidate.value -> 'probability'::text), (candidate.value -> 'score'::text)), 'species_url', COALESCE((candidate.value -> 'species_url'::text), (candidate.value -> 'speciesUrl'::text)), 'redlist_category', COALESCE((candidate.value -> 'redlist_category'::text), (candidate.value -> 'redlistCategory'::text)), 'redlist_status', COALESCE((candidate.value -> 'redlist_status'::text), (candidate.value -> 'redlistStatus'::text)), 'redlist_source', COALESCE((candidate.value -> 'redlist_source'::text), (candidate.value -> 'redlistSource'::text)), 'picture_url', COALESCE((candidate.value -> 'picture_url'::text), (candidate.value -> 'pictureUrl'::text), (candidate.value -> 'photo_url'::text), (candidate.value -> 'photoUrl'::text), (candidate.value -> 'image_url'::text), (candidate.value -> 'imageUrl'::text), (candidate.value -> 'thumbnail_url'::text), (candidate.value -> 'thumbnailUrl'::text)), 'external_ids', NULLIF(jsonb_strip_nulls(jsonb_build_object('gbif', ((candidate.value -> 'external_ids'::text) -> 'gbif'::text), 'inat', ((candidate.value -> 'external_ids'::text) -> 'inat'::text), 'nbic', ((candidate.value -> 'external_ids'::text) -> 'nbic'::text))), '{}'::jsonb))) ORDER BY candidate.ordinality), '[]'::jsonb) AS results
+           FROM jsonb_array_elements(
+                CASE
+                    WHEN (jsonb_typeof(oi.results) = 'array'::text) THEN oi.results
+                    ELSE '[]'::jsonb
+                END) WITH ORDINALITY candidate(value, ordinality)) safe_results)
+  WHERE (((o.user_id = auth.uid()) OR ((NOT COALESCE(o.is_draft, false)) AND can_read_observation(o.user_id, o.visibility))) AND (NOT (EXISTS ( SELECT 1
+           FROM profiles p
+          WHERE ((p.id = o.user_id) AND (p.is_banned = true))))) AND (NOT current_user_is_blocked_with(o.user_id)));
+
 COMMIT;

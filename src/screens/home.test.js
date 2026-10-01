@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { recentFindMediaIdentityForTests, reconcileRecentFindRowsForTests } from './home.js'
+import { _compareRecentFinds, recentFindMediaIdentityForTests, reconcileRecentFindRowsForTests } from './home.js'
 
 function fakeRow(id, mediaIdentity, imageToken) {
   const image = { dataset: { mediaCache: '1', mediaKey: mediaIdentity, mediaPublicUrl: `https://fresh/${imageToken}` }, token: imageToken }
@@ -125,4 +125,17 @@ test('Home refreshes discard superseded or cross-account network results before 
   assert.ok(generationGuardIndex < renderLoopIndex, 'stale/account guards must run before any section renderer')
   assert.match(source.slice(generationGuardIndex, renderLoopIndex), /state\.user\?\.id !== uid/)
   assert.match(source.slice(generationGuardIndex, renderLoopIndex), /auth\.userId !== uid/)
+})
+
+test('_compareRecentFinds orders by date, then own upload time, then id', () => {
+  // Friend rows carry NULL created_at (time of day is private, 20261001195524).
+  const rows = [
+    { id: 5, date: '2026-09-14', created_at: null },
+    { id: 3, date: '2026-09-15', created_at: null },
+    { id: 4, date: '2026-09-15', created_at: null },
+    { id: 1, date: '2026-09-15', created_at: '2026-09-15T10:00:00Z' },
+    { id: 2, date: '2026-09-15', created_at: '2026-09-15T09:00:00Z' },
+    { id: 6, date: null, created_at: '2026-09-20T09:00:00Z' },
+  ]
+  assert.deepEqual([...rows].sort(_compareRecentFinds).map(row => row.id), [4, 3, 1, 2, 5, 6])
 })

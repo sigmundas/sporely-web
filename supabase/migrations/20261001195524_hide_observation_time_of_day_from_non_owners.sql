@@ -6,7 +6,15 @@
 -- to read captured_at / created_at / ai_selected_at (and the image upload
 -- created_at) with full time of day.
 --
--- Fix: the four shared views keep their exact column list, names and types,
+-- observation_identifications_community_view is handled the same way but is
+-- owner-aware (see its section at the end).
+--
+-- Known remaining exposure (NOT fixed here): image storage keys embed the
+-- upload epoch-ms (<user>/<obs>/<sort>_<Date.now()>.<ext>) and are still
+-- returned as storage_path / image_key / thumb_key and in the legacy URLs of
+-- search_public_observation_images. Tracked separately.
+--
+-- Fix: the four shared observation views keep their exact column list, names and types,
 -- but the time-bearing timestamptz columns are now always NULL. The date is
 -- still served by observations.date (a DATE column, the local observation
 -- date chosen by the client, so no UTC truncation and no timezone shift).
@@ -248,6 +256,39 @@ SELECT oi.id,
    FROM (observation_images oi
      JOIN observations o ON ((o.id = oi.observation_id)))
   WHERE ((oi.deleted_at IS NULL) AND (oi.purged_at IS NULL) AND (oi.storage_path IS NOT NULL) AND (btrim(oi.storage_path) <> ''::text) AND (NOT COALESCE(o.is_draft, false)) AND can_read_observation(o.user_id, o.visibility) AND (NOT (EXISTS ( SELECT 1
+           FROM profiles p
+          WHERE ((p.id = o.user_id) AND (p.is_banned = true))))) AND (NOT current_user_is_blocked_with(o.user_id)));
+
+-- observation_identifications_community_view: AI identification runs right
+-- after capture, so created_at/updated_at reveal the time of day like
+-- ai_selected_at. This view already has an owner branch and is the only
+-- identification read sporely-web uses, so the owner keeps the real values
+-- here; everyone else gets NULL.
+CREATE OR REPLACE VIEW public.observation_identifications_community_view WITH (security_barrier = true) AS
+SELECT oi.id,
+    oi.observation_id,
+    oi.service,
+    oi.status,
+    safe_results.results,
+    oi.top_scientific_name,
+    oi.top_vernacular_name,
+    oi.top_taxon_id,
+    oi.top_probability,
+    oi.top_species_url,
+    oi.top_redlist_category,
+    oi.top_redlist_status,
+    oi.top_redlist_source,
+    CASE WHEN o.user_id = auth.uid() THEN oi.created_at END AS created_at,
+    CASE WHEN o.user_id = auth.uid() THEN oi.updated_at END AS updated_at
+   FROM ((observation_identifications oi
+     JOIN observations o ON ((o.id = oi.observation_id)))
+     CROSS JOIN LATERAL ( SELECT COALESCE(jsonb_agg(jsonb_strip_nulls(jsonb_build_object('rank', COALESCE((candidate.value -> 'rank'::text), to_jsonb((candidate.ordinality)::integer)), 'service', COALESCE((candidate.value -> 'service'::text), to_jsonb(oi.service)), 'taxon_id', COALESCE((candidate.value -> 'taxon_id'::text), (candidate.value -> 'taxonId'::text)), 'scientific_name', COALESCE((candidate.value -> 'scientific_name'::text), (candidate.value -> 'scientificName'::text)), 'vernacular_name', COALESCE((candidate.value -> 'vernacular_name'::text), (candidate.value -> 'vernacularName'::text)), 'probability', COALESCE((candidate.value -> 'probability'::text), (candidate.value -> 'score'::text)), 'species_url', COALESCE((candidate.value -> 'species_url'::text), (candidate.value -> 'speciesUrl'::text)), 'redlist_category', COALESCE((candidate.value -> 'redlist_category'::text), (candidate.value -> 'redlistCategory'::text)), 'redlist_status', COALESCE((candidate.value -> 'redlist_status'::text), (candidate.value -> 'redlistStatus'::text)), 'redlist_source', COALESCE((candidate.value -> 'redlist_source'::text), (candidate.value -> 'redlistSource'::text)), 'picture_url', COALESCE((candidate.value -> 'picture_url'::text), (candidate.value -> 'pictureUrl'::text), (candidate.value -> 'photo_url'::text), (candidate.value -> 'photoUrl'::text), (candidate.value -> 'image_url'::text), (candidate.value -> 'imageUrl'::text), (candidate.value -> 'thumbnail_url'::text), (candidate.value -> 'thumbnailUrl'::text)), 'external_ids', NULLIF(jsonb_strip_nulls(jsonb_build_object('gbif', ((candidate.value -> 'external_ids'::text) -> 'gbif'::text), 'inat', ((candidate.value -> 'external_ids'::text) -> 'inat'::text), 'nbic', ((candidate.value -> 'external_ids'::text) -> 'nbic'::text))), '{}'::jsonb))) ORDER BY candidate.ordinality), '[]'::jsonb) AS results
+           FROM jsonb_array_elements(
+                CASE
+                    WHEN (jsonb_typeof(oi.results) = 'array'::text) THEN oi.results
+                    ELSE '[]'::jsonb
+                END) WITH ORDINALITY candidate(value, ordinality)) safe_results)
+  WHERE (((o.user_id = auth.uid()) OR ((NOT COALESCE(o.is_draft, false)) AND can_read_observation(o.user_id, o.visibility))) AND (NOT (EXISTS ( SELECT 1
            FROM profiles p
           WHERE ((p.id = o.user_id) AND (p.is_banned = true))))) AND (NOT current_user_is_blocked_with(o.user_id)));
 

@@ -17,6 +17,22 @@ import { beginReauthentication } from '../reauth.js'
 import { clearHomeCache, readHomeCache, writeHomeCache } from '../home-cache.js'
 import { isObservationUnidentified } from '../observation-identity.js'
 
+// Recent-finds merge order: date desc (missing date last), then upload time
+// when both rows have one (own rows only), then id desc. Exported for tests.
+export function _compareRecentFinds(a, b) {
+  const dateA = String(a?.date || '')
+  const dateB = String(b?.date || '')
+  if (dateA !== dateB) {
+    if (!dateA) return 1
+    if (!dateB) return -1
+    return dateA < dateB ? 1 : -1
+  }
+  const timeA = Date.parse(a?.created_at || '')
+  const timeB = Date.parse(b?.created_at || '')
+  if (Number.isFinite(timeA) && Number.isFinite(timeB) && timeA !== timeB) return timeB - timeA
+  return (Number(b?.id) || 0) - (Number(a?.id) || 0)
+}
+
 function _isDebugCommentQueryEnabled() {
   try {
     return globalThis.localStorage?.getItem('sporely-debug-comment-queries') === 'true'
@@ -495,7 +511,10 @@ async function fetchRecentFindsModel(userId = state.user?.id) {
       .from('observations_friend_view')
       .select('id, user_id, date, created_at, genus, species, common_name, gps_latitude, gps_longitude, location, visibility')
       .neq('user_id', uid)
-      .order('created_at', { ascending: false })
+      // created_at is NULL for non-owners (time of day is private,
+      // 20261001195524); mirror the finds feed order instead.
+      .order('date', { ascending: false, nullsFirst: false })
+      .order('id', { ascending: false })
       .limit(3),
   ])
 
@@ -504,9 +523,10 @@ async function fetchRecentFindsModel(userId = state.user?.id) {
   const mine    = (myRes.data    || []).map(o => ({ ...o, _owner: 'mine' }))
   const friends = (friendRes.data || []).map(o => ({ ...o, _owner: 'friend' }))
 
-  // Merge and sort by upload time, take top 4
+  // Merge newest first by date; friend rows carry no time of day, so
+  // same-date ties use upload time when both sides have it, else id.
   const combined = [...mine, ...friends]
-    .sort((a, b) => new Date(b.created_at || b.date) - new Date(a.created_at || a.date))
+    .sort(_compareRecentFinds)
     .slice(0, 4)
 
   if (!combined.length) return { items: [], profiles: {} }
