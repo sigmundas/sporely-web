@@ -70,7 +70,8 @@ Desktop PR #7 (sporely-py) stays unmerged until the owner retests.
 - **One sharing period for both bases:** a new column,
   `shared_first_revision integer`, holds the first revision of the current
   sharing period. It is set for both bases whenever a row becomes `shared`,
-  and cleared on withdrawal. `consent_first_revision` stays for `consented`
+  and cleared on withdrawal. A CHECK keeps `shared_first_revision <=
+  current_revision`, like the existing `consent_period_bound`. `consent_first_revision` stays for `consented`
   rows only. Every check that today means "shared and consented" moves to
   "shared, with `share_basis`, and revision `>= shared_first_revision`":
   - `reference_contribution_is_served`;
@@ -189,7 +190,8 @@ observation read serves for that contribution's (owner, set, taxon).
   species-page listing under your name, updated when you edit the reference
   in your library. This includes references you attach later. You can stop
   sharing a reference in My shared references." When the observation uses an
-  opted-out set: "References you stopped sharing stay private."
+  opted-out set: "References you stopped sharing stay private." This line needs opt-out data from
+  `list_my_reference_sharing`, so it ships with order step 4, not step 1.
 - **"Don't show this again (on this device)":** stored per user and per
   device:
   - web: a `localStorage` key that includes the user id;
