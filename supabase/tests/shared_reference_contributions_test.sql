@@ -39,7 +39,7 @@ DECLARE c private.shared_reference_contributions%ROWTYPE; v_events text[];
 BEGIN
   SELECT * INTO c FROM private.shared_reference_contributions WHERE id=p_id;
   IF c.status <> 'withdrawn' OR c.withdrawn_at IS NULL OR c.consented_at IS NOT NULL
-     OR c.consent_version IS NOT NULL OR c.consent_client IS NOT NULL
+     OR c.consent_version IS NOT NULL OR c.consent_locale IS NOT NULL OR c.consent_client IS NOT NULL
      OR c.consent_first_revision IS NOT NULL OR c.consent_scope IS NOT NULL THEN
     RAISE EXCEPTION '%: not withdrawn with a cleared consent record: %', p_label, to_jsonb(c);
   END IF;
@@ -128,6 +128,8 @@ BEGIN
      private.reference_canonical_snapshot(user_1,set_1)),
     (user_1,'74000000-0000-4000-8000-000000000004',940000004,set_1,'compared',1,
      private.reference_canonical_snapshot(user_1,set_1));
+  -- The fixture text replaces the shipped, inactive version-1 texts.
+  DELETE FROM private.reference_share_consent_texts;
   INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope) VALUES
     (1,'en','fixture consent text',encode(sha256(convert_to('fixture consent text','UTF8')),'hex'),true,
      '{"snapshot_schema_versions":[1,2],"data_kinds":["raw_points","free_text","measurement_details"]}'),
@@ -461,6 +463,14 @@ BEGIN
   END;
   BEGIN
     INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
+      status,consented_at,consent_version,consent_first_revision,consent_scope)
+    VALUES (user_2,gen_random_uuid(),taxon_id,'shared',now(),1,1,
+      '{"snapshot_schema_versions":[1],"data_kinds":[]}');
+    RAISE EXCEPTION 'a consent record without consent_locale was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
       status,withdrawn_at,consent_client)
     VALUES (user_2,gen_random_uuid(),taxon_id,'withdrawn',now(),'desktop');
     RAISE EXCEPTION 'a consent client without consent was accepted';
@@ -468,8 +478,8 @@ BEGIN
   END;
   BEGIN
     INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
-      status,consented_at,consent_version,consent_first_revision,consent_scope)
-    VALUES (user_2,gen_random_uuid(),taxon_id,'shared',now(),1,1,'{"data_kinds":["everything"]}');
+      status,consented_at,consent_version,consent_locale,consent_first_revision,consent_scope)
+    VALUES (user_2,gen_random_uuid(),taxon_id,'shared',now(),1,'en',1,'{"data_kinds":["everything"]}');
     RAISE EXCEPTION 'an invalid consent scope was accepted';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -549,7 +559,12 @@ BEGIN
          'refresh_shared_reference_for_use','refresh_shared_references_for_measurement_set',
          'refresh_shared_references_for_parent','refresh_shared_references_for_observation_taxon',
          'anonymize_shared_reference_contributions_for_profile',
-         '_taxon_identity_repair_reconcile_references')
+         '_taxon_identity_repair_reconcile_references',
+         'withdraw_contribution_if_unpublishable',
+         'share_reference_contribution_with_consent_unthrottled',
+         'list_my_shared_reference_contributions_unthrottled',
+         'get_reference_share_consent_text_unthrottled',
+         'reference_consent_text_revoked','revoke_reference_share_consent_text')
     LOOP
       IF has_function_privilege(v_role, v_fn, 'EXECUTE') THEN
         RAISE EXCEPTION 'role % can execute %', v_role, v_fn;
@@ -571,12 +586,45 @@ BEGIN
      OR has_function_privilege('authenticated','public.moderate_shared_reference_contribution(uuid,text,text)','EXECUTE') THEN
     RAISE EXCEPTION 'shared contribution least-privilege grants are incorrect';
   END IF;
-  -- 2a exposes no new public RPC.
-  IF EXISTS (
-    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-     WHERE n.nspname='public' AND p.proname ~ 'consent'
-  ) THEN
-    RAISE EXCEPTION '2a must not expose a consent RPC';
+  -- 2b: exactly two public consent RPCs (grant, consent text) plus the
+  -- owner list; authenticated only, never anon, service_role or PUBLIC.
+  IF (SELECT array_agg(p.oid::regprocedure::text ORDER BY p.proname)
+        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+       WHERE n.nspname='public' AND (p.proname ~ 'consent' OR p.proname ~ '^list_my_shared'))
+     IS DISTINCT FROM ARRAY[
+       'get_reference_share_consent_text(text)',
+       'list_my_shared_reference_contributions()',
+       'share_reference_contribution_with_consent(uuid,integer,integer,integer,integer,integer,text,text)'] THEN
+    RAISE EXCEPTION '2b public consent surface changed';
+  END IF;
+  FOREACH v_role IN ARRAY ARRAY['anon','service_role','public'] LOOP
+    IF has_function_privilege(v_role,'public.share_reference_contribution_with_consent(uuid,integer,integer,integer,integer,integer,text,text)','EXECUTE')
+       OR has_function_privilege(v_role,'public.list_my_shared_reference_contributions()','EXECUTE')
+       OR has_function_privilege(v_role,'public.get_reference_share_consent_text(text)','EXECUTE') THEN
+      RAISE EXCEPTION 'role % can execute a 2b owner RPC', v_role;
+    END IF;
+  END LOOP;
+  IF NOT has_function_privilege('authenticated','public.share_reference_contribution_with_consent(uuid,integer,integer,integer,integer,integer,text,text)','EXECUTE')
+     OR NOT has_function_privilege('authenticated','public.list_my_shared_reference_contributions()','EXECUTE')
+     OR NOT has_function_privilege('authenticated','public.get_reference_share_consent_text(text)','EXECUTE')
+     OR EXISTS (
+       SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE (n.nspname,p.proname) IN (
+          ('public','share_reference_contribution_with_consent'),
+          ('public','list_my_shared_reference_contributions'),
+          ('public','get_reference_share_consent_text'),
+          ('private','share_reference_contribution_with_consent_unthrottled'),
+          ('private','list_my_shared_reference_contributions_unthrottled'),
+          ('private','get_reference_share_consent_text_unthrottled'))
+          AND (pg_get_userbyid(p.proowner) <> 'postgres'
+               OR NOT coalesce(p.proconfig @> ARRAY['search_path=""'],false)
+               OR (n.nspname='public') <> p.prosecdef)
+     ) THEN
+    RAISE EXCEPTION '2b owner RPCs: grants, owner, search_path or SECURITY DEFINER wrong';
+  END IF;
+  -- The observation delete trigger is gone; the cascaded use delete covers it.
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='observation_delete_shared_contribution_trg') THEN
+    RAISE EXCEPTION 'redundant observation delete trigger still exists';
   END IF;
   -- New helpers: owned by postgres, empty search_path.
   IF EXISTS (
@@ -587,7 +635,7 @@ BEGIN
          'withdraw_unqualified_contributions','lock_shared_reference_key',
          'reference_share_scope_valid','reference_share_snapshot_scope',
          'reference_share_scope_within','withdraw_shared_references_for_observation',
-         'reject_shared_reference_consent_event_change')
+         'reject_shared_reference_consent_event_change','withdraw_contribution_if_unpublishable')
        AND (pg_get_userbyid(p.proowner) <> 'postgres'
             OR NOT coalesce(p.proconfig @> ARRAY['search_path=""'],false))
   ) OR (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -597,7 +645,7 @@ BEGIN
          'withdraw_unqualified_contributions','lock_shared_reference_key',
          'reference_share_scope_valid','reference_share_snapshot_scope',
          'reference_share_scope_within','withdraw_shared_references_for_observation',
-         'reject_shared_reference_consent_event_change')) <> 11 THEN
+         'reject_shared_reference_consent_event_change','withdraw_contribution_if_unpublishable')) <> 13 THEN
     RAISE EXCEPTION 'new private helpers are not owned by postgres with an empty search_path';
   END IF;
 END
@@ -605,14 +653,20 @@ $$;
 
 ROLLBACK;
 
--- Outside the fixture transaction: 2a ships no consent text and no shared row
--- without consent.
+-- Outside the fixture transaction: 2b ships consent text version 1 in en and
+-- nb, INACTIVE (activation is a separate owner-approved step), and no shared
+-- row without consent.
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM private.reference_share_consent_texts)
+  IF EXISTS (SELECT 1 FROM private.reference_share_consent_texts WHERE active OR revoked)
+     OR (SELECT array_agg(version||':'||locale ORDER BY locale) FROM private.reference_share_consent_texts)
+        IS DISTINCT FROM ARRAY['1:en','1:nb']
+     OR EXISTS (SELECT 1 FROM private.reference_share_consent_texts
+                 WHERE scope <> '{"snapshot_schema_versions":[1],"data_kinds":["raw_points","free_text","measurement_details"]}'::jsonb
+                    OR text_sha256 <> encode(sha256(convert_to(text,'UTF8')),'hex'))
      OR EXISTS (SELECT 1 FROM private.shared_reference_contributions
                  WHERE status='shared' AND consented_at IS NULL) THEN
-    RAISE EXCEPTION '2a must ship no consent text and no unconsented share';
+    RAISE EXCEPTION '2b must ship exactly the inactive v1 en/nb texts and no unconsented share';
   END IF;
 END
 $$;
