@@ -70,9 +70,17 @@ it gates **only the shared-row path**. These stay exactly as they are:
 - serving a **requested revision** from the current consent period, with the
   1 MiB cap applied to that revision.
 
-The helper must not change any of today's read behaviour. In particular,
-search keeps applying its 1 MiB cap across the **whole page**, not per row.
-All existing read tests pass unchanged.
+The helper must not change any served behaviour. In particular, search keeps
+applying its 1 MiB cap across the **whole page**, not per row.
+
+Existing tests move as follows:
+- **Shared-row read assertions** move to the `_v2` reads and must pass there
+  unchanged. They are in `shared_reference_contributions_test.sql`,
+  `shared_reference_production_policy_test.sql`,
+  `shared_reference_consent_data_step_test.sql` and
+  `shared_reference_consent_grant_test.sql`.
+- **Tombstone assertions** on today's `get` stay where they are.
+- **Today's reads** get new tests for the restriction.
 
 Replacing those two read functions is allowed: they aren't on the
 `20260914090000` must-not-replace list.
@@ -98,6 +106,8 @@ gate is the **RPC version** instead.
     clients show no relationship label for it.
   - Tombstones and in-period historical revisions in `get_v2` behave exactly
     as in today's `get`.
+    Tombstones carry **no** `relationship_roles` key, so clients' exact-key
+    checks for tombstones stay as they are.
   - Rate-limited, VOLATILE SECURITY DEFINER wrappers around `_unthrottled`
     bodies, as in `20260830193144`. Execute granted to anon and authenticated
     only.
@@ -115,6 +125,9 @@ gate is the **RPC version** instead.
   exact-key sets for `_v2` rows only.
 - **Live:** changing a role publishes no new revision and doesn't touch
   `consent_scope`.
+- **Deferred `20260914090000`:** its header requires a shared-envelope
+  version decision before it is applied. That decision must now cover the
+  `_v2` reads as well as the restricted ones.
 - **Cost:** no extra request, since roles come inline.
 
 ### Label rule (landing and desktop)
@@ -128,8 +141,10 @@ gate is the **RPC version** instead.
 
 ### Landing
 
-- Switch the species page and the compare tray to the `_v2` reads, parse
-  `relationship_roles`, and apply the label rule.
+- Switch the species page and the compare tray to the `_v2` reads
+  (`publicApi.ts`), parse `relationship_roles`, and apply the label rule.
+  Move `CuratedReferencesSection.test.tsx` and
+  `publicApi.curatedReferences.test.ts` to the `_v2` names.
 - Tests:
   - a contradicting fixture and a mixed one;
   - empty roles;
@@ -142,9 +157,12 @@ gate is the **RPC version** instead.
   published publicly, under the owner's name, for the observation's species,
   **marked as contradicting the identification**.
 - **Catalogue and fork dialog (required):** switch to the `_v2` reads, parse
-  `relationship_roles`, and apply the label rule. Update `utils/cloud_sync.py`
-  and its allowlists accordingly, and add the `_v2` names and signatures to
-  `tests/test_stage6l_cross_repository_contract.py`.
+  `relationship_roles`, and apply the label rule.
+  - Update `database/curated_reference_forks.py`, `utils/cloud_sync.py` and
+    its allowlists, and move `tests/test_curated_reference_forks.py` to `_v2`.
+  - **Rewrite** the existing assertions for today's names in
+    `tests/test_stage6l_cross_repository_contract.py` (around :120-122) to
+    the `_v2` names and signatures.
 - **Moderation message:** the follow-up check runs after `created`,
   `updated` and `no_change`. It returns *unknown* in these cases:
   - the list call throws or returns `rate_limited` or another non-ok status;
@@ -237,9 +255,9 @@ The added wording, in en and nb:
    - `source_measurement_set_id` in the owner list;
    - the v1 text edit.
 
-   Deployed via the deploy tree, with general and security review. There are
-   0 shared contributions now, so restricting today's reads changes nothing
-   visible.
+   Deployed via the deploy tree, with general and security review. The deploy
+   preflight confirms in production that there are 0 shared contributions,
+   so restricting today's reads changes nothing visible.
 2. **Landing:** `_v2` reads and labels on the species page and compare tray,
    after 1.
 3. **Desktop** (PR #7 branch): the contradicts wording, required catalogue
