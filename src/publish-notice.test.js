@@ -138,7 +138,7 @@ test('dialog receives the chosen settings', async () => {
   assert.ok(model.notes.includes(REFERENCES_EN))
 })
 
-test("don't show again: per user, skips the modal incl. precision increase; Settings restores", async () => {
+test("don't show again: per user, skips the publish modal; precision increase still asks; Settings restores", async () => {
   memoryStore.clear()
   let shown = 0
   const checkDontShow = async (_model, _doc, { onDontShowAgain }) => { shown += 1; onDontShowAgain(); return true }
@@ -150,10 +150,19 @@ test("don't show again: per user, skips the modal incl. precision increase; Sett
   assert.equal(getShowPublishNotice('user-a'), false)
 
   assert.equal(await confirmPublishIfNeeded(privateObs, PUB, { userId: 'user-a', showDialog }), true)
+  assert.equal(shown, 1, 'suppressed: no publish modal')
+  let precisionModel
   assert.equal(await confirmPublishIfNeeded(
-    { ...PUB, location_precision: 'fuzzed' }, { ...PUB, location_precision: 'exact' }, { userId: 'user-a', showDialog },
-  ), true, 'precision increase proceeds without the modal')
-  assert.equal(shown, 1, 'suppressed: no modal')
+    { ...PUB, location_precision: 'fuzzed' }, { ...PUB, location_precision: 'exact' },
+    { userId: 'user-a', showDialog: async m => { shown += 1; precisionModel = m; return false } },
+  ), false, 'precision increase is not suppressible')
+  assert.equal(precisionModel.title, 'Show a more precise location?')
+  assert.equal(precisionModel.confirm, 'Show precise location')
+  assert.equal(precisionModel.suppressible, false)
+  const precisionHtml = publishNoticeHtml(precisionModel)
+  assert.doesNotMatch(precisionHtml, /data-publish-notice-dont-show/, 'no checkbox on the precision notice')
+  assert.match(precisionHtml, /Show precise location/)
+  shown -= 1
 
   assert.equal(getShowPublishNotice('user-b'), true, 'another user on this device still sees it')
   assert.equal(await confirmPublishIfNeeded(privateObs, PUB, { userId: 'user-b', showDialog }), false)

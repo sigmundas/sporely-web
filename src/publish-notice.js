@@ -49,7 +49,8 @@
 //
 // "Don't show this again" is stored per signed-in user in
 // localStorage (settings.js getShowPublishNotice); Settings turns it back on.
-// When suppressed, every transition proceeds without the modal.
+// When suppressed, publishing proceeds without the modal; the precision
+// notice has no checkbox and always shows.
 import { esc } from './esc.js'
 import { t } from './i18n.js'
 import { getShowPublishNotice, setShowPublishNotice } from './settings.js'
@@ -103,6 +104,7 @@ export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility
       exposed: [],
       notes: caveat,
       confirm: t('publishNotice.precisionConfirm'),
+      suppressible: false,
     }
   }
   const exposed = [
@@ -121,6 +123,7 @@ export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility
     exposed,
     notes,
     confirm: t('publishNotice.publish'),
+    suppressible: true,
   }
 }
 
@@ -132,10 +135,10 @@ export function publishNoticeHtml(model) {
       ${model.exposed.length ? `<ul>${model.exposed.map(line => `<li>${esc(line)}</li>`).join('')}</ul>` : ''}
       ${model.notes.map(line => `<p class="publish-notice-note">${esc(line)}</p>`).join('')}
     </div>
-    <label class="publish-notice-dont-show">
+    ${model.suppressible === false ? '' : `<label class="publish-notice-dont-show">
       <input type="checkbox" data-publish-notice-dont-show>
       <span>${esc(t('publishNotice.dontShowAgain'))}</span>
-    </label>
+    </label>`}
     <div class="publish-notice-actions">
       <button type="button" class="btn-secondary" data-publish-notice="cancel">${esc(t('publishNotice.cancel'))}</button>
       <button type="button" class="btn-primary" data-publish-notice="publish">${esc(model.confirm || t('publishNotice.publish'))}</button>
@@ -235,7 +238,10 @@ export async function confirmPublishIfNeeded(previous, next, {
   when = 'sync',
 } = {}) {
   if (!needsPublishNotice(previous, next)) return true
-  if (!getShowPublishNotice(userId)) return true
+  const publishing = isPublishingTransition(previous, next)
+  // Only the publish notice is suppressible; a more precise location on an
+  // already-public observation always asks (same as desktop).
+  if (publishing && !getShowPublishNotice(userId)) return true
   let facts
   try { facts = await loadFacts() } catch { facts = {} }
   const model = buildPublishNoticeModel({
@@ -243,7 +249,7 @@ export async function confirmPublishIfNeeded(previous, next, {
     sporeDataVisibility: facts?.sporeDataVisibility,
     imagesExifSafe: facts?.imagesExifSafe,
     when,
-    kind: isPublishingTransition(previous, next) ? 'publish' : 'precision',
+    kind: publishing ? 'publish' : 'precision',
   })
   return (await showDialog(model, undefined, {
     onDontShowAgain: () => setShowPublishNotice(userId, false),
