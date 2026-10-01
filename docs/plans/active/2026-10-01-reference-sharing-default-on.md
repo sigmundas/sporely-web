@@ -59,17 +59,40 @@ Desktop PR #7 (sporely-py) stays unmerged until the owner retests.
   `consent_text_revoked` or `consent_scope_exceeded`. The basis is decided by
   the server, never by client input: `p_consent_client` cannot produce
   `automatic`.
-- **Event types:** the event table gains `shared_automatically`,
-  `opted_out` and `share_again`. They carry no locale and no hash. The CHECKs
+- **Event types:** the event table gains `shared_automatically`
+  (per contribution, no locale or hash). Set-level stop and share-again are
+  not logged in that table, because its `contribution_id` is `NOT NULL` and
+  taxon-less sets have no contribution. The opt-out row's `opted_out_at` is
+  the record, and deleting it is share-again. Contribution withdrawals caused
+  by a stop are still logged per contribution through the helper. The CHECKs
   are updated, and the withdrawal reasons gain `rollback` (helper list,
   events CHECK, web `WITHDRAWAL_REASON_KEYS`).
+- **One sharing period for both bases:** a new column,
+  `shared_first_revision integer`, holds the first revision of the current
+  sharing period. It is set for both bases whenever a row becomes `shared`,
+  and cleared on withdrawal. `consent_first_revision` stays for `consented`
+  rows only. Every check that today means "shared and consented" moves to
+  "shared, with `share_basis`, and revision `>= shared_first_revision`":
+  - `reference_contribution_is_served`;
+  - `reference_contribution_public_roles`;
+  - `search_public_reference_contributions_v2` and
+    `get_public_reference_contribution_v2` (`20261001091940:51-52,89,107,217`);
+  - `withdraw_contribution_if_unpublishable` (`20260930232633:570`);
+  - the Stage 1B post-check (`:871`);
+  - the `shared_iff_consented` CHECK.
+
+  A re-shared row therefore never serves revisions from before its earlier
+  withdrawal.
 - **Consent texts and the grant RPC** stay inert.
 
 ### Opt-out: `private.reference_share_opt_outs(owner_id, source_measurement_set_id, opted_out_at)`
 
 - **Keys and protection:** PK `(owner_id, set)`; `owner_id` references
-  `profiles` `ON DELETE CASCADE`. RLS is enabled with no grants. Writes take
-  `lock_shared_reference_key(owner, set)`.
+  `profiles` `ON DELETE CASCADE`. RLS is enabled with no grants. Writes lock
+  the owner's `profiles` row `FOR KEY SHARE` **first**, then
+  `lock_shared_reference_key(owner, set)`. That is the grant's order from
+  Stage 2b (`20260930232633:22-24`), so a profile delete can't deadlock with
+  them.
 - **New owner RPCs**, rate-limited, owner-checked, and returning the same
   response for an unknown or foreign set:
   - `public.stop_sharing_reference_set(set_id)` inserts the opt-out and
@@ -78,9 +101,14 @@ Desktop PR #7 (sporely-py) stays unmerged until the owner retests.
     refreshes now.
 
   The existing `withdraw_reference_contribution` becomes a wrapper:
-  contribution id → its set → stop sharing.
-- **Owner list:** `list_my_shared_reference_contributions` is replaced by a
-  set-keyed `list_my_reference_sharing()`. It returns each of the owner's
+  contribution id → its set → stop sharing. Its response contract stays the
+  same (`updated`, `no_change`, `forbidden`, `not_found`, `rate_limited`), so
+  released desktop and web keep working. One call now stops the whole set,
+  which errs toward privacy. The stop confirmation text in both clients says
+  so.
+- **Owner list:** a new set-keyed RPC, `list_my_reference_sharing()`.
+  `list_my_shared_reference_contributions` **stays** unchanged until web and
+  desktop have moved, and is removed in a later cleanup. It returns each of the owner's
   sets that has a live use on a public, non-draft, spore-public observation,
   or an opt-out. For each:
   - status: shared, stopped, or hidden by moderation;
@@ -91,6 +119,17 @@ Desktop PR #7 (sporely-py) stays unmerged until the owner retests.
   system-withdrawal event (`withdrawn_by_system`) gets an opt-out for its
   (owner, set). Withdrawals made by owners before Stage 2a are therefore
   respected.
+  - **Over-matches safely:** this also turns event-less system withdrawals
+    from before Stage 2a into opt-outs: taxon change, detach, source deletion
+    and Stage 1B (`20260830183210:697,874,916`; `20260930193000:331`). That
+    errs toward less exposure.
+  - **Repair withdrawals:** they are excluded when identifiable, through
+    `taxon_identity_repair_reference_actions` rows with
+    `old_contribution='withdrawn'`.
+  - **Preflight** lists the affected sets. Production has 2 withdrawn rows
+    today, both with `withdrawn_by_system` events, so the backfill is expected
+    to touch none.
+  - It runs **strictly before** the deploy refresh.
 
 ### Automatic sharing (species-page contributions)
 
@@ -109,10 +148,16 @@ Desktop PR #7 (sporely-py) stays unmerged until the owner retests.
   the species-page row.
 - **Stage 1B** maps `created` to `shared`, and an opted-out set to
   `opted_out`. `consent_required` is retired.
-- **At deploy:** after creating the functions, the migration runs refresh
-  once for every currently qualifying key, which creates the 1 qualifying
-  key and re-shares the 1 eligible `consent_missing` row. The rows are
-  logged as `shared_automatically`.
+- **At deploy:** after the backfill and after creating the functions, the
+  migration runs refresh once for every currently qualifying key. It calls
+  `share_reference_contribution_for_owner` or the core **directly**: the
+  trigger path's owner/service gate (`20260930232633:623-625`) skips every row
+  inside a migration, where `auth.uid()` is NULL.
+  - **Honours opt-outs and hides,** because the core checks both.
+  - **Count-agnostic:** the migration works on any count; the production
+    preflight asserts the expected 1 created and 1 re-shared, and shows them
+    to the owner.
+  - Rows are logged as `shared_automatically`.
 
 ### Observation references (observation page and plots)
 
@@ -182,13 +227,17 @@ observation read serves for that contribution's (owner, set, taxon).
 
 ## Order
 
-1. **Web notice and list** (over-warns until the server change).
+1. **Web notice text and triggers** only (over-warns until the server
+   change). The web list keeps using today's RPC.
 2. **Landing PR #3**, after its Cloudflare preview issue is resolved.
-3. **Server migration:** share basis, the opt-out table and backfill, the
-   RPCs, automatic sharing, triggers, the observation read, roles, Stage 1B
-   and the deploy refresh. Deployed via the deploy tree after the preflight
-   counts are **shown to the owner**.
-4. **Desktop (PR #7):** retested by the owner, then released by the owner.
+3. **Server migration:** share basis and sharing period, the opt-out table
+   and backfill, the new RPCs (the old list kept), automatic sharing,
+   triggers, the observation read, roles, Stage 1B and the deploy refresh.
+   Deployed via the deploy tree after the preflight counts are **shown to the
+   owner**.
+4. **Web list** moves to `list_my_reference_sharing`, with stop and
+   share-again.
+5. **Desktop (PR #7):** retested by the owner, then released by the owner.
 
 The deferred `20260914090000`'s envelope-version decision must also cover
 automatic sharing.

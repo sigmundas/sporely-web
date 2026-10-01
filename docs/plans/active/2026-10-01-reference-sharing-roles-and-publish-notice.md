@@ -1,5 +1,8 @@
 # Stage 2c: contradicting references and the publish notice
 
+> **Superseded in part (2026-10-01):** the owner replaced opt-in sharing with default-on sharing and a sticky per-reference Stop sharing. See `docs/plans/active/2026-10-01-reference-sharing-default-on.md`. The consent texts, the consent dialog, the activation gate and the content proof described here no longer apply. Roles, labels and the `_v2` version gate (Stage 2c) remain.
+
+
 Status: proposed, revised after general review and security review of
 `3f9eec2` (both "needs changes"; incorporated). Not started. Follows Stage 2
 (`docs/plans/active/2026-09-30-reference-sharing-consent.md`). Consent text v1
