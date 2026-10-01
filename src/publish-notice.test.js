@@ -26,7 +26,7 @@ import { _confirmImportSessionPublish } from './screens/import_review.js'
 setLocale('en')
 
 const PUB = { visibility: 'public', is_draft: false }
-const REFERENCES_EN = 'References on a public observation are public: on the observation and its plots, as the version you attached, and in the species-page listing under your name, updated when you edit the reference in your library. This includes references you attach later. You can stop sharing a reference in My shared references.'
+const REFERENCES_EN = 'Attached references are shared by default. You can stop sharing them under My shared references.'
 
 test('publishing transition: only into public and not draft', () => {
   assert.equal(isPublishingTransition({ visibility: 'public', is_draft: true }, PUB), true)
@@ -74,6 +74,30 @@ test('notice text: location precision, spore data, references public by default'
   assert.ok(fuzzed.notes.includes(t('publishNotice.sporeDataHidden')))
   assert.ok(fuzzed.notes.includes(REFERENCES_EN))
 
+  assert.equal(exact.title, 'Make this observation public?')
+  assert.equal(exact.intro, 'After the next sync, anyone, including people who are not signed in, can see:')
+  assert.equal(buildPublishNoticeModel({ locationPrecision: 'exact', when: 'save' }).intro,
+    'After you save, anyone, including people who are not signed in, can see:')
+  assert.deepEqual(exact.exposed, [
+    'Species, date, habitat, notes and your name',
+    'The exact location and the location name you entered',
+    'Your photos, microscope photos and the AI identification you selected',
+    'Spore measurements and statistics',
+  ])
+  assert.deepEqual(exact.notes, [REFERENCES_EN])
+  assert.equal(exact.confirm, 'Make public')
+  assert.equal(fuzzed.exposed[1], 'An approximate location (about 1 km), shown with region or country only')
+  assert.deepEqual(fuzzed.notes, [
+    'Some photos may still contain the exact position in their file data.',
+    'Spore measurements stay hidden.',
+    REFERENCES_EN,
+  ])
+
+  const precise = buildPublishNoticeModel({ locationPrecision: 'exact', kind: 'precision', when: 'save' })
+  assert.equal(precise.title, 'Show a more precise location?')
+  assert.equal(precise.intro, 'After you save, this public observation will show the exact location and the location name you entered.')
+  assert.deepEqual(precise.exposed, [])
+
   const unknown = buildPublishNoticeModel({ locationPrecision: 'exact' })
   assert.ok(unknown.exposed.includes(t('publishNotice.sporeData')), 'unknown spore visibility is disclosed as public')
 
@@ -81,7 +105,7 @@ test('notice text: location precision, spore data, references public by default'
   assert.match(html, /data-publish-notice="publish"/)
   assert.match(html, /data-publish-notice="cancel"/)
   assert.match(html, /data-publish-notice-dont-show/)
-  assert.match(html, /Don&#39;t show this again \(on this device\)|Don't show this again \(on this device\)/)
+  assert.match(html, /Don&#39;t show this again|Don't show this again/)
 })
 
 test('removed reference lines are gone from the notice and every locale', () => {
@@ -201,49 +225,20 @@ test('locales: German notice uses one register (du); shared-references labels ma
   }
 })
 
-test('opted-out line: shown only when an attached set is stopped; omitted when unknown', async () => {
-  const STOPPED_EN = 'References you stopped sharing are no longer shown publicly.'
-  assert.equal(t('publishNotice.referencesStopped'), STOPPED_EN)
-  const sets = [
-    { source_measurement_set_id: 'set-a', status: 'stopped', stopped_at: '2026-01-01T00:00:00Z' },
-    { source_measurement_set_id: 'set-b', status: 'shared', stopped_at: null },
-  ]
-  const load = opts => loadExistingObservationFacts({ client: fakeClient(opts), observationId: 1, userId: 'u' })
-
-  const stopped = await load({ uses: [{ reference_measurement_set_id: 'set-a' }], rpc: { status: 'ok', sets } })
-  assert.equal(stopped.usesStoppedReference, true)
-  const shared = await load({ uses: [{ reference_measurement_set_id: 'set-b' }], rpc: { status: 'ok', sets } })
-  assert.equal(shared.usesStoppedReference, false)
-  let rpcCalled = false
-  const none = await load({ uses: [], rpc: () => { rpcCalled = true } })
-  assert.equal(none.usesStoppedReference, false)
-  assert.equal(rpcCalled, false, 'no list RPC without attached references')
-  const limited = await load({ uses: [{ reference_measurement_set_id: 'set-a' }], rpc: { status: 'rate_limited', retry_after_seconds: 9 } })
-  assert.equal(limited.usesStoppedReference, undefined)
-  const usesFail = await load({ usesError: true })
-  assert.equal(usesFail.usesStoppedReference, undefined)
-  const rpcThrows = await load({ uses: [{ reference_measurement_set_id: 'set-a' }], rpc: () => { throw new Error('net') } })
-  assert.equal(rpcThrows.usesStoppedReference, undefined)
-
-  const withLine = buildPublishNoticeModel({ locationPrecision: 'exact', usesStoppedReference: true })
-  assert.ok(withLine.notes.includes(STOPPED_EN))
-  assert.ok(withLine.notes.includes(REFERENCES_EN))
-  for (const value of [false, undefined]) {
-    const model = buildPublishNoticeModel({ locationPrecision: 'exact', usesStoppedReference: value })
-    assert.ok(!model.notes.includes(STOPPED_EN))
-    assert.ok(model.notes.includes(REFERENCES_EN))
-  }
-
-  let shown
-  state.user = { id: 'opted-out-user' }
-  await confirmPublishIfNeeded({ visibility: 'private', is_draft: false }, PUB, {
-    userId: 'opted-out-user',
-    loadFacts: async () => ({ usesStoppedReference: true }),
-    showDialog: async model => { shown = model; return true },
-  })
-  assert.ok(shown.notes.includes(STOPPED_EN))
+test('reference lookups are gone: no stopped-set read, no per-role lines', async () => {
+  const tables = []
+  const client = fakeClient({ row: { spore_data_visibility: 'public' } })
+  const tracking = { rpc: () => { throw new Error('no rpc expected') }, from: table => { tables.push(table); return client.from(table) } }
+  const facts = await loadExistingObservationFacts({ client: tracking, observationId: 1, userId: 'u' })
+  assert.deepEqual(Object.keys(facts).sort(), ['imagesExifSafe', 'sporeDataVisibility'])
+  assert.ok(!tables.includes('observation_reference_uses'))
   const source = fs.readFileSync(new URL('./i18n.js', import.meta.url), 'utf8')
-  assert.equal((source.match(/'publishNotice\.referencesStopped': '[^']+'/g) || []).length, 4)
+  for (const key of ['referencesStopped', 'comments', 'microscopy', 'ai', 'photos']) {
+    assert.ok(!source.includes(`'publishNotice.${key}':`), `${key} still defined`)
+  }
+  for (const key of ['title', 'intro', 'whenSave', 'whenSync', 'media', 'precisionTitle', 'precisionBody', 'precisionConfirm']) {
+    assert.equal((source.match(new RegExp(`'publishNotice\\.${key}': '[^']+'`, 'g')) || []).length, 4, key)
+  }
 })
 
 function fakeClient({ row = null, images = [], rowError = false, uses = [], usesError = false, rpc = null }) {

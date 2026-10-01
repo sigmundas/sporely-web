@@ -4386,7 +4386,7 @@ async function _save() {
       location_precision: currentObs.location_precision,
     },
     patch,
-    { ...detailPublishNoticeOptions, loadFacts: () => loadExistingObservationFacts({
+    { when: 'save', ...detailPublishNoticeOptions, loadFacts: () => loadExistingObservationFacts({
       client: supabase,
       observationId: currentObs.id,
       userId: state.user.id,
