@@ -9,8 +9,10 @@
 # A2 (set S2, with B2) from X to Y. Apply must wait for session 1, then:
 #   * S1: X withdrawn (neither A nor B carries X any more);
 #   * S2: X still shared (B2 genuinely still carries X);
-#   * nothing is created under Y or Z (Stage 2a: automatic paths refresh
-#     consented rows or withdraw, never publish anew).
+#   * Stage 2d (20261001113007, changed meaning: was "nothing is created
+#     under Y or Z"): automatic shares are created under Y for S1 and S2
+#     (the repair's reconcile) and under Z for S1 (the owner's taxon change),
+#     each with a qualifying use.
 # The X contributions are seeded consented through the core's grant mode, on
 # public observations (decision B).
 # Z differs from Y on purpose: if B moved to Y, the share helper's advisory
@@ -159,11 +161,13 @@ wait "$S2_PID" || { cat /tmp/repair_race_s2.log; fail "apply failed"; }
 [ "$(P -c "select taxon_identity_state from public.observations where id = 953000001")" = sporely_v2 ] || fail "A not promoted"
 [ "$(P -c "select taxon_identity_state from public.observations where id = 953000003")" = sporely_v2 ] || fail "A2 not promoted"
 [ "$(status $S1 $X)" = withdrawn ] || fail "S1 contribution under X is '$(status $S1 $X)', expected withdrawn (no live use carries X)"
-[ "$(status $S1 $Y)" = none ] || fail "S1 contribution under Y is '$(status $S1 $Y)', expected none (refresh never creates)"
-[ "$(status $S1 $Z)" = none ] || fail "S1 contribution under Z is '$(status $S1 $Z)', expected none (refresh never creates)"
+[ "$(status $S1 $Y)" = shared ] || fail "S1 contribution under Y is '$(status $S1 $Y)', expected shared (repair creates)"
+[ "$(status $S1 $Z)" = shared ] || fail "S1 contribution under Z is '$(status $S1 $Z)', expected shared (owner taxon change creates)"
 [ "$(status $S2 $X)" = shared ] || fail "S2 contribution under X is '$(status $S2 $X)', expected shared (B2 still carries X)"
-[ "$(status $S2 $Y)" = none ] || fail "S2 contribution under Y is '$(status $S2 $Y)', expected none (refresh never creates)"
+[ "$(status $S2 $Y)" = shared ] || fail "S2 contribution under Y is '$(status $S2 $Y)', expected shared (repair creates)"
+[ "$(P -c "select string_agg(new_contribution,',' order by observation_id) from private.taxon_identity_repair_reference_actions")" = "shared,shared" ] \
+  || fail "repair reference actions not labelled shared: $(P -c "select string_agg(new_contribution,',') from private.taxon_identity_repair_reference_actions")"
 [ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='shared' and not private.reference_set_has_qualifying_use(c.owner_id,c.source_measurement_set_id,c.sporely_taxon_id)")" = 0 ] \
   || fail "a share survived without a qualifying use"
 [ "$WAITED" = yes ] || fail "apply did not wait for the concurrent owner transaction"
-echo "PASS: apply waited for the owner transaction; S1/X withdrawn, S2/X kept, nothing created under Y or Z"
+echo "PASS: apply waited for the owner transaction; S1/X withdrawn, S2/X kept, automatic shares under Y and Z"

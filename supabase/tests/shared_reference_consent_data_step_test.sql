@@ -3,7 +3,10 @@
 -- statement below is the migration's statement verbatim. After the
 -- migration no unconsented shared row can exist (CHECK), so the fixture
 -- drops the consent CHECKs inside this rolled-back transaction to recreate
--- the pre-migration state.
+-- the pre-migration state. Since Stage 2d (20261001113007) the CHECK is
+-- shared_iff_basis (a shared row needs a share basis), so that is the one
+-- dropped and restored here; an unconsented shared row is one without a
+-- basis.
 
 BEGIN;
 
@@ -25,7 +28,7 @@ BEGIN
   ) VALUES (v_taxon,'Amanita datastepensis','species','include','in_cache','data-step-test');
 
   ALTER TABLE private.shared_reference_contributions
-    DROP CONSTRAINT shared_reference_contributions_shared_iff_consented;
+    DROP CONSTRAINT shared_reference_contributions_shared_iff_basis;
 
   -- Two pre-2a shares (as in production), one consented row and one
   -- withdrawn row.
@@ -40,8 +43,9 @@ BEGIN
   SELECT id,1,1,1,1,repeat('a',64),jsonb_build_object('contribution_id',id,'revision',1,'status','shared')
     FROM unnest(v_unconsented) id;
   INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,status,
+    share_basis,shared_first_revision,
     consented_at,consent_version,consent_locale,consent_first_revision,consent_scope)
-  VALUES (v_owner,gen_random_uuid(),v_taxon,'shared',now(),1,'en',1,'{"snapshot_schema_versions":[1],"data_kinds":[]}')
+  VALUES (v_owner,gen_random_uuid(),v_taxon,'shared','consented',1,now(),1,'en',1,'{"snapshot_schema_versions":[1],"data_kinds":[]}')
   RETURNING id INTO v_consented;
   INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,status,withdrawn_at)
   VALUES (v_owner,gen_random_uuid(),v_taxon,'withdrawn',now()-interval '1 day')
@@ -96,8 +100,13 @@ BEGIN
 
   -- The CHECK is restorable over the result, as the migration's step 4 needs.
   ALTER TABLE private.shared_reference_contributions
-    ADD CONSTRAINT shared_reference_contributions_shared_iff_consented
-    CHECK ((status = 'shared') = (consented_at IS NOT NULL));
+    ADD CONSTRAINT shared_reference_contributions_shared_iff_basis
+    CHECK (CASE WHEN status = 'shared'
+                THEN share_basis IS NOT NULL AND shared_first_revision IS NOT NULL
+                     AND (share_basis = 'consented') = (consented_at IS NOT NULL)
+                ELSE share_basis IS NULL AND shared_first_revision IS NULL
+                     AND consented_at IS NULL
+           END);
 END
 $$;
 

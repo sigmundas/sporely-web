@@ -1,7 +1,9 @@
 # Stage 2d: references shared by default, and a dismissible publish notice
 
-Status: proposed, revised after general and security review of `fbd3da1`
-(both "needs changes"; incorporated). Not started.
+Status: approved (`7e5aac0`). Order step 3 (server) in review on
+`feature/reference-sharing-default-on-server`: candidate `145e25d`
+(general: approve, rollback needed before deploy; security: needs changes),
+fixes in a follow-up candidate (see Handoff). Not deployed.
 - **Supersedes:** the opt-in model of Stage 2
   (`2026-09-30-reference-sharing-consent.md`); and, from Stage 2c
   (`2026-10-01-reference-sharing-roles-and-publish-notice.md`), the content
@@ -26,6 +28,11 @@ Desktop PR #7 (sporely-py) stays unmerged until the owner retests.
 4. **Informational publish notice.** It has a persistent "Don't show this
    again" checkbox. Once suppressed, transitions proceed without the modal,
    and Settings can turn the notice back on.
+5. **Moderation ("Both", 2026-10-01):** ship relying on the observation
+   hide (a moderator makes the observation private, which removes its
+   references from both surfaces) and the existing contribution hide, which
+   applies to the whole set. A per-reference or set-level moderator hide
+   (its own RPC and audit) is a separately reviewed follow-up stage.
 
 ## Exposure at deploy (production, read-only, 2026-10-01; re-run in the preflight)
 
@@ -124,9 +131,9 @@ Desktop PR #7 (sporely-py) stays unmerged until the owner retests.
     from before Stage 2a into opt-outs: taxon change, detach, source deletion
     and Stage 1B (`20260830183210:697,874,916`; `20260930193000:331`). That
     errs toward less exposure.
-  - **Repair withdrawals:** they are excluded when identifiable, through
-    `taxon_identity_repair_reference_actions` rows with
-    `old_contribution='withdrawn'`.
+  - **Repair withdrawals:** not excluded (security review of `145e25d`):
+    an event-less Stage 1B repair withdrawal becomes an opt-out like any
+    other event-less withdrawal, which errs toward less exposure.
   - **Preflight** lists the affected sets. Production has 2 withdrawn rows
     today, both with `withdrawn_by_system` events, so the backfill is expected
     to touch none.
@@ -318,3 +325,42 @@ Every candidate gets a general review and a security review.
   "(on this device)".
 - Not done: the opted-out line and the web list (step 4). Step 4 must ship
   together with step 3.
+
+## Handoff: order step 3 (server), 2026-10-01
+
+- Branch `feature/reference-sharing-default-on-server` from `7e5aac0`;
+  migration `20261001113007_share_references_by_default.sql`. First
+  candidate `145e25d`; review fixes `f792ada`, test-quality fixes `4a49b7c`.
+  General and security review approved `4a49b7c`. Deployed to production on
+  2026-10-01 through the deploy tree after the owner saw the preflight (30 uses
+  on 21 observations, 1 owner; 0 opt-outs; deploy refresh 0 created, 1
+  re-shared). Verified afterwards: 1 automatic shared contribution, 30
+  observation-reference items served, 0 opt-outs.
+- Review fixes: moderation is set-level everywhere (the species-page served
+  check and every refresh stop at a hidden contribution of the set); the
+  backfill has no repair exclusion; the core locks the owner's profile
+  FOR KEY SHARE before the key lock; the owner list includes every set with a
+  shared contribution.
+- Deploy aids: `supabase/reference-sharing-default-on-preflight.sql`
+  (read-only; tested against the pre-migration schema and cross-checked by
+  applying the migration on the same data); rollback
+  `supabase/rollbacks/20261001113007_rollback.sql` (not a migration; its
+  header says how to promote it), tested by
+  `supabase/tests/shared_reference_rollback_test.sh` (also: an automatic row
+  created by a direct core call after the rollback is served nowhere).
+- The backfill is tested through the migration itself by
+  `supabase/tests/shared_reference_backfill_migration_test.sh` (reset to
+  `20261001091940`, fixtures, `supabase migration up --local`).
+- Verified locally: 71/72 SQL tests (`public_observation_point_prep_test.sql`
+  fails at the base too); both concurrency scripts (30 races, plus
+  account deletion vs automatic create) and the rollback script on fresh
+  resets; deploy-tree node tests; applies without the deferred
+  `20260914090000`.
+- Choices inside the plan: the grant mode also refuses an opted-out set; a
+  refresh on a set with a hidden contribution returns `moderation_hidden`
+  (Stage 1B: `not_shareable:moderation_hidden`); a refresh with no
+  qualifying use and no shared row returns `qualifying_use_required`; the
+  backfill also opts out rows whose latest withdrawal is the owner's; any
+  error in the deploy refresh aborts the migration.
+- Step 4 (web list, `feature/shared-references-set-list`) replaces the
+  reason keys altogether, since the set-keyed list has no reason field.

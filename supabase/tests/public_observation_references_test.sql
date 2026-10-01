@@ -1,24 +1,20 @@
--- Public observation-reference projection contract after Stage 2a
--- (decision E): a frozen use snapshot is public only when the use itself
--- qualifies, a consented contribution backs it, and its content equals a
--- consented revision. Output shape is unchanged (landing:
--- sporely-landing/src/lib/publicApi.ts, publicReferenceSnapshot.ts).
+-- Public observation-reference projection contract after Stage 2d
+-- (20261001113007; shared by default). A frozen use snapshot is public for
+-- every live use with a live source on a public, non-draft, spore-public
+-- observation of an owner who is not banned, deleting or blocked with the
+-- caller, whose set is not opted out and has no hidden contribution. Taxon
+-- and registry membership do not matter; there is no consent and no content
+-- proof (changed meaning: the Stage 2a content-proof cases 940000005,
+-- 940000010 and 940000011 are now served). Output shape is unchanged
+-- (landing: sporely-landing/src/lib/publicApi.ts, publicReferenceSnapshot.ts).
 -- Run after local migrations with psql; the transaction is always rolled back.
 
 BEGIN;
 
-CREATE FUNCTION pg_temp.fixture_grant(p_owner uuid, p_set uuid, p_taxon integer)
-RETURNS jsonb LANGUAGE plpgsql AS $$
-DECLARE r record;
-BEGIN
-  SELECT w.revision AS w, t.revision AS t, m.revision AS m INTO r
-    FROM public.reference_measurement_sets m
-    JOIN public.reference_taxon_treatments t ON t.user_id=m.user_id AND t.id=m.taxon_treatment_id
-    JOIN public.reference_works w ON w.user_id=t.user_id AND w.id=t.reference_work_id
-   WHERE m.user_id=p_owner AND m.id=p_set;
-  RETURN private.reference_contribution_share_core(
-    'grant',p_owner,p_set,p_taxon,r.w,r.t,r.m,1,'en','fixture');
-END
+-- The automatic share (the deploy refresh's call), for the species-page row.
+CREATE FUNCTION pg_temp.fixture_refresh(p_owner uuid, p_set uuid, p_taxon integer)
+RETURNS jsonb LANGUAGE sql AS $$
+  SELECT private.reference_contribution_share_core('refresh',p_owner,p_set,p_taxon)
 $$;
 
 DO $$
@@ -31,6 +27,7 @@ DECLARE
   set_1 constant uuid := '33000000-0000-4000-8000-000000000001';
   set_2 constant uuid := '33000000-0000-4000-8000-000000000002';
   set_3 constant uuid := '33000000-0000-4000-8000-000000000003';
+  set_4 constant uuid := '33000000-0000-4000-8000-000000000004';
   snapshot_1 jsonb;
   snapshot_2 jsonb;
   imported jsonb;
@@ -45,12 +42,9 @@ BEGIN
     (viewer,'public_ref_viewer',false),(banned_owner,'public_ref_banned',false);
   INSERT INTO taxonomy_v3.registry_concept(
     sporely_taxon_id,canonical_name,rank,scope_state,cache_state,first_materialized_from_release
-  ) VALUES (taxon,'Russula paludosa','species','include','in_cache','obs-ref-test');
-  -- The fixture text replaces the shipped, inactive version-1 texts.
-  DELETE FROM private.reference_share_consent_texts;
-  INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope)
-  VALUES (1,'en','fixture consent text',encode(sha256(convert_to('fixture consent text','UTF8')),'hex'),true,
-          '{"snapshot_schema_versions":[1,2],"data_kinds":["raw_points","free_text","measurement_details"]}');
+  ) VALUES (taxon,'Russula paludosa','species','include','in_cache','obs-ref-test'),
+           -- Not a registry species (a genus): shares on observations only.
+           (2100000949,'Russula','genus','include','in_cache','obs-ref-test');
 
   INSERT INTO public.observations(id,user_id,date,visibility,is_draft,resolved_sporely_taxon_id,spore_data_visibility)
   OVERRIDING SYSTEM VALUE VALUES
@@ -68,7 +62,10 @@ BEGIN
     (940000012,owner_a,current_date,'public',false,taxon,'private'),
     (940000013,owner_a,current_date,'public',false,taxon,'public'),
     (940000014,owner_a,current_date,'public',false,taxon,'public'),
-    (940000015,owner_a,current_date,'public',false,taxon,'public');
+    (940000015,owner_a,current_date,'public',false,taxon,'public'),
+    (940000016,owner_a,current_date,'public',false,NULL,'public'),
+    (940000017,owner_a,current_date,'public',false,2100000949,'public'),
+    (940000018,owner_a,current_date,'public',false,taxon,'public');
 
   INSERT INTO public.reference_works(user_id,id,type,title,short_label,authors_json,year,revision) VALUES
     (owner_a,'11000000-0000-4000-8000-000000000001','book','Frozen source','Author 2026','[{"family":"Author"}]',2026,1),
@@ -82,6 +79,7 @@ BEGIN
     (owner_a,set_1,'22000000-0000-4000-8000-000000000001','spore_size','range','8-10 µm',8,10,1),
     (owner_a,set_2,'22000000-0000-4000-8000-000000000001','spore_size','range','9-11 µm',9,11,1),
     (owner_a,set_3,'22000000-0000-4000-8000-000000000001','spore_size','range','7-8 µm',7,8,1),
+    (owner_a,set_4,'22000000-0000-4000-8000-000000000001','spore_size','range','6-8 µm',6,8,1),
     (owner_b,set_1,'22000000-0000-4000-8000-000000000001','spore_size','range','7-9 µm',7,9,1),
     (banned_owner,set_1,'22000000-0000-4000-8000-000000000001','spore_size','range','9-11 µm',9,11,1);
 
@@ -126,23 +124,28 @@ BEGIN
        private.reference_canonical_snapshot(owner_a,set_3)),
     (owner_b,'44000000-0000-4000-8000-000000000006',940000006,set_1,'compared','other owner note',1,private.reference_canonical_snapshot(owner_b,set_1)),
     (banned_owner,'44000000-0000-4000-8000-000000000007',940000007,set_1,'compared','banned',1,private.reference_canonical_snapshot(banned_owner,set_1)),
-    (owner_a,'44000000-0000-4000-8000-000000000008',940000008,set_1,'compared','friends',1,snapshot_1);
+    (owner_a,'44000000-0000-4000-8000-000000000008',940000008,set_1,'compared','friends',1,snapshot_1),
+    -- Taxon-less and non-registry observations: observation page only.
+    (owner_a,'44000000-0000-4000-8000-000000000017',940000016,set_2,'compared','taxon-less',1,snapshot_2),
+    (owner_a,'44000000-0000-4000-8000-000000000018',940000017,set_2,'compared','non-registry',1,snapshot_2),
+    -- Opted-out set.
+    (owner_a,'44000000-0000-4000-8000-000000000019',940000018,set_4,'compared','opted out',1,
+       private.reference_canonical_snapshot(owner_a,set_4));
+  INSERT INTO private.reference_share_opt_outs(owner_id,source_measurement_set_id) VALUES (owner_a,set_4);
 
-  -- Nothing is public before consent.
-  IF EXISTS (
-    SELECT 1 FROM public.search_public_observation_references(
-      ARRAY[940000001,940000004,940000005,940000006,940000009,940000010,940000011,940000012,940000013]::bigint[]) r
-     WHERE r."references" <> '[]'::jsonb
-  ) THEN
-    RAISE EXCEPTION 'observation reference data is public without a consented contribution';
+  -- Served without any contribution (no consent, no species-page row).
+  IF jsonb_array_length(public.get_public_observation_references(940000006))<>1
+     OR EXISTS (SELECT 1 FROM private.shared_reference_contributions) THEN
+    RAISE EXCEPTION 'observation reference needs a contribution, or a fixture write created one';
   END IF;
 
-  IF (pg_temp.fixture_grant(owner_a,set_1,taxon)->>'status') <> 'created'
-     OR (pg_temp.fixture_grant(owner_a,set_2,taxon)->>'status') <> 'created'
-     OR (pg_temp.fixture_grant(owner_a,set_3,taxon)->>'status') <> 'created'
-     OR (pg_temp.fixture_grant(owner_b,set_1,taxon)->>'status') <> 'created'
-     OR (pg_temp.fixture_grant(banned_owner,set_1,taxon)->>'status') <> 'created' THEN
-    RAISE EXCEPTION 'fixture grants failed';
+  IF (pg_temp.fixture_refresh(owner_a,set_1,taxon)->>'status') <> 'created'
+     OR (pg_temp.fixture_refresh(owner_a,set_2,taxon)->>'status') <> 'created'
+     OR (pg_temp.fixture_refresh(owner_a,set_3,taxon)->>'status') <> 'created'
+     OR (pg_temp.fixture_refresh(owner_a,set_4,taxon)->>'status') <> 'opted_out'
+     OR (pg_temp.fixture_refresh(owner_b,set_1,taxon)->>'status') <> 'created'
+     OR (pg_temp.fixture_refresh(banned_owner,set_1,taxon)->>'status') <> 'created' THEN
+    RAISE EXCEPTION 'fixture refreshes failed';
   END IF;
   UPDATE public.profiles SET is_banned=true WHERE id=banned_owner;
 
@@ -176,7 +179,7 @@ BEGIN
   IF rows_seen<>10 THEN RAISE EXCEPTION 'anon eligible observation row count was %, ids %',rows_seen,visible_ids; END IF;
 
   result:=public.get_public_observation_references(940000001);
-  IF jsonb_array_length(result)<>2 THEN RAISE EXCEPTION 'consented frozen references missing: %',result; END IF;
+  IF jsonb_array_length(result)<>2 THEN RAISE EXCEPTION 'frozen references missing: %',result; END IF;
   IF result->0 ? 'note' OR result->0 ? 'user_id' OR result->0 ? 'deleted_at' THEN
     RAISE EXCEPTION 'private use metadata leaked: %',result;
   END IF;
@@ -210,28 +213,38 @@ BEGIN
       public.get_public_observation_references(940000004);
   END IF;
   IF jsonb_array_length(public.get_public_observation_references(940000015))<>1 THEN
-    RAISE EXCEPTION 'content proof compared numbers as text';
+    RAISE EXCEPTION 'valid snapshot with a different number spelling was not served';
   END IF;
-  IF public.get_public_observation_references(940000014)<>'[]'::jsonb THEN
-    RAISE EXCEPTION 'raw points with non-allowlisted keys were served';
+  -- Changed meaning (2d): without the content proof the use is served, but
+  -- only the allowlisted raw-point keys are projected.
+  IF public.get_public_observation_references(940000014)->0->'snapshot'->'raw_points'
+       IS DISTINCT FROM '[{"length":9}]'::jsonb THEN
+    RAISE EXCEPTION 'raw points with non-allowlisted keys were not projected to the allowlist: %',
+      public.get_public_observation_references(940000014);
   END IF;
-  IF public.get_public_observation_references(940000005)<>'[]'::jsonb THEN
-    RAISE EXCEPTION 'snapshot with an unconsented citation was served at the same set revision';
+  -- Changed meaning (2d): the frozen version attached is served as is.
+  IF jsonb_array_length(public.get_public_observation_references(940000005))<>1
+     OR public.get_public_observation_references(940000005)->0->'snapshot'->>'full_citation' IS NULL
+     OR jsonb_array_length(public.get_public_observation_references(940000010))<>1
+     OR jsonb_array_length(public.get_public_observation_references(940000011))<>1
+     OR (public.get_public_observation_references(940000011)->0->'snapshot'->'measurements'->>'length_core_min')::numeric <> 7.5 THEN
+    RAISE EXCEPTION 'frozen pre-edit or imported snapshots were not served as attached';
   END IF;
-  IF public.get_public_observation_references(940000010)<>'[]'::jsonb THEN
-    RAISE EXCEPTION 'snapshot with an unconsented treatment was served at the same set revision';
+  IF jsonb_array_length(public.get_public_observation_references(940000016))<>1
+     OR jsonb_array_length(public.get_public_observation_references(940000017))<>1 THEN
+    RAISE EXCEPTION 'taxon-less or non-registry observation reference not served';
   END IF;
-  IF public.get_public_observation_references(940000011)<>'[]'::jsonb THEN
-    RAISE EXCEPTION 'historical-import snapshot not equal to a consented revision was served';
+  IF public.get_public_observation_references(940000018)<>'[]'::jsonb THEN
+    RAISE EXCEPTION 'opted-out set served on the observation';
   END IF;
   IF public.get_public_observation_references(940000012)<>'[]'::jsonb THEN
     RAISE EXCEPTION 'use on an observation with private spore data was served';
   END IF;
   IF public.get_public_observation_references(940000013)<>'[]'::jsonb THEN
-    RAISE EXCEPTION 'frozen snapshot of a deleted (withdrawn) source was served';
+    RAISE EXCEPTION 'frozen snapshot of a deleted source was served';
   END IF;
   IF jsonb_array_length(public.get_public_observation_references(940000006))<>1 THEN
-    RAISE EXCEPTION 'consented reference of owner B missing';
+    RAISE EXCEPTION 'reference of owner B missing';
   END IF;
   IF public.get_public_observation_references(940000009)<>'[]'::jsonb THEN
     RAISE EXCEPTION 'eligible observation without references did not return empty array';
@@ -278,8 +291,10 @@ END $$;
 RESET ROLE;
 SET LOCAL request.jwt.claims='';
 
--- Hidden, deleting-account and pre-consent-revision owners are omitted; a
--- withdrawal removes the exposure.
+-- A hidden contribution of the set (even withdrawn), a deleting account and
+-- an opt-out remove the exposure; share-again restores it. A system
+-- withdrawal of the species-page row does not (changed meaning: in 2a it
+-- did).
 DO $$
 DECLARE
   owner_b constant uuid := '00000000-0000-4000-8000-00000000c402';
@@ -300,21 +315,29 @@ BEGIN
   IF jsonb_array_length(public.get_public_observation_references(940000006))<>1 THEN
     RAISE EXCEPTION 'restored fixture not served';
   END IF;
-  -- Withdraw, change the source, grant again: the frozen snapshot now only
-  -- equals a pre-consent revision and is omitted.
   PERFORM private.lock_shared_reference_key(owner_b,'33000000-0000-4000-8000-000000000001');
-  PERFORM private.withdraw_shared_reference_contribution(c_b,'owner');
-  IF public.get_public_observation_references(940000006)<>'[]'::jsonb THEN
-    RAISE EXCEPTION 'withdrawal did not remove the observation reference';
+  PERFORM private.withdraw_shared_reference_contribution(c_b,'use_detached');
+  IF jsonb_array_length(public.get_public_observation_references(940000006))<>1 THEN
+    RAISE EXCEPTION 'a system withdrawal of the species-page row hid the observation reference';
   END IF;
-  UPDATE public.reference_measurement_sets SET raw_text='7-9.5 µm',revision=2
-   WHERE user_id=owner_b AND id='33000000-0000-4000-8000-000000000001';
-  IF (pg_temp.fixture_grant(owner_b,'33000000-0000-4000-8000-000000000001',2100000941)->>'status') <> 'updated'
-     OR (SELECT consent_first_revision FROM private.shared_reference_contributions WHERE id=c_b) <> 2 THEN
-    RAISE EXCEPTION 're-grant fixture failed';
+  UPDATE private.shared_reference_contributions SET hidden_at=now(),hidden_reason='abuse' WHERE id=c_b;
+  IF public.get_public_observation_references(940000006)<>'[]'::jsonb THEN
+    RAISE EXCEPTION 'hidden withdrawn contribution kept its observation reference public';
+  END IF;
+  UPDATE private.shared_reference_contributions SET hidden_at=NULL,hidden_reason=NULL WHERE id=c_b;
+  -- (Each write is its own statement: a STABLE read in the same statement
+  -- would see the snapshot from before the write.)
+  IF private.stop_sharing_reference_set_for_owner(owner_b,'33000000-0000-4000-8000-000000000001') <> 'updated' THEN
+    RAISE EXCEPTION 'stop sharing did not report updated';
   END IF;
   IF public.get_public_observation_references(940000006)<>'[]'::jsonb THEN
-    RAISE EXCEPTION 'snapshot equal only to a pre-consent revision was served';
+    RAISE EXCEPTION 'stop sharing did not remove the observation reference';
+  END IF;
+  IF private.share_reference_set_again_for_owner(owner_b,'33000000-0000-4000-8000-000000000001') <> 'updated' THEN
+    RAISE EXCEPTION 'share again did not report updated';
+  END IF;
+  IF jsonb_array_length(public.get_public_observation_references(940000006))<>1 THEN
+    RAISE EXCEPTION 'share again did not restore the observation reference';
   END IF;
 END $$;
 

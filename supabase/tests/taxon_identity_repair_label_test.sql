@@ -9,9 +9,10 @@
 --     (the 617026 / 55368 case);
 --   * 'not_species' for a non-species in the active release, and for a species
 --     that only a retired release carries.
---   * 'consent_required' (Stage 2a) for a registry species without a
---     consented contribution: the repair refreshes, it never creates.
--- In every case nothing is shared: eligibility is unchanged.
+--   * Stage 2d (changed meaning; was 'consent_required', nothing created):
+--     'shared' for a registry species on a public observation, through an
+--     automatic contribution, and 'opted_out' when the set is opted out.
+-- Non-registry taxa never share or get anchored.
 
 BEGIN;
 
@@ -28,6 +29,7 @@ DECLARE
   v_obs_retired constant bigint := 961000003;
   v_registry constant bigint := 2099100004;  -- registry species, no consent
   v_obs_registry constant bigint := 961000004;
+  v_obs_opted constant bigint := 961000005;
   v_run bigint;
   v_actions jsonb;
 BEGIN
@@ -68,7 +70,8 @@ BEGIN
     (v_obs_species,v_owner,current_date,'private',false,'Labela','species',v_species,'sporely_v2'),
     (v_obs_genus,v_owner,current_date,'private',false,'Labela',NULL,v_genus,'sporely_v2'),
     (v_obs_retired,v_owner,current_date,'private',false,'Labela','retirata',v_retired,'sporely_v2'),
-    (v_obs_registry,v_owner,current_date,'public',false,'Labela','registrata',v_registry,'sporely_v2');
+    (v_obs_registry,v_owner,current_date,'public',false,'Labela','registrata',v_registry,'sporely_v2'),
+    (v_obs_opted,v_owner,current_date,'public',false,'Labela','registrata',v_registry,'sporely_v2');
   INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
   VALUES (v_owner,'81000000-0000-4000-8000-00000001c001','article','[{"family":"Test"}]','Label regression',2026,'Test 2026',1);
   INSERT INTO public.reference_taxon_treatments(user_id,id,reference_work_id,taxon_id,name_as_published,revision)
@@ -86,7 +89,10 @@ BEGIN
     (v_owner,'84000000-0000-4000-8000-00000001c001',v_obs_species,'83000000-0000-4000-8000-00000001c00a','compared',1,'{}'::jsonb),
     (v_owner,'84000000-0000-4000-8000-00000001c002',v_obs_genus,'83000000-0000-4000-8000-00000001c00b','compared',1,'{}'::jsonb),
     (v_owner,'84000000-0000-4000-8000-00000001c003',v_obs_retired,'83000000-0000-4000-8000-00000001c00c','compared',1,'{}'::jsonb),
-    (v_owner,'84000000-0000-4000-8000-00000001c004',v_obs_registry,'83000000-0000-4000-8000-00000001c00a','compared',1,'{}'::jsonb);
+    (v_owner,'84000000-0000-4000-8000-00000001c004',v_obs_registry,'83000000-0000-4000-8000-00000001c00a','compared',1,'{}'::jsonb),
+    (v_owner,'84000000-0000-4000-8000-00000001c005',v_obs_opted,'83000000-0000-4000-8000-00000001c00c','compared',1,'{}'::jsonb);
+  INSERT INTO private.reference_share_opt_outs(owner_id,source_measurement_set_id)
+  VALUES (v_owner,'83000000-0000-4000-8000-00000001c00c');
 
   INSERT INTO private.taxon_identity_repair_runs(
     release_id,plan_sha256,candidate_count,promoted_count,outcome_counts
@@ -96,7 +102,8 @@ BEGIN
   IF private._taxon_identity_repair_reconcile_references(v_run, v_obs_species) <> 1
      OR private._taxon_identity_repair_reconcile_references(v_run, v_obs_genus) <> 1
      OR private._taxon_identity_repair_reconcile_references(v_run, v_obs_retired) <> 1
-     OR private._taxon_identity_repair_reconcile_references(v_run, v_obs_registry) <> 1 THEN
+     OR private._taxon_identity_repair_reconcile_references(v_run, v_obs_registry) <> 1
+     OR private._taxon_identity_repair_reconcile_references(v_run, v_obs_opted) <> 1 THEN
     RAISE EXCEPTION 'expected one reference action per observation';
   END IF;
 
@@ -106,7 +113,8 @@ BEGIN
        v_obs_species::text, 'not_registry_species',
        v_obs_genus::text, 'not_species',
        v_obs_retired::text, 'not_species',
-       v_obs_registry::text, 'consent_required') THEN
+       v_obs_registry::text, 'shared',
+       v_obs_opted::text, 'opted_out') THEN
     RAISE EXCEPTION 'unexpected reference-action labels: %', v_actions;
   END IF;
 
@@ -115,8 +123,13 @@ BEGIN
     RAISE EXCEPTION 'old contribution must be none when the observation had no effective taxon';
   END IF;
 
-  -- Eligibility unchanged: no contribution and no registry row was created.
-  IF EXISTS (SELECT 1 FROM private.shared_reference_contributions c WHERE c.owner_id = v_owner)
+  -- Only the registry species on the non-opted-out set is shared
+  -- (automatic); nothing else is shared or anchored.
+  IF (SELECT array_agg(c.source_measurement_set_id::text || ':' || c.sporely_taxon_id || ':' || c.share_basis)
+        FROM private.shared_reference_contributions c WHERE c.owner_id = v_owner AND c.status = 'shared')
+       IS DISTINCT FROM ARRAY['83000000-0000-4000-8000-00000001c00a:' || v_registry || ':automatic']
+     OR EXISTS (SELECT 1 FROM private.shared_reference_contributions c
+                 WHERE c.owner_id = v_owner AND c.source_measurement_set_id = '83000000-0000-4000-8000-00000001c00c')
      OR EXISTS (SELECT 1 FROM taxonomy_v3.registry_concept rc
                  WHERE rc.sporely_taxon_id IN (v_species, v_genus, v_retired)) THEN
     RAISE EXCEPTION 'the label change must not share or anchor anything';

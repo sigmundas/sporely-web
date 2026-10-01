@@ -2,7 +2,13 @@
 -- 20260930232633_add_reference_sharing_consent_grant.sql.
 --
 -- Uses the shipped version-1 consent texts, activated inside this rolled-back
--- transaction (they ship inactive).
+-- transaction (they ship inactive). Uses are written without a session, so
+-- the automatic paths of Stage 2d (20261001113007) do not create rows here
+-- unless a step calls them. Stage 2d changes: section 7 (the withdrawal RPC
+-- now stops the whole set, so a grant on it is refused as opted_out until
+-- Share again), section 13 (a refresh after a revoked text re-shares the
+-- row as automatic instead of answering consent_required) and section 14
+-- (new_contribution labels opted_out / shared).
 
 BEGIN;
 
@@ -272,9 +278,20 @@ BEGIN
   SET LOCAL ROLE authenticated;
   r := public.withdraw_reference_contribution(v_id);
   RESET ROLE;
+  -- The withdrawal RPC opted the set out: a grant is refused.
+  IF pg_temp.grant_as(owner_a,s_pub,t_species)->>'status' <> 'opted_out'
+     OR (SELECT status FROM private.shared_reference_contributions WHERE id=v_id) <> 'withdrawn' THEN
+    RAISE EXCEPTION 'a grant re-shared an opted-out set';
+  END IF;
+  -- Share again: the hidden row is not re-shared automatically.
+  IF private.share_reference_set_again_for_owner(owner_a,s_pub) <> 'updated'
+     OR (SELECT status FROM private.shared_reference_contributions WHERE id=v_id) <> 'withdrawn'
+     OR (SELECT hidden_at FROM private.shared_reference_contributions WHERE id=v_id) IS NULL THEN
+    RAISE EXCEPTION 'share again re-shared a hidden row or cleared hidden_at';
+  END IF;
   r := pg_temp.grant_as(owner_a,s_pub,t_species);
   SELECT * INTO c FROM private.shared_reference_contributions WHERE id=v_id;
-  IF r->>'status' <> 'updated' OR c.status <> 'shared' OR c.hidden_at IS NULL
+  IF r->>'status' <> 'updated' OR c.share_basis <> 'consented' OR c.shared_first_revision <> c.current_revision OR c.status <> 'shared' OR c.hidden_at IS NULL
      OR c.hidden_reason <> 'privacy' OR pg_temp.public_revisions(v_id) IS NOT NULL THEN
     RAISE EXCEPTION 'grant cleared hidden_at or exposed a hidden row: %', to_jsonb(c);
   END IF;
@@ -452,8 +469,11 @@ BEGIN
      IS DISTINCT FROM ARRAY['withdrawn_by_system:consent_text_revoked'] THEN
     RAISE EXCEPTION 'refresh under a revoked text did not withdraw';
   END IF;
-  IF (private.reference_contribution_share_core('refresh',owner_a,s_multi,t_other)->>'status') <> 'consent_required' THEN
-    RAISE EXCEPTION 'refresh re-shared a revoked row';
+  -- Changed meaning (2d): the next refresh re-shares it as automatic.
+  IF (private.reference_contribution_share_core('refresh',owner_a,s_multi,t_other)->>'status') <> 'updated'
+     OR (SELECT share_basis||':'||(consented_at IS NULL) FROM private.shared_reference_contributions
+          WHERE source_measurement_set_id=s_multi AND sporely_taxon_id=t_other) <> 'automatic:true' THEN
+    RAISE EXCEPTION 'refresh did not re-share the revoked row as automatic';
   END IF;
 
   -- ── 14. Stage 1B labels each observation by its own contribution ──
@@ -476,9 +496,16 @@ BEGIN
           private.reference_canonical_snapshot(owner_a,'73000000-0000-4000-8000-00000000f211')),
          (owner_a,gen_random_uuid(),962000012,'73000000-0000-4000-8000-00000000f212','compared',1,
           private.reference_canonical_snapshot(owner_a,'73000000-0000-4000-8000-00000000f212'));
-  IF pg_temp.grant_as(owner_a,'73000000-0000-4000-8000-00000000f211',t_species,'en',2)->>'status' <> 'created'
-     OR pg_temp.grant_as(owner_a,'73000000-0000-4000-8000-00000000f212',t_species,'en',2)->>'status' <> 'created' THEN
+  -- (Whether 2d already shared them automatically depends on the session the
+  -- use inserts ran under; either way the grants leave them consented.)
+  IF pg_temp.grant_as(owner_a,'73000000-0000-4000-8000-00000000f211',t_species,'en',2)->>'status' NOT IN ('created','no_change')
+     OR pg_temp.grant_as(owner_a,'73000000-0000-4000-8000-00000000f212',t_species,'en',2)->>'status' NOT IN ('created','no_change') THEN
     RAISE EXCEPTION '1B fixture grants failed';
+  END IF;
+  IF (SELECT count(*) FROM private.shared_reference_contributions
+          WHERE source_measurement_set_id IN ('73000000-0000-4000-8000-00000000f211','73000000-0000-4000-8000-00000000f212')
+            AND status='shared' AND share_basis='consented') <> 2 THEN
+    RAISE EXCEPTION '1B fixture rows not consented';
   END IF;
   v_id := (SELECT id FROM private.shared_reference_contributions
              WHERE source_measurement_set_id='73000000-0000-4000-8000-00000000f211');
@@ -493,9 +520,9 @@ BEGIN
   VALUES (v_rel,repeat('e',64),2,2,'{}') RETURNING run_id INTO v_rev;
   PERFORM private._taxon_identity_repair_reconcile_references(v_rev,962000011);
   PERFORM private._taxon_identity_repair_reconcile_references(v_rev,962000012);
-  IF (SELECT array_agg(a.observation_id||':'||a.old_contribution ORDER BY a.observation_id)
+  IF (SELECT array_agg(a.observation_id||':'||a.old_contribution||':'||a.new_contribution ORDER BY a.observation_id)
         FROM private.taxon_identity_repair_reference_actions a WHERE a.run_id=v_rev)
-     IS DISTINCT FROM ARRAY['962000011:none','962000012:withdrawn'] THEN
+     IS DISTINCT FROM ARRAY['962000011:none:opted_out','962000012:withdrawn:shared'] THEN
     RAISE EXCEPTION '1B labels not tied to the observation''s own contribution: %',
       (SELECT array_agg(a.observation_id||':'||a.old_contribution) FROM private.taxon_identity_repair_reference_actions a WHERE a.run_id=v_rev);
   END IF;
