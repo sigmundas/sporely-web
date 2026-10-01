@@ -314,3 +314,45 @@ Consent text v1 is activated only when all of these hold:
   new migration; it is still inactive.
 - **Clients:** revert normally. Without labels, the activation gate is not
   met.
+
+## Handoff: candidate 4 (web publish notice)
+
+Branch `feature/publish-notice-web` (base `1215910`). First candidate
+`2fab057`; both reviews asked for changes. A correction commit follows on the
+same branch. Not accepted. No migrations, DB or production touched.
+
+**Done:** `src/publish-notice.js` (rules, text model, dialog, owner fact
+loading). Wired into find detail `_save()` (visibility, draft, precision),
+review `review-vis` radios, `#review-draft`, `#review-draft-card`,
+`review-location-precision` radios and `#review-obscured`, and import
+`.import-vis-radio`, `.import-draft-checkbox` and `.import-obscure-checkbox`.
+The notice shows on every change to public and not draft, and on every move
+of a public, non-draft item from approximate to exact location. Cancel keeps
+the previous state and resets the control. Excluded: sync-queue inserts and
+stored sessions, which carry already-confirmed state. Other observation
+updates never change visibility or draft. i18n is in en, nb_NO, sv_SE and
+de_DE.
+
+**Verified exposure** (public, not draft; drafts and private/friends are on no
+public surface):
+
+| Setting | Public to anyone (incl. signed-out) | Source |
+|---|---|---|
+| always | species, date, captured_at, created_at, author, habitat, notes, uncertain flag, red list, AI selection fields | `observations_community_view` (anon grant 20260803120000; def 20260930181742) |
+| `exact` | location text and exact coordinates | same view; `get_public_observation` 20260721120000 |
+| `fuzzed` | region or country; coordinates rounded to 2 decimals | same |
+| photos | thumbnails and worker full-size media, served as stored bytes; `storage_exif_safe` gates only the legacy `fullUrl` | `search_public_observation_images` 20260809120000 |
+| spore `public` | statistics, summary, points, mosaic | view; `get_public_observation` |
+| spore not public | the above withheld; microscope photos and prep details stay public | same |
+| comments | signed-in users only | `phase7_comments_read` TO authenticated, 20260812120000 |
+| references | only shared, consented contributions for the set and species, on a qualifying use (needs spore `public`) | `search_public_observation_references` 20260930224506 |
+
+The already-shared fact comes from `list_my_shared_reference_contributions`
+(status `shared`, species after the save, `source_measurement_set_id` among
+the owner's `observation_reference_uses`). It is unknown until candidate 1
+adds that field, and on any failure, rate limit or offline state; then the
+cautious line shows. With approximate location, a photo caveat shows unless
+every `observation_images` row is `storage_exif_safe`. New web uploads are
+recorded safe.
+
+**Deferred:** manual Android (Capacitor) check; desktop paths (candidate 3).

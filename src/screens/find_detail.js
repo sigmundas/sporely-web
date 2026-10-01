@@ -4260,9 +4260,24 @@ export function detailTaxonAfterSave(selectedTaxon, identificationChanged) {
   return { known: false }
 }
 
+let detailPublishNoticeOptions = {}
+
+export function __setDetailPublishTestState({ obs = null, isOwner = true, publishNoticeOptions = {} } = {}) {
+  currentObs = obs
+  currentObsIsOwner = isOwner
+  selectedTaxon = null
+  detailPublishNoticeOptions = publishNoticeOptions
+}
+
+export function __saveDetailForTests() {
+  return _save()
+}
+
 function _restoreDetailPublishControls(obs) {
   const draftInput = document.getElementById('detail-draft')
   if (draftInput) draftInput.checked = obs.is_draft !== false
+  const obscuredInput = document.getElementById('detail-obscured')
+  if (obscuredInput) obscuredInput.checked = obs.location_precision === 'fuzzed'
   const visibility = normalizeVisibility(obs.visibility, 'public')
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.checked = radio.value === visibility
@@ -4364,9 +4379,13 @@ async function _save() {
   // the observation public and not a draft. Cancel writes nothing and puts
   // the draft/visibility controls back to the saved state.
   const publishConfirmed = await confirmPublishIfNeeded(
-    { visibility: currentObs.visibility, is_draft: currentObs.is_draft },
+    {
+      visibility: currentObs.visibility,
+      is_draft: currentObs.is_draft,
+      location_precision: currentObs.location_precision,
+    },
     patch,
-    { loadFacts: () => loadExistingObservationFacts({
+    { ...detailPublishNoticeOptions, loadFacts: () => loadExistingObservationFacts({
       client: supabase,
       observationId: currentObs.id,
       userId: state.user.id,
