@@ -101,6 +101,7 @@ test('stop sharing: confirmation first, then guard, then RPC', async () => {
   assert.match(shown, /species-page listing/)
   assert.match(shown, /Share again/)
   assert.match(shown, /cannot be recalled/)
+  assert.match(shown, /keeps earlier versions privately as a record/)
 
   const blocked = await stopSharingWithConfirmation('set-1', {
     confirm: () => true, guard: () => false, stop: async () => { calls.push('stop2') },

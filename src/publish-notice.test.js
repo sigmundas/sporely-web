@@ -202,7 +202,7 @@ test('locales: German notice uses one register (du); shared-references labels ma
 })
 
 test('opted-out line: shown only when an attached set is stopped; omitted when unknown', async () => {
-  const STOPPED_EN = 'References you stopped sharing stay private.'
+  const STOPPED_EN = 'References you stopped sharing are no longer shown publicly.'
   assert.equal(t('publishNotice.referencesStopped'), STOPPED_EN)
   const sets = [
     { source_measurement_set_id: 'set-a', status: 'stopped', stopped_at: '2026-01-01T00:00:00Z' },
