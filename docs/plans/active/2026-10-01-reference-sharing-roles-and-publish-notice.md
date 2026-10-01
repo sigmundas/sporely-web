@@ -314,3 +314,18 @@ Consent text v1 is activated only when all of these hold:
   new migration; it is still inactive.
 - **Clients:** revert normally. Without labels, the activation gate is not
   met.
+
+## Handoff: candidate 1 (server)
+
+Branch `feature/reference-sharing-roles-server`, migration
+`20261001091940_add_reference_contribution_relationship_roles.sql`, tests in
+`supabase/tests/shared_reference_roles_test.sql` plus the moved `_v2`
+assertions. Not deployed; awaiting general and security review.
+- The served check takes `p_enforce_envelope_cap boolean DEFAULT true`;
+  search passes `false` and keeps its page-level cap, get passes `false` and
+  caps the revision it serves.
+- `_unthrottled` `_v2` bodies live in `private` (as in 2b), not `public`.
+- `relationship_roles` is added to every served shared envelope from `get_v2`,
+  including in-period historical revisions; tombstones carry none.
+- Pre-existing, unrelated: `public_observation_point_prep_test.sql` fails on
+  the base too.
