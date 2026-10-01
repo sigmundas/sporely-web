@@ -2080,16 +2080,7 @@ export function renderSessions() {
   });
 
   list.querySelectorAll('.import-obscure-checkbox[data-sid]').forEach(input => {
-    input.addEventListener('change', async () => {
-      const s = sessionById(input.dataset.sid);
-      const nextPrecision = input.checked ? 'fuzzed' : 'exact';
-      if (s && !await _confirmImportSessionPublish(s, { location_precision: nextPrecision })) {
-        input.checked = s.location_precision === 'fuzzed';
-        return;
-      }
-      if (s) s.location_precision = nextPrecision;
-      _persistSessions();
-    });
+    input.addEventListener('change', () => { void _handleImportPrecisionChange(input); });
   });
 
   list.querySelectorAll('.import-uncertain-checkbox[data-sid]').forEach(input => {
@@ -2934,6 +2925,17 @@ export async function _handleImportVisibilityChange(input) {
     group.querySelectorAll('.scope-tab').forEach(tab => tab.classList.remove('active'));
     input.closest('.scope-tab')?.classList.add('active');
   }
+}
+
+export async function _handleImportPrecisionChange(input) {
+  const s = sessionById(input.dataset.sid);
+  const nextPrecision = input.checked ? 'fuzzed' : 'exact';
+  if (s && !await _confirmImportSessionPublish(s, { location_precision: nextPrecision })) {
+    input.checked = s.location_precision === 'fuzzed';
+    return;
+  }
+  if (s) s.location_precision = nextPrecision;
+  _persistSessions();
 }
 
 export async function _handleImportDraftChange(input) {

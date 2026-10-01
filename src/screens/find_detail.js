@@ -1777,7 +1777,7 @@ export async function openFindDetail(obsId, options = {}) {
   const draftInput = document.getElementById('detail-draft')
   if (draftInput) draftInput.checked = obs.is_draft !== false
   const obscuredInput = document.getElementById('detail-obscured')
-  if (obscuredInput) obscuredInput.checked = obs.location_precision === 'fuzzed'
+  if (obscuredInput) obscuredInput.checked = detailPrecisionIsObscured(obs.location_precision)
   detailPrivacySlotCount = null
   _renderPrivacySlotNote()
   _loadPrivacySlotCount()
@@ -3588,7 +3588,7 @@ function _initDetailLocationActions() {
 
 function _currentDetailUsesPrivacySlot() {
   const visibility = document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'
-  const precision = document.getElementById('detail-obscured')?.checked ? 'fuzzed' : 'exact'
+  const precision = detailLocationPrecisionForSave(currentObs?.location_precision, document.getElementById('detail-obscured')?.checked)
   const isDraft = document.getElementById('detail-draft')?.checked !== false
   return observationUsesPrivacySlot({
     is_draft: isDraft,
@@ -4262,6 +4262,19 @@ export function detailTaxonAfterSave(selectedTaxon, identificationChanged) {
 
 let detailPublishNoticeOptions = {}
 
+// The obscured checkbox can only express exact vs not exact. The server also
+// has 'region' and 'hidden' (less than fuzzed). Those show as obscured and are
+// kept on save while the box stays checked; only unchecking writes 'exact',
+// and checking an exact observation writes 'fuzzed'.
+const DETAIL_OBSCURED_PRECISIONS = new Set(['fuzzed', 'region', 'hidden'])
+export function detailPrecisionIsObscured(precision) {
+  return DETAIL_OBSCURED_PRECISIONS.has(precision)
+}
+export function detailLocationPrecisionForSave(storedPrecision, obscuredChecked) {
+  if (!obscuredChecked) return 'exact'
+  return detailPrecisionIsObscured(storedPrecision) ? storedPrecision : 'fuzzed'
+}
+
 export function __setDetailPublishTestState({ obs = null, isOwner = true, publishNoticeOptions = {} } = {}) {
   currentObs = obs
   currentObsIsOwner = isOwner
@@ -4277,7 +4290,7 @@ function _restoreDetailPublishControls(obs) {
   const draftInput = document.getElementById('detail-draft')
   if (draftInput) draftInput.checked = obs.is_draft !== false
   const obscuredInput = document.getElementById('detail-obscured')
-  if (obscuredInput) obscuredInput.checked = obs.location_precision === 'fuzzed'
+  if (obscuredInput) obscuredInput.checked = detailPrecisionIsObscured(obs.location_precision)
   const visibility = normalizeVisibility(obs.visibility, 'public')
   document.querySelectorAll('input[name="detail-vis"]').forEach(radio => {
     radio.checked = radio.value === visibility
@@ -4303,7 +4316,7 @@ async function _save() {
     uncertain:  document.getElementById('detail-uncertain').checked,
     visibility: toCloudVisibility(document.querySelector('input[name="detail-vis"]:checked')?.value || 'public'),
     is_draft: document.getElementById('detail-draft')?.checked !== false,
-    location_precision: document.getElementById('detail-obscured')?.checked ? 'fuzzed' : 'exact',
+    location_precision: detailLocationPrecisionForSave(currentObs.location_precision, document.getElementById('detail-obscured')?.checked),
     ai_selected_service: currentObs.ai_selected_service || null,
     ai_selected_taxon_id: currentObs.ai_selected_taxon_id || null,
     ai_selected_scientific_name: currentObs.ai_selected_scientific_name || null,

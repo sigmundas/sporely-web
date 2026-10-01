@@ -27,9 +27,15 @@ import {
   __setImportAiTestHooks,
   __setImportPublishNoticeOptionsForTests,
   _handleImportDraftChange,
+  _handleImportPrecisionChange,
   _handleImportVisibilityChange,
 } from './screens/import_review.js'
-import { __saveDetailForTests, __setDetailPublishTestState } from './screens/find_detail.js'
+import {
+  __saveDetailForTests,
+  __setDetailPublishTestState,
+  detailLocationPrecisionForSave,
+  detailPrecisionIsObscured,
+} from './screens/find_detail.js'
 
 setLocale('en')
 
@@ -372,4 +378,74 @@ test('dialog: Publish button resolves true; Cancel button false', async () => {
     overlay.clickListener({ target: overlay.buttons[action] })
     assert.equal(await pending, expected)
   }
+})
+
+// ── location precision levels ─────────────────────────────────────────────
+
+test('more precise location on a public item needs a notice at every level', () => {
+  const pub = { visibility: 'public', is_draft: false }
+  const at = p => ({ ...pub, location_precision: p })
+  for (const [from, to] of [['hidden', 'exact'], ['region', 'exact'], ['fuzzed', 'exact'], ['hidden', 'fuzzed'], ['region', 'fuzzed'], ['hidden', 'region']]) {
+    assert.equal(needsPublishNotice(at(from), at(to)), true, `${from} -> ${to}`)
+  }
+  for (const [from, to] of [['exact', 'fuzzed'], ['fuzzed', 'hidden'], ['hidden', 'hidden'], ['region', 'region']]) {
+    assert.equal(needsPublishNotice(at(from), at(to)), false, `${from} -> ${to}`)
+  }
+})
+
+test('find detail keeps a stored hidden/region precision while the box stays checked', () => {
+  assert.equal(detailPrecisionIsObscured('hidden'), true)
+  assert.equal(detailPrecisionIsObscured('region'), true)
+  assert.equal(detailLocationPrecisionForSave('hidden', true), 'hidden')
+  assert.equal(detailLocationPrecisionForSave('region', true), 'region')
+  assert.equal(detailLocationPrecisionForSave('exact', true), 'fuzzed')
+  assert.equal(detailLocationPrecisionForSave('hidden', false), 'exact')
+})
+
+test('edit notes on a hidden public observation keeps hidden and shows no notice', async () => {
+  state.user = { id: 'owner-1' }
+  const db = recordSupabase()
+  const dialog = dialogRecorder(true)
+  // the screen shows a hidden observation as obscured (checked)
+  const dom = detailDom({ draft: false, visibility: 'public', obscured: true })
+  dom.byId['detail-notes'].value = 'new note'
+  __setDetailPublishTestState({ obs: { id: 8, user_id: 'owner-1', visibility: 'public', is_draft: false, location_precision: 'hidden' }, publishNoticeOptions: { showDialog: dialog.showDialog } })
+  try {
+    await __saveDetailForTests()
+    assert.equal(dialog.calls.length, 0)
+    const write = db.writes.find(w => w.table === 'observations')
+    assert.equal(write.patch.location_precision, 'hidden')
+    assert.equal(write.patch.notes, 'new note')
+  } finally { dom.restore(); db.restore(); __setDetailPublishTestState() }
+})
+
+test('find detail: unchecking obscured on a fuzzed public observation shows the notice', async () => {
+  state.user = { id: 'owner-1' }
+  const db = recordSupabase()
+  const dialog = dialogRecorder(false)
+  const dom = detailDom({ draft: false, visibility: 'public', obscured: false })
+  __setDetailPublishTestState({ obs: { id: 9, user_id: 'owner-1', visibility: 'public', is_draft: false, location_precision: 'fuzzed' }, publishNoticeOptions: { showDialog: dialog.showDialog } })
+  try {
+    await __saveDetailForTests()
+    assert.equal(dialog.calls.length, 1)
+    assert.deepEqual(db.writes, [])
+    assert.equal(dom.byId['detail-obscured'].checked, true)
+  } finally { dom.restore(); db.restore(); __setDetailPublishTestState() }
+})
+
+test('import obscure checkbox: approximate -> exact on a public item re-confirms; Cancel keeps it', async () => {
+  const persisted = []
+  __setImportAiTestHooks({ persistSessions: s => persisted.push(s) })
+  const session = { id: 's3', visibility: 'public', is_draft: false, location_precision: 'fuzzed' }
+  __setImportAiSessionsForTests([session])
+  const dialog = dialogRecorder(false)
+  __setImportPublishNoticeOptionsForTests({ showDialog: dialog.showDialog })
+  const input = el({ checked: false, dataset: { sid: 's3' } })
+  try {
+    await _handleImportPrecisionChange(input)
+    assert.equal(dialog.calls.length, 1)
+    assert.equal(input.checked, true)
+    assert.equal(session.location_precision, 'fuzzed')
+    assert.equal(persisted.length, 0)
+  } finally { __setImportPublishNoticeOptionsForTests(undefined); __setImportAiTestHooks(null) }
 })

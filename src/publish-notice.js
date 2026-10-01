@@ -53,8 +53,11 @@ function isPublic(obs) {
   return String(obs?.visibility || '').toLowerCase() === 'public' && obs?.is_draft === false
 }
 
-function isFuzzed(obs) {
-  return obs?.location_precision === 'fuzzed'
+// How much location a public observation shows. The views treat a missing
+// value as 'exact' (coalesce(location_precision, 'exact')).
+const PRECISION_RANK = { hidden: 0, region: 1, fuzzed: 2, exact: 3 }
+function precisionRank(obs) {
+  return PRECISION_RANK[obs?.location_precision] ?? PRECISION_RANK.exact
 }
 
 /** True only for a change that makes the observation public and not a draft. */
@@ -64,11 +67,12 @@ export function isPublishingTransition(previous, next) {
 
 /**
  * A notice is needed when the change publishes the observation, or when a
- * public observation's location goes from approximate to exact.
+ * public observation's location becomes more precise (hidden < region <
+ * fuzzed < exact).
  */
 export function needsPublishNotice(previous, next) {
   if (isPublishingTransition(previous, next)) return true
-  return isPublic(previous) && isPublic(next) && isFuzzed(previous) && !isFuzzed(next)
+  return isPublic(previous) && isPublic(next) && precisionRank(next) > precisionRank(previous)
 }
 
 /**
@@ -110,7 +114,9 @@ export function resolveAlreadySharedFact({ attachedUses, taxonId, sporeDataVisib
  *   imagesExifSafe: true (all images known safe) | false | undefined (unknown)
  */
 export function buildPublishNoticeModel({ locationPrecision, sporeDataVisibility, imagesExifSafe, sharedFact }) {
-  const fuzzed = locationPrecision === 'fuzzed'
+  // 'region'/'hidden' show less than fuzzed; the approximate text (and the
+  // photo caveat) is the cautious description for them.
+  const fuzzed = ['fuzzed', 'region', 'hidden'].includes(locationPrecision)
   const exposed = [
     fuzzed ? t('publishNotice.locationFuzzed') : t('publishNotice.locationExact'),
     t('publishNotice.details'),
