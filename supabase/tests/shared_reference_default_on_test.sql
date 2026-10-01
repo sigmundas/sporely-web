@@ -39,21 +39,6 @@ SELECT c.owner_id, c.source_measurement_set_id, pg_catalog.min(c.withdrawn_at)
         ORDER BY e.id DESC LIMIT 1
      ) = 'withdrawn_by_owner'
    )
-   AND NOT (
-     NOT EXISTS (
-       SELECT 1 FROM private.shared_reference_consent_events e
-        WHERE e.contribution_id = c.id AND e.event = 'withdrawn_by_owner'
-     )
-     AND EXISTS (
-       SELECT 1
-         FROM private.taxon_identity_repair_reference_actions a
-         JOIN public.observations o ON o.id = a.observation_id
-        WHERE a.old_contribution = 'withdrawn'
-          AND o.user_id = c.owner_id
-          AND a.reference_measurement_set_id = c.source_measurement_set_id
-          AND a.old_sporely_taxon_id = c.sporely_taxon_id
-     )
-   )
  GROUP BY c.owner_id, c.source_measurement_set_id
 ON CONFLICT (owner_id, source_measurement_set_id) DO NOTHING;
 $$;
@@ -177,7 +162,7 @@ BEGIN
   VALUES (v_id,1,1,1,1,repeat('a',64),'{"status":"shared","revision":1}');
   INSERT INTO private.shared_reference_consent_events(contribution_id,event,reason)
   VALUES (v_id,'withdrawn_by_system','consent_missing');
-  -- event-less Stage 1B repair withdrawal (identifiable).
+  -- event-less Stage 1B repair withdrawal: opted out too (no exclusion).
   INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,status,current_revision,withdrawn_at)
   VALUES (o1,s_repair,t2,'withdrawn',1,now()-interval '20 days');
   INSERT INTO public.taxonomy_v2_releases(
@@ -212,7 +197,7 @@ BEGIN
   PERFORM pg_temp.backfill();
   IF (SELECT array_agg(source_measurement_set_id ORDER BY source_measurement_set_id)
         FROM private.reference_share_opt_outs)
-       IS DISTINCT FROM ARRAY[s_owner_pre2a,s_owner_2a] THEN
+       IS DISTINCT FROM ARRAY[s_owner_pre2a,s_repair,s_owner_2a] THEN
     RAISE EXCEPTION 'backfill opted out the wrong sets: %',
       (SELECT array_agg(source_measurement_set_id) FROM private.reference_share_opt_outs);
   END IF;
@@ -221,7 +206,7 @@ BEGIN
     RAISE EXCEPTION 'backfill did not keep the withdrawal time';
   END IF;
   PERFORM pg_temp.backfill();
-  IF (SELECT count(*) FROM private.reference_share_opt_outs) <> 2 THEN
+  IF (SELECT count(*) FROM private.reference_share_opt_outs) <> 3 THEN
     RAISE EXCEPTION 'backfill is not idempotent';
   END IF;
 
@@ -230,7 +215,7 @@ BEGIN
   IF pg_temp.state(o1,s_owner_pre2a) <> 'withdrawn:-'
      OR pg_temp.state(o1,s_owner_2a) <> 'withdrawn:-'
      OR pg_temp.state(o1,s_system) <> 'shared:automatic'
-     OR pg_temp.state(o1,s_repair) <> 'shared:automatic,withdrawn:-'
+     OR pg_temp.state(o1,s_repair) <> 'withdrawn:-'
      OR pg_temp.state(o1,s_new) <> 'shared:automatic'
      OR pg_temp.state(o1,s_hidden) <> 'withdrawn:-'
      OR pg_temp.state(o1,s_private) <> 'none'
@@ -248,7 +233,7 @@ BEGIN
      OR NOT EXISTS (SELECT 1 FROM private.get_public_reference_contribution_v2_unthrottled(v_id,2)) THEN
     RAISE EXCEPTION 'deploy re-share did not start a new sharing period';
   END IF;
-  IF (SELECT count(*) FROM private.shared_reference_consent_events WHERE event='shared_automatically') <> 4 THEN
+  IF (SELECT count(*) FROM private.shared_reference_consent_events WHERE event='shared_automatically') <> 3 THEN
     RAISE EXCEPTION 'deploy refresh did not log one shared_automatically per share';
   END IF;
   SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) INTO v_before FROM private.shared_reference_contributions c;
@@ -409,6 +394,55 @@ BEGIN
     RAISE EXCEPTION 'withdrawal RPC did not stop the set';
   END IF;
 
+  -- ── D2. Moderation is set-level: hiding the contribution under one taxon
+  -- hides a shared sibling under another taxon on the species page, in
+  -- roles and on observations; a refresh does not touch the sibling ──
+  PERFORM pg_temp.claims(NULL,'service_role');
+  UPDATE public.observations SET resolved_sporely_taxon_id=t2 WHERE id=970000005;
+  UPDATE public.observations SET resolved_sporely_taxon_id=t WHERE id=970000005;
+  INSERT INTO public.observations(id,user_id,date,visibility,is_draft,spore_data_visibility,resolved_sporely_taxon_id)
+  OVERRIDING SYSTEM VALUE VALUES (970000009,o1,current_date,'public',false,'public',t2);
+  INSERT INTO public.observation_reference_uses(user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json)
+  VALUES (o1,gen_random_uuid(),970000009,s_new,'contradicts',1,private.reference_canonical_snapshot(o1,s_new));
+  PERFORM pg_temp.claims(NULL,NULL);
+  IF pg_temp.state(o1,s_new) <> 'shared:automatic,shared:automatic' THEN
+    RAISE EXCEPTION 'sibling fixture: %', pg_temp.state(o1,s_new);
+  END IF;
+  SELECT id INTO v_id FROM private.shared_reference_contributions WHERE source_measurement_set_id=s_new AND sporely_taxon_id=t;
+  IF NOT private.reference_contribution_is_served(v_id)
+     OR private.reference_contribution_public_roles(v_id) IS DISTINCT FROM ARRAY['compared'] THEN
+    RAISE EXCEPTION 'sibling A not served before the hide';
+  END IF;
+  UPDATE private.shared_reference_contributions SET hidden_at=now(),hidden_reason='abuse'
+   WHERE source_measurement_set_id=s_new AND sporely_taxon_id=t2;
+  v_n := (SELECT current_revision FROM private.shared_reference_contributions WHERE id=v_id);
+  IF private.reference_contribution_is_served(v_id)
+     OR EXISTS (SELECT 1 FROM private.search_public_reference_contributions_v2_unthrottled(t,100,NULL,NULL) i
+                 WHERE i->>'contribution_id'=v_id::text)
+     OR EXISTS (SELECT 1 FROM private.get_public_reference_contribution_v2_unthrottled(v_id,NULL))
+     OR private.reference_contribution_public_roles(v_id) IS DISTINCT FROM '{}'::text[]
+     OR public.get_public_observation_references(970000005) <> '[]'::jsonb
+     OR public.get_public_observation_references(970000009) <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'a sibling of a hidden contribution is still served';
+  END IF;
+  IF (private.reference_contribution_share_core('refresh',o1,s_new,t)->>'status') <> 'moderation_hidden'
+     OR (SELECT current_revision FROM private.shared_reference_contributions WHERE id=v_id) <> v_n THEN
+    RAISE EXCEPTION 'a refresh touched the sibling of a hidden contribution';
+  END IF;
+  UPDATE private.shared_reference_contributions SET hidden_at=NULL,hidden_reason=NULL
+   WHERE source_measurement_set_id=s_new AND sporely_taxon_id=t2;
+  IF NOT private.reference_contribution_is_served(v_id) THEN
+    RAISE EXCEPTION 'restore did not serve the sibling again';
+  END IF;
+  -- The owner list includes a still-shared set without a qualifying use.
+  UPDATE public.observations SET visibility='private' WHERE id IN (970000005,970000009);
+  -- (the trigger withdrew; put one row back to simulate a stale share)
+  UPDATE private.shared_reference_contributions
+     SET status='shared',withdrawn_at=NULL,share_basis='automatic',
+         shared_first_revision=current_revision
+   WHERE id=v_id;
+  PERFORM pg_temp.claims(o1,'authenticated');
+
   -- ── E. list_my_reference_sharing ──
   DELETE FROM private.shared_reference_rate_buckets;
   SET LOCAL ROLE authenticated;
@@ -417,7 +451,7 @@ BEGIN
   IF r->>'status' <> 'ok'
      OR (SELECT array_agg(x->>'source_measurement_set_id'||':'||(x->>'status') ORDER BY x->>'source_measurement_set_id')
            FROM jsonb_array_elements(r->'sets') x)
-        IS DISTINCT FROM ARRAY[s_owner_pre2a||':stopped', s_system||':shared', s_repair||':shared',
+        IS DISTINCT FROM ARRAY[s_owner_pre2a||':stopped', s_system||':shared', s_repair||':stopped',
                                s_owner_2a||':stopped', s_new||':shared', s_hidden||':hidden',
                                s_private||':stopped']
      OR EXISTS (SELECT 1 FROM jsonb_array_elements(r->'sets') x
@@ -427,7 +461,7 @@ BEGIN
                                 'status','stopped_at'])
      OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(r->'sets') x
                      WHERE x->>'source_measurement_set_id'=s_new::text
-                       AND (x->>'public_observation_count')::integer=1
+                       AND (x->>'public_observation_count')::integer=0
                        AND x->'stopped_at'='null'::jsonb
                        AND x->>'source_short_label'='Default 2026' AND x->>'source_raw_text'='8-10 um'
                        AND jsonb_array_length(x->'species_page_contributions')=1
@@ -463,7 +497,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM private.shared_reference_contributions WHERE share_basis='automatic')
      OR (SELECT count(*) FROM private.shared_reference_consent_events
           WHERE event='withdrawn_by_system' AND reason='rollback') <> v_n
-     OR (SELECT count(*) FROM private.reference_share_opt_outs) <> 3 THEN
+     OR (SELECT count(*) FROM private.reference_share_opt_outs) <> 4 THEN
     RAISE EXCEPTION 'rollback step 2 did not withdraw exactly the automatic rows, keeping opt-outs';
   END IF;
 END

@@ -136,6 +136,8 @@ op_after() {
 race() {
   local k=$1 first=$2 second=$3 expect=$4 seeded=${5:-granted} o
   o=$(owner "$k")
+  local ev0
+  ev0=$(P -c "select coalesce(max(id),0) from private.shared_reference_consent_events")
   seed "$k" "$seeded"
   local sql_a sql_b
   sql_a="BEGIN; $(op_resolved "$first" "$k") SELECT 'race-$k-A-holding', pg_sleep(2); $(op_after "$first" "$k") COMMIT;"
@@ -169,7 +171,7 @@ race() {
   # account_deleted event of this race's taxon/key instead.
   local anon=false
   case "$first$second" in *deleteacct*) anon=true ;; esac
-  got=$(P -c "select coalesce(string_agg(status,',' order by sporely_taxon_id),'none') from private.shared_reference_contributions c where c.owner_id='$o' or ($anon and c.owner_id is null and exists (select 1 from private.shared_reference_consent_events e where e.contribution_id=c.id and e.reason='account_deleted'))")
+  got=$(P -c "select coalesce(string_agg(status,',' order by sporely_taxon_id),'none') from private.shared_reference_contributions c where c.owner_id='$o' or ($anon and c.owner_id is null and exists (select 1 from private.shared_reference_consent_events e where e.contribution_id=c.id and e.reason='account_deleted' and e.id > $ev0))")
   [ "$got" = "$expect" ] || fail "race $k ($first then $second): contribution is '$got', expected '$expect'"
   [ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='shared' and not private.reference_set_has_qualifying_use(c.owner_id,c.source_measurement_set_id,c.sporely_taxon_id)")" = 0 ] \
     || fail "race $k ($first then $second): a share survived without a qualifying use"
@@ -214,6 +216,13 @@ k=$((k+1)); race $k revoke grant none ungranted
 grep -q "grant-status|consent_text_unavailable" "$LOG.$k.b" \
   || { cat "$LOG.$k.b"; fail "grant after revocation was not refused"; }
 
+# Stage 2d: account deletion against an automatic create through the core
+# (the deploy-refresh / trigger path). The core takes the profile row before
+# the key lock, so the delete's anonymise trigger cannot deadlock with it.
+k=$((k+1)); race $k lockdeleteacct corerefresh none ungranted
+grep -q "core-status|account_unavailable" "$LOG.$k.b" || { cat "$LOG.$k.b"; fail "core refresh after account deletion did not return account_unavailable"; }
+k=$((k+1)); race $k corerefresh deleteacct withdrawn ungranted
+grep -q "core-status|created" "$LOG.$k.a" || { cat "$LOG.$k.a"; fail "core refresh before account deletion did not create"; }
 # Stage 2d: stop sharing against refresh, both orders; on a system-withdrawn
 # row the core refresh would re-share, so stop must win either way.
 P -c "update private.reference_share_consent_texts set revoked=false, active=true where version=1 and locale='en'"
@@ -228,8 +237,19 @@ k=$((k+1)); race $k corerefresh stop withdrawn sysw
 grep -q "core-status|updated" "$LOG.$k.a" || { cat "$LOG.$k.a"; fail "core refresh did not re-share the system-withdrawn row"; }
 grep -q "stop-status|updated" "$LOG.$k.b" || { cat "$LOG.$k.b"; fail "stop after the re-share did not report updated"; }
 # Share again against stop sharing, both orders, from a stopped set.
+# served <k>: species-page rows served plus observation references of the
+# race's observation (fail closed: both 0 after a stop).
+served() { P -c "select (select count(*) from private.shared_reference_contributions c where c.owner_id='$(owner "$1")' and private.reference_contribution_is_served(c.id)) + (select jsonb_array_length(public.get_public_observation_references($(obs_id "$1"))))"; }
 k=$((k+1)); race $k shareagain stop withdrawn stopped
 [ "$(opted $k)" = 1 ] || fail "race $k: stop after share again left no opt-out"
+[ "$(served $k)" = 0 ] || fail "race $k: still served after share again then stop"
+# From a system-withdrawn (not opted-out) set: share again re-shares, the
+# concurrent stop must still end withdrawn, opted out and unserved.
+k=$((k+1)); race $k shareagain stop withdrawn sysw
+[ "$(opted $k)" = 1 ] && [ "$(served $k)" = 0 ] || fail "race $k: share again then stop did not fail closed"
+grep -q "again-status|no_change" "$LOG.$k.a" || { cat "$LOG.$k.a"; fail "race $k: share again status"; }
+k=$((k+1)); race $k stop shareagain shared sysw
+[ "$(opted $k)" = 0 ] || fail "race $k: share again after stop left the opt-out"
 k=$((k+1)); race $k stop shareagain shared stopped
 [ "$(opted $k)" = 0 ] || fail "race $k: share again after stop left the opt-out"
 grep -q "again-status|updated" "$LOG.$k.b" || { cat "$LOG.$k.b"; fail "share again did not report updated"; }

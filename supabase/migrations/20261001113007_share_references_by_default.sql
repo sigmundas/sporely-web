@@ -250,6 +250,10 @@ BEGIN
     RETURN private.shared_reference_contribution_result('invalid_payload');
   END IF;
 
+  -- Lock order: the owner's profile row FOR KEY SHARE before the key lock,
+  -- as the grant, the opt-out writes and a profile delete take them, so an
+  -- automatic create cannot deadlock with an account deletion.
+  PERFORM 1 FROM public.profiles p WHERE p.id = v_owner FOR KEY SHARE;
   PERFORM private.lock_shared_reference_key(v_owner, p_source_measurement_set_id);
 
   IF EXISTS (SELECT 1 FROM private.reference_account_deletions d WHERE d.user_id = v_owner)
@@ -286,7 +290,11 @@ BEGIN
     END IF;
     RETURN private.shared_reference_contribution_result('opted_out');
   END IF;
-  IF p_mode = 'refresh' AND NOT v_shared
+  -- Moderation is set-level: while any contribution of the set is hidden, a
+  -- refresh neither creates, re-shares nor adds revisions (a shared sibling
+  -- stays as it is and is not served: reference_contribution_is_served
+  -- checks the set too). hidden_at is never cleared.
+  IF p_mode = 'refresh'
      AND private.reference_set_has_hidden_contribution(v_owner, p_source_measurement_set_id) THEN
     RETURN private.shared_reference_contribution_result('moderation_hidden');
   END IF;
@@ -952,6 +960,7 @@ AS $$
        AND c.share_basis IS NOT NULL
        AND r.revision >= c.shared_first_revision
        AND NOT private.reference_set_opted_out(c.owner_id, c.source_measurement_set_id)
+       AND NOT private.reference_set_has_hidden_contribution(c.owner_id, c.source_measurement_set_id)
        AND NOT EXISTS (
          SELECT 1 FROM private.reference_account_deletions d WHERE d.user_id = c.owner_id
        )
@@ -1272,8 +1281,15 @@ BEGIN
         SELECT o.source_measurement_set_id AS set_id, o.opted_out_at
           FROM private.reference_share_opt_outs o
          WHERE o.owner_id = v_owner
+      ), still_shared AS (
+        -- Every set that still has a shared contribution, even without a
+        -- qualifying use, so the owner can always stop what may be served.
+        SELECT DISTINCT c.source_measurement_set_id AS set_id
+          FROM private.shared_reference_contributions c
+         WHERE c.owner_id = v_owner AND c.status = 'shared'
       ), keys AS (
         SELECT set_id FROM used UNION SELECT set_id FROM opted
+        UNION SELECT set_id FROM still_shared
       ), rows AS (
         SELECT k.set_id,
                op.opted_out_at,
@@ -1402,9 +1418,9 @@ REVOKE ALL ON FUNCTION public.search_public_observation_references(bigint[]) FRO
 -- 13. Backfill: owner withdrawals become opt-outs --------------------------------
 -- Every withdrawn contribution with no withdrawn_by_system event (pre-2a owner
 -- withdrawals, and event-less pre-2a system withdrawals: errs toward less
--- exposure), or whose latest withdrawal event is the owner's, gets an opt-out
--- for its (owner, set). Stage 1B repair withdrawals are excluded when
--- identifiable. Runs strictly before the deploy refresh.
+-- exposure, including event-less Stage 1B repair withdrawals), or whose
+-- latest withdrawal event is the owner's, gets an opt-out for its
+-- (owner, set). Runs strictly before the deploy refresh.
 INSERT INTO private.reference_share_opt_outs(owner_id, source_measurement_set_id, opted_out_at)
 SELECT c.owner_id, c.source_measurement_set_id, pg_catalog.min(c.withdrawn_at)
   FROM private.shared_reference_contributions c
@@ -1421,21 +1437,6 @@ SELECT c.owner_id, c.source_measurement_set_id, pg_catalog.min(c.withdrawn_at)
           AND e.event IN ('withdrawn_by_owner','withdrawn_by_system')
         ORDER BY e.id DESC LIMIT 1
      ) = 'withdrawn_by_owner'
-   )
-   AND NOT (
-     NOT EXISTS (
-       SELECT 1 FROM private.shared_reference_consent_events e
-        WHERE e.contribution_id = c.id AND e.event = 'withdrawn_by_owner'
-     )
-     AND EXISTS (
-       SELECT 1
-         FROM private.taxon_identity_repair_reference_actions a
-         JOIN public.observations o ON o.id = a.observation_id
-        WHERE a.old_contribution = 'withdrawn'
-          AND o.user_id = c.owner_id
-          AND a.reference_measurement_set_id = c.source_measurement_set_id
-          AND a.old_sporely_taxon_id = c.sporely_taxon_id
-     )
    )
  GROUP BY c.owner_id, c.source_measurement_set_id
 ON CONFLICT (owner_id, source_measurement_set_id) DO NOTHING;

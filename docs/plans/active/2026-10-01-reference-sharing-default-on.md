@@ -1,7 +1,9 @@
 # Stage 2d: references shared by default, and a dismissible publish notice
 
-Status: proposed, revised after general and security review of `fbd3da1`
-(both "needs changes"; incorporated). Not started.
+Status: approved (`7e5aac0`). Order step 3 (server) in review on
+`feature/reference-sharing-default-on-server`: candidate `145e25d`
+(general: approve, rollback needed before deploy; security: needs changes),
+fixes in a follow-up candidate (see Handoff). Not deployed.
 - **Supersedes:** the opt-in model of Stage 2
   (`2026-09-30-reference-sharing-consent.md`); and, from Stage 2c
   (`2026-10-01-reference-sharing-roles-and-publish-notice.md`), the content
@@ -294,24 +296,32 @@ Opt-out rows stay. No row stays `shared` without the opt-out check.
 
 Every candidate gets a general review and a security review.
 
-## Handoff: order step 3 (server) candidate, 2026-10-01
+## Handoff: order step 3 (server), 2026-10-01
 
 - Branch `feature/reference-sharing-default-on-server` from `7e5aac0`;
-  migration `20261001113007_share_references_by_default.sql`; new test
-  `shared_reference_default_on_test.sql`; listed test files updated (plus
-  `identification_v2_rpc_regression_test.sql`). Not deployed.
-- Verified locally: `supabase db reset --local`; 71/72 SQL tests pass
-  (`public_observation_point_prep_test.sql` fails at the base too); both
-  concurrency scripts on fresh resets; deploy-tree node tests; the migration
-  also applies without the deferred `20260914090000`.
-- Choices inside the plan: the grant mode also refuses an opted-out set
-  (`opted_out`); the species-page read (`reference_contribution_is_served`)
-  also checks the opt-out; a refresh on a set with a hidden contribution
-  returns `moderation_hidden` (Stage 1B records `not_shareable:moderation_hidden`);
-  a refresh without a qualifying use and no shared row returns
-  `qualifying_use_required` (Stage 1B records it); the backfill also opts out
-  rows whose latest withdrawal event is the owner's; the deploy refresh
-  aborts the migration on any error.
-- Open: the rollback migration is not drafted (its step 2 is tested);
-  web `WITHDRAWAL_REASON_KEYS` gains `rollback` with order step 4;
-  general and security review of this candidate.
+  migration `20261001113007_share_references_by_default.sql`. First
+  candidate `145e25d`; review fixes in the next commit. Not deployed.
+- Review fixes: moderation is set-level everywhere (the species-page served
+  check and every refresh stop at a hidden contribution of the set); the
+  backfill has no repair exclusion; the core locks the owner's profile
+  FOR KEY SHARE before the key lock; the owner list includes every set with a
+  shared contribution.
+- Deploy aids: `supabase/reference-sharing-default-on-preflight.sql`
+  (read-only; tested against the pre-migration schema and cross-checked by
+  applying the migration on the same data); rollback
+  `supabase/rollbacks/20261001113007_rollback.sql` (not a migration; its
+  header says how to promote it), tested by
+  `supabase/tests/shared_reference_rollback_test.sh`.
+- Verified locally: 71/72 SQL tests (`public_observation_point_prep_test.sql`
+  fails at the base too); both concurrency scripts (30 races, plus
+  account deletion vs automatic create) and the rollback script on fresh
+  resets; deploy-tree node tests; applies without the deferred
+  `20260914090000`.
+- Choices inside the plan: the grant mode also refuses an opted-out set; a
+  refresh on a set with a hidden contribution returns `moderation_hidden`
+  (Stage 1B: `not_shareable:moderation_hidden`); a refresh with no
+  qualifying use and no shared row returns `qualifying_use_required`; the
+  backfill also opts out rows whose latest withdrawal is the owner's; any
+  error in the deploy refresh aborts the migration.
+- Open: web `WITHDRAWAL_REASON_KEYS` gains `rollback` with order step 4;
+  review of the fix commit; deploy needs the preflight shown to the owner.
