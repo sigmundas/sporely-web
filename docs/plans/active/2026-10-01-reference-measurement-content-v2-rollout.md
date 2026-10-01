@@ -1,7 +1,7 @@
 # Reference measurement content v2 rollout
 
-Status: approved direction (owner decisions 2026-10-01). Stage A in progress
-on `feature/reference-v2-stage-a`. Nothing deployed.
+Status: approved direction (owner decisions 2026-10-01). Stage A candidate
+on `feature/reference-v2-stage-a` awaiting review. Nothing deployed.
 
 Driving case: `"Sp. 7–9.5(–10.5) × 4–5.5 µm, Qav = 1.6–2"`. `Qav 1.6–2` is a
 reported **mean interval**: not Q extremes, not a typical Q range, never a
@@ -250,3 +250,60 @@ for current production data). Landing opts in to v2 in Stage B.
 ## Handoff
 
 - 2026-10-01: plan written; Stage A started on `feature/reference-v2-stage-a`.
+- 2026-10-01: Stage A candidate (implementation claim, not acceptance).
+  Branch `feature/reference-v2-stage-a`, base `8afc74f` (origin/main), plan
+  commit `422997a`, inventory `6d111c2`, migration `4bb24b5`.
+  - Migration `supabase/migrations/20261001213000_version_aware_public_reference_reads.sql`;
+    rollback `supabase/rollbacks/20261001213000_rollback.sql`. Not deployed;
+    `20260914090000` untouched and still deferred.
+  - Overloads: the four public reads (`search/get_public_reference_contribution_v2`,
+    `search/get_public_observation_references`) are DROPped and recreated with
+    a trailing `p_accept_snapshot_versions integer[] DEFAULT '{1}'`; one
+    function per name, so landing's named-argument calls resolve unchanged.
+    NULL = default; otherwise a subset of {1,2} containing 1, else 22023.
+    Private `_unthrottled` reads, rate limit, page policy, byte cap, owner,
+    SECURITY DEFINER, `search_path=''` and grants unchanged (fingerprint
+    checked).
+  - Projection (v2 -> v1, non-accepting caller): drop `measurement_details`
+    and `measurements.q_core_min/q_core_max`; `schema_version` 1; every
+    other value as stored (`q_mean` stays NULL for a mean interval; Q core
+    never folded into `q_min/q_max`); a length/width core pair tagged
+    `percentile_interval` is nulled. Item stamped
+    `measurement_details_omitted: true` at envelope/item level (snapshot
+    keeps the exact v1 key set). Unknown versions are not served to that
+    caller. Note: landing's exact-key normalizers drop a marked item today
+    (fails closed); Stage B must accept the marker.
+  - Automatic share: `reference_contribution_share_core` binds every
+    automatic outcome (new share, re-share, new revision of an automatic
+    row) to `private.reference_automatic_share_scope()` (v1 only); out of
+    scope it writes nothing and returns `snapshot_version_unsupported`.
+    Triggers and Share again ignore it; Stage 1B records
+    `not_shareable:snapshot_version_unsupported`; the 2d deploy refresh
+    ignores statuses. Consented refresh and grant unchanged.
+  - Tests (local `supabase db reset` only): new
+    `supabase/tests/reference_snapshot_version_public_reads_test.sql` passes;
+    on the pre-stage definitions (reset without `20261001213000`) all 9
+    blocks fail (A1-A4, F on sharing v2; B, C1 cascade from the automatic
+    share; C2, D, E undefined opt-in signature).
+    `supabase/tests/reference_snapshot_version_rollback_test.sh` passes:
+    rollback state fingerprint equals a pre-stage reset exactly, forward
+    re-apply identical. Existing SQL tests pass (public_observation_references,
+    reference_measurement_content_extension, reference_snapshot_v2,
+    shared_reference_{backfill,consent_grant,consent_data_step,default_on,roles,contributions,production_policy},
+    taxon_identity_repair{,_label}); `shared_reference_rollback_test.sh`,
+    `shared_reference_consent_concurrency_test.sh`,
+    `taxon_identity_repair_concurrency_test.sh` pass. Two tests' privilege
+    checks updated to the new signatures.
+    `shared_reference_backfill_migration_test.sh` fails ("migration not
+    applied") independently of Stage A: it pins max version
+    `20261001113007` after `migration up`, already false at base since
+    `20261001195524`.
+  - `supabase migration list` not run: the worktree is not linked (no
+    production access attempted).
+  - Open: (1) an automatic row whose source becomes v2 keeps serving its
+    last v1 revision (stale) rather than being withdrawn; withdrawal would
+    need a new reason. (2) Percentile-core nulling is a policy choice beyond
+    the brief; confirm. (3) Curated public reads
+    (`reference_curated_public_envelope`) not made version-aware: curation
+    still publishes v1 only. (4) Rolling back 2d after A drops the new
+    Stage 1B status (unreachable then).
