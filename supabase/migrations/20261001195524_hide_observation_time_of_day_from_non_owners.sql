@@ -9,10 +9,11 @@
 -- observation_identifications_community_view is handled the same way but is
 -- owner-aware (see its section at the end).
 --
--- Known remaining exposure (NOT fixed here): image storage keys embed the
--- upload epoch-ms (<user>/<obs>/<sort>_<Date.now()>.<ext>) and are still
--- returned as storage_path / image_key / thumb_key and in the legacy URLs of
--- search_public_observation_images. Tracked separately.
+-- Image storage keys embed the upload epoch-ms (<user>/<obs>/<sort>_<ms>.<ext>;
+-- desktop keys may embed the capture time). storage_path / image_key /
+-- thumb_key are now returned only to the observation owner, and the legacy
+-- key-derived URLs of search_public_observation_images are NULL. Existing
+-- objects keep their keys (not re-keyed); new web keys use a random suffix.
 --
 -- Fix: the four shared observation views keep their exact column list, names and types,
 -- but the time-bearing timestamptz columns are now always NULL. The date is
@@ -70,8 +71,8 @@ SELECT o.id,
         END AS gps_longitude,
     o.source_type,
     o.spore_data_visibility,
-    o.image_key,
-    o.thumb_key,
+    CASE WHEN o.user_id = auth.uid() THEN o.image_key END AS image_key,
+    CASE WHEN o.user_id = auth.uid() THEN o.thumb_key END AS thumb_key,
     o.is_draft,
     o.location_precision,
     o.ai_selected_service,
@@ -135,8 +136,8 @@ SELECT DISTINCT o.id,
         END AS gps_longitude,
     o.source_type,
     o.spore_data_visibility,
-    o.image_key,
-    o.thumb_key,
+    CASE WHEN o.user_id = auth.uid() THEN o.image_key END AS image_key,
+    CASE WHEN o.user_id = auth.uid() THEN o.thumb_key END AS thumb_key,
     o.is_draft,
     o.location_precision,
     media.image_id,
@@ -184,8 +185,8 @@ SELECT o.id,
         END AS gps_longitude,
     o.source_type,
     o.spore_data_visibility,
-    o.image_key,
-    o.thumb_key,
+    CASE WHEN o.user_id = auth.uid() THEN o.image_key END AS image_key,
+    CASE WHEN o.user_id = auth.uid() THEN o.thumb_key END AS thumb_key,
     o.is_draft,
     o.location_precision,
     o.ai_selected_service,
@@ -216,7 +217,7 @@ CREATE OR REPLACE VIEW public.observation_images_community_view WITH (security_b
 SELECT oi.id,
     oi.observation_id,
     oi.user_id,
-    oi.storage_path,
+    CASE WHEN o.user_id = auth.uid() THEN oi.storage_path END AS storage_path,
     oi.sort_order,
     oi.image_type,
     oi.micro_category,
@@ -291,5 +292,85 @@ SELECT oi.id,
   WHERE (((o.user_id = auth.uid()) OR ((NOT COALESCE(o.is_draft, false)) AND can_read_observation(o.user_id, o.visibility))) AND (NOT (EXISTS ( SELECT 1
            FROM profiles p
           WHERE ((p.id = o.user_id) AND (p.is_banned = true))))) AND (NOT current_user_is_blocked_with(o.user_id)));
+
+-- search_public_observation_images (anon RPC): the legacy thumbUrl /
+-- previewUrl / fullUrl were media.sporely.no/<storage key>, and keys embed
+-- the upload epoch-ms. They are now NULL; clients use the worker URLs
+-- thumbMediaUrl / fullMediaUrl (/m/<image_id>/<variant>?v=<n>, no key).
+-- Column list and types are unchanged.
+CREATE OR REPLACE FUNCTION public.search_public_observation_images(p_observation_ids bigint[] DEFAULT NULL::bigint[])
+ RETURNS TABLE("observationId" bigint, "imageId" bigint, "sortOrder" integer, "imageType" text, width integer, height integer, "thumbUrl" text, "previewUrl" text, "fullUrl" text, "aiCropX1" double precision, "aiCropY1" double precision, "aiCropX2" double precision, "aiCropY2" double precision, "aiCropSourceW" integer, "aiCropSourceH" integer, "aiCropIsCustom" boolean, "scaleMicronsPerPixel" double precision, "mediaVersion" bigint, "fullMediaUrl" text, "thumbMediaUrl" text)
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+  WITH visible_images AS (
+    SELECT
+      o.id AS observation_id,
+      i.id AS image_id,
+      i.sort_order,
+      i.image_type,
+      coalesce(i.stored_width, i.source_width) AS width,
+      coalesce(i.stored_height, i.source_height) AS height,
+      nullif(regexp_replace(btrim(i.storage_path, '/'), '/[^/]+$', '', ''), btrim(i.storage_path, '/')) AS storage_dir,
+      regexp_replace(btrim(i.storage_path, '/'), '^.*/', '') AS file_name,
+      i.ai_crop_x1, i.ai_crop_y1, i.ai_crop_x2, i.ai_crop_y2,
+      i.ai_crop_source_w, i.ai_crop_source_h,
+      coalesce(i.ai_crop_is_custom, false) AS ai_crop_is_custom,
+      coalesce(i.storage_exif_safe, false) AS storage_exif_safe,
+      i.scale_microns_per_pixel,
+      i.media_version,
+      i.created_at
+    FROM public.observations o
+    JOIN public.observation_images i ON i.observation_id = o.id
+    WHERE o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.id = ANY (coalesce(p_observation_ids, '{}'::bigint[]))
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.storage_path IS NOT NULL
+      AND btrim(i.storage_path) <> ''
+      AND NOT EXISTS (
+        SELECT 1 FROM public.profiles p
+        WHERE p.id = o.user_id AND p.is_banned = true
+      )
+      AND (auth.uid() IS NULL OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE)
+  ), prepared AS (
+    SELECT
+      vi.*,
+      concat(
+        CASE WHEN vi.storage_dir IS NULL THEN '' ELSE vi.storage_dir || '/' END,
+        'thumb_', regexp_replace(vi.file_name, '^(?:thumb_|medium_|small_|cards_)+', '', 'i')
+      ) AS thumb_path,
+      concat(
+        CASE WHEN vi.storage_dir IS NULL THEN '' ELSE vi.storage_dir || '/' END,
+        regexp_replace(vi.file_name, '^(?:thumb_|medium_|small_|cards_)+', '', 'i')
+      ) AS full_path
+    FROM visible_images vi
+  )
+  SELECT
+    p.observation_id AS "observationId",
+    p.image_id AS "imageId",
+    p.sort_order AS "sortOrder",
+    p.image_type AS "imageType",
+    p.width AS "width",
+    p.height AS "height",
+    NULL::text AS "thumbUrl",
+    NULL::text AS "previewUrl",
+    NULL::text AS "fullUrl",
+    p.ai_crop_x1 AS "aiCropX1",
+    p.ai_crop_y1 AS "aiCropY1",
+    p.ai_crop_x2 AS "aiCropX2",
+    p.ai_crop_y2 AS "aiCropY2",
+    p.ai_crop_source_w AS "aiCropSourceW",
+    p.ai_crop_source_h AS "aiCropSourceH",
+    p.ai_crop_is_custom AS "aiCropIsCustom",
+    p.scale_microns_per_pixel AS "scaleMicronsPerPixel",
+    p.media_version AS "mediaVersion",
+    public.build_worker_media_url(p.image_id, 'full', p.media_version) AS "fullMediaUrl",
+    public.build_worker_media_url(p.image_id, 'thumb', p.media_version) AS "thumbMediaUrl"
+  FROM prepared p
+  ORDER BY p.observation_id, p.sort_order NULLS LAST, p.created_at DESC NULLS LAST, p.image_id DESC
+$function$;
 
 COMMIT;

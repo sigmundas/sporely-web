@@ -2953,6 +2953,17 @@ async function _loadDetailAiCache() {
       ? (hasDetailImages ? '' : _tf('detail.noPhotoToIdentify', 'No usable photo available for iNaturalist.'))
       : _tf('settings.inaturalistLoginMissing', 'Please log in to iNaturalist first.')
     detailAiState.availability = Object.fromEntries(availabilityList.map(item => [item.service, item]))
+    if (!currentObsIsOwner) {
+      // Non-owners get no storage keys (20261001195524) and cannot run AI;
+      // keep stored Artsorakel results visible whenever the find has images.
+      detailAiState.availability[ID_SERVICE_ARTSORAKEL] = {
+        ...(detailAiState.availability[ID_SERVICE_ARTSORAKEL] || {}),
+        service: ID_SERVICE_ARTSORAKEL,
+        available: hasDetailImages,
+        disabled: !hasDetailImages,
+        reason: hasDetailImages ? '' : _tf('detail.noPhotoToIdentify', 'No images available.'),
+      }
+    }
     detailAiState.availability[ID_SERVICE_INATURALIST] = {
       ...(detailAiState.availability[ID_SERVICE_INATURALIST] || {}),
       service: ID_SERVICE_INATURALIST,
@@ -5066,7 +5077,6 @@ async function _addPhotosToObservation(files) {
         userId,
         observationId: obsId,
         sortOrder,
-        timestamp: Date.now(),
         extension: imageExtensionForBlob(preparedImage.uploadBlob),
       })
       const reservedRow = await reserveObservationImage({

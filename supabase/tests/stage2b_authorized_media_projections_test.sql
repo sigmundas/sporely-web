@@ -126,7 +126,8 @@ BEGIN
      OR rec.media_version IS NULL
      OR rec.full_media_url NOT LIKE 'https://upload.sporely.no/m/' || img_public::text || '/full?v=%'
      OR rec.thumb_media_url NOT LIKE 'https://upload.sporely.no/m/' || img_public::text || '/thumb?v=%'
-     OR rec.storage_path IS NULL THEN
+     -- storage_path is owner-only (keys embed upload time, 20261001195524).
+     OR rec.storage_path IS NOT NULL THEN
     RAISE EXCEPTION 'Public image authorized + legacy projection failed';
   END IF;
 
@@ -140,7 +141,8 @@ BEGIN
      OR rec."mediaVersion" IS NULL
      OR rec."fullMediaUrl" NOT LIKE 'https://upload.sporely.no/m/' || img_public::text || '/full?v=%'
      OR rec."thumbMediaUrl" NOT LIKE 'https://upload.sporely.no/m/' || img_public::text || '/thumb?v=%'
-     OR rec."thumbUrl" NOT LIKE 'https://media.sporely.no/%' THEN
+     -- Legacy key URL withheld (keys embed upload time, 20261001195524).
+     OR rec."thumbUrl" IS NOT NULL THEN
     RAISE EXCEPTION 'Public image RPC additive contract failed';
   END IF;
   SELECT count(*) INTO row_count FROM public.get_public_observation_images(obs_private);

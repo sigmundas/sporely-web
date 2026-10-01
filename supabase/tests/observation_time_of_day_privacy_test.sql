@@ -15,7 +15,7 @@ DECLARE
   viewer_id uuid := '00000000-0000-4000-8000-0000000071a2';
   obs_early bigint;
   obs_late  bigint;
-  image_id  bigint;
+  img_id  bigint;
   role_name text;
   view_name text;
   col_name  text;
@@ -86,7 +86,7 @@ BEGIN
     obs_early, owner_id, owner_id::text || '/' || obs_early || '/0_' || key_epoch || '.webp', 'field', 0,
     TIMESTAMPTZ '2026-09-15 13:47:21+00', TIMESTAMPTZ '2026-09-15 13:47:30+00'
   )
-  RETURNING id INTO image_id;
+  RETURNING id INTO img_id;
 
   INSERT INTO public.observation_identifications (
     observation_id, user_id, service, request_fingerprint, results,
@@ -184,24 +184,49 @@ BEGIN
       RAISE EXCEPTION '% can read identification time of day: %', role_name, payload;
     END IF;
 
-    -- 1c) KNOWN EXPOSURE, NOT YET FIXED: image keys embed the upload epoch-ms.
-    --     Reported as a NOTICE so it stays visible without failing the suite;
-    --     turn into RAISE EXCEPTION once keys are hidden or re-keyed.
-    IF role_name <> 'owner' THEN
-      SELECT coalesce(string_agg(to_jsonb(r)::text, ' '), '') INTO payload
-      FROM public.search_public_observation_images(ARRAY[obs_early]) r;
-      IF position(key_epoch IN payload) > 0 THEN
-        RAISE NOTICE 'KNOWN EXPOSURE (pending): % reads upload epoch-ms via search_public_observation_images', role_name;
+    -- 1c) Image keys embed the upload epoch-ms: no key or key-derived URL
+    --     reaches a non-owner; the owner still reads its keys; worker URLs
+    --     (which carry only image id + version) still render.
+    SELECT coalesce(string_agg(to_jsonb(r)::text, ' '), '') INTO payload
+    FROM public.search_public_observation_images(ARRAY[obs_early]) r;
+    IF position(key_epoch IN payload) > 0 THEN
+      RAISE EXCEPTION '% reads upload epoch-ms via search_public_observation_images: %', role_name, payload;
+    END IF;
+    IF position('/m/' || img_id || '/thumb' IN payload) = 0 THEN
+      RAISE EXCEPTION '% lost thumbMediaUrl from search_public_observation_images: %', role_name, payload;
+    END IF;
+    FOREACH view_name IN ARRAY ARRAY[
+      'observations_community_view',
+      'observations_friend_view',
+      'observations_follow_view',
+      'observation_images_community_view'
+    ]
+    LOOP
+      EXECUTE format(
+        'SELECT coalesce(string_agg(to_jsonb(v)::text, '' ''), '''') FROM public.%I v WHERE %s = $1',
+        view_name,
+        CASE WHEN view_name LIKE 'observation_images%' THEN 'observation_id' ELSE 'id' END
+      ) INTO payload USING obs_early;
+      IF role_name <> 'owner' AND position(key_epoch IN payload) > 0 THEN
+        RAISE EXCEPTION '% reads upload epoch-ms via %: %', role_name, view_name, payload;
       END IF;
-      SELECT coalesce(string_agg(to_jsonb(v)::text, ' '), '') INTO payload
-      FROM public.observations_community_view v WHERE v.id = obs_early;
-      IF position(key_epoch IN payload) > 0 THEN
-        RAISE NOTICE 'KNOWN EXPOSURE (pending): % reads upload epoch-ms via observations_community_view image_key/thumb_key', role_name;
+      IF payload <> '' AND position('/m/' || img_id || '/' IN payload) = 0 THEN
+        RAISE EXCEPTION '% lost worker media URL in %: %', role_name, view_name, payload;
       END IF;
-      SELECT coalesce(string_agg(to_jsonb(v)::text, ' '), '') INTO payload
-      FROM public.observation_images_community_view v WHERE v.observation_id = obs_early;
-      IF position(key_epoch IN payload) > 0 THEN
-        RAISE NOTICE 'KNOWN EXPOSURE (pending): % reads upload epoch-ms via observation_images_community_view storage_path', role_name;
+    END LOOP;
+    IF role_name = 'owner' THEN
+      SELECT count(*) INTO row_count
+      FROM public.observations_community_view v
+      WHERE v.id = obs_early AND position(key_epoch IN v.image_key) > 0
+        AND position(key_epoch IN v.thumb_key) > 0;
+      IF row_count <> 1 THEN
+        RAISE EXCEPTION 'owner lost image_key/thumb_key in observations_community_view';
+      END IF;
+      SELECT count(*) INTO row_count
+      FROM public.observation_images_community_view v
+      WHERE v.id = img_id AND position(key_epoch IN v.storage_path) > 0;
+      IF row_count <> 1 THEN
+        RAISE EXCEPTION 'owner lost storage_path in observation_images_community_view';
       END IF;
     END IF;
 
@@ -253,7 +278,7 @@ BEGIN
       IF row_count <> 2 OR got_ts IS DISTINCT FROM TIMESTAMPTZ '2026-09-15 13:47:50+00' THEN
         RAISE EXCEPTION 'owner lost full captured_at (rows %, max %)', row_count, got_ts;
       END IF;
-      SELECT i.captured_at INTO got_ts FROM public.observation_images i WHERE i.id = image_id;
+      SELECT i.captured_at INTO got_ts FROM public.observation_images i WHERE i.id = img_id;
       IF got_ts IS DISTINCT FROM TIMESTAMPTZ '2026-09-15 13:47:21+00' THEN
         RAISE EXCEPTION 'owner lost full image captured_at: %', got_ts;
       END IF;
@@ -261,7 +286,7 @@ BEGIN
       IF row_count <> 0 THEN
         RAISE EXCEPTION 'non-owner read % base observation rows', row_count;
       END IF;
-      SELECT count(*) INTO row_count FROM public.observation_images i WHERE i.id = image_id;
+      SELECT count(*) INTO row_count FROM public.observation_images i WHERE i.id = img_id;
       IF row_count <> 0 THEN
         RAISE EXCEPTION 'non-owner read base observation_images row';
       END IF;

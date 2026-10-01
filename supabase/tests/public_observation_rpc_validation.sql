@@ -770,9 +770,10 @@ BEGIN
      OR rpc_row."imageType" IS DISTINCT FROM 'microscope'
      OR rpc_row."width" IS DISTINCT FROM 800
      OR rpc_row."height" IS DISTINCT FROM 600
-     OR rpc_row."thumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp'
-     OR rpc_row."previewUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-exact.webp'
-     OR rpc_row."fullUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/public-exact.webp'
+     -- Legacy key URLs are withheld (keys embed upload time, 20261001195524).
+     OR rpc_row."thumbUrl" IS NOT NULL
+     OR rpc_row."previewUrl" IS NOT NULL
+     OR rpc_row."fullUrl" IS NOT NULL
      OR rpc_row."aiCropX1" IS DISTINCT FROM 0.12::double precision
      OR rpc_row."aiCropY1" IS DISTINCT FROM 0.15::double precision
      OR rpc_row."aiCropX2" IS DISTINCT FROM 0.62::double precision
@@ -793,8 +794,9 @@ BEGIN
      OR rpc_row."imageType" IS DISTINCT FROM 'microscope'
      OR rpc_row."width" IS DISTINCT FROM 800
      OR rpc_row."height" IS DISTINCT FROM 600
-     OR rpc_row."thumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-unsafe.webp'
-     OR rpc_row."previewUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_public-unsafe.webp'
+     -- Legacy key URLs are withheld (keys embed upload time, 20261001195524).
+     OR rpc_row."thumbUrl" IS NOT NULL
+     OR rpc_row."previewUrl" IS NOT NULL
      OR rpc_row."fullUrl" IS NOT NULL
      OR rpc_row."aiCropX1" IS DISTINCT FROM 0.22::double precision
      OR rpc_row."aiCropY1" IS DISTINCT FROM 0.23::double precision
