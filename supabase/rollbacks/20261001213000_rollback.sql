@@ -10,7 +10,11 @@
 --     public.get_public_observation_references (20260828172243);
 --   * private.reference_contribution_share_core and
 --     private._taxon_identity_repair_reconcile_references (20261001113007);
+--   * private.withdraw_shared_reference_contribution and the consent-event
+--     reason CHECK (20261001113007), without snapshot_version_unsupported;
 -- with their prior owners, REVOKEs and GRANTs, and drops the four helpers.
+-- Refuses (55000) while any event carries reason snapshot_version_unsupported:
+-- such a row was withdrawn by Stage A and must be decided on explicitly.
 -- No data is written by the forward migration, so none is restored. A
 -- caller passing p_accept_snapshot_versions fails after the rollback
 -- (undefined function); every caller that omits it is unaffected.
@@ -25,6 +29,77 @@
 -- Never edit or delete 20261001213000 itself once applied.
 
 BEGIN;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM private.shared_reference_consent_events
+              WHERE reason = 'snapshot_version_unsupported') THEN
+    RAISE EXCEPTION 'events with reason snapshot_version_unsupported exist; resolve them before rolling back'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$$;
+
+ALTER TABLE private.shared_reference_consent_events
+  DROP CONSTRAINT shared_reference_consent_events_reason_check,
+  ADD CONSTRAINT shared_reference_consent_events_reason_check
+    CHECK (reason IS NULL OR reason IN (
+      'owner','consent_missing','observation_not_public','use_detached',
+      'source_deleted','taxon_changed','consent_scope_exceeded',
+      'consent_text_revoked','account_deleted','rollback'
+    ));
+
+CREATE OR REPLACE FUNCTION private.withdraw_shared_reference_contribution(
+  p_contribution_id uuid,
+  p_reason text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = ''
+AS $$
+DECLARE
+  v_row private.shared_reference_contributions%ROWTYPE;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+BEGIN
+  IF p_reason IS NULL OR p_reason NOT IN (
+    'owner','consent_missing','observation_not_public','use_detached',
+    'source_deleted','taxon_changed','consent_scope_exceeded',
+    'consent_text_revoked','account_deleted','rollback'
+  ) THEN
+    RAISE EXCEPTION 'invalid shared reference withdrawal reason %', p_reason
+      USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_row
+    FROM private.shared_reference_contributions c
+   WHERE c.id = p_contribution_id
+   FOR UPDATE;
+  IF NOT FOUND OR v_row.status <> 'shared' THEN
+    RETURN false;
+  END IF;
+  UPDATE private.shared_reference_contributions
+     SET status = 'withdrawn',
+         withdrawn_at = v_now,
+         updated_at = v_now,
+         share_basis = NULL,
+         shared_first_revision = NULL,
+         consented_at = NULL,
+         consent_version = NULL,
+         consent_locale = NULL,
+         consent_client = NULL,
+         consent_first_revision = NULL,
+         consent_scope = NULL
+   WHERE id = p_contribution_id;
+  INSERT INTO private.shared_reference_consent_events(
+    contribution_id, event, reason, consent_version, occurred_at
+  ) VALUES (
+    p_contribution_id,
+    CASE WHEN p_reason = 'owner' THEN 'withdrawn_by_owner' ELSE 'withdrawn_by_system' END,
+    p_reason, v_row.consent_version, v_now
+  );
+  RETURN true;
+END
+$$;
 
 DROP FUNCTION public.search_public_reference_contributions_v2(integer,integer,timestamptz,uuid,integer[]);
 DROP FUNCTION public.get_public_reference_contribution_v2(uuid,integer,integer[]);
@@ -707,6 +782,8 @@ ALTER FUNCTION public.search_public_observation_references(bigint[]) OWNER TO po
 ALTER FUNCTION public.get_public_observation_references(bigint) OWNER TO postgres;
 ALTER FUNCTION private.reference_contribution_share_core(text,uuid,uuid,integer,integer,integer,integer,integer,text,text) OWNER TO postgres;
 ALTER FUNCTION private._taxon_identity_repair_reconcile_references(bigint,bigint) OWNER TO postgres;
+ALTER FUNCTION private.withdraw_shared_reference_contribution(uuid,text) OWNER TO postgres;
+REVOKE ALL ON FUNCTION private.withdraw_shared_reference_contribution(uuid,text) FROM PUBLIC, anon, authenticated, service_role;
 
 REVOKE ALL ON FUNCTION private.reference_contribution_share_core(text,uuid,uuid,integer,integer,integer,integer,integer,text,text) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private._taxon_identity_repair_reconcile_references(bigint,bigint) FROM PUBLIC, anon, authenticated, service_role;

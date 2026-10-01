@@ -82,7 +82,8 @@ BEGIN
     (981000002,o,current_date,'public',false,'public',t),
     (981000003,o,current_date,'public',false,'public',t),
     (981000004,o,current_date,'public',false,'public',t),
-    (981000005,o,current_date,'public',false,'public',t);
+    (981000005,o,current_date,'public',false,'public',t),
+    (981000007,o,current_date,'public',false,'public',t);
   INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
   VALUES (o,w,'article','[{"family":"Qav"}]','Mean intervals',2026,'Qav 2026',1);
   INSERT INTO public.reference_taxon_treatments(user_id,id,reference_work_id,taxon_id,name_as_published,revision)
@@ -106,7 +107,10 @@ BEGIN
      NULL,9,11,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1),
     -- version 1 now, withdrawn, version 2 later (re-share)
     (o,'73000000-0000-4000-8000-0000000a2005',tr,'spore_size','range','10-12 um',
-     NULL,10,12,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1);
+     NULL,10,12,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1),
+    -- version 1 now, consented, version 2 later (consented revision 2)
+    (o,'73000000-0000-4000-8000-0000000a2007',tr,'spore_size','range','11-13 um',
+     NULL,11,13,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1);
   DELETE FROM private.reference_share_consent_texts;
   INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope)
   VALUES (1,'en','fixture consent text',encode(sha256(convert_to('fixture consent text','UTF8')),'hex'),true,
@@ -117,7 +121,7 @@ BEGIN
   INSERT INTO public.observation_reference_uses(user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json)
   SELECT o,gen_random_uuid(),981000000+n,('73000000-0000-4000-8000-0000000a200'||n)::uuid,'compared',1,
          private.reference_canonical_snapshot(o,('73000000-0000-4000-8000-0000000a200'||n)::uuid)
-    FROM generate_series(1,5) n;
+    FROM unnest(ARRAY[1,2,3,4,5,7]) n;
   PERFORM pg_temp.claims(NULL,NULL);
   IF private.reference_canonical_snapshot(o,'73000000-0000-4000-8000-0000000a2002')->>'schema_version' <> '2' THEN
     RAISE EXCEPTION 'fixture: the enhanced set must produce a version-2 snapshot (is 20260914090000 applied locally?)';
@@ -158,8 +162,9 @@ BEGIN
 END
 $$;
 
--- A3. An automatic row whose source becomes version 2 gets no new revision
--- (set trigger and direct core); its last version-1 revision stays.
+-- A3. An automatic row whose source becomes version 2 gets no new revision:
+-- the set trigger withdraws it (reason snapshot_version_unsupported, no
+-- opt-out); the public reads serve nothing but the tombstone.
 DO $$
 DECLARE r jsonb;
 BEGIN
@@ -172,11 +177,25 @@ BEGIN
   r := private.reference_contribution_share_core('refresh','00000000-0000-4000-8000-0000000a2001',
          '73000000-0000-4000-8000-0000000a2004',2100000981);
   IF r->>'status' IS DISTINCT FROM 'snapshot_version_unsupported'
-     OR pg_temp.state('73000000-0000-4000-8000-0000000a2004') <> 'shared:automatic:1'
+     OR pg_temp.state('73000000-0000-4000-8000-0000000a2004') <> 'withdrawn:-:1'
+     OR (SELECT e.event||':'||e.reason FROM private.shared_reference_consent_events e
+          WHERE e.contribution_id=pg_temp.cid('73000000-0000-4000-8000-0000000a2004')
+          ORDER BY e.id DESC LIMIT 1) IS DISTINCT FROM 'withdrawn_by_system:snapshot_version_unsupported'
+     OR private.reference_set_opted_out('00000000-0000-4000-8000-0000000a2001','73000000-0000-4000-8000-0000000a2004')
      OR EXISTS (SELECT 1 FROM private.shared_reference_contribution_revisions rv
                  WHERE rv.contribution_id=pg_temp.cid('73000000-0000-4000-8000-0000000a2004')
                    AND rv.envelope_json->'snapshot'->>'schema_version' <> '1') THEN
-    RAISE EXCEPTION 'A3: automatic row took a version-2 revision: % %', r, pg_temp.state('73000000-0000-4000-8000-0000000a2004');
+    RAISE EXCEPTION 'A3: automatic row not withdrawn for version 2: % %', r, pg_temp.state('73000000-0000-4000-8000-0000000a2004');
+  END IF;
+  -- Tombstone only: not listed, no current envelope, revision 1 a stub.
+  IF EXISTS (SELECT 1 FROM public.search_public_reference_contributions_v2(2100000981,100,NULL,NULL,ARRAY[1,2]) e
+              WHERE e->>'contribution_id' = pg_temp.cid('73000000-0000-4000-8000-0000000a2004')::text)
+     OR EXISTS (SELECT 1 FROM public.get_public_reference_contribution_v2(pg_temp.cid('73000000-0000-4000-8000-0000000a2004')))
+     OR (SELECT array_agg(e->>'status') FROM public.get_public_reference_contribution_v2(pg_temp.cid('73000000-0000-4000-8000-0000000a2004'),1) e)
+        IS DISTINCT FROM ARRAY['withdrawn']
+     OR (SELECT array_agg(e->>'status') FROM public.get_public_reference_contribution_v2(pg_temp.cid('73000000-0000-4000-8000-0000000a2004'),1,ARRAY[1,2]) e)
+        IS DISTINCT FROM ARRAY['withdrawn'] THEN
+    RAISE EXCEPTION 'A3: the withdrawn row is still served';
   END IF;
 END
 $$;
@@ -217,6 +236,29 @@ BEGIN
   IF r->>'status' <> 'created' OR r->'row'->'snapshot'->>'schema_version' <> '2' THEN
     RAISE EXCEPTION 'B: grant of the percentile set: %', r;
   END IF;
+  -- Consented row at version 1, revision 1. The core cannot move a
+  -- consented row to version 2 within its consent (the consent scope is the
+  -- granted snapshot's), so revision 2 at version 2 is a direct fixture.
+  r := private.reference_contribution_share_core('grant','00000000-0000-4000-8000-0000000a2001',
+         '73000000-0000-4000-8000-0000000a2007',2100000981,1,1,1,1,'en','stage-a-test');
+  IF r->>'status' <> 'no_change' OR pg_temp.state('73000000-0000-4000-8000-0000000a2007') <> 'shared:consented:1' THEN
+    RAISE EXCEPTION 'B: grant of the version-1 set: % %', r, pg_temp.state('73000000-0000-4000-8000-0000000a2007');
+  END IF;
+  INSERT INTO private.shared_reference_contribution_revisions(
+    contribution_id, revision, source_work_revision, source_treatment_revision,
+    source_measurement_set_revision, content_hash, envelope_json, created_at)
+  SELECT rv.contribution_id, 2, 1, 1, 2, repeat('e',64),
+         jsonb_set(jsonb_set(rv.envelope_json, '{revision}', '2'), '{snapshot}',
+           (rv.envelope_json->'snapshot') || jsonb_build_object(
+             'schema_version', 2, 'reference_revision', 2,
+             'measurements', (rv.envelope_json->'snapshot'->'measurements')
+                             || '{"q_core_min":null,"q_core_max":null}'::jsonb,
+             'measurement_details', '{"schema_version":1,"metrics":{"q":{"mean_interval":{"lower":1.6,"upper":2,"kind":"reported_range"}}}}'::jsonb)),
+         now()
+    FROM private.shared_reference_contribution_revisions rv
+   WHERE rv.contribution_id = pg_temp.cid('73000000-0000-4000-8000-0000000a2007') AND rv.revision = 1;
+  UPDATE private.shared_reference_contributions SET current_revision = 2
+   WHERE id = pg_temp.cid('73000000-0000-4000-8000-0000000a2007');
   -- A consented refresh of an unchanged version-2 row is a no-op, not refused.
   r := private.reference_contribution_share_core('refresh','00000000-0000-4000-8000-0000000a2001',
          '73000000-0000-4000-8000-0000000a2002',2100000981);
@@ -404,13 +446,39 @@ BEGIN
     END;
   END LOOP;
   IF (SELECT count(*) FROM public.search_public_reference_contributions_v2(2100000981,100,NULL,NULL,NULL) e
-       WHERE e ? 'measurement_details_omitted') <> 2 THEN
+       WHERE e ? 'measurement_details_omitted') <> 3 THEN
     RAISE EXCEPTION 'E: NULL accepted versions is not the default';
   END IF;
   IF has_function_privilege('public','public.search_public_reference_contributions_v2(integer,integer,timestamptz,uuid,integer[])','EXECUTE')
      OR NOT has_function_privilege('anon','public.get_public_reference_contribution_v2(uuid,integer,integer[])','EXECUTE')
      OR has_function_privilege('anon','private.reference_public_item_for_versions(jsonb,boolean)','EXECUTE') THEN
     RAISE EXCEPTION 'E: execution surface changed';
+  END IF;
+END
+$$;
+
+-- G. get with an explicit older version-1 revision while the current
+-- revision is version 2: the v1 revision is unchanged for both callers; the
+-- current one is projected and marked only for the default caller.
+DO $$
+DECLARE
+  v_c uuid := pg_temp.cid('73000000-0000-4000-8000-0000000a2007');
+  v_old text := (SELECT array_agg(e)::text FROM private.get_public_reference_contribution_v2_unthrottled(v_c,1) e);
+  v_cur text := (SELECT array_agg(e)::text FROM private.get_public_reference_contribution_v2_unthrottled(v_c,NULL) e);
+BEGIN
+  IF (SELECT array_agg(e->'snapshot'->>'schema_version') FROM private.get_public_reference_contribution_v2_unthrottled(v_c,1) e)
+       IS DISTINCT FROM ARRAY['1'] THEN
+    RAISE EXCEPTION 'G: fixture revision 1 is not version 1: %', v_old;
+  END IF;
+  IF (SELECT array_agg(e)::text FROM public.get_public_reference_contribution_v2(v_c,1) e) IS DISTINCT FROM v_old
+     OR (SELECT array_agg(e)::text FROM public.get_public_reference_contribution_v2(v_c,1,ARRAY[1,2]) e) IS DISTINCT FROM v_old THEN
+    RAISE EXCEPTION 'G: an older version-1 revision changed for some caller';
+  END IF;
+  IF (SELECT array_agg(e)::text FROM public.get_public_reference_contribution_v2(v_c,NULL,ARRAY[1,2]) e) IS DISTINCT FROM v_cur
+     OR (SELECT count(*) FROM public.get_public_reference_contribution_v2(v_c,2) e
+          WHERE e->'measurement_details_omitted' = 'true'::jsonb AND pg_temp.v1_shape(e->'snapshot')
+            AND (e->'snapshot'->>'reference_revision')::int = 2) <> 1 THEN
+    RAISE EXCEPTION 'G: current version-2 revision not as stored (opt-in) / projected (default)';
   END IF;
 END
 $$;

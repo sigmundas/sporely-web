@@ -26,8 +26,10 @@
 --   2. private.reference_contribution_share_core: every automatic outcome
 --      (new share, re-share, new revision of an automatic row) is bound by
 --      private.reference_automatic_share_scope(), snapshot version 1 only
---      until Stage D. Out of scope the core writes nothing and answers
---      snapshot_version_unsupported. Consented refresh and grant are
+--      until Stage D. Out of scope the core answers
+--      snapshot_version_unsupported, creating nothing and withdrawing a
+--      shared automatic row with the new reason snapshot_version_unsupported
+--      (no opt-out). Consented refresh and grant are
 --      unchanged. Stage 1B records not_shareable:snapshot_version_unsupported;
 --      the triggers, share-again and deploy refresh ignore the status.
 --
@@ -135,6 +137,72 @@ IMMUTABLE
 SET search_path = ''
 AS $$
   SELECT '{"snapshot_schema_versions":[1],"data_kinds":["free_text","measurement_details","raw_points"]}'::jsonb
+$$;
+
+-- 1b. Withdrawal reason snapshot_version_unsupported (event CHECK and the
+-- withdrawal helper; helper body otherwise identical to 20261001113007).
+
+ALTER TABLE private.shared_reference_consent_events
+  DROP CONSTRAINT shared_reference_consent_events_reason_check,
+  ADD CONSTRAINT shared_reference_consent_events_reason_check
+    CHECK (reason IS NULL OR reason IN (
+      'owner','consent_missing','observation_not_public','use_detached',
+      'source_deleted','taxon_changed','consent_scope_exceeded',
+      'consent_text_revoked','account_deleted','rollback',
+      'snapshot_version_unsupported'
+    ));
+
+CREATE OR REPLACE FUNCTION private.withdraw_shared_reference_contribution(
+  p_contribution_id uuid,
+  p_reason text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = ''
+AS $$
+DECLARE
+  v_row private.shared_reference_contributions%ROWTYPE;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+BEGIN
+  IF p_reason IS NULL OR p_reason NOT IN (
+    'owner','consent_missing','observation_not_public','use_detached',
+    'source_deleted','taxon_changed','consent_scope_exceeded',
+    'consent_text_revoked','account_deleted','rollback',
+    'snapshot_version_unsupported'
+  ) THEN
+    RAISE EXCEPTION 'invalid shared reference withdrawal reason %', p_reason
+      USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_row
+    FROM private.shared_reference_contributions c
+   WHERE c.id = p_contribution_id
+   FOR UPDATE;
+  IF NOT FOUND OR v_row.status <> 'shared' THEN
+    RETURN false;
+  END IF;
+  UPDATE private.shared_reference_contributions
+     SET status = 'withdrawn',
+         withdrawn_at = v_now,
+         updated_at = v_now,
+         share_basis = NULL,
+         shared_first_revision = NULL,
+         consented_at = NULL,
+         consent_version = NULL,
+         consent_locale = NULL,
+         consent_client = NULL,
+         consent_first_revision = NULL,
+         consent_scope = NULL
+   WHERE id = p_contribution_id;
+  INSERT INTO private.shared_reference_consent_events(
+    contribution_id, event, reason, consent_version, occurred_at
+  ) VALUES (
+    p_contribution_id,
+    CASE WHEN p_reason = 'owner' THEN 'withdrawn_by_owner' ELSE 'withdrawn_by_system' END,
+    p_reason, v_row.consent_version, v_now
+  );
+  RETURN true;
+END
 $$;
 
 -- 2. Species-page reads --------------------------------------------------------------
@@ -573,6 +641,14 @@ BEGIN
     ELSIF NOT private.reference_share_scope_within(
             v_scope, private.reference_automatic_share_scope()
           ) THEN
+      -- A shared automatic row is withdrawn (fail closed) rather than left
+      -- serving a revision the source no longer matches. No opt-out is
+      -- written, so a later in-scope refresh shares again.
+      IF v_shared THEN
+        PERFORM private.withdraw_shared_reference_contribution(
+          v_contribution.id, 'snapshot_version_unsupported'
+        );
+      END IF;
       RETURN private.shared_reference_contribution_result('snapshot_version_unsupported');
     END IF;
   ELSIF NOT private.reference_share_scope_within(v_scope, v_text.scope) THEN
@@ -865,6 +941,7 @@ ALTER FUNCTION private.reference_accepts_snapshot_v2(integer[]) OWNER TO postgre
 ALTER FUNCTION private.reference_public_snapshot_project_v1(jsonb) OWNER TO postgres;
 ALTER FUNCTION private.reference_public_item_for_versions(jsonb,boolean) OWNER TO postgres;
 ALTER FUNCTION private.reference_automatic_share_scope() OWNER TO postgres;
+ALTER FUNCTION private.withdraw_shared_reference_contribution(uuid,text) OWNER TO postgres;
 ALTER FUNCTION public.search_public_reference_contributions_v2(integer,integer,timestamptz,uuid,integer[]) OWNER TO postgres;
 ALTER FUNCTION public.get_public_reference_contribution_v2(uuid,integer,integer[]) OWNER TO postgres;
 ALTER FUNCTION public.search_public_observation_references(bigint[],integer[]) OWNER TO postgres;
@@ -876,6 +953,7 @@ REVOKE ALL ON FUNCTION private.reference_accepts_snapshot_v2(integer[]) FROM PUB
 REVOKE ALL ON FUNCTION private.reference_public_snapshot_project_v1(jsonb) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.reference_public_item_for_versions(jsonb,boolean) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.reference_automatic_share_scope() FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION private.withdraw_shared_reference_contribution(uuid,text) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.reference_contribution_share_core(text,uuid,uuid,integer,integer,integer,integer,integer,text,text) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private._taxon_identity_repair_reconcile_references(bigint,bigint) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.search_public_reference_contributions_v2(integer,integer,timestamptz,uuid,integer[]) FROM PUBLIC, anon, authenticated, service_role;
