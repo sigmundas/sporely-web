@@ -293,3 +293,28 @@ Opt-out rows stay. No row stays `shared` without the opt-out check.
   - contract tests for the new RPCs.
 
 Every candidate gets a general review and a security review.
+
+## Handoff: order step 1, web notice (2026-10-01)
+
+- Branch `feature/publish-notice-default-sharing` from main 7e5aac0; candidate
+  883b900 (approved by general and security review), lows closed in a follow-up
+  commit.
+- Shipped: the plan's reference text replaces the private, already-shared and
+  cautious lines (and their code: the shared-contribution match and reference-use
+  lookup); "Don't show this again (on this device)" stored in localStorage under
+  `sporely-publish-notice-suppressed:<userId>`, set only on Publish; when
+  suppressed every transition, including precision increases, proceeds without
+  the modal; Settings toggle "Show what becomes public before publishing (this
+  device)", disabled when signed out. Four locales; German notice uses "du";
+  sv_SE/de_DE gained the "My shared references" strings.
+- Tests: `node --test src/publish-notice.test.js src/publish-notice.handlers.test.js`
+  pass; `vite build` passes. Unrelated pre-existing failures outside `src/`
+  (taxonomy manifest, Deno `.ts` files under node).
+- Deviations: no attach-to-public or spore private→public triggers on web, since
+  web has no reference attach UI and never writes `spore_data_visibility`; the
+  toggle lives in a new "Privacy" section in `index.html`/`src/main.js` (the
+  Settings screen is there, not `settings-overlay.js`); new string
+  `publishNotice.dontShowAgain` instead of `import.dontShowAgain`, which lacks
+  "(on this device)".
+- Not done: the opted-out line and the web list (step 4). Step 4 must ship
+  together with step 3.

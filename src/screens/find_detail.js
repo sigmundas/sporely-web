@@ -4248,18 +4248,6 @@ function _setDetailHeader({ commonName = '', genus = '', species = '', fallbackN
   }
 }
 
-// Species the observation will carry after this save, for the publish
-// notice's already-shared match. Unchanged identification: null here means
-// "use the stored identity". A proven Sporely selection is known; any other
-// identification change (provider candidate, free text) may be resolved or
-// cleared server-side, so it is unknown.
-export function detailTaxonAfterSave(selectedTaxon, identificationChanged) {
-  if (!identificationChanged) return null
-  const selection = selectedTaxon ? taxonomySelectionForTaxon(selectedTaxon) : null
-  if (isProvenSporelySelection(selection)) return { known: true, id: selection.sporelyTaxonId }
-  return { known: false }
-}
-
 let detailPublishNoticeOptions = {}
 
 // The obscured checkbox can only express exact vs not exact. The server also
@@ -4402,7 +4390,6 @@ async function _save() {
       client: supabase,
       observationId: currentObs.id,
       userId: state.user.id,
-      taxonAfterSave: detailTaxonAfterSave(selectedTaxon, identificationChanged),
     }) },
   )
   if (!publishConfirmed) {
