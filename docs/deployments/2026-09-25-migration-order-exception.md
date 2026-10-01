@@ -31,7 +31,11 @@ Reason: its own documented rollout precondition is unmet.
   step 1).
 - The public shared-contribution envelope version decision is unresolved
   (see the migration's own header: `share_reference_contribution` could
-  otherwise publish a v2 snapshot through anon readers).
+  otherwise publish a v2 snapshot through anon readers). Since Stage 2c
+  (`20261001091940`), shared envelopes reach anon readers only through
+  `search_public_reference_contributions_v2` and
+  `get_public_reference_contribution_v2`; the pre-`_v2` reads serve
+  tombstones only. The decision must cover the `_v2` reads.
 
 The deferred migration touches no object that the four deployed migrations
 touch, and they touch none of its objects, so applying it later out of order
