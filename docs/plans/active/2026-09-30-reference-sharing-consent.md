@@ -1,5 +1,8 @@
 # Stage 2: consent and visibility for shared reference data
 
+> **Superseded in part (2026-10-01):** the owner replaced opt-in sharing with default-on sharing and a sticky per-reference Stop sharing. See `docs/plans/active/2026-10-01-reference-sharing-default-on.md`. The consent texts, the consent dialog, the activation gate and the content proof described here no longer apply. Roles, labels and the `_v2` version gate (Stage 2c) remain.
+
+
 Status: decided 2026-10-01. Revised after independent security review and
 general review of `ebb9416` (both "needs changes"; incorporated). Not
 started. Order: re-review of this revision, then 2a (implement, review,
