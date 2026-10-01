@@ -201,12 +201,64 @@ test('locales: German notice uses one register (du); shared-references labels ma
   }
 })
 
-function fakeClient({ row = null, images = [], rowError = false }) {
+test('opted-out line: shown only when an attached set is stopped; omitted when unknown', async () => {
+  const STOPPED_EN = 'References you stopped sharing are no longer shown publicly.'
+  assert.equal(t('publishNotice.referencesStopped'), STOPPED_EN)
+  const sets = [
+    { source_measurement_set_id: 'set-a', status: 'stopped', stopped_at: '2026-01-01T00:00:00Z' },
+    { source_measurement_set_id: 'set-b', status: 'shared', stopped_at: null },
+  ]
+  const load = opts => loadExistingObservationFacts({ client: fakeClient(opts), observationId: 1, userId: 'u' })
+
+  const stopped = await load({ uses: [{ reference_measurement_set_id: 'set-a' }], rpc: { status: 'ok', sets } })
+  assert.equal(stopped.usesStoppedReference, true)
+  const shared = await load({ uses: [{ reference_measurement_set_id: 'set-b' }], rpc: { status: 'ok', sets } })
+  assert.equal(shared.usesStoppedReference, false)
+  let rpcCalled = false
+  const none = await load({ uses: [], rpc: () => { rpcCalled = true } })
+  assert.equal(none.usesStoppedReference, false)
+  assert.equal(rpcCalled, false, 'no list RPC without attached references')
+  const limited = await load({ uses: [{ reference_measurement_set_id: 'set-a' }], rpc: { status: 'rate_limited', retry_after_seconds: 9 } })
+  assert.equal(limited.usesStoppedReference, undefined)
+  const usesFail = await load({ usesError: true })
+  assert.equal(usesFail.usesStoppedReference, undefined)
+  const rpcThrows = await load({ uses: [{ reference_measurement_set_id: 'set-a' }], rpc: () => { throw new Error('net') } })
+  assert.equal(rpcThrows.usesStoppedReference, undefined)
+
+  const withLine = buildPublishNoticeModel({ locationPrecision: 'exact', usesStoppedReference: true })
+  assert.ok(withLine.notes.includes(STOPPED_EN))
+  assert.ok(withLine.notes.includes(REFERENCES_EN))
+  for (const value of [false, undefined]) {
+    const model = buildPublishNoticeModel({ locationPrecision: 'exact', usesStoppedReference: value })
+    assert.ok(!model.notes.includes(STOPPED_EN))
+    assert.ok(model.notes.includes(REFERENCES_EN))
+  }
+
+  let shown
+  state.user = { id: 'opted-out-user' }
+  await confirmPublishIfNeeded({ visibility: 'private', is_draft: false }, PUB, {
+    userId: 'opted-out-user',
+    loadFacts: async () => ({ usesStoppedReference: true }),
+    showDialog: async model => { shown = model; return true },
+  })
+  assert.ok(shown.notes.includes(STOPPED_EN))
+  const source = fs.readFileSync(new URL('./i18n.js', import.meta.url), 'utf8')
+  assert.equal((source.match(/'publishNotice\.referencesStopped': '[^']+'/g) || []).length, 4)
+})
+
+function fakeClient({ row = null, images = [], rowError = false, uses = [], usesError = false, rpc = null }) {
   return {
+    async rpc(name) {
+      assert.equal(name, 'list_my_reference_sharing')
+      const data = typeof rpc === 'function' ? rpc() : rpc
+      return { data, error: null }
+    },
     from(table) {
       const result = table === 'observation_images'
         ? { data: images, error: null }
-        : (rowError ? { data: null, error: { message: 'x' } } : { data: row, error: null })
+        : table === 'observation_reference_uses'
+          ? (usesError ? { data: null, error: { message: 'x' } } : { data: uses, error: null })
+          : (rowError ? { data: null, error: { message: 'x' } } : { data: row, error: null })
       const chain = {
         select: () => chain, eq: () => chain, is: () => Promise.resolve(result),
         maybeSingle: () => Promise.resolve(result),
