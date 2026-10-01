@@ -1,6 +1,12 @@
 -- Stage 2c candidate 1 (20261001091940_add_reference_contribution_relationship_roles.sql):
 -- the "is served" check, public relationship roles, the _v2 reads, today's
 -- restricted reads, the execution surface and the consent text v1 edit.
+-- Stage 2d (20261001113007): roles come from exactly the uses
+-- search_public_observation_references serves for the contribution's
+-- (owner, set, taxon); the content proof is gone, so a use whose frozen
+-- snapshot matches no shared revision now counts (changed meaning: 940000308
+-- contributes 'compared'). The is-served check uses the share basis and
+-- sharing period instead of consent.
 -- Run after local migrations with psql; every transaction is rolled back.
 
 BEGIN;
@@ -64,7 +70,9 @@ DECLARE
   w constant uuid := '71000000-0000-4000-8000-00000000e301';
   tr constant uuid := '72000000-0000-4000-8000-00000000e301';
   s constant uuid := '73000000-0000-4000-8000-00000000e301';
-  obs constant bigint[] := ARRAY[940000301,940000302,940000303,940000304,940000305,940000306,940000307,940000308]::bigint[];
+  -- The observations of the contribution's taxon (940000307 is another
+  -- taxon: served on its observation page, but not this contribution's role).
+  obs constant bigint[] := ARRAY[940000301,940000302,940000303,940000304,940000305,940000306,940000308]::bigint[];
   v_snap jsonb;
   v_id uuid;
   v_roles text[];
@@ -93,7 +101,7 @@ BEGIN
     (940000305,owner_1,current_date,'public',false,'private',t),    -- compared, private spore data
     (940000306,owner_1,current_date,'public',false,'public',t),     -- compared, deleted use
     (940000307,owner_1,current_date,'public',false,'public',t_other), -- compared, other taxon
-    (940000308,owner_1,current_date,'public',false,'public',t);     -- compared, fails content proof
+    (940000308,owner_1,current_date,'public',false,'public',t);     -- compared, matches no shared revision
   INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
   VALUES (owner_1,w,'article','[{"family":"Roles"}]','Roles of a reference',2001,'Roles 2001',1);
   INSERT INTO public.reference_taxon_treatments(user_id,id,reference_work_id,taxon_id,name_as_published,revision)
@@ -136,14 +144,14 @@ BEGIN
   INSERT INTO public.observation_reference_uses(
     user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json
   ) VALUES (owner_1,'74000000-0000-4000-8000-00000000e302',940000302,s,'supports_identification',1,v_snap);
-  -- A use whose frozen snapshot matches no consented revision.
+  -- A use whose frozen snapshot matches no shared revision (served since 2d).
   INSERT INTO public.observation_reference_uses(
     user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json
   ) VALUES (owner_1,'74000000-0000-4000-8000-00000000e308',940000308,s,'compared',1,
             jsonb_set(v_snap,'{raw_text}','"9-12 x 5-6 um"'));
   PERFORM pg_temp.claims(viewer,'authenticated');
   v_roles := pg_temp.v2_roles(v_id,t);
-  IF v_roles IS DISTINCT FROM ARRAY['contradicts','supports_identification']
+  IF v_roles IS DISTINCT FROM ARRAY['compared','contradicts','supports_identification']
      OR pg_temp.served_observation_roles(obs) IS DISTINCT FROM v_roles
      OR (SELECT current_revision FROM private.shared_reference_contributions WHERE id=v_id) <> 1 THEN
     RAISE EXCEPTION 'roles (two served uses) wrong: % / %', v_roles, pg_temp.served_observation_roles(obs);
@@ -158,10 +166,28 @@ BEGIN
     RAISE EXCEPTION 'role change not reflected live';
   END IF;
 
-  -- Only the content-proof-failing use is left: still shared, roles [].
+  -- The other-taxon observation is served on its own page but not counted.
+  IF pg_temp.served_observation_roles(ARRAY[940000307]::bigint[]) IS DISTINCT FROM ARRAY['compared'] THEN
+    RAISE EXCEPTION 'other-taxon observation reference not served';
+  END IF;
+
+  -- Only an observation of another taxon is left: still shared (the stale
+  -- row stays until a refresh), roles [].
   PERFORM pg_temp.claims(owner_1,'authenticated');
   UPDATE public.observation_reference_uses SET deleted_at=now()
-   WHERE id IN ('74000000-0000-4000-8000-00000000e301','74000000-0000-4000-8000-00000000e302');
+   WHERE id IN ('74000000-0000-4000-8000-00000000e301','74000000-0000-4000-8000-00000000e302',
+                '74000000-0000-4000-8000-00000000e308');
+  -- (Deleting the last same-taxon use withdraws; keep the row shared to test
+  -- the empty-roles case.)
+  PERFORM pg_temp.claims(NULL,NULL);
+  IF (SELECT status FROM private.shared_reference_contributions WHERE id=v_id) <> 'withdrawn' THEN
+    RAISE EXCEPTION 'losing the last qualifying use did not withdraw';
+  END IF;
+  ALTER TABLE private.shared_reference_contributions DISABLE TRIGGER USER;
+  UPDATE private.shared_reference_contributions
+     SET status='shared',withdrawn_at=NULL,share_basis='automatic',shared_first_revision=1
+   WHERE id=v_id;
+  ALTER TABLE private.shared_reference_contributions ENABLE TRIGGER USER;
   PERFORM pg_temp.claims(viewer,'authenticated');
   IF (SELECT status FROM private.shared_reference_contributions WHERE id=v_id) <> 'shared'
      OR NOT private.reference_contribution_is_served(v_id)
@@ -175,13 +201,24 @@ BEGIN
     RAISE EXCEPTION 'relationship_roles is not the empty array';
   END IF;
 
-  -- Unserved contributions have no roles.
-  UPDATE private.shared_reference_contributions SET hidden_at=now(),hidden_reason='abuse' WHERE id=v_id;
+  -- Roles and the observation read agree under an opt-out and a hide.
   UPDATE public.observation_reference_uses SET deleted_at=NULL
    WHERE id='74000000-0000-4000-8000-00000000e302';
+  IF private.reference_contribution_public_roles(v_id) IS DISTINCT FROM ARRAY['supports_identification'] THEN
+    RAISE EXCEPTION 'restored use not counted';
+  END IF;
+  INSERT INTO private.reference_share_opt_outs(owner_id,source_measurement_set_id) VALUES (owner_1,s);
   IF private.reference_contribution_public_roles(v_id) IS DISTINCT FROM '{}'::text[]
+     OR pg_temp.served_observation_roles(obs || 940000307::bigint) IS DISTINCT FROM '{}'::text[] THEN
+    RAISE EXCEPTION 'an opted-out set has roles or observation references';
+  END IF;
+  DELETE FROM private.reference_share_opt_outs WHERE owner_id=owner_1;
+  -- Unserved contributions have no roles.
+  UPDATE private.shared_reference_contributions SET hidden_at=now(),hidden_reason='abuse' WHERE id=v_id;
+  IF private.reference_contribution_public_roles(v_id) IS DISTINCT FROM '{}'::text[]
+     OR pg_temp.served_observation_roles(obs || 940000307::bigint) IS DISTINCT FROM '{}'::text[]
      OR private.reference_contribution_public_roles(gen_random_uuid()) IS DISTINCT FROM '{}'::text[] THEN
-    RAISE EXCEPTION 'a hidden or unknown contribution has roles';
+    RAISE EXCEPTION 'a hidden or unknown contribution has roles, or its set is still on observations';
   END IF;
 END
 $$;
@@ -205,9 +242,10 @@ DECLARE v_id uuid := gen_random_uuid();
 BEGIN
   INSERT INTO private.shared_reference_contributions(
     id,owner_id,source_measurement_set_id,sporely_taxon_id,status,current_revision,shared_at,
+    share_basis,shared_first_revision,
     consented_at,consent_version,consent_locale,consent_first_revision,consent_scope)
   VALUES (v_id,p_owner,CASE WHEN p_owner IS NOT NULL THEN gen_random_uuid() END,p_taxon,'shared',
-          p_revisions,now()-(p_age||' seconds')::interval,now(),1,'en',p_first,
+          p_revisions,now()-(p_age||' seconds')::interval,'consented',p_first,now(),1,'en',p_first,
           '{"snapshot_schema_versions":[1],"data_kinds":[]}');
   INSERT INTO private.shared_reference_contribution_revisions(
     contribution_id,revision,source_work_revision,source_treatment_revision,
@@ -249,7 +287,7 @@ DECLARE
   t_page constant integer := 2100000985;
   v_ok uuid; v_hidden uuid; v_withdrawn uuid; v_null uuid; v_banned uuid; v_deleted uuid;
   v_blocked uuid; v_pre uuid; v_missing uuid; v_big uuid; v_hist uuid; v_hist_big uuid; v_tomb uuid;
-  v_p1 uuid; v_p2 uuid; v_p3 uuid;
+  v_p1 uuid; v_p2 uuid; v_p3 uuid; v_opted uuid;
   v_env jsonb;
 BEGIN
   INSERT INTO auth.users(id,aud,role,email,raw_user_meta_data,created_at,updated_at)
@@ -267,7 +305,8 @@ BEGIN
            (t_big,'Amanita magna','species','include','in_cache','served-test'),
            (t_page,'Amanita paginata','species','include','in_cache','served-test');
   ALTER TABLE private.shared_reference_contributions
-    DROP CONSTRAINT shared_reference_contributions_consent_period_bound;
+    DROP CONSTRAINT shared_reference_contributions_consent_period_bound,
+    DROP CONSTRAINT shared_reference_contributions_shared_period_bound;
   -- The reads cap envelopes independently of this CHECK (defence in depth).
   ALTER TABLE private.shared_reference_contribution_revisions
     DROP CONSTRAINT shared_reference_contribution_revisions_envelope_json_check;
@@ -278,12 +317,17 @@ BEGIN
   v_withdrawn := pg_temp.seed(o_ok,t,1,1,12);
   UPDATE private.shared_reference_contributions
      SET status='withdrawn',withdrawn_at=now(),consented_at=NULL,consent_version=NULL,consent_locale=NULL,
-         consent_first_revision=NULL,consent_scope=NULL WHERE id=v_withdrawn;
+         consent_first_revision=NULL,consent_scope=NULL,share_basis=NULL,shared_first_revision=NULL
+   WHERE id=v_withdrawn;
   v_null := pg_temp.seed(NULL,t,1,1,13);
   v_banned := pg_temp.seed(o_banned,t,1,1,14);
   v_deleted := pg_temp.seed(o_deleted,t,1,1,15);
   v_blocked := pg_temp.seed(o_blocked,t,1,1,16);
   v_pre := pg_temp.seed(o_ok,t,1,2,17);          -- current revision before the consent period
+  -- An opted-out set is not served on the species page (2d).
+  v_opted := pg_temp.seed(o_ok,t,1,1,20);
+  INSERT INTO private.reference_share_opt_outs(owner_id,source_measurement_set_id)
+  SELECT o_ok, source_measurement_set_id FROM private.shared_reference_contributions WHERE id=v_opted;
   v_missing := pg_temp.seed(o_ok,t,1,1,18);
   UPDATE private.shared_reference_contributions SET current_revision=2 WHERE id=v_missing;
   v_big := pg_temp.seed(o_ok,t_big,1,1,19,1048577);
@@ -296,7 +340,8 @@ BEGIN
   PERFORM pg_temp.agree('banned',v_banned,t,false);
   PERFORM pg_temp.agree('account deletion',v_deleted,t,false);
   PERFORM pg_temp.agree('blocked',v_blocked,t,false);
-  PERFORM pg_temp.agree('pre-consent current revision',v_pre,t,false);
+  PERFORM pg_temp.agree('current revision before the sharing period',v_pre,t,false);
+  PERFORM pg_temp.agree('opted out',v_opted,t,false);
   PERFORM pg_temp.agree('missing current revision',v_missing,t,false);
   PERFORM pg_temp.agree('oversize envelope',v_big,t_big,false);
   IF NOT private.reference_contribution_is_served(v_big,false) THEN
@@ -366,7 +411,8 @@ BEGIN
   v_tomb := pg_temp.seed(o_ok,t,2,1,42);
   UPDATE private.shared_reference_contributions
      SET status='withdrawn',withdrawn_at=now(),consented_at=NULL,consent_version=NULL,consent_locale=NULL,
-         consent_first_revision=NULL,consent_scope=NULL,owner_id=NULL,source_measurement_set_id=NULL
+         consent_first_revision=NULL,consent_scope=NULL,share_basis=NULL,shared_first_revision=NULL,
+         owner_id=NULL,source_measurement_set_id=NULL
    WHERE id=v_tomb;
   IF (SELECT i FROM public.get_public_reference_contribution_v2(v_tomb,1) i) IS DISTINCT FROM
         (SELECT i FROM public.get_public_reference_contribution(v_tomb,1) i)
@@ -604,13 +650,13 @@ BEGIN
     sporely_taxon_id,canonical_name,rank,scope_state,cache_state,first_materialized_from_release
   ) VALUES (2100000986,'Amanita textualis','species','include','in_cache','text-test');
   INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,status,
-    consented_at,consent_version,consent_locale,consent_first_revision,consent_scope)
-  VALUES (v_owner,gen_random_uuid(),2100000986,'shared',now(),1,'nb',1,'{"snapshot_schema_versions":[1],"data_kinds":[]}')
+    share_basis,shared_first_revision,consented_at,consent_version,consent_locale,consent_first_revision,consent_scope)
+  VALUES (v_owner,gen_random_uuid(),2100000986,'shared','consented',1,now(),1,'nb',1,'{"snapshot_schema_versions":[1],"data_kinds":[]}')
   RETURNING id INTO v_id;
   PERFORM pg_temp.expect_abort('referenced by a contribution');
   UPDATE private.shared_reference_contributions
      SET status='withdrawn',withdrawn_at=now(),consented_at=NULL,consent_version=NULL,consent_locale=NULL,
-         consent_first_revision=NULL,consent_scope=NULL WHERE id=v_id;
+         consent_first_revision=NULL,consent_scope=NULL,share_basis=NULL,shared_first_revision=NULL WHERE id=v_id;
   INSERT INTO private.shared_reference_consent_events(contribution_id,event,reason,consent_version)
   VALUES (v_id,'withdrawn_by_system','use_detached',1);
   PERFORM pg_temp.expect_abort('referenced by an event');

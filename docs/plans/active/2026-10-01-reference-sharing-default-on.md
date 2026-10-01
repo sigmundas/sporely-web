@@ -293,3 +293,25 @@ Opt-out rows stay. No row stays `shared` without the opt-out check.
   - contract tests for the new RPCs.
 
 Every candidate gets a general review and a security review.
+
+## Handoff: order step 3 (server) candidate, 2026-10-01
+
+- Branch `feature/reference-sharing-default-on-server` from `7e5aac0`;
+  migration `20261001113007_share_references_by_default.sql`; new test
+  `shared_reference_default_on_test.sql`; listed test files updated (plus
+  `identification_v2_rpc_regression_test.sql`). Not deployed.
+- Verified locally: `supabase db reset --local`; 71/72 SQL tests pass
+  (`public_observation_point_prep_test.sql` fails at the base too); both
+  concurrency scripts on fresh resets; deploy-tree node tests; the migration
+  also applies without the deferred `20260914090000`.
+- Choices inside the plan: the grant mode also refuses an opted-out set
+  (`opted_out`); the species-page read (`reference_contribution_is_served`)
+  also checks the opt-out; a refresh on a set with a hidden contribution
+  returns `moderation_hidden` (Stage 1B records `not_shareable:moderation_hidden`);
+  a refresh without a qualifying use and no shared row returns
+  `qualifying_use_required` (Stage 1B records it); the backfill also opts out
+  rows whose latest withdrawal event is the owner's; the deploy refresh
+  aborts the migration on any error.
+- Open: the rollback migration is not drafted (its step 2 is tested);
+  web `WITHDRAWAL_REASON_KEYS` gains `rollback` with order step 4;
+  general and security review of this candidate.

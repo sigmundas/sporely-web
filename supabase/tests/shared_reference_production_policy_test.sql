@@ -43,12 +43,12 @@ BEGIN
 
   INSERT INTO private.shared_reference_contributions(
     id,owner_id,source_measurement_set_id,sporely_taxon_id,status,current_revision,shared_at,
-    consented_at,consent_version,consent_locale,consent_first_revision,consent_scope
+    share_basis,shared_first_revision,consented_at,consent_version,consent_locale,consent_first_revision,consent_scope
   )
   -- Fixture rows carry a consent record: only consented rows are public.
   SELECT gen_random_uuid(),v_owner_id,gen_random_uuid(),taxon_id,'shared',1,
          now()-(n || ' seconds')::interval,
-         now(),1,'en',1,'{"snapshot_schema_versions":[1],"data_kinds":[]}'::jsonb
+         'consented',1,now(),1,'en',1,'{"snapshot_schema_versions":[1],"data_kinds":[]}'::jsonb
     FROM generate_series(1,30) n;
   INSERT INTO private.shared_reference_contribution_revisions(
     contribution_id,revision,source_work_revision,source_treatment_revision,
@@ -102,11 +102,16 @@ BEGIN
     RAISE EXCEPTION 'authenticated source-sync request 61 was not throttled';
   END IF;
 
-  -- 2b owner RPCs share the authenticated bucket: each counts as a request
-  -- and request 61 is refused with Retry-After, changing nothing.
+  -- 2b and 2d owner RPCs share the authenticated bucket: each counts as a
+  -- request and request 61 is refused with Retry-After, changing nothing.
   DELETE FROM private.shared_reference_rate_buckets;
   PERFORM set_config('response.status','200',true);
-  FOR i IN 1..20 LOOP
+  FOR i IN 1..10 LOOP
+    IF public.list_my_reference_sharing()->>'status' <> 'ok'
+       OR public.stop_sharing_reference_set(gen_random_uuid())->>'status' <> 'not_found'
+       OR public.share_reference_set_again(gen_random_uuid())->>'status' <> 'not_found' THEN
+      RAISE EXCEPTION 'set-keyed owner RPC failed or throttled early (round %)', i;
+    END IF;
     item := public.list_my_shared_reference_contributions();
     IF item->>'status' <> 'ok' THEN
       RAISE EXCEPTION 'owner list request % failed: %', i, item;
@@ -127,7 +132,11 @@ BEGIN
      OR current_setting('response.headers',true)::jsonb->0->>'Retry-After' IS NULL
      OR public.get_reference_share_consent_text('en')->>'status' <> 'rate_limited'
      OR public.share_reference_contribution_with_consent(gen_random_uuid(),taxon_id,1,1,1,1,'en')->>'status'
-        <> 'rate_limited' THEN
+        <> 'rate_limited'
+     OR public.list_my_reference_sharing()->>'status' <> 'rate_limited'
+     OR public.stop_sharing_reference_set(gen_random_uuid())->>'status' <> 'rate_limited'
+     OR public.share_reference_set_again(gen_random_uuid())->>'status' <> 'rate_limited'
+     OR EXISTS (SELECT 1 FROM private.reference_share_opt_outs) THEN
     RAISE EXCEPTION 'owner RPC request 61 was not throttled: %', item;
   END IF;
 

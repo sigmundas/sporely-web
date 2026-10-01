@@ -98,12 +98,14 @@ BEGIN
     (v_obs_bound,v_owner,current_date,'private',false,'Fixtura','beta',v_amb_b,'sporely_v2');
 
   -- Shared-reference fixtures. 2099000003 is the old (W3-resolved) species.
-  -- Stage 2a: shares exist only through consent (fixture grants below), the
-  -- carrying observations are public (decision B), and the repair refreshes
-  -- but never creates.
+  -- Shares are seeded through the grant mode (the use inserts run without a
+  -- session, so the automatic paths do not run), the carrying observations
+  -- are public (decision B). Since Stage 2d (20261001113007) the repair
+  -- creates an automatic share for the new taxon (changed meaning: was
+  -- consent_required, nothing created).
   --   951000010: resolved 2099000003, use of set A, a consented share under
-  --              2099000003 -> promotion withdraws it; nothing is created
-  --              under 620390 (consent_required).
+  --              2099000003 -> promotion withdraws it; an automatic share is
+  --              created under 620390 ('shared').
   --   951000011: resolved 620390 already, use of set B -> effective taxon is
   --              unchanged; promotes with no reference action.
   --   951000013: resolved 2099000003, use of set C; 951000012 (not a
@@ -379,12 +381,13 @@ BEGIN
   END IF;
 
   -- Shared references followed the new identity: withdrawn where no
-  -- qualifying use is left, kept where one is, refreshed where consented,
-  -- and never created.
+  -- qualifying use is left, kept where one is, refreshed where shared, and
+  -- created (automatic) for the new taxon.
   IF (SELECT status FROM private.shared_reference_contributions
        WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00a' AND sporely_taxon_id=2099000003) <> 'withdrawn'
-     OR EXISTS (SELECT 1 FROM private.shared_reference_contributions
+     OR (SELECT status||':'||share_basis FROM private.shared_reference_contributions
        WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00a' AND sporely_taxon_id=620390)
+       IS DISTINCT FROM 'shared:automatic'
      OR (SELECT status FROM private.shared_reference_contributions
        WHERE source_measurement_set_id='83000000-0000-4000-8000-00000001b00c' AND sporely_taxon_id=2099000003) <> 'shared'
      OR (SELECT status FROM private.shared_reference_contributions
@@ -407,7 +410,7 @@ BEGIN
      OR NOT EXISTS (SELECT 1 FROM private.taxon_identity_repair_reference_actions
        WHERE observation_id=951000010 AND reference_measurement_set_id='83000000-0000-4000-8000-00000001b00a'
          AND old_sporely_taxon_id=2099000003 AND new_sporely_taxon_id=620390
-         AND old_contribution='withdrawn' AND new_contribution='consent_required')
+         AND old_contribution='withdrawn' AND new_contribution='shared')
      OR NOT EXISTS (SELECT 1 FROM private.taxon_identity_repair_reference_actions
        WHERE observation_id=951000013 AND reference_measurement_set_id='83000000-0000-4000-8000-00000001b00c'
          AND old_contribution='kept_by_other_use' AND new_contribution='shared') THEN
