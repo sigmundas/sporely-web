@@ -83,6 +83,7 @@ landing, public API, species pages, compare tray, reference sharing).
 | Public anon reads | `search_public_reference_contributions(_v2)`, `get_public_reference_contribution(_v2)` | verbatim, version-unaware | Stage A |
 | Sync/use-feed guard | `sync_reference_measurement_set_unthrottled`, use-feed RPCs | no client capability enforcement | Stage M |
 | Web reference UI | `src/**` | not inventoried | inventory Stage A, implement Stage C |
+| Desktop shared-reference catalogue | `utils/cloud_sync.py` `search/get_public_reference_contribution_v2` (2b branch :16583), `database/curated_reference_forks.py` `normalize_curated_bundle` (`_SHARED_KEYS`, exact keys) | a marked envelope fails exact keys and the `_FULL_KEYS` fallback, raising `CuratedReferenceError`; `search_shared_reference_contributions` does not catch per row, so **the whole page fails** | accept the marker or opt in `{1,2}` before Stage D (Stage E/M scope) |
 | Landing species page / compare tray | `publicReferenceSnapshot.ts`, `sporeSummary.ts`, `compareTray.ts` | rejects v2 | Stage B |
 | Landing relationship labels | PR #3 `feature/reference-relationship-labels` | unmerged, v1 | coordinate in Stage B |
 
@@ -200,8 +201,13 @@ for current production data). Landing opts in to v2 in Stage B.
 
 - Apply `20260914090000` through `scripts/supabase-deploy-tree.mjs` and remove
   it from `supabase/deploy-exceptions.json` in the same commit, per
-  `docs/deployments/2026-09-25-migration-order-exception.md`. Widen the
-  automatic-share version allowance to v2 here (or in a companion migration).
+  `docs/deployments/2026-09-25-migration-order-exception.md`. Widen
+  `private.reference_automatic_share_scope()` to versions [1,2] in the
+  **same** migration/deploy that applies `20260914090000` (no companion
+  migration: in between, every automatic refresh of an enhanced set would
+  withdraw it with `snapshot_version_unsupported`).
+- Prerequisite: desktop public-read callers accept the
+  `measurement_details_omitted` marker or opt in `{1,2}` (see Stage E/M).
 - Tests: `reference_snapshot_v2_test.sql`,
   `reference_measurement_content_extension_test.sql`, replay dry run.
 - Review: general + security. Prod approval: yes, explicit.
@@ -307,3 +313,29 @@ for current production data). Landing opts in to v2 in Stage B.
     (`reference_curated_public_envelope`) not made version-aware: curation
     still publishes v1 only. (4) Rolling back 2d after A drops the new
     Stage 1B status (unreachable then).
+- 2026-10-01: Stage A approved at `4ad0c4f` (general + security). Follow-ups
+  as new commits (PR #23 stays draft, nothing deployed):
+  - `01113af`: a shared automatic row whose source becomes v2 is withdrawn
+    with new reason `snapshot_version_unsupported` (event reason CHECK and
+    `withdraw_shared_reference_contribution` redefined in `20261001213000`;
+    no opt-out, so the Stage D refresh re-shares). Trigger/refresh paths do
+    not error (set-update trigger exercised in the test). Rollback restores
+    the helper and CHECK and refuses (55000) while events with the new
+    reason exist. Tests: withdrawn tombstone (search nothing, get current
+    nothing, get revision 1 a withdrawn stub for both callers); explicit v1
+    revision 1 under a v2 current revision unchanged for both callers, the
+    current one projected/marked or as stored; consented rows unchanged.
+    Rollback test now asserts equality with the embedded pre-stage
+    fingerprint (includes the helper and the CHECK). All Stage A and
+    existing reference SQL tests and the three `.sh` tests pass after reset.
+  - Owner-facing reason labels: web `src/shared-references.js` renders no
+    withdrawal reason (tolerant). Desktop `_withdrawal_reason_label` was not
+    found in `ui/reference_sharing_dialogs.py` or anywhere on
+    `origin/feature/reference-sharing-consent-2b-desktop` (`86da707`) or
+    other refs; desktop owners would see whatever its list renders for an
+    unknown reason, to be checked when that UI lands.
+  - Desktop public reads: a marked envelope makes the whole
+    `search_shared_reference_contributions` page raise (see inventory row).
+    Harmless before Stage D (no v2 exists); a Stage E/M prerequisite of D.
+  - The Stage D plan now requires widening the automatic scope in the same
+    migration/deploy as `20260914090000`.
