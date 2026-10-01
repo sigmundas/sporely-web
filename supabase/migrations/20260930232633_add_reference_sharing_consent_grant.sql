@@ -33,21 +33,106 @@
 
 BEGIN;
 
-LOCK TABLE private.shared_reference_contributions,
-           private.shared_reference_contribution_revisions
-  IN ACCESS EXCLUSIVE MODE;
--- Triggers on these tables are replaced or dropped below; block writes (not
--- reads) so no write runs half on the old and half on the new definitions.
+-- Public tables first, then the private ones, in the order application
+-- paths reach them (a write to a public table fires the trigger that then
+-- touches the contribution tables). Triggers on the public tables are
+-- replaced or dropped below; block their writes (not reads) so no write runs
+-- half on the old and half on the new definitions.
 LOCK TABLE public.observations,
            public.observation_reference_uses,
            public.reference_measurement_sets,
            public.reference_taxon_treatments,
            public.reference_works
   IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE private.shared_reference_contributions,
+           private.shared_reference_contribution_revisions
+  IN ACCESS EXCLUSIVE MODE;
+
+-- Consent locale (M1): the (version, locale) of the text a row was consented
+-- under, so revoking one text withdraws exactly its rows. No row is
+-- consented before 2b, so nothing to backfill.
+ALTER TABLE private.shared_reference_contributions
+  ADD COLUMN consent_locale text CHECK (
+    consent_locale IS NULL OR consent_locale ~ '^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$'
+  );
+ALTER TABLE private.shared_reference_contributions
+  DROP CONSTRAINT shared_reference_contributions_consent_all_or_none,
+  ADD CONSTRAINT shared_reference_contributions_consent_all_or_none
+    CHECK (
+      (consented_at IS NULL AND consent_version IS NULL AND consent_locale IS NULL
+        AND consent_first_revision IS NULL AND consent_scope IS NULL)
+      OR (consented_at IS NOT NULL AND consent_version IS NOT NULL AND consent_locale IS NOT NULL
+        AND consent_first_revision IS NOT NULL AND consent_scope IS NOT NULL)
+    );
+
+-- The withdrawal helper (2a) now also clears consent_locale.
+CREATE OR REPLACE FUNCTION private.withdraw_shared_reference_contribution(
+  p_contribution_id uuid,
+  p_reason text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = ''
+AS $$
+DECLARE
+  v_row private.shared_reference_contributions%ROWTYPE;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+BEGIN
+  IF p_reason IS NULL OR p_reason NOT IN (
+    'owner','consent_missing','observation_not_public','use_detached',
+    'source_deleted','taxon_changed','consent_scope_exceeded',
+    'consent_text_revoked','account_deleted'
+  ) THEN
+    RAISE EXCEPTION 'invalid shared reference withdrawal reason %', p_reason
+      USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_row
+    FROM private.shared_reference_contributions c
+   WHERE c.id = p_contribution_id
+   FOR UPDATE;
+  IF NOT FOUND OR v_row.status <> 'shared' THEN
+    RETURN false;
+  END IF;
+  UPDATE private.shared_reference_contributions
+     SET status = 'withdrawn',
+         withdrawn_at = v_now,
+         updated_at = v_now,
+         consented_at = NULL,
+         consent_version = NULL,
+         consent_locale = NULL,
+         consent_client = NULL,
+         consent_first_revision = NULL,
+         consent_scope = NULL
+   WHERE id = p_contribution_id;
+  INSERT INTO private.shared_reference_consent_events(
+    contribution_id, event, reason, consent_version, occurred_at
+  ) VALUES (
+    p_contribution_id,
+    CASE WHEN p_reason = 'owner' THEN 'withdrawn_by_owner' ELSE 'withdrawn_by_system' END,
+    p_reason, v_row.consent_version, v_now
+  );
+  RETURN true;
+END
+$$;
+
+-- True when the row's consent text (version, locale) is revoked or gone.
+CREATE FUNCTION private.reference_consent_text_revoked(p_version integer, p_locale text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = ''
+AS $$
+  SELECT NOT EXISTS (
+    SELECT 1 FROM private.reference_share_consent_texts ct
+     WHERE ct.version = p_version AND ct.locale = p_locale AND NOT ct.revoked
+  )
+$$;
 
 -- 1. The core: identical to 2a except that grant records consent_scope from
 -- the final snapshot (checked to lie within the text's scope) instead of the
--- whole text scope.
+-- whole text scope, and consent_locale; refresh withdraws a row whose text
+-- was revoked (consent_text_revoked).
 CREATE OR REPLACE FUNCTION private.reference_contribution_share_core(
   p_mode text,
   p_owner uuid,
@@ -137,6 +222,12 @@ BEGIN
      AND (NOT v_found OR v_contribution.status <> 'shared'
           OR v_contribution.consented_at IS NULL) THEN
     RETURN private.shared_reference_contribution_result('consent_required');
+  END IF;
+  IF p_mode = 'refresh' AND private.reference_consent_text_revoked(
+       v_contribution.consent_version, v_contribution.consent_locale
+     ) THEN
+    PERFORM private.withdraw_shared_reference_contribution(v_contribution.id, 'consent_text_revoked');
+    RETURN private.shared_reference_contribution_result('consent_text_revoked');
   END IF;
 
   IF p_mode = 'grant' THEN
@@ -278,12 +369,12 @@ BEGIN
     INSERT INTO private.shared_reference_contributions(
       owner_id, source_measurement_set_id, sporely_taxon_id,
       status, current_revision, shared_at, updated_at,
-      consented_at, consent_version, consent_client,
+      consented_at, consent_version, consent_locale, consent_client,
       consent_first_revision, consent_scope
     ) VALUES (
       v_owner, p_source_measurement_set_id, p_sporely_taxon_id,
       'shared', 1, v_now, v_now,
-      v_now, v_text.version, p_consent_client, 1, v_scope
+      v_now, v_text.version, v_text.locale, p_consent_client, 1, v_scope
     ) RETURNING * INTO v_contribution;
     v_revision := 1;
   ELSIF v_contribution.status = 'shared' THEN
@@ -292,7 +383,7 @@ BEGIN
       -- consent_first_revision) is unchanged.
       UPDATE private.shared_reference_contributions
          SET consented_at = v_now, consent_version = v_text.version,
-             consent_client = p_consent_client, consent_scope = v_scope,
+             consent_locale = v_text.locale, consent_client = p_consent_client, consent_scope = v_scope,
              updated_at = v_now
        WHERE id = v_contribution.id
        RETURNING * INTO v_contribution;
@@ -328,7 +419,7 @@ BEGIN
        SET status = 'shared', current_revision = v_revision,
            shared_at = v_now, updated_at = v_now, withdrawn_at = NULL,
            consented_at = v_now, consent_version = v_text.version,
-           consent_client = p_consent_client,
+           consent_locale = v_text.locale, consent_client = p_consent_client,
            consent_first_revision = v_revision, consent_scope = v_scope
      WHERE id = v_contribution.id
      RETURNING * INTO v_contribution;
@@ -452,8 +543,9 @@ $$;
 
 -- The withdrawal decisions of a refresh, taken outside any error-swallowing
 -- block: withdraws a consented shared row whose live source can no longer be
--- read into a snapshot (source_deleted) or whose next snapshot would fall
--- outside its consent_scope (consent_scope_exceeded). Caller holds the key
+-- read into a snapshot (source_deleted), whose consent text was revoked
+-- (consent_text_revoked), or whose next snapshot would fall outside its
+-- consent_scope (consent_scope_exceeded). Caller holds the key
 -- lock. Returns true when it withdrew.
 CREATE FUNCTION private.withdraw_contribution_if_unpublishable(
   p_owner uuid,
@@ -478,6 +570,9 @@ BEGIN
      AND c.status = 'shared' AND c.consented_at IS NOT NULL;
   IF NOT FOUND THEN
     RETURN false;
+  END IF;
+  IF private.reference_consent_text_revoked(v_contribution.consent_version, v_contribution.consent_locale) THEN
+    RETURN private.withdraw_shared_reference_contribution(v_contribution.id, 'consent_text_revoked');
   END IF;
   SELECT m.raw_points_json AS raw_points_json,
          private.reference_canonical_snapshot(p_owner, p_set) AS snapshot
@@ -779,7 +874,8 @@ BEGIN
             v_set, v_new, v_status;
         END IF;
         v_new_action := 'shared';
-      ELSIF v_status IN ('consent_required', 'consent_scope_exceeded', 'withdrawn_unqualified') THEN
+      ELSIF v_status IN ('consent_required', 'consent_scope_exceeded', 'withdrawn_unqualified',
+                         'consent_text_revoked') THEN
         v_new_action := v_status;
       ELSIF v_status = 'source_not_found_or_stale' THEN
         v_new_action := 'source_deleted';
@@ -844,6 +940,16 @@ BEGIN
   PERFORM 1 FROM public.profiles p WHERE p.id = v_owner FOR KEY SHARE;
   IF NOT FOUND THEN
     RETURN private.shared_reference_contribution_result('account_unavailable');
+  END IF;
+  -- The text row, also before the key lock: a concurrent revocation holds it
+  -- (then takes key locks), so a grant either waits and then sees it
+  -- revoked, or holds it and the revocation's scan sees the new row.
+  PERFORM 1 FROM private.reference_share_consent_texts ct
+   WHERE ct.version = p_consent_version AND ct.locale = p_locale
+     AND ct.active AND NOT ct.revoked
+   FOR SHARE;
+  IF NOT FOUND THEN
+    RETURN private.shared_reference_contribution_result('consent_text_unavailable');
   END IF;
   RETURN private.reference_contribution_share_core(
     'grant', v_owner, p_source_measurement_set_id, p_sporely_taxon_id,
@@ -911,10 +1017,29 @@ BEGIN
                'canonical_scientific_name', rc.canonical_name,
                'current_revision', c.current_revision,
                'shared_at', c.shared_at,
-               'withdrawn_at', c.withdrawn_at
+               'withdrawn_at', c.withdrawn_at,
+               'hidden_at', c.hidden_at,
+               'withdrawal_reason', CASE WHEN c.status = 'withdrawn' THEN (
+                 SELECT e.reason FROM private.shared_reference_consent_events e
+                  WHERE e.contribution_id = c.id AND e.event <> 'granted'
+                  ORDER BY e.id DESC LIMIT 1) END,
+               -- The owner's own source labels, so several sets for one
+               -- species can be told apart.
+               'source_short_label', src.short_label,
+               'source_raw_text', src.raw_text
              ) ORDER BY c.shared_at DESC, c.id)
         FROM private.shared_reference_contributions c
         LEFT JOIN taxonomy_v3.registry_concept rc ON rc.sporely_taxon_id = c.sporely_taxon_id
+        LEFT JOIN LATERAL (
+          SELECT coalesce(nullif(pg_catalog.btrim(w.short_label), ''), pg_catalog.left(w.title, 200)) AS short_label,
+                 pg_catalog.left(m.raw_text, 200) AS raw_text
+            FROM public.reference_measurement_sets m
+            JOIN public.reference_taxon_treatments t
+              ON t.user_id = m.user_id AND t.id = m.taxon_treatment_id
+            JOIN public.reference_works w
+              ON w.user_id = t.user_id AND w.id = t.reference_work_id
+           WHERE m.user_id = v_owner AND m.id = c.source_measurement_set_id
+        ) src ON true
        WHERE c.owner_id = v_owner
     ), '[]'::jsonb)
   );
@@ -983,6 +1108,47 @@ BEGIN
 END
 $$;
 
+-- Operator step (postgres only): revoke one consent text version and
+-- withdraw every row consented under it, through the withdrawal helper,
+-- with consent_text_revoked. Idempotent. Takes the text row first, then the
+-- key locks in sorted (owner, set) order, as a grant does.
+CREATE FUNCTION private.revoke_reference_share_consent_text(p_version integer, p_locale text)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = ''
+AS $$
+DECLARE
+  v_row record;
+  v_count integer := 0;
+BEGIN
+  UPDATE private.reference_share_consent_texts
+     SET revoked = true, active = false
+   WHERE version = p_version AND locale = p_locale;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'no consent text version % for locale %', p_version, p_locale
+      USING ERRCODE = '22023';
+  END IF;
+  FOR v_row IN
+    SELECT c.id, c.owner_id, c.source_measurement_set_id
+      FROM private.shared_reference_contributions c
+     WHERE c.status = 'shared'
+       AND c.consent_version = p_version AND c.consent_locale = p_locale
+     ORDER BY c.owner_id, c.source_measurement_set_id, c.id
+  LOOP
+    PERFORM private.lock_shared_reference_key(v_row.owner_id, v_row.source_measurement_set_id);
+    IF EXISTS (
+      SELECT 1 FROM private.shared_reference_contributions c
+       WHERE c.id = v_row.id AND c.status = 'shared'
+         AND c.consent_version = p_version AND c.consent_locale = p_locale
+    ) AND private.withdraw_shared_reference_contribution(v_row.id, 'consent_text_revoked') THEN
+      v_count := v_count + 1;
+    END IF;
+  END LOOP;
+  RETURN v_count;
+END
+$$;
+
 -- 5. Consent text version 1 (en, nb), INACTIVE until the owner approves the
 -- wording. The scope is the current snapshot schema (version 1) and every
 -- data kind the text discloses.
@@ -996,16 +1162,18 @@ SELECT 1, v.locale, v.body,
 
 If you share, anyone can see and download the following, without signing in:
 - your public name on Sporely (your username, or "Sporely user"), shown as the contributor;
-- the species it is shared for;
+- the species it is shared for, which shows publicly, under your name, that you identified this species;
 - the full citation: authors, editors, title, year, publisher, journal and pages, DOI, ISBN and link, and the citation exports (plain text, BibTeX, CSL-JSON);
 - the name as published and the other citation fields, which are always public in a shared reference;
 - the measurements: the text, ranges and averages, method details, and every individual measured point.
 
-Later edits: while you share, a changed version of this reference is published automatically, as long as it contains only the kinds of data listed above. If a change would publish more, sharing stops and you are asked again.
+The reference also appears on your public observations that use it, with how you used it (compared, supports or contradicts the identification).
 
-Sharing needs a public observation of this species, not a draft, that uses this reference. If it becomes private, friends-only or a draft, or you remove the reference from it, sharing stops.
+Later edits: while you share, a changed version is published automatically only while it contains the same kinds of data as the version you shared. For example, if the version you shared had no measured points or no measurement details, adding them later stops sharing, and you are asked again. Earlier versions published while you share stay publicly available by version number until you stop.
 
-You can stop sharing at any time. Stopping removes it from public view in Sporely. It cannot undo:
+Sharing needs at least one of your public observations of this species that uses this reference. Sharing stops when none is left: when the observation is made private, friends-only or a draft, its spore data is made private, it is deleted, its species is changed, or the reference is removed from it; or when the reference set, treatment or work is deleted.
+
+You can stop sharing at any time. Stopping removes the reference from public view in Sporely, including from your observations. It cannot undo:
 - copies other users have already made; these are their own reference sets, which they may keep and share under their own name;
 - anything others have already downloaded, saved or cited;
 - the earlier versions Sporely keeps privately as a record.
@@ -1015,16 +1183,18 @@ By sharing, you confirm that you have the right to share this citation and these
 
 Hvis du deler, kan hvem som helst se og laste ned følgende, uten å logge inn:
 - det offentlige navnet ditt i Sporely (brukernavnet ditt, eller «Sporely-bruker»), vist som bidragsyter;
-- arten den deles for;
+- arten den deles for, som viser offentlig, under ditt navn, at du har bestemt denne arten;
 - hele kildehenvisningen: forfattere, redaktører, tittel, år, forlag, tidsskrift og sider, DOI, ISBN og lenke, og eksportene av henvisningen (ren tekst, BibTeX, CSL-JSON);
 - navnet slik det er publisert og de andre feltene i kildehenvisningen, som alltid er offentlige i en delt referanse;
 - målingene: teksten, intervaller og gjennomsnitt, metodedetaljer og hvert enkelt målepunkt.
 
-Senere endringer: mens du deler, publiseres en endret versjon av referansen automatisk, så lenge den bare inneholder slike data som er listet opp over. Hvis en endring ville publisere mer, stopper delingen, og du blir spurt på nytt.
+Referansen vises også på de offentlige observasjonene dine som bruker den, med hvordan du brukte den (sammenlignet, støtter eller motsier bestemmelsen).
 
-Deling krever en offentlig observasjon av denne arten, som ikke er et utkast, og som bruker denne referansen. Hvis den blir privat, kun for venner eller et utkast, eller du fjerner referansen fra den, stopper delingen.
+Senere endringer: mens du deler, publiseres en endret versjon automatisk bare så lenge den inneholder de samme typene data som versjonen du delte. Hvis for eksempel versjonen du delte ikke hadde målepunkter eller måledetaljer, og du legger dem til senere, stopper delingen, og du blir spurt på nytt. Tidligere versjoner som er publisert mens du deler, forblir offentlig tilgjengelige etter versjonsnummer til du slutter å dele.
 
-Du kan når som helst slutte å dele. Da fjernes den fra offentlig visning i Sporely. Det kan ikke gjøre om:
+Deling krever minst én av dine offentlige observasjoner av denne arten som bruker denne referansen. Delingen stopper når ingen er igjen: når observasjonen blir privat, kun for venner eller et utkast, sporedataene blir private, den slettes, arten endres, eller referansen fjernes fra den; eller når referansesettet, behandlingen eller verket slettes.
+
+Du kan når som helst slutte å dele. Da fjernes referansen fra offentlig visning i Sporely, også fra observasjonene dine. Det kan ikke gjøre om:
 - kopier andre brukere allerede har laget; disse er deres egne referansesett, som de kan beholde og dele under sitt eget navn;
 - det andre allerede har lastet ned, lagret eller sitert;
 - tidligere versjoner Sporely beholder privat som dokumentasjon.
@@ -1036,6 +1206,9 @@ Ved å dele bekrefter du at du har rett til å dele denne kildehenvisningen og d
 
 ALTER FUNCTION private.reference_contribution_share_core(text,uuid,uuid,integer,integer,integer,integer,integer,text,text) OWNER TO postgres;
 ALTER FUNCTION private.withdraw_unqualified_contributions(uuid,uuid,text) OWNER TO postgres;
+ALTER FUNCTION private.withdraw_shared_reference_contribution(uuid,text) OWNER TO postgres;
+ALTER FUNCTION private.reference_consent_text_revoked(integer,text) OWNER TO postgres;
+ALTER FUNCTION private.revoke_reference_share_consent_text(integer,text) OWNER TO postgres;
 ALTER FUNCTION private.withdraw_unqualified_contributions(uuid,uuid) OWNER TO postgres;
 ALTER FUNCTION private.withdraw_contribution_if_unpublishable(uuid,uuid,integer) OWNER TO postgres;
 ALTER FUNCTION private.refresh_shared_reference_for_use_row(public.observation_reference_uses) OWNER TO postgres;
@@ -1052,6 +1225,9 @@ ALTER FUNCTION public.get_reference_share_consent_text(text) OWNER TO postgres;
 
 REVOKE ALL ON FUNCTION private.reference_contribution_share_core(text,uuid,uuid,integer,integer,integer,integer,integer,text,text) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.withdraw_unqualified_contributions(uuid,uuid,text) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION private.withdraw_shared_reference_contribution(uuid,text) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION private.reference_consent_text_revoked(integer,text) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION private.revoke_reference_share_consent_text(integer,text) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.withdraw_unqualified_contributions(uuid,uuid) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.withdraw_contribution_if_unpublishable(uuid,uuid,integer) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.refresh_shared_reference_for_use_row(public.observation_reference_uses) FROM PUBLIC, anon, authenticated, service_role;

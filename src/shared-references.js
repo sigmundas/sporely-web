@@ -66,6 +66,18 @@ export async function stopSharingWithConfirmation(contributionId, {
   return withdraw(contributionId)
 }
 
+const WITHDRAWAL_REASON_KEYS = {
+  owner: 'sharedReferences.reason.owner',
+  consent_missing: 'sharedReferences.reason.consent_missing',
+  observation_not_public: 'sharedReferences.reason.observation_not_public',
+  use_detached: 'sharedReferences.reason.use_detached',
+  source_deleted: 'sharedReferences.reason.source_deleted',
+  taxon_changed: 'sharedReferences.reason.taxon_changed',
+  consent_scope_exceeded: 'sharedReferences.reason.consent_scope_exceeded',
+  consent_text_revoked: 'sharedReferences.reason.consent_text_revoked',
+  account_deleted: 'sharedReferences.reason.account_deleted',
+}
+
 // ── Rendering (pure HTML-string builders — no DOM access, testable) ───────
 
 export function sharedReferencesLoadingHtml() {
@@ -97,12 +109,23 @@ export function sharedReferenceRowHtml(contribution) {
   if (contribution.withdrawn_at) {
     metaParts.push(t('sharedReferences.stoppedAtLabel', { date: formatDate(contribution.withdrawn_at) }))
   }
+  const reasonKey = WITHDRAWAL_REASON_KEYS[contribution.withdrawal_reason]
+  if (!isShared && contribution.withdrawal_reason) {
+    metaParts.push(reasonKey ? t(reasonKey) : t('sharedReferences.reason.other'))
+  }
+  // The owner's own source labels tell several sets for one species apart.
+  const sourceParts = [contribution.source_short_label, contribution.source_raw_text]
+    .filter(v => typeof v === 'string' && v.trim())
+  const hiddenHtml = contribution.hidden_at
+    ? ` <span class="shared-ref-status shared-ref-status-hidden">${esc(t('sharedReferences.hiddenByModeration'))}</span>`
+    : ''
   const stopBtnHtml = isShared
     ? `<button type="button" class="friend-remove-btn shared-ref-stop-btn" data-contribution-id="${esc(contribution.contribution_id)}">${esc(t('sharedReferences.stopSharing'))}</button>`
     : ''
   return `<div class="friend-row shared-ref-row" data-contribution-id="${esc(contribution.contribution_id)}">
     <div class="friend-info shared-ref-info">
-      <div class="friend-name shared-ref-name"><em>${esc(contribution.canonical_scientific_name)}</em> <span class="shared-ref-status ${statusClass}">${esc(statusLabel)}</span></div>
+      <div class="friend-name shared-ref-name"><em>${esc(contribution.canonical_scientific_name)}</em> <span class="shared-ref-status ${statusClass}">${esc(statusLabel)}</span>${hiddenHtml}</div>
+      ${sourceParts.length ? `<div class="friend-handle shared-ref-source">${esc(sourceParts.join(' · '))}</div>` : ''}
       <div class="friend-handle shared-ref-meta">${esc(metaParts.join(' · '))}</div>
     </div>
     ${stopBtnHtml}

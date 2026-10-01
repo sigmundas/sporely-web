@@ -363,7 +363,8 @@ BEGIN
      OR EXISTS (SELECT 1 FROM jsonb_array_elements(r->'contributions') x
                  WHERE (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(x) k)
                        <> ARRAY['canonical_scientific_name','contribution_id','current_revision',
-                                'shared_at','sporely_taxon_id','status','withdrawn_at'])
+                                'hidden_at','shared_at','source_raw_text','source_short_label',
+                                'sporely_taxon_id','status','withdrawal_reason','withdrawn_at'])
      OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(r->'contributions') x
                      WHERE x->>'contribution_id'=v_id::text AND x->>'status'='shared'
                        AND x->>'canonical_scientific_name'='Amanita consentiens'
@@ -371,7 +372,11 @@ BEGIN
                        AND (x->>'current_revision')::integer=3 AND x->'withdrawn_at'='null'::jsonb)
      OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(r->'contributions') x
                      WHERE x->>'contribution_id'=v_multi_id::text AND x->>'status'='withdrawn'
-                       AND x->>'withdrawn_at' IS NOT NULL)
+                       AND x->>'withdrawn_at' IS NOT NULL AND x->>'withdrawal_reason'='use_detached'
+                       AND x->>'source_short_label'='Consent 2026' AND x->>'source_raw_text'='8-10 um')
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(r->'contributions') x
+                 WHERE x->>'status'='shared' AND (x->'withdrawal_reason' <> 'null'::jsonb
+                                                  OR x->'hidden_at' <> 'null'::jsonb))
      OR r::text LIKE '%'||owner_a::text||'%'
      OR r::text LIKE '%'||s_pub::text||'%' THEN
     RAISE EXCEPTION 'owner list wrong: %', r;
@@ -389,6 +394,109 @@ BEGIN
     RAISE EXCEPTION 'list served without a session';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
+  -- A hidden row shows hidden_at to its owner.
+  PERFORM set_config('request.jwt.claims','{"role":"service_role"}',true);
+  SET LOCAL ROLE service_role;
+  r := public.moderate_shared_reference_contribution(v_id,'hide','abuse');
+  RESET ROLE;
+  IF (SELECT x->>'hidden_at' FROM jsonb_array_elements(pg_temp.list_as(owner_a)->'contributions') x
+       WHERE x->>'contribution_id'=v_id::text) IS NULL THEN
+    RAISE EXCEPTION 'list does not show hidden_at';
+  END IF;
+  PERFORM set_config('request.jwt.claims','{"role":"service_role"}',true);
+  SET LOCAL ROLE service_role;
+  r := public.moderate_shared_reference_contribution(v_id,'restore',NULL);
+  RESET ROLE;
+
+  -- ── 13. Consent-text revocation (operator step) ──
+  UPDATE private.reference_share_consent_texts SET active=true WHERE version=1 AND locale='nb';
+  -- A row consented under nb: s_multi still has a public use of t_other.
+  r := pg_temp.grant_as(owner_a,s_multi,t_other,'nb');
+  IF r->>'status' <> 'created'
+     OR (SELECT consent_locale FROM private.shared_reference_contributions
+          WHERE source_measurement_set_id=s_multi AND sporely_taxon_id=t_other) <> 'nb'
+     OR (SELECT consent_locale FROM private.shared_reference_contributions WHERE id=v_id) <> 'en' THEN
+    RAISE EXCEPTION 'consent_locale not recorded: %', r;
+  END IF;
+  v_events := (SELECT max(id) FROM private.shared_reference_consent_events);
+  PERFORM pg_temp.as_user(NULL);
+  IF private.revoke_reference_share_consent_text(1,'en') <> 2 THEN
+    RAISE EXCEPTION 'revocation did not withdraw exactly the two en rows';
+  END IF;
+  IF (SELECT array_agg(e.event||':'||e.reason ORDER BY e.id) FROM private.shared_reference_consent_events e
+       WHERE e.id>v_events)
+     IS DISTINCT FROM ARRAY['withdrawn_by_system:consent_text_revoked','withdrawn_by_system:consent_text_revoked']
+     OR (SELECT status FROM private.shared_reference_contributions WHERE id=v_id) <> 'withdrawn'
+     OR (SELECT status FROM private.shared_reference_contributions WHERE owner_id=owner_b) <> 'withdrawn'
+     OR (SELECT status FROM private.shared_reference_contributions
+          WHERE source_measurement_set_id=s_multi AND sporely_taxon_id=t_other) <> 'shared'
+     OR NOT (SELECT revoked AND NOT active FROM private.reference_share_consent_texts WHERE version=1 AND locale='en') THEN
+    RAISE EXCEPTION 'revocation touched the wrong rows';
+  END IF;
+  v_events := (SELECT max(id) FROM private.shared_reference_consent_events);
+  IF private.revoke_reference_share_consent_text(1,'en') <> 0
+     OR (SELECT max(id) FROM private.shared_reference_consent_events) <> v_events THEN
+    RAISE EXCEPTION 'revocation is not idempotent';
+  END IF;
+  IF pg_temp.grant_as(owner_a,s_pub,t_species)->>'status' <> 'consent_text_unavailable' THEN
+    RAISE EXCEPTION 'a revoked text could be granted after revocation';
+  END IF;
+  -- A text revoked without the operator step: the next refresh withdraws.
+  UPDATE private.reference_share_consent_texts SET revoked=true, active=false WHERE version=1 AND locale='nb';
+  PERFORM pg_temp.as_user(owner_a);
+  UPDATE public.reference_measurement_sets SET raw_text='8-10.5 um',revision=revision+1,row_version=row_version+1
+   WHERE user_id=owner_a AND id=s_multi;
+  IF (SELECT array_agg(e.event||':'||e.reason) FROM private.shared_reference_consent_events e WHERE e.id>v_events)
+     IS DISTINCT FROM ARRAY['withdrawn_by_system:consent_text_revoked'] THEN
+    RAISE EXCEPTION 'refresh under a revoked text did not withdraw';
+  END IF;
+  IF (private.reference_contribution_share_core('refresh',owner_a,s_multi,t_other)->>'status') <> 'consent_required' THEN
+    RAISE EXCEPTION 'refresh re-shared a revoked row';
+  END IF;
+
+  -- ── 14. Stage 1B labels each observation by its own contribution ──
+  -- P1's contribution was withdrawn earlier (owner); P2's is withdrawn by
+  -- the promotion's own taxon trigger. Both in this transaction: only P2 is
+  -- 'withdrawn'.
+  INSERT INTO private.reference_share_consent_texts(version,locale,text,text_sha256,active,scope)
+  VALUES (2,'en','fixture v2',encode(sha256(convert_to('fixture v2','UTF8')),'hex'),true,
+          '{"snapshot_schema_versions":[1],"data_kinds":["raw_points","free_text","measurement_details"]}');
+  INSERT INTO public.taxonomy_v2_concepts(sporely_taxon_id,first_seen_release_id) VALUES (t_other,v_rel);
+  INSERT INTO public.observations(id,user_id,date,visibility,is_draft,spore_data_visibility,resolved_sporely_taxon_id)
+  OVERRIDING SYSTEM VALUE VALUES
+    (962000011,owner_a,current_date,'public',false,'public',t_species),
+    (962000012,owner_a,current_date,'public',false,'public',t_species);
+  INSERT INTO public.reference_measurement_sets(user_id,id,taxon_treatment_id,character,data_kind,raw_text,revision)
+  VALUES (owner_a,'73000000-0000-4000-8000-00000000f211',tr,'spore_size','range','7-9 um',1),
+         (owner_a,'73000000-0000-4000-8000-00000000f212',tr,'spore_size','range','7-9 um',1);
+  INSERT INTO public.observation_reference_uses(user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json)
+  VALUES (owner_a,gen_random_uuid(),962000011,'73000000-0000-4000-8000-00000000f211','compared',1,
+          private.reference_canonical_snapshot(owner_a,'73000000-0000-4000-8000-00000000f211')),
+         (owner_a,gen_random_uuid(),962000012,'73000000-0000-4000-8000-00000000f212','compared',1,
+          private.reference_canonical_snapshot(owner_a,'73000000-0000-4000-8000-00000000f212'));
+  IF pg_temp.grant_as(owner_a,'73000000-0000-4000-8000-00000000f211',t_species,'en',2)->>'status' <> 'created'
+     OR pg_temp.grant_as(owner_a,'73000000-0000-4000-8000-00000000f212',t_species,'en',2)->>'status' <> 'created' THEN
+    RAISE EXCEPTION '1B fixture grants failed';
+  END IF;
+  v_id := (SELECT id FROM private.shared_reference_contributions
+             WHERE source_measurement_set_id='73000000-0000-4000-8000-00000000f211');
+  PERFORM pg_temp.as_user(owner_a);
+  SET LOCAL ROLE authenticated;
+  r := public.withdraw_reference_contribution(v_id);
+  RESET ROLE;
+  PERFORM pg_temp.as_user(NULL);
+  UPDATE public.observations SET selected_sporely_taxon_id=t_other, taxon_identity_state='sporely_v2'
+   WHERE id IN (962000011,962000012);
+  INSERT INTO private.taxon_identity_repair_runs(release_id,plan_sha256,candidate_count,promoted_count,outcome_counts)
+  VALUES (v_rel,repeat('e',64),2,2,'{}') RETURNING run_id INTO v_rev;
+  PERFORM private._taxon_identity_repair_reconcile_references(v_rev,962000011);
+  PERFORM private._taxon_identity_repair_reconcile_references(v_rev,962000012);
+  IF (SELECT array_agg(a.observation_id||':'||a.old_contribution ORDER BY a.observation_id)
+        FROM private.taxon_identity_repair_reference_actions a WHERE a.run_id=v_rev)
+     IS DISTINCT FROM ARRAY['962000011:none','962000012:withdrawn'] THEN
+    RAISE EXCEPTION '1B labels not tied to the observation''s own contribution: %',
+      (SELECT array_agg(a.observation_id||':'||a.old_contribution) FROM private.taxon_identity_repair_reference_actions a WHERE a.run_id=v_rev);
+  END IF;
 END
 $$;
 

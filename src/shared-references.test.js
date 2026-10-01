@@ -251,3 +251,29 @@ test('stop sharing: withdraws only after confirmation and the cloud guard', asyn
   assert.equal(ok.kind, 'ok')
   assert.equal(seenId, 'contrib-1')
 })
+
+// ── Hidden, withdrawal reason and source labels ────────────────────────────
+
+test('row: hidden shared row shows "Hidden by moderation" and keeps Stop sharing', () => {
+  const html = sharedReferenceRowHtml({ ...SHARED_ROW, hidden_at: '2026-02-01T00:00:00Z' })
+  assert.ok(html.includes(t('sharedReferences.hiddenByModeration')))
+  assert.match(html, /shared-ref-stop-btn/)
+  assert.ok(!sharedReferenceRowHtml(SHARED_ROW).includes(t('sharedReferences.hiddenByModeration')))
+})
+
+test('row: withdrawn row shows the withdrawal reason; unknown reasons fall back', () => {
+  const html = sharedReferenceRowHtml({ ...WITHDRAWN_ROW, withdrawal_reason: 'consent_text_revoked' })
+  assert.ok(html.includes(t('sharedReferences.reason.consent_text_revoked')))
+  const unknown = sharedReferenceRowHtml({ ...WITHDRAWN_ROW, withdrawal_reason: 'something_new' })
+  assert.ok(unknown.includes(t('sharedReferences.reason.other')))
+  assert.ok(!sharedReferenceRowHtml({ ...SHARED_ROW, withdrawal_reason: null })
+    .includes(t('sharedReferences.reason.other')))
+})
+
+test('row: source labels distinguish sets and are escaped', () => {
+  const html = sharedReferenceRowHtml({
+    ...SHARED_ROW, source_short_label: 'Smith <1998>', source_raw_text: '8–10 × 5–6 µm',
+  })
+  assert.ok(html.includes('Smith &lt;1998&gt; · 8–10 × 5–6 µm'))
+  assert.ok(!html.includes('<1998>'))
+})

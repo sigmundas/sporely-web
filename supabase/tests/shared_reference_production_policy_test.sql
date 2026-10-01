@@ -43,12 +43,12 @@ BEGIN
 
   INSERT INTO private.shared_reference_contributions(
     id,owner_id,source_measurement_set_id,sporely_taxon_id,status,current_revision,shared_at,
-    consented_at,consent_version,consent_first_revision,consent_scope
+    consented_at,consent_version,consent_locale,consent_first_revision,consent_scope
   )
   -- Fixture rows carry a consent record: only consented rows are public.
   SELECT gen_random_uuid(),v_owner_id,gen_random_uuid(),taxon_id,'shared',1,
          now()-(n || ' seconds')::interval,
-         now(),1,1,'{"snapshot_schema_versions":[1],"data_kinds":[]}'::jsonb
+         now(),1,'en',1,'{"snapshot_schema_versions":[1],"data_kinds":[]}'::jsonb
     FROM generate_series(1,30) n;
   INSERT INTO private.shared_reference_contribution_revisions(
     contribution_id,revision,source_work_revision,source_treatment_revision,

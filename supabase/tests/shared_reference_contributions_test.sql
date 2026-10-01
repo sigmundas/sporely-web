@@ -39,7 +39,7 @@ DECLARE c private.shared_reference_contributions%ROWTYPE; v_events text[];
 BEGIN
   SELECT * INTO c FROM private.shared_reference_contributions WHERE id=p_id;
   IF c.status <> 'withdrawn' OR c.withdrawn_at IS NULL OR c.consented_at IS NOT NULL
-     OR c.consent_version IS NOT NULL OR c.consent_client IS NOT NULL
+     OR c.consent_version IS NOT NULL OR c.consent_locale IS NOT NULL OR c.consent_client IS NOT NULL
      OR c.consent_first_revision IS NOT NULL OR c.consent_scope IS NOT NULL THEN
     RAISE EXCEPTION '%: not withdrawn with a cleared consent record: %', p_label, to_jsonb(c);
   END IF;
@@ -463,6 +463,14 @@ BEGIN
   END;
   BEGIN
     INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
+      status,consented_at,consent_version,consent_first_revision,consent_scope)
+    VALUES (user_2,gen_random_uuid(),taxon_id,'shared',now(),1,1,
+      '{"snapshot_schema_versions":[1],"data_kinds":[]}');
+    RAISE EXCEPTION 'a consent record without consent_locale was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
       status,withdrawn_at,consent_client)
     VALUES (user_2,gen_random_uuid(),taxon_id,'withdrawn',now(),'desktop');
     RAISE EXCEPTION 'a consent client without consent was accepted';
@@ -470,8 +478,8 @@ BEGIN
   END;
   BEGIN
     INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,
-      status,consented_at,consent_version,consent_first_revision,consent_scope)
-    VALUES (user_2,gen_random_uuid(),taxon_id,'shared',now(),1,1,'{"data_kinds":["everything"]}');
+      status,consented_at,consent_version,consent_locale,consent_first_revision,consent_scope)
+    VALUES (user_2,gen_random_uuid(),taxon_id,'shared',now(),1,'en',1,'{"data_kinds":["everything"]}');
     RAISE EXCEPTION 'an invalid consent scope was accepted';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
@@ -555,7 +563,8 @@ BEGIN
          'withdraw_contribution_if_unpublishable',
          'share_reference_contribution_with_consent_unthrottled',
          'list_my_shared_reference_contributions_unthrottled',
-         'get_reference_share_consent_text_unthrottled')
+         'get_reference_share_consent_text_unthrottled',
+         'reference_consent_text_revoked','revoke_reference_share_consent_text')
     LOOP
       IF has_function_privilege(v_role, v_fn, 'EXECUTE') THEN
         RAISE EXCEPTION 'role % can execute %', v_role, v_fn;

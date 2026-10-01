@@ -40,8 +40,8 @@ BEGIN
   SELECT id,1,1,1,1,repeat('a',64),jsonb_build_object('contribution_id',id,'revision',1,'status','shared')
     FROM unnest(v_unconsented) id;
   INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,status,
-    consented_at,consent_version,consent_first_revision,consent_scope)
-  VALUES (v_owner,gen_random_uuid(),v_taxon,'shared',now(),1,1,'{"snapshot_schema_versions":[1],"data_kinds":[]}')
+    consented_at,consent_version,consent_locale,consent_first_revision,consent_scope)
+  VALUES (v_owner,gen_random_uuid(),v_taxon,'shared',now(),1,'en',1,'{"snapshot_schema_versions":[1],"data_kinds":[]}')
   RETURNING id INTO v_consented;
   INSERT INTO private.shared_reference_contributions(owner_id,source_measurement_set_id,sporely_taxon_id,status,withdrawn_at)
   VALUES (v_owner,gen_random_uuid(),v_taxon,'withdrawn',now()-interval '1 day')

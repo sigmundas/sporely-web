@@ -9,7 +9,7 @@
 #   source edit  vs  use sync
 #   owner withdraw  vs  refresh
 # and, for Stage 2b (20260930232633), the public grant RPC:
-#   grant  vs  owner withdraw / draft flip / account deletion
+#   grant  vs  owner withdraw / draft flip / account deletion / text revocation
 # The account-deletion race holds the profile row first (as a profile delete
 # does before its anonymise trigger takes the key locks), so a grant that
 # took the key lock before the profile row would deadlock.
@@ -91,6 +91,7 @@ op() {
     taxon) echo "$as_service UPDATE public.observations SET resolved_sporely_taxon_id=$T2 WHERE id=$b;" ;;
     usesync) echo "$as_owner UPDATE public.observation_reference_uses SET snapshot_json=private.reference_canonical_snapshot('$o','$s'),reference_revision=(SELECT revision FROM public.reference_measurement_sets WHERE user_id='$o' AND id='$s'),row_version=row_version+1 WHERE user_id='$o' AND id='$u';" ;;
     grant) echo "$as_owner SET LOCAL ROLE authenticated; SELECT 'grant-status', public.share_reference_contribution_with_consent('$s',$T,1,1,1,1,'en','race')->>'status'; RESET ROLE;" ;;
+    revoke) echo "SELECT 'revoked', private.revoke_reference_share_consent_text(1,'en');" ;;
     deleteacct) echo "DELETE FROM public.profiles WHERE id='$o';" ;;
     lockdeleteacct) echo "SELECT 1 FROM public.profiles WHERE id='$o' FOR UPDATE;" ;;
     *) fail "unknown op $name" ;;
@@ -150,7 +151,9 @@ race() {
   local got
   # An anonymised row (account deletion) has lost its owner; find it by the
   # account_deleted event of this race's taxon/key instead.
-  got=$(P -c "select coalesce(string_agg(status,','),'none') from private.shared_reference_contributions c where c.owner_id='$o' or (c.owner_id is null and exists (select 1 from private.shared_reference_consent_events e where e.contribution_id=c.id and e.reason='account_deleted'))")
+  local anon=false
+  case "$first$second" in *deleteacct*) anon=true ;; esac
+  got=$(P -c "select coalesce(string_agg(status,','),'none') from private.shared_reference_contributions c where c.owner_id='$o' or ($anon and c.owner_id is null and exists (select 1 from private.shared_reference_consent_events e where e.contribution_id=c.id and e.reason='account_deleted'))")
   [ "$got" = "$expect" ] || fail "race $k ($first then $second): contribution is '$got', expected '$expect'"
   [ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='shared' and not private.reference_set_has_qualifying_use(c.owner_id,c.source_measurement_set_id,c.sporely_taxon_id)")" = 0 ] \
     || fail "race $k ($first then $second): a share survived without a qualifying use"
@@ -179,9 +182,19 @@ grep -q "grant-status|account_unavailable" "$LOG.$((k-1)).b" \
   || { cat "$LOG.$((k-1)).b"; fail "grant after account deletion did not return account_unavailable"; }
 grep -q "grant-status|created" "$LOG.$k.a" \
   || { cat "$LOG.$k.a"; fail "grant before account deletion did not create"; }
+# Text revocation (operator step) against a grant, both orders; the text is
+# restored between the two races.
+k=$((k+1)); race $k grant revoke withdrawn ungranted
+# (The revocation also withdraws the earlier races' shared rows; the race's
+# own row is checked by race.)
+grep -q "revoked|[1-9]" "$LOG.$k.b" || { cat "$LOG.$k.b"; fail "revocation withdrew nothing"; }
+P -c "update private.reference_share_consent_texts set revoked=false, active=true where version=1 and locale='en'"
+k=$((k+1)); race $k revoke grant none ungranted
+grep -q "grant-status|consent_text_unavailable" "$LOG.$k.b" \
+  || { cat "$LOG.$k.b"; fail "grant after revocation was not refused"; }
 
-# Every withdrawal wrote exactly one event; shared rows gained revisions only
-# within their consent period.
-[ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='withdrawn' and (select count(*) from private.shared_reference_consent_events e where e.contribution_id=c.id and e.event<>'granted') <> 1")" = 0 ] \
-  || fail "a withdrawn contribution does not have exactly one withdrawal event"
+# Every withdrawn row ends with exactly one withdrawal after its last grant
+# (the revocation races withdraw rows re-shared by earlier races again).
+[ "$(P -c "select count(*) from private.shared_reference_contributions c where c.status='withdrawn' and (select count(*) from private.shared_reference_consent_events e where e.contribution_id=c.id and e.event<>'granted' and e.id > coalesce((select max(g.id) from private.shared_reference_consent_events g where g.contribution_id=c.id and g.event='granted'),0)) <> 1")" = 0 ] \
+  || fail "a withdrawn contribution does not have exactly one withdrawal after its last grant"
 echo "PASS: $k races, both orders, no deadlock, no surviving unqualified share"

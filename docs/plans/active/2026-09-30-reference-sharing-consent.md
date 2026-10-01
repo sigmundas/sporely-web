@@ -18,8 +18,18 @@ null-contributor test on sporely-landing `feature/reference-sharing-consent-2a`.
 `20260930232633_add_reference_sharing_consent_grant.sql`: grant, owner list
 and consent-text RPCs; consent text v1 en/nb shipped **inactive** (owner must
 approve the wording, then activate in a separate step); the 2a review lows;
-web "My shared references" in the profile overlay. The grant records
-`consent_scope` from the granted snapshot. Desktop (sporely-py) is a separate
+web "My shared references" in the profile overlay. Decisions recorded here:
+- `consent_scope` is taken from the **granted snapshot** (within the text's
+  scope), so a later revision with a new data kind or schema version
+  withdraws with `consent_scope_exceeded`;
+- the observation `AFTER DELETE` trigger from 2a is **dropped**: deleting an
+  observation cascades to its uses, and the use trigger withdraws
+  (`use_detached`);
+- rows record `consent_locale`; the postgres-only
+  `private.revoke_reference_share_consent_text(version, locale)` revokes a
+  text and withdraws its rows (`consent_text_revoked`), and refresh withdraws
+  rows whose text is revoked.
+Desktop (sporely-py) is a separate
 later candidate, including the allowlist and
 `test_stage6l_cross_repository_contract.py`.
 
@@ -128,7 +138,7 @@ More gaps in today's code:
     withdrawn row can't keep consent, and a shared row can't lack it;
   - `consented_at`, `consent_version`, `consent_first_revision` and
     `consent_scope` are all set or all NULL.
-- **`consent_scope`** (jsonb): recorded at grant. It holds the snapshot schema
+- **`consent_scope`** (jsonb): recorded at grant from the granted snapshot (2b). It holds the snapshot schema
   version and data kinds the consent covered, and must fit within the consent
   text version's `scope`.
 - **Withdrawal** clears all five, and only through the single withdrawal
@@ -259,9 +269,10 @@ More gaps in today's code:
   - A new `private.withdraw_unqualified_contributions(owner, set)` withdraws
     a shared row that has no qualifying use left and records a system event.
   - Called from the use trigger (all callers, including service role and
-    cascade deletes), from new triggers `AFTER UPDATE OF is_draft,
-    visibility, spore_data_visibility` and `AFTER DELETE` on
-    `public.observations`, and from the source triggers on a `deleted_at`
+    cascade deletes, so an observation delete is covered by its cascaded use
+    deletes), from a new trigger `AFTER UPDATE OF is_draft, visibility,
+    spore_data_visibility` on `public.observations` (2a also added an
+    `AFTER DELETE` trigger; 2b dropped it as redundant), and from the source triggers on a `deleted_at`
     change of the set, treatment or work (see "Source deletion").
   - Moderation hide (`admin-ops/adminActions.ts:444-451`) sets
     `visibility = 'private'`. Under decision B a private observation doesn't
@@ -455,9 +466,10 @@ a consented row. The test lives in 2a.
 - the grant/refresh core (grant mode not exposed until 2b);
 - `reference_set_has_qualifying_use`, `withdraw_shared_reference_contribution`
   and `withdraw_unqualified_contributions`;
-- the observation trigger function, with `AFTER UPDATE OF is_draft,
-  visibility, spore_data_visibility` and `AFTER DELETE` triggers on
-  `public.observations`.
+- the observation trigger function, with an `AFTER UPDATE OF is_draft,
+  visibility, spore_data_visibility` trigger on `public.observations` (2a's
+  `AFTER DELETE` trigger was dropped in 2b; the cascaded use delete covers
+  it).
 
 **Replaces:**
 - the 6-argument `share_reference_contribution_for_owner`, as a refresh
