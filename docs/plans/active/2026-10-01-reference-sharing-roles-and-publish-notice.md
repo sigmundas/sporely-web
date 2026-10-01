@@ -315,11 +315,29 @@ Consent text v1 is activated only when all of these hold:
 - **Clients:** revert normally. Without labels, the activation gate is not
   met.
 
+## Handoff: candidate 1 (server)
+
+Branch `feature/reference-sharing-roles-server`, migration
+`20261001091940_add_reference_contribution_relationship_roles.sql`, tests in
+`supabase/tests/shared_reference_roles_test.sql` plus the moved `_v2`
+assertions. Reviewed (general and security approved `dd4d557`), merged in
+PR #15 and deployed to production via the deploy tree on 2026-10-01; consent
+texts still inactive.
+- The served check takes `p_enforce_envelope_cap boolean DEFAULT true`;
+  search passes `false` and keeps its page-level cap, get passes `false` and
+  caps the revision it serves.
+- `_unthrottled` `_v2` bodies live in `private` (as in 2b), not `public`.
+- `relationship_roles` is added to every served shared envelope from `get_v2`,
+  including in-period historical revisions; tombstones carry none.
+- Pre-existing, unrelated: `public_observation_point_prep_test.sql` fails on
+  the base too.
+
 ## Handoff: candidate 4 (web publish notice)
 
-Branch `feature/publish-notice-web` (base `1215910`). First candidate
-`2fab057`; both reviews asked for changes. A correction commit follows on the
-same branch. Not accepted. No migrations, DB or production touched.
+Branch `feature/publish-notice-web` (base `1215910`). `2fab057` and `0da5d68`
+needed changes; security approved `d5ec38f`, and general approved `0da5d68`
+(the final commit is the narrow hidden/region precision fix, security-reviewed).
+Merged via PR #16. No migrations, DB or production data touched.
 
 **Done:** `src/publish-notice.js` (rules, text model, dialog, owner fact
 loading). Wired into find detail `_save()` (visibility, draft, precision),
