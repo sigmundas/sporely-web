@@ -34,6 +34,7 @@ import { normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js'
 import { getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
+import { confirmPublishIfNeeded } from '../publish-notice.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
 import { QUEUED_TAXONOMY_SELECTION_KEY, taxonomySelectionForTaxon } from '../taxonomy-v2.js'
 import { playIrisShutter } from '../iris-shutter.js'
@@ -436,40 +437,19 @@ export function initReview() {
     _scheduleReviewDraftFieldSync()
   })
   document.querySelectorAll('input[name="review-vis"]').forEach(radio => {
-    radio.addEventListener('change', event => {
-      if (event.target.checked) {
-        state.captureDraft.visibility = normalizeVisibility(event.target.value, getDefaultVisibility())
-        const group = event.target.closest('.scope-tabs')
-        if (group) {
-          group.querySelectorAll('.scope-tab').forEach(tab => tab.classList.remove('active'))
-          event.target.closest('.scope-tab').classList.add('active')
-        }
-      }
-      _updateReviewObscureHint()
-      _scheduleReviewDraftFieldSync()
-    })
+    radio.addEventListener('change', event => { void _handleReviewVisibilityChange(event) })
   })
   const draftToggle = document.getElementById('review-draft')
   if (draftToggle) {
-    draftToggle.addEventListener('change', event => {
-      state.captureDraft.is_draft = event.target.checked
-      _scheduleReviewDraftFieldSync()
-    })
+    draftToggle.addEventListener('change', event => { void _handleReviewDraftChange(event) })
   }
   document.querySelectorAll('input[name="review-location-precision"]').forEach(radio => {
-    radio.addEventListener('change', event => {
-      if (event.target.checked) state.captureDraft.location_precision = event.target.value
-      _scheduleReviewDraftFieldSync()
-    })
+    radio.addEventListener('change', event => { void _handleReviewPrecisionRadioChange(event) })
   })
 
   const reviewObscured = document.getElementById('review-obscured')
   if (reviewObscured) {
-    reviewObscured.addEventListener('change', event => {
-      state.captureDraft.location_precision = event.target.checked ? 'fuzzed' : 'exact'
-      _updateReviewObscureHint()
-      _scheduleReviewDraftFieldSync()
-    })
+    reviewObscured.addEventListener('change', event => { void _handleReviewObscuredChange(event) })
   }
 
   initLocationField()
@@ -1464,9 +1444,7 @@ function wireCardEvents() {
 
   const draftCard = document.getElementById('review-draft-card')
   if (draftCard) {
-    draftCard.addEventListener('change', event => {
-      state.captureDraft.is_draft = event.target.checked
-    })
+    draftCard.addEventListener('change', event => { void _handleReviewDraftChange(event, { sync: false }) })
   }
 
   // Taxon autocomplete inputs
@@ -2501,4 +2479,89 @@ function _setProgress(done, total, label) {
 function _hideProgress() {
   const overlay = document.getElementById('import-progress')
   if (overlay) overlay.style.display = 'none'
+}
+
+// Publish notice: a new capture has no attached references yet (they are
+// attached to cloud observations from desktop), so the already-shared fact is
+// known to be "none"; spore_data_visibility keeps its column default, public.
+function _reviewPublishState(overrides = {}) {
+  return {
+    visibility: normalizeVisibility(state.captureDraft?.visibility, getDefaultVisibility()),
+    is_draft: state.captureDraft?.is_draft !== false,
+    location_precision: state.captureDraft?.location_precision === 'fuzzed' ? 'fuzzed' : 'exact',
+    ...overrides,
+  }
+}
+
+let reviewPublishNoticeOptions
+export function __setReviewPublishNoticeOptionsForTests(options) {
+  reviewPublishNoticeOptions = options
+}
+
+export function _confirmReviewPublish(overrides, options = reviewPublishNoticeOptions) {
+  return confirmPublishIfNeeded(_reviewPublishState(), _reviewPublishState(overrides), options)
+}
+
+// Change handlers for the review privacy controls. Each asks for the publish
+// notice first; Cancel puts the control back and leaves captureDraft as it was.
+export async function _handleReviewVisibilityChange(event) {
+  if (!event.target.checked) return
+  const nextVisibility = normalizeVisibility(event.target.value, getDefaultVisibility())
+  if (!await _confirmReviewPublish({ visibility: nextVisibility })) {
+    _setReviewVisibilityRadio(state.captureDraft.visibility)
+    return
+  }
+  state.captureDraft.visibility = nextVisibility
+  _setReviewVisibilityRadio(nextVisibility)
+  _updateReviewObscureHint()
+  _scheduleReviewDraftFieldSync()
+}
+
+export async function _handleReviewDraftChange(event, { sync = true } = {}) {
+  const nextDraft = event.target.checked
+  if (!await _confirmReviewPublish({ is_draft: nextDraft })) {
+    event.target.checked = state.captureDraft.is_draft !== false
+    return
+  }
+  state.captureDraft.is_draft = nextDraft
+  if (sync) _scheduleReviewDraftFieldSync()
+}
+
+export async function _handleReviewPrecisionRadioChange(event) {
+  if (!event.target.checked) return
+  const nextPrecision = event.target.value
+  if (!await _confirmReviewPublish({ location_precision: nextPrecision })) {
+    _syncReviewPrecisionControls(state.captureDraft.location_precision)
+    return
+  }
+  state.captureDraft.location_precision = nextPrecision
+  _scheduleReviewDraftFieldSync()
+}
+
+export async function _handleReviewObscuredChange(event) {
+  const nextPrecision = event.target.checked ? 'fuzzed' : 'exact'
+  if (!await _confirmReviewPublish({ location_precision: nextPrecision })) {
+    _syncReviewPrecisionControls(state.captureDraft.location_precision)
+    return
+  }
+  state.captureDraft.location_precision = nextPrecision
+  _updateReviewObscureHint()
+  _scheduleReviewDraftFieldSync()
+}
+
+function _syncReviewPrecisionControls(precision) {
+  const value = precision === 'fuzzed' ? 'fuzzed' : 'exact'
+  const obscured = document.getElementById('review-obscured')
+  if (obscured) obscured.checked = value === 'fuzzed'
+  document.querySelectorAll('input[name="review-location-precision"]').forEach(radio => {
+    radio.checked = radio.value === value
+  })
+}
+
+function _setReviewVisibilityRadio(visibility) {
+  const value = normalizeVisibility(visibility, getDefaultVisibility())
+  document.querySelectorAll('input[name="review-vis"]').forEach(radio => {
+    radio.checked = radio.value === value
+    radio.closest('.scope-tab')?.classList.toggle('active', radio.checked)
+  })
 }

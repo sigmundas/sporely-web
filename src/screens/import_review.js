@@ -14,6 +14,7 @@ import { openAiCropEditor } from '../ai-crop-editor.js';
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js';
 import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js';
 import { normalizeCaptureVisibility, normalizeVisibility, toCloudVisibility } from '../visibility.js';
+import { confirmPublishIfNeeded } from '../publish-notice.js';
 import { lookupCoordinateKey, lookupReverseLocation } from '../location-lookup.js';
 import { normalizeObservationGeography } from '../observation-geography.js';
 import { isAndroidNativeApp } from '../camera-actions.js';
@@ -2071,33 +2072,15 @@ export function renderSessions() {
   });
 
   list.querySelectorAll('.import-vis-radio[data-sid]').forEach(input => {
-    input.addEventListener('change', () => {
-      const s = sessionById(input.dataset.sid);
-      if (s) s.visibility = normalizeCaptureVisibility(input.value, getDefaultVisibility());
-      _persistSessions();
-      
-      const group = input.closest('.scope-tabs');
-      if (group) {
-        group.querySelectorAll('.scope-tab').forEach(tab => tab.classList.remove('active'));
-        input.closest('.scope-tab').classList.add('active');
-      }
-    });
+    input.addEventListener('change', () => { void _handleImportVisibilityChange(input); });
   });
 
   list.querySelectorAll('.import-draft-checkbox[data-sid]').forEach(input => {
-    input.addEventListener('change', () => {
-      const s = sessionById(input.dataset.sid);
-      if (s) s.is_draft = input.checked;
-      _persistSessions();
-    });
+    input.addEventListener('change', () => { void _handleImportDraftChange(input); });
   });
 
   list.querySelectorAll('.import-obscure-checkbox[data-sid]').forEach(input => {
-    input.addEventListener('change', () => {
-      const s = sessionById(input.dataset.sid);
-      if (s) s.location_precision = input.checked ? 'fuzzed' : 'exact';
-      _persistSessions();
-    });
+    input.addEventListener('change', () => { void _handleImportPrecisionChange(input); });
   });
 
   list.querySelectorAll('.import-uncertain-checkbox[data-sid]').forEach(input => {
@@ -2903,4 +2886,72 @@ export {
   _sessionServiceNeedsRerun,
   _applySessionAiPrediction,
   _applySessionAiTopPrediction,
+}
+
+// Publish notice for one import session. An import session is a new
+// observation: no references can be attached to it yet, so the already-shared
+// fact is known to be "none"; spore_data_visibility keeps its default, public.
+function _importSessionPublishState(session, overrides = {}) {
+  return {
+    visibility: normalizeCaptureVisibility(session?.visibility, getDefaultVisibility()),
+    is_draft: session?.is_draft !== false,
+    location_precision: session?.location_precision === 'fuzzed' ? 'fuzzed' : 'exact',
+    ...overrides,
+  };
+}
+
+let importPublishNoticeOptions;
+export function __setImportPublishNoticeOptionsForTests(options) {
+  importPublishNoticeOptions = options;
+}
+
+// Change handlers for an import card's privacy controls. Cancel puts the
+// control back and leaves the session as it was.
+export async function _handleImportVisibilityChange(input) {
+  const s = sessionById(input.dataset.sid);
+  const nextVisibility = normalizeCaptureVisibility(input.value, getDefaultVisibility());
+  const group = input.closest('.scope-tabs');
+  if (s && !await _confirmImportSessionPublish(s, { visibility: nextVisibility })) {
+    const previous = normalizeCaptureVisibility(s.visibility, getDefaultVisibility());
+    group?.querySelectorAll('.import-vis-radio').forEach(radio => {
+      radio.checked = radio.value === previous;
+      radio.closest('.scope-tab')?.classList.toggle('active', radio.checked);
+    });
+    return;
+  }
+  if (s) s.visibility = nextVisibility;
+  _persistSessions();
+  if (group) {
+    group.querySelectorAll('.scope-tab').forEach(tab => tab.classList.remove('active'));
+    input.closest('.scope-tab')?.classList.add('active');
+  }
+}
+
+export async function _handleImportPrecisionChange(input) {
+  const s = sessionById(input.dataset.sid);
+  const nextPrecision = input.checked ? 'fuzzed' : 'exact';
+  if (s && !await _confirmImportSessionPublish(s, { location_precision: nextPrecision })) {
+    input.checked = s.location_precision === 'fuzzed';
+    return;
+  }
+  if (s) s.location_precision = nextPrecision;
+  _persistSessions();
+}
+
+export async function _handleImportDraftChange(input) {
+  const s = sessionById(input.dataset.sid);
+  if (s && !await _confirmImportSessionPublish(s, { is_draft: input.checked })) {
+    input.checked = s.is_draft !== false;
+    return;
+  }
+  if (s) s.is_draft = input.checked;
+  _persistSessions();
+}
+
+export function _confirmImportSessionPublish(session, overrides, options = importPublishNoticeOptions) {
+  return confirmPublishIfNeeded(
+    _importSessionPublishState(session),
+    _importSessionPublishState(session, overrides),
+    options,
+  );
 }
