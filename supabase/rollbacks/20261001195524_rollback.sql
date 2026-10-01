@@ -6,7 +6,8 @@
 -- updated_at) with time of day, and image storage keys / legacy key URLs
 -- (which embed the upload epoch-ms) to anon and every signed-in non-owner,
 -- i.e. reintroduces the privacy defect. Also restores
--- search_public_observation_images with its legacy URLs. Use only if the forward migration breaks
+-- search_public_observation_images with its legacy URLs, the species RPCs'
+-- representativeThumbUrl and get_public_observation's legacy cropUrl. Use only if the forward migration breaks
 -- a client and the exposure has been accepted for that window.
 --
 -- Promotion to a real migration: copy this file unchanged to
@@ -340,6 +341,96 @@ AS $function$
     public.build_worker_media_url(p.image_id, 'thumb', p.media_version) AS "thumbMediaUrl"
   FROM prepared p
   ORDER BY p.observation_id, p.sort_order NULLS LAST, p.created_at DESC NULLS LAST, p.image_id DESC
+$function$;
+
+CREATE OR REPLACE FUNCTION public.get_public_species(p_species_slug text)
+ RETURNS TABLE("speciesSlug" text, genus text, species text, "speciesName" text, "commonName" text, "observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" date, "lastObservedOn" date, countries jsonb, regions jsonb, "representativeThumbUrl" text, "recentObservationIds" bigint[], "representativeImageId" bigint, "representativeMediaVersion" bigint, "representativeThumbMediaUrl" text, "taxonIdentity" jsonb)
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO ''
+AS $function$
+  WITH legacy AS MATERIALIZED (
+    SELECT * FROM public._get_public_species_stage6f(p_species_slug)
+  ), identities AS MATERIALIZED (
+    SELECT identity.*
+      FROM private.public_species_taxon_identities(
+        (SELECT pg_catalog.array_agg(legacy."speciesSlug") FROM legacy)
+      ) identity
+  )
+  SELECT legacy.*, identities.taxon_identity AS "taxonIdentity"
+    FROM legacy
+    LEFT JOIN identities ON identities.species_slug = legacy."speciesSlug"
+$function$;
+
+CREATE OR REPLACE FUNCTION public.search_public_species(p_limit integer DEFAULT 50, p_offset integer DEFAULT 0, p_genus text DEFAULT NULL::text, p_query text DEFAULT NULL::text)
+ RETURNS TABLE("speciesSlug" text, genus text, species text, "speciesName" text, "commonName" text, "observationCount" bigint, "microscopyObservationCount" bigint, "sporeMeasurementCount" bigint, "firstObservedOn" date, "lastObservedOn" date, countries jsonb, regions jsonb, "representativeThumbUrl" text, "representativeImageId" bigint, "representativeMediaVersion" bigint, "representativeThumbMediaUrl" text, "taxonIdentity" jsonb)
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO ''
+AS $function$
+  WITH legacy AS MATERIALIZED (
+    SELECT * FROM public._search_public_species_stage6f(
+      p_limit, p_offset, p_genus, p_query
+    )
+  ), identities AS MATERIALIZED (
+    SELECT identity.*
+      FROM private.public_species_taxon_identities(
+        (SELECT pg_catalog.array_agg(legacy."speciesSlug") FROM legacy)
+      ) identity
+  )
+  SELECT legacy.*, identities.taxon_identity AS "taxonIdentity"
+    FROM legacy
+    LEFT JOIN identities ON identities.species_slug = legacy."speciesSlug"
+   ORDER BY legacy."observationCount" DESC,
+            legacy."lastObservedOn" DESC,
+            legacy."speciesName" ASC,
+            legacy."speciesSlug" ASC
+$function$;
+
+CREATE OR REPLACE FUNCTION public.get_public_observation(p_observation_id bigint)
+ RETURNS TABLE(id bigint, "speciesSlug" text, "speciesName" text, "speciesCommonName" text, "observerDisplayName" text, "observedOn" date, country text, "regionId" text, "locationPrecision" text, "locationLabel" text, "hasMicroscopy" boolean, "sporeMeasurementCount" bigint, "sporeSummary" jsonb, "sporePoints" jsonb, "sporeMosaic" jsonb, "contrastMethod" text, "mountReagent" text, "sampleType" text, "sampleSource" text, "prepSummary" jsonb, "mapLat" double precision, "mapLon" double precision)
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+  SELECT
+    legacy.id,
+    legacy."speciesSlug",
+    legacy."speciesName",
+    legacy."speciesCommonName",
+    legacy."observerDisplayName",
+    legacy."observedOn",
+    legacy.country,
+    legacy."regionId",
+    legacy."locationPrecision",
+    legacy."locationLabel",
+    legacy."hasMicroscopy",
+    legacy."sporeMeasurementCount",
+    legacy."sporeSummary",
+    legacy."sporePoints",
+    CASE
+      WHEN legacy."sporeMosaic" IS NULL OR mosaic.id IS NULL THEN legacy."sporeMosaic"
+      ELSE legacy."sporeMosaic" || jsonb_build_object(
+        'mosaicId', mosaic.id,
+        'mosaicMediaVersion', mosaic.media_version,
+        'mosaicMediaUrl', public.build_worker_mosaic_url(mosaic.id, mosaic.media_version)
+      )
+    END AS "sporeMosaic",
+    legacy."contrastMethod",
+    legacy."mountReagent",
+    legacy."sampleType",
+    legacy."sampleSource",
+    legacy."prepSummary",
+    legacy."mapLat",
+    legacy."mapLon"
+  FROM public._get_public_observation_stage2a(p_observation_id) legacy
+  LEFT JOIN LATERAL (
+    SELECT sm.id, sm.media_version
+    FROM public.spore_measurement_mosaics sm
+    WHERE sm.observation_id = legacy.id
+    ORDER BY sm.version DESC, sm.id DESC
+    LIMIT 1
+  ) mosaic ON true
 $function$;
 
 COMMIT;

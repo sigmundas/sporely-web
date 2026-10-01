@@ -26,8 +26,11 @@ DECLARE
   first_id  bigint;
   payload   text;
   secret_time constant text := '13:47';
-  -- Epoch ms of 2026-09-15 13:47:30 UTC, as embedded by Date.now() in keys.
-  key_epoch constant text := '1789393650123';
+  -- Epoch ms of 2026-09-15 13:47:30.123 UTC (the observation's upload
+  -- time), as the legacy web key builder embedded Date.now() in keys.
+  key_epoch constant text := '1789480050123';
+  micro_id  bigint;
+  species_slug text;
   ident_id  bigint;
 BEGIN
   INSERT INTO auth.users (id, aud, role, email, raw_user_meta_data, created_at, updated_at)
@@ -87,6 +90,22 @@ BEGIN
     TIMESTAMPTZ '2026-09-15 13:47:21+00', TIMESTAMPTZ '2026-09-15 13:47:30+00'
   )
   RETURNING id INTO img_id;
+
+  -- Microscope image + spore measurement whose thumb_key is the image's thumb
+  -- key, as the desktop writes it (legacy cropUrl source).
+  INSERT INTO public.observation_images (
+    observation_id, user_id, storage_path, image_type, sort_order
+  )
+  VALUES (
+    obs_early, owner_id, owner_id::text || '/' || obs_early || '/1_' || key_epoch || '.webp', 'microscope', 1
+  )
+  RETURNING id INTO micro_id;
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type, thumb_key, image_key)
+  VALUES (
+    micro_id, owner_id, 10.5, 5.2, 'spore',
+    owner_id::text || '/' || obs_early || '/thumb_1_' || key_epoch || '.webp',
+    owner_id::text || '/' || obs_early || '/1_' || key_epoch || '.webp'
+  );
 
   INSERT INTO public.observation_identifications (
     observation_id, user_id, service, request_fingerprint, results,
@@ -172,16 +191,19 @@ BEGIN
     IF row_count <> 1 THEN
       RAISE EXCEPTION '% saw % identification rows (test setup broken)', role_name, row_count;
     END IF;
-    SELECT to_jsonb(v)::text INTO payload
-    FROM public.observation_identifications_community_view v WHERE v.id = ident_id;
     IF role_name = 'owner' THEN
       SELECT v.created_at INTO got_ts
       FROM public.observation_identifications_community_view v WHERE v.id = ident_id;
       IF got_ts IS DISTINCT FROM TIMESTAMPTZ '2026-09-15 13:47:40+00' THEN
         RAISE EXCEPTION 'owner lost identification created_at: %', got_ts;
       END IF;
-    ELSIF position(secret_time IN payload) > 0 THEN
-      RAISE EXCEPTION '% can read identification time of day: %', role_name, payload;
+    ELSE
+      SELECT count(*) INTO row_count
+      FROM public.observation_identifications_community_view v
+      WHERE v.id = ident_id AND (v.created_at IS NOT NULL OR v.updated_at IS NOT NULL);
+      IF row_count <> 0 THEN
+        RAISE EXCEPTION '% can read identification created_at/updated_at', role_name;
+      END IF;
     END IF;
 
     -- 1c) Image keys embed the upload epoch-ms: no key or key-derived URL
@@ -228,6 +250,40 @@ BEGIN
       IF row_count <> 1 THEN
         RAISE EXCEPTION 'owner lost storage_path in observation_images_community_view';
       END IF;
+    END IF;
+
+    -- 1d) Public species RPCs: no key-derived representativeThumbUrl; the
+    --     worker URL is still there.
+    SELECT r."speciesSlug" INTO species_slug
+    FROM public.search_public_observations(p_genus => 'Timeprivacia') r LIMIT 1;
+    SELECT coalesce(string_agg(to_jsonb(r)::text, ' '), '') INTO payload
+    FROM public.get_public_species(species_slug) r;
+    IF payload = '' OR position(key_epoch IN payload) > 0 OR position('media.sporely.no' IN payload) > 0 THEN
+      RAISE EXCEPTION '% get_public_species leaks a key URL (or is empty): %', role_name, payload;
+    END IF;
+    IF position('/m/' IN payload) = 0 THEN
+      RAISE EXCEPTION '% get_public_species lost representativeThumbMediaUrl: %', role_name, payload;
+    END IF;
+    SELECT coalesce(string_agg(to_jsonb(r)::text, ' '), '') INTO payload
+    FROM public.search_public_species(p_genus => 'Timeprivacia') r;
+    IF payload = '' OR position(key_epoch IN payload) > 0 OR position('media.sporely.no' IN payload) > 0 THEN
+      RAISE EXCEPTION '% search_public_species leaks a key URL (or is empty): %', role_name, payload;
+    END IF;
+
+    -- 1e) get_public_observation spore points: cropUrl is a worker URL, not
+    --     media.sporely.no/<thumb_key>.
+    SELECT coalesce(r."sporePoints"::text, '') INTO payload
+    FROM public.get_public_observation(obs_early) r;
+    IF position(key_epoch IN payload) > 0 THEN
+      RAISE EXCEPTION '% get_public_observation cropUrl leaks key: %', role_name, payload;
+    END IF;
+    IF position('/m/' || micro_id || '/thumb' IN payload) = 0 THEN
+      RAISE EXCEPTION '% get_public_observation lost cropUrl: %', role_name, payload;
+    END IF;
+    SELECT coalesce(string_agg(to_jsonb(r)::text, ' '), '') INTO payload
+    FROM public.get_public_observation(obs_early) r;
+    IF position(key_epoch IN payload) > 0 THEN
+      RAISE EXCEPTION '% get_public_observation leaks key: %', role_name, payload;
     END IF;
 
     -- 2) The date is still served, unshifted, and same-date order is stable

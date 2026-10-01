@@ -1326,7 +1326,9 @@ BEGIN
       AND s."sporeMeasurementCount" = 4
       AND s."firstObservedOn" = DATE '2026-06-01'
       AND s."lastObservedOn" = DATE '2026-06-25'
-      AND s."representativeThumbUrl" = 'https://media.sporely.no/rpc/thumb_amanita-koh.webp'
+      -- Legacy key URL withheld (keys embed upload time, 20261001195524).
+      AND s."representativeThumbUrl" IS NULL
+      AND s."representativeThumbMediaUrl" LIKE 'https://upload.sporely.no/m/%/thumb?v=%'
   ) THEN
     RAISE EXCEPTION 'Expected public species summary for Amanita muscaria';
   END IF;
@@ -1416,7 +1418,8 @@ BEGIN
      OR rpc_row."sporeMeasurementCount" IS DISTINCT FROM 4
      OR rpc_row."firstObservedOn" IS DISTINCT FROM DATE '2026-06-01'
      OR rpc_row."lastObservedOn" IS DISTINCT FROM DATE '2026-06-25'
-     OR rpc_row."representativeThumbUrl" IS DISTINCT FROM 'https://media.sporely.no/rpc/thumb_amanita-koh.webp' THEN
+     OR rpc_row."representativeThumbUrl" IS NOT NULL
+     OR rpc_row."representativeThumbMediaUrl" NOT LIKE 'https://upload.sporely.no/m/%/thumb?v=%' THEN
     RAISE EXCEPTION 'Public species detail projection did not match expected safe fields';
   END IF;
 
