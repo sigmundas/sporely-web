@@ -612,3 +612,13 @@ supersedes walk per query), plus a partial index of live enhanced sets.
   and label-free; rollback test
   `supabase/tests/reference_curated_fork_from_contribution_rollback_test.sh`
   (R1–R3). 23 checks fail on the pre-fix definition, 9 on `3b6d210`.
+- 2026-10-02: Fork fix follow-up 2 (reviews of `a204dc1` approved with
+  pre-merge items): restrictive policy
+  `reference_curated_forks_contribution_reader_select` hides
+  contribution-kind forks from direct table reads (sporely-py v0.9.24 pulls
+  by plain GET and aborts the whole curated pull on an unvalidatable row;
+  omission is harmless there: no delete/push on absence); the capable feed
+  still returns them. Missing snapshot `schema_version` refused. Rollback
+  drops the policy; rollback test R2 now asserts the specific failure.
+  `reference_client_capability_test.sql` cannot run on a local stack
+  without the deferred `20260914090000` (fixture needs v2 snapshots).

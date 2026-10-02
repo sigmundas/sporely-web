@@ -8,7 +8,8 @@
 -- Restores public.sync_reference_curated_fork(jsonb,bigint) verbatim from
 -- 20260830120000 (owner, REVOKE, GRANT), the single source FK to
 -- private.curated_reference_publication_taxa, and drops source_kind and the
--- two generated source columns.
+-- two generated source columns, and drops the restrictive policy that hides
+-- contribution forks from direct table reads.
 --
 -- REFUSES while any contribution-sourced fork exists: the restored FK cannot
 -- hold for it, and deleting it would silently drop a user's provenance
@@ -36,6 +37,8 @@ BEGIN
 END
 $$;
 
+DROP POLICY IF EXISTS reference_curated_forks_contribution_reader_select
+  ON public.reference_curated_forks;
 DROP FUNCTION public.sync_reference_curated_fork(jsonb,bigint);
 
 ALTER TABLE public.reference_curated_forks

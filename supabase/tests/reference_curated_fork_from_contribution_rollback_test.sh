@@ -68,6 +68,10 @@ BEGIN
                               'reference_curated_forks_contribution_source_fkey')) THEN
     RAISE EXCEPTION 'R1: forward FKs remain';
   END IF;
+  IF EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='reference_curated_forks'
+              AND policyname='reference_curated_forks_contribution_reader_select') THEN
+    RAISE EXCEPTION 'R1: contribution reader policy remains';
+  END IF;
   IF (SELECT prosrc FROM pg_proc WHERE oid=v_fn) IS DISTINCT FROM E'\n' || \$legacy\$${LEGACY_BODY}\$legacy\$ || E'\n' THEN
     RAISE EXCEPTION 'R1: function body differs from 20260830120000';
   END IF;
@@ -87,15 +91,16 @@ SQL
 echo "R1 ok: rollback restores the legacy schema and function; legacy fork test passes"
 
 # R2
-if {
+out="$({
   forward_state
   echo "DELETE FROM public.reference_curated_forks WHERE source_kind = 'shared_contribution';"
   strip "$ROLLBACK"
   strip "$NEW_TEST"
   echo "ROLLBACK;"
-} | psqlx >/dev/null 2>&1; then
-  fail "R2: contribution fork test passed after the rollback"
-fi
+} | psqlx 2>&1 || true)"
+echo "$out" | grep -q "FAILED: A: served contribution fork (with contributor) is created (got invalid_source)" \
+  && echo "$out" | grep -q "ERROR:  reference_curated_fork_from_contribution_test: [0-9]* check(s) failed" \
+  || fail "R2: expected the contribution test to fail with invalid_source: $out"
 echo "R2 ok: contribution fork test fails after the rollback"
 
 # R3

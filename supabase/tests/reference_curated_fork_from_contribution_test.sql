@@ -17,7 +17,10 @@
 --   D. self-fork of a served own contribution is accepted (legacy has no
 --      self-fork rule).
 --   M. Stage M: a fork bound to an enhanced (withheld) target set is hidden
---      from a non-capable reader and counted in withheld_count.
+--      from a non-capable feed reader and counted in withheld_count.
+--   R. direct table reads (sporely-py v0.9.24 plain GET) see no contribution
+--      fork; the capable feed returns them (A). Legacy publication forks
+--      through table reads: reference_curated_fork_provenance_test.sql.
 -- The legacy curated-publication path is covered unchanged by
 -- reference_curated_fork_provenance_test.sql.
 -- Failures are collected (WARNING per failed check) and raised at the end, so
@@ -235,6 +238,11 @@ BEGIN
     'B: withdrawn contribution is invalid_source');
   PERFORM pg_temp.check(pg_temp.sync(c, pg_temp.payload(cx,1,t,wc,trc,sc1,pg_temp.envelope(cx,1))) = 'invalid_source',
     'B: snapshot schema_version 3 is invalid_source');
+  UPDATE private.shared_reference_contribution_revisions
+     SET envelope_json = envelope_json #- '{snapshot,schema_version}'
+   WHERE contribution_id=cx AND revision=1;
+  PERFORM pg_temp.check(pg_temp.sync(c, pg_temp.payload(cx,1,t,wc,trc,sc1,pg_temp.envelope(cx,1))) = 'invalid_source',
+    'B: snapshot without schema_version is invalid_source');
   -- Re-share the withdrawn row: revision 2 opens a new sharing period.
   PERFORM private.reference_contribution_share_core('refresh', a, sw, t);
   PERFORM pg_temp.check((SELECT status = 'shared' AND shared_first_revision = 2
@@ -336,10 +344,8 @@ SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claims',
   '{"sub":"00000000-0000-4000-8000-0000000f0a02","role":"authenticated"}', true) \g /dev/null
 INSERT INTO pg_temp.failures
-SELECT 'A/M: owner reads 3 contribution forks through RLS; the enhanced one is withheld'
- WHERE (SELECT count(*) FROM public.reference_curated_forks) <> 3
-    OR EXISTS (SELECT 1 FROM public.reference_curated_forks
-                WHERE reference_measurement_set_id = '7d000000-0000-4000-8000-0000000f0007');
+SELECT 'R: direct table reads (old desktops) never see contribution forks'
+ WHERE EXISTS (SELECT 1 FROM public.reference_curated_forks);
 SELECT set_config('request.jwt.claims',
   '{"sub":"00000000-0000-4000-8000-0000000f0a03","role":"authenticated"}', true) \g /dev/null
 INSERT INTO pg_temp.failures

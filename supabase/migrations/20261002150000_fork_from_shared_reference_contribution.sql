@@ -19,9 +19,20 @@
 -- The client envelope is validated ignoring contributor and is never
 -- stored; the client's sha256 must still match the client text.
 -- Creation requires the contribution revision to be shared and served to the
--- caller at that moment, with the stored envelope exactly equal to the
--- server's revision envelope; an existing fork is never re-validated (the
--- idempotent no_change/conflict lookup precedes source validation).
+-- caller at that moment, with the client envelope equal to the server's
+-- revision envelope apart from contributor; an existing fork is never
+-- re-validated (the idempotent no_change/conflict lookup precedes source
+-- validation).
+--
+-- Old readers: released desktops (sporely-py v0.9.24) read forks with a
+-- plain table GET and abort the whole curated pull on the first row their
+-- frozen-envelope validator rejects (a contributor-less contribution
+-- envelope), and since Stage M a failed curated pull skips every reference
+-- push. A restrictive SELECT policy therefore hides contribution-kind forks
+-- from direct table reads; capable clients read them through
+-- list_reference_library_feed('curated_fork') (SECURITY DEFINER, owner
+-- filter, unaffected). Omission is harmless to v0.9.24: its pull only
+-- inserts/updates rows it receives and never deletes or pushes on absence.
 --
 -- Self-forks: the legacy path has no contributor concept and no self-fork
 -- rule, so a caller may fork their own served contribution (same semantics).
@@ -276,6 +287,7 @@ BEGIN
        AND r.revision = v_bundle_revision
        AND pg_catalog.octet_length(r.envelope_json::text) <= 1048576;
     IF v_served_envelope IS NULL
+       OR (v_served_envelope->'snapshot'->'schema_version') IS NULL
        OR (v_served_envelope->'snapshot'->'schema_version') NOT IN ('1'::jsonb,'2'::jsonb)
        OR (v_source_envelope - 'contributor')
           IS DISTINCT FROM (v_served_envelope - 'contributor') THEN
@@ -330,5 +342,11 @@ REVOKE ALL ON FUNCTION public.sync_reference_curated_fork(jsonb,bigint)
   FROM PUBLIC, anon, service_role;
 GRANT EXECUTE ON FUNCTION public.sync_reference_curated_fork(jsonb,bigint)
   TO authenticated;
+
+-- Direct table reads (old desktops) see legacy publication forks only.
+CREATE POLICY reference_curated_forks_contribution_reader_select
+  ON public.reference_curated_forks
+  AS RESTRICTIVE FOR SELECT TO authenticated
+  USING (source_kind = 'curated_publication');
 
 COMMIT;
