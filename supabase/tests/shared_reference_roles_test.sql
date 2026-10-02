@@ -506,14 +506,14 @@ BEGIN
     END LOOP;
   END LOOP;
   FOREACH v_role IN ARRAY ARRAY['anon','authenticated'] LOOP
-    IF NOT has_function_privilege(v_role,'public.search_public_reference_contributions_v2(integer,integer,timestamptz,uuid)','EXECUTE')
-       OR NOT has_function_privilege(v_role,'public.get_public_reference_contribution_v2(uuid,integer)','EXECUTE') THEN
+    IF NOT has_function_privilege(v_role,'public.search_public_reference_contributions_v2(integer,integer,timestamptz,uuid,integer[])','EXECUTE')
+       OR NOT has_function_privilege(v_role,'public.get_public_reference_contribution_v2(uuid,integer,integer[])','EXECUTE') THEN
       RAISE EXCEPTION 'role % cannot execute a v2 read', v_role;
     END IF;
   END LOOP;
   FOREACH v_role IN ARRAY ARRAY['service_role','public'] LOOP
-    IF has_function_privilege(v_role,'public.search_public_reference_contributions_v2(integer,integer,timestamptz,uuid)','EXECUTE')
-       OR has_function_privilege(v_role,'public.get_public_reference_contribution_v2(uuid,integer)','EXECUTE') THEN
+    IF has_function_privilege(v_role,'public.search_public_reference_contributions_v2(integer,integer,timestamptz,uuid,integer[])','EXECUTE')
+       OR has_function_privilege(v_role,'public.get_public_reference_contribution_v2(uuid,integer,integer[])','EXECUTE') THEN
       RAISE EXCEPTION 'role % can execute a v2 read', v_role;
     END IF;
   END LOOP;

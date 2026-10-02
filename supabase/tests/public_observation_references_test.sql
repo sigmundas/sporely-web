@@ -355,12 +355,12 @@ RESET ROLE;
 
 -- Input caps and grants are part of the public contract.
 DO $$ BEGIN
-  IF has_function_privilege('public','public.search_public_observation_references(bigint[])','EXECUTE') THEN
+  IF has_function_privilege('public','public.search_public_observation_references(bigint[],integer[])','EXECUTE') THEN
     RAISE EXCEPTION 'PUBLIC retained execute on batch reference projection';
   END IF;
-  IF NOT has_function_privilege('anon','public.search_public_observation_references(bigint[])','EXECUTE')
-     OR NOT has_function_privilege('authenticated','public.get_public_observation_references(bigint)','EXECUTE')
-     OR NOT has_function_privilege('service_role','public.search_public_observation_references(bigint[])','EXECUTE') THEN
+  IF NOT has_function_privilege('anon','public.search_public_observation_references(bigint[],integer[])','EXECUTE')
+     OR NOT has_function_privilege('authenticated','public.get_public_observation_references(bigint,integer[])','EXECUTE')
+     OR NOT has_function_privilege('service_role','public.search_public_observation_references(bigint[],integer[])','EXECUTE') THEN
     RAISE EXCEPTION 'expected public projection grants are missing';
   END IF;
   IF has_table_privilege('anon','public.observation_reference_uses','SELECT')
