@@ -48,6 +48,7 @@ DROP FUNCTION reference_rls.use_withheld_from_v1_readers(uuid,uuid,jsonb);
 DROP FUNCTION reference_rls.set_withheld_from_v1_readers(uuid,uuid);
 DROP SCHEMA reference_rls;
 DROP INDEX public.reference_measurement_sets_enhanced_live_idx;
+DROP INDEX public.reference_measurement_sets_supersedes_idx;
 DROP FUNCTION private.reference_creation_blocked_by_older_client(uuid,jsonb);
 DROP FUNCTION private.reference_older_client_active(uuid,uuid);
 DROP FUNCTION private.reference_record_client_device(uuid,jsonb);

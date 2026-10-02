@@ -479,15 +479,17 @@ BEGIN
   PERFORM pg_temp.claims(NULL);
   IF reference_rls.set_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002') THEN
     RAISE EXCEPTION 'G: predicate answers without auth.uid()'; END IF;
-  -- another account learns nothing about the owner's rows through the predicates
+  -- the single-row predicates are not executable by clients at all
   PERFORM pg_temp.claims('00000000-0000-4000-8000-0000000b3002');
+  IF has_function_privilege('authenticated','reference_rls.set_withheld_from_v1_readers(uuid,uuid)','EXECUTE')
+     OR has_function_privilege('authenticated','reference_rls.use_withheld_from_v1_readers(uuid,uuid,jsonb)','EXECUTE')
+     OR has_function_privilege('authenticated','reference_rls.fork_withheld_from_v1_readers(uuid,uuid)','EXECUTE')
+     OR NOT has_function_privilege('authenticated','reference_rls.caller_withheld_set_ids()','EXECUTE') THEN
+    RAISE EXCEPTION 'G: predicate grants'; END IF;
   SET LOCAL ROLE authenticated;
-  v := reference_rls.set_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002');
-  IF v THEN RESET ROLE; RAISE EXCEPTION 'G: predicate answers for another account'; END IF;
-  v := reference_rls.use_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002','{"schema_version":2}');
-  IF v THEN RESET ROLE; RAISE EXCEPTION 'G: use predicate answers for another account'; END IF;
-  v := reference_rls.fork_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002');
-  IF v THEN RESET ROLE; RAISE EXCEPTION 'G: fork predicate answers for another account'; END IF;
+  -- another account's withheld-set lookup sees nothing of the owner's rows
+  SELECT count(*) INTO n FROM reference_rls.caller_withheld_set_ids();
+  IF n <> 0 THEN RESET ROLE; RAISE EXCEPTION 'G: withheld ids of another account visible'; END IF;
   SELECT count(*) INTO n FROM public.reference_client_devices;
   IF n <> 0 THEN RESET ROLE; RAISE EXCEPTION 'G: device rows of another account visible'; END IF;
   BEGIN

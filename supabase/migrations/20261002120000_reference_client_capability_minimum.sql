@@ -167,9 +167,19 @@ $$;
 -- private, so the predicates live in reference_rls: USAGE for authenticated,
 -- not a PostgREST-exposed schema (no RPC surface). Each answers only for the
 -- caller's own rows (auth.uid()); for anyone else it is false.
+-- The single-row predicates are called only by postgres-owned SECURITY
+-- DEFINER write functions (no EXECUTE for authenticated); the policies use
+-- caller_withheld_set_ids(), which authenticated may execute.
 CREATE SCHEMA reference_rls;
 REVOKE ALL ON SCHEMA reference_rls FROM PUBLIC;
 GRANT USAGE ON SCHEMA reference_rls TO authenticated;
+
+-- The descendant walk (caller_withheld_set_ids) joins on supersedes_id over
+-- live and deleted successors; the existing successor index is partial
+-- (live only).
+CREATE INDEX reference_measurement_sets_supersedes_idx
+  ON public.reference_measurement_sets (user_id, supersedes_id)
+  WHERE supersedes_id IS NOT NULL;
 
 -- Small: only live enhanced sets (none in production before Stage D/E).
 CREATE INDEX reference_measurement_sets_enhanced_live_idx
@@ -255,9 +265,6 @@ REVOKE ALL ON FUNCTION private.reference_creation_blocked_by_older_client(uuid,j
 REVOKE ALL ON FUNCTION reference_rls.fork_withheld_from_v1_readers(uuid,uuid) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION reference_rls.set_withheld_from_v1_readers(uuid,uuid) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION reference_rls.use_withheld_from_v1_readers(uuid,uuid,jsonb) FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION reference_rls.set_withheld_from_v1_readers(uuid,uuid) TO authenticated;
-GRANT EXECUTE ON FUNCTION reference_rls.use_withheld_from_v1_readers(uuid,uuid,jsonb) TO authenticated;
-GRANT EXECUTE ON FUNCTION reference_rls.fork_withheld_from_v1_readers(uuid,uuid) TO authenticated;
 
 -- Direct table reads are the legacy (v1-only) feed --------------------------------
 CREATE POLICY reference_measurement_sets_v1_reader_select ON public.reference_measurement_sets
