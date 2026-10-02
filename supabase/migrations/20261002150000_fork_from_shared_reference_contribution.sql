@@ -10,7 +10,14 @@
 -- curated publications, so every such push returned invalid_source.
 --
 -- Owner decision (a): the copier keeps the copy and its provenance even if
--- the contributor later stops sharing or moderation hides the contribution.
+-- the contributor later stops sharing, moderation hides the contribution or
+-- the contributor deletes their account.
+--
+-- Stored contribution envelope (owner option B): the served revision
+-- envelope (envelope_json) with contributor and relationship_roles removed;
+-- source_sha256 = sha256 of exactly the stored source_envelope_json text.
+-- The client envelope is validated ignoring contributor and is never
+-- stored; the client's sha256 must still match the client text.
 -- Creation requires the contribution revision to be shared and served to the
 -- caller at that moment, with the stored envelope exactly equal to the
 -- server's revision envelope; an existing fork is never re-validated (the
@@ -30,6 +37,8 @@
 -- nulls owner_id). RLS (owner select + Stage M restrictive v1 policy) and
 -- grants are untouched.
 -- Rollback: supabase/rollbacks/20261002150000_rollback.sql.
+-- Snapshot schema_version must be 1 or 2 (parity with
+-- private.reference_public_item_for_versions).
 
 BEGIN;
 
@@ -145,6 +154,20 @@ BEGIN
      AND curated_measurement_set_id = v_curated_set_id
      AND bundle_revision = v_bundle_revision
    FOR UPDATE;
+  IF FOUND AND v_current.source_kind = 'shared_contribution' THEN
+    -- The stored envelope is the server-built form (no contributor), so a
+    -- re-push compares the client envelope with contributor removed; the
+    -- client text and sha256 are not what is stored.
+    IF v_current.sporely_taxon_id = v_taxon_id
+       AND v_current.reference_work_id = v_work_id
+       AND v_current.taxon_treatment_id = v_treatment_id
+       AND v_current.reference_measurement_set_id = v_set_id
+       AND v_current.source_envelope_json::jsonb = (v_source_envelope - 'contributor')
+    THEN
+      RETURN private.reference_result('no_change', pg_catalog.to_jsonb(v_current));
+    END IF;
+    RETURN private.reference_result('conflict', pg_catalog.to_jsonb(v_current));
+  END IF;
   IF FOUND THEN
     IF v_current.sporely_taxon_id = v_taxon_id
        AND v_current.reference_work_id = v_work_id
@@ -221,8 +244,9 @@ BEGIN
     END IF;
   ELSE
     v_source_kind := 'shared_contribution';
-    -- Frozen provenance is the complete served envelope without the live
-    -- relationship_roles. A version-1 projection (Stage A marker
+    -- The client envelope is the served envelope without the live
+    -- relationship_roles, with or without contributor (ignored, never
+    -- stored). A version-1 projection (Stage A marker
     -- measurement_details_omitted) is lossy and never a frozen source.
     IF v_source_envelope ? 'measurement_details_omitted'
        OR v_source_envelope ? 'relationship_roles' THEN
@@ -252,9 +276,20 @@ BEGIN
        AND r.revision = v_bundle_revision
        AND pg_catalog.octet_length(r.envelope_json::text) <= 1048576;
     IF v_served_envelope IS NULL
-       OR v_source_envelope IS DISTINCT FROM v_served_envelope THEN
+       OR (v_served_envelope->'snapshot'->'schema_version') NOT IN ('1'::jsonb,'2'::jsonb)
+       OR (v_source_envelope - 'contributor')
+          IS DISTINCT FROM (v_served_envelope - 'contributor') THEN
       RETURN private.reference_result('invalid_source');
     END IF;
+    -- Persisted provenance: the served revision envelope without
+    -- contributor (and without relationship_roles, never in envelope_json).
+    -- No contributor identity or label is stored, so contributor account
+    -- deletion needs no rewrite of fork rows. source_sha256 is computed over
+    -- the stored text, as the legacy path stores sha256(stored text).
+    v_source_envelope_text := (v_served_envelope - 'contributor')::text;
+    v_source_sha256 := pg_catalog.encode(extensions.digest(
+      pg_catalog.convert_to(v_source_envelope_text,'UTF8'),'sha256'
+    ),'hex');
   END IF;
 
   IF NOT EXISTS (

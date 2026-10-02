@@ -1,7 +1,9 @@
 -- Rollback of supabase/migrations/20261002150000_fork_from_shared_reference_contribution.sql.
 -- NOT a migration: kept outside supabase/migrations so it never runs by
--- accident. Tested by supabase/tests/reference_curated_fork_from_contribution_test.sql
--- (section R, inside a rolled-back transaction).
+-- accident. Tested by
+-- supabase/tests/reference_curated_fork_from_contribution_rollback_test.sh
+-- (section R: R1 restored state + legacy test, R2 contribution test fails,
+-- R3 refusal; every step in a rolled-back transaction).
 --
 -- Restores public.sync_reference_curated_fork(jsonb,bigint) verbatim from
 -- 20260830120000 (owner, REVOKE, GRANT), the single source FK to

@@ -594,3 +594,21 @@ supersedes walk per query), plus a partial index of live enhanced sets.
   contribution forks exist. Test
   `supabase/tests/reference_curated_fork_from_contribution_test.sql`
   (10 checks fail on the old definition); legacy fork test passes on both.
+- 2026-10-02: Fork fix follow-up after review of `3b6d210` (security: fork
+  rows kept the contributor's username after account deletion). Owner
+  option (B), same unapplied migration `20261002150000` amended in a new
+  commit: a contribution fork stores the revision `envelope_json` minus
+  `contributor` (and never `relationship_roles`); `source_sha256` =
+  sha256 of the stored text (server computed). The client envelope is
+  validated against the served revision ignoring `contributor` (with or
+  without it; never stored); re-push compares the same way, so no_change
+  survives contributor anonymization. No fork column holds contributor
+  data (other columns: ids, revision, taxon, sha, timestamps; the
+  snapshot's citation is the work's, not the contributor's). Snapshot
+  `schema_version` must be 1 or 2. Desktop must accept the contributor-less
+  frozen envelope (being changed in parallel). Tests added: older revision
+  in period, pre-re-share revision refused, v2 envelope, version 3 refused,
+  feed columns, Stage M withholding, contributor deletion keeps forks valid
+  and label-free; rollback test
+  `supabase/tests/reference_curated_fork_from_contribution_rollback_test.sh`
+  (R1–R3). 23 checks fail on the pre-fix definition, 9 on `3b6d210`.
