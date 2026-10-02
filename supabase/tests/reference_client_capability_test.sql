@@ -1,14 +1,18 @@
 -- Stage M of docs/plans/active/2026-10-01-reference-measurement-content-v2-rollout.md
 -- (20261002120000_reference_client_capability_minimum.sql):
 --   A. legacy table reads (how every released desktop reads its feeds) omit
---      withheld rows: enhanced live sets, their successors, non-v1 uses and
---      uses of withheld sets; tombstones stay visible;
+--      withheld rows: enhanced live sets, their successors (live or deleted),
+--      non-v1 uses, uses of withheld sets (live or deleted) and curated forks
+--      of withheld sets; enhanced tombstones and the live v1 predecessor of an
+--      enhanced successor stay visible;
 --   B. old-parser fixture: the rows a v0.9.22 / v0.9.24 desktop receives pass
 --      its whole-feed staging and graph validation, and no withheld row is
 --      presented as a deletion;
---   C. v1 data: the legacy table read equals the raw rows (no change);
---   D. list_reference_library_feed: undeclared/v1 vs [1,2], withheld_count,
---      pagination, argument validation;
+--   C. an owner with only v1 rows: legacy reads and the undeclared feed RPC
+--      return exactly the raw rows (byte-identical, all columns);
+--   D. list_reference_library_feed: undeclared/v1 vs [1,2] for all three
+--      entities, withheld_count only on a v1 caller's first page,
+--      pagination, argument validation (incl. 1.0 and the nil device id);
 --   E. non-capable writes touching withheld/enhanced content are refused
 --      with requires_newer_client and change nothing; v1 writes still work;
 --   F. creation guard incl. the 30-day window edges and the no-report case;
@@ -39,8 +43,10 @@ $$;
 
 -- Fixture ------------------------------------------------------------------------
 -- Sets (suffix): 01 v1 live; 02 enhanced live; 03 v1 successor of 02;
--- 04 enhanced tombstone; 05 v1 live. Uses (suffix): 11 on 01 (v1),
--- 12 on 02 (v2 snapshot), 15 on 05 (v1).
+-- 04 enhanced tombstone; 05 v1 live; 06 deleted v1 successor of 02;
+-- 07 live v1 predecessor of 08; 08 enhanced live successor of 07.
+-- Uses (suffix): 11 on 01 (v1), 12 on 02 (v2 snapshot), 15 on 05 (v1),
+-- 16 deleted v1 use on 02. Curated forks: 91 bound to 02, 92 bound to 01.
 DO $$
 DECLARE
   o constant uuid := '00000000-0000-4000-8000-0000000b3001';
@@ -86,12 +92,38 @@ BEGIN
        WHERE id='74000000-0000-4000-8000-0000000b3012') <> '2' THEN
     RAISE EXCEPTION 'fixture: use 12 must carry a version-2 snapshot (is 20260914090000 applied locally?)';
   END IF;
+  INSERT INTO public.reference_measurement_sets(
+    user_id,id,taxon_treatment_id,character,data_kind,raw_text,length_core_min,length_core_max,
+    measurement_details_json,supersedes_id,revision,deleted_at
+  ) VALUES
+    (o,'73000000-0000-4000-8000-0000000b3006',tr,'spore_size','range','7-9.5 um',7,9.5,NULL,'73000000-0000-4000-8000-0000000b3002',1,now()),
+    (o,'73000000-0000-4000-8000-0000000b3007',tr,'spore_size','range','6-8 um',6,8,NULL,NULL,1,NULL);
+  INSERT INTO public.reference_measurement_sets(
+    user_id,id,taxon_treatment_id,character,data_kind,raw_text,length_core_min,length_core_max,
+    measurement_details_json,supersedes_id,revision
+  ) VALUES (o,'73000000-0000-4000-8000-0000000b3008',tr,'spore_size','range','6-8 um, Qav = 1.6-2',6,8,qav,
+            '73000000-0000-4000-8000-0000000b3007',1);
+  INSERT INTO public.observations(id,user_id,date,visibility,is_draft,spore_data_visibility,resolved_sporely_taxon_id)
+  OVERRIDING SYSTEM VALUE VALUES (982000007,o,current_date,'private',false,'private',t);
+  -- a historical v1 snapshot of 02 (as frozen before 02 became enhanced)
+  INSERT INTO public.observation_reference_uses(user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json,deleted_at)
+  VALUES (o,'74000000-0000-4000-8000-0000000b3016',982000007,'73000000-0000-4000-8000-0000000b3002','compared',1,
+          jsonb_set(private.reference_canonical_snapshot(o,'73000000-0000-4000-8000-0000000b3007'),
+                    '{reference_measurement_set_id}','"73000000-0000-4000-8000-0000000b3002"'),now());
+  -- curated forks (FKs to the curated publication are irrelevant here)
+  SET LOCAL session_replication_role = replica;
+  INSERT INTO public.reference_curated_forks(id,user_id,curated_measurement_set_id,bundle_revision,sporely_taxon_id,
+    reference_work_id,taxon_treatment_id,reference_measurement_set_id,source_sha256,source_envelope_json)
+  VALUES
+    ('75000000-0000-4000-8000-0000000b3091',o,gen_random_uuid(),1,t,w,tr,'73000000-0000-4000-8000-0000000b3002',repeat('a',64),'{}'),
+    ('75000000-0000-4000-8000-0000000b3092',o,gen_random_uuid(),1,t,w,tr,'73000000-0000-4000-8000-0000000b3001',repeat('b',64),'{}');
+  SET LOCAL session_replication_role = origin;
 END
 $$;
 
 -- A. Legacy table reads omit withheld rows ---------------------------------------
 DO $$
-DECLARE v_sets text; v_uses text; j_sets jsonb; j_uses jsonb;
+DECLARE v_sets text; v_uses text; j_sets jsonb; j_uses jsonb; j_forks jsonb;
 BEGIN
   PERFORM pg_temp.claims('00000000-0000-4000-8000-0000000b3001');
   SET LOCAL ROLE authenticated;
@@ -105,10 +137,12 @@ BEGIN
     SELECT user_id,id,observation_id,reference_measurement_set_id,role,note,selected_at,reference_revision,
            snapshot_json,row_version,created_at,updated_at,deleted_at
       FROM public.observation_reference_uses ORDER BY updated_at,id) x) q;
+  SELECT coalesce(jsonb_agg(to_jsonb(f)),'[]') INTO j_forks FROM public.reference_curated_forks f;
   RESET ROLE;
   v_sets := pg_temp.ids(j_sets); v_uses := pg_temp.ids(j_uses);
-  IF v_sets <> '01,04,05' THEN RAISE EXCEPTION 'A: legacy set feed is %, expected 01,04,05', v_sets; END IF;
+  IF v_sets <> '01,04,05,07' THEN RAISE EXCEPTION 'A: legacy set feed is %, expected 01,04,05,07', v_sets; END IF;
   IF v_uses <> '11,15' THEN RAISE EXCEPTION 'A: legacy use feed is %, expected 11,15', v_uses; END IF;
+  IF pg_temp.ids(j_forks) <> '92' THEN RAISE EXCEPTION 'A: legacy fork feed is %, expected 92', pg_temp.ids(j_forks); END IF;
 END
 $$;
 
@@ -117,7 +151,7 @@ $$;
 -- snapshot version 2): the received feed is accepted as a whole, and no
 -- withheld row arrives as a tombstone.
 DO $$
-DECLARE v_sets jsonb; v_uses jsonb; v_treatments jsonb; e jsonb;
+DECLARE v_sets jsonb; v_uses jsonb; v_treatments jsonb; v_forks jsonb; e jsonb;
 BEGIN
   PERFORM pg_temp.claims('00000000-0000-4000-8000-0000000b3001');
   SET LOCAL ROLE authenticated;
@@ -132,6 +166,7 @@ BEGIN
            snapshot_json,row_version,created_at,updated_at,deleted_at
       FROM public.observation_reference_uses ORDER BY updated_at,id) x) q;
   SELECT coalesce(jsonb_agg(to_jsonb(t)),'[]') INTO v_treatments FROM public.reference_taxon_treatments t WHERE user_id=auth.uid();
+  SELECT coalesce(jsonb_agg(to_jsonb(f)),'[]') INTO v_forks FROM public.reference_curated_forks f;
   RESET ROLE;
   FOR e IN SELECT * FROM jsonb_array_elements(v_sets) LOOP
     IF e->>'id' IS NULL OR e->>'row_version' IS NULL OR e->>'updated_at' IS NULL OR e->>'created_at' IS NULL
@@ -153,10 +188,17 @@ BEGIN
         WHERE s->>'id'=e->>'reference_measurement_set_id' AND s->>'deleted_at' IS NULL) THEN
       RAISE EXCEPTION 'B: live use % depends on an absent set (blocked forever)', e->>'id'; END IF;
   END LOOP;
+  -- sporely-py utils/curated_reference_sync.py pull (:177 at v0.9.22/v0.9.24):
+  -- a fork whose private set is not reconciled errors on every pull.
+  FOR e IN SELECT * FROM jsonb_array_elements(v_forks) LOOP
+    IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(v_sets) s
+        WHERE s->>'id'=e->>'reference_measurement_set_id' AND s->>'deleted_at' IS NULL) THEN
+      RAISE EXCEPTION 'B: fork % is bound to an absent set (curated pull errors, pushes skipped)', e->>'id'; END IF;
+  END LOOP;
   -- Withheld rows are absent, never delivered as tombstones (old reconcile
   -- deletes only rows carrying deleted_at), and the server rows are live.
-  IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_sets) s WHERE right(s->>'id',2) IN ('02','03'))
-     OR EXISTS (SELECT 1 FROM jsonb_array_elements(v_uses) u WHERE right(u->>'id',2)='12') THEN
+  IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_sets) s WHERE right(s->>'id',2) IN ('02','03','06','08'))
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(v_uses) u WHERE right(u->>'id',2) IN ('12','16')) THEN
     RAISE EXCEPTION 'B: a withheld row was delivered'; END IF;
   IF (SELECT count(*) FROM public.reference_measurement_sets WHERE right(id::text,2) IN ('02','03')
         AND user_id='00000000-0000-4000-8000-0000000b3001' AND deleted_at IS NULL) <> 2 THEN
@@ -164,28 +206,65 @@ BEGIN
 END
 $$;
 
--- C. v1 data unchanged: for an owner with only v1 rows the legacy read equals
--- the raw rows exactly.
+-- C. An owner with only v1 rows (live, deleted, a successor chain, a live and
+-- a deleted use, a curated fork): the legacy reads and the undeclared feed
+-- RPC return exactly the raw rows, all columns.
 DO $$
-DECLARE v_raw jsonb; v_rls jsonb;
+DECLARE
+  y constant uuid := '00000000-0000-4000-8000-0000000b3003';
+  t constant integer := 2100000982;
+  w constant uuid := '71000000-0000-4000-8000-0000000b3003';
+  tr constant uuid := '72000000-0000-4000-8000-0000000b3003';
+  raw_s jsonb; raw_u jsonb; raw_f jsonb; rls_s jsonb; rls_u jsonb; rls_f jsonb; f_s jsonb; f_u jsonb; f_f jsonb;
 BEGIN
-  UPDATE public.reference_measurement_sets SET deleted_at=now() WHERE id='73000000-0000-4000-8000-0000000b3003';
-  UPDATE public.observation_reference_uses SET deleted_at=now() WHERE id='74000000-0000-4000-8000-0000000b3012';
-  PERFORM pg_temp.claims('00000000-0000-4000-8000-0000000b3001');
-  SELECT jsonb_agg(to_jsonb(m) ORDER BY id) INTO v_raw FROM public.reference_measurement_sets m
-   WHERE user_id='00000000-0000-4000-8000-0000000b3001' AND id IN ('73000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3005','73000000-0000-4000-8000-0000000b3004');
+  INSERT INTO auth.users(id,aud,role,email,raw_user_meta_data,created_at,updated_at)
+  VALUES (y,'authenticated','authenticated','stage-m-y@example.invalid','{}',now(),now());
+  INSERT INTO public.profiles(id,username,is_banned) VALUES (y,'stage_m_v1_only',false);
+  INSERT INTO public.observations(id,user_id,date,visibility,is_draft,spore_data_visibility,resolved_sporely_taxon_id)
+  OVERRIDING SYSTEM VALUE VALUES (982000101,y,current_date,'private',false,'private',t),(982000102,y,current_date,'private',false,'private',t);
+  INSERT INTO public.reference_works(user_id,id,type,authors_json,title,year,short_label,revision)
+  VALUES (y,w,'article','[{"family":"Vone"}]','Version one',2025,'Vone 2025',1);
+  INSERT INTO public.reference_taxon_treatments(user_id,id,reference_work_id,taxon_id,name_as_published,revision)
+  VALUES (y,tr,w,'q','Inocybe capabilis',1);
+  INSERT INTO public.reference_measurement_sets(user_id,id,taxon_treatment_id,character,data_kind,raw_text,
+    length_min,length_core_min,length_core_max,length_max,q_min,q_max,q_mean,sample_size,supersedes_id,revision,deleted_at)
+  VALUES
+    (y,'73000000-0000-4000-8000-0000000b3101',tr,'spore_size','range','(7) 8-10 (11) um, Q 1.5-1.9',7,8,10,11,1.5,1.9,1.7,30,NULL,1,NULL),
+    (y,'73000000-0000-4000-8000-0000000b3103',tr,'spore_size','range','gone',NULL,8,9,NULL,NULL,NULL,NULL,NULL,NULL,1,now());
+  INSERT INTO public.reference_measurement_sets(user_id,id,taxon_treatment_id,character,data_kind,raw_text,
+    length_core_min,length_core_max,supersedes_id,revision)
+  VALUES (y,'73000000-0000-4000-8000-0000000b3102',tr,'spore_size','range','8-10.5 um',8,10.5,'73000000-0000-4000-8000-0000000b3101',1);
+  INSERT INTO public.observation_reference_uses(user_id,id,observation_id,reference_measurement_set_id,role,reference_revision,snapshot_json,deleted_at)
+  VALUES
+    (y,'74000000-0000-4000-8000-0000000b3111',982000101,'73000000-0000-4000-8000-0000000b3101','compared',1,
+     private.reference_canonical_snapshot(y,'73000000-0000-4000-8000-0000000b3101'),NULL),
+    (y,'74000000-0000-4000-8000-0000000b3112',982000102,'73000000-0000-4000-8000-0000000b3102','compared',1,
+     private.reference_canonical_snapshot(y,'73000000-0000-4000-8000-0000000b3102'),now());
+  SET LOCAL session_replication_role = replica;
+  INSERT INTO public.reference_curated_forks(id,user_id,curated_measurement_set_id,bundle_revision,sporely_taxon_id,
+    reference_work_id,taxon_treatment_id,reference_measurement_set_id,source_sha256,source_envelope_json)
+  VALUES ('75000000-0000-4000-8000-0000000b3191',y,gen_random_uuid(),1,t,w,tr,'73000000-0000-4000-8000-0000000b3101',repeat('c',64),'{}');
+  SET LOCAL session_replication_role = origin;
+
+  SELECT jsonb_agg(to_jsonb(m) ORDER BY m.updated_at, m.id) INTO raw_s FROM public.reference_measurement_sets m WHERE user_id=y;
+  SELECT jsonb_agg(to_jsonb(u) ORDER BY u.updated_at, u.id) INTO raw_u FROM public.observation_reference_uses u WHERE user_id=y;
+  SELECT jsonb_agg(to_jsonb(f) ORDER BY f.updated_at, f.id) INTO raw_f FROM public.reference_curated_forks f WHERE user_id=y;
+  PERFORM pg_temp.claims(y);
   SET LOCAL ROLE authenticated;
-  SELECT jsonb_agg(to_jsonb(m) ORDER BY id) INTO v_rls FROM public.reference_measurement_sets m;
+  SELECT jsonb_agg(to_jsonb(m) ORDER BY m.updated_at, m.id) INTO rls_s FROM public.reference_measurement_sets m;
+  SELECT jsonb_agg(to_jsonb(u) ORDER BY u.updated_at, u.id) INTO rls_u FROM public.observation_reference_uses u;
+  SELECT jsonb_agg(to_jsonb(f) ORDER BY f.updated_at, f.id) INTO rls_f FROM public.reference_curated_forks f;
+  f_s := public.list_reference_library_feed('measurement_set');
+  f_u := public.list_reference_library_feed('observation_use');
+  f_f := public.list_reference_library_feed('curated_fork');
   RESET ROLE;
-  IF v_raw IS DISTINCT FROM v_rls THEN RAISE EXCEPTION 'C: v1 rows differ under the legacy read'; END IF;
-  SELECT jsonb_agg(to_jsonb(u) ORDER BY id) INTO v_raw FROM public.observation_reference_uses u
-   WHERE user_id='00000000-0000-4000-8000-0000000b3001' AND id IN ('74000000-0000-4000-8000-0000000b3011','74000000-0000-4000-8000-0000000b3015');
-  SET LOCAL ROLE authenticated;
-  SELECT jsonb_agg(to_jsonb(u) ORDER BY id) INTO v_rls FROM public.observation_reference_uses u WHERE snapshot_json->>'schema_version'='1';
-  RESET ROLE;
-  IF v_raw IS DISTINCT FROM v_rls THEN RAISE EXCEPTION 'C: v1 uses differ under the legacy read'; END IF;
-  RAISE EXCEPTION 'C ok (rolled back by savepoint)' USING ERRCODE='P0099';
-EXCEPTION WHEN SQLSTATE 'P0099' THEN NULL;
+  IF jsonb_array_length(raw_s) <> 3 OR jsonb_array_length(raw_u) <> 2 OR jsonb_array_length(raw_f) <> 1 THEN
+    RAISE EXCEPTION 'C: fixture'; END IF;
+  IF rls_s IS DISTINCT FROM raw_s OR rls_u IS DISTINCT FROM raw_u OR rls_f IS DISTINCT FROM raw_f THEN
+    RAISE EXCEPTION 'C: legacy reads differ from the raw v1 rows'; END IF;
+  IF f_s->'rows' IS DISTINCT FROM raw_s OR f_u->'rows' IS DISTINCT FROM raw_u OR f_f->'rows' IS DISTINCT FROM raw_f
+     OR (f_s->>'withheld_count')::int <> 0 OR (f_u->>'withheld_count')::int <> 0 OR (f_f->>'withheld_count')::int <> 0 THEN
+    RAISE EXCEPTION 'C: undeclared feed differs from the raw v1 rows'; END IF;
 END
 $$;
 
@@ -200,9 +279,18 @@ BEGIN
   r := r || public.list_reference_library_feed('measurement_set','{"reference_snapshot_versions":[1,2]}');
   r := r || public.list_reference_library_feed('observation_use');
   r := r || public.list_reference_library_feed('observation_use','{"reference_snapshot_versions":[1,2]}');
-  p1 := public.list_reference_library_feed('measurement_set','{"reference_snapshot_versions":[1,2]}',NULL,NULL,3);
+  r := r || public.list_reference_library_feed('curated_fork');
+  r := r || public.list_reference_library_feed('curated_fork','{"reference_snapshot_versions":[1,2]}');
+  p1 := public.list_reference_library_feed('measurement_set','{"reference_snapshot_versions":[1,2]}',NULL,NULL,5);
   p2 := public.list_reference_library_feed('measurement_set','{"reference_snapshot_versions":[1,2]}',
-          (p1->'next_cursor'->>'updated_at')::timestamptz,(p1->'next_cursor'->>'id')::uuid,3);
+          (p1->'next_cursor'->>'updated_at')::timestamptz,(p1->'next_cursor'->>'id')::uuid,5);
+  -- a v1 caller's later page: no withheld_count
+  r := r || public.list_reference_library_feed('measurement_set',NULL,
+          (p1->'next_cursor'->>'updated_at')::timestamptz,(p1->'next_cursor'->>'id')::uuid,5);
+  BEGIN PERFORM public.list_reference_library_feed('measurement_set','{"reference_snapshot_versions":[1.0,2]}');
+    e := e || 'accepted [1.0,2]'::text; EXCEPTION WHEN invalid_parameter_value THEN NULL; END;
+  BEGIN PERFORM public.record_reference_client_capabilities('{"reference_snapshot_versions":[1,2],"device_id":"00000000-0000-0000-0000-000000000000"}');
+    e := e || 'accepted nil device'::text; EXCEPTION WHEN invalid_parameter_value THEN NULL; END;
   BEGIN PERFORM public.list_reference_library_feed('measurement_set','{"reference_snapshot_versions":[2]}');
     e := e || 'accepted [2]'::text; EXCEPTION WHEN invalid_parameter_value THEN NULL; END;
   BEGIN PERFORM public.list_reference_library_feed('measurement_set','{"reference_snapshot_versions":[1,3]}');
@@ -213,15 +301,19 @@ BEGIN
     e := e || 'accepted entity work'::text; EXCEPTION WHEN invalid_parameter_value THEN NULL; END;
   RESET ROLE;
   IF cardinality(e) > 0 THEN RAISE EXCEPTION 'D: validation %', e; END IF;
-  IF pg_temp.ids(r[1]->'rows') <> '01,04,05' OR (r[1]->>'withheld_count')::int <> 2 OR r[1]->'next_cursor' <> 'null'::jsonb
+  IF pg_temp.ids(r[1]->'rows') <> '01,04,05,07' OR (r[1]->>'withheld_count')::int <> 4 OR r[1]->'next_cursor' <> 'null'::jsonb
      OR r[1]->>'status' <> 'ok' THEN RAISE EXCEPTION 'D: undeclared set feed %', r[1]; END IF;
-  IF pg_temp.ids(r[2]->'rows') <> '01,04,05' OR (r[2]->>'withheld_count')::int <> 2 THEN RAISE EXCEPTION 'D: [1] set feed %', r[2]; END IF;
-  IF pg_temp.ids(r[3]->'rows') <> '01,02,03,04,05' OR (r[3]->>'withheld_count')::int <> 0 THEN RAISE EXCEPTION 'D: [1,2] set feed %', r[3]; END IF;
+  IF pg_temp.ids(r[2]->'rows') <> '01,04,05,07' OR (r[2]->>'withheld_count')::int <> 4 THEN RAISE EXCEPTION 'D: [1] set feed %', r[2]; END IF;
+  IF pg_temp.ids(r[3]->'rows') <> '01,02,03,04,05,06,07,08' OR (r[3]->>'withheld_count')::int <> 0 THEN RAISE EXCEPTION 'D: [1,2] set feed %', r[3]; END IF;
   IF NOT ((r[3]->'rows'->0) ? 'measurement_details_json') THEN RAISE EXCEPTION 'D: rows must be full rows'; END IF;
-  IF pg_temp.ids(r[4]->'rows') <> '11,15' OR (r[4]->>'withheld_count')::int <> 1 THEN RAISE EXCEPTION 'D: undeclared use feed %', r[4]; END IF;
-  IF pg_temp.ids(r[5]->'rows') <> '11,12,15' OR (r[5]->>'withheld_count')::int <> 0 THEN RAISE EXCEPTION 'D: [1,2] use feed %', r[5]; END IF;
-  IF jsonb_array_length(p1->'rows') <> 3 OR jsonb_array_length(p2->'rows') <> 2 OR p2->'next_cursor' <> 'null'::jsonb
-     OR pg_temp.ids((p1->'rows') || (p2->'rows')) <> '01,02,03,04,05' THEN
+  IF pg_temp.ids(r[4]->'rows') <> '11,15' OR (r[4]->>'withheld_count')::int <> 2 THEN RAISE EXCEPTION 'D: undeclared use feed %', r[4]; END IF;
+  IF pg_temp.ids(r[5]->'rows') <> '11,12,15,16' OR (r[5]->>'withheld_count')::int <> 0 THEN RAISE EXCEPTION 'D: [1,2] use feed %', r[5]; END IF;
+  IF pg_temp.ids(r[6]->'rows') <> '92' OR (r[6]->>'withheld_count')::int <> 1 THEN RAISE EXCEPTION 'D: undeclared fork feed %', r[6]; END IF;
+  IF pg_temp.ids(r[7]->'rows') <> '91,92' OR (r[7]->>'withheld_count')::int <> 0 THEN RAISE EXCEPTION 'D: [1,2] fork feed %', r[7]; END IF;
+  IF r[8]->'withheld_count' <> 'null'::jsonb OR (p2->>'withheld_count')::int <> 0 THEN
+    RAISE EXCEPTION 'D: withheld_count must be computed only on a v1 first page: % / %', r[8]->'withheld_count', p2->'withheld_count'; END IF;
+  IF jsonb_array_length(p1->'rows') <> 5 OR jsonb_array_length(p2->'rows') <> 3 OR p2->'next_cursor' <> 'null'::jsonb
+     OR pg_temp.ids((p1->'rows') || (p2->'rows')) <> '01,02,03,04,05,06,07,08' THEN
     RAISE EXCEPTION 'D: pagination % / %', p1, p2; END IF;
   -- another account sees nothing of the owner's rows
   PERFORM pg_temp.claims('00000000-0000-4000-8000-0000000b3002');
@@ -260,7 +352,7 @@ BEGIN
          'taxon_treatment_id',tr,'character','spore_size','data_kind','range','raw_text','x','revision',1,
          'supersedes_id','73000000-0000-4000-8000-0000000b3002'),0);
   IF r->>'status' <> 'requires_newer_client' THEN RAISE EXCEPTION 'E5: successor of enhanced set: %', r; END IF;
-  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3008',
+  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3010',
          'taxon_treatment_id',tr,'character','spore_size','data_kind','range','raw_text','x','revision',1,
          'measurement_details_json','{"schema_version":1,"metrics":{"q":{"mean_interval":{"lower":1.6,"upper":2,"kind":"reported_range"}}}}'::jsonb,
          'q_core_min',NULL,'q_core_max',NULL),0);
@@ -273,6 +365,10 @@ BEGIN
          'observation_id',982000006,'reference_measurement_set_id','73000000-0000-4000-8000-0000000b3002',
          'role','compared','reference_revision',1),0);
   IF r->>'status' <> 'requires_newer_client' THEN RAISE EXCEPTION 'E8: new use of enhanced set: %', r; END IF;
+  r := public.sync_observation_reference_use(jsonb_build_object('id','74000000-0000-4000-8000-0000000b3011',
+         'observation_id',982000001,'reference_measurement_set_id','73000000-0000-4000-8000-0000000b3001',
+         'role','compared','reference_revision',1,'deleted','yes'),1,'current','{"reference_snapshot_versions":[1,2]}');
+  IF r->>'status' <> 'invalid_payload' THEN RESET ROLE; RAISE EXCEPTION 'E11: capable non-boolean deleted: %', r; END IF;
   -- ordinary v1 work still goes through (both payload shapes)
   r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3001',
          'taxon_treatment_id',tr,'raw_text','8-10.5 um','revision',2),1);
@@ -286,7 +382,7 @@ BEGIN
   IF v_after IS DISTINCT FROM (SELECT jsonb_agg(e ORDER BY e->>'id') FROM jsonb_array_elements(v_before) e
                                 WHERE right(e->>'id',2) IN ('02','03','04')) THEN
     RAISE EXCEPTION 'E: a refused write changed rows'; END IF;
-  IF EXISTS (SELECT 1 FROM public.reference_measurement_sets WHERE right(id::text,2) IN ('08','09') AND user_id=o) THEN
+  IF EXISTS (SELECT 1 FROM public.reference_measurement_sets WHERE right(id::text,2) IN ('09','10') AND user_id=o) THEN
     RAISE EXCEPTION 'E: a refused create wrote a row'; END IF;
 END
 $$;
@@ -379,13 +475,19 @@ $$;
 DO $$
 DECLARE v boolean; n integer;
 BEGIN
+  -- without a caller identity the predicates answer for nobody
+  PERFORM pg_temp.claims(NULL);
+  IF reference_rls.set_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002') THEN
+    RAISE EXCEPTION 'G: predicate answers without auth.uid()'; END IF;
   -- another account learns nothing about the owner's rows through the predicates
   PERFORM pg_temp.claims('00000000-0000-4000-8000-0000000b3002');
   SET LOCAL ROLE authenticated;
-  v := public.reference_set_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002');
+  v := reference_rls.set_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002');
   IF v THEN RESET ROLE; RAISE EXCEPTION 'G: predicate answers for another account'; END IF;
-  v := public.reference_use_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002','{"schema_version":2}');
+  v := reference_rls.use_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002','{"schema_version":2}');
   IF v THEN RESET ROLE; RAISE EXCEPTION 'G: use predicate answers for another account'; END IF;
+  v := reference_rls.fork_withheld_from_v1_readers('00000000-0000-4000-8000-0000000b3001','73000000-0000-4000-8000-0000000b3002');
+  IF v THEN RESET ROLE; RAISE EXCEPTION 'G: fork predicate answers for another account'; END IF;
   SELECT count(*) INTO n FROM public.reference_client_devices;
   IF n <> 0 THEN RESET ROLE; RAISE EXCEPTION 'G: device rows of another account visible'; END IF;
   BEGIN
@@ -396,7 +498,8 @@ BEGIN
   RESET ROLE;
   IF has_function_privilege('anon','public.list_reference_library_feed(text,jsonb,timestamptz,uuid,integer)','EXECUTE')
      OR has_function_privilege('anon','public.sync_reference_measurement_set(jsonb,bigint,jsonb)','EXECUTE')
-     OR has_function_privilege('anon','public.reference_set_withheld_from_v1_readers(uuid,uuid)','EXECUTE')
+     OR has_schema_privilege('anon','reference_rls','USAGE')
+     OR EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname LIKE '%withheld_from_v1%')
      OR has_function_privilege('anon','public.record_reference_client_capabilities(jsonb)','EXECUTE')
      OR NOT has_function_privilege('authenticated','public.sync_observation_reference_use(jsonb,bigint,text,jsonb)','EXECUTE') THEN
     RAISE EXCEPTION 'G: grants'; END IF;
@@ -405,8 +508,7 @@ BEGIN
      OR NOT (SELECT bool_and(prosecdef AND proconfig=ARRAY['search_path=""'] AND pg_get_userbyid(proowner)='postgres')
                FROM pg_proc WHERE pronamespace='public'::regnamespace
                 AND proname IN ('sync_reference_measurement_set','sync_observation_reference_use','list_reference_library_feed',
-                                'record_reference_client_capabilities','reference_set_withheld_from_v1_readers',
-                                'reference_use_withheld_from_v1_readers')) THEN
+                                'record_reference_client_capabilities')) THEN
     RAISE EXCEPTION 'G: one function per name, SECURITY DEFINER, search_path, owner'; END IF;
 END
 $$;

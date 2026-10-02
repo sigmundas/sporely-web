@@ -14,7 +14,9 @@
 --      withhold (omit) an enhanced live measurement set, every set whose
 --      supersedes chain reaches one (the old graph validator rejects a
 --      successor with a missing predecessor), every use whose snapshot is not
---      version 1, and every use of a withheld set.
+--      version 1, every use of a withheld set, and every curated fork row
+--      bound to a withheld set (old curated pull errors on such a row and the
+--      whole reference sync then skips its pushes).
 --   2. Capable clients read through public.list_reference_library_feed with
 --      p_client_capabilities; it returns withheld_count for a v1-only caller.
 --   3. sync_reference_measurement_set / sync_observation_reference_use take a
@@ -44,7 +46,7 @@ BEGIN
   IF v IS NULL THEN RETURN ARRAY[1]; END IF;
   IF pg_catalog.jsonb_typeof(v) <> 'array' OR pg_catalog.jsonb_array_length(v) = 0
      OR EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements(v) e
-                 WHERE e NOT IN ('1'::jsonb, '2'::jsonb)) THEN
+                 WHERE pg_catalog.jsonb_typeof(e) <> 'number' OR e::text NOT IN ('1','2')) THEN
     RAISE EXCEPTION 'reference_snapshot_versions must be a subset of [1,2]' USING ERRCODE = '22023';
   END IF;
   SELECT pg_catalog.array_agg(DISTINCT e::text::integer ORDER BY e::text::integer) INTO r
@@ -59,16 +61,22 @@ $$;
 CREATE FUNCTION private.reference_client_device_id(p_capabilities jsonb)
 RETURNS uuid
 LANGUAGE plpgsql IMMUTABLE SET search_path = '' AS $$
+DECLARE v uuid;
 BEGIN
   IF p_capabilities IS NULL OR pg_catalog.jsonb_typeof(p_capabilities) <> 'object'
      OR p_capabilities->'device_id' IS NULL OR p_capabilities->'device_id' = 'null'::jsonb THEN
     RETURN NULL;
   END IF;
   BEGIN
-    RETURN (p_capabilities->>'device_id')::uuid;
+    v := (p_capabilities->>'device_id')::uuid;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION 'device_id must be a uuid' USING ERRCODE = '22023';
   END;
+  -- The nil uuid is reserved for the undeclared-writer pseudo-device.
+  IF v = '00000000-0000-0000-0000-000000000000' THEN
+    RAISE EXCEPTION 'device_id must not be the nil uuid' USING ERRCODE = '22023';
+  END IF;
+  RETURN v;
 END
 $$;
 
@@ -109,7 +117,7 @@ BEGIN
   IF p_owner IS NULL THEN RETURN; END IF;
   IF p_capabilities IS NULL THEN
     v_device := '00000000-0000-0000-0000-000000000000'; v_client := 'undeclared'; v_version := '';
-  ELSIF v_device IS NULL OR v_device = '00000000-0000-0000-0000-000000000000' THEN
+  ELSIF v_device IS NULL THEN
     RETURN;
   ELSE
     v_client := pg_catalog.left(coalesce(p_capabilities->>'client', 'unknown'), 32);
@@ -133,6 +141,10 @@ $$;
 
 -- True while another device of the owner, seen within 30 days (strictly
 -- newer than now - 30 days), last reported a v1-only capability.
+-- The creation guard (both sync wrappers) calls only
+-- private.reference_creation_blocked_by_older_client below; a future
+-- owner-acknowledgement override belongs there (e.g. ignore devices the
+-- owner acknowledged), leaving this predicate and the wrappers unchanged.
 CREATE FUNCTION private.reference_older_client_active(p_owner uuid, p_self uuid)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
@@ -144,14 +156,26 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
        AND d.last_seen_at > pg_catalog.clock_timestamp() - interval '30 days')
 $$;
 
+CREATE FUNCTION private.reference_creation_blocked_by_older_client(p_owner uuid, p_capabilities jsonb)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT private.reference_older_client_active(p_owner, private.reference_client_device_id(p_capabilities))
+$$;
+
 -- Withholding predicates ----------------------------------------------------------
--- In public because the RLS policies run as the invoker (authenticated has no
--- USAGE on private). Both answer only for the caller's own rows.
-CREATE FUNCTION public.reference_set_withheld_from_v1_readers(p_user_id uuid, p_set_id uuid)
+-- The RLS policies run as the invoker and authenticated has no USAGE on
+-- private, so the predicates live in reference_rls: USAGE for authenticated,
+-- not a PostgREST-exposed schema (no RPC surface). Each answers only for the
+-- caller's own rows (auth.uid()); for anyone else it is false.
+CREATE SCHEMA reference_rls;
+REVOKE ALL ON SCHEMA reference_rls FROM PUBLIC;
+GRANT USAGE ON SCHEMA reference_rls TO authenticated;
+
+CREATE FUNCTION reference_rls.set_withheld_from_v1_readers(p_user_id uuid, p_set_id uuid)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
   WITH RECURSIVE chain(id, depth) AS (
-    SELECT p_set_id, 0 WHERE p_user_id = (SELECT auth.uid()) OR (SELECT auth.uid()) IS NULL
+    SELECT p_set_id, 0 WHERE p_user_id = (SELECT auth.uid())
     UNION ALL
     SELECT m.supersedes_id, c.depth + 1
       FROM public.reference_measurement_sets m JOIN chain c ON m.user_id = p_user_id AND m.id = c.id
@@ -163,43 +187,67 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
        AND (m.measurement_details_json IS NOT NULL OR m.q_core_min IS NOT NULL OR m.q_core_max IS NOT NULL))
 $$;
 
-CREATE FUNCTION public.reference_use_withheld_from_v1_readers(p_user_id uuid, p_set_id uuid, p_snapshot jsonb)
+CREATE FUNCTION reference_rls.use_withheld_from_v1_readers(p_user_id uuid, p_set_id uuid, p_snapshot jsonb)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
-  SELECT (p_user_id = (SELECT auth.uid()) OR (SELECT auth.uid()) IS NULL)
+  SELECT p_user_id = (SELECT auth.uid())
      AND ((p_snapshot->>'schema_version') IS DISTINCT FROM '1'
-          OR public.reference_set_withheld_from_v1_readers(p_user_id, p_set_id))
+          OR reference_rls.set_withheld_from_v1_readers(p_user_id, p_set_id))
+$$;
+
+-- A curated fork row is withheld when its set is (sporely-py
+-- utils/curated_reference_sync.py pull: a fork whose private graph is absent
+-- errors on every pull, and the reference sync then skips all pushes).
+CREATE FUNCTION reference_rls.fork_withheld_from_v1_readers(p_user_id uuid, p_set_id uuid)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT reference_rls.set_withheld_from_v1_readers(p_user_id, p_set_id)
 $$;
 
 ALTER FUNCTION private.reference_client_snapshot_versions(jsonb) OWNER TO postgres;
 ALTER FUNCTION private.reference_client_device_id(jsonb) OWNER TO postgres;
 ALTER FUNCTION private.reference_record_client_device(uuid,jsonb) OWNER TO postgres;
 ALTER FUNCTION private.reference_older_client_active(uuid,uuid) OWNER TO postgres;
-ALTER FUNCTION public.reference_set_withheld_from_v1_readers(uuid,uuid) OWNER TO postgres;
-ALTER FUNCTION public.reference_use_withheld_from_v1_readers(uuid,uuid,jsonb) OWNER TO postgres;
+ALTER FUNCTION private.reference_creation_blocked_by_older_client(uuid,jsonb) OWNER TO postgres;
+ALTER FUNCTION reference_rls.fork_withheld_from_v1_readers(uuid,uuid) OWNER TO postgres;
+ALTER FUNCTION reference_rls.set_withheld_from_v1_readers(uuid,uuid) OWNER TO postgres;
+ALTER FUNCTION reference_rls.use_withheld_from_v1_readers(uuid,uuid,jsonb) OWNER TO postgres;
 REVOKE ALL ON FUNCTION private.reference_client_snapshot_versions(jsonb) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.reference_client_device_id(jsonb) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.reference_record_client_device(uuid,jsonb) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.reference_older_client_active(uuid,uuid) FROM PUBLIC, anon, authenticated, service_role;
-REVOKE ALL ON FUNCTION public.reference_set_withheld_from_v1_readers(uuid,uuid) FROM PUBLIC, anon, authenticated, service_role;
-REVOKE ALL ON FUNCTION public.reference_use_withheld_from_v1_readers(uuid,uuid,jsonb) FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.reference_set_withheld_from_v1_readers(uuid,uuid) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.reference_use_withheld_from_v1_readers(uuid,uuid,jsonb) TO authenticated;
+REVOKE ALL ON FUNCTION private.reference_creation_blocked_by_older_client(uuid,jsonb) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION reference_rls.fork_withheld_from_v1_readers(uuid,uuid) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION reference_rls.set_withheld_from_v1_readers(uuid,uuid) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION reference_rls.use_withheld_from_v1_readers(uuid,uuid,jsonb) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION reference_rls.set_withheld_from_v1_readers(uuid,uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION reference_rls.use_withheld_from_v1_readers(uuid,uuid,jsonb) TO authenticated;
+GRANT EXECUTE ON FUNCTION reference_rls.fork_withheld_from_v1_readers(uuid,uuid) TO authenticated;
 
 -- Direct table reads are the legacy (v1-only) feed --------------------------------
 CREATE POLICY reference_measurement_sets_v1_reader_select ON public.reference_measurement_sets
   AS RESTRICTIVE FOR SELECT TO authenticated
-  USING (NOT public.reference_set_withheld_from_v1_readers(user_id, id));
+  USING (NOT reference_rls.set_withheld_from_v1_readers(user_id, id));
 CREATE POLICY observation_reference_uses_v1_reader_select ON public.observation_reference_uses
   AS RESTRICTIVE FOR SELECT TO authenticated
-  USING (NOT public.reference_use_withheld_from_v1_readers(user_id, reference_measurement_set_id, snapshot_json));
+  USING (NOT reference_rls.use_withheld_from_v1_readers(user_id, reference_measurement_set_id, snapshot_json));
+
+CREATE POLICY reference_curated_forks_v1_reader_select ON public.reference_curated_forks
+  AS RESTRICTIVE FOR SELECT TO authenticated
+  USING (NOT reference_rls.fork_withheld_from_v1_readers(user_id, reference_measurement_set_id));
 
 -- Capability-aware owner feed ----------------------------------------------------
--- p_entity: 'measurement_set' | 'observation_use'. Keyset pagination in the
--- table-read order (updated_at, id). Envelope:
---   {status:'ok', entity, rows:[row...], withheld_count:int, next_cursor:{updated_at,id}|null}
--- withheld_count counts the owner's rows of that entity a v1-only reader does
--- not receive (0 for a caller accepting 2). Rows are the full table rows.
+-- p_entity: 'measurement_set' | 'observation_use' | 'curated_fork'. Keyset
+-- pagination in (updated_at, id) order, within ONE full pull (callers must
+-- not persist the cursor across pulls). Envelope:
+--   {status:'ok', entity, rows:[row...], withheld_count:int|null, next_cursor:{updated_at,id}|null}
+-- withheld_count (the owner's rows of that entity a v1-only reader does not
+-- receive) is computed only on the first page (p_after_id IS NULL) of a
+-- v1-only caller; it is 0 for a caller accepting 2 and null on later pages.
+-- Not rate-limited: it replaces the owner table GETs, which are not
+-- rate-limited either; work per call is bounded by p_limit (<=1000) over the
+-- caller's own rows, and the shared bucket (consume_shared_reference_request)
+-- is sized for writes, so a full pull would starve the same sync's pushes.
 CREATE FUNCTION public.list_reference_library_feed(
   p_entity text,
   p_client_capabilities jsonb DEFAULT NULL,
@@ -213,41 +261,61 @@ DECLARE
   v_owner uuid := auth.uid();
   v_v2 boolean := 2 = ANY(private.reference_client_snapshot_versions(p_client_capabilities));
   v_limit integer := coalesce(p_limit, 500);
-  v_rows jsonb; v_withheld integer; v_last record; v_count integer;
+  v_count_withheld boolean;
+  v_rows jsonb; v_withheld integer; v_count integer;
 BEGIN
   IF v_owner IS NULL THEN RAISE EXCEPTION 'authentication required' USING ERRCODE = '42501'; END IF;
   IF v_limit < 1 OR v_limit > 1000 THEN RAISE EXCEPTION 'p_limit must be 1..1000' USING ERRCODE = '22023'; END IF;
   IF (p_after_updated_at IS NULL) <> (p_after_id IS NULL) THEN
     RAISE EXCEPTION 'cursor needs both updated_at and id' USING ERRCODE = '22023';
   END IF;
+  v_count_withheld := p_after_id IS NULL AND NOT v_v2;
   IF p_entity = 'measurement_set' THEN
-    SELECT count(*) FILTER (WHERE public.reference_set_withheld_from_v1_readers(m.user_id, m.id))
-      INTO v_withheld FROM public.reference_measurement_sets m WHERE m.user_id = v_owner;
+    IF v_count_withheld THEN
+      SELECT count(*) INTO v_withheld FROM public.reference_measurement_sets m
+       WHERE m.user_id = v_owner AND reference_rls.set_withheld_from_v1_readers(m.user_id, m.id);
+    END IF;
     WITH page AS (
       SELECT m.* FROM public.reference_measurement_sets m
        WHERE m.user_id = v_owner
          AND (p_after_id IS NULL OR (m.updated_at, m.id) > (p_after_updated_at, p_after_id))
-         AND (v_v2 OR NOT public.reference_set_withheld_from_v1_readers(m.user_id, m.id))
+         AND (v_v2 OR NOT reference_rls.set_withheld_from_v1_readers(m.user_id, m.id))
        ORDER BY m.updated_at, m.id LIMIT v_limit)
     SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(p) ORDER BY p.updated_at, p.id), '[]'::jsonb), count(*)
       INTO v_rows, v_count FROM page p;
   ELSIF p_entity = 'observation_use' THEN
-    SELECT count(*) FILTER (WHERE public.reference_use_withheld_from_v1_readers(u.user_id, u.reference_measurement_set_id, u.snapshot_json))
-      INTO v_withheld FROM public.observation_reference_uses u WHERE u.user_id = v_owner;
+    IF v_count_withheld THEN
+      SELECT count(*) INTO v_withheld FROM public.observation_reference_uses u
+       WHERE u.user_id = v_owner
+         AND reference_rls.use_withheld_from_v1_readers(u.user_id, u.reference_measurement_set_id, u.snapshot_json);
+    END IF;
     WITH page AS (
       SELECT u.* FROM public.observation_reference_uses u
        WHERE u.user_id = v_owner
          AND (p_after_id IS NULL OR (u.updated_at, u.id) > (p_after_updated_at, p_after_id))
-         AND (v_v2 OR NOT public.reference_use_withheld_from_v1_readers(u.user_id, u.reference_measurement_set_id, u.snapshot_json))
+         AND (v_v2 OR NOT reference_rls.use_withheld_from_v1_readers(u.user_id, u.reference_measurement_set_id, u.snapshot_json))
        ORDER BY u.updated_at, u.id LIMIT v_limit)
     SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(p) ORDER BY p.updated_at, p.id), '[]'::jsonb), count(*)
       INTO v_rows, v_count FROM page p;
+  ELSIF p_entity = 'curated_fork' THEN
+    IF v_count_withheld THEN
+      SELECT count(*) INTO v_withheld FROM public.reference_curated_forks f
+       WHERE f.user_id = v_owner AND reference_rls.fork_withheld_from_v1_readers(f.user_id, f.reference_measurement_set_id);
+    END IF;
+    WITH page AS (
+      SELECT f.* FROM public.reference_curated_forks f
+       WHERE f.user_id = v_owner
+         AND (p_after_id IS NULL OR (f.updated_at, f.id) > (p_after_updated_at, p_after_id))
+         AND (v_v2 OR NOT reference_rls.fork_withheld_from_v1_readers(f.user_id, f.reference_measurement_set_id))
+       ORDER BY f.updated_at, f.id LIMIT v_limit)
+    SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(p) ORDER BY p.updated_at, p.id), '[]'::jsonb), count(*)
+      INTO v_rows, v_count FROM page p;
   ELSE
-    RAISE EXCEPTION 'p_entity must be measurement_set or observation_use' USING ERRCODE = '22023';
+    RAISE EXCEPTION 'p_entity must be measurement_set, observation_use or curated_fork' USING ERRCODE = '22023';
   END IF;
   RETURN pg_catalog.jsonb_build_object(
     'status', 'ok', 'entity', p_entity, 'rows', v_rows,
-    'withheld_count', CASE WHEN v_v2 THEN 0 ELSE v_withheld END,
+    'withheld_count', CASE WHEN v_v2 THEN 0 WHEN v_count_withheld THEN v_withheld END,
     'next_cursor', CASE WHEN v_count = v_limit THEN pg_catalog.jsonb_build_object(
         'updated_at', v_rows->(v_count - 1)->'updated_at', 'id', v_rows->(v_count - 1)->'id') END);
 END
@@ -309,12 +377,12 @@ BEGIN
       IF v_enhanced_next
          OR (FOUND AND (v_current.measurement_details_json IS NOT NULL OR v_current.q_core_min IS NOT NULL
                         OR v_current.q_core_max IS NOT NULL
-                        OR public.reference_set_withheld_from_v1_readers(v_owner, v_id)))
-         OR (v_supersedes IS NOT NULL AND public.reference_set_withheld_from_v1_readers(v_owner, v_supersedes))
+                        OR reference_rls.set_withheld_from_v1_readers(v_owner, v_id)))
+         OR (v_supersedes IS NOT NULL AND reference_rls.set_withheld_from_v1_readers(v_owner, v_supersedes))
       THEN RETURN private.reference_result('requires_newer_client'); END IF;
     ELSIF v_enhanced_next
       AND NOT (FOUND AND (v_current.measurement_details_json IS NOT NULL OR v_current.q_core_min IS NOT NULL OR v_current.q_core_max IS NOT NULL))
-      AND private.reference_older_client_active(v_owner, private.reference_client_device_id(p_client_capabilities))
+      AND private.reference_creation_blocked_by_older_client(v_owner, p_client_capabilities)
     THEN
       RETURN private.reference_result('older_client_active', CASE WHEN FOUND THEN pg_catalog.to_jsonb(v_current) END);
     END IF;
@@ -331,7 +399,7 @@ CREATE FUNCTION public.sync_observation_reference_use(
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path='' AS $$
 DECLARE
   v_retry_after integer; v_owner uuid := auth.uid(); v_versions integer[]; v_id uuid; v_set uuid;
-  v_current public.observation_reference_uses%ROWTYPE; v_v2_next boolean;
+  v_current public.observation_reference_uses%ROWTYPE; v_v2_next boolean; v_deleting boolean;
 BEGIN
   IF v_owner IS NULL THEN RAISE EXCEPTION 'authentication required' USING ERRCODE='42501'; END IF;
   v_versions := private.reference_client_snapshot_versions(p_client_capabilities);
@@ -342,20 +410,28 @@ BEGIN
   BEGIN
     v_id := (p_payload->>'id')::uuid; v_set := (p_payload->>'reference_measurement_set_id')::uuid;
   EXCEPTION WHEN OTHERS THEN v_id := NULL; END;
+  -- A capable caller's 'deleted' must be a JSON boolean (or absent/null);
+  -- undeclared callers keep the unchanged validator's handling.
+  IF 2 = ANY(v_versions) AND pg_catalog.jsonb_typeof(p_payload) = 'object'
+     AND pg_catalog.jsonb_typeof(coalesce(p_payload->'deleted','null'::jsonb)) NOT IN ('boolean','null') THEN
+    RETURN private.reference_result('invalid_payload');
+  END IF;
+  v_deleting := CASE WHEN pg_catalog.jsonb_typeof(p_payload->'deleted') = 'boolean'
+                     THEN (p_payload->'deleted')::text::boolean ELSE false END;
   IF v_id IS NOT NULL AND pg_catalog.jsonb_typeof(p_payload) = 'object' THEN
     SELECT * INTO v_current FROM public.observation_reference_uses WHERE user_id=v_owner AND id=v_id;
     -- New version-2 content: a client-supplied v2 snapshot, or a use whose
     -- current snapshot would be built from an enhanced set.
     v_v2_next := ((p_payload->'snapshot_json'->>'schema_version') IS NOT NULL
                   AND (p_payload->'snapshot_json'->>'schema_version') <> '1')
-      OR (v_set IS NOT NULL AND public.reference_set_withheld_from_v1_readers(v_owner, v_set));
+      OR (v_set IS NOT NULL AND reference_rls.set_withheld_from_v1_readers(v_owner, v_set));
     IF NOT (2 = ANY(v_versions)) THEN
       IF v_v2_next
-         OR (FOUND AND public.reference_use_withheld_from_v1_readers(v_owner, v_current.reference_measurement_set_id, v_current.snapshot_json))
+         OR (FOUND AND reference_rls.use_withheld_from_v1_readers(v_owner, v_current.reference_measurement_set_id, v_current.snapshot_json))
       THEN RETURN private.reference_result('requires_newer_client'); END IF;
-    ELSIF v_v2_next AND NOT coalesce((p_payload->>'deleted')::boolean, false)
-      AND NOT (FOUND AND public.reference_use_withheld_from_v1_readers(v_owner, v_current.reference_measurement_set_id, v_current.snapshot_json))
-      AND private.reference_older_client_active(v_owner, private.reference_client_device_id(p_client_capabilities))
+    ELSIF v_v2_next AND NOT v_deleting
+      AND NOT (FOUND AND reference_rls.use_withheld_from_v1_readers(v_owner, v_current.reference_measurement_set_id, v_current.snapshot_json))
+      AND private.reference_creation_blocked_by_older_client(v_owner, p_client_capabilities)
     THEN
       RETURN private.reference_result('older_client_active', CASE WHEN FOUND THEN pg_catalog.to_jsonb(v_current) END);
     END IF;
