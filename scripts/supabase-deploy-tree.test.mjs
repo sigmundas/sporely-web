@@ -15,6 +15,8 @@ import {
   parseMigrationList,
   postVerifyDeployTree,
   prepareDeployTree,
+  defaultTreeParent,
+  isDirectInvocation,
 } from './supabase-deploy-tree.mjs'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
@@ -232,4 +234,53 @@ test('parsers accept the captured CLI shapes', () => {
   const rows = parseMigrationList(LIST_MAIN)
   assert.equal(rows.length, 5)
   assert.deepEqual(rows[1], { local: '20260914090000', remote: null })
+})
+
+// Regression: on macOS os.tmpdir() is under /var -> /private/var. Run through
+// such a path, the helper used to skip main() and exit 0 with no output, so a
+// `check` looked like it passed without running. These run the real script
+// through a symlinked directory and require it to actually execute.
+const SCRIPT = path.join(import.meta.dirname, 'supabase-deploy-tree.mjs')
+
+function symlinkedScript(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-tree-link-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const link = path.join(root, 'scripts-link')
+  fs.symlinkSync(path.dirname(fs.realpathSync(SCRIPT)), link, 'dir')
+  return path.join(link, path.basename(SCRIPT))
+}
+
+test('the helper executes when invoked through a symlinked path', (t) => {
+  const viaLink = symlinkedScript(t)
+  assert.notEqual(viaLink, fs.realpathSync(viaLink))
+  for (const args of [[], ['no-such-command']]) {
+    const result = spawnSync(process.execPath, [viaLink, ...args], { encoding: 'utf8' })
+    assert.equal(result.status, 2, `exit status for ${JSON.stringify(args)}`)
+    assert.match(result.stderr, /usage: node .*supabase-deploy-tree\.mjs prepare/)
+  }
+})
+
+test('check through a symlinked path runs and refuses a tree that is not prepared', (t) => {
+  const viaLink = symlinkedScript(t)
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-tree-empty-'))
+  t.after(() => fs.rmSync(empty, { recursive: true, force: true }))
+  const result = spawnSync(process.execPath, [viaLink, 'check', '--tree', empty], { encoding: 'utf8' })
+  assert.notEqual(result.status, 0)
+  assert.doesNotMatch(result.stdout, /All checks passed/)
+  assert.ok(`${result.stdout}${result.stderr}`.trim().length > 0, 'check produced no output')
+})
+
+test('isDirectInvocation compares real paths', (t) => {
+  const viaLink = symlinkedScript(t)
+  assert.equal(isDirectInvocation(viaLink, SCRIPT), true)
+  assert.equal(isDirectInvocation(SCRIPT, SCRIPT), true)
+  assert.equal(isDirectInvocation(path.join(import.meta.dirname, 'supabase-deploy-tree.test.mjs'), SCRIPT), false)
+  assert.equal(isDirectInvocation(undefined, SCRIPT), false)
+  assert.equal(isDirectInvocation('/no/such/file.mjs', SCRIPT), false)
+})
+
+test('the default tree parent is the canonical temp directory', () => {
+  const parent = defaultTreeParent()
+  assert.equal(parent, fs.realpathSync(parent))
+  assert.equal(parent, fs.realpathSync(os.tmpdir()))
 })

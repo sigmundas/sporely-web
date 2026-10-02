@@ -244,7 +244,7 @@ export function evaluatePostDeploy({ registry, plan, listText }) {
 export function prepareDeployTree({ repoRoot = DEFAULT_REPO_ROOT, ref = 'HEAD', allow, out, linkFrom } = {}) {
   const allowlist = parseAllowlist(allow)
   const sha = git(repoRoot, ['rev-parse', '--verify', `${ref}^{commit}`]).trim()
-  const tree = path.resolve(out || path.join(os.tmpdir(), `sporely-web-deploy-${sha.slice(0, 12)}`))
+  const tree = path.resolve(out || path.join(defaultTreeParent(), `sporely-web-deploy-${sha.slice(0, 12)}`))
   if (fs.existsSync(tree)) fail(`${tree} already exists; remove it or pass --out`)
 
   git(repoRoot, ['worktree', 'add', '--detach', tree, sha])
@@ -397,7 +397,26 @@ function main(argv) {
   process.exitCode = 2
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH) {
+// The default tree lives under the canonical temp directory, so the commands
+// printed by prepare/check name the real path. On macOS os.tmpdir() is under
+// /var, a symlink to /private/var.
+export function defaultTreeParent() {
+  return fs.realpathSync(os.tmpdir())
+}
+
+// Node resolves import.meta.url through symlinks but leaves argv[1] as typed,
+// so a plain path comparison silently skipped main() when the helper was run
+// through a symlinked path (exit 0, no output). Compare real paths instead.
+export function isDirectInvocation(argv1, scriptPath = SCRIPT_PATH) {
+  if (!argv1) return false
+  try {
+    return fs.realpathSync(path.resolve(argv1)) === fs.realpathSync(scriptPath)
+  } catch {
+    return false
+  }
+}
+
+if (isDirectInvocation(process.argv[1])) {
   try {
     main(process.argv.slice(2))
   } catch (error) {
