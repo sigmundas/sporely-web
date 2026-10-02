@@ -575,3 +575,50 @@ supersedes walk per query), plus a partial index of live enhanced sets.
   to the local pre-stage reset; none of the new object names exist in
   production. Production PostgREST exposes only `public` (PGRST106 for
   `Accept-Profile: reference_rls`). All Stage M and regression tests pass.
+- 2026-10-02: Fix (outside the A–E stages), branch
+  `fix/curated-fork-from-shared-contribution`, draft PR, nothing deployed.
+  sporely-py PR #13's two-account harness showed every copy of a shared
+  contribution pushed a curated fork that `sync_reference_curated_fork`
+  rejected (`invalid_source`: it knew only legacy curated publications).
+  `20261002150000_fork_from_shared_reference_contribution.sql` adds
+  `reference_curated_forks.source_kind` (+ two generated per-kind FK
+  columns: publication taxa as before, contribution revisions RESTRICT) and
+  redefines the RPC: legacy path verbatim when a publication exists at the
+  identity, else the contribution revision must be shared and served to the
+  caller at creation and the stored envelope must equal the revision
+  `envelope_json` exactly (marker `measurement_details_omitted` or live
+  `relationship_roles` rejected). Owner decision (a): existing forks are not
+  re-validated, so stop sharing / hide keep them (re-push `no_change`).
+  Self-forks allowed (legacy has no rule). Rollback
+  `supabase/rollbacks/20261002150000_rollback.sql` refuses while
+  contribution forks exist. Test
+  `supabase/tests/reference_curated_fork_from_contribution_test.sql`
+  (10 checks fail on the old definition); legacy fork test passes on both.
+- 2026-10-02: Fork fix follow-up after review of `3b6d210` (security: fork
+  rows kept the contributor's username after account deletion). Owner
+  option (B), same unapplied migration `20261002150000` amended in a new
+  commit: a contribution fork stores the revision `envelope_json` minus
+  `contributor` (and never `relationship_roles`); `source_sha256` =
+  sha256 of the stored text (server computed). The client envelope is
+  validated against the served revision ignoring `contributor` (with or
+  without it; never stored); re-push compares the same way, so no_change
+  survives contributor anonymization. No fork column holds contributor
+  data (other columns: ids, revision, taxon, sha, timestamps; the
+  snapshot's citation is the work's, not the contributor's). Snapshot
+  `schema_version` must be 1 or 2. Desktop must accept the contributor-less
+  frozen envelope (being changed in parallel). Tests added: older revision
+  in period, pre-re-share revision refused, v2 envelope, version 3 refused,
+  feed columns, Stage M withholding, contributor deletion keeps forks valid
+  and label-free; rollback test
+  `supabase/tests/reference_curated_fork_from_contribution_rollback_test.sh`
+  (R1–R3). 23 checks fail on the pre-fix definition, 9 on `3b6d210`.
+- 2026-10-02: Fork fix follow-up 2 (reviews of `a204dc1` approved with
+  pre-merge items): restrictive policy
+  `reference_curated_forks_contribution_reader_select` hides
+  contribution-kind forks from direct table reads (sporely-py v0.9.24 pulls
+  by plain GET and aborts the whole curated pull on an unvalidatable row;
+  omission is harmless there: no delete/push on absence); the capable feed
+  still returns them. Missing snapshot `schema_version` refused. Rollback
+  drops the policy; rollback test R2 now asserts the specific failure.
+  `reference_client_capability_test.sql` cannot run on a local stack
+  without the deferred `20260914090000` (fixture needs v2 snapshots).
