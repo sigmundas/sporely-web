@@ -278,11 +278,44 @@ cannot be detected (table GETs record nothing); they are protected by
 withholding, not by the guard. With no reports at all creation is allowed:
 nothing an old reader can see changes and every old write to the content is
 refused. Editing already-enhanced content is not creation.
-Semantics are provisional (owner decision pending on the post-upgrade
-lockout). Both wrappers call only
-`private.reference_creation_blocked_by_older_client(owner, capabilities)`,
-so an owner-acknowledgement override can be added there without touching
-the wrappers or `private.reference_older_client_active`.
+Owner decision (2026-10-02): keep the guard exactly as implemented; no
+account override feature, no UI, no general mechanism. Both wrappers call
+`private.reference_creation_blocked_by_older_client(owner, capabilities)`.
+
+Operator procedure (post-upgrade lockout): when an owner is blocked
+(`older_client_active`) after upgrading every desktop, an operator — with
+explicit owner approval for that account in production — runs
+`supabase/reference-client-devices-clear-stale.sql`:
+
+    psql "$DB_URL" -v ON_ERROR_STOP=1 -v user_id=<account uuid> \
+      -f supabase/reference-client-devices-clear-stale.sql
+
+It deletes, in one transaction, only that account's
+`reference_client_devices` rows lacking version 2 (the `undeclared`
+pseudo-device and v1-only devices), prints `removed|N` and the remaining
+rows, and refuses an unset/non-uuid/nil/unknown `user_id`. Idempotent. It
+touches no reference data and no guard logic: a desktop that still writes
+undeclared re-registers on its next write and the guard blocks again.
+Tested by `supabase/tests/reference_client_devices_clear_stale_test.sh`.
+
+Performance (2026-10-02): production has 1 owner with reference rows (max
+and p99 per owner: 41 sets, 51 uses, 0 curated forks; supersedes chain max
+depth 0). Locally, one owner seeded at 2x (82 sets) and a 10k stress owner
+(10k sets in 3-chains, 20% enhanced roots so 40% withheld; 12k uses; 1k
+forks), max ms per 1000-row page, before -> after `20261002120000`:
+
+| | 82 sets | 10k sets |
+|---|---|---|
+| legacy sets (offset paging) | 0.6 -> 1.1 | 0.7 -> 5.4 |
+| legacy uses | 0.2 -> 0.4 | 4.6 -> 8.5 |
+| legacy forks | 0.1 -> 0.3 | 0.5 -> 3.8 |
+| feed v1 sets / uses / forks | -> 1.3 / 1.1 / 0.8 | -> 15 / 37 / 9 |
+| feed [1,2] sets / uses / forks | -> 1.1 / 1.1 / 0.1 | -> 10 / 14 / 4 |
+
+The first version (per-row SECURITY DEFINER predicate in the policies) took
+up to ~1 s per page at 10k uses; the policies and feed now filter on a
+hashed `NOT IN (SELECT reference_rls.caller_withheld_set_ids())` (one
+supersedes walk per query), plus a partial index of live enhanced sets.
 
 ### Stage B — landing: v2 display and wording
 
@@ -530,3 +563,15 @@ the wrappers or `private.reference_older_client_active`.
   feed entity, withheld-count, deleted, schema fixes). Rollback test (new
   pre-stage fingerprint incl. fork policies/schema) and all reference SQL
   and `.sh` regression tests pass after local reset.
+- 2026-10-02: owner decision on the post-upgrade lockout: guard unchanged,
+  no override feature; operator script
+  `supabase/reference-client-devices-clear-stale.sql` + shell test added.
+  Perf fix (`caller_withheld_set_ids`, hashed NOT IN, partial index); numbers
+  in Stage M design. Read-only production preflight: remote migrations =
+  origin/main except deferred `20260914090000`, latest remote
+  `20261001213000`, `20261002120000` absent; fingerprint of every object the
+  migration touches (both write RPCs and their `_unthrottled`, policies on
+  the three tables, sets indexes, table ACLs, `reference_rls`) is identical
+  to the local pre-stage reset; none of the new object names exist in
+  production. Production PostgREST exposes only `public` (PGRST106 for
+  `Accept-Profile: reference_rls`). All Stage M and regression tests pass.
