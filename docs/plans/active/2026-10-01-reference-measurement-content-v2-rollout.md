@@ -191,7 +191,19 @@ Old-parser evidence (sporely-py tags; file:line at `v0.9.22` / `v0.9.24`):
 - Write envelope: the adapter requires keys exactly `{status,row}` and a
   known status (`utils/reference_cloud_adapter.py` 154-158 / 158-162); an
   unknown status raises a protocol error that `utils/reference_cloud_sync.py`
-  735 records as a **per-item** terminal error and continues (local row kept).
+  735 records as a per-item error and continues with the next item (local
+  row kept, still pending). Released desktops therefore **retry a refused
+  write on every sync** and show a sync error each time: non-destructive,
+  but noisy until the user upgrades.
+- Curated forks: `list_reference_curated_forks` reads the
+  `reference_curated_forks` table. `utils/curated_reference_sync.py`
+  `pull_curated_reference_forks` (v0.9.22 = v0.9.24) appends
+  "private graph not reconciled" (:177) for a fork whose private set is not
+  reconciled locally, on every pull; `reference_cloud_sync.py` :884 then
+  skips **all** pushes of that sync. Omission is harmless: the pull only
+  iterates remote rows and never deletes local forks; the push
+  (`push_curated_reference_forks`, :74) sends only local pending rows, never
+  absent-remote ones.
 
 Chosen strategy (migration `20261002120000_reference_client_capability_minimum.sql`):
 
@@ -199,7 +211,8 @@ Chosen strategy (migration `20261002120000_reference_client_capability_minimum.s
 |---|---|---|
 | `reference_measurement_sets` table read | v1 only | **omission** via restrictive SELECT policy: hide a live enhanced set (`measurement_details_json`/`q_core_*` non-null) and every set whose supersedes chain reaches one (else the old graph check fails the feed). Tombstones stay visible. |
 | `observation_reference_uses` table read | v1 only | **omission**: hide any use whose snapshot `schema_version` is not 1 (live or deleted) and any use of a withheld set (avoids permanent `blocked`). |
-| works / treatments / curated forks | unchanged | never withheld |
+| `reference_curated_forks` table read | v1 only | **omission**: hide a fork bound to a withheld set |
+| works / treatments | unchanged | never withheld |
 | `sync_reference_measurement_set`, `sync_observation_reference_use` | v1 only | refuse with `requires_newer_client` (`row: null`, envelope unchanged) |
 
 Client contract (desktop Stage M part, web Stage C):
@@ -208,7 +221,8 @@ Client contract (desktop Stage M part, web Stage C):
   `{"reference_snapshot_versions":[1,2],"device_id":"<uuid per install>","client":"desktop_app","app_version":"0.9.x"}`.
   NULL/omitted or no `reference_snapshot_versions` = `[1]`. Versions must be
   a non-empty subset of {1,2} containing 1; non-object, bad versions or a
-  non-uuid `device_id` raise 22023. Unknown keys ignored.
+  non-uuid or nil-uuid `device_id` raise 22023 (versions must be the JSON
+  integers 1/2; `1.0` is 22023). Unknown keys ignored.
 - Sync RPCs: `sync_reference_measurement_set(p_payload, p_expected_row_version, p_client_capabilities)`,
   `sync_observation_reference_use(p_payload, p_expected_row_version, p_snapshot_mode, p_client_capabilities)`.
   New statuses (envelope stays `{status,row}`):
@@ -217,22 +231,41 @@ Client contract (desktop Stage M part, web Stage C):
   a successor/use of a withheld set; never downgraded.
   `older_client_active` (row = current row or null) — creation guard.
   A capable caller otherwise reaches the unchanged validator
-  (`_unthrottled`), so v2 payload validation still applies.
-- Feed: capable clients stop reading the two tables directly and call
-  `list_reference_library_feed(p_entity 'measurement_set'|'observation_use', p_client_capabilities, p_after_updated_at, p_after_id, p_limit 1..1000 default 500)`
+  (`_unthrottled`), so v2 payload validation still applies (a capable use
+  write with a non-boolean `deleted` is `invalid_payload`).
+- Handling both statuses (new clients): keep the local change pending (never
+  drop or downgrade it); do **not** retry on every sync — retry only when
+  the declared capability or device set changes (e.g. after upgrade, or a
+  device report) or on explicit user action; surface a notice
+  (`requires_newer_client`: "needs a newer Sporely"; `older_client_active`:
+  "another of your devices needs updating first").
+- Feed: capable clients stop reading the three tables directly and call
+  `list_reference_library_feed(p_entity 'measurement_set'|'observation_use'|'curated_fork', p_client_capabilities, p_after_updated_at, p_after_id, p_limit 1..1000 default 500)`
   → `{status:'ok', entity, rows:[full table rows], withheld_count, next_cursor:{updated_at,id}|null}`,
-  order `(updated_at,id)`, keyset cursor. `withheld_count` = owner rows of
-  that entity a v1-only reader does not get (0 for `[1,2]`); drives the
-  notice "N references need a newer Sporely to view or edit".
+  order `(updated_at,id)`, keyset cursor. Every pull is a **full pull**
+  (as desktops do today): start with no cursor and page with `next_cursor`
+  only within that pull; never seed `p_after_*` from the local
+  `reference_cloud_pull_cursors` or any persisted cursor.
+  `withheld_count` = owner rows of that entity a v1-only reader does not
+  get; computed only on the first page of a v1-only caller (later pages:
+  null; `[1,2]`: 0); drives the notice "N references need a newer Sporely
+  to view or edit". The feed is read-only: it does not refresh the device
+  record. Not rate-limited, like the table GETs it replaces (bounded by
+  `p_limit` over the caller's own rows; the shared reference bucket is
+  sized for writes and would starve the same sync's pushes).
+- Portable import/export (bundles) of enhanced content is out of scope until
+  the bundle-export gate stage.
 - Device report: `record_reference_client_capabilities(p_client_capabilities)`
   (requires `device_id`; rate-limited like the sync RPCs) → `{status:'recorded'}`;
-  call at sign-in/start. Every sync/feed call with `device_id` also refreshes
-  the record. `public.reference_client_devices` (owner SELECT only; no client
+  call at sign-in/start. Every sync write call with `device_id` also
+  refreshes the record (the feed does not). `public.reference_client_devices` (owner SELECT only; no client
   writes; pruned after 90 days; max 32 per owner) — no other telemetry.
   `record_client_activity` is not changed (it has no device identity).
 - Trust: a declared `[1,2]` only selects how the caller sees its **own**
   rows; it unlocks no other row, and validation is unchanged. A client
-  lying `[1]` restricts itself.
+  lying `[1]` restricts itself. The RLS predicates live in schema
+  `reference_rls` (USAGE for authenticated, not exposed by PostgREST) and
+  answer only for `auth.uid()`'s own rows (false without a caller).
 
 Creation guard (fail-closed but usable): a capable write creating new
 enhanced content (new enhanced set, v1→enhanced, new/re-pointed use of an
@@ -245,6 +278,11 @@ cannot be detected (table GETs record nothing); they are protected by
 withholding, not by the guard. With no reports at all creation is allowed:
 nothing an old reader can see changes and every old write to the content is
 refused. Editing already-enhanced content is not creation.
+Semantics are provisional (owner decision pending on the post-upgrade
+lockout). Both wrappers call only
+`private.reference_creation_blocked_by_older_client(owner, capabilities)`,
+so an owner-acknowledgement override can be added there without touching
+the wrappers or `private.reference_older_client_active`.
 
 ### Stage B — landing: v2 display and wording
 
@@ -339,10 +377,11 @@ refused. Editing already-enhanced content is not creation.
 - ~~Placeholder vs omission~~: omission (Stage M design).
 - Stage M: support override of the 30-day guard; whether pseudo-device
   `undeclared` should expire sooner once all owner devices declare.
-- Stage M: curated forks (`sync_reference_curated_fork`,
-  `reference_curated_forks` table) are not capability-aware; a fork whose
-  set later becomes enhanced is still listed to old desktops (fork rows
-  reference a withheld set id). Check the desktop fork reader before Stage D.
+- Stage M: owner decision on the post-upgrade lockout of the creation guard
+  (acknowledgement override).
+- Stage M: `sync_reference_curated_fork` takes no capability (forks are
+  immutable creates of curated v1 content); revisit if forks can bind an
+  enhanced set.
 - Stage M: public reads by desktop (`search_shared_reference_contributions`
   page failure on a marked envelope) remain a desktop Stage M/E item.
 - Whether any client outside these three repos calls the sync RPCs.
@@ -471,3 +510,23 @@ refused. Editing already-enhanced content is not creation.
     read the two feeds through `list_reference_library_feed` when capable,
     call `record_reference_client_capabilities`, handle the two statuses and
     `withheld_count`. Web: no reference sync call today (Stage C).
+- 2026-10-02: Stage M review fixes (security approve-with-fixes, general
+  needs-changes) as new commits on `feature/reference-v2-stage-m`:
+  curated forks of withheld sets withheld from legacy reads (restrictive
+  policy) and served by `list_reference_library_feed('curated_fork')`;
+  `withheld_count` only on a v1 caller's first page; predicates moved to
+  non-exposed schema `reference_rls` without the `auth.uid() IS NULL`
+  branch; nil device id and `1.0` versions → 22023; capable non-boolean
+  `deleted` → `invalid_payload`; creation guard factored behind
+  `private.reference_creation_blocked_by_older_client` (semantics
+  unchanged); rollback header states it is safe only before any v2 content
+  exists; contract text (full pull, status handling, retry noise of
+  released desktops, export out of scope, feed does not refresh devices).
+  Tests: block C now a v1-only owner (legacy reads and undeclared feed
+  byte-identical to raw rows); new fixtures (deleted successor of a live
+  enhanced set, deleted v1 use on a hidden set, live v1 predecessor of an
+  enhanced successor, forks). All 7 blocks fail on pre-stage definitions;
+  on the previous candidate `2e6f338` blocks A, B, C, D, E, G fail (fork,
+  feed entity, withheld-count, deleted, schema fixes). Rollback test (new
+  pre-stage fingerprint incl. fork policies/schema) and all reference SQL
+  and `.sh` regression tests pass after local reset.
