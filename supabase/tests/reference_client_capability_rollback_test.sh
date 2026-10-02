@@ -34,18 +34,24 @@ fingerprint() {
                            'sync_reference_measurement_set_unthrottled','sync_observation_reference_use_unthrottled',
                            'list_reference_library_feed','record_reference_client_capabilities',
                            'reference_set_withheld_from_v1_readers','reference_use_withheld_from_v1_readers',
+                           'fork_withheld_from_v1_readers','set_withheld_from_v1_readers','use_withheld_from_v1_readers',
+                           'reference_creation_blocked_by_older_client',
                            'reference_older_client_active','reference_record_client_device',
                            'reference_client_device_id','reference_client_snapshot_versions')
       UNION ALL
       SELECT 'policy ' || tablename || ' ' || policyname || ' ' || permissive || ' ' || cmd || ' '
              || md5(coalesce(qual,'') || '|' || coalesce(with_check,''))
         FROM pg_policies WHERE schemaname='public'
-         AND tablename IN ('reference_measurement_sets','observation_reference_uses','reference_client_devices')
+         AND tablename IN ('reference_measurement_sets','observation_reference_uses','reference_client_devices',
+                           'reference_curated_forks')
       UNION ALL
       SELECT 'table ' || c.oid::regclass::text || ' ' || coalesce(c.relacl::text,'-')
         FROM pg_class c WHERE c.oid IN (to_regclass('public.reference_client_devices'),
                                          to_regclass('public.reference_measurement_sets'),
-                                         to_regclass('public.observation_reference_uses'))
+                                         to_regclass('public.observation_reference_uses'),
+                                         to_regclass('public.reference_curated_forks'))
+      UNION ALL
+      SELECT 'schema ' || nspname || ' ' || coalesce(nspacl::text,'-') FROM pg_namespace WHERE nspname = 'reference_rls'
     ) s"
 }
 stage_test_errors() {

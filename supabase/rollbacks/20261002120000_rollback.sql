@@ -3,8 +3,9 @@
 -- NOT a migration: kept outside supabase/migrations so it never runs by
 -- accident. Tested both ways by supabase/tests/reference_client_capability_rollback_test.sh.
 --
--- One transaction. Drops the two restrictive SELECT policies, the feed and
--- device RPCs, the predicates and helpers and public.reference_client_devices
+-- One transaction. Drops the three restrictive SELECT policies (sets, uses,
+-- curated forks), the feed and device RPCs, the predicates (schema
+-- reference_rls) and helpers and public.reference_client_devices
 -- (its rows are disposable capability reports, not user content), and
 -- restores public.sync_reference_measurement_set(jsonb,bigint) and
 -- public.sync_observation_reference_use(jsonb,bigint,text) verbatim from
@@ -14,8 +15,17 @@
 -- list_reference_library_feed fails (undefined function); callers that omit
 -- them are unaffected.
 --
--- Only safe while no enhanced (v2) owner content exists (before Stage D/E):
--- afterwards old desktops would again receive it and reject their feeds.
+-- ONLY SAFE BEFORE ANY V2 CONTENT EXISTS (no enhanced set, no version-2
+-- use snapshot, i.e. before Stage D/E enable writing). Afterwards the
+-- restrictive policies are gone: a v0.9.22 desktop would again receive a
+-- version-2 use and reject its WHOLE use feed, a successor of a withheld set
+-- would fail its whole set feed, a fork of one would make its curated pull
+-- error and skip all pushes, and non-capable writes could downgrade enhanced
+-- sets. Check first (both must be 0):
+--   SELECT count(*) FROM public.reference_measurement_sets
+--    WHERE measurement_details_json IS NOT NULL OR q_core_min IS NOT NULL OR q_core_max IS NOT NULL;
+--   SELECT count(*) FROM public.observation_reference_uses
+--    WHERE snapshot_json->>'schema_version' IS DISTINCT FROM '1';
 --
 -- Promotion to a real migration (only if the forward migration was deployed
 -- and must be undone): copy this file unchanged to
@@ -26,13 +36,17 @@ BEGIN;
 
 DROP POLICY reference_measurement_sets_v1_reader_select ON public.reference_measurement_sets;
 DROP POLICY observation_reference_uses_v1_reader_select ON public.observation_reference_uses;
+DROP POLICY reference_curated_forks_v1_reader_select ON public.reference_curated_forks;
 
 DROP FUNCTION public.list_reference_library_feed(text,jsonb,timestamptz,uuid,integer);
 DROP FUNCTION public.record_reference_client_capabilities(jsonb);
 DROP FUNCTION public.sync_reference_measurement_set(jsonb,bigint,jsonb);
 DROP FUNCTION public.sync_observation_reference_use(jsonb,bigint,text,jsonb);
-DROP FUNCTION public.reference_use_withheld_from_v1_readers(uuid,uuid,jsonb);
-DROP FUNCTION public.reference_set_withheld_from_v1_readers(uuid,uuid);
+DROP FUNCTION reference_rls.fork_withheld_from_v1_readers(uuid,uuid);
+DROP FUNCTION reference_rls.use_withheld_from_v1_readers(uuid,uuid,jsonb);
+DROP FUNCTION reference_rls.set_withheld_from_v1_readers(uuid,uuid);
+DROP SCHEMA reference_rls;
+DROP FUNCTION private.reference_creation_blocked_by_older_client(uuid,jsonb);
 DROP FUNCTION private.reference_older_client_active(uuid,uuid);
 DROP FUNCTION private.reference_record_client_device(uuid,jsonb);
 DROP FUNCTION private.reference_client_device_id(jsonb);
