@@ -171,11 +171,22 @@ CREATE SCHEMA reference_rls;
 REVOKE ALL ON SCHEMA reference_rls FROM PUBLIC;
 GRANT USAGE ON SCHEMA reference_rls TO authenticated;
 
+-- Small: only live enhanced sets (none in production before Stage D/E).
+CREATE INDEX reference_measurement_sets_enhanced_live_idx
+  ON public.reference_measurement_sets (user_id, id)
+  WHERE deleted_at IS NULL
+    AND (measurement_details_json IS NOT NULL OR q_core_min IS NOT NULL OR q_core_max IS NOT NULL);
+
 CREATE FUNCTION reference_rls.set_withheld_from_v1_readers(p_user_id uuid, p_set_id uuid)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
   WITH RECURSIVE chain(id, depth) AS (
+    -- Fast path: an owner without any live enhanced set (every owner before
+    -- Stage D/E) never walks a chain (partial index below).
     SELECT p_set_id, 0 WHERE p_user_id = (SELECT auth.uid())
+      AND EXISTS (SELECT 1 FROM public.reference_measurement_sets e
+                   WHERE e.user_id = p_user_id AND e.deleted_at IS NULL
+                     AND (e.measurement_details_json IS NOT NULL OR e.q_core_min IS NOT NULL OR e.q_core_max IS NOT NULL))
     UNION ALL
     SELECT m.supersedes_id, c.depth + 1
       FROM public.reference_measurement_sets m JOIN chain c ON m.user_id = p_user_id AND m.id = c.id
@@ -204,7 +215,31 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
   SELECT reference_rls.set_withheld_from_v1_readers(p_user_id, p_set_id)
 $$;
 
+-- The caller's withheld set ids, computed once per query: the live enhanced
+-- sets and every set descending from one through supersedes_id (live or
+-- deleted). Same rule as set_withheld_from_v1_readers (which walks one row's
+-- ancestors for the single-row write checks); the table policies and the
+-- feed use this set so the cost is one walk per query plus a hashed lookup
+-- per row, instead of a SECURITY DEFINER call per row. Never returns NULL.
+CREATE FUNCTION reference_rls.caller_withheld_set_ids()
+RETURNS SETOF uuid
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  WITH RECURSIVE w(id, depth) AS (
+    SELECT e.id, 0 FROM public.reference_measurement_sets e
+     WHERE e.user_id = (SELECT auth.uid()) AND e.deleted_at IS NULL
+       AND (e.measurement_details_json IS NOT NULL OR e.q_core_min IS NOT NULL OR e.q_core_max IS NOT NULL)
+    UNION
+    SELECT m.id, w.depth + 1 FROM public.reference_measurement_sets m JOIN w
+        ON m.user_id = (SELECT auth.uid()) AND m.supersedes_id = w.id
+     WHERE w.depth < 1000
+  )
+  SELECT DISTINCT id FROM w
+$$;
+
 ALTER FUNCTION private.reference_client_snapshot_versions(jsonb) OWNER TO postgres;
+ALTER FUNCTION reference_rls.caller_withheld_set_ids() OWNER TO postgres;
+REVOKE ALL ON FUNCTION reference_rls.caller_withheld_set_ids() FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION reference_rls.caller_withheld_set_ids() TO authenticated;
 ALTER FUNCTION private.reference_client_device_id(jsonb) OWNER TO postgres;
 ALTER FUNCTION private.reference_record_client_device(uuid,jsonb) OWNER TO postgres;
 ALTER FUNCTION private.reference_older_client_active(uuid,uuid) OWNER TO postgres;
@@ -227,14 +262,15 @@ GRANT EXECUTE ON FUNCTION reference_rls.fork_withheld_from_v1_readers(uuid,uuid)
 -- Direct table reads are the legacy (v1-only) feed --------------------------------
 CREATE POLICY reference_measurement_sets_v1_reader_select ON public.reference_measurement_sets
   AS RESTRICTIVE FOR SELECT TO authenticated
-  USING (NOT reference_rls.set_withheld_from_v1_readers(user_id, id));
+  USING (id NOT IN (SELECT reference_rls.caller_withheld_set_ids()));
 CREATE POLICY observation_reference_uses_v1_reader_select ON public.observation_reference_uses
   AS RESTRICTIVE FOR SELECT TO authenticated
-  USING (NOT reference_rls.use_withheld_from_v1_readers(user_id, reference_measurement_set_id, snapshot_json));
+  USING ((snapshot_json->>'schema_version') = '1'
+         AND reference_measurement_set_id NOT IN (SELECT reference_rls.caller_withheld_set_ids()));
 
 CREATE POLICY reference_curated_forks_v1_reader_select ON public.reference_curated_forks
   AS RESTRICTIVE FOR SELECT TO authenticated
-  USING (NOT reference_rls.fork_withheld_from_v1_readers(user_id, reference_measurement_set_id));
+  USING (reference_measurement_set_id NOT IN (SELECT reference_rls.caller_withheld_set_ids()));
 
 -- Capability-aware owner feed ----------------------------------------------------
 -- p_entity: 'measurement_set' | 'observation_use' | 'curated_fork'. Keyset
@@ -270,16 +306,19 @@ BEGIN
     RAISE EXCEPTION 'cursor needs both updated_at and id' USING ERRCODE = '22023';
   END IF;
   v_count_withheld := p_after_id IS NULL AND NOT v_v2;
+  -- Filters below use NOT IN over an uncorrelated subquery (hashed once per
+  -- query; empty for a [1,2] caller) rather than an OR with v_v2, which
+  -- would defeat hashing.
   IF p_entity = 'measurement_set' THEN
     IF v_count_withheld THEN
       SELECT count(*) INTO v_withheld FROM public.reference_measurement_sets m
-       WHERE m.user_id = v_owner AND reference_rls.set_withheld_from_v1_readers(m.user_id, m.id);
+       WHERE m.user_id = v_owner AND m.id IN (SELECT reference_rls.caller_withheld_set_ids());
     END IF;
     WITH page AS (
       SELECT m.* FROM public.reference_measurement_sets m
        WHERE m.user_id = v_owner
          AND (p_after_id IS NULL OR (m.updated_at, m.id) > (p_after_updated_at, p_after_id))
-         AND (v_v2 OR NOT reference_rls.set_withheld_from_v1_readers(m.user_id, m.id))
+         AND m.id NOT IN (SELECT w.id FROM reference_rls.caller_withheld_set_ids() AS w(id) WHERE NOT v_v2)
        ORDER BY m.updated_at, m.id LIMIT v_limit)
     SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(p) ORDER BY p.updated_at, p.id), '[]'::jsonb), count(*)
       INTO v_rows, v_count FROM page p;
@@ -287,26 +326,28 @@ BEGIN
     IF v_count_withheld THEN
       SELECT count(*) INTO v_withheld FROM public.observation_reference_uses u
        WHERE u.user_id = v_owner
-         AND reference_rls.use_withheld_from_v1_readers(u.user_id, u.reference_measurement_set_id, u.snapshot_json);
+         AND ((u.snapshot_json->>'schema_version') IS DISTINCT FROM '1'
+              OR u.reference_measurement_set_id IN (SELECT reference_rls.caller_withheld_set_ids()));
     END IF;
     WITH page AS (
       SELECT u.* FROM public.observation_reference_uses u
        WHERE u.user_id = v_owner
          AND (p_after_id IS NULL OR (u.updated_at, u.id) > (p_after_updated_at, p_after_id))
-         AND (v_v2 OR NOT reference_rls.use_withheld_from_v1_readers(u.user_id, u.reference_measurement_set_id, u.snapshot_json))
+         AND (v_v2 OR (u.snapshot_json->>'schema_version') = '1')
+         AND u.reference_measurement_set_id NOT IN (SELECT w.id FROM reference_rls.caller_withheld_set_ids() AS w(id) WHERE NOT v_v2)
        ORDER BY u.updated_at, u.id LIMIT v_limit)
     SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(p) ORDER BY p.updated_at, p.id), '[]'::jsonb), count(*)
       INTO v_rows, v_count FROM page p;
   ELSIF p_entity = 'curated_fork' THEN
     IF v_count_withheld THEN
       SELECT count(*) INTO v_withheld FROM public.reference_curated_forks f
-       WHERE f.user_id = v_owner AND reference_rls.fork_withheld_from_v1_readers(f.user_id, f.reference_measurement_set_id);
+       WHERE f.user_id = v_owner AND f.reference_measurement_set_id IN (SELECT reference_rls.caller_withheld_set_ids());
     END IF;
     WITH page AS (
       SELECT f.* FROM public.reference_curated_forks f
        WHERE f.user_id = v_owner
          AND (p_after_id IS NULL OR (f.updated_at, f.id) > (p_after_updated_at, p_after_id))
-         AND (v_v2 OR NOT reference_rls.fork_withheld_from_v1_readers(f.user_id, f.reference_measurement_set_id))
+         AND f.reference_measurement_set_id NOT IN (SELECT w.id FROM reference_rls.caller_withheld_set_ids() AS w(id) WHERE NOT v_v2)
        ORDER BY f.updated_at, f.id LIMIT v_limit)
     SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(p) ORDER BY p.updated_at, p.id), '[]'::jsonb), count(*)
       INTO v_rows, v_count FROM page p;
