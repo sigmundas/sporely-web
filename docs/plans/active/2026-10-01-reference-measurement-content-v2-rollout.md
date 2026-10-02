@@ -575,3 +575,22 @@ supersedes walk per query), plus a partial index of live enhanced sets.
   to the local pre-stage reset; none of the new object names exist in
   production. Production PostgREST exposes only `public` (PGRST106 for
   `Accept-Profile: reference_rls`). All Stage M and regression tests pass.
+- 2026-10-02: Fix (outside the A–E stages), branch
+  `fix/curated-fork-from-shared-contribution`, draft PR, nothing deployed.
+  sporely-py PR #13's two-account harness showed every copy of a shared
+  contribution pushed a curated fork that `sync_reference_curated_fork`
+  rejected (`invalid_source`: it knew only legacy curated publications).
+  `20261002150000_fork_from_shared_reference_contribution.sql` adds
+  `reference_curated_forks.source_kind` (+ two generated per-kind FK
+  columns: publication taxa as before, contribution revisions RESTRICT) and
+  redefines the RPC: legacy path verbatim when a publication exists at the
+  identity, else the contribution revision must be shared and served to the
+  caller at creation and the stored envelope must equal the revision
+  `envelope_json` exactly (marker `measurement_details_omitted` or live
+  `relationship_roles` rejected). Owner decision (a): existing forks are not
+  re-validated, so stop sharing / hide keep them (re-push `no_change`).
+  Self-forks allowed (legacy has no rule). Rollback
+  `supabase/rollbacks/20261002150000_rollback.sql` refuses while
+  contribution forks exist. Test
+  `supabase/tests/reference_curated_fork_from_contribution_test.sql`
+  (10 checks fail on the old definition); legacy fork test passes on both.
