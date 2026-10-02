@@ -5,6 +5,8 @@
 -- Run after local migrations:
 --   supabase db query --local --file supabase/tests/reference_measurement_content_extension_test.sql
 
+-- Stage M (20261002120000): these calls declare a [1,2] client so the
+-- content validator, not the minimum-client guard, answers.
 BEGIN;
 
 DO $$
@@ -91,7 +93,8 @@ BEGIN
 
   -- 1. An unaware create without a predecessor is still accepted (legacy row),
   --    and the authoritative row acknowledges the contract with all three keys.
-  result := public.sync_reference_measurement_set(base || jsonb_build_object('id', legacy_id), 0);
+  result := public.sync_reference_measurement_set(base || jsonb_build_object('id', legacy_id), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'created' THEN RAISE EXCEPTION 'legacy create failed: %', result; END IF;
   IF NOT (result->'row' ?& extension_keys)
      OR jsonb_typeof(result->'row'->'measurement_details_json') <> 'null'
@@ -102,13 +105,15 @@ BEGIN
   -- 2. Partial acknowledgement is rejected before anything else, with and
   --    without a destination row (section 12 case 17).
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', partial_id, 'q_core_min', 1.36, 'q_core_max', 2.19), 0);
+    base || jsonb_build_object('id', partial_id, 'q_core_min', 1.36, 'q_core_max', 2.19), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'invalid_payload' THEN RAISE EXCEPTION 'partial create accepted: %', result; END IF;
   IF EXISTS (SELECT 1 FROM public.reference_measurement_sets WHERE id = partial_id) THEN
     RAISE EXCEPTION 'partial create wrote a row';
   END IF;
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', legacy_id, 'measurement_details_json', details, 'revision', 2), 1);
+    base || jsonb_build_object('id', legacy_id, 'measurement_details_json', details, 'revision', 2), 1,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'invalid_payload' THEN RAISE EXCEPTION 'partial update accepted: %', result; END IF;
   SELECT to_jsonb(m) INTO stored FROM public.reference_measurement_sets m WHERE m.id = legacy_id;
   IF (stored->>'row_version')::bigint <> 1 OR stored->'measurement_details_json' <> 'null'::jsonb THEN
@@ -116,26 +121,31 @@ BEGIN
   END IF;
 
   -- 3. An aware create stores the extension exactly; the exact retry is a no-op.
-  result := public.sync_reference_measurement_set(enhanced || jsonb_build_object('id', enhanced_id), 0);
+  result := public.sync_reference_measurement_set(enhanced || jsonb_build_object('id', enhanced_id), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'created' THEN RAISE EXCEPTION 'enhanced create failed: %', result; END IF;
   IF result->'row'->'measurement_details_json' <> details
      OR (result->'row'->>'q_core_min')::double precision <> 1.36
      OR (result->'row'->>'q_core_max')::double precision <> 2.19 THEN
     RAISE EXCEPTION 'enhanced row was not stored as sent: %', result->'row';
   END IF;
-  result := public.sync_reference_measurement_set(enhanced || jsonb_build_object('id', enhanced_id), 0);
+  result := public.sync_reference_measurement_set(enhanced || jsonb_build_object('id', enhanced_id), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'no_change' THEN RAISE EXCEPTION 'aware exact retry was not a no-op: %', result; END IF;
 
   -- 4. Unaware requests against the enhanced row (section 9 items 3 and 5).
   --    An exact unaware retry keeps no_change.
-  result := public.sync_reference_measurement_set(base || jsonb_build_object('id', enhanced_id), 1);
+  result := public.sync_reference_measurement_set(base || jsonb_build_object('id', enhanced_id), 1,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'no_change' THEN RAISE EXCEPTION 'unaware exact retry was not a no-op: %', result; END IF;
   --    An unaware content mutation is rejected and nothing is written.
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', enhanced_id, 'length_max', 17.0, 'revision', 2), 1);
+    base || jsonb_build_object('id', enhanced_id, 'length_max', 17.0, 'revision', 2), 1,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'invalid_payload' THEN RAISE EXCEPTION 'unaware content mutation accepted: %', result; END IF;
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', enhanced_id, 'notes', 'private note', 'revision', 2), 1);
+    base || jsonb_build_object('id', enhanced_id, 'notes', 'private note', 'revision', 2), 1,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'invalid_payload' THEN RAISE EXCEPTION 'unaware notes mutation accepted: %', result; END IF;
   SELECT to_jsonb(m) INTO stored FROM public.reference_measurement_sets m WHERE m.id = enhanced_id;
   IF (stored->>'row_version')::bigint <> 1 OR (stored->>'length_max')::double precision <> 16.1
@@ -146,12 +156,14 @@ BEGIN
   --    (The parent id accompanies the tombstone as in reference_library_mutation_test;
   --    the RPC's pre-existing parent check precedes every content rule.)
   result := public.sync_reference_measurement_set(
-    jsonb_build_object('id', enhanced_id, 'taxon_treatment_id', treatment_id, 'deleted', true), 1);
+    jsonb_build_object('id', enhanced_id, 'taxon_treatment_id', treatment_id, 'deleted', true), 1,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'updated' OR result->'row'->>'deleted_at' IS NULL
      OR result->'row'->'measurement_details_json' <> details THEN
     RAISE EXCEPTION 'unaware tombstone of enhanced row failed: %', result;
   END IF;
-  result := public.sync_reference_measurement_set(base || jsonb_build_object('id', enhanced_id, 'deleted', false), 2);
+  result := public.sync_reference_measurement_set(base || jsonb_build_object('id', enhanced_id, 'deleted', false), 2,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'updated' OR result->'row'->>'deleted_at' IS NOT NULL
      OR result->'row'->'measurement_details_json' <> details
      OR (result->'row'->>'q_core_min')::double precision <> 1.36 THEN
@@ -159,31 +171,36 @@ BEGIN
   END IF;
   --    A lifecycle request cannot smuggle content past the guard.
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', enhanced_id, 'length_max', 17.0, 'revision', 2, 'deleted', true), 3);
+    base || jsonb_build_object('id', enhanced_id, 'length_max', 17.0, 'revision', 2, 'deleted', true), 3,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'invalid_payload' THEN RAISE EXCEPTION 'tombstone with content change bypassed the guard: %', result; END IF;
 
   -- 5. Successor creation (section 9 item 4).
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', successor_id, 'supersedes_id', enhanced_id, 'revision', 2), 0);
+    base || jsonb_build_object('id', successor_id, 'supersedes_id', enhanced_id, 'revision', 2), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'invalid_payload' THEN RAISE EXCEPTION 'unaware successor of enhanced predecessor accepted: %', result; END IF;
   IF EXISTS (SELECT 1 FROM public.reference_measurement_sets WHERE id = successor_id) THEN
     RAISE EXCEPTION 'rejected successor wrote a row';
   END IF;
   result := public.sync_reference_measurement_set(
-    enhanced || jsonb_build_object('id', successor_id, 'supersedes_id', enhanced_id, 'revision', 2), 0);
+    enhanced || jsonb_build_object('id', successor_id, 'supersedes_id', enhanced_id, 'revision', 2), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'created' OR result->'row'->'measurement_details_json' <> details THEN
     RAISE EXCEPTION 'aware successor of enhanced predecessor failed: %', result;
   END IF;
   --    An unaware successor of a legacy predecessor is still accepted.
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', successor_2_id, 'supersedes_id', legacy_id, 'revision', 2), 0);
+    base || jsonb_build_object('id', successor_2_id, 'supersedes_id', legacy_id, 'revision', 2), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'created' THEN RAISE EXCEPTION 'unaware successor of legacy predecessor failed: %', result; END IF;
 
   -- 6. Explicit JSON null clears (section 9 item 6); the row is legacy again
   --    and an unaware content mutation is accepted afterwards.
   result := public.sync_reference_measurement_set(
     base || jsonb_build_object('id', enhanced_id, 'revision', 2,
-      'measurement_details_json', null, 'q_core_min', null, 'q_core_max', null), 3);
+      'measurement_details_json', null, 'q_core_min', null, 'q_core_max', null), 3,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'updated' OR jsonb_typeof(result->'row'->'measurement_details_json') <> 'null'
      OR jsonb_typeof(result->'row'->'q_core_min') <> 'null' OR jsonb_typeof(result->'row'->'q_core_max') <> 'null' THEN
     RAISE EXCEPTION 'explicit null did not clear the extension: %', result;
@@ -193,11 +210,13 @@ BEGIN
     RAISE EXCEPTION 'cleared extension is not SQL NULL: %', stored;
   END IF;
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', enhanced_id, 'length_max', 17.0, 'revision', 3), 4);
+    base || jsonb_build_object('id', enhanced_id, 'length_max', 17.0, 'revision', 3), 4,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'updated' THEN RAISE EXCEPTION 'unaware mutation of a cleared row was rejected: %', result; END IF;
   --    Re-enhance through an aware update (all keys, bumped revision).
   result := public.sync_reference_measurement_set(
-    enhanced || jsonb_build_object('id', enhanced_id, 'revision', 4), 5);
+    enhanced || jsonb_build_object('id', enhanced_id, 'revision', 4), 5,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'updated' OR result->'row'->'measurement_details_json' <> details THEN
     RAISE EXCEPTION 'aware re-enhancement failed: %', result;
   END IF;
@@ -211,7 +230,8 @@ BEGIN
   --    to RPCs granted to anon.
   future := '{"schema_version":2,"metrics":{"length":{"core_range":{"kind":"percentile_interval","percentile_bounds":[5,95]},"population":{"kind":"specimen_means","n":12}}},"provenance":{"basis":"verbatim"}}'::jsonb;
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', future_id, 'measurement_details_json', future, 'q_core_min', null, 'q_core_max', null), 0);
+    base || jsonb_build_object('id', future_id, 'measurement_details_json', future, 'q_core_min', null, 'q_core_max', null), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'invalid_payload' THEN
     RAISE EXCEPTION 'future-version details were not refused: %', result;
   END IF;
@@ -270,7 +290,8 @@ BEGIN
   case_index := 0;
   FOREACH candidate IN ARRAY rejections LOOP
     case_index := case_index + 1;
-    result := public.sync_reference_measurement_set(candidate || jsonb_build_object('id', invalid_id), 0);
+    result := public.sync_reference_measurement_set(candidate || jsonb_build_object('id', invalid_id), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
     IF result->>'status' <> 'invalid_payload' THEN
       RAISE EXCEPTION 'validation case % was accepted: % (payload %)', case_index, result, candidate;
     END IF;
@@ -280,7 +301,8 @@ BEGIN
   END LOOP;
   --    The same rules apply to an update of the complete candidate row.
   result := public.sync_reference_measurement_set(
-    enhanced || jsonb_build_object('id', enhanced_id, 'length_mean', 11.0, 'revision', 5), 6);
+    enhanced || jsonb_build_object('id', enhanced_id, 'length_mean', 11.0, 'revision', 5), 6,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'invalid_payload' THEN RAISE EXCEPTION 'invalid aware update accepted: %', result; END IF;
   SELECT to_jsonb(m) INTO stored FROM public.reference_measurement_sets m WHERE m.id = enhanced_id;
   IF (stored->>'row_version')::bigint <> 6 OR stored->'length_mean' <> 'null'::jsonb THEN
@@ -289,16 +311,19 @@ BEGIN
   --    Clearing the interval first, then setting the scalar mean, is valid.
   result := public.sync_reference_measurement_set(
     enhanced || jsonb_build_object('id', enhanced_id, 'length_mean', 11.0, 'revision', 5,
-      'measurement_details_json', details #- '{metrics,length,mean_interval}'), 6);
+      'measurement_details_json', details #- '{metrics,length,mean_interval}'), 6,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'updated' THEN RAISE EXCEPTION 'valid aware update rejected: %', result; END IF;
   result := public.sync_reference_measurement_set(
-    enhanced || jsonb_build_object('id', enhanced_id, 'revision', 6), 7);
+    enhanced || jsonb_build_object('id', enhanced_id, 'revision', 6), 7,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'updated' THEN RAISE EXCEPTION 'restoring the fixture content failed: %', result; END IF;
 
   -- 9. A legacy twin of the enhanced row (same ordinary columns) for the
   --    snapshot comparison below.
   result := public.sync_reference_measurement_set(
-    base || jsonb_build_object('id', twin_id, 'revision', 6), 0);
+    base || jsonb_build_object('id', twin_id, 'revision', 6), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'created' THEN RAISE EXCEPTION 'twin create failed: %', result; END IF;
 END
 $$;

@@ -18,6 +18,8 @@
 --   docker exec -i supabase_db_<ref> psql -v ON_ERROR_STOP=1 -U postgres \
 --     -d postgres < supabase/tests/reference_snapshot_v2_test.sql
 
+-- Stage M (20261002120000): these calls declare a [1,2] client so the
+-- content validator, not the minimum-client guard, answers.
 BEGIN;
 
 DO $$
@@ -83,7 +85,8 @@ BEGIN
     'id', legacy_id, 'taxon_treatment_id', treatment_id, 'character', 'spore_size',
     'data_kind', 'range', 'raw_text', '8.5-12.5 x 4.5-5.5', 'length_min', 8.5,
     'length_max', 12.5, 'width_min', 4.5, 'width_max', 5.5, 'revision', 1,
-    'measurement_details_json', NULL, 'q_core_min', NULL, 'q_core_max', NULL), 0);
+    'measurement_details_json', NULL, 'q_core_min', NULL, 'q_core_max', NULL), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'created' THEN RAISE EXCEPTION 'legacy create failed: %', result; END IF;
 
   result := public.sync_reference_measurement_set(jsonb_build_object(
@@ -91,7 +94,8 @@ BEGIN
     'data_kind', 'range', 'raw_text', '(6.9) 8.0-15.2 (16.1)', 'length_min', 6.9,
     'length_core_min', 8.0, 'length_core_max', 15.2, 'length_max', 16.1,
     'q_min', 1.17, 'q_max', 2.79, 'revision', 1,
-    'measurement_details_json', details, 'q_core_min', 1.36, 'q_core_max', 2.19), 0);
+    'measurement_details_json', details, 'q_core_min', 1.36, 'q_core_max', 2.19), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'created' THEN RAISE EXCEPTION 'enhanced create failed: %', result; END IF;
 
   -- Enhanced by its details alone, with no q_core pair.
@@ -99,7 +103,8 @@ BEGIN
     'id', details_only_id, 'taxon_treatment_id', treatment_id, 'character', 'spore_size',
     'data_kind', 'range', 'raw_text', 'details only', 'length_min', 8.5,
     'length_max', 12.5, 'revision', 1,
-    'measurement_details_json', details_only, 'q_core_min', NULL, 'q_core_max', NULL), 0);
+    'measurement_details_json', details_only, 'q_core_min', NULL, 'q_core_max', NULL), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'created' THEN
     RAISE EXCEPTION 'details-only create failed: %', result;
   END IF;
@@ -304,7 +309,8 @@ BEGIN
     'id', use_id, 'observation_id', observation_id,
     'reference_measurement_set_id', enhanced_id,
     'role', 'compared', 'reference_revision', 1,
-    'snapshot_json', downgraded), 0);
+    'snapshot_json', downgraded), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'invalid_snapshot' THEN
     RAISE EXCEPTION 'a version-1 projection of an enhanced row must not be frozen: %', result;
   END IF;
@@ -313,7 +319,8 @@ BEGIN
     'id', use_id, 'observation_id', observation_id,
     'reference_measurement_set_id', enhanced_id,
     'role', 'compared', 'reference_revision', 1,
-    'snapshot_json', enhanced_snapshot), 0);
+    'snapshot_json', enhanced_snapshot), 0,
+    p_client_capabilities => '{"reference_snapshot_versions":[1,2]}');
   IF result->>'status' <> 'created' THEN
     RAISE EXCEPTION 'the canonical version-2 snapshot must be attachable: %', result;
   END IF;
