@@ -5,6 +5,7 @@ import { getEffectiveCloudUploadPolicy } from './cloud-plan.js'
 import {
   IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
   buildFullImagePreparationPolicy,
+  buildFullImageFitByteCapAttempts,
   buildThumbnailEncodeCandidates,
   getFullImageEncodeRetryJump,
   looksLikeIosWebKitRuntime,
@@ -53,7 +54,7 @@ function getMediaBaseUrl() {
   return _envText('VITE_MEDIA_BASE_URL', DEFAULT_MEDIA_BASE_URL).replace(/\/+$/, '')
 }
 
-function getMediaUploadBaseUrl() {
+export function getMediaUploadBaseUrl() {
   return _envText('VITE_MEDIA_UPLOAD_BASE_URL', '').replace(/\/+$/, '')
 }
 

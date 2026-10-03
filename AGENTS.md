@@ -5,8 +5,7 @@
 For a staged implementation pass, complete only the selected bounded stage and
 update the canonical active plan's current-stage/handoff record before stopping,
 including verification, commit or manual-test status, and deferred work. Final
-review occurs in a fresh top-level sparring session; reports and subagent
-summaries are claims until checked against repository state and evidence.
+review occurs in a fresh top-level sparring session.
 
 ## Supabase migration safety
 

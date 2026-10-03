@@ -18,10 +18,11 @@ import {
   buildDetailLocationPatch,
   detailLocationActionMode,
   detailAiState,
-  formatMicroscopeCapturedAt,
+  deleteDetailImageRecord,
   formatSporeStatsShort,
+  loadObservationSporeMosaic,
   loadObservationSporeSummaries,
-  microscopeCapturePresentation,
+  normalizeSporeMosaicPresentation,
   pickSporeSummaryRow,
   sporeStatsPresentation,
 } from './find_detail.js'
@@ -277,28 +278,171 @@ test('optional spore statistics failure is non-fatal and unavailable', async () 
   }
 })
 
-test('microscope image capture labels never fall back to upload time or leak to viewers', () => {
-  const captured = microscopeCapturePresentation({
-    image_type: 'microscope',
-    captured_at: '2026-08-10T19:42:00Z',
-    created_at: '2030-01-01T00:00:00Z',
-  }, true)
-  assert.match(captured, /2026/)
-  assert.doesNotMatch(captured, /2030/)
+const MOSAIC_URL = 'https://upload.sporely.no/mm/77?v=3'
 
-  assert.equal(microscopeCapturePresentation({
-    image_type: 'microscope',
-    captured_at: null,
-    created_at: '2030-01-01T00:00:00Z',
-  }, true), 'Capture time unknown')
-  assert.equal(microscopeCapturePresentation({
-    image_type: 'microscope',
-    captured_at: '2026-08-10T19:42:00Z',
-  }, false), null)
-  assert.equal(microscopeCapturePresentation({
-    image_type: 'field',
-    captured_at: '2026-08-10T19:42:00Z',
-  }, true), null)
+test('spore mosaic comes from the microscopy presentation contract for owners and viewers alike', async () => {
+  const calls = []
+  const client = {
+    async rpc(name, args) {
+      calls.push({ name, args })
+      return {
+        data: [{
+          observationId: 42,
+          sporeMeasurementCount: 120,
+          sporeSummary: null,
+          sporeMosaic: { mosaicId: 77, mosaicMediaVersion: 3, mosaicMediaUrl: MOSAIC_URL, width: 1200, height: 800 },
+        }],
+        error: null,
+      }
+    },
+  }
+  assert.deepEqual(await loadObservationSporeMosaic({ client, observationId: '42' }), {
+    mosaicId: 77,
+    url: MOSAIC_URL,
+    width: 1200,
+    height: 800,
+    umPerPixel: null,
+  })
+  assert.deepEqual(calls, [{
+    name: 'get_observation_microscopy_presentations',
+    args: { p_observation_ids: [42] },
+  }])
+
+  // Queued/unsynced observations have no cloud row.
+  const localCalls = []
+  assert.equal(await loadObservationSporeMosaic({
+    client: { rpc: async (...args) => { localCalls.push(args); return { data: [], error: null } } },
+    observationId: 'local-draft-1',
+  }), null)
+  assert.equal(localCalls.length, 0)
+})
+
+test('spore mosaic is absent when the contract withholds it or returns no row', async () => {
+  const respond = data => ({ rpc: async () => ({ data, error: null }) })
+  // Spore data denied or no mosaic: the row exists, sporeMosaic is NULL.
+  assert.equal(await loadObservationSporeMosaic({
+    client: respond([{ observationId: 42, sporeMosaic: null }]),
+    observationId: 42,
+  }), null)
+  // Observation not authorized: no row at all.
+  assert.equal(await loadObservationSporeMosaic({ client: respond([]), observationId: 42 }), null)
+  // A row for another observation is never used.
+  assert.equal(await loadObservationSporeMosaic({
+    client: respond([{ observationId: 41, sporeMosaic: { mosaicMediaUrl: MOSAIC_URL } }]),
+    observationId: 42,
+  }), null)
+})
+
+test('optional spore mosaic failure is non-fatal', async () => {
+  const previousWarn = console.warn
+  console.warn = () => {}
+  try {
+    assert.equal(await loadObservationSporeMosaic({
+      client: { rpc: async () => ({ data: null, error: { code: 'PGRST202' } }) },
+      observationId: 43,
+    }), null)
+    assert.equal(await loadObservationSporeMosaic({
+      client: { rpc: async () => { throw new Error('offline') } },
+      observationId: 43,
+    }), null)
+  } finally {
+    console.warn = previousWarn
+  }
+})
+
+test('spore mosaic URLs must be the Worker mosaic delivery route before a token is attached', () => {
+  for (const url of [
+    'https://attacker.example/mm/77?v=3',
+    'https://media.sporely.no/mm/77?v=3',
+    'http://upload.sporely.no/mm/77?v=3',
+    'https://upload.sporely.no.attacker.example/mm/77?v=3',
+    'https://user:password@upload.sporely.no/mm/77?v=3',
+    'https://upload.sporely.no/mm/77?v=garbage',
+    'https://upload.sporely.no/mm/77?v=0',
+  ]) assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: url }), null, url)
+  assert.ok(normalizeSporeMosaicPresentation(
+    { mosaicMediaUrl: 'http://localhost:8787/mm/77?v=3' }, 'http://localhost:8787',
+  ))
+  assert.equal(normalizeSporeMosaicPresentation(null), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: null }), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: 'not a url' }), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: 'javascript:alert(1)' }), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: 'https://media.sporely.no/m/1/full?v=3' }), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: 'https://media.sporely.no/mm/77' }), null)
+  assert.deepEqual(normalizeSporeMosaicPresentation({
+    mosaicId: 77,
+    mosaicMediaUrl: MOSAIC_URL,
+    width: null,
+    height: '0',
+  }), { mosaicId: 77, url: MOSAIC_URL, width: null, height: null, umPerPixel: null })
+})
+
+function deletionClient({ deleteError = null, inventoryError = null, coverError = null, remaining = [] } = {}) {
+  const calls = []
+  let phase = 0
+  return {
+    calls,
+    from(table) {
+      const operation = phase++
+      const call = { table, filters: [] }
+      calls.push(call)
+      const result = operation === 0 ? { error: deleteError }
+        : operation === 1 ? { data: remaining, error: inventoryError } : { error: coverError }
+      return {
+        update(patch) { call.patch = patch; return this },
+        select() { return this },
+        eq(key, value) { call.filters.push([key, value]); return this },
+        is() { return this },
+        order() { return this },
+        limit() { return this },
+        then(resolve, reject) { return Promise.resolve(result).then(resolve, reject) },
+      }
+    },
+  }
+}
+
+test('photo deletion stops on database failures instead of clearing the cover', async () => {
+  for (const [failure, count] of [['deleteError', 1], ['inventoryError', 2], ['coverError', 3]]) {
+    const error = new Error(failure)
+    const client = deletionClient({ [failure]: error })
+    await assert.rejects(deleteDetailImageRecord({ client, observationId: 42, imageId: 7 }), error)
+    assert.equal(client.calls.length, count)
+  }
+})
+
+test('photo deletion keeps every query on its original observation and selects its next cover', async () => {
+  const client = deletionClient({ remaining: [{ storage_path: 'owner/42/next.webp' }] })
+  await deleteDetailImageRecord({ client, observationId: 42, imageId: 7 })
+  assert.deepEqual(client.calls[0].filters, [['id', 7], ['observation_id', 42]])
+  assert.deepEqual(client.calls[1].filters, [['observation_id', 42]])
+  assert.deepEqual(client.calls[2].filters, [['id', 42]])
+  assert.deepEqual(client.calls[2].patch, {
+    image_key: 'owner/42/next.webp', thumb_key: 'owner/42/thumb_next.webp',
+  })
+  const empty = deletionClient()
+  await deleteDetailImageRecord({ client: empty, observationId: 42, imageId: 7 })
+  assert.deepEqual(empty.calls[2].patch, { image_key: null, thumb_key: null })
+})
+
+test('the spore mosaic renders as the last gallery image, not a separate section', () => {
+  const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(html, /detail-spore-mosaic/)
+  assert.match(source, /bindProtectedMedia\(img, mosaic\.url/)
+  assert.match(source, /querySelectorAll\('#detail-gallery img:not\(\.detail-gallery-mosaic-img\)'\)/)
+  assert.doesNotMatch(source, /get_observation_spore_mosaic\b/)
+})
+
+test('spore mosaic calibration is the common crop width over the tile width', () => {
+  const mosaic = normalizeSporeMosaicPresentation({
+    mosaicMediaUrl: MOSAIC_URL, width: 1200, height: 800, commonCropWidthUm: 20, tileWidthPx: 200,
+  })
+  assert.equal(mosaic.umPerPixel, 0.1)
+  for (const bad of [null, 0, -5, 'x']) {
+    assert.equal(normalizeSporeMosaicPresentation({
+      mosaicMediaUrl: MOSAIC_URL, commonCropWidthUm: bad, tileWidthPx: 200,
+    }).umPerPixel, null, String(bad))
+  }
 })
 
 test('the spore tagline shows the 5-95 percentile spread as length x width with Q and n', () => {
@@ -371,29 +515,15 @@ test('the spore tagline never mixes measurement contexts and stays hidden withou
   assert.equal(sporeStatsPresentation(null), null)
 })
 
-test('microscope timestamps format the instant in the browser timezone across UTC midnight', () => {
-  const previousTimezone = process.env.TZ
-  process.env.TZ = 'America/Los_Angeles'
-  try {
-    const formatted = formatMicroscopeCapturedAt('2026-08-10T00:30:00Z')
-    assert.match(formatted, /Aug 9, 2026/)
-    assert.doesNotMatch(formatted, /Aug 10, 2026/)
-  } finally {
-    if (previousTimezone === undefined) delete process.env.TZ
-    else process.env.TZ = previousTimezone
-  }
-})
-
-test('detail markup and load path keep microscopy metadata owner-only and race-safe', () => {
+test('detail load path stays race-safe and never shows microscope capture dates', () => {
   const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
   const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
 
   assert.match(html, /id="detail-spore-stats" style="display:none"/)
-  assert.match(html, /id="photo-viewer-metadata" style="display:none"/)
   assert.match(source, /isOwner: currentObsIsOwner/)
   assert.match(source, /loadGeneration !== detailLoadGeneration/)
-  assert.match(source, /ownerSelectFields: isOwner \? DETAIL_OWNER_IMAGE_SELECT_WITH_CUSTOM : undefined/)
-  assert.doesNotMatch(source, /created_at[^\n]+captureTimeUnknown/)
+  assert.doesNotMatch(source, /captured_at`/)
+  assert.doesNotMatch(source, /microscopyCaption/)
 })
 
 test('non-owner detail tabs stay disabled until there is a stored result to view', () => {
@@ -1162,6 +1292,15 @@ test('no-match and error states still render their stored messages', () => {
     }
     _renderDetailAiResults()
     assert.match(resultsEl.innerHTML, /Boom/)
+    for (const status of ['error', 'unavailable', 'stale']) {
+      detailAiState.resultsByService.artsorakel = {
+        service: 'artsorakel', status, predictions: [],
+        errorMessage: '<img src=x onerror=alert(1)>',
+      }
+      _renderDetailAiResults()
+      assert.doesNotMatch(resultsEl.innerHTML, /<img/)
+      assert.match(resultsEl.innerHTML, /&lt;img/)
+    }
   } finally {
     restore()
   }
@@ -1327,4 +1466,27 @@ test('the not-found state keeps its message and explanation, each once', () => {
   } finally {
     restore()
   }
+})
+
+test('find detail starts id-keyed requests before the observation and reveals the page once', () => {
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+  const css = fs.readFileSync(new URL('../style.css', import.meta.url), 'utf8')
+  const body = source.slice(source.indexOf('async function _loadFindDetail('))
+  const observationAwait = body.indexOf('await loadDetailObservation(')
+  assert.ok(body.indexOf('_loadDetailObservationImages(obsId)') < observationAwait)
+  assert.ok(body.indexOf('loadObservationIdentifications(obsId)') < observationAwait)
+  assert.ok(body.indexOf('const mosaicPromise = loadObservationSporeMosaic(') < observationAwait)
+  assert.ok(body.indexOf('mosaicPromise.then(') > body.indexOf('currentObs = obs'))
+  // An early mosaic is stored, not drawn into the gallery that is about to be
+  // rebuilt, so it is fetched once.
+  assert.match(body, /if \(galleryBuilt\) _renderSporeMosaic\(\)/)
+  assert.ok(body.indexOf('galleryBuilt = true') < body.indexOf('_applyDetailAiCachedRows(aiRows)'))
+  assert.ok(body.indexOf('_setDetailLoading(true)') < observationAwait)
+  // Author, images, spore stats and stored AI rows are awaited together.
+  assert.match(body, /await Promise\.all\(\[\s*imagePromise,\s*sporeSummariesPromise,\s*aiRowsPromise,\s*_loadDetailAuthorAndSocial\(\),/)
+  // The previous find's spore stats and red-list badge are cleared up front.
+  assert.ok(body.indexOf('_renderSporeStats()') < observationAwait)
+  assert.ok(body.indexOf('_syncDetailRedlistSummary()') < observationAwait)
+  assert.match(source, /if \(loadGeneration === detailLoadGeneration\) _setDetailLoading\(false\)/)
+  assert.match(css, /\.review-body\.is-detail-loading > \* \{\s*visibility: hidden;/)
 })

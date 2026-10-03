@@ -25,9 +25,12 @@ import {
 } from '../ai-identification.js'
 import { fetchCommentAuthorMap, getCommentAuthor } from '../comments.js'
 import { deleteObservationMedia, verifyWorkerObjectExists, downloadObservationImageBlob, resolveMediaSources, updateObservationImageCrop, prepareImageVariants, uploadPreparedObservationImageVariants, reserveObservationImage, syncObservationMediaKeys, imageExtensionForBlob, buildObservationImageStoragePath, fetchObservationImageRows, getVariantPath } from '../images.js'
-import { bindProtectedMedia } from '../protected-media.js'
+import { bindProtectedMedia, releaseProtectedMediaWithin } from '../protected-media.js'
+import { getMediaUploadBaseUrl } from '../images.js'
 import { classifyDraftAge, invalidateFindsCardImages, loadFinds, openFinds, restoreFindsAfterDetailReturn } from './finds.js'
 import { openPhotoViewer } from '../photo-viewer.js'
+import { createScaleBarElement, pickScaleBar, renderScaleBar, umPerLoadedPixel } from '../scale-bar.js'
+import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
@@ -78,6 +81,7 @@ let detailFollowState = { user: false, observation: false, taxon: false, genus: 
 let detailPrivacySlotCount = null
 let detailLoadGeneration = 0
 let detailSporeSummaries = { available: false, rows: [] }
+let detailSporeMosaic = null
 const detailAiState = {
   running: false,
   runningByService: {},
@@ -561,11 +565,9 @@ const DETAIL_TAXON_IDENTITY_FIELDS = [
   'selected_sporely_taxon_id',
   ...TAXON_IDENTITY_COLUMNS,
 ]
-const DETAIL_IMAGE_SELECT_WITH_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom'
-const DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h'
+const DETAIL_IMAGE_SELECT_WITH_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom, scale_microns_per_pixel, source_width, source_height'
+const DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM = 'id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, scale_microns_per_pixel, source_width, source_height'
 const DETAIL_IMAGE_SELECT_BASE = 'id, storage_path, sort_order'
-const DETAIL_OWNER_IMAGE_SELECT_WITH_CUSTOM = `${DETAIL_IMAGE_SELECT_WITH_CUSTOM}, captured_at`
-const DETAIL_OWNER_IMAGE_SELECT_WITHOUT_CUSTOM = `${DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM}, captured_at`
 const DETAIL_UNAVAILABLE_SECTION_IDS = [
   'detail-author',
   'detail-social-row',
@@ -923,16 +925,14 @@ export async function loadDetailObservation(obsId, options = {}) {
   }
 }
 
-async function _loadDetailObservationImages(obsId, { isOwner = false } = {}) {
+async function _loadDetailObservationImages(obsId) {
   const rows = await fetchObservationImageRows([obsId], {
     selectFields: DETAIL_IMAGE_SELECT_WITH_CUSTOM,
-    ownerSelectFields: isOwner ? DETAIL_OWNER_IMAGE_SELECT_WITH_CUSTOM : undefined,
   })
   if (rows.length) return _normalizeDetailImageRows(rows)
 
   const withoutCustomRows = await fetchObservationImageRows([obsId], {
     selectFields: DETAIL_IMAGE_SELECT_WITHOUT_CUSTOM,
-    ownerSelectFields: isOwner ? DETAIL_OWNER_IMAGE_SELECT_WITHOUT_CUSTOM : undefined,
   })
   if (withoutCustomRows.length) {
     return _normalizeDetailImageRows(withoutCustomRows).map(row => ({
@@ -1007,20 +1007,71 @@ export async function loadObservationSporeSummaries({ client = supabase, observa
   }
 }
 
-export function formatMicroscopeCapturedAt(value, separator = ', ') {
-  if (!value) return ''
-  const instant = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(instant.getTime())) return ''
-  const date = formatDate(instant, { day: 'numeric', month: 'short', year: 'numeric' })
-  const time = formatTime(instant, { hour: '2-digit', minute: '2-digit' })
-  return `${date}${separator}${time}`
+// The latest authorized spore mosaic, from the mobile microscopy presentation
+// contract. The RPC applies the owner / non-draft / visibility / spore-data
+// visibility gates and returns NULL sporeMosaic when the caller may not see it,
+// so this loader adds no gating of its own. The URL is the Worker's /mm/
+// delivery route, which re-authorizes every fetch.
+const _MOSAIC_URL_PATH_RE = /^\/mm\/[1-9][0-9]*$/
+
+function _positiveInteger(value) {
+  const numeric = _finiteMeasurement(value)
+  return numeric !== null && numeric > 0 ? Math.round(numeric) : null
 }
 
-export function microscopeCapturePresentation(row, isOwner) {
-  if (!isOwner || row?.image_type !== 'microscope') return null
-  if (!Object.prototype.hasOwnProperty.call(row, 'captured_at')) return null
-  const formatted = formatMicroscopeCapturedAt(row.captured_at, ' · ')
-  return formatted || t('detail.captureTimeUnknown')
+export function normalizeSporeMosaicPresentation(mosaic, workerBaseUrl = getMediaUploadBaseUrl() || 'https://upload.sporely.no') {
+  if (!mosaic || typeof mosaic !== 'object') return null
+  const rawUrl = String(mosaic.mosaicMediaUrl || '').trim()
+  if (!rawUrl) return null
+  let parsed
+  try {
+    parsed = new URL(rawUrl)
+    const worker = new URL(workerBaseUrl)
+    if (parsed.origin !== worker.origin || parsed.username || parsed.password) return null
+  } catch {
+    return null
+  }
+  // The URL receives the session bearer token, so only the Worker's mosaic
+  // delivery shape is accepted.
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null
+  if (!_MOSAIC_URL_PATH_RE.test(parsed.pathname) || !/^[1-9][0-9]*$/.test(parsed.searchParams.get('v') || '')) return null
+  // Mosaic tiles share one common crop, so the atlas has a uniform
+  // calibration: commonCropWidthUm across tileWidthPx atlas pixels.
+  const cropWidthUm = _finiteMeasurement(mosaic.commonCropWidthUm)
+  const tileWidthPx = _positiveInteger(mosaic.tileWidthPx)
+  return {
+    mosaicId: _positiveInteger(mosaic.mosaicId),
+    url: parsed.toString(),
+    width: _positiveInteger(mosaic.width),
+    height: _positiveInteger(mosaic.height),
+    umPerPixel: cropWidthUm > 0 && tileWidthPx ? cropWidthUm / tileWidthPx : null,
+  }
+}
+
+export async function loadObservationSporeMosaic({ client = supabase, observationId }) {
+  const numericId = Number(observationId)
+  if (!Number.isFinite(numericId) || numericId <= 0) return null
+  try {
+    const { data, error } = await client.rpc('get_observation_microscopy_presentations', {
+      p_observation_ids: [numericId],
+    })
+    if (error) {
+      console.warn('Optional spore mosaic is unavailable:', {
+        observationId,
+        code: error?.code || null,
+      })
+      return null
+    }
+    const row = (Array.isArray(data) ? data : [])
+      .find(candidate => Number(candidate?.observationId) === numericId)
+    return normalizeSporeMosaicPresentation(row?.sporeMosaic)
+  } catch (error) {
+    console.warn('Optional spore mosaic could not be loaded:', {
+      observationId,
+      message: error?.message || String(error),
+    })
+    return null
+  }
 }
 
 // Absent measurements must stay absent: Number(null) and Number('') are 0, which
@@ -1100,6 +1151,52 @@ function _renderSporeStats() {
   valueEl.textContent = presentation
 }
 
+// The spore mosaic is shown as the last image of the gallery, ahead of the
+// add card, once its protected media has loaded.
+export function _renderSporeMosaic(mosaic = detailSporeMosaic) {
+  const gallery = document.getElementById('detail-gallery')
+  if (!gallery) return
+  const existing = gallery.querySelector('.detail-gallery-mosaic-wrap')
+  const existingImg = existing?.querySelector('img')
+  if (existingImg && mosaic && existingImg.dataset.mosaicUrl === mosaic.url
+      && existingImg.dataset.protectedMediaState !== 'unavailable') return
+  if (existing) {
+    releaseProtectedMediaWithin(existing)
+    existing.remove()
+  }
+  if (!mosaic) return
+
+  const container = document.createElement('div')
+  container.className = 'detail-gallery-item-wrap detail-gallery-mosaic-wrap'
+  container.style.display = 'none'
+  const img = document.createElement('img')
+  img.className = 'detail-gallery-img detail-gallery-mosaic-img'
+  img.alt = t('detail.sporeMosaic')
+  img.decoding = 'async'
+  img.dataset.mosaicUrl = mosaic.url
+  img.dataset.filenameSuffix = 'spore-mosaic'
+  _reserveDetailThumbSize(img, mosaic.width, mosaic.height)
+  img.addEventListener('click', () => {
+    if (img.dataset.fullSrc) _openDetailGalleryViewer(img)
+  })
+  container.appendChild(img)
+  _attachDetailGalleryScaleBar(container, img, {
+    umPerSourcePx: mosaic.umPerPixel,
+    sourceWidthPx: mosaic.width,
+  })
+  const addCard = gallery.querySelector('.gallery-add-placeholder')?.closest('.detail-gallery-item-wrap')
+  if (addCard) gallery.insertBefore(container, addCard)
+  else gallery.appendChild(container)
+  bindProtectedMedia(img, mosaic.url, {
+    onLoad: objectUrl => {
+      if (gallery.querySelector('.detail-gallery-mosaic-img') !== img) return
+      img.dataset.fullSrc = objectUrl
+      img.style.cursor = 'pointer'
+      container.style.display = ''
+    },
+  })
+}
+
 async function _refreshSporeStats(observationId, generation = detailLoadGeneration) {
   const result = await loadObservationSporeSummaries({
     client: supabase,
@@ -1109,6 +1206,13 @@ async function _refreshSporeStats(observationId, generation = detailLoadGenerati
   if (generation !== detailLoadGeneration || String(currentObs?.id) !== String(observationId)) return
   detailSporeSummaries = result
   _renderSporeStats()
+}
+
+async function _refreshSporeMosaic(observationId, generation = detailLoadGeneration) {
+  const mosaic = await loadObservationSporeMosaic({ client: supabase, observationId })
+  if (generation !== detailLoadGeneration || String(currentObs?.id) !== String(observationId)) return
+  detailSporeMosaic = mosaic
+  _renderSporeMosaic()
 }
 
 // A genus: initial capital, then letters or hyphens. Rejects `***`, numeric
@@ -1645,6 +1749,15 @@ export function initFindDetail() {
 
 export async function openFindDetail(obsId, options = {}) {
   const loadGeneration = ++detailLoadGeneration
+  try {
+    await _loadFindDetail(obsId, options, loadGeneration)
+  } finally {
+    // A failed load must never leave the page hidden behind the spinner.
+    if (loadGeneration === detailLoadGeneration) _setDetailLoading(false)
+  }
+}
+
+async function _loadFindDetail(obsId, options, loadGeneration) {
   currentObs    = null
   selectedTaxon = null
   currentObsIsOwner = false
@@ -1668,6 +1781,11 @@ export async function openFindDetail(obsId, options = {}) {
   detailImageCropDirty = false
   detailLocationLookup = null
   detailSporeSummaries = { available: false, rows: [] }
+  detailSporeMosaic = null
+  _renderSporeMosaic()
+  _renderSporeStats()
+  _syncDetailRedlistSummary()
+  _clearDetailFullImages()
 
   // Update back button label — state.currentScreen is still the previous screen at this point
   const prevLabel = {
@@ -1682,12 +1800,28 @@ export async function openFindDetail(obsId, options = {}) {
   _clearDetailUnavailableState()
   const cancelBtn = document.getElementById('detail-cancel-btn')
   if (cancelBtn) cancelBtn.style.display = hideCancelOverride ? 'none' : ''
+  // Nothing from the previous find may show while this one loads, and the
+  // page is revealed in one pass so sections do not shift as data arrives.
+  _setDetailLoading(true)
   navigate('find-detail')
+
+  // Requests keyed only by the observation id start together; RLS and the
+  // views still decide what the caller may see.
+  const imagePromise = _loadDetailObservationImages(obsId).catch(error => {
+    console.warn('Failed to load detail images:', error)
+    return []
+  })
+  const aiRowsPromise = loadObservationIdentifications(obsId).catch(error => {
+    console.warn('Failed to load cached AI rows:', error)
+    return []
+  })
+  const mosaicPromise = loadObservationSporeMosaic({ client: supabase, observationId: obsId })
 
   const { observation: obs, error, outcome } = await loadDetailObservation(obsId, {
     client: supabase,
   })
   if (loadGeneration !== detailLoadGeneration) return
+  if (outcome === 'error' || !obs) _setDetailLoading(false)
 
   if (outcome === 'error') {
     // Log full PostgREST diagnostics for triage but never surface DB
@@ -1717,7 +1851,30 @@ export async function openFindDetail(obsId, options = {}) {
 
   currentObs = obs
   currentObsIsOwner = obs.user_id === state.user?.id
-  await _loadDetailAuthorAndSocial()
+  // The RPC can finish before the observation. Keep its result until the
+  // observation has been accepted, then apply the usual stale-load guard.
+  // Before the gallery is built the result is only stored; the build renders
+  // it once, so the protected mosaic is fetched a single time.
+  let galleryBuilt = false
+  void mosaicPromise.then(mosaic => {
+    if (loadGeneration !== detailLoadGeneration || String(currentObs?.id) !== String(obsId)) return
+    detailSporeMosaic = mosaic
+    if (galleryBuilt) _renderSporeMosaic()
+  })
+  const sporeSummariesPromise = loadObservationSporeSummaries({
+    client: supabase,
+    observationId: obsId,
+    isOwner: currentObsIsOwner,
+  })
+  const [imgData, sporeSummaries, aiRows] = await Promise.all([
+    imagePromise,
+    sporeSummariesPromise,
+    aiRowsPromise,
+    _loadDetailAuthorAndSocial(),
+  ])
+  if (loadGeneration !== detailLoadGeneration || String(currentObs?.id) !== String(obsId)) return
+  detailSporeSummaries = sporeSummaries
+
   _applyOwnershipMode(currentObsIsOwner)
   _renderDetailAuthorAndSocial()
 
@@ -1782,25 +1939,12 @@ export async function openFindDetail(obsId, options = {}) {
   _renderPrivacySlotNote()
   _loadPrivacySlotCount()
 
-  const imagePromise = _loadDetailObservationImages(obsId, { isOwner: currentObsIsOwner })
-  const sporeSummariesPromise = loadObservationSporeSummaries({
-    client: supabase,
-    observationId: obsId,
-    isOwner: currentObsIsOwner,
-  })
-  const [imgData, sporeSummaries] = await Promise.all([imagePromise, sporeSummariesPromise])
-  if (loadGeneration !== detailLoadGeneration || String(currentObs?.id) !== String(obsId)) return
-  detailSporeSummaries = sporeSummaries
-
   const gallery = document.getElementById('detail-gallery')
   _clearDetailThumbCropObserver()
   gallery.innerHTML = ''
   detailImageRows = []
   detailImageSources = []
   detailAiSources = []
-  detailAuthorProfile = null
-  detailFriendship = null
-  detailFollowState = { user: false, observation: false, taxon: false, genus: false }
 
   let topRow = document.getElementById('detail-top-row');
   let introEl = document.querySelector('.detail-intro');
@@ -1906,6 +2050,8 @@ export async function openFindDetail(obsId, options = {}) {
   }
 
   _renderSporeStats()
+  galleryBuilt = true
+  _renderSporeMosaic()
 
   if (currentObsIsOwner) {
     const addCardContainer = document.createElement('div')
@@ -1930,14 +2076,149 @@ export async function openFindDetail(obsId, options = {}) {
     addCardContainer.querySelector('.gallery-add-btn-file').addEventListener('click', () => _openPickerForDetail())
   }
 
-  await _loadDetailAiCache()
+  _applyDetailAiCachedRows(aiRows)
+  _setDetailLoading(false)
+  gallery.scrollLeft = 0
 
+  void _refreshDetailAiAvailability(loadGeneration)
   // Load comments async (don't await)
   _loadComments(obsId)
 }
 
+function _setDetailLoading(loading) {
+  const body = document.querySelector('#screen-find-detail .review-body')
+  if (!body) return
+  body.classList.toggle('is-detail-loading', !!loading)
+  body.setAttribute('aria-busy', loading ? 'true' : 'false')
+}
+
 function _mediaSourceUrl(source) {
   return source?.primaryUrl || source?.fallbackUrl || ''
+}
+
+// The thumbnail's width is fixed before it loads, so neighbours never shift
+// as images arrive. Unknown dimensions take a 4:3 frame; object-fit: cover
+// fills it.
+function _reserveDetailThumbSize(img, width, height) {
+  const w = Number(width)
+  const h = Number(height)
+  img.style.aspectRatio = w > 0 && h > 0 ? `${w} / ${h}` : '4 / 3'
+}
+
+function _createCacheableDetailThumb(source) {
+  if (!source?.key || typeof document === 'undefined') return null
+  const template = document.createElement('template')
+  template.innerHTML = imageHtml(source, 'detail-gallery-img', '')
+  const img = template.content.firstElementChild
+  return img?.tagName === 'IMG' && img.dataset.mediaCache === '1' ? img : null
+}
+
+// Worker media is served no-store, so without a cache every viewer visit
+// re-downloads the original. Full images are kept for the session as object
+// URLs owned by the protected-media loader, which revokes them on sign-out.
+const DETAIL_FULL_IMAGE_CACHE_LIMIT = 12
+const detailFullImages = new Map()
+
+function _detailFullLoaderUrl(source) {
+  const url = source?.protectedUrl || _mediaSourceUrl(source)
+  const workerBase = getMediaUploadBaseUrl() || 'https://upload.sporely.no'
+  try {
+    return url && new URL(url).origin === new URL(workerBase).origin ? url : ''
+  } catch {
+    return ''
+  }
+}
+
+function _loadDetailFullImage(url) {
+  if (!url || typeof document === 'undefined') return Promise.resolve(null)
+  const hit = detailFullImages.get(url)
+  if (hit && (!hit.objectUrl || hit.holder.getAttribute('src') === hit.objectUrl)) {
+    detailFullImages.delete(url)
+    detailFullImages.set(url, hit)
+    return hit.promise
+  }
+  if (hit) _releaseDetailFullImage(url)
+  const holder = document.createElement('img')
+  const entry = { holder, objectUrl: null, promise: null }
+  entry.promise = bindProtectedMedia(holder, url).then(objectUrl => {
+    if (!objectUrl) {
+      if (detailFullImages.get(url) === entry) _releaseDetailFullImage(url)
+      return null
+    }
+    entry.objectUrl = objectUrl
+    return objectUrl
+  }, () => {
+    if (detailFullImages.get(url) === entry) _releaseDetailFullImage(url)
+    return null
+  })
+  detailFullImages.set(url, entry)
+  while (detailFullImages.size > DETAIL_FULL_IMAGE_CACHE_LIMIT) {
+    _releaseDetailFullImage(detailFullImages.keys().next().value)
+  }
+  return entry.promise
+}
+
+function _releaseDetailFullImage(url) {
+  const entry = detailFullImages.get(url)
+  if (!entry) return
+  detailFullImages.delete(url)
+  releaseProtectedMediaWithin(entry.holder)
+}
+
+function _clearDetailFullImages() {
+  for (const url of [...detailFullImages.keys()]) _releaseDetailFullImage(url)
+}
+
+function _openDetailGalleryViewer(img) {
+  const gallery = document.getElementById('detail-gallery')
+  if (!gallery) return
+  const galleryImgs = Array.from(gallery.querySelectorAll('.detail-gallery-img'))
+    .filter(i => i.dataset.fullLoaderUrl || i.dataset.fullSrc || i.src)
+  const currentIndex = galleryImgs.indexOf(img)
+  const stem = _buildShareFilenameStem(currentObs)
+  openPhotoViewer(galleryImgs.map((i, idx) => ({
+    src: i.dataset.fullSrc || i.src,
+    previewSrc: i.currentSrc || i.src,
+    resolveSrc: i.dataset.fullLoaderUrl ? () => _loadDetailFullImage(i.dataset.fullLoaderUrl) : null,
+    fallbackSrc: i.src,
+    storagePath: i.dataset.storagePath || '',
+    filenameStem: i.dataset.filenameSuffix
+      ? `${stem}-${i.dataset.filenameSuffix}`
+      : (galleryImgs.length > 1 ? `${stem}-${idx + 1}` : stem),
+    scale: i.dataset.scaleUmPerPx
+      ? { umPerSourcePx: Number(i.dataset.scaleUmPerPx), sourceWidthPx: Number(i.dataset.scaleSourceWidth) || null }
+      : null,
+  })), Math.max(0, currentIndex))
+}
+
+// Calibrated images get a scale bar in the bottom-right corner. The
+// thumbnail is object-fit: cover, so its on-screen µm/px follows the cover
+// factor of whichever variant has loaded.
+function _attachDetailGalleryScaleBar(container, img, { umPerSourcePx, sourceWidthPx }) {
+  const umPerPx = Number(umPerSourcePx)
+  if (!(umPerPx > 0) || !Number.isFinite(umPerPx)) return
+  img.dataset.scaleUmPerPx = String(umPerPx)
+  const sourceWidth = Number(sourceWidthPx)
+  if (sourceWidth > 0) img.dataset.scaleSourceWidth = String(sourceWidth)
+  const bar = createScaleBarElement('detail-gallery-scale-bar')
+  container.appendChild(bar)
+  const update = () => {
+    const umPerImagePx = umPerLoadedPixel({
+      umPerSourcePx: umPerPx,
+      sourceWidthPx: sourceWidth,
+      loadedWidthPx: img.naturalWidth,
+    })
+    const boxW = img.clientWidth
+    const boxH = img.clientHeight
+    if (!umPerImagePx || !boxW || !boxH || !img.naturalHeight) {
+      renderScaleBar(bar, null)
+      return
+    }
+    const cover = Math.max(boxW / img.naturalWidth, boxH / img.naturalHeight)
+    renderScaleBar(bar, pickScaleBar(umPerImagePx / cover, boxW))
+  }
+  img.addEventListener('load', update)
+  if (img.complete) requestAnimationFrame(update)
 }
 
 function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
@@ -1954,13 +2235,21 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   container.className = 'detail-gallery-item-wrap'
   container.dataset.imageId = row.id || ''
 
-  const img = document.createElement('img')
-  img.className = 'detail-gallery-img'
-  if (displayUrl) img.src = displayUrl
-  img.loading = 'lazy'
-  img.alt = ''
+  // Thumbnails go through the same cache-first loader as the finds list, so
+  // they come from the persisted thumb cache on revisits. The full image is
+  // only fetched when the viewer opens.
+  const cacheable = _createCacheableDetailThumb(source)
+  const img = cacheable || document.createElement('img')
+  if (!cacheable) {
+    img.className = 'detail-gallery-img'
+    if (displayUrl) img.src = displayUrl
+    img.loading = 'lazy'
+    img.alt = ''
+  }
+  _reserveDetailThumbSize(img, row.source_width, row.source_height)
   img.dataset.storagePath = row.storage_path || ''
   img.dataset.fullSrc = _mediaSourceUrl(originalSource) || displayUrl || ''
+  img.dataset.fullLoaderUrl = _detailFullLoaderUrl(originalSource)
   img.dataset.aiSrc = _mediaSourceUrl(aiSource) || displayUrl || ''
   img.dataset.aiFallback = _mediaSourceUrl(originalSource) || _mediaSourceUrl(source) || displayUrl || ''
   img.dataset.aiCropX1 = row.ai_crop_x1 ?? ''
@@ -1970,12 +2259,10 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   img.dataset.aiCropSourceW = row.ai_crop_source_w ?? ''
   img.dataset.aiCropSourceH = row.ai_crop_source_h ?? ''
   img.dataset.aiCropIsCustom = row.ai_crop_is_custom === true ? 'true' : ''
-  const microscopyCaption = microscopeCapturePresentation(row, currentObsIsOwner)
-  if (microscopyCaption) img.dataset.microscopyCaption = microscopyCaption
   const fallbackSources = [...new Set([
     source.fallbackUrl,
   ].filter(url => url && url !== source.primaryUrl))]
-  if (fallbackSources.length) {
+  if (!cacheable && fallbackSources.length) {
     const onError = () => {
       const nextUrl = fallbackSources.shift()
       if (!nextUrl) return
@@ -1989,34 +2276,16 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
   }
 
   img.style.cursor = 'pointer'
-  img.addEventListener('click', () => {
-    const galleryImgs = Array.from(gallery.querySelectorAll('.detail-gallery-img'))
-    const currentIndex = galleryImgs.indexOf(img)
-    const stem = _buildShareFilenameStem(currentObs)
-    openPhotoViewer(galleryImgs.map((i, idx) => ({
-      src: i.dataset.fullSrc || i.src,
-      fallbackSrc: i.src,
-      storagePath: i.dataset.storagePath || '',
-      filenameStem: galleryImgs.length > 1 ? `${stem}-${idx + 1}` : stem,
-      metadata: i.dataset.microscopyCaption || '',
-    })), Math.max(0, currentIndex))
-  })
+  img.addEventListener('click', () => _openDetailGalleryViewer(img))
   container.appendChild(img)
-  if (microscopyCaption) {
-    const caption = document.createElement('div')
-    caption.className = 'detail-microscope-capture'
-    caption.textContent = microscopyCaption
-    container.appendChild(caption)
-  }
-  if (protectedUrl) {
-    bindProtectedMedia(img, protectedUrl, {
-      onLoad: objectUrl => {
-        img.dataset.fullSrc = objectUrl
-        img.dataset.aiSrc = objectUrl
-        img.dataset.aiFallback = objectUrl
-      },
+  if (isMicroscope) {
+    _attachDetailGalleryScaleBar(container, img, {
+      umPerSourcePx: row.scale_microns_per_pixel,
+      sourceWidthPx: row.source_width,
     })
   }
+  if (cacheable) wireImageFallback(container)
+  else if (source?.protectedUrl) bindProtectedMedia(img, source.protectedUrl)
   _syncDetailThumbCropOverlay(container, row)
 
   if (currentObsIsOwner) {
@@ -2099,12 +2368,13 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
       e.stopPropagation()
       if (!confirm(t('detail.confirmDeleteImage') || 'Delete this image?')) return
 
+      const observationId = currentObs.id
+      const generation = detailLoadGeneration
       delBtn.disabled = true
       try {
-        await supabase
-          .from('observation_images')
-          .update({ deleted_at: new Date().toISOString() })
-          .eq('id', row.id)
+        await deleteDetailImageRecord({ client: supabase, observationId, imageId: row.id })
+        invalidateFindsCardImages(observationId)
+        if (generation !== detailLoadGeneration || String(currentObs?.id) !== String(observationId)) return
         const rowIndex = detailImageRows.findIndex(r => String(r.id) === String(row.id))
         if (rowIndex >= 0) {
           detailImageRows.splice(rowIndex, 1)
@@ -2112,21 +2382,9 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
           detailAiSources.splice(rowIndex, 1)
         }
 
-        const { data: remaining } = await supabase
-          .from('observation_images')
-          .select('storage_path')
-          .eq('observation_id', currentObs.id)
-          .is('deleted_at', null)
-          .order('sort_order', { ascending: true })
-          .limit(1)
-        if (remaining && remaining.length > 0) {
-          await syncObservationMediaKeys(currentObs.id, remaining[0].storage_path, { sortOrder: 0 })
-        } else {
-          await supabase.from('observations').update({ image_key: null, thumb_key: null }).eq('id', currentObs.id)
-        }
         container.remove()
-        invalidateFindsCardImages(currentObs.id)
-        _refreshSporeStats(currentObs.id)
+        _refreshSporeStats(observationId, generation)
+        _refreshSporeMosaic(observationId, generation)
         _markDetailAiStale()
       } catch (err) {
         console.error('Failed to delete image:', err)
@@ -2137,8 +2395,10 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
     container.appendChild(delBtn)
   }
 
-  const addCard = gallery.querySelector('.gallery-add-placeholder')?.closest('.detail-gallery-item-wrap')
-  if (addCard && !options.appendAfterAddCard) gallery.insertBefore(container, addCard)
+  // The spore mosaic and the add card stay after the observation's images.
+  const trailing = gallery.querySelector('.detail-gallery-mosaic-wrap')
+    || gallery.querySelector('.gallery-add-placeholder')?.closest('.detail-gallery-item-wrap')
+  if (trailing && !options.appendAfterAddCard) gallery.insertBefore(container, trailing)
   else gallery.appendChild(container)
 
   if (!options.skipStateInsert && !detailImageRows.some(r => String(r.id) === String(row.id))) {
@@ -2147,6 +2407,30 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
     detailAiSources.splice(index, 0, aiSource)
   }
   return container
+}
+
+export async function deleteDetailImageRecord({ client = supabase, observationId, imageId }) {
+  const { error: deleteError } = await client
+    .from('observation_images')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', imageId)
+    .eq('observation_id', observationId)
+  if (deleteError) throw deleteError
+
+  const { data: remaining, error: inventoryError } = await client
+    .from('observation_images')
+    .select('storage_path')
+    .eq('observation_id', observationId)
+    .is('deleted_at', null)
+    .order('sort_order', { ascending: true })
+    .limit(1)
+  if (inventoryError) throw inventoryError
+
+  const imageKey = remaining?.[0]?.storage_path || null
+  const { error: coverError } = await client.from('observations')
+    .update({ image_key: imageKey, thumb_key: imageKey ? getVariantPath(imageKey, 'thumb') : null })
+    .eq('id', observationId)
+  if (coverError) throw coverError
 }
 
 function _storagePathExtension(storagePath) {
@@ -2255,6 +2539,10 @@ function _readDetailAiCropMeta(source = {}, index = null) {
 async function _loadDetailIdentifyBlob(img, variant = 'medium') {
   const storagePath = img?.dataset?.storagePath || ''
   const fallbackUrls = _detailIdentifyFallbackUrls(img)
+  if (!storagePath && img?.dataset?.fullLoaderUrl) {
+    const fullImage = await _loadDetailFullImage(img.dataset.fullLoaderUrl)
+    if (fullImage) fallbackUrls.unshift(fullImage)
+  }
   const viewerMode = currentObs?.user_id === state.user?.id ? 'owner' : 'viewer'
 
   let lastError = null
@@ -2327,7 +2615,8 @@ function _isArtsorakelBlobFallbackError(error) {
 }
 
 function getDetailIdentifySources() {
-  const galleryImgs = Array.from(document.querySelectorAll('#detail-gallery img'))
+  // The spore mosaic is a derived presentation, not an identification input.
+  const galleryImgs = Array.from(document.querySelectorAll('#detail-gallery img:not(.detail-gallery-mosaic-img)'))
   const hasStoredSources = detailImageRows.length > 0 || detailImageSources.length > 0 || detailAiSources.length > 0
   if (galleryImgs.length || !hasStoredSources) {
     return { galleryImgs, hasStoredSources }
@@ -2755,12 +3044,12 @@ function _renderDetailAiResults() {
         return
       }
       if (result?.status === 'unavailable') {
-        resultsEl.innerHTML = `<div class="ai-results-empty">${detailAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+        resultsEl.innerHTML = `<div class="ai-results-empty">${_esc(detailAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable'))}</div>`
         resultsEl.style.display = ''
         return
       }
       if (result?.status === 'error' || (result?.status === 'stale' && result.errorMessage)) {
-        resultsEl.innerHTML = `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
+        resultsEl.innerHTML = `<div class="ai-results-empty">${_esc(result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error'))}</div>`
         resultsEl.style.display = ''
         return
       }
@@ -2877,7 +3166,7 @@ function _markDetailAiStale() {
   _renderDetailAiResults()
 }
 
-async function _loadDetailAiCache() {
+function _applyDetailAiCachedRows(rows = []) {
   if (!currentObs?.id) return
   const fingerprints = {
     [ID_SERVICE_ARTSORAKEL]: _detailImageFingerprint(ID_SERVICE_ARTSORAKEL),
@@ -2887,10 +3176,6 @@ async function _loadDetailAiCache() {
   detailAiState.currentFingerprint = detailAiState.currentFingerprintByService[ID_SERVICE_ARTSORAKEL]?.requestFingerprint || ''
   detailAiState.requestedFingerprintByService = { ...fingerprints }
   detailAiState.requestedFingerprint = detailAiState.currentFingerprint
-  const rows = await loadObservationIdentifications(currentObs.id).catch(error => {
-    console.warn('Failed to load cached AI rows:', error)
-    return []
-  })
   detailAiState.cachedRows = rows
   detailAiState.resultsByService = _buildDetailAiCachedResults(rows, detailAiState.currentFingerprintByService)
   const selectionState = _detailAiSelectionStateFromResults(detailAiState.resultsByService, currentObs)
@@ -2939,7 +3224,9 @@ async function _loadDetailAiCache() {
 
   _renderDetailAiTabs()
   _renderDetailAiResults()
+}
 
+async function _refreshDetailAiAvailability(generation = detailLoadGeneration) {
   try {
     const mediaKeys = detailImageRows.map(row => row.storage_path || '').filter(Boolean)
     const hasDetailImages = detailImageRows.length > 0
@@ -2948,6 +3235,7 @@ async function _loadDetailAiCache() {
       mediaKeys,
       inaturalistSession,
     })
+    if (generation !== detailLoadGeneration) return
     const inatLoggedIn = Boolean(inaturalistSession?.connected && (inaturalistSession?.api_token || inaturalistSession?.apiToken))
     const inatReason = inatLoggedIn
       ? (hasDetailImages ? '' : _tf('detail.noPhotoToIdentify', 'No usable photo available for iNaturalist.'))
@@ -2974,6 +3262,7 @@ async function _loadDetailAiCache() {
   } catch (error) {
     console.warn('Failed to load detail AI availability:', error)
   }
+  if (generation !== detailLoadGeneration) return
 
   _renderDetailAiTabs()
   _renderDetailAiResults()
@@ -3664,6 +3953,8 @@ function _detailAuthorFallbackLabel(userId = '') {
 }
 
 async function _loadDetailAuthorAndSocial(options = {}) {
+  const observation = currentObs
+  const generation = detailLoadGeneration
   const preserveAuthorProfile = options.preserveAuthorProfile === true
   const preserveFriendship = options.preserveFriendship === true
   const preserveFollowState = options.preserveFollowState === true
@@ -3706,6 +3997,7 @@ async function _loadDetailAuthorAndSocial(options = {}) {
     .in('target_id', followTargets)
 
   const [profileRes, friendshipRes, followsRes] = await Promise.all([profilePromise, friendshipPromise, followsPromise])
+  if (generation !== detailLoadGeneration || currentObs !== observation) return
 
   if (!profileRes.error) {
     detailAuthorProfile = profileRes.data || null

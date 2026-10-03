@@ -2539,6 +2539,7 @@ html, body {
 .detail-gallery {
   display: flex; gap: 8px; overflow-x: auto; padding: 0 0 12px;
   scrollbar-width: none;
+  overflow-anchor: none;
 }
 .detail-gallery::-webkit-scrollbar { display: none; }
 .detail-gallery:empty { display: none; }
@@ -2547,16 +2548,38 @@ html, body {
   flex-shrink: 0;
   display: block;
 }
-.detail-microscope-capture {
-  max-width: 220px;
-  padding: 6px 4px 0;
-  color: var(--text-dim);
+/* Scale bar: fixed in the corner, length and value follow the image scale. */
+.scale-bar {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 6px 5px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
   font-family: 'DM Mono', monospace;
   font-size: 11px;
-  line-height: 1.25;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 3;
+}
+.scale-bar-line {
+  display: block;
+  height: 3px;
+  background: #fff;
+  border-radius: 1px;
+}
+.detail-gallery-scale-bar {
+  right: 8px;
+  bottom: 8px;
+}
+.photo-viewer-scale-bar {
+  right: 10px;
+  bottom: 10px;
+  font-size: 12px;
+  z-index: 10;
 }
 .detail-gallery-item-wrap,
 .ai-crop-gallery-item {
@@ -6265,3 +6288,28 @@ html.light .ai-id-dot.is-complete::before {
 }
 .mention-dropdown li:last-child { border-bottom: none; }
 .mention-dropdown li:active { background: var(--card); }
+
+/* Find detail stays blank (with a spinner) until the find has fully loaded,
+   so nothing stale shows and sections do not jump as data arrives. */
+#screen-find-detail .review-body.is-detail-loading {
+  position: relative;
+}
+#screen-find-detail .review-body.is-detail-loading > * {
+  visibility: hidden;
+}
+#screen-find-detail .review-body.is-detail-loading::before {
+  content: '';
+  position: absolute;
+  top: 96px;
+  left: 50%;
+  width: 28px;
+  height: 28px;
+  margin-left: -14px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--text-dim);
+  animation: detail-loading-spin 0.8s linear infinite;
+}
+@keyframes detail-loading-spin {
+  to { transform: rotate(360deg); }
+}

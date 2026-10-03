@@ -22,7 +22,7 @@ function withTestEnv(env, fn) {
     })
 }
 
-function withImagePipelineHarness({ decodeFails = false, width = 1600, height = 1200 } = {}, fn) {
+function withImagePipelineHarness({ decodeFails = false, width = 1600, height = 1200, oversizedFull = false } = {}, fn) {
   const originalImage = globalThis.Image
   const originalDocument = globalThis.document
   const originalHTMLCanvasElement = globalThis.HTMLCanvasElement
@@ -79,6 +79,10 @@ function withImagePipelineHarness({ decodeFails = false, width = 1600, height = 
     }
 
     toBlob(callback, type) {
+      if (oversizedFull && this.width === width && this.height === height) {
+        callback(new Blob([new Uint8Array(1_600_000)], { type: type || 'image/jpeg' }))
+        return
+      }
       callback(new Blob([`${type || 'image/jpeg'}:${this.width}x${this.height}`], {
         type: type || 'image/jpeg',
       }))
@@ -356,6 +360,17 @@ test('prepareImageVariants marks worker-prepared uploads as exif-safe', async ()
 
     assert.notEqual(prepared.uploadBlob, blob)
     assert.equal(prepared.uploadMeta.storage_exif_safe, true)
+    assert.ok(prepared.variants.thumb)
+  })
+})
+
+test('oversized main-thread image retries smaller dimensions and stays within the plan cap', async () => {
+  await withImagePipelineHarness({ oversizedFull: true }, async () => {
+    const policy = buildCloudUploadPolicy({ cloud_plan: 'free' }, { uploadMode: 'full' })
+    const prepared = await prepareImageVariants(new Blob(['photo'], { type: 'image/jpeg' }), policy)
+    assert.equal(prepared.uploadMeta.stored_width, 1440)
+    assert.equal(prepared.uploadMeta.stored_height, 1080)
+    assert.ok(prepared.uploadBlob.size <= 1_500_000)
     assert.ok(prepared.variants.thumb)
   })
 })
