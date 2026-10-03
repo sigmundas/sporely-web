@@ -7,7 +7,7 @@ android {
         applicationId "com.sporelab.sporely"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 291
+        versionCode 292
         versionName "0.7.14"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
