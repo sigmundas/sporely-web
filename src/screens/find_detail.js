@@ -1815,7 +1815,7 @@ async function _loadFindDetail(obsId, options, loadGeneration) {
     console.warn('Failed to load cached AI rows:', error)
     return []
   })
-  void _refreshSporeMosaic(obsId, loadGeneration)
+  const mosaicPromise = loadObservationSporeMosaic({ client: supabase, observationId: obsId })
 
   const { observation: obs, error, outcome } = await loadDetailObservation(obsId, {
     client: supabase,
@@ -1851,6 +1851,16 @@ async function _loadFindDetail(obsId, options, loadGeneration) {
 
   currentObs = obs
   currentObsIsOwner = obs.user_id === state.user?.id
+  // The RPC can finish before the observation. Keep its result until the
+  // observation has been accepted, then apply the usual stale-load guard.
+  // Before the gallery is built the result is only stored; the build renders
+  // it once, so the protected mosaic is fetched a single time.
+  let galleryBuilt = false
+  void mosaicPromise.then(mosaic => {
+    if (loadGeneration !== detailLoadGeneration || String(currentObs?.id) !== String(obsId)) return
+    detailSporeMosaic = mosaic
+    if (galleryBuilt) _renderSporeMosaic()
+  })
   const sporeSummariesPromise = loadObservationSporeSummaries({
     client: supabase,
     observationId: obsId,
@@ -2040,6 +2050,7 @@ async function _loadFindDetail(obsId, options, loadGeneration) {
   }
 
   _renderSporeStats()
+  galleryBuilt = true
   _renderSporeMosaic()
 
   if (currentObsIsOwner) {
@@ -2109,8 +2120,7 @@ const DETAIL_FULL_IMAGE_CACHE_LIMIT = 12
 const detailFullImages = new Map()
 
 function _detailFullLoaderUrl(source) {
-  if (source?.protectedUrl) return source.protectedUrl
-  const url = _mediaSourceUrl(source)
+  const url = source?.protectedUrl || _mediaSourceUrl(source)
   const workerBase = getMediaUploadBaseUrl() || 'https://upload.sporely.no'
   try {
     return url && new URL(url).origin === new URL(workerBase).origin ? url : ''
@@ -2132,13 +2142,13 @@ function _loadDetailFullImage(url) {
   const entry = { holder, objectUrl: null, promise: null }
   entry.promise = bindProtectedMedia(holder, url).then(objectUrl => {
     if (!objectUrl) {
-      if (detailFullImages.get(url) === entry) detailFullImages.delete(url)
+      if (detailFullImages.get(url) === entry) _releaseDetailFullImage(url)
       return null
     }
     entry.objectUrl = objectUrl
     return objectUrl
   }, () => {
-    if (detailFullImages.get(url) === entry) detailFullImages.delete(url)
+    if (detailFullImages.get(url) === entry) _releaseDetailFullImage(url)
     return null
   })
   detailFullImages.set(url, entry)
@@ -3943,6 +3953,8 @@ function _detailAuthorFallbackLabel(userId = '') {
 }
 
 async function _loadDetailAuthorAndSocial(options = {}) {
+  const observation = currentObs
+  const generation = detailLoadGeneration
   const preserveAuthorProfile = options.preserveAuthorProfile === true
   const preserveFriendship = options.preserveFriendship === true
   const preserveFollowState = options.preserveFollowState === true
@@ -3985,6 +3997,7 @@ async function _loadDetailAuthorAndSocial(options = {}) {
     .in('target_id', followTargets)
 
   const [profileRes, friendshipRes, followsRes] = await Promise.all([profilePromise, friendshipPromise, followsPromise])
+  if (generation !== detailLoadGeneration || currentObs !== observation) return
 
   if (!profileRes.error) {
     detailAuthorProfile = profileRes.data || null

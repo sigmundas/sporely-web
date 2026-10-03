@@ -1475,6 +1475,12 @@ test('find detail starts id-keyed requests before the observation and reveals th
   const observationAwait = body.indexOf('await loadDetailObservation(')
   assert.ok(body.indexOf('_loadDetailObservationImages(obsId)') < observationAwait)
   assert.ok(body.indexOf('loadObservationIdentifications(obsId)') < observationAwait)
+  assert.ok(body.indexOf('const mosaicPromise = loadObservationSporeMosaic(') < observationAwait)
+  assert.ok(body.indexOf('mosaicPromise.then(') > body.indexOf('currentObs = obs'))
+  // An early mosaic is stored, not drawn into the gallery that is about to be
+  // rebuilt, so it is fetched once.
+  assert.match(body, /if \(galleryBuilt\) _renderSporeMosaic\(\)/)
+  assert.ok(body.indexOf('galleryBuilt = true') < body.indexOf('_applyDetailAiCachedRows(aiRows)'))
   assert.ok(body.indexOf('_setDetailLoading(true)') < observationAwait)
   // Author, images, spore stats and stored AI rows are awaited together.
   assert.match(body, /await Promise\.all\(\[\s*imagePromise,\s*sporeSummariesPromise,\s*aiRowsPromise,\s*_loadDetailAuthorAndSocial\(\),/)

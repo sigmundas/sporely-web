@@ -121,6 +121,18 @@ function _currentStoragePath() {
 }
 
 async function _fetchCurrentBlob() {
+  const photo = _currentPhoto()
+  if (typeof photo?.resolveSrc === 'function') {
+    // Share/save must use the same authorized full-image resolver as display,
+    // including while the viewer is still showing its thumbnail.
+    // On failure, fall through to the storage-path download (owners).
+    const src = await Promise.resolve().then(photo.resolveSrc).catch(() => null)
+    if (src) {
+      const response = await fetch(src)
+      if (response.ok) return response.blob()
+    }
+    if (!_currentStoragePath()) throw new Error('Full image is unavailable.')
+  }
   const storagePath = _currentStoragePath()
   if (storagePath) {
     try {
@@ -326,10 +338,12 @@ function _showCurrent() {
   if (resolveSrc) {
     if (photo.previewSrc) _img.src = photo.previewSrc
     else _img.removeAttribute?.('src')
-    Promise.resolve(resolveSrc()).catch(() => null).then(url => {
+    Promise.resolve().then(resolveSrc).catch(() => null).then(url => {
       if (token !== _showToken) return
-      _showingPreview = false
-      const next = url || photo.src
+      // Keep the loaded preview on failure; photo.src may be a protected
+      // Worker URL that cannot be assigned directly without a bearer header.
+      _showingPreview = !url
+      const next = url || photo.previewSrc || photo.src
       if (!next) return
       photo.src = next
       _img.src = next
@@ -352,6 +366,7 @@ function _showCurrent() {
   }
   _prevBtn.style.display = (_current > 0 && _photos.length > 1) ? 'flex' : 'none'
   _nextBtn.style.display = (_current < _photos.length - 1 && _photos.length > 1) ? 'flex' : 'none'
+  _updateScaleBar()
 }
 
 function _navigate(dir) {

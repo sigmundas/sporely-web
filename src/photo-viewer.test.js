@@ -118,6 +118,7 @@ test('photo viewer shows the thumbnail first and only switches to the resolved f
     initPhotoViewer()
     openPhotoViewer(photos, 0)
     assert.equal(elements['photo-viewer-img'].src, 'blob:thumb-a')
+    await Promise.resolve()
     openPhotoViewer(photos, 1)
     await new Promise(resolve => setTimeout(resolve, 0))
     assert.equal(elements['photo-viewer-img'].src, 'blob:full-b')
@@ -125,6 +126,39 @@ test('photo viewer shows the thumbnail first and only switches to the resolved f
     releaseFirst('blob:full-a')
     await new Promise(resolve => setTimeout(resolve, 0))
     assert.equal(elements['photo-viewer-img'].src, 'blob:full-b')
+  } finally {
+    closePhotoViewer()
+    globalThis.document = previousDocument
+  }
+})
+
+test('a failed or synchronously throwing full resolver keeps the thumbnail and close ignores late results', async () => {
+  const previousDocument = globalThis.document
+  const elements = Object.fromEntries([
+    'photo-viewer', 'photo-viewer-img', 'photo-viewer-counter', 'photo-viewer-metadata',
+    'photo-viewer-prev', 'photo-viewer-next', 'photo-viewer-share', 'photo-viewer-share-menu',
+    'photo-viewer-close', 'photo-viewer-scale-bar',
+  ].map(id => [id, makeElement()]))
+  globalThis.document = {
+    body: { style: {} }, getElementById: id => elements[id], addEventListener() {},
+  }
+  try {
+    initPhotoViewer()
+    for (const resolveSrc of [async () => null, () => { throw new Error('offline') }]) {
+      openPhotoViewer([{
+        src: 'https://upload.sporely.no/m/7/full?v=1', previewSrc: 'blob:cached-thumb', resolveSrc,
+      }])
+      await new Promise(resolve => setTimeout(resolve, 0))
+      assert.equal(elements['photo-viewer-img'].src, 'blob:cached-thumb')
+    }
+    let complete
+    openPhotoViewer([{ previewSrc: 'blob:cached-thumb', resolveSrc: () => new Promise(resolve => { complete = resolve }) }])
+    await Promise.resolve()
+    closePhotoViewer()
+    complete('blob:late-full')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(elements['photo-viewer'].style.display, 'none')
+    assert.equal(elements['photo-viewer-img'].src, 'blob:cached-thumb')
   } finally {
     closePhotoViewer()
     globalThis.document = previousDocument
