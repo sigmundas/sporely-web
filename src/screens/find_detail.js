@@ -78,6 +78,7 @@ let detailFollowState = { user: false, observation: false, taxon: false, genus: 
 let detailPrivacySlotCount = null
 let detailLoadGeneration = 0
 let detailSporeSummaries = { available: false, rows: [] }
+let detailSporeMosaic = null
 const detailAiState = {
   running: false,
   runningByService: {},
@@ -1007,6 +1008,66 @@ export async function loadObservationSporeSummaries({ client = supabase, observa
   }
 }
 
+// The latest authorized spore mosaic, from the mobile microscopy presentation
+// contract. The RPC applies the owner / non-draft / visibility / spore-data
+// visibility gates and returns NULL sporeMosaic when the caller may not see it,
+// so this loader adds no gating of its own. The URL is the Worker's /mm/
+// delivery route, which re-authorizes every fetch.
+const _MOSAIC_URL_PATH_RE = /^\/mm\/[1-9][0-9]*$/
+
+function _positiveInteger(value) {
+  const numeric = _finiteMeasurement(value)
+  return numeric !== null && numeric > 0 ? Math.round(numeric) : null
+}
+
+export function normalizeSporeMosaicPresentation(mosaic) {
+  if (!mosaic || typeof mosaic !== 'object') return null
+  const rawUrl = String(mosaic.mosaicMediaUrl || '').trim()
+  if (!rawUrl) return null
+  let parsed
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return null
+  }
+  // The URL receives the session bearer token, so only the Worker's mosaic
+  // delivery shape is accepted.
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null
+  if (!_MOSAIC_URL_PATH_RE.test(parsed.pathname) || !parsed.searchParams.get('v')) return null
+  return {
+    mosaicId: _positiveInteger(mosaic.mosaicId),
+    url: parsed.toString(),
+    width: _positiveInteger(mosaic.width),
+    height: _positiveInteger(mosaic.height),
+  }
+}
+
+export async function loadObservationSporeMosaic({ client = supabase, observationId }) {
+  const numericId = Number(observationId)
+  if (!Number.isFinite(numericId) || numericId <= 0) return null
+  try {
+    const { data, error } = await client.rpc('get_observation_microscopy_presentations', {
+      p_observation_ids: [numericId],
+    })
+    if (error) {
+      console.warn('Optional spore mosaic is unavailable:', {
+        observationId,
+        code: error?.code || null,
+      })
+      return null
+    }
+    const row = (Array.isArray(data) ? data : [])
+      .find(candidate => Number(candidate?.observationId) === numericId)
+    return normalizeSporeMosaicPresentation(row?.sporeMosaic)
+  } catch (error) {
+    console.warn('Optional spore mosaic could not be loaded:', {
+      observationId,
+      message: error?.message || String(error),
+    })
+    return null
+  }
+}
+
 export function formatMicroscopeCapturedAt(value, separator = ', ') {
   if (!value) return ''
   const instant = value instanceof Date ? value : new Date(value)
@@ -1100,6 +1161,44 @@ function _renderSporeStats() {
   valueEl.textContent = presentation
 }
 
+function _renderSporeMosaic() {
+  const section = document.getElementById('detail-spore-mosaic')
+  const frame = document.getElementById('detail-spore-mosaic-frame')
+  if (!section || !frame) return
+  const label = document.getElementById('detail-spore-mosaic-label')
+  if (label) label.textContent = t('detail.sporeMosaic')
+  const mosaic = detailSporeMosaic
+  const existing = frame.querySelector('img')
+  if (existing && mosaic && existing.dataset.mosaicUrl === mosaic.url) return
+  frame.innerHTML = ''
+  section.style.display = mosaic ? '' : 'none'
+  if (!mosaic) return
+
+  const img = document.createElement('img')
+  img.className = 'detail-spore-mosaic-img'
+  img.alt = t('detail.sporeMosaic')
+  img.decoding = 'async'
+  img.dataset.mosaicUrl = mosaic.url
+  if (mosaic.width && mosaic.height) {
+    img.width = mosaic.width
+    img.height = mosaic.height
+  }
+  img.addEventListener('click', () => {
+    if (!img.dataset.objectSrc) return
+    openPhotoViewer([{
+      src: img.dataset.objectSrc,
+      filenameStem: `${_buildShareFilenameStem(currentObs)}-spore-mosaic`,
+    }], 0)
+  })
+  frame.appendChild(img)
+  bindProtectedMedia(img, mosaic.url, {
+    onLoad: objectUrl => {
+      img.dataset.objectSrc = objectUrl
+      img.style.cursor = 'pointer'
+    },
+  })
+}
+
 async function _refreshSporeStats(observationId, generation = detailLoadGeneration) {
   const result = await loadObservationSporeSummaries({
     client: supabase,
@@ -1109,6 +1208,13 @@ async function _refreshSporeStats(observationId, generation = detailLoadGenerati
   if (generation !== detailLoadGeneration || String(currentObs?.id) !== String(observationId)) return
   detailSporeSummaries = result
   _renderSporeStats()
+}
+
+async function _refreshSporeMosaic(observationId, generation = detailLoadGeneration) {
+  const mosaic = await loadObservationSporeMosaic({ client: supabase, observationId })
+  if (generation !== detailLoadGeneration || String(currentObs?.id) !== String(observationId)) return
+  detailSporeMosaic = mosaic
+  _renderSporeMosaic()
 }
 
 // A genus: initial capital, then letters or hyphens. Rejects `***`, numeric
@@ -1668,6 +1774,8 @@ export async function openFindDetail(obsId, options = {}) {
   detailImageCropDirty = false
   detailLocationLookup = null
   detailSporeSummaries = { available: false, rows: [] }
+  detailSporeMosaic = null
+  _renderSporeMosaic()
 
   // Update back button label — state.currentScreen is still the previous screen at this point
   const prevLabel = {
@@ -1788,9 +1896,15 @@ export async function openFindDetail(obsId, options = {}) {
     observationId: obsId,
     isOwner: currentObsIsOwner,
   })
-  const [imgData, sporeSummaries] = await Promise.all([imagePromise, sporeSummariesPromise])
+  const sporeMosaicPromise = loadObservationSporeMosaic({ client: supabase, observationId: obsId })
+  const [imgData, sporeSummaries, sporeMosaic] = await Promise.all([
+    imagePromise,
+    sporeSummariesPromise,
+    sporeMosaicPromise,
+  ])
   if (loadGeneration !== detailLoadGeneration || String(currentObs?.id) !== String(obsId)) return
   detailSporeSummaries = sporeSummaries
+  detailSporeMosaic = sporeMosaic
 
   const gallery = document.getElementById('detail-gallery')
   _clearDetailThumbCropObserver()
@@ -1906,6 +2020,7 @@ export async function openFindDetail(obsId, options = {}) {
   }
 
   _renderSporeStats()
+  _renderSporeMosaic()
 
   if (currentObsIsOwner) {
     const addCardContainer = document.createElement('div')
@@ -2127,6 +2242,7 @@ function _appendDetailGalleryImage(row, source, aiSource, options = {}) {
         container.remove()
         invalidateFindsCardImages(currentObs.id)
         _refreshSporeStats(currentObs.id)
+        _refreshSporeMosaic(currentObs.id)
         _markDetailAiStale()
       } catch (err) {
         console.error('Failed to delete image:', err)

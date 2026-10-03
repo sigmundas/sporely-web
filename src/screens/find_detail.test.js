@@ -20,8 +20,10 @@ import {
   detailAiState,
   formatMicroscopeCapturedAt,
   formatSporeStatsShort,
+  loadObservationSporeMosaic,
   loadObservationSporeSummaries,
   microscopeCapturePresentation,
+  normalizeSporeMosaicPresentation,
   pickSporeSummaryRow,
   sporeStatsPresentation,
 } from './find_detail.js'
@@ -275,6 +277,100 @@ test('optional spore statistics failure is non-fatal and unavailable', async () 
   } finally {
     console.warn = previousWarn
   }
+})
+
+const MOSAIC_URL = 'https://media.sporely.no/mm/77?v=3'
+
+test('spore mosaic comes from the microscopy presentation contract for owners and viewers alike', async () => {
+  const calls = []
+  const client = {
+    async rpc(name, args) {
+      calls.push({ name, args })
+      return {
+        data: [{
+          observationId: 42,
+          sporeMeasurementCount: 120,
+          sporeSummary: null,
+          sporeMosaic: { mosaicId: 77, mosaicMediaVersion: 3, mosaicMediaUrl: MOSAIC_URL, width: 1200, height: 800 },
+        }],
+        error: null,
+      }
+    },
+  }
+  assert.deepEqual(await loadObservationSporeMosaic({ client, observationId: '42' }), {
+    mosaicId: 77,
+    url: MOSAIC_URL,
+    width: 1200,
+    height: 800,
+  })
+  assert.deepEqual(calls, [{
+    name: 'get_observation_microscopy_presentations',
+    args: { p_observation_ids: [42] },
+  }])
+
+  // Queued/unsynced observations have no cloud row.
+  const localCalls = []
+  assert.equal(await loadObservationSporeMosaic({
+    client: { rpc: async (...args) => { localCalls.push(args); return { data: [], error: null } } },
+    observationId: 'local-draft-1',
+  }), null)
+  assert.equal(localCalls.length, 0)
+})
+
+test('spore mosaic is absent when the contract withholds it or returns no row', async () => {
+  const respond = data => ({ rpc: async () => ({ data, error: null }) })
+  // Spore data denied or no mosaic: the row exists, sporeMosaic is NULL.
+  assert.equal(await loadObservationSporeMosaic({
+    client: respond([{ observationId: 42, sporeMosaic: null }]),
+    observationId: 42,
+  }), null)
+  // Observation not authorized: no row at all.
+  assert.equal(await loadObservationSporeMosaic({ client: respond([]), observationId: 42 }), null)
+  // A row for another observation is never used.
+  assert.equal(await loadObservationSporeMosaic({
+    client: respond([{ observationId: 41, sporeMosaic: { mosaicMediaUrl: MOSAIC_URL } }]),
+    observationId: 42,
+  }), null)
+})
+
+test('optional spore mosaic failure is non-fatal', async () => {
+  const previousWarn = console.warn
+  console.warn = () => {}
+  try {
+    assert.equal(await loadObservationSporeMosaic({
+      client: { rpc: async () => ({ data: null, error: { code: 'PGRST202' } }) },
+      observationId: 43,
+    }), null)
+    assert.equal(await loadObservationSporeMosaic({
+      client: { rpc: async () => { throw new Error('offline') } },
+      observationId: 43,
+    }), null)
+  } finally {
+    console.warn = previousWarn
+  }
+})
+
+test('spore mosaic URLs must be the Worker mosaic delivery route before a token is attached', () => {
+  assert.equal(normalizeSporeMosaicPresentation(null), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: null }), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: 'not a url' }), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: 'javascript:alert(1)' }), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: 'https://media.sporely.no/m/1/full?v=3' }), null)
+  assert.equal(normalizeSporeMosaicPresentation({ mosaicMediaUrl: 'https://media.sporely.no/mm/77' }), null)
+  assert.deepEqual(normalizeSporeMosaicPresentation({
+    mosaicId: 77,
+    mosaicMediaUrl: MOSAIC_URL,
+    width: null,
+    height: '0',
+  }), { mosaicId: 77, url: MOSAIC_URL, width: null, height: null })
+})
+
+test('detail markup keeps the spore mosaic hidden until the contract supplies one', () => {
+  const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+  assert.match(html, /id="detail-spore-mosaic" style="display:none"/)
+  assert.match(source, /bindProtectedMedia\(img, mosaic\.url/)
+  assert.doesNotMatch(source, /get_observation_spore_mosaic\b/)
 })
 
 test('microscope image capture labels never fall back to upload time or leak to viewers', () => {

@@ -2678,6 +2678,19 @@ html, body {
 .detail-spore-stats > :first-child {
   color: var(--text-secondary);
 }
+.detail-spore-mosaic {
+  margin: 0 0 16px;
+}
+.detail-spore-mosaic-frame {
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--card);
+}
+.detail-spore-mosaic-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
 .detail-top-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
