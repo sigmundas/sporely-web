@@ -3,6 +3,7 @@
 import { showToast } from './toast.js'
 import { downloadObservationImageBlob } from './images.js'
 import { isNativeApp } from './platform.js'
+import { pickScaleBar, renderScaleBar, umPerLoadedPixel } from './scale-bar.js'
 
 let _photos = []
 let _current = 0
@@ -14,8 +15,12 @@ let _startScale = 1
 let _startPanX = 0
 let _startPanY = 0
 let _lastTap = 0
+// A photo with `resolveSrc` shows its already-loaded `previewSrc` at once and
+// switches to the resolved full image when it is ready.
+let _showToken = 0
+let _showingPreview = false
 
-let _overlay, _img, _counter, _metadata, _prevBtn, _nextBtn, _shareBtn, _shareMenu
+let _overlay, _img, _counter, _metadata, _prevBtn, _nextBtn, _shareBtn, _shareMenu, _scaleBar
 
 export function initPhotoViewer() {
   _overlay = document.getElementById('photo-viewer')
@@ -26,6 +31,7 @@ export function initPhotoViewer() {
   _nextBtn = document.getElementById('photo-viewer-next')
   _shareBtn = document.getElementById('photo-viewer-share')
   _shareMenu = document.getElementById('photo-viewer-share-menu')
+  _scaleBar = document.getElementById('photo-viewer-scale-bar')
 
   document.getElementById('photo-viewer-close').addEventListener('click', closePhotoViewer)
   _overlay.addEventListener('click', e => {
@@ -55,6 +61,9 @@ export function initPhotoViewer() {
   _img.addEventListener('touchmove', _onTouchMove, { passive: false })
   _img.addEventListener('touchend', _onTouchEnd, { passive: false })
 
+  _img.addEventListener('load', _updateScaleBar)
+  if (typeof window !== 'undefined') window.addEventListener('resize', _updateScaleBar)
+
   _img.addEventListener('error', () => {
     if (_img.dataset.fallbackSrc && _img.dataset.fallbackApplied !== 'true') {
       _img.dataset.fallbackApplied = 'true'
@@ -79,6 +88,7 @@ export function openPhotoViewer(photos, startIndex = 0) {
 }
 
 export function closePhotoViewer() {
+  _showToken += 1
   _overlay.style.display = 'none'
   document.body.style.overflow = ''
   _hideShareMenu()
@@ -310,7 +320,23 @@ function _showCurrent() {
   _resetTransform()
   _hideShareMenu()
   const photo = _photos[_current]
-  _img.src = typeof photo === 'string' ? photo : (photo?.src || '')
+  const token = ++_showToken
+  const resolveSrc = typeof photo?.resolveSrc === 'function' ? photo.resolveSrc : null
+  _showingPreview = !!resolveSrc
+  if (resolveSrc) {
+    if (photo.previewSrc) _img.src = photo.previewSrc
+    else _img.removeAttribute?.('src')
+    Promise.resolve(resolveSrc()).catch(() => null).then(url => {
+      if (token !== _showToken) return
+      _showingPreview = false
+      const next = url || photo.src
+      if (!next) return
+      photo.src = next
+      _img.src = next
+    })
+  } else {
+    _img.src = typeof photo === 'string' ? photo : (photo?.src || '')
+  }
   if (typeof photo === 'object' && photo.fallbackSrc) {
     _img.dataset.fallbackSrc = photo.fallbackSrc
     _img.dataset.fallbackApplied = 'false'
@@ -342,6 +368,42 @@ function _resetTransform() {
 
 function _applyTransform() {
   _img.style.transform = `translate(${_panX}px, ${_panY}px) scale(${_scale})`
+  _updateScaleBar()
+}
+
+// The bar stays put on screen; only its length and value follow the zoom.
+function _updateScaleBar() {
+  if (!_scaleBar) return
+  const scale = _currentPhoto()?.scale
+  const renderedWidth = _img?.offsetWidth || 0
+  // A preview only carries a calibration when the source width is known.
+  const calibrated = scale && !(_showingPreview && !scale.sourceWidthPx)
+  const umPerImagePx = calibrated && _img?.complete ? umPerLoadedPixel({
+    umPerSourcePx: scale.umPerSourcePx,
+    sourceWidthPx: scale.sourceWidthPx,
+    loadedWidthPx: _img.naturalWidth,
+  }) : null
+  if (!umPerImagePx || !renderedWidth) {
+    renderScaleBar(_scaleBar, null)
+    return
+  }
+  const screenWidth = renderedWidth * _scale
+  const umPerScreenPx = umPerImagePx * _img.naturalWidth / screenWidth
+  const visibleWidth = Math.min(screenWidth, _overlay?.clientWidth || screenWidth)
+  renderScaleBar(_scaleBar, pickScaleBar(umPerScreenPx, visibleWidth))
+  _anchorScaleBarToImage()
+}
+
+// Sit in the image's lower-right corner, clamped to the screen when zoomed in.
+function _anchorScaleBarToImage() {
+  const imgRect = _img?.getBoundingClientRect?.()
+  const viewRect = _overlay?.getBoundingClientRect?.()
+  if (!imgRect || !viewRect) return
+  const inset = 10
+  const right = Math.max(0, viewRect.right - Math.min(imgRect.right, viewRect.right)) + inset
+  const bottom = Math.max(0, viewRect.bottom - Math.min(imgRect.bottom, viewRect.bottom)) + inset
+  _scaleBar.style.right = `${Math.round(right)}px`
+  _scaleBar.style.bottom = `${Math.round(bottom)}px`
 }
 
 function _constrainPan() {
