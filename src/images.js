@@ -5,6 +5,7 @@ import { getEffectiveCloudUploadPolicy } from './cloud-plan.js'
 import {
   IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE,
   buildFullImagePreparationPolicy,
+  buildFullImageFitByteCapAttempts,
   buildThumbnailEncodeCandidates,
   getFullImageEncodeRetryJump,
   looksLikeIosWebKitRuntime,
