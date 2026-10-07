@@ -1,6 +1,6 @@
 # Stage 4B — taxonomy parent-reference validator
 
-Verdict: **VALIDATOR_FIX_READY** (not deployed). The frozen taxonomy import must
+Verdict: **VALIDATOR_FIX_DEPLOYED_AND_VERIFIED**. The frozen taxonomy import must
 not be retried in this stage.
 
 The failed production import hit the 2-minute timeout in the same-release parent
@@ -97,3 +97,41 @@ remain unchanged; `verify_frozen` passes. No artifacts regenerated.
 Operational plans/logs: `~/sporely-scratch/vernacular-2026-10-07-stage4b/`.
 Prior production plans: adjacent Stage 4 `timeout-investigation/`. Tests and
 migration are prepared for review, not production-applied.
+
+
+## Production deployment — 2026-10-07
+
+Reviewed migration/tests/report checkpoint `3f574390b616357c9b51dc30ae5ecf46964af027`
+pushed to `feature/taxonomy-validator-parent-reference`. No merge.
+
+Production preflight at 15:14:41 Europe/Oslo verified the exact old function,
+sole active release tax-2026.09.30-01, 52,917 concepts / 13,760 active vernaculars,
+three release rows, no target release/import run, and no applied fix migration.
+Baseline includes row-count/content fingerprints for every taxonomy-v2 table and
+seven taxonomy-v3 registry/mapping/identity/audit tables, function owner/ACL/OID/
+settings, indexes, validator JSON result and timeout.
+
+Guarded deploy tree at the checkpoint commit omitted only documented deferred
+migration 20260914090000. `check` verified history and a dry-run pending set of
+exactly 20261007123912. `supabase db push --linked` prompted only for that migration,
+applied it, and completed successfully. `post-verify` confirmed remote history
+matches the deploy tree and the deferred migration remains absent.
+
+At 15:15:45 Europe/Oslo, production read-back matches the reviewed function source
+byte-for-byte. Only the validator body changed; its owner/ACL/OID/security/settings
+are identical. `taxonomy_v2_validate_release('tax-2026.09.30-01')` returns exactly
+the pre-deployment JSON: ok=true, errors=[], expected=actual counts. Production
+parent-check EXPLAIN ANALYZE: **511.612 ms**, correlated primary-key index lookup
+with BOTH release_id=t.release_id and sporely_taxon_id=t.parent_sporely_taxon_id;
+no release-only inner join filter. Full validator: **2375.4 ms**. Both ran read-only.
+
+Every recorded taxonomy-v2/taxonomy-v3 content fingerprint and row count is
+unchanged; indexes and `statement_timeout=2min` unchanged. Sole active release and
+all release-state metadata unchanged. No target taxonomy release or import run.
+Frozen SQL/freeze SHA-256 values above are unchanged. No import or activation ran.
+
+Operational evidence: `~/sporely-scratch/vernacular-2026-10-07-stage4b-deploy/`
+(before.json, after.json, parent-plan.json, validator-timing.json, verdict.json,
+read-only migration-list/dry-run/deploy-plan records). Temporary deploy tree removed
+only after verification. Next separately authorized stage may retry the exact
+frozen SQL; this stage stops at verified validator deployment.
