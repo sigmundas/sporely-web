@@ -94,8 +94,9 @@ Frozen descriptor `a86e35854fd4d01984d8b8fe121d8fc318e75a01876d243975847127462fd
 and exact SQL `cc9a1ddfc4c5f56fa553935b79fb40a2eda01588f0c6d2781e243cddda84852e`
 remain unchanged; `verify_frozen` passes. No artifacts regenerated.
 
-Operational plans/logs: `~/sporely-scratch/vernacular-2026-10-07-stage4b/`.
-Prior production plans: adjacent Stage 4 `timeout-investigation/`. Tests and
+Operational plans/logs: sporely-py `database/taxonomy/evidence/taxonomy-v3/vernacular-production-publication-2026-10-07/stage4b-prepare/`
+(committed copy of the former `~/sporely-scratch/vernacular-2026-10-07-stage4b/`).
+Prior production plans: sporely-py `database/taxonomy/evidence/taxonomy-v3/vernacular-production-publication-2026-10-07/stage4-attempt1/timeout-investigation/`. Tests and
 migration are prepared for review, not production-applied.
 
 
@@ -130,7 +131,8 @@ unchanged; indexes and `statement_timeout=2min` unchanged. Sole active release a
 all release-state metadata unchanged. No target taxonomy release or import run.
 Frozen SQL/freeze SHA-256 values above are unchanged. No import or activation ran.
 
-Operational evidence: `~/sporely-scratch/vernacular-2026-10-07-stage4b-deploy/`
+Operational evidence: sporely-py `database/taxonomy/evidence/taxonomy-v3/vernacular-production-publication-2026-10-07/stage4b-deploy/`
+(committed copy of the former `~/sporely-scratch/vernacular-2026-10-07-stage4b-deploy/`)
 (before.json, after.json, parent-plan.json, validator-timing.json, verdict.json,
 read-only migration-list/dry-run/deploy-plan records). Temporary deploy tree removed
 only after verification. Next separately authorized stage may retry the exact
