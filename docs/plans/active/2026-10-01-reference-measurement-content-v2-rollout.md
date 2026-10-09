@@ -333,6 +333,7 @@ supersedes walk per query), plus a partial index of live enhanced sets.
 - Stage A inventory (2026-10-01, read-only, `src/**` excluding tests, base
   `8afc74f`): web has **no reader of reference snapshots, measurement
   content or `envelope_json`**.
+  - *(Removed 2026-10-09 in PR #28; this inventory entry is historical.)*
   - `src/shared-references.js` (rendered by `src/screens/profile.js`): owner
     list via `list_my_reference_sharing` and the owner RPCs
     `stop_sharing_reference_set` / `share_reference_set_again`. Renders
@@ -497,7 +498,7 @@ supersedes walk per query), plus a partial index of live enhanced sets.
     fingerprint (includes the helper and the CHECK). All Stage A and
     existing reference SQL tests and the three `.sh` tests pass after reset.
   - Owner-facing reason labels: web `src/shared-references.js` renders no
-    withdrawal reason (tolerant). Desktop `_withdrawal_reason_label` was not
+    withdrawal reason (tolerant). (That module was removed 2026-10-09, PR #28.) Desktop `_withdrawal_reason_label` was not
     found in `ui/reference_sharing_dialogs.py` or anywhere on
     `origin/feature/reference-sharing-consent-2b-desktop` (`86da707`) or
     other refs; desktop owners would see whatever its list renders for an

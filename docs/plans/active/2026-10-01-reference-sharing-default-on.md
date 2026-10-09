@@ -1,5 +1,14 @@
 # Stage 2d: references shared by default, and a dismissible publish notice
 
+> **Superseded in part (2026-10-09):** the owner removed the web "My shared
+> references" profile section (`src/shared-references.js`, its Stop sharing
+> and Share again actions, and the `sharedReferences.*` strings) in PR #28
+> (`9c08687`). The publish notice now reads only "Attached references are
+> shared by default." The owner RPCs (`list_my_reference_sharing`,
+> `stop_sharing_reference_set`, `share_reference_set_again`) remain in the
+> schema but have no web caller. Web references below to that section are
+> historical.
+
 Status: approved (`7e5aac0`). Order step 3 (server) in review on
 `feature/reference-sharing-default-on-server`: candidate `145e25d`
 (general: approve, rollback needed before deploy; security: needs changes),
