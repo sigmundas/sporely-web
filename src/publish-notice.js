@@ -34,9 +34,8 @@
 //   Comments: readable and writable by signed-in users only, when they can
 //     read the observation (phase7_comments_read TO authenticated,
 //     20260812120000).
-//   References: attached references are shared by default; the owner can
-//     stop sharing one in My shared references. The notice says this once,
-//     generically.
+//   References: attached references are shared by default. The notice says
+//     this once, generically.
 //
 // Wording (shared with desktop): new web observations are saved to the
 // IndexedDB queue (sync-queue.js) and reach the server on the next sync, so

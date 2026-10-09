@@ -26,7 +26,7 @@ import { _confirmImportSessionPublish } from './screens/import_review.js'
 setLocale('en')
 
 const PUB = { visibility: 'public', is_draft: false }
-const REFERENCES_EN = 'Attached references are shared by default. You can stop sharing them under My shared references.'
+const REFERENCES_EN = 'Attached references are shared by default.'
 
 test('publishing transition: only into public and not draft', () => {
   assert.equal(isPublishingTransition({ visibility: 'public', is_draft: true }, PUB), true)
@@ -216,22 +216,11 @@ test('Settings toggle is wired per signed-in user and translated', () => {
   assert.match(mainSource, /publishNoticeToggle\.disabled = !state\.user\?\.id/, 'disabled when signed out')
 })
 
-test('locales: German notice uses one register (du); shared-references labels match the notice', () => {
+test('locales: German notice uses one register (du)', () => {
   const i18nSource = fs.readFileSync(new URL('./i18n.js', import.meta.url), 'utf8')
   const de = i18nSource.slice(i18nSource.indexOf('\n  de_DE: {'))
   const deNotice = de.split('\n').filter(line => /'(publishNotice\.|settings\.showPublishNotice)/.test(line)).join('\n')
   assert.doesNotMatch(deNotice, /\b(Sie|Ihr|Ihre|Ihren|Ihnen|Ihrer)\b/, 'no formal register in the German notice')
-  const enKeys = [...i18nSource.slice(0, i18nSource.indexOf('\n  nb_NO: {')).matchAll(/'(sharedReferences\.[^']+)':/g)].map(m => m[1])
-  assert.ok(enKeys.includes('sharedReferences.sectionTitle'))
-  const titles = { sv_SE: 'Mina delade referenser', de_DE: 'Meine geteilten Referenzen' }
-  for (const [locale, title] of Object.entries(titles)) {
-    const start = i18nSource.indexOf(`\n  ${locale}: {`)
-    const next = locale === 'sv_SE' ? i18nSource.indexOf('\n  de_DE: {') : i18nSource.length
-    const block = i18nSource.slice(start, next)
-    for (const key of enKeys) assert.ok(block.includes(`'${key}':`), `${locale} is missing ${key}`)
-    assert.ok(block.includes(`'sharedReferences.sectionTitle': '${title}'`))
-    assert.ok(block.includes(`„${title}“`) || block.includes(`i ${title}.`), `${locale} notice names ${title}`)
-  }
 })
 
 test('reference lookups are gone: no stopped-set read, no per-role lines', async () => {
