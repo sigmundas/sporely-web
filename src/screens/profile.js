@@ -19,18 +19,6 @@ import {
   readCachedMedia,
   writeCachedMedia,
 } from '../media-cache.js'
-import {
-  fetchMyReferenceSharing,
-  shareAgainGuarded,
-  shareReferenceSetAgain,
-  sharedReferencesEmptyHtml,
-  sharedReferencesErrorHtml,
-  sharedReferencesListHtml,
-  sharedReferencesLoadingHtml,
-  sharedReferencesRateLimitedHtml,
-  stopSharingWithConfirmation,
-  stopSharingReferenceSet,
-} from '../shared-references.js'
 
 // ── Init (once at boot) ───────────────────────────────────────────────────────
 
@@ -335,7 +323,7 @@ export async function loadProfile() {
     await _loadProfileData({ setup: true })
     return
   }
-  await Promise.all([_loadProfileData(), _loadFriends(), _loadPending(), _loadSharedReferences()])
+  await Promise.all([_loadProfileData(), _loadFriends(), _loadPending()])
 }
 
 function _profileAccessCapability() {
@@ -1295,67 +1283,6 @@ async function _loadBlocked() {
   list.querySelectorAll('.friend-remove-btn').forEach(btn => {
     btn.addEventListener('click', () => _unblockUser(btn.dataset.id))
   })
-}
-
-async function _loadSharedReferences() {
-  const uid = state.user?.id
-  if (!uid) return
-  const list = document.getElementById('shared-references-list')
-  if (!list) return
-
-  list.innerHTML = sharedReferencesLoadingHtml()
-  const result = await fetchMyReferenceSharing()
-
-  if (result.kind === 'rate_limited') {
-    list.innerHTML = sharedReferencesRateLimitedHtml(result.retryAfterSeconds)
-    return
-  }
-  if (result.kind === 'error') {
-    list.innerHTML = sharedReferencesErrorHtml(result.message)
-    return
-  }
-
-  if (!result.sets.length) {
-    list.innerHTML = sharedReferencesEmptyHtml()
-    return
-  }
-
-  list.innerHTML = sharedReferencesListHtml(result.sets)
-  list.querySelectorAll('.shared-ref-stop-btn').forEach(btn => {
-    btn.addEventListener('click', () => _changeReferenceSharing(btn, 'stop'))
-  })
-  list.querySelectorAll('.shared-ref-share-again-btn').forEach(btn => {
-    btn.addEventListener('click', () => _changeReferenceSharing(btn, 'shareAgain'))
-  })
-}
-
-async function _changeReferenceSharing(btn, action) {
-  const setId = btn.dataset.setId
-  const originalLabel = btn.textContent
-  const guard = () => requireCloudMutation({ showToast }).allowed
-  const busy = (label, run) => id => {
-    btn.disabled = true
-    btn.textContent = t(label)
-    return run(id)
-  }
-  const result = action === 'stop'
-    ? await stopSharingWithConfirmation(setId, { guard, stop: busy('sharedReferences.stopping', stopSharingReferenceSet) })
-    : await shareAgainGuarded(setId, { guard, shareAgain: busy('sharedReferences.sharingAgain', shareReferenceSetAgain) })
-  if (result.kind === 'cancelled' || result.kind === 'blocked') return
-
-  if (result.kind === 'ok' || result.kind === 'not_found') {
-    // not_found: the set is gone — refresh so the list reflects reality.
-    await _loadSharedReferences()
-    return
-  }
-
-  btn.disabled = false
-  btn.textContent = originalLabel
-  if (result.kind === 'rate_limited') {
-    showToast(t('sharedReferences.rateLimited', { seconds: result.retryAfterSeconds }))
-  } else {
-    showToast(t(action === 'stop' ? 'sharedReferences.stopFailed' : 'sharedReferences.shareAgainFailed', { message: result.message }))
-  }
 }
 
 function _blockedUserRowHtml(row) {
