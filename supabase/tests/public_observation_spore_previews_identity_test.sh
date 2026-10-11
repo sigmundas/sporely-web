@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Proves that 20261011120000_add_public_observation_spore_previews.sql left the
 # output of public.get_public_observation(bigint) and
-# public._get_public_observation_stage2a(bigint) byte-identical.
+# public._get_public_observation_stage2a(bigint) byte-identical for these
+# fixtures, whose old point order is id order. The migration's owner-approved
+# exception (point order is now image id, then measurement id) can reorder
+# sporePoints for rows whose old order differed; this script does not cover
+# that case (see public_observation_spore_previews_order_test.sql).
 #
 # In ONE transaction that is rolled back:
 #   1. load the fixtures of public_observation_spore_previews_test.sql, then
@@ -149,4 +153,4 @@ END
 ROLLBACK;
 SQL
 
-echo "ok: get_public_observation and _get_public_observation_stage2a output is byte-identical before and after 20261011120000"
+echo "ok: get_public_observation and _get_public_observation_stage2a output is byte-identical before and after 20261011120000 for these fixtures"

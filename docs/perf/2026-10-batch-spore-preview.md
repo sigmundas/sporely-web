@@ -81,8 +81,15 @@ pointing at the row's original slot, so not even current ctid order matches
 it. This is the one place where "byte-identical" holds only for the usual case
 (see "Decision for the owner" below).
 
-**Decision for the owner:** accept `get_public_observation`'s point order
-becoming image id, then measurement id. The alternatives are:
+**Owner decision, 2026-10-11: approved.** `get_public_observation`'s point
+order becomes image id, then measurement id. This is an explicit exception
+to the unchanged-output requirement, limited to the order of `sporePoints`.
+Consequences:
+- Landing Cards can show a different first 16 points for affected
+  observations.
+- A single call is 3–12 % slower locally (see "Database work").
+
+The alternatives that were offered:
 
 - keep the batch on the slow composed route, which failed the wall-clock
   condition;

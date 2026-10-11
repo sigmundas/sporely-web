@@ -36,9 +36,14 @@
 -- Expression text inside each helper is the text it replaces; only the
 -- correlation c.id / legacy.id became a parameter, and the point aggregate's
 -- implicit plan order became the explicit point_ordinal. Both public functions
--- keep their signatures, owner, grants, SECURITY DEFINER and search_path, and
--- their output is unchanged (proved by
--- supabase/tests/public_observation_spore_previews_identity_test.sh).
+-- keep their signatures, owner, grants, SECURITY DEFINER, search_path, fields,
+-- media behaviour and legacy url. Their output is NOT universally
+-- byte-identical: sporePoints is now ordered by image id, then measurement id
+-- (owner-approved exception, 2026-10-11). Where the old plan order already
+-- was id order the output is byte-identical (proved for the fixtures by
+-- supabase/tests/public_observation_spore_previews_identity_test.sh); for
+-- observations whose old order depended on the plan or on rows moved by
+-- updates, the point order can change. See SUPABASE_DB.md.
 --
 -- The batch function calls the eligibility helper, spore_point_rows (once
 -- for all ids) and the two mosaic helpers. It does not call spore_points_raw
@@ -586,7 +591,8 @@ $function$;
 -- --- public.get_public_observation(bigint)  [latest def: 20261001195524] ---
 --
 -- Unchanged except: the sporePoints and sporeMosaic expressions and the
--- mosaic lateral moved into the two private.*_authorize_* helpers above.
+-- mosaic lateral moved into the two private.*_authorize_* helpers above, and
+-- sporePoints is now in point_ordinal order (owner-approved, 2026-10-11).
 
 CREATE OR REPLACE FUNCTION public.get_public_observation(p_observation_id bigint)
  RETURNS TABLE(id bigint, "speciesSlug" text, "speciesName" text, "speciesCommonName" text, "observerDisplayName" text, "observedOn" date, country text, "regionId" text, "locationPrecision" text, "locationLabel" text, "hasMicroscopy" boolean, "sporeMeasurementCount" bigint, "sporeSummary" jsonb, "sporePoints" jsonb, "sporeMosaic" jsonb, "contrastMethod" text, "mountReagent" text, "sampleType" text, "sampleSource" text, "prepSummary" jsonb, "mapLat" double precision, "mapLon" double precision)
@@ -639,8 +645,8 @@ $function$;
 -- its invalid id / bucket / media version / owner mismatch / no key /
 -- invalid_storage_namespace checks) allows that mosaic for the caller AND
 -- mosaicMediaUrl is non-NULL. Otherwise it is NULL: fail closed, with no raw
--- key or url and no Worker URL. get_public_observation itself is unchanged
--- and keeps its url.
+-- key or url and no Worker URL. get_public_observation keeps its fields and
+-- its legacy url; only its point order became explicit.
 --
 -- Points come from private.public_observation_spore_point_rows, the same
 -- source get_public_observation reads through public_observation_spore_points_raw:

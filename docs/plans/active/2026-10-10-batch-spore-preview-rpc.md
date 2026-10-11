@@ -54,6 +54,28 @@ replace it.
   for now; removing it is a separate, reviewed follow-up. Its output stays
   byte-identical (identity test). Batch/single parity compares everything
   except `url`, and `SUPABASE_DB.md` documents the difference.
+  *Amended by the owner on 2026-10-11, during Stage 2 (below).*
+- **Point-order exception (owner decision 2026-10-11, Stage 2).**
+  `get_public_observation`'s `sporePoints` are now ordered by image id, then
+  measurement id, the same order the batch uses. This is an explicit
+  exception to the unchanged-output requirement, limited to the order of
+  `sporePoints`. The previous SQL order was unspecified and depended on the
+  plan and on physical row placement. Output is therefore not universally
+  byte-identical; the identity test proves it only where the old order was
+  id order. Everything else stays: fields, values, signatures, grants, visibility
+  gates and media behaviour (including the legacy `url`). The batch still
+  omits the raw mosaic `url` and fails closed. Consequences, documented in
+  `SUPABASE_DB.md`:
+  - Landing Cards can show a different first 16 points for affected
+    observations.
+  - A single `get_public_observation` call costs 3–12 % more execution time
+    and about 4 % more buffers locally.
+
+  The order regression test (`public_observation_spore_previews_order_test.sql`,
+  four plan shapes, rows moved by updates) stays.
+  The owner's approval and a fresh `sporely-security-reviewer` APPROVE on
+  `22f7b60` were the Stage 2 gate evidence. The documentation follow-up after
+  acceptance gets its own security verdict on the final SHA.
 - **Stage 2 must also:**
   - run case (b) at concurrency 2 as well as 6, per `sporely-landing`
     `docs/perf/2026-10-11-rpc-timeout-incident.md` §"Local only: whether

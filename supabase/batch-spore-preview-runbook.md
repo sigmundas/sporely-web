@@ -38,8 +38,18 @@ committed.
   `public.get_public_observation(bigint)` are replaced (`CREATE OR REPLACE`).
   - Their signatures, owner, grants, `SECURITY DEFINER` and `search_path` stay
     the same.
-  - Their output stays byte-identical: see
-    `supabase/tests/public_observation_spore_previews_identity_test.sh`.
+  - Their fields, values, visibility gates and media behaviour (including
+    the legacy mosaic `url`) stay the same.
+  - **Owner-approved exception:** `sporePoints` order becomes image id,
+    then measurement id. Observations whose previous, unspecified order
+    differed now return their points reordered, and a Landing card may show
+    a different first 16 points. Output is byte-identical only where the old
+    order already was id order (see
+    `supabase/tests/public_observation_spore_previews_identity_test.sh` and
+    `SUPABASE_DB.md`).
+  - A single `get_public_observation` call is modestly more expensive:
+    3–12 % more execution time locally. The step 5 baseline and the
+    post-switch comparison should be read with this in mind.
   - They now read the private helpers instead of inline subqueries.
 - No table, row, index, policy or trigger changes. No Worker deploy and no
   client release. Nothing calls the new function until `sporely-landing`
