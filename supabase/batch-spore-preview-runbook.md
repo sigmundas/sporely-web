@@ -4,7 +4,9 @@ Plan: `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md` (Stage 3).
 Migration: `supabase/migrations/20261011120000_add_public_observation_spore_previews.sql`.
 Probe SQL:
 - `supabase/batch-spore-preview-live-probe.sql` (step 3a);
-- `supabase/batch-spore-preview-stats-probe.sql` (step 5).
+- `supabase/batch-spore-preview-stats-probe.sql` (step 5);
+- `supabase/batch-spore-preview-compensation-check.sql` (step 4, only if a
+  compensation is needed).
 
 **Only a person runs this.** A person with explicit owner authorization
 performs every step and records the evidence. No agent runs any of it or
@@ -270,8 +272,7 @@ Never edit, rename or delete `20261011120000`, never run
 `supabase migration repair`, and never run reverse DDL directly in the SQL
 editor. Every correction is a **new** migration:
 - versioned later than every Remote version;
-- tested locally with `supabase db reset`, the pgTAP suite and the identity
-  test;
+- validated locally as described in "Validating a compensation" below;
 - deployed through the step 2 deploy-tree path with `--allow <new version>`.
 
 ### Order relative to `sporely-landing`
@@ -336,29 +337,112 @@ transaction:
 `CREATE OR REPLACE` keeps the existing owner and grants, and neither earlier
 migration sets grants for these two functions. Steps 1–2 are exactly what
 `supabase/tests/public_observation_spore_previews_identity_test.sh` applies
-inside its rolled-back transaction. Run that test against the compensating
-migration's result to show the output is unchanged.
+inside its rolled-back transaction. That test is therefore the proof that R2
+changes no `get_public_observation` output, but only when it runs **before**
+R2, on the deployed state. Once R2 is applied, it compares the old bodies with
+themselves and proves nothing.
 
 R2 touches a public read surface and its visibility gates. It needs owner
 approval and its own `sporely-security-reviewer` pass.
 
-## 5. Baseline `pg_stat_statements` snapshot (read-only, aggregate-only)
+### Validating a compensation
 
-Take it after step 3 and **before** `sporely-landing` switches Cards to the
-batch function. It is the baseline for the landing plan's Stage 2 human gate,
-which runs the same file again after the switch.
+Both options drop `get_public_observation_spore_previews`. The three batch
+test files call it throughout, so after either option they **must** fail with
+`function public.get_public_observation_spore_previews(bigint[]) does not
+exist`. That failure is expected; any other failure is a regression.
+
+**Locally, before committing the compensating migration:**
+
+1. `supabase db reset --local` on a branch that holds the compensating
+   migration. Seed nothing before step 3: the identity test refuses to run
+   (`shuffle did not make ctid order differ from id order`) on a database that
+   has been seeded and cleaned.
+2. **R2 only, first:** on a reset of the branch *without* the compensating
+   migration, run
+   `bash supabase/tests/public_observation_spore_previews_identity_test.sh`.
+   It must print its pass line. This is R2's output-identity proof.
+3. Run each SQL test that touches the public observation read surface, one
+   file at a time. That is every file under `supabase/tests/` that names
+   `get_public_observation` or `_get_public_observation_stage2a`. Do not rely
+   on a whole-suite `supabase test db` run. Locally it lost its server
+   connection partway through, and it reports the plain-SQL `NOTICE` tests as
+   "No subtests run".
+
+   The local evidence below used this per file:
+   - `psql -U postgres -X -v ON_ERROR_STOP=1 < <file>`;
+   - with `CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions`
+     beforehand;
+   - pass = exit 0 and no TAP `not ok` line.
+   - **must pass:**
+     - `metadata_only_microscope_images_test.sql`;
+     - `microscope_capture_chronology_test.sql`;
+     - `observation_time_of_day_privacy_test.sql`;
+     - `owner_sync_metadata_parents_test.sql`;
+     - `public_observation_prep_summary_test.sql`;
+     - `public_observation_rpc_validation.sql`;
+     - `sample_source_public_rpc_validation.sql`;
+     - `spore_child_image_ownership_rls_test.sql`;
+     - `stage2b_authorized_media_projections_test.sql`;
+     - the identity test (`.sh`; for R1 it proves `get_public_observation`
+       still matches its pre-`20261011120000` output; for R2 it is trivial);
+   - **must fail with "does not exist" for the batch function, and nothing
+     else:**
+     - `public_observation_spore_previews_test.sql`;
+     - `public_observation_spore_previews_order_test.sql`;
+     - `public_observation_spore_previews_eval_count_test.sql`;
+   - **already failing before this plan, not evidence either way:**
+     `public_observation_point_prep_test.sql` ("image C point should have all
+     prep keys stripped"). It fails identically on the deployed state, after
+     R1 and after R2 (whose bodies are `main`'s before this plan).
+4. Run the compensation check with the option applied:
+
+       psql "<local db url>" -X -v ON_ERROR_STOP=1 -v mode=r1 -f supabase/batch-spore-preview-compensation-check.sql
+
+   (`mode=r2` for R2.) Part A raises unless:
+   - the batch function is gone;
+   - the six helpers are present (R1) or absent (R2);
+   - both public read functions reference the helpers (R1) or do not (R2);
+   - both keep owner `postgres`, `SECURITY DEFINER`, `STABLE`,
+     `search_path=public` and an explicit ACL with no PUBLIC entry;
+   - `get_public_observation` is executable by `anon`, `authenticated` and
+     `service_role`, and `_get_public_observation_stage2a` by none of them;
+   - (R1) no helper is executable by a client role.
+
+   Part B calls `get_public_observation` as `anon` and prints counts. To give
+   it data locally, load `docs/perf/2026-10-batch-spore-preview/seed.sql`
+   after step 3, and remove it with `cleanup.sql` afterwards.
+
+**In production:**
+
+1. Before the compensation is deployed, run the same file with `mode=pre`.
+   It asserts the deployed state and records the Part B counts.
+2. Deploy the compensating migration through step 2.
+3. Run it again with `mode=r1` or `mode=r2`. Part A must pass. In Part B,
+   expect `caller = anon`, `uid_is_null = t`, `public_rows_with_points ≥ 1` and
+   `nonpublic_rows = 0`. Every count should equal the `mode=pre` run, unless
+   observations changed in between.
+4. Record both runs' outputs; they are booleans and integers only.
+
+Local evidence for this runbook (2026-10-11, synthetic fixtures, fresh reset
+per state):
+- R1 and R2 each applied cleanly.
+- The read-surface test set gave exactly the results listed in step 3.
+- The check passed for `pre`, `r1` and `r2`. Each wrong mode raised: for
+  example `mode=r2` on R1 raised "6 private helpers present, expected 0".
+- Part B printed `anon|t|30|20|20|20|20|30|0` in all three states.
+
+## 5. Baseline `pg_stat_statements` window (read-only, aggregate-only)
 
     psql "<connection string>" -X -v ON_ERROR_STOP=1 -f supabase/batch-spore-preview-stats-probe.sql
 
-It does not reset statistics. **Do not run `pg_stat_statements_reset()`.** The
-landing comparison needs the same cumulative counters.
+It does not reset statistics. **Do not run `pg_stat_statements_reset()`**, in
+any form, at any point in this runbook or the landing comparison.
 
-Output:
+### Output
 
 - **Epoch row:** `taken_at`, `stats_reset`, `dealloc`, `track`,
-  `max_entries`, `entries_now`. The later snapshot can be subtracted from this
-  one only if `stats_reset` is unchanged. If `dealloc` rose in between,
-  entries were evicted, and only per-call means and maximums are comparable.
+  `max_entries`, `entries_now`.
 - **One row per function and executing role:** `entries`, `calls`,
   `total_exec_ms`, `mean_exec_ms`, `max_exec_ms`, `rows`, `shared_blks_hit`
   and `shared_blks_read`. It covers four functions:
@@ -366,21 +450,72 @@ Output:
   - `media_authorize_delivery`;
   - `media_authorize_mosaic_delivery`;
   - `get_public_observation_spore_previews`.
-- **Expected roles:** `anon` and `authenticated` for the explorer's calls, and
-  `service_role` (the Worker) for the two media functions, which only
-  `service_role` may execute.
+- **Expected roles:**
+  - `anon` and `authenticated` for the explorer's calls;
+  - `service_role` (the Worker) for the two media functions, which only
+    `service_role` may execute.
 - **Expected for the batch function before the switch:** only the few step 3b
   calls, as `anon`. Statements from step 3a are excluded by their
   `/* bsp_probe */` marker.
 
-Caveats to record with the numbers:
+### Why a single snapshot is not a baseline
 
-- These are cumulative totals since `stats_reset`, not per-load figures.
+The figures are cumulative since each entry was created, not since any
+point the operator chooses. An entry can be evicted when the table is full and
+later re-created. It then starts from zero, while the global `stats_reset`
+stays the same. Comparing a snapshot taken after the switch with one taken
+before it therefore mixes different, unknown measurement periods. That holds
+for totals, for per-call means, and especially for `max_exec_ms`, which is
+the maximum since the entry was created. Such a comparison cannot show the
+effect of the switch.
+
+### Baseline procedure: one bracketed window before the switch
+
+1. After step 3, take snapshot **B0**.
+2. Wait a fixed window. Use at least 24 hours, so it covers a daily traffic
+   cycle, and keep the explorer's normal traffic: no load test. Take
+   snapshot **B1**. The landing switch must not happen before B1.
+3. The window B0→B1 is **valid** only if all of the following hold:
+   - `stats_reset` is identical in B0 and B1;
+   - `dealloc` is identical in B0 and B1. Any rise means that at least one
+     entry was evicted somewhere in the window. It might have been one of
+     these functions' entries, and the probe cannot tell which;
+   - for every function and role row present in both snapshots, `calls`,
+     `total_exec_ms`, `shared_blks_hit` and `shared_blks_read` did not
+     decrease;
+   - nobody ran `pg_stat_statements_reset` during the window. The operator
+     confirms this; a targeted reset of one entry changes neither
+     `stats_reset` nor `dealloc`.
+4. For a valid window, record per function and role the deltas Δcalls,
+   Δtotal_exec_ms, Δshared_blks_hit and Δshared_blks_read, plus the
+   window's mean, Δtotal_exec_ms / Δcalls. A row that exists only in B1 counts
+   from zero.
+5. If the window is **invalid**, record it as *inconclusive*, with the failing
+   condition, and do not use its figures. Take a new window from a fresh B0.
+   To make eviction less likely:
+   - use a shorter window, no shorter than one full day of explorer traffic;
+   - or ask the owner to raise `pg_stat_statements.max`. That is a separate
+     configuration change, which this runbook does not authorize.
+
+   Do not combine figures from different windows.
+
+`sporely-landing`'s Stage 2 human gate measures a window after the switch the
+same way (A0→A1, same length, same validity rules) and compares its deltas
+with B0→B1. If either window is invalid, the comparison is inconclusive and
+is repeated. A cumulative figure is never evidence of a change.
+
+### Caveats to record with the numbers
+
+- `max_exec_ms` is the maximum since the entry was created, not within the
+  window. Record it from B1 as context, but it is not window evidence.
 - Statements cancelled with `57014` are not recorded. The true tail is longer
-  than `max_exec_ms`.
+  than any figure here.
 - With `track = top`, `media_authorize_mosaic_delivery` calls made **inside**
   the batch function are not counted. After the switch, its row reflects only
   the Worker's `/mm/` requests.
+- Traffic differs between windows. Compare per-call means and the ratio of
+  `get_public_observation` calls to `media_authorize_delivery` calls, not raw
+  call totals alone.
 
 ## Record
 
@@ -392,7 +527,8 @@ Include:
 - the `check` and `post-verify` outcomes;
 - every step 3a output value;
 - the H1–H5 statuses and counts;
-- the step 5 epoch row and table.
+- the step 5 B0 and B1 epoch rows and tables, the window's validity verdict
+  (with the failing condition if inconclusive) and, if valid, its deltas.
 
 Include no ids, keys or query text.
 

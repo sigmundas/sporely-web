@@ -1,9 +1,10 @@
 -- Batch spore-preview RPC: aggregate pg_stat_statements snapshot (read-only).
 --
--- Runbook: supabase/batch-spore-preview-runbook.md, step 5. This is the
--- baseline that sporely-landing's explorer-cards-batch-preview plan
--- (Stage 2, human gate 2) compares its post-switch snapshot against. Run the
--- same file again for that later snapshot.
+-- Runbook: supabase/batch-spore-preview-runbook.md, step 5. Run it at both
+-- ends of a measurement window (B0 and B1 before the landing switch; A0 and
+-- A1 after it, for sporely-landing's explorer-cards-batch-preview Stage 2).
+-- Only deltas within a valid window are evidence; a single cumulative
+-- snapshot is not (see the runbook).
 --
 -- Run as the database owner (postgres), with psql:
 --
@@ -22,9 +23,11 @@ BEGIN TRANSACTION READ ONLY;
 SET LOCAL statement_timeout = '15s';
 SET LOCAL search_path = extensions, public, pg_catalog;
 
--- Counter epoch. A later snapshot can be subtracted from this one only if
--- stats_reset is unchanged. If dealloc rose in between, entries were evicted
--- and per-call means are the only comparable figures.
+-- Counter epoch. Two snapshots bound a valid window only if stats_reset and
+-- dealloc are identical in both: any dealloc rise means some entry was
+-- evicted, possibly one counted below, and an evicted entry restarts from
+-- zero without changing stats_reset. Such a window is inconclusive, for
+-- totals and means alike.
 SELECT
   now()                                              AS taken_at,
   i.stats_reset,
