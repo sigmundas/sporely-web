@@ -4242,6 +4242,24 @@ html.light .btn-add-photo { background: var(--green-deep); border-color: var(--g
 }
 .taxon-input:focus { border-color: var(--green-accent); }
 .taxon-input::placeholder { color: var(--text-dim); }
+.taxon-field-wrap--clearable .taxon-input { padding-right: 36px; text-overflow: ellipsis; }
+.taxon-clear-btn {
+  position: absolute;
+  top: 50%; right: 2px;
+  transform: translateY(-50%);
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 50%;
+  color: var(--text-dim);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.taxon-clear-btn[hidden] { display: none; }
+.taxon-clear-btn:hover, .taxon-clear-btn:focus-visible { color: var(--text-primary); }
+.taxon-clear-btn:disabled { opacity: 0.4; cursor: default; }
 
 .taxon-dropdown {
   position: absolute;

@@ -26,6 +26,7 @@ import {
   __runImportAiComparisonForTests,
   __setImportAiSessionsForTests,
   __setImportAiTestHooks,
+  _wireCard,
 } from './screens/import_review.js'
 
 function makeSession(id = 'session-1') {
@@ -888,4 +889,144 @@ test('ai crop overlays only display for custom crops', () => {
   const rect = { x1: 0.1, y1: 0.1, x2: 0.9, y2: 0.9 }
   assert.equal(shouldShowAiCropOverlay(rect, false), false)
   assert.equal(shouldShowAiCropOverlay(rect, true), true)
+})
+
+function makeTaxonField(sid, value = '') {
+  const makeNode = extra => {
+    const listeners = {}
+    return {
+      style: { display: '' },
+      dataset: {},
+      innerHTML: '',
+      hidden: false,
+      disabled: false,
+      addEventListener(type, handler) {
+        (listeners[type] ||= []).push(handler)
+      },
+      dispatchEvent(event) {
+        for (const handler of listeners[event.type] || []) handler(event)
+        return true
+      },
+      ...extra,
+    }
+  }
+  const field = { focusCount: 0 }
+  const dropdown = makeNode()
+  const button = makeNode()
+  const wrap = makeNode({
+    querySelector(selector) {
+      if (selector === '.taxon-clear-btn') return button
+      if (selector === '.taxon-dropdown') return dropdown
+      return null
+    },
+  })
+  const input = makeNode({
+    value,
+    closest(selector) {
+      return selector === '.taxon-field-wrap' ? wrap : null
+    },
+    focus() { field.focusCount++ },
+    blur() {},
+  })
+  const card = makeNode({
+    querySelector(selector) {
+      if (selector === `.import-taxon-input[data-sid="${sid}"]`) return input
+      if (selector === `.import-taxon-dropdown[data-sid="${sid}"]`) return dropdown
+      return null
+    },
+    querySelectorAll() { return [] },
+  })
+  return Object.assign(field, { input, button, dropdown, wrap, card })
+}
+
+function sessionTaxonSelection(session) {
+  return {
+    taxon: session.taxon,
+    aiSelectedTaxonSource: session.aiSelectedTaxonSource,
+    aiSelectedService: session.aiSelectedService,
+    aiSelectedPrediction: session.aiSelectedPrediction,
+    aiSelectedPredictionByService: session.aiSelectedPredictionByService,
+    aiSelectedProbabilityByService: session.aiSelectedProbabilityByService,
+  }
+}
+
+test('import species clear button follows the input value and clears like manual deletion', () => {
+  const sid = 'session-clear'
+  const prediction = {
+    scientificName: 'Amanita muscaria',
+    vernacularName: 'Fly agaric',
+    displayName: 'Fly agaric (Amanita muscaria)',
+    probability: 0.91,
+  }
+  const previousDocument = globalThis.document
+  const previousSetTimeout = globalThis.setTimeout
+  const previousClearTimeout = globalThis.clearTimeout
+  const timers = manualTimers()
+  const emptyField = makeTaxonField('session-empty')
+  const field = makeTaxonField(sid, prediction.displayName)
+  const cards = new Map([
+    ['session-empty', emptyField.card],
+    [sid, field.card],
+  ])
+  let persisted = 0
+  globalThis.document = {
+    querySelector(selector) {
+      const match = /^\.import-card\[data-sid="([^"]+)"\]$/.exec(selector)
+      return match ? cards.get(match[1]) || null : null
+    },
+    querySelectorAll() { return [] },
+  }
+  globalThis.setTimeout = timers.setTimeoutImpl
+  globalThis.clearTimeout = timers.clearTimeoutImpl
+
+  try {
+    const emptySession = { ...makeSession('session-empty'), files: [], aiFiles: [], imageMeta: [] }
+    const manualSession = { ...makeSession('session-manual'), files: [], aiFiles: [], imageMeta: [] }
+    const session = { ...makeSession(sid), files: [], aiFiles: [], imageMeta: [] }
+    __setImportAiSessionsForTests([emptySession, manualSession, session])
+    __setImportAiTestHooks({ persistSessions: () => { persisted++ } })
+
+    _wireCard('session-empty')
+    assert.equal(emptyField.button.hidden, true, 'hidden for an empty input')
+    emptyField.input.value = 'Ama'
+    emptyField.input.dispatchEvent({ type: 'input' })
+    assert.equal(emptyField.button.hidden, false, 'shown after typing')
+
+    // Card rendered with an AI-filled taxon.
+    _applySessionAiTopPrediction(manualSession, [prediction], { service: 'artsorakel' })
+    _applySessionAiTopPrediction(session, [prediction], { service: 'artsorakel' })
+    assert.equal(session.aiSelectedTaxonSource, 'ai')
+    _wireCard(sid)
+    assert.equal(field.button.hidden, false, 'shown for an AI-filled input')
+
+    // Reference: what deleting the text by hand does to an identical session.
+    const manualField = makeTaxonField('session-manual', prediction.displayName)
+    cards.set('session-manual', manualField.card)
+    _wireCard('session-manual')
+    manualField.input.value = ''
+    manualField.input.dispatchEvent({ type: 'input' })
+    const manual = sessionTaxonSelection(manualSession)
+    assert.equal(manual.taxon, null) // createManualTaxon('')
+    assert.equal(manual.aiSelectedTaxonSource, 'manual')
+
+    field.dropdown.style.display = 'block'
+    const persistedBefore = persisted
+    const pointer = { type: 'pointerdown', defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }
+    field.button.dispatchEvent(pointer)
+    assert.equal(pointer.defaultPrevented, true, 'pointerdown must keep focus on the input')
+    field.button.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} })
+
+    assert.equal(field.input.value, '')
+    assert.deepEqual(sessionTaxonSelection(session), manual)
+    assert.equal(persisted, persistedBefore + 1)
+    assert.equal(field.button.hidden, true)
+    assert.equal(field.dropdown.style.display, 'none')
+    assert.equal(field.focusCount, 1, 'focus returns to the input')
+  } finally {
+    __setImportAiTestHooks(null)
+    __setImportAiSessionsForTests([])
+    globalThis.document = previousDocument
+    globalThis.setTimeout = previousSetTimeout
+    globalThis.clearTimeout = previousClearTimeout
+  }
 })

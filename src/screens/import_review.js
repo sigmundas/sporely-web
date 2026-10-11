@@ -7,6 +7,7 @@ import { searchTaxa, formatTaxonLabel, createManualTaxon } from '../artsorakel.j
 import { enqueueObservation } from '../sync-queue.js';
 import { nativeCaptureSourcePathFromNativePhoto } from '../native-capture-storage.js';
 import { canPerformCloudMutation } from '../capabilities.js';
+import { renderTaxonClearButton, syncTaxonClearButton, wireTaxonClearButton } from '../taxon-clear-button.js';
 import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
 import { saveImportSessions, clearImportSessions } from '../import-store.js';
@@ -1093,7 +1094,7 @@ function _updateImportFooterUi() {
   if (progressText) progressText.textContent = total > 0 ? `${done}/${total}` : '';
 
   document
-    .querySelectorAll('#import-session-list .import-card-delete, #import-session-list .import-strip-delete, #import-session-list .import-vis-radio, #import-session-list .import-taxon-input')
+    .querySelectorAll('#import-session-list .import-card-delete, #import-session-list .import-strip-delete, #import-session-list .import-vis-radio, #import-session-list .import-taxon-input, #import-session-list .taxon-clear-btn')
     .forEach(el => {
       el.disabled = running;
     });
@@ -2195,10 +2196,11 @@ function buildCardHTML(session) {
     <div class="import-location-hint import-card-crop-hint">${t('crop.noCropHint')}</div>
       <div class="detail-field" style="margin-top:12px">
       <div class="detail-field-label">${t('detail.species')}</div>
-      <div class="taxon-field-wrap">
+      <div class="taxon-field-wrap taxon-field-wrap--clearable">
         <input class="taxon-input import-taxon-input" type="text" placeholder="${t('detail.unknownSpecies')}"
           data-sid="${sid}" autocomplete="off" spellcheck="false"
           value="${taxonVal}">
+        ${renderTaxonClearButton(taxonVal)}
         <ul class="taxon-dropdown import-taxon-dropdown" data-sid="${sid}" style="display:none"></ul>
       </div>
       <div data-redlist-summary data-sid="${sid}" style="display:none"></div>
@@ -2360,6 +2362,7 @@ function _wireCard(sid) {
               _persistSessions();
             }
             input.value = display;
+            syncTaxonClearButton(input);
             dropdown.style.display = 'none';
             dropdown.innerHTML = '';
             input.blur?.();
@@ -2375,6 +2378,7 @@ function _wireCard(sid) {
   input.addEventListener('blur', () => {
     setTimeout(() => { dropdown.style.display = 'none'; }, 200);
   });
+  wireTaxonClearButton(input);
 
   const session = sessionById(sid)
   card.querySelectorAll(`.import-strip-item[data-sid="${sid}"]`).forEach(item => {
@@ -2441,6 +2445,7 @@ function _wireCard(sid) {
         session.aiPredictionsByService ||= {}
         _persistSessions()
         input.value = prediction.displayName
+        syncTaxonClearButton(input)
         input.blur?.()
         renderSessions()
       })
@@ -2876,6 +2881,7 @@ export function __abortImportAiRunsForTests() {
 }
 
 export {
+  _wireCard,
   _abortImportAiRuns,
   _ensureSessionAiState,
   _cloneSessionAiState,

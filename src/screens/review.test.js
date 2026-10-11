@@ -2303,3 +2303,147 @@ test('capture review rerender keeps the national display label; canonical fields
     env.restore()
   }
 })
+
+function _makeTaxonField(value = '') {
+  const makeNode = extra => {
+    const listeners = {}
+    return {
+      style: { display: '' },
+      dataset: {},
+      innerHTML: '',
+      hidden: false,
+      disabled: false,
+      addEventListener(type, handler) {
+        (listeners[type] ||= []).push(handler)
+      },
+      dispatchEvent(event) {
+        for (const handler of listeners[event.type] || []) handler(event)
+        return true
+      },
+      ...extra,
+    }
+  }
+  const field = { focusCount: 0 }
+  const dropdown = makeNode()
+  dropdown.style.display = 'block'
+  const button = makeNode()
+  const wrap = makeNode({
+    querySelector(selector) {
+      if (selector === '.taxon-clear-btn') return button
+      if (selector === '.taxon-dropdown') return dropdown
+      return null
+    },
+  })
+  const input = makeNode({
+    value,
+    closest(selector) {
+      return selector === '.taxon-field-wrap' ? wrap : null
+    },
+    focus() { field.focusCount++ },
+    blur() {},
+  })
+  input.dataset.idx = '0'
+  return Object.assign(field, { input, button, dropdown, wrap })
+}
+
+function _clickTaxonClear(field) {
+  const pointer = { type: 'pointerdown', defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }
+  field.button.dispatchEvent(pointer)
+  assert.equal(pointer.defaultPrevented, true, 'pointerdown must keep focus on the input')
+  field.button.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} })
+}
+
+function _reviewTaxonSelection() {
+  const aiState = __getReviewAiStateForTests()
+  return {
+    taxon: state.capturedPhotos[0].taxon,
+    selectedTaxonSource: aiState.selectedTaxonSource,
+    selectedService: aiState.selectedService,
+    selectedPrediction: aiState.selectedPrediction,
+  }
+}
+
+test('review species clear button follows the input value and clears like manual deletion', async () => {
+  const snapshot = _snapshotReviewState()
+  const timers = _manualTimers()
+  const env = _installReviewGlobals({
+    setTimeout: timers.setTimeoutImpl,
+    clearTimeout: timers.clearTimeoutImpl,
+    localStorage: { getItem() { return null }, setItem() {}, removeItem() {} },
+  })
+  const field = _makeTaxonField()
+  const prediction = {
+    service: 'artsorakel',
+    scientificName: 'Amanita muscaria',
+    vernacularName: 'Fly agaric',
+    displayName: 'Fly agaric (Amanita muscaria)',
+    probability: 0.91,
+  }
+  const resultEl = _makeElement('ai-result', 'button')
+  resultEl.dataset.identifyResult = JSON.stringify(prediction)
+  const resultsEl = _makeElement('ai-results')
+  resultsEl.querySelectorAll = selector => (selector === '[data-identify-result]' ? [resultEl] : [])
+  env.document.querySelectorAll = selector => (selector === '.taxon-input' ? [field.input] : [])
+  env.document.querySelector = selector => (selector === '[data-identify-results]' ? resultsEl : null)
+
+  const applyAiPrediction = async () => {
+    await __runReviewAiForTests('artsorakel')
+    _click(resultEl)
+  }
+
+  try {
+    _seedReviewState()
+    resetReviewAiState()
+    __setReviewTestHooks({
+      prepareReviewIdentifyInputs: async () => [{
+        blob: state.capturedPhotos[0].aiBlob,
+        originalBlob: state.capturedPhotos[0].blob,
+      }],
+      getAvailableIdentifyServices: async () => [{ service: 'artsorakel', available: true, reason: '' }],
+      resolvePhotoIdServices: () => ({ primary: 'artsorakel', run: ['artsorakel'] }),
+      identifyBlobs: async () => [prediction],
+    })
+    buildReviewGrid()
+
+    assert.equal(field.button.hidden, true, 'hidden for an empty input')
+
+    field.input.value = 'Amani'
+    field.input.dispatchEvent({ type: 'input' })
+    assert.equal(field.button.hidden, false, 'shown after typing')
+    field.input.value = ''
+    field.input.dispatchEvent({ type: 'input' })
+    assert.equal(field.button.hidden, true)
+
+    await applyAiPrediction()
+    assert.equal(field.input.value, prediction.displayName)
+    assert.equal(field.button.hidden, false, 'shown after a programmatic AI fill')
+    assert.equal(__getReviewAiStateForTests().selectedTaxonSource, 'ai')
+
+    // Reference: what deleting the text by hand leaves behind.
+    field.input.value = ''
+    field.input.dispatchEvent({ type: 'input' })
+    const manual = _reviewTaxonSelection()
+    assert.equal(manual.taxon, null)
+    assert.equal(manual.selectedTaxonSource, 'manual')
+
+    await applyAiPrediction()
+    assert.equal(__getReviewAiStateForTests().selectedTaxonSource, 'ai')
+    assert.notEqual(state.capturedPhotos[0].taxon, null)
+    field.dropdown.style.display = 'block'
+    const focusBefore = field.focusCount
+
+    _clickTaxonClear(field)
+
+    assert.equal(field.input.value, '')
+    assert.deepEqual(_reviewTaxonSelection(), manual)
+    assert.equal(state.capturedPhotos.every(photo => photo.taxon === null), true)
+    assert.equal(field.button.hidden, true)
+    assert.equal(field.dropdown.style.display, 'none')
+    assert.equal(field.focusCount, focusBefore + 1, 'focus returns to the input')
+  } finally {
+    __setReviewTestHooks(null)
+    resetReviewAiState()
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})

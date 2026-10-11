@@ -29,6 +29,7 @@ import { refreshHome } from './home.js'
 import { openFinds } from './finds.js'
 import { enqueueObservation } from '../sync-queue.js'
 import { canPerformCloudMutation } from '../capabilities.js'
+import { renderTaxonClearButton, syncTaxonClearButton, wireTaxonClearButton } from '../taxon-clear-button.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js'
@@ -1298,7 +1299,7 @@ export function buildReviewGrid() {
       <div class="field-meta-section capture-session-species">
         <div class="field-meta-header">${t('detail.species')}</div>
         <div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;">
-          <div class="taxon-field-wrap">
+          <div class="taxon-field-wrap taxon-field-wrap--clearable">
             <input
               class="taxon-input detail-taxon-input"
               type="text"
@@ -1308,6 +1309,7 @@ export function buildReviewGrid() {
               autocomplete="off"
               spellcheck="false"
             />
+            ${renderTaxonClearButton(displayName)}
             <ul class="taxon-dropdown" data-idx="0" style="display:none"></ul>
           </div>
           ${hasBlob ? _renderReviewAiControls() : ''}
@@ -1472,6 +1474,7 @@ function wireCardEvents() {
       // Delay hide so click on dropdown item registers
       setTimeout(() => hideDropdown(Number(input.dataset.idx)), 200)
     })
+    wireTaxonClearButton(input)
   })
 }
 
@@ -1550,6 +1553,7 @@ function setSharedTaxon(taxon, options = {}) {
   if (options.syncInputs) {
     document.querySelectorAll('.taxon-input').forEach(input => {
       input.value = taxon?.displayName || ''
+      syncTaxonClearButton(input)
     })
   }
   if (options.hideMenus !== false) {
