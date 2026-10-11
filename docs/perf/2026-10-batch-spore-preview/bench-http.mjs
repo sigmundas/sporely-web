@@ -87,7 +87,7 @@ for (const [label, rs] of results) {
 // once, all V in parallel). Reports each visitor's own wall-clock time.
 const visitorCases = cases.filter((c) => !c.label.startsWith('b2'))
 console.log('\nload: V simultaneous visitors, per-visitor wall-clock (ms)')
-console.log('V  case     | median | max   | concurrent DB requests at peak')
+console.log('V  case     | median | max   | client requests in flight at most (not a DB measurement)')
 for (const visitors of [4, 8]) {
   const loads = new Map(visitorCases.map((c) => [c.label, []]))
   for (let rep = 0; rep < reps; rep++) {
@@ -98,7 +98,7 @@ for (const visitors of [4, 8]) {
     }
   }
   for (const [label, totals] of loads) {
-    const peak = label.startsWith('a') ? visitors : visitors * 6
-    console.log(`${String(visitors).padEnd(2)} ${label} | ${fmt(median(totals)).padStart(6)} | ${fmt(Math.max(...totals)).padStart(5)} | ${peak}`)
+    const inFlight = label.startsWith('a') ? visitors : visitors * 6
+    console.log(`${String(visitors).padEnd(2)} ${label} | ${fmt(median(totals)).padStart(6)} | ${fmt(Math.max(...totals)).padStart(5)} | ${inFlight}`)
   }
 }
