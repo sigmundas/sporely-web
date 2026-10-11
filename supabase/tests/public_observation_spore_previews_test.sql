@@ -1,17 +1,17 @@
--- public.get_public_observation_spore_previews(bigint[]) regression test.
+-- pgTAP: public.get_public_observation_spore_previews(bigint[]).
 -- Plan: docs/plans/active/2026-10-10-batch-spore-preview-rpc.md, Stage 1.
 --
--- Run after a local reset with psql as postgres:
+-- Run after a local reset with the Supabase pgTAP runner:
 --   supabase db reset --local
---   docker exec -i supabase_db_zkpjklzfwzefhjluvhfw psql -U postgres -v ON_ERROR_STOP=1 \
---     < supabase/tests/public_observation_spore_previews_test.sql
--- Everything runs in one transaction and is rolled back. A failed assertion
--- raises, so ON_ERROR_STOP makes psql exit non-zero.
+--   supabase test db supabase/tests/public_observation_spore_previews_test.sql
+-- Everything runs in one transaction and is rolled back.
 --
 -- The block between the @fixtures markers is also replayed by
 -- public_observation_spore_previews_identity_test.sh; keep it self-contained.
 
 BEGIN;
+
+CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 
 -- @fixtures-begin
 CREATE TEMP TABLE spv_fixture (
@@ -174,6 +174,22 @@ BEGIN
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
   VALUES (obs, owner_id, owner_id::text || '/micro-empty.webp', 'microscope');
 
+  -- mosaic_no_points: a mosaic but no public spore measurement (only a
+  -- non-spore measurement type), so sporePoints is NULL and sporeMosaic is not.
+  INSERT INTO public.observations
+    (user_id, date, genus, species, visibility, is_draft, location_precision, spore_data_visibility)
+  VALUES (owner_id, '2026-10-04', 'Boletus', 'aereus', 'public', false, 'hidden', 'public')
+  RETURNING id INTO obs;
+  INSERT INTO spv_fixture VALUES ('mosaic_no_points', obs);
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
+  VALUES (obs, owner_id, owner_id::text || '/micro-cystidia.webp', 'microscope')
+  RETURNING id INTO img_meta;
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type, thumb_key)
+  VALUES (img_meta, owner_id, 50, 12, 'cystidia', owner_id::text || '/cyst2.webp');
+  INSERT INTO public.spore_measurement_mosaics
+    (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version)
+  VALUES (obs, owner_id, owner_id::text || '/mosaic-no-points.webp', 64, 64, 32, 1);
+
   -- Observation-level gates and spore_data_visibility values. Each of these
   -- gets one public spore-bearing image so a leaked point would show.
   FOREACH label IN ARRAY ARRAY[
@@ -213,271 +229,290 @@ END
 $fixtures$;
 -- @fixtures-end
 
-DO $test$
+-- ── Expected outcome per fixture, independent of get_public_observation ─────
+-- want_row: a row for every viewer except the blocked one.
+CREATE TEMP TABLE spv_expect (
+  label text PRIMARY KEY,
+  want_row boolean NOT NULL,
+  want_points boolean NOT NULL,
+  want_mosaic boolean NOT NULL
+) ON COMMIT DROP;
+INSERT INTO spv_expect (label, want_row, want_points, want_mosaic)
+SELECT label,
+       label NOT IN ('private', 'friends', 'draft', 'banned_owner', 'deleted'),
+       label IN ('full', 'metadata_parent_public'),
+       label IN ('full', 'mosaic_no_points')
+  FROM spv_fixture;
+
+CREATE FUNCTION pg_temp.spv_as(p_viewer text) RETURNS void
+LANGUAGE plpgsql AS $$
 DECLARE
-  card_keys CONSTANT text[] := ARRAY[
-    'id', 'lengthUm', 'widthUm', 'cropUrl',
-    'mosaicX', 'mosaicY', 'mosaicW', 'mosaicH',
-    'contrastMethod', 'mountReagent', 'sampleType', 'sampleSource'
-  ];
-  all_ids bigint[];
-  v record;
-  f record;
-  batch record;
-  single record;
-  expected_points jsonb;
-  n bigint;
-  payload jsonb;
-  mosaic jsonb;
-  full_id bigint;
-  err_state text;
-  err_message text;
+  uid uuid := (SELECT user_id FROM spv_viewer WHERE label = p_viewer);
 BEGIN
-  SELECT array_agg(observation_id ORDER BY label) INTO all_ids FROM spv_fixture;
-  full_id := (SELECT observation_id FROM spv_fixture WHERE label = 'full');
+  PERFORM set_config('request.jwt.claim.sub', coalesce(uid::text, ''), true);
+  PERFORM set_config('request.jwt.claims',
+    CASE WHEN uid IS NULL THEN jsonb_build_object('role', 'anon')
+         ELSE jsonb_build_object('sub', uid::text, 'role', 'authenticated') END::text,
+    true);
+END
+$$;
 
-  -- ── Visibility matrix: expected outcome per fixture and viewer ────────────
-  -- row: does the batch return a row? points: are points/mosaic non-null?
-  FOR v IN SELECT * FROM spv_viewer LOOP
-    PERFORM set_config('request.jwt.claim.sub', coalesce(v.user_id::text, ''), true);
-    PERFORM set_config('request.jwt.claims',
-      CASE WHEN v.user_id IS NULL THEN jsonb_build_object('role', 'anon')
-           ELSE jsonb_build_object('sub', v.user_id::text, 'role', 'authenticated') END::text,
-      true);
+-- get_public_observation per fixture, its points reduced to the card keys.
+CREATE TEMP VIEW spv_single AS
+SELECT f.label,
+       g.id AS observation_id,
+       CASE WHEN g."sporePoints" IS NULL THEN NULL ELSE (
+         SELECT coalesce(jsonb_agg((
+                  SELECT coalesce(jsonb_object_agg(kv.key, kv.value), '{}'::jsonb)
+                    FROM jsonb_each(pt.value) kv
+                   WHERE kv.key = ANY (ARRAY[
+                     'id', 'lengthUm', 'widthUm', 'cropUrl',
+                     'mosaicX', 'mosaicY', 'mosaicW', 'mosaicH',
+                     'contrastMethod', 'mountReagent', 'sampleType', 'sampleSource'])
+                ) ORDER BY pt.ord), '[]'::jsonb)
+           FROM jsonb_array_elements(g."sporePoints") WITH ORDINALITY pt(value, ord)
+       ) END AS points,
+       g."sporeMosaic" AS spore_mosaic
+  FROM spv_fixture f
+ CROSS JOIN LATERAL public.get_public_observation(f.observation_id) g;
 
-    FOR f IN
-      SELECT fx.label, fx.observation_id,
-             CASE
-               WHEN fx.label IN ('private', 'friends', 'draft', 'banned_owner', 'deleted') THEN false
-               WHEN v.label = 'blocker' THEN false
-               ELSE true
-             END AS want_row,
-             fx.label IN ('full', 'metadata_parent_public') AS want_points,
-             fx.label IN ('full') AS want_mosaic
-        FROM spv_fixture fx
-    LOOP
-      SELECT count(*) INTO n
-        FROM public.get_public_observation_spore_previews(ARRAY[f.observation_id]);
-      IF n <> (CASE WHEN f.want_row THEN 1 ELSE 0 END) THEN
-        RAISE EXCEPTION 'matrix: % as %: expected % rows, got %', f.label, v.label, f.want_row::int, n;
-      END IF;
+-- One batch call over every fixture id.
+CREATE TEMP VIEW spv_batch AS
+SELECT f.label, b.observation_id, b.points, b.spore_mosaic
+  FROM public.get_public_observation_spore_previews(
+         (SELECT array_agg(observation_id ORDER BY observation_id) FROM spv_fixture)) b
+  JOIN spv_fixture f ON f.observation_id = b.observation_id;
 
-      SELECT * INTO batch FROM public.get_public_observation_spore_previews(ARRAY[f.observation_id]);
-      SELECT * INTO single FROM public.get_public_observation(f.observation_id);
+-- One batch call per fixture id.
+CREATE TEMP VIEW spv_batch_each AS
+SELECT f.label, b.observation_id, b.points, b.spore_mosaic
+  FROM spv_fixture f
+ CROSS JOIN LATERAL public.get_public_observation_spore_previews(ARRAY[f.observation_id]) b;
 
-      -- Row presence agrees with get_public_observation.
-      IF (batch.observation_id IS NULL) <> (single.id IS NULL) THEN
-        RAISE EXCEPTION 'parity: % as %: batch row % but get_public_observation row %',
-          f.label, v.label, batch.observation_id IS NOT NULL, single.id IS NOT NULL;
-      END IF;
-      CONTINUE WHEN NOT f.want_row;
+SELECT plan(47);
 
-      IF (batch.points IS NOT NULL) <> f.want_points THEN
-        RAISE EXCEPTION 'matrix: % as %: points expected %, got %', f.label, v.label, f.want_points, batch.points;
-      END IF;
-      IF (batch.spore_mosaic IS NOT NULL) <> f.want_mosaic THEN
-        RAISE EXCEPTION 'matrix: % as %: mosaic expected %, got %', f.label, v.label, f.want_mosaic, batch.spore_mosaic;
-      END IF;
+-- ── Visibility matrix and parity, per viewer ─────────────────────────────────
+SELECT pg_temp.spv_as('anon');
+SELECT results_eq('SELECT label FROM spv_batch ORDER BY label',
+  'SELECT label FROM spv_expect WHERE want_row ORDER BY label',
+  'anon: rows exactly for the eligible fixtures');
+SELECT results_eq('SELECT label FROM spv_batch ORDER BY label',
+  'SELECT label FROM spv_single ORDER BY label',
+  'anon: rows exactly where get_public_observation returns one');
+SELECT results_eq('SELECT label, points IS NOT NULL, spore_mosaic IS NOT NULL FROM spv_batch ORDER BY label',
+  'SELECT label, want_points, want_mosaic FROM spv_expect WHERE want_row ORDER BY label',
+  'anon: points and mosaic present exactly where expected');
+SELECT is_empty($$SELECT label FROM spv_batch b FULL JOIN spv_single s USING (label)
+   WHERE b.observation_id IS DISTINCT FROM s.observation_id
+      OR b.points IS DISTINCT FROM s.points OR b.spore_mosaic IS DISTINCT FROM s.spore_mosaic$$,
+  'anon: batch points and mosaic equal get_public_observation');
+SELECT is_empty($$SELECT label FROM spv_batch_each b FULL JOIN spv_single s USING (label)
+   WHERE b.observation_id IS DISTINCT FROM s.observation_id
+      OR b.points IS DISTINCT FROM s.points OR b.spore_mosaic IS DISTINCT FROM s.spore_mosaic$$,
+  'anon: single-id batch calls equal get_public_observation');
 
-      -- Parity: mosaic equal; points equal get_public_observation's points
-      -- reduced to the card keys, element for element and in order.
-      IF batch.spore_mosaic IS DISTINCT FROM single."sporeMosaic" THEN
-        RAISE EXCEPTION 'parity: % as %: mosaic % <> %', f.label, v.label, batch.spore_mosaic, single."sporeMosaic";
-      END IF;
-      SELECT CASE WHEN single."sporePoints" IS NULL THEN NULL ELSE coalesce(jsonb_agg((
-               SELECT coalesce(jsonb_object_agg(kv.key, kv.value), '{}'::jsonb)
-                 FROM jsonb_each(pt.value) kv WHERE kv.key = ANY (card_keys)
-             ) ORDER BY pt.ord), '[]'::jsonb) END
-        INTO expected_points
-        FROM jsonb_array_elements(coalesce(single."sporePoints", '[]'::jsonb)) WITH ORDINALITY pt(value, ord);
-      IF batch.points IS DISTINCT FROM expected_points THEN
-        RAISE EXCEPTION 'parity: % as %: points % <> %', f.label, v.label, batch.points, expected_points;
-      END IF;
-    END LOOP;
-  END LOOP;
+SELECT pg_temp.spv_as('stranger');
+SELECT results_eq('SELECT label FROM spv_batch ORDER BY label',
+  'SELECT label FROM spv_expect WHERE want_row ORDER BY label',
+  'stranger: rows exactly for the eligible fixtures');
+SELECT results_eq('SELECT label FROM spv_batch ORDER BY label',
+  'SELECT label FROM spv_single ORDER BY label',
+  'stranger: rows exactly where get_public_observation returns one');
+SELECT results_eq('SELECT label, points IS NOT NULL, spore_mosaic IS NOT NULL FROM spv_batch ORDER BY label',
+  'SELECT label, want_points, want_mosaic FROM spv_expect WHERE want_row ORDER BY label',
+  'stranger: points and mosaic present exactly where expected');
+SELECT is_empty($$SELECT label FROM spv_batch b FULL JOIN spv_single s USING (label)
+   WHERE b.observation_id IS DISTINCT FROM s.observation_id
+      OR b.points IS DISTINCT FROM s.points OR b.spore_mosaic IS DISTINCT FROM s.spore_mosaic$$,
+  'stranger: batch points and mosaic equal get_public_observation');
+SELECT is_empty($$SELECT label FROM spv_batch_each b FULL JOIN spv_single s USING (label)
+   WHERE b.observation_id IS DISTINCT FROM s.observation_id
+      OR b.points IS DISTINCT FROM s.points OR b.spore_mosaic IS DISTINCT FROM s.spore_mosaic$$,
+  'stranger: single-id batch calls equal get_public_observation');
 
-  -- ── Concrete values for the full fixture (anon) ───────────────────────────
-  PERFORM set_config('request.jwt.claim.sub', '', true);
-  PERFORM set_config('request.jwt.claims', '{"role":"anon"}', true);
-  SELECT points, spore_mosaic INTO payload, mosaic
-    FROM public.get_public_observation_spore_previews(ARRAY[full_id]);
+SELECT pg_temp.spv_as('owner');
+SELECT results_eq('SELECT label FROM spv_batch ORDER BY label',
+  'SELECT label FROM spv_expect WHERE want_row ORDER BY label',
+  'owner: rows exactly for the eligible fixtures (no owner bypass)');
+SELECT results_eq('SELECT label FROM spv_batch ORDER BY label',
+  'SELECT label FROM spv_single ORDER BY label',
+  'owner: rows exactly where get_public_observation returns one');
+SELECT results_eq('SELECT label, points IS NOT NULL, spore_mosaic IS NOT NULL FROM spv_batch ORDER BY label',
+  'SELECT label, want_points, want_mosaic FROM spv_expect WHERE want_row ORDER BY label',
+  'owner: points and mosaic present exactly where expected');
+SELECT is_empty($$SELECT label FROM spv_batch b FULL JOIN spv_single s USING (label)
+   WHERE b.observation_id IS DISTINCT FROM s.observation_id
+      OR b.points IS DISTINCT FROM s.points OR b.spore_mosaic IS DISTINCT FROM s.spore_mosaic$$,
+  'owner: batch points and mosaic equal get_public_observation');
+SELECT is_empty($$SELECT label FROM spv_batch_each b FULL JOIN spv_single s USING (label)
+   WHERE b.observation_id IS DISTINCT FROM s.observation_id
+      OR b.points IS DISTINCT FROM s.points OR b.spore_mosaic IS DISTINCT FROM s.spore_mosaic$$,
+  'owner: single-id batch calls equal get_public_observation');
 
-  -- 4 public spore points: m1, m2, the ' Spores ' one and the '' one on the
-  -- microscope image. Excluded: cystidia, deleted image, purged image.
-  IF jsonb_array_length(payload) <> 4 THEN
-    RAISE EXCEPTION 'full: expected 4 points, got %', payload;
-  END IF;
-  IF EXISTS (
-    SELECT 1 FROM jsonb_array_elements(payload) pt, jsonb_object_keys(pt.value) k
-     WHERE k <> ALL (card_keys)
-  ) THEN
-    RAISE EXCEPTION 'full: a point carries a non-card key: %', payload;
-  END IF;
-  IF EXISTS (SELECT 1 FROM jsonb_array_elements(payload) pt WHERE (pt.value->>'lengthUm')::numeric IN (99, 98, 40)) THEN
-    RAISE EXCEPTION 'full: a gated point leaked: %', payload;
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM jsonb_array_elements(payload) pt
-     WHERE pt.value->>'lengthUm' = '10.5'
+SELECT pg_temp.spv_as('blocker');
+SELECT is_empty('SELECT label FROM spv_batch',
+  'blocked viewer: no rows for the blocked owner''s observations');
+SELECT is_empty('SELECT label FROM spv_single',
+  'blocked viewer: get_public_observation also returns no rows');
+SELECT is_empty('SELECT label FROM spv_batch_each',
+  'blocked viewer: no rows from single-id batch calls');
+
+-- ── Concrete values for the full and mosaic_no_points fixtures (anon) ───────
+SELECT pg_temp.spv_as('anon');
+SELECT is((SELECT jsonb_array_length(points) FROM spv_batch WHERE label = 'full'), 4,
+  'full: four public spore points (cystidia, deleted and purged images excluded)');
+SELECT is_empty($$SELECT k FROM spv_batch b, jsonb_array_elements(b.points) pt, jsonb_object_keys(pt.value) k
+   WHERE b.label = 'full' AND k <> ALL (ARRAY[
+     'id', 'lengthUm', 'widthUm', 'cropUrl', 'mosaicX', 'mosaicY', 'mosaicW', 'mosaicH',
+     'contrastMethod', 'mountReagent', 'sampleType', 'sampleSource'])$$,
+  'full: points carry only card keys');
+SELECT is_empty($$SELECT 1 FROM spv_batch b, jsonb_array_elements(b.points) pt
+   WHERE b.label = 'full' AND (pt.value->>'lengthUm')::numeric IN (99, 98, 40)$$,
+  'full: no point from a deleted or purged image or a non-spore type');
+SELECT ok(EXISTS (
+    SELECT 1 FROM spv_batch b, jsonb_array_elements(b.points) pt
+     WHERE b.label = 'full'
+       AND pt.value->>'lengthUm' = '10.5'
+       AND pt.value->>'widthUm' = '7.25'
        AND pt.value->>'cropUrl' ~ '^https://upload\.example\.test/m/[0-9]+/thumb\?v=[0-9]+$'
        AND pt.value->>'contrastMethod' = 'BF'
        AND pt.value->>'mountReagent' = 'Water'
        AND pt.value->>'sampleType' = 'fresh'
        AND pt.value->>'sampleSource' = 'spore_print'
-       AND (pt.value->>'mosaicW')::int = 100
-       AND pt.value ? 'mosaicX'
-  ) THEN
-    RAISE EXCEPTION 'full: card fields of m1 are wrong: %', payload;
-  END IF;
-  IF EXISTS (
-    SELECT 1 FROM jsonb_array_elements(payload) pt
-     WHERE pt.value->>'lengthUm' = '12'
-       AND (pt.value ? 'contrastMethod' AND pt.value->>'contrastMethod' <> 'not_set'
-            OR pt.value ? 'mountReagent' OR pt.value ? 'sampleType' OR pt.value ? 'sampleSource'
-            OR pt.value ? 'cropUrl')
-  ) THEN
-    RAISE EXCEPTION 'full: normalization of the microscope-image point differs: %', payload;
-  END IF;
-  IF mosaic->>'version' <> '2' OR NOT mosaic ? 'mosaicMediaUrl'
-     OR mosaic->>'mosaicMediaUrl' !~ '^https://upload\.example\.test/' THEN
-    RAISE EXCEPTION 'full: mosaic is not the latest authorized one: %', mosaic;
-  END IF;
+       AND (pt.value->>'mosaicX')::int = 0
+       AND (pt.value->>'mosaicW')::int = 100),
+  'full: card fields of the first measurement, cropUrl from build_worker_media_url');
+SELECT is_empty($$SELECT 1 FROM spv_batch b, jsonb_array_elements(b.points) pt
+   WHERE b.label = 'full' AND pt.value->>'lengthUm' = '12'
+     AND (pt.value->>'contrastMethod' IS DISTINCT FROM 'not_set'
+          OR pt.value ?| ARRAY['mountReagent', 'sampleType', 'sampleSource', 'cropUrl'])$$,
+  'full: microscope-image point normalized as get_public_observation does');
+SELECT ok((SELECT spore_mosaic->>'version' = '2'
+                  AND spore_mosaic->>'mosaicMediaUrl' ~ '^https://upload\.example\.test/'
+             FROM spv_batch WHERE label = 'full'),
+  'full: latest mosaic with its worker mosaic URL');
+SELECT ok((SELECT points IS NULL AND spore_mosaic->>'mosaicMediaUrl' IS NOT NULL
+             FROM spv_batch WHERE label = 'mosaic_no_points'),
+  'mosaic_no_points: points NULL while spore_mosaic is returned');
 
-  -- ── Bounds ────────────────────────────────────────────────────────────────
-  IF (SELECT count(*) FROM public.get_public_observation_spore_previews(NULL)) <> 0 THEN
-    RAISE EXCEPTION 'bounds: NULL input returned rows';
-  END IF;
-  IF (SELECT count(*) FROM public.get_public_observation_spore_previews('{}'::bigint[])) <> 0 THEN
-    RAISE EXCEPTION 'bounds: empty input returned rows';
-  END IF;
-  IF (SELECT count(*) FROM public.get_public_observation_spore_previews(ARRAY[full_id, full_id, NULL, full_id])) <> 1 THEN
-    RAISE EXCEPTION 'bounds: duplicates were not collapsed to one row';
-  END IF;
-  IF (SELECT count(*) FROM public.get_public_observation_spore_previews(
-        array_fill(full_id, ARRAY[59]) || ARRAY[-1::bigint])) <> 1 THEN
-    RAISE EXCEPTION 'bounds: 60 ids should be accepted';
-  END IF;
-  SELECT count(*) INTO n FROM public.get_public_observation_spore_previews(all_ids);
-  IF n <> (SELECT count(*) FROM spv_fixture
-            WHERE label NOT IN ('private', 'friends', 'draft', 'banned_owner', 'deleted')) THEN
-    RAISE EXCEPTION 'bounds: whole-fixture batch returned % rows', n;
-  END IF;
-  IF EXISTS (
-    SELECT 1 FROM (
-      SELECT observation_id, lag(observation_id) OVER () AS prev
-        FROM public.get_public_observation_spore_previews(all_ids)
-    ) s WHERE s.prev >= s.observation_id
-  ) THEN
-    RAISE EXCEPTION 'bounds: rows are not in observation_id order';
-  END IF;
+-- ── Bounds ───────────────────────────────────────────────────────────────────
+SELECT is_empty('SELECT * FROM public.get_public_observation_spore_previews(NULL)',
+  'bounds: NULL input returns no rows');
+SELECT is_empty($$SELECT * FROM public.get_public_observation_spore_previews('{}'::bigint[])$$,
+  'bounds: empty input returns no rows');
+SELECT is((SELECT count(*) FROM public.get_public_observation_spore_previews(
+             ARRAY[f.observation_id, f.observation_id, NULL, f.observation_id])),
+          1::bigint, 'bounds: duplicate and NULL elements collapse to one row')
+  FROM spv_fixture f WHERE f.label = 'full';
+SELECT is((SELECT count(*) FROM public.get_public_observation_spore_previews(
+             array_fill(f.observation_id, ARRAY[59]) || ARRAY[-1::bigint])),
+          1::bigint, 'bounds: 60 elements are accepted')
+  FROM spv_fixture f WHERE f.label = 'full';
+SELECT throws_ok(
+  format('SELECT * FROM public.get_public_observation_spore_previews(array_fill(%s::bigint, ARRAY[61]))',
+         (SELECT observation_id FROM spv_fixture WHERE label = 'full')),
+  '22023', 'get_public_observation_spore_previews accepts at most 60 observation ids, got 61',
+  'bounds: 61 ids are rejected with a clear error');
+SELECT throws_ok(
+  'SELECT * FROM public.get_public_observation_spore_previews(array_fill(NULL::bigint, ARRAY[61]))',
+  '22023', NULL, 'bounds: 61 NULL elements are rejected');
+SELECT throws_ok(
+  format('SELECT * FROM public.get_public_observation_spore_previews(array_fill(%s::bigint, ARRAY[8, 8]))',
+         (SELECT observation_id FROM spv_fixture WHERE label = 'full')),
+  '22023', NULL, 'bounds: a 64-element 2-D array is rejected');
+SELECT is_empty($$SELECT 1 FROM (
+    SELECT observation_id, lag(observation_id) OVER () AS prev
+      FROM public.get_public_observation_spore_previews(
+             (SELECT array_agg(observation_id ORDER BY observation_id DESC) FROM spv_fixture))
+  ) s WHERE s.prev >= s.observation_id$$,
+  'bounds: rows come back in observation_id order');
 
-  BEGIN
-    PERFORM public.get_public_observation_spore_previews(array_fill(full_id, ARRAY[61]));
-    RAISE EXCEPTION 'bounds: 61 ids were accepted';
-  EXCEPTION WHEN invalid_parameter_value THEN
-    GET STACKED DIAGNOSTICS err_message = MESSAGE_TEXT;
-    IF err_message NOT LIKE '%at most 60 observation ids, got 61%' THEN
-      RAISE EXCEPTION 'bounds: unexpected 61-id error: %', err_message;
-    END IF;
-  END;
-  BEGIN
-    PERFORM public.get_public_observation_spore_previews(array_fill(NULL::bigint, ARRAY[61]));
-    RAISE EXCEPTION 'bounds: 61 NULL elements were accepted';
-  EXCEPTION WHEN invalid_parameter_value THEN NULL;
-  END;
-  BEGIN
-    PERFORM public.get_public_observation_spore_previews(array_fill(full_id, ARRAY[8, 8]));
-    RAISE EXCEPTION 'bounds: a 64-element 2-D array was accepted';
-  EXCEPTION WHEN invalid_parameter_value THEN NULL;
-  END;
+-- ── Grants, owner, SECURITY DEFINER and search_path ──────────────────────────
+SELECT ok(has_function_privilege('anon', 'public.get_public_observation_spore_previews(bigint[])', 'EXECUTE'),
+  'grants: anon can execute');
+SELECT ok(has_function_privilege('authenticated', 'public.get_public_observation_spore_previews(bigint[])', 'EXECUTE'),
+  'grants: authenticated can execute');
+SELECT ok(NOT has_function_privilege('service_role', 'public.get_public_observation_spore_previews(bigint[])', 'EXECUTE'),
+  'grants: service_role is not granted');
+SELECT is_empty($$SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a
+   WHERE p.oid = 'public.get_public_observation_spore_previews(bigint[])'::regprocedure
+     AND a.grantee = 0$$,
+  'grants: PUBLIC holds no privilege');
+SELECT is_definer('public', 'get_public_observation_spore_previews', ARRAY['bigint[]'],
+  'shape: SECURITY DEFINER');
+SELECT volatility_is('public', 'get_public_observation_spore_previews', ARRAY['bigint[]'], 'stable',
+  'shape: STABLE');
+SELECT function_owner_is('public', 'get_public_observation_spore_previews', ARRAY['bigint[]'], 'postgres',
+  'shape: owned by postgres');
+SELECT is((SELECT proconfig FROM pg_proc
+            WHERE oid = 'public.get_public_observation_spore_previews(bigint[])'::regprocedure),
+          ARRAY['search_path=""'], 'shape: search_path is empty');
+SELECT is((SELECT count(*) FROM pg_proc
+            WHERE pronamespace = 'private'::regnamespace AND proname LIKE 'public_observation_%'),
+          5::bigint, 'shape: five private public_observation_* helpers');
+SELECT is_empty($$SELECT p.oid::regprocedure FROM pg_proc p
+   WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'public_observation_%'
+     AND (has_function_privilege('anon', p.oid, 'EXECUTE')
+          OR has_function_privilege('authenticated', p.oid, 'EXECUTE')
+          OR has_function_privilege('service_role', p.oid, 'EXECUTE')
+          OR NOT p.prosecdef
+          OR p.proconfig IS DISTINCT FROM ARRAY['search_path=""'])$$,
+  'shape: private helpers are definer, search_path empty, not executable by client roles');
 
-  -- ── Grants, owner, SECURITY DEFINER and search_path ───────────────────────
-  IF NOT has_function_privilege('anon', 'public.get_public_observation_spore_previews(bigint[])', 'EXECUTE')
-     OR NOT has_function_privilege('authenticated', 'public.get_public_observation_spore_previews(bigint[])', 'EXECUTE') THEN
-    RAISE EXCEPTION 'grants: anon and authenticated must be able to execute';
-  END IF;
-  IF has_function_privilege('service_role', 'public.get_public_observation_spore_previews(bigint[])', 'EXECUTE') THEN
-    RAISE EXCEPTION 'grants: service_role was not granted execute by this contract';
-  END IF;
-  IF EXISTS (
-    SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a
-     WHERE p.oid = 'public.get_public_observation_spore_previews(bigint[])'::regprocedure
-       AND a.grantee = 0
-  ) THEN
-    RAISE EXCEPTION 'grants: PUBLIC holds a privilege';
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_proc p
-     WHERE p.oid = 'public.get_public_observation_spore_previews(bigint[])'::regprocedure
-       AND p.prosecdef
-       AND p.provolatile = 's'
-       AND p.proconfig = ARRAY['search_path=""']
-       AND pg_get_userbyid(p.proowner) = 'postgres'
-  ) THEN
-    RAISE EXCEPTION 'shape: expected STABLE SECURITY DEFINER, owner postgres, search_path=""';
-  END IF;
-
-  FOR f IN
-    SELECT p.oid::regprocedure AS fn, p.prosecdef, p.proconfig
-      FROM pg_proc p
-     WHERE p.pronamespace = 'private'::regnamespace
-       AND p.proname IN ('public_observation_eligibility', 'public_observation_spore_points_raw',
-                         'public_observation_spore_mosaic_raw', 'public_observation_authorize_spore_points',
-                         'public_observation_authorize_spore_mosaic')
-  LOOP
-    IF has_function_privilege('anon', f.fn, 'EXECUTE')
-       OR has_function_privilege('authenticated', f.fn, 'EXECUTE')
-       OR has_function_privilege('service_role', f.fn, 'EXECUTE') THEN
-      RAISE EXCEPTION 'grants: % is executable by a client role', f.fn;
-    END IF;
-    IF NOT f.prosecdef OR f.proconfig IS DISTINCT FROM ARRAY['search_path=""'] THEN
-      RAISE EXCEPTION 'shape: % must be SECURITY DEFINER with search_path=""', f.fn;
-    END IF;
-  END LOOP;
-  IF (SELECT count(*) FROM pg_proc p
-       WHERE p.pronamespace = 'private'::regnamespace
-         AND p.proname LIKE 'public_observation_%') <> 5 THEN
-    RAISE EXCEPTION 'shape: expected exactly five private public_observation_* helpers';
-  END IF;
-END
-$test$;
-
--- ── Called through the client roles (EXECUTE path as PostgREST uses it) ────
-DO $roles$
-DECLARE
-  full_id bigint := (SELECT observation_id FROM spv_fixture WHERE label = 'full');
-  stranger uuid := (SELECT user_id FROM spv_viewer WHERE label = 'stranger');
-  blocker uuid := (SELECT user_id FROM spv_viewer WHERE label = 'blocker');
-  n bigint;
+-- ── Through the client roles, as PostgREST calls it ──────────────────────────
+-- Viewer switches here are inline DO blocks: calling a pg_temp function while
+-- SET ROLE anon crashes the local Postgres backend (signal 11), independent
+-- of this feature.
+GRANT SELECT ON spv_fixture TO anon, authenticated;
+GRANT SELECT ON spv_viewer TO anon, authenticated;
+SET LOCAL ROLE anon;
+DO $as$
+DECLARE uid uuid := (SELECT user_id FROM spv_viewer WHERE label = 'anon');
 BEGIN
-  SET LOCAL ROLE anon;
-  PERFORM set_config('request.jwt.claim.sub', '', true);
-  PERFORM set_config('request.jwt.claims', '{"role":"anon"}', true);
-  SELECT count(*) INTO n FROM public.get_public_observation_spore_previews(ARRAY[full_id]);
-  IF n <> 1 THEN RAISE EXCEPTION 'roles: anon got % rows', n; END IF;
-  BEGIN
-    PERFORM private.public_observation_eligibility(ARRAY[full_id]);
-    RAISE EXCEPTION 'roles: anon can call a private helper';
-  EXCEPTION WHEN insufficient_privilege THEN NULL;
-  END;
-  RESET ROLE;
-
-  SET LOCAL ROLE authenticated;
-  PERFORM set_config('request.jwt.claim.sub', stranger::text, true);
+  PERFORM set_config('request.jwt.claim.sub', coalesce(uid::text, ''), true);
   PERFORM set_config('request.jwt.claims',
-    jsonb_build_object('sub', stranger::text, 'role', 'authenticated')::text, true);
-  SELECT count(*) INTO n FROM public.get_public_observation_spore_previews(ARRAY[full_id]);
-  IF n <> 1 THEN RAISE EXCEPTION 'roles: stranger got % rows', n; END IF;
-
-  PERFORM set_config('request.jwt.claim.sub', blocker::text, true);
-  PERFORM set_config('request.jwt.claims',
-    jsonb_build_object('sub', blocker::text, 'role', 'authenticated')::text, true);
-  SELECT count(*) INTO n FROM public.get_public_observation_spore_previews(ARRAY[full_id]);
-  IF n <> 0 THEN RAISE EXCEPTION 'roles: blocked viewer got % rows', n; END IF;
-  RESET ROLE;
+    CASE WHEN uid IS NULL THEN jsonb_build_object('role', 'anon')
+         ELSE jsonb_build_object('sub', uid::text, 'role', 'authenticated') END::text, true);
 END
-$roles$;
+$as$;
+SELECT is((SELECT count(*) FROM spv_fixture f,
+                 public.get_public_observation_spore_previews(ARRAY[f.observation_id]) b
+            WHERE f.label = 'full'),
+          1::bigint, 'roles: anon executes the function');
+SELECT throws_ok(
+  'SELECT * FROM private.public_observation_eligibility(ARRAY[1::bigint])',
+  '42501', NULL, 'roles: anon cannot call a private helper');
+RESET ROLE;
 
-SELECT 'public_observation_spore_previews_test: ok' AS result;
+SET LOCAL ROLE authenticated;
+DO $as$
+DECLARE uid uuid := (SELECT user_id FROM spv_viewer WHERE label = 'stranger');
+BEGIN
+  PERFORM set_config('request.jwt.claim.sub', coalesce(uid::text, ''), true);
+  PERFORM set_config('request.jwt.claims',
+    CASE WHEN uid IS NULL THEN jsonb_build_object('role', 'anon')
+         ELSE jsonb_build_object('sub', uid::text, 'role', 'authenticated') END::text, true);
+END
+$as$;
+SELECT is((SELECT count(*) FROM spv_fixture f,
+                 public.get_public_observation_spore_previews(ARRAY[f.observation_id]) b
+            WHERE f.label = 'full'),
+          1::bigint, 'roles: authenticated stranger executes the function');
+DO $as$
+DECLARE uid uuid := (SELECT user_id FROM spv_viewer WHERE label = 'blocker');
+BEGIN
+  PERFORM set_config('request.jwt.claim.sub', coalesce(uid::text, ''), true);
+  PERFORM set_config('request.jwt.claims',
+    CASE WHEN uid IS NULL THEN jsonb_build_object('role', 'anon')
+         ELSE jsonb_build_object('sub', uid::text, 'role', 'authenticated') END::text, true);
+END
+$as$;
+SELECT is((SELECT count(*) FROM spv_fixture f,
+                 public.get_public_observation_spore_previews(ARRAY[f.observation_id]) b
+            WHERE f.label = 'full'),
+          0::bigint, 'roles: authenticated blocked viewer gets no row');
+RESET ROLE;
+
+SELECT * FROM finish();
 
 ROLLBACK;
