@@ -76,13 +76,17 @@ committed.
 All of the following must be true. Otherwise stop.
 
 - Stages 1 and 2 of the plan are accepted, including the
-  `sporely-security-reviewer` verdict on the Stage 1 candidate SHA.
+  `sporely-security-reviewer` verdict on the Stage 1 candidate SHA, and the
+  branch's final SHA has its own `sporely-security-reviewer` APPROVE.
 - The branch is merged to `main`, and `<merged main SHA>` is pushed. The
-  migration file at that SHA is byte-identical to the accepted candidate:
+  migration file at that SHA is byte-identical to the migration as
+  security-reviewed in its final form, at `cf68f4a`. The engine-accepted
+  Stage 2/3 candidates (`22f7b60`, `4c21355`) carry the same SQL but older
+  comments, so do not diff against them:
 
       git fetch origin
       git merge-base --is-ancestor <merged main SHA> origin/main
-      git diff --exit-code <accepted candidate SHA> <merged main SHA> -- \
+      git diff --exit-code cf68f4ad68772b4580c63d7a0a48bd97665cf26b <merged main SHA> -- \
         supabase/migrations/20261011120000_add_public_observation_spore_previews.sql
 
   Both commands must exit 0.
