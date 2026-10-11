@@ -5,12 +5,17 @@
 //
 //   node docs/perf/2026-10-batch-spore-preview/bench-db.mjs <db-container> [reps]
 //
+// With BASELINE_SQL=<file>, every session first runs that file inside a
+// transaction that is rolled back at the end (used to measure (b) with the
+// pre-20261011120000 get_public_observation definitions).
+//
 // Each repetition opens a fresh psql backend per case and runs the case twice:
 // "cold" is the first run in that backend (function plan caches empty),
 // "warm" the second (what a reused PostgREST pool connection sees). Shared
 // buffers are warm in both. Buffer counts on the top plan node include every
 // nested function call made while that node executes.
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 
 const container = process.argv[2]
 const reps = Number(process.argv[3] ?? 10)
@@ -25,6 +30,7 @@ function psql(sql) {
 }
 
 const ids = JSON.parse(psql('SELECT json_agg(observation_id ORDER BY ordinal) FROM perf_bsp.ids;'))
+const baseline = process.env.BASELINE_SQL ? readFileSync(process.env.BASELINE_SQL, 'utf8') : null
 
 const explain = (call) => `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call};`
 const batchSql = (list) => explain(`public.get_public_observation_spore_previews('{${list.join(',')}}'::bigint[])`)
@@ -50,7 +56,8 @@ const sum = (ms) => ms.reduce((acc, m) => ({
 
 // One backend; statements = [...] per run; returns [coldRun, warmRun] metrics.
 function runCase(statements) {
-  const out = psql(['SET ROLE anon;', ...statements, ...statements].join('\n'))
+  const body = ['SET ROLE anon;', ...statements, ...statements]
+  const out = psql((baseline ? ['BEGIN;', baseline, ...body, 'ROLLBACK;'] : body).join('\n'))
   const docs = out.trim().split(/\n(?=\[)/).map((chunk) => JSON.parse(chunk)[0])
   if (docs.length !== statements.length * 2) throw new Error(`expected ${statements.length * 2} plans, got ${docs.length}`)
   const per = docs.map(metrics)

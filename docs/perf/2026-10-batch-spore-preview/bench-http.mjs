@@ -8,6 +8,10 @@
 //   SUPABASE_URL=http://127.0.0.1:54321 SUPABASE_ANON_KEY=<local publishable key> \
 //     node docs/perf/2026-10-batch-spore-preview/bench-http.mjs '<json id array>' [reps]
 //
+// With TODAY_RPC=<name> (a renamed copy of the pre-20261011120000
+// get_public_observation, see baseline-today.sh), (b) also runs against it as
+// "b6t"/"b2t": the single calls exactly as deployed today.
+//
 // One unrecorded warm-up round runs first. Case order rotates each round.
 // A second section repeats (a) and (b) at concurrency 6 with 4 and 8
 // simultaneous visitors.
@@ -37,7 +41,7 @@ async function batch(list) {
   return { total: performance.now() - t0, perCall: [] }
 }
 
-async function singles(list, concurrency) {
+async function singles(list, concurrency, name = 'get_public_observation') {
   const t0 = performance.now()
   const queue = [...list]
   const perCall = []
@@ -45,7 +49,7 @@ async function singles(list, concurrency) {
   await Promise.all(Array.from({ length: concurrency }, async () => {
     while (queue.length) {
       const id = queue.shift()
-      const { ms, rows } = await rpc('get_public_observation', { p_observation_id: id })
+      const { ms, rows } = await rpc(name, { p_observation_id: id })
       perCall.push(ms)
       found += rows.length
     }
@@ -60,6 +64,10 @@ for (const n of [30, 60]) {
   cases.push({ label: `a  n=${n}`, run: () => batch(list) })
   cases.push({ label: `b6 n=${n}`, run: () => singles(list, 6) })
   cases.push({ label: `b2 n=${n}`, run: () => singles(list, 2) })
+  if (process.env.TODAY_RPC) {
+    cases.push({ label: `b6t n=${n}`, run: () => singles(list, 6, process.env.TODAY_RPC) })
+    cases.push({ label: `b2t n=${n}`, run: () => singles(list, 2, process.env.TODAY_RPC) })
+  }
 }
 
 for (const c of cases) await c.run() // warm-up, not recorded
@@ -79,7 +87,7 @@ console.log('case     | requests | total median | total max | per-request median
 for (const [label, rs] of results) {
   const totals = rs.map((r) => r.total)
   const per = rs.flatMap((r) => r.perCall)
-  const requests = label.startsWith('a') ? 1 : Number(label.split('n=')[1])
+  const requests = label.startsWith('a ') ? 1 : Number(label.split('n=')[1])
   console.log(`${label} | ${String(requests).padStart(8)} | ${fmt(median(totals)).padStart(12)} | ${fmt(Math.max(...totals)).padStart(9)} | ${(per.length ? fmt(median(per)) : fmt(median(totals))).padStart(18)} | ${(per.length ? fmt(Math.max(...per)) : fmt(Math.max(...totals))).padStart(15)} | ${totals.map(fmt).join(' ')}`)
 }
 
@@ -98,7 +106,7 @@ for (const visitors of [4, 8]) {
     }
   }
   for (const [label, totals] of loads) {
-    const inFlight = label.startsWith('a') ? visitors : visitors * 6
+    const inFlight = label.startsWith('a ') ? visitors : visitors * 6
     console.log(`${String(visitors).padEnd(2)} ${label} | ${fmt(median(totals)).padStart(6)} | ${fmt(Math.max(...totals)).padStart(5)} | ${inFlight}`)
   }
 }
