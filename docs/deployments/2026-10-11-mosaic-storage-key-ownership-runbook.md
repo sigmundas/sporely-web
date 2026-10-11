@@ -1,6 +1,6 @@
 # Runbook — spore-mosaic storage-key ownership (production)
 
-Plan: `docs/plans/active/2026-10-11-mosaic-storage-key-ownership.md` (Stage 2).
+Plan: `docs/plans/completed/2026-10-11-mosaic-storage-key-ownership.md` (Stage 2).
 Migration: `supabase/migrations/20261011100000_enforce_mosaic_storage_key_ownership.sql`.
 
 **Human-executed only.** A person with explicit owner authorization performs

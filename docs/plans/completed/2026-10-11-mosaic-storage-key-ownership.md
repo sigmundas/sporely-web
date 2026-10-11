@@ -1,6 +1,10 @@
 # Enforce spore-mosaic storage-key ownership (security fix)
 
-Status: approved 2026-10-11 by the owner, with the decisions recorded below.
+Status: **completed 2026-10-11.** Stage 1 was accepted (security review APPROVE
+on `4e58763`) and merged to `main` at `0af1e32`. Stage 2 was executed in
+production by the owner; see "Closing entry" at the end. Approved 2026-10-11 by
+the owner, with the decisions recorded below. Was `docs/plans/active/` until
+closed 2026-10-11.
 Repository: `sporely-web`. Branch: `fix/mosaic-storage-key-ownership` from
 `main` (`5739b9a`). Independent of `feature/batch-spore-preview-rpc`, which is
 paused at its Stage 1 gate until this plan completes.
@@ -342,3 +346,26 @@ records the evidence. Nothing is deployed automatically.
   - **Test gaps:** an upsert/ON CONFLICT case, an anon INSERT, an UPDATE to a
     traversal key, and an `<owner uuid>` key without the trailing slash. The
     same code paths or RLS cover these by inspection.
+
+## Closing entry (2026-10-11)
+
+- Stage 1: candidate `4e58763` accepted, including the `sporely-security-reviewer`
+  verdict (APPROVE, none blocking). Merged to `main` at `0af1e32`. The migration
+  file is byte-identical between the two SHAs.
+- Stage 2: the owner applied `20261011100000` to production through the
+  deploy tree, with `check` and `post-verify` passing. The pre-flight probe found
+  no namespace-invalid rows, so step 3 (snapshot and neutralization) did not
+  apply. 5.1–5.6 passed. The owner reported 5.7 as passing, run with their normal
+  account rather than a test account. The full record, aggregate counts only, is
+  under "Production deployment — 2026-10-11" in
+  `docs/deployments/2026-10-11-mosaic-storage-key-ownership-runbook.md`
+  (`75ff78f`).
+- The batch spore-preview RPC branch is no longer blocked by this plan. Resume it
+  as described under "After this plan" above; that is separate work.
+- The items under "Follow-ups (not in this plan)" remain open, including the
+  legacy `media.sporely.no` exposure (Stage 2c).
+- The header comments in
+  `supabase/migrations/20261011100000_enforce_mosaic_storage_key_ownership.sql`
+  and `supabase/tests/mosaic_storage_key_ownership_test.sql` still cite the
+  `docs/plans/active/` path. The migration is applied and immutable, so they are
+  left as they are.
