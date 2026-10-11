@@ -148,6 +148,51 @@ which 2a does not count. Note it if so.
 
 Record every 2a and 2b integer with a UTC timestamp. No other output.
 
+### Earlier pre-flight result (2026-10-11, before this runbook)
+
+The owner ran the 2a probe read-only on 2026-10-11, before Stage 1 was
+accepted. It returned these aggregate counts:
+
+| Column | Value |
+|---|---|
+| `total` | 391 |
+| `empty_key` | 0 |
+| `owner_prefixed` | 391 |
+| `not_owner_prefixed` | 0 |
+| `foreign_uuid_prefixed` | 0 |
+| `url_or_leading_slash` | 0 |
+| `bad_segments` | 0 |
+| `owner_mismatch` | 0 |
+| `nonpositive_id` | 0 |
+| `private_bucket` | 0 |
+| `version_gt_1` | 44 |
+| `owners_with_bad_keys` | 0 |
+| `keys_shared_across_users` | 0 |
+| `max_id` | 393 |
+| `seq_last_value` | 393 |
+
+The owner's assessment, verbatim:
+
+> The read-only inspection of 391 existing mosaic rows found no ownership
+> mismatches, foreign storage namespaces, malformed keys, shared cross-user
+> keys, or suspicious identity values.
+>
+> No existing rows require remediation under the proposed security migration.
+> The results do not trigger the planned forensic-snapshot or
+> row-neutralization procedure.
+>
+> **Historical exposure cannot be ruled out.** The inspection covers current
+> database state only. A previously inserted and subsequently deleted
+> malicious row would not be detected. No evidence of such activity has been
+> identified by this inspection.
+>
+> The security fix should proceed regardless. This assessment does not resolve
+> the separate legacy public-media-domain exposure.
+
+This earlier result does not replace step 2. Re-run 2a and 2b immediately
+before applying. Rows can change between the two runs, and the incident branch
+(step 3) applies whenever the re-run shows possible exploitation.
+
 ### How to read it
 
 | Signal | Meaning | Action |

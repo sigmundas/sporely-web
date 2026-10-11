@@ -328,3 +328,17 @@ records the evidence. Nothing is deployed automatically.
 - Revoke anon/authenticated ALL on the mosaic and image id sequences.
 - Image path: reject `..` segments in the write guard, and run the
   `20260804120000` §11 inventory queries for rows written before the guard.
+- From the Stage 1 security review of `4e58763` (APPROVE, none blocking):
+  - **Low, pre-existing:** the error messages from both the image and mosaic
+    key-ownership guards reveal whether an observation exists and its owner's
+    uuid, including for private and draft observations. These guards run before
+    RLS WITH CHECK. Make the messages generic in both guards.
+  - **Info:** the mosaic guard does not make `observation_id`/`user_id`
+    immutable on UPDATE (the image guard does). An owner can move a mosaic
+    between their own observations. Moving it across users is prevented.
+  - **Info:** the new guard functions use `search_path=public,pg_catalog`,
+    which is the repository convention. Client roles have no CREATE on
+    `public`.
+  - **Test gaps:** an upsert/ON CONFLICT case, an anon INSERT, an UPDATE to a
+    traversal key, and an `<owner uuid>` key without the trailing slash. The
+    same code paths or RLS cover these by inspection.
