@@ -112,6 +112,11 @@ DECLARE
   v_taxa_bytes bigint;
   v_reltuples real;
 BEGIN
+  IF EXISTS (SELECT 1 FROM public.taxonomy_v2_releases) THEN
+    RAISE NOTICE 'SKIP seeded payload measurement: local database holds taxonomy releases';
+    RETURN;
+  END IF;
+
   INSERT INTO public.taxonomy_v2_releases (
     release_id, taxonomy_schema_version, export_schema_version, manifest_schema_version,
     exporter_version, scope_predicate_id, source_gz_sha256, source_sqlite_sha256,
@@ -160,6 +165,9 @@ BEGIN
   ASSERT (h->'taxonomy'->>'retained_non_active_estimated_bytes')::bigint = round(v_taxa_bytes * 3 / 4.0)::bigint, 'retained share';
   ASSERT EXISTS (SELECT 1 FROM jsonb_array_elements(h->'warnings') w WHERE w->>'key' = 'retired_taxonomy_payload_resident'),
     'retained warning';
+
+  -- The n_mod_since_analyze freshness gate cannot be exercised here: its
+  -- counters only include committed transactions.
 
   -- Retired payload removed: one resident release, attributed in full.
   DELETE FROM public.taxonomy_v2_taxa WHERE release_id = r_old;
