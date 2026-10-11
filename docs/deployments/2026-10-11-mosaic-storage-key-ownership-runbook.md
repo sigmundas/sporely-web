@@ -48,8 +48,12 @@ All of the following must be true. Otherwise stop.
   migration file at that SHA is byte-identical to the reviewed candidate:
 
       git fetch origin
+      git merge-base --is-ancestor <merged main SHA> origin/main
       git diff --exit-code <accepted candidate SHA> <merged main SHA> -- \
         supabase/migrations/20261011100000_enforce_mosaic_storage_key_ownership.sql
+
+  Both commands must exit 0. The first proves `<merged main SHA>` is on
+  `origin/main`; the second proves the migration file is unchanged.
 
 - No other migration is pending. In particular the paused batch migration
   `20261011120000` is neither on `main` nor applied remotely.
@@ -189,6 +193,12 @@ The owner's assessment, verbatim:
 > The security fix should proceed regardless. This assessment does not resolve
 > the separate legacy public-media-domain exposure.
 
+The earlier run covered 2a only. It did not include 2b, so it does not
+establish that there are no namespace-invalid rows. For example, an
+owner-prefixed key ending in `/` or containing a control character is counted
+only by 2b. The quoted statements about malformed keys and remediation refer to
+the 2a columns.
+
 This earlier result does not replace step 2. Re-run 2a and 2b immediately
 before applying. Rows can change between the two runs, and the incident branch
 (step 3) applies whenever the re-run shows possible exploitation.
@@ -197,12 +207,15 @@ before applying. Rows can change between the two runs, and the incident branch
 
 | Signal | Meaning | Action |
 | --- | --- | --- |
-| 2b `namespace_invalid_mosaics > 0`, `not_owner_prefixed > 0`, `bad_segments > 0`, `nonpositive_id > 0`, or `max_id > seq_last_value` | **Possible exploitation** | Step 3 (incident branch), then apply |
+| 2b `namespace_invalid_mosaics > 0`, `not_owner_prefixed − empty_key > 0`, `bad_segments > 0`, `nonpositive_id > 0`, or `max_id > seq_last_value` | **Possible exploitation** | Step 3 (incident branch), then apply |
 | `url_or_leading_slash > 0` | Legitimate rows in a non-canonical form would be denied, and step 3.4 would delete them | STOP. The owner decides on normalization before proceeding |
 | `private_bucket > 0` | Suspicious while production runs `MEDIA_STORAGE_MODE=legacy` | Include in the step 3 snapshot; the owner decides |
 | `empty_key > 0` | Counted inside `not_owner_prefixed`. Denied as `no_key` both before and after; not foreign, and not deleted by step 3.4 | Snapshot in 3.1; the owner decides |
 | `keys_shared_across_users > 0` | A key used by more than one owner; at most one can be in-namespace | Treat as possible exploitation |
 | All of the above are 0, **including** 2b `namespace_invalid_mosaics` | No existing malformed rows | Skip step 3; go to step 4 |
+
+If a STOP row and the step 3 row both apply, STOP wins: do not enter step 3
+or delete anything until the owner has decided (see also the step 0 gate).
 
 2b is decisive on its own. A positive `namespace_invalid_mosaics` enters step 3
 even when every 2a signal is 0: an owner-prefixed key that ends in `/` or
@@ -218,6 +231,11 @@ declare "no malformed rows" unless 2b `namespace_invalid_mosaics` is 0.
 A person exports the offending rows to private storage under the owner's
 incident procedure. Run it read-only. **Its output must never enter an agent
 context, this repository, or a chat.**
+
+Run it with `psql`, and send the output straight to a private file with
+`\o <private file>` before the query (and `\o` afterwards). Do not use the
+dashboard SQL editor or terminal scrollback, and do not run it in a terminal an
+agent can read.
 
     BEGIN TRANSACTION READ ONLY;
     SELECT m.id, m.observation_id, m.user_id, o.user_id AS observation_owner,
@@ -367,9 +385,10 @@ COMMIT;
 
 Run it from a file with `psql -v ON_ERROR_STOP=1 -f <file>`, so that `psql`
 stops at the first error. If the `DO` block raises, `psql` reports the error and
-the transaction is aborted. Run `ROLLBACK;` and investigate (without
-`ON_ERROR_STOP`, the trailing `COMMIT` of an aborted transaction also only rolls
-back). Do not edit the predicate to make
+the transaction is aborted. `psql` then exits and the aborted transaction is
+discarded, so nothing is applied; investigate before any retry. (Without
+`ON_ERROR_STOP`, the trailing `COMMIT` of an aborted transaction would also only
+roll back.) Do not edit the predicate to make
 the counts match.
 
 **Do not delete the R2 objects** that these keys point at. They belong to the
