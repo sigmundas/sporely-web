@@ -228,8 +228,8 @@ declare "no malformed rows" unless 2b `namespace_invalid_mosaics` is 0.
 
 ### 3.1 Forensic snapshot (before applying, person only)
 
-A person exports the offending rows to private storage under the owner's
-incident procedure. Run it read-only. **Its output must never enter an agent
+A person exports the offending rows to private storage under the data
+controller's incident procedure. Run it read-only. **Its output must never enter an agent
 context, this repository, or a chat.**
 
 Run it with `psql`, and send the output straight to a private file with
@@ -268,8 +268,8 @@ step 3.4 does not delete. The owner decides about those separately.
 
 A namespace-invalid row lets its author fetch another user's R2 object, which
 may contain personal data. The owner decides whether to make a personal-data
-breach assessment under SINTEF and GDPR procedure, and records only that the
-decision was made, not its contents. This runbook does not decide it.
+breach assessment under the data controller's GDPR personal-data breach
+procedure, and records only that the decision was made, not its contents. This runbook does not decide it.
 
 Already-disclosed keys stay readable through the legacy `media.sporely.no`
 domain until the Stage 2c cutover (plan, Follow-ups). Neutralization does not

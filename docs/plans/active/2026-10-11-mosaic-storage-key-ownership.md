@@ -263,7 +263,7 @@ executes nothing and connects to nothing. The runbook covers:
 3. **Incident branch, only if the probe shows possible exploitation:**
    1. A person takes a private forensic snapshot of the offending rows (id,
       observation id, owner, key, bucket, version, timestamps), stored under the
-      owner's incident procedure and never pasted into agent context.
+      data controller's incident procedure and never pasted into agent context.
    2. The owner decides whether to make a personal-data breach assessment.
    3. After the migration is applied, an owner-approved **neutralization step**
       runs as a single reviewed transaction. The runbook provides the SQL, which
