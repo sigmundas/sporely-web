@@ -540,7 +540,7 @@ SELECT is((SELECT proconfig FROM pg_proc
           ARRAY['search_path=""'], 'shape: search_path is empty');
 SELECT is((SELECT count(*) FROM pg_proc
             WHERE pronamespace = 'private'::regnamespace AND proname LIKE 'public_observation_%'),
-          5::bigint, 'shape: five private public_observation_* helpers');
+          6::bigint, 'shape: six private public_observation_* helpers');
 SELECT is_empty($$SELECT p.oid::regprocedure FROM pg_proc p
    WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'public_observation_%'
      AND (has_function_privilege('anon', p.oid, 'EXECUTE')

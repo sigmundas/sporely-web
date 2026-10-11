@@ -1,6 +1,6 @@
--- pgTAP: get_public_observation_spore_previews(bigint[]) does each piece of
--- work once, and its mirrored point gates stay in step with
--- private.public_observation_spore_points_raw.
+-- pgTAP: get_public_observation_spore_previews(bigint[]) reads points only
+-- through the shared private.public_observation_spore_point_rows source, and
+-- does each piece of work once.
 -- Plan: docs/plans/active/2026-10-10-batch-spore-preview-rpc.md, Stage 2;
 -- evidence in docs/perf/2026-10-batch-spore-preview.md.
 --
@@ -14,7 +14,7 @@
 
 BEGIN;
 
-SELECT plan(8);
+SELECT plan(9);
 
 SET LOCAL track_functions = 'all';
 
@@ -26,6 +26,7 @@ DECLARE
   obs bigint;
   img bigint;
   k int;
+  n int;
 BEGIN
   INSERT INTO public._media_worker_config (singleton, base_url)
   VALUES (true, 'https://upload.example.test')
@@ -38,18 +39,21 @@ BEGIN
   VALUES (owner_id, 'spv_eval', 'SPV Eval', true, false)
   ON CONFLICT (id) DO UPDATE SET is_banned = false;
 
+  -- Three observations, each with two microscope images of two points.
   FOR k IN 1..3 LOOP
     INSERT INTO public.observations
       (user_id, date, genus, species, visibility, is_draft, location_precision, spore_data_visibility)
     VALUES (owner_id, '2026-10-01', 'Evalgenus', 'species' || k, 'public', false, 'hidden', 'public')
     RETURNING id INTO obs;
     INSERT INTO spv_eval_obs VALUES (obs);
-    INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
-    VALUES (obs, owner_id, owner_id::text || '/spv-eval-' || k || '.webp', 'microscope')
-    RETURNING id INTO img;
-    INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type, thumb_key)
-    SELECT img, owner_id, 10 + g, 6, 'spore', owner_id::text || '/spv-eval-' || k || '-' || g || '.webp'
-    FROM generate_series(1, 4) g;
+    FOR n IN 1..2 LOOP
+      INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
+      VALUES (obs, owner_id, owner_id::text || '/spv-eval-' || k || '-' || n || '.webp', 'microscope')
+      RETURNING id INTO img;
+      INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type, thumb_key)
+      SELECT img, owner_id, 10 + g, 6, 'spore', owner_id::text || '/spv-eval-' || k || '-' || n || '-' || g || '.webp'
+      FROM generate_series(1, 2) g;
+    END LOOP;
     INSERT INTO public.spore_measurement_mosaics
       (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version)
     VALUES (obs, owner_id, owner_id::text || '/spv-eval-mosaic-' || k || '.webp', 200, 100, 100, 1);
@@ -69,11 +73,17 @@ SELECT is(
 );
 
 SELECT is(
+  (SELECT calls FROM pg_stat_xact_user_functions
+   WHERE schemaname = 'private' AND funcname = 'public_observation_spore_point_rows'),
+  1::bigint,
+  'the batch reads all points through one spore_point_rows call'
+);
+SELECT is(
   (SELECT coalesce(sum(calls), 0) FROM pg_stat_xact_user_functions
    WHERE schemaname = 'private'
      AND funcname IN ('public_observation_spore_points_raw', 'public_observation_authorize_spore_points')),
   0::numeric,
-  'the batch builds points in one pass, without the single-observation point helpers'
+  'the batch does not build and rewrite full point arrays per observation'
 );
 SELECT is(
   (SELECT calls FROM pg_stat_xact_user_functions
@@ -96,53 +106,33 @@ SELECT is(
 SELECT is(
   (SELECT calls FROM pg_stat_xact_user_functions
    WHERE schemaname = 'public' AND funcname = 'build_worker_media_url'),
-  3::bigint,
-  'build_worker_media_url runs once per image, not once per point (12 points)'
+  6::bigint,
+  'build_worker_media_url runs once per image (6), not once per point (12)'
 );
 
--- Every WHERE gate line of spore_points_raw (after its observation_id
--- correlation; bare "AND (" and ")" wrappers skipped) must appear, trimmed,
--- as a line of the batch function. A gate added to the helper and not to the
--- batch fails here.
-WITH raw_lines AS (
-  SELECT btrim(x.line) AS line, x.ord
-  FROM pg_catalog.pg_proc p,
-       regexp_split_to_table(p.prosrc, E'\n') WITH ORDINALITY x(line, ord)
-  WHERE p.oid = 'private.public_observation_spore_points_raw(bigint)'::regprocedure
-),
-gates AS (
-  SELECT line
-  FROM raw_lines
-  WHERE ord > (SELECT ord FROM raw_lines WHERE line LIKE 'WHERE i.observation_id = p_observation_id%')
-    AND line NOT IN ('', 'AND (', ')')
-)
+-- Structure: the point tables are read, for points, only by spore_point_rows.
+-- Neither the batch nor spore_points_raw (get_public_observation's path) may
+-- name them, so neither can apply gates of its own.
 SELECT is(
-  (SELECT count(*) FROM gates),
-  4::bigint,
-  'spore_points_raw has the four expected gate lines (deleted, purged, image type, measurement type)'
-);
-WITH raw_lines AS (
-  SELECT btrim(x.line) AS line, x.ord
-  FROM pg_catalog.pg_proc p,
-       regexp_split_to_table(p.prosrc, E'\n') WITH ORDINALITY x(line, ord)
-  WHERE p.oid = 'private.public_observation_spore_points_raw(bigint)'::regprocedure
-),
-gates AS (
-  SELECT line
-  FROM raw_lines
-  WHERE ord > (SELECT ord FROM raw_lines WHERE line LIKE 'WHERE i.observation_id = p_observation_id%')
-    AND line NOT IN ('', 'AND (', ')')
-),
-batch_lines AS (
-  SELECT array_agg(btrim(x.line)) AS lines
-  FROM pg_catalog.pg_proc p,
-       regexp_split_to_table(p.prosrc, E'\n') x(line)
-  WHERE p.oid = 'public.get_public_observation_spore_previews(bigint[])'::regprocedure
-)
-SELECT is(
-  ARRAY(SELECT g.line FROM gates g, batch_lines b WHERE g.line <> ALL (b.lines) ORDER BY 1),
+  ARRAY(
+    SELECT p.oid::regprocedure::text || ' names ' || t.name
+    FROM pg_catalog.pg_proc p
+    CROSS JOIN (VALUES ('observation_images'), ('spore_measurements'), ('spore_measurement_mosaic_tiles')) t(name)
+    WHERE p.oid IN ('public.get_public_observation_spore_previews(bigint[])'::regprocedure,
+                    'private.public_observation_spore_points_raw(bigint)'::regprocedure)
+      AND p.prosrc LIKE '%' || t.name || '%'
+    ORDER BY 1
+  ),
   ARRAY[]::text[],
-  'every spore_points_raw gate line is mirrored verbatim in the batch'
+  'the batch and spore_points_raw read point rows only through spore_point_rows'
+);
+SELECT ok(
+  (SELECT p.prosrc LIKE '%public.spore_measurements%'
+      AND p.prosrc LIKE '%public.observation_images%'
+      AND p.prosrc LIKE '%public.spore_measurement_mosaic_tiles%'
+   FROM pg_catalog.pg_proc p
+   WHERE p.oid = 'private.public_observation_spore_point_rows(bigint[])'::regprocedure),
+  'spore_point_rows is the reader of the point tables'
 );
 
 SELECT * FROM finish();

@@ -4,7 +4,8 @@
 # public._get_public_observation_stage2a(bigint) byte-identical.
 #
 # In ONE transaction that is rolled back:
-#   1. load the fixtures of public_observation_spore_previews_test.sql;
+#   1. load the fixtures of public_observation_spore_previews_test.sql, then
+#      move rows (HOT) so that physical (ctid) order differs from id order;
 #   2. snapshot both functions' rows as text, for every observation in the
 #      database and for an anon, a stranger, a blocked and an owner viewer;
 #   3. CREATE OR REPLACE both functions with their previous definitions, read
@@ -66,9 +67,38 @@ END
 \$snap\$;
 "
 
+# Move the first image and the first measurement of every observation to a
+# new heap position (HOT updates of unindexed columns), so that physical
+# (ctid) order differs from id order. The old point aggregate had no ORDER BY
+# and its index plan returned index-entry order, which HOT updates leave at
+# the original (id) order; the new one orders by image id, measurement id.
+# The two must still agree. The guard makes sure the rows really moved.
+SHUFFLE="
+UPDATE public.observation_images i
+   SET sample_type = i.sample_type
+ WHERE i.id IN (SELECT min(id) FROM public.observation_images GROUP BY observation_id HAVING count(*) > 1);
+UPDATE public.spore_measurements m
+   SET length_um = m.length_um
+ WHERE m.id IN (SELECT min(id) FROM public.spore_measurements GROUP BY image_id HAVING count(*) > 1);
+DO \$shuffled\$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM public.spore_measurements a JOIN public.spore_measurements b
+      ON a.image_id = b.image_id AND a.id < b.id AND a.ctid > b.ctid
+  ) OR NOT EXISTS (
+    SELECT 1 FROM public.observation_images a JOIN public.observation_images b
+      ON a.observation_id = b.observation_id AND a.id < b.id AND a.ctid > b.ctid
+  ) THEN
+    RAISE EXCEPTION 'shuffle did not make ctid order differ from id order';
+  END IF;
+END
+\$shuffled\$;
+"
+
 docker exec -i "$DB" psql -U postgres -v ON_ERROR_STOP=1 -qAt <<SQL
 BEGIN;
 $FIXTURES
+$SHUFFLE
 
 CREATE TEMP TABLE spv_snapshot (
   phase text, viewer text, fn text, observation_id bigint, out text
