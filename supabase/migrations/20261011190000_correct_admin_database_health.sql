@@ -18,11 +18,17 @@
 --       5. everything else is 'unclassified' and raises a dashboard warning.
 --     A new table therefore needs an explicit decision here; the
 --     admin_database_health_test.sql suite fails while any local table is
---     unclassified.
+--     unclassified. The pattern rules err towards taxonomy: a future
+--     per-observation table inside a taxonomy_vN schema or named taxonomy_*
+--     must be added to rule 1, or it will be reported as taxonomy.
 --
 --   admin_database_health_measure()
 --     Read-only measurement: relation sizes for every schema, database and
 --     cluster sizes, counts, and taxonomy v2 payload rows per release.
+--     Payload residency uses one indexed probe per release; row shares come
+--     from planner statistics, falling back to an exact count only when
+--     statistics are missing. A full GROUP BY scan took ~2.2 s on production
+--     with one resident release and grows with every retained release.
 --
 --   admin_database_health_assess(measurements jsonb)
 --     Pure derivation of categories, quota headroom, per-release estimates,
@@ -126,6 +132,8 @@ DECLARE
   v_cluster_bytes bigint;
   v_payload jsonb := '[]'::jsonb;
   v_rows jsonb;
+  v_rows_basis text;
+  v_resident text[];
   v_table record;
   v_storage jsonb;
 BEGIN
@@ -166,13 +174,12 @@ BEGIN
   END;
 
   FOR v_table IN
-    SELECT c.relname::text AS table_name
+    SELECT c.relname::text AS table_name, greatest(c.reltuples, 0)::bigint AS estimated_rows
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     CROSS JOIN LATERAL private.admin_database_health_classify(n.nspname, c.relname, true) k
     WHERE n.nspname = 'public'
-      AND c.relkind IN ('r', 'p')
-      AND NOT c.relispartition
+      AND c.relkind = 'r'  -- partitioned payload tables are not supported
       AND k.component = 'taxonomy_release_payload'
       AND EXISTS (
         SELECT 1 FROM pg_attribute a
@@ -181,15 +188,51 @@ BEGIN
       )
     ORDER BY c.relname
   LOOP
+    -- Residency: release_id leads an index on every payload table, and the
+    -- payload FKs guarantee each release_id has a header.
     EXECUTE format(
-      'SELECT coalesce(jsonb_object_agg(release_id, n), ''{}''::jsonb)
-         FROM (SELECT release_id::text AS release_id, count(*) AS n
-                 FROM public.%I GROUP BY release_id) s',
+      'SELECT coalesce(array_agg(r.release_id::text ORDER BY r.release_id), ''{}''::text[])
+         FROM public.taxonomy_v2_releases r
+        WHERE EXISTS (SELECT 1 FROM public.%I t WHERE t.release_id = r.release_id)',
       v_table.table_name
-    ) INTO v_rows;
-    v_payload := v_payload || jsonb_build_array(
-      jsonb_build_object('table', v_table.table_name, 'rows_by_release', v_rows)
-    );
+    ) INTO v_resident;
+
+    v_rows := NULL;
+    v_rows_basis := 'statistics';
+    IF cardinality(v_resident) = 0 THEN
+      v_rows := '{}'::jsonb;
+      v_rows_basis := 'none_resident';
+    ELSIF v_table.estimated_rows > 0 AND cardinality(v_resident) = 1 THEN
+      v_rows := jsonb_build_object(v_resident[1], v_table.estimated_rows);
+    ELSIF v_table.estimated_rows > 0 THEN
+      -- Shares from most-common-value frequencies of release_id, limited to
+      -- resident releases. NULL unless every resident release is listed.
+      SELECT jsonb_object_agg(x.val, round(v_table.estimated_rows * x.freq / x.total_freq)::bigint)
+      INTO v_rows
+      FROM (
+        SELECT m.val, m.freq, sum(m.freq) OVER () AS total_freq, count(*) OVER () AS listed
+        FROM pg_stats s
+        CROSS JOIN LATERAL unnest(s.most_common_vals::text::text[], s.most_common_freqs) AS m(val, freq)
+        WHERE s.schemaname = 'public' AND s.tablename = v_table.table_name
+          AND s.attname = 'release_id' AND NOT s.inherited
+          AND m.val = ANY (v_resident)
+      ) x
+      WHERE x.listed = cardinality(v_resident) AND x.total_freq > 0;
+    END IF;
+
+    IF v_rows IS NULL THEN
+      EXECUTE format(
+        'SELECT coalesce(jsonb_object_agg(release_id, n), ''{}''::jsonb)
+           FROM (SELECT release_id::text AS release_id, count(*) AS n
+                   FROM public.%I WHERE release_id IS NOT NULL GROUP BY release_id) s',
+        v_table.table_name
+      ) INTO v_rows;
+      v_rows_basis := 'counted';
+    END IF;
+
+    v_payload := v_payload || jsonb_build_array(jsonb_build_object(
+      'table', v_table.table_name, 'rows_by_release', v_rows, 'rows_basis', v_rows_basis
+    ));
   END LOOP;
 
   -- Supabase Storage objects are files under a separate quota; only their
@@ -257,6 +300,7 @@ DECLARE
 
   v_releases jsonb;
   v_payload_releases integer;
+  v_rows_basis text;
   v_payload_bytes bigint;
   v_active_count integer;
   v_active_id text;
@@ -371,7 +415,7 @@ BEGIN
     ) ORDER BY release_id), '[]'::jsonb),
     count(*) FILTER (WHERE rows > 0),
     count(*) FILTER (WHERE status = 'active'),
-    max(release_id) FILTER (WHERE status = 'active'),
+    (array_agg(release_id ORDER BY bytes DESC, release_id) FILTER (WHERE status = 'active'))[1],
     max(bytes) FILTER (WHERE status = 'active'),
     coalesce(sum(bytes) FILTER (WHERE status IN ('retired', 'failed', 'unknown') AND rows > 0), 0),
     coalesce(jsonb_agg(release_id ORDER BY release_id) FILTER (WHERE status IN ('retired', 'failed', 'unknown') AND rows > 0), '[]'::jsonb),
@@ -382,6 +426,13 @@ BEGIN
 
   SELECT coalesce(sum((x->>'bytes')::bigint), 0) INTO v_payload_bytes
   FROM jsonb_array_elements(v_rel) x WHERE x->>'component' = 'taxonomy_release_payload';
+
+  SELECT CASE
+           WHEN bool_and(p->>'rows_basis' IN ('counted', 'none_resident')) THEN 'counted'
+           ELSE 'estimated_from_statistics'
+         END
+  INTO v_rows_basis
+  FROM jsonb_array_elements(coalesce(p_m->'taxonomy_payload', '[]'::jsonb)) p;
 
   v_in_progress := coalesce(v_in_progress, false)
     OR coalesce((p_m->>'taxonomy_import_runs_running')::bigint, 0) > 0;
@@ -406,8 +457,8 @@ BEGIN
     v_next := jsonb_build_object('available', false, 'reason', 'No active taxonomy release payload is resident.');
   END IF;
 
-  -- Observation data average. Includes fixed table and index overhead, so it
-  -- is an upper bound on marginal growth, not a measured growth rate.
+  -- Observation data average. Includes fixed table and index overhead and
+  -- excludes platform rows that also grow with use; not a measured rate.
   SELECT coalesce(sum((c->>'bytes')::bigint), 0) INTO v_obs_bytes
   FROM jsonb_array_elements(v_categories->'user_data'->'components') c
   WHERE c->>'component' = 'observations';
@@ -563,6 +614,7 @@ BEGIN
       'active_release_estimated_bytes', v_active_bytes,
       'resident_release_count', v_payload_releases,
       'estimate_basis', CASE WHEN v_payload_releases > 1 THEN 'proportional_row_share' ELSE 'measured_single_release' END,
+      'payload_rows_basis', coalesce(v_rows_basis, 'counted'),
       'retained_non_active_estimated_bytes', v_retained_bytes,
       'retained_non_active_release_ids', v_retained_ids,
       'publication_in_progress', v_in_progress,
@@ -574,7 +626,7 @@ BEGIN
       'image_count', v_image_count,
       'observation_data_bytes', v_obs_bytes,
       'average_bytes_per_observation', v_avg,
-      'average_basis', 'Average over observation-linked tables, including fixed table and index overhead. An upper bound on marginal growth, not a measured rate.',
+      'average_basis', 'Average over observation-linked tables, including fixed table and index overhead. An estimate, not a measured growth rate; auth, storage metadata and activity rows that also grow with use are not included.',
       'capacity', jsonb_build_object(
         'until_quota', CASE WHEN v_avg > 0 THEN floor(v_headroom::numeric / v_avg)::bigint END,
         'after_next_publication', CASE WHEN v_avg > 0 AND v_required IS NOT NULL

@@ -98,6 +98,89 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
+-- 2b. Payload measurement on seeded releases: exact-count fallback without
+--     statistics, statistics with two resident releases, then one resident
+--     release. The block is atomic and removes its seed rows on success.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  r_old constant text := 'tax-1999.01.01-01';
+  r_new constant text := 'tax-1999.02.01-01';
+  m jsonb;
+  h jsonb;
+  t jsonb;
+  v_taxa_bytes bigint;
+  v_reltuples real;
+BEGIN
+  INSERT INTO public.taxonomy_v2_releases (
+    release_id, taxonomy_schema_version, export_schema_version, manifest_schema_version,
+    exporter_version, scope_predicate_id, source_gz_sha256, source_sqlite_sha256,
+    whole_export_sha256, manifest_sha256, generated_at, status, row_counts,
+    authoritative_namespace_counts, legacy_source_counts, dangling_parent_count,
+    dangling_parent_report, source_manifest
+  )
+  SELECT rid, 2, 1, 1, 'dbh-test', 'dbh-test', repeat('a', 64), repeat('b', 64),
+         repeat(c, 64), repeat('d', 64), now(), st, '{}', '{}', '{}', 0, '{}', '{}'
+  FROM (VALUES (r_old, 'retired', 'e'), (r_new, 'active', 'f')) v(rid, st, c);
+
+  INSERT INTO public.taxonomy_v2_concepts (sporely_taxon_id, first_seen_release_id)
+  SELECT 990000000 + g, r_old FROM generate_series(1, 300) g;
+  INSERT INTO public.taxonomy_v2_taxa (release_id, sporely_taxon_id, canonical_source_system, canonical_external_id)
+  SELECT r_old, 990000000 + g, 'dbh', g::text FROM generate_series(1, 300) g
+  UNION ALL
+  SELECT r_new, 990000000 + g, 'dbh', g::text FROM generate_series(1, 100) g;
+
+  -- Without statistics (empty table never analysed) the rows are counted.
+  SELECT reltuples INTO v_reltuples FROM pg_class WHERE oid = 'public.taxonomy_v2_taxa'::regclass;
+  m := private.admin_database_health_measure();
+  SELECT p INTO t FROM jsonb_array_elements(m->'taxonomy_payload') p WHERE p->>'table' = 'taxonomy_v2_taxa';
+  IF v_reltuples <= 0 THEN
+    ASSERT t->>'rows_basis' = 'counted', 'fallback basis ' || t::text;
+  END IF;
+  ASSERT (t->'rows_by_release'->>r_old)::bigint = 300 AND (t->'rows_by_release'->>r_new)::bigint = 100,
+    'counted rows ' || t::text;
+
+  -- Statistics path: shares from release_id frequencies.
+  ANALYZE public.taxonomy_v2_taxa;
+  m := private.admin_database_health_measure();
+  SELECT p INTO t FROM jsonb_array_elements(m->'taxonomy_payload') p WHERE p->>'table' = 'taxonomy_v2_taxa';
+  ASSERT t->>'rows_basis' = 'statistics', 'statistics basis ' || t::text;
+  ASSERT (t->'rows_by_release'->>r_old)::bigint = 300 AND (t->'rows_by_release'->>r_new)::bigint = 100,
+    'statistics rows ' || t::text;
+  ASSERT NOT EXISTS (SELECT 1 FROM jsonb_array_elements(m->'taxonomy_payload') p
+                     WHERE p->>'table' <> 'taxonomy_v2_taxa' AND p->'rows_by_release' <> '{}'::jsonb),
+    'only taxa resident';
+
+  h := private.admin_database_health_assess(m);
+  v_taxa_bytes := pg_total_relation_size('public.taxonomy_v2_taxa');
+  ASSERT (h->'taxonomy'->>'resident_release_count')::int = 2, 'two resident';
+  ASSERT h->'taxonomy'->>'estimate_basis' = 'proportional_row_share', 'proportional';
+  ASSERT h->'taxonomy'->>'payload_rows_basis' = 'estimated_from_statistics', 'rows basis ' || (h->'taxonomy'->>'payload_rows_basis');
+  ASSERT (h->'taxonomy'->>'active_release_estimated_bytes')::bigint = round(v_taxa_bytes / 4.0)::bigint, 'active share';
+  ASSERT (h->'taxonomy'->>'retained_non_active_estimated_bytes')::bigint = round(v_taxa_bytes * 3 / 4.0)::bigint, 'retained share';
+  ASSERT EXISTS (SELECT 1 FROM jsonb_array_elements(h->'warnings') w WHERE w->>'key' = 'retired_taxonomy_payload_resident'),
+    'retained warning';
+
+  -- Retired payload removed: one resident release, attributed in full.
+  DELETE FROM public.taxonomy_v2_taxa WHERE release_id = r_old;
+  ANALYZE public.taxonomy_v2_taxa;
+  m := private.admin_database_health_measure();
+  SELECT p INTO t FROM jsonb_array_elements(m->'taxonomy_payload') p WHERE p->>'table' = 'taxonomy_v2_taxa';
+  ASSERT t->'rows_by_release' = jsonb_build_object(r_new, 100), 'single rows ' || t::text;
+  h := private.admin_database_health_assess(m);
+  ASSERT h->'taxonomy'->>'estimate_basis' = 'measured_single_release', 'single basis';
+  ASSERT (h->'taxonomy'->>'active_release_estimated_bytes')::bigint = pg_total_relation_size('public.taxonomy_v2_taxa'),
+    'single bytes';
+  ASSERT (h->'taxonomy'->>'retained_non_active_estimated_bytes')::bigint = 0, 'nothing retained';
+
+  DELETE FROM public.taxonomy_v2_taxa WHERE release_id IN (r_old, r_new);
+  DELETE FROM public.taxonomy_v2_concepts WHERE sporely_taxon_id BETWEEN 990000001 AND 990000300;
+  DELETE FROM public.taxonomy_v2_releases WHERE release_id IN (r_old, r_new);
+  ANALYZE public.taxonomy_v2_taxa;
+  RAISE NOTICE 'PASS seeded payload measurement';
+END $$;
+
+-- ---------------------------------------------------------------------------
 -- 3. Synthetic measurements.
 -- ---------------------------------------------------------------------------
 -- Base: relations shared by every case. Payload bytes vary per case.
@@ -259,6 +342,17 @@ BEGIN
   ASSERT (h->'taxonomy'->>'retained_non_active_estimated_bytes')::bigint = 0, 'loading is not retained';
   ASSERT h->>'status_key' = 'ok', 'info warnings do not escalate';
   RAISE NOTICE 'PASS no active release';
+
+  -- 3f2. Two releases marked active: the estimate and its basis id both use the larger.
+  h := private.admin_database_health_assess(pg_temp._dbh(
+    200000000,
+    '[{"release_id":"tax-2026.10.07-01","status":"active"},{"release_id":"tax-2026.10.20-01","status":"active"}]',
+    '{"tax-2026.10.07-01":300,"tax-2026.10.20-01":100}', '{"tax-2026.10.07-01":50,"tax-2026.10.20-01":50}'));
+  ASSERT h->'taxonomy'->'next_publication'->>'basis_release_id' = 'tax-2026.10.07-01', 'largest active id';
+  ASSERT (h->'taxonomy'->>'active_release_estimated_bytes')::bigint = 40000000, 'largest active bytes';
+  ASSERT EXISTS (SELECT 1 FROM jsonb_array_elements(h->'warnings') w WHERE w->>'key' = 'multiple_active_taxonomy_releases'),
+    'multiple active warning';
+  RAISE NOTICE 'PASS multiple active releases';
 
   -- 3g. Unclassified table: reported, never user data; cluster unmeasured.
   h := private.admin_database_health_assess(
