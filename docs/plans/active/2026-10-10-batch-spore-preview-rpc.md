@@ -1,0 +1,139 @@
+# Batch spore-preview RPC for the public explorer's Cards view
+
+Status: approved 2026-10-10; not started.
+Repository: `sporely-web`. Suggested branch: `feature/batch-spore-preview-rpc`
+from `main`.
+Consumer: `sporely-landing`, `docs/plans/explorer-cards-batch-preview.md`.
+That plan must not start until Stage 3 below has passed.
+Origin: companion plan A in
+`sporely-landing/docs/plans/public-explorer-performance.md`.
+
+## Why
+
+On a cold load, the public explorer's Cards view calls `get_public_observation`
+once per spore-bearing card: about 23–28 calls, 6 at a time. Cards use only the
+spore points and `sporeMosaic` from those calls. Under that fan-out,
+production returned `57014` statement timeouts. One bounded batch call should
+replace it.
+
+## Fixed decisions
+
+- **Media policy is unchanged:** `/m/` and `/mm/` keep
+  `Cache-Control: no-store` and revoke access on the next request. This plan
+  does not touch the Worker. A Worker-side R2 cache behind authorization stays
+  a possible later optimization, out of scope here.
+- **No automatic deployment.** A person applies the migration to production
+  (Stage 3).
+- **No live production connection** for implementation or review (see
+  `.sparring/PROJECT.md`). Work against migrations, `schema.sql` and a local
+  `supabase db reset`.
+
+## Stage 1 — Batch preview function, contract and pgTAP tests
+
+First read the sections above the stages in `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.
+
+1. **Contract.** Add a new anon-executable function. Name it in the contract,
+   for example `get_public_observation_spore_previews(p_observation_ids bigint[])`.
+   - **Input:** at most 60 ids. Reject more with a clear error. Null or empty
+     input returns no rows. Duplicate ids are tolerated.
+   - **Output:** one row per *eligible* observation, with `observation_id`, the
+     minimal `points` and `spore_mosaic`. Ineligible and nonexistent ids are
+     both simply absent, so they cannot be told apart.
+   - **`points` fields:** exactly what the landing card path reads. Derive
+     them from `sporely-landing/src/lib/publicApi.ts` (`normalizeSporePoints`
+     `:473`, `normalizeSporeMosaic` `:518`), `ObservationCard.tsx` (point id,
+     mosaic crop geometry, `cropUrl`) and `sporePointFilters.ts` (contrast,
+     mount, sample type and source). Each value and the order of points must
+     equal what `get_public_observation` returns for that observation.
+   - **No server-side capping or filtering of points.** Client filtering and
+     the 16-point selection stay on the client.
+   - Record the contract in `SUPABASE_DB.md` (or the repo's public-API
+     contract doc).
+2. **Eligibility.** Reuse the eligibility predicate of
+   `_get_public_observation_stage2a` rather than copying it. It covers:
+   public; not draft or deleted; owner not banned; blocking; moderation;
+   `spore_data_visibility`; image and measurement gates; and
+   `metadata_microscope_parent_is_public`.
+   - If reuse means extracting the predicate into a helper,
+     `get_public_observation`'s output must stay byte-identical. Prove that
+     with a test.
+   - Media URLs come from the same `build_worker_media_url` path as today.
+3. **Security shape.** Set `search_path=''` and qualify every name. Revoke
+   execute from PUBLIC, then grant it to `anon` and `authenticated`. Use
+   SECURITY DEFINER only if the existing public reads use it, with the same
+   justification.
+4. **pgTAP tests** under `supabase/tests/`, run with a local `supabase db reset`
+   plus the test runner:
+   - a visibility matrix: private, friends-only, draft, deleted, moderated,
+     banned owner, blocked viewer (authenticated), each `spore_data_visibility`
+     value, missing image or measurement gates, and a non-public microscope
+     parent. Each yields no row, or no points, exactly as
+     `get_public_observation` does;
+   - parity: for eligible fixtures, `points` and `spore_mosaic` equal the
+     corresponding parts of `get_public_observation`;
+   - bounds: null, empty, duplicates, and 61 ids;
+   - grants and `search_path`.
+5. Write one new migration, using a timestamp after the latest one. Do not
+   edit applied migrations, do not repair migration history, and do not use
+   MCP `apply_migration`.
+
+Human gate before READY: the person runs `sporely-security-reviewer` on the
+candidate SHA and supplies its verdict as evidence. This stage touches a
+public RPC and visibility gates.
+
+## Stage 2 — Prove reduced database work and latency
+
+First read the sections above the stages in `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.
+
+Local only. Seed the local database with synthetic public fixtures (no real
+personal data): at least 30 spore-bearing observations with realistic point
+counts, plus ineligible decoys.
+
+For the 30 ids, compare:
+- (a) one batch call;
+- (b) the 30 single `get_public_observation` calls the Cards view makes today.
+
+Report:
+- `EXPLAIN (ANALYZE, BUFFERS)` for (a), and summed over (b): execution and
+  planning time, and shared buffers hit and read;
+- wall-clock time through local PostgREST: (a), and (b) at concurrency 6, over
+  at least 10 repetitions (median and maximum);
+- per-point work such as `build_worker_media_url`, if it dominates either
+  plan;
+- the same measurements at 60 ids.
+
+Write the results to `docs/perf/2026-10-batch-spore-preview.md`, with the
+exact commands and raw output.
+
+Pass:
+- (a) does less total database work (time and buffers) than (b), and its
+  wall-clock time is lower;
+- (a) at 60 ids stays well under the 3-second anonymous statement timeout;
+- an explanation if a gain is small.
+
+No threshold is fixed in advance. The reviewer judges whether the evidence
+proves less work, not just fewer HTTP requests.
+
+## Stage 3 — Production migration gate
+
+First read the sections above the stages in `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.
+
+The agent prepares, without running it:
+- a runbook: `supabase/batch-spore-preview-runbook.md`;
+- probe SQL that returns only aggregate, non-personal results.
+
+The runbook covers:
+1. checking that local and remote `supabase migration list` agree, and stopping
+   if they don't;
+2. applying the migration via the repository's supported path;
+3. confirming the function is live with anonymous calls: a known public
+   spore-bearing observation returns its row, and a known non-public one
+   returns none;
+4. the rollback or compensating migration;
+5. a baseline snapshot of aggregate `pg_stat_statements` figures for
+   `get_public_observation` and the two media authorization functions, taken
+   before the landing switch.
+
+Human gate: a person performs steps 1–5 and records the evidence. Only then
+may `sporely-landing`'s `explorer-cards-batch-preview` plan start. Nothing is
+deployed automatically.
