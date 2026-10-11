@@ -1513,6 +1513,33 @@ test('Stage2a-r3: /mm/ obsolete version returns 404', async () => {
   } finally { restore() }
 })
 
+test('/mm/ invalid_storage_namespace denial returns 404 and never reads a bucket', async () => {
+  // Pins the database-only mosaic key-ownership fix: when the RPC denies a
+  // row whose storage_key lies outside its owner's namespace, the Worker
+  // must not touch R2 even if the foreign object exists.
+  const restore = installMockFetchStage2([
+    ['/rest/v1/rpc/media_authorize_mosaic_delivery', async () => ({ status: 200, body: [{
+      allowed: false, storage_key: null, canonical_bucket: 'legacy',
+      media_version: 3, cache_class: 'deny', reason: 'invalid_storage_namespace',
+    }] })],
+  ])
+  const legacy = makeMockBucketStage2({
+    'victim/o/mosaic.webp': { body: new TextEncoder().encode('VICTIM_BYTES') },
+  })
+  const priv = makeMockBucketStage2({
+    'victim/o/mosaic.webp': { body: new TextEncoder().encode('VICTIM_BYTES') },
+  })
+  try {
+    const res = await worker.fetch(
+      new Request('https://upload.sporely.no/mm/42?v=3'),
+      baseDeliveryEnv({ MEDIA_BUCKET: legacy, PRIVATE_MEDIA_BUCKET: priv }), {})
+    assert.equal(res.status, 404)
+    assert.doesNotMatch(await res.text(), /VICTIM_BYTES/)
+    assert.deepEqual(legacy.events, [], 'legacy bucket must not be read')
+    assert.deepEqual(priv.events, [], 'private bucket must not be read')
+  } finally { restore() }
+})
+
 test('Stage2h: /mm/ uses canonical role first and migration fallback second', async () => {
   const restore = installMockFetchStage2([
     ['/rest/v1/rpc/media_authorize_mosaic_delivery', async () => ({ status: 200, body: [{

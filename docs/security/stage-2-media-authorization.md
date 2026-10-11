@@ -125,6 +125,32 @@ change; the authorization RPC re-checks `is_banned` at read time so a bump
 is not strictly necessary for revocation, but Stage 2b will add it for
 symmetry with the image path.
 
+Storage-key ownership (`20261011100000_enforce_mosaic_storage_key_ownership`):
+- `spore_measurement_mosaics.id` is `GENERATED ALWAYS`; clients cannot pick
+  ids, and the sequence was advanced past every id already claimed.
+- Write guards mirror the image path. Each is skipped for trusted writers
+  (service role / postgres; the Worker's `canonical_bucket='private'` PATCH
+  relies on this):
+  - `trg_00_media_guard_server_owned_mosaic` (BEFORE): a client INSERT must
+    use bucket `legacy` and `media_version` 1. A client UPDATE may not change
+    `canonical_bucket`, and may change `media_version` only as a nested +1
+    (the observation cascade).
+  - `trg_01_media_guard_key_ownership_mosaic` (BEFORE, SECURITY DEFINER):
+    `user_id` must equal `auth.uid()` and the observation owner. On INSERT,
+    or when `storage_key` changes, the key must start with `<user_id>/` and
+    contain no `.`/`..` or empty segments, backslash or control characters.
+    An unchanged key is not re-checked, so an existing malformed row cannot
+    block the owner's observation updates.
+  - `trg_zz_media_final_state_guard_mosaic` (AFTER): a client INSERT must end
+    at version 1 / `legacy`. A client UPDATE may move the version by 0 or +1
+    only, and may not change the bucket.
+- Read time: `media_authorize_mosaic_delivery` denies with
+  `invalid_storage_namespace` when the key is not a normalized path under
+  `<mosaic user_id>/`. The check runs before the owner branch, so the owner of
+  a malformed row is denied too. It applies to every row, including rows
+  written by a trusted role. `get_observation_spore_mosaic` inherits it, and
+  the Worker returns 404 without reading R2.
+
 ### 3.5 Variant allowlist
 
 Canonical image variants: `full`, `thumb`, `original`. Enforced by
@@ -234,7 +260,8 @@ them at write time, so a legacy row or a trusted-role-inserted malformed
 row cannot be served.
 
 `media_authorize_mosaic_delivery` performs equivalent integrity checks:
-`invalid_bucket`, `invalid_media_version`, `owner_mismatch`, `no_key`.
+`invalid_bucket`, `invalid_media_version`, `owner_mismatch`, `no_key`,
+`invalid_storage_namespace` (see §3.4).
 
 ### 3.13 Server-owned field guard
 

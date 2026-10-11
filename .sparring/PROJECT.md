@@ -182,8 +182,8 @@ alone just builds and syncs.
 ## Data handling
 
 The production database holds accounts, emails, and observation locations —
-personal data. Under SINTEF policy this tooling is approved for green and yellow
-data but not personal data without prior written consent. Do not connect live
+personal data. Under the applicable data-handling policy this tooling is approved for green
+and yellow data but not personal data without prior written consent. Do not connect live
 production as a review or implementation input; work against the declared
 contracts (`SUPABASE_DB.md`, `docs/supabase-sync-contract.md`,
 `supabase/migrations/`). Never put a service-role key in a prompt or a commit.
