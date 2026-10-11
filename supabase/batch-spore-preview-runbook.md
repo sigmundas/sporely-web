@@ -354,14 +354,24 @@ exist`. That failure is expected; any other failure is a regression.
 
 **Locally, before committing the compensating migration:**
 
-1. `supabase db reset --local` on a branch that holds the compensating
-   migration. Seed nothing before step 3: the identity test refuses to run
-   (`shuffle did not make ctid order differ from id order`) on a database that
-   has been seeded and cleaned.
-2. **R2 only, first:** on a reset of the branch *without* the compensating
-   migration, run
+1. **R2 only, first: the output-identity proof, on the deployed state.**
+   Check out the branch *without* the compensating migration, then run
+   `supabase db reset --local` and
    `bash supabase/tests/public_observation_spore_previews_identity_test.sh`.
-   It must print its pass line. This is R2's output-identity proof.
+   It must print its pass line. Skip this step for R1.
+2. **Apply the compensation.** Check out the branch that *holds* the
+   compensating migration, and run `supabase db reset --local` again. Every
+   later step runs on this compensated state. If step 1 ran, it left the
+   database uncompensated, so this second reset is mandatory.
+
+   Seed nothing until step 3 has finished; only step 4 seeds. The identity
+   test in step 3 refuses to run
+   on a database that has been seeded and then cleaned
+   (`shuffle did not make ctid order differ from id order`).
+
+   To confirm you are on the compensated state before going on, run
+   `select to_regprocedure('public.get_public_observation_spore_previews(bigint[])')`.
+   It must return NULL.
 3. Run each SQL test that touches the public observation read surface, one
    file at a time. That is every file under `supabase/tests/` that names
    `get_public_observation` or `_get_public_observation_stage2a`. Do not rely
@@ -411,7 +421,8 @@ exist`. That failure is expected; any other failure is a regression.
 
    Part B calls `get_public_observation` as `anon` and prints counts. To give
    it data locally, load `docs/perf/2026-10-batch-spore-preview/seed.sql`
-   after step 3, and remove it with `cleanup.sql` afterwards.
+   after step 3, and remove it with `cleanup.sql` afterwards. Run this step on
+   the same compensated database as step 3, with no reset in between.
 
 **In production:**
 
@@ -426,6 +437,9 @@ exist`. That failure is expected; any other failure is a regression.
 
 Local evidence for this runbook (2026-10-11, synthetic fixtures, fresh reset
 per state):
+- Sequence for each state: a fresh `supabase db reset --local` of this
+  branch, then R1 or R2 applied with `psql` to the local database, standing in
+  for the compensating migration, then steps 3 and 4.
 - R1 and R2 each applied cleanly.
 - The read-surface test set gave exactly the results listed in step 3.
 - The check passed for `pre`, `r1` and `r2`. Each wrong mode raised: for
