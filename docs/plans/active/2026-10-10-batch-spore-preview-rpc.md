@@ -28,6 +28,49 @@ replace it.
   `.sparring/PROJECT.md`). Work against migrations, `schema.sql` and a local
   `supabase db reset`.
 
+### Owner decisions 2026-10-11
+
+- **Prerequisite on `main`.** The mosaic storage-key ownership fix (`0af1e32`,
+  migration `20261011100000_enforce_mosaic_storage_key_ownership.sql`) is on
+  `main` and deployed to production. This branch takes it in with
+  `git merge --no-ff main`; no rebase, amend or force-push. Nothing that
+  migration owns may be edited, weakened or re-created:
+  - mosaic id `GENERATED ALWAYS`;
+  - the `trg_00`/`trg_01`/`trg_zz` mosaic guards;
+  - `media_authorize_mosaic_delivery` and its `invalid_storage_namespace`
+    check;
+  - `supabase/tests/mosaic_storage_key_ownership_test.sql`.
+
+  The batch migration keeps version `20261011120000`.
+- **Fail-closed batch mosaic.** The batch RPC never exposes a raw mosaic
+  storage URL or key: the legacy `spore_mosaic.url` is omitted, and the
+  authorized Worker `mosaicMediaUrl` is used instead. A mosaic that is
+  malformed or rejected by the delivery authorizer produces no usable
+  reference, neither a raw key or url nor a `mosaicMediaUrl`. Rejection
+  covers a non-positive id, a bad bucket, a namespace-invalid key, an owner
+  mismatch, and a missing Worker config. This is proved with pgTAP fixtures
+  inserted as a trusted role.
+- **Existing API unchanged.** `get_public_observation` keeps its legacy `url`
+  for now; removing it is a separate, reviewed follow-up. Its output stays
+  byte-identical (identity test). Batch/single parity compares everything
+  except `url`, and `SUPABASE_DB.md` documents the difference.
+- **Stage 2 must also:**
+  - run case (b) at concurrency 2 as well as 6, per `sporely-landing`
+    `docs/perf/2026-10-11-rpc-timeout-incident.md` §"Local only: whether
+    concurrency matters";
+  - report RPC request counts, total query cost, batch execution time and
+    EXPLAIN plans;
+  - state explicitly how close the 60-id batch gets to the anon role's 3 s
+    statement timeout. Fewer requests is not a pass if the single batch is
+    too slow.
+
+  `OBSERVATION_DETAIL_CONCURRENCY` stays unchanged, and there are no
+  production load tests.
+- **Stage 3's runbook** must use the repository's deploy-tree path:
+  `node scripts/supabase-deploy-tree.mjs prepare --allow 20261011120000 ...`,
+  then check and post-verify. `supabase/deploy-exceptions.json` still lists
+  the deferred `20260914090000`. No agent executes production migrations.
+
 ## Stage 1 — Batch preview function, contract and pgTAP tests
 
 First read the sections above the stages in `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.

@@ -5,7 +5,10 @@
 -- The Cards view called get_public_observation once per spore-bearing card
 -- and used only sporePoints and sporeMosaic. This migration adds
 -- public.get_public_observation_spore_previews(bigint[]), which returns just
--- those two values for up to 60 observations in one call.
+-- those two values for up to 60 observations in one call. Unlike
+-- get_public_observation, its mosaic never carries the legacy raw-storage url
+-- and fails closed unless media_authorize_mosaic_delivery (20261011100000)
+-- allows it.
 --
 -- So that the batch function reuses the single-observation gates instead of
 -- copying them, the pieces it needs are moved, unchanged, out of
@@ -560,7 +563,15 @@ $function$;
 -- points: get_public_observation's sporePoints for that observation, in the
 -- same order and with the same values, each point reduced to the keys the
 -- landing Cards view reads. NULL when get_public_observation's is NULL.
--- spore_mosaic: get_public_observation's sporeMosaic, unchanged.
+-- spore_mosaic: get_public_observation's sporeMosaic without its legacy
+-- `url` (concat('https://media.sporely.no/', storage_key), which bypasses the
+-- Worker and names the owner's storage namespace). It is returned only when
+-- public.media_authorize_mosaic_delivery (the Worker's /mm/ authorizer, with
+-- its invalid id / bucket / media version / owner mismatch / no key /
+-- invalid_storage_namespace checks) allows that mosaic for the caller AND
+-- mosaicMediaUrl is non-NULL. Otherwise it is NULL: fail closed, with no raw
+-- key or url and no Worker URL. get_public_observation itself is unchanged
+-- and keeps its url.
 --
 -- SECURITY DEFINER for the same reason as get_public_observation: anon has no
 -- SELECT on observations, observation_images or spore_measurements, and the
@@ -609,7 +620,12 @@ BEGIN
         FROM pg_catalog.jsonb_array_elements(authorized.points) WITH ORDINALITY pt(value, ordinality)
       )
     END,
-    authorized.spore_mosaic
+    CASE
+      WHEN delivery.allowed IS TRUE
+           AND authorized.spore_mosaic->>'mosaicMediaUrl' IS NOT NULL
+        THEN authorized.spore_mosaic - 'url'
+      ELSE NULL::jsonb
+    END
   FROM private.public_observation_eligibility(p_observation_ids) eligible
   CROSS JOIN LATERAL (
     SELECT
@@ -629,6 +645,13 @@ BEGIN
         END
       ) AS spore_mosaic
   ) authorized
+  LEFT JOIN LATERAL public.media_authorize_mosaic_delivery(
+    CASE
+      WHEN pg_catalog.jsonb_typeof(authorized.spore_mosaic->'mosaicId') = 'number'
+        THEN (authorized.spore_mosaic->>'mosaicId')::bigint
+    END,
+    auth.uid()
+  ) delivery ON authorized.spore_mosaic IS NOT NULL
   ORDER BY eligible.observation_id;
 END
 $function$;
@@ -640,6 +663,6 @@ GRANT EXECUTE ON FUNCTION public.get_public_observation_spore_previews(bigint[])
   TO anon, authenticated;
 
 COMMENT ON FUNCTION public.get_public_observation_spore_previews(bigint[]) IS
-  'Public explorer Cards view: per eligible observation, the card-read subset of get_public_observation sporePoints and its sporeMosaic. At most 60 ids. Contract in SUPABASE_DB.md.';
+  'Public explorer Cards view: per eligible observation, the card-read subset of get_public_observation sporePoints, and its sporeMosaic without the legacy url, only when media_authorize_mosaic_delivery allows it (else NULL). At most 60 ids. Contract in SUPABASE_DB.md.';
 
 COMMIT;
