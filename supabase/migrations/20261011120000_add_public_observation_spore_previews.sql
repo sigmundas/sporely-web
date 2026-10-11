@@ -644,6 +644,10 @@ BEGIN
           ELSE NULL::jsonb
         END
       ) AS spore_mosaic
+    -- Optimization fence: without it the planner pulls this subquery up and
+    -- re-evaluates both STABLE helpers once per reference to authorized.*
+    -- below (3x the point work, 5x the mosaic work per observation).
+    OFFSET 0
   ) authorized
   LEFT JOIN LATERAL public.media_authorize_mosaic_delivery(
     CASE
