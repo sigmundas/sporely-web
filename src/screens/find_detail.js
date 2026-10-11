@@ -34,6 +34,7 @@ import { imageHtml, wireImageFallback } from '../image-helpers.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { createImageCropMeta, normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
 import { esc as _esc } from '../esc.js'
+import { syncTaxonClearButton, wireTaxonClearButton } from '../taxon-clear-button.js'
 import { getArtsorakelMaxEdge, getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices, setLastSyncAt, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY } from '../settings.js'
 import { normalizeVisibility, observationUsesPrivacySlot, toCloudVisibility } from '../visibility.js'
 import { getIdentifyNoMatchMessage, runIdentifyForBlobs, runIdentifyForMediaKeys } from '../identify.js'
@@ -1642,17 +1643,8 @@ async function _persistDetailImageCrops() {
   return null
 }
 
-export function initFindDetail() {
-  const backBtn = document.getElementById('detail-back')
-  backBtn.addEventListener('click', _goBack)
-  document.getElementById('detail-cancel-btn').addEventListener('click', _goBack)
-  document.getElementById('detail-save-btn').addEventListener('click', _save)
-  document.getElementById('detail-delete-btn').addEventListener('click', _delete)
-
-  const input    = document.getElementById('detail-taxon-input')
-  const dropdown = document.getElementById('detail-taxon-dropdown')
+function _wireDetailTaxonInput(input, dropdown) {
   let debounce
-
   input.addEventListener('input', () => {
     selectedTaxon = null
     _setDetailHeader({
@@ -1665,6 +1657,29 @@ export function initFindDetail() {
   input.addEventListener('blur', () => {
     setTimeout(() => { dropdown.style.display = 'none' }, 200)
   })
+  wireTaxonClearButton(input)
+}
+
+// Every programmatic fill goes through here so the clear button follows the
+// value; typing is covered by the button's own input listener.
+function _setDetailTaxonInputValue(value) {
+  const input = document.getElementById('detail-taxon-input')
+  if (!input) return
+  input.value = value
+  syncTaxonClearButton(input)
+}
+
+export function initFindDetail() {
+  const backBtn = document.getElementById('detail-back')
+  backBtn.addEventListener('click', _goBack)
+  document.getElementById('detail-cancel-btn').addEventListener('click', _goBack)
+  document.getElementById('detail-save-btn').addEventListener('click', _save)
+  document.getElementById('detail-delete-btn').addEventListener('click', _delete)
+
+  _wireDetailTaxonInput(
+    document.getElementById('detail-taxon-input'),
+    document.getElementById('detail-taxon-dropdown'),
+  )
 
   const locationInput = document.getElementById('detail-location')
   if (locationInput) {
@@ -1886,7 +1901,7 @@ async function _loadFindDetail(obsId, options, loadGeneration) {
     fallbackName: displayName.trim() || t('detail.unknownSpecies'),
     uncertain: !!obs.uncertain,
   })
-  document.getElementById('detail-taxon-input').value = displayName.trim()
+  _setDetailTaxonInputValue(displayName.trim())
 
   document.getElementById('detail-location').value = obs.location || ''
   _startDetailLocationLookup(obs)
@@ -3113,7 +3128,7 @@ function _renderDetailAiResults() {
           ...(detailAiState.selectedProbabilityByService || {}),
           [activeService]: _detailAiPredictionProbability(clickedPrediction),
         }
-        document.getElementById('detail-taxon-input').value = clickedPrediction.displayName
+        _setDetailTaxonInputValue(clickedPrediction.displayName)
         _setDetailHeader({
           commonName: selectedTaxon.vernacularName || '',
           genus: selectedTaxon.genus || '',
@@ -3550,7 +3565,7 @@ async function _goBack(event, options = {}) {
 function _resetForm() {
   _clearDetailUnavailableState()
   currentObsIsOwner = false
-  document.getElementById('detail-taxon-input').value = ''
+  _setDetailTaxonInputValue('')
   document.getElementById('detail-taxon-dropdown').style.display = 'none'
   document.getElementById('detail-location').value    = ''
   detailLocationSuggestions = []
@@ -4427,6 +4442,8 @@ function _applyOwnershipMode(isOwner) {
     tab.setAttribute('aria-disabled', 'false')
   })
   if (taxonInput) taxonInput.disabled = !isOwner
+  const taxonClearBtn = document.getElementById('detail-taxon-clear')
+  if (taxonClearBtn) taxonClearBtn.disabled = !isOwner
   if (locationInput) locationInput.readOnly = !isOwner
   if (habitatInput) habitatInput.readOnly = !isOwner
   if (notesInput) notesInput.readOnly = !isOwner
@@ -4514,7 +4531,7 @@ async function _searchTaxon(q, dropdown) {
   dropdown.querySelectorAll('li').forEach(li => {
     li.addEventListener('mousedown', () => {
       selectedTaxon = JSON.parse(li.dataset.taxon)
-      document.getElementById('detail-taxon-input').value = selectedTaxon.displayName
+      _setDetailTaxonInputValue(selectedTaxon.displayName)
       _setDetailHeader({
         commonName: selectedTaxon.vernacularName || '',
         genus: selectedTaxon.genus || '',
@@ -4571,6 +4588,10 @@ export function __setDetailPublishTestState({ obs = null, isOwner = true, publis
   currentObsIsOwner = isOwner
   selectedTaxon = null
   detailPublishNoticeOptions = publishNoticeOptions
+}
+
+export function __getDetailSelectedTaxonForTests() {
+  return selectedTaxon
 }
 
 export function __saveDetailForTests() {
@@ -5498,6 +5519,8 @@ function _hideProgress() {
 }
 
 export {
+  _wireDetailTaxonInput,
+  _setDetailTaxonInputValue,
   _canRunDetailAiService,
   _canViewDetailAiResult,
   _buildDetailAiCachedResult,

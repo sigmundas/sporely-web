@@ -683,9 +683,10 @@
         <div class="detail-form">
           <div class="detail-field">
             <div class="detail-field-label">Species</div>
-          <div class="taxon-field-wrap">
+          <div class="taxon-field-wrap taxon-field-wrap--clearable">
             <input id="detail-taxon-input" class="taxon-input detail-taxon-input" type="text"
               placeholder="Unknown species" autocomplete="off" spellcheck="false">
+            <button id="detail-taxon-clear" type="button" class="taxon-clear-btn" aria-label="Clear species" hidden><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
             <ul id="detail-taxon-dropdown" class="taxon-dropdown" style="display:none"></ul>
           </div>
           <div class="detail-ai-stack is-fused-tabs" data-identify-comparison-state>

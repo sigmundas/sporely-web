@@ -25,6 +25,10 @@ import {
   normalizeSporeMosaicPresentation,
   pickSporeSummaryRow,
   sporeStatsPresentation,
+  _setDetailTaxonInputValue,
+  _wireDetailTaxonInput,
+  __getDetailSelectedTaxonForTests,
+  __setDetailPublishTestState,
 } from './find_detail.js'
 
 class MockClassList {
@@ -1489,4 +1493,167 @@ test('find detail starts id-keyed requests before the observation and reveals th
   assert.ok(body.indexOf('_syncDetailRedlistSummary()') < observationAwait)
   assert.match(source, /if \(loadGeneration === detailLoadGeneration\) _setDetailLoading\(false\)/)
   assert.match(css, /\.review-body\.is-detail-loading > \* \{\s*visibility: hidden;/)
+})
+
+function makeDetailTaxonField(value = '') {
+  const makeNode = extra => {
+    const listeners = {}
+    return {
+      style: { display: '' },
+      dataset: {},
+      innerHTML: '',
+      hidden: false,
+      disabled: false,
+      addEventListener(type, handler) {
+        (listeners[type] ||= []).push(handler)
+      },
+      dispatchEvent(event) {
+        for (const handler of listeners[event.type] || []) handler(event)
+        return true
+      },
+      ...extra,
+    }
+  }
+  const field = { focusCount: 0 }
+  const dropdown = makeNode()
+  dropdown.style.display = 'none'
+  // Mirrors the static markup: the button starts hidden.
+  const button = makeNode({ hidden: true })
+  const wrap = makeNode({
+    querySelector(selector) {
+      if (selector === '.taxon-clear-btn') return button
+      if (selector === '.taxon-dropdown') return dropdown
+      return null
+    },
+  })
+  const input = makeNode({
+    value,
+    closest(selector) {
+      return selector === '.taxon-field-wrap' ? wrap : null
+    },
+    focus() { field.focusCount++ },
+    blur() {},
+  })
+  return Object.assign(field, { input, button, dropdown, wrap })
+}
+
+function withDetailTaxonDocument(field, { resultsEl = makeResultsEl() } = {}) {
+  const previous = {
+    document: globalThis.document,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+  }
+  globalThis.document = {
+    querySelectorAll() { return [] },
+    querySelector() { return null },
+    getElementById(id) {
+      if (id === 'detail-taxon-input') return field.input
+      if (id === 'detail-taxon-dropdown') return field.dropdown
+      if (id === 'detail-taxon-clear') return field.button
+      if (id === 'detail-ai-results') return resultsEl
+      return null
+    },
+  }
+  // The input handler schedules a debounced taxon search; never run it.
+  globalThis.setTimeout = () => 0
+  globalThis.clearTimeout = () => {}
+  return () => {
+    globalThis.document = previous.document
+    globalThis.setTimeout = previous.setTimeout
+    globalThis.clearTimeout = previous.clearTimeout
+  }
+}
+
+function clickDetailTaxonClear(field) {
+  const pointer = { type: 'pointerdown', defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }
+  field.button.dispatchEvent(pointer)
+  assert.equal(pointer.defaultPrevented, true, 'pointerdown must keep focus on the input')
+  field.button.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} })
+}
+
+test('find detail species clear button is hidden when empty and follows programmatic fills', () => {
+  const field = makeDetailTaxonField()
+  const restore = withDetailTaxonDocument(field)
+  try {
+    _wireDetailTaxonInput(field.input, field.dropdown)
+    assert.equal(field.button.hidden, true, 'hidden for an empty input')
+
+    // Load fill for an observation with a taxon.
+    _setDetailTaxonInputValue('Fly agaric (Amanita muscaria)')
+    assert.equal(field.input.value, 'Fly agaric (Amanita muscaria)')
+    assert.equal(field.button.hidden, false, 'shown after load with a taxon')
+
+    // Form reset between observations.
+    _setDetailTaxonInputValue('')
+    assert.equal(field.button.hidden, true, 'hidden again after reset')
+
+    field.input.value = 'Ama'
+    field.input.dispatchEvent({ type: 'input' })
+    assert.equal(field.button.hidden, false, 'shown after typing')
+  } finally {
+    restore()
+  }
+})
+
+test('find detail species clear button shows after an AI pick and clears like manual deletion', () => {
+  resetDetailState()
+  __setDetailPublishTestState({ obs: { id: 'obs-1' }, isOwner: true })
+  const prediction = {
+    scientificName: 'Amanita muscaria',
+    vernacularName: 'Fly agaric',
+    displayName: 'Fly agaric (Amanita muscaria)',
+    probability: 0.91,
+  }
+  const resultsEl = makeResultsEl()
+  const item = makeIdentifyResultItem(prediction)
+  const itemListeners = {}
+  item.addEventListener = (type, handler) => { itemListeners[type] = handler }
+  resultsEl._items.push(item)
+  const field = makeDetailTaxonField()
+  const restore = withDetailTaxonDocument(field, { resultsEl })
+  try {
+    _wireDetailTaxonInput(field.input, field.dropdown)
+    detailAiState.activeService = 'artsorakel'
+    detailAiState.resultsByService = {
+      artsorakel: { service: 'artsorakel', status: 'success', predictions: [prediction] },
+    }
+    _renderDetailAiResults()
+    itemListeners.click()
+
+    assert.equal(field.input.value, prediction.displayName)
+    assert.equal(__getDetailSelectedTaxonForTests()?.displayName, prediction.displayName)
+    assert.equal(field.button.hidden, false, 'shown after an AI prediction click')
+
+    field.dropdown.style.display = 'block'
+    field.dropdown.innerHTML = '<li>Amanita</li>'
+    clickDetailTaxonClear(field)
+
+    assert.equal(field.input.value, '')
+    assert.equal(__getDetailSelectedTaxonForTests(), null, 'selection nulled exactly as by manual deletion')
+    assert.equal(field.button.hidden, true)
+    assert.equal(field.dropdown.style.display, 'none')
+    assert.equal(field.dropdown.innerHTML, '')
+    assert.equal(field.focusCount, 1, 'focus returns to the input')
+  } finally {
+    restore()
+    __setDetailPublishTestState()
+    resetDetailState()
+  }
+})
+
+test('find detail routes every species input fill through the clear-button sync', () => {
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+  const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
+  const i18n = fs.readFileSync(new URL('../i18n.js', import.meta.url), 'utf8')
+  // Load, AI pick, reset and dropdown selection; no direct writes remain.
+  assert.doesNotMatch(source, /getElementById\('detail-taxon-input'\)\.value\s*=[^=]/)
+  assert.match(source, /_setDetailTaxonInputValue\(displayName\.trim\(\)\)/)
+  assert.match(source, /_setDetailTaxonInputValue\(clickedPrediction\.displayName\)/)
+  assert.match(source, /_setDetailTaxonInputValue\(''\)/)
+  assert.match(source, /_setDetailTaxonInputValue\(selectedTaxon\.displayName\)/)
+  // Non-owners cannot edit the species, so they cannot clear it either.
+  assert.match(source, /taxonClearBtn\.disabled = !isOwner/)
+  // Static markup sits inside the wrap and is relabelled on language switch.
+  assert.match(html, /<div class="taxon-field-wrap taxon-field-wrap--clearable">\s*<input id="detail-taxon-input"[^>]*>\s*<button id="detail-taxon-clear" type="button" class="taxon-clear-btn"[^>]* hidden>/)
+  assert.match(i18n, /setAria\('#detail-taxon-clear', 'detail\.clearSpecies'\)/)
 })

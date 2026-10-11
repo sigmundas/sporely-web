@@ -2233,6 +2233,7 @@ export function applyStaticTranslations() {
   setPlaceholder('#finds-search-input', 'finds.search')
   setPlaceholder('#review-notes', 'review.fieldNotes')
   setPlaceholder('#detail-taxon-input', 'detail.unknownSpecies')
+  setAria('#detail-taxon-clear', 'detail.clearSpecies')
   setPlaceholder('#detail-notes', 'review.fieldNotes')
   setPlaceholder('#comment-input', 'comments.add')
   setPlaceholder('#map-search-input', 'map.filter')
