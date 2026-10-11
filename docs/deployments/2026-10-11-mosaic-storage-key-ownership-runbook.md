@@ -8,8 +8,8 @@ every step below and records the evidence. No agent runs any of it, connects to
 production, or sees its output beyond the aggregate counts this runbook marks
 as recordable. Nothing here is deployed automatically.
 
-Status: **prepared, not executed.** No production read or write has been made
-for this change.
+Status: **executed 2026-10-11.** The owner applied `20261011100000` to
+production. See "Production deployment — 2026-10-11" at the end of this file.
 
 ## What changes in production
 
@@ -661,3 +661,123 @@ the 5.1–5.6 results, and the 5.7 pass/fail. Include no identifiers or keys.
 - Never use `supabase migration repair`, never edit or rename
   `20261011100000` or any other applied migration, and never run the reverse
   DDL directly in the SQL editor.
+
+## Production deployment — 2026-10-11
+
+Recorded by an agent from the owner's report, after the owner had finished the
+deployment. The agent ran no production query or command. Every result below
+was reported by the owner. The agent checked only the repository facts marked
+"checked locally".
+
+- **Operator:** the owner (manual, human-executed).
+- **Target:** Supabase project `zkpjklzfwzefhjluvhfw`.
+- **`<merged main SHA>`:** `0af1e32` (`0af1e32233c6bf80aa9f378fffbcd32c700f6ba0`).
+  Accepted candidate: `4e58763`.
+- **UTC times:** exact times for the probe, the push and the verification were
+  **not captured**. Bounds from evidence:
+  - Earliest: `2026-10-11T15:35:30Z`, the commit time of `0af1e32`, which the
+    deploy tree was built from.
+  - Latest: `2026-10-11T17:49:18Z`, when this record was written. The owner
+    reported the deployment as complete at that point.
+
+### Step 0 — gate
+
+- Merge ancestry (`0af1e32` on `origin/main`): PASS.
+- Migration integrity (`git diff --exit-code 4e58763 0af1e32 -- <migration>`):
+  PASS. Also checked locally: the file is byte-identical between the two SHAs.
+
+### Step 1 — pre-checks
+
+`supabase migration list`: only `20260914090000` (documented deferred) and
+`20261011100000` (this migration) were local-only. PASS.
+
+### Step 2 — probe (aggregate only)
+
+2a, run before applying:
+
+| Column | Value |
+|---|---|
+| `total` | 391 |
+| `empty_key` | 0 |
+| `owner_prefixed` | 391 |
+| `not_owner_prefixed` | 0 |
+| `foreign_uuid_prefixed` | 0 |
+| `url_or_leading_slash` | 0 |
+| `bad_segments` | 0 |
+| `owner_mismatch` | 0 |
+| `nonpositive_id` | 0 |
+| `private_bucket` | 0 |
+| `version_gt_1` | 44 |
+| `owners_with_bad_keys` | 0 |
+| `keys_shared_across_users` | 0 |
+| `max_id` | 393 |
+| `seq_last_value` | 393 |
+
+2b:
+
+| Column | Value |
+|---|---|
+| `namespace_invalid_mosaics` | 0 |
+| `namespace_invalid_tiles` | 0 |
+| `affected_observations` | 0 |
+
+Sanity check: `namespace_invalid_mosaics` (0) ≥ `not_owner_prefixed − empty_key`
+(0). Holds. Every "How to read it" signal is 0, including 2b, and
+`max_id` = `seq_last_value`. Outcome: no existing malformed rows. Step 3 skipped.
+
+### Step 3 — incident branch
+
+Not applicable. No forensic snapshot was taken. 3.4 neutralization was not run:
+no rows were deleted or made inert.
+
+The limit stated under "Earlier pre-flight result" still applies. The probe
+covers current database state only and cannot rule out historical exposure
+through rows that were later deleted.
+
+### Step 4 — apply
+
+- `prepare` / `check` (deploy-tree dry run): PASS. The pending set was exactly
+  `20261011100000`.
+- `supabase db push --linked` in the deploy tree: applied
+  `20261011100000_enforce_mosaic_storage_key_ownership.sql` with no errors.
+- `post-verify`: "Remote matches the deploy tree exactly; deferred migrations
+  are still absent."
+- Deploy tree `sporely-web-deploy-0af1e32233c6`: checked locally at closeout.
+  It had already been removed. The directory does not exist and git has no
+  worktree entry for it. The agent removed nothing.
+
+### Step 5 — verify
+
+| Check | Expected | Result |
+|---|---|---|
+| 5.1 `attidentity` | `a` | `a` |
+| 5.2 sequence ≥ max id | `t` | `t` |
+| 5.3 guard triggers | 3 rows, `O` | 3 rows, all `O` |
+| 5.4 `invalid_storage_namespace` in function | `t` | `t` |
+| 5.5 privileges | `f f f f f f f f t` | `f f f f f f f f t` (eight denied, `service_role` allowed) |
+| 5.6 namespace-invalid rows allowed | 0 | 0 |
+
+The post-3.4 re-run of 2b does not apply, because step 3.4 did not run.
+
+5.7 end-to-end. The owner tested manually. The agent did not run these tests:
+
+| Step | Result |
+|---|---|
+| 1. New mosaic upload and sync | PASS |
+| 2. Replacement mosaic after a measurement change, and sync | PASS |
+| 3. Visibility change and restore; mosaic still displays | PASS |
+| Mosaic display and app behavior | PASS |
+
+Deviation: the owner ran 5.7 with their normal Sporely account, not a dedicated
+test account as 5.7 specifies.
+
+### Outcome
+
+Deployed and verified. No rollback or compensation is needed.
+
+Still open, tracked in the plan and not part of this deployment:
+
+- the paused batch spore-preview RPC branch, which is now unblocked by this
+  plan;
+- the legacy `media.sporely.no` raw-URL exposure (Stage 2c);
+- the remaining items under "Follow-ups" in the plan.
