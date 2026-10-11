@@ -152,16 +152,21 @@ Record every 2a and 2b integer with a UTC timestamp. No other output.
 
 | Signal | Meaning | Action |
 | --- | --- | --- |
-| `not_owner_prefixed > 0`, `bad_segments > 0`, `nonpositive_id > 0`, or `max_id > seq_last_value` | **Possible exploitation** | Step 3 (incident branch), then apply |
+| 2b `namespace_invalid_mosaics > 0`, `not_owner_prefixed > 0`, `bad_segments > 0`, `nonpositive_id > 0`, or `max_id > seq_last_value` | **Possible exploitation** | Step 3 (incident branch), then apply |
 | `url_or_leading_slash > 0` | Legitimate rows in a non-canonical form would be denied, and step 3.4 would delete them | STOP. The owner decides on normalization before proceeding |
 | `private_bucket > 0` | Suspicious while production runs `MEDIA_STORAGE_MODE=legacy` | Include in the step 3 snapshot; the owner decides |
 | `empty_key > 0` | Counted inside `not_owner_prefixed`. Denied as `no_key` both before and after; not foreign, and not deleted by step 3.4 | Snapshot in 3.1; the owner decides |
 | `keys_shared_across_users > 0` | A key used by more than one owner; at most one can be in-namespace | Treat as possible exploitation |
-| All of the above are 0 | No existing malformed rows | Skip step 3; go to step 4 |
+| All of the above are 0, **including** 2b `namespace_invalid_mosaics` | No existing malformed rows | Skip step 3; go to step 4 |
+
+2b is decisive on its own. A positive `namespace_invalid_mosaics` enters step 3
+even when every 2a signal is 0: an owner-prefixed key that ends in `/` or
+contains a control character is counted by 2b but by no 2a column. Never
+declare "no malformed rows" unless 2b `namespace_invalid_mosaics` is 0.
 
 `version_gt_1` is normal: replacement uploads and visibility changes bump it.
 
-## 3. Incident branch (only if step 2 shows possible exploitation)
+## 3. Incident branch (only if step 2 shows possible exploitation, or 2b is above 0)
 
 ### 3.1 Forensic snapshot (before applying, person only)
 
@@ -235,9 +240,14 @@ this plan's scope.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
--- Block concurrent mosaic writes (including the Worker's service-role PATCH)
--- for the duration; reads continue.
-LOCK TABLE public.spore_measurement_mosaics IN SHARE ROW EXCLUSIVE MODE;
+-- Block concurrent writes to BOTH tables for the duration, so the counts
+-- taken below equal what is actually deleted; reads continue. The tile lock
+-- matters: a tile INSERT/UPDATE/DELETE takes only a compatible lock on the
+-- mosaic table, so the mosaic lock alone would not stop it. If either LOCK
+-- times out (or a concurrent sync deadlocks against it), the transaction
+-- aborts with nothing changed; re-run it.
+LOCK TABLE public.spore_measurement_mosaics, public.spore_measurement_mosaic_tiles
+  IN SHARE ROW EXCLUSIVE MODE;
 
 CREATE TEMP TABLE _mosaic_neutralization_result (
   deleted_mosaics bigint, deleted_tiles bigint, remaining_invalid bigint
@@ -333,15 +343,103 @@ Expected effects:
 
 #### Alternative: keep the rows, made inert (owner's choice only)
 
-If the owner prefers to keep the rows, run this instead of the `DELETE` (same
-transaction structure, same lock and expected-count assertion, `UPDATE`
-replacing `DELETE`):
+If the owner prefers to keep the rows, run this transaction **instead of** the
+one above. Fill in the constants from step 3.4.1 the same way, and run it with
+`psql -v ON_ERROR_STOP=1 -f <file>`. It rewrites each target key to
+`<user_id>/<observation_id>/neutralized_mosaic_<id>.webp`, an in-namespace key
+that names no object, and asserts that every tile is kept.
 
 ```sql
-UPDATE public.spore_measurement_mosaics m
-   SET storage_key = m.user_id::text || '/' || m.observation_id::text
-                     || '/neutralized_mosaic_' || m.id::text || '.webp'
- WHERE m.id = ANY (target_ids);
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+-- Same reasoning as the delete transaction: lock both tables against writes.
+LOCK TABLE public.spore_measurement_mosaics, public.spore_measurement_mosaic_tiles
+  IN SHARE ROW EXCLUSIVE MODE;
+
+CREATE TEMP TABLE _mosaic_inert_result (
+  rewritten_mosaics bigint, preserved_tiles bigint, remaining_invalid bigint
+) ON COMMIT DROP;
+
+DO $$
+DECLARE
+  expected_mosaics constant bigint := NULL;  -- <- step 3.4.1 namespace_invalid_mosaics
+  expected_tiles   constant bigint := NULL;  -- <- step 3.4.1 namespace_invalid_tiles
+  target_ids bigint[];
+  tiles_before bigint;
+  tiles_after bigint;
+  rewritten bigint;
+  not_inert bigint;
+  remaining bigint;
+BEGIN
+  IF expected_mosaics IS NULL OR expected_tiles IS NULL THEN
+    RAISE EXCEPTION 'fill in expected_mosaics and expected_tiles first';
+  END IF;
+
+  SELECT coalesce(array_agg(m.id), '{}') INTO target_ids
+  FROM public.spore_measurement_mosaics m
+  WHERE coalesce(m.storage_key, '') <> ''
+    AND (   NOT starts_with(m.storage_key, m.user_id::text || '/')
+         OR m.storage_key ~ '(^|/)\.{1,2}(/|$)'
+         OR strpos(m.storage_key, '//') > 0
+         OR right(m.storage_key, 1) = '/'
+         OR strpos(m.storage_key, chr(92)) > 0
+         OR m.storage_key ~ '[\x01-\x1f]');
+
+  IF cardinality(target_ids) <> expected_mosaics THEN
+    RAISE EXCEPTION 'target mosaics % <> expected %', cardinality(target_ids), expected_mosaics;
+  END IF;
+
+  SELECT count(*) INTO tiles_before
+  FROM public.spore_measurement_mosaic_tiles WHERE mosaic_id = ANY (target_ids);
+  IF tiles_before <> expected_tiles THEN
+    RAISE EXCEPTION 'target tiles % <> expected %', tiles_before, expected_tiles;
+  END IF;
+
+  -- No R2 object is touched. trg_mosaic_media_version_bump adds +1.
+  UPDATE public.spore_measurement_mosaics m
+     SET storage_key = m.user_id::text || '/' || m.observation_id::text
+                       || '/neutralized_mosaic_' || m.id::text || '.webp'
+   WHERE m.id = ANY (target_ids);
+  GET DIAGNOSTICS rewritten = ROW_COUNT;
+  IF rewritten <> expected_mosaics THEN
+    RAISE EXCEPTION 'rewritten % <> expected %', rewritten, expected_mosaics;
+  END IF;
+
+  SELECT count(*) INTO not_inert
+  FROM public.spore_measurement_mosaics m
+  WHERE m.id = ANY (target_ids)
+    AND m.storage_key IS DISTINCT FROM
+        m.user_id::text || '/' || m.observation_id::text
+        || '/neutralized_mosaic_' || m.id::text || '.webp';
+  IF not_inert <> 0 THEN
+    RAISE EXCEPTION '% target rows do not carry the inert key', not_inert;
+  END IF;
+
+  SELECT count(*) INTO tiles_after
+  FROM public.spore_measurement_mosaic_tiles WHERE mosaic_id = ANY (target_ids);
+  IF tiles_after <> tiles_before THEN
+    RAISE EXCEPTION 'tiles changed: % before, % after', tiles_before, tiles_after;
+  END IF;
+
+  SELECT count(*) INTO remaining
+  FROM public.spore_measurement_mosaics m
+  WHERE coalesce(m.storage_key, '') <> ''
+    AND (   NOT starts_with(m.storage_key, m.user_id::text || '/')
+         OR m.storage_key ~ '(^|/)\.{1,2}(/|$)'
+         OR strpos(m.storage_key, '//') > 0
+         OR right(m.storage_key, 1) = '/'
+         OR strpos(m.storage_key, chr(92)) > 0
+         OR m.storage_key ~ '[\x01-\x1f]');
+  IF remaining <> 0 THEN
+    RAISE EXCEPTION '% namespace-invalid rows remain', remaining;
+  END IF;
+
+  INSERT INTO _mosaic_inert_result VALUES (rewritten, tiles_after, remaining);
+END $$;
+
+SELECT * FROM _mosaic_inert_result;   -- counts only; record these
+COMMIT;
 ```
 
 As the database owner, `auth.uid()` is NULL and `current_user` is trusted, so
