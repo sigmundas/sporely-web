@@ -298,8 +298,11 @@ editor. Every correction is a **new** migration:
 ### Option R1 — withdraw the batch function (default)
 
 Use R1 when the batch function is wrong or exposes too much, but
-`get_public_observation` is fine. The identity test shows that the latter is
-unchanged. Compensating migration body:
+`get_public_observation` is fine. R1 leaves `get_public_observation` as
+`20261011120000` made it: same fields, values, gates and media behaviour,
+with the owner-approved point order (image id, then measurement id). The
+identity test shows its output equals the pre-migration output only where the
+old order already was id order. Compensating migration body:
 
 ```sql
 BEGIN;
@@ -347,10 +350,14 @@ transaction:
 `CREATE OR REPLACE` keeps the existing owner and grants, and neither earlier
 migration sets grants for these two functions. Steps 1–2 are exactly what
 `supabase/tests/public_observation_spore_previews_identity_test.sh` applies
-inside its rolled-back transaction. That test is therefore the proof that R2
-changes no `get_public_observation` output, but only when it runs **before**
-R2, on the deployed state. Once R2 is applied, it compares the old bodies with
-themselves and proves nothing.
+inside its rolled-back transaction. Run **before** R2, on the deployed state,
+it shows that R2 changes no `get_public_observation` output for observations
+whose points are in id order. It does not cover the rest: R2 removes the
+explicit point order, so observations whose plan or row placement gives a
+different order go back to that unspecified, plan-dependent order. That is
+the owner-approved exception reversed, not a regression R2 introduces. Once
+R2 is applied, the test compares the old bodies with themselves and proves
+nothing.
 
 R2 touches a public read surface and its visibility gates. It needs owner
 approval and its own `sporely-security-reviewer` pass.
@@ -405,7 +412,9 @@ exist`. That failure is expected; any other failure is a regression.
      - `spore_child_image_ownership_rls_test.sql`;
      - `stage2b_authorized_media_projections_test.sql`;
      - the identity test (`.sh`; for R1 it proves `get_public_observation`
-       still matches its pre-`20261011120000` output; for R2 it is trivial);
+       still matches its pre-`20261011120000` output for its fixtures, whose
+       old order is id order; it does not cover the approved point-order
+       exception; for R2 it is trivial);
    - **must fail with "does not exist" for the batch function, and nothing
      else:**
      - `public_observation_spore_previews_test.sql`;
