@@ -35,6 +35,12 @@
 -- their output is unchanged (proved by
 -- supabase/tests/public_observation_spore_previews_identity_test.sh).
 --
+-- The batch function calls the eligibility and the two mosaic helpers. It
+-- does not call the two point helpers: for speed, it mirrors them in one pass
+-- (see the comment above the batch function). Their gate lines are repeated
+-- verbatim there, and public_observation_spore_previews_eval_count_test.sql
+-- fails if any WHERE gate line of spore_points_raw is missing.
+--
 -- Observations have no soft-delete or moderation column: a deleted
 -- observation is a missing row, and owner moderation is profiles.is_banned.
 -- Image soft deletion (deleted_at / purged_at) is gated inside the point
@@ -573,9 +579,27 @@ $function$;
 -- key or url and no Worker URL. get_public_observation itself is unchanged
 -- and keeps its url.
 --
+-- Observation eligibility and the mosaic come from the shared private
+-- helpers. The points do not: composing public_observation_spore_points_raw
+-- with public_observation_authorize_spore_points and then dropping keys built
+-- every point's JSON three times and called build_worker_media_url once per
+-- point, which made one batch call slower than six parallel single calls
+-- (docs/perf/2026-10-batch-spore-preview.md). The `pts` lateral below is the
+-- same query in one pass:
+--   * its tables, joins and WHERE gates are spore_points_raw's, verbatim; the
+--     image gates sit inside the per-image subquery, the measurement-type
+--     gate outside it;
+--   * cropUrl is authorize_spore_points' build_worker_media_url(image id,
+--     'thumb', image media_version), present only when the point has a
+--     thumb_key. Those arguments depend only on the image, so it is computed
+--     once per image;
+--   * the per-point expressions are spore_points_raw's, for the card keys only.
+-- supabase/tests/public_observation_spore_previews_test.sql proves value and
+-- order parity with get_public_observation across the visibility matrix.
+--
 -- SECURITY DEFINER for the same reason as get_public_observation: anon has no
 -- SELECT on observations, observation_images or spore_measurements, and the
--- rows it may see are decided by the gates in the private helpers.
+-- rows it may see are decided by the gates in the private helpers and below.
 
 CREATE FUNCTION public.get_public_observation_spore_previews(p_observation_ids bigint[])
 RETURNS TABLE(observation_id bigint, points jsonb, spore_mosaic jsonb)
@@ -584,15 +608,6 @@ STABLE
 SECURITY DEFINER
 SET search_path = ''
 AS $function$
-DECLARE
-  -- The fields read by normalizeSporePoints (id, lengthUm and widthUm decide
-  -- whether a point is kept), ObservationCard (crop geometry, cropUrl) and
-  -- sporePointFilters (prep context). Nothing else leaves the server.
-  card_point_keys CONSTANT text[] := ARRAY[
-    'id', 'lengthUm', 'widthUm', 'cropUrl',
-    'mosaicX', 'mosaicY', 'mosaicW', 'mosaicH',
-    'contrastMethod', 'mountReagent', 'sampleType', 'sampleSource'
-  ];
 BEGIN
   IF pg_catalog.cardinality(p_observation_ids) > 60 THEN
     RAISE EXCEPTION 'get_public_observation_spore_previews accepts at most 60 observation ids, got %',
@@ -603,23 +618,7 @@ BEGIN
   RETURN QUERY
   SELECT
     eligible.observation_id,
-    CASE
-      WHEN authorized.points IS NULL OR pg_catalog.jsonb_typeof(authorized.points) <> 'array'
-        THEN authorized.points
-      ELSE (
-        SELECT coalesce(pg_catalog.jsonb_agg(
-                 CASE
-                   WHEN pg_catalog.jsonb_typeof(pt.value) = 'object' THEN (
-                     SELECT coalesce(pg_catalog.jsonb_object_agg(kv.key, kv.value), '{}'::jsonb)
-                     FROM pg_catalog.jsonb_each(pt.value) kv
-                     WHERE kv.key = ANY (card_point_keys)
-                   )
-                   ELSE pt.value
-                 END
-                 ORDER BY pt.ordinality), '[]'::jsonb)
-        FROM pg_catalog.jsonb_array_elements(authorized.points) WITH ORDINALITY pt(value, ordinality)
-      )
-    END,
+    pts.points,
     CASE
       WHEN delivery.allowed IS TRUE
            AND authorized.spore_mosaic->>'mosaicMediaUrl' IS NOT NULL
@@ -627,15 +626,61 @@ BEGIN
       ELSE NULL::jsonb
     END
   FROM private.public_observation_eligibility(p_observation_ids) eligible
+  LEFT JOIN LATERAL (
+    -- Only the fields read by normalizeSporePoints (id, lengthUm and widthUm
+    -- decide whether a point is kept), ObservationCard (crop geometry,
+    -- cropUrl) and sporePointFilters (prep context) leave the server.
+    SELECT pg_catalog.jsonb_agg(
+      pg_catalog.jsonb_strip_nulls(
+        pg_catalog.jsonb_build_object(
+          'id',             m.id::text,
+          'lengthUm',       m.length_um,
+          'widthUm',        m.width_um,
+          'cropUrl',        CASE WHEN m.thumb_key IS NOT NULL THEN i.crop_url ELSE NULL END,
+          'contrastMethod', nullif(btrim(coalesce(i.contrast, '')), ''),
+          'mountReagent',   nullif(btrim(coalesce(i.mount_medium, '')), ''),
+          'sampleType',     CASE
+                              WHEN lower(btrim(coalesce(i.sample_type, ''))) IN ('fresh', 'dried')
+                                THEN lower(btrim(i.sample_type))
+                              ELSE NULL::text
+                            END,
+          'sampleSource',   CASE
+                              WHEN lower(btrim(coalesce(i.sample_source, ''))) IN ('spore_print', 'hymenium', 'stipe', 'pileus', 'context', 'other')
+                                THEN lower(btrim(i.sample_source))
+                              ELSE NULL::text
+                            END,
+          'mosaicX',        t.x_px,
+          'mosaicY',        t.y_px,
+          'mosaicW',        t.w_px,
+          'mosaicH',        t.h_px
+        )
+      )
+    ) AS points
+    FROM public.spore_measurements m
+    JOIN (
+      SELECT
+        i.*,
+        public.build_worker_media_url(i.id, 'thumb', i.media_version) AS crop_url
+      FROM public.observation_images i
+      WHERE eligible.spore_data_public
+        AND i.observation_id = eligible.observation_id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND (i.image_type IS NULL OR (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id))))
+      -- Fence: evaluate crop_url once per image, not once per joined point.
+      -- The image gates must stay inside it, because quals are not pushed
+      -- down past OFFSET.
+      OFFSET 0
+    ) i
+      ON i.id = m.image_id
+    LEFT JOIN public.spore_measurement_mosaic_tiles t
+      ON t.measurement_id = m.id
+    WHERE (
+        public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  ) pts ON true
   CROSS JOIN LATERAL (
     SELECT
-      private.public_observation_authorize_spore_points(
-        CASE
-          WHEN eligible.spore_data_public
-            THEN private.public_observation_spore_points_raw(eligible.observation_id)
-          ELSE NULL::jsonb
-        END
-      ) AS points,
       private.public_observation_authorize_spore_mosaic(
         eligible.observation_id,
         CASE
@@ -645,8 +690,8 @@ BEGIN
         END
       ) AS spore_mosaic
     -- Optimization fence: without it the planner pulls this subquery up and
-    -- re-evaluates both STABLE helpers once per reference to authorized.*
-    -- below (3x the point work, 5x the mosaic work per observation).
+    -- re-evaluates the mosaic helpers once per reference to
+    -- authorized.spore_mosaic below.
     OFFSET 0
   ) authorized
   LEFT JOIN LATERAL public.media_authorize_mosaic_delivery(

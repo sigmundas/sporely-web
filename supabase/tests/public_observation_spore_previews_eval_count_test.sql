@@ -1,11 +1,12 @@
--- pgTAP: get_public_observation_spore_previews(bigint[]) evaluates each
--- per-observation helper exactly once.
+-- pgTAP: get_public_observation_spore_previews(bigint[]) does each piece of
+-- work once, and its mirrored point gates stay in step with
+-- private.public_observation_spore_points_raw.
 -- Plan: docs/plans/active/2026-10-10-batch-spore-preview-rpc.md, Stage 2;
 -- evidence in docs/perf/2026-10-batch-spore-preview.md.
 --
--- Without the OFFSET 0 fence on the `authorized` subquery the planner pulls it
--- up and re-runs the point helpers 3x and the mosaic helpers 5x per
--- observation. Results stay correct, so only call counts catch it.
+-- Results stay correct when work is repeated (a pulled-up subquery re-running
+-- the mosaic helpers per reference, or build_worker_media_url per point
+-- instead of per image), so only call counts catch it.
 --
 --   supabase db reset --local
 --   supabase test db supabase/tests/public_observation_spore_previews_eval_count_test.sql
@@ -13,7 +14,7 @@
 
 BEGIN;
 
-SELECT plan(6);
+SELECT plan(8);
 
 SET LOCAL track_functions = 'all';
 
@@ -68,16 +69,11 @@ SELECT is(
 );
 
 SELECT is(
-  (SELECT calls FROM pg_stat_xact_user_functions
-   WHERE schemaname = 'private' AND funcname = 'public_observation_spore_points_raw'),
-  3::bigint,
-  'spore_points_raw runs once per observation'
-);
-SELECT is(
-  (SELECT calls FROM pg_stat_xact_user_functions
-   WHERE schemaname = 'private' AND funcname = 'public_observation_authorize_spore_points'),
-  3::bigint,
-  'authorize_spore_points runs once per observation'
+  (SELECT coalesce(sum(calls), 0) FROM pg_stat_xact_user_functions
+   WHERE schemaname = 'private'
+     AND funcname IN ('public_observation_spore_points_raw', 'public_observation_authorize_spore_points')),
+  0::numeric,
+  'the batch builds points in one pass, without the single-observation point helpers'
 );
 SELECT is(
   (SELECT calls FROM pg_stat_xact_user_functions
@@ -93,9 +89,60 @@ SELECT is(
 );
 SELECT is(
   (SELECT calls FROM pg_stat_xact_user_functions
+   WHERE schemaname = 'public' AND funcname = 'media_authorize_mosaic_delivery'),
+  3::bigint,
+  'media_authorize_mosaic_delivery runs once per observation'
+);
+SELECT is(
+  (SELECT calls FROM pg_stat_xact_user_functions
    WHERE schemaname = 'public' AND funcname = 'build_worker_media_url'),
-  12::bigint,
-  'build_worker_media_url runs once per point'
+  3::bigint,
+  'build_worker_media_url runs once per image, not once per point (12 points)'
+);
+
+-- Every WHERE gate line of spore_points_raw (after its observation_id
+-- correlation; bare "AND (" and ")" wrappers skipped) must appear, trimmed,
+-- as a line of the batch function. A gate added to the helper and not to the
+-- batch fails here.
+WITH raw_lines AS (
+  SELECT btrim(x.line) AS line, x.ord
+  FROM pg_catalog.pg_proc p,
+       regexp_split_to_table(p.prosrc, E'\n') WITH ORDINALITY x(line, ord)
+  WHERE p.oid = 'private.public_observation_spore_points_raw(bigint)'::regprocedure
+),
+gates AS (
+  SELECT line
+  FROM raw_lines
+  WHERE ord > (SELECT ord FROM raw_lines WHERE line LIKE 'WHERE i.observation_id = p_observation_id%')
+    AND line NOT IN ('', 'AND (', ')')
+)
+SELECT is(
+  (SELECT count(*) FROM gates),
+  4::bigint,
+  'spore_points_raw has the four expected gate lines (deleted, purged, image type, measurement type)'
+);
+WITH raw_lines AS (
+  SELECT btrim(x.line) AS line, x.ord
+  FROM pg_catalog.pg_proc p,
+       regexp_split_to_table(p.prosrc, E'\n') WITH ORDINALITY x(line, ord)
+  WHERE p.oid = 'private.public_observation_spore_points_raw(bigint)'::regprocedure
+),
+gates AS (
+  SELECT line
+  FROM raw_lines
+  WHERE ord > (SELECT ord FROM raw_lines WHERE line LIKE 'WHERE i.observation_id = p_observation_id%')
+    AND line NOT IN ('', 'AND (', ')')
+),
+batch_lines AS (
+  SELECT array_agg(btrim(x.line)) AS lines
+  FROM pg_catalog.pg_proc p,
+       regexp_split_to_table(p.prosrc, E'\n') x(line)
+  WHERE p.oid = 'public.get_public_observation_spore_previews(bigint[])'::regprocedure
+)
+SELECT is(
+  ARRAY(SELECT g.line FROM gates g, batch_lines b WHERE g.line <> ALL (b.lines) ORDER BY 1),
+  ARRAY[]::text[],
+  'every spore_points_raw gate line is mirrored verbatim in the batch'
 );
 
 SELECT * FROM finish();
