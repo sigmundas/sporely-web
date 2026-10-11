@@ -120,6 +120,22 @@ AS $$
   ) c;
 $$;
 
+-- Whether planner statistics may be used for release row shares: the table
+-- has a row estimate, has been analysed, and has no committed changes since.
+-- NULL inputs (no stats entry) mean no.
+CREATE OR REPLACE FUNCTION private.admin_database_health_statistics_usable(
+  p_estimated_rows bigint,
+  p_analyzed boolean,
+  p_modified_since_analyze bigint
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path TO 'pg_catalog'
+AS $$
+  SELECT coalesce(p_estimated_rows > 0 AND p_analyzed AND p_modified_since_analyze = 0, false);
+$$;
+
 CREATE OR REPLACE FUNCTION private.admin_database_health_measure()
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -175,8 +191,12 @@ BEGIN
 
   FOR v_table IN
     SELECT c.relname::text AS table_name, greatest(c.reltuples, 0)::bigint AS estimated_rows,
-           -- Committed changes since the last analyze (not this transaction's own).
-           coalesce(st.n_mod_since_analyze, 1) AS modified_since_analyze
+           -- Committed changes since the last analyze (not this transaction's
+           -- own). Reads 0 for a table with no stats entry, so the analyze
+           -- timestamps below are what detects never-analysed tables.
+           st.n_mod_since_analyze AS modified_since_analyze,
+           -- NULL for a table never analysed, or after a stats reset or crash.
+           coalesce(st.last_analyze, st.last_autoanalyze) IS NOT NULL AS analyzed
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     LEFT JOIN pg_stat_all_tables st ON st.relid = c.oid
@@ -207,12 +227,14 @@ BEGIN
       v_rows_basis := 'none_resident';
     ELSIF v_table.estimated_rows > 0 AND cardinality(v_resident) = 1 THEN
       v_rows := jsonb_build_object(v_resident[1], v_table.estimated_rows);
-    ELSIF v_table.estimated_rows > 0 AND v_table.modified_since_analyze = 0 THEN
+    ELSIF private.admin_database_health_statistics_usable(
+            v_table.estimated_rows, v_table.analyzed, v_table.modified_since_analyze) THEN
       -- Shares from most-common-value frequencies of release_id, limited to
       -- resident releases. NULL unless every resident release is listed.
-      -- Only used when nothing changed since the last analyze: the importer
-      -- does not ANALYZE, so an autoanalyze during a load could otherwise
-      -- leave a partial frequency for the new release.
+      -- Only used for a table that has been analysed and has no committed
+      -- changes since: the importer does not ANALYZE, so stale frequencies
+      -- could otherwise misattribute bytes between releases. Defence in
+      -- depth; stats flush lag can still briefly hide a change.
       SELECT jsonb_object_agg(x.val, round(v_table.estimated_rows * x.freq / x.total_freq)::bigint)
       INTO v_rows
       FROM (
@@ -674,12 +696,14 @@ AS $$
 $$;
 
 ALTER FUNCTION private.admin_database_health_classify(text, text, boolean) OWNER TO postgres;
+ALTER FUNCTION private.admin_database_health_statistics_usable(bigint, boolean, bigint) OWNER TO postgres;
 ALTER FUNCTION private.admin_database_health_measure() OWNER TO postgres;
 ALTER FUNCTION private.admin_database_health_assess(jsonb) OWNER TO postgres;
 ALTER FUNCTION private.admin_database_health_mib(bigint) OWNER TO postgres;
 ALTER FUNCTION public.admin_database_health() OWNER TO postgres;
 
 REVOKE ALL ON FUNCTION private.admin_database_health_classify(text, text, boolean) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION private.admin_database_health_statistics_usable(bigint, boolean, bigint) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.admin_database_health_measure() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.admin_database_health_assess(jsonb) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.admin_database_health_mib(bigint) FROM PUBLIC, anon, authenticated, service_role;

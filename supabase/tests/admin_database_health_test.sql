@@ -60,6 +60,35 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
+-- 1b. Statistics freshness gate. Never-analysed and modified tables cannot be
+--     produced end to end here (stats reset needs superuser; change counters
+--     only include committed transactions), so the decision is tested directly.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN
+    SELECT * FROM (VALUES
+      (52917::bigint, true, 0::bigint, true),     -- analysed, unchanged
+      (52917, false, 0, false),                   -- never analysed / stats reset
+      (52917, NULL, 0, false),                    -- no stats entry
+      (52917, true, 1, false),                    -- committed change since analyze
+      (52917, true, NULL, false),                 -- no change counter
+      (0, true, 0, false),                        -- no row estimate
+      (NULL, true, 0, false)
+    ) AS t(estimated_rows, analyzed, modified, expected)
+  LOOP
+    IF private.admin_database_health_statistics_usable(r.estimated_rows, r.analyzed, r.modified) IS DISTINCT FROM r.expected THEN
+      RAISE EXCEPTION 'statistics_usable(%, %, %) expected %', r.estimated_rows, r.analyzed, r.modified, r.expected;
+    END IF;
+  END LOOP;
+  ASSERT NOT has_function_privilege('authenticated', 'private.admin_database_health_statistics_usable(bigint, boolean, bigint)', 'EXECUTE'),
+    'gate helper denied';
+  RAISE NOTICE 'PASS statistics freshness gate';
+END $$;
+
+-- ---------------------------------------------------------------------------
 -- 2. Current local schema: nothing unclassified, payload tables detected.
 -- ---------------------------------------------------------------------------
 DO $$
@@ -111,6 +140,7 @@ DECLARE
   t jsonb;
   v_taxa_bytes bigint;
   v_reltuples real;
+  v_analyzed boolean;
 BEGIN
   IF EXISTS (SELECT 1 FROM public.taxonomy_v2_releases) THEN
     RAISE NOTICE 'SKIP seeded payload measurement: local database holds taxonomy releases';
@@ -135,11 +165,14 @@ BEGIN
   UNION ALL
   SELECT r_new, 990000000 + g, 'dbh', g::text FROM generate_series(1, 100) g;
 
-  -- Without statistics (empty table never analysed) the rows are counted.
+  -- Without usable statistics (no row estimate, or never analysed) the
+  -- rows are counted.
   SELECT reltuples INTO v_reltuples FROM pg_class WHERE oid = 'public.taxonomy_v2_taxa'::regclass;
+  SELECT coalesce(last_analyze, last_autoanalyze) IS NOT NULL INTO v_analyzed
+  FROM pg_stat_all_tables WHERE relid = 'public.taxonomy_v2_taxa'::regclass;
   m := private.admin_database_health_measure();
   SELECT p INTO t FROM jsonb_array_elements(m->'taxonomy_payload') p WHERE p->>'table' = 'taxonomy_v2_taxa';
-  IF v_reltuples <= 0 THEN
+  IF v_reltuples <= 0 OR NOT v_analyzed THEN
     ASSERT t->>'rows_basis' = 'counted', 'fallback basis ' || t::text;
   END IF;
   ASSERT (t->'rows_by_release'->>r_old)::bigint = 300 AND (t->'rows_by_release'->>r_new)::bigint = 100,
@@ -147,6 +180,7 @@ BEGIN
 
   -- Statistics path: shares from release_id frequencies.
   ANALYZE public.taxonomy_v2_taxa;
+  PERFORM pg_stat_clear_snapshot();  -- stats views are cached per transaction
   m := private.admin_database_health_measure();
   SELECT p INTO t FROM jsonb_array_elements(m->'taxonomy_payload') p WHERE p->>'table' = 'taxonomy_v2_taxa';
   ASSERT t->>'rows_basis' = 'statistics', 'statistics basis ' || t::text;
@@ -166,12 +200,12 @@ BEGIN
   ASSERT EXISTS (SELECT 1 FROM jsonb_array_elements(h->'warnings') w WHERE w->>'key' = 'retired_taxonomy_payload_resident'),
     'retained warning';
 
-  -- The n_mod_since_analyze freshness gate cannot be exercised here: its
-  -- counters only include committed transactions.
+  -- The freshness gate's rejecting cases are covered by section 1b.
 
   -- Retired payload removed: one resident release, attributed in full.
   DELETE FROM public.taxonomy_v2_taxa WHERE release_id = r_old;
   ANALYZE public.taxonomy_v2_taxa;
+  PERFORM pg_stat_clear_snapshot();  -- stats views are cached per transaction
   m := private.admin_database_health_measure();
   SELECT p INTO t FROM jsonb_array_elements(m->'taxonomy_payload') p WHERE p->>'table' = 'taxonomy_v2_taxa';
   ASSERT t->'rows_by_release' = jsonb_build_object(r_new, 100), 'single rows ' || t::text;
