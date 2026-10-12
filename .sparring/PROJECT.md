@@ -181,12 +181,8 @@ alone just builds and syncs.
 
 ## Data handling
 
-The production database holds accounts, emails, and observation locations —
-personal data. Under the applicable data-handling policy this tooling is approved for green
-and yellow data but not personal data without prior written consent. Do not connect live
-production as a review or implementation input; work against the declared
-contracts (`SUPABASE_DB.md`, `docs/supabase-sync-contract.md`,
-`supabase/migrations/`). Never put a service-role key in a prompt or a commit.
+Agents may inspect production database metadata and run approved, read-only diagnostic queries using restricted credentials. They may not access individual personal records, modify production data or schema, reset statistics, or execute migrations without explicit authorization.
+Diagnostic queries must have bounded execution time, limited permissions and aggregate-only outputs. Production credentials must never enter agent prompts or logs.
 
 ## Reading discipline
 
@@ -199,24 +195,6 @@ lines and a single wholesale read ends a session; the same habit applies here.
 
 Available for delegation from inside a stage. They are capacity, not
 independent review — this stage's sparring agent is the independent check.
-
-- `Explore` (Haiku) — locate files, symbols, call paths, likely ownership.
-  Returns a compact map. Use it before any expensive investigation. Give it a
-  turn budget and an explicit repository path; it stops at a turn limit and
-  returns partial output if the task is too broad.
-- `sporely-implementer` (Sonnet) — one bounded work package with nontrivial
-  edits. Stops at the package boundary.
-- `sporely-planner` (Sonnet) — only real architectural decisions: ambiguous
-  ownership, cross-repo contracts, schema or sync redesign. Not for locating
-  code.
-- `sporely-security-reviewer` — only when auth/session, RLS, SECURITY DEFINER
-  or public RPCs, storage, secrets/service-role, account binding, visibility,
-  moderation/blocking, or deletion actually changed. Not for routine UI work.
-
-Guidance: Haiku maps, Sonnet works, Opus diagnoses hard failures. Do not chain
-planner → implementer → reviewer by default. If a subagent's result is
-incomplete rather than wrong, resume it instead of spawning a fresh one, and
-pass the failure evidence up when escalating.
 
 ## Subagent policy
 
