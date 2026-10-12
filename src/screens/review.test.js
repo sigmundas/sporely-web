@@ -2572,6 +2572,39 @@ test('provenance: denied or timeout followed by a successful retry saves device_
   }
 })
 
+test('provenance (G3): a failed retry keeps the existing selected device fix and its pair', async () => {
+  for (const code of [1, 2, 3]) {
+    const geolocation = _geolocationSequence([code])
+    const { payload, sheetShows } = await _saveWithProvenance({
+      geolocation,
+      seed: { liveFix: { lat: 63.42, lon: 10.39, accuracy: 6, altitude: null, timestamp: Date.now(), source: 'device_gps' } },
+      before: async () => {
+        // An explicit fresh attempt after the fix was selected fails.
+        await requestFreshLocation({ timeoutMs: 1000 })
+        assert.ok(geolocation.calls() >= 1, 'the retry reached geolocation')
+      },
+    })
+    assert.deepEqual(sheetShows, [])
+    assert.deepEqual(_pair(payload), ['device_gps', 'acquired'], `after error ${code}`)
+    assert.equal(payload.gps_latitude, 63.42)
+    assert.equal(payload.gps_longitude, 10.39)
+    assert.equal(payload.gps_accuracy, 6)
+  }
+})
+
+test('provenance (G3): timeout at save, then a retry that gets a fix, saves device_gps/acquired with that fix', async () => {
+  const geolocation = _geolocationSequence([3, { lat: 62.25, lon: 8.75, accuracy: 9 }])
+  const { payload } = await _saveWithProvenance({
+    geolocation,
+    sheet: ['retry', 'retry'],
+  })
+  assert.ok(geolocation.calls() >= 2)
+  assert.deepEqual(_pair(payload), ['device_gps', 'acquired'])
+  assert.equal(payload.gps_latitude, 62.25)
+  assert.equal(payload.gps_longitude, 8.75)
+  assert.equal(payload.gps_accuracy, 9)
+})
+
 test('provenance: a late session fix after a timeout wins over the failure', async () => {
   const { payload } = await _saveWithProvenance({
     geolocation: _geolocationSequence([3, { lat: 60.1, lon: 11.1 }]),
