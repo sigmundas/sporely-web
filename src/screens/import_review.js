@@ -65,9 +65,11 @@ function _processFileForCapture(...args) {
 import { debugImagePipeline } from '../image-pipeline-debug.js';
 import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, ID_SERVICE_INATURALIST } from '../identify.js';
 import {
+  INGEST_METHOD,
   isBlob,
   isUsableCoordinate,
   hasObservationLocation,
+  normalizeIngestMethod,
   normalizeObservationGps,
 } from '../observation-shapes.js';
 import {
@@ -594,15 +596,19 @@ function _buildImportObservationPayload(session, options = {}) {
     ..._sessionObservationGeography(normalized),
   })
 
+  // Pair each blob with its own metadata BEFORE dropping non-blob slots;
+  // indexing imageMeta after filtering would shift metadata onto the wrong
+  // photo.
   const imageEntries = normalized.files
-    .filter(blob => isBlob(blob))
     .map((blob, index) => ({
       blob,
       aiCropRect: normalized.imageMeta[index]?.aiCropRect || null,
       aiCropSourceW: normalized.imageMeta[index]?.aiCropSourceW ?? null,
       aiCropSourceH: normalized.imageMeta[index]?.aiCropSourceH ?? null,
       aiCropIsCustom: normalized.imageMeta[index]?.aiCropIsCustom === true,
+      ingestMethod: normalizeIngestMethod(normalized.imageMeta[index]?.ingestMethod),
     }))
+    .filter(entry => isBlob(entry.blob))
 
   return {
     obsPayload,
@@ -1259,6 +1265,37 @@ function _groupSourceItems(items, gapMs) {
   return grouped;
 }
 
+// One import photo: its blob, AI blob and metadata (crop + ingestMethod)
+// stay on a single object through sorting, grouping, removal and restore.
+function _buildImportSourceItem(id, item, processed, ingestMethod, overrides = {}) {
+  return {
+    id,
+    blob: processed.blob,
+    aiBlob: processed.aiBlob || processed.blob,
+    meta: { ...processed.meta, ingestMethod: normalizeIngestMethod(ingestMethod) || INGEST_METHOD.UNKNOWN },
+    metadataPromise: item.metadataPromise || null,
+    captureTime: item.captureTime,
+    lat: item.lat ?? null,
+    lon: item.lon ?? null,
+    altitude: item.altitude ?? null,
+    accuracy: item.accuracy ?? null,
+    dbg: item.dbg || null,
+    ...overrides,
+  };
+}
+
+function _sortByCaptureTime(items) {
+  return items.sort((a, b) => a.captureTime - b.captureTime);
+}
+
+// Drop rejected photos by source-item id and regroup the survivors. Each
+// survivor keeps its own blob/meta object, so per-photo metadata cannot shift.
+function _removeSourceItemsAndRegroup(removeIds) {
+  const ids = new Set(removeIds || []);
+  sourceItems = sourceItems.filter(item => !ids.has(item.id));
+  _buildSessionsFromSourceItems();
+}
+
 function _groupKey(items) {
   return (items || []).map(item => item.id).join('|');
 }
@@ -1334,6 +1371,7 @@ function _flattenSourceItemsFromSessions(savedSessions) {
         aiCropSourceW: null,
         aiCropSourceH: null,
         aiCropIsCustom: false,
+        ingestMethod: null,
       },
       metadataPromise: session.metadataPromises?.[index] || null,
       captureTime: session.photoTimes?.[index] || session.ts?.getTime?.() || Date.now(),
@@ -1355,6 +1393,7 @@ function _ensureSessionImageMeta(session) {
       aiCropSourceW: null,
       aiCropSourceH: null,
       aiCropIsCustom: false,
+      ingestMethod: null,
     });
   }
   return session.imageMeta;
@@ -1614,12 +1653,15 @@ export async function openNativeCamera() {
 
   try {
     let result
+    let ingestMethod
     if (getUseSystemCamera()) {
+      ingestMethod = INGEST_METHOD.SYSTEM_CAMERA
       playIrisShutter({ mode: 'quick' })
       markCameraStep('nativeCamera.openSystemCamera:start')
       result = await _nativeCamera().openSystemCamera()
       markCameraStep('nativeCamera.openSystemCamera:end')
     } else {
+      ingestMethod = INGEST_METHOD.SPORELY_CAMERA
       const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
       if (gps) options.gps = gps
       debugImagePipeline('android native camera capture requested', {
@@ -1651,7 +1693,7 @@ export async function openNativeCamera() {
     // hadn't resolved by the time capturePhotos returned; no second request
     // is needed here.)
     markCameraStep('handleNativePhotoResultAsLive:start')
-    await _handleNativePhotoResultAsLive(result)
+    await _handleNativePhotoResultAsLive(result, ingestMethod)
     markCameraStep('handleNativePhotoResultAsLive:end')
   } catch (err) {
     if (isPickerCancel(err)) {
@@ -1681,7 +1723,9 @@ async function _requestInitialNativeCameraLocation() {
   }
 }
 
-async function _handleNativePhotoResultAsLive(result) {
+// `ingestMethod` comes from the camera branch the caller actually opened;
+// the `captureSource` label below is debug-only.
+async function _handleNativePhotoResultAsLive(result, ingestMethod = INGEST_METHOD.UNKNOWN) {
   const photos = Array.isArray(result?.photos) ? result.photos
     : Array.isArray(result?.files) ? result.files
       : []
@@ -1722,6 +1766,7 @@ async function _handleNativePhotoResultAsLive(result) {
     aiCropSourceW: entry.meta?.aiCropSourceW ?? null,
     aiCropSourceH: entry.meta?.aiCropSourceH ?? null,
     aiCropIsCustom: entry.meta?.aiCropIsCustom === true,
+    ingestMethod: normalizeIngestMethod(ingestMethod) || INGEST_METHOD.UNKNOWN,
     // Sporely Cam only (null for the system camera): the private cache JPEG
     // that review Save exports/deletes once the queue owns the bytes.
     nativeSourcePath: nativeCaptureSourcePathFromNativePhoto(photos[index]),
@@ -1751,7 +1796,7 @@ async function _handleNativePhotoResult(result) {
     fileCount: files.length,
     fileSizes: files.map(file => file?.size || 0),
   })
-  await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos });
+  await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos, ingestMethod: INGEST_METHOD.NATIVE_PICKER });
 }
 
 export async function openFileImportPicker() {
@@ -1784,7 +1829,7 @@ export async function openFileImportPicker() {
         }],
       });
       const files = await Promise.all(handles.map(handle => handle.getFile()));
-      await _handleSelectedFilesWithFeedback(files);
+      await _handleSelectedFilesWithFeedback(files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER });
       return;
     } catch (err) {
       if (err?.name !== 'AbortError') {
@@ -1801,12 +1846,14 @@ export async function openFileImportPicker() {
 export async function handleFileSelect(event) {
   const files = Array.from(event.target.files || []);
   if (event.target) event.target.value = '';
-  await _handleSelectedFilesWithFeedback(files);
+  // Both import inputs are plain browser file pickers (no `capture`).
+  await _handleSelectedFilesWithFeedback(files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER });
 }
 
 async function handleSelectedFiles(files, options = {}) {
   if (!files.length) return;
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
+  const ingestMethod = normalizeIngestMethod(options.ingestMethod) || INGEST_METHOD.UNKNOWN;
   const supportedSelection = _filterUnsupportedBrowserFiles(files, nativePhotos);
   const supportedFiles = supportedSelection.files;
   const supportedNativePhotos = supportedSelection.nativePhotos;
@@ -1842,7 +1889,7 @@ async function handleSelectedFiles(files, options = {}) {
   }));
 
   // Sort by actual capture time
-  withTimes.sort((a, b) => a.captureTime - b.captureTime);
+  _sortByCaptureTime(withTimes);
 
   // Convert to JPEG sequentially — avoids exhausting mobile memory with parallel decodes.
   _disposeSessionBlobUrls();
@@ -1854,19 +1901,7 @@ async function handleSelectedFiles(files, options = {}) {
     const item = withTimes[idx];
     _setProgress(doneCount, supportedFiles.length, t('import.convertingFile', { current: doneCount + 1, total: supportedFiles.length }));
     const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
-    sourceItems.push({
-      id: `i${idx}`,
-      blob: processed.blob,
-      aiBlob: processed.aiBlob || processed.blob,
-      meta: processed.meta,
-      metadataPromise: item.metadataPromise || null,
-      captureTime: item.captureTime,
-      lat: item.lat ?? null,
-      lon: item.lon ?? null,
-      altitude: item.altitude ?? null,
-      accuracy: item.accuracy ?? null,
-      dbg: item.dbg || null,
-    });
+    sourceItems.push(_buildImportSourceItem(`i${idx}`, item, processed, ingestMethod));
     doneCount++;
   }
 
@@ -2039,10 +2074,8 @@ export function renderSessions() {
       const sid = btn.dataset.sid;
       const session = sessionById(sid);
       if (session) {
-        const removeIds = new Set(session.sourceItemIds || []);
-        sourceItems = sourceItems.filter(item => !removeIds.has(item.id));
         expandedSessionIds.delete(sid);
-        _buildSessionsFromSourceItems();
+        _removeSourceItemsAndRegroup(session.sourceItemIds || []);
         if (!sessions.length) clearImportSessions();
         else _persistSessions();
         renderSessions();
@@ -2059,11 +2092,8 @@ export function renderSessions() {
       const session = sessionById(sid);
       if (!session) return;
       const removeId = session.sourceItemIds?.[idx];
-      if (removeId) {
-        sourceItems = sourceItems.filter(item => item.id !== removeId);
-      }
       if (session.files.length <= 1) expandedSessionIds.delete(sid);
-      _buildSessionsFromSourceItems();
+      _removeSourceItemsAndRegroup(removeId ? [removeId] : []);
       if (!sessions.length) clearImportSessions();
       else _persistSessions();
       renderSessions();
@@ -2461,7 +2491,7 @@ async function _openFileImportForSession(sid) {
   input.onchange = async event => {
     const files = Array.from(event.target.files || [])
     if (!files.length) return
-    await _addFilesToSession(sid, files)
+    await _addFilesToSession(sid, files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER })
   }
   input.click()
 }
@@ -2660,7 +2690,7 @@ async function _openCameraForSession(sid) {
           _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
           files.push(await nativePickedPhotoToFile(photos[i], i));
         }
-        await _addFilesToSession(sid, files, { nativePhotos: photos });
+        await _addFilesToSession(sid, files, { nativePhotos: photos, ingestMethod: INGEST_METHOD.SYSTEM_CAMERA });
         return;
       }
 
@@ -2701,7 +2731,7 @@ async function _openCameraForSession(sid) {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addFilesToSession(sid, files, { nativePhotos: photos });
+      await _addFilesToSession(sid, files, { nativePhotos: photos, ingestMethod: INGEST_METHOD.SPORELY_CAMERA });
     } catch (err) {
       if (isPickerCancel(err)) return;
       showToast(`Sporely Cam: ${err?.message || err}`);
@@ -2715,7 +2745,9 @@ async function _openCameraForSession(sid) {
     input.onchange = async (e) => {
       const files = Array.from(e.target.files || []);
       if (!files.length) return;
-      await _addFilesToSession(sid, files);
+      // A `capture` file input may open a camera app or a file chooser
+      // depending on the browser; the entry point cannot be classified.
+      await _addFilesToSession(sid, files, { ingestMethod: INGEST_METHOD.UNKNOWN });
     };
     input.click();
   }
@@ -2748,7 +2780,7 @@ async function _openPickerForSession(sid) {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addFilesToSession(sid, files, { nativePhotos: photos });
+      await _addFilesToSession(sid, files, { nativePhotos: photos, ingestMethod: INGEST_METHOD.NATIVE_PICKER });
       return;
     } catch (err) {
       if (isPickerCancel(err)) return;
@@ -2766,7 +2798,7 @@ async function _openPickerForSession(sid) {
   input.onchange = async (e) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    await _addFilesToSession(sid, files);
+    await _addFilesToSession(sid, files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER });
   };
   input.click();
 }
@@ -2775,6 +2807,7 @@ async function _addFilesToSession(sid, files, options = {}) {
   const session = sessionById(sid);
   if (!session || !files.length) return;
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
+  const ingestMethod = normalizeIngestMethod(options.ingestMethod) || INGEST_METHOD.UNKNOWN;
   _setProgress(0, files.length, t('import.readingTimestamps'));
   
   const withTimes = await Promise.all(files.map(async (f, idx) => {
@@ -2792,19 +2825,9 @@ async function _addFilesToSession(sid, files, options = {}) {
     const item = withTimes[idx];
     _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
     const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
-    const newItem = {
-      id: `i_add_${Date.now()}_${idx}`,
-      blob: processed.blob,
-      aiBlob: processed.aiBlob || processed.blob,
-      meta: processed.meta,
-      metadataPromise: item.metadataPromise || null,
+    const newItem = _buildImportSourceItem(`i_add_${Date.now()}_${idx}`, item, processed, ingestMethod, {
       captureTime: session.ts.getTime(), // Force to match session so it is not ripped out by photo gap
-      lat: item.lat ?? null,
-      lon: item.lon ?? null,
-      altitude: item.altitude ?? null,
-      accuracy: item.accuracy ?? null,
-      dbg: item.dbg || null,
-    };
+    });
     sourceItems.push(newItem);
     session.sourceItemIds.push(newItem.id);
     session.files.push(newItem.blob);
@@ -2875,6 +2898,19 @@ export function __abortImportAiRunsForTests() {
   _abortImportAiRuns()
 }
 
+// Drives the production grouping over a given source-item list (as built by
+// handleSelectedFiles / restoreImportSessions) and returns the sessions.
+export function __setImportSourceItemsForTests(items = []) {
+  sourceItems = Array.isArray(items) ? items : []
+  _buildSessionsFromSourceItems()
+  return sessions
+}
+
+export function __removeImportSourceItemsForTests(removeIds = []) {
+  _removeSourceItemsAndRegroup(removeIds)
+  return sessions
+}
+
 export {
   _abortImportAiRuns,
   _ensureSessionAiState,
@@ -2882,6 +2918,9 @@ export {
   _sessionAiResultState,
   _buildSessionAiIdentificationRuns,
   _buildImportObservationPayload,
+  _buildImportSourceItem,
+  _flattenSourceItemsFromSessions,
+  _sortByCaptureTime,
   _storeSessionAiServiceResult,
   _sessionServiceNeedsRerun,
   _applySessionAiPrediction,

@@ -10,7 +10,7 @@ import { isNativeApp } from './platform.js'
 import { startUploadForegroundService, updateUploadForegroundService, stopUploadForegroundService } from './upload-foreground-service.js'
 import { normalizeObservationVisibility, toCloudVisibility } from './visibility.js'
 import { debugImagePipeline } from './image-pipeline-debug.js'
-import { isBlob } from './observation-shapes.js'
+import { isBlob, normalizeIngestMethod } from './observation-shapes.js'
 import { normalizeObservationGeography } from './observation-geography.js'
 import {
   isProvenSporelySelection,
@@ -426,6 +426,7 @@ function _normalizeQueuedImages(imageEntries) {
         uploadMeta: null,
         variants: null,
         variantMeta: null,
+        ingestMethod: null,
       }
     }
     const realBlob = isBlob(entry?.blob)
@@ -450,6 +451,8 @@ function _normalizeQueuedImages(imageEntries) {
       variants: thumbBlob ? { thumb: thumbBlob } : (entry?.variants || null),
       variantMeta: entry?.variantMeta || null,
       reservedImageId: entry?.reservedImageId ?? null,
+      // Per-image provenance; legacy entries have none and stay NULL.
+      ingestMethod: normalizeIngestMethod(entry?.ingestMethod),
     }
   }).filter(entry => isBlob(entry.blob) || isBlob(entry.uploadBlob))
 }
@@ -483,6 +486,7 @@ async function _serializeQueuedImageForStorage(image) {
     variantSizes: thumb ? { thumb: thumb.size } : null,
     variantMeta: image?.variantMeta || null,
     reservedImageId: image?.reservedImageId ?? null,
+    ingestMethod: normalizeIngestMethod(image?.ingestMethod),
   }
 }
 
@@ -1234,6 +1238,7 @@ async function _runSyncQueue() {
             aiCropIsCustom: image.aiCropIsCustom === true,
             ...preparedImage.uploadMeta,
             storage_exif_safe: preparedImage.uploadMeta?.storage_exif_safe === true,
+            ingestMethod: image.ingestMethod,
           })
           reservedImageId = reservedRow.id
           // Persist so retry reuses the same row. If the existing slot is a

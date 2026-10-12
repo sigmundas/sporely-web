@@ -4,6 +4,7 @@
 import { getDefaultVisibility } from './settings.js'
 import { normalizeCaptureVisibility } from './visibility.js'
 import { debugImagePipeline } from './image-pipeline-debug.js'
+import { normalizeIngestMethod } from './observation-shapes.js'
 
 const DB_NAME = 'sporely'
 const DB_VERSION = 1
@@ -68,6 +69,7 @@ export async function saveImportSessions(sessions) {
         aiCropSourceW: meta?.aiCropSourceW ?? null,
         aiCropSourceH: meta?.aiCropSourceH ?? null,
         aiCropIsCustom: meta?.aiCropIsCustom === true,
+        ingestMethod: normalizeIngestMethod(meta?.ingestMethod),
       })),
       sourceItemIds: [...(s.sourceItemIds || [])],
       photoTimes: [...(s.photoTimes || [])],
@@ -171,6 +173,7 @@ export async function loadImportSessions() {
             aiCropSourceW: meta?.aiCropSourceW ?? null,
             aiCropSourceH: meta?.aiCropSourceH ?? null,
             aiCropIsCustom: meta?.aiCropIsCustom === true,
+            ingestMethod: normalizeIngestMethod(meta?.ingestMethod),
           })),
         }
       })

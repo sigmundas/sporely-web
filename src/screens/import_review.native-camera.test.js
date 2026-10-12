@@ -683,6 +683,7 @@ test('Sporely Cam captures carry their private cache source path into review, on
 
   assert.equal(state.currentScreen, 'review')
   assert.deepEqual(state.capturedPhotos.map(photo => photo.nativeSourcePath), [pathA, pathB])
+  assert.deepEqual(state.capturedPhotos.map(photo => photo.ingestMethod), ['sporely_camera', 'sporely_camera'])
   await new Promise(resolve => setTimeout(resolve, 20))
 })
 
@@ -704,6 +705,7 @@ test('System camera photos are not tracked as Sporely Cam cache sources', async 
     assert.equal(state.currentScreen, 'review')
     assert.equal(state.capturedPhotos.length, 1)
     assert.equal(state.capturedPhotos[0].nativeSourcePath, null)
+    assert.equal(state.capturedPhotos[0].ingestMethod, 'system_camera')
   } finally {
     setUseSystemCamera(false)
   }

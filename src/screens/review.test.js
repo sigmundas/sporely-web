@@ -2303,3 +2303,71 @@ test('capture review rerender keeps the national display label; canonical fields
     env.restore()
   }
 })
+
+test('review save queues each photo with its own ingest method', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  let savedEntries = null
+
+  try {
+    const liveFix = { lat: 60.1111, lon: 10.2222, accuracy: 4.4, altitude: 123.0, timestamp: Date.now() }
+    _seedReviewState({
+      liveFix,
+      user: { id: 'user-1' },
+      location: { preference: 'enabled', capability: 'supported', permission: 'granted', status: 'fix' },
+    })
+    const base = state.capturedPhotos[0]
+    const photo = (label, ingestMethod, blob = new Blob([label])) => ({ ...base, blob, aiBlob: blob, ingestMethod })
+    state.capturedPhotos = [
+      photo('lost', 'native_picker', null), // unresolved bytes are not queued
+      photo('A', 'web_camera'),
+      { ...photo('B', 'system_camera', null), blobPromise: Promise.resolve(new Blob(['B'])) },
+      photo('legacy', undefined),
+    ]
+    state.batchCount = state.capturedPhotos.length
+
+    __setReviewTestHooks({
+      requestFreshLocation: async () => null,
+      enqueueObservation: async (_payload, entries) => { savedEntries = entries },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+
+    initReview()
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitFor(() => savedEntries !== null)
+
+    const pairs = await Promise.all(savedEntries.map(async entry => [await entry.blob.text(), entry.ingestMethod]))
+    assert.deepEqual(pairs, [['A', 'web_camera'], ['B', 'system_camera'], ['legacy', null]])
+  } finally {
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('imported review photos take their ingest method from the session image metadata', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  try {
+    initReview()
+    openImportedReview({
+      files: [new Blob(['x']), new Blob(['y'])],
+      imageMeta: [{ ingestMethod: 'native_picker' }, { ingestMethod: 'web_file_picker' }],
+      ts: new Date(),
+      visibility: 'public',
+      location_precision: 'exact',
+      is_draft: true,
+      photoGps: [],
+    })
+    buildReviewGrid()
+    assert.deepEqual(state.capturedPhotos.map(photo => photo.ingestMethod), ['native_picker', 'web_file_picker'])
+    await new Promise(resolve => setImmediate(resolve))
+  } finally {
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})

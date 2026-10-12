@@ -53,9 +53,11 @@ import { NO_LOCATION_PILL_TEXT, openLocationSettingsOrExplain } from '../locatio
 import { hideLocationFixSheet, initLocationFixSheet, showLocationFixSheet } from '../location-fix-sheet.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
 import {
+  INGEST_METHOD,
   isBlob,
   isUsableCoordinate as sharedIsUsableCoordinate,
   normalizeCoordinatePair,
+  normalizeIngestMethod,
   normalizeObservationGps,
 } from '../observation-shapes.js'
 import {
@@ -491,6 +493,7 @@ export function openImportedReview(session) {
     aiCropSourceW: session?.imageMeta?.[index]?.aiCropSourceW ?? null,
     aiCropSourceH: session?.imageMeta?.[index]?.aiCropSourceH ?? null,
     aiCropIsCustom: session?.imageMeta?.[index]?.aiCropIsCustom === true,
+    ingestMethod: normalizeIngestMethod(session?.imageMeta?.[index]?.ingestMethod),
     taxon: taxon ? { ...taxon } : null,
   }))
   state.batchCount = state.capturedPhotos.length
@@ -2232,6 +2235,7 @@ async function saveObservationBatch() {
         aiCropSourceW: photo.aiCropSourceW ?? null,
         aiCropSourceH: photo.aiCropSourceH ?? null,
         aiCropIsCustom: photo.aiCropIsCustom === true,
+        ingestMethod: normalizeIngestMethod(photo.ingestMethod),
       }))
 
     debugImagePipeline('review batch ready for queue', {
@@ -2345,7 +2349,7 @@ async function _openCameraForReview() {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath })
+      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath, ingestMethod: INGEST_METHOD.SPORELY_CAMERA })
     } catch (err) {
       if (isPickerCancel(err)) return
       showToast(`Sporely Cam: ${err?.message || err}`)
@@ -2387,7 +2391,7 @@ async function _openPickerForReview() {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath })
+      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath, ingestMethod: INGEST_METHOD.NATIVE_PICKER })
       return
     } catch (err) {
       if (isPickerCancel(err)) return
@@ -2405,7 +2409,7 @@ async function _openPickerForReview() {
   input.onchange = async (e) => {
     const files = Array.from(e.target.files || [])
     if (!files.length) return
-    await _addFilesToReview(files)
+    await _addFilesToReview(files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER })
   }
   input.click()
 }
@@ -2414,6 +2418,9 @@ async function _addFilesToReview(files, options = {}) {
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : []
   const captureSource = options.captureSource || 'Sporely native camera'
   const screenPath = options.screenPath || 'review:add-photo'
+  // Set by the caller's actual entry point; `captureSource` above is only a
+  // debug label and is not provenance.
+  const ingestMethod = normalizeIngestMethod(options.ingestMethod) || INGEST_METHOD.UNKNOWN
   const supportedSelection = _filterUnsupportedBrowserFiles(files, nativePhotos)
   const supportedFiles = supportedSelection.files
   const supportedNativePhotos = supportedSelection.nativePhotos
@@ -2449,6 +2456,7 @@ async function _addFilesToReview(files, options = {}) {
       aiCropSourceH: processed.meta?.aiCropSourceH ?? null,
       aiCropIsCustom: processed.meta?.aiCropIsCustom === true,
       taxon: state.capturedPhotos[0]?.taxon || null,
+      ingestMethod,
       // Sporely Cam only; null for picker imports and the system camera.
       nativeSourcePath: nativeCaptureSourcePathFromNativePhoto(item.nativePhoto),
     }

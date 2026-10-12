@@ -24,7 +24,38 @@
  * @property {boolean|null} aiCropIsCustom
  * @property {Object|null} uploadMeta
  * @property {{ thumb: Blob }|null} variants
+ * @property {IngestMethod|null} ingestMethod
  */
+
+/**
+ * How a photo entered Sporely (`observation_images.ingest_method`). It is
+ * assigned at the entry point that produced the photo and travels with that
+ * photo's own object; it is never derived from screen, MIME, dimensions, EXIF,
+ * filenames, current settings or debug labels. `null` means a historical or
+ * pre-provenance entry (legacy drafts/queue items) and is stored as NULL.
+ *
+ * @typedef {'sporely_camera'|'system_camera'|'web_camera'|'native_picker'|'web_file_picker'|'unknown'} IngestMethod
+ */
+export const INGEST_METHOD = Object.freeze({
+  SPORELY_CAMERA: 'sporely_camera',
+  SYSTEM_CAMERA: 'system_camera',
+  WEB_CAMERA: 'web_camera',
+  NATIVE_PICKER: 'native_picker',
+  WEB_FILE_PICKER: 'web_file_picker',
+  UNKNOWN: 'unknown',
+})
+
+const INGEST_METHOD_VALUES = new Set(Object.values(INGEST_METHOD))
+
+/**
+ * Keep only a known ingest method; anything else (legacy undefined, garbage)
+ * becomes null so it is stored as NULL rather than rejected by the server.
+ * @param {unknown} value
+ * @returns {IngestMethod|null}
+ */
+export function normalizeIngestMethod(value) {
+  return typeof value === 'string' && INGEST_METHOD_VALUES.has(value) ? value : null
+}
 
 /**
  * Review-screen photo entry shape. Capture/review code keeps the original
@@ -43,6 +74,7 @@
  * @property {number|null} aiCropSourceH
  * @property {boolean|null} aiCropIsCustom
  * @property {Object|null} taxon
+ * @property {IngestMethod|null} ingestMethod
  */
 
 /**
@@ -54,7 +86,7 @@
  * @property {Blob[]} files
  * @property {Blob[]} aiFiles
  * @property {string[]} blobUrls
- * @property {Array<Object>} imageMeta
+ * @property {Array<Object>} imageMeta  per-photo crop metadata plus `ingestMethod`
  * @property {Array<Promise<Object>|null>} metadataPromises
  * @property {Array<number>} photoTimes
  * @property {Array<ObservationGps|null>} photoGps

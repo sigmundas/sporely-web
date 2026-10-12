@@ -209,3 +209,28 @@ test('store failures degrade gracefully instead of throwing', async () => {
     globalThis.indexedDB = previousIndexedDb
   }
 })
+
+test('review draft keeps each photo paired with its ingest method across restart', _withIndexedDbStub(async () => {
+  const photo = (label, ingestMethod, blob = new Blob([label], { type: 'image/jpeg' })) => ({
+    blob, blobPromise: null, gps: null, ts: new Date(1784700000000), emoji: '📸', taxon: null,
+    aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null, aiCropIsCustom: false, ingestMethod,
+  })
+  await saveReviewDraft(_makeDraft({
+    photos: [
+      photo('lost-early', 'native_picker', null), // no bytes: dropped from the draft
+      photo('A', 'web_camera'),
+      photo('lost-interior', 'system_camera', null),
+      photo('C', 'sporely_camera'),
+      photo('D', 'not-a-method'),
+    ],
+  }))
+  const restored = await loadReviewDraft()
+  const pairs = await Promise.all(restored.photos.map(async p => [await p.blob.text(), p.ingestMethod]))
+  assert.deepEqual(pairs, [['A', 'web_camera'], ['C', 'sporely_camera'], ['D', null]])
+}))
+
+test('a review draft written before provenance restores with a null ingest method', _withIndexedDbStub(async () => {
+  await saveReviewDraft(_makeDraft())
+  const restored = await loadReviewDraft()
+  assert.deepEqual(restored.photos.map(p => p.ingestMethod), [null, null])
+}))

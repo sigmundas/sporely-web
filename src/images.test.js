@@ -10,6 +10,7 @@ import {
   fetchCardImages,
   fetchFirstImages,
   fetchObservationImageRows,
+  reserveObservationImage,
   resolveMediaSources,
   verifyWorkerObjectExists,
 } from './images.js'
@@ -512,4 +513,66 @@ test('verifyWorkerObjectExists: missing base URL → throws', async () => {
     clearSharedAuthSessionCache()
     delete globalThis.__SPORLEY_TEST_ENV__
   }
+})
+
+function makeReserveInsertStub(inserts, { missingIngestColumn = false } = {}) {
+  return table => ({
+    insert(payload) {
+      assert.equal(table, 'observation_images')
+      inserts.push(structuredClone(payload))
+      return {
+        select() { return this },
+        async single() {
+          if (missingIngestColumn && 'ingest_method' in payload) {
+            return { data: null, error: { message: "Could not find the 'ingest_method' column of 'observation_images' in the schema cache" } }
+          }
+          return { data: { id: 77, storage_path: payload.storage_path, sort_order: payload.sort_order }, error: null }
+        },
+      }
+    },
+  })
+}
+
+const RESERVE_BASE = {
+  observation_id: 5,
+  user_id: 'user-1',
+  storage_path: 'user-1/5/a.webp',
+  sort_order: 0,
+}
+
+test('reserveObservationImage writes ingest_method once in the reservation insert', async () => {
+  const inserts = []
+  await withSupabaseFromStub(makeReserveInsertStub(inserts), async () => {
+    const row = await reserveObservationImage({ ...RESERVE_BASE, ingestMethod: 'system_camera' })
+    assert.equal(row.id, 77)
+  })
+  assert.equal(inserts.length, 1)
+  assert.equal(inserts[0].ingest_method, 'system_camera')
+})
+
+test('reserveObservationImage omits ingest_method for legacy or invalid values', async () => {
+  for (const ingestMethod of [undefined, null, 'Sporely native camera', 'camera']) {
+    const inserts = []
+    await withSupabaseFromStub(makeReserveInsertStub(inserts), () =>
+      reserveObservationImage({ ...RESERVE_BASE, ingestMethod }))
+    assert.equal(inserts.length, 1)
+    assert.equal('ingest_method' in inserts[0], false, `must not send ${ingestMethod}`)
+  }
+})
+
+test('reserveObservationImage still reserves when the target schema lacks ingest_method', async () => {
+  const inserts = []
+  const originalWarn = console.warn
+  console.warn = () => {}
+  try {
+    await withSupabaseFromStub(makeReserveInsertStub(inserts, { missingIngestColumn: true }), async () => {
+      const row = await reserveObservationImage({ ...RESERVE_BASE, ingestMethod: 'web_camera' })
+      assert.equal(row.id, 77)
+    })
+  } finally {
+    console.warn = originalWarn
+  }
+  assert.equal(inserts.length, 2)
+  assert.equal(inserts[0].ingest_method, 'web_camera')
+  assert.equal('ingest_method' in inserts[1], false)
 })

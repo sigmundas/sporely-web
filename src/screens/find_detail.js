@@ -50,7 +50,7 @@ import { NativeCamera, isPickerCancel, pickImagesWithNativePhotoPicker, nativePi
 import { setCaptureCompleteHandler } from './capture.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
 import { prepareImageBlobForUpload } from '../image_crop.js'
-import { isBlob, normalizeCoordinatePair } from '../observation-shapes.js'
+import { INGEST_METHOD, isBlob, normalizeCoordinatePair } from '../observation-shapes.js'
 import { focusObservationOnMapScreen, openMapLocationPickerScreen } from '../map-loader.js'
 import { buildExternalMapUrl, MAP_LINK_SERVICES } from '../map-links.js'
 import { confirmPublishIfNeeded, loadExistingObservationFacts } from '../publish-notice.js'
@@ -5191,7 +5191,7 @@ async function _openCameraForDetail() {
           _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
           files.push(await nativePickedPhotoToFile(photos[i], i, { captureSource, screenPath }))
         }
-        await _addPhotosToObservation(files)
+        await _addPhotosToObservation(files, INGEST_METHOD.SYSTEM_CAMERA)
         return
       }
 
@@ -5235,7 +5235,7 @@ async function _openCameraForDetail() {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addPhotosToObservation(files)
+      await _addPhotosToObservation(files, INGEST_METHOD.SPORELY_CAMERA)
     } catch (err) {
       if (isPickerCancel(err)) return
       showToast(`Sporely Cam: ${err?.message || err}`)
@@ -5247,6 +5247,9 @@ async function _openCameraForDetail() {
       navigate('find-detail')
       try {
         const files = []
+        // Built in the same pass as `files` so a skipped photo cannot shift
+        // the method of the photos after it.
+        const ingestMethods = []
         for (let i = 0; i < photos.length; i++) {
           const photo = photos[i]
           const blob = photo?.blob || await photo?.blobPromise
@@ -5256,9 +5259,10 @@ async function _openCameraForDetail() {
             `sporely-capture-${i + 1}.${imageExtensionForBlob(blob)}`,
             { type: blob.type || 'image/jpeg', lastModified: photo?.ts?.getTime?.() || Date.now() }
           ))
+          ingestMethods.push(photo?.ingestMethod ?? null)
         }
         if (files.length) {
-          await _addPhotosToObservation(files)
+          await _addPhotosToObservation(files, ingestMethods)
         }
       } finally {
         if (detailObsId) await openFindDetail(detailObsId)
@@ -5299,7 +5303,7 @@ async function _openPickerForDetail() {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addPhotosToObservation(files)
+      await _addPhotosToObservation(files, INGEST_METHOD.NATIVE_PICKER)
       return
     } catch (err) {
       if (isPickerCancel(err)) return
@@ -5319,12 +5323,14 @@ async function _openPickerForDetail() {
   input.onchange = async (e) => {
     const files = Array.from(e.target.files || [])
     if (!files.length) return
-    await _addPhotosToObservation(files)
+    await _addPhotosToObservation(files, INGEST_METHOD.WEB_FILE_PICKER)
   }
   input.click()
 }
 
-async function _addPhotosToObservation(files) {
+// `ingestMethod` is one method for the whole selection, or an array aligned
+// with `files` when the photos came from different entry points.
+async function _addPhotosToObservation(files, ingestMethod = INGEST_METHOD.UNKNOWN) {
   if (!currentObs || !files.length) return
 
   const obsId = currentObs.id
@@ -5380,6 +5386,7 @@ async function _addPhotosToObservation(files) {
         ...preparedImage.uploadMeta,
         storage_exif_safe: preparedImage.uploadMeta?.storage_exif_safe === true,
         ...cropMeta,
+        ingestMethod: Array.isArray(ingestMethod) ? ingestMethod[i] : ingestMethod,
       })
       try {
         await uploadPreparedObservationImageVariants(preparedImage, storagePath, {

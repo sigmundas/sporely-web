@@ -12,7 +12,7 @@ import {
   scaleDimensionsToMaxPixels,
 } from './cloud-media-policy.js'
 import { debugImagePipeline, isImagePipelineDebugEnabled } from './image-pipeline-debug.js'
-import { isBlob } from './observation-shapes.js'
+import { isBlob, normalizeIngestMethod } from './observation-shapes.js'
 
 const DEFAULT_MEDIA_BASE_URL = 'https://media.sporely.no'
 const OBSERVATION_IMAGES_COMMUNITY_VIEW = 'observation_images_community_view'
@@ -1507,12 +1507,31 @@ export async function reserveObservationImage(observationImage) {
     stored_bytes: observationImage?.stored_bytes ?? null,
     storage_exif_safe: observationImage?.storage_exif_safe === true,
   }
-  const { data, error } = await supabase
+  // Private provenance, written once with the reservation row (no later
+  // metadata PATCH). Legacy/unknown-shape entries omit the column so the
+  // insert is unchanged for them and NULL is stored.
+  const ingestMethod = normalizeIngestMethod(observationImage?.ingestMethod)
+  if (ingestMethod) payload.ingest_method = ingestMethod
+  let { data, error } = await supabase
     .from('observation_images')
     .insert(payload)
     .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom')
     .single()
   if (!error) return data
+  if (ingestMethod && _isMissingColumnError(error, 'ingest_method')) {
+    // Target schema predates the provenance migration: keep the upload
+    // working and store nothing rather than failing the reservation.
+    console.warn('[reserveObservationImage] ingest_method column missing; reserving without provenance', {
+      message: error?.message || '',
+    })
+    delete payload.ingest_method
+    ;({ data, error } = await supabase
+      .from('observation_images')
+      .insert(payload)
+      .select('id, storage_path, sort_order, image_type, ai_crop_x1, ai_crop_y1, ai_crop_x2, ai_crop_y2, ai_crop_source_w, ai_crop_source_h, ai_crop_is_custom')
+      .single())
+    if (!error) return data
+  }
   if (_isMissingColumnError(error, 'ai_crop_is_custom')) {
     _warnMissingAiCropCustomFallback('reserveObservationImage', error, { payload })
     const payloadWithoutCustom = { ...payload }

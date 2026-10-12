@@ -9,7 +9,7 @@ import { endCameraTimingRun, markCameraStep } from '../camera-timing.js'
 import { clearIrisShutter, startPendingIrisShutter } from '../iris-shutter.js'
 import { resetReviewAiState } from './review.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
-import { isBlob } from '../observation-shapes.js'
+import { INGEST_METHOD, isBlob } from '../observation-shapes.js'
 import {
   beginCaptureLocationSession,
   checkLocationCapabilityAndPermission,
@@ -834,6 +834,8 @@ async function capturePhoto() {
         aiCropSourceW: 800,
         aiCropSourceH: 600,
         aiCropIsCustom: false,
+        // Synthetic demo frame: never classified as a real camera capture.
+        ingestMethod: INGEST_METHOD.UNKNOWN,
       })
 
       state.batchCount++
@@ -961,6 +963,7 @@ async function capturePhoto() {
         aiCropSourceW: acceptedWidth,
         aiCropSourceH: acceptedHeight,
         aiCropIsCustom: false,
+        ingestMethod: INGEST_METHOD.WEB_CAMERA,
       })
 
       state.batchCount++
