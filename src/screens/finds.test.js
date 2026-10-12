@@ -1443,6 +1443,36 @@ test('finds card date-time helper formats dd-mm hh:mm and prefers captured_at', 
   )
 })
 
+test('finds card shows the observation date without time when timestamps are hidden', () => {
+  for (const id of [1447, 1457]) {
+    assert.equal(formatFindsDateTimeLabel({
+      id,
+      date: '2026-10-11',
+      captured_at: null,
+      created_at: null,
+    }), '11-10')
+  }
+})
+
+test('finds card skips null capture time and uses an available creation timestamp', () => {
+  const createdAt = new Date(2026, 9, 11, 14, 22).toISOString()
+  assert.equal(formatFindsDateTimeLabel({
+    captured_at: null,
+    created_at: createdAt,
+    date: '2026-10-10',
+  }), '11-10 14:22')
+})
+
+test('finds card date-only fallback handles absent or invalid timestamps and calendar dates', () => {
+  assert.equal(formatFindsDateTimeLabel({ date: '2026-10-11' }), '11-10')
+  assert.equal(formatFindsDateTimeLabel({
+    captured_at: 'invalid', created_at: '', date: '2024-02-29',
+  }), '29-02')
+  for (const date of [undefined, null, '', 'invalid', '2026-02-29', '2026-02-30', '2026-13-01']) {
+    assert.equal(formatFindsDateTimeLabel({ captured_at: null, created_at: null, date }), null)
+  }
+})
+
 test('finds dropdown pills update after selection', () => {
   const harness = installFindsDropdownHarness()
   const previousState = { ...state }
