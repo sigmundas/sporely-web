@@ -55,7 +55,7 @@ import { resetObservationIdentificationsTableAvailabilityForTests } from '../ai-
 import { state } from '../state.js'
 import { AUTH_STATE, getAuthState, setAuthState } from '../auth-state.js'
 import { supabase } from '../supabase.js'
-import { formatDate, formatTime } from '../i18n.js'
+import { formatDate, formatTime, getLocale, setLocale } from '../i18n.js'
 
 function makeClassList(initial = []) {
   const values = new Set(initial)
@@ -4749,6 +4749,42 @@ async function runIdentificationReconcile(beforeRows, afterRows, { findsView = '
     findsSort,
   })
   return { harness, restoreTimers }
+}
+
+for (const findsSort of ['date', 'species']) {
+  test(`language change refreshes cached ${findsSort} cards and date headings without restarting`, async () => {
+    const rows = identificationRows(true)
+    const { harness, restoreTimers } = await runIdentificationReconcile(rows, rows, { findsSort })
+    const previousLocale = getLocale()
+    document.documentElement = {}
+    try {
+      setLocale('en')
+      await loadFinds()
+      const writesBefore = harness.list.innerHtmlWrites
+      const labelBefore = formatFindsDateTimeLabel(rows[0])
+      assert.match(harness.list.innerHTML, /Sep/)
+
+      // Refresh retained observations and also cover returning to the hidden
+      // Finds screen after its language changed elsewhere.
+      setLocale('nb_NO')
+      if (findsSort === 'date') await restoreFindsAfterDetailReturn()
+      else await _applyFilter()
+      assert.ok(harness.list.innerHtmlWrites > writesBefore, 'old-language render was replaced')
+      const labelAfter = formatFindsDateTimeLabel(rows[0])
+      assert.notEqual(labelAfter, labelBefore)
+      assert.ok(harness.list.innerHTML.includes(labelAfter), 'card uses the selected language')
+      assert.doesNotMatch(harness.list.innerHTML, /Sep/)
+      if (findsSort === 'date') assert.match(harness.list.innerHTML, /september/)
+
+      const writesAfter = harness.list.innerHtmlWrites
+      await _applyFilter()
+      assert.equal(harness.list.innerHtmlWrites, writesAfter, 'same-language refresh still reuses the render')
+    } finally {
+      setLocale(previousLocale)
+      harness.restore()
+      restoreTimers()
+    }
+  })
 }
 
 test('reconcile repaints a surviving card that gained an identification', async () => {

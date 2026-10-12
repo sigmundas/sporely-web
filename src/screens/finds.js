@@ -1,5 +1,5 @@
 import { supabase } from '../supabase.js'
-import { formatDate, formatTime, t, tp } from '../i18n.js'
+import { formatDate, formatTime, getLocale, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
@@ -1711,6 +1711,7 @@ export function restoreFindsAfterDetailReturn() {
   // with or without a save, so a rendered card whose images changed there is
   // wrong on screen right now and has to be rebuilt.
   if (_renderedStaleFindsImageIds(list).length) return loadFinds()
+  if (_renderedFindsView?.locale !== getLocale()) return _applyFilter()
   // `_pendingScrollRestore` was recorded when the card was opened. The
   // scroller normally still holds that position, but reapplying it is what
   // makes the restore explicit — and clearing it here keeps a stale offset
@@ -2590,6 +2591,7 @@ export function _matches(obs, q) {
 
 function _isCurrentFindsRender(list, renderContext) {
   return _findsRenderGuard.isCurrent(renderContext?.renderSequence)
+    && renderContext?.locale === getLocale()
     && renderContext?.accountGeneration === currentAccountGeneration()
     && list === document.getElementById('finds-list')
 }
@@ -2674,6 +2676,7 @@ export function _applyFilter() {
     && view.sort === sort
     && view.variant === variant
     && view.scope === context.currentScope
+    && view.locale === getLocale()
     // The offline note is painted outside `.finds-grid-outer` by the full
     // renderers, so a list built online cannot be reconciled into an offline
     // one (or back) without losing or keeping that note wrongly.
@@ -2687,6 +2690,7 @@ export function _applyFilter() {
   const renderSequence = _findsRenderGuard.begin()
   const renderContext = {
     renderSequence,
+    locale: getLocale(),
     accountGeneration: currentAccountGeneration(),
   }
 
@@ -3592,6 +3596,7 @@ export function _appendFindsPage(addedItems) {
     || view.sort !== sort
     || view.variant !== variant
     || view.scope !== context.currentScope
+    || view.locale !== getLocale()
     || view.offline !== _isOfflineFindsMode()) {
     return _applyFilter()
   }
@@ -3623,6 +3628,7 @@ export function _appendFindsPage(addedItems) {
   const targetList = _filterFindsItems(_currentFindsCache(context), context)
   const renderContext = {
     renderSequence: _findsRenderGuard.begin(),
+    locale: getLocale(),
     accountGeneration: currentAccountGeneration(),
   }
   const renderPromise = _renderFindsAppend(list, outer, targetList, items, {
@@ -3911,6 +3917,7 @@ async function _renderBySpecies(list, data, options = {}) {
     list.innerHTML = html
     _renderedFindsView = {
       sort: 'species',
+      locale: renderContext.locale,
       variant,
       scope: currentScope,
       offline: _isOfflineFindsMode(),
@@ -4055,6 +4062,7 @@ async function _renderCards(list, data, options) {
     list.innerHTML = html
     _renderedFindsView = {
       sort: 'date',
+      locale: renderContext.locale,
       variant,
       scope: currentScope,
       offline: _isOfflineFindsMode(),
