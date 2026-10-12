@@ -842,6 +842,7 @@ export function matchesFindsStatus(obs, status = 'all') {
 }
 
 function _formatFindsDateTime(value) {
+  if (value == null || value === '') return null
   const date = value instanceof Date ? value : new Date(value)
   if (Number.isNaN(date.getTime())) return null
   return `${String(date.getDate()).padStart(2, '0')}-${String(date.getMonth() + 1).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
@@ -852,7 +853,17 @@ export function formatFindsDateTimeLabel(obs = {}) {
     const label = _formatFindsDateTime(value)
     if (label) return label
   }
-  return null
+  // Non-owner views intentionally hide timestamps but retain the observation
+  // date. Keep that calendar date independent of the viewer's time zone and
+  // do not invent a capture time from a missing timestamp.
+  const dateOnly = typeof obs?.date === 'string' ? obs.date : ''
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) return null
+  const date = new Date(`${dateOnly}T12:00:00`)
+  if (Number.isNaN(date.getTime())
+      || date.getFullYear() !== Number(dateOnly.slice(0, 4))
+      || date.getMonth() + 1 !== Number(dateOnly.slice(5, 7))
+      || date.getDate() !== Number(dateOnly.slice(8, 10))) return null
+  return `${dateOnly.slice(8, 10)}-${dateOnly.slice(5, 7)}`
 }
 
 function _findsCardMetaLeadHtml(obs = {}, loc = '') {
