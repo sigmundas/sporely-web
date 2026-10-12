@@ -1,6 +1,8 @@
-# Cache-first startup and optimistic connectivity
+# Faster startup — show cached content without a false Offline warning
 
 Status: proposed 2026-10-04. Planning only; implementation and execution have not started.
+
+Purpose: improve startup and connection recovery. This plan does not change camera capture, photo imports, image aspect ratios, or upload metadata.
 
 ## Outcome
 
@@ -110,7 +112,7 @@ behavior-changing candidate uncommitted at a human gate when required by the
 project workflow; the engine handles exact-candidate finalization after evidence.
 No deployment or release is part of this plan.
 
-## Stage 1 — Separate connectivity presentation from auth authority
+## Stage 1 — Model connection checks without changing login permissions
 
 **Goal:** Introduce and test the state model needed to reveal a trusted cached
 shell without describing an untested connection as offline. Keep runtime startup
@@ -150,7 +152,7 @@ its entire side-effect graph.
 **Non-goals:** Wiring optimistic resume/cold boot, changing screen loaders,
 Supabase credential handling, migrations, deployment, or global polling.
 
-## Stage 2 — Confirm connectivity loss and recover without an offline flash
+## Stage 2 — Check the connection before showing Offline after resume
 
 **Goal:** Keep the current screen visible on resume and treat native/browser loss
 hints as requests for a backend check. Clear a confirmed Offline state as soon as
@@ -205,7 +207,7 @@ saved locally. Turn airplane mode off: the badge clears after backend success,
 queued work syncs once after session validation, and the screen stays in place.
 Record platform, candidate/build, elapsed timings and observed transitions.
 
-## Stage 3 — Reveal trusted cached Home before network validation
+## Stage 3 — Show cached Home immediately at startup
 
 **Goal:** On an ordinary cold launch by a previously validated user, reveal cached
 Home and header before awaiting session/backend/profile work, then refresh in place.
@@ -272,7 +274,7 @@ capture/save works. Relaunch after explicit logout: the previous cached account
 does not return. Verify password recovery and an existing native OAuth return flow
 remain usable; do not claim callback safety solely from a normal login test.
 
-## Stage 4 — Verify prolonged inactivity, failure recovery and final contracts
+## Stage 4 — Test startup and connection recovery on Android and PWA
 
 **Goal:** Verify the complete user experience after hours of inactivity and close
 bounded integration defects. Document the final client state/transition contract
