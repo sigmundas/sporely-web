@@ -55,6 +55,7 @@ import { resetObservationIdentificationsTableAvailabilityForTests } from '../ai-
 import { state } from '../state.js'
 import { AUTH_STATE, getAuthState, setAuthState } from '../auth-state.js'
 import { supabase } from '../supabase.js'
+import { formatDate, formatTime } from '../i18n.js'
 
 function makeClassList(initial = []) {
   const values = new Set(initial)
@@ -1423,7 +1424,7 @@ test('finds redlist tag helper renders only the tag in a thumbnail-friendly badg
   assert.doesNotMatch(html, /ai-redlist-summary-text/)
 })
 
-test('finds card date-time helper formats dd-mm hh:mm and prefers captured_at', () => {
+test('finds card date-time helper includes localized month and year and prefers captured_at', () => {
   const capturedAt = new Date(2026, 5, 24, 12, 34, 0).toISOString()
   const createdAt = new Date(2026, 5, 25, 8, 9, 0).toISOString()
 
@@ -1432,14 +1433,14 @@ test('finds card date-time helper formats dd-mm hh:mm and prefers captured_at', 
       captured_at: capturedAt,
       created_at: createdAt,
     }),
-    '24-06 12:34',
+    `${formatDate(capturedAt, { day: 'numeric', month: 'short', year: 'numeric' })} · ${formatTime(capturedAt, { hour: '2-digit', minute: '2-digit' })}`,
   )
 
   assert.equal(
     formatFindsDateTimeLabel({
       created_at: createdAt,
     }),
-    '25-06 08:09',
+    `${formatDate(createdAt, { day: 'numeric', month: 'short', year: 'numeric' })} · ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}`,
   )
 })
 
@@ -1450,7 +1451,7 @@ test('finds card shows the observation date without time when timestamps are hid
       date: '2026-10-11',
       captured_at: null,
       created_at: null,
-    }), '11-10')
+    }), formatDate(new Date(2026, 9, 11, 12), { day: 'numeric', month: 'short', year: 'numeric' }))
   }
 })
 
@@ -1460,14 +1461,18 @@ test('finds card skips null capture time and uses an available creation timestam
     captured_at: null,
     created_at: createdAt,
     date: '2026-10-10',
-  }), '11-10 14:22')
+  }), `${formatDate(createdAt, { day: 'numeric', month: 'short', year: 'numeric' })} · ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}`)
 })
 
 test('finds card date-only fallback handles absent or invalid timestamps and calendar dates', () => {
-  assert.equal(formatFindsDateTimeLabel({ date: '2026-10-11' }), '11-10')
+  const label = formatFindsDateTimeLabel({ date: '2026-10-11' })
+  assert.equal(label, formatDate(new Date(2026, 9, 11, 12), { day: 'numeric', month: 'short', year: 'numeric' }))
+  assert.match(label, /2026/)
+  assert.match(label, /\p{L}/u)
+  assert.doesNotMatch(label, /\d{1,2}:\d{2}/)
   assert.equal(formatFindsDateTimeLabel({
     captured_at: 'invalid', created_at: '', date: '2024-02-29',
-  }), '29-02')
+  }), formatDate(new Date(2024, 1, 29, 12), { day: 'numeric', month: 'short', year: 'numeric' }))
   for (const date of [undefined, null, '', 'invalid', '2026-02-29', '2026-02-30', '2026-13-01']) {
     assert.equal(formatFindsDateTimeLabel({ captured_at: null, created_at: null, date }), null)
   }
