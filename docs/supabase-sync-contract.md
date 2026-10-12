@@ -935,3 +935,39 @@ Every pull request that can remove a cloud row or file must state:
 - Which test proves publication selection is not deletion consent?
 - How can the owner audit and recover the result?
 - Were both copies of this contract updated?
+
+## Candidate private ingestion/location provenance (Stage 1, not deployed)
+
+Migration `20261012105630_ingestion_location_provenance.sql` adds nullable
+`observation_images.ingest_method` and observation `location_source` /
+`location_status`. These are owner diagnostics, excluded from existing public
+views/RPCs. Historical and unsupported-client values stay NULL; ingestion is
+into Sporely and does not identify the photographing device. `gps_source`
+continues to identify the contributing image separately.
+
+The coordinate bundle is latitude, longitude, altitude and accuracy. Ordinary
+UPDATEs changing any actual bundle value invalidate both location fields to
+NULL, including direct writes resending unchanged enum labels. Unrelated edits
+and value-identical coordinate resends preserve attribution. Complete pair and
+coordinate compatibility checks apply to new provenance; legacy NULL pairs do
+not impose new restrictions on historical coordinates.
+
+Aware clients must call owner/RLS-enforced `set_observation_location` with all
+seven arguments (observation ID, four coordinate values, source, status). It
+locks the owner row, updates coordinates with ordinary invalidation, then sets
+the validated pair within the same transaction. Same-value retries make no
+writes. A failing second write rolls back both. No bypass flag or definer
+privileges are used. This RPC does not collect GPS or classify client actions;
+Stage 3 wires the frozen transition contract in the active plan.
+
+Continue-without-location preserves the current session's denied, timeout,
+unavailable or disabled outcome. `skipped` is used when no meaningful outcome
+exists or coordinates are deliberately cleared. Valid selected coordinates
+use acquired and their actual source; failed background acquisition does not
+replace a valid selected location's provenance.
+
+Clients must compare before writing, and Download-from-Cloud remains strictly
+zero-cloud-write. Stage 4 will add desktop persistence and aware writes; older
+desktop coordinate edits receive conservative server invalidation. No image
+byte upload, media-key change or child media-version bump is required merely
+to assign location provenance.
