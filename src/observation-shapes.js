@@ -145,13 +145,24 @@ export function normalizeObservationGps(value) {
     value.lon ?? value.longitude ?? value.gps_longitude,
   )
   if (!coords) return null
-  const altitude = Number(value.altitude)
-  const accuracy = Number(value.accuracy)
   return {
     ...coords,
-    altitude: Number.isFinite(altitude) ? altitude : null,
-    accuracy: Number.isFinite(accuracy) ? accuracy : null,
+    altitude: optionalFiniteNumber(value.altitude),
+    accuracy: optionalFiniteNumber(value.accuracy),
   }
+}
+
+/**
+ * A measured number, or null when absent. `Number(null)` is 0, which would
+ * turn an unmeasured accuracy into "perfect" and an unknown altitude into sea
+ * level.
+ * @param {unknown} value
+ * @returns {number|null}
+ */
+export function optionalFiniteNumber(value) {
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
 }
 
 /**

@@ -29,6 +29,16 @@ import {
 } from '../geo.js';
 import { resetReviewAiState } from './review.js';
 import {
+  LOCATION_SOURCE,
+  applyLocationProvenanceToPayload,
+  attachLatePhotoExifGps,
+  exifGpsSourceForIngest,
+  photoExifGps,
+  normalizeLocationSource,
+  resolveSaveLocationProvenance,
+  withLocationSource,
+} from '../location-provenance.js';
+import {
   isPreflightCurrent,
   nextPreflightToken,
   prepareNewFindLocation,
@@ -38,13 +48,22 @@ import {
 let _NativeCameraOverride = null;
 let _nativePhotoToFileOverride = null;
 let _processFileOverride = null;
+let _nativeExifOverride = null;
+let _nativeHydrationOverride = null;
 let importAiTestDependencies = null;
 export function __setNativeCameraForTests(mock) {
   _NativeCameraOverride = mock || null;
 }
-export function __setNativePhotoPipelineForTests({ nativePickedPhotoToFile: nptf, processFile: pf } = {}) {
+export function __setNativePhotoPipelineForTests({
+  nativePickedPhotoToFile: nptf,
+  processFile: pf,
+  captureNativePhotoExif: exif,
+  createNativeMetadataHydrationPromise: hydration,
+} = {}) {
   _nativePhotoToFileOverride = typeof nptf === 'function' ? nptf : null;
   _processFileOverride = typeof pf === 'function' ? pf : null;
+  _nativeExifOverride = typeof exif === 'function' ? exif : null;
+  _nativeHydrationOverride = typeof hydration === 'function' ? hydration : null;
 }
 export function __setImportAiTestHooks(overrides = null) {
   importAiTestDependencies = overrides && typeof overrides === 'object' ? { ...overrides } : null;
@@ -61,6 +80,24 @@ function _nativePickedPhotoToFile(...args) {
 }
 function _processFileForCapture(...args) {
   return (_processFileOverride || processFile)(...args);
+}
+// The photo's own original EXIF; a read failure means "no EXIF GPS", never a
+// failed capture.
+async function _readLiveNativePhotoExif(photo, file, options) {
+  try {
+    return await (_nativeExifOverride || captureNativePhotoExif)(photo, file, options);
+  } catch (error) {
+    console.warn('Native camera EXIF read failed:', error);
+    return null;
+  }
+}
+function _liveNativeMetadataHydration(photo, file) {
+  try {
+    return (_nativeHydrationOverride || createNativeMetadataHydrationPromise)(photo, file);
+  } catch (error) {
+    console.warn('Native camera metadata hydration failed:', error);
+    return null;
+  }
 }
 import { debugImagePipeline } from '../image-pipeline-debug.js';
 import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, ID_SERVICE_INATURALIST } from '../identify.js';
@@ -560,6 +597,7 @@ function _buildImportObservationPayload(session, options = {}) {
     altitude: normalized.gpsAltitude,
     accuracy: normalized.gpsAccuracy,
   })
+  const leadGpsSource = normalizeLocationSource(normalized.gpsSource) || LOCATION_SOURCE.UNKNOWN
   const leadPhoto = {
     ts: normalized.ts || new Date(),
   }
@@ -595,6 +633,12 @@ function _buildImportObservationPayload(session, options = {}) {
     ...(taxonomySelection ? { [QUEUED_TAXONOMY_SELECTION_KEY]: taxonomySelection } : {}),
     ..._sessionObservationGeography(normalized),
   })
+  // Coordinates carry the source of the photo they were taken from. Without
+  // coordinates nothing is stamped here: only the save confirmation (an
+  // explicit skip) may add none/skipped.
+  applyLocationProvenanceToPayload(obsPayload, resolveSaveLocationProvenance({
+    gps: leadGps ? { ...leadGps, source: leadGpsSource } : null,
+  }))
 
   // Pair each blob with its own metadata BEFORE dropping non-blob slots;
   // indexing imageMeta after filtering would shift metadata onto the wrong
@@ -1268,11 +1312,14 @@ function _groupSourceItems(items, gapMs) {
 // One import photo: its blob, AI blob and metadata (crop + ingestMethod)
 // stay on a single object through sorting, grouping, removal and restore.
 function _buildImportSourceItem(id, item, processed, ingestMethod, overrides = {}) {
+  const normalizedIngestMethod = normalizeIngestMethod(ingestMethod) || INGEST_METHOD.UNKNOWN;
   return {
     id,
+    // Source of this photo's own EXIF GPS (Sporely Cam: the fix Sporely wrote).
+    gpsSource: exifGpsSourceForIngest(normalizedIngestMethod, item.writtenGpsSource),
     blob: processed.blob,
     aiBlob: processed.aiBlob || processed.blob,
-    meta: { ...processed.meta, ingestMethod: normalizeIngestMethod(ingestMethod) || INGEST_METHOD.UNKNOWN },
+    meta: { ...processed.meta, ingestMethod: normalizedIngestMethod },
     metadataPromise: item.metadataPromise || null,
     captureTime: item.captureTime,
     lat: item.lat ?? null,
@@ -1330,11 +1377,12 @@ function _buildSessionsFromSourceItems() {
       imageMeta: group.map(item => item.meta),
       metadataPromises: group.map(item => item.metadataPromise || null),
       photoTimes: group.map(item => item.captureTime),
-      photoGps: group.map(item => ({ lat: item.lat, lon: item.lon, altitude: item.altitude ?? null, accuracy: item.accuracy ?? null })),
+      photoGps: group.map(item => ({ lat: item.lat, lon: item.lon, altitude: item.altitude ?? null, accuracy: item.accuracy ?? null, source: normalizeLocationSource(item.gpsSource) })),
       photoDebug: group.map(item => item.dbg || null),
       ts: new Date(group[0].captureTime),
       gpsLat: exifGps?.lat ?? null,
       gpsLon: exifGps?.lon ?? null,
+      gpsSource: exifGps ? normalizeLocationSource(exifGps.gpsSource) : null,
       gpsAltitude: sessionAltitude,
       gpsAccuracy: sessionAccuracy,
       locationName: previous?.locationName || '',
@@ -1379,9 +1427,20 @@ function _flattenSourceItemsFromSessions(savedSessions) {
       lon: session.photoGps?.[index]?.lon ?? null,
       altitude: session.photoGps?.[index]?.altitude ?? null,
       accuracy: session.photoGps?.[index]?.accuracy ?? null,
+      gpsSource: normalizeLocationSource(session.photoGps?.[index]?.source),
       dbg: session.photoDebug?.[index] || null,
     }))
   );
+}
+
+// The user explicitly confirmed saving these groups without a location.
+// Imports never attempt GPS, so there is no failure to preserve: none/skipped.
+// Groups that only have a place name were not part of that confirmation.
+function _stampConfirmedImportSkips(queuedSessions) {
+  queuedSessions.forEach(({ obsPayload }) => {
+    if (!obsPayload || hasObservationLocation(obsPayload)) return
+    applyLocationProvenanceToPayload(obsPayload, resolveSaveLocationProvenance({ decision: 'continue' }))
+  })
 }
 
 function _ensureSessionImageMeta(session) {
@@ -1447,8 +1506,11 @@ function _applyMetadataToSession(session, index, metadata) {
   session.photoGps[index] = nextPhotoGps
 
   if (hasGps && (session.gpsLat === null || session.gpsLon === null)) {
+    // Late EXIF wins the session location only here, so only here does the
+    // session take this photo's source.
     session.gpsLat = lat
     session.gpsLon = lon
+    session.gpsSource = normalizeLocationSource(nextPhotoGps.source)
     if (session.gpsAltitude == null && Number.isFinite(altitude)) session.gpsAltitude = altitude
     if (session.gpsAccuracy == null && Number.isFinite(accuracy)) session.gpsAccuracy = accuracy
     changed = true
@@ -1654,6 +1716,9 @@ export async function openNativeCamera() {
   try {
     let result
     let ingestMethod
+    // Sporely Cam writes exactly `gps` into its EXIF; the system camera writes
+    // its own original GPS (image_exif).
+    let writtenGpsSource = null
     if (getUseSystemCamera()) {
       ingestMethod = INGEST_METHOD.SYSTEM_CAMERA
       playIrisShutter({ mode: 'quick' })
@@ -1663,7 +1728,10 @@ export async function openNativeCamera() {
     } else {
       ingestMethod = INGEST_METHOD.SPORELY_CAMERA
       const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
-      if (gps) options.gps = gps
+      if (gps) {
+        options.gps = gps
+        writtenGpsSource = normalizeLocationSource(sessionFix?.source) || LOCATION_SOURCE.UNKNOWN
+      }
       debugImagePipeline('android native camera capture requested', {
         screenPath: 'new-find:native-camera',
         captureSource: 'Sporely native camera',
@@ -1693,7 +1761,7 @@ export async function openNativeCamera() {
     // hadn't resolved by the time capturePhotos returned; no second request
     // is needed here.)
     markCameraStep('handleNativePhotoResultAsLive:start')
-    await _handleNativePhotoResultAsLive(result, ingestMethod)
+    await _handleNativePhotoResultAsLive(result, ingestMethod, { writtenGpsSource })
     markCameraStep('handleNativePhotoResultAsLive:end')
   } catch (err) {
     if (isPickerCancel(err)) {
@@ -1725,7 +1793,7 @@ async function _requestInitialNativeCameraLocation() {
 
 // `ingestMethod` comes from the camera branch the caller actually opened;
 // the `captureSource` label below is debug-only.
-async function _handleNativePhotoResultAsLive(result, ingestMethod = INGEST_METHOD.UNKNOWN) {
+async function _handleNativePhotoResultAsLive(result, ingestMethod = INGEST_METHOD.UNKNOWN, { writtenGpsSource = null } = {}) {
   const photos = Array.isArray(result?.photos) ? result.photos
     : Array.isArray(result?.files) ? result.files
       : []
@@ -1737,12 +1805,12 @@ async function _handleNativePhotoResultAsLive(result, ingestMethod = INGEST_METH
   _setProgress(0, photos.length, t('import.readingFiles'))
 
   const files = []
+  const exifs = []
   for (let i = 0; i < photos.length; i++) {
     _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
-    files.push(await _nativePickedPhotoToFile(photos[i], i, {
-      captureSource: 'Sporely native camera',
-      screenPath: 'new-find:native-camera',
-    }))
+    const debugOptions = { captureSource: 'Sporely native camera', screenPath: 'new-find:native-camera' }
+    files.push(await _nativePickedPhotoToFile(photos[i], i, debugOptions))
+    exifs.push(await _readLiveNativePhotoExif(photos[i], files[i], debugOptions))
   }
 
   const processed = []
@@ -1755,23 +1823,38 @@ async function _handleNativePhotoResultAsLive(result, ingestMethod = INGEST_METH
 
   const sessionFix = state.captureSessionLocation.fix
   const capturedAt = new Date()
-  state.capturedPhotos = processed.map((entry, index) => ({
-    blob: entry.blob,
-    aiBlob: entry.aiBlob || entry.blob,
-    blobPromise: Promise.resolve(entry.blob),
-    gps: sessionFix ? { ...sessionFix } : null,
-    ts: capturedAt,
-    emoji: '📸',
-    aiCropRect: entry.meta?.aiCropRect || null,
-    aiCropSourceW: entry.meta?.aiCropSourceW ?? null,
-    aiCropSourceH: entry.meta?.aiCropSourceH ?? null,
-    aiCropIsCustom: entry.meta?.aiCropIsCustom === true,
-    ingestMethod: normalizeIngestMethod(ingestMethod) || INGEST_METHOD.UNKNOWN,
-    // Sporely Cam only (null for the system camera): the private cache JPEG
-    // that review Save exports/deletes once the queue owns the bytes.
-    nativeSourcePath: nativeCaptureSourcePathFromNativePhoto(photos[index]),
-    _nativePhotoIndex: index,
-  }))
+  const normalizedIngestMethod = normalizeIngestMethod(ingestMethod) || INGEST_METHOD.UNKNOWN
+  const exifGpsSource = exifGpsSourceForIngest(normalizedIngestMethod, writtenGpsSource)
+  state.capturedPhotos = processed.map((entry, index) => {
+    // The photo's own original GPS competes with the session fix in canonical
+    // selection at save; without it the photo keeps the session snapshot.
+    const exifGps = photoExifGps(exifs[index], exifGpsSource)
+    const photo = {
+      blob: entry.blob,
+      aiBlob: entry.aiBlob || entry.blob,
+      blobPromise: Promise.resolve(entry.blob),
+      gps: exifGps || withLocationSource(sessionFix, sessionFix?.source),
+      gpsFromExif: !!exifGps,
+      ts: capturedAt,
+      emoji: '📸',
+      aiCropRect: entry.meta?.aiCropRect || null,
+      aiCropSourceW: entry.meta?.aiCropSourceW ?? null,
+      aiCropSourceH: entry.meta?.aiCropSourceH ?? null,
+      aiCropIsCustom: entry.meta?.aiCropIsCustom === true,
+      ingestMethod: normalizedIngestMethod,
+      // Sporely Cam only (null for the system camera): the private cache JPEG
+      // that review Save exports/deletes once the queue owns the bytes.
+      nativeSourcePath: nativeCaptureSourcePathFromNativePhoto(photos[index]),
+      _nativePhotoIndex: index,
+    }
+    // Late original EXIF (review Save awaits it before choosing a location).
+    photo.metadataPromise = attachLatePhotoExifGps(
+      photo,
+      _liveNativeMetadataHydration(photos[index], files[index]),
+      exifGpsSource,
+    )
+    return photo
+  })
   state.batchCount = state.capturedPhotos.length
   state.captureDraft = createDefaultObservationDraft()
   state.reviewContext = null
@@ -2572,6 +2655,7 @@ async function saveAll() {
       saveBtn.disabled = false;
       return;
     }
+    _stampConfirmedImportSkips(queuedSessions)
   }
 
   // Local-first: enqueueObservation persists to IndexedDB only. A failure
@@ -2731,7 +2815,12 @@ async function _openCameraForSession(sid) {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addFilesToSession(sid, files, { nativePhotos: photos, ingestMethod: INGEST_METHOD.SPORELY_CAMERA });
+      // Sporely Cam writes exactly this device fix into the photo's EXIF.
+      await _addFilesToSession(sid, files, {
+        nativePhotos: photos,
+        ingestMethod: INGEST_METHOD.SPORELY_CAMERA,
+        writtenGpsSource: gps ? LOCATION_SOURCE.DEVICE_GPS : null,
+      });
     } catch (err) {
       if (isPickerCancel(err)) return;
       showToast(`Sporely Cam: ${err?.message || err}`);
@@ -2825,7 +2914,7 @@ async function _addFilesToSession(sid, files, options = {}) {
     const item = withTimes[idx];
     _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
     const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
-    const newItem = _buildImportSourceItem(`i_add_${Date.now()}_${idx}`, item, processed, ingestMethod, {
+    const newItem = _buildImportSourceItem(`i_add_${Date.now()}_${idx}`, { ...item, writtenGpsSource: options.writtenGpsSource }, processed, ingestMethod, {
       captureTime: session.ts.getTime(), // Force to match session so it is not ripped out by photo gap
     });
     sourceItems.push(newItem);
@@ -2836,12 +2925,13 @@ async function _addFilesToSession(sid, files, options = {}) {
     session.imageMeta.push(newItem.meta);
     session.metadataPromises.push(newItem.metadataPromise);
     session.photoTimes.push(newItem.captureTime);
-    session.photoGps.push({ lat: newItem.lat, lon: newItem.lon, altitude: newItem.altitude, accuracy: newItem.accuracy });
+    session.photoGps.push({ lat: newItem.lat, lon: newItem.lon, altitude: newItem.altitude, accuracy: newItem.accuracy, source: newItem.gpsSource });
     session.photoDebug.push(newItem.dbg);
     
     if (session.gpsLat === null && isUsableCoordinate(newItem.lat, newItem.lon)) {
       session.gpsLat = newItem.lat;
       session.gpsLon = newItem.lon;
+      session.gpsSource = newItem.gpsSource;
       session.gpsAltitude = newItem.altitude;
       session.gpsAccuracy = newItem.accuracy;
     }
@@ -2920,6 +3010,8 @@ export {
   _buildImportObservationPayload,
   _buildImportSourceItem,
   _flattenSourceItemsFromSessions,
+  _applyMetadataToSession,
+  _stampConfirmedImportSkips,
   _sortByCaptureTime,
   _storeSessionAiServiceResult,
   _sessionServiceNeedsRerun,

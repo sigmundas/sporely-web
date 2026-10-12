@@ -5,6 +5,7 @@ import { getDefaultVisibility } from './settings.js'
 import { normalizeCaptureVisibility } from './visibility.js'
 import { debugImagePipeline } from './image-pipeline-debug.js'
 import { normalizeIngestMethod } from './observation-shapes.js'
+import { normalizeLocationSource } from './location-provenance.js'
 
 const DB_NAME = 'sporely'
 const DB_VERSION = 1
@@ -77,9 +78,12 @@ export async function saveImportSessions(sessions) {
         lat: gps?.lat ?? null,
         lon: gps?.lon ?? null,
         altitude: gps?.altitude ?? null,
+        accuracy: gps?.accuracy ?? null,
+        source: normalizeLocationSource(gps?.source),
       })),
       photoDebug: [...(s.photoDebug || [])],
       gpsLat: s.gpsLat ?? null,
+      gpsSource: normalizeLocationSource(s.gpsSource),
       gpsLon: s.gpsLon ?? null,
       gpsAltitude: s.gpsAltitude ?? null,
       gpsAccuracy: s.gpsAccuracy ?? null,
@@ -162,9 +166,12 @@ export async function loadImportSessions() {
             lat: gps?.lat ?? null,
             lon: gps?.lon ?? null,
             altitude: gps?.altitude ?? null,
+            accuracy: gps?.accuracy ?? null,
+            source: normalizeLocationSource(gps?.source),
           })),
           photoDebug: [...(r.photoDebug || [])],
           gpsLat: r.gpsLat ?? null,
+          gpsSource: normalizeLocationSource(r.gpsSource),
           gpsLon: r.gpsLon ?? null,
           gpsAltitude: r.gpsAltitude ?? null,
           gpsAccuracy: r.gpsAccuracy ?? null,

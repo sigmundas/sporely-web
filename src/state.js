@@ -22,6 +22,9 @@ function _createDefaultCaptureSessionLocationState() {
     // moment are rejected for the session fix, so the observation location
     // stays pinned to capture time even if the device keeps moving.
     captureWindowEndAt: null,
+    // Latest meaningful acquisition outcome of this session (denied, timeout,
+    // unavailable, disabled, unknown) for location provenance; geo.js owns it.
+    outcome: null,
   }
 }
 

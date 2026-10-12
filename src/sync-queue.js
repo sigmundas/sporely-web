@@ -20,6 +20,7 @@ import {
   takeQueuedTaxonomySelection,
 } from './taxonomy-v2.js'
 import { canPerformCloudMutation } from './capabilities.js'
+import { isMissingLocationProvenanceError, sanitizeQueuedLocationProvenance, withoutLocationProvenance } from './location-provenance.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -541,6 +542,19 @@ async function _enqueueObservation(obsPayload, imageEntries) {
     tx.onerror = () => reject(tx.error)
     tx.onabort = () => reject(tx.error || new Error('Queue write aborted'))
   })
+}
+
+// A target that predates the provenance migration rejects the two columns:
+// store the same observation with a NULL pair rather than block the queue.
+// Any other error (including a CHECK refusal) is returned unchanged.
+async function _retryObservationInsertWithoutProvenance(error, data, payload) {
+  if (!error || !isMissingLocationProvenanceError(error)) return { data, error, payload }
+  console.warn('[sync-queue] location provenance columns missing; inserting without provenance', {
+    message: error?.message || '',
+  })
+  const fallbackPayload = withoutLocationProvenance(payload)
+  const retry = await supabase.from('observations').insert(fallbackPayload).select('id').single()
+  return { data: retry.data, error: retry.error, payload: fallbackPayload }
 }
 
 export async function getQueuedObservations(userId) {
@@ -1105,6 +1119,9 @@ async function _runSyncQueue() {
         if (repairedPayload.photoGps !== undefined) {
           delete repairedPayload.photoGps
         }
+        // Provenance is inserted atomically with the coordinates, or not at
+        // all: an incomplete/incompatible pair must never fail the insert.
+        sanitizeQueuedLocationProvenance(repairedPayload)
 
         _debugQueue('observation insert payload', {
           itemId: item.id,
@@ -1116,6 +1133,7 @@ async function _runSyncQueue() {
         })
 
         let { data: obsData, error } = await supabase.from('observations').insert(repairedPayload).select('id').single()
+        ;({ data: obsData, error, payload: repairedPayload } = await _retryObservationInsertWithoutProvenance(error, obsData, repairedPayload))
         if (error?.message?.includes('captured_at')) {
           const { captured_at: _capturedAt, ...payloadWithout } = repairedPayload
           ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithout).select('id').single())

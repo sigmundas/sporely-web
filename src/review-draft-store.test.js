@@ -234,3 +234,41 @@ test('a review draft written before provenance restores with a null ingest metho
   const restored = await loadReviewDraft()
   assert.deepEqual(restored.photos.map(p => p.ingestMethod), [null, null])
 }))
+
+test('review draft persists photo GPS source and the session location outcome', _withIndexedDbStub(async () => {
+  const draft = _makeDraft()
+  draft.photos[0].gps = { lat: 60, lon: 10, accuracy: 4, altitude: null, timestamp: 1, source: 'image_exif' }
+  draft.photos[1].gps = { lat: 61, lon: 11, accuracy: 9, altitude: null, timestamp: 2 }
+  draft.sessionLocationOutcome = 'timeout'
+  await saveReviewDraft(draft)
+  let restored = await loadReviewDraft()
+  assert.deepEqual(restored.photos.map(p => p.gps?.source ?? null), ['image_exif', null])
+  assert.equal(restored.sessionLocationOutcome, 'timeout')
+
+  // A later GPS outcome is merged without rewriting photos; skipped/garbage
+  // is never a carried outcome.
+  await updateReviewDraftFields({ sessionLocationOutcome: 'denied' })
+  restored = await loadReviewDraft()
+  assert.equal(restored.sessionLocationOutcome, 'denied')
+  assert.equal(restored.photos.length, 2)
+  await updateReviewDraftFields({ sessionLocationOutcome: 'skipped' })
+  assert.equal((await loadReviewDraft()).sessionLocationOutcome, null)
+}))
+
+test('a review draft written before location provenance restores with no outcome', _withIndexedDbStub(async () => {
+  await saveReviewDraft(_makeDraft())
+  const restored = await loadReviewDraft()
+  assert.equal(restored.sessionLocationOutcome, null)
+}))
+
+test('review draft persists the session fix source; an untagged legacy fix restores without one', _withIndexedDbStub(async () => {
+  const draft = _makeDraft()
+  draft.sessionFix = { lat: 60, lon: 10, accuracy: 4, altitude: null, timestamp: 1, source: 'device_gps' }
+  await saveReviewDraft(draft)
+  assert.equal((await loadReviewDraft()).sessionFix.source, 'device_gps')
+
+  const legacy = _makeDraft()
+  legacy.sessionFix = { lat: 60, lon: 10, accuracy: 4, altitude: null, timestamp: 1 }
+  await saveReviewDraft(legacy)
+  assert.equal((await loadReviewDraft()).sessionFix.source, null)
+}))

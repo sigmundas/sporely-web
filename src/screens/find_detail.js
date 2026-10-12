@@ -52,6 +52,7 @@ import { debugImagePipeline } from '../image-pipeline-debug.js'
 import { prepareImageBlobForUpload } from '../image_crop.js'
 import { INGEST_METHOD, isBlob, normalizeCoordinatePair } from '../observation-shapes.js'
 import { focusObservationOnMapScreen, openMapLocationPickerScreen } from '../map-loader.js'
+import { LOCATION_SOURCE, LOCATION_STATUS, setObservationLocation } from '../location-provenance.js'
 import { buildExternalMapUrl, MAP_LINK_SERVICES } from '../map-links.js'
 import { confirmPublishIfNeeded, loadExistingObservationFacts } from '../publish-notice.js'
 import {
@@ -3719,6 +3720,25 @@ export function buildDetailLocationPatch(lat, lon) {
   }
 }
 
+/**
+ * The aware `set_observation_location` request for a hand-placed point.
+ * @param {string|number} observationId
+ * @param {{ gps_latitude: number, gps_longitude: number }} patch from buildDetailLocationPatch
+ * @param {string} userId owner (used only by the pre-migration fallback filter)
+ */
+export function buildDetailLocationRequest(observationId, patch, userId) {
+  return {
+    observationId,
+    userId,
+    lat: patch.gps_latitude,
+    lon: patch.gps_longitude,
+    altitude: null,
+    accuracy: null,
+    source: LOCATION_SOURCE.MANUAL,
+    status: LOCATION_STATUS.ACQUIRED,
+  }
+}
+
 function _detailLocationCoords(obs = currentObs) {
   return normalizeCoordinatePair(obs?.gps_latitude, obs?.gps_longitude)
 }
@@ -3807,11 +3827,10 @@ async function _persistDetailLocation(observationId, picked) {
     return
   }
 
-  const { error } = await supabase
-    .from('observations')
-    .update(patch)
-    .eq('id', observationId)
-    .eq('user_id', state.user.id)
+  // A hand-placed point is manual/acquired, written atomically with the
+  // coordinates by the owner-only server operation. A plain PATCH would make
+  // the server drop attribution (legacy coordinate-change contract).
+  const { error } = await setObservationLocation(supabase, buildDetailLocationRequest(observationId, patch, state.user.id))
 
   if (error) {
     showToast(t('detail.locationSaveFailed', { message: error.message }))

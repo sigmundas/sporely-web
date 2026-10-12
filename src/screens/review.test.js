@@ -21,7 +21,7 @@ import {
   restoreReviewDraft,
   formatLatLon,
 } from './review.js'
-import { LOCATION_STATE_CHANGED_EVENT, beginCaptureLocationSession, endCaptureLocationSession } from '../geo.js'
+import { LOCATION_STATE_CHANGED_EVENT, beginCaptureLocationSession, endCaptureLocationSession, requestFreshLocation, setLocationPreference } from '../geo.js'
 import { state } from '../state.js'
 import { normalizeTaxonomyV2Result } from '../taxonomy-v2.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
@@ -2369,5 +2369,458 @@ test('imported review photos take their ingest method from the session image met
     __setReviewTestHooks(null)
     _restoreReviewState(snapshot)
     env.restore()
+  }
+})
+
+// ── Stage 3: location provenance at save (frozen transitions) ───────────────
+
+function _geolocationSequence(steps) {
+  // Each getCurrentPosition call consumes one step: an error code or a fix.
+  let index = 0
+  return {
+    calls: () => index,
+    getCurrentPosition(success, error) {
+      const step = steps[Math.min(index, steps.length - 1)]
+      index += 1
+      if (typeof step === 'number') {
+        error({ code: step, message: `code ${step}` })
+        return
+      }
+      success({
+        coords: { latitude: step.lat, longitude: step.lon, accuracy: step.accuracy ?? 8, altitude: null },
+        timestamp: Date.now(),
+      })
+    },
+    watchPosition() { return 1 },
+    clearWatch() {},
+  }
+}
+
+async function _saveWithProvenance({
+  seed = {},
+  photos = null,
+  geolocation = _geolocationSequence([3]),
+  permissions = undefined,
+  before = null,
+  sheet = [],
+} = {}) {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals({
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+    navigator: { geolocation, permissions },
+  })
+  let savedPayload = null
+  const sheetShows = []
+  try {
+    endCaptureLocationSession()
+    beginCaptureLocationSession()
+    _seedReviewState({
+      user: { id: 'user-1' },
+      location: { preference: 'enabled', capability: 'supported', permission: 'granted', status: 'idle' },
+      ...seed,
+    })
+    if (photos) state.capturedPhotos = photos(state.capturedPhotos[0])
+    __setReviewTestHooks({
+      enqueueObservation: async payload => { savedPayload = payload },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+    initReview()
+    buildReviewGrid()
+    if (before) await before(env)
+    _click(env.document.getElementById('review-save-btn'))
+    const overlay = env.document.getElementById('location-fix-overlay')
+    for (const action of sheet) {
+      for (let i = 0; i < 100 && overlay.style.display !== 'flex'; i++) {
+        await new Promise(resolve => globalThis.setTimeout(resolve, 5))
+      }
+      sheetShows.push(overlay.style.display)
+      _click(env.document.getElementById(action === 'retry' ? 'location-fix-try-again' : 'location-fix-continue'))
+    }
+    for (let i = 0; i < 100 && savedPayload === null; i++) {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 5))
+    }
+    return { payload: savedPayload, sheetShows }
+  } finally {
+    endCaptureLocationSession()
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+}
+
+async function _waitForTimer(predicate, attempts = 200) {
+  for (let i = 0; i < attempts && !predicate(); i++) {
+    await new Promise(resolve => globalThis.setTimeout(resolve, 5))
+  }
+  return predicate()
+}
+
+function _pair(payload) {
+  return [payload?.location_source ?? null, payload?.location_status ?? null]
+}
+
+test('provenance: a fresh device fix saves device_gps/acquired with its coordinates', async () => {
+  const { payload } = await _saveWithProvenance({
+    // geo.js tags every fix it accepts into the session as device_gps.
+    seed: { liveFix: { lat: 63.42, lon: 10.39, accuracy: 6, altitude: null, timestamp: Date.now(), source: 'device_gps' } },
+  })
+  assert.deepEqual(_pair(payload), ['device_gps', 'acquired'])
+  assert.equal(payload.gps_latitude, 63.42)
+})
+
+test('provenance: usable original-image EXIF saves image_exif/acquired; missing EXIF falls to the sheet', async () => {
+  const exif = await _saveWithProvenance({
+    photos: base => [{ ...base, gps: { lat: 59.9, lon: 10.7, accuracy: 4, altitude: null, source: 'image_exif' } }],
+  })
+  assert.deepEqual(_pair(exif.payload), ['image_exif', 'acquired'])
+  assert.equal(exif.payload.gps_latitude, 59.9)
+
+  const missing = await _saveWithProvenance({
+    photos: base => [{ ...base, gps: null }],
+    sheet: ['continue'],
+  })
+  assert.deepEqual(_pair(missing.payload), ['none', 'skipped'])
+  assert.equal(missing.payload.gps_latitude, null)
+})
+
+test('provenance: mixed device fix and photo EXIF — the selected coordinate decides the source', async () => {
+  const deviceFix = { lat: 63.0, lon: 10.0, accuracy: 25, altitude: null, timestamp: Date.now(), source: 'device_gps' }
+  const exifWins = await _saveWithProvenance({
+    seed: { liveFix: deviceFix },
+    photos: base => [
+      { ...base, gps: { lat: 63.001, lon: 10.001, accuracy: 4, altitude: null, source: 'image_exif' } },
+      { ...base, gps: { ...deviceFix, source: 'device_gps' } },
+    ],
+  })
+  assert.deepEqual(_pair(exifWins.payload), ['image_exif', 'acquired'])
+  assert.equal(exifWins.payload.gps_latitude, 63.001)
+
+  const deviceWins = await _saveWithProvenance({
+    seed: { liveFix: { ...deviceFix, accuracy: 3 } },
+    photos: base => [{ ...base, gps: { lat: 63.001, lon: 10.001, accuracy: 40, altitude: null, source: 'image_exif' } }],
+  })
+  assert.deepEqual(_pair(deviceWins.payload), ['device_gps', 'acquired'])
+  assert.equal(deviceWins.payload.gps_latitude, 63.0)
+})
+
+test('provenance: continue-without-location preserves denied, timeout and unavailable', async () => {
+  for (const [code, status] of [[1, 'denied'], [3, 'timeout'], [2, 'unavailable']]) {
+    const { payload } = await _saveWithProvenance({
+      geolocation: _geolocationSequence([code]),
+      sheet: ['retry', 'continue'],
+    })
+    assert.deepEqual(_pair(payload), ['none', status], `geolocation error ${code}`)
+    assert.equal(payload.gps_latitude, null)
+    assert.equal(payload.gps_accuracy, null)
+  }
+})
+
+test('provenance: continue-without-location preserves an outcome observed earlier in the session (capture-time timeout)', async () => {
+  const { payload } = await _saveWithProvenance({
+    geolocation: _geolocationSequence([3]),
+    before: async () => { await requestFreshLocation({ timeoutMs: 1000 }) },
+    sheet: ['continue'],
+  })
+  assert.deepEqual(_pair(payload), ['none', 'timeout'])
+})
+
+test('provenance: location disabled saves none/disabled — at save and when disabled mid-session', async () => {
+  const atSave = await _saveWithProvenance({
+    seed: { location: { preference: 'disabled', capability: 'supported', permission: 'granted', status: 'idle' } },
+  })
+  assert.deepEqual(_pair(atSave.payload), ['none', 'disabled'])
+
+  const midSession = await _saveWithProvenance({
+    before: () => {
+      setLocationPreference('disabled')
+      setLocationPreference('ask')
+    },
+    sheet: ['continue'],
+  })
+  assert.deepEqual(_pair(midSession.payload), ['none', 'disabled'])
+})
+
+test('provenance: skipping with no observed failure saves none/skipped', async () => {
+  const { payload, sheetShows } = await _saveWithProvenance({ sheet: ['continue'] })
+  assert.deepEqual(sheetShows, ['flex'])
+  assert.deepEqual(_pair(payload), ['none', 'skipped'])
+})
+
+test('provenance: timeout, explicit retry, permission denied, then continue saves denied', async () => {
+  const geolocation = _geolocationSequence([3, 1])
+  const { payload } = await _saveWithProvenance({
+    geolocation,
+    sheet: ['retry', 'retry', 'continue'],
+  })
+  assert.equal(geolocation.calls(), 2)
+  assert.deepEqual(_pair(payload), ['none', 'denied'])
+})
+
+test('provenance: denied or timeout followed by a successful retry saves device_gps/acquired', async () => {
+  for (const code of [1, 3]) {
+    const { payload } = await _saveWithProvenance({
+      geolocation: _geolocationSequence([code, { lat: 61.5, lon: 9.5 }]),
+      // The user re-grants permission in system settings before retrying.
+      permissions: { query: async () => ({ state: 'granted' }) },
+      sheet: ['retry', 'retry'],
+    })
+    assert.deepEqual(_pair(payload), ['device_gps', 'acquired'], `after error ${code}`)
+    assert.equal(payload.gps_latitude, 61.5)
+  }
+})
+
+test('provenance: a late session fix after a timeout wins over the failure', async () => {
+  const { payload } = await _saveWithProvenance({
+    geolocation: _geolocationSequence([3, { lat: 60.1, lon: 11.1 }]),
+    before: async () => {
+      await requestFreshLocation({ timeoutMs: 1000 })
+      assert.equal(state.captureSessionLocation.outcome, 'timeout')
+      await requestFreshLocation({ timeoutMs: 1000 })
+      assert.ok(state.captureSessionLocation.fix, 'late fix accepted into the session')
+    },
+  })
+  assert.deepEqual(_pair(payload), ['device_gps', 'acquired'])
+  assert.equal(payload.gps_latitude, 60.1)
+})
+
+test('provenance: session reset — a new capture session does not borrow the previous denial', async () => {
+  const { payload } = await _saveWithProvenance({
+    geolocation: _geolocationSequence([1]),
+    before: async () => {
+      await requestFreshLocation({ timeoutMs: 1000 })
+      assert.equal(state.captureSessionLocation.outcome, 'denied')
+      endCaptureLocationSession()
+      beginCaptureLocationSession()
+      state.location.permission = 'granted'
+    },
+    sheet: ['continue'],
+  })
+  assert.deepEqual(_pair(payload), ['none', 'skipped'])
+})
+
+test('provenance: imported review stores its own EXIF source, and NULL when acquisition was never observed', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  const saved = []
+  try {
+    __setReviewTestHooks({
+      enqueueObservation: async payload => { saved.push(payload) },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+    state.user = { id: 'user-1' }
+    initReview()
+    // A previous live session's denial must not leak into the import.
+    beginCaptureLocationSession()
+    state.captureSessionLocation.outcome = 'denied'
+    endCaptureLocationSession()
+    state.captureSessionLocation.outcome = 'denied'
+
+    const session = (overrides = {}) => ({
+      files: [new Blob(['x'])],
+      imageMeta: [{ ingestMethod: 'native_picker' }],
+      ts: new Date(),
+      visibility: 'public',
+      location_precision: 'exact',
+      is_draft: true,
+      photoGps: [],
+      ...overrides,
+    })
+
+    openImportedReview(session({ gpsLat: 59.91, gpsLon: 10.75, gpsSource: 'image_exif', photoGps: [{ lat: 59.91, lon: 10.75, source: 'image_exif' }] }))
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitForTimer(() => saved.length === 1)
+    await _waitForTimer(() => env.document.getElementById('review-save-btn').disabled === false)
+    assert.deepEqual(_pair(saved[0]), ['image_exif', 'acquired'])
+
+    state.captureSessionLocation.outcome = 'denied'
+    openImportedReview(session())
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitForTimer(() => saved.length === 2)
+    await _waitForTimer(() => env.document.getElementById('review-save-btn').disabled === false)
+    assert.equal('location_source' in saved[1], false)
+    assert.equal('location_status' in saved[1], false)
+    assert.equal(saved[1].gps_latitude, null)
+  } finally {
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('provenance: late import EXIF hydration supplies its source only when its coordinates are selected', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals()
+  const saved = []
+  try {
+    __setReviewTestHooks({
+      enqueueObservation: async payload => { saved.push(payload) },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+    state.user = { id: 'user-1' }
+    initReview()
+    const base = {
+      files: [new Blob(['x'])],
+      imageMeta: [{ ingestMethod: 'native_picker' }],
+      ts: new Date(),
+      visibility: 'public',
+      location_precision: 'exact',
+      is_draft: true,
+    }
+    // No coordinates at open; hydration delivers EXIF → selected → image_exif.
+    openImportedReview({
+      ...base,
+      photoGps: [],
+      metadataPromise: Promise.resolve({ gpsLat: 58.1, gpsLon: 7.9, gpsSource: 'image_exif', photoGps: [] }),
+    })
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitForTimer(() => saved.length === 1)
+    await _waitForTimer(() => env.document.getElementById('review-save-btn').disabled === false)
+    assert.deepEqual(_pair(saved[0]), ['image_exif', 'acquired'])
+    assert.equal(saved[0].gps_latitude, 58.1)
+
+    // Coordinates already selected: hydration only fills altitude/accuracy and
+    // must not replace the selected source.
+    openImportedReview({
+      ...base,
+      gpsLat: 58.5,
+      gpsLon: 8.5,
+      gpsSource: 'device_gps',
+      photoGps: [{ lat: 58.5, lon: 8.5, source: 'device_gps' }],
+      metadataPromise: Promise.resolve({ gpsLat: 40, gpsLon: 4, gpsAccuracy: 7, gpsSource: 'image_exif', photoGps: [] }),
+    })
+    buildReviewGrid()
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitForTimer(() => saved.length === 2)
+    await _waitForTimer(() => env.document.getElementById('review-save-btn').disabled === false)
+    assert.deepEqual(_pair(saved[1]), ['device_gps', 'acquired'])
+    assert.equal(saved[1].gps_latitude, 58.5)
+  } finally {
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('provenance: a restored draft keeps its session outcome and photo GPS source', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals({
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+  })
+  const saved = []
+  try {
+    __setReviewTestHooks({
+      enqueueObservation: async payload => { saved.push(payload) },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+    state.user = { id: 'user-1' }
+    state.location = { ...state.location, preference: 'enabled', capability: 'supported', permission: 'granted' }
+    initReview()
+    const photo = { blob: new Blob(['p']), aiBlob: new Blob(['p']), blobPromise: null, ts: new Date(), emoji: '📸', taxon: null }
+    restoreReviewDraft({
+      photos: [{ ...photo, gps: null }],
+      sessionStartAt: Date.now() - 1000,
+      captureDraft: {},
+      sessionLocationOutcome: 'timeout',
+    })
+    assert.equal(state.captureSessionLocation.outcome, 'timeout')
+    _click(env.document.getElementById('review-save-btn'))
+    const overlay = env.document.getElementById('location-fix-overlay')
+    for (let i = 0; i < 100 && overlay.style.display !== 'flex'; i++) {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 5))
+    }
+    _click(env.document.getElementById('location-fix-continue'))
+    await _waitForTimer(() => saved.length === 1)
+    await _waitForTimer(() => env.document.getElementById('review-save-btn').disabled === false)
+    assert.deepEqual(_pair(saved[0]), ['none', 'timeout'])
+
+    restoreReviewDraft({
+      photos: [{ ...photo, gps: { lat: 62, lon: 7, accuracy: 3, altitude: null, timestamp: Date.now(), source: 'image_exif' } }],
+      sessionStartAt: Date.now() - 1000,
+      captureDraft: {},
+      sessionLocationOutcome: null,
+    })
+    _click(env.document.getElementById('review-save-btn'))
+    await _waitForTimer(() => saved.length === 2)
+    await _waitForTimer(() => env.document.getElementById('review-save-btn').disabled === false)
+    assert.deepEqual(_pair(saved[1]), ['image_exif', 'acquired'])
+  } finally {
+    endCaptureLocationSession()
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('provenance: a restored session fix keeps its recorded source; a legacy untagged fix saves unknown', async () => {
+  const snapshot = _snapshotReviewState()
+  const env = _installReviewGlobals({
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+  })
+  const saved = []
+  try {
+    __setReviewTestHooks({
+      enqueueObservation: async payload => { saved.push(payload) },
+      refreshHome: async () => {},
+      openFinds: async () => {},
+      openLocationSuggestions: () => {},
+    })
+    state.user = { id: 'user-1' }
+    state.location = { ...state.location, preference: 'enabled', capability: 'supported', permission: 'granted' }
+    initReview()
+    const photo = { blob: new Blob(['p']), aiBlob: new Blob(['p']), blobPromise: null, ts: new Date(), emoji: '📸', taxon: null, gps: null }
+    const fix = { lat: 62.5, lon: 7.5, accuracy: 5, altitude: null, timestamp: Date.now() }
+    const cases = [
+      [{ ...fix }, 'unknown'], // draft written before provenance
+      [{ ...fix, source: null }, 'unknown'],
+      [{ ...fix, source: 'device_gps' }, 'device_gps'],
+      [{ ...fix, source: 'image_exif' }, 'image_exif'],
+    ]
+    for (const [sessionFix, expected] of cases) {
+      restoreReviewDraft({ photos: [{ ...photo }], sessionStartAt: Date.now() - 1000, captureDraft: {}, sessionFix })
+      const before = saved.length
+      _click(env.document.getElementById('review-save-btn'))
+      await _waitForTimer(() => saved.length === before + 1)
+      await _waitForTimer(() => env.document.getElementById('review-save-btn').disabled === false)
+      assert.deepEqual(_pair(saved.at(-1)), [expected, 'acquired'], JSON.stringify(sessionFix.source))
+      assert.equal(saved.at(-1).gps_latitude, 62.5)
+    }
+  } finally {
+    endCaptureLocationSession()
+    __setReviewTestHooks(null)
+    _restoreReviewState(snapshot)
+    env.restore()
+  }
+})
+
+test('provenance: a missing accuracy is unknown, never more accurate than a measured fix', async () => {
+  const deviceFix = { lat: 63.0, lon: 10.0, altitude: null, timestamp: Date.now(), source: 'device_gps' }
+  const exif = { lat: 63.001, lon: 10.001, altitude: null, source: 'image_exif' }
+  const cases = [
+    [{ ...deviceFix, accuracy: 3 }, { ...exif, accuracy: null }, 'device_gps', 3],
+    [{ ...deviceFix, accuracy: null }, { ...exif, accuracy: 5 }, 'image_exif', 5],
+    [{ ...deviceFix, accuracy: undefined }, { ...exif, accuracy: undefined }, 'device_gps', null], // tie → session fix
+  ]
+  for (const [liveFix, photoGps, expected, accuracy] of cases) {
+    const { payload } = await _saveWithProvenance({
+      seed: { liveFix },
+      photos: base => [{ ...base, gps: { ...photoGps } }],
+    })
+    assert.deepEqual(_pair(payload), [expected, 'acquired'], JSON.stringify([liveFix.accuracy, photoGps.accuracy]))
+    // An unmeasured accuracy is saved as NULL, not 0.
+    assert.equal(payload.gps_accuracy, accuracy)
   }
 })
