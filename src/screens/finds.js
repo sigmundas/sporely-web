@@ -1,5 +1,5 @@
 import { supabase } from '../supabase.js'
-import { formatDate, t, tp } from '../i18n.js'
+import { formatDate, formatTime, t, tp } from '../i18n.js'
 import { state } from '../state.js'
 import { navigate } from '../router.js'
 import { showToast } from '../toast.js'
@@ -845,7 +845,7 @@ function _formatFindsDateTime(value) {
   if (value == null || value === '') return null
   const date = value instanceof Date ? value : new Date(value)
   if (Number.isNaN(date.getTime())) return null
-  return `${String(date.getDate()).padStart(2, '0')}-${String(date.getMonth() + 1).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  return `${formatDate(date, { day: 'numeric', month: 'short', year: 'numeric' })} · ${formatTime(date, { hour: '2-digit', minute: '2-digit' })}`
 }
 
 export function formatFindsDateTimeLabel(obs = {}) {
@@ -863,7 +863,7 @@ export function formatFindsDateTimeLabel(obs = {}) {
       || date.getFullYear() !== Number(dateOnly.slice(0, 4))
       || date.getMonth() + 1 !== Number(dateOnly.slice(5, 7))
       || date.getDate() !== Number(dateOnly.slice(8, 10))) return null
-  return `${dateOnly.slice(8, 10)}-${dateOnly.slice(5, 7)}`
+  return formatDate(date, { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
 function _findsCardMetaLeadHtml(obs = {}, loc = '') {
