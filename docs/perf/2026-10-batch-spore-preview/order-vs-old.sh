@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Point order of get_public_observation before 20261011120000 (no ORDER BY,
+# Point order of get_public_observation before 20261012100000 (no ORDER BY,
 # plan order) against after (image id, measurement id), over every eligible
 # seeded observation. LOCAL ONLY; seed.sql first. One transaction, rolled
 # back: the previous definitions are restored from the applied migrations,

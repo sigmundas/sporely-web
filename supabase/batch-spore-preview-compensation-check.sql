@@ -6,7 +6,7 @@
 -- in production after the compensating migration is deployed.
 --
 -- Run as the database owner (postgres), with psql. mode=pre checks the state
--- 20261011120000 left (run it before the compensation, for the comparison
+-- 20261012100000 left (run it before the compensation, for the comparison
 -- figures); mode=r1 or mode=r2 checks the state after that option:
 --
 --   psql "<connection string>" -X -v ON_ERROR_STOP=1 -v mode=r1 -f supabase/batch-spore-preview-compensation-check.sql
@@ -28,14 +28,14 @@ SELECT /* bsp_probe */ pg_catalog.set_config('bsp_probe.mode', :'mode', true) IS
 
 -- --- Part A: catalog ---------------------------------------------------------
 -- pre: the batch function, the six helpers, and both public read functions
--- calling them, as 20261011120000 left them.
+-- calling them, as 20261012100000 left them.
 -- R1 drops only the batch function: the six private helpers stay, and both
 -- public read functions still call them.
 -- R2 drops the batch function and the six helpers, and restores both public
 -- read functions to their 20260925120000 / 20261001195524 bodies, which
 -- reference no private helper.
 -- All modes: owner, SECURITY DEFINER, search_path and grants of the two public read
--- functions are those from before 20261011120000.
+-- functions are those from before 20261012100000.
 
 DO $$
 DECLARE

@@ -201,7 +201,7 @@ zero existing observations with resolved stable taxonomy-v2 identity. See
     - It is also NULL when `spore_data_visibility` is not `public` or the owner has no mosaic for the observation, as in `get_public_observation`.
     - `get_public_observation` keeps all its fields and still returns `url`; removing it there is a separate, reviewed follow-up. Parity for `spore_mosaic` therefore means equal to `get_public_observation`'s value minus `url` for accepted mosaics, and NULL for rejected ones.
   - `SECURITY DEFINER` (as `get_public_observation`, because anon has no table access), `search_path = ''`, owner `postgres`. Execute is revoked from PUBLIC and `service_role` and granted only to `anon` and `authenticated`.
-  - **Shared gates.** `20261011120000_add_public_observation_spore_previews.sql` moved the gates and projections out of `_get_public_observation_stage2a` and `get_public_observation` into private helpers. The helpers are not executable by client roles:
+  - **Shared gates.** `20261012100000_add_public_observation_spore_previews.sql` moved the gates and projections out of `_get_public_observation_stage2a` and `get_public_observation` into private helpers. The helpers are not executable by client roles:
     - `private.public_observation_eligibility` decides which observations are eligible.
     - `private.public_observation_spore_point_rows` holds the point tables, joins, gates, normalization and point order.
     - `private.public_observation_spore_points_raw` is the point aggregate over those rows.

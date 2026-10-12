@@ -1,0 +1,72 @@
+report,check_name,expected,actual,status
+DATABASE-HEALTH PROVENANCE 9b2287a,migration_history / name,correct_admin_database_health,correct_admin_database_health,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,migration_history / recorded_statements_md5,informational only,0a66b768589c7b96b8275fe96388bfc2,INFO
+DATABASE-HEALTH PROVENANCE 9b2287a,migration_history / row_count,1,1,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,migration_history / statements_present,nonempty original statement array,22,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / definition_md5,adc725a37de82ab57943336ea19912fc,adc725a37de82ab57943336ea19912fc,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / effective_EXECUTE_anon,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / effective_EXECUTE_authenticated,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / effective_EXECUTE_postgres,true,true,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / effective_EXECUTE_service_role,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / owner,postgres,postgres,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / PUBLIC_EXECUTE,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / return_signature,jsonb,jsonb,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / search_path_and_config,"[""search_path=pg_catalog""]","[""search_path=pg_catalog""]",PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / security_definer,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_assess(jsonb) / volatility,s,s,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / definition_md5",ea72c8b7333a0ada32941e39da76acc2,ea72c8b7333a0ada32941e39da76acc2,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / effective_EXECUTE_anon",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / effective_EXECUTE_authenticated",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / effective_EXECUTE_postgres",true,true,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / effective_EXECUTE_service_role",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / owner",postgres,postgres,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / PUBLIC_EXECUTE",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / return_signature","TABLE(category text, component text)","TABLE(category text, component text)",PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / search_path_and_config","[""search_path=pg_catalog""]","[""search_path=pg_catalog""]",PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / security_definer",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_classify(text, text, boolean) / volatility",i,i,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / definition_md5,fccf19fbc6c109339d921bdca30e73a1,fccf19fbc6c109339d921bdca30e73a1,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / effective_EXECUTE_anon,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / effective_EXECUTE_authenticated,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / effective_EXECUTE_postgres,true,true,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / effective_EXECUTE_service_role,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / owner,postgres,postgres,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / PUBLIC_EXECUTE,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / return_signature,jsonb,jsonb,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / search_path_and_config,"[""search_path=pg_catalog""]","[""search_path=pg_catalog""]",PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / security_definer,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_measure() / volatility,s,s,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / definition_md5,777f58efd20ba92dda0a595f04e4e9a9,777f58efd20ba92dda0a595f04e4e9a9,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / effective_EXECUTE_anon,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / effective_EXECUTE_authenticated,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / effective_EXECUTE_postgres,true,true,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / effective_EXECUTE_service_role,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / owner,postgres,postgres,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / PUBLIC_EXECUTE,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / return_signature,text,text,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / search_path_and_config,"[""search_path=pg_catalog""]","[""search_path=pg_catalog""]",PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / security_definer,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,private.admin_database_health_mib(bigint) / volatility,i,i,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / definition_md5",f03c9b6a68bb9e4089a11998e6a2280f,f03c9b6a68bb9e4089a11998e6a2280f,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / effective_EXECUTE_anon",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / effective_EXECUTE_authenticated",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / effective_EXECUTE_postgres",true,true,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / effective_EXECUTE_service_role",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / owner",postgres,postgres,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / PUBLIC_EXECUTE",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / return_signature",boolean,boolean,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / search_path_and_config","[""search_path=pg_catalog""]","[""search_path=pg_catalog""]",PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / security_definer",false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,"private.admin_database_health_statistics_usable(bigint, boolean, bigint) / volatility",i,i,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,provenance / original_file_byte_identity,requires deployment artifact fingerprint,Catalog match and statement availability do not establish original migration byte identity,UNVERIFIED
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / definition_md5,9d1a16d09a9db4a214f57239f9d6b40d,9d1a16d09a9db4a214f57239f9d6b40d,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / effective_EXECUTE_anon,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / effective_EXECUTE_authenticated,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / effective_EXECUTE_postgres,true,true,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / effective_EXECUTE_service_role,true,true,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / owner,postgres,postgres,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / PUBLIC_EXECUTE,false,false,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / return_signature,jsonb,jsonb,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / search_path_and_config,"[""search_path=pg_catalog""]","[""search_path=pg_catalog""]",PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / security_definer,true,true,PASS
+DATABASE-HEALTH PROVENANCE 9b2287a,public.admin_database_health() / volatility,s,s,PASS

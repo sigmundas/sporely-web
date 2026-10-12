@@ -13,7 +13,7 @@ Compared, for the same ids, as the `anon` role:
 
 (b) is measured twice:
 
-- **(b)** with `20261011120000` applied, which is what production will have
+- **(b)** with `20261012100000` applied, which is what production will have
   after Stage 3;
 - **(b-today)** with the pre-migration definitions of `get_public_observation`
   and `_get_public_observation_stage2a`, restored from the applied

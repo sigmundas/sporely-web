@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Proves that 20261011120000_add_public_observation_spore_previews.sql left the
+# Proves that 20261012100000_add_public_observation_spore_previews.sql left the
 # output of public.get_public_observation(bigint) and
 # public._get_public_observation_stage2a(bigint) byte-identical for these
 # fixtures, whose old point order is id order. The migration's owner-approved
@@ -153,4 +153,4 @@ END
 ROLLBACK;
 SQL
 
-echo "ok: get_public_observation and _get_public_observation_stage2a output is byte-identical before and after 20261011120000 for these fixtures"
+echo "ok: get_public_observation and _get_public_observation_stage2a output is byte-identical before and after 20261012100000 for these fixtures"

@@ -7,7 +7,7 @@
 //
 // With BASELINE_SQL=<file>, every session first runs that file inside a
 // transaction that is rolled back at the end (used to measure (b) with the
-// pre-20261011120000 get_public_observation definitions).
+// pre-20261012100000 get_public_observation definitions).
 //
 // Each repetition opens a fresh psql backend per case and runs the case twice:
 // "cold" is the first run in that backend (function plan caches empty),

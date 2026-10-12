@@ -1,7 +1,7 @@
 -- Batch spore-preview RPC: post-apply live probe (read-only, aggregate-only).
 --
 -- Runbook: supabase/batch-spore-preview-runbook.md, step 3a.
--- Migration: supabase/migrations/20261011120000_add_public_observation_spore_previews.sql.
+-- Migration: supabase/migrations/20261012100000_add_public_observation_spore_previews.sql.
 --
 -- Run as the database owner (postgres), with psql, after the migration is
 -- applied:

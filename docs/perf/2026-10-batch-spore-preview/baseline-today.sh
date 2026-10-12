@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prints SQL that restores the pre-20261011120000 get_public_observation and
+# Prints SQL that restores the pre-20261012100000 get_public_observation and
 # _get_public_observation_stage2a (production today), from the applied
 # migrations. With --as-copies, it renames them to public.zz_today_* instead,
 # so both versions exist side by side for the HTTP benchmark.

@@ -8,7 +8,7 @@
 //   SUPABASE_URL=http://127.0.0.1:54321 SUPABASE_ANON_KEY=<local publishable key> \
 //     node docs/perf/2026-10-batch-spore-preview/bench-http.mjs '<json id array>' [reps]
 //
-// With TODAY_RPC=<name> (a renamed copy of the pre-20261011120000
+// With TODAY_RPC=<name> (a renamed copy of the pre-20261012100000
 // get_public_observation, see baseline-today.sh), (b) also runs against it as
 // "b6t"/"b2t": the single calls exactly as deployed today.
 //

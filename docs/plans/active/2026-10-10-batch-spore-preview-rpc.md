@@ -41,7 +41,7 @@ replace it.
     check;
   - `supabase/tests/mosaic_storage_key_ownership_test.sql`.
 
-  The batch migration keeps version `20261011120000`.
+  The batch migration keeps version `20261012100000`.
 - **Fail-closed batch mosaic.** The batch RPC never exposes a raw mosaic
   storage URL or key: the legacy `spore_mosaic.url` is omitted, and the
   authorized Worker `mosaicMediaUrl` is used instead. A mosaic that is
@@ -89,7 +89,7 @@ replace it.
   `OBSERVATION_DETAIL_CONCURRENCY` stays unchanged, and there are no
   production load tests.
 - **Stage 3's runbook** must use the repository's deploy-tree path:
-  `node scripts/supabase-deploy-tree.mjs prepare --allow 20261011120000 ...`,
+  `node scripts/supabase-deploy-tree.mjs prepare --allow 20261012100000 ...`,
   then check and post-verify. `supabase/deploy-exceptions.json` still lists
   the deferred `20260914090000`. No agent executes production migrations.
 
@@ -202,3 +202,33 @@ The runbook covers:
 Human gate: a person performs steps 1–5 and records the evidence. Only then
 may `sporely-landing`'s `explorer-cards-batch-preview` plan start. Nothing is
 deployed automatically.
+
+
+## Migration reconciliation handoff — 2026-10-12
+
+Owner-returned production provenance report: 69 PASS, 1 INFO, 1 UNVERIFIED.
+All six database-health function catalog definitions and security attributes
+match `9b2287a`. Original deployment-file byte identity and deployment author
+remain unverified. Evidence: `supabase/verification/20261011190000_owner_results.csv`.
+
+Uncommitted candidate in `feature/migration-history-reconciliation`, based on
+main `10ff4d2`: exact health migration/tests copied from `9b2287a`; unapplied
+batch file renamed to `20261012100000`, byte-for-byte unchanged (SHA-256
+`bd18677d8b0228b92f175a642fc8183af3647c9d8547035062b68eb6fe590956`).
+Current deployment instructions and executable references updated. Historical
+Sparring acceptance, completed plans and recorded performance/mosaic deployment
+reports preserved. Deferred `20260914090000` registry and file untouched.
+
+Clean local reset completed the full reconciled sequence. Final verification:
+batch61/61, order11/11, evaluation9/9, mosaic security38/38; identity42 visible
+rows PASS; health and three ordinary SQL assertion suites PASS; deployment
+guard19/19 PASS. Initial12failures reproduced under wrong supabase_admin fixture
+role, not documentedpostgres; old identity-order failure disappears after reset.
+No migration/test logic changes required. Exact assertions, commands,
+classification and immutable hashes: `supabase/verification/reconciliation-regression-report.md`.
+
+Fresh independent specialist security review: APPROVE, no security findings.
+Separate top-level sporely-security-reviewer/Sparring gate remains pending. Candidate not approved for merge;
+no main push/merge, no production access. Original deployment-file byte identity
+remains unverified despite accepted catalog equivalence. Historical Sparring
+acceptance records and unrelated worktrees/files remain unchanged.

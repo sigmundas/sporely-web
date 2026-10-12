@@ -1,7 +1,7 @@
 # Runbook — batch spore-preview RPC (production)
 
 Plan: `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md` (Stage 3).
-Migration: `supabase/migrations/20261011120000_add_public_observation_spore_previews.sql`.
+Migration: `supabase/migrations/20261012100000_add_public_observation_spore_previews.sql`.
 Probe SQL:
 - `supabase/batch-spore-preview-live-probe.sql` (step 3a);
 - `supabase/batch-spore-preview-stats-probe.sql` (step 5);
@@ -86,10 +86,11 @@ All of the following must be true. Otherwise stop.
 
       git fetch origin
       git merge-base --is-ancestor <merged main SHA> origin/main
-      git diff --exit-code cf68f4ad68772b4580c63d7a0a48bd97665cf26b <merged main SHA> -- \
-        supabase/migrations/20261011120000_add_public_observation_spore_previews.sql
+      git show cf68f4ad68772b4580c63d7a0a48bd97665cf26b:supabase/migrations/20261011120000_add_public_observation_spore_previews.sql | shasum -a 256
+      git show <merged main SHA>:supabase/migrations/20261012100000_add_public_observation_spore_previews.sql | shasum -a 256
 
-  Both commands must exit 0.
+  Both hashes must equal `bd18677d8b0228b92f175a642fc8183af3647c9d8547035062b68eb6fe590956`.
+  The ancestor command must exit 0.
 - `supabase/deploy-exceptions.json` at `<merged main SHA>` still lists only
   the deferred `20260914090000`.
 - The owner has explicitly authorized this production deployment in the
@@ -109,13 +110,11 @@ Expected:
     (`supabase/deploy-exceptions.json`,
     `docs/deployments/2026-09-25-migration-order-exception.md`). It is not a
     mismatch and must not be repaired.
-  - `20261011120000` is local-only. This is the migration being deployed.
-- The latest Remote version is `20261011100000`, the mosaic storage-key
-  ownership migration deployed on 2026-10-11
-  (`docs/deployments/2026-10-11-mosaic-storage-key-ownership-runbook.md`).
+  - `20261012100000` is local-only. This is the migration being deployed.
+- The latest Remote version is `20261011190000`, the already-deployed database-health migration. Its catalog equivalence to `9b2287a` is owner-verified in `supabase/verification/20261011190000_owner_results.csv`; original deployment-file byte identity remains unverified. It must match Local and must never be reapplied. The mosaic `20261011100000` must also match.
 
 STOP if anything else differs, or if Remote has a version later than
-`20261011100000`. Report:
+`20261011190000`. Report:
 - the mismatched versions and their filenames;
 - `git status`;
 - the tail of the list.
@@ -124,16 +123,16 @@ Do not run `supabase migration repair`, rename files or use `--include-all`. A
 plain `supabase db push` refuses here because of the deferred migration. That
 refusal is expected; do not work around it.
 
-A later Remote version means someone else deployed in the meantime. The deploy
-tree would then still apply `20261011120000` out of order. Only the owner may
-decide to continue, and only after re-checking the migration against whatever
-landed.
+The unapplied batch migration was renamed from `20261011120000` to
+`20261012100000` with SQL bytes unchanged, to follow the already-applied health
+migration. Neither column may contain the old batch version. A later Remote
+version or any unexpected mismatch means STOP; do not apply out of order.
 
 ## 2. Apply (deploy tree)
 
 Only after steps 0 and 1 pass. The helper never pushes; the person does.
 
-    node scripts/supabase-deploy-tree.mjs prepare --allow 20261011120000 --ref <merged main SHA>
+    node scripts/supabase-deploy-tree.mjs prepare --allow 20261012100000 --ref <merged main SHA>
 
 `prepare` creates a temporary worktree of that commit without the deferred
 `20260914090000` file. It copies the Supabase link and refuses unless the link
@@ -143,14 +142,14 @@ points at `zkpjklzfwzefhjluvhfw`. It prints the tree path. Then run:
 
 `check` runs the read-only `supabase migration list` and
 `supabase db push --dry-run` in the tree. It refuses unless the pending set and
-the dry run are exactly `20261011120000`. Do not continue unless it prints
+the dry run are exactly `20261012100000`. Do not continue unless it prints
 `All checks passed`.
 
     cd <deploy tree>
     supabase db push --linked
 
 Answer `y` only if the CLI prompt lists exactly
-`20261011120000_add_public_observation_spore_previews.sql`. If the push fails,
+`20261012100000_add_public_observation_spore_previews.sql`. If the push fails,
 nothing is applied, because the migration is one transaction. Stop and report
 the error. Do not retry with other flags.
 
@@ -282,7 +281,7 @@ Any other deviation: STOP. Do not pass the gate; go to step 4.
 
 ## 4. Rollback / compensation
 
-Never edit, rename or delete `20261011120000`, never run
+Never edit, rename or delete `20261012100000`, never run
 `supabase migration repair`, and never run reverse DDL directly in the SQL
 editor. Every correction is a **new** migration:
 - versioned later than every Remote version;
@@ -303,7 +302,7 @@ editor. Every correction is a **new** migration:
 
 Use R1 when the batch function is wrong or exposes too much, but
 `get_public_observation` is fine. R1 leaves `get_public_observation` as
-`20261011120000` made it: same fields, values, gates and media behaviour,
+`20261012100000` made it: same fields, values, gates and media behaviour,
 with the owner-approved point order (image id, then measurement id). The
 identity test shows its output equals the pre-migration output only where the
 old order already was id order. Compensating migration body:
@@ -416,7 +415,7 @@ exist`. That failure is expected; any other failure is a regression.
      - `spore_child_image_ownership_rls_test.sql`;
      - `stage2b_authorized_media_projections_test.sql`;
      - the identity test (`.sh`; for R1 it proves `get_public_observation`
-       still matches its pre-`20261011120000` output for its fixtures, whose
+       still matches its pre-`20261012100000` output for its fixtures, whose
        old order is id order; it does not cover the approved point-order
        exception; for R2 it is trivial);
    - **must fail with "does not exist" for the batch function, and nothing
