@@ -618,8 +618,13 @@ not the operator's own run, which is **not recorded**:
   printed `All checks passed` is **not recorded**.
 - `supabase db push --linked` outcome: **not recorded**. B0 shows that the
   migration ran (see "Step 5").
-- `post-verify`: **not recorded**. The deploy tree still exists, so the
-  removal command `post-verify` prints has not been run.
+- `post-verify` on 2026-10-12: **not recorded**.
+- `post-verify` re-run by the operator on 2026-10-13 (time not recorded),
+  against the saved deploy tree of `a427a6f`: passed. It printed "Remote
+  matches the deploy tree exactly; deferred migrations are still absent."
+  So on 2026-10-13, Remote held every tree version, including
+  `20261012100000`, held no version outside the tree, and did not hold
+  `20260914090000`.
 
 ### Step 3
 
@@ -732,5 +737,7 @@ Caveats:
    and the owner confirms the pending window conditions.
 2. If no reset ran, the window verdict becomes **valid**. Otherwise it is
    **inconclusive**, and a new B0→B1 is taken.
-3. Remove the deploy tree with the command `post-verify` printed.
+3. Remove the deploy tree with the command the 2026-10-13 `post-verify`
+   printed (`git -C <main checkout> worktree remove --force <deploy tree>`),
+   and record that it was removed.
 4. Change `Status:` above to "executed 2026-10-12", in a new commit.
