@@ -103,7 +103,16 @@ No production access, function or schema change. Output: the probe file.
    data. It reads:
    - `pg_stat_statements` for `search_public_observations` per role: calls,
      total, mean, max and stddev time, rows, `shared_blks_hit`/`read` and
-     `temp_blks_written`, plus the `pg_stat_statements_info` epoch row. Use
+     `temp_blks_written`, plus the `pg_stat_statements_info` epoch row.
+     Several entries per role are combined exactly:
+     - the mean is weighted by calls;
+     - the maximum is the maximum;
+     - the standard deviation is pooled. With per-entry calls nᵢ, means μᵢ
+       and standard deviations σᵢ, and overall N = Σnᵢ and μ = Σnᵢμᵢ/N, the
+       pooled variance is Σnᵢ(σᵢ² + μᵢ²)/N − μ². Never average the per-entry
+       standard deviations.
+
+     Use
      the same tagging and exclusions as
      `supabase/batch-spore-preview-stats-probe.sql`. It never resets
      anything.
@@ -288,8 +297,13 @@ Nothing is deployed.
      every combination of `p_has_microscopy` and `p_has_spores` in {`NULL`,
      `true`, `false`}. It covers offsets 0, 30, 60, past the end, negative
      and `NULL`, and limits 0, 1, 31, 51, 100 and 1000.
-   - For each fixture, the `true` and `false` results for a filter
-     partition the `NULL` result: disjoint, and their union equals it.
+   - **Partition over the complete relation.** For each fixture and each
+     filter, page through the full eligible result with non-overlapping
+     windows (`p_limit` 100 and offsets 0, 100, 200, … until empty), for
+     `true`, `false` and `NULL`. The complete `true` and `false` results
+     are disjoint, and their union equals the complete `NULL` result. This
+     is never asserted per page: separately paginated pages do not
+     partition.
    - The existing `public_observation_rpc_validation.sql`,
      `sample_source_public_rpc_validation.sql`,
      `observation_time_of_day_privacy_test.sql`,
@@ -331,9 +345,12 @@ Pass: every threshold fixed at the Stage 1b gate is met, for every scenario
 gate named. A missed threshold fails the stage.
 
 Changing thresholds:
-- A failed Stage 3 is never accepted afterwards.
+- A failed Stage 3 is never accepted afterwards, and nothing proceeds
+  towards Stage 4 on it.
 - The owner may revise thresholds only as a recorded plan decision, with
-  the reason, before a fresh Stage 3 run.
+  the reason. A fresh Stage 3 run is then prepared and approved separately
+  under that decision. It is a new run of Stage 3, not a resumption of the
+  failed one.
 - That fresh run measures again against the revised numbers and goes
   through review and acceptance as normal.
 - A revision cannot change the result of a run that has already finished.
@@ -371,9 +388,16 @@ Model it on `supabase/batch-spore-preview-runbook.md`:
       and the sum of `sporeMeasurementCount`.
     - **Input fingerprint.** It also prints a fingerprint of every input
       the function reads. For `observations`, `observation_images`,
-      `spore_measurements`, and the profile and moderation rows the gates
-      and the contributor label read, it prints the row count and an MD5
-      of `id || ':' || xmin`, ordered by `id`. Any insert, update or
+      `spore_measurements`, `public_regions` (read for `locationLabel`),
+      and every other table the function and its helpers read, it prints
+      the row count and an MD5 of `id || ':' || xmin` (or the table's key
+      instead of `id`), ordered by key. "Every other table" means the
+      profile, moderation and blocking tables that the gates, the
+      contributor label and `metadata_microscope_parent_is_public` read.
+      Stage 4 enumerates them from the definitions at the pinned SHA and
+      lists them in the runbook.
+    - Each run reads the fingerprints and all outputs in one
+      `REPEATABLE READ READ ONLY` transaction, so they share one snapshot. Any insert, update or
       delete changes it, with no statistics-collector lag. It prints
       hashes only.
     - **Decision**, before against after:
@@ -388,20 +412,34 @@ Model it on `supabase/batch-spore-preview-runbook.md`:
   - **Invariant checks.** These run after the push, in the same read-only,
     aggregate-only form, and need no old function. They print counts of
     violations, never ids:
-    - for each filter, the `true` and `false` results partition the `NULL`
-      result;
-    - page 1 followed by page 2 equals the first 2 × page-size rows at
-      offset 0;
+    - **Pagination**, with non-overlapping SQL windows and no lookahead
+      row: `(p_limit 30, p_offset 0)` followed by `(p_limit 30, p_offset
+      30)` equals `(p_limit 60, p_offset 0)`. The same check runs for
+      Microscopy `true`. The landing's 31-row lookahead is a client detail
+      and plays no part here.
     - ordering is strictly `(observedOn DESC, id DESC)`;
     - every returned row passes the visibility gates when re-checked
       directly against the tables;
-    - `hasMicroscopy` and `sporeMeasurementCount` agree with the filter
-      that was used.
+    - **Flag consistency.** Every row returned with a filter `true` has
+      that flag set (`hasMicroscopy`, or `sporeMeasurementCount > 0`), and
+      every row returned with `false` does not. The complete-relation
+      partition is proved locally in Stage 2. It is not re-run in
+      production, because that would need many paged calls.
   - **PostgREST.** Anonymous calls for the default page 1 and page 2, and
     for `p_has_microscopy` `true` and `false`. Record only HTTP status and
     row counts.
-- **Rollback.** A compensating migration that restores the previous
-  definition and drops any added index, with its own local validation.
+- **Rollback.** The compensation is prepared and validated now, but it is
+  **not** a pending migration.
+  - It lives at `supabase/rollback/search_public_observations_two_phase_compensation.sql`,
+    outside `supabase/migrations/`, so neither `supabase db reset` nor
+    `db push` applies it.
+  - It restores the previous definition, byte-identical to
+    `20260925120000`'s, with the same grants and attributes, and drops any
+    index the forward migration added.
+  - Only if production needs a rollback does a person copy it into a new
+    migration with a fresh version. It is then committed, reviewed and
+    deployed through the deploy tree with `--allow <that version>`,
+    following the same runbook pattern.
 - **Statistics windows.** A bracketed `pg_stat_statements` window before the
   change and one after it, both for `search_public_observations`, under the
   same validity rules as the batch runbook §5. No resets. The windows are
@@ -425,7 +463,8 @@ Pass (preparation; the agent does all of this locally):
 - **Hashes pinned:** the migration file's SHA-256, and the expected
   `pg_get_functiondef` SHA-256 from a local `supabase db reset`, recorded
   in the runbook.
-- **Compensation validated locally:** apply, compensate, then show that the
+- **Compensation validated locally:** reset with the forward migration,
+  then apply the rollback file with `psql`. Show that the
   function's `pg_get_functiondef` hash equals the pre-migration hash, that
   every added index is gone, and that the Stage 2 suites pass.
 - The runbook is reviewed through the normal stage review.
