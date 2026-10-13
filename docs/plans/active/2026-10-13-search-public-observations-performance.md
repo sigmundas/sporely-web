@@ -1,6 +1,7 @@
 # `search_public_observations` performance: page first, enrich after
 
-Status: draft for owner review, 2026-10-13. Not started.
+Status: draft, amended after owner review on 2026-10-13. Not started. Not
+approved to run.
 Repository: `sporely-web`. Suggested branch:
 `feature/search-public-observations-performance` from `main`.
 Bug report: `sporely-landing`
@@ -48,8 +49,18 @@ The batch spore-preview RPC does not change this query.
     - images not deleted or purged;
     - metadata-parent publication (`metadata_microscope_parent_is_public`);
     - public measurement types (`is_public_microscopy_measurement_type`);
-  - the microscopy, spore, context, sample and observer filters, with their
-    current semantics. `p_observer` is an `ILIKE` substring match against
+  - the microscopy and spores filters, with all three values meaning what
+    they mean today:
+    - `NULL`: no filter;
+    - `true`: only observations with public microscopy, or with spore
+      measurements (`spore_measurement_count > 0`);
+    - `false`: only observations **without** them.
+
+    Phase 1 must mirror both the `true` and `false` cases exactly. `false`
+    needs a `NOT EXISTS` that is the exact negation of the `true`
+    predicate.
+  - the context, sample and observer filters, with their current
+    semantics. `p_observer` is an `ILIKE` substring match against
     `community_contributor_label`, so phase 1 must compute that label for
     candidates whenever `p_observer` is set;
   - ordering `(observed_on DESC, id DESC)`, the `p_limit` clamp `1..100`,
@@ -128,10 +139,10 @@ script.
      `plan_cache_mode` settings, since a SQL function is planned
      generically.
    - Scenarios:
-     - the default request: Microscopy on, `p_limit` 31, `p_offset` 0, 30,
-       60 and 300;
-     - Microscopy off;
-     - spores on;
+     - the default request: Microscopy `true`, `p_limit` 31, `p_offset` 0,
+       30, 60 and 300;
+     - every combination of `p_has_microscopy` and `p_has_spores` in
+       {`NULL`, `true`, `false`}, at offsets 0 and 30;
      - genus or species text, including the taxon-free fallback the landing
        sends;
      - a date range;
@@ -153,8 +164,21 @@ script.
 
    Also list what only a production plan could settle.
 
-Human gate: the owner reviews the evidence. Two decisions come before
+5. **Proposed thresholds.** From the measurements, propose measurable
+   pass thresholds for Stage 3. They must be checkable numbers, for
+   example:
+   - p95 and maximum execution time per scenario at 1× and 4× scale;
+   - shared buffers per call;
+   - an upper bound on how much the default request's cost may grow from
+     1× to 4× (cost bounded by the page, not by the total);
+   - helper-function calls per call.
+
+   Each threshold leaves a stated margin under the anon `3s` timeout.
+
+Human gate: the owner reviews the evidence. Three decisions come before
 Stage 2:
+- the Stage 3 pass thresholds, fixed as numbers and recorded in this plan's
+  notes. Stage 3 cannot pass without them;
 - whether a production plan capture is needed, which is a separate
   explicit approval for a session-local `LOAD 'auto_explain'` run by the
   owner and changes no settings;
@@ -189,9 +213,12 @@ Nothing is deployed.
    - A pgTAP test (`supabase/tests/search_public_observations_two_phase_test.sql`)
      compares the old and new output row by row, order included. It runs
      over a fixture matrix covering every gate and filter, and over the
-     Stage 1 seed. It uses every argument combination the landing sends,
-     with offsets 0, 30, 60, past the end, negative, NULL, and limits 0, 1,
-     31, 51, 100 and 1000.
+     Stage 1 seed. It uses every argument combination the landing sends, and
+     every combination of `p_has_microscopy` and `p_has_spores` in {`NULL`,
+     `true`, `false`}. It covers offsets 0, 30, 60, past the end, negative
+     and `NULL`, and limits 0, 1, 31, 51, 100 and 1000.
+   - For each fixture, the `true` and `false` results for a filter
+     partition the `NULL` result: disjoint, and their union equals it.
    - The existing `public_observation_rpc_validation.sql`,
      `sample_source_public_rpc_validation.sql`,
      `observation_time_of_day_privacy_test.sql`,
@@ -228,9 +255,10 @@ harness's `bench-db.mjs` style with bounded local concurrency. Record:
 
 Output: an appended section in `docs/perf/2026-10-search-public-observations.md`.
 
-Pass: every scenario's p95 is far below `3s` at 4× scale, with a target set
-from Stage 1's numbers and agreed at its gate. Cost no longer grows with the
-total number of public observations for the default request.
+Pass: every threshold fixed at the Stage 1 gate is met, for every scenario
+(all `true`/`false`/`NULL` filter combinations included) at the scales the
+gate named. A missed threshold fails the stage. It cannot be waived without
+a recorded owner decision.
 
 ## Stage 4 — Production migration gate
 
@@ -243,13 +271,36 @@ Model it on `supabase/batch-spore-preview-runbook.md`:
 - `supabase migration list` agreement, with the documented deferred
   migration.
 - The deploy-tree `prepare` / `check` / push / `post-verify`.
-- **Read-only live checks:**
-  - catalog and grant parity;
-  - an anonymous parity probe between the deployed function and a
-    transaction-local copy of the old body for sampled pages, printing
-    counts and mismatches only;
-  - anonymous PostgREST calls for the default page 1 and page 2, recording
-    status and counts.
+- **Read-only live checks.** These create, alter and write nothing in
+  production. Old/new equivalence is proved locally in Stage 2, never in
+  production.
+  - **Catalog.** In a `READ ONLY` transaction:
+    - the function's SHA-256 (`pg_get_functiondef`) equals the migration's
+      expected hash;
+    - `prosecdef`, `proconfig` (`search_path`), owner and `proacl` are as
+      before;
+    - any added index exists and is valid.
+  - **Output stability.** One read-only, aggregate-only probe, run twice:
+    immediately before the push, and immediately after `post-verify`.
+    - In a `READ ONLY` transaction with `SET LOCAL ROLE anon`, it calls the
+      deployed `search_public_observations` for a fixed, bounded list of
+      argument shapes. The list includes every `p_has_microscopy` ×
+      `p_has_spores` combination at offsets 0 and 30, and the default
+      page 1 and page 2. The calls run one at a time, about 20 in total;
+      this is not a load test.
+    - For each shape it prints only the row count, an MD5 of the ordered id
+      list (a hash, never the ids), the `hasMicroscopy` true/false counts
+      and the sum of `sporeMeasurementCount`.
+    - It also prints `pg_stat_user_tables` write counters
+      (`n_tup_ins`/`upd`/`del`) for the three tables, so writes between the
+      two runs show up.
+    - **Decision.** Identical outputs pass. A difference with no writes in
+      between means STOP and go to rollback. A difference alongside writes
+      is repeated once as a fresh pair, taken immediately one after the
+      other. If it still differs, investigate before passing.
+  - **PostgREST.** Anonymous calls for the default page 1 and page 2, and
+    for `p_has_microscopy` `true` and `false`. Record only HTTP status and
+    row counts.
 - **Rollback.** A compensating migration that restores the previous
   definition and drops any added index, with its own local validation.
 - **Statistics windows.** A bracketed `pg_stat_statements` window before the
