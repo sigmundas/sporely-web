@@ -66,3 +66,18 @@ export function obsoleteDesktopRefusal(request, corsHeaders) {
     { status: 426, headers },
   )
 }
+
+// Self-check for /healthz (`obsoleteDesktopBrake`). Runs a synthetic
+// shipped-desktop upload through the guard, so the flag reports what the
+// guard actually does rather than a constant that could drift from it. A
+// worker built from a tree without this module has no flag at all.
+const BRAKE_SELF_CHECK_URL =
+  'https://upload.sporely.no/upload/00000000-0000-4000-8000-000000000000/brake-self-check.webp'
+
+export function isObsoleteDesktopBrakeActive() {
+  const probe = new Request(BRAKE_SELF_CHECK_URL, {
+    method: 'PUT',
+    headers: { 'User-Agent': 'python-requests/2.32.3' },
+  })
+  return obsoleteDesktopRefusal(probe, null)?.status === 426
+}

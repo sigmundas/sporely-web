@@ -12,7 +12,7 @@ import {
   buildCloudUploadPolicy,
   normalizeCloudPlanProfile,
 } from '../../../src/cloud-media-policy.js'
-import { obsoleteDesktopRefusal } from './obsolete-desktop-guard.js'
+import { isObsoleteDesktopBrakeActive, obsoleteDesktopRefusal } from './obsolete-desktop-guard.js'
 
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
@@ -48,7 +48,7 @@ const DEFAULT_ALLOWED_HEADER_NAMES = DEFAULT_ALLOWED_HEADERS
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000
 const ARTS_MAX_DIST = 0.006
 const NOMINATIM_INTERVAL_MS = 1000
-const WORKER_VERSION_MARKER = 'sporely-r2-upload-worker@source'
+const WORKER_VERSION_MARKER = 'sporely-r2-upload-worker@obsolete-desktop-brake-1'
 const ARTSORAKEL_UPSTREAM_URL = 'https://ai.artsdatabanken.no/identify'
 
 function resolveArtsorakelToken(env) {
@@ -146,6 +146,9 @@ async function handleRequest(request, env, ctx) {
         ok: storageModeError === null,
         service: 'sporely-r2-upload-worker',
         workerVersion: WORKER_VERSION_MARKER,
+        // Must stay true after every worker deploy until the sync-key
+        // cutover (docs/deployments/2026-10-13-obsolete-desktop-sync-brake-runbook.md).
+        obsoleteDesktopBrake: isObsoleteDesktopBrakeActive(),
         mediaStorageMode: storageMode,
         mediaStorageModeError: storageModeError,
         writeBindingReady: storageMode === 'private'

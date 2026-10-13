@@ -7,6 +7,7 @@ import {
   UPGRADE_REQUIRED_CODE,
   UPGRADE_REQUIRED_MESSAGE,
   isMediaMutationRequest,
+  isObsoleteDesktopBrakeActive,
   isObsoleteDesktopRequest,
   obsoleteDesktopRefusal,
 } from './obsolete-desktop-guard.js'
@@ -373,4 +374,22 @@ test('worker: OPTIONS preflight from an old desktop is answered normally', async
     {},
   )
   assert.equal(response.status, 204)
+})
+
+test('guard: the /healthz self-check reports the brake as active', () => {
+  assert.equal(isObsoleteDesktopBrakeActive(), true)
+})
+
+test('worker: /healthz reports obsoleteDesktopBrake: true, also to an old desktop', async () => {
+  for (const userAgent of [PYTHON_UA, BROWSER_UA]) {
+    const response = await worker.fetch(
+      new Request('https://upload.sporely.no/healthz', { headers: { 'User-Agent': userAgent } }),
+      workerEnv(trackedBucket()),
+      {},
+    )
+    const payload = await response.json()
+    assert.equal(response.status, 200)
+    assert.equal(payload.obsoleteDesktopBrake, true)
+    assert.equal(payload.workerVersion, 'sporely-r2-upload-worker@obsolete-desktop-brake-1')
+  }
 })
