@@ -1,10 +1,15 @@
 # `search_public_observations` performance: page first, enrich after
 
-Status: draft, amended after owner review on 2026-10-13. The owner approved
-preparing and reviewing this revision only. Not approved to run:
-- no stage may start;
-- there is no production access, statistics collection or profiling without
-  the explicit gates below.
+Status (2026-10-13):
+- **Stage 1a accepted** at `a4b9cb8e807b1547737c2ff23a3cadfbdb8a0bad`,
+  pushed to `origin/feature/search-public-observations-performance`.
+- **The single authorized production statistics collection has been
+  performed** (2026-10-13 18:22:46 UTC). It must not be repeated.
+- **Stage 1b** is approved to start once this revision's intake has no
+  blocking findings and the isolated database checks pass.
+- **Not approved:** Stage 2 and later, any further production query,
+  statistics collection or profiling, and any production SQL change. Each
+  needs its own explicit gate below.
 Repository: `sporely-web`. Suggested branch:
 `feature/search-public-observations-performance` from `main`.
 Bug report: `sporely-landing`
@@ -128,8 +133,11 @@ No production access, function or schema change. Output: the probe file.
      and last (auto)vacuum.
    - Index definitions and `pg_stat_user_indexes` (`idx_scan`, size) for
      those tables.
-   - A SHA-256 of `pg_get_functiondef` for `search_public_observations`,
-     compared with the function as defined at `main`.
+   - A SHA-256 of `pg_get_functiondef` for `search_public_observations`.
+     The optional `-v main_sha256` input prints `matches_main`. The probe
+     ran without it, and the comparison with `main` was done outside the
+     probe, as recorded under Stage 1b's "Recorded before Stage 1b":
+     derived on an isolated `origin/main` `f92d560` build, and it matched.
 
 2. **Local validation.** Run the probe against the local database only.
    Show that it:
@@ -186,10 +194,29 @@ The output is that evidence doc plus a seed script.
   - So production runs exactly the definition in `20260925120000`. The
     later `20261001195524` only mentions the function in a comment.
 - **Scale definitions (outstanding requirement #1).**
-  - **1×** means exactly the observed production counts in the committed
-    probe output. That covers the counts above, plus each table's
-    `n_live_tup` for all visibilities, drafts and private rows included,
-    since the function scans and filters them.
+  - **1×** is defined by the committed probe output
+    (`docs/perf/2026-10-search-public-observations/production-probe-2026-10-13.txt`).
+    The seed treats two kinds of number differently:
+    - **Exact targets.** The seed reproduces these exactly, since the probe
+      computed them with `count(*)`: 228 public non-draft observations, 133
+      of them with a gated microscope image, 127 with public spore
+      measurements, 988 metadata-parent images, 8,982 spore measurements,
+      and the per-owner distribution (p50 2, p95 146, maximum 146).
+    - **Estimates.** These are rounded to whole rows and labelled as
+      estimates: each table's `n_live_tup` (787 observations, 5,585
+      images; the 8,982 for `spore_measurements` agrees with the exact
+      count). `n_live_tup` is the planner's statistic, not a count. The
+      non-public and draft observations (787 − 228 = 559) and the
+      non-metadata-parent images come from it.
+    - **Deterministic allocation.** No `random()`. Rows are assigned to
+      observations by fixed modular rules, in the style of the batch
+      harness `seed.sql`. One owner holds 146 public observations to
+      reproduce the skew, and the rest share the remainder at 2 or so
+      each. The evidence doc states every per-observation distribution the
+      allocation implies, for example about 71 measurements per
+      spore-bearing observation and about 7.4 metadata-parent images per
+      gated-microscopy observation. Each is marked as an assumption, not
+      a measurement.
   - **2×** and **4×** multiply every count by 2 and 4, keeping all shares
     and per-observation distributions. There is no separate rounding-up
     factor. 4× is the growth margin, and thresholds are stated against
@@ -261,15 +288,31 @@ The output is that evidence doc plus a seed script.
    Also list what only a production plan could settle.
 
 4. **Proposed thresholds.** From the measurements, propose measurable
-   pass thresholds for Stage 3. They must be checkable numbers, for
-   example:
-   - p95 and maximum execution time per scenario at 1× and 4× scale;
-   - shared buffers per call;
-   - an upper bound on how much the default request's cost may grow from
-     1× to 4× (cost bounded by the page, not by the total);
-   - helper-function calls per call.
+   pass thresholds for Stage 3, in two separate groups. The two-phase
+   design bounds only the second.
+   - **Eligibility filtering and pagination.** This is phase 1's work:
+     the visibility gates, the microscopy and spores
+     `EXISTS`/`NOT EXISTS` checks, observer-label substring filtering,
+     ordering and `OFFSET`. It can still grow with the number of
+     candidates and with the offset. Its thresholds cover:
+     - p95 and maximum time per scenario, at 1× and 4×, and at offsets 0,
+       30 and 300;
+     - shared buffers per call;
+     - eligibility helper calls (`metadata_microscope_parent_is_public`)
+       per candidate;
+     - a stated allowed growth from 1× to 4×.
+   - **Enrichment.** This is phase 2's work: the latest image, spore
+     statistics and summary, contributor label and prep/stain fields for
+     the returned rows only. Its thresholds cover:
+     - cost per returned row;
+     - helper calls per returned row (`community_contributor_label`, and
+       `metadata_microscope_parent_is_public` where enrichment calls it);
+     - near-zero growth from 1× to 4× at a fixed page size.
+   - **Overall.** End-to-end p95 and maximum time per scenario, each with
+     a stated margin under the anon `3s` timeout.
 
-   Each threshold leaves a stated margin under the anon `3s` timeout.
+   Each threshold is a checkable number, and the report states which group
+   each measured cost belongs to.
 
 Human gate: the owner reviews the evidence. Three decisions come before
 Stage 2:

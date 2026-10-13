@@ -1,0 +1,71 @@
+           taken_at            |          stats_reset          | dealloc | track | max_entries | entries_now
+-------------------------------+-------------------------------+---------+-------+-------------+-------------
+ 2026-10-13 18:22:46.606319+00 | 2026-06-17 13:38:01.755619+00 |       0 | top   | 5000        |        4793
+(1 row)
+
+   role   | entries | calls | total_exec_ms | mean_exec_ms | max_exec_ms | stddev_exec_ms | rows | shared_blks_hit | shared_blks_read | temp_blks_written
+----------+---------+-------+---------------+--------------+-------------+----------------+------+-----------------+------------------+-------------------
+ anon     |      63 |  3287 |      778722.4 |        236.9 |      2663.3 |          337.2 | 3287 |        38927721 |              346 |               0
+ postgres |      19 |    49 |         929.1 |         19.0 |       151.1 |           37.5 |   20 |           17983 |                6 |               0
+(2 rows)
+
+ public_observations | with_gated_microscope_image | with_public_spore_measurements | metadata_parent_images | spore_measurements | obs_per_owner_p50 | obs_per_owner_p95 | obs_per_owner_max
+---------------------+-----------------------------+--------------------------------+------------------------+--------------------+-------------------+-------------------+-------------------
+                 228 |                         133 |                            127 |                    988 |               8982 |                 2 |               146 |               146
+(1 row)
+
+     table_name     | n_live_tup | n_dead_tup | last_analyze |       last_autoanalyze        | last_vacuum |        last_autovacuum        
+--------------------+------------+------------+--------------+-------------------------------+-------------+-------------------------------
+ observation_images |       5585 |       1126 |              | 2026-10-12 13:31:40.460852+00 |             | 2026-09-25 10:12:39.557586+00
+ observations       |        787 |         14 |              | 2026-10-12 11:30:33.204714+00 |             | 2026-10-12 17:36:50.069501+00
+ spore_measurements |       8982 |          0 |              | 2026-10-02 08:36:19.489209+00 |             | 2026-10-10 15:34:30.163793+00
+(3 rows)
+
+     table_name     |                  index_name                   |                                                                                                                indexdef                                                                                                                | idx_scan | size_bytes 
+--------------------+-----------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------+------------
+ observation_images | idx_observation_images_deleted_purged_at      | CREATE INDEX idx_observation_images_deleted_purged_at ON public.observation_images USING btree (deleted_at, purged_at)                                                                                                                 |     1605 |     106496
+ observation_images | idx_observation_images_observation_id         | CREATE INDEX idx_observation_images_observation_id ON public.observation_images USING btree (observation_id)                                                                                                                           |  2337898 |     139264
+ observation_images | observation_images_desktop_id_user_unique     | CREATE UNIQUE INDEX observation_images_desktop_id_user_unique ON public.observation_images USING btree (desktop_id, user_id)                                                                                                           |    12577 |     434176
+ observation_images | observation_images_microscope_captured_at_idx | CREATE INDEX observation_images_microscope_captured_at_idx ON public.observation_images USING btree (observation_id, captured_at DESC) WHERE ((image_type = 'microscope'::text) AND (captured_at IS NOT NULL))                         |        0 |     196608
+ observation_images | observation_images_observation_id_idx         | CREATE INDEX observation_images_observation_id_idx ON public.observation_images USING btree (observation_id)                                                                                                                           |      177 |     131072
+ observation_images | observation_images_pkey                       | CREATE UNIQUE INDEX observation_images_pkey ON public.observation_images USING btree (id)                                                                                                                                              |  4147847 |     278528
+ observation_images | observation_images_user_id_idx                | CREATE INDEX observation_images_user_id_idx ON public.observation_images USING btree (user_id)                                                                                                                                         |     5745 |     139264
+ observation_images | observation_images_user_updated_at_id_idx     | CREATE INDEX observation_images_user_updated_at_id_idx ON public.observation_images USING btree (user_id, updated_at, id)                                                                                                              |     1606 |     720896
+ observations       | idx_observations_image_key                    | CREATE INDEX idx_observations_image_key ON public.observations USING btree (image_key)                                                                                                                                                 |        0 |     122880
+ observations       | idx_observations_is_draft                     | CREATE INDEX idx_observations_is_draft ON public.observations USING btree (is_draft)                                                                                                                                                   |      117 |      32768
+ observations       | idx_observations_location_precision           | CREATE INDEX idx_observations_location_precision ON public.observations USING btree (location_precision)                                                                                                                               |       61 |      32768
+ observations       | idx_observations_public_country_code          | CREATE INDEX idx_observations_public_country_code ON public.observations USING btree (country_code) WHERE ((country_code IS NOT NULL) AND (COALESCE(visibility, 'public'::text) = 'public'::text) AND (NOT COALESCE(is_draft, false))) |        0 |      16384
+ observations       | idx_observations_public_region_id             | CREATE INDEX idx_observations_public_region_id ON public.observations USING btree (region_id) WHERE ((region_id IS NOT NULL) AND (COALESCE(visibility, 'public'::text) = 'public'::text) AND (NOT COALESCE(is_draft, false)))          |        0 |      16384
+ observations       | idx_observations_species_spore_visibility     | CREATE INDEX idx_observations_species_spore_visibility ON public.observations USING btree (genus, species, spore_data_visibility)                                                                                                      |      374 |      57344
+ observations       | idx_observations_spore_visibility             | CREATE INDEX idx_observations_spore_visibility ON public.observations USING btree (spore_data_visibility)                                                                                                                              |      110 |      32768
+ observations       | idx_observations_user_visibility              | CREATE INDEX idx_observations_user_visibility ON public.observations USING btree (user_id, visibility)                                                                                                                                 |    82944 |      40960
+ observations       | idx_observations_visibility                   | CREATE INDEX idx_observations_visibility ON public.observations USING btree (visibility)                                                                                                                                               |       85 |      40960
+ observations       | observations_date_idx                         | CREATE INDEX observations_date_idx ON public.observations USING btr
+ee (date DESC)                                                                                                                           
+                           |     3735 |      40960
+ observations       | observations_desktop_id_user_unique           | CREATE UNIQUE INDEX observations_desktop_id_user_unique ON public.o
+bservations USING btree (desktop_id, user_id)                                                                                                                       |     1860 |      65536
+ observations       | observations_genus_species_idx                | CREATE INDEX observations_genus_species_idx ON public.observations USING btree (genus, species)                                                                                                                                        |      155 |      40960
+ observations       | observations_pkey                             | CREATE UNIQUE INDEX observations_pkey ON public.observations USING btree (id)                                                                                                                                                          |  4697206 |      57344
+ observations       | observations_user_id_id_key                   | CREATE UNIQUE INDEX observations_user_id_id_key ON public.observations USING btree (user_id, id)                           |   535979 |      73728
+ observations       | observations_user_id_idx                      | CREATE INDEX observations_user_id_idx ON public.observations USINGbtree (user_id)                           |    10007 |      40960
+ spore_measurements | idx_spore_measurements_desktop_user           | CREATE UNIQUE INDEX idx_spore_measurements_desktop_user ON public.spore_measurements USING btree (desktop_id, user_id) WHERE ((desktop_id IS NOT NULL) AND (user_id IS NOT NULL))                           |      115 |     475136
+ spore_measurements | idx_spore_measurements_image_type             | CREATE INDEX idx_spore_measurements_image_type ON public.spore_measurements USING btree (image_id, measurement_type)                           |  3101436 |     180224
+ spore_measurements | idx_spore_measurements_thumb_key              | CREATE INDEX idx_spore_measurements_thumb_key ON public.spore_measurements USING btree (thumb_key)                           |        0 |     270336
+ spore_measurements | idx_spore_measurements_user_id                | CREATE INDEX idx_spore_measurements_user_id ON public.spore_measurements USING btree (user_id)                           |     2132 |     122880
+ spore_measurements | spore_measurements_image_id_idx               | CREATE INDEX spore_measurements_image_id_idx ON public.spore_measurements USING btree (image_id)                           |  7218851 |     139264
+ spore_measurements | spore_measurements_pkey                       | CREATE UNIQUE INDEX spore_measurements_pkey ON public.spore_measurements USING btree (id)                           |    97186 |     253952
+ spore_measurements | spore_measurements_user_id_idx                | CREATE INDEX spore_measurements_user_id_idx ON public.spore_measurements USING btree (user_id)                           |       19 |     122880
+(30 rows)
+
+                                                      function                                                      |    functiondef_sha256                        | main_sha256 | matches_main
+--------------------------------------------------------------------------------------------------------------------+------------------------------------------------------------------+-------------+--------------
+ search_public_observations(integer,integer,text,text,text,text,date,date,boolean,boolean,text,text,text,text,text) | 84db51be5bcfbcc63d72b6cfb5068cbe12bf18a989c879febf7ebf3bfa9e28c2 |             |
+(1 row)
+
+ wrote_nothing
+---------------
+ t
+(1 row)
+
+ROLLBACK
