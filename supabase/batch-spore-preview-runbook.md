@@ -625,11 +625,37 @@ not the operator's own run, which is **not recorded**:
   So on 2026-10-13, Remote held every tree version, including
   `20261012100000`, held no version outside the tree, and did not hold
   `20260914090000`.
+- Deploy tree removed on 2026-10-13, after the `post-verify` re-run, with the
+  command it printed. The operator reported this, and the agent confirmed
+  that the worktree is gone from `git worktree list` and from disk.
 
 ### Step 3
 
-- 3a, every output value of `batch-spore-preview-live-probe.sql`: **not
-  recorded**.
+- 3a on 2026-10-12: **not recorded**.
+- 3a re-run by the operator on 2026-10-13 (time not recorded) with
+  `batch-spore-preview-live-probe.sql`, unchanged since `a427a6f`. It
+  **passed**: every value matches the expected table, and the transaction
+  ended in `ROLLBACK`. It ran after B1, so its statements are outside the
+  B0→B1 window, and its `bsp_probe` marker keeps them out of the stats probe.
+
+  | Output | Value |
+  |---|---|
+  | `security_definer`, `empty_search_path`, `result_shape` | `t`, `t`, `t` |
+  | `anon_execute`, `authenticated_execute` | `t`, `t` |
+  | `service_role_execute`, `public_execute`, `helper_executable_by_client` | `f`, `f`, `f` |
+  | `private_helpers` | 6 |
+  | `public_sample_stored`, `nonpublic_sample_stored`, `claims_cleared` | `t`, `t`, `t` |
+  | `caller`, `uid_is_null` | `anon`, `t` |
+  | `public_sample` | 30 |
+  | `public_single_rows`, `public_batch_rows` | 30, 30 |
+  | `public_batch_rows_with_points` | 30 |
+  | `public_batch_points` | 1346 |
+  | `public_batch_mosaics` | 30 |
+  | `batch_mosaics_with_url` | 0 |
+  | `public_mismatches` | 0 |
+  | `mosaics_withheld` | 0 |
+  | `nonpublic_sample` | 30 |
+  | `nonpublic_single_rows`, `nonpublic_batch_rows` | 0, 0 |
 - 3b, H1–H5 statuses and counts: **not recorded**.
 
 ### Step 5 — window B0→B1
@@ -737,7 +763,4 @@ Caveats:
    and the owner confirms the pending window conditions.
 2. If no reset ran, the window verdict becomes **valid**. Otherwise it is
    **inconclusive**, and a new B0→B1 is taken.
-3. Remove the deploy tree with the command the 2026-10-13 `post-verify`
-   printed (`git -C <main checkout> worktree remove --force <deploy tree>`),
-   and record that it was removed.
-4. Change `Status:` above to "executed 2026-10-12", in a new commit.
+3. Change `Status:` above to "executed 2026-10-12", in a new commit.
