@@ -178,10 +178,25 @@ The output is that evidence doc plus a seed script.
      - an observer substring;
      - Table's page size of 51.
 
-   Record per-node time and buffers. Count the calls to
-   `metadata_microscope_parent_is_public` and `community_contributor_label`.
-   Show whether the cost scales with the total number of public observations
-   or with the offset.
+   Record per-node time and buffers. Show whether the cost scales with the
+   total number of public observations or with the offset.
+
+   **Count helper calls** to `metadata_microscope_parent_is_public` and
+   `community_contributor_label`:
+   - Both are `LANGUAGE sql STABLE SECURITY DEFINER` (migrations
+     `20260925120000` and `20260521120000`). PostgreSQL never inlines a
+     `SECURITY DEFINER` function, so each call is a real function call.
+   - Count them as `docs/perf/2026-10-batch-spore-preview/function-calls.sql`
+     does: a fresh `\connect` per case, `SET LOCAL track_functions = 'all'`,
+     the call as `anon`, then read `pg_stat_xact_user_functions` before
+     `ROLLBACK`. Local database only.
+   - **Check the counter first.** On a small fixture with a known number of
+     candidates, the count for `community_contributor_label` must equal that
+     number, and the count for `metadata_microscope_parent_is_public` must
+     equal the number of metadata-parent rows the plan reaches. If either
+     differs, or any measured helper is not `SECURITY DEFINER` and could be
+     inlined, report that helper's count as unavailable. Use the `EXPLAIN`
+     row estimates for it instead, labelled as such.
 3. **Report.** In the evidence doc, cover:
    - where the time goes;
    - how cost grows with data size (run the seed at 1×, 2× and 4× the
@@ -209,8 +224,31 @@ Stage 2:
 - the Stage 3 pass thresholds, fixed as numbers and recorded in this plan's
   notes. Stage 3 cannot pass without them;
 - whether a production plan capture is needed. It is a separate, explicit
-  owner approval for a session-local `LOAD 'auto_explain'`, run by the
-  owner, that changes no settings.
+  owner approval, run by the owner, and it is bounded as follows:
+  - **Allowed operation.** One owner session, inside one transaction:
+    - `LOAD 'auto_explain'`;
+    - `SET LOCAL` of `auto_explain.log_min_duration = 0`,
+      `log_analyze = on`, `log_buffers = on`,
+      `log_nested_statements = on` and `log_format = text`, plus
+      `SET LOCAL ROLE anon` and `SET LOCAL statement_timeout = '15s'`;
+    - at most four calls (`p_has_microscopy` `true` at offsets 0 and 30,
+      and `false` at offset 0, plus the default page 1 if it differs);
+    - then `ROLLBACK`.
+
+    No `ALTER SYSTEM`, `ALTER ROLE`, `ALTER DATABASE`, extension change or
+    configuration change. Session-scoped `SET LOCAL` values end with the
+    transaction.
+  - **Requires.** The `postgres` role may `LOAD` the module, and the
+    resulting plans are readable from the Supabase Postgres logs for that
+    session. The capture prepared in Stage 1b states both checks in its
+    instructions.
+  - **Output.** The plan text of the nested statements for each call:
+    node types, timings, buffers and row counts. Parameter values are only
+    limit, offset and booleans. The owner removes anything else before
+    returning it.
+  - **Stop condition.** If `LOAD` is refused, or the nested plans don't
+    appear in the logs, the capture is recorded as unavailable. Nothing else
+    is tried without a new approval.
   - If the owner chooses a capture, Stage 2 does not start until the owner
     has returned its output.
   - Stage 2's first step then adds it to the evidence doc, and records any
@@ -331,13 +369,34 @@ Model it on `supabase/batch-spore-preview-runbook.md`:
     - For each shape it prints only the row count, an MD5 of the ordered id
       list (a hash, never the ids), the `hasMicroscopy` true/false counts
       and the sum of `sporeMeasurementCount`.
-    - It also prints `pg_stat_user_tables` write counters
-      (`n_tup_ins`/`upd`/`del`) for the three tables, so writes between the
-      two runs show up.
-    - **Decision.** Identical outputs pass. A difference with no writes in
-      between means STOP and go to rollback. A difference alongside writes
-      is repeated once as a fresh pair, taken immediately one after the
-      other. If it still differs, investigate before passing.
+    - **Input fingerprint.** It also prints a fingerprint of every input
+      the function reads. For `observations`, `observation_images`,
+      `spore_measurements`, and the profile and moderation rows the gates
+      and the contributor label read, it prints the row count and an MD5
+      of `id || ':' || xmin`, ordered by `id`. Any insert, update or
+      delete changes it, with no statistics-collector lag. It prints
+      hashes only.
+    - **Decision**, before against after:
+      - Inputs and outputs identical: pass.
+      - Inputs identical, outputs different: the new function changed
+        results. STOP and roll back.
+      - Inputs different: the old/new comparison is **inconclusive**,
+        whatever the outputs show. A later pair cannot settle it, because
+        after the push both runs use the new function. The runbook then
+        relies on the invariant checks below, and passes only if they all
+        hold and the owner records the decision. Otherwise, roll back.
+  - **Invariant checks.** These run after the push, in the same read-only,
+    aggregate-only form, and need no old function. They print counts of
+    violations, never ids:
+    - for each filter, the `true` and `false` results partition the `NULL`
+      result;
+    - page 1 followed by page 2 equals the first 2 × page-size rows at
+      offset 0;
+    - ordering is strictly `(observedOn DESC, id DESC)`;
+    - every returned row passes the visibility gates when re-checked
+      directly against the tables;
+    - `hasMicroscopy` and `sporeMeasurementCount` agree with the filter
+      that was used.
   - **PostgREST.** Anonymous calls for the default page 1 and page 2, and
     for `p_has_microscopy` `true` and `false`. Record only HTTP status and
     row counts.
@@ -347,6 +406,29 @@ Model it on `supabase/batch-spore-preview-runbook.md`:
   change and one after it, both for `search_public_observations`, under the
   same validity rules as the batch runbook §5. No resets. The windows are
   compared only when both are valid.
+
+Pass (preparation; the agent does all of this locally):
+- The runbook covers every item above, in order. Every command is copied
+  exactly, with placeholders only for connection strings and SHAs fixed at
+  merge time.
+- **Probes validated locally:** the catalog, output-stability and invariant
+  probes, run on a local database before and after a local apply of the
+  migration.
+  - Each ends in `ROLLBACK`, writes nothing and prints aggregates only.
+  - The output-stability probe reports "identical" for the equivalent
+    function.
+  - A deliberately altered local copy of the function (a mutation test,
+    local only) makes it report "inputs identical, outputs different".
+  - A local write between the two runs makes it report "inconclusive".
+  - The invariant probe reports zero violations for the candidate, and
+    detects a mutation that breaks ordering.
+- **Hashes pinned:** the migration file's SHA-256, and the expected
+  `pg_get_functiondef` SHA-256 from a local `supabase db reset`, recorded
+  in the runbook.
+- **Compensation validated locally:** apply, compensate, then show that the
+  function's `pg_get_functiondef` hash equals the pre-migration hash, that
+  every added index is gone, and that the Stage 2 suites pass.
+- The runbook is reviewed through the normal stage review.
 
 Human gate: a person with explicit owner approval runs the runbook and
 commits the record. Nothing is deployed automatically.
