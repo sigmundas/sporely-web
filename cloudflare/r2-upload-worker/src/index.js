@@ -12,6 +12,7 @@ import {
   buildCloudUploadPolicy,
   normalizeCloudPlanProfile,
 } from '../../../src/cloud-media-policy.js'
+import { obsoleteDesktopRefusal } from './obsolete-desktop-guard.js'
 
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
@@ -117,6 +118,13 @@ async function handleRequest(request, env, ctx) {
 
   if (request.method === 'OPTIONS') {
     return handleOptions(request, env)
+  }
+
+  // Obsolete-desktop brake: refuse media uploads and deletes from shipped
+  // desktops before any authentication, R2 or quota work.
+  const obsoleteDesktop = obsoleteDesktopRefusal(request, corsHeaders(request, env))
+  if (obsoleteDesktop) {
+    return obsoleteDesktop
   }
 
   if (url.pathname === '/healthz') {
