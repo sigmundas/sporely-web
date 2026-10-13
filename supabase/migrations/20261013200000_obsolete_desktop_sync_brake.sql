@@ -76,8 +76,24 @@
 --   observation_reference_uses
 --     - attached to a client-supplied observation id through the
 --       sync_observation_reference_use RPC.
+-- Trigger order
+-- -------------
 -- Each trigger is named trg_000_sync_brake so that it sorts, and fires,
--- before the existing BEFORE triggers (trg_00_*, trg_01_*, ...).
+-- before the existing trg_* BEFORE triggers (trg_00_*, trg_01_*, ...). It does
+-- NOT fire first on every table. PostgreSQL fires BEFORE row triggers in name
+-- order (C collation), and on public.observations three earlier-sorting
+-- triggers run before the brake:
+--   * enforce_non_public_observation_limit_trigger (row);
+--   * guard_selected_sporely_taxon_id_v2_trg (row);
+--   * observation_taxon_shared_reference_rate_row_trg (row), which acts on the
+--     verdict of the statement-level observation_taxon_shared_reference_rate_trg
+--     (statement triggers fire before all row triggers, whatever their name).
+-- Each of them can only raise or skip the row; none writes anything the
+-- brake would have refused. When an obsolete desktop's taxon PATCH is
+-- rate-limited, the row trigger skips the row, the brake never sees it and
+-- the desktop gets HTTP 429 with Retry-After instead of the upgrade refusal.
+-- Nothing is written in that case either. The pgTAP test and runbook check
+-- 3c assert that exactly these three row triggers sort before the brake.
 
 BEGIN;
 
