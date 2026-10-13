@@ -96,9 +96,51 @@ kept, and the next pull brings it back.
    - overwrites are still possible;
    - an old desktop can create observation and image rows whose media upload is
      then refused. Those rows have no media until a desktop that is not braked
-     syncs them again.
+     syncs them again;
+   - v0.8.13 and v0.9.1 desktops that delete an observation leave its media
+     orphaned in the public legacy bucket. See the next section.
 
    Keep the gap to minutes.
+
+### The worker-first gap orphans media (accepted residual)
+
+Between the worker deploy and the database migration, the worker refuses an
+old desktop's media delete with 426, but the database still accepts its row
+deletes. The v0.8.13 and v0.9.1 desktops ignore a failed media delete:
+`delete_cloud_observation` (sporely-py v0.8.13 `utils/cloud_sync.py`,
+about lines 8354-8371) catches the error, prints a warning, and then deletes
+the `observation_images` rows and the `observations` row anyway. v0.9.15 and
+later stop at the failed media delete instead, so they are not affected.
+
+The result for each observation deleted this way in the gap:
+
+- its media objects stay in the legacy bucket `sporely-media` with no row
+  pointing at them;
+- production runs `MEDIA_STORAGE_MODE = "legacy"`, and that bucket is served
+  publicly at `media.sporely.no`, so media the user deleted stays reachable
+  by anyone who has its old URL;
+- the user's storage quota accounting for those objects is not released.
+
+Worker-first is still the right order. The database-first order loses media
+outright: an old desktop's media delete succeeds before the database refuses
+the row delete (bk31 lost 4 media objects this way). Orphaned objects in a
+short window are the smaller, recoverable harm: no user data is lost, and the
+objects can be found and removed afterwards (step 5).
+
+Requirements:
+
+- Keep the gap as short as possible. Run step 3 immediately after the 2a
+  checks pass, in the same sitting, with step 3's commands prepared in
+  advance.
+- Record the gap's **UTC start** (the time `wrangler deploy` in step 2
+  finished) and its **UTC end** (the time `supabase db push --linked` in
+  step 3 committed). Step 5 uses this window.
+- The owner accepts this residual explicitly before the deploy. This line must
+  be ticked, with a name and a date, before step 2:
+
+  - [ ] Owner accepts that v0.8.13/v0.9.1 observation deletes during the
+        worker-first gap can leave publicly reachable orphaned media until
+        step 5 removes it. Name: ____________ Date (UTC): ____________
 
 ## Data-handling rules for whoever runs this
 
@@ -131,6 +173,8 @@ All of the following must be true. Otherwise stop.
 - No other migration is pending except the documented deferred
   `20260914090000` (see `supabase/deploy-exceptions.json`).
 - The owner has explicitly authorized this production deployment in writing.
+- The owner-acceptance line in "The worker-first gap orphans media" is
+  ticked, with a name and a date.
 - Users have been told, or the owner has accepted deploying first: release
   notes and a web/support message carrying the upgrade text. The desktop shows
   only a count of issues, so most users will not see the refusal text.
@@ -142,6 +186,7 @@ All of the following must be true. Otherwise stop.
        curl -s https://upload.sporely.no/healthz
 
    Expect `"ok": true`. Record the `workerVersion` and `mediaStorageMode`.
+   Before this deploy, `obsoleteDesktopBrake` is absent.
 2. Migration history, from a checkout of `<merged main SHA>`:
 
        supabase migration list
@@ -193,7 +238,14 @@ From a clean checkout of `<merged main SHA>`, following
 
 No secret, binding or `wrangler.toml` change is part of this stage.
 
+When `wrangler deploy` finishes, record the time in UTC. This is the start
+of the worker-first gap.
+
 ### 2a. Verify the worker (no media is touched)
+
+These are the same two checks that the worker README ("Deploy") makes
+mandatory after every worker deploy until the sync-key cutover: the
+`/healthz` flag and the 426 probe.
 
 The refusal comes before authentication, so these probes need no token and
 cannot change anything:
@@ -210,8 +262,13 @@ cannot change anything:
     curl -si -X DELETE -A 'python-requests/2.32.3' -H 'x-sporely-sync-identity: 2' \
       https://upload.sporely.no/upload/00000000-0000-4000-8000-000000000000/brake-probe.webp
 
-    # Expect 200 and the same health as step 1.
+    # Expect 200, the same health as step 1, "obsoleteDesktopBrake": true and
+    # "workerVersion": "sporely-r2-upload-worker@obsolete-desktop-brake-1".
     curl -s https://upload.sporely.no/healthz
+
+The README's probe uses a throwaway key under your own test account instead
+of the zero-UUID path. Both work, because the refusal comes before
+authentication.
 
 If any result differs, roll the worker forward with a fix, or roll it back to
 the version recorded in step 1. Rolling back is allowed here, and only here,
@@ -236,6 +293,9 @@ is exactly `20261013200000`.
 Answer `y` only if the prompt lists exactly
 `20261013200000_obsolete_desktop_sync_brake.sql`. The migration is one
 `BEGIN … COMMIT`. If it fails, nothing is applied: stop and report the error.
+
+When the push has committed, record the time in UTC. This is the end of the
+worker-first gap.
 
     node <deploy tree>/scripts/supabase-deploy-tree.mjs post-verify --tree <deploy tree>
 
@@ -284,8 +344,55 @@ Send the requests with that account's access token and the project's anon key.
 
 ### Record
 
-The 4a results (counts and booleans) and the pass/fail of each 4b item. No
-ids, tokens or row contents.
+The 4a results (counts and booleans), the pass/fail of each 4b item, and the
+worker-first gap's UTC start and end (steps 2 and 3). No ids, tokens or row
+contents.
+
+## 5. Optional: reconcile media orphaned in the gap
+
+This step is optional and separate from the deploy. It finds the legacy-bucket
+objects left behind by v0.8.13/v0.9.1 observation deletes during the recorded
+gap (see "The worker-first gap orphans media").
+
+The repository has no tool that lists bucket objects without a row. The
+existing media-health audit (`admin-ops` edge function, `media_health` in
+`supabase/functions/admin-ops/index.ts`) works from the rows: rows missing
+media, unpurged tombstones and media issues. It cannot see an object whose rows
+were deleted, so it does not find these orphans. Its output is still a useful
+before/after sanity check.
+
+### 5a. Identify (read-only)
+
+1. List the object keys in the legacy bucket `sporely-media` with a read-only
+   R2 credential. Keys have the form `<user_id>/…`.
+2. Inside `BEGIN TRANSACTION READ ONLY; … ROLLBACK;`, collect every media key
+   that a row still references: `observation_images` (including tombstoned
+   rows), the thumbnail keys derived from them, and
+   `spore_measurement_mosaics.storage_key`.
+3. The orphans are the bucket keys from 1 that are missing from 2. The
+   bucket cannot show when the rows were deleted, so this set also contains
+   any orphans older than the gap. Only objects uploaded before the gap's end
+   can be gap orphans; beyond that, gap orphans cannot be told apart from
+   older ones. Treat the set as one reconciliation. If the operator captured
+   the worker's refused `DELETE` requests during the gap (for example with
+   `wrangler tail` running between steps 2 and 3), those paths are the exact
+   candidates, and each must also be missing from 2.
+4. Keep the list on the operator's machine. Object keys contain user ids and
+   are personal data: record only the **count** and total size in this
+   repository or in an agent session.
+
+### 5b. Remove (separately approved)
+
+Deleting objects, and correcting the affected users' storage accounting (for
+example through the admin storage reconciliation,
+`reconcile_profile_storage_usage`), are production writes. They are **not**
+part of this runbook. Each needs its own written approval from the owner,
+based on the 5a count.
+
+### Record
+
+Whether 5a was run, the orphan count and total size, and whether 5b was
+approved. No keys or user ids.
 
 ## What users see
 
@@ -315,6 +422,26 @@ worker to a version without the guard while the database brake is active,
 reactivates unsafe desktop synchronization. That means silent overwrites, or
 media deletion ahead of a refused row delete (bk31). There is deliberately no
 down migration.
+
+### Every later worker deploy, until the cutover
+
+The database brake is protected by its pgTAP test; the worker guard is not.
+A `wrangler deploy` from any tree without the guard (a branch cut before this
+merge, an emergency hotfix) **silently removes the brake**. That is forbidden
+until the cutover.
+
+After **every** worker deploy until the cutover, both checks from 2a are
+**mandatory** (they are also step 8 of "Deploy" in
+`cloudflare/r2-upload-worker/README.md`):
+
+1. `curl -s https://upload.sporely.no/healthz` reports
+   `"obsoleteDesktopBrake": true`.
+2. The 426 probe: a PUT with `User-Agent: python-requests/2.32.3` and no
+   token, to a throwaway key under your own test account
+   (`/upload/<your test account user_id>/brake-probe/brake-probe.webp`),
+   returns **426** with `X-Sporely-Error-Code: sporely_upgrade_required`.
+
+If either fails, deploy a tree that contains the guard at once.
 
 ## Emergency procedure: narrow, never remove
 
