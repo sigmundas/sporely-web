@@ -11,14 +11,18 @@ thresholds are proposals for the owner's decision at the Stage 1b gate.
 - The cost of the current function is proportional to the number of
   public candidates. It does not depend on the offset, the page size or the
   microscopy and spores filters.
-- About 85% of the shared buffers come from evaluating
-  `metadata_microscope_parent_is_public` twice for every metadata-parent
-  image of every candidate, once in each `LEFT JOIN LATERAL`.
+- 95% of the shared buffers are in the two `LEFT JOIN LATERAL` subqueries.
+  85% (22,040 of 25,933 at 1×) are in their two image scans, which call
+  `metadata_microscope_parent_is_public` once for every metadata-parent
+  image of every candidate, so twice per parent in all. That 85% covers both
+  the scans' own index and heap reads and the helper's nested work; this run
+  did not separate the two.
 - From 1× to 4× the work grows 4.06× (26.0k → 105.5k buffers per call), and
   the local time grows from 25 ms to about 100 ms.
-- Production spends roughly 10–20× more time per unit of work than this
-  laptop. The 1× production maximum of 2,663 ms therefore leaves no headroom
-  for growth: at 2× the same tail would pass 3 s.
+- The production aggregates and these local runs cover different request
+  mixes, so they do not give a hardware multiplier. Production's 1× maximum
+  (2,663 ms) is already close to 3 s. Whether its tail grows with data as the
+  local work does is a hypothesis this stage cannot test (section 6).
 
 ## 1. Production probe output (input)
 
@@ -381,10 +385,19 @@ and is therefore materialized, so even a custom plan cannot see them. Both
 modes estimate `rows=1` for the candidate set (actual 227 at 1×, 908 at 4×),
 which is why every join is a nested loop.
 
-Default request (sid 1), per node, generic plan; the `auto_explain` body
-plan of a real call (`plans-1x.txt`) has the same nodes and buffers:
+Default request (sid 1), per node. Sources:
+- **1× column:** the `auto_explain` body plan of a real anon call, in
+  `results/plans-1x.txt` (the plan whose `Query Parameters` line has
+  `$1 = '31', $2 = '0', $10 = 't'`). `custom sid 1` in
+  `results/plans-prepared-1x.txt` has the same nodes and the same 25,933
+  buffers (23.5 ms).
+- **4× column:** `custom sid 1` in `results/plans-prepared-4x.txt`.
 
-| node | 1× time / buffers | 4× time / buffers (custom plan) | share of buffers |
+The `generic sid 1` plans are each file's first `EXECUTE` (planning
+included). At 1× it took 55.1 ms and 25,958 buffers: same nodes, but cold
+for the session. It is therefore not used as the per-node reference.
+
+| node | 1× time / buffers (`auto_explain`, real call) | 4× time / buffers (prepared, custom) | share of buffers |
 | --- | --- | --- | --: |
 | candidates: Bitmap Heap Scan on `observations` via `idx_observations_visibility`, banned anti-join (Seq Scan on `profiles` per candidate), `observations_pkey` re-join | 0.8 ms / 1,013 | 7.0 ms / 5,863 (2,735 in the `profiles` scans) | 4–6% |
 | latest-image lateral: Index Scan `observation_images_observation_id_idx` with the helper in its filter, top-N sort, loops = candidates | 10.6 ms / 11,020 | 43.1 ms / 44,024 | 42% |
@@ -392,8 +405,12 @@ plan of a real call (`plans-1x.txt`) has the same nodes and buffers:
 | join filter (microscopy, spores), top-N sort on `(date DESC, id DESC)`, `Result` (label), `Limit` | 0.6 ms / 31 | 1.9 ms / 86 | <1% |
 | total | 24.8 ms / 25,933 | 106.1 ms / 105,413 | |
 
-- The image scans that gate on the helper cost 11.8 buffers per helper call
-  at both scales (11,020 / 937 and 44,024 / 3,748).
+- Each lateral's image scan costs 11.8 buffers per helper call at both
+  scales (11,020 / 937 and 44,024 / 3,748). That figure includes the scan's
+  own index and heap reads of `observation_images` (one index descent per
+  candidate plus about 10 images per candidate) as well as the helper's
+  nested reads. The split between them was not measured, so the 85% is the
+  share of the helper-gated image scans, not of the helper alone.
 - `plans.sql`: `auto_explain` logged the body plan for every full-scan
   scenario and for the date range (body 7.0 ms). The genus and observer
   bodies ran under its 5 ms threshold and were not logged, so their per-node
@@ -474,23 +491,28 @@ the eligibility path.
 machine: the worst maximum is 173.0 ms at 4× (margin 2,827 ms). Local margins
 are not production margins, though; see the next paragraph.
 
-**Do the local plans plausibly match production?** In kind, yes. In speed,
-production is much slower per unit of work.
+**Do the local plans plausibly match production?** In kind, plausibly. In
+magnitude, the aggregates cannot say.
 - **Buffers.** Production anon averages 11,843 buffers per call. Locally a
   full-scan call at 1× uses 26,000, and filtered calls use 161–6,889.
   Production's mix includes species-page and genus calls and taxon misses,
   so a mean below the full-scan cost is consistent with this plan. It is
   also consistent with production having fewer parents per candidate than
-  the seed assumes; the probe cannot tell these apart.
-- **Speed.** Locally a full-scan call does about 1,040 buffers per ms
-  (25,990 / 25.0). Production's mean does about 50 (11,843 / 236.9), roughly
-  20× slower per buffer. Its slow tail (2,663 ms maximum, standard deviation
-  337 ms) is about 11× its mean.
-- **Projection.** Production cost per call would grow linearly with public
-  candidates, as it does locally. Then at 2× the production mean would be
-  about 474 ms and the 1× tail about 5.3 s, well past the 3 s timeout. At
-  1× the tail already touches it, which matches the two baseline timeouts
-  and the 2026-10-13 page-2 failure.
+  the seed assumes. The probe cannot tell these apart.
+- **Speed.** A local full-scan call does about 1,040 buffers per ms
+  (25,990 / 25.0). Production's anon mean works out to about 50
+  (11,843 / 236.9). The two numbers describe different request mixes over
+  different data, so their ratio (about 20×) is **descriptive only**. It is
+  not a measured hardware or contention multiplier, and it does not convert
+  a local time into a production time. Production's slow tail (2,663 ms
+  maximum, standard deviation 337 ms) is about 11× its own mean.
+- **Growth (hypothesis, not established).** Locally the work per call grows
+  linearly with public candidates. If production's mean and tail grew the
+  same way, the mean would be about 474 ms and the tail about 5.3 s at 2×.
+  Nothing here shows that production's tail scales with work rather than
+  with concurrency or contention. What is established: production's tail
+  already reached 2,663 ms at 1×, and timeouts were recorded (two in the
+  baseline, plus the 2026-10-13 page-2 failure).
 
 ## 7. What only a production plan could settle
 
@@ -507,26 +529,10 @@ Independent of the local results:
   deviation of 337 ms against a 236.9 ms mean.
 - Any PostgreSQL version or settings difference between production and the
   local image (`work_mem`, `jit`, `random_page_cost`).
-
-## 7. What only a production plan could settle
-
-Independent of the local results:
-- The plan production actually chooses for the body with its real statistics,
-  including 1,126 dead image tuples and its real, unknown per-observation
-  distribution of parents and measurements.
-- Whether production's 11,843 buffers per call come from the same nodes as
-  the local plan's buffers.
-- Production's helper call counts per request, which depend on that real
-  distribution.
-- The effect of concurrent Explorer traffic (page 1 and page 2 in parallel,
-  facets) on the slow tail: the 2,663 ms maximum and the pooled standard
-  deviation of 337 ms against a 236.9 ms mean.
-- Any PostgreSQL version or settings difference between production and the
-  local image (`work_mem`, `jit`, `random_page_cost`).
-- Why production does about 20× less work per ms than this machine, and
-  whether that comes from the plan, from contention or from the instance's
-  CPU. The 20× is what turns a 25 ms local call into a 237 ms production
-  mean.
+- How much time production spends per unit of work on a full-scan call,
+  and whether its slow tail grows with work or with concurrency. The
+  aggregates' descriptive ratio (about 50 buffers per ms in production
+  against 1,040 locally) mixes different requests and cannot answer this.
 - How the banned-owner checks behave with production's real number of
   `profiles` rows, which the probe did not count. Locally they are a Seq
   Scan of a 26–104-row table once per candidate (2,735 buffers at 4×), and
@@ -536,23 +542,73 @@ Independent of the local results:
 ## 8. Proposed Stage 3 thresholds
 
 Proposals for the owner's decision at the Stage 1b gate. Every number is
-measured with this harness on the Stage 1b seed, locally, on the isolated
-stack, as anon:
-- time with `bench.sql` (20 measured calls, `percentile_disc` p95);
-- buffers as the top node's shared hits;
-- helper calls with `function-calls.sql`.
+local, on the Stage 1b seed, on an isolated stack.
 
-A threshold holds for **every** scenario in `perf_spo.scenario` (all `NULL` /
-`true` / `false` combinations, offsets 0, 30 and 300) unless the line says
-otherwise.
+**Scenario matrix for Stage 3.** It has 38 scenarios:
+- the 32 in `perf_spo.scenario`;
+- six more at offset 300 with `p_limit` 31, for the `(p_has_spores,
+  p_has_microscopy)` pairs not yet covered there: (`true`, `NULL`),
+  (`true`, `true`), (`true`, `false`), (`false`, `NULL`), (`false`, `true`)
+  and (`false`, `false`). Sids 4, 31 and 32 already cover (`NULL`, `true`),
+  (`NULL`, `NULL`) and (`NULL`, `false`).
 
-**How Stage 3 separates the phases.**
-- Phase 1 is the `MATERIALIZED` page-id CTE that Stage 2 requires. Its time
-  and buffers are that CTE node's actual time and shared hits in the
-  `plans-prepared.sql` generic plan.
-- Phase 1 helper calls are counted by running the page-id query alone as a
-  local, test-only statement through `function-calls.sql`.
-- Phase 2 is the total minus phase 1.
+That puts every `NULL`/`true`/`false` combination at offsets 0, 30 and 300.
+Stage 3 adds the six rows as sids 33–38 and measures them for the old and
+the new function. Each threshold applies to every scenario in the matrix at
+the scales named, unless the line says otherwise. A scenario that returns 0
+rows at a scale (for example Microscopy `true` at offset 300 at 1×) is a
+**zero-result scenario** there.
+
+**End-to-end measurement.** `bench.sql` unchanged:
+- the real function call as anon, timed with
+  `EXPLAIN (ANALYZE, BUFFERS, TIMING OFF)`;
+- 2 warm-up calls, then 20 measured calls;
+- p95 = `percentile_disc(0.95)` over the 20 execution times, max = their
+  maximum;
+- buffers = the top node's shared hit + read, taking the maximum over the 20
+  calls (on this seed they are identical across calls).
+
+This gives the **overall** thresholds.
+
+**Phase measurement (paired).**
+- Stage 3 adds a phase bench that runs the candidate's body exactly as
+  `plans-prepared.sql` does: taken from `pg_proc.prosrc`, prepared,
+  `force_generic_plan` (what the SQL function runs), as postgres (the
+  definer).
+- Each scenario gets 2 warm-up and 20 measured
+  `EXPLAIN (ANALYZE, BUFFERS, TIMING ON, FORMAT JSON) EXECUTE` samples.
+  `TIMING ON` is required to time the CTE node.
+- From each sample's single JSON plan:
+  - `T` = `Execution Time`; `B` = the top node's shared hit + read.
+  - `T1` and `B1` = the page-id CTE's own node (the `CTE <name>` subplan of
+    the `MATERIALIZED` CTE): `Actual Total Time` × `Actual Loops` (1 for a
+    materialized CTE), and its shared hit + read. Both are inclusive of
+    everything beneath it, phase-1 helper calls included.
+  - `T2 = T − T1` and `B2 = B − B1`, computed **within the same sample**.
+- Phase p95 and max are `percentile_disc(0.95)` and the maximum over the 20
+  per-sample values of `T1` (phase 1) and of `T2` (phase 2). Percentiles are
+  never subtracted from each other, and phase numbers are never mixed with
+  `bench.sql`'s uninstrumented times.
+- The phase time thresholds below apply to these instrumented values. The
+  phase bench also reports its instrumentation overhead per scenario, as its
+  median `T` divided by `bench.sql`'s median.
+- Phase helper calls:
+  - phase 1: the page-id query alone, as a local test-only statement, run
+    the way `function-calls.sql` runs a call (fresh `\connect`,
+    `track_functions = 'all'`, as anon);
+  - phase 2: `function-calls.sql` on the full candidate minus phase 1.
+  Counts are deterministic, so one run per scenario is enough.
+
+**Zero-result scenarios.** The per-returned-row enrichment thresholds do not
+apply to them. Instead, phase 2 must stay within p95 ≤ 1.0 ms and ≤ 100
+buffers, with 0 calls to either helper.
+
+**Enrichment growth (1× → 4×).** It is checked per scenario.
+- If the scenario returns the same number of rows at 1× and 4× (full pages
+  of 31 or 51), compare phase-2 p95 `T2` and `B2` directly.
+- Otherwise compare the per-returned-row values (`T2` / rows and `B2` /
+  rows).
+- Zero-result scenarios use only the absolute limits above.
 
 Today's references: 1× full scan 25.0 ms median, about 26,000 buffers,
 8.26 helper calls per candidate. At 4×: 102.7 ms, about 105,500 buffers.
@@ -563,8 +619,8 @@ per-parent double helper evaluation.
 
 | measure | 1× | 4× |
 | --- | --- | --- |
-| p95 time | ≤ 7 ms | ≤ 22 ms |
-| maximum time | ≤ 14 ms | ≤ 44 ms |
+| p95 time (`T1`, instrumented) | ≤ 7 ms | ≤ 22 ms |
+| maximum time (`T1`, instrumented) | ≤ 14 ms | ≤ 44 ms |
 | shared buffers per call, at most one of `p_has_microscopy` / `p_has_spores` non-NULL | ≤ 20 per candidate (≤ 4,540) | ≤ 20 per candidate (≤ 18,160) |
 | shared buffers per call, both non-NULL | ≤ 35 per candidate (≤ 7,945) | ≤ 35 per candidate (≤ 31,780) |
 | `metadata_microscope_parent_is_public` calls | ≤ 1.0 per candidate per non-NULL microscopy/spores filter; 0 when both are NULL | same |
@@ -572,40 +628,53 @@ per-parent double helper evaluation.
 | growth 1× → 4× (buffers, and p95 time) | ≤ 4.5× | |
 
 The offset may add only the rows it skips: at offset 300, phase-1 buffers
-may exceed the offset-0 value by at most 5%.
+(`B1`) may exceed the offset-0 value of the same filters by at most 5%.
 
 **Enrichment (phase 2), returned rows only.**
 
 | measure | threshold (1× and 4×) |
 | --- | --- |
-| shared buffers | ≤ 120 per returned row (≤ 3,720 for 31 rows, ≤ 6,120 for 51) |
-| time | ≤ 0.1 ms per returned row (≤ 3.1 ms for 31, ≤ 5.1 ms for 51), at p95 |
+| shared buffers (`B2`) | ≤ 120 per returned row (≤ 3,720 for 31 rows, ≤ 6,120 for 51) |
+| time (`T2`, instrumented) | p95 ≤ 0.1 ms per returned row (≤ 3.1 ms for 31, ≤ 5.1 ms for 51); max ≤ 0.2 ms per returned row |
 | `community_contributor_label` | exactly 1 per returned row. Today it is one per row reaching `LIMIT`: 61 at offset 30, 331 at offset 300 at 4× |
 | `metadata_microscope_parent_is_public` | ≤ 2 × the metadata parents of the returned rows, and ≤ 24 per returned row |
 | growth 1× → 4× at a fixed page size | ≤ 1.2× in buffers and in p95 time |
 
-**Overall (end to end).**
+**Overall (end to end, `bench.sql`).**
 
 | measure | 1× | 4× |
 | --- | --- | --- |
 | p95 time | ≤ 10 ms | ≤ 25 ms |
 | maximum time | ≤ 20 ms | ≤ 50 ms |
-| shared buffers per call (page 31) | ≤ 8,500 | ≤ 24,000 |
+| shared buffers per call (page 31; page 51 may add 120 per extra row) | ≤ 8,500 | ≤ 24,000 |
 
-**Margin under 3 s.** Local time does not transfer directly to production,
-so each margin is stated through today's observed ratio. Production's 1×
-maximum (2,663 ms) is 103× the local 1× p95 of the default request
-(25.9 ms). With the same ratio:
-- 1× p95 ≤ 10 ms projects to a production maximum of about 1,030 ms, a
-  margin of about 1,970 ms (66%).
-- 4× p95 ≤ 25 ms projects to about 2,575 ms, a margin of about 425 ms (14%).
+**Margin under 3 s, measured locally.** These are the actual local margins
+at the threshold values:
+- 1×: p95 ≤ 10 ms leaves 2,990 ms; max ≤ 20 ms leaves 2,980 ms.
+- 4×: p95 ≤ 25 ms leaves 2,975 ms; max ≤ 50 ms leaves 2,950 ms.
 
-In buffers, the 4× limit (24,000) is below today's 1× cost (26,000). So at
-four times today's data the function would do less work than it does now.
+Today's function, for comparison: worst 1× maximum 77.3 ms (2,922.7 ms
+margin), worst 4× maximum 173.0 ms (2,827.0 ms).
 
-The ratio is an assumption. It holds only if production's slow tail scales
-with work, as section 6 suggests. A production plan capture, or the post-deploy
-`pg_stat_statements` window, would test it.
+In work, the 4× buffer limit (24,000) is below today's 1× cost (26,000): at
+four times today's data the function would do less work than it does now
+at 1×. That much is established locally.
+
+**Production margin (hypothetical, not established).** Production's 1×
+maximum (2,663 ms) is 103× the local 1× p95 of today's default request
+(25.9 ms). This ratio compares different things: a production maximum over
+a mixed workload, and a local p95 for one request. It is not a measured
+conversion factor.
+- If it held, a 1× p95 of 10 ms would correspond to a production maximum
+  of about 1,030 ms (about 1,970 ms under 3 s).
+- A 4× p95 of 25 ms would correspond to about 2,575 ms (about 425 ms under
+  3 s).
+- The ratio is anchored on the local p95, so it is not applied to the local
+  maxima; that would count the production tail twice.
+
+Whether production time scales with work at all is unverified (sections 6
+and 7). A production plan capture, or the post-deploy `pg_stat_statements`
+window in the Stage 4 runbook, would test it.
 
 ## 9. Optional production plan capture (prepared, not run)
 
