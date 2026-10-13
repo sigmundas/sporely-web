@@ -48,7 +48,7 @@ $bench$;
 
 \echo '== per scenario (ms; buffers are 8 kB pages per call; margin = 3000 - max)'
 SELECT b.sid, s.label, max(b.rows) AS rows,
-       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY b.exec_ms), 1) AS median_ms,
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY b.exec_ms))::numeric, 1) AS median_ms,
        round(percentile_disc(0.95) WITHIN GROUP (ORDER BY b.exec_ms), 1) AS p95_ms,
        round(max(b.exec_ms), 1) AS max_ms,
        round(3000 - max(b.exec_ms), 1) AS margin_ms,

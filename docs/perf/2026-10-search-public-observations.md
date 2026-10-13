@@ -3,12 +3,22 @@
 Plan: `docs/plans/active/2026-10-13-search-public-observations-performance.md`,
 Stage 1b. Harness: `docs/perf/2026-10-search-public-observations/`.
 
-**Status: harness prepared, local measurements not yet run.** The stage agent
-could not run any SQL file against the isolated database: in its session,
-every `docker exec -i supabase_db_sporely-stage1b-f92d560 psql … < docs/perf/2026-10-search-public-observations/*.sql`
-command, including the exact allow-listed form, was refused as needing
-approval. No SQL in this directory has been executed yet. Sections 5–8 are
-placeholders until the run in section 4 is done.
+**Status: harness prepared, local measurements not yet run.** No SQL in this
+directory has been executed yet; sections 5–8 are placeholders until the run
+in section 4 is done.
+
+Why: the stage agent's permission check removes the `< file` redirect before
+it compares a command with the allow rules. With the redirect gone, the
+command is `docker exec -i supabase_db_sporely-stage1b-f92d560 psql -U postgres -X -v ON_ERROR_STOP=1`,
+which no rule matches, because both allow rules include the redirect. A
+piped form confirmed it: the refusal named exactly that redirect-free
+command. Rules that would let the agent run these files, and nothing beyond
+the isolated container:
+
+```
+Bash(docker exec -i supabase_db_sporely-stage1b-f92d560 psql -U postgres -X -v ON_ERROR_STOP=1)
+Bash(docker exec -i supabase_db_sporely-stage1b-f92d560 psql -U postgres -X -At -v ON_ERROR_STOP=1)
+```
 
 ## 1. Production probe output (input)
 
@@ -226,10 +236,15 @@ What each file measures:
   median, p95 (`percentile_disc`), maximum, margin under 3 s, shared buffers
   per call.
 - `function-calls.sql`: helper calls per scenario, one fresh connection each.
-- `plans.sql`: per-node time and buffers of the body as it really runs
-  (`auto_explain`, nested statements), for 11 representative scenarios.
-- `plans-prepared.sql`: the body from `pg_proc.prosrc`, prepared and run under
-  `force_generic_plan` and `force_custom_plan`.
+- `plans-prepared.sql`: the per-node evidence. For all 32 scenarios, the body
+  from `pg_proc.prosrc` is prepared and run with `EXPLAIN (ANALYZE, BUFFERS)`
+  under `force_generic_plan` (what the SQL function runs) and
+  `force_custom_plan`. There is no duration threshold, so no fast plan is
+  dropped.
+- `plans.sql`: a cross-check through `auto_explain` (nested statements, 5 ms
+  threshold so the helper statements stay out) on 11 scenarios. It confirms
+  that a real call's body plan has the generic plan's shape, and records which
+  bodies ran too fast to be logged.
 
 Scenarios (`perf_spo.scenario`, 32): the default request (Microscopy `true`,
 `p_limit` 31) at offsets 0, 30, 60 and 300; every `p_has_spores` ×

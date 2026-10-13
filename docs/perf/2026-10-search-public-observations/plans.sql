@@ -7,9 +7,14 @@
 -- The top-level EXPLAIN shows only a Function Scan: a SECURITY DEFINER SQL
 -- function is never inlined. Its body is planned on every call without the
 -- argument values (a generic plan). auto_explain logs that nested plan.
--- Statements under 5 ms (the per-row helper calls) are not logged; their
--- counts come from function-calls.sql. Each scenario runs once to warm up,
--- then once logged.
+--
+-- This file is a cross-check, not the per-node evidence: it confirms, for 11
+-- representative scenarios, that the body plan of a real call has the same
+-- shape as the force_generic_plan plan in plans-prepared.sql, which covers
+-- all 32 scenarios without a duration threshold. Here, statements under 5 ms
+-- are not logged so that the thousands of per-row helper statements stay
+-- out; a body that itself runs under 5 ms is then missing too, and the
+-- results record which ones were.
 \set QUIET on
 \pset footer off
 SELECT scale || 'x ' || variant AS seeded FROM perf_spo.seeded \gset
