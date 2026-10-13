@@ -13,9 +13,9 @@ performs every step and records the evidence. No agent runs any of it or
 connects to production. An agent may see only the aggregate results this
 runbook marks as recordable. Nothing here is deployed automatically.
 
-Status: **applied to production 2026-10-12; record incomplete.** See
-"Production deployment — 2026-10-12" at the end. The `sporely-landing` gate
-below has not passed.
+Status: **executed 2026-10-12; re-verified 2026-10-13.** See "Production
+deployment — 2026-10-12" at the end. Some historical details of the original
+run are marked **not recorded** there.
 
 **Gate for `sporely-landing`.** Its `docs/plans/explorer-cards-batch-preview.md`
 must not start until steps 0–5 have passed and the record from "Record" is
@@ -576,24 +576,31 @@ passed.
 
 ## Production deployment — 2026-10-12
 
-Recorded 2026-10-13 from the owner's step 5 output and from the `check`
-files the deploy helper left in the local deploy tree. No agent connected to
-production. An entry marked **not recorded** has no evidence in the
-repository; only the operator can supply it.
+Recorded 2026-10-13. Sources: the owner's step 5 output, the `check` files
+the deploy helper left in the local deploy tree, the operator's 2026-10-13
+re-runs, and the operator's own statements. No agent connected to production.
+
+- **Operator statement:** what the operator says, which nobody else checked.
+- **Verified:** what output or repository state shows.
+- **Not recorded:** a fact about the original run with no evidence. It cannot
+  be recovered now.
 
 ### Run
 
-- Operator: **not recorded**.
+- Operator: the owner. **Operator statement:** they personally performed
+  the production deployment and verification work.
 - Deployed ref: `a427a6f436df6d944c9234f56e4fe46bd0b11e53`. The helper's
   `sporely-deploy-plan.json` in the deploy tree records it as `sha` and
   `ref`, with `allow` `20261012100000`, `deferred` `20260914090000` and
-  project `zkpjklzfwzefhjluvhfw`. The operator confirms this was the
-  `<merged main SHA>`.
+  project `zkpjklzfwzefhjluvhfw`. **Verified:** `a427a6f` is on
+  `origin/main` (see "Step 0"), and the 2026-10-13 `post-verify` against this
+  tree passed.
 - Accepted candidate SHAs: Stage 3 preparation `4c21355` (Agent Sparring
   READY). The migration's final security-reviewed form is `cf68f4a`.
-- UTC times: `check` files written 2026-10-12 09:53. B0 at 10:50:00 already
-  shows the migration's statements (see "Step 5"), so the push happened
-  between those times. The exact push time is **not recorded**.
+- UTC times: the exact push time is **not recorded**. The approximate
+  interval is 2026-10-12 09:53 to 10:50 UTC. `check` wrote its files at 09:53,
+  and B0 at 10:50:00 already shows the migration's statements (see
+  "Step 5").
 
 ### Step 0
 
@@ -604,7 +611,9 @@ not the operator's own run, which is **not recorded**:
 - Both migration hashes:
   `bd18677d8b0228b92f175a642fc8183af3647c9d8547035062b68eb6fe590956`.
 - `supabase/deploy-exceptions.json` at `a427a6f` lists only `20260914090000`.
-- Owner authorization for the deployment: **not recorded**.
+- Owner authorization: the owner performed the deployment themselves
+  (operator statement). The step 0 checks as the operator ran them on
+  2026-10-12 are **not recorded**.
 
 ### Steps 1 and 2
 
@@ -616,8 +625,11 @@ not the operator's own run, which is **not recorded**:
   Its saved dry run would push exactly
   `20261012100000_add_public_observation_spore_previews.sql`. Whether it
   printed `All checks passed` is **not recorded**.
-- `supabase db push --linked` outcome: **not recorded**. B0 shows that the
-  migration ran (see "Step 5").
+- `supabase db push --linked`: **operator statement:** they pushed a
+  migration on 2026-10-12. The CLI output is **not recorded**. **Verified:**
+  `20261012100000` is applied. It was the only pending version in the `check`
+  output, B0 shows its statements, and both the 2026-10-13 `post-verify` and
+  3a passed.
 - `post-verify` on 2026-10-12: **not recorded**.
 - `post-verify` re-run by the operator on 2026-10-13 (time not recorded),
   against the saved deploy tree of `a427a6f`: passed. It printed "Remote
@@ -656,7 +668,22 @@ not the operator's own run, which is **not recorded**:
   | `mosaics_withheld` | 0 |
   | `nonpublic_sample` | 30 |
   | `nonpublic_single_rows`, `nonpublic_batch_rows` | 0, 0 |
-- 3b, H1–H5 statuses and counts: **not recorded**.
+- 3b on 2026-10-12: **not recorded**.
+- 3b re-run by the operator on 2026-10-13 (time not recorded) over
+  PostgREST, with operator-chosen ids that are not recorded. It **passed**:
+  every call matches the expected table.
+
+  | Call | Result |
+  |---|---|
+  | H1 known public, spore-bearing | `status=200`, `rows: 1`, `with_points: 1`, `points: 78`, `mosaic: 1`, `mosaic_url: 0` |
+  | H2 known non-public | `status=200`, `rows: 0` |
+  | H3 empty array | `status=200`, `rows: 0` |
+  | H4 null | `status=200`, `rows: 0` |
+  | H5 61 ids | `status=400`, `code: "22023"` |
+
+  These calls ran after B1, so they are outside the B0→B1 window. H1–H4 do
+  add to the batch function's `anon` counters, so the landing A0 snapshot
+  must be taken after these re-runs.
 
 ### Step 5 — window B0→B1
 
@@ -704,18 +731,34 @@ Validity conditions (§5, step 3):
 | `stats_reset` identical | Pass: 2026-06-17 13:38:01.755619 in both. |
 | `dealloc` identical | Pass: 0 in both. |
 | No decrease in `calls`, `total_exec_ms`, `shared_blks_hit`, `shared_blks_read` for rows in both snapshots | Pass: the same nine rows are in both, with the same `entries`, and no counter decreased. |
-| No `pg_stat_statements_reset` during the window | **Pending owner confirmation.** A targeted reset changes neither `stats_reset` nor `dealloc`, so the snapshots cannot show it. |
+| No `pg_stat_statements_reset` during the window | Pass, on operator statement plus counter evidence. See below. |
 
-Procedure conditions (§5, steps 1–2), also for the operator:
-- B0 was taken after step 3. 3a and 3b are not recorded, so this cannot be
-  checked.
-- The window had normal explorer traffic and no load test: **pending owner
-  confirmation**.
-- The landing switch did not happen before B1: **pending owner
-  confirmation**. It is consistent with the batch function's anon Δcalls of 0.
+No reset:
+- **Operator statement:** the operator did not knowingly run
+  `pg_stat_statements_reset()`, globally or for single entries. They know of
+  nobody else who did, but cannot independently verify that.
+- **Verified, partly:** a targeted reset removes an entry, and the entry
+  starts again from zero if it is called again. Such a reset would lower that
+  row's `entries`, or its `calls` and other counters. The checks rule it out
+  for every row except `get_public_observation` / `anon`:
+  - each single-entry row's B0 `calls` far exceeds its window Δcalls;
+  - every zero-delta row kept both its `entries` and its counters exactly.
 
-Verdict: **not yet valid; pending owner confirmation** that no reset ran.
-Until then, these deltas are not evidence.
+  For `get_public_observation` / `anon` (13 entries, Δcalls 68), a reset of
+  one of its entries that had few calls cannot be excluded.
+
+Procedure conditions (§5, steps 1–2):
+- B0 was taken after step 3: **not recorded** for the 2026-10-12 run. The
+  batch function's 5 `anon` calls before B0 are consistent with it.
+- Normal explorer traffic, no load test: **operator statement:** only normal
+  browsing, with no intentional load testing.
+- Landing switch not before B1: **operator statement:** the operator did not
+  intentionally deploy or activate it. **Verified:** consistent with the
+  batch function's `anon` Δcalls of 0 in the window.
+
+Verdict: **valid**. The window relies on the operator's statement for the
+no-reset condition, with the qualification above. A later finding that a
+reset did occur makes it inconclusive.
 
 Deltas (B1 − B0). The window mean is Δtotal_exec_ms / Δcalls. Each
 `total_exec_ms` is rounded to 0.1 ms, so each Δtotal_exec_ms is exact to
@@ -754,13 +797,16 @@ Caveats:
   `REVOKE`, `GRANT`, `COMMENT`). That is consistent with the push, not proof
   of it. The `anon` row (1 entry, 5 calls) predates B0. Errored statements are
   not counted, so H5's expected `22023` would not appear. Five calls is more
-  than the four successful H1–H4 calls, which is unexplained until 3b is
-  recorded. Neither row is window evidence.
+  than the four successful H1–H4 calls. The 2026-10-12 3b run is not
+  recorded, so the extra call stays unexplained. Neither row is window
+  evidence.
 
-### Before the `sporely-landing` gate passes
+### Gate
 
-1. The operator supplies or confirms the entries marked **not recorded**,
-   and the owner confirms the pending window conditions.
-2. If no reset ran, the window verdict becomes **valid**. Otherwise it is
-   **inconclusive**, and a new B0→B1 is taken.
-3. Change `Status:` above to "executed 2026-10-12", in a new commit.
+The migration is applied. As of 2026-10-13:
+- `post-verify`, 3a and 3b pass;
+- the B0→B1 window is valid, with the qualification above.
+
+Items marked **not recorded** are historical details of the 2026-10-12 run.
+They cannot be recovered. Once this record is on `main`, it is the evidence
+for `sporely-landing`'s `explorer-cards-batch-preview` gate.
