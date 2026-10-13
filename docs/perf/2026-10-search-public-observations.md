@@ -593,10 +593,38 @@ This gives the **overall** thresholds.
   phase bench also reports its instrumentation overhead per scenario, as its
   median `T` divided by `bench.sql`'s median.
 - Phase helper calls:
-  - phase 1: the page-id query alone, as a local test-only statement, run
-    the way `function-calls.sql` runs a call (fresh `\connect`,
-    `track_functions = 'all'`, as anon);
-  - phase 2: `function-calls.sql` on the full candidate minus phase 1.
+  - **Phase 1.** Count them through a local, test-only wrapper that copies
+    the page-id CTE's query text verbatim from the candidate body.
+    - Make the wrapper `LANGUAGE sql STABLE SECURITY DEFINER`, owned by the
+      candidate function's owner (postgres), with the same
+      `SET search_path` and the same 15 parameters. It returns the page ids
+      in order.
+    - Grant execute to `anon` only inside the measuring transaction.
+    - Call it as anon with `function-calls.sql`'s method: fresh
+      `\connect`, `SET LOCAL track_functions = 'all'`, `SET LOCAL ROLE
+      anon`, counters read from `pg_stat_xact_user_functions`, `ROLLBACK`.
+      Leave `request.jwt.claims` unset, as for a PostgREST anon call, so
+      `auth.uid()` is NULL.
+    - Because the query then runs as the definer, the privileges match the
+      real body. `metadata_microscope_parent_is_public` is executable only
+      by `service_role` and the definer (its PUBLIC execute is revoked in
+      `20260925120000`), and the tables are read under the definer's RLS
+      position.
+    - Do **not** run the page-id query directly as anon. anon cannot call
+      the helper, and direct table access would go through anon's RLS
+      policies instead.
+    - Create the wrapper and its grant in the measuring transaction and roll
+      them back, so no object or grant outlives the run. Production grants,
+      RLS and functions are never touched; this is local only.
+  - **Check before using it.** For every scenario, the wrapper must return
+    the same ordered ids as the candidate, compared as an MD5 of the ordered
+    id list. Its plan, from the same prepared-body method, must have the
+    same node shape as the page-id CTE subplan inside the full candidate's
+    plan. If either differs for a scenario, that scenario's phase-1 count is
+    unavailable and is reported as such.
+  - **Phase 2:** `function-calls.sql` on the full candidate, minus phase 1,
+    for the same scenario.
+
   Counts are deterministic, so one run per scenario is enough.
 
 **Zero-result scenarios.** The per-returned-row enrichment thresholds do not
