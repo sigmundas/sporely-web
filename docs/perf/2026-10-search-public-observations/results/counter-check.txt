@@ -1,0 +1,2201 @@
+NOTICE:  schema "perf_spo_cc" does not exist, skipping
+== known values
+ candidates | parents_reached_per_lateral 
+------------+-----------------------------
+          5 |                           3
+
+== helper attributes (prosecdef t = never inlined)
+                proname                | prosecdef | provolatile | lanname 
+---------------------------------------+-----------+-------------+---------
+ community_contributor_label           | t         | s           | sql
+ is_public_microscopy_measurement_type | f         | i           | sql
+ metadata_microscope_parent_is_public  | t         | s           | sql
+
+== case 0: direct calls; expected community_contributor_label 5, metadata_microscope_parent_is_public 3
+ label_rows 
+------------
+          5
+
+ public_parents | parents 
+----------------+---------
+              2 |       3
+
+               funcname               | calls 
+--------------------------------------+-------
+ community_contributor_label          |     5
+ metadata_microscope_parent_is_public |     3
+
+== case 1: search, no filters, p_limit 100, as anon
+ rows | with_microscopy | measurements 
+------+-----------------+--------------
+    5 |               2 |            8
+
+               funcname               | calls 
+--------------------------------------+-------
+ community_contributor_label          |     5
+ metadata_microscope_parent_is_public |     6
+ search_public_observations           |     1
+
+== case 2: search, p_observer => Counter (label needed for every candidate), as anon
+ rows 
+------
+    5
+
+               funcname               | calls 
+--------------------------------------+-------
+ community_contributor_label          |    10
+ metadata_microscope_parent_is_public |     6
+ search_public_observations           |     1
+
+== case 3: search, p_has_microscopy => true, p_limit 2, as anon
+ rows 
+------
+    2
+
+               funcname               | calls 
+--------------------------------------+-------
+ community_contributor_label          |     2
+ metadata_microscope_parent_is_public |     6
+ search_public_observations           |     1
+
+== nested plans for case 1 and case 2 (auto_explain, VERBOSE, every statement)
+LOG:  duration: 0.014 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '1'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.014..0.014 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=4
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.013..0.014 rows=1 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=4
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.006..0.007 rows=1 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Rows Removed by Join Filter: 1
+                Buffers: shared hit=3
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.005..0.005 rows=1 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=2
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.003..0.003 rows=1 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                            Buffers: shared hit=1
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.001..0.001 rows=1 loops=1)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+                      Rows Removed by Filter: 1
+                      Buffers: shared hit=1
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (actual time=0.007..0.007 rows=1 loops=1)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                Buffers: shared hit=1
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.009 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '2'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.008..0.009 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=4
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.008..0.008 rows=1 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=4
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.005..0.005 rows=1 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Rows Removed by Join Filter: 1
+                Buffers: shared hit=3
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.004..0.004 rows=1 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=2
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Rows Removed by Filter: 1
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                            Buffers: shared hit=1
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.001..0.001 rows=1 loops=1)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+                      Rows Removed by Filter: 1
+                      Buffers: shared hit=1
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (actual time=0.003..0.003 rows=1 loops=1)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                Rows Removed by Filter: 4
+                Buffers: shared hit=1
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.012 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '1'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.011..0.011 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=4
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.011..0.011 rows=1 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=4
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.008..0.008 rows=1 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Rows Removed by Join Filter: 1
+                Buffers: shared hit=3
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.006..0.006 rows=1 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=2
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.003..0.003 rows=1 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (actual time=0.003..0.003 rows=1 loops=1)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                            Buffers: shared hit=1
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.002..0.002 rows=1 loops=1)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+                      Rows Removed by Filter: 1
+                      Buffers: shared hit=1
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (actual time=0.002..0.002 rows=1 loops=1)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                Buffers: shared hit=1
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.006 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '2'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.005..0.006 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=4
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.005..0.005 rows=1 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=4
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.004..0.004 rows=1 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Rows Removed by Join Filter: 1
+                Buffers: shared hit=3
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.003..0.003 rows=1 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=2
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Rows Removed by Filter: 1
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (actual time=0.001..0.001 rows=1 loops=1)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                            Buffers: shared hit=1
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.001..0.001 rows=1 loops=1)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+                      Rows Removed by Filter: 1
+                      Buffers: shared hit=1
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (actual time=0.001..0.001 rows=1 loops=1)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                Rows Removed by Filter: 4
+                Buffers: shared hit=1
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.003 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '3'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.003..0.003 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=1
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=1
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.003..0.003 rows=0 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Buffers: shared hit=1
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.003..0.003 rows=0 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=1
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.003..0.003 rows=0 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Rows Removed by Filter: 8
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (never executed)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (never executed)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (never executed)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.003 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '3'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.002..0.002 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=1
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=1
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.002..0.002 rows=0 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Buffers: shared hit=1
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.002..0.002 rows=0 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=1
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.002..0.002 rows=0 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Rows Removed by Filter: 8
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (never executed)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (never executed)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (never executed)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.004 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.004..0.004 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.003..0.003 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.003..0.003 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.003 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.002..0.003 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.002 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.001..0.002 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.002 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.001..0.002 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.002 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.001..0.002 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+ count 
+-------
+     5
+
+LOG:  duration: 1.958 ms  plan:
+Query Text: 
+  WITH normalized AS (
+    SELECT
+      greatest(1, least(coalesce(p_limit, 50), 100)) AS lim,
+      greatest(coalesce(p_offset, 0), 0) AS off,
+      nullif(btrim(coalesce(p_genus, '')), '') AS genus,
+      nullif(btrim(coalesce(p_species, '')), '') AS species,
+      nullif(btrim(coalesce(p_country, '')), '') AS country,
+      nullif(btrim(coalesce(p_region, '')), '') AS region,
+      p_date_from AS date_from,
+      p_date_to AS date_to,
+      p_has_spores AS has_spores,
+      p_has_microscopy AS has_microscopy,
+      nullif(btrim(coalesce(p_contrast, '')), '') AS contrast,
+      nullif(btrim(coalesce(p_mount, '')), '') AS mount,
+      nullif(btrim(coalesce(p_sample, '')), '') AS sample,
+      nullif(btrim(lower(coalesce(p_sample_source, ''))), '') AS sample_source,
+      nullif(btrim(coalesce(p_observer, '')), '') AS observer
+  ),
+  candidate_base AS (
+    SELECT
+      o.id,
+      nullif(btrim(coalesce(o.genus, '')), '') AS genus,
+      nullif(btrim(coalesce(o.species, '')), '') AS species,
+      nullif(btrim(coalesce(o.common_name, '')), '') AS common_name,
+      o.user_id,
+      o.author,
+      o.date AS observed_on,
+      nullif(btrim(coalesce(o.country_code, '')), '') AS country,
+      nullif(btrim(coalesce(o.region_id, '')), '') AS region_id,
+      coalesce(o.location_precision, 'hidden') AS location_precision,
+      nullif(btrim(coalesce(o.location, '')), '') AS location,
+      nullif(btrim(coalesce(r.label, '')), '') AS region_label,
+      public.community_contributor_label(o.user_id, o.author) AS observer_display_name
+    FROM public.observations o
+    LEFT JOIN public.public_regions r
+      ON r.id = o.region_id
+    WHERE o.visibility = 'public'::text
+      AND NOT coalesce(o.is_draft, false)
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+  ),
+  candidate AS (
+    SELECT cb.*
+    FROM candidate_base cb
+    CROSS JOIN normalized n
+    WHERE (n.genus IS NULL OR lower(coalesce(cb.genus, '')) = lower(n.genus))
+      AND (n.species IS NULL OR lower(coalesce(cb.species, '')) = lower(n.species))
+      AND (n.country IS NULL OR lower(coalesce(cb.country, '')) = lower(n.country))
+      AND (n.region IS NULL OR cb.region_id = n.region)
+      AND (n.date_from IS NULL OR cb.observed_on >= n.date_from)
+      AND (n.date_to IS NULL OR cb.observed_on <= n.date_to)
+      AND (
+        n.observer IS NULL
+        OR coalesce(cb.observer_display_name, '') ILIKE '%' || n.observer || '%'
+      )
+  ),
+  enriched AS (
+    SELECT
+      c.*,
+      latest_image.contrast AS contrast_method,
+      latest_image.mount_medium AS mount_reagent,
+      latest_image.sample_type AS sample_type,
+      latest_image.sample_source AS sample_source,
+      latest_image.stain AS stain_reagent,
+      (latest_image.id IS NOT NULL) AS has_microscopy,
+      o.spore_data_visibility,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+          THEN coalesce(spore_stats.spore_measurement_count, 0::bigint)
+        ELSE 0::bigint
+      END AS spore_measurement_count,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+          THEN o.spore_statistics
+        ELSE NULL::jsonb
+      END AS spore_summary
+    FROM candidate c
+    JOIN public.observations o
+      ON o.id = c.id
+    CROSS JOIN normalized n
+    LEFT JOIN LATERAL (
+      SELECT
+        i.id,
+        i.contrast,
+        i.mount_medium,
+        i.sample_type,
+        i.sample_source,
+        i.stain
+      FROM public.observation_images i
+      WHERE i.observation_id = c.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+        AND (n.contrast IS NULL OR lower(btrim(coalesce(i.contrast, '')))     = lower(btrim(n.contrast)))
+        AND (n.mount    IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = lower(btrim(n.mount)))
+        AND (n.sample   IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
+        AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
+        AND (
+          (
+            n.contrast IS NULL
+            AND n.mount IS NULL
+            AND n.sample IS NULL
+            AND n.sample_source IS NULL
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM public.spore_measurements m
+            WHERE m.image_id = i.id
+              AND m.length_um IS NOT NULL
+              AND m.width_um IS NOT NULL
+              AND (
+                public.is_public_microscopy_measurement_type(m.measurement_type)
+              )
+          )
+        )
+      ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
+      LIMIT 1
+    ) latest_image ON true
+    LEFT JOIN LATERAL (
+      SELECT count(*)::bigint AS spore_measurement_count
+      FROM public.observation_images i
+      JOIN public.spore_measurements m
+        ON m.image_id = i.id
+      WHERE i.observation_id = c.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+        AND (
+          public.is_public_microscopy_measurement_type(m.measurement_type)
+        )
+        AND m.length_um IS NOT NULL
+        AND m.width_um IS NOT NULL
+    ) spore_stats ON true
+  )
+  SELECT
+    e.id AS id,
+    nullif(
+      regexp_replace(
+        regexp_replace(lower(btrim(concat_ws(' ', e.genus, e.species))), '[^a-z0-9]+', '-', 'g'),
+        '(^-|-$)',
+        '',
+        'g'
+      ),
+      ''
+    ) AS "speciesSlug",
+    nullif(btrim(concat_ws(' ', e.genus, e.species)), '') AS "speciesName",
+    e.common_name AS "speciesCommonName",
+    e.observer_display_name AS "observerDisplayName",
+    e.observed_on AS "observedOn",
+    e.country AS country,
+    e.region_id AS "regionId",
+    e.location_precision AS "locationPrecision",
+    CASE
+      WHEN e.location_precision = 'exact'::text THEN e.location
+      WHEN e.location_precision = 'fuzzed'::text THEN coalesce(e.region_label, e.country)
+      WHEN e.location_precision = 'region'::text THEN e.region_label
+      ELSE NULL::text
+    END AS "locationLabel",
+    e.has_microscopy AS "hasMicroscopy",
+    e.spore_measurement_count AS "sporeMeasurementCount",
+    e.spore_summary AS "sporeSummary",
+    e.contrast_method AS "contrastMethod",
+    e.mount_reagent AS "mountReagent",
+    CASE
+      WHEN lower(btrim(coalesce(e.sample_type, ''))) IN ('fresh', 'dried')
+        THEN lower(btrim(e.sample_type))
+      ELSE NULL::text
+    END AS "sampleType",
+    public.public_normalized_sample_source(e.sample_source, e.sample_type) AS "sampleSource",
+    nullif(btrim(coalesce(e.stain_reagent, '')), '') AS "stainReagent"
+  FROM enriched e
+  CROSS JOIN normalized n
+  WHERE (n.has_microscopy IS NULL OR e.has_microscopy = n.has_microscopy)
+    AND (
+      n.has_spores IS NULL
+      OR (e.spore_measurement_count > 0) = n.has_spores
+    )
+    AND (
+      (
+        n.contrast IS NULL
+        AND n.mount IS NULL
+        AND n.sample IS NULL
+        AND n.sample_source IS NULL
+      )
+      OR (
+        e.spore_data_visibility = 'public'::text
+        AND EXISTS (
+          SELECT 1
+          FROM public.spore_measurements m
+          JOIN public.observation_images i
+            ON i.id = m.image_id
+          WHERE i.observation_id = e.id
+            AND i.deleted_at IS NULL
+            AND i.purged_at IS NULL
+            AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+            AND (n.contrast IS NULL OR lower(btrim(coalesce(i.contrast, ''))) = lower(btrim(n.contrast)))
+            AND (n.mount IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = lower(btrim(n.mount)))
+            AND (n.sample IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
+            AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
+            AND (
+              public.is_public_microscopy_measurement_type(m.measurement_type)
+            )
+            AND m.length_um IS NOT NULL
+            AND m.width_um IS NOT NULL
+        )
+      )
+    )
+  ORDER BY e.observed_on DESC, e.id DESC
+  LIMIT (SELECT lim FROM normalized)
+  OFFSET (SELECT off FROM normalized)
+
+Query Parameters: $1 = '100', $2 = '0', $3 = NULL, $4 = NULL, $5 = NULL, $6 = NULL, $7 = NULL, $8 = NULL, $9 = NULL, $10 = NULL, $11 = NULL, $12 = NULL, $13 = NULL, $14 = NULL, $15 = NULL
+Limit  (cost=38.83..39.24 rows=1 width=469) (actual time=1.781..1.955 rows=5 loops=1)
+  Output: o_1.id, (NULLIF(regexp_replace(regexp_replace(lower(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text)))), '[^a-z0-9]+'::text, '-'::text, 'g'::text), '(^-|-$)'::text, ''::text, 'g'::text), ''::text)), (NULLIF(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text))), ''::text)), (NULLIF(btrim(COALESCE(o_1.common_name, ''::text)), ''::text)), (community_contributor_label(o_1.user_id, o_1.author)), o_1.date, (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text)), (NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text)), (COALESCE(o_1.location_precision, 'hidden'::text)), (CASE WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'exact'::text) THEN NULLIF(btrim(COALESCE(o_1.location, ''::text)), ''::text) WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'fuzzed'::text) THEN COALESCE(NULLIF(btrim(COALESCE(r.label, ''::text)), ''::text), (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text))) WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'region'::text) THEN NULLIF(btrim(COALESCE(r.label, ''::text)), ''::text) ELSE NULL::text END), ((i.id IS NOT NULL)), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN o.spore_statistics ELSE NULL::jsonb END), i.contrast, i.mount_medium, (CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END), (CASE WHEN (lower(btrim(COALESCE(i.sample_source, ''::text))) = ANY ('{spore_print,hymenium,stipe,pileus,context,other}'::text[])) THEN lower(btrim(i.sample_source)) WHEN ((NULLIF(btrim(i.sample_source), ''::text) IS NULL) AND (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{spore_print,"spore print",print}'::text[]))) THEN 'spore_print'::text ELSE NULL::text END), (NULLIF(btrim(COALESCE(i.stain, ''::text)), ''::text))
+  Buffers: shared hit=99
+  CTE normalized
+    ->  Result  (cost=0.00..0.06 rows=1 width=306) (actual time=0.008..0.009 rows=1 loops=1)
+          Output: GREATEST(1, LEAST(COALESCE($1, 50), 100)), GREATEST(COALESCE($2, 0), 0), NULLIF(btrim(COALESCE($3, ''::text)), ''::text), NULLIF(btrim(COALESCE($4, ''::text)), ''::text), NULLIF(btrim(COALESCE($5, ''::text)), ''::text), NULLIF(btrim(COALESCE($6, ''::text)), ''::text), $7, $8, $9, $10, NULLIF(btrim(COALESCE($11, ''::text)), ''::text), NULLIF(btrim(COALESCE($12, ''::text)), ''::text), NULLIF(btrim(COALESCE($13, ''::text)), ''::text), NULLIF(btrim(lower(COALESCE($15, ''::text))), ''::text), NULLIF(btrim(COALESCE($14, ''::text)), ''::text)
+  InitPlan 3
+    ->  CTE Scan on normalized  (cost=0.00..0.02 rows=1 width=4) (actual time=0.009..0.010 rows=1 loops=1)
+          Output: normalized.off
+  InitPlan 4
+    ->  CTE Scan on normalized normalized_1  (cost=0.00..0.02 rows=1 width=4) (actual time=0.000..0.000 rows=1 loops=1)
+          Output: normalized_1.lim
+  ->  Result  (cost=38.32..38.73 rows=1 width=469) (actual time=1.771..1.944 rows=5 loops=1)
+        Output: o_1.id, (NULLIF(regexp_replace(regexp_replace(lower(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text)))), '[^a-z0-9]+'::text, '-'::text, 'g'::text), '(^-|-$)'::text, ''::text, 'g'::text), ''::text)), (NULLIF(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text))), ''::text)), (NULLIF(btrim(COALESCE(o_1.common_name, ''::text)), ''::text)), community_contributor_label(o_1.user_id, o_1.author), o_1.date, (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text)), (NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text)), (COALESCE(o_1.location_precision, 'hidden'::text)), CASE WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'exact'::text) THEN NULLIF(btrim(COALESCE(o_1.location, ''::text)), ''::text) WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'fuzzed'::text) THEN COALESCE(NULLIF(btrim(COALESCE(r.label, ''::text)), ''::text), (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text))) WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'region'::text) THEN NULLIF(btrim(COALESCE(r.label, ''::text)), ''::text) ELSE NULL::text END, ((i.id IS NOT NULL)), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN o.spore_statistics ELSE NULL::jsonb END), i.contrast, i.mount_medium, (CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END), CASE WHEN (lower(btrim(COALESCE(i.sample_source, ''::text))) = ANY ('{spore_print,hymenium,stipe,pileus,context,other}'::text[])) THEN lower(btrim(i.sample_source)) WHEN ((NULLIF(btrim(i.sample_source), ''::text) IS NULL) AND (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{spore_print,"spore print",print}'::text[]))) THEN 'spore_print'::text ELSE NULL::text END, (NULLIF(btrim(COALESCE(i.stain, ''::text)), ''::text))
+        Buffers: shared hit=99
+        ->  Sort  (cost=38.32..38.33 rows=1 width=559) (actual time=1.630..1.632 rows=5 loops=1)
+              Output: o_1.id, (NULLIF(regexp_replace(regexp_replace(lower(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text)))), '[^a-z0-9]+'::text, '-'::text, 'g'::text), '(^-|-$)'::text, ''::text, 'g'::text), ''::text)), (NULLIF(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text))), ''::text)), (NULLIF(btrim(COALESCE(o_1.common_name, ''::text)), ''::text)), o_1.date, (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text)), (NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text)), (COALESCE(o_1.location_precision, 'hidden'::text)), ((i.id IS NOT NULL)), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN o.spore_statistics ELSE NULL::jsonb END), i.contrast, i.mount_medium, (CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END), (NULLIF(btrim(COALESCE(i.stain, ''::text)), ''::text)), o_1.user_id, o_1.author, o_1.location_precision, o_1.location, r.label, o_1.country_code, i.sample_source, i.sample_type
+              Sort Key: o_1.date DESC, o_1.id DESC
+              Sort Method: quicksort  Memory: 26kB
+              Buffers: shared hit=88
+              ->  Nested Loop  (cost=15.01..38.31 rows=1 width=559) (actual time=1.280..1.621 rows=5 loops=1)
+                    Output: o_1.id, NULLIF(regexp_replace(regexp_replace(lower(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text)))), '[^a-z0-9]+'::text, '-'::text, 'g'::text), '(^-|-$)'::text, ''::text, 'g'::text), ''::text), NULLIF(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text))), ''::text), NULLIF(btrim(COALESCE(o_1.common_name, ''::text)), ''::text), o_1.date, NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text), COALESCE(o_1.location_precision, 'hidden'::text), (i.id IS NOT NULL), CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END, CASE WHEN (o.spore_data_visibility = 'public'::text) THEN o.spore_statistics ELSE NULL::jsonb END, i.contrast, i.mount_medium, CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END, NULLIF(btrim(COALESCE(i.stain, ''::text)), ''::text), o_1.user_id, o_1.author, o_1.location_precision, o_1.location, r.label, o_1.country_code, i.sample_source, i.sample_type
+                    Join Filter: (((n.has_microscopy IS NULL) OR ((i.id IS NOT NULL) = n.has_microscopy)) AND ((n.has_spores IS NULL) OR ((CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END > 0) = n.has_spores)) AND (((n.contrast IS NULL) AND (n.mount IS NULL) AND (n.sample IS NULL) AND (n.sample_source IS NULL)) OR ((o.spore_data_visibility = 'public'::text) AND EXISTS(SubPlan 2))))
+                    Buffers: shared hit=82
+                    ->  Nested Loop Left Join  (cost=15.01..32.82 rows=1 width=435) (actual time=1.244..1.567 rows=5 loops=1)
+                          Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label, o.spore_data_visibility, o.spore_statistics, i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain, (count(*))
+                          Buffers: shared hit=82
+                          ->  Nested Loop Left Join  (cost=10.27..28.06 rows=1 width=427) (actual time=0.708..0.881 rows=5 loops=1)
+                                Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label, o.spore_data_visibility, o.spore_statistics, i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain
+                                Buffers: shared hit=55
+                                ->  Nested Loop  (cost=0.15..17.91 rows=1 width=387) (actual time=0.013..0.035 rows=5 loops=1)
+                                      Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label, o.spore_data_visibility, o.spore_statistics, n_1.contrast, n_1.mount, n_1.sample, n_1.sample_source
+                                      Buffers: shared hit=7
+                                      ->  Nested Loop  (cost=0.15..17.88 rows=1 width=259) (actual time=0.013..0.033 rows=5 loops=1)
+                                            Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label, o.spore_data_visibility, o.spore_statistics
+                                            Inner Unique: true
+                                            Join Filter: (o_1.id = o.id)
+                                            Rows Removed by Join Filter: 10
+                                            Buffers: shared hit=7
+                                            ->  Nested Loop  (cost=0.15..16.73 rows=1 width=220) (actual time=0.011..0.022 rows=5 loops=1)
+                                                  Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label
+                                                  Join Filter: (((n_2.date_from IS NULL) OR (o_1.date >= n_2.date_from)) AND ((n_2.date_to IS NULL) OR (o_1.date <= n_2.date_to)) AND ((n_2.region IS NULL) OR (NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text) = n_2.region)) AND ((n_2.genus IS NULL) OR (lower(COALESCE(NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), ''::text)) = lower(n_2.genus))) AND ((n_2.species IS NULL) OR (lower(COALESCE(NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text), ''::text)) = lower(n_2.species))) AND ((n_2.country IS NULL) OR (lower(COALESCE(NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text), ''::text)) = lower(n_2.country))) AND ((n_2.observer IS NULL) OR (COALESCE(community_contributor_label(o_1.user_id, o_1.author), ''::text) ~~* (('%'::text || n_2.observer) || '%'::text))))
+                                                  Buffers: shared hit=2
+                                                  ->  Nested Loop Left Join  (cost=0.15..16.39 rows=1 width=220) (actual time=0.009..0.018 rows=5 loops=1)
+                                                        Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label
+                                                        Inner Unique: true
+                                                        Buffers: shared hit=2
+                                                        ->  Nested Loop Anti Join  (cost=0.00..4.21 rows=1 width=188) (actual time=0.007..0.013 rows=5 loops=1)
+                                                              Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location
+                                                              Join Filter: (p.id = o_1.user_id)
+                                                              Rows Removed by Join Filter: 5
+                                                              Buffers: shared hit=2
+                                                              ->  Seq Scan on public.observations o_1  (cost=0.00..3.15 rows=2 width=188) (actual time=0.004..0.008 rows=6 loops=1)
+                                                                    Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location
+                                                                    Filter: ((NOT COALESCE(o_1.is_draft, false)) AND (o_1.visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o_1.user_id) IS NOT TRUE)))
+                                                                    Rows Removed by Filter: 1
+                                                                    Buffers: shared hit=1
+                                                              ->  Materialize  (cost=0.00..1.02 rows=1 width=16) (actual time=0.000..0.000 rows=1 loops=6)
+                                                                    Output: p.id
+                                                                    Buffers: shared hit=1
+                                                                    ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.002..0.002 rows=1 loops=1)
+                                                                          Output: p.id
+                                                                          Filter: p.is_banned
+                                                                          Rows Removed by Filter: 1
+                                                                          Buffers: shared hit=1
+                                                        ->  Index Scan using public_regions_pkey on public.public_regions r  (cost=0.15..6.17 rows=1 width=64) (actual time=0.000..0.000 rows=0 loops=5)
+                                                              Output: r.id, r.country_code, r.label, r.sort_order, r.map_x, r.map_y
+                                                              Index Cond: (r.id = o_1.region_id)
+                                                  ->  CTE Scan on normalized n_2  (cost=0.00..0.02 rows=1 width=168) (actual time=0.000..0.000 rows=1 loops=5)
+                                                        Output: n_2.lim, n_2.off, n_2.genus, n_2.species, n_2.country, n_2.region, n_2.date_from, n_2.date_to, n_2.has_spores, n_2.has_microscopy, n_2.contrast, n_2.mount, n_2.sample, n_2.sample_source, n_2.observer
+                                            ->  Seq Scan on public.observations o  (cost=0.00..1.07 rows=7 width=47) (actual time=0.001..0.001 rows=3 loops=5)
+                                                  Output: o.spore_data_visibility, o.spore_statistics, o.id
+                                                  Buffers: shared hit=5
+                                      ->  CTE Scan on normalized n_1  (cost=0.00..0.02 rows=1 width=128) (actual time=0.000..0.000 rows=1 loops=5)
+                                            Output: n_1.lim, n_1.off, n_1.genus, n_1.species, n_1.country, n_1.region, n_1.date_from, n_1.date_to, n_1.has_spores, n_1.has_microscopy, n_1.contrast, n_1.mount, n_1.sample, n_1.sample_source, n_1.observer
+                                ->  Limit  (cost=10.12..10.13 rows=1 width=184) (actual time=0.169..0.169 rows=0 loops=5)
+                                      Output: i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain, i.captured_at, i.created_at
+                                      Buffers: shared hit=48
+                                      ->  Sort  (cost=10.12..10.13 rows=1 width=184) (actual time=0.168..0.168 rows=0 loops=5)
+                                            Output: i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain, i.captured_at, i.created_at
+                                            Sort Key: i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
+                                            Sort Method: quicksort  Memory: 25kB
+                                            Buffers: shared hit=48
+                                            ->  Index Scan using observation_images_observation_id_idx on public.observation_images i  (cost=0.13..10.11 rows=1 width=184) (actual time=0.137..0.166 rows=1 loops=5)
+                                                  Output: i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain, i.captured_at, i.created_at
+                                                  Index Cond: (i.observation_id = o_1.id)
+                                                  Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.image_type = 'microscope'::text) AND ((n_1.contrast IS NULL) OR (lower(btrim(COALESCE(i.contrast, ''::text))) = lower(btrim(n_1.contrast)))) AND ((n_1.mount IS NULL) OR (lower(btrim(COALESCE(i.mount_medium, ''::text))) = lower(btrim(n_1.mount)))) AND ((n_1.sample IS NULL) OR (CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END = lower(btrim(n_1.sample)))) AND ((n_1.sample_source IS NULL) OR (CASE WHEN (lower(btrim(COALESCE(i.sample_source, ''::text))) = ANY ('{spore_print,hymenium,stipe,pileus,context,other}'::text[])) THEN lower(btrim(i.sample_source)) WHEN ((NULLIF(btrim(i.sample_source), ''::text) IS NULL) AND (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{spore_print,"spore print",print}'::text[]))) THEN 'spore_print'::text ELSE NULL::text END = n_1.sample_source)) AND ((i.storage_path IS NOT NULL) OR metadata_microscope_parent_is_public(i.id)) AND (((n_1.contrast IS NULL) AND (n_1.mount IS NULL) AND (n_1.sample IS NULL) AND (n_1.sample_source IS NULL)) OR (ANY (i.id = (hashed SubPlan 6).col1))))
+                                                  Rows Removed by Filter: 1
+                                                  Buffers: shared hit=45
+                                                  SubPlan 6
+                                                    ->  Seq Scan on public.spore_measurements m_2  (cost=0.00..1.57 rows=4 width=8) (never executed)
+                                                          Output: m_2.image_id
+                                                          Filter: ((m_2.width_um IS NOT NULL) AND ((m_2.measurement_type IS NULL) OR (btrim(m_2.measurement_type) = ''::text) OR (lower(btrim(m_2.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                          ->  Aggregate  (cost=4.74..4.75 rows=1 width=8) (actual time=0.137..0.137 rows=1 loops=5)
+                                Output: count(*)
+                                Buffers: shared hit=27
+                                ->  Nested Loop  (cost=0.00..4.74 rows=1 width=0) (actual time=0.104..0.136 rows=2 loops=5)
+                                      Join Filter: (m.image_id = i_1.id)
+                                      Rows Removed by Join Filter: 13
+                                      Buffers: shared hit=27
+                                      ->  Seq Scan on public.observation_images i_1  (cost=0.00..3.12 rows=1 width=8) (actual time=0.100..0.128 rows=1 loops=5)
+                                            Output: i_1.id
+                                            Filter: ((i_1.deleted_at IS NULL) AND (i_1.purged_at IS NULL) AND (i_1.observation_id = o_1.id) AND (i_1.image_type = 'microscope'::text) AND ((i_1.storage_path IS NOT NULL) OR metadata_microscope_parent_is_public(i_1.id)))
+                                            Rows Removed by Filter: 7
+                                            Buffers: shared hit=24
+                                      ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.57 rows=4 width=8) (actual time=0.002..0.011 rows=24 loops=3)
+                                            Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                                            Filter: ((m.width_um IS NOT NULL) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                                            Buffers: shared hit=3
+                    ->  CTE Scan on normalized n  (cost=0.00..0.02 rows=1 width=130) (actual time=0.000..0.000 rows=1 loops=5)
+                          Output: n.lim, n.off, n.genus, n.species, n.country, n.region, n.date_from, n.date_to, n.has_spores, n.has_microscopy, n.contrast, n.mount, n.sample, n.sample_source, n.observer
+                    SubPlan 2
+                      ->  Nested Loop  (cost=0.00..5.37 rows=1 width=0) (never executed)
+                            Join Filter: (i_2.id = m_1.image_id)
+                            ->  Seq Scan on public.observation_images i_2  (cost=0.00..3.75 rows=1 width=8) (never executed)
+                                  Output: i_2.id
+                                  Filter: ((i_2.deleted_at IS NULL) AND (i_2.purged_at IS NULL) AND (i_2.observation_id = o_1.id) AND (i_2.image_type = 'microscope'::text) AND ((n.contrast IS NULL) OR (lower(btrim(COALESCE(i_2.contrast, ''::text))) = lower(btrim(n.contrast)))) AND ((n.mount IS NULL) OR (lower(btrim(COALESCE(i_2.mount_medium, ''::text))) = lower(btrim(n.mount)))) AND ((n.sample IS NULL) OR (CASE WHEN (lower(btrim(COALESCE(i_2.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i_2.sample_type)) ELSE NULL::text END = lower(btrim(n.sample)))) AND ((n.sample_source IS NULL) OR (CASE WHEN (lower(btrim(COALESCE(i_2.sample_source, ''::text))) = ANY ('{spore_print,hymenium,stipe,pileus,context,other}'::text[])) THEN lower(btrim(i_2.sample_source)) WHEN ((NULLIF(btrim(i_2.sample_source), ''::text) IS NULL) AND (lower(btrim(COALESCE(i_2.sample_type, ''::text))) = ANY ('{spore_print,"spore print",print}'::text[]))) THEN 'spore_print'::text ELSE NULL::text END = n.sample_source)) AND ((i_2.storage_path IS NOT NULL) OR metadata_microscope_parent_is_public(i_2.id)))
+                            ->  Seq Scan on public.spore_measurements m_1  (cost=0.00..1.57 rows=4 width=8) (never executed)
+                                  Output: m_1.id, m_1.image_id, m_1.user_id, m_1.length_um, m_1.width_um, m_1.measurement_type, m_1.gallery_rotation, m_1.p1_x, m_1.p1_y, m_1.p2_x, m_1.p2_y, m_1.p3_x, m_1.p3_y, m_1.p4_x, m_1.p4_y, m_1.notes, m_1.desktop_id, m_1.measured_at, m_1.image_key, m_1.thumb_key
+                                  Filter: ((m_1.width_um IS NOT NULL) AND ((m_1.measurement_type IS NULL) OR (btrim(m_1.measurement_type) = ''::text) OR (lower(btrim(m_1.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+Query Identifier: 6257179111675970538
+LOG:  duration: 5.946 ms  plan:
+Query Text: SELECT count(*) FROM public.search_public_observations(p_limit => 100);
+Aggregate  (cost=12.75..12.76 rows=1 width=8) (actual time=5.944..5.944 rows=1 loops=1)
+  Output: count(*)
+  Buffers: shared hit=1940
+  ->  Function Scan on public.search_public_observations  (cost=0.25..10.25 rows=1000 width=0) (actual time=5.943..5.943 rows=5 loops=1)
+        Output: id, "speciesSlug", "speciesName", "speciesCommonName", "observerDisplayName", "observedOn", country, "regionId", "locationPrecision", "locationLabel", "hasMicroscopy", "sporeMeasurementCount", "sporeSummary", "contrastMethod", "mountReagent", "sampleType", "sampleSource", "stainReagent"
+        Function Call: search_public_observations(100, 0, NULL::text, NULL::text, NULL::text, NULL::text, NULL::date, NULL::date, NULL::boolean, NULL::boolean, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text)
+        Buffers: shared hit=1940
+Query Identifier: 7621148610341729945
+LOG:  duration: 0.003 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.003..0.003 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.002..0.003 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.010 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '1'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.009..0.009 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=4
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.009..0.009 rows=1 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=4
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.006..0.006 rows=1 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Rows Removed by Join Filter: 1
+                Buffers: shared hit=3
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.004..0.005 rows=1 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=2
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                            Buffers: shared hit=1
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.001..0.001 rows=1 loops=1)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+                      Rows Removed by Filter: 1
+                      Buffers: shared hit=1
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (actual time=0.003..0.003 rows=1 loops=1)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                Buffers: shared hit=1
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.008 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '2'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.007..0.007 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=4
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.007..0.007 rows=1 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=4
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.005..0.005 rows=1 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Rows Removed by Join Filter: 1
+                Buffers: shared hit=3
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.004..0.004 rows=1 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=2
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Rows Removed by Filter: 1
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                            Buffers: shared hit=1
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.001..0.001 rows=1 loops=1)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+                      Rows Removed by Filter: 1
+                      Buffers: shared hit=1
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (actual time=0.002..0.002 rows=1 loops=1)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                Rows Removed by Filter: 4
+                Buffers: shared hit=1
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.010 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '1'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.009..0.010 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=4
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.009..0.009 rows=1 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=4
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.006..0.006 rows=1 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Rows Removed by Join Filter: 1
+                Buffers: shared hit=3
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.005..0.005 rows=1 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=2
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                            Buffers: shared hit=1
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.001..0.001 rows=1 loops=1)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+                      Rows Removed by Filter: 1
+                      Buffers: shared hit=1
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (actual time=0.003..0.003 rows=1 loops=1)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                Buffers: shared hit=1
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.007 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '2'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.006..0.006 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=4
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.006..0.006 rows=1 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=4
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.004..0.005 rows=1 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Rows Removed by Join Filter: 1
+                Buffers: shared hit=3
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.003..0.003 rows=1 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=2
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Rows Removed by Filter: 1
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (actual time=0.002..0.002 rows=1 loops=1)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                            Buffers: shared hit=1
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.001..0.001 rows=1 loops=1)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+                      Rows Removed by Filter: 1
+                      Buffers: shared hit=1
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (actual time=0.001..0.001 rows=1 loops=1)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                Rows Removed by Filter: 4
+                Buffers: shared hit=1
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.003 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.007 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '3'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.003..0.006 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=1
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.003..0.006 rows=0 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=1
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.003..0.003 rows=0 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Buffers: shared hit=1
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.003..0.003 rows=0 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=1
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.003..0.003 rows=0 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Rows Removed by Filter: 8
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (never executed)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (never executed)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (never executed)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.003 ms  plan:
+Query Text: 
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.observation_images i
+    JOIN public.observations o
+      ON o.id = i.observation_id
+    WHERE i.id = p_image_id
+      AND i.deleted_at IS NULL
+      AND i.purged_at IS NULL
+      AND i.metadata_purpose = 'public_microscopy'
+      AND o.visibility = 'public'
+      AND NOT coalesce(o.is_draft, false)
+      AND o.spore_data_visibility = 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM public.spore_measurements m
+        WHERE m.image_id = i.id
+          -- Only the image owner's own measurements count. spore_measurements
+          -- insert/update RLS does not (yet) require owning image_id, so a
+          -- foreign user's row must never unlock someone else's parent.
+          AND m.user_id = i.user_id
+          AND m.length_um IS NOT NULL
+          AND m.width_um IS NOT NULL
+          AND public.is_public_microscopy_measurement_type(m.measurement_type)
+      )
+  )
+
+Query Parameters: $1 = '3'
+Result  (cost=6.99..7.00 rows=1 width=1) (actual time=0.003..0.003 rows=1 loops=1)
+  Output: (InitPlan 1).col1
+  Buffers: shared hit=1
+  InitPlan 1
+    ->  Nested Loop Semi Join  (cost=0.00..6.99 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+          Join Filter: (i.user_id = m.user_id)
+          Buffers: shared hit=1
+          ->  Nested Loop Anti Join  (cost=0.00..5.35 rows=1 width=24) (actual time=0.002..0.002 rows=0 loops=1)
+                Output: i.id, i.user_id
+                Join Filter: (p.id = o.user_id)
+                Buffers: shared hit=1
+                ->  Nested Loop  (cost=0.00..4.32 rows=1 width=40) (actual time=0.002..0.002 rows=0 loops=1)
+                      Output: i.id, i.user_id, o.user_id
+                      Inner Unique: true
+                      Join Filter: (o.id = i.observation_id)
+                      Buffers: shared hit=1
+                      ->  Seq Scan on public.observation_images i  (cost=0.00..1.12 rows=1 width=32) (actual time=0.002..0.002 rows=0 loops=1)
+                            Output: i.observation_id, i.id, i.user_id
+                            Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.id = $1) AND (i.metadata_purpose = 'public_microscopy'::text))
+                            Rows Removed by Filter: 8
+                            Buffers: shared hit=1
+                      ->  Seq Scan on public.observations o  (cost=0.00..3.17 rows=2 width=24) (never executed)
+                            Output: o.id, o.user_id
+                            Filter: ((NOT COALESCE(o.is_draft, false)) AND (o.visibility = 'public'::text) AND (o.spore_data_visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (public.is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o.user_id) IS NOT TRUE)))
+                ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (never executed)
+                      Output: p.id, p.username, p.display_name, p.avatar_url, p.bio, p.created_at, p.updated_at, p.cloud_plan, p.full_res_storage_enabled, p.storage_quota_bytes, p.storage_used_bytes, p.billing_status, p.billing_provider, p.total_storage_bytes, p.image_count, p.is_admin, p.is_banned, p.is_pro, p.billing_customer_id, p.billing_payment_id, p.billing_checkout_session_id, p.billing_updated_at, p.last_client, p.last_app_version, p.last_client_seen_at, p.profile_completed_at
+                      Filter: p.is_banned
+          ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.63 rows=1 width=24) (never executed)
+                Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                Filter: ((m.width_um IS NOT NULL) AND (m.image_id = $1) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+Query Identifier: 3945044404277590186
+LOG:  duration: 0.002 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.002 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.002..0.002 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.001 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.003 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.003..0.003 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.003..0.003 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.003..0.003 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.002 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.001..0.002 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.001 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.001 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+LOG:  duration: 0.002 ms  plan:
+Query Text: 
+  SELECT nullif(
+    coalesce(
+      nullif(p.display_name, ''),
+      nullif(p.username, ''),
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+
+Query Parameters: $1 = '00000000-0000-4000-8000-00005e0c0001', $2 = NULL
+Limit  (cost=0.00..1.04 rows=1 width=32) (actual time=0.001..0.002 rows=1 loops=1)
+  Output: (NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text))
+  Buffers: shared hit=1
+  ->  Append  (cost=0.00..2.08 rows=2 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+        Buffers: shared hit=1
+        ->  Seq Scan on public.profiles p  (cost=0.00..1.03 rows=1 width=32) (actual time=0.001..0.001 rows=1 loops=1)
+              Output: NULLIF(COALESCE(NULLIF(p.display_name, ''::text), NULLIF(p.username, ''::text), NULLIF($2, ''::text)), ''::text)
+              Filter: (p.id = $1)
+              Buffers: shared hit=1
+        ->  Result  (cost=1.02..1.04 rows=1 width=32) (never executed)
+              Output: NULLIF($2, ''::text)
+              One-Time Filter: (NOT (InitPlan 1).col1)
+              InitPlan 1
+                ->  Seq Scan on public.profiles p_1  (cost=0.00..1.02 rows=1 width=0) (never executed)
+                      Filter: (p_1.id = $1)
+Query Identifier: 5156072196655063962
+ count 
+-------
+     5
+
+== removing the fixture
+LOG:  duration: 1.997 ms  plan:
+Query Text: 
+  WITH normalized AS (
+    SELECT
+      greatest(1, least(coalesce(p_limit, 50), 100)) AS lim,
+      greatest(coalesce(p_offset, 0), 0) AS off,
+      nullif(btrim(coalesce(p_genus, '')), '') AS genus,
+      nullif(btrim(coalesce(p_species, '')), '') AS species,
+      nullif(btrim(coalesce(p_country, '')), '') AS country,
+      nullif(btrim(coalesce(p_region, '')), '') AS region,
+      p_date_from AS date_from,
+      p_date_to AS date_to,
+      p_has_spores AS has_spores,
+      p_has_microscopy AS has_microscopy,
+      nullif(btrim(coalesce(p_contrast, '')), '') AS contrast,
+      nullif(btrim(coalesce(p_mount, '')), '') AS mount,
+      nullif(btrim(coalesce(p_sample, '')), '') AS sample,
+      nullif(btrim(lower(coalesce(p_sample_source, ''))), '') AS sample_source,
+      nullif(btrim(coalesce(p_observer, '')), '') AS observer
+  ),
+  candidate_base AS (
+    SELECT
+      o.id,
+      nullif(btrim(coalesce(o.genus, '')), '') AS genus,
+      nullif(btrim(coalesce(o.species, '')), '') AS species,
+      nullif(btrim(coalesce(o.common_name, '')), '') AS common_name,
+      o.user_id,
+      o.author,
+      o.date AS observed_on,
+      nullif(btrim(coalesce(o.country_code, '')), '') AS country,
+      nullif(btrim(coalesce(o.region_id, '')), '') AS region_id,
+      coalesce(o.location_precision, 'hidden') AS location_precision,
+      nullif(btrim(coalesce(o.location, '')), '') AS location,
+      nullif(btrim(coalesce(r.label, '')), '') AS region_label,
+      public.community_contributor_label(o.user_id, o.author) AS observer_display_name
+    FROM public.observations o
+    LEFT JOIN public.public_regions r
+      ON r.id = o.region_id
+    WHERE o.visibility = 'public'::text
+      AND NOT coalesce(o.is_draft, false)
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.profiles p
+        WHERE p.id = o.user_id
+          AND p.is_banned = true
+      )
+      AND (
+        auth.uid() IS NULL
+        OR public.is_blocked_between(auth.uid(), o.user_id) IS NOT TRUE
+      )
+  ),
+  candidate AS (
+    SELECT cb.*
+    FROM candidate_base cb
+    CROSS JOIN normalized n
+    WHERE (n.genus IS NULL OR lower(coalesce(cb.genus, '')) = lower(n.genus))
+      AND (n.species IS NULL OR lower(coalesce(cb.species, '')) = lower(n.species))
+      AND (n.country IS NULL OR lower(coalesce(cb.country, '')) = lower(n.country))
+      AND (n.region IS NULL OR cb.region_id = n.region)
+      AND (n.date_from IS NULL OR cb.observed_on >= n.date_from)
+      AND (n.date_to IS NULL OR cb.observed_on <= n.date_to)
+      AND (
+        n.observer IS NULL
+        OR coalesce(cb.observer_display_name, '') ILIKE '%' || n.observer || '%'
+      )
+  ),
+  enriched AS (
+    SELECT
+      c.*,
+      latest_image.contrast AS contrast_method,
+      latest_image.mount_medium AS mount_reagent,
+      latest_image.sample_type AS sample_type,
+      latest_image.sample_source AS sample_source,
+      latest_image.stain AS stain_reagent,
+      (latest_image.id IS NOT NULL) AS has_microscopy,
+      o.spore_data_visibility,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+          THEN coalesce(spore_stats.spore_measurement_count, 0::bigint)
+        ELSE 0::bigint
+      END AS spore_measurement_count,
+      CASE
+        WHEN o.spore_data_visibility = 'public'::text
+          THEN o.spore_statistics
+        ELSE NULL::jsonb
+      END AS spore_summary
+    FROM candidate c
+    JOIN public.observations o
+      ON o.id = c.id
+    CROSS JOIN normalized n
+    LEFT JOIN LATERAL (
+      SELECT
+        i.id,
+        i.contrast,
+        i.mount_medium,
+        i.sample_type,
+        i.sample_source,
+        i.stain
+      FROM public.observation_images i
+      WHERE i.observation_id = c.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+        AND (n.contrast IS NULL OR lower(btrim(coalesce(i.contrast, '')))     = lower(btrim(n.contrast)))
+        AND (n.mount    IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = lower(btrim(n.mount)))
+        AND (n.sample   IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
+        AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
+        AND (
+          (
+            n.contrast IS NULL
+            AND n.mount IS NULL
+            AND n.sample IS NULL
+            AND n.sample_source IS NULL
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM public.spore_measurements m
+            WHERE m.image_id = i.id
+              AND m.length_um IS NOT NULL
+              AND m.width_um IS NOT NULL
+              AND (
+                public.is_public_microscopy_measurement_type(m.measurement_type)
+              )
+          )
+        )
+      ORDER BY i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
+      LIMIT 1
+    ) latest_image ON true
+    LEFT JOIN LATERAL (
+      SELECT count(*)::bigint AS spore_measurement_count
+      FROM public.observation_images i
+      JOIN public.spore_measurements m
+        ON m.image_id = i.id
+      WHERE i.observation_id = c.id
+        AND i.deleted_at IS NULL
+        AND i.purged_at IS NULL
+        AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+        AND (
+          public.is_public_microscopy_measurement_type(m.measurement_type)
+        )
+        AND m.length_um IS NOT NULL
+        AND m.width_um IS NOT NULL
+    ) spore_stats ON true
+  )
+  SELECT
+    e.id AS id,
+    nullif(
+      regexp_replace(
+        regexp_replace(lower(btrim(concat_ws(' ', e.genus, e.species))), '[^a-z0-9]+', '-', 'g'),
+        '(^-|-$)',
+        '',
+        'g'
+      ),
+      ''
+    ) AS "speciesSlug",
+    nullif(btrim(concat_ws(' ', e.genus, e.species)), '') AS "speciesName",
+    e.common_name AS "speciesCommonName",
+    e.observer_display_name AS "observerDisplayName",
+    e.observed_on AS "observedOn",
+    e.country AS country,
+    e.region_id AS "regionId",
+    e.location_precision AS "locationPrecision",
+    CASE
+      WHEN e.location_precision = 'exact'::text THEN e.location
+      WHEN e.location_precision = 'fuzzed'::text THEN coalesce(e.region_label, e.country)
+      WHEN e.location_precision = 'region'::text THEN e.region_label
+      ELSE NULL::text
+    END AS "locationLabel",
+    e.has_microscopy AS "hasMicroscopy",
+    e.spore_measurement_count AS "sporeMeasurementCount",
+    e.spore_summary AS "sporeSummary",
+    e.contrast_method AS "contrastMethod",
+    e.mount_reagent AS "mountReagent",
+    CASE
+      WHEN lower(btrim(coalesce(e.sample_type, ''))) IN ('fresh', 'dried')
+        THEN lower(btrim(e.sample_type))
+      ELSE NULL::text
+    END AS "sampleType",
+    public.public_normalized_sample_source(e.sample_source, e.sample_type) AS "sampleSource",
+    nullif(btrim(coalesce(e.stain_reagent, '')), '') AS "stainReagent"
+  FROM enriched e
+  CROSS JOIN normalized n
+  WHERE (n.has_microscopy IS NULL OR e.has_microscopy = n.has_microscopy)
+    AND (
+      n.has_spores IS NULL
+      OR (e.spore_measurement_count > 0) = n.has_spores
+    )
+    AND (
+      (
+        n.contrast IS NULL
+        AND n.mount IS NULL
+        AND n.sample IS NULL
+        AND n.sample_source IS NULL
+      )
+      OR (
+        e.spore_data_visibility = 'public'::text
+        AND EXISTS (
+          SELECT 1
+          FROM public.spore_measurements m
+          JOIN public.observation_images i
+            ON i.id = m.image_id
+          WHERE i.observation_id = e.id
+            AND i.deleted_at IS NULL
+            AND i.purged_at IS NULL
+            AND (i.image_type = 'microscope' AND (i.storage_path IS NOT NULL OR public.metadata_microscope_parent_is_public(i.id)))
+            AND (n.contrast IS NULL OR lower(btrim(coalesce(i.contrast, ''))) = lower(btrim(n.contrast)))
+            AND (n.mount IS NULL OR lower(btrim(coalesce(i.mount_medium, ''))) = lower(btrim(n.mount)))
+            AND (n.sample IS NULL OR public.public_normalized_specimen_condition(i.sample_type) = lower(btrim(n.sample)))
+            AND (n.sample_source IS NULL OR public.public_normalized_sample_source(i.sample_source, i.sample_type) = n.sample_source)
+            AND (
+              public.is_public_microscopy_measurement_type(m.measurement_type)
+            )
+            AND m.length_um IS NOT NULL
+            AND m.width_um IS NOT NULL
+        )
+      )
+    )
+  ORDER BY e.observed_on DESC, e.id DESC
+  LIMIT (SELECT lim FROM normalized)
+  OFFSET (SELECT off FROM normalized)
+
+Query Parameters: $1 = '100', $2 = '0', $3 = NULL, $4 = NULL, $5 = NULL, $6 = NULL, $7 = NULL, $8 = NULL, $9 = NULL, $10 = NULL, $11 = NULL, $12 = NULL, $13 = NULL, $14 = 'Counter', $15 = NULL
+Limit  (cost=38.83..39.24 rows=1 width=469) (actual time=1.848..1.994 rows=5 loops=1)
+  Output: o_1.id, (NULLIF(regexp_replace(regexp_replace(lower(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text)))), '[^a-z0-9]+'::text, '-'::text, 'g'::text), '(^-|-$)'::text, ''::text, 'g'::text), ''::text)), (NULLIF(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text))), ''::text)), (NULLIF(btrim(COALESCE(o_1.common_name, ''::text)), ''::text)), (community_contributor_label(o_1.user_id, o_1.author)), o_1.date, (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text)), (NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text)), (COALESCE(o_1.location_precision, 'hidden'::text)), (CASE WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'exact'::text) THEN NULLIF(btrim(COALESCE(o_1.location, ''::text)), ''::text) WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'fuzzed'::text) THEN COALESCE(NULLIF(btrim(COALESCE(r.label, ''::text)), ''::text), (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text))) WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'region'::text) THEN NULLIF(btrim(COALESCE(r.label, ''::text)), ''::text) ELSE NULL::text END), ((i.id IS NOT NULL)), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN o.spore_statistics ELSE NULL::jsonb END), i.contrast, i.mount_medium, (CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END), (CASE WHEN (lower(btrim(COALESCE(i.sample_source, ''::text))) = ANY ('{spore_print,hymenium,stipe,pileus,context,other}'::text[])) THEN lower(btrim(i.sample_source)) WHEN ((NULLIF(btrim(i.sample_source), ''::text) IS NULL) AND (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{spore_print,"spore print",print}'::text[]))) THEN 'spore_print'::text ELSE NULL::text END), (NULLIF(btrim(COALESCE(i.stain, ''::text)), ''::text))
+  Buffers: shared hit=73
+  CTE normalized
+    ->  Result  (cost=0.00..0.06 rows=1 width=306) (actual time=0.004..0.004 rows=1 loops=1)
+          Output: GREATEST(1, LEAST(COALESCE($1, 50), 100)), GREATEST(COALESCE($2, 0), 0), NULLIF(btrim(COALESCE($3, ''::text)), ''::text), NULLIF(btrim(COALESCE($4, ''::text)), ''::text), NULLIF(btrim(COALESCE($5, ''::text)), ''::text), NULLIF(btrim(COALESCE($6, ''::text)), ''::text), $7, $8, $9, $10, NULLIF(btrim(COALESCE($11, ''::text)), ''::text), NULLIF(btrim(COALESCE($12, ''::text)), ''::text), NULLIF(btrim(COALESCE($13, ''::text)), ''::text), NULLIF(btrim(lower(COALESCE($15, ''::text))), ''::text), NULLIF(btrim(COALESCE($14, ''::text)), ''::text)
+  InitPlan 3
+    ->  CTE Scan on normalized  (cost=0.00..0.02 rows=1 width=4) (actual time=0.005..0.005 rows=1 loops=1)
+          Output: normalized.off
+  InitPlan 4
+    ->  CTE Scan on normalized normalized_1  (cost=0.00..0.02 rows=1 width=4) (actual time=0.000..0.000 rows=1 loops=1)
+          Output: normalized_1.lim
+  ->  Result  (cost=38.32..38.73 rows=1 width=469) (actual time=1.842..1.988 rows=5 loops=1)
+        Output: o_1.id, (NULLIF(regexp_replace(regexp_replace(lower(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text)))), '[^a-z0-9]+'::text, '-'::text, 'g'::text), '(^-|-$)'::text, ''::text, 'g'::text), ''::text)), (NULLIF(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text))), ''::text)), (NULLIF(btrim(COALESCE(o_1.common_name, ''::text)), ''::text)), community_contributor_label(o_1.user_id, o_1.author), o_1.date, (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text)), (NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text)), (COALESCE(o_1.location_precision, 'hidden'::text)), CASE WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'exact'::text) THEN NULLIF(btrim(COALESCE(o_1.location, ''::text)), ''::text) WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'fuzzed'::text) THEN COALESCE(NULLIF(btrim(COALESCE(r.label, ''::text)), ''::text), (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text))) WHEN ((COALESCE(o_1.location_precision, 'hidden'::text)) = 'region'::text) THEN NULLIF(btrim(COALESCE(r.label, ''::text)), ''::text) ELSE NULL::text END, ((i.id IS NOT NULL)), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN o.spore_statistics ELSE NULL::jsonb END), i.contrast, i.mount_medium, (CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END), CASE WHEN (lower(btrim(COALESCE(i.sample_source, ''::text))) = ANY ('{spore_print,hymenium,stipe,pileus,context,other}'::text[])) THEN lower(btrim(i.sample_source)) WHEN ((NULLIF(btrim(i.sample_source), ''::text) IS NULL) AND (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{spore_print,"spore print",print}'::text[]))) THEN 'spore_print'::text ELSE NULL::text END, (NULLIF(btrim(COALESCE(i.stain, ''::text)), ''::text))
+        Buffers: shared hit=73
+        ->  Sort  (cost=38.32..38.33 rows=1 width=559) (actual time=1.732..1.734 rows=5 loops=1)
+              Output: o_1.id, (NULLIF(regexp_replace(regexp_replace(lower(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text)))), '[^a-z0-9]+'::text, '-'::text, 'g'::text), '(^-|-$)'::text, ''::text, 'g'::text), ''::text)), (NULLIF(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text))), ''::text)), (NULLIF(btrim(COALESCE(o_1.common_name, ''::text)), ''::text)), o_1.date, (NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text)), (NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text)), (COALESCE(o_1.location_precision, 'hidden'::text)), ((i.id IS NOT NULL)), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END), (CASE WHEN (o.spore_data_visibility = 'public'::text) THEN o.spore_statistics ELSE NULL::jsonb END), i.contrast, i.mount_medium, (CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END), (NULLIF(btrim(COALESCE(i.stain, ''::text)), ''::text)), o_1.user_id, o_1.author, o_1.location_precision, o_1.location, r.label, o_1.country_code, i.sample_source, i.sample_type
+              Sort Key: o_1.date DESC, o_1.id DESC
+              Sort Method: quicksort  Memory: 26kB
+              Buffers: shared hit=68
+              ->  Nested Loop  (cost=15.01..38.31 rows=1 width=559) (actual time=1.234..1.730 rows=5 loops=1)
+                    Output: o_1.id, NULLIF(regexp_replace(regexp_replace(lower(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text)))), '[^a-z0-9]+'::text, '-'::text, 'g'::text), '(^-|-$)'::text, ''::text, 'g'::text), ''::text), NULLIF(btrim(concat_ws(' '::text, NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text))), ''::text), NULLIF(btrim(COALESCE(o_1.common_name, ''::text)), ''::text), o_1.date, NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text), NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text), COALESCE(o_1.location_precision, 'hidden'::text), (i.id IS NOT NULL), CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END, CASE WHEN (o.spore_data_visibility = 'public'::text) THEN o.spore_statistics ELSE NULL::jsonb END, i.contrast, i.mount_medium, CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END, NULLIF(btrim(COALESCE(i.stain, ''::text)), ''::text), o_1.user_id, o_1.author, o_1.location_precision, o_1.location, r.label, o_1.country_code, i.sample_source, i.sample_type
+                    Join Filter: (((n.has_microscopy IS NULL) OR ((i.id IS NOT NULL) = n.has_microscopy)) AND ((n.has_spores IS NULL) OR ((CASE WHEN (o.spore_data_visibility = 'public'::text) THEN COALESCE((count(*)), '0'::bigint) ELSE '0'::bigint END > 0) = n.has_spores)) AND (((n.contrast IS NULL) AND (n.mount IS NULL) AND (n.sample IS NULL) AND (n.sample_source IS NULL)) OR ((o.spore_data_visibility = 'public'::text) AND EXISTS(SubPlan 2))))
+                    Buffers: shared hit=68
+                    ->  Nested Loop Left Join  (cost=15.01..32.82 rows=1 width=435) (actual time=1.222..1.703 rows=5 loops=1)
+                          Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label, o.spore_data_visibility, o.spore_statistics, i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain, (count(*))
+                          Buffers: shared hit=68
+                          ->  Nested Loop Left Join  (cost=10.27..28.06 rows=1 width=427) (actual time=0.672..1.030 rows=5 loops=1)
+                                Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label, o.spore_data_visibility, o.spore_statistics, i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain
+                                Buffers: shared hit=41
+                                ->  Nested Loop  (cost=0.15..17.91 rows=1 width=387) (actual time=0.147..0.350 rows=5 loops=1)
+                                      Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label, o.spore_data_visibility, o.spore_statistics, n_1.contrast, n_1.mount, n_1.sample, n_1.sample_source
+                                      Buffers: shared hit=12
+                                      ->  Nested Loop  (cost=0.15..17.88 rows=1 width=259) (actual time=0.146..0.347 rows=5 loops=1)
+                                            Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label, o.spore_data_visibility, o.spore_statistics
+                                            Inner Unique: true
+                                            Join Filter: (o_1.id = o.id)
+                                            Rows Removed by Join Filter: 10
+                                            Buffers: shared hit=12
+                                            ->  Nested Loop  (cost=0.15..16.73 rows=1 width=220) (actual time=0.144..0.337 rows=5 loops=1)
+                                                  Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label
+                                                  Join Filter: (((n_2.date_from IS NULL) OR (o_1.date >= n_2.date_from)) AND ((n_2.date_to IS NULL) OR (o_1.date <= n_2.date_to)) AND ((n_2.region IS NULL) OR (NULLIF(btrim(COALESCE(o_1.region_id, ''::text)), ''::text) = n_2.region)) AND ((n_2.genus IS NULL) OR (lower(COALESCE(NULLIF(btrim(COALESCE(o_1.genus, ''::text)), ''::text), ''::text)) = lower(n_2.genus))) AND ((n_2.species IS NULL) OR (lower(COALESCE(NULLIF(btrim(COALESCE(o_1.species, ''::text)), ''::text), ''::text)) = lower(n_2.species))) AND ((n_2.country IS NULL) OR (lower(COALESCE(NULLIF(btrim(COALESCE(o_1.country_code, ''::text)), ''::text), ''::text)) = lower(n_2.country))) AND ((n_2.observer IS NULL) OR (COALESCE(community_contributor_label(o_1.user_id, o_1.author), ''::text) ~~* (('%'::text || n_2.observer) || '%'::text))))
+                                                  Buffers: shared hit=7
+                                                  ->  Nested Loop Left Join  (cost=0.15..16.39 rows=1 width=220) (actual time=0.008..0.015 rows=5 loops=1)
+                                                        Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location, r.label
+                                                        Inner Unique: true
+                                                        Buffers: shared hit=2
+                                                        ->  Nested Loop Anti Join  (cost=0.00..4.21 rows=1 width=188) (actual time=0.007..0.012 rows=5 loops=1)
+                                                              Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location
+                                                              Join Filter: (p.id = o_1.user_id)
+                                                              Rows Removed by Join Filter: 5
+                                                              Buffers: shared hit=2
+                                                              ->  Seq Scan on public.observations o_1  (cost=0.00..3.15 rows=2 width=188) (actual time=0.004..0.007 rows=6 loops=1)
+                                                                    Output: o_1.id, o_1.genus, o_1.species, o_1.common_name, o_1.user_id, o_1.author, o_1.date, o_1.country_code, o_1.region_id, o_1.location_precision, o_1.location
+                                                                    Filter: ((NOT COALESCE(o_1.is_draft, false)) AND (o_1.visibility = 'public'::text) AND (((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid IS NULL) OR (is_blocked_between((COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid, o_1.user_id) IS NOT TRUE)))
+                                                                    Rows Removed by Filter: 1
+                                                                    Buffers: shared hit=1
+                                                              ->  Materialize  (cost=0.00..1.02 rows=1 width=16) (actual time=0.000..0.000 rows=1 loops=6)
+                                                                    Output: p.id
+                                                                    Buffers: shared hit=1
+                                                                    ->  Seq Scan on public.profiles p  (cost=0.00..1.02 rows=1 width=16) (actual time=0.001..0.001 rows=1 loops=1)
+                                                                          Output: p.id
+                                                                          Filter: p.is_banned
+                                                                          Rows Removed by Filter: 1
+                                                                          Buffers: shared hit=1
+                                                        ->  Index Scan using public_regions_pkey on public.public_regions r  (cost=0.15..6.17 rows=1 width=64) (actual time=0.000..0.000 rows=0 loops=5)
+                                                              Output: r.id, r.country_code, r.label, r.sort_order, r.map_x, r.map_y
+                                                              Index Cond: (r.id = o_1.region_id)
+                                                  ->  CTE Scan on normalized n_2  (cost=0.00..0.02 rows=1 width=168) (actual time=0.000..0.000 rows=1 loops=5)
+                                                        Output: n_2.lim, n_2.off, n_2.genus, n_2.species, n_2.country, n_2.region, n_2.date_from, n_2.date_to, n_2.has_spores, n_2.has_microscopy, n_2.contrast, n_2.mount, n_2.sample, n_2.sample_source, n_2.observer
+                                            ->  Seq Scan on public.observations o  (cost=0.00..1.07 rows=7 width=47) (actual time=0.001..0.001 rows=3 loops=5)
+                                                  Output: o.spore_data_visibility, o.spore_statistics, o.id
+                                                  Buffers: shared hit=5
+                                      ->  CTE Scan on normalized n_1  (cost=0.00..0.02 rows=1 width=128) (actual time=0.000..0.000 rows=1 loops=5)
+                                            Output: n_1.lim, n_1.off, n_1.genus, n_1.species, n_1.country, n_1.region, n_1.date_from, n_1.date_to, n_1.has_spores, n_1.has_microscopy, n_1.contrast, n_1.mount, n_1.sample, n_1.sample_source, n_1.observer
+                                ->  Limit  (cost=10.12..10.13 rows=1 width=184) (actual time=0.135..0.135 rows=0 loops=5)
+                                      Output: i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain, i.captured_at, i.created_at
+                                      Buffers: shared hit=29
+                                      ->  Sort  (cost=10.12..10.13 rows=1 width=184) (actual time=0.135..0.135 rows=0 loops=5)
+                                            Output: i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain, i.captured_at, i.created_at
+                                            Sort Key: i.captured_at DESC NULLS LAST, i.created_at DESC, i.id DESC
+                                            Sort Method: quicksort  Memory: 25kB
+                                            Buffers: shared hit=29
+                                            ->  Index Scan using observation_images_observation_id_idx on public.observation_images i  (cost=0.13..10.11 rows=1 width=184) (actual time=0.104..0.134 rows=1 loops=5)
+                                                  Output: i.id, i.contrast, i.mount_medium, i.sample_type, i.sample_source, i.stain, i.captured_at, i.created_at
+                                                  Index Cond: (i.observation_id = o_1.id)
+                                                  Filter: ((i.deleted_at IS NULL) AND (i.purged_at IS NULL) AND (i.image_type = 'microscope'::text) AND ((n_1.contrast IS NULL) OR (lower(btrim(COALESCE(i.contrast, ''::text))) = lower(btrim(n_1.contrast)))) AND ((n_1.mount IS NULL) OR (lower(btrim(COALESCE(i.mount_medium, ''::text))) = lower(btrim(n_1.mount)))) AND ((n_1.sample IS NULL) OR (CASE WHEN (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i.sample_type)) ELSE NULL::text END = lower(btrim(n_1.sample)))) AND ((n_1.sample_source IS NULL) OR (CASE WHEN (lower(btrim(COALESCE(i.sample_source, ''::text))) = ANY ('{spore_print,hymenium,stipe,pileus,context,other}'::text[])) THEN lower(btrim(i.sample_source)) WHEN ((NULLIF(btrim(i.sample_source), ''::text) IS NULL) AND (lower(btrim(COALESCE(i.sample_type, ''::text))) = ANY ('{spore_print,"spore print",print}'::text[]))) THEN 'spore_print'::text ELSE NULL::text END = n_1.sample_source)) AND ((i.storage_path IS NOT NULL) OR metadata_microscope_parent_is_public(i.id)) AND (((n_1.contrast IS NULL) AND (n_1.mount IS NULL) AND (n_1.sample IS NULL) AND (n_1.sample_source IS NULL)) OR (ANY (i.id = (hashed SubPlan 6).col1))))
+                                                  Rows Removed by Filter: 1
+                                                  Buffers: shared hit=29
+                                                  SubPlan 6
+                                                    ->  Seq Scan on public.spore_measurements m_2  (cost=0.00..1.57 rows=4 width=8) (never executed)
+                                                          Output: m_2.image_id
+                                                          Filter: ((m_2.width_um IS NOT NULL) AND ((m_2.measurement_type IS NULL) OR (btrim(m_2.measurement_type) = ''::text) OR (lower(btrim(m_2.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                          ->  Aggregate  (cost=4.74..4.75 rows=1 width=8) (actual time=0.134..0.134 rows=1 loops=5)
+                                Output: count(*)
+                                Buffers: shared hit=27
+                                ->  Nested Loop  (cost=0.00..4.74 rows=1 width=0) (actual time=0.101..0.133 rows=2 loops=5)
+                                      Join Filter: (m.image_id = i_1.id)
+                                      Rows Removed by Join Filter: 13
+                                      Buffers: shared hit=27
+                                      ->  Seq Scan on public.observation_images i_1  (cost=0.00..3.12 rows=1 width=8) (actual time=0.098..0.125 rows=1 loops=5)
+                                            Output: i_1.id
+                                            Filter: ((i_1.deleted_at IS NULL) AND (i_1.purged_at IS NULL) AND (i_1.observation_id = o_1.id) AND (i_1.image_type = 'microscope'::text) AND ((i_1.storage_path IS NOT NULL) OR metadata_microscope_parent_is_public(i_1.id)))
+                                            Rows Removed by Filter: 7
+                                            Buffers: shared hit=24
+                                      ->  Seq Scan on public.spore_measurements m  (cost=0.00..1.57 rows=4 width=8) (actual time=0.002..0.011 rows=24 loops=3)
+                                            Output: m.id, m.image_id, m.user_id, m.length_um, m.width_um, m.measurement_type, m.gallery_rotation, m.p1_x, m.p1_y, m.p2_x, m.p2_y, m.p3_x, m.p3_y, m.p4_x, m.p4_y, m.notes, m.desktop_id, m.measured_at, m.image_key, m.thumb_key
+                                            Filter: ((m.width_um IS NOT NULL) AND ((m.measurement_type IS NULL) OR (btrim(m.measurement_type) = ''::text) OR (lower(btrim(m.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+                                            Buffers: shared hit=3
+                    ->  CTE Scan on normalized n  (cost=0.00..0.02 rows=1 width=130) (actual time=0.000..0.000 rows=1 loops=5)
+                          Output: n.lim, n.off, n.genus, n.species, n.country, n.region, n.date_from, n.date_to, n.has_spores, n.has_microscopy, n.contrast, n.mount, n.sample, n.sample_source, n.observer
+                    SubPlan 2
+                      ->  Nested Loop  (cost=0.00..5.37 rows=1 width=0) (never executed)
+                            Join Filter: (i_2.id = m_1.image_id)
+                            ->  Seq Scan on public.observation_images i_2  (cost=0.00..3.75 rows=1 width=8) (never executed)
+                                  Output: i_2.id
+                                  Filter: ((i_2.deleted_at IS NULL) AND (i_2.purged_at IS NULL) AND (i_2.observation_id = o_1.id) AND (i_2.image_type = 'microscope'::text) AND ((n.contrast IS NULL) OR (lower(btrim(COALESCE(i_2.contrast, ''::text))) = lower(btrim(n.contrast)))) AND ((n.mount IS NULL) OR (lower(btrim(COALESCE(i_2.mount_medium, ''::text))) = lower(btrim(n.mount)))) AND ((n.sample IS NULL) OR (CASE WHEN (lower(btrim(COALESCE(i_2.sample_type, ''::text))) = ANY ('{fresh,dried}'::text[])) THEN lower(btrim(i_2.sample_type)) ELSE NULL::text END = lower(btrim(n.sample)))) AND ((n.sample_source IS NULL) OR (CASE WHEN (lower(btrim(COALESCE(i_2.sample_source, ''::text))) = ANY ('{spore_print,hymenium,stipe,pileus,context,other}'::text[])) THEN lower(btrim(i_2.sample_source)) WHEN ((NULLIF(btrim(i_2.sample_source), ''::text) IS NULL) AND (lower(btrim(COALESCE(i_2.sample_type, ''::text))) = ANY ('{spore_print,"spore print",print}'::text[]))) THEN 'spore_print'::text ELSE NULL::text END = n.sample_source)) AND ((i_2.storage_path IS NOT NULL) OR metadata_microscope_parent_is_public(i_2.id)))
+                            ->  Seq Scan on public.spore_measurements m_1  (cost=0.00..1.57 rows=4 width=8) (never executed)
+                                  Output: m_1.id, m_1.image_id, m_1.user_id, m_1.length_um, m_1.width_um, m_1.measurement_type, m_1.gallery_rotation, m_1.p1_x, m_1.p1_y, m_1.p2_x, m_1.p2_y, m_1.p3_x, m_1.p3_y, m_1.p4_x, m_1.p4_y, m_1.notes, m_1.desktop_id, m_1.measured_at, m_1.image_key, m_1.thumb_key
+                                  Filter: ((m_1.width_um IS NOT NULL) AND ((m_1.measurement_type IS NULL) OR (btrim(m_1.measurement_type) = ''::text) OR (lower(btrim(m_1.measurement_type)) = ANY ('{manual,spore,spores}'::text[]))))
+Query Identifier: 6257179111675970538
+LOG:  duration: 4.625 ms  plan:
+Query Text: SELECT count(*) FROM public.search_public_observations(p_limit => 100, p_observer => 'Counter');
+Aggregate  (cost=12.75..12.76 rows=1 width=8) (actual time=4.624..4.624 rows=1 loops=1)
+  Output: count(*)
+  Buffers: shared hit=104
+  ->  Function Scan on public.search_public_observations  (cost=0.25..10.25 rows=1000 width=0) (actual time=4.622..4.622 rows=5 loops=1)
+        Output: id, "speciesSlug", "speciesName", "speciesCommonName", "observerDisplayName", "observedOn", country, "regionId", "locationPrecision", "locationLabel", "hasMicroscopy", "sporeMeasurementCount", "sporeSummary", "contrastMethod", "mountReagent", "sampleType", "sampleSource", "stainReagent"
+        Function Call: search_public_observations(100, 0, NULL::text, NULL::text, NULL::text, NULL::text, NULL::date, NULL::date, NULL::boolean, NULL::boolean, NULL::text, NULL::text, NULL::text, 'Counter'::text, NULL::text)
+        Buffers: shared hit=104
+Query Identifier: -5725206479114402452
+NOTICE:  drop cascades to table perf_spo_cc.fixture
+ observations_left 
+-------------------
+                 0
+

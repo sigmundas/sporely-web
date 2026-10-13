@@ -1,0 +1,28 @@
+BEGIN
+ server_version | container_port |                                                              preload                                                              
+----------------+----------------+-----------------------------------------------------------------------------------------------------------------------------------
+ 17.6           |                | pg_stat_statements, pgaudit, plpgsql, plpgsql_check, pg_cron, pg_net, pgsodium, auto_explain, pg_tle, plan_filter, supabase_vault
+(1 row)
+
+ migrations | first_version  |  last_version  | deferred_present 
+------------+----------------+----------------+------------------
+        128 | 20260521120000 | 20261012100000 | f
+(1 row)
+
+ observations | images | measurements | profiles | users 
+--------------+--------+--------------+----------+-------
+            0 |      0 |            0 |        0 |     0
+(1 row)
+
+                proname                | prosecdef | provolatile | lang |      proconfig       |                        functiondef_sha256                        
+---------------------------------------+-----------+-------------+------+----------------------+------------------------------------------------------------------
+ community_contributor_label           | t         | s           | sql  | {search_path=public} | 82628c1b6c4659b6862baf8879331e391fd57cc5d0e233ec5c547f2e76c1ccd5
+ is_blocked_between                    | t         | s           | sql  | {"search_path=\"\""} | a90de6cf012b0800b2b59461a2a316f9ca4cfd256de59c21da5c34934fd466ff
+ is_public_microscopy_measurement_type | f         | i           | sql  |                      | 78a8030bb60f8665c8c62490b7b8d9e9fbddc75fb16f1aadd7bfad40e31bf7bd
+ metadata_microscope_parent_is_public  | t         | s           | sql  | {"search_path=\"\""} | 27a91c3b3ba87bf2602da8baf932918e76842e4108b6ae7bb47eda8168334718
+ public_normalized_sample_source       | f         | i           | sql  |                      | c85c186bdb5fbda7ad16ee5c232f93ff61ea9f38c19eeeed0359eb5e87eeedc8
+ public_normalized_specimen_condition  | f         | i           | sql  |                      | ef546fbaab8fa54705e186cad3edee3ddaa08964c8d13aedc985375ec6822974
+ search_public_observations            | t         | s           | sql  | {search_path=public} | 84db51be5bcfbcc63d72b6cfb5068cbe12bf18a989c879febf7ebf3bfa9e28c2
+(7 rows)
+
+ROLLBACK

@@ -3,22 +3,22 @@
 Plan: `docs/plans/active/2026-10-13-search-public-observations-performance.md`,
 Stage 1b. Harness: `docs/perf/2026-10-search-public-observations/`.
 
-**Status: harness prepared, local measurements not yet run.** No SQL in this
-directory has been executed yet; sections 5–8 are placeholders until the run
-in section 4 is done.
+**Status: measured on the isolated local database (2026-10-13).** Every
+output is under `2026-10-search-public-observations/results/`. Section 8's
+thresholds are proposals for the owner's decision at the Stage 1b gate.
 
-Why: the stage agent's permission check removes the `< file` redirect before
-it compares a command with the allow rules. With the redirect gone, the
-command is `docker exec -i supabase_db_sporely-stage1b-f92d560 psql -U postgres -X -v ON_ERROR_STOP=1`,
-which no rule matches, because both allow rules include the redirect. A
-piped form confirmed it: the refusal named exactly that redirect-free
-command. Rules that would let the agent run these files, and nothing beyond
-the isolated container:
-
-```
-Bash(docker exec -i supabase_db_sporely-stage1b-f92d560 psql -U postgres -X -v ON_ERROR_STOP=1)
-Bash(docker exec -i supabase_db_sporely-stage1b-f92d560 psql -U postgres -X -At -v ON_ERROR_STOP=1)
-```
+**Summary.**
+- The cost of the current function is proportional to the number of
+  public candidates. It does not depend on the offset, the page size or the
+  microscopy and spores filters.
+- About 85% of the shared buffers come from evaluating
+  `metadata_microscope_parent_is_public` twice for every metadata-parent
+  image of every candidate, once in each `LEFT JOIN LATERAL`.
+- From 1× to 4× the work grows 4.06× (26.0k → 105.5k buffers per call), and
+  the local time grows from 25 ms to about 100 ms.
+- Production spends roughly 10–20× more time per unit of work than this
+  laptop. The 1× production maximum of 2,663 ms therefore leaves no headroom
+  for growth: at 2× the same tail would pass 3 s.
 
 ## 1. Production probe output (input)
 
@@ -122,10 +122,17 @@ Checked from Docker metadata (no SQL), 2026-10-13:
   shared stack's container `supabase_db_zkpjklzfwzefhjluvhfw` (port 54322);
 - this worktree has no `supabase/.temp/project-ref`.
 
-**Not yet checked (needs SQL):** 128 applied migrations, `20260914090000`
-absent, an empty `observations` table, the function hash, and that
-`auto_explain` is preloaded. `isolation-check.sql` prints all of them; it is
-the first file to run.
+Checked with `isolation-check.sql` before any write
+(`results/isolation-check.txt`): PostgreSQL 17.6; 128 applied migrations
+(`20260521120000` … `20261012100000`) with `deferred_present = f`; 0
+observations, images, measurements, profiles and users;
+`search_public_observations` `functiondef_sha256 = 84db51be…a9e28c2`
+(`prosecdef = t`, `search_path=public`), equal to production's;
+`metadata_microscope_parent_is_public` and `community_contributor_label` both
+`SECURITY DEFINER`; `auto_explain` in `shared_preload_libraries`.
+
+After the run, `cleanup.sql` left 0 observations, images and measurements and
+dropped the `perf_spo` schema (`results/cleanup.txt`).
 
 ## 3. Synthetic data (`seed.sql`)
 
@@ -206,14 +213,21 @@ drives the cost.
 
 ## 4. Method and run order
 
-All files run as postgres through `psql` against the isolated container only:
+All files ran as postgres through `psql` against the isolated container
+only, via the owner's fixed wrapper (gate `stage1b-isolated-sql-access`). It
+accepts only a committed, unmodified `.sql` file directly in
+`docs/perf/2026-10-search-public-observations/`, checks the container's
+project label, and runs
+`docker exec -i supabase_db_sporely-stage1b-f92d560 psql -U postgres -X [-At] -v ON_ERROR_STOP=1 < <file>`:
 
 ```
-docker exec -i supabase_db_sporely-stage1b-f92d560 psql -U postgres -X -v ON_ERROR_STOP=1 \
-  < docs/perf/2026-10-search-public-observations/<file>.sql
+<wrapper>/run-stage1b-sql.sh [-At] docs/perf/2026-10-search-public-observations/<file>.sql \
+  > docs/perf/2026-10-search-public-observations/results/<file>-<scale>.txt 2>&1
 ```
 
-(`function-calls.sql` reads best with `-At`.)
+The wrapper passes no `-v` variables, so the scale is chosen by file: `seed.sql`
+(1×, installs the harness), then `seed-2x.sql`, `seed-4x.sql`,
+`seed-1x-skew.sql`. `function-calls.sql` ran with `-At`.
 
 1. `isolation-check.sql`: expect 128 migrations, `deferred_present f`,
    0 observations, hash `84db51be…a9e28c2`, `auto_explain` in
@@ -264,15 +278,219 @@ Limits of the local method, stated in advance:
 
 ## 5. Results
 
-Not yet run.
+Raw outputs (`results/`): `isolation-check.txt`, `counter-check.txt`, and for
+each of `1x`, `2x`, `4x` and `1x-skew`: `seed-*.txt`, `bench-*.txt`,
+`function-calls-*.txt`, `plans-prepared-*.txt`, `plans-*.txt`; `cleanup.txt`.
+Every seed passed its own check that the probe's exact targets were reproduced
+at its scale (the seed raises otherwise; its output has no error).
+
+### 5.1 Helper-call counter (`counter-check.sql`, empty database)
+
+Fixture: 5 candidates, 3 metadata-parent rows on candidates that pass the
+laterals' cheaper quals.
+
+| case | `community_contributor_label` | `metadata_microscope_parent_is_public` | expected |
+| --- | --: | --: | --- |
+| 0: direct calls, 5 label + 3 helper | 5 | 3 | 5 and 3, exact |
+| 1: search, no filters, limit 100 (5 rows) | 5 | 6 | 5 (one per returned row) and 3 × 2 laterals |
+| 2: search, `p_observer` set | 10 | 6 | one per candidate in the filter + one per output row |
+| 3: search, Microscopy `true`, limit 2 | 2 | 6 | label only for returned rows; helper for every candidate |
+
+The nested VERBOSE plan shows where each count comes from:
+- `metadata_microscope_parent_is_public` appears in the filter of the image
+  scan inside each of the two laterals: the latest-image lateral and the
+  spore-count lateral. It is evaluated once per microscope image that passes
+  `deleted_at IS NULL AND purged_at IS NULL AND image_type = 'microscope'`
+  and has `storage_path IS NULL`, so 3 rows × 2 laterals = 6.
+- `community_contributor_label` is in the `Result` node above the top `Sort`.
+  The planner postpones it past the sort, so it runs once per row that
+  reaches `LIMIT`, offset rows included. When `p_observer` is set it is also
+  in the candidate join filter. There is no common-subexpression reuse, so it
+  then runs twice for matching rows.
+
+Both counts match the plan exactly, and both helpers are `SECURITY DEFINER`
+(never inlined), so **both counts are available**. No `EXPLAIN` estimates are
+substituted.
+
+### 5.2 Timing and buffers per scenario (`bench.sql`, 20 measured calls as anon)
+
+Full-scan scenarios are every scenario without a genus, date or observer
+filter (sids 1–22 and 28–32). Their ranges:
+
+| seed | candidates | median ms | p95 ms | max ms | shared hit / call | margin under 3 s (worst max) |
+| --- | --: | --- | --- | --- | --- | --: |
+| 1× | 227 | 24.1–27.0 | 24.5–41.4 | 24.6–77.3 | 25,959–26,186 | 2,922.7 ms |
+| 2× | 454 | 47.0–54.2 | 48.0–81.7 | 48.3–120.3 | 52,287–52,949 | 2,879.7 ms |
+| 4× | 908 | 94.3–104.0 | 96.4–161.3 | 98.8–173.0 | 105,380–106,291 | 2,827.0 ms |
+| 1× skew (sensitivity) | 227 | 27.7–32.2 | 28.7–55.2 | 28.8–69.2 | 25,945–26,172 | 2,930.8 ms |
+
+Default request (Microscopy `true`, `p_limit` 31) by offset:
+
+| seed | off 0 med / p95 / max, buffers | off 30 | off 60 | off 300 |
+| --- | --- | --- | --- | --- |
+| 1× | 25.0 / 25.9 / 25.9, 25,990 | 24.5 / 25.6 / 26.5, 26,020 | 24.9 / 25.9 / 26.8, 26,050 | 25.2 / 25.6 / 25.8, 26,092 (0 rows) |
+| 2× | 49.0 / 52.6 / 59.0, 52,349 | 49.0 / 53.4 / 53.7, 52,409 | 48.6 / 51.5 / 51.7, 52,469 | 54.2 / 73.8 / 77.7, 52,819 (0 rows) |
+| 4× | 102.7 / 110.6 / 113.0, 105,466 | 104.0 / 161.3 / 173.0, 105,548 | 100.1 / 121.4 / 126.1, 105,631 | 100.1 / 105.6 / 171.0, 106,291 |
+
+Filtered scenarios (median ms / p95 ms, buffers, rows):
+
+| sid | scenario | 1× | 2× | 4× | 1× skew |
+| --: | --- | --- | --- | --- | --- |
+| 23 | genus, Microscopy `true` | 3.8 / 4.1, 2,112, 11 | 6.0 / 6.2, 4,181, 22 | 10.3 / 11.6, 8,338, 31 | 3.5 / 3.9, 1,409, 11 |
+| 24 | genus + species | 2.6 / 2.7, 788, 4 | 3.5 / 3.6, 1,492, 8 | 4.8 / 5.4, 2,921, 16 | 2.5 / 2.8, 568, 4 |
+| 25 | taxon miss (then sid 1 as fallback) | 1.6 / 1.7, 161, 0 | 1.8 / 2.0, 261, 0 | 2.2 / 2.5, 457, 0 | 1.6 / 1.6, 146, 0 |
+| 26 | date range (2026-01-01..06-30) | 8.0 / 8.2, 6,889, 31 | 14.7 / 20.2, 13,816, 31 | 28.7 / 29.4, 27,726, 31 | 10.4 / 10.8, 7,881, 31 |
+| 27 | observer substring | 4.4 / 4.4, 2,181, 8 | 7.4 / 7.8, 4,758, 16 | 13.3 / 14.2, 10,176, 31 | 3.8 / 4.0, 1,257, 8 |
+
+The landing's taxon-free fallback costs sid 25 plus sid 1: 26.6 ms and 26,151
+buffers at 1×, 104.9 ms and 105,923 at 4×. No read blocks were recorded
+(`read_max` 0 everywhere): all data is in shared buffers, as in production
+(346 reads against 38.9 million hits).
+
+The occasional max far above p95 (77.3 ms at 1×, 173.0 ms at 4×) is local
+scheduling noise on a laptop. The buffer counts are identical across all 20
+calls of every scenario.
+
+### 5.3 Helper calls (`function-calls.sql`, one call each, as anon)
+
+| seed | candidates | parents reached per lateral | `metadata_microscope_parent_is_public` (every full-scan scenario) | per candidate | `community_contributor_label` |
+| --- | --: | --: | --: | --: | --- |
+| 1× | 227 | 937 | 1,874 | 8.26 | rows reaching `LIMIT`: 31 (off 0), 61 (off 30), 91 (off 60), 133 (off 300) |
+| 2× | 454 | 1,874 | 3,748 | 8.26 | 31 (off 0), 266 (off 300) |
+| 4× | 908 | 3,748 | 7,496 | 8.26 | 31 (off 0), 331 (off 300) |
+| 1× skew | 227 | 937 | 1,874 | 8.26 | as 1× |
+
+- The helper count is exactly 2 × parents reached, in every scenario without
+  a genus, date or observer filter, whatever the microscopy and spores
+  filter, offset or page size. With a filter on `observations` columns it
+  falls with the matching candidates. For example, at 1× genus gives 138,
+  genus + species 40, the date range 494 and the observer filter 130.
+- The label count is 236, 472 and 943 for the observer substring at 1×, 2×
+  and 4×: one per candidate (227, 454, 908) for the filter, plus one per row
+  leaving the sort.
+- In `track_functions` time, the helper accounts for 26–33 ms of a 35–44 ms
+  call at 1× (about 75%). At 4× it is 109–155 ms of 142–197 ms. Function
+  tracking itself adds overhead, so these totals are higher than `bench.sql`'s.
+
+### 5.4 Plans (`plans-prepared.sql`, all 32 scenarios; `plans.sql`, cross-check)
+
+Every scenario has the same plan shape at every scale, under both
+`force_generic_plan` and `force_custom_plan`. The argument values reach the
+body only through the `normalized` CTE, which is referenced several times
+and is therefore materialized, so even a custom plan cannot see them. Both
+modes estimate `rows=1` for the candidate set (actual 227 at 1×, 908 at 4×),
+which is why every join is a nested loop.
+
+Default request (sid 1), per node, generic plan; the `auto_explain` body
+plan of a real call (`plans-1x.txt`) has the same nodes and buffers:
+
+| node | 1× time / buffers | 4× time / buffers (custom plan) | share of buffers |
+| --- | --- | --- | --: |
+| candidates: Bitmap Heap Scan on `observations` via `idx_observations_visibility`, banned anti-join (Seq Scan on `profiles` per candidate), `observations_pkey` re-join | 0.8 ms / 1,013 | 7.0 ms / 5,863 (2,735 in the `profiles` scans) | 4–6% |
+| latest-image lateral: Index Scan `observation_images_observation_id_idx` with the helper in its filter, top-N sort, loops = candidates | 10.6 ms / 11,020 | 43.1 ms / 44,024 | 42% |
+| spore-count lateral: the same image scan and helper (11,020 / 44,024) plus `spore_measurements_image_id_idx` (2,849 / 11,416), loops = candidates | 12.8 ms / 13,869 | 54.0 ms / 55,440 | 53% |
+| join filter (microscopy, spores), top-N sort on `(date DESC, id DESC)`, `Result` (label), `Limit` | 0.6 ms / 31 | 1.9 ms / 86 | <1% |
+| total | 24.8 ms / 25,933 | 106.1 ms / 105,413 | |
+
+- The image scans that gate on the helper cost 11.8 buffers per helper call
+  at both scales (11,020 / 937 and 44,024 / 3,748).
+- `plans.sql`: `auto_explain` logged the body plan for every full-scan
+  scenario and for the date range (body 7.0 ms). The genus and observer
+  bodies ran under its 5 ms threshold and were not logged, so their per-node
+  evidence is in `plans-prepared-*.txt`.
+- psql writes `\echo` labels to stdout and `LOG` lines to stderr, which are
+  buffered separately, so the labels in `plans-*.txt` do not line up with the
+  logs. Each logged body carries its own `Query Parameters` line, which
+  identifies the scenario.
 
 ## 6. Report
 
-Not yet written. To cover, from section 5: where the time goes; growth from 1×
-to 2× to 4× and with offset; indexes used and ignored; distance from 3 s per
-scenario; whether the local plans plausibly match production (compare local
-buffers per call and the anon mean of 236.9 ms and 11,843 buffers against the
-1× results); and the sensitivity run.
+**Where the time goes.** For every public candidate, before any filter,
+sort or pagination, the function runs two laterals that each scan the
+candidate's images and call `metadata_microscope_parent_is_public` once per
+metadata parent. That is 8.26 helper calls per candidate on this seed.
+Together the laterals hold 95% of the buffers and almost all of the time.
+The candidate scan, the filters, the sort, the offset and the label are
+under 6% together. The contributor label is cheap: the planner already
+evaluates it only for rows that reach `LIMIT`.
+
+**Phase attribution** of today's costs, for the plan's two groups:
+- *Eligibility and pagination (phase 1):* the candidate scan and banned
+  check (4–6%), the microscopy and spores decisions, and the sort, offset and
+  `LIMIT` (<1%). Today the microscopy and spores decisions are taken from the
+  laterals' results, so part of the laterals' cost is the eligibility work
+  phase 1 must keep: one helper-gated `EXISTS` per candidate and filter.
+- *Enrichment (phase 2):* the rest of both laterals (latest image,
+  spore-measurement count), the contributor label, and the prep/stain and
+  location fields. Today all of it runs for every candidate, not just for
+  returned rows. That is the part the two-phase design bounds.
+
+**Growth with data size.** Work is linear in candidates: about 115 shared
+buffers per candidate (114.5 at 1×, 115.3 at 2×, 116.2 at 4×) and about
+0.11 ms per candidate locally.
+- From 1× to 4× the buffers grow 4.06× and the median time 4.1× (25.0 →
+  102.7 ms for the default request).
+- The offset barely matters. Offset 300 adds 102 buffers at 1× and 825 at
+  4×, all from labels for skipped rows, and no measurable time.
+- The microscopy and spores filters do not reduce the work either: `false`
+  and `true` cost the same as `NULL`, because they are applied after both
+  laterals.
+- Only filters on `observations` columns (genus, species, date, observer)
+  shrink the candidate set, and the cost falls in proportion.
+
+**Sensitivity run (skewed parents and measurements, 1×).** It reaches the
+same 937 parents, makes the same 1,874 helper calls and uses the same 26k
+buffers. The median time rises from about 25 to about 29 ms, because 12
+observations carry about 445 measurements each for the spore count. The cost
+depends on the total number of parents on public candidates, not on how they
+are spread. Measurement concentration adds a little time but no buffers in
+the eligibility path.
+
+**Indexes.**
+- **Used:**
+  - `idx_observations_visibility` (bitmap) for the candidate set;
+  - `observations_pkey` for the re-join;
+  - `observation_images_observation_id_idx` in both laterals. Production
+    shows the duplicate `idx_observation_images_observation_id` taking those
+    scans (2.3 million) instead; the two are interchangeable;
+  - `spore_measurements_image_id_idx` for the count;
+  - `public_regions_pkey` at 1× (a Seq Scan at 4×, with an empty table).
+- **Ignored:**
+  - `observations_date_idx`: the order is applied by a top-N sort after
+    every candidate is enriched, so an ordered index scan cannot help;
+  - `observation_images_microscope_captured_at_idx`: it is partial
+    (`captured_at IS NOT NULL`), while the lateral sorts by
+    `captured_at DESC NULLS LAST, created_at DESC, id DESC`. Production also
+    shows 0 scans;
+  - `observations_genus_species_idx` and
+    `idx_observations_species_spore_visibility`: the genus and species
+    predicates compare `lower(coalesce(nullif(btrim(...))))`, so they are
+    filtered in the candidate join filter.
+
+  There is no index on `profiles.is_banned`; the banned anti-join seq-scans
+  `profiles` once per candidate (26 rows at 1×, 104 at 4× locally).
+
+**Distance from 3 s, locally.** Every scenario is far below 3 s on this
+machine: the worst maximum is 173.0 ms at 4× (margin 2,827 ms). Local margins
+are not production margins, though; see the next paragraph.
+
+**Do the local plans plausibly match production?** In kind, yes. In speed,
+production is much slower per unit of work.
+- **Buffers.** Production anon averages 11,843 buffers per call. Locally a
+  full-scan call at 1× uses 26,000, and filtered calls use 161–6,889.
+  Production's mix includes species-page and genus calls and taxon misses,
+  so a mean below the full-scan cost is consistent with this plan. It is
+  also consistent with production having fewer parents per candidate than
+  the seed assumes; the probe cannot tell these apart.
+- **Speed.** Locally a full-scan call does about 1,040 buffers per ms
+  (25,990 / 25.0). Production's mean does about 50 (11,843 / 236.9), roughly
+  20× slower per buffer. Its slow tail (2,663 ms maximum, standard deviation
+  337 ms) is about 11× its mean.
+- **Projection.** Production cost per call would grow linearly with public
+  candidates, as it does locally. Then at 2× the production mean would be
+  about 474 ms and the 1× tail about 5.3 s, well past the 3 s timeout. At
+  1× the tail already touches it, which matches the two baseline timeouts
+  and the 2026-10-13 page-2 failure.
 
 ## 7. What only a production plan could settle
 
@@ -290,19 +508,104 @@ Independent of the local results:
 - Any PostgreSQL version or settings difference between production and the
   local image (`work_mem`, `jit`, `random_page_cost`).
 
+## 7. What only a production plan could settle
+
+Independent of the local results:
+- The plan production actually chooses for the body with its real statistics,
+  including 1,126 dead image tuples and its real, unknown per-observation
+  distribution of parents and measurements.
+- Whether production's 11,843 buffers per call come from the same nodes as
+  the local plan's buffers.
+- Production's helper call counts per request, which depend on that real
+  distribution.
+- The effect of concurrent Explorer traffic (page 1 and page 2 in parallel,
+  facets) on the slow tail: the 2,663 ms maximum and the pooled standard
+  deviation of 337 ms against a 236.9 ms mean.
+- Any PostgreSQL version or settings difference between production and the
+  local image (`work_mem`, `jit`, `random_page_cost`).
+- Why production does about 20× less work per ms than this machine, and
+  whether that comes from the plan, from contention or from the instance's
+  CPU. The 20× is what turns a 25 ms local call into a 237 ms production
+  mean.
+- How the banned-owner checks behave with production's real number of
+  `profiles` rows, which the probe did not count. Locally they are a Seq
+  Scan of a 26–104-row table once per candidate (2,735 buffers at 4×), and
+  the helper repeats the check once per call. With many more profiles the
+  planner may choose differently, and the cost may grow.
+
 ## 8. Proposed Stage 3 thresholds
 
-Not yet proposed: every number needs the section 5 measurements. The
-structure the plan requires:
-- **Eligibility filtering and pagination (phase 1):** p95 and maximum per
-  scenario at 1× and 4× and at offsets 0, 30 and 300; shared buffers per call;
-  `metadata_microscope_parent_is_public` calls per candidate; allowed growth
-  from 1× to 4×.
-- **Enrichment (phase 2):** cost per returned row; `community_contributor_label`
-  (and any enrichment-time `metadata_microscope_parent_is_public`) calls per
-  returned row; near-zero growth from 1× to 4× at a fixed page size.
-- **Overall:** end-to-end p95 and maximum per scenario, each with a stated
-  margin under 3 s.
+Proposals for the owner's decision at the Stage 1b gate. Every number is
+measured with this harness on the Stage 1b seed, locally, on the isolated
+stack, as anon:
+- time with `bench.sql` (20 measured calls, `percentile_disc` p95);
+- buffers as the top node's shared hits;
+- helper calls with `function-calls.sql`.
+
+A threshold holds for **every** scenario in `perf_spo.scenario` (all `NULL` /
+`true` / `false` combinations, offsets 0, 30 and 300) unless the line says
+otherwise.
+
+**How Stage 3 separates the phases.**
+- Phase 1 is the `MATERIALIZED` page-id CTE that Stage 2 requires. Its time
+  and buffers are that CTE node's actual time and shared hits in the
+  `plans-prepared.sql` generic plan.
+- Phase 1 helper calls are counted by running the page-id query alone as a
+  local, test-only statement through `function-calls.sql`.
+- Phase 2 is the total minus phase 1.
+
+Today's references: 1× full scan 25.0 ms median, about 26,000 buffers,
+8.26 helper calls per candidate. At 4×: 102.7 ms, about 105,500 buffers.
+
+**Eligibility filtering and pagination (phase 1).** Phase 1 still scans the
+candidates, so it may grow linearly, but it must not repeat today's
+per-parent double helper evaluation.
+
+| measure | 1× | 4× |
+| --- | --- | --- |
+| p95 time | ≤ 7 ms | ≤ 22 ms |
+| maximum time | ≤ 14 ms | ≤ 44 ms |
+| shared buffers per call, at most one of `p_has_microscopy` / `p_has_spores` non-NULL | ≤ 20 per candidate (≤ 4,540) | ≤ 20 per candidate (≤ 18,160) |
+| shared buffers per call, both non-NULL | ≤ 35 per candidate (≤ 7,945) | ≤ 35 per candidate (≤ 31,780) |
+| `metadata_microscope_parent_is_public` calls | ≤ 1.0 per candidate per non-NULL microscopy/spores filter; 0 when both are NULL | same |
+| `community_contributor_label` calls | ≤ 1.0 per candidate when `p_observer` is set; 0 otherwise | same |
+| growth 1× → 4× (buffers, and p95 time) | ≤ 4.5× | |
+
+The offset may add only the rows it skips: at offset 300, phase-1 buffers
+may exceed the offset-0 value by at most 5%.
+
+**Enrichment (phase 2), returned rows only.**
+
+| measure | threshold (1× and 4×) |
+| --- | --- |
+| shared buffers | ≤ 120 per returned row (≤ 3,720 for 31 rows, ≤ 6,120 for 51) |
+| time | ≤ 0.1 ms per returned row (≤ 3.1 ms for 31, ≤ 5.1 ms for 51), at p95 |
+| `community_contributor_label` | exactly 1 per returned row. Today it is one per row reaching `LIMIT`: 61 at offset 30, 331 at offset 300 at 4× |
+| `metadata_microscope_parent_is_public` | ≤ 2 × the metadata parents of the returned rows, and ≤ 24 per returned row |
+| growth 1× → 4× at a fixed page size | ≤ 1.2× in buffers and in p95 time |
+
+**Overall (end to end).**
+
+| measure | 1× | 4× |
+| --- | --- | --- |
+| p95 time | ≤ 10 ms | ≤ 25 ms |
+| maximum time | ≤ 20 ms | ≤ 50 ms |
+| shared buffers per call (page 31) | ≤ 8,500 | ≤ 24,000 |
+
+**Margin under 3 s.** Local time does not transfer directly to production,
+so each margin is stated through today's observed ratio. Production's 1×
+maximum (2,663 ms) is 103× the local 1× p95 of the default request
+(25.9 ms). With the same ratio:
+- 1× p95 ≤ 10 ms projects to a production maximum of about 1,030 ms, a
+  margin of about 1,970 ms (66%).
+- 4× p95 ≤ 25 ms projects to about 2,575 ms, a margin of about 425 ms (14%).
+
+In buffers, the 4× limit (24,000) is below today's 1× cost (26,000). So at
+four times today's data the function would do less work than it does now.
+
+The ratio is an assumption. It holds only if production's slow tail scales
+with work, as section 6 suggests. A production plan capture, or the post-deploy
+`pg_stat_statements` window, would test it.
 
 ## 9. Optional production plan capture (prepared, not run)
 

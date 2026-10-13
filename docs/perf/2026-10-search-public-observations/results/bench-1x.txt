@@ -1,0 +1,37 @@
+== bench at 1x base
+== per scenario (ms; buffers are 8 kB pages per call; margin = 3000 - max)
+ sid |              label               | rows | median_ms | p95_ms | max_ms | margin_ms | hit_median | hit_max | read_max 
+-----+----------------------------------+------+-----------+--------+--------+-----------+------------+---------+----------
+   1 | default mic=true lim31 off0      |   31 |      25.0 |   25.9 |   25.9 |    2974.1 |      25990 |   25990 |        0
+   2 | default mic=true lim31 off30     |   31 |      24.5 |   25.6 |   26.5 |    2973.5 |      26020 |   26020 |        0
+   3 | default mic=true lim31 off60     |   31 |      24.9 |   25.9 |   26.8 |    2973.2 |      26050 |   26050 |        0
+   4 | default mic=true lim31 off300    |    0 |      25.2 |   25.6 |   25.8 |    2974.2 |      26092 |   26092 |        0
+   5 | spo=null mic=null off0           |   31 |      24.8 |   25.5 |   25.7 |    2974.3 |      25990 |   25990 |        0
+   6 | spo=null mic=null off30          |   31 |      24.5 |   25.2 |   25.3 |    2974.7 |      26020 |   26020 |        0
+   7 | spo=null mic=true off0           |   31 |      24.4 |   25.1 |   25.2 |    2974.8 |      25990 |   25990 |        0
+   8 | spo=null mic=true off30          |   31 |      24.8 |   25.4 |   25.5 |    2974.5 |      26020 |   26020 |        0
+   9 | spo=null mic=false off0          |   31 |      24.2 |   24.7 |   24.9 |    2975.1 |      25990 |   25990 |        0
+  10 | spo=null mic=false off30         |   31 |      24.1 |   24.5 |   24.6 |    2975.4 |      26020 |   26020 |        0
+  11 | spo=true mic=null off0           |   31 |      24.7 |   29.5 |   30.1 |    2969.9 |      25990 |   25990 |        0
+  12 | spo=true mic=null off30          |   31 |      24.7 |   25.0 |   25.3 |    2974.7 |      26020 |   26020 |        0
+  13 | spo=true mic=true off0           |   31 |      25.3 |   27.4 |   30.3 |    2969.7 |      25990 |   25990 |        0
+  14 | spo=true mic=true off30          |   31 |      27.0 |   33.0 |   33.1 |    2966.9 |      26020 |   26020 |        0
+  15 | spo=true mic=false off0          |    0 |      24.4 |   25.8 |   26.0 |    2974.0 |      25959 |   25959 |        0
+  16 | spo=true mic=false off30         |    0 |      25.1 |   41.4 |   72.6 |    2927.4 |      25959 |   25959 |        0
+  17 | spo=false mic=null off0          |   31 |      25.6 |   28.7 |   31.8 |    2968.2 |      25990 |   25990 |        0
+  18 | spo=false mic=null off30         |   31 |      26.0 |   29.1 |   36.2 |    2963.8 |      26020 |   26020 |        0
+  19 | spo=false mic=true off0          |    6 |      24.8 |   29.6 |   77.3 |    2922.7 |      25965 |   25965 |        0
+  20 | spo=false mic=true off30         |    0 |      24.3 |   25.0 |   25.1 |    2974.9 |      25965 |   25965 |        0
+  21 | spo=false mic=false off0         |   31 |      24.3 |   24.8 |   25.1 |    2974.9 |      25990 |   25990 |        0
+  22 | spo=false mic=false off30        |   31 |      24.5 |   25.2 |   25.9 |    2974.2 |      26020 |   26020 |        0
+  23 | genus mic=true off0              |   11 |       3.8 |    4.1 |    4.1 |    2995.9 |       2112 |    2112 |        0
+  24 | genus+species mic=true off0      |    4 |       2.6 |    2.7 |    2.7 |    2997.3 |        788 |     788 |        0
+  25 | taxon miss (fallback = sid 1)    |    0 |       1.6 |    1.7 |    1.7 |    2998.3 |        161 |     161 |        0
+  26 | date range mic=true off0         |   31 |       8.0 |    8.2 |    8.2 |    2991.8 |       6889 |    6889 |        0
+  27 | observer substring mic=true off0 |    8 |       4.4 |    4.4 |    4.7 |    2995.3 |       2181 |    2181 |        0
+  28 | table lim51 mic=true off0        |   51 |      25.2 |   26.1 |   27.2 |    2972.8 |      26010 |   26010 |        0
+  29 | table lim51 mic=true off51       |   51 |      25.7 |   28.0 |   32.2 |    2967.8 |      26061 |   26061 |        0
+  30 | table lim51 mic=null off0        |   51 |      25.3 |   25.7 |   25.7 |    2974.3 |      26010 |   26010 |        0
+  31 | spo=null mic=null off300         |    0 |      25.6 |   27.6 |   35.6 |    2964.4 |      26186 |   26186 |        0
+  32 | spo=null mic=false off300        |    0 |      24.7 |   25.5 |   26.1 |    2973.9 |      26053 |   26053 |        0
+

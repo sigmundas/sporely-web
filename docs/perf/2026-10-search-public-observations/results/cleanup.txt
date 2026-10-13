@@ -1,0 +1,27 @@
+BEGIN
+DELETE 8982
+DELETE 5585
+DELETE 787
+DELETE 26
+DELETE 26
+DROP SCHEMA
+NOTICE:  drop cascades to 13 other objects
+DETAIL:  drop cascades to table perf_spo.obs
+drop cascades to table perf_spo.seeded
+drop cascades to table perf_spo.scenario
+drop cascades to function perf_spo.call_sql(integer)
+drop cascades to function perf_spo.owner(integer,integer)
+drop cascades to function perf_spo.alloc(integer,integer[],integer)
+drop cascades to function perf_spo.add_image(bigint,uuid,text,text,boolean,text,boolean,boolean,timestamp with time zone,integer)
+drop cascades to function perf_spo.add_meas(bigint,uuid,integer,text,integer)
+drop cascades to function perf_spo.clear()
+drop cascades to function perf_spo.seed(integer,text)
+drop cascades to function perf_spo.fcalls()
+drop cascades to function perf_spo.body_sql()
+drop cascades to function perf_spo.exec_args(integer)
+COMMIT
+ observations_left | images_left | measurements_left 
+-------------------+-------------+-------------------
+                 0 |           0 |                 0
+(1 row)
+
