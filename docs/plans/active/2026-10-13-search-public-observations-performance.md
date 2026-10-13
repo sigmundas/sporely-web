@@ -161,10 +161,53 @@ committed by the agent as the first section of
 `docs/perf/2026-10-search-public-observations.md`. No production access.
 The output is that evidence doc plus a seed script.
 
+**Recorded before Stage 1b (owner, 2026-10-13).**
+- **Probe run.** The owner ran the probe from `a4b9cb8` on production once,
+  at 18:22:46 UTC on 2026-10-13. It returned all seven result sets, ended
+  in `ROLLBACK`, and reported `wrote_nothing = t`.
+- **Owner-reported summary.** The full aggregate output is the input
+  committed to the evidence doc.
+  - `search_public_observations` as anon: 63 entries, 3,287 calls, mean
+    236.9 ms, maximum 2,663.3 ms, pooled standard deviation 337.2 ms;
+  - `pg_stat_statements`: 4,793 of 5,000 entries, `dealloc` 0;
+  - 228 public observations: 133 with gated microscopy and 127 with public
+    spore measurements;
+  - 988 metadata-parent microscope images and 8,982 spore measurements.
+- **Reference hash (outstanding requirement #4): matches.** It was
+  verified on 2026-10-13 on an isolated local Supabase stack built from
+  `origin/main` `f92d560`, with all 128 migration files applied and the
+  deferred `20260914090000` absent, as in production. The stack had its own
+  project ID and ports, and was stopped and removed afterwards. The shared
+  local database was not used.
+  - Its `search_public_observations` `functiondef_sha256` is
+    `84db51be5bcfbcc63d72b6cfb5068cbe12bf18a989c879febf7ebf3bfa9e28c2`,
+    with `prosecdef = t` and `search_path=public`. That equals the
+    production probe's hash.
+  - So production runs exactly the definition in `20260925120000`. The
+    later `20261001195524` only mentions the function in a comment.
+- **Scale definitions (outstanding requirement #1).**
+  - **1×** means exactly the observed production counts in the committed
+    probe output. That covers the counts above, plus each table's
+    `n_live_tup` for all visibilities, drafts and private rows included,
+    since the function scans and filters them.
+  - **2×** and **4×** multiply every count by 2 and 4, keeping all shares
+    and per-observation distributions. There is no separate rounding-up
+    factor. 4× is the growth margin, and thresholds are stated against
+    these exact scales.
+  - The probe gives totals, not per-observation distributions. The seed
+    derives them from the totals, for example about 71 spore measurements
+    per spore-bearing observation (8,982 / 127) and about 7.4
+    metadata-parent images per observation with gated microscopy
+    (988 / 133). It records every such assumption in the evidence doc.
+  - Production is slow at only 228 public observations, so the cost
+    probably comes from per-row helper work and non-public rows, not from
+    the number of public observations. The report must test that, for
+    example with one variant that skews metadata parents or measurements
+    per observation, labelled as a sensitivity run.
+
 1. **Realistic local data.** Add `docs/perf/2026-10-search-public-observations/seed.sql`.
    - It is deterministic and synthetic, in the style of the batch harness.
-     It is scaled to the probe output's counts and shares, rounded up so the data
-     covers expected growth.
+     It is parameterized by scale (1×, 2×, 4×), as defined above.
    - It includes ineligible decoys for every visibility gate, metadata
      parents (public and unpublished), and deleted or purged images.
    - It ends with `ANALYZE`, and has a matching `cleanup.sql`.
