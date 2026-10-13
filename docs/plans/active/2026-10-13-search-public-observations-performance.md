@@ -6,7 +6,21 @@ Status (2026-10-13):
 - **The single authorized production statistics collection has been
   performed** (2026-10-13 18:22:46 UTC). It must not be repeated.
 - **Stage 1b** is approved to start once this revision's intake has no
-  blocking findings and the isolated database checks pass.
+  blocking findings and the isolated database checks below pass.
+  - **Isolated database for Stage 1b:** a local Supabase stack built from
+    `origin/main` `f92d560` without the deferred `20260914090000`, as
+    production has it. Project ID `sporely-stage1b-f92d560`, database
+    container `supabase_db_sporely-stage1b-f92d560`, host port 56522.
+  - **Isolation checks**, all must hold before the run starts:
+    - its own project label, containers and Docker network;
+    - its own data volume, distinct from the shared local stack's
+      (`supabase_db_zkpjklzfwzefhjluvhfw`, port 54322);
+    - all 128 migration files applied, and `20260914090000` absent;
+    - an empty `observations` table;
+    - no `supabase/.temp/project-ref` link to any remote project.
+  - The stage agent may reach that container only by running SQL files in
+    `docs/perf/2026-10-search-public-observations/` through `psql`. It
+    must not use the shared stack or production.
 - **Not approved:** Stage 2 and later, any further production query,
   statistics collection or profiling, and any production SQL change. Each
   needs its own explicit gate below.
@@ -210,15 +224,33 @@ The output is that evidence doc plus a seed script.
       non-metadata-parent images come from it.
     - **Deterministic allocation.** No `random()`. Rows are assigned to
       observations by fixed modular rules, in the style of the batch
-      harness `seed.sql`. One owner holds 146 public observations to
-      reproduce the skew, and the rest share the remainder at 2 or so
-      each. The evidence doc states every per-observation distribution the
+      harness `seed.sql`.
+    - **Owners.** The probe computes `percentile_disc` over public
+      non-draft observations grouped by owner. With 228 observations,
+      p95 = maximum = 146 forces exactly one owner with 146 and at most 19
+      owners in all: with 20 or more, the 95th-percentile rank falls below
+      the top owner.
+      - The seed uses exactly 19 public-observation owners with these
+        counts: one with 146; nine with 1; one with 2; eight with 5, 6, 7,
+        8, 9, 10, 12 and 14. That totals 228, and `percentile_disc` gives
+        p50 2, p95 146 and maximum 146, matching the probe exactly.
+      - The real number of owners is unknown, at most 19. This allocation
+        is one deterministic choice consistent with the probe. The
+        evidence doc says so.
+      - The non-public and draft observations (559 at 1×) are spread
+        across the same 19 owners in proportion to their public counts,
+        plus a fixed set of owners with no public observations. This is an
+        assumption. The evidence doc states every per-observation distribution the
       allocation implies, for example about 71 measurements per
       spore-bearing observation and about 7.4 metadata-parent images per
       gated-microscopy observation. Each is marked as an assumption, not
       a measurement.
-  - **2×** and **4×** multiply every count by 2 and 4, keeping all shares
-    and per-observation distributions. There is no separate rounding-up
+  - **2×** and **4×** replicate the whole 1× population 2 or 4 times:
+    every owner, with all of their observations, images and measurements,
+    as new synthetic owners. Every count doubles or quadruples, and every
+    share and per-observation distribution is unchanged. Because whole
+    owners are replicated, the owner percentiles stay at p50 2, p95 146
+    and maximum 146 (checked at 2× with 38 owners and 4× with 76). There is no separate rounding-up
     factor. 4× is the growth margin, and thresholds are stated against
     these exact scales.
   - The probe gives totals, not per-observation distributions. The seed
@@ -365,8 +397,10 @@ Nothing is deployed.
      metadata_microscope_parent_is_public(id)` for microscopy; the visible
      measurement types for spores.
    - Order by `(observed_on DESC, id DESC)`, apply the clamped
-     `LIMIT/OFFSET`, and fence it (`MATERIALIZED` CTE or `OFFSET 0`) so the
-     enrichment cannot be pushed below it.
+     `LIMIT/OFFSET`, and fence it with an explicit `MATERIALIZED` page-id
+     CTE so the enrichment cannot be pushed below it. `OFFSET 0` alone is
+     not accepted as the fence. The local plan must show that all phase-2
+     enrichment runs after pagination.
 2. **Phase 2, enrichment.** For those at most 100 ids only, compute the
    latest image, the spore statistics and summary, the observer label and
    the prep/stain fields. Output order equals phase 1's order.
