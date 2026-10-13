@@ -31,7 +31,7 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 
-SELECT plan(152);
+SELECT plan(174);
 
 -- ---------------------------------------------------------------
 -- Helpers (as postgres).
@@ -128,14 +128,14 @@ $fn$;
 
 -- One observation with an image, two measurements, a mosaic with one tile,
 -- a spore summary and a reference use, all owned by the test user.
--- Keys: <tag>.obs, <tag>.img, <tag>.meas, <tag>.meas2, <tag>.mosaic,
+-- Keys: <tag>.obs, <tag>.img, <tag>.img2 (leaf image), <tag>.meas, <tag>.meas2, <tag>.mosaic,
 -- <tag>.summary, <tag>.use.
 CREATE FUNCTION pg_temp.make_fixture(p_tag text) RETURNS void
 LANGUAGE plpgsql AS $fn$
 DECLARE
   v_owner constant uuid := '00000000-0000-4000-8000-0000000b4a01';
   v_set   constant uuid := '0b4a0000-0000-4000-8000-000000000003';
-  v_obs bigint; v_img bigint; v_meas bigint; v_meas2 bigint; v_mosaic bigint;
+  v_obs bigint; v_img bigint; v_img2 bigint; v_meas bigint; v_meas2 bigint; v_mosaic bigint;
   v_summary bigint; v_use uuid := gen_random_uuid();
 BEGIN
   INSERT INTO public.observations (user_id, date, visibility, is_draft, spore_data_visibility, notes)
@@ -144,6 +144,11 @@ BEGIN
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type, notes)
   VALUES (v_obs, v_owner, v_owner || '/' || v_obs || '/brake_' || p_tag || '.webp', 'microscope', 'fixture')
   RETURNING id INTO v_img;
+  -- A second image with no measurements: deleting it reaches only the
+  -- observation_images trigger, not a cascade into a braked child table.
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type, notes)
+  VALUES (v_obs, v_owner, v_owner || '/' || v_obs || '/brake_' || p_tag || '_leaf.webp', 'field', 'fixture leaf')
+  RETURNING id INTO v_img2;
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, notes)
   VALUES (v_img, v_owner, 10.0, 5.0, 'fixture') RETURNING id INTO v_meas;
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, notes)
@@ -161,14 +166,14 @@ BEGIN
   VALUES (v_owner, v_use, v_obs, v_set, 'compared', 1, private.reference_canonical_snapshot(v_owner, v_set));
 
   INSERT INTO fx VALUES
-    (p_tag || '.obs', v_obs::text), (p_tag || '.img', v_img::text),
+    (p_tag || '.obs', v_obs::text), (p_tag || '.img', v_img::text), (p_tag || '.img2', v_img2::text),
     (p_tag || '.meas', v_meas::text), (p_tag || '.meas2', v_meas2::text),
     (p_tag || '.mosaic', v_mosaic::text), (p_tag || '.summary', v_summary::text),
     (p_tag || '.use', v_use::text);
 END
 $fn$;
 
--- The write matrix for one context: 20 statements over the seven braked
+-- The write matrix for one context: 21 statements over the seven braked
 -- tables. Inserts first, then updates, then deletes child-first. Returns the
 -- outcome of each statement, labelled.
 CREATE FUNCTION pg_temp.write_matrix(p_ctx text, p_tag text)
@@ -235,7 +240,9 @@ BEGIN
         $$DELETE FROM public.observation_spore_summaries WHERE id = %s$$, v_summary)),
       (19, 'spore_measurements DELETE', format(
         $$DELETE FROM public.spore_measurements WHERE id = %s$$, v_meas)),
-      (20, 'observations DELETE (cascades to the image)', format(
+      (20, 'observation_images DELETE', format(
+        $$DELETE FROM public.observation_images WHERE id = %s$$, pg_temp.fx(p_tag || '.img2'))),
+      (21, 'observations DELETE', format(
         $$DELETE FROM public.observations WHERE id = %s$$, v_obs))
     ) AS s (n, label, sql)
     ORDER BY n
@@ -407,6 +414,37 @@ SELECT is(
   (SELECT n_spores FROM public.observation_spore_summaries WHERE id = pg_temp.fx('old.summary')::bigint),
   2, 'refused UPDATE left the spore summary unchanged');
 
+-- observation_images and spore_measurements writes also touch the parent
+-- observation (AFTER trigger), so the matrix above would still see P0001 from
+-- the observations brake if their own trigger were missing. Disable the
+-- observations brake for this block (inside the test transaction, rolled
+-- back) to prove each table's own trigger refuses.
+ALTER TABLE public.observations DISABLE TRIGGER trg_000_sync_brake;
+
+SELECT is(pg_temp.brake_try('old_desktop', format(
+    $$INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type, notes)
+      VALUES (%s, '00000000-0000-4000-8000-0000000b4a01', %L, 'field', 'isolated')$$,
+    pg_temp.fx('old.obs'), '00000000-0000-4000-8000-0000000b4a01/' || pg_temp.fx('old.obs') || '/isolated.webp')),
+  'P0001:sporely_upgrade_required', 'isolated: observation_images INSERT is refused by its own trigger');
+SELECT is(pg_temp.brake_try('old_desktop', format(
+    $$UPDATE public.observation_images SET notes = 'isolated' WHERE id = %s$$, pg_temp.fx('old.img'))),
+  'P0001:sporely_upgrade_required', 'isolated: observation_images UPDATE is refused by its own trigger');
+SELECT is(pg_temp.brake_try('old_desktop', format(
+    $$DELETE FROM public.observation_images WHERE id = %s$$, pg_temp.fx('old.img2'))),
+  'P0001:sporely_upgrade_required', 'isolated: observation_images DELETE is refused by its own trigger');
+SELECT is(pg_temp.brake_try('old_desktop', format(
+    $$INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, notes)
+      VALUES (%s, '00000000-0000-4000-8000-0000000b4a01', 9.0, 4.0, 'isolated')$$, pg_temp.fx('old.img'))),
+  'P0001:sporely_upgrade_required', 'isolated: spore_measurements INSERT is refused by its own trigger');
+SELECT is(pg_temp.brake_try('old_desktop', format(
+    $$UPDATE public.spore_measurements SET notes = 'isolated' WHERE id = %s$$, pg_temp.fx('old.meas'))),
+  'P0001:sporely_upgrade_required', 'isolated: spore_measurements UPDATE is refused by its own trigger');
+SELECT is(pg_temp.brake_try('old_desktop', format(
+    $$DELETE FROM public.spore_measurements WHERE id = %s$$, pg_temp.fx('old.meas2'))),
+  'P0001:sporely_upgrade_required', 'isolated: spore_measurements DELETE is refused by its own trigger');
+
+ALTER TABLE public.observations ENABLE TRIGGER trg_000_sync_brake;
+
 -- Identification variants: case, anon, and a sync-identity value other than 2.
 SELECT is(
   pg_temp.brake_try('old_desktop_mixed_case',
@@ -479,6 +517,84 @@ SELECT is(
     format($$SELECT public.brake_test_definer_set_notes(%s, 'definer')$$, pg_temp.fx('browser.obs'))),
   'ok:1', 'a write inside a SECURITY DEFINER function from a browser succeeds');
 
+-- observation_reference_uses is client-writable only through RPCs. These
+-- test-only SECURITY DEFINER writers reach its trigger the way
+-- sync_observation_reference_use does, without changing production grants
+-- and without needing reference_rls. Each returns the affected row count.
+CREATE FUNCTION public.brake_test_definer_use_insert(p_obs bigint, p_snapshot jsonb) RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $fn$
+DECLARE v_rows bigint;
+BEGIN
+  INSERT INTO public.observation_reference_uses
+    (user_id, id, observation_id, reference_measurement_set_id, role, reference_revision, snapshot_json)
+  VALUES ('00000000-0000-4000-8000-0000000b4a01', gen_random_uuid(), p_obs,
+          '0b4a0000-0000-4000-8000-000000000004', 'compared', 1, p_snapshot);
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows;
+END
+$fn$;
+CREATE FUNCTION public.brake_test_definer_use_update(p_id uuid) RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $fn$
+DECLARE v_rows bigint;
+BEGIN
+  UPDATE public.observation_reference_uses SET note = 'definer' WHERE id = p_id;
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows;
+END
+$fn$;
+CREATE FUNCTION public.brake_test_definer_use_delete(p_id uuid) RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $fn$
+DECLARE v_rows bigint;
+BEGIN
+  DELETE FROM public.observation_reference_uses WHERE id = p_id;
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows;
+END
+$fn$;
+GRANT EXECUTE ON FUNCTION public.brake_test_definer_use_insert(bigint, jsonb) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.brake_test_definer_use_update(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.brake_test_definer_use_delete(uuid) TO authenticated;
+
+-- Old desktop: all three refused. 'ok:1' would require exactly one row
+-- written, so an allowed write cannot pass as a refusal or vice versa.
+SELECT is(
+  pg_temp.brake_try('old_desktop', format(
+    $$SELECT 1 WHERE public.brake_test_definer_use_insert(%s, %L::jsonb) = 1$$,
+    pg_temp.fx('old.obs'), pg_temp.fx('snapshot2'))),
+  'P0001:sporely_upgrade_required', 'old desktop: observation_reference_uses INSERT inside a definer is refused');
+SELECT is(
+  pg_temp.brake_try('old_desktop', format(
+    $$SELECT 1 WHERE public.brake_test_definer_use_update(%L) = 1$$, pg_temp.fx('old.use'))),
+  'P0001:sporely_upgrade_required', 'old desktop: observation_reference_uses UPDATE inside a definer is refused');
+SELECT is(
+  pg_temp.brake_try('old_desktop', format(
+    $$SELECT 1 WHERE public.brake_test_definer_use_delete(%L) = 1$$, pg_temp.fx('old.use'))),
+  'P0001:sporely_upgrade_required', 'old desktop: observation_reference_uses DELETE inside a definer is refused');
+SELECT results_eq(
+  format($$SELECT note, (SELECT count(*) FROM public.observation_reference_uses WHERE observation_id = %s)
+             FROM public.observation_reference_uses WHERE id = %L$$,
+         pg_temp.fx('old.obs'), pg_temp.fx('old.use')),
+  $$VALUES (NULL::text, 1::bigint)$$,
+  'refused definer writes left the old desktop''s reference uses unchanged');
+
+-- Allowed contexts: the same three writes succeed, one row each.
+SELECT is(
+  pg_temp.brake_try(ctx, format(
+    $$SELECT 1 WHERE public.brake_test_definer_use_insert(%s, %L::jsonb) = 1$$,
+    pg_temp.fx(tag || '.obs'), pg_temp.fx('snapshot2'))),
+  'ok:1', ctx || ': observation_reference_uses INSERT inside a definer succeeds')
+  FROM (VALUES ('browser', 'browser'), ('sync_identity_2', 'sync2')) AS c (ctx, tag);
+SELECT is(
+  pg_temp.brake_try(ctx, format(
+    $$SELECT 1 WHERE public.brake_test_definer_use_update(%L) = 1$$, pg_temp.fx(tag || '.use'))),
+  'ok:1', ctx || ': observation_reference_uses UPDATE inside a definer succeeds')
+  FROM (VALUES ('browser', 'browser'), ('sync_identity_2', 'sync2')) AS c (ctx, tag);
+SELECT is(
+  pg_temp.brake_try(ctx, format(
+    $$SELECT 1 WHERE public.brake_test_definer_use_delete(%L) = 1$$, pg_temp.fx(tag || '.use'))),
+  'ok:1', ctx || ': observation_reference_uses DELETE inside a definer succeeds')
+  FROM (VALUES ('browser', 'browser'), ('sync_identity_2', 'sync2')) AS c (ctx, tag);
+
 SELECT is(
   (SELECT prosecdef FROM pg_proc
     WHERE oid = 'public.sync_observation_reference_use(jsonb, bigint, text, jsonb)'::regprocedure),
@@ -520,9 +636,9 @@ SELECT CASE WHEN to_regnamespace('reference_rls') IS NULL
     pg_temp.brake_try('browser', format(
       $$SELECT 1 WHERE public.sync_observation_reference_use(
           jsonb_build_object('id', gen_random_uuid(), 'observation_id', %s,
-                             'reference_measurement_set_id', '0b4a0000-0000-4000-8000-000000000003',
+                             'reference_measurement_set_id', '0b4a0000-0000-4000-8000-000000000004',
                              'role', 'compared', 'reference_revision', 1, 'snapshot_json', %L::jsonb),
-          0, 'current', NULL) ->> 'status' = 'created'$$, pg_temp.fx('browser.obs'), pg_temp.fx('snapshot'))),
+          0, 'current', NULL) ->> 'status' = 'created'$$, pg_temp.fx('webview.obs'), pg_temp.fx('snapshot2'))),
     'ok:1', 'sync_observation_reference_use create from a browser succeeds')
   END;
 
@@ -535,7 +651,7 @@ SELECT is(pg_temp.brake_try('old_desktop',
   'ok:1', 'old desktop can read observations');
 SELECT is(pg_temp.brake_try('old_desktop',
   format($$SELECT 1 FROM public.observation_images WHERE observation_id = %s$$, pg_temp.fx('old.obs'))),
-  'ok:1', 'old desktop can read observation_images');
+  'ok:2', 'old desktop can read observation_images');
 SELECT is(pg_temp.brake_try('old_desktop',
   format($$SELECT 1 FROM public.spore_measurements WHERE image_id = %s$$, pg_temp.fx('old.img'))),
   'ok:2', 'old desktop can read spore_measurements');
