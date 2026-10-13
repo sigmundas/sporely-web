@@ -10,11 +10,12 @@
 --     -v main_sha256=<hex> \
 --     -f supabase/search-public-observations-stats-probe.sql
 --
--- main_sha256 is the functiondef_sha256 this probe prints against a local
--- database reset to the `main` commit being compared (supabase db reset on a
--- clean checkout of that commit). It is passed in rather than pinned here so
--- the comparison always names the main it was taken from. Without it,
--- matches_main is NULL.
+-- -v main_sha256 is optional, and the production probe may run without it;
+-- matches_main is then NULL. The reference hash is not part of Stage 1a: in
+-- Stage 1b it is derived from an isolated local database built from
+-- origin/main at f92d560 (not a stale local main), compared with the
+-- functiondef_sha256 the production run printed, and a mismatch stops the
+-- work.
 --
 -- One READ ONLY transaction ending in ROLLBACK. The only SET is SET LOCAL of
 -- statement_timeout and search_path. No DDL, no write, no reset of any
@@ -46,10 +47,46 @@
 --      idx_scan, size_bytes.
 --   6. function (1 row per overload): function, functiondef_sha256,
 --      main_sha256, matches_main.
+--   7. write check (1 row): wrote_nothing.
 --
--- Local validation: NOT YET RUN. The sample local run is to be recorded here
--- after the probe is run against the local database (see the Stage 1a
--- handoff for the exact commands).
+-- Local validation, 2026-10-13, against the local Supabase CLI database only
+-- (container supabase_db_zkpjklzfwzefhjluvhfw), with exactly:
+--
+--   docker exec -i supabase_db_zkpjklzfwzefhjluvhfw psql -U postgres -X \
+--     -v ON_ERROR_STOP=1 < supabase/search-public-observations-stats-probe.sql
+--
+-- Result: BEGIN, SET, SET, the seven result sets, ROLLBACK, exit 0. The
+-- transaction is READ ONLY, wrote_nothing = t (no transaction id assigned),
+-- and only the columns listed above were printed. That database holds no
+-- observations, so the counts are 0 and the per-owner distribution is NULL;
+-- its one pg_stat_statements entry does not exercise the multi-entry pooling.
+-- Its functiondef_sha256 is not a reference for main (see above). Sample
+-- output, index definitions elided to keep the header short:
+--
+--   1. taken_at 2026-10-13 17:58:16.630872+00 | stats_reset
+--      2026-10-12 10:59:18.426361+00 | dealloc 0 | track top |
+--      max_entries 5000 | entries_now 78
+--   2. postgres | entries 1 | calls 2 | total_exec_ms 350.5 |
+--      mean_exec_ms 175.3 | max_exec_ms 181.2 | stddev_exec_ms 6.0 |
+--      rows 0 | shared_blks_hit 44650 | shared_blks_read 25 |
+--      temp_blks_written 0
+--   3. public_observations 0 | with_gated_microscope_image 0 |
+--      with_public_spore_measurements 0 | metadata_parent_images 0 |
+--      spore_measurements 0 | obs_per_owner_p50/p95/max NULL
+--   4. observation_images 0 live, 0 dead, last_autovacuum
+--        2026-10-12 13:49:26.680692+00, others NULL
+--      observations       0 live, 0 dead, last_autovacuum
+--        2026-10-12 13:49:26.688877+00, others NULL
+--      spore_measurements 0 live, 32 dead, all four NULL
+--   5. 30 rows (8 observation_images, 15 observations, 7 spore_measurements),
+--      e.g. observation_images | observation_images_observation_id_idx |
+--      CREATE INDEX ... USING btree (observation_id) | idx_scan 450 |
+--      size_bytes 16384
+--   6. search_public_observations(integer,integer,text,text,text,text,date,
+--      date,boolean,boolean,text,text,text,text,text) | functiondef_sha256
+--      84db51be5bcfbcc63d72b6cfb5068cbe12bf18a989c879febf7ebf3bfa9e28c2 |
+--      main_sha256 NULL | matches_main NULL
+--   7. wrote_nothing t
 
 \if :{?main_sha256}
 \else
@@ -227,5 +264,8 @@ JOIN pg_namespace ns ON ns.oid = p.pronamespace
 WHERE ns.nspname = 'public'
   AND p.proname = 'search_public_observations'
 ORDER BY 1;
+
+-- 7. Write check: no transaction id is assigned unless something wrote.
+SELECT /* spo_probe */ txid_current_if_assigned() IS NULL AS wrote_nothing;
 
 ROLLBACK;
