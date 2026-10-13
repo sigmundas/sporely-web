@@ -1,7 +1,10 @@
 # `search_public_observations` performance: page first, enrich after
 
-Status: draft, amended after owner review on 2026-10-13. Not started. Not
-approved to run.
+Status: draft, amended after owner review on 2026-10-13. The owner approved
+preparing and reviewing this revision only. Not approved to run:
+- no stage may start;
+- there is no production access, statistics collection or profiling without
+  the explicit gates below.
 Repository: `sporely-web`. Suggested branch:
 `feature/search-public-observations-performance` from `main`.
 Bug report: `sporely-landing`
@@ -32,7 +35,7 @@ candidate it computes:
 Only after all that does it apply the microscopy and spore filters, sort by
 `(observed_on DESC, id DESC)` and apply `LIMIT/OFFSET` (`:936-973`). The
 expensive work therefore likely scales with every public observation, not
-with the page. That is unverified on production data; Stage 1 measures it.
+with the page. That is unverified on production data; Stage 1b measures it.
 
 The batch spore-preview RPC does not change this query.
 
@@ -72,10 +75,10 @@ The batch spore-preview RPC does not change this query.
   - agents never connect to production;
   - nobody enables `auto_explain`, alters database or role settings, runs
     load tests, or changes production SQL;
-  - anything beyond the read-only aggregate probe in Stage 1 needs its own
+  - anything beyond the one read-only aggregate probe run at the Stage 1a gate needs its own
     owner approval.
 - **No indexes are decided in advance.** An index is added only if the
-  Stage 1 evidence and a Stage 2 measurement show it is used and needed. Its
+  Stage 1b evidence and a Stage 2 measurement show it is used and needed. Its
   write and storage cost must be recorded.
 - **Security review.** The function is a public `SECURITY DEFINER` RPC, so
   the Stage 2 candidate needs a `sporely-security-reviewer` APPROVE on its
@@ -83,20 +86,18 @@ The batch spore-preview RPC does not change this query.
 - **Repository deploy path only:** `scripts/supabase-deploy-tree.mjs`
   (`prepare`, `check`, `post-verify`). No direct DDL in the SQL editor, no
   MCP `apply_migration`, no `migration repair`.
-- Stage 1 reuses the local perf harness in
+- Stage 1b reuses the local perf harness in
   `docs/perf/2026-10-batch-spore-preview/` (`seed.sql`, `plans.sql`,
   `parity.sql`, `bench-db.mjs`, `cleanup.sql`) and its synthetic-data rules.
 
-## Stage 1 — Evidence
+## Stage 1a — Prepare the production statistics probe
 
 First read the sections above the stages in `docs/plans/active/2026-10-13-search-public-observations-performance.md`. Their decisions and constraints apply to this stage.
 
-No function or schema change. The output is
-`docs/perf/2026-10-search-public-observations.md` plus a probe and a seed
-script.
+No production access, function or schema change. Output: the probe file.
 
-1. **Production aggregates.** The owner runs a read-only probe once. Prepare
-   it as `supabase/search-public-observations-stats-probe.sql`: one
+1. **Probe.** Prepare `supabase/search-public-observations-stats-probe.sql`:
+   one
    `READ ONLY` transaction, `SET LOCAL statement_timeout = '15s'`, ending in
    `ROLLBACK`. It prints aggregates only: no ids, query text or personal
    data. It reads:
@@ -121,18 +122,46 @@ script.
    - A SHA-256 of `pg_get_functiondef` for `search_public_observations`,
      compared with the function as defined at `main`.
 
-   The owner returns the output. The agent records it in the evidence doc.
-   Running it does not authorize any further production step.
-2. **Realistic local data.** Add `docs/perf/2026-10-search-public-observations/seed.sql`.
+2. **Local validation.** Run the probe against the local database only.
+   Show that it:
+   - completes inside the transaction and ends in `ROLLBACK`;
+   - writes nothing;
+   - prints only the aggregate columns listed above.
+
+   Record the output columns and a sample local run in the probe's header
+   comment.
+
+Pass: the probe is reviewed, validated locally, and contains no `SET`
+beyond `SET LOCAL statement_timeout` and `search_path`. It contains no
+DDL, no write, no reset and no `auto_explain`.
+
+Human gate (production statistics collection):
+- The owner decides whether and when to run the probe once against
+  production, as a read-only aggregate collection, and returns its output.
+- This gate is the only authorization for that one run. Every further
+  production statistics collection or profiling needs its own explicit
+  owner approval.
+- Stage 1b does not start until the output is returned.
+
+## Stage 1b — Local evidence
+
+First read the sections above the stages in `docs/plans/active/2026-10-13-search-public-observations-performance.md`. Their decisions and constraints apply to this stage.
+
+Inputs: the production probe output the owner returned at the Stage 1a gate,
+committed by the agent as the first section of
+`docs/perf/2026-10-search-public-observations.md`. No production access.
+The output is that evidence doc plus a seed script.
+
+1. **Realistic local data.** Add `docs/perf/2026-10-search-public-observations/seed.sql`.
    - It is deterministic and synthetic, in the style of the batch harness.
-     It is scaled to Step 1's counts and shares, rounded up so the data
+     It is scaled to the probe output's counts and shares, rounded up so the data
      covers expected growth.
    - It includes ineligible decoys for every visibility gate, metadata
      parents (public and unpublished), and deleted or purged images.
    - It ends with `ANALYZE`, and has a matching `cleanup.sql`.
 
    Local database only. No production data is copied.
-3. **Local plans.** Measure the current function on that data, locally and
+2. **Local plans.** Measure the current function on that data, locally and
    as `anon`.
    - Use local `auto_explain` (`log_analyze`, `log_buffers`,
      `log_nested_statements`) or the body's statement prepared under both
@@ -153,18 +182,18 @@ script.
    `metadata_microscope_parent_is_public` and `community_contributor_label`.
    Show whether the cost scales with the total number of public observations
    or with the offset.
-4. **Report.** In the evidence doc, cover:
+3. **Report.** In the evidence doc, cover:
    - where the time goes;
    - how cost grows with data size (run the seed at 1×, 2× and 4× the
      production counts);
    - which existing indexes are used or ignored;
    - how close each scenario is to `3s`;
-   - whether the local plans plausibly match production, based on Step 1's
+   - whether the local plans plausibly match production, based on the probe's
      statistics.
 
    Also list what only a production plan could settle.
 
-5. **Proposed thresholds.** From the measurements, propose measurable
+4. **Proposed thresholds.** From the measurements, propose measurable
    pass thresholds for Stage 3. They must be checkable numbers, for
    example:
    - p95 and maximum execution time per scenario at 1× and 4× scale;
@@ -179,9 +208,13 @@ Human gate: the owner reviews the evidence. Three decisions come before
 Stage 2:
 - the Stage 3 pass thresholds, fixed as numbers and recorded in this plan's
   notes. Stage 3 cannot pass without them;
-- whether a production plan capture is needed, which is a separate
-  explicit approval for a session-local `LOAD 'auto_explain'` run by the
-  owner and changes no settings;
+- whether a production plan capture is needed. It is a separate, explicit
+  owner approval for a session-local `LOAD 'auto_explain'`, run by the
+  owner, that changes no settings.
+  - If the owner chooses a capture, Stage 2 does not start until the owner
+    has returned its output.
+  - Stage 2's first step then adds it to the evidence doc, and records any
+    change it makes to the Stage 1b conclusions, before any query design.
 - which index candidates, if any, Stage 2 may evaluate.
 
 ## Stage 2 — Two-phase query candidate
@@ -204,7 +237,7 @@ Nothing is deployed.
 2. **Phase 2, enrichment.** For those at most 100 ids only, compute the
    latest image, the spore statistics and summary, the observer label and
    the prep/stain fields. Output order equals phase 1's order.
-3. **Indexes.** Add only the candidates the Stage 1 gate allowed. For each,
+3. **Indexes.** Add only the candidates the Stage 1b gate allowed. For each,
    show the plan uses it and record its size and write cost. Otherwise add
    none.
 4. **Equivalence.**
@@ -213,7 +246,7 @@ Nothing is deployed.
    - A pgTAP test (`supabase/tests/search_public_observations_two_phase_test.sql`)
      compares the old and new output row by row, order included. It runs
      over a fixture matrix covering every gate and filter, and over the
-     Stage 1 seed. It uses every argument combination the landing sends, and
+     Stage 1b seed. It uses every argument combination the landing sends, and
      every combination of `p_has_microscopy` and `p_has_spores` in {`NULL`,
      `true`, `false`}. It covers offsets 0, 30, 60, past the end, negative
      and `NULL`, and limits 0, 1, 31, 51, 100 and 1000.
@@ -240,8 +273,8 @@ review.
 
 First read the sections above the stages in `docs/plans/active/2026-10-13-search-public-observations-performance.md`. Their decisions and constraints apply to this stage.
 
-Docs only. On the Stage 1 seed at 1×, 2× and 4× scale, compare the old and
-new function for every Stage 1 scenario:
+Docs only. On the Stage 1b seed at 1×, 2× and 4× scale, compare the old and
+new function for every Stage 1b scenario:
 - time (median and p95 over repeated runs);
 - buffers;
 - helper-function call counts.
@@ -255,10 +288,17 @@ harness's `bench-db.mjs` style with bounded local concurrency. Record:
 
 Output: an appended section in `docs/perf/2026-10-search-public-observations.md`.
 
-Pass: every threshold fixed at the Stage 1 gate is met, for every scenario
+Pass: every threshold fixed at the Stage 1b gate is met, for every scenario
 (all `true`/`false`/`NULL` filter combinations included) at the scales the
-gate named. A missed threshold fails the stage. It cannot be waived without
-a recorded owner decision.
+gate named. A missed threshold fails the stage.
+
+Changing thresholds:
+- A failed Stage 3 is never accepted afterwards.
+- The owner may revise thresholds only as a recorded plan decision, with
+  the reason, before a fresh Stage 3 run.
+- That fresh run measures again against the revised numbers and goes
+  through review and acceptance as normal.
+- A revision cannot change the result of a run that has already finished.
 
 ## Stage 4 — Production migration gate
 
