@@ -1,6 +1,8 @@
 # Batch spore-preview RPC for the public explorer's Cards view
 
-Status: approved 2026-10-10; not started.
+Status: approved 2026-10-10; Stages 1–3 accepted 2026-10-11; migration
+`20261012100000` applied to production 2026-10-12; Stage 3 human gate passed
+(see "Stage 3 outcome" below).
 Repository: `sporely-web`. Suggested branch: `feature/batch-spore-preview-rpc`
 from `main`.
 Consumer: `sporely-landing`, `docs/plans/explorer-cards-batch-preview.md`.
@@ -232,3 +234,39 @@ Separate top-level sporely-security-reviewer/Sparring gate remains pending. Cand
 no main push/merge, no production access. Original deployment-file byte identity
 remains unverified despite accepted catalog equivalence. Historical Sparring
 acceptance records and unrelated worktrees/files remain unchanged.
+
+## Stage 3 outcome — recorded 2026-10-14
+
+The authoritative record is the "Production deployment — 2026-10-12" section of
+`supabase/batch-spore-preview-runbook.md` (commits `1d07d3c`…`d54eea0`). This
+entry only summarises it; it adds no new production evidence.
+
+- Agent Sparring run `2026-10-10-batch-spore-preview-r-22db4bec-0a07a15e`:
+  Stages 1–3 accepted; Stage 3 candidate `4c21355` READY. The run is complete.
+- The reconciliation candidate above was later merged as `a427a6f`, and that
+  ref is what the owner deployed. Its "not approved for merge" line describes
+  the state on 2026-10-12 before that merge.
+- Migration `20261012100000` applied by the owner on 2026-10-12. On
+  2026-10-13 `post-verify`, 3a and 3b re-runs passed.
+- Step 5 window B0 (2026-10-12 10:50:00 UTC) → B1 (2026-10-13 11:08:35 UTC):
+  `stats_reset`, `dealloc` (0), `track` (top) and `max_entries` (5000)
+  unchanged; `entries_now` 4779 → 4792. Verdict **valid**, resting on the
+  owner's statement that no `pg_stat_statements_reset` (global or targeted)
+  was run. A targeted reset of a low-call `get_public_observation` / `anon`
+  entry cannot be excluded from counters alone.
+- Window deltas used as the landing baseline:
+
+  | Function / role | Δcalls | Δexec ms | Δblks hit | Δblks read |
+  |---|---:|---:|---:|---:|
+  | `get_public_observation` / anon | 68 | 12868.2 | 102642 | 17 |
+  | `get_public_observation_spore_previews` / anon | 0 | 0 | 0 | 0 |
+  | `media_authorize_delivery` / service_role | 1517 | 68098.5 | 257879 | 1 |
+  | `media_authorize_mosaic_delivery` / service_role | 58 | 743.4 | 5744 | 0 |
+
+  All other function/role counters were unchanged.
+
+`sporely-landing`'s `explorer-cards-batch-preview` plan may start. Its own
+gates still apply: Stage 1 re-checks the deployed function; the landing A0
+snapshot must be taken after the 2026-10-13 3b re-runs and before the Cards
+switch; Stage 2 needs the owner's screenshot comparison and a post-switch
+aggregate window compared with B0→B1.
