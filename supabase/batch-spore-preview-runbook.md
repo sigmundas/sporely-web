@@ -13,7 +13,9 @@ performs every step and records the evidence. No agent runs any of it or
 connects to production. An agent may see only the aggregate results this
 runbook marks as recordable. Nothing here is deployed automatically.
 
-Status: **prepared, not executed.**
+Status: **executed 2026-10-12; re-verified 2026-10-13.** See "Production
+deployment — 2026-10-12" at the end. Some historical details of the original
+run are marked **not recorded** there.
 
 **Gate for `sporely-landing`.** Its `docs/plans/explorer-cards-batch-preview.md`
 must not start until steps 0–5 have passed and the record from "Record" is
@@ -571,3 +573,240 @@ Include no ids, keys or query text.
 Then change `Status:` above to "executed <date>". That committed record is
 the evidence that `sporely-landing`'s `explorer-cards-batch-preview` gate has
 passed.
+
+## Production deployment — 2026-10-12
+
+Recorded 2026-10-13. Sources: the owner's step 5 output, the `check` files
+the deploy helper left in the local deploy tree, the operator's 2026-10-13
+re-runs, and the operator's own statements. No agent connected to production.
+
+- **Operator statement:** what the operator says, which nobody else checked.
+- **Verified:** what output or repository state shows.
+- **Not recorded:** a fact about the original run with no evidence. It cannot
+  be recovered now.
+
+### Run
+
+- Operator: the owner. **Operator statement:** they personally performed
+  the production deployment and verification work.
+- Deployed ref: `a427a6f436df6d944c9234f56e4fe46bd0b11e53`. The helper's
+  `sporely-deploy-plan.json` in the deploy tree records it as `sha` and
+  `ref`, with `allow` `20261012100000`, `deferred` `20260914090000` and
+  project `zkpjklzfwzefhjluvhfw`. **Verified:** `a427a6f` is on
+  `origin/main` (see "Step 0"), and the 2026-10-13 `post-verify` against this
+  tree passed.
+- Accepted candidate SHAs: Stage 3 preparation `4c21355` (Agent Sparring
+  READY). The migration's final security-reviewed form is `cf68f4a`.
+- UTC times: the exact push time is **not recorded**. The approximate
+  interval is 2026-10-12 09:53 to 10:50 UTC. `check` wrote its files at 09:53,
+  and B0 at 10:50:00 already shows the migration's statements (see
+  "Step 5").
+
+### Step 0
+
+Reproduced by an agent on 2026-10-13 against `origin/main` `59c8ffb`. This is
+not the operator's own run, which is **not recorded**:
+
+- `git merge-base --is-ancestor a427a6f origin/main`: exit 0.
+- Both migration hashes:
+  `bd18677d8b0228b92f175a642fc8183af3647c9d8547035062b68eb6fe590956`.
+- `supabase/deploy-exceptions.json` at `a427a6f` lists only `20260914090000`.
+- Owner authorization: the owner performed the deployment themselves
+  (operator statement). The step 0 checks as the operator ran them on
+  2026-10-12 are **not recorded**.
+
+### Steps 1 and 2
+
+- Step 1 (`supabase migration list` from an ordinary checkout): **not
+  recorded**.
+- `check`: its saved `supabase migration list` shows one mismatch,
+  `20261012100000` local-only, with latest Remote `20261011190000`. The
+  deferred `20260914090000` is absent from the tree, as `prepare` intends.
+  Its saved dry run would push exactly
+  `20261012100000_add_public_observation_spore_previews.sql`. Whether it
+  printed `All checks passed` is **not recorded**.
+- `supabase db push --linked`: **operator statement:** they pushed a
+  migration on 2026-10-12. The CLI output is **not recorded**. **Verified:**
+  `20261012100000` is applied. It was the only pending version in the `check`
+  output, B0 shows its statements, and both the 2026-10-13 `post-verify` and
+  3a passed.
+- `post-verify` on 2026-10-12: **not recorded**.
+- `post-verify` re-run by the operator on 2026-10-13 (time not recorded),
+  against the saved deploy tree of `a427a6f`: passed. It printed "Remote
+  matches the deploy tree exactly; deferred migrations are still absent."
+  So on 2026-10-13, Remote held every tree version, including
+  `20261012100000`, held no version outside the tree, and did not hold
+  `20260914090000`.
+- Deploy tree removed on 2026-10-13, after the `post-verify` re-run, with the
+  command it printed. The operator reported this, and the agent confirmed
+  that the worktree is gone from `git worktree list` and from disk.
+
+### Step 3
+
+- 3a on 2026-10-12: **not recorded**.
+- 3a re-run by the operator on 2026-10-13 (time not recorded) with
+  `batch-spore-preview-live-probe.sql`, unchanged since `a427a6f`. It
+  **passed**: every value matches the expected table, and the transaction
+  ended in `ROLLBACK`. It ran after B1, so its statements are outside the
+  B0→B1 window, and its `bsp_probe` marker keeps them out of the stats probe.
+
+  | Output | Value |
+  |---|---|
+  | `security_definer`, `empty_search_path`, `result_shape` | `t`, `t`, `t` |
+  | `anon_execute`, `authenticated_execute` | `t`, `t` |
+  | `service_role_execute`, `public_execute`, `helper_executable_by_client` | `f`, `f`, `f` |
+  | `private_helpers` | 6 |
+  | `public_sample_stored`, `nonpublic_sample_stored`, `claims_cleared` | `t`, `t`, `t` |
+  | `caller`, `uid_is_null` | `anon`, `t` |
+  | `public_sample` | 30 |
+  | `public_single_rows`, `public_batch_rows` | 30, 30 |
+  | `public_batch_rows_with_points` | 30 |
+  | `public_batch_points` | 1346 |
+  | `public_batch_mosaics` | 30 |
+  | `batch_mosaics_with_url` | 0 |
+  | `public_mismatches` | 0 |
+  | `mosaics_withheld` | 0 |
+  | `nonpublic_sample` | 30 |
+  | `nonpublic_single_rows`, `nonpublic_batch_rows` | 0, 0 |
+- 3b on 2026-10-12: **not recorded**.
+- 3b re-run by the operator on 2026-10-13 (time not recorded) over
+  PostgREST, with operator-chosen ids that are not recorded. It **passed**:
+  every call matches the expected table.
+
+  | Call | Result |
+  |---|---|
+  | H1 known public, spore-bearing | `status=200`, `rows: 1`, `with_points: 1`, `points: 78`, `mosaic: 1`, `mosaic_url: 0` |
+  | H2 known non-public | `status=200`, `rows: 0` |
+  | H3 empty array | `status=200`, `rows: 0` |
+  | H4 null | `status=200`, `rows: 0` |
+  | H5 61 ids | `status=400`, `code: "22023"` |
+
+  These calls ran after B1, so they are outside the B0→B1 window. H1–H4 do
+  add to the batch function's `anon` counters, so the landing A0 snapshot
+  must be taken after these re-runs.
+
+### Step 5 — window B0→B1
+
+Epoch rows:
+
+| | `taken_at` (UTC) | `stats_reset` (UTC) | `dealloc` | `track` | `max_entries` | `entries_now` |
+|---|---|---|---|---|---|---|
+| B0 | 2026-10-12 10:50:00.081066 | 2026-06-17 13:38:01.755619 | 0 | top | 5000 | 4779 |
+| B1 | 2026-10-13 11:08:35.166926 | 2026-06-17 13:38:01.755619 | 0 | top | 5000 | 4792 |
+
+Window length: 24 h 18 min 35 s.
+
+B0 table:
+
+| fn | role | entries | calls | total_exec_ms | mean_exec_ms | max_exec_ms | rows | shared_blks_hit | shared_blks_read |
+|---|---|---|---|---|---|---|---|---|---|
+| get_public_observation | anon | 13 | 16293 | 2880311.5 | 176.8 | 2966.7 | 16291 | 19397937 | 246 |
+| get_public_observation | authenticated | 2 | 6 | 458.6 | 76.4 | 128.4 | 6 | 5416 | 0 |
+| get_public_observation | postgres | 42 | 107 | 2851.7 | 26.7 | 296.1 | 75 | 70696 | 7 |
+| get_public_observation_spore_previews | anon | 1 | 5 | 625.6 | 125.1 | 504.2 | 5 | 7267 | 0 |
+| get_public_observation_spore_previews | postgres | 5 | 5 | 24.0 | 4.8 | 8.5 | 0 | 128 | 3 |
+| media_authorize_delivery | postgres | 5 | 5 | 1.3 | 0.3 | 0.9 | 0 | 85 | 0 |
+| media_authorize_delivery | service_role | 1 | 39969 | 948704.3 | 23.7 | 2796.5 | 39969 | 3228989 | 5 |
+| media_authorize_mosaic_delivery | postgres | 10 | 13 | 1211.1 | 93.2 | 1102.9 | 2 | 14590 | 0 |
+| media_authorize_mosaic_delivery | service_role | 1 | 11718 | 264878.0 | 22.6 | 3439.1 | 11718 | 328534 | 0 |
+
+B1 table:
+
+| fn | role | entries | calls | total_exec_ms | mean_exec_ms | max_exec_ms | rows | shared_blks_hit | shared_blks_read |
+|---|---|---|---|---|---|---|---|---|---|
+| get_public_observation | anon | 13 | 16361 | 2893179.7 | 176.8 | 2966.7 | 16359 | 19500579 | 263 |
+| get_public_observation | authenticated | 2 | 6 | 458.6 | 76.4 | 128.4 | 6 | 5416 | 0 |
+| get_public_observation | postgres | 42 | 107 | 2851.7 | 26.7 | 296.1 | 75 | 70696 | 7 |
+| get_public_observation_spore_previews | anon | 1 | 5 | 625.6 | 125.1 | 504.2 | 5 | 7267 | 0 |
+| get_public_observation_spore_previews | postgres | 5 | 5 | 24.0 | 4.8 | 8.5 | 0 | 128 | 3 |
+| media_authorize_delivery | postgres | 5 | 5 | 1.3 | 0.3 | 0.9 | 0 | 85 | 0 |
+| media_authorize_delivery | service_role | 1 | 41486 | 1016802.8 | 24.5 | 2796.5 | 41486 | 3486868 | 6 |
+| media_authorize_mosaic_delivery | postgres | 10 | 13 | 1211.1 | 93.2 | 1102.9 | 2 | 14590 | 0 |
+| media_authorize_mosaic_delivery | service_role | 1 | 11776 | 265621.4 | 22.6 | 3439.1 | 11776 | 334278 | 0 |
+
+Validity conditions (§5, step 3):
+
+| Condition | Result |
+|---|---|
+| `stats_reset` identical | Pass: 2026-06-17 13:38:01.755619 in both. |
+| `dealloc` identical | Pass: 0 in both. |
+| No decrease in `calls`, `total_exec_ms`, `shared_blks_hit`, `shared_blks_read` for rows in both snapshots | Pass: the same nine rows are in both, with the same `entries`, and no counter decreased. |
+| No `pg_stat_statements_reset` during the window | Pass, on operator statement plus counter evidence. See below. |
+
+No reset:
+- **Operator statement:** the operator did not knowingly run
+  `pg_stat_statements_reset()`, globally or for single entries. They know of
+  nobody else who did, but cannot independently verify that.
+- **Verified, partly:** a targeted reset removes an entry, and the entry
+  starts again from zero if it is called again. Such a reset would lower that
+  row's `entries`, or its `calls` and other counters. The checks rule it out
+  for every row except `get_public_observation` / `anon`:
+  - each single-entry row's B0 `calls` far exceeds its window Δcalls;
+  - every zero-delta row kept both its `entries` and its counters exactly.
+
+  For `get_public_observation` / `anon` (13 entries, Δcalls 68), a reset of
+  one of its entries that had few calls cannot be excluded.
+
+Procedure conditions (§5, steps 1–2):
+- B0 was taken after step 3: **not recorded** for the 2026-10-12 run. The
+  batch function's 5 `anon` calls before B0 are consistent with it.
+- Normal explorer traffic, no load test: **operator statement:** only normal
+  browsing, with no intentional load testing.
+- Landing switch not before B1: **operator statement:** the operator did not
+  intentionally deploy or activate it. **Verified:** consistent with the
+  batch function's `anon` Δcalls of 0 in the window.
+
+Verdict: **valid**. The window relies on the operator's statement for the
+no-reset condition, with the qualification above. A later finding that a
+reset did occur makes it inconclusive.
+
+Deltas (B1 − B0). The window mean is Δtotal_exec_ms / Δcalls. Each
+`total_exec_ms` is rounded to 0.1 ms, so each Δtotal_exec_ms is exact to
+±0.1 ms.
+
+| fn | role | Δcalls | Δtotal_exec_ms | window mean ms | Δshared_blks_hit | Δshared_blks_read | Δrows |
+|---|---|---|---|---|---|---|---|
+| get_public_observation | anon | 68 | 12868.2 | 189.2 | 102642 | 17 | 68 |
+| get_public_observation | authenticated | 0 | 0.0 | — | 0 | 0 | 0 |
+| get_public_observation | postgres | 0 | 0.0 | — | 0 | 0 | 0 |
+| get_public_observation_spore_previews | anon | 0 | 0.0 | — | 0 | 0 | 0 |
+| get_public_observation_spore_previews | postgres | 0 | 0.0 | — | 0 | 0 | 0 |
+| media_authorize_delivery | postgres | 0 | 0.0 | — | 0 | 0 | 0 |
+| media_authorize_delivery | service_role | 1517 | 68098.5 | 44.9 | 257879 | 1 | 1517 |
+| media_authorize_mosaic_delivery | postgres | 0 | 0.0 | — | 0 | 0 | 0 |
+| media_authorize_mosaic_delivery | service_role | 58 | 743.4 | 12.8 | 5744 | 0 | 58 |
+
+Derived, for the A0→A1 comparison:
+- `get_public_observation` Δcalls (all roles) to `media_authorize_delivery`
+  Δcalls: 68 : 1517, about 0.045.
+- Shared buffers hit per call: `get_public_observation` anon about 1509;
+  `media_authorize_delivery` about 170; `media_authorize_mosaic_delivery`
+  about 99.
+
+Caveats:
+- `max_exec_ms` is from B1 and is not window evidence:
+  `get_public_observation` anon 2966.7, `media_authorize_delivery`
+  2796.5, `media_authorize_mosaic_delivery` 3439.1. None of these changed in
+  the window.
+- Calls cancelled with `57014`, or ending in any other error, are not
+  recorded. The true tail is longer.
+- 68 `get_public_observation` calls in 24 h is a small sample. Its window
+  mean, 189.2 ms, is noisier than the media functions' means.
+- The batch function's `postgres` row (5 entries, 5 calls, 0 rows) matches the
+  migration's five statements that name it (`CREATE`, `ALTER … OWNER`,
+  `REVOKE`, `GRANT`, `COMMENT`). That is consistent with the push, not proof
+  of it. The `anon` row (1 entry, 5 calls) predates B0. Errored statements are
+  not counted, so H5's expected `22023` would not appear. Five calls is more
+  than the four successful H1–H4 calls. The 2026-10-12 3b run is not
+  recorded, so the extra call stays unexplained. Neither row is window
+  evidence.
+
+### Gate
+
+The migration is applied. As of 2026-10-13:
+- `post-verify`, 3a and 3b pass;
+- the B0→B1 window is valid, with the qualification above.
+
+Items marked **not recorded** are historical details of the 2026-10-12 run.
+They cannot be recovered. Once this record is on `main`, it is the evidence
+for `sporely-landing`'s `explorer-cards-batch-preview` gate.
