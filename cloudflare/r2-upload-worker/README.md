@@ -74,8 +74,9 @@ See `wrangler.toml` and `wrangler.toml.example`.
 
    One exception, only during the brake's own first deploy: until the brake
    migration has committed (the runbook's T2), the runbook's "Abort" may roll
-   the worker back to the pre-brake version recorded in its step 1, after its
-   procedure Q has shown that the database brake is not installed. Once the
+   the worker back to the pre-brake version recorded in its step 1, and only
+   when nothing was pushed, or its procedure Q has proved that the migration
+   did not commit and cannot commit. Once the
    migration has committed, the rule above is absolute: never deploy or roll
    back to a worker without the guard.
 

@@ -181,77 +181,87 @@ record with the deploy notes; every field is recordable.
 | Push started | `supabase db push --linked` started in step 3 | |
 | T2 | the push committed: **gap end** | |
 | T3 | 4a passed | |
-| Quiescence | only after an abort with a started push: procedure Q finished | |
+| Settled | only if the push started and T2 is not confirmed: procedure Q's outcome and time | |
 | Rollback | only after an abort: worker rollback verified (replaces T2 as gap end) | |
 
 ### Bound
 
 - The gap, T2 − T0, must not exceed **15 minutes**. The target is under 10.
-- **Push cutoff, T0 + 10 min.** Do not start the push after it. If the push
-  has started but T2 is not confirmed by then, stop it with procedure Q
-  below. The 5 minutes up to "abort at" are reserved for Q and the worker
-  rollback.
+- **Push cutoff, T0 + 10 min.** Do not start the first push after it; abort
+  instead. The only later push is Q step 4's forward retry, which closes a
+  gap that is already open. The 5 minutes up to "abort at" are reserved for settling a push
+  that failed (procedure Q) and for the worker rollback.
 - **Abort at, T0 + 15 min.** By then either T2 has happened, or the worker
   rollback is verified.
 - An aborted deploy may be retried later, only from step 0, with a fresh
   timing record. The earlier gap still gets its own step 5.
-- **Limit of the bound.** No document can force a server-side transaction
-  to end. Step P therefore checks, before the gap, that the operator's
-  database role can see and terminate other sessions. If Q still cannot
-  establish that no push session remains (for example, the push session
-  belongs to a role the operator cannot terminate), the worker is **not**
-  rolled back, and the gap outlives the bound. That state is the documented
-  gap state, not bk31: keep the worker brake, keep the tail running, keep
-  working Q, and report the overrun.
+- **Limit of the bound: a push with an unsettled outcome.** Once the push
+  has started, the worker may be rolled back only if procedure Q proves the
+  migration did not commit and cannot commit. When Q cannot prove that, the
+  bound gives way, never the safety rule: the worker is **not** rolled back,
+  and the gap outlives the bound. That state is the documented gap state,
+  not bk31. A worker rollback while the outcome is unknown could recreate
+  bk31.
 
-### Procedure Q: end the push and settle its outcome
+### Procedure Q: settle the outcome of a push that did not report success
 
-The migration is one `BEGIN … COMMIT`, so it is either fully applied or not
-at all. A client that exits with an error, or loses its connection, does not
-show which: the server-side transaction can still be running and can still
-commit. Q settles it. Use it whenever the push was started (even if the
-prompt was answered `n`) and T2 is not confirmed.
+The migration is one transaction (`BEGIN;` at line 98, `COMMIT;` at line
+165 of the migration file), so it is applied fully or not at all. A push
+that does not report success does not show which. The database session that
+ran it is not identified: this runbook has no verified way to identify it,
+because the CLI's connection path and any pooling were not verified. So Q
+neither lists nor terminates sessions. It settles the outcome only from facts
+that do not depend on which session ran the push.
 
-1. Stop the CLI with Ctrl-C if it is still running, and confirm that the
-   process has exited.
-2. In the database-owner SQL session prepared in step P, outside any
-   transaction block, list the sessions the push may have left:
+Use Q whenever the push started and did not report success: it errored, it
+was refused, its prompt was answered `n`, or it is still running at the
+push cutoff.
 
-       SELECT pid, usename, application_name, state, wait_event_type,
-              backend_start, xact_start, left(query, 120) AS query
-         FROM pg_stat_activity
-        WHERE pid <> pg_backend_pid()
-          AND backend_type = 'client backend'
-          AND backend_start >= '<push started>'::timestamptz - interval '1 minute'
-        ORDER BY backend_start;
+1. **Still running at the push cutoff.** Do not interrupt it: interrupting
+   only makes the outcome harder to settle, and a push that finishes and
+   commits ends the gap the right way. The outcome is unsettled; go to 4.
+2. **Committed.** Run query 3a from step 1 (read-only). If it returns 7 and
+   a non-NULL procedure, the push committed: record T2 as the time observed,
+   run `post-verify` from step 3, and follow "After T2". No rollback.
+3. **Proven not committed, and unable to commit.** The worker rollback is
+   allowed only when **all** of the following hold:
+   - the CLI process has exited;
+   - query 3a returns 0 and NULL;
+   - and one of these:
+     - the prompt was answered `n`, and the CLI printed nothing that shows
+       it applied a statement. This case rests on the CLI asking before it
+       applies anything, which is the prompt's purpose but was not verified
+       for this runbook. If the output leaves any doubt, the outcome is
+       unsettled;
+     - the output shows a **PostgreSQL error with an SQLSTATE**, raised by
+       one of the migration's statements. PostgreSQL aborts the whole
+       transaction on such an error and turns any later `COMMIT` into a
+       rollback, so that transaction can never commit.
 
-   Only a session with an open transaction (`xact_start` not NULL) can still
-   commit. Treat every such listed session as a push session unless it is
-   clearly something else (for example PostgREST app traffic as
-   `authenticator`). That includes one whose `query` names `sync_brake`,
-   `trg_000_sync_brake`, `20261013200000` or `supabase_migrations`, one
-   whose `query` is only `BEGIN` or `COMMIT`, and any session of the role the
-   CLI connected as (for example `postgres`, or a temporary `cli_login_…`
-   role). A session with `xact_start` NULL has no transaction and cannot
-   commit anything. The output stays on the operator's machine.
-3. Terminate each such session: `SELECT pg_terminate_backend(<pid>);`.
-   Termination rolls back a transaction that has not committed; a committed
-   one stays committed.
-4. Repeat 2 and 3 until step 2 shows no push session. That is quiescence:
-   no session remains that could still commit the migration. Record the
-   time. If the push session cannot be identified with certainty, or
-   `pg_terminate_backend` returns `false` or errors, quiescence is **not**
-   established: see "Limit of the bound".
-5. Only after quiescence, run query 3a from step 1 (read-only):
-   - 0 and NULL: the brake is not installed, and nothing can install it
-     now. The worker rollback is allowed.
-   - 7 and a non-NULL procedure: the push committed. Record T2 as the time
-     observed, run `post-verify` from step 3, and follow "After T2". No
-     rollback.
-   - Anything else: STOP and report. No rollback.
+   Record the case, the SQLSTATE if there is one, the 3a result and the time
+   as "settled".
+4. **Unsettled.** This is every other case: a lost connection, a timeout, an
+   interrupted or still-running CLI, an error without an SQLSTATE, or output
+   that does not show which statement failed.
+   - Do **not** roll the worker back. Keep the worker guard and the tail
+     running.
+   - Record the overrun and report it to the owner.
+   - Repeat query 3a every few minutes, read-only. When it shows the brake,
+     record T2 as the time observed and continue with "After T2".
+   - The only other way out is forward. With the owner's agreement, run
+     `check` from step P again in the deploy tree. If `20261013200000` is no
+     longer pending, the first push committed: run query 3a and continue at
+     T2. Otherwise push again. The migration is idempotent
+     (`CREATE OR REPLACE FUNCTION`, and `DROP TRIGGER IF EXISTS` before each
+     `CREATE TRIGGER`), so a second run leaves the same brake whether or not
+     the first transaction commits after all. If the first transaction is
+     still open, the second waits behind its locks; it is then a running push
+     again, handled by step 1.
+   - Do not terminate database sessions to force an outcome. This runbook
+     has no verified way to identify the push's session, and terminating
+     anything else would abort unrelated work.
 
-Never roll the worker back while a push session may exist, or before Q's
-step 5 has returned 0 and NULL.
+Never roll the worker back unless step 3 holds.
 
 ### Abort
 
@@ -262,7 +272,7 @@ The worker rollback before T2 is the **only** rollback this runbook allows.
 | Before step 2 | Any gate, pre-check or step P fails | Stop. Nothing has changed in production. | — | Which check failed. |
 | Step 2 fails | `wrangler deploy` exits with an error | Run `curl -s https://upload.sporely.no/healthz`. | If it still shows the step 1 `workerVersion` and no `obsoleteDesktopBrake`, nothing changed: stop. If it shows `sporely-r2-upload-worker@obsolete-desktop-brake-1`, the new worker is live: set T0 now and continue with the next row. | The error, which `workerVersion` `/healthz` showed. |
 | Before the push starts | Any 2a result differs, or the push cutoff passes before the push was started | Roll the worker back (see "Rollback" below). | Rollback check below. | Trigger, rollback UTC time (the gap end), healthz result. Step 5 applies to [T0, rollback]. |
-| After the push started, T2 not confirmed | The push errors or is refused; its prompt lists anything other than exactly `20261013200000_obsolete_desktop_sync_brake.sql` (answer `n`); or the push cutoff passes | Run procedure Q. Only if Q's step 5 returns 0 and NULL, roll the worker back. If it shows the brake, continue "After T2". If quiescence is not established, do not roll back ("Limit of the bound"). | Q's step 5 result, then the rollback check. | Trigger, quiescence time, the 3a result, and either the rollback time (gap end) or T2. Step 5 applies to the window that ended. |
+| After the push started, T2 not confirmed | The push errors or is refused; its prompt lists anything other than exactly `20261013200000_obsolete_desktop_sync_brake.sql` (answer `n`); or the push cutoff passes | Run procedure Q. Roll the worker back only if Q's step 3 holds. If 3a shows the brake, continue "After T2". If the outcome is unsettled, do not roll back (Q step 4, "Limit of the bound"). | Q's result, then the rollback check. | Trigger, Q's case (and SQLSTATE), the 3a result, the "settled" time, and either the rollback time (gap end), T2, or the overrun. Step 5 applies to the window that ended. |
 | After T2 | Anything | **No rollback of either half, ever.** See below. | — | — |
 
 **Rollback:** roll the worker back to the deployment version id recorded in
@@ -275,7 +285,7 @@ tail.
 What the pre-T2 rollback restores: exactly the production behaviour before
 the deploy. Old desktops upload and delete media as before, and the
 multi-device overwrite hazard remains as before. No database brake was
-applied (Q's step 5 proved it when a push was started), so nothing the
+applied (when a push had started, Q's step 3 proved it), so nothing the
 database was refusing is re-enabled.
 
 After T2 the database brake has committed:
@@ -428,14 +438,15 @@ probes, `supabase db push --linked` and its confirmation.
    - `wrangler rollback` accepts a version id. If not, the dashboard's
      Deployments → Rollback for `sporely-r2-upload` is the rollback path
      (it needs no capture), and you note that.
-4. Database session for procedure Q. Open a SQL session as the database
-   owner (the same access as step 1's queries) and keep it open through
-   T3. In it, read-only:
+4. Database session for query 3a. Open a SQL session as the database owner
+   (the same access as step 1's queries) and keep it open through T3, so
+   procedure Q can run query 3a at once. In it, read-only, check that no
+   long transaction would block the migration, which makes an unsettled push
+   less likely:
 
-       -- Expect t, t. Otherwise stop: abort before step 2. Q needs both to
-       -- see and end another session.
-       SELECT pg_has_role('pg_signal_backend', 'MEMBER') AS can_terminate,
-              pg_has_role('pg_read_all_stats', 'MEMBER') AS can_read_activity;
+       -- Expect t. Without it, other roles' xact_start reads as NULL and the
+       -- next count is not reliable: stop, abort before step 2.
+       SELECT pg_has_role('pg_read_all_stats', 'MEMBER') AS can_read_activity;
 
        -- Expect 0: no transaction older than a minute holds a lock on the
        -- seven tables. Such a transaction would block the migration's
@@ -451,20 +462,19 @@ probes, `supabase db push --linked` and its confirmation.
                                'observation_spore_summaries',
                                'observation_reference_uses'));
 
-   Q's `pg_terminate_backend` ends a session; it changes no data. It is part
-   of this deploy's authorization, used only on the push's own session.
+   The deploy never terminates database sessions (see procedure Q).
 5. Have four terminals ready:
    - in `cloudflare/r2-upload-worker`, the step 2 deploy, then the tail
      command from step 2, with an output file **outside any repository**;
    - in `<deploy tree>`, `supabase db push --linked` typed but not run;
    - the abort command `wrangler rollback <version id from step 1>` typed but
      not run;
-   - the database session from item 4, with Q's step 2 query ready.
+   - the database session from item 4, with query 3a ready.
 6. Optional baseline for step 5a: the `media_health` counts (see 5a, part B).
 
 ### Record
 
-That `check` passed, the two role checks, the lock count, that the tail
+That `check` passed, the role check, the lock count, that the tail
 command was confirmed (and from which source), and whether rollback is by
 CLI or dashboard.
 
@@ -549,9 +559,11 @@ Answer `y` only if the prompt lists exactly
 abort. The migration is one `BEGIN … COMMIT`, so it is applied fully or not
 at all, but a push that reports an error does not prove that nothing
 committed. If the push errors, is refused, or has not finished by the push
-cutoff, abort ("Abort", row "After the push started"): procedure Q ends the
-push and settles with query 3a whether it committed, and only then may the
-worker be rolled back. "Stop and report" alone would leave the gap open.
+cutoff, abort ("Abort", row "After the push started"). Procedure Q settles
+whether it committed, and the worker may be rolled back only if Q proves it
+did not and cannot. Otherwise the gap stays open past the bound, with the
+worker guard kept, and is closed forward. Do not just stop and report:
+that would leave the gap open.
 
 When the push reports success, record **T2** in UTC. This is the end of the
 worker-first gap. Then stop the tail.
