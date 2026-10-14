@@ -79,7 +79,12 @@ A practical way to stop writes from a faulty newly released desktop build, witho
   - `x-sporely-client-version: <app version>`.
 - A new migration, versioned after `20261013210000`, adds:
   - a table `private.sync_client_write_block(client_version text PRIMARY KEY, reason text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())`, owner-only: privileges revoked from `PUBLIC`, `anon`, `authenticated` and `service_role`, RLS on with no policies;
-  - a SECURITY INVOKER check, run as BEFORE INSERT/UPDATE/DELETE triggers on `observations`, `observation_images`, `spore_measurements`, `spore_measurement_mosaics`, `spore_measurement_mosaic_tiles`, `observation_spore_summaries` and `observation_reference_uses`.
+  - a trigger function `private.sync_client_write_block_guard()`, run as BEFORE INSERT/UPDATE/DELETE row triggers on `observations`, `observation_images`, `spore_measurements`, `spore_measurement_mosaics`, `spore_measurement_mosaic_tiles`, `observation_spore_summaries` and `observation_reference_uses`.
+- Privileges:
+  - The trigger function is SECURITY DEFINER, owned by the migration owner, with `search_path` pinned to `''` and fully qualified names.
+  - EXECUTE is revoked from `PUBLIC`, `anon`, `authenticated` and `service_role`. Trigger firing does not need EXECUTE, so clients can neither call the function nor read the table.
+  - The function reads only the block table and `request.headers`. It never uses `current_user`, writes nothing, and returns `NEW` (or `OLD` on DELETE) unchanged when not refusing.
+  - pgTAP asserts `prosecdef = true`, the pinned `search_path`, the revoked EXECUTE, and that `authenticated` cannot `SELECT` the table.
 - The check reads PostgREST's `request.headers`. When `x-sporely-sync-identity` is present and `x-sporely-client-version` is listed in the table, it refuses with `P0001`, hint `sporely_upgrade_required`, and the fixed message "This version of Sporely Desktop is blocked from uploading. Install the latest version from sporely.no. Nothing was changed in the cloud."
 - The check keys only on the request headers, never on the database role. Requests without the identity header are never affected: web, Android, released desktops, Edge Functions, migrations and plain SQL sessions.
 - RPC writes are covered even when the function runs as its owner, because the request's headers stay visible inside it.
@@ -243,8 +248,12 @@ Engine checked 2026-10-14: agent-sparring `ea8e70d`.
   - the local Supabase stack `sporely-g3-verify`, its stub media worker and the Vite web app;
   - the scratch-database wrappers `sporely-worktrees/identity-impl/db/dbreset.sh` and `dbsql.sh`;
   - the harness in `sporely-worktrees/g4-evidence/tools/` (`run.sh`, `g4_launch.py`, `g4_scenarios.py`, `g4_netprobe.py`, `g4_web.mjs`).
-- **The harness** launches only under its kernel sandbox. It admits a desktop commit only if it is on its fixed list, or is a clean sporely-py commit that contains `ee6f2af` and `be511bf` and is reachable from `feature/sync-key-desktop-n1` or `feature/ingestion-location-provenance-stage-4`. It refuses to start unless outbound traffic is blocked and the local target answers. It records the tested commit and those checks in each run's `manifest.json`. Stages may add scenarios to `g4_scenarios.py`, but must not change the admission or isolation code. If the harness refuses a candidate, the stage stops.
-- **No hosted access:** no stage contacts a hosted Supabase project, production host or production credential. Stage 1 creates one migration. Before creating it, the stage compares the branch's migration list with `origin/main` and stops on any disagreement other than a version registered in `supabase/deploy-exceptions.json`. The production history check (`supabase migration list`) belongs to the release procedure.
+- **The harness** launches only under its kernel sandbox. It admits a desktop commit only if it is on its fixed list, or is a clean sporely-py commit that contains `ee6f2af` and `be511bf` and is reachable from `feature/sync-key-desktop-n1` or `feature/ingestion-location-provenance-stage-4`. It refuses to start unless outbound traffic is blocked and the local target answers. It records the tested commit and those checks in each run's `manifest.json`. No stage edits anything under `sporely-worktrees/g4-evidence/tools/`. New desktop GUI scenarios belong to the sporely-py candidate in `tools/sync_harness/scenarios.py`:
+  - they are tracked, reviewed with the stage, contain no credentials or network code, and use the harness's driver helpers;
+  - the harness runs them as `--scenario repo:<function>` and records the file's sha256 in `scenario_source.json`.
+
+  If the harness refuses a candidate, the stage stops.
+- **No hosted access:** no stage contacts a hosted Supabase project, production host or production credential. Stage 1 creates one migration. Before creating it, the stage compares the branch's migration files with `origin/main`. Exactly two additions are expected and allowed: the accepted photo-location migration `20261012105630_ingestion_location_provenance.sql` and the accepted sync-key migration `20261013210000_sync_key_identity.sql`. Any other difference stops the stage: a missing, changed or extra file, or a version registered in `supabase/deploy-exceptions.json` behaving differently than its registry entry says. The new migration's version must be newer than every migration on the branch and on `origin/main`. The production history check (`supabase migration list`) belongs to the release procedure.
 - **Tools:** project interpreters and focused tests only. No `npm test`, builds, Capacitor sync, dependency installation or package upgrade.
 - **Hands off:** the brake branches, the earlier S1/S2 run worktrees, `INBOX.md` in any checkout, and the untracked `tools/metadata_backfill/` work in the primary sporely-py checkout.
 
@@ -351,7 +360,7 @@ Required cases:
 - Rows 14, 14b, 15, 22, 23 and 24.
 - The exact ab15/ab17/ab19 reproducer: zero overwrites and zero `desktop_id` writes.
 - One new-desktop profile alongside released `ee6f2af` and `0520afd` on the same account.
-- **The outstanding desktop GUI scenarios** from the local-key check, on this integrated build: measurement creation, bundle import, portable import and image move. Add harness scenarios as needed.
+- **The outstanding desktop GUI scenarios** from the local-key check, on this integrated build: measurement creation, bundle import, portable import and image move. Scenarios the harness lacks are added in this stage to `tools/sync_harness/scenarios.py`.
 - An orphan-object count from the stub store after the crash cases.
 
 Photo-location desktop re-check (G4), on the same build and web pin. Re-run only the cases whose code path the sync change touched:
