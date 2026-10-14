@@ -79,6 +79,11 @@ bk61–63) behaved the same under the brake:
   loop;
 - no local row gains another device's cloud id.
 
+That is the final state, with both halves applied. In the worker-first gap a
+v0.8.13 or v0.9.1 desktop does create a new observation's cloud row; the local
+row then stays `dirty` with that cloud id, and its photo stays local and
+pending (`brake-426/RESULTS.md`, G-NEW). See "What users see".
+
 Pending work uploads once a desktop that is not braked syncs. An observation
 deleted in an old desktop disappears locally only. Its cloud row and media are
 kept, and the next pull brings it back.
@@ -94,23 +99,29 @@ kept, and the next pull brings it back.
    `desktop_id` heal) go straight to PostgREST, never through the worker (bk10).
    Between the two steps:
    - overwrites are still possible;
-   - an old desktop can create observation and image rows whose media upload is
-     then refused. Those rows have no media until a desktop that is not braked
-     syncs them again;
+   - an old desktop can create an observation row whose media upload is then
+     refused. v0.8.13 and v0.9.1 then insert no `observation_images` row, so
+     the cloud observation has no image row and no media until a desktop that
+     is not braked syncs the still-pending local photo
+     (`brake-426/RESULTS.md`, G-NEW);
    - v0.8.13 and v0.9.1 desktops that delete an observation leave its media
      orphaned in the public legacy bucket. See the next section.
 
-   Keep the gap to minutes.
+   The gap is bounded: at most 15 minutes, or the worker is rolled back. See
+   "Gap timing, bound and abort".
 
 ### The worker-first gap orphans media (accepted residual)
 
 Between the worker deploy and the database migration, the worker refuses an
 old desktop's media delete with 426, but the database still accepts its row
 deletes. The v0.8.13 and v0.9.1 desktops ignore a failed media delete:
-`delete_cloud_observation` (sporely-py v0.8.13 `utils/cloud_sync.py`,
-about lines 8354-8371) catches the error, prints a warning, and then deletes
-the `observation_images` rows and the `observations` row anyway. v0.9.15 and
-later stop at the failed media delete instead, so they are not affected.
+`delete_cloud_observation` (sporely-py v0.8.13 `utils/cloud_sync.py`
+lines 8366-8372, v0.9.1 lines 9182-9188) catches the error, prints a warning,
+and then deletes the `observation_images` rows and the `observations` row
+anyway. v0.9.15 and later stop at the failed media delete instead, so they
+are not affected. The client stops trying media after the first refused
+`DELETE`, so the worker sees **one** refused `DELETE` per deleted observation,
+not one per object (`brake-426/RESULTS.md`, G-DEL).
 
 The result for each observation deleted this way in the gap:
 
@@ -121,26 +132,89 @@ The result for each observation deleted this way in the gap:
   by anyone who has its old URL;
 - the user's storage quota accounting for those objects is not released.
 
+The gap's other residual is the G-NEW case above: an observation row created
+by a v0.8.13 or v0.9.1 desktop in the gap, with no image row and no media.
+Nothing is lost (the photo stays on the user's computer, pending), but the
+cloud copy is incomplete until a desktop that is not braked syncs it.
+
 Worker-first is still the right order. The database-first order loses media
 outright: an old desktop's media delete succeeds before the database refuses
 the row delete (bk31 lost 4 media objects this way). Orphaned objects in a
 short window are the smaller, recoverable harm: no user data is lost, and the
-objects can be found and removed afterwards (step 5).
+objects can be found afterwards (step 5a) and removed under a separately
+approved step 5b.
 
 Requirements:
 
-- Keep the gap as short as possible. Run step 3 immediately after the 2a
-  checks pass, in the same sitting, with step 3's commands prepared in
-  advance.
-- Record the gap's **UTC start** (the time `wrangler deploy` in step 2
-  finished) and its **UTC end** (the time `supabase db push --linked` in
-  step 3 committed). Step 5 uses this window.
+- Keep the gap within the bound in "Gap timing, bound and abort": at most 15
+  minutes, target under 10. Everything that can run before the gap does (step
+  P), so the gap holds only `wrangler deploy`, the 2a checks and the push.
+- Fill in the timing record (T0–T3). Step 5 uses the window from T0 to T2, or
+  to the rollback time after an abort.
+- Capture the worker's requests during the gap (step 2, `wrangler tail`).
+  Step 5a uses the capture.
 - The owner accepts this residual explicitly before the deploy. This line must
   be ticked, with a name and a date, before step 2:
 
-  - [ ] Owner accepts that v0.8.13/v0.9.1 observation deletes during the
-        worker-first gap can leave publicly reachable orphaned media until
-        step 5 removes it. Name: ____________ Date (UTC): ____________
+  - [ ] Owner accepts that, during the worker-first gap, v0.8.13/v0.9.1
+        observation deletes can leave publicly reachable orphaned media, and
+        v0.8.13/v0.9.1 uploads can leave cloud observation rows without image
+        rows or media. Orphaned media stays until it is removed, if ever,
+        under a separately approved step 5b. Name: ____________
+        Date (UTC): ____________
+
+## Gap timing, bound and abort
+
+### Timing record
+
+Fill in UTC values as the procedure runs (`date -u +%FT%TZ`). Keep this
+record with the deploy notes; every field is recordable.
+
+| Field | Meaning | UTC |
+|---|---|---|
+| T0 | `wrangler deploy` in step 2 finished: **gap start** | |
+| Abort at | T0 + 15 min | |
+| Tail start | `wrangler tail` capture running (step 2) | |
+| T1 | all 2a checks passed | |
+| T2 | `supabase db push --linked` in step 3 committed: **gap end** | |
+| T3 | 4a passed | |
+| Rollback | only after an abort: worker rollback verified (replaces T2 as gap end) | |
+
+### Bound
+
+- The gap, T2 − T0, must not exceed **15 minutes**. The target is under 10.
+- If T2 has not happened by the "abort at" time, the operator aborts (below),
+  even if the push looks close.
+- An aborted deploy may be retried later, only from step 0, with a fresh
+  timing record. The earlier gap still gets its own step 5.
+
+### Abort
+
+The worker rollback before T2 is the **only** rollback this runbook allows.
+
+| Point | Trigger | Operator action | Verify | Record |
+|---|---|---|---|---|
+| Before step 2 | Any gate, pre-check or step P fails | Stop. Nothing has changed in production. | — | Which check failed. |
+| Step 2 fails | `wrangler deploy` exits with an error | Run `curl -s https://upload.sporely.no/healthz`. | If it still shows the step 1 `workerVersion` and no `obsoleteDesktopBrake`, nothing changed: stop. If it shows `sporely-r2-upload-worker@obsolete-desktop-brake-1`, the new worker is live: set T0 now and continue with the next row. | The error, which `workerVersion` `/healthz` showed. |
+| 2a fails, bound reached, or step 3 push fails or is refused | Any 2a result differs; the "abort at" time passes before T2; `supabase db push --linked` errors, or its prompt lists anything other than exactly `20261013200000_obsolete_desktop_sync_brake.sql` (answer `n`) | If `supabase db push --linked` was started at all (it errored, or is still running when the bound is reached): wait for it to end, then run the step 1 query 3a read-only. Only if it returns 0 and NULL (brake not installed) continue here; otherwise T2 has happened (record it) and the "After T2" row applies. Then roll the worker back to the deployment version id recorded in step 1: `wrangler rollback <version id>`, or the Cloudflare dashboard's deployment rollback for `sporely-r2-upload`. Stop the tail after verifying. | `curl -s https://upload.sporely.no/healthz` reports the step 1 `workerVersion` and has **no** `obsoleteDesktopBrake` field. | Trigger, rollback UTC time (the gap end), healthz result. Step 5 then applies to [T0, rollback]. |
+| After T2 | Anything | **No rollback of either half, ever.** See below. | — | — |
+
+What the pre-T2 rollback restores: exactly the production behaviour before
+the deploy. Old desktops upload and delete media as before, and the
+multi-device overwrite hazard remains as before. No database brake was
+applied, so nothing the database was refusing is re-enabled. A failed step 3
+push applies nothing, because the migration is one `BEGIN … COMMIT`; the
+database is as it was in step 1.
+
+After T2 the database brake has committed:
+
+- 4a or 4b fails: stop and report. Any fix is a forward change.
+- Web or Android are refused: narrow forward at once ("Emergency procedure",
+  step 3).
+- The worker misbehaves: deploy a fixed tree that **contains the guard**.
+  Never deploy an older worker: with the database brake active, that recreates
+  the bk31 media loss.
+- "Removal rule" and "Emergency procedure" apply unchanged.
 
 ## Data-handling rules for whoever runs this
 
@@ -170,6 +244,12 @@ All of the following must be true. Otherwise stop.
         cloudflare/r2-upload-worker/src
 
   Both commands must exit 0.
+- **Before merging:** in the Cloudflare dashboard, confirm that the
+  `sporely-r2-upload` worker has no Git-connected automatic build. If it had
+  one, the merge to `main` would itself deploy the worker and start an
+  unrecorded, unbounded gap. This repository has no CI that deploys the worker
+  or applies migrations: `.github/workflows/` holds only the Android release
+  build and a read-only Supabase heartbeat.
 - No other migration is pending except the documented deferred
   `20260914090000` (see `supabase/deploy-exceptions.json`).
 - The owner has explicitly authorized this production deployment in writing.
@@ -192,7 +272,9 @@ All of the following must be true. Otherwise stop.
        supabase migration list
 
    Only the deferred `20260914090000` may show as local-only, plus the new
-   `20261013200000`. Any other disagreement: STOP and report.
+   `20261013200000`. Any other disagreement: STOP and report. A successful
+   listing also proves that the Supabase CLI is authenticated and linked to
+   the production project.
 3. Database, as the database owner, inside
    `BEGIN TRANSACTION READ ONLY; … ROLLBACK;`:
 
@@ -222,11 +304,56 @@ All of the following must be true. Otherwise stop.
                             'spore_measurement_mosaics', 'spore_measurement_mosaic_tiles',
                             'observation_spore_summaries', 'observation_reference_uses')
         ORDER BY 1, 2;
+4. The current worker deployment, from `cloudflare/r2-upload-worker`:
+
+       wrangler deployments list
+
+   Record the version id of the deployment currently serving 100% of
+   traffic. It is the rollback target for "Abort". Without it, do not start
+   step 2.
 
 ### Record
 
-`workerVersion`, `mediaStorageMode`, the 3a–3c values, and whether
-`migration list` showed only the expected rows.
+`workerVersion`, `mediaStorageMode`, the 3a–3c values, whether
+`migration list` showed only the expected rows, and the current worker
+deployment's version id.
+
+## P. Prepare the gap (no production change)
+
+Run this in the same sitting, directly before step 2. Everything here is
+read-only or local, so the gap itself holds only `wrangler deploy`, the 2a
+probes, `supabase db push --linked` and its confirmation.
+
+1. Build and check the deploy tree. The deferred-migration gap is in force,
+   so step 3 uses it. The helper never pushes; the person does.
+
+       node scripts/supabase-deploy-tree.mjs prepare --allow 20261013200000 --ref <merged main SHA>
+       node <deploy tree>/scripts/supabase-deploy-tree.mjs check --tree <deploy tree>
+
+   Do not continue unless `check` prints `All checks passed` and the pending
+   set is exactly `20261013200000`. If anything delays step 2 noticeably,
+   run `check` again before starting it.
+2. The Supabase CLI is authenticated and linked to the production project.
+   Step 1's `supabase migration list` already proved this, `prepare` verifies
+   the deploy tree's production link, and `check` runs `migration list` and
+   `db push --dry-run` inside the tree. Nothing further is needed.
+3. Wrangler, from `cloudflare/r2-upload-worker`: `wrangler whoami` shows the
+   Cloudflare account that owns `sporely-r2-upload`. `wrangler tail --help`
+   lists `--format` with the value `json`, and `wrangler rollback --help`
+   accepts a version id. If either is missing in the installed Wrangler, use
+   the dashboard equivalents (Workers → `sporely-r2-upload` → Logs, and
+   Deployments → Rollback) and note that in the deploy notes.
+4. Have three terminals ready:
+   - in `cloudflare/r2-upload-worker`, the step 2 deploy, then the tail
+     command from step 2, with an output file **outside any repository**;
+   - in `<deploy tree>`, `supabase db push --linked` typed but not run;
+   - the abort command `wrangler rollback <version id from step 1>` typed but
+     not run.
+5. Optional baseline for step 5a: the `media_health` counts (see 5a, part B).
+
+### Record
+
+That `check` passed, and whether tail and rollback are by CLI or dashboard.
 
 ## 2. Deploy the worker
 
@@ -238,8 +365,23 @@ From a clean checkout of `<merged main SHA>`, following
 
 No secret, binding or `wrangler.toml` change is part of this stage.
 
-When `wrangler deploy` finishes, record the time in UTC. This is the start
-of the worker-first gap.
+When `wrangler deploy` finishes, record **T0** in UTC and set "abort at" to
+T0 + 15 min. This is the start of the worker-first gap. If `wrangler deploy`
+errors, follow "Abort", row "Step 2 fails".
+
+Immediately start the capture, and record "tail start":
+
+    wrangler tail sporely-r2-upload --format json >> <capture file outside any repository>
+
+- Use no filter flags. Filter the saved file afterwards by request method
+  (`DELETE`, `PUT`) and response status (`426`); step 5a says how.
+- If the tail disconnects, restart the same command at once (it appends) and
+  note the uncovered interval. If Wrangler reports that it is sampling
+  events, note that too: the capture is then incomplete.
+- Stop it after T2 (or after a verified abort rollback).
+- The file contains user ids in request paths and may contain request
+  headers. It stays on the operator's machine. Only counts derived from it
+  are recorded. Delete it once step 5 (and any 5b decision) is done.
 
 ### 2a. Verify the worker (no media is touched)
 
@@ -270,32 +412,30 @@ The README's probe uses a throwaway key under your own test account instead
 of the zero-UUID path. Both work, because the refusal comes before
 authentication.
 
-If any result differs, roll the worker forward with a fix, or roll it back to
-the version recorded in step 1. Rolling back is allowed here, and only here,
-because the database brake is not applied yet. Then stop.
+The 2a probes are refused requests too, so they appear in the capture. Step
+5a excludes them by their paths.
 
-Continue to step 3 **immediately**.
+If all results match, record **T1** and continue to step 3 **immediately**.
+If any result differs, do not attempt a fix inside the gap: abort ("Abort",
+row "2a fails"), which rolls the worker back to the step 1 version id.
+Rolling back is allowed here, and only before T2, because the database brake
+is not applied yet.
 
 ## 3. Apply the migration (deploy tree)
 
-The deferred-migration gap is in force, so use the deploy tree. The helper
-never pushes; the person does.
+The deploy tree was built and checked in step P. In `<deploy tree>`:
 
-    node scripts/supabase-deploy-tree.mjs prepare --allow 20261013200000 --ref <merged main SHA>
-    node <deploy tree>/scripts/supabase-deploy-tree.mjs check --tree <deploy tree>
-
-Do not continue unless `check` prints `All checks passed` and the pending set
-is exactly `20261013200000`.
-
-    cd <deploy tree>
     supabase db push --linked
 
 Answer `y` only if the prompt lists exactly
-`20261013200000_obsolete_desktop_sync_brake.sql`. The migration is one
-`BEGIN … COMMIT`. If it fails, nothing is applied: stop and report the error.
+`20261013200000_obsolete_desktop_sync_brake.sql`; otherwise answer `n` and
+abort. The migration is one `BEGIN … COMMIT`. If the push fails or is
+refused, nothing is applied: abort ("Abort", row "step 3 push fails"), which
+first confirms with query 3a that the brake is not installed, then rolls the
+worker back. "Stop and report" alone would leave the gap open.
 
-When the push has committed, record the time in UTC. This is the end of the
-worker-first gap.
+When the push has committed, record **T2** in UTC. This is the end of the
+worker-first gap. Then stop the tail.
 
     node <deploy tree>/scripts/supabase-deploy-tree.mjs post-verify --tree <deploy tree>
 
@@ -322,6 +462,10 @@ Then remove the tree with the exact command `post-verify` prints. Never use
 
     -- Repeat 3c: still exactly the three known triggers.
 
+When 4a passes, record **T3**. If it fails, stop and report: the database
+brake has committed, so there is no rollback, and any fix is forward ("Abort",
+"After T2").
+
 ### 4b. End-to-end with a test account you own
 
 Use an existing observation of the test account, and a field you can set back.
@@ -345,41 +489,122 @@ Send the requests with that account's access token and the project's anon key.
 ### Record
 
 The 4a results (counts and booleans), the pass/fail of each 4b item, and the
-worker-first gap's UTC start and end (steps 2 and 3). No ids, tokens or row
-contents.
+completed timing record (T0, abort at, tail start, T1, T2, T3, and whether
+T2 − T0 stayed within 15 minutes). No ids, tokens or row contents.
 
-## 5. Optional: reconcile media orphaned in the gap
+## 5. Optional: reconcile the gap (orphaned media, rows without media)
 
-This step is optional and separate from the deploy. It finds the legacy-bucket
-objects left behind by v0.8.13/v0.9.1 observation deletes during the recorded
-gap (see "The worker-first gap orphans media").
+This step is optional and separate from the deploy. It covers the window from
+T0 to T2, or to the rollback time after an abort, and finds both gap
+residuals (see "The worker-first gap orphans media"):
 
-The repository has no tool that lists bucket objects without a row. The
-existing media-health audit (`admin-ops` edge function, `media_health` in
-`supabase/functions/admin-ops/index.ts`) works from the rows: rows missing
-media, unpurged tombstones and media issues. It cannot see an object whose rows
-were deleted, so it does not find these orphans. Its output is still a useful
-before/after sanity check.
+- legacy-bucket objects left behind by v0.8.13/v0.9.1 observation deletes
+  (part A);
+- cloud observation rows that v0.8.13/v0.9.1 created without an image row,
+  because the media upload was refused (part B).
+
+The method was dry-run on the disposable target
+(`brake-426/RESULTS.md`, "Orphan detection", `orphan-detect.sh`): it found
+exactly the 4 objects of the two G-DEL observations, and 0 orphans before
+them.
 
 ### 5a. Identify (read-only)
 
-1. List the object keys in the legacy bucket `sporely-media` with a read-only
-   R2 credential. Keys have the form `<user_id>/…`.
-2. Inside `BEGIN TRANSACTION READ ONLY; … ROLLBACK;`, collect every media key
-   that a row still references: `observation_images` (including tombstoned
-   rows), the thumbnail keys derived from them, and
-   `spore_measurement_mosaics.storage_key`.
-3. The orphans are the bucket keys from 1 that are missing from 2. The
-   bucket cannot show when the rows were deleted, so this set also contains
-   any orphans older than the gap. Only objects uploaded before the gap's end
-   can be gap orphans; beyond that, gap orphans cannot be told apart from
-   older ones. Treat the set as one reconciliation. If the operator captured
-   the worker's refused `DELETE` requests during the gap (for example with
-   `wrangler tail` running between steps 2 and 3), those paths are the exact
-   candidates, and each must also be missing from 2.
-4. Keep the list on the operator's machine. Object keys contain user ids and
-   are personal data: record only the **count** and total size in this
-   repository or in an agent session.
+**Reading the capture.** Every request URL to the worker's upload route has
+the form `/upload/<key>`, and the key is
+`<user_id>/<observation_id>/<file name>`. From the capture file, keep only
+events whose request URL path starts with `/upload/` and whose response
+status is `426`. Check one saved event first to see where Wrangler puts the
+method, URL and status. Then drop:
+
+- the 2a probes, which use the zero user id
+  `00000000-0000-4000-8000-000000000000`;
+- any README-style probe under your own test account's `brake-probe/` path.
+
+Split the rest by method: `DELETE` events feed part A, `PUT` events feed part
+B. If the capture is incomplete (a late start after T0, a disconnect, or
+sampling), it is a lower bound; use the full-bucket listing in A3 as well.
+
+**Part A: orphaned media.**
+
+1. Candidate prefixes. Each refused `DELETE` names one object, but the client
+   stops after the first refused media delete, so one refused `DELETE` stands
+   for the whole observation. Expand each one to its observation prefix
+   `<user_id>/<observation_id>/`. Deduplicate.
+2. List the bucket, read-only. Use an R2 API token with **Object Read**
+   permission only, scoped to the bucket `sporely-media`, and the
+   S3-compatible `ListObjectsV2` call against
+   `https://<account id>.r2.cloudflarestorage.com` (any S3 client), with each
+   candidate prefix as `prefix`. This runbook does not rely on
+   `wrangler r2 object` for listing: that it can list keys has not been
+   verified. For A3, list the whole bucket the same way, without a prefix.
+3. Collect every referenced key, inside a read-only transaction. Thumbnails
+   live in the same directory as their image, with the file name prefixed
+   `thumb_`, `thumb_small_` or `thumb_medium_` (`media_variant_key`, sporely-py
+   `utils/r2_storage.py`); old desktops uploaded only `thumb_`. Deriving the
+   prefixes from every key, as below, can only mark more objects as
+   referenced, which is the safe direction.
+
+       BEGIN TRANSACTION READ ONLY;
+       WITH refs(k) AS (
+         SELECT storage_path FROM public.observation_images       -- includes tombstoned rows
+         UNION ALL SELECT original_storage_path FROM public.observation_images
+         UNION ALL SELECT image_key FROM public.observations
+         UNION ALL SELECT thumb_key FROM public.observations
+         UNION ALL SELECT image_key FROM public.spore_measurements
+         UNION ALL SELECT thumb_key FROM public.spore_measurements
+         UNION ALL SELECT storage_key FROM public.spore_measurement_mosaics
+       ), keys AS (SELECT ltrim(k, '/') AS k FROM refs WHERE k IS NOT NULL AND k <> '')
+       SELECT k FROM keys
+       UNION
+       SELECT regexp_replace(k, '([^/]+)$', v || '\1')
+         FROM keys, unnest(ARRAY['thumb_', 'thumb_small_', 'thumb_medium_']) AS v;
+       ROLLBACK;
+
+4. The gap orphans are the keys listed under the candidate prefixes (A2) that
+   are missing from A3. With a complete capture this set is exact.
+5. Full-bucket reconciliation, when the capture is incomplete or missing: the
+   orphans are all bucket keys missing from A3. The bucket cannot show when
+   rows were deleted, so this set also contains any orphans older than the
+   gap; only objects uploaded before the gap's end can be gap orphans, and
+   beyond that they cannot be told apart. Treat that set as one
+   reconciliation.
+
+**Part B: observation rows without media.**
+
+1. From the refused `PUT` events, take the distinct `<observation_id>`
+   segments.
+2. Inside `BEGIN TRANSACTION READ ONLY; … ROLLBACK;`:
+
+       -- B2a: rows named by the capture that still have no image row.
+       SELECT count(*) FROM public.observations o
+        WHERE o.id = ANY ('{<observation ids from B1>}'::bigint[])
+          AND NOT EXISTS (SELECT 1 FROM public.observation_images i
+                           WHERE i.observation_id = o.id);
+
+       -- B2b: cross-check over the window. An upper bound: an observation
+       -- without photos is legitimate, and created_at is only a default.
+       SELECT count(*) FROM public.observations o
+        WHERE o.created_at >= '<T0>' AND o.created_at < '<T2 or rollback>'
+          AND NOT EXISTS (SELECT 1 FROM public.observation_images i
+                           WHERE i.observation_id = o.id);
+
+3. The existing media-health audit (`admin-ops` edge function called
+   without an `action`, the read-only overview whose `media_health` block is
+   built in `supabase/functions/admin-ops/index.ts`) is a before/after sanity
+   check, taken in step P and again now. It counts image rows with missing
+   media (`rows_missing_storage_path`, `rows_missing_thumb_path`) and media
+   issues. It **cannot** count the G-NEW rows: they have no image row at all
+   (`brake-426/RESULTS.md`). Its counts should not move because of the gap;
+   if they do, report it.
+
+These rows heal when a desktop that is not braked syncs the still-pending
+local photo. No server-side change to them is part of this runbook.
+
+**Data handling.** Keep the capture, listings and query output on the
+operator's machine. Object keys and observation ids belong to users and are
+personal data: record only counts and total size in this repository or in an
+agent session.
 
 ### 5b. Remove (separately approved)
 
@@ -391,8 +616,10 @@ based on the 5a count.
 
 ### Record
 
-Whether 5a was run, the orphan count and total size, and whether 5b was
-approved. No keys or user ids.
+Whether 5a was run; whether the capture was complete (and any uncovered
+intervals); the number of candidate prefixes; the orphan count and total size
+(A4, and A5 if run); the B2a and B2b counts; the `media_health` before/after
+counts; and whether 5b was approved. No keys, ids or user ids.
 
 ## What users see
 
@@ -404,7 +631,27 @@ approved. No keys or user ids.
   - There is no dialog and no sign-in prompt.
   - Download and pull keep working.
   - Deleting an observation shows `Observation deleted with 1 cleanup issue(s).`
-    The cloud copy and its media stay, and come back on the next pull.
+    The media `DELETE` gets 426 and the image-row `DELETE` gets 400 `P0001`,
+    so the observation `DELETE` is never sent and the cloud is unchanged. The
+    cloud copy and its media stay, and the next pull re-imports the
+    observation (`brake-426/RESULTS.md`, F-DEL).
+  - Credentials are kept, and a restart comes up signed in with no prompt, in
+    both the gap and the final state (`brake-426`, restart runs).
+- **Old desktop v0.8.13 and v0.9.1, during the worker-first gap only:**
+  - A new observation's row is created in the cloud (201), its media upload
+    is refused (426), and no image row is inserted. The UI reports success
+    with 0 errors (`Sporely Cloud synced: 1 uploaded.` on v0.8.13,
+    `Cloud sync complete. … 1 patched.` on v0.9.1); the refusal appears only on
+    stdout. The local observation stays linked to the new cloud row and
+    `dirty`, and its photo stays local and unlinked. It is retried once per
+    sync, with no loop.
+  - Deleting a synced observation shows only `Observation deleted.`, with no
+    cleanup issue. The rows are deleted and the media stays as orphans.
+  - Credentials stay stored and restarts come up signed in.
+  - Known gap-only inaccuracy: the 426 refusal text says `Nothing was changed
+    in the cloud.` That is false in the gap, because rows were created or
+    deleted. It is accurate in the final state. The worker is not changed for
+    this; users see the text at most in per-row details or on stdout.
 - **Web and Android:** no change.
 - **Support text:** "If Sporely Desktop says it must be updated before it can
   upload, nothing was lost: your observations are still on your computer and
@@ -422,6 +669,10 @@ worker to a version without the guard while the database brake is active,
 reactivates unsafe desktop synchronization. That means silent overwrites, or
 media deletion ahead of a refused row delete (bk31). There is deliberately no
 down migration.
+
+The worker rollback before T2 in "Gap timing, bound and abort" is the only
+rollback this runbook allows; at that point the database brake has not been
+applied.
 
 ### Every later worker deploy, until the cutover
 
