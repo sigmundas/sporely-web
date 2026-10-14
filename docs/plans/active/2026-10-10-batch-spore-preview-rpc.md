@@ -247,8 +247,8 @@ entry only summarises it; it adds no new production evidence.
   ref is what the owner deployed. Its "not approved for merge" line describes
   the state on 2026-10-12 before that merge.
 - Migration `20261012100000` authorized and applied by the owner on
-  2026-10-12. On 2026-10-13 `post-verify`, 3a and 3b re-runs passed; a further
-  3b re-run on 2026-10-14 passed.
+  2026-10-12. On 2026-10-13 `post-verify` and 3a re-runs passed; on 2026-10-14
+  a 3b re-run passed.
 - Step 5 window B0 (2026-10-12 10:50:00 UTC) → B1 (2026-10-13 11:08:35 UTC):
   `stats_reset`, `dealloc` (0), `track` (top) and `max_entries` (5000)
   unchanged; `entries_now` 4779 → 4792. Verdict **valid**, resting on the
