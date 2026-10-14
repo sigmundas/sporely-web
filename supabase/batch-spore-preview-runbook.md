@@ -13,7 +13,8 @@ performs every step and records the evidence. No agent runs any of it or
 connects to production. An agent may see only the aggregate results this
 runbook marks as recordable. Nothing here is deployed automatically.
 
-Status: **executed 2026-10-12; re-verified 2026-10-13.** See "Production
+Status: **executed 2026-10-12; re-verified 2026-10-13 (3a) and 2026-10-14
+(3b).** See "Production
 deployment — 2026-10-12" at the end. Some historical details of the original
 run are marked **not recorded** there.
 
@@ -576,9 +577,10 @@ passed.
 
 ## Production deployment — 2026-10-12
 
-Recorded 2026-10-13. Sources: the owner's step 5 output, the `check` files
-the deploy helper left in the local deploy tree, the operator's 2026-10-13
-re-runs, and the operator's own statements. No agent connected to production.
+Recorded 2026-10-13, corrected 2026-10-14. Sources: the owner's step 5
+output, the `check` files the deploy helper left in the local deploy tree, the
+operator's 2026-10-13 `post-verify` and 3a re-runs, their 2026-10-14 3b re-run,
+and the operator's own statements. No agent connected to production.
 
 - **Operator statement:** what the operator says, which nobody else checked.
 - **Verified:** what output or repository state shows.
@@ -587,8 +589,9 @@ re-runs, and the operator's own statements. No agent connected to production.
 
 ### Run
 
-- Operator: the owner. **Operator statement:** they personally performed
-  the production deployment and verification work.
+- Operator: the owner. **Operator statement:** they personally authorized
+  and performed the production database migration, and performed the
+  verification work.
 - Deployed ref: `a427a6f436df6d944c9234f56e4fe46bd0b11e53`. The helper's
   `sporely-deploy-plan.json` in the deploy tree records it as `sha` and
   `ref`, with `allow` `20261012100000`, `deferred` `20260914090000` and
@@ -669,8 +672,9 @@ not the operator's own run, which is **not recorded**:
   | `nonpublic_sample` | 30 |
   | `nonpublic_single_rows`, `nonpublic_batch_rows` | 0, 0 |
 - 3b on 2026-10-12: **not recorded**.
-- 3b re-run by the operator on 2026-10-13 (time not recorded) over
-  PostgREST, with operator-chosen ids that are not recorded. It **passed**:
+- 3b re-run by the operator on 2026-10-14 (time not recorded) over
+  PostgREST, with operator-chosen ids that are not recorded. These are
+  2026-10-14 verification results, not 2026-10-12 results. It **passed**:
   every call matches the expected table.
 
   | Call | Result |
@@ -683,7 +687,10 @@ not the operator's own run, which is **not recorded**:
 
   These calls ran after B1, so they are outside the B0→B1 window. H1–H4 do
   add to the batch function's `anon` counters, so the landing A0 snapshot
-  must be taken after these re-runs.
+  must be taken after this 2026-10-14 run, or after any later 3b run.
+- No 3b run on 2026-10-13 is recorded. An earlier version of this record
+  listed one; the operator does not recall it and there is no independent
+  evidence, so it was removed.
 
 ### Step 5 — window B0→B1
 
@@ -803,8 +810,9 @@ Caveats:
 
 ### Gate
 
-The migration is applied. As of 2026-10-13:
-- `post-verify`, 3a and 3b pass;
+The migration is applied. As of 2026-10-14:
+- `post-verify` and 3a pass (2026-10-13 re-runs);
+- 3b passes (2026-10-14 re-run);
 - the B0→B1 window is valid, with the qualification above.
 
 Items marked **not recorded** are historical details of the 2026-10-12 run.
