@@ -86,7 +86,8 @@ A practical way to stop writes from a faulty newly released desktop build, witho
   - The function reads only the block table and `request.headers`. It never uses `current_user`, writes nothing, and returns `NEW` (or `OLD` on DELETE) unchanged when not refusing.
   - pgTAP asserts `prosecdef = true`, the pinned `search_path`, the revoked EXECUTE, and that `authenticated` cannot `SELECT` the table.
 - The check reads PostgREST's `request.headers`. When `x-sporely-sync-identity` is present and `x-sporely-client-version` is listed in the table, it refuses with `P0001`, hint `sporely_upgrade_required`, and the fixed message "This version of Sporely Desktop is blocked from uploading. Install the latest version from sporely.no. Nothing was changed in the cloud."
-- The check keys only on the request headers, never on the database role. Requests without the identity header are never affected: web, Android, released desktops, Edge Functions, migrations and plain SQL sessions.
+- The check keys only on the request headers, never on the database role. Requests without the identity header are never affected: web, Android, released desktops, Edge Functions, migrations and plain SQL sessions. Every released desktop lacks that header, so the write stop can never block one, even if its version string were listed.
+- The migration creates the block table **empty** and inserts nothing. With an empty table nothing is blocked, including the new desktop.
 - RPC writes are covered even when the function runs as its owner, because the request's headers stay visible inside it.
 - Activation is one authorized production `INSERT` of the faulty version, and removal is one `DELETE`.
 - The new desktop treats the refusal like any `sporely_upgrade_required` answer: it stops uploading, keeps rows dirty and shows the banner.
@@ -181,7 +182,7 @@ No behaviour claim rests on U alone.
 | 13 | copied database, unchanged content | 23505 → adopt silently | U+G |
 | 13b | copied or restored database whose rows were since edited elsewhere | adoption raises a conflict; no PATCH | U+G |
 | 13c | adopted row soft-deleted or purged | deletion/restore flow; no resurrection | U+G |
-| 13d | 409 from `23503`, or `23505` on another constraint | plain error, not adoption | U+P |
+| 13d | 409 from `23503`, or `23505` on another constraint | plain error, not adoption | U+P+G |
 | 14 | old clients (v0.8.13, v0.9.1, v0.9.15, v0.9.18, v0.9.25, `0520afd`, `ee6f2af`) against the key schema | unchanged except refused link repairs onto keyed rows; no sign-in prompt; local data and credentials kept | G |
 | 14b | an old client repairs a link onto a new-desktop row | refused; the row keeps a NULL link | P+G |
 | 15 | new desktop against a server without the key schema | uploads blocked "cloud not ready"; pull works | U+G |
@@ -190,7 +191,7 @@ No behaviour claim rests on U alone.
 | 19 | another tenant uses the same key | allowed; no cross-tenant 409 | P (accepted) |
 | 20a | `sync_key` absent from every non-owner view and public RPC | absent | P (accepted) |
 | 22 | an old desktop crashed after creating cloud rows, before storing `cloud_id`; the new desktop upgrades the profile | equal content → linked, no cloud write, no duplicate; different content or another device's colliding row → new row plus a "possible duplicate" report; nothing PATCHed | U+G |
-| 23 | the write stop: block the candidate's version, sync, then unblock | while blocked: every row write refused, banner shown, local data kept, other clients unaffected; after unblock: pending work uploads | P+G |
+| 23 | the write stop: with the table empty, then block the candidate's version, sync, then unblock | empty table: the new desktop and released desktops sync normally; while blocked: every row write from the blocked build refused, banner shown, local data kept, released desktops and web unaffected; after unblock: pending work uploads | P+G |
 | 24 | ownership after two-desktop activity: images and measurements of both computers | every image under its own observation and every measurement under its own image; storage paths stay in the owner's prefix; no child re-parented | U+G |
 
 Rows 17, 20b, 21 and 16b belong to the deferred cutover and keyless refusal.
@@ -268,7 +269,10 @@ Make three separate commits, in this order:
 1. Merge the accepted database-key commit `24700c0`. The merge was conflict-free when checked with `git merge-tree` on 2026-10-14. No other change goes in this commit.
 2. Add the write-stop migration and its pgTAP tests exactly as "Desktop write stop" specifies. Tests:
    - a listed version is refused on INSERT, UPDATE and DELETE of every covered table, including a write made inside `set_observation_location`;
+   - with the table empty, as the migration leaves it, writes with the identity header and any version are allowed;
+   - a released-desktop request (`python-requests` User-Agent, no identity header) is allowed even when its version string is listed;
    - an unlisted version, a request without the identity header, and a SQL session with no request headers are allowed;
+   - the migration inserts no rows into the block table;
    - the table's privileges are owner-only;
    - the refusal is `P0001` with hint `sporely_upgrade_required`, and the message contains no auth or transient word.
 3. Add the identity section to `docs/supabase-sync-contract.md` exactly as "Contract text" specifies.
