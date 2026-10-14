@@ -72,6 +72,13 @@ See `wrangler.toml` and `wrangler.toml.example`.
    the row delete. Deploying such a tree is forbidden until the sync-key
    cutover removes the brake on purpose.
 
+   One exception, only during the brake's own first deploy: until the brake
+   migration has committed (the runbook's T2), the runbook's "Abort" may roll
+   the worker back to the pre-brake version recorded in its step 1, after its
+   procedure Q has shown that the database brake is not installed. Once the
+   migration has committed, the rule above is absolute: never deploy or roll
+   back to a worker without the guard.
+
 ## Request Format
 
 ```bash

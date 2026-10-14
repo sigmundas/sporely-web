@@ -107,8 +107,9 @@ kept, and the next pull brings it back.
    - v0.8.13 and v0.9.1 desktops that delete an observation leave its media
      orphaned in the public legacy bucket. See the next section.
 
-   The gap is bounded: at most 15 minutes, or the worker is rolled back. See
-   "Gap timing, bound and abort".
+   The gap is bounded: at most 15 minutes, or the worker is rolled back, with
+   one documented limit when a push's outcome cannot be settled. See "Gap
+   timing, bound and abort".
 
 ### The worker-first gap orphans media (accepted residual)
 
@@ -173,20 +174,84 @@ record with the deploy notes; every field is recordable.
 | Field | Meaning | UTC |
 |---|---|---|
 | T0 | `wrangler deploy` in step 2 finished: **gap start** | |
+| Push cutoff | T0 + 10 min | |
 | Abort at | T0 + 15 min | |
 | Tail start | `wrangler tail` capture running (step 2) | |
 | T1 | all 2a checks passed | |
-| T2 | `supabase db push --linked` in step 3 committed: **gap end** | |
+| Push started | `supabase db push --linked` started in step 3 | |
+| T2 | the push committed: **gap end** | |
 | T3 | 4a passed | |
+| Quiescence | only after an abort with a started push: procedure Q finished | |
 | Rollback | only after an abort: worker rollback verified (replaces T2 as gap end) | |
 
 ### Bound
 
 - The gap, T2 − T0, must not exceed **15 minutes**. The target is under 10.
-- If T2 has not happened by the "abort at" time, the operator aborts (below),
-  even if the push looks close.
+- **Push cutoff, T0 + 10 min.** Do not start the push after it. If the push
+  has started but T2 is not confirmed by then, stop it with procedure Q
+  below. The 5 minutes up to "abort at" are reserved for Q and the worker
+  rollback.
+- **Abort at, T0 + 15 min.** By then either T2 has happened, or the worker
+  rollback is verified.
 - An aborted deploy may be retried later, only from step 0, with a fresh
   timing record. The earlier gap still gets its own step 5.
+- **Limit of the bound.** No document can force a server-side transaction
+  to end. Step P therefore checks, before the gap, that the operator's
+  database role can see and terminate other sessions. If Q still cannot
+  establish that no push session remains (for example, the push session
+  belongs to a role the operator cannot terminate), the worker is **not**
+  rolled back, and the gap outlives the bound. That state is the documented
+  gap state, not bk31: keep the worker brake, keep the tail running, keep
+  working Q, and report the overrun.
+
+### Procedure Q: end the push and settle its outcome
+
+The migration is one `BEGIN … COMMIT`, so it is either fully applied or not
+at all. A client that exits with an error, or loses its connection, does not
+show which: the server-side transaction can still be running and can still
+commit. Q settles it. Use it whenever the push was started (even if the
+prompt was answered `n`) and T2 is not confirmed.
+
+1. Stop the CLI with Ctrl-C if it is still running, and confirm that the
+   process has exited.
+2. In the database-owner SQL session prepared in step P, outside any
+   transaction block, list the sessions the push may have left:
+
+       SELECT pid, usename, application_name, state, wait_event_type,
+              backend_start, xact_start, left(query, 120) AS query
+         FROM pg_stat_activity
+        WHERE pid <> pg_backend_pid()
+          AND backend_type = 'client backend'
+          AND backend_start >= '<push started>'::timestamptz - interval '1 minute'
+        ORDER BY backend_start;
+
+   Only a session with an open transaction (`xact_start` not NULL) can still
+   commit. Treat every such listed session as a push session unless it is
+   clearly something else (for example PostgREST app traffic as
+   `authenticator`). That includes one whose `query` names `sync_brake`,
+   `trg_000_sync_brake`, `20261013200000` or `supabase_migrations`, one
+   whose `query` is only `BEGIN` or `COMMIT`, and any session of the role the
+   CLI connected as (for example `postgres`, or a temporary `cli_login_…`
+   role). A session with `xact_start` NULL has no transaction and cannot
+   commit anything. The output stays on the operator's machine.
+3. Terminate each such session: `SELECT pg_terminate_backend(<pid>);`.
+   Termination rolls back a transaction that has not committed; a committed
+   one stays committed.
+4. Repeat 2 and 3 until step 2 shows no push session. That is quiescence:
+   no session remains that could still commit the migration. Record the
+   time. If the push session cannot be identified with certainty, or
+   `pg_terminate_backend` returns `false` or errors, quiescence is **not**
+   established: see "Limit of the bound".
+5. Only after quiescence, run query 3a from step 1 (read-only):
+   - 0 and NULL: the brake is not installed, and nothing can install it
+     now. The worker rollback is allowed.
+   - 7 and a non-NULL procedure: the push committed. Record T2 as the time
+     observed, run `post-verify` from step 3, and follow "After T2". No
+     rollback.
+   - Anything else: STOP and report. No rollback.
+
+Never roll the worker back while a push session may exist, or before Q's
+step 5 has returned 0 and NULL.
 
 ### Abort
 
@@ -196,15 +261,22 @@ The worker rollback before T2 is the **only** rollback this runbook allows.
 |---|---|---|---|---|
 | Before step 2 | Any gate, pre-check or step P fails | Stop. Nothing has changed in production. | — | Which check failed. |
 | Step 2 fails | `wrangler deploy` exits with an error | Run `curl -s https://upload.sporely.no/healthz`. | If it still shows the step 1 `workerVersion` and no `obsoleteDesktopBrake`, nothing changed: stop. If it shows `sporely-r2-upload-worker@obsolete-desktop-brake-1`, the new worker is live: set T0 now and continue with the next row. | The error, which `workerVersion` `/healthz` showed. |
-| 2a fails, bound reached, or step 3 push fails or is refused | Any 2a result differs; the "abort at" time passes before T2; `supabase db push --linked` errors, or its prompt lists anything other than exactly `20261013200000_obsolete_desktop_sync_brake.sql` (answer `n`) | If `supabase db push --linked` was started at all (it errored, or is still running when the bound is reached): wait for it to end, then run the step 1 query 3a read-only. Only if it returns 0 and NULL (brake not installed) continue here; otherwise T2 has happened (record it) and the "After T2" row applies. Then roll the worker back to the deployment version id recorded in step 1: `wrangler rollback <version id>`, or the Cloudflare dashboard's deployment rollback for `sporely-r2-upload`. Stop the tail after verifying. | `curl -s https://upload.sporely.no/healthz` reports the step 1 `workerVersion` and has **no** `obsoleteDesktopBrake` field. | Trigger, rollback UTC time (the gap end), healthz result. Step 5 then applies to [T0, rollback]. |
+| Before the push starts | Any 2a result differs, or the push cutoff passes before the push was started | Roll the worker back (see "Rollback" below). | Rollback check below. | Trigger, rollback UTC time (the gap end), healthz result. Step 5 applies to [T0, rollback]. |
+| After the push started, T2 not confirmed | The push errors or is refused; its prompt lists anything other than exactly `20261013200000_obsolete_desktop_sync_brake.sql` (answer `n`); or the push cutoff passes | Run procedure Q. Only if Q's step 5 returns 0 and NULL, roll the worker back. If it shows the brake, continue "After T2". If quiescence is not established, do not roll back ("Limit of the bound"). | Q's step 5 result, then the rollback check. | Trigger, quiescence time, the 3a result, and either the rollback time (gap end) or T2. Step 5 applies to the window that ended. |
 | After T2 | Anything | **No rollback of either half, ever.** See below. | — | — |
+
+**Rollback:** roll the worker back to the deployment version id recorded in
+step 1, with `wrangler rollback <version id>` or the Cloudflare dashboard's
+deployment rollback for `sporely-r2-upload`. Verify that
+`curl -s https://upload.sporely.no/healthz` reports the step 1
+`workerVersion` and has **no** `obsoleteDesktopBrake` field. Then stop the
+tail.
 
 What the pre-T2 rollback restores: exactly the production behaviour before
 the deploy. Old desktops upload and delete media as before, and the
 multi-device overwrite hazard remains as before. No database brake was
-applied, so nothing the database was refusing is re-enabled. A failed step 3
-push applies nothing, because the migration is one `BEGIN … COMMIT`; the
-database is as it was in step 1.
+applied (Q's step 5 proved it when a push was started), so nothing the
+database was refusing is re-enabled.
 
 After T2 the database brake has committed:
 
@@ -337,23 +409,64 @@ probes, `supabase db push --linked` and its confirmation.
    Step 1's `supabase migration list` already proved this, `prepare` verifies
    the deploy tree's production link, and `check` runs `migration list` and
    `db push --dry-run` inside the tree. Nothing further is needed.
-3. Wrangler, from `cloudflare/r2-upload-worker`: `wrangler whoami` shows the
-   Cloudflare account that owns `sporely-r2-upload`. `wrangler tail --help`
-   lists `--format` with the value `json`, and `wrangler rollback --help`
-   accepts a version id. If either is missing in the installed Wrangler, use
-   the dashboard equivalents (Workers → `sporely-r2-upload` → Logs, and
-   Deployments → Rollback) and note that in the deploy notes.
-4. Have three terminals ready:
+3. Wrangler, from `cloudflare/r2-upload-worker`. The Wrangler commands and
+   flags in this runbook (`wrangler deployments list`,
+   `wrangler tail <worker> --format json`, `wrangler rollback <version id>`)
+   have **not** been checked against Wrangler's own documentation while this
+   runbook was written: it was prepared offline, and no Wrangler install or
+   copy of its command reference was available. The missing input is
+   Wrangler's command reference for `tail`, `deployments` and `rollback`
+   (developers.cloudflare.com, Wrangler "Commands"), or the `--help` output of
+   the Wrangler version the operator uses. Check them now, before the gap:
+   - `wrangler whoami` shows the Cloudflare account that owns
+     `sporely-r2-upload`;
+   - `wrangler tail` accepts a worker name and `--format json`, according to
+     the command reference or `wrangler tail --help`. **This is a gate.** The
+     capture must be a local JSON file; the dashboard's live logs are not a
+     substitute. If the installed Wrangler cannot do this, stop: abort
+     before step 2;
+   - `wrangler rollback` accepts a version id. If not, the dashboard's
+     Deployments → Rollback for `sporely-r2-upload` is the rollback path
+     (it needs no capture), and you note that.
+4. Database session for procedure Q. Open a SQL session as the database
+   owner (the same access as step 1's queries) and keep it open through
+   T3. In it, read-only:
+
+       -- Expect t, t. Otherwise stop: abort before step 2. Q needs both to
+       -- see and end another session.
+       SELECT pg_has_role('pg_signal_backend', 'MEMBER') AS can_terminate,
+              pg_has_role('pg_read_all_stats', 'MEMBER') AS can_read_activity;
+
+       -- Expect 0: no transaction older than a minute holds a lock on the
+       -- seven tables. Such a transaction would block the migration's
+       -- CREATE TRIGGER. Otherwise wait and repeat; do not start step 2.
+       SELECT count(*) FROM pg_stat_activity a
+        WHERE a.pid <> pg_backend_pid()
+          AND a.xact_start < now() - interval '1 minute'
+          AND EXISTS (SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+                       WHERE l.pid = a.pid
+                         AND c.relname IN ('observations', 'observation_images',
+                               'spore_measurements', 'spore_measurement_mosaics',
+                               'spore_measurement_mosaic_tiles',
+                               'observation_spore_summaries',
+                               'observation_reference_uses'));
+
+   Q's `pg_terminate_backend` ends a session; it changes no data. It is part
+   of this deploy's authorization, used only on the push's own session.
+5. Have four terminals ready:
    - in `cloudflare/r2-upload-worker`, the step 2 deploy, then the tail
      command from step 2, with an output file **outside any repository**;
    - in `<deploy tree>`, `supabase db push --linked` typed but not run;
    - the abort command `wrangler rollback <version id from step 1>` typed but
-     not run.
-5. Optional baseline for step 5a: the `media_health` counts (see 5a, part B).
+     not run;
+   - the database session from item 4, with Q's step 2 query ready.
+6. Optional baseline for step 5a: the `media_health` counts (see 5a, part B).
 
 ### Record
 
-That `check` passed, and whether tail and rollback are by CLI or dashboard.
+That `check` passed, the two role checks, the lock count, that the tail
+command was confirmed (and from which source), and whether rollback is by
+CLI or dashboard.
 
 ## 2. Deploy the worker
 
@@ -373,7 +486,8 @@ Immediately start the capture, and record "tail start":
 
     wrangler tail sporely-r2-upload --format json >> <capture file outside any repository>
 
-- Use no filter flags. Filter the saved file afterwards by request method
+- Use only the worker name and `--format json`, as confirmed in step P. Use
+  no filter flags: none were verified. Filter the saved file afterwards by request method
   (`DELETE`, `PUT`) and response status (`426`); step 5a says how.
 - If the tail disconnects, restart the same command at once (it appends) and
   note the uncovered interval. If Wrangler reports that it is sampling
@@ -417,24 +531,29 @@ The 2a probes are refused requests too, so they appear in the capture. Step
 
 If all results match, record **T1** and continue to step 3 **immediately**.
 If any result differs, do not attempt a fix inside the gap: abort ("Abort",
-row "2a fails"), which rolls the worker back to the step 1 version id.
+row "Before the push starts"), which rolls the worker back to the step 1
+version id.
 Rolling back is allowed here, and only before T2, because the database brake
 is not applied yet.
 
 ## 3. Apply the migration (deploy tree)
 
-The deploy tree was built and checked in step P. In `<deploy tree>`:
+The deploy tree was built and checked in step P. Start the push only before
+the push cutoff (T0 + 10 min), and record "push started". In
+`<deploy tree>`:
 
     supabase db push --linked
 
 Answer `y` only if the prompt lists exactly
 `20261013200000_obsolete_desktop_sync_brake.sql`; otherwise answer `n` and
-abort. The migration is one `BEGIN … COMMIT`. If the push fails or is
-refused, nothing is applied: abort ("Abort", row "step 3 push fails"), which
-first confirms with query 3a that the brake is not installed, then rolls the
-worker back. "Stop and report" alone would leave the gap open.
+abort. The migration is one `BEGIN … COMMIT`, so it is applied fully or not
+at all, but a push that reports an error does not prove that nothing
+committed. If the push errors, is refused, or has not finished by the push
+cutoff, abort ("Abort", row "After the push started"): procedure Q ends the
+push and settles with query 3a whether it committed, and only then may the
+worker be rolled back. "Stop and report" alone would leave the gap open.
 
-When the push has committed, record **T2** in UTC. This is the end of the
+When the push reports success, record **T2** in UTC. This is the end of the
 worker-first gap. Then stop the tail.
 
     node <deploy tree>/scripts/supabase-deploy-tree.mjs post-verify --tree <deploy tree>
@@ -523,7 +642,8 @@ method, URL and status. Then drop:
 
 Split the rest by method: `DELETE` events feed part A, `PUT` events feed part
 B. If the capture is incomplete (a late start after T0, a disconnect, or
-sampling), it is a lower bound; use the full-bucket listing in A3 as well.
+sampling), it is a lower bound; use the full-bucket reconciliation in A5 as
+well.
 
 **Part A: orphaned media.**
 
@@ -537,7 +657,12 @@ sampling), it is a lower bound; use the full-bucket listing in A3 as well.
    `https://<account id>.r2.cloudflarestorage.com` (any S3 client), with each
    candidate prefix as `prefix`. This runbook does not rely on
    `wrangler r2 object` for listing: that it can list keys has not been
-   verified. For A3, list the whole bucket the same way, without a prefix.
+   verified. For A5, list the whole bucket the same way, without a prefix.
+   `ListObjectsV2` returns at most one page of keys per call. Follow every
+   page: while a response has `IsTruncated` true, call again with its
+   `NextContinuationToken` as `continuation-token`. The listing is complete
+   only when the last response has `IsTruncated` false. Record the number of
+   pages and keys, so a listing that stopped early is visible.
 3. Collect every referenced key, inside a read-only transaction. Thumbnails
    live in the same directory as their image, with the file name prefixed
    `thumb_`, `thumb_small_` or `thumb_medium_` (`media_variant_key`, sporely-py
@@ -572,22 +697,43 @@ sampling), it is a lower bound; use the full-bucket listing in A3 as well.
 
 **Part B: observation rows without media.**
 
-1. From the refused `PUT` events, take the distinct `<observation_id>`
-   segments.
-2. Inside `BEGIN TRANSACTION READ ONLY; … ROLLBACK;`:
+1. From the refused `PUT` events, take the distinct
+   (`<user_id>`, `<observation_id>`) pairs. The worker refuses before
+   authentication, so a path can name anything: a pair is only a claim until
+   B2 matches it to a real row of that user.
+2. Inside `BEGIN TRANSACTION READ ONLY; … ROLLBACK;`, with the pairs from B1
+   in the `VALUES` list and the window from the timing record:
 
-       -- B2a: rows named by the capture that still have no image row.
-       SELECT count(*) FROM public.observations o
-        WHERE o.id = ANY ('{<observation ids from B1>}'::bigint[])
-          AND NOT EXISTS (SELECT 1 FROM public.observation_images i
-                           WHERE i.observation_id = o.id);
+       WITH captured(user_id, id) AS (
+         VALUES ('<user_id>'::uuid, <observation_id>::bigint) -- one row per pair
+       ), imageless AS (
+         SELECT o.id, o.created_at FROM public.observations o
+          WHERE NOT EXISTS (SELECT 1 FROM public.observation_images i
+                             WHERE i.observation_id = o.id)
+       )
+       SELECT
+         -- B2a, the result: captured pairs that match a row of that user,
+         -- created in the gap, with no image row.
+         (SELECT count(*) FROM captured c
+            JOIN public.observations o ON o.id = c.id AND o.user_id = c.user_id
+            JOIN imageless m ON m.id = o.id
+           WHERE m.created_at >= '<T0>' AND m.created_at < '<T2 or rollback>') AS b2a_in_gap,
+         -- B2b: the same match, but created outside the window: an older
+         -- pending upload, or a client-supplied created_at. Report, do not add.
+         (SELECT count(*) FROM captured c
+            JOIN public.observations o ON o.id = c.id AND o.user_id = c.user_id
+            JOIN imageless m ON m.id = o.id
+           WHERE NOT (m.created_at >= '<T0>' AND m.created_at < '<T2 or rollback>')) AS b2b_outside_gap,
+         -- B2c, approximate fallback only: every image-less row created in the
+         -- window, captured or not. An upper bound: an observation without
+         -- photos is legitimate, and created_at is only a column default.
+         (SELECT count(*) FROM imageless m
+           WHERE m.created_at >= '<T0>' AND m.created_at < '<T2 or rollback>') AS b2c_window;
 
-       -- B2b: cross-check over the window. An upper bound: an observation
-       -- without photos is legitimate, and created_at is only a default.
-       SELECT count(*) FROM public.observations o
-        WHERE o.created_at >= '<T0>' AND o.created_at < '<T2 or rollback>'
-          AND NOT EXISTS (SELECT 1 FROM public.observation_images i
-                           WHERE i.observation_id = o.id);
+   B2a counts **candidates**: rows consistent with a refused gap upload. It
+   does not prove that the refusal caused them. Captured pairs that match no
+   row of that user are dropped. If the capture is incomplete, B2a is a lower
+   bound and B2c the only (approximate) cover for the uncovered interval.
 
 3. The existing media-health audit (`admin-ops` edge function called
    without an `action`, the read-only overview whose `media_health` block is
@@ -617,8 +763,9 @@ based on the 5a count.
 ### Record
 
 Whether 5a was run; whether the capture was complete (and any uncovered
-intervals); the number of candidate prefixes; the orphan count and total size
-(A4, and A5 if run); the B2a and B2b counts; the `media_health` before/after
+intervals); the number of candidate prefixes; the listing's page and key
+counts; the orphan count and total size (A4, and A5 if run); the number of
+captured pairs and the B2a, B2b and B2c counts; the `media_health` before/after
 counts; and whether 5b was approved. No keys, ids or user ids.
 
 ## What users see
