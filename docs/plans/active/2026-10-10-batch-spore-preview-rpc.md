@@ -246,8 +246,9 @@ entry only summarises it; it adds no new production evidence.
 - The reconciliation candidate above was later merged as `a427a6f`, and that
   ref is what the owner deployed. Its "not approved for merge" line describes
   the state on 2026-10-12 before that merge.
-- Migration `20261012100000` applied by the owner on 2026-10-12. On
-  2026-10-13 `post-verify`, 3a and 3b re-runs passed.
+- Migration `20261012100000` authorized and applied by the owner on
+  2026-10-12. On 2026-10-13 `post-verify`, 3a and 3b re-runs passed; a further
+  3b re-run on 2026-10-14 passed.
 - Step 5 window B0 (2026-10-12 10:50:00 UTC) → B1 (2026-10-13 11:08:35 UTC):
   `stats_reset`, `dealloc` (0), `track` (top) and `max_entries` (5000)
   unchanged; `entries_now` 4779 → 4792. Verdict **valid**, resting on the
@@ -267,6 +268,6 @@ entry only summarises it; it adds no new production evidence.
 
 `sporely-landing`'s `explorer-cards-batch-preview` plan may start. Its own
 gates still apply: Stage 1 re-checks the deployed function; the landing A0
-snapshot must be taken after the 2026-10-13 3b re-runs and before the Cards
+snapshot must be taken after the latest 3b run (2026-10-14) and before the Cards
 switch; Stage 2 needs the owner's screenshot comparison and a post-switch
 aggregate window compared with B0→B1.
