@@ -239,7 +239,7 @@ Environment rules for every stage:
   - It records the tested commit, the admission and these pre-launch checks in each run's `manifest.json`.
   - Stages use it as it is and do not edit it. If it refuses a candidate, the stage stops and reports.
 - Every desktop GUI session starts with a passing network-isolation probe, uses test accounts and synthetic photos, and keeps the harness's per-run manifest and logs as evidence.
-- No hosted Supabase project, production host or production credential is contacted. Disposable-target migrations and writes are agent verification; any hosted-project write is a production operation and outside every stage.
+- No stage contacts a hosted Supabase project, a production host or a production credential. The migration-history precheck that sporely-web `AGENTS.md` requires before migrations change is satisfied for Stages 10 and 11 by the snapshot the user captures at GW3-INPUTS. Those stages compare their new migrations with it offline, and stop on any disagreement before the new migration. The full deploy-time checks (AGENTS.md steps 7–9) stay part of each production authorization. Stage 1 adds no new migration; it merges the already-reviewed S1 migration. Disposable-target migrations and writes are agent verification; any hosted-project write is a production operation and outside every stage.
 - Use the project interpreters and focused tests only. No `npm test`, builds, Capacitor sync, dependency installation or package upgrade.
 - Do not touch the brake branches, the S1/S2 run worktrees, `INBOX.md` in any checkout, or the untracked `tools/metadata_backfill/` work in the primary sporely-py checkout.
 
@@ -253,7 +253,7 @@ Kind: external. Blocks Stage 1. Run `plan-29e3f313-f8d7a4e6` is complete, with `
 
 ### GP-S2 — S2 accepted with GS2-GUI recorded
 
-Kind: external. Blocks Stage 2. Run `plan-77425a26-9581f511` is complete, with `be511bf` accepted and pushed (true as of 2026-10-14) and GS2-GUI recorded by the user. Stage 2 integrates exactly that accepted commit. Any record of GS2-GUI must say that measurement creation, bundle import, portable import and image move were unit-tested only; they are verified in the GUI at Stage 6.
+Kind: external. Blocks Stage 2. Not satisfied as of 2026-10-14: `be511bf` is accepted and pushed, but GS2-GUI is not yet recorded, so run `plan-77425a26-9581f511` is not complete. The gate is satisfied when the user has recorded GS2-GUI and the run is complete. Stage 2 integrates exactly that accepted commit. Any record of GS2-GUI must say that measurement creation, bundle import, portable import and image move were unit-tested only; they are verified in the GUI at Stage 6.
 
 ### GS1b-ANDROID — S1b on a real Android device
 
@@ -271,7 +271,8 @@ Kind: authorization. Blocks Stage 10. Before Stage 10 starts, the user records t
 
 1. The DPO decision on the restricted `desktop_id` backup: a backup with an approved retention period, or no backup. The DPO note in the design record is the input to this decision.
 2. The production brake state: never deployed, or deployed with its merged `main` commit, so that Stage 10 knows whether the cutover lifts it.
-3. The go-ahead to prepare the cutover.
+3. The migration-history snapshot. The user runs the read-only `supabase migration list` against the linked production project, which sporely-web `AGENTS.md` requires before migrations change, and saves the captured output for Stages 10 and 11. Optionally they record it with `sparring record-migration-history`. If local and remote history disagree anywhere other than a version registered in `supabase/deploy-exceptions.json`, the gate does not pass.
+4. The go-ahead to prepare the cutover.
 
 ## Stages
 
@@ -403,9 +404,16 @@ G4 delta, on the same candidate and pinned web candidate. Re-run only the G4 cas
 
 The Prepare Images typing cases (r03–r06, r04b, r05b) are carried forward from `ee6f2af` only if `git diff ee6f2af..<candidate>` touches neither `ui/observations_tab.py` `ObservationDetailsDialog` nor the image-import dialog; otherwise re-run them too. State which applied.
 
-Commit a summary record, `docs/verification/2026-10-sync-key-n1-two-desktop.md`, containing:
+Commit a summary record, `docs/verification/2026-10-sync-key-n1-two-desktop.md`. A commit cannot contain its own SHA, so the convention is:
 
-- the candidate SHA;
+- Every harness run is made on one clean **tested commit** `T`, the last code commit of this stage. The launcher records `T` in each run's `manifest.json`.
+- The summary is committed on top of `T` as the stage's final commit, the **evidence commit**, and changes only that one file.
+- The reviewer verifies three things: `git diff T..<candidate>` touches only the summary file; every cited run manifest records `T`; and `T` is an ancestor of the candidate.
+- If code changes after a run, every affected case is re-run on the new `T`.
+
+The summary contains:
+
+- the tested commit `T`;
 - the target snapshot;
 - per case: run id, expected result, observed result, and the evidence log path in the operator evidence directory;
 - the list of G4 cases carried forward with the reason.
@@ -424,7 +432,7 @@ A fresh reviewer with no write access checks:
 - that the fault hook is inert unless its environment variable is set;
 - that the identity header is sent on every write path, including media;
 - that the contract copies are byte-identical in the identity section;
-- that the Stage 6 evidence matches its logs and covers every listed case in both brake states.
+- that the Stage 6 evidence matches its logs, covers every listed case in both brake states, and follows the tested-commit convention: every run on `T`, and only the summary file between `T` and the accepted commit.
 
 A defect is a defect report that stops the plan; nothing is fixed in this stage.
 
@@ -453,7 +461,7 @@ Gate GS1b-ANDROID follows this stage.
 
 Primary repository: sporely-web. Depends on gates GS1b-ANDROID and GW3-INPUTS, and on accepted Stage 7 (slice P1 complete). If GW3-INPUTS records a deployed brake, first merge the `main` commit that contains the brake migration `20261013200000` into this branch, unchanged, as its own commit.
 
-Write the cutover migration exactly as "Cutover migration (S4)" and "Backup tables" in the Frozen identity contract specify:
+First compare the branch's migration files with the GW3-INPUTS migration-history snapshot, and stop on any disagreement other than a registered exception. Then write the cutover migration exactly as "Cutover migration (S4)" and "Backup tables" in the Frozen identity contract specify:
 
 - lock first;
 - the backup only as GW3-INPUTS decided, with source-row foreign keys, owner-only privileges and a retention comment;
@@ -464,7 +472,7 @@ Write the cutover migration exactly as "Cutover migration (S4)" and "Backup tabl
 - the views with `NULL::integer AS desktop_id`;
 - lifting the brake in the same transaction when it is present.
 
-Also write a forward-only rollback script that relaxes rule 4 without restoring any link, and the documented retry procedure.
+Also write the rollback script exactly as the Frozen identity contract's rollback rule specifies. It keeps rule 4 and the `CHECK`, restores no link, relaxes only rule 5 if it is enabled, and leaves the brake to the brake workstream. Write the documented retry procedure too.
 
 Verify:
 
@@ -502,7 +510,7 @@ Mode: `independent_review`. Primary repository: sporely-web at the accepted Stag
 
 The ingestion run pins sporely-py by branch, not SHA: its Stage 5 declares sibling `sporely-py` at path `/Users/sigmundas/Documents/Code/sporely/sporely-py`, branch `feature/ingestion-location-provenance-stage-4`, with `candidate_sha` null. Its manifest is immutable, so the corrected desktop must become that branch's head. The order:
 
-1. After slice P1 completes, the operator runs a revised pin preflight. It replaces `stage4b/verify_stage5_pin.sh`, whose hard-coded chain ends at `ee6f2af`. The preflight must confirm all of these:
+1. After slice P1 completes, an agent runs a revised, read-only pin preflight script and reports its output. This is agent verification; it records nothing in any run. It replaces `stage4b/verify_stage5_pin.sh`, whose hard-coded chain ends at `ee6f2af`. The preflight must confirm all of these:
    - the target commit is the slice's accepted final commit, read from the engine's acceptance records: accepted at Stage 6 and re-accepted unchanged at Stage 7;
    - it descends from accepted `ee6f2af` and accepted `be511bf`;
    - every commit between `ee6f2af` and it is part of an accepted P1 stage candidate;
