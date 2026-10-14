@@ -1,8 +1,9 @@
 # Batch spore-preview RPC for the public explorer's Cards view
 
-Status: approved 2026-10-10; Stages 1–3 accepted 2026-10-11; migration
+Status: **completed 2026-10-14.** Stages 1–3 accepted 2026-10-11; migration
 `20261012100000` applied to production 2026-10-12; Stage 3 human gate passed
-(see "Stage 3 outcome" below).
+and recorded on `main` at `ac76353` (see "Stage 3 outcome" below). Was
+`docs/plans/active/` until closed 2026-10-14.
 Repository: `sporely-web`. Suggested branch: `feature/batch-spore-preview-rpc`
 from `main`.
 Consumer: `sporely-landing`, `docs/plans/explorer-cards-batch-preview.md`.
@@ -97,7 +98,7 @@ replace it.
 
 ## Stage 1 — Batch preview function, contract and pgTAP tests
 
-First read the sections above the stages in `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.
+First read the sections above the stages in `docs/plans/completed/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.
 
 1. **Contract.** Add a new anon-executable function. Name it in the contract,
    for example `get_public_observation_spore_previews(p_observation_ids bigint[])`.
@@ -150,7 +151,7 @@ public RPC and visibility gates.
 
 ## Stage 2 — Prove reduced database work and latency
 
-First read the sections above the stages in `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.
+First read the sections above the stages in `docs/plans/completed/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.
 
 Local only. Seed the local database with synthetic public fixtures (no real
 personal data): at least 30 spore-bearing observations with realistic point
@@ -183,7 +184,7 @@ proves less work, not just fewer HTTP requests.
 
 ## Stage 3 — Production migration gate
 
-First read the sections above the stages in `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.
+First read the sections above the stages in `docs/plans/completed/2026-10-10-batch-spore-preview-rpc.md`. Their decisions and constraints apply to this stage.
 
 The agent prepares, without running it:
 - a runbook: `supabase/batch-spore-preview-runbook.md`;
@@ -271,3 +272,13 @@ gates still apply: Stage 1 re-checks the deployed function; the landing A0
 snapshot must be taken after the latest 3b run (2026-10-14) and before the Cards
 switch; Stage 2 needs the owner's screenshot comparison and a post-switch
 aggregate window compared with B0→B1.
+
+## Closing entry (2026-10-14)
+
+- The Stage 3 record merged to `main` via PR #31 (`ac76353`, head `4e33cee`),
+  after a review with verdict APPROVE.
+- The applied migration and the SQL tests keep their original
+  `docs/plans/active/` header comments.
+- Nothing calls the batch function in production yet. The landing switch is
+  separate work under `sporely-landing`'s `explorer-cards-batch-preview` plan,
+  which this plan's gate now allows to start.

@@ -1,6 +1,6 @@
 # Runbook — batch spore-preview RPC (production)
 
-Plan: `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md` (Stage 3).
+Plan: `docs/plans/completed/2026-10-10-batch-spore-preview-rpc.md` (Stage 3).
 Migration: `supabase/migrations/20261012100000_add_public_observation_spore_previews.sql`.
 Probe SQL:
 - `supabase/batch-spore-preview-live-probe.sql` (step 3a);
