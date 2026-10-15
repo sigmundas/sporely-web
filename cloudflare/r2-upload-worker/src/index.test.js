@@ -268,7 +268,8 @@ test('healthz exposes media policy values', async () => {
   assert.equal(response.status, 200)
   assert.equal(payload.ok, true)
   assert.equal(payload.service, 'sporely-r2-upload-worker')
-  assert.equal(payload.workerVersion, 'sporely-r2-upload-worker@source')
+  assert.equal(payload.workerVersion, 'sporely-r2-upload-worker@obsolete-desktop-brake-1')
+  assert.equal(payload.obsoleteDesktopBrake, true)
   assert.deepEqual(payload.mediaPolicy, {
     fullResizeMaxPixels: 21_000_000,
     fullResizeMaxEdge: 5_300,

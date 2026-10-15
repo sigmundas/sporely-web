@@ -45,6 +45,40 @@ See `wrangler.toml` and `wrangler.toml.example`.
    `npx wrangler secret put ARTSORAKEL_API_TOKEN`
 7. Deploy:
    `wrangler deploy`
+8. **Mandatory after every worker deploy until the sync-key cutover:** check
+   that the obsolete-desktop brake is still active. Both checks must pass.
+   - `curl -s https://upload.sporely.no/healthz` must report
+     `"obsoleteDesktopBrake": true`. A missing field or `false` means the
+     guard is not in the deployed code.
+   - The 426 probe: a PUT with an old-desktop User-Agent to a throwaway key
+     under your own test account, with no token, must return **426** with
+     `X-Sporely-Error-Code: sporely_upgrade_required` and
+     `"error":"sporely_upgrade_required"` in the body:
+
+         curl -si -X PUT -A 'python-requests/2.32.3' --data-binary 'x' \
+           https://upload.sporely.no/upload/<your test account user_id>/brake-probe/brake-probe.webp
+
+     The refusal comes before authentication, so nothing is written. Any
+     other status (in particular 401) means the guard is not active.
+
+   If either check fails, deploy a tree that contains the guard at once.
+
+   The guard (`src/obsolete-desktop-guard.js`, called at the top of
+   `handleRequest` in `src/index.js`) is the media half of the obsolete-desktop
+   sync brake (`docs/deployments/2026-10-13-obsolete-desktop-sync-brake-runbook.md`).
+   A `wrangler deploy` from any tree without it, such as a branch cut before
+   the brake was merged or an emergency hotfix, **silently removes the
+   brake**. Old desktops can then delete media before the database refuses
+   the row delete. Deploying such a tree is forbidden until the sync-key
+   cutover removes the brake on purpose.
+
+   One exception, only during the brake's own first deploy: until the brake
+   migration has committed (the runbook's T2), the runbook's "Abort" may roll
+   the worker back to the pre-brake version recorded in its step 1, and only
+   when nothing was pushed, or its procedure Q has proved that the migration
+   did not commit and cannot commit. Once the
+   migration has committed, the rule above is absolute: never deploy or roll
+   back to a worker without the guard.
 
 ## Request Format
 
