@@ -25,7 +25,7 @@ its procedure for these steps:
 | 2. merge photo-location web, the web identity branch and the integrated desktop to `main` (not `fix/obsolete-desktop-sync-brake`) | gate 0 |
 | 3. prepare the desktop release artefacts and the upgrade notice | gate 0 |
 | 4. deploy the media worker with the guard, `/healthz` flag, 426 probe and the real-worker smoke test | steps 2, 2a, 2b |
-| 5. apply the migrations in version order: `20261012105630`, `20261013210000`, `20261014120000`, `20261015090000` | step 3 (one deploy-tree push of exactly these four) |
+| 5. apply the migrations in version order: `20261012105630`, `20261013210000`, `20261014120000`, `20261015090000` | step 3 (one deploy-tree push of exactly these four; after a partial push, a recovery push of the rest, procedure Q) |
 | — | steps 4, 4c and, when required, 5 |
 | 6. publish the integrated desktop and the upgrade notice | only after 4c passed and any required step 5 is done |
 
@@ -259,7 +259,11 @@ record with the deploy notes; every field is recordable.
 
 The brake migration is one transaction (`BEGIN;` at line 107, `COMMIT;` at
 line 174 of the migration file), so it is applied fully or not at all. A push
-that does not report success does not show which.
+that does not report success does not show which. The database session that
+ran it is not identified: this runbook has no verified way to identify it,
+because the CLI's connection path and any pooling were not verified. So Q
+neither lists nor terminates sessions. It settles the outcome only from facts
+that do not depend on which session ran the push.
 
 The push applies four files in version order, and the brake is the last.
 This runbook does not rely on how the CLI groups them: each of the three
@@ -268,11 +272,8 @@ committed while the brake did not. Q decides on the brake alone (query 3a).
 Record which of the four are still pending afterwards (`check` from step P,
 read-only). The earlier three are not rolled back either; with no brake, no
 key-minting client published and an empty write-block table, they change
-nothing for the clients in use. The database session that
-ran it is not identified: this runbook has no verified way to identify it,
-because the CLI's connection path and any pooling were not verified. So Q
-neither lists nor terminates sessions. It settles the outcome only from facts
-that do not depend on which session ran the push.
+nothing for the clients in use. A later push of the versions still pending
+is a **recovery push** (below), not the step 3 push.
 
 Use Q whenever the push started and did not report success: it errored, it
 was refused, its prompt was answered `n`, or it is still running at the
@@ -283,7 +284,8 @@ push cutoff.
    commits ends the gap the right way. The outcome is unsettled; go to 4.
 2. **Committed.** Run query 3a from step 1 (read-only). If it returns 7 and
    a non-NULL procedure, the push committed: record T2 as the time observed,
-   run `post-verify` from step 3, and follow "After T2". No rollback.
+   run `post-verify` on the tree that pushed the brake (the step P tree, or
+   the recovery tree), and follow "After T2". No rollback.
 3. **Proven not committed, and unable to commit.** The worker rollback is
    allowed only when **all** of the following hold:
    - the CLI process has exited;
@@ -313,20 +315,66 @@ push cutoff.
    - The only other way out is forward. With the owner's agreement, run
      `check` from step P again in the deploy tree. If `20261015090000` is no
      longer pending, the first push committed it: run query 3a and continue at
-     T2. Otherwise push again. If some of the earlier three are no longer
-     pending, `check` refuses, because the pending set no longer equals the
-     allowlist; then `prepare` a new deploy tree with `--allow` set to exactly
-     the versions still pending, run its `check`, and push from it. The
-     brake migration is idempotent (`CREATE OR REPLACE FUNCTION`, and
-     `DROP TRIGGER IF EXISTS` before each `CREATE TRIGGER`), so a second run
-     leaves the same brake whether or not the first transaction commits after
-     all. If the first transaction is still open, the second waits behind its
-     locks; it is then a running push again, handled by step 1.
+     T2. Otherwise make a recovery push (below). The brake migration is
+     idempotent (`CREATE OR REPLACE FUNCTION`, and `DROP TRIGGER IF EXISTS`
+     before each `CREATE TRIGGER`), so a second run leaves the same brake
+     whether or not the first transaction commits after all. If the first
+     transaction is still open, the second waits behind its locks; it is then
+     a running push again, handled by step 1.
    - Do not terminate database sessions to force an outcome. This runbook
      has no verified way to identify the push's session, and terminating
      anything else would abort unrelated work.
 
 Never roll the worker back unless step 3 holds.
+
+### Recovery push (only from procedure Q)
+
+A recovery push applies the versions still pending after a push that did
+not report success. It is the only push besides step 3, and it needs the
+owner's agreement. It can repeat: each attempt starts from the **current
+tree**, which is the step P tree at first and afterwards the tree of the
+last push. Every tree is prepared from the same approved
+`<merged main SHA>`, never another ref.
+
+1. **Pending set.** Run `check` in the current tree, read-only.
+   - **`check` passes:** the pending set still equals the current tree's
+     allowlist, so the last push committed nothing. Go to step 3 with the
+     current tree and its allowlist.
+   - **`check` refuses because the pending set differs from the allowlist:**
+     record the versions it reports as pending. They must be a non-empty
+     suffix of the current allowlist, in version order, that includes
+     `20261015090000` (for example `20261014120000,20261015090000`). Go to
+     step 2.
+   - **Anything else** (a gap, an unknown version, a missing
+     `20261015090000`, or `check` failing for another reason): STOP and
+     report.
+2. **New tree, only when the pending set has shrunk.** Remove the current
+   tree with `git -C <checkout> worktree remove --force <current tree>`, the
+   form `post-verify` prints; its `check` no longer matches the pending set.
+   (Its `post-verify` would pass again once everything is applied, but the
+   new tree is the one that pushes and is verified.) Then prepare and check
+   the new tree; `prepare` refuses an existing tree path, so pass `--out`:
+
+       node scripts/supabase-deploy-tree.mjs prepare --allow <pending versions> --ref <merged main SHA> --out <new tree>
+       node <new tree>/scripts/supabase-deploy-tree.mjs check --tree <new tree>
+
+   Continue only if `check` prints `All checks passed` and the pending set is
+   exactly the recorded versions. The new tree is now the current tree.
+3. **Push.** In the current tree, `supabase db push --linked`. Answer `y`
+   only if the prompt lists exactly that tree's allowlisted files, in version
+   order (all four files when it is still the step P tree); otherwise answer
+   `n`. Record "push started" again. If this push also does not report
+   success, procedure Q applies to it, and a further recovery push starts
+   again at step 1 with this tree as the current tree.
+4. **Verify.** When it reports success, record T2 and run
+
+       node <current tree>/scripts/supabase-deploy-tree.mjs post-verify --tree <current tree>
+
+   then remove the tree with the command `post-verify` prints, and continue
+   with step 4.
+
+Record, for each attempt: the pending versions found, whether a new tree was
+prepared, its `check` result, and the push and `post-verify` outcomes.
 
 ### Abort
 
@@ -337,7 +385,7 @@ The worker rollback before T2 is the **only** rollback this runbook allows.
 | Before step 2 | Any gate, pre-check or step P fails | Stop. Nothing has changed in production. | — | Which check failed. |
 | Step 2 fails | `wrangler deploy` exits with an error | Run `curl -s https://upload.sporely.no/healthz`. | If it still shows the step 1 `workerVersion` and no `obsoleteDesktopBrake`, nothing changed: stop. If it shows `sporely-r2-upload-worker@obsolete-desktop-brake-1`, the new worker is live: set T0 now and continue with the next row. | The error, which `workerVersion` `/healthz` showed. |
 | Before the push starts | Any 2a or 2b result differs, or the push cutoff passes before the push was started | Roll the worker back (see "Rollback" below). | Rollback check below. | Trigger, rollback UTC time (the gap end), healthz result. Step 5 applies to [T0, rollback]. |
-| After the push started, T2 not confirmed | The push errors or is refused; its prompt lists anything other than exactly the four files of step 3 (answer `n`); or the push cutoff passes | Run procedure Q. Roll the worker back only if Q's step 3 holds. If 3a shows the brake, continue "After T2". If the outcome is unsettled, do not roll back (Q step 4, "Limit of the bound"). | Q's result, then the rollback check. | Trigger, Q's case (and SQLSTATE), the 3a result, the "settled" time, and either the rollback time (gap end), T2, or the overrun. Step 5 applies to the window that ended. |
+| After the push started, T2 not confirmed | The push errors or is refused; its prompt lists anything other than exactly the four files of step 3, or, for a recovery push, the current tree's allowlisted files (answer `n`); or the push cutoff passes | Run procedure Q. Roll the worker back only if Q's step 3 holds. If 3a shows the brake, continue "After T2". If the outcome is unsettled, do not roll back (Q step 4, "Limit of the bound"). | Q's result, then the rollback check. | Trigger, Q's case (and SQLSTATE), the 3a result, the "settled" time, and either the rollback time (gap end), T2, or the overrun. Step 5 applies to the window that ended. |
 | After T2 | Anything | **No rollback of either half, ever.** See below. | — | — |
 
 **Rollback:** roll the worker back to the deployment version id recorded in
@@ -674,11 +722,13 @@ Answer `y` only if the prompt lists exactly these four files, in this order:
     20261014120000_sync_client_write_block.sql
     20261015090000_obsolete_desktop_sync_brake.sql
 
-Otherwise answer `n` and abort. The brake migration is one
-`BEGIN … COMMIT`, so it is applied fully or not at all, but a push that
-reports an error does not prove that nothing committed, and the earlier
-files may have committed without it (procedure Q). If the push errors, is refused, or has not finished by the push
-cutoff, abort ("Abort", row "After the push started"). Procedure Q settles
+Otherwise answer `n` and abort. This four-file rule is for this first push
+only; a recovery push from procedure Q lists only its current tree's allowlisted files
+("Recovery push"). The brake migration is one `BEGIN … COMMIT`, so it is
+applied fully or not at all, but a push that reports an error does not prove
+that nothing committed, and the earlier files may have committed without it
+(procedure Q). If the push errors, is refused, or has not finished by the
+push cutoff, abort ("Abort", row "After the push started"). Procedure Q settles
 whether it committed, and the worker may be rolled back only if Q proves it
 did not and cannot. Otherwise the gap stays open past the bound, with the
 worker guard kept, and is closed forward. Do not just stop and report:
