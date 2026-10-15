@@ -299,11 +299,13 @@ Primary repository: sporely-web, starting at the W1 final candidate `c094722`. N
    - the runbook's migration version and its deployment steps, made consistent with this plan's "Release", including the controlled procedure for the worker/database mismatch window described there.
 
 Verify:
-- **The complete reordered migration sequence**, on disposable scratch databases through the wrappers:
-  - a fresh database with every migration on the branch in version order, the renamed brake last;
-  - an upgrade path: a database built from `origin/main`'s migrations only, then exactly the four new migrations applied in version order, as the release applies them;
-  - on both: the brake pgTAP suite, the accepted database-key and write-stop suites and the photo-location suite;
+- **The complete reordered migration sequence**, on a disposable scratch database through the wrappers:
+  - `dbreset.sh` restores the snapshot of `origin/main`'s migrations plus the photo-location migration `20261012105630` (the base every earlier stage used); the stage confirms that this migration file on the branch is unchanged from the accepted one;
+  - then exactly the branch's later migrations are applied with `ON_ERROR_STOP`, one file at a time in version order: `20261013210000`, the write stop `20261014120000`, then the renamed brake;
+  - then the brake pgTAP suite, the accepted database-key and write-stop suites and the photo-location suite pass on that database;
   - the branch holds no file with the old brake version `20261013200000`, and every new version is newer than every migration on `origin/main`.
+
+  Limit: the base is a snapshot, not a replay from an empty database. A replay needs the Supabase admin roles of a separate local stack (attempted by the coordinator on 2026-10-15 and set aside as infrastructure work). The release's production history check and the deploy tree's checks cover the applied history.
 - New pgTAP cases (row 14d): a request with `x-sporely-sync-identity: 2` passes the brake and is still refused by the write stop when its version is listed; a released-desktop request is refused by the brake on INSERT, UPDATE and DELETE; new-desktop, web, Android-WebView and service-role writes pass, including an image DELETE whose cascade through `touch_observation_updated_at_from_image` updates the observation.
 - The worker's focused `node --test` files (`obsolete-desktop-guard.test.js`, `index.test.js`), including the new desktop's PUT/DELETE passing the guard.
 - One focused real-worker test: `sporely-worktrees/identity-impl/real-worker/run-candidate.sh <candidate>` runs the candidate's own worker files under local `wrangler dev` (no Cloudflare login, no production credentials, local storage emulation, `127.0.0.1` only) against the disposable stack. Pass: a released-desktop PUT and DELETE get 426 `sporely_upgrade_required` and leave the store unchanged; new-desktop and Android-WebView PUT and DELETE succeed; GETs are unaffected. The coordinator's pre-check on the brake branch passed (`identity-impl/real-worker/RESULT.md`). The desktop G tier keeps the stub worker with the exact guard file; a real-worker smoke test is also part of release verification.
