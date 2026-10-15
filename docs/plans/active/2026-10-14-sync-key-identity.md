@@ -1,6 +1,6 @@
 # Per-record sync keys — retire the shared `desktop_id` identity
 
-Status: revised 2026-10-14 after the user's scope decisions; not started. Approving this plan authorizes the three implementation slices below and their candidate pushes to the designated branches. It authorizes no merge to `main`, no production operation and no gate result in any other run.
+Status: revised 2026-10-14 after the user's scope decisions; amended 2026-10-15 (old-desktop compatibility, see "Decisions recorded 2026-10-15"). Stages 1–5 accepted; Stage 6 paused. Approving this plan authorizes the three implementation slices below and their candidate pushes to the designated branches. It authorizes no merge to `main`, no production operation and no gate result in any other run.
 Date: 2026-10-14
 Scope: the permanent fix for the multi-desktop `desktop_id` collision, implemented and tested together with the photo-location feature as one integrated desktop release. In scope: the web identity contract and a write stop for faulty desktop builds; the desktop sync change; web/Android key creation. Deferred: the database cutover and the refusal of keyless inserts. Repositories: sporely-web and sporely-py.
 
@@ -41,9 +41,7 @@ Accepted work, built on and not redone:
 
 Not owned by this plan:
 
-- **The temporary production brake** (sporely-web `fix/obsolete-desktop-sync-brake` at `48dc63e`, runbook, and sporely-py contract note `f774d9b`).
-  - By the user's decision of 2026-10-14 it is **not deployed** and is kept only as a contingency: the admin center shows no microscopy cloud uploads from any account but the user's.
-  - Its branches are not merged to `main`. See "Database migration order" for how it stays inactive.
+- **Brake deployment.** By the user's decision of 2026-10-15 the reviewed obsolete-desktop brake (sporely-web `fix/obsolete-desktop-sync-brake`, code at `48dc63e`, runbook at the branch head) becomes part of this release: Stage 1b re-issues it on the web identity branch, and "Release" deploys it before any keyed row can exist. Its production deployment still needs the user's explicit approval. The brake branch itself is not merged to `main`.
 - **The photo-location plan** (`docs/plans/active/2026-10-12-ingestion-location-provenance.md`). Its run stays paused with the desktop check (G4) failed. This plan supplies the accepted integrated desktop commit and the re-test evidence.
 - **Later work, planned closer to release** when actual adoption is known (see "Deferred"):
   - the database cutover and the refusal of keyless inserts;
@@ -145,7 +143,7 @@ A practical way to stop writes from a faulty newly released desktop build, witho
 
 ### Contract text
 
-Both copies of `docs/supabase-sync-contract.md` get this identity section, byte-identical. Stage 1 writes the web copy, and Stage 5 copies it to sporely-py. The brake's marked block is not added.
+Both copies of `docs/supabase-sync-contract.md` get this identity section, byte-identical. Stage 1 writes the web copy, and Stage 5 copies it to sporely-py. The brake's marked block (between the `obsolete-desktop-brake` markers) is added to the web copy in Stage 1b and copied byte-identical to sporely-py in Stage 6.
 
 - Definition: "`sync_key` is a random uuid minted locally before the first upload. It is immutable for every role, unique per owner, and recovers only the creating database's own rows. `desktop_id` is retired as an identity: clients must not send it, and the server refuses it on rows that have a key."
 - Rule 12: "A lost `cloud_id` is reconciled by `sync_key`; rows that predate keys use the one-time legacy recovery, which never writes to the matched row."
@@ -181,17 +179,20 @@ No behaviour claim rests on U alone.
 | 12 | portable or bundle import of A's archive into B | fresh keys, new rows, no shared `cloud_id` | U+G |
 | 13 | copied database, unchanged content | 23505 → adopt silently | U+G |
 | 13b | copied or restored database whose rows were since edited elsewhere | adoption raises a conflict; no PATCH | U+G |
-| 13c | adopted row soft-deleted or purged | deletion/restore flow; no resurrection | U+G |
+| 13c | adopted row soft-deleted (image `deleted_at` tombstone) | deletion/restore flow; no resurrection | U+G |
+| 13c-p | an unlinked copy holds a key whose observation was hard-deleted (observations have no soft delete) | **accepted limitation:** re-uploaded once as a new row; no other row written; recorded, not a failure | G |
 | 13d | 409 from `23503`, or `23505` on another constraint | plain error, not adoption | U+P+G |
-| 14 | old clients (v0.8.13, v0.9.1, v0.9.15, v0.9.18, v0.9.25, `0520afd`, `ee6f2af`) against the key schema | unchanged except refused link repairs onto keyed rows; no sign-in prompt; local data and credentials kept | G |
+| 14 | old clients (v0.8.13, v0.9.1, v0.9.15, v0.9.18, v0.9.25, `0520afd`, `ee6f2af`) against the key schema **with the brake** (database and media worker): create, edit and delete on an account holding keyed rows, then sync and restart | every row write refused `P0001` / `sporely_upgrade_required`, every media PUT/DELETE refused 426; zero cloud changes; downloads work; no sign-in prompt; credentials and unsynced local work kept. Accepted local effects: a locally deleted observation reappears on the next sync; v0.8.13 duplicates photos locally | G |
 | 14b | an old client repairs a link onto a new-desktop row | refused; the row keeps a NULL link | P+G |
+| 14c | upgrade of a legacy profile that has already paired a local observation with another installation's cloud row (the v0.9.15 wrong-pairing state) | first sync, an edit and a delete on the upgraded desktop never modify or delete the other installation's cloud row, its images or its media; unsynced local work is kept. Any such write is a hard failure, investigated and fixed in Stage 6 | G |
+| 14d | positive clients under the brake: the new desktop (create, edit, delete, media PUT/DELETE), the web app, an Android-WebView User-Agent, and the write stop | all allowed; the write stop still refuses a listed new-desktop version | P + worker unit + G |
 | 15 | new desktop against a server without the key schema | uploads blocked "cloud not ready"; pull works | U+G |
 | 16 | web create and edit with keys, retries and adoption | keys present, no duplicates | P + web unit + G |
 | 18 | `sync_key` immutable for every role; guard `prosecdef = false` | refused for every role | P (accepted) |
 | 19 | another tenant uses the same key | allowed; no cross-tenant 409 | P (accepted) |
 | 20a | `sync_key` absent from every non-owner view and public RPC | absent | P (accepted) |
 | 22 | an old desktop crashed after creating cloud rows, before storing `cloud_id`; the new desktop upgrades the profile | equal content → linked, no cloud write, no duplicate; different content or another device's colliding row → new row plus a "possible duplicate" report; nothing PATCHed | U+G |
-| 23 | the write stop: with the table empty, then block the candidate's version, sync, then unblock | empty table: the new desktop and released desktops sync normally; while blocked: every row write from the blocked build refused, banner shown, local data kept, released desktops and web unaffected; after unblock: pending work uploads | P+G |
+| 23 | the write stop: with the table empty, then block the candidate's version, sync, then unblock | empty table: the new desktop syncs normally; while blocked: every row write from the blocked build refused, banner shown, local data kept, web unaffected (released desktops are refused by the brake, row 14, not by the write stop); after unblock: pending work uploads | P+G |
 | 24 | ownership after two-desktop activity: images and measurements of both computers | every image under its own observation and every measurement under its own image; storage paths stay in the owner's prefix; no child re-parented | U+G |
 
 Rows 17, 20b, 21 and 16b belong to the deferred cutover and keyless refusal.
@@ -201,7 +202,8 @@ Rows 17, 20b, 21 and 16b belong to the deferred cutover and keyless refusal.
 | Work | Needs | Does not need |
 | --- | --- | --- |
 | Web contract and write stop (Stage 1) | accepted database keys | anything else |
-| Desktop fix (Stages 2–7) | accepted database keys, local keys and photo-EXIF desktop code; the Stage 1 contract | web/Android key creation |
+| Brake re-issue (Stage 1b) | accepted Stage 1 | the desktop fix |
+| Desktop fix (Stages 2–7) | accepted database keys, local keys and photo-EXIF desktop code; the Stage 1 contract; Stage 1b before Stage 6 resumes | web/Android key creation |
 | Web/Android key creation (Stage 8) | accepted database keys | the desktop fix |
 | Photo-location desktop re-check (G4) | the accepted desktop fix | web/Android key creation |
 
@@ -212,14 +214,12 @@ The design record listed web key creation before the desktop. That is a release 
 The production order is fixed by migration version:
 1. photo-location `20261012105630`;
 2. database sync keys `20261013210000`;
-3. the write stop, newer than both.
+3. the write stop `20261014120000`;
+4. the re-issued brake (Stage 1b), newer than all three.
 
 They reach `main` together with the integrated release and are applied through the repository's deploy-tree procedure, with its history checks.
 
-The brake stays inactive by construction:
-- Its migration `20261013200000` and its worker change exist only on `fix/obsolete-desktop-sync-brake`, which is not merged to `main`. `supabase db push` and the deploy tree therefore never see it.
-- The sporely-py brake contract note `f774d9b` is not merged either.
-- If the brake is ever needed, it is re-issued as a new migration with a version newer than everything applied, which is allowed because it was never applied anywhere in production. It is reviewed again at that point. The new desktop already sends the identity header the brake exempts.
+The brake's original migration `20261013200000` was never applied anywhere in production. It stays only on `fix/obsolete-desktop-sync-brake`, which is not merged; Stage 1b re-issues its body under a new version so the version order above holds. The brake is removed only by the deferred cutover, never as a rollback.
 
 ## Execution structure
 
@@ -230,11 +230,15 @@ Engine checked 2026-10-14: agent-sparring `ea8e70d`.
 
 | Slice | Primary repository and branch | Stages | Starts from |
 | --- | --- | --- | --- |
-| W1 | sporely-web `feature/sync-key-identity-web` | 1 | `1029975` (photo-location web head) |
-| P1 | sporely-py `feature/sync-key-desktop-n1` | 2–7 | accepted `ee6f2af`; sibling pin: W1 final candidate |
-| W2 | sporely-web, same branch as W1 | 8 | W1 final candidate |
+| W1 (complete) | sporely-web `feature/sync-key-identity-web` | 1 | `1029975`; accepted `c094722` |
+| P1 (Stages 2–5 accepted; superseded at Stage 6) | sporely-py `feature/sync-key-desktop-n1` | 2–5 | accepted `ee6f2af`; accepted `79f5a35` |
+| W1b | sporely-web, same branch as W1 | 1b | W1 final candidate `c094722` |
+| P1c | sporely-py `feature/sync-key-desktop-n1` | 6–7 | accepted Stage 5 candidate `79f5a35`; sibling pin: W1b final candidate |
+| W2 | sporely-web, same branch as W1 | 8 | W1b final candidate |
 
-**Run order:** W1, then P1, then W2. W2 depends only on W1.
+**Run order (revision of 2026-10-15):** W1 and P1 Stages 2–5 are accepted and are not executed again; intake treats Stages 1–5 as accepted records, not as stages. The remaining slices run in this order: W1b, then P1c, then W2. P1c depends on W1b; W2 depends only on W1b.
+- The earlier P1 run stays paused at its first Stage 6 attempt and is superseded by P1c; its records are kept as history. P1c continues the same branch from accepted `79f5a35`.
+- The first attempt's local commits (`79f5a35..d4445e0`, unpushed) are kept at the local ref `backup/sync-key-s6-attempt-1`. P1c may reuse them, in particular the image-adoption sample-field fix `6934c2e` and the scenario additions, by cherry-pick into its own reviewed commits. Its evidence is not reused: every case is re-run on P1c's tested commit.
 - Each implementation stage has one writer in its primary repository and never edits a sibling.
 - If a desktop stage needs a web contract change, it stops and reports.
 - The slices contain no manual or authorization gates; every check inside them is agent verification. The user's actions are listed in "Outside these runs".
@@ -256,11 +260,13 @@ Engine checked 2026-10-14: agent-sparring `ea8e70d`.
   If the harness refuses a candidate, the stage stops.
 - **No hosted access:** no stage contacts a hosted Supabase project, production host or production credential. Stage 1 creates one migration. Before creating it, the stage compares the branch's migration files with `origin/main`. Exactly two additions are expected and allowed: the accepted photo-location migration `20261012105630_ingestion_location_provenance.sql` and the accepted sync-key migration `20261013210000_sync_key_identity.sql`. Any other difference stops the stage: a missing, changed or extra file, or a version registered in `supabase/deploy-exceptions.json` behaving differently than its registry entry says. The new migration's version must be newer than every migration on the branch and on `origin/main`. The production history check (`supabase migration list`) belongs to the release procedure.
 - **Tools:** project interpreters and focused tests only. No `npm test`, builds, Capacitor sync, dependency installation or package upgrade.
-- **Hands off:** the brake branches, the earlier S1/S2 run worktrees, `INBOX.md` in any checkout, and the untracked `tools/metadata_backfill/` work in the primary sporely-py checkout.
+- **Hands off:** the brake branches (Stage 1b only reads them), the earlier S1/S2 run worktrees, `INBOX.md` in any checkout, and the untracked `tools/metadata_backfill/` work in the primary sporely-py checkout.
 
 ## Stages
 
 ### Stage 1 — Merge the database keys into the photo-location web line; add the desktop write stop; write the identity contract (web copy)
+
+**Accepted at `c094722`. Record only; not executed again.**
 
 Primary repository: sporely-web. Starts at `1029975`.
 
@@ -282,7 +288,30 @@ Verify:
 - The focused `node --test` files for `src/sync-queue*.test.js` and `src/images*.test.js` pass unchanged.
 - `git diff --check`.
 
+### Stage 1b — Re-issue the reviewed brake on the web identity branch
+
+Primary repository: sporely-web, starting at the W1 final candidate `c094722`. No behaviour change to the reviewed brake.
+
+1. Bring in the brake's code, tests, worker guard, worker README and contract block from `fix/obsolete-desktop-sync-brake` (checked conflict-free with `git merge-tree` on 2026-10-15). The runbook comes too.
+2. Rename the migration to a version newer than `20261014120000`. The function body, triggers, grants and refusal text stay identical to `48dc63e`; record a diff of the non-comment lines in `notes.md`.
+3. Adjust only what the newer schema requires:
+   - the trigger-order test and runbook check 3c: `aaa_sync_client_write_block` now also sorts before `trg_000_sync_brake`;
+   - the runbook's migration version and its deployment steps, made consistent with this plan's "Release", including the controlled procedure for the worker/database mismatch window described there.
+
+Verify:
+- **The complete reordered migration sequence**, on disposable scratch databases through the wrappers:
+  - a fresh database with every migration on the branch in version order, the renamed brake last;
+  - an upgrade path: a database built from `origin/main`'s migrations only, then exactly the four new migrations applied in version order, as the release applies them;
+  - on both: the brake pgTAP suite, the accepted database-key and write-stop suites and the photo-location suite;
+  - the branch holds no file with the old brake version `20261013200000`, and every new version is newer than every migration on `origin/main`.
+- New pgTAP cases (row 14d): a request with `x-sporely-sync-identity: 2` passes the brake and is still refused by the write stop when its version is listed; a released-desktop request is refused by the brake on INSERT, UPDATE and DELETE; new-desktop, web, Android-WebView and service-role writes pass, including an image DELETE whose cascade through `touch_observation_updated_at_from_image` updates the observation.
+- The worker's focused `node --test` files (`obsolete-desktop-guard.test.js`, `index.test.js`), including the new desktop's PUT/DELETE passing the guard.
+- One focused real-worker test: `sporely-worktrees/identity-impl/real-worker/run-candidate.sh <candidate>` runs the candidate's own worker files under local `wrangler dev` (no Cloudflare login, no production credentials, local storage emulation, `127.0.0.1` only) against the disposable stack. Pass: a released-desktop PUT and DELETE get 426 `sporely_upgrade_required` and leave the store unchanged; new-desktop and Android-WebView PUT and DELETE succeed; GETs are unaffected. The coordinator's pre-check on the brake branch passed (`identity-impl/real-worker/RESULT.md`). The desktop G tier keeps the stub worker with the exact guard file; a real-worker smoke test is also part of release verification.
+- `git diff --check`.
+
 ### Stage 2 — Integrated desktop baseline, verified before any sync change
+
+**Accepted at `8b03812`. Record only; not executed again.**
 
 Primary repository: sporely-py. Read-only sibling: sporely-web at the exact accepted Stage 1 commit.
 
@@ -306,6 +335,8 @@ If the harness cannot be launched, the stage stops and reports what blocked it.
 
 ### Stage 3 — Observation identity: state machine, legacy recovery, readiness probe, headers
 
+**Accepted at `9b9bc52`. Record only; not executed again.**
+
 Primary repository: sporely-py. Same web pin.
 
 Implement, for observations:
@@ -324,6 +355,8 @@ Unit tests (U tier, observations): matrix rows 1, 6–8, 13–13d, 15 and 22, an
 
 ### Stage 4 — Images, measurements and anchors on the state machine
 
+**Accepted at `53934bd`. Record only; not executed again.**
+
 Primary repository: sporely-py. Same web pin.
 
 - Children are deferred until the parent's `cloud_id` is committed.
@@ -336,6 +369,8 @@ Primary repository: sporely-py. Same web pin.
 Unit tests: matrix rows 6–11, 12, 13–13d, 22 and 24 for images and measurements.
 
 ### Stage 5 — Pull and conflict pairing by id or key; remove every `desktop_id` read, write and repair; desktop contract copy
+
+**Accepted at `79f5a35`. Record only; not executed again.**
 
 Primary repository: sporely-py. Same web pin.
 
@@ -352,20 +387,38 @@ Unit tests: rows 2–5 and 10, plus a regression that fails on `ee6f2af`: two da
 
 ### Stage 6 — Two-desktop collision regression, ownership, recovery and the outstanding GUI scenarios on the integrated build
 
-Primary repository: sporely-py. Same web pin. This is agent verification of the accepted Stage 5 code. A defect found here is fixed in this stage and re-verified, so the evidence comes from the final code.
+Primary repository: sporely-py, slice P1c, from accepted `79f5a35`. Read-only sibling: sporely-web at the W1b final candidate. This is agent verification of the accepted Stage 5 code. A defect found here is fixed in this stage and re-verified, so the evidence comes from the final code.
 
 Set-up:
-- The disposable target has the Stage 1 web migrations applied, as a recorded snapshot.
+- The disposable target has the web migrations of the W1b final candidate applied, as a recorded snapshot. The row 14c legacy state is produced first, before the brake migration is applied; every other case runs with the brake applied.
+- The media worker is the harness stub importing the W1b candidate's exact `obsolete-desktop-guard.js`, as in `identity-impl/brake-426/`. The coordinator provides it before the slice starts, and the stage records its sha256.
 - Two isolated new-desktop profiles on one test account, with deliberately overlapping local id sequences.
 - Audit triggers record every cloud write.
 
 Required cases:
 - Matrix rows 1–13d in the G tier, including row 11 with the fault hook.
-- Rows 14, 14b, 15, 22, 23 and 24.
-- The exact ab15/ab17/ab19 reproducer: zero overwrites and zero `desktop_id` writes.
-- One new-desktop profile alongside released `ee6f2af` and `0520afd` on the same account.
+- Rows 14, 14b, 14c, 14d, 15, 22, 23 and 24, with the accepted Stage 1b brake applied to the target (database migration and the exact worker guard file) and recorded in the target snapshot.
+- Brake regressions, with full header, status and response-body capture:
+  - the two-installation collision on v0.9.15 and `0520afd` (the earlier wrong-target delete) and an old-desktop delete of a keyed row (the earlier ghost row), both under the brake: zero cloud changes;
+  - an old-desktop delete of an observation without photos, so the database DELETE refusal is actually reached;
+  - a collision, pull and delete check on v0.9.18, v0.9.25 and `ee6f2af`;
+  - a new-desktop delete interrupted between the image-row and observation DELETEs, then restarted;
+  - unsynced local work present in every destructive case and confirmed after sync and restart.
+- Row 14c uses a legacy v0.9.15 profile brought into the wrong-pairing state by the released builds themselves on the disposable target, before the brake is applied, then upgraded to `T`. A write by `T` to the other installation's row fails the stage.
+- The exact ab15/ab17/ab19 reproducer, run with the new desktop at `T`: zero overwrites and zero `desktop_id` writes. A run of released `0520afd` is baseline evidence of the defect only.
+- One new-desktop profile alongside released `ee6f2af` and `0520afd` on the same account: the released builds are refused by the brake, and the new desktop's rows are untouched.
 - **The outstanding desktop GUI scenarios** from the local-key check, on this integrated build: measurement creation, bundle import, portable import and image move. Scenarios the harness lacks are added in this stage to `tools/sync_harness/scenarios.py`.
 - An orphan-object count from the stub store after the crash cases.
+- Copy the brake's contract block into sporely-py's contract, byte-identical to the accepted Stage 1b web copy (verify by section diff).
+
+Corrections to the paused candidate's evidence (sparrer findings, 2026-10-14):
+1. Row 9 needs a fault while the media PUT is in flight and one after upload before confirmation. A `before_request` fault is row 8 evidence, not row 9.
+2. Re-run the full typing set r03–r06, r04b and r05b, or state exactly which ran; r04 and r05 are missing.
+3. Row 13d needs the constraint-specific `23503` and other-constraint `23505` G cases; `42501` is not a substitute.
+4. ab17 must run on the new desktop at `T` (see above).
+5. The summary attributes the Stage 6 preflight timeout to a host maintenance DarkWake, not to a proxy, and cites the harness `run.sh` as restored.
+
+Two fault points are added to the existing `SPORELY_SYNC_FAULT` hook for the cases above: `during_upload` (the process ends while the media PUT is in flight) and `between_deletes` (after the image-row DELETEs, before the observation DELETE). Like the existing points, they act only when the environment variable names them, are never read from settings or the UI, and have unit tests showing they are inert when it is unset.
 
 Photo-location desktop re-check (G4), on the same build and web pin. Re-run only the cases whose code path the sync change touched:
 - Download from Cloud on a fresh profile, then the first write-enabled sync: zero identity writes;
@@ -389,16 +442,18 @@ Evidence convention:
 
 ### Stage 7 — Independent security review of the desktop fix
 
-Mode: `independent_review`. Primary repository: sporely-py at the accepted Stage 6 commit; sibling sporely-web at the accepted Stage 1 commit.
+Mode: `independent_review`. Primary repository: sporely-py at the accepted Stage 6 commit; sibling sporely-web at the W1b final candidate.
 
 A fresh reviewer with no write access checks:
 - that no path sends, writes or repairs `desktop_id`, and that the legacy lookup is read-only, exact-content only and never followed by a write to the matched row;
 - that adoption cannot cross owners or parents, or resurrect a tombstone;
 - that refusal handling cannot trigger sign-in prompts, credential clearing or retry storms;
 - that the write stop affects only listed desktop versions;
-- that the fault hook is inert unless its environment variable is set;
+- that the fault hook, including the new `during_upload` and `between_deletes` points, is inert unless its environment variable is set;
+- that an upgraded profile with an inherited wrong pairing cannot modify or delete another installation's cloud row (row 14c);
+- that the Stage 6 evidence shows every old build refused by the brake with no cloud change, and the new desktop, web and Android unaffected (rows 14 and 14d);
 - that both headers are sent on every write path;
-- that the contract copies are byte-identical in the identity section;
+- that the contract copies are byte-identical in the identity section and the brake block;
 - that the Stage 6 evidence follows its convention and covers every listed case.
 
 A defect stops the plan; nothing is fixed in this stage.
@@ -442,15 +497,25 @@ Verify:
 
 **Release**, one integrated release with the photo-location feature. Each step needs explicit authorization, exact SHAs and sporely-web `AGENTS.md`'s deploy-tree and history checks:
 1. Optional, read-only and quick: confirm limited exposure with one aggregate query over production metadata. Count accounts with desktop cloud writes in the last 90 days, and accounts with more than one desktop device in `reference_client_devices`, with small counts suppressed. No per-account rows go into Claude.
-2. Merge the integrated branches to `main`: photo-location web, the web identity branch, and the integrated desktop. Do not merge the brake branches.
-3. Apply the migrations in version order: `20261012105630`, `20261013210000`, then the write stop.
-4. Deploy the web build. Build an Android test build and check it on a real device:
+2. Merge the integrated branches to `main`: photo-location web, the web identity branch (including Stage 1b), and the integrated desktop. Do not merge `fix/obsolete-desktop-sync-brake`.
+3. Prepare the integrated desktop release artefacts and the upgrade notice the user approves. The notice tells users of older desktops to upgrade and not to keep syncing with old versions.
+4. Deploy the media worker with the brake guard first, per the runbook (`/healthz` flag and 426 probe), with the real-worker smoke test of Stage 1b repeated against the deployed worker using a test account.
+5. Apply the migrations in version order: `20261012105630`, `20261013210000`, the write stop, then the brake. No keyed row can exist before this step: no released client mints keys, and steps 6–8 follow it.
+6. Publish the integrated desktop and the upgrade notice, so old desktops are not left without an upgrade.
+7. Deploy the web build. Build an Android test build and check it on a real device:
    - an offline queue survives a restart;
    - an item queued before the change gains a key;
    - a lost-response retry adopts.
 
    Publish Android.
-5. Publish the integrated desktop, with an upgrade notice the user approves. If it misbehaves, list its version in the write-block table.
+8. If the new desktop misbehaves, list its version in the write-block table.
+
+**Worker/database mismatch window.** Between steps 4 and 5 the worker refuses old desktops' media changes while the database still accepts their row writes. An old desktop syncing then can create an image-less row or orphan an observation's media (both reproduced in `identity-impl/brake-426/RESULTS.md`). Running the steps in one session shortens the window but does not remove it. The deployment is therefore controlled:
+- Before step 4, every desktop installation that syncs to the account is quit and stays closed until the new desktop is installed. The account owner is the only desktop cloud-sync user; other users use Android, which neither half of the brake affects.
+- The window's UTC start and end are recorded. Step 5 starts only after step 4's checks pass, and if step 5 fails, the runbook's abort and rollback rules apply; the window is not left open.
+- After step 5, a read-only check of the API logs for the window shows no row writes with a `python-requests` User-Agent. Any found are reconciled with the runbook's read-only orphan reconciliation before step 6.
+
+The reverse order (database first) is not used: it causes the half-deletes found in the delete tests. The brake blocks every obsolete desktop on every account from step 5 on; downloads keep working.
 
 ## Deferred: cutover and keyless refusal (to be planned closer to release)
 
@@ -476,9 +541,23 @@ Planned in a later revision of this plan, once desktop adoption after the releas
 - **Cleanup:** drop the `desktop_id` unique constraints; retire `portable_cloud_identity_pending` and the legacy-recovery marker; run the orphan-media audit; review any backup before its retention ends.
 - Matrix rows 16b, 17, 20b and 21 move to that revision.
 
+## Decisions recorded 2026-10-15
+
+- Old-desktop compatibility (Stage 6 gate `sync-key-old-client-compatibility-resolution`): the reviewed brake protects database writes and media-worker mutations from obsolete desktops on all accounts, deployed in the release before any keyed data. The proposed account-scoped migration is not built. Evidence: `identity-impl/del-tests/RESULTS.md` and the independent review `identity-impl/del-review/VERDICT.md`.
+- Released desktops' duplicates (F1) and refused edits (F2) are resolved by the brake's refusal and its update-required message; `desktop_id` is never stripped.
+- Purged copy (gate `sync-key-purged-copy-recovery-resolution`): row 13c is narrowed to soft-deleted rows. Re-upload of a hard-deleted observation from an unlinked offline copy is an accepted limitation (row 13c-p). Resurrection after an administrator or moderator deletion is tracked separately, outside this plan.
+- Accepted release limitations: a refused legacy delete reappears locally on the next sync; v0.8.13 duplicates photos locally. Users are told to upgrade. The new desktop keeping a row another client deleted ("already up to date" ghost, seen in the delete tests) is tracked separately as a desktop bug.
+- The local wrong-record pairing on old builds is a significant residual risk. An upgraded desktop must never modify or delete another installation's cloud row because of an inherited pairing (row 14c, a hard failure). The owner, the only desktop cloud-sync user, may reconcile their own local databases with private scripts; those are not a product deliverable.
+- Real media worker: Wrangler is installed locally for disposable testing only (no login, no production credentials, no deployment). One focused real-worker test passed on the brake branch and is repeated on the Stage 1b candidate. The desktop G tier keeps the stub with the exact guard file, because moving the harness to the real worker is infrastructure work; a real-worker smoke test is part of release verification.
+- Two new fault points (`during_upload`, `between_deletes`) are approved for Stage 6; Stage 7 reviews them.
+- Continuation: Stages 1–5 stay accepted and are not re-run. The amended Stage 6 and Stage 7 requirements are in this plan's stage text, so a new intake gives both agents the same briefs. The earlier P1 run is superseded at Stage 6 (slice P1c).
+- The release's worker/database mismatch window is handled by the controlled procedure in "Release" and the runbook.
+- Read-only admin integrity views are a separate follow-up, not a release blocker. No event counters or audit-data retention.
+- Pre-existing desktop defects found in Stage 6 (export/import non-integer `image_ids`, a missing-file image dropped while its observation is marked synced, partial legacy bundle import, the conflict dialog on every sync in v0.9.25 and `ee6f2af`) are tracked separately in sporely-py.
+
 ## Decisions recorded 2026-10-14
 
-- The brake is not deployed and is kept as a contingency.
+- The brake is not deployed and is kept as a contingency. (Superseded 2026-10-15: it is deployed in the release.)
 - The desktop fix ships with the photo-location feature in one integrated release.
 - The local-key GUI check is amended: its four unperformed scenarios run on the integrated build in Stage 6. Its incomplete result is preserved, not recorded as passed.
 - The cutover and keyless refusal are deferred out of this run.
