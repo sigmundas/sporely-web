@@ -451,6 +451,8 @@ Evidence convention:
 
 Mode: `independent_review`. Primary repository: sporely-py at the accepted Stage 6 commit; sibling sporely-web at the W1b final candidate.
 
+The reviewer reads the whole Stage 6 section above (set-up, required cases, brake regressions, corrections, fault points and evidence convention) as the list it checks Stage 6's evidence against.
+
 A fresh reviewer with no write access checks:
 - that no path sends, writes or repairs `desktop_id`, and that the legacy lookup is read-only, exact-content only and never followed by a write to the matched row;
 - that adoption cannot cross owners or parents, or resurrect a tombstone;
