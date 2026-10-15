@@ -292,6 +292,8 @@ Verify:
 
 Primary repository: sporely-web, starting at the W1 final candidate `c094722`. No behaviour change to the reviewed brake.
 
+Migration precheck: the disposable exception the user authorized for Stage 1 on 2026-10-14 (intake decision `stage1-migration-precheck`) applies unchanged to Stage 1b. AGENTS.md's `supabase migration list` precheck is not run during development, because no stage contacts a hosted project; the stage compares the branch's migration files with `origin/main` instead, and the production history check runs at release, before any migration is applied. The original brake migration `20261013200000` was never applied in production: the brake was never deployed (user decision of 2026-10-14); the release's history check confirms it.
+
 1. Bring in the brake's code, tests, worker guard, worker README and contract block from `fix/obsolete-desktop-sync-brake` (checked conflict-free with `git merge-tree` on 2026-10-15). The runbook comes too.
 2. Rename the migration to a version newer than `20261014120000`. The function body, triggers, grants and refusal text stay identical to `48dc63e`; record a diff of the non-comment lines in `notes.md`.
 3. Adjust only what the newer schema requires:
@@ -462,7 +464,7 @@ A defect stops the plan; nothing is fixed in this stage.
 
 ### Stage 8 — Web and Android key creation and adoption
 
-Primary repository: sporely-web, starting at the W1 final candidate. Implement "Web and Android" from the identity rules.
+Primary repository: sporely-web, slice W2, starting at the W1b final candidate (which contains the brake). Implement "Web and Android" from the identity rules.
 
 The engine's review of this stage includes a security checklist:
 - every insert path mints and keeps a key;
@@ -484,11 +486,13 @@ Verify:
 ## Outside these runs (user actions; none is a gate or stage of this plan)
 
 **Photo-location re-check and resume:**
-1. After slice P1 completes, the coordinating agent runs these read-only commands outside every run and reports their output:
+`<P1>` below is the final accepted candidate of slice P1c (Stage 7), which supersedes the earlier P1 run; its run state is P1c's.
+
+1. After slice P1c completes, the coordinating agent runs these read-only commands outside every run and reports their output:
    - `git -C sporely-py merge-base --is-ancestor ee6f2af <P1>`
    - `git -C sporely-py merge-base --is-ancestor be511bf <P1>`
    - `git -C sporely-py ls-remote origin refs/heads/feature/sync-key-desktop-n1` (must equal `<P1>`)
-   - a check that `<P1>` equals the candidate recorded as accepted in the P1 run's final stage state.
+   - a check that `<P1>` equals the candidate recorded as accepted in the P1c run's final stage state.
 2. With the user's separate authorization, the user or the coordinating agent fast-forwards `feature/ingestion-location-provenance-stage-4` from `ee6f2af` to `<P1>`. That branch is outside the push guard's allow-list.
 3. The user records the photo-location desktop check in its own run, citing `<P1>`, the web pin, the Stage 6 summary and the earlier `ee6f2af` evidence for carried-forward cases. The earlier failure stays in its history.
 4. The user prepares the two primary checkouts, then resumes the photo-location plan:
