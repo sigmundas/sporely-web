@@ -4,22 +4,103 @@ Date: 2026-10-16. Plan: `docs/plans/active/2026-10-14-sync-key-identity.md`,
 Stage 8b. Verifies accepted Stage 8 (`46c9297`) on the disposable target only.
 No production access, deployment or merge.
 
-## Status (second pass): incomplete; reruns pending
+## Result (second pass): all three items pass on web `a6abde7`
 
-Review sent this summary back. The results below are **not** accepted evidence
-for Stage 8b:
+These runs are the evidence for Stage 8b. Every result below comes from the
+`w2b-r2-*` runs; the first pass further down is history only.
 
-- `307ef7f` rounded every number, including `numeric` and `bigint` columns.
-  `a6abde7` limits rounding to the listed `real` and `double precision` columns.
-- The web runs did not record which commit the browser served.
-- `w2b-1b-lost-obs-2` did not reuse the precision-sensitive fixture that
-  failed (`g4_geo_r4.jpg`).
+**Defect and correction.** Supabase's Postgres runs with
+`extra_float_digits = 0` (`w2b/float-columns.txt`), so PostgREST prints
+`double precision` with 15 and `real` with 6 significant digits.
 
-Every web case is to be rerun on `a6abde7` with
-`g4-evidence/w2b/served-tree-check.mjs` run right after each web run. The
-helper records the git HEAD, a clean-tree check, the served source hashes and
-a probe of the comparator the page resolves. This session could not run it
-(`node <helper>` needs approval). The runs below are kept as history only.
+- At Stage 8 (`46c9297`), an EXIF latitude of `62.34566944444445` read back
+  as `62.3456694444444`. A lost-response retry then refused its own row as
+  "different content" (run `w2b-1b-lost-obs`).
+- `307ef7f` rounded every number, which was too broad.
+- `a6abde7` rounds only the listed `real` and `double precision` columns; those
+  lists match the live schema. Every other number, including `numeric` and
+  `bigint`, is compared exactly. Regression tests cover both directions.
+
+**Tested commit.** Web code `a6abde7`. The served HEAD is `b174fba`, which
+changes only this document; the second-pass runs ran with it, before this
+summary was updated. `g4-evidence/w2b/served-tree-check.mjs` (sha256
+`c90f4d56…`) ran right after every web run and wrote `provenance-after.json`
+into that run's directory. Each one shows:
+
+- a clean tree;
+- served-source hashes for `sync-key.js`, `sync-queue.js` and `images.js`,
+  fetched both from Node and from inside the app page, equal to the worktree
+  files;
+- the comparator the page resolves behaving as `a6abde7`. Its probe flags the
+  bigint case and accepts the EXIF float case, which tells it apart from both
+  earlier commits.
+
+The desktop is `3850b3f` in every desktop run's `manifest.json` (clean tree,
+outbound traffic blocked).
+
+**Evidence per run.** `db-audit.txt` lists every audited database write after
+the run's start mark, with the columns it changed. `db-final.txt` holds row
+counts where they matter. Running notes: `g4-evidence/w2b/notes.md`.
+
+### Item 1 — web create and edit (matrix row 16)
+
+| Case | Run | Evidence |
+| --- | --- | --- |
+| Plain create | `w2b-r2-1a-create` | Observation 357 and image 346 carry the keys from their insert bodies; `desktop_id` is NULL. Writes: the two INSERTs, the trigger's `updated_at` touch, and the conditional cover fill. |
+| Lost observation-insert response, original fixture `g4_geo_r4.jpg` | `w2b-r2-1b-lost-obs` | Both POSTs sent `gps_latitude 62.34566944444445`. The first response was dropped (connection reset); the retry got 409 and adopted row 358 with no PATCH. Then image 201 and the conditional cover fill. `db-final.txt`: one observation for the key, stored exactly as `62.34566944444445`, and one image. |
+| Lost image-insert response | `w2b-r2-1c-lost-img` | Dropped response, then 409, then adopted. One image row (348) for its key and no UPDATE on it. |
+| Lost observation response, then page reload | `w2b-r2-1d-reload-obs` | Key `9096aa5e…` was sent before and after the reload; 409, then adopted 361. One row. |
+| Lost image response, then page reload | `w2b-r2-1d-reload-img` | Key `662aff91…` was sent before and after the reload; 409, then adopted image 351. One image. |
+| Web edit of keyed row 357 | `w2b-r2-1e-edit` | Only 357 changed (location fields). `sync_key` is the same in the old and new rows. |
+
+The harness records a 409's status but not its body. That the 409 was a
+`23505` on the named key index is inferred from the app adopting, which unit
+tests show it does only for that index.
+
+### Item 2 — coexistence with desktop `3850b3f` (profile `w2b-D`, already pulled)
+
+**Direction A: web creates, desktop edits, web reads.**
+- `w2b-r2-2a-web-create`: web created observation 366 and image 357.
+- `w2b-r2-2a-desktop-pull`: the desktop linked both with the web's keys (local 201) and wrote nothing to the database.
+- `w2b-r2-2a-desktop-edit`: the desktop wrote only to 366 and its image 357. Keys were unchanged and `desktop_id` stayed NULL.
+- `w2b-r2-2a-web-read`: the web shows the desktop's `open_comment`.
+
+**Direction B: desktop creates, web edits, desktop pulls.**
+- `w2b-r2-2b-desktop-create`: the desktop created observation 367 and image 358 with its own keys; `desktop_id` is NULL.
+- `w2b-r2-2b-web-edit`: only 367 changed, and its key was unchanged.
+- `w2b-r2-2b-desktop-pull`: the desktop wrote no rows. Its local 367 holds the web's manual location.
+
+**Final state (`db-final.txt`).**
+- One row per key.
+- No keyed observation or image has a `desktop_id`.
+- No duplicate keys.
+- The owner has 202 observations and 205 images.
+
+**Desktop finding, outside this stage.** The desktop edit again set web-written
+image metadata on image 357 to NULL (`source_*`, `stored_*`, `stored_bytes`,
+`upload_mode`). It filled desktop defaults (`crop_mode`, `measure_color`,
+`objective_name`, `original_filename`) and set the image's `captured_at`. On
+observation 366 it changed `habitat_host_genus` and `habitat_host_species` from
+NULL to `""`. This stays within the same rows, so it is not an identity
+violation, but it is a sporely-py follow-up.
+
+### Item 3 — conditional cover against real PostgREST
+
+| Case | Run | Evidence |
+| --- | --- | --- |
+| Both keys NULL → fill | r2 runs 1a, 1b, 1c, 1d and 2a | `PATCH ?id=eq.N&image_key=is.null&thumb_key=is.null` caused an audited UPDATE of `image_key,thumb_key` only. |
+| Partial cover already present | `w2b-r2-3b-partial-cover` | An owner session (role `authenticated` with the owner's JWT claims) set only `image_key` on 364 inside the retry window (`w2b/r2-3b-partial-cover-writer.txt`). The app's two conditional PATCHes both returned 204, and the audit has no later write. 364 keeps the partial cover. |
+| Cover written concurrently | `w2b-r2-3c-concurrent-cover` | The owner session wrote a different full cover on 365 and held the transaction. `pg_stat_activity` showed PostgREST's cover UPDATE blocked by that session (`w2b/r2-3c-concurrent-cover-writer.txt`). After the commit, the PATCH returned 204 with no write. 365 keeps the concurrent cover. |
+
+### Unit checks on `a6abde7`
+
+- Focused `node --test` on Stage 8's six files: 129 tests, 128 pass. The one failure is the baseline assertion `enqueueObservation is IndexedDB-only`.
+- `git diff --check` is clean.
+
+### Still in the environment
+
+Blocked queue item 3 (row 345, from the failed run at `46c9297`) stays in
+IndexedDB. Blocked items are never retried, and it caused no writes in any run.
 
 ## Result (first pass, superseded)
 
