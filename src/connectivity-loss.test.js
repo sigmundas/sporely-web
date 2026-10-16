@@ -255,7 +255,7 @@ test('processor: attempt marker persists BEFORE the insert; new ids are claimed'
   assert.match(chunk, /obsId = obsData\.id\s*\n\s*claimedRemoteIds\.add\(obsId\)/)
   // Recovery is gated and claim-aware.
   assert.match(chunk, /if \(!obsId && shouldAttemptRemoteRecovery\(item\)\)/)
-  assert.match(chunk, /_findRemoteObservationForQueueItem\(\{[\s\S]*?\}, claimedRemoteIds\)/)
+  assert.match(chunk, /_findRemoteObservationForQueueItem\(\{[\s\S]*?\}, claimedRemoteIds, repairedPayload, /)
   // The claimed set is seeded from EVERY item's persisted remote id.
   assert.match(queue, /const claimedRemoteIds = new Set\(\s*\n\s*items\.map\(other => other\?\.remoteObservationId\)\.filter\(Boolean\)/)
 })

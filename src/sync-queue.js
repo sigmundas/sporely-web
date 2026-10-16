@@ -1,7 +1,7 @@
 import { supabase } from './supabase.js'
 import { getSharedAuthSession } from './auth-session.js'
 import { isExplicitAuthRejection, isTransportSessionError } from './auth-classification.js'
-import { verifyWorkerObjectExists, getVariantPath, reserveObservationImage, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, deleteObservationMedia, imageExtensionForMimeType, buildObservationImageStoragePath, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
+import { verifyWorkerObjectExists, getVariantPath, normalizeMediaKey, reserveObservationImage, buildObservationImageRowPayload, syncObservationMediaKeys, prepareImageVariants, uploadPreparedObservationImageVariants, deleteObservationMedia, imageExtensionForMimeType, buildObservationImageStoragePath, UNDECODABLE_IMAGE_USER_MESSAGE } from './images.js'
 import { saveIdentificationRun } from './ai-identification.js'
 import { CLOUD_UPLOAD_POLICY_CHANGED_EVENT, fetchCloudPlanProfile } from './cloud-plan.js'
 import { canSyncOnCurrentConnection, onConnectionTypeChange } from './settings.js'
@@ -18,9 +18,11 @@ import {
   persistObservationTaxonomySelection,
   resolveExternalTaxonomySelection,
   takeQueuedTaxonomySelection,
+  taxonIdentityPatchForSelection,
 } from './taxonomy-v2.js'
 import { canPerformCloudMutation } from './capabilities.js'
 import { isMissingLocationProvenanceError, sanitizeQueuedLocationProvenance, withoutLocationProvenance } from './location-provenance.js'
+import { SYNC_IDENTITY_CONFLICT_CODE, SYNC_IDENTITY_CONFLICT_USER_MESSAGE, SyncIdentityConflictError, ensureSyncKey, fetchOwnRowBySyncKey, isSyncKey, isSyncKeyConflict, syncRowDifferences } from './sync-key.js'
 
 const DB_NAME = 'sporely_sync'
 const STORE_NAME = 'offline_queue'
@@ -173,6 +175,18 @@ export function classifyQueueSyncError(error) {
       syncErrorCode: 'image_too_large_for_plan',
       blockedReason: IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
       syncErrorMessage: String(_collectSyncErrorDetails(error).texts.join(' ') || '').trim() || IMAGE_TOO_LARGE_FOR_PLAN_USER_MESSAGE,
+      isBlocked: true,
+      isRetryable: false,
+    }
+  }
+
+  if (String(error?.code || '') === SYNC_IDENTITY_CONFLICT_CODE) {
+    // Adoption found a differing, tombstoned or re-parented row: fail visibly
+    // and keep the local item; a retry would never change the outcome.
+    return {
+      syncErrorCode: SYNC_IDENTITY_CONFLICT_CODE,
+      blockedReason: SYNC_IDENTITY_CONFLICT_USER_MESSAGE,
+      syncErrorMessage: String(error?.message || SYNC_IDENTITY_CONFLICT_USER_MESSAGE),
       isBlocked: true,
       isRetryable: false,
     }
@@ -428,6 +442,8 @@ function _normalizeQueuedImages(imageEntries) {
         variants: null,
         variantMeta: null,
         ingestMethod: null,
+        syncKey: null,
+        legacyRecoveryPending: false,
       }
     }
     const realBlob = isBlob(entry?.blob)
@@ -454,6 +470,8 @@ function _normalizeQueuedImages(imageEntries) {
       reservedImageId: entry?.reservedImageId ?? null,
       // Per-image provenance; legacy entries have none and stay NULL.
       ingestMethod: normalizeIngestMethod(entry?.ingestMethod),
+      syncKey: isSyncKey(entry?.syncKey) ? entry.syncKey : null,
+      legacyRecoveryPending: entry?.legacyRecoveryPending === true,
     }
   }).filter(entry => isBlob(entry.blob) || isBlob(entry.uploadBlob))
 }
@@ -488,6 +506,8 @@ async function _serializeQueuedImageForStorage(image) {
     variantMeta: image?.variantMeta || null,
     reservedImageId: image?.reservedImageId ?? null,
     ingestMethod: normalizeIngestMethod(image?.ingestMethod),
+    syncKey: isSyncKey(image?.syncKey) ? image.syncKey : null,
+    legacyRecoveryPending: image?.legacyRecoveryPending === true,
   }
 }
 
@@ -519,9 +539,11 @@ async function _enqueueObservation(obsPayload, imageEntries) {
   const persistentImages = await _serializeQueuedImagesForStorage(queuedImages)
   const db = await openDB()
   const queueUserId = _normalizeQueueUserId(obsPayload.user_id)
+  // Keys are minted once, at queue time, and persisted with the item so every
+  // retry repeats the same POST.
   const queueItem = {
-    obsPayload,
-    imageEntries: persistentImages,
+    obsPayload: { ...obsPayload, sync_key: ensureSyncKey(obsPayload?.sync_key) },
+    imageEntries: persistentImages.map(entry => ({ ...entry, syncKey: ensureSyncKey(entry.syncKey) })),
     userId: queueUserId,
     queueUserId,
     queueKey: _queueKeyForUser(queueUserId),
@@ -644,9 +666,114 @@ export function hasActiveSyncPass() {
 }
 const _cloudPlanCache = new Map()
 
+// A remote image row belongs to a queued image through its cloud id (the
+// persisted reservedImageId), whatever its current sort_order. A keyed image
+// whose reservation response was lost re-POSTs the same key and adopts on the
+// named-index 23505. Only an image whose key was minted on load (it predates
+// keys) may still reuse a keyless row of its own observation, and only when
+// exactly one keyless row holds its position and that row's content equals
+// what this image would reserve. Anything else reserves a fresh keyed row and
+// leaves the existing row and its media untouched.
 function _queuedImageReservation(rows, image, index) {
-  return rows.find(row => Number(row.sort_order) === index
-    && (!image.reservedImageId || row.id === image.reservedImageId)) || null
+  if (image.reservedImageId) return rows.find(row => row.id === image.reservedImageId) || null
+  if (!image.legacyRecoveryPending) return null
+  const candidates = rows.filter(row => Number(row.sort_order) === index
+    && (row.sync_key === null || row.sync_key === undefined))
+  if (candidates.length !== 1) return null
+  const expected = buildObservationImageRowPayload({
+    image_type: 'field',
+    sort_order: index,
+    aiCropRect: image.aiCropRect,
+    aiCropSourceW: image.aiCropSourceW,
+    aiCropSourceH: image.aiCropSourceH,
+    aiCropIsCustom: image.aiCropIsCustom === true,
+    ...image.uploadMeta,
+    storage_exif_safe: image.uploadMeta?.storage_exif_safe === true,
+    ingestMethod: image.ingestMethod,
+  })
+  const differing = syncRowDifferences(expected, candidates[0], {
+    table: 'observation_images',
+    ignore: ['observation_id', 'user_id', 'storage_path'],
+  })
+  return differing.length ? null : candidates[0]
+}
+
+// The saved reservation is not among this observation's live rows. Read it
+// by id and owner: a tombstone or another parent is an identity conflict and
+// nothing is uploaded; a row that no longer exists is forgotten so the image
+// reserves again with its own key; a row that is live under this observation
+// after all is used with its own storage_path.
+async function _verifyMissingQueuedReservation(itemId, index, reservedImageId, obsId, userId) {
+  const { data, error } = await supabase
+    .from('observation_images')
+    .select('id, observation_id, user_id, storage_path, sort_order, deleted_at')
+    .eq('id', reservedImageId)
+    .eq('user_id', userId)
+    .limit(1)
+  if (error) throw error
+  const row = Array.isArray(data) ? data[0] || null : null
+  if (row && String(row.user_id) === String(userId)) {
+    if (row.deleted_at) throw new SyncIdentityConflictError('observation_images', 'deleted')
+    if (String(row.observation_id) !== String(obsId)) throw new SyncIdentityConflictError('observation_images', 'parent')
+    return row
+  }
+  await _updateQueueItem(itemId, current => {
+    if (!current) return current
+    const entries = [...(current.imageEntries || current.imageBlobs || [])]
+    if (!entries[index] || isBlob(entries[index])) return current
+    entries[index] = { ...entries[index], reservedImageId: null }
+    return current.imageEntries ? { ...current, imageEntries: entries } : { ...current, imageBlobs: entries }
+  })
+  return null
+}
+
+// Items queued before keys existed get them on load, written inside the item's
+// own IndexedDB transaction so an existing key is never replaced. Keys minted
+// here are flagged legacyRecoveryPending: the item may already have reached
+// the cloud keyless, so its one-time recovery lookup still applies.
+export function _needsQueuedSyncKeys(item) {
+  if (!item?.obsPayload) return false
+  const entries = item.imageEntries || item.imageBlobs
+  return !isSyncKey(item.obsPayload.sync_key)
+    || (Array.isArray(entries) && entries.some(entry => !isSyncKey(entry?.syncKey)))
+}
+
+export function _withQueuedSyncKeys(item, cryptoImpl = globalThis.crypto) {
+  if (!_needsQueuedSyncKeys(item)) return item
+  const priorAttempt = Boolean(item.remoteObservationId)
+    || (Number.isFinite(Number(item.syncInsertAttemptedAt)) && Number(item.syncInsertAttemptedAt) > 0)
+  let next = item
+  if (!isSyncKey(item.obsPayload.sync_key)) {
+    next = {
+      ...next,
+      obsPayload: { ...item.obsPayload, sync_key: ensureSyncKey(null, cryptoImpl) },
+      ...(priorAttempt && !item.remoteObservationId ? { legacyRecoveryPending: true } : {}),
+    }
+  }
+  const entries = item.imageEntries || item.imageBlobs
+  if (Array.isArray(entries) && entries.some(entry => !isSyncKey(entry?.syncKey))) {
+    const keyed = entries.map(entry => {
+      if (isSyncKey(entry?.syncKey)) return entry
+      const base = isBlob(entry) ? { blob: entry } : (entry || {})
+      return { ...base, syncKey: ensureSyncKey(null, cryptoImpl), legacyRecoveryPending: true }
+    })
+    next = item.imageEntries ? { ...next, imageEntries: keyed } : { ...next, imageBlobs: keyed }
+  }
+  return next
+}
+
+async function _ensureQueuedSyncKeys(items) {
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]
+    if (!_needsQueuedSyncKeys(item)) continue
+    try {
+      const updated = await _updateQueueItem(item.id, current => _withQueuedSyncKeys(current))
+      if (updated) items[index] = updated
+    } catch (error) {
+      // The item stays keyless and is refused before any POST below.
+      console.warn('[sync-queue] could not add sync keys to queued item', item.id, error?.message || error)
+    }
+  }
 }
 
 
@@ -730,7 +857,7 @@ function _selectionHasExternalProvenance(selection) {
   )
 }
 
-async function _fetchRemoteObservationState(observationId, queuedImages) {
+async function _fetchRemoteObservationState(observationId, queuedImages, { writeProtected = false } = {}) {
   if (!observationId) {
     return {
       observationExists: false,
@@ -748,7 +875,8 @@ async function _fetchRemoteObservationState(observationId, queuedImages) {
       .limit(1),
     supabase
       .from('observation_images')
-      .select('id, sort_order, storage_path')
+      // Full rows: a pre-key image is reused only after a content comparison.
+      .select('*')
       .eq('observation_id', observationId)
       .is('deleted_at', null)
       .order('sort_order', { ascending: true }),
@@ -773,25 +901,27 @@ async function _fetchRemoteObservationState(observationId, queuedImages) {
 
   const firstRow = completedIndexes.includes(0)
     ? _queuedImageReservation(rows, queuedImages[0], 0) : null
-  if (observation && firstRow && (!observation.image_key || !observation.thumb_key)) {
-    await syncObservationMediaKeys(observationId, firstRow.storage_path, { sortOrder: 0 })
+  // A legacy-linked observation is never written to, not even its cover.
+  if (!writeProtected && observation && firstRow && (!observation.image_key || !observation.thumb_key)) {
+    await syncObservationMediaKeys(observationId, firstRow.storage_path, { sortOrder: 0, fillOnly: true })
   }
 
   return {
     observationExists: !!observation,
+    coverComplete: Boolean(observation?.image_key && observation?.thumb_key),
     imageRows: rows,
     completedIndexes,
     confirmed: false,
   }
 }
 
-async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'local') {
+async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'local', options = {}) {
   const expectedImageCount = queuedImages.length
   await _setQueueSyncStatus(item.id, 'finalizing', {
     syncImageCount: expectedImageCount,
   })
 
-  const remoteState = await _fetchRemoteObservationState(obsId, queuedImages)
+  const remoteState = await _fetchRemoteObservationState(obsId, queuedImages, options)
   const confirmed = remoteState.observationExists
     && remoteState.completedIndexes.length >= expectedImageCount
 
@@ -824,9 +954,15 @@ async function _finalizeSyncedQueueItem(item, obsId, queuedImages, reason = 'loc
 // before the insert request) but the response was lost before
 // remoteObservationId could be recorded. Fresh, never-attempted items always
 // insert a new remote row.
+//
+// Since sync keys, this lookup is the one-time legacy recovery only: an item
+// whose key was minted on load (legacyRecoveryPending) may have reached the
+// cloud keyless. A keyed item recovers by repeating its POST and adopting on
+// the named-index 23505 instead.
 export function shouldAttemptRemoteRecovery(item) {
   if (!item) return false
   if (item.remoteObservationId) return false
+  if (isSyncKey(item.obsPayload?.sync_key) && item.legacyRecoveryPending !== true) return false
   return Number.isFinite(Number(item.syncInsertAttemptedAt)) && Number(item.syncInsertAttemptedAt) > 0
 }
 
@@ -842,7 +978,28 @@ export function pickRecoveredRemoteObservationId(candidateIds, claimedRemoteIds)
   return null
 }
 
-async function _findRemoteObservationForQueueItem(item, claimedRemoteIds = new Set()) {
+// Observation fields the queue writes only AFTER its INSERT (cover keys, then
+// the taxonomy identity; the identity list mirrors TAXON_IDENTITY_COLUMNS).
+// A row whose INSERT response was lost is still in exactly the state that
+// INSERT left: every one of these empty. Any value here was written by
+// another client, so recovery must not link (legacy) or adopt (keyed) it.
+export function _fieldsWrittenAfterInsert(row) {
+  return [
+    'image_key', 'thumb_key', 'selected_sporely_taxon_id',
+    'taxon_identity_state', 'taxon_identity_source_system', 'taxon_identity_namespace',
+    'taxon_identity_external_id', 'taxon_identity_raw_external_id',
+  ].filter(field => row && row[field] !== null && row[field] !== undefined && row[field] !== '')
+}
+
+// Read-only. Links only exactly one unclaimed keyless row whose content equals
+// the insert payload and which nobody has written since. An item that still
+// has observation-level data to write (a taxonomy identity or AI
+// identification runs) is never linked: the matched observation must not be
+// written to, so linking would drop that data. Anything else returns null and
+// the item POSTs a new keyed row. A row found here is never written to (see
+// remoteObservationRecovery: 'legacy' in _runSyncQueue).
+async function _findRemoteObservationForQueueItem(item, claimedRemoteIds = new Set(), insertPayload = null, pendingObservationWrites = false) {
+  if (pendingObservationWrites) return null
   const payload = item?.obsPayload || {}
   const capturedAt = String(payload.captured_at || '').trim()
   const userId = String(item?.userId || payload.user_id || '').trim()
@@ -850,9 +1007,10 @@ async function _findRemoteObservationForQueueItem(item, claimedRemoteIds = new S
 
   const { data, error } = await supabase
     .from('observations')
-    .select('id')
+    .select('*')
     .eq('user_id', userId)
     .eq('captured_at', capturedAt)
+    .is('sync_key', null)
     .order('id', { ascending: false })
     .limit(5)
 
@@ -861,8 +1019,106 @@ async function _findRemoteObservationForQueueItem(item, claimedRemoteIds = new S
     throw error
   }
 
-  const candidateIds = (Array.isArray(data) ? data : []).map(row => row?.id).filter(Boolean)
-  return pickRecoveredRemoteObservationId(candidateIds, claimedRemoteIds)
+  const rows = (Array.isArray(data) ? data : []).filter(row => row?.id && !claimedRemoteIds.has(row.id))
+  if (rows.length !== 1) return null
+  if (insertPayload && syncRowDifferences(insertPayload, rows[0], { table: 'observations' }).length) return null
+  if (_fieldsWrittenAfterInsert(rows[0]).length) return null
+  return pickRecoveredRemoteObservationId([rows[0].id], claimedRemoteIds)
+}
+
+// The identity columns this item's taxonomy step writes, or null without a
+// selection (then the row's identity must stay as the INSERT left it: empty).
+export function _identityColumnsForSelection(selection) {
+  const patch = taxonIdentityPatchForSelection(selection)
+  if (!patch) return null
+  return {
+    selected_sporely_taxon_id: isProvenSporelySelection(selection) ? selection.sporelyTaxonId : null,
+    ...patch,
+  }
+}
+
+// Compares a row's taxonomy identity with this item's: 'empty' (as its INSERT
+// left it), 'equal' (already this item's), or 'differs' (written elsewhere).
+// `selections` may list several of this item's own candidates: the queued
+// selection and the resolved target saved before an earlier write.
+export function _identityStateForSelection(row, selections) {
+  const identity = _fieldsWrittenAfterInsert(row).filter(field => field !== 'image_key' && field !== 'thumb_key')
+  if (!identity.length) return 'empty'
+  const candidates = (Array.isArray(selections) ? selections : [selections]).filter(Boolean)
+  const equal = candidates.some(selection => {
+    const target = _identityColumnsForSelection(selection)
+    return target && !syncRowDifferences(target, row, { table: 'observations' }).length
+  })
+  return equal ? 'equal' : 'differs'
+}
+
+// The exact selection this item will write: a proven selection as is, an
+// external one offered to the resolver first (a failed resolution keeps the
+// identifier, as _persistQueuedTaxonomyIdentity does).
+async function _resolveTaxonomyWriteTarget(selection) {
+  if (isProvenSporelySelection(selection)) return selection
+  try {
+    return (await resolveExternalTaxonomySelection(selection)) || selection
+  } catch (error) {
+    console.warn('[sync-queue] external taxonomy resolution threw; keeping unresolved', error)
+    return selection
+  }
+}
+
+// The earlier POST with this key landed (23505 on the named index). The
+// fetched row is the recovery base: its INSERT fields must equal this item's,
+// and every field the item writes later (taxonomy identity, cover) must be
+// either empty, as the INSERT left it, or already equal to this item's own
+// value. Equal populated fields are steps already done; any other value was
+// written elsewhere and fails visibly. Never PATCH on adoption.
+async function _adoptObservationBySyncKey(insertPayload, claimedRemoteIds, { selection = null, firstImageSyncKey = null } = {}) {
+  const row = await fetchOwnRowBySyncKey(supabase, 'observations', {
+    userId: insertPayload.user_id,
+    syncKey: insertPayload.sync_key,
+  })
+  if (claimedRemoteIds.has(row.id)) throw new SyncIdentityConflictError('observations', 'claimed')
+  const fields = syncRowDifferences(insertPayload, row, { table: 'observations' })
+  const identityState = _identityStateForSelection(row, selection)
+  if (identityState === 'differs') fields.push('taxon_identity')
+  const coverSet = _fieldsWrittenAfterInsert(row).some(field => field === 'image_key' || field === 'thumb_key')
+  if (coverSet && !await _coverIsOwnFirstImage(row, insertPayload.user_id, firstImageSyncKey)) fields.push('cover')
+  if (fields.length) throw new SyncIdentityConflictError('observations', 'content', { fields })
+  return { id: row.id, taxonomyDone: Boolean(selection) && identityState === 'equal' }
+}
+
+// Whether a populated cover is exactly what this item's first image sets: the
+// keys of the live image row carrying that image's own sync_key.
+async function _coverIsOwnFirstImage(row, userId, firstImageSyncKey) {
+  if (!isSyncKey(firstImageSyncKey)) return false
+  const { data, error } = await supabase
+    .from('observation_images')
+    .select('id, storage_path, sync_key, deleted_at')
+    .eq('observation_id', row.id)
+    .eq('user_id', userId)
+    .eq('sync_key', firstImageSyncKey)
+    .limit(1)
+  if (error) throw error
+  const image = Array.isArray(data) ? data[0] : null
+  if (!image?.storage_path || image.deleted_at) return false
+  const imageKey = normalizeMediaKey(image.storage_path)
+  return row.image_key === imageKey && row.thumb_key === getVariantPath(imageKey, 'thumb')
+}
+
+// Before a pending taxonomy write, re-read the row: write only while its
+// identity is still empty; if it is already this item's, the step is done;
+// anything else was written elsewhere and fails visibly.
+async function _reconcileObservationIdentity(observationId, selection) {
+  const { data, error } = await supabase
+    .from('observations')
+    .select('id, selected_sporely_taxon_id, taxon_identity_state, taxon_identity_source_system, taxon_identity_namespace, taxon_identity_external_id, taxon_identity_raw_external_id')
+    .eq('id', observationId)
+    .limit(1)
+  if (error) throw error
+  const row = Array.isArray(data) ? data[0] : null
+  if (!row) throw new Error(`Observation ${observationId} could not be read before its identity write; it will be retried`)
+  const state = _identityStateForSelection(row, selection)
+  if (state === 'differs') throw new SyncIdentityConflictError('observations', 'content', { fields: ['taxon_identity'] })
+  return state
 }
 
 async function _persistQueuedObservationIdentifications({
@@ -931,6 +1187,7 @@ async function _runSyncQueue() {
   // queue must not cost a session refresh.
   const items = await _readQueueItems()
   if (!items || !items.length) return
+  await _ensureQueuedSyncKeys(items)
 
   // Transport-safe: connectivity may vanish between the capability check and
   // this refresh (stale-COMPLETE race). A thrown "Failed to fetch" here must
@@ -1050,7 +1307,46 @@ async function _runSyncQueue() {
       }
 
       let obsId = item.remoteObservationId || null
-      let repairedPayload = null
+      // A row linked by the one-time legacy recovery is never written to:
+      // no cover keys and no taxonomy identity; only children are uploaded.
+      let observationWriteProtected = item.remoteObservationRecovery === 'legacy'
+      let taxonomyIdentityDone = item.taxonomyIdentityDone === true
+
+      // Built before recovery: the legacy lookup and key adoption both
+      // compare the cloud row against exactly what this item would insert.
+      let repairedPayload = {
+        ...queuedDatabasePayload,
+        user_id: authUserId,
+        visibility: toCloudVisibility(observationPayload.visibility, 'public'),
+        ...normalizeObservationGeography(observationPayload),
+      }
+      delete repairedPayload.owner_id
+      delete repairedPayload.created_by
+      delete repairedPayload.userId
+      delete repairedPayload.queueUserId
+      delete repairedPayload.queueKey
+      delete repairedPayload.remoteObservationId
+      delete repairedPayload.aiIdentificationRuns
+      // Web never sends the retired desktop identity.
+      delete repairedPayload.desktop_id
+      if (repairedPayload.gpsLat !== undefined) {
+        repairedPayload.gps_latitude = repairedPayload.gpsLat
+        delete repairedPayload.gpsLat
+      }
+      if (repairedPayload.gpsLon !== undefined) {
+        repairedPayload.gps_longitude = repairedPayload.gpsLon
+        delete repairedPayload.gpsLon
+      }
+      if (repairedPayload.gpsAltitude !== undefined) {
+        repairedPayload.gps_altitude = repairedPayload.gpsAltitude
+        delete repairedPayload.gpsAltitude
+      }
+      if (repairedPayload.photoGps !== undefined) {
+        delete repairedPayload.photoGps
+      }
+      // Provenance is inserted atomically with the coordinates, or not at
+      // all: an incomplete/incompatible pair must never fail the insert.
+      sanitizeQueuedLocationProvenance(repairedPayload)
 
       // Remote recovery ONLY heals a lost insert response: it requires a
       // persisted prior insert attempt (see shouldAttemptRemoteRecovery) and
@@ -1064,64 +1360,40 @@ async function _runSyncQueue() {
             ...observationPayload,
             user_id: authUserId,
           },
-        }, claimedRemoteIds)
+        }, claimedRemoteIds, repairedPayload, Boolean(queuedTaxonomySelection) || queuedAiIdentificationRuns.length > 0)
         if (obsId) {
           claimedRemoteIds.add(obsId)
+          // The disposition is persisted with the link, so every later pass
+          // also leaves the matched row unwritten.
           const updatedItem = await _updateQueueItem(item.id, current => current ? {
             ...current,
             remoteObservationId: obsId,
+            remoteObservationRecovery: 'legacy',
             syncRecoveredRemoteIdAt: Date.now(),
+            legacyRecoveryPending: false,
           } : current)
           if (!updatedItem) continue
+          observationWriteProtected = true
         }
       }
 
       // 1. Upload parent observation once, then persist the remote ID for retries.
       if (!obsId) {
+        // No POST without a committed key.
+        if (!isSyncKey(repairedPayload.sync_key)) throw new Error('Queued observation has no sync key yet; it will be retried')
         await _setQueueSyncStatus(item.id, 'saving-observation', {
           syncImageCount: queuedImages.length,
         })
         // Persist the attempt marker BEFORE the network request: if the
         // response is lost (transport drop after server accept), the next
-        // pass is allowed to run remote recovery for this item — and ONLY
-        // for this item (see shouldAttemptRemoteRecovery).
+        // pass repeats this POST with the same key and adopts on the 23505.
+        // The one-time legacy lookup is spent from here on.
         await _updateQueueItem(item.id, current => current ? {
           ...current,
           syncInsertAttemptedAt: Date.now(),
+          legacyRecoveryPending: false,
         } : current)
         updateUploadForegroundService('Saving observation…')
-
-        repairedPayload = {
-          ...queuedDatabasePayload,
-          user_id: authUserId,
-          visibility: toCloudVisibility(observationPayload.visibility, 'public'),
-          ...normalizeObservationGeography(observationPayload),
-        }
-        delete repairedPayload.owner_id
-        delete repairedPayload.created_by
-        delete repairedPayload.userId
-        delete repairedPayload.queueUserId
-        delete repairedPayload.queueKey
-        delete repairedPayload.remoteObservationId
-        delete repairedPayload.aiIdentificationRuns
-        if (repairedPayload.gpsLat !== undefined) {
-          repairedPayload.gps_latitude = repairedPayload.gpsLat
-          delete repairedPayload.gpsLat
-        }
-        if (repairedPayload.gpsLon !== undefined) {
-          repairedPayload.gps_longitude = repairedPayload.gpsLon
-          delete repairedPayload.gpsLon
-        }
-        if (repairedPayload.gpsAltitude !== undefined) {
-          repairedPayload.gps_altitude = repairedPayload.gpsAltitude
-          delete repairedPayload.gpsAltitude
-        }
-        if (repairedPayload.photoGps !== undefined) {
-          delete repairedPayload.photoGps
-        }
-        // Provenance is inserted atomically with the coordinates, or not at
-        // all: an incomplete/incompatible pair must never fail the insert.
-        sanitizeQueuedLocationProvenance(repairedPayload)
 
         _debugQueue('observation insert payload', {
           itemId: item.id,
@@ -1142,6 +1414,15 @@ async function _runSyncQueue() {
           const { is_draft: _isDraft, location_precision: _locationPrecision, ...payloadWithoutPhase7 } = repairedPayload
           ;({ data: obsData, error } = await supabase.from('observations').insert(payloadWithoutPhase7).select('id').single())
         }
+        if (error && isSyncKeyConflict(error, 'observations')) {
+          const adopted = await _adoptObservationBySyncKey(repairedPayload, claimedRemoteIds, {
+            selection: queuedTaxonomySelection,
+            firstImageSyncKey: queuedImages[0]?.syncKey || null,
+          })
+          obsData = { id: adopted.id }
+          taxonomyIdentityDone = adopted.taxonomyDone
+          error = null
+        }
         if (error) throw error
 
         obsId = obsData.id
@@ -1149,6 +1430,8 @@ async function _runSyncQueue() {
         const updatedItem = await _updateQueueItem(item.id, current => ({
           ...current,
           remoteObservationId: obsId,
+          // Completed steps are persisted with the link and never repeated.
+          ...(taxonomyIdentityDone ? { taxonomyIdentityDone: true } : {}),
           obsPayload: {
             ...(repairedPayload || current.obsPayload || {}),
             aiIdentificationRuns: queuedAiIdentificationRuns,
@@ -1158,11 +1441,42 @@ async function _runSyncQueue() {
         if (!updatedItem) continue
       }
 
+      // Legacy recovery never links an item with observation-level data to
+      // write; if one is found anyway, fail visibly rather than write or drop it.
+      if (observationWriteProtected && queuedAiIdentificationRuns.length) {
+        throw new SyncIdentityConflictError('observations', 'legacy-identification')
+      }
       if (queuedTaxonomySelection) {
-        await _setQueueSyncStatus(item.id, 'saving-taxonomy-identity', {
-          syncImageCount: queuedImages.length,
-        })
-        await _persistQueuedTaxonomyIdentity(obsId, queuedTaxonomySelection)
+        if (observationWriteProtected) throw new SyncIdentityConflictError('observations', 'legacy-identity')
+        // Written at most once: a completed write is recorded and never
+        // repeated, so a later edit elsewhere is never overwritten. A pending
+        // write first re-reads the row and proceeds only while it is empty.
+        if (!taxonomyIdentityDone) {
+          await _setQueueSyncStatus(item.id, 'saving-taxonomy-identity', {
+            syncImageCount: queuedImages.length,
+          })
+          // Order matters. 1) Resolve the exact target (asynchronous, may
+          // take a while). 2) Persist it BEFORE any RPC, added to every target
+          // saved by earlier attempts: after a lost response or crash the row
+          // may hold any of them, and each counts as this item's own. 3) Only
+          // then re-read the row, so the decision to write uses the latest
+          // state: empty -> write; already ours -> done; anything else (for
+          // example an edit made while resolution was pending) -> fail
+          // visibly without an RPC. 4) The writer sends the target unchanged.
+          const target = await _resolveTaxonomyWriteTarget(queuedTaxonomySelection)
+          const savedTargets = [...(Array.isArray(item.taxonomyWriteTargets) ? item.taxonomyWriteTargets : []), target]
+          const savedItem = await _updateQueueItem(item.id, current => current ? {
+            ...current,
+            taxonomyWriteTargets: [...(Array.isArray(current.taxonomyWriteTargets) ? current.taxonomyWriteTargets : []), target],
+          } : current)
+          if (!savedItem) continue
+          if (await _reconcileObservationIdentity(obsId, [queuedTaxonomySelection, ...savedTargets]) === 'empty') {
+            await _persistQueuedTaxonomyIdentity(obsId, target, { resolveExternal: async selection => selection })
+          }
+          taxonomyIdentityDone = true
+          const updatedItem = await _updateQueueItem(item.id, current => current ? { ...current, taxonomyIdentityDone: true } : current)
+          if (!updatedItem) continue
+        }
       }
 
       // 2. Reconcile against remote state so a stale local queue can heal itself.
@@ -1172,7 +1486,8 @@ async function _runSyncQueue() {
       await _setQueueSyncStatus(item.id, 'reconciling', {
         syncImageCount: queuedImages.length,
       })
-      const remoteState = await _fetchRemoteObservationState(obsId, queuedImages)
+      const writeOptions = { writeProtected: observationWriteProtected }
+      const remoteState = await _fetchRemoteObservationState(obsId, queuedImages, writeOptions)
       remoteState.completedIndexes.forEach(index => completedImageIndexes.add(index))
       if (completedImageIndexes.size >= queuedImages.length) {
         await _persistQueuedObservationIdentifications({
@@ -1184,7 +1499,7 @@ async function _runSyncQueue() {
             stage: 'remote-reconcile',
           },
         })
-        await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'remote-reconcile')
+        await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'remote-reconcile', writeOptions)
         continue
       }
       if (remoteState.completedIndexes.length) {
@@ -1232,21 +1547,29 @@ async function _runSyncQueue() {
 
         const blobType = preparedImage.uploadBlob?.type || preparedImage.uploadType || ''
         const ext = imageExtensionForMimeType(blobType)
-        const remoteReservation = _queuedImageReservation(remoteState.imageRows, image, i)
-        const path = remoteReservation?.storage_path || buildObservationImageStoragePath({
+        let remoteReservation = _queuedImageReservation(remoteState.imageRows, image, i)
+        if (!remoteReservation && image.reservedImageId) {
+          // The saved reservation is not a live row of this observation:
+          // verify it before any upload (tombstone or other parent fails
+          // visibly; a hard-deleted row is reserved again with the same key).
+          remoteReservation = await _verifyMissingQueuedReservation(item.id, i, image.reservedImageId, obsId, authUserId)
+        }
+        let path = remoteReservation?.storage_path || buildObservationImageStoragePath({
           userId: authUserId,
           observationId: obsId,
           sortOrder: i,
           extension: ext,
         })
 
-        let reservedImageId = Number.isInteger(image.reservedImageId) && image.reservedImageId > 0 ? image.reservedImageId : null
-        // Also recover a reservation whose response/local ID write was lost.
-        reservedImageId = remoteReservation?.id || reservedImageId
+        // Only a verified live row of this observation is ever uploaded to.
+        let reservedImageId = remoteReservation?.id || null
         if (!reservedImageId) {
+          // No POST without a committed key: the retry repeats it unchanged.
+          if (!isSyncKey(image.syncKey)) throw new Error('Queued image has no sync key yet; it will be retried')
           const reservedRow = await reserveObservationImage({
             observation_id: obsId,
             user_id: authUserId,
+            sync_key: image.syncKey,
             storage_path: path,
             image_type: 'field',
             sort_order: i,
@@ -1259,6 +1582,8 @@ async function _runSyncQueue() {
             ingestMethod: image.ingestMethod,
           })
           reservedImageId = reservedRow.id
+          // An adopted row keeps its own reserved key: upload to that object.
+          if (reservedRow.storage_path) path = reservedRow.storage_path
           // Persist so retry reuses the same row. If the existing slot is a
           // raw Blob (legacy queue shape), serialize preparedImage first —
           // spreading a Blob yields {} and would silently lose the bytes.
@@ -1271,6 +1596,8 @@ async function _runSyncQueue() {
             return { ...current, imageEntries: entries }
           })
         }
+        // Final confirmation finds this image's row by its cloud id.
+        queuedImages[i] = { ...preparedImage, reservedImageId }
         try {
           await uploadPreparedObservationImageVariants(preparedImage, path, {
             uploadPolicy,
@@ -1297,7 +1624,13 @@ async function _runSyncQueue() {
           }
           throw uploadErr
         }
-        await syncObservationMediaKeys(obsId, path, { sortOrder: i })
+        // The cover is only filled while empty, never replaced: the condition
+        // is part of each UPDATE, so a cover set elsewhere at any time
+        // (including during this upload) is left as it is. A cover already
+        // complete when read needs no UPDATE at all.
+        if (!observationWriteProtected && !remoteState.coverComplete) {
+          await syncObservationMediaKeys(obsId, path, { sortOrder: i, fillOnly: true })
+        }
 
         completedImageIndexes.add(i)
         await _updateQueueItem(item.id, current => current ? {
@@ -1319,7 +1652,7 @@ async function _runSyncQueue() {
       })
 
       // 3. Confirm remote DB/image state, then purge from the offline queue.
-      await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'local-sync')
+      await _finalizeSyncedQueueItem(item, obsId, queuedImages, 'local-sync', writeOptions)
     } catch (err) {
       const message = String(err?.message || err || 'Upload failed')
       const unrecoverable = /authenticated user id|missing authenticated user|different signed-in user|missing an auth user id|owner does not match|violates row-level security/i.test(message)
