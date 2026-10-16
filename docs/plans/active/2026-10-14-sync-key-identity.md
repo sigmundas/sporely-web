@@ -543,7 +543,7 @@ Evidence:
 
 **If a defect is found:** fix it in this stage, then rerun the focused unit tests for the touched code and the affected Stage 8b cases, on the new tested commit. The sparrer independently reviews the correction. Earlier Stage 8b results that the fix cannot affect stay valid, cited with the commit they tested.
 
-**Review:** the sparrer independently reviews the raw results and whether coverage is sufficient for the three items. READY requires passing raw evidence for all three on the tested commit. Missing required evidence is never READY: it is sent back, or raised as NEEDS_YOU when the stage cannot obtain it.
+**Review:** the sparrer independently reviews the raw results and whether coverage is sufficient for the three items. READY requires passing raw evidence for all three items, each citing the commit it tested. A result from an earlier commit of this stage counts only where the later change cannot affect it, and the summary says so. Missing required evidence is never READY: it is sent back, or raised as NEEDS_YOU when the stage cannot obtain it.
 
 No production access, deployment or merge.
 
