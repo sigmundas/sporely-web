@@ -90,7 +90,10 @@ The User-Agent test holds back **honest** old clients. It is **not** an
 authorization boundary: any caller can choose its User-Agent and headers. RLS
 and the existing guards remain the authorization layer.
 
-### No unsynced local data is lost
+### No unsynced local data is lost to the brake
+
+This section covers what the brake refuses. It does not cover the accepted F1
+limitation below.
 
 On the disposable target, every tested build (v0.8.13, v0.9.1, v0.9.15,
 v0.9.18, v0.9.25, `0520afd`, `ee6f2af`; `RESULTS.md` bk20, bk32/33, bk40/41,
@@ -110,6 +113,18 @@ pending (`brake-426/RESULTS.md`, G-NEW). See "What users see".
 Pending work uploads once a desktop that is not braked syncs. An observation
 deleted in an old desktop disappears locally only. Its cloud row and media are
 kept, and the next pull brings it back.
+
+**Accepted limitation F1 (plan owner, 2026-10-16).** The brake does not stop
+pulls. A released desktop that pulls can still overwrite unsynced local
+observation fields when local ids collide (sync-key plan, matrix row 14,
+condition "unsynced local work kept": **failed**, kept as a failed result and
+accepted as a limitation; raw evidence `g4-evidence/runs/p1g-o-<build>-3sync`).
+An upgrade cannot necessarily recover fields an old-client pull has already
+overwritten. The only protection is procedural: the owner's desktops are quit
+before their databases are backed up and stay closed until the integrated
+desktop is installed (see "Controlled window" and gate 0), and no installation
+syncs again with an obsolete version. The upgrade notice and release notes
+carry this warning.
 
 ## Order: worker first, then the database immediately after
 
@@ -145,13 +160,19 @@ create an image-less row or orphan an observation's media
 (`identity-impl/brake-426/RESULTS.md`). The deployment is therefore
 controlled:
 
-- **Before step 2,** every desktop installation that syncs to the account is
-  quit, and stays closed until the integrated desktop is installed on it. The
-  account owner is the only desktop cloud-sync user; other users use Android,
-  which neither half of the brake affects. Tick before step 2:
+- **Before the owner's desktop backups (plan "Release" step 3),** every
+  desktop installation that syncs to the account is quit, and stays closed
+  until the integrated desktop is installed on it. No installation is opened
+  with an obsolete version in between, not even to look, because an old
+  desktop can still pull (F1). The account owner is the only desktop
+  cloud-sync user; other users use Android, which neither half of the brake
+  affects. Tick before the backups are taken, and confirm again before step 2:
 
-  - [ ] Every desktop installation that syncs to Sporely Cloud is quit and
-        will stay closed until the integrated desktop is installed.
+  - [ ] Every desktop installation that syncs to Sporely Cloud was quit
+        before its database was backed up and has stayed closed since.
+        Name: ____________ Date (UTC): ____________
+  - [ ] Confirmed again before step 2: still closed, and will stay closed
+        until the integrated desktop is installed.
         Name: ____________ Date (UTC): ____________
 
 - **The window's UTC start and end are recorded:** T0 and T2 (or the
@@ -429,7 +450,11 @@ All of the following must be true. Otherwise stop.
   candidate of the web identity branch `feature/sync-key-identity-web`.
 - The old-client case of the sync-key plan (verification matrix row 14:
   released desktop builds against the key schema with the brake, database and
-  media worker) has passed on the disposable target, in Stage 6.
+  media worker) has run on the disposable target, in Stage 6. The brake's
+  protection of cloud data passed. The condition "unsynced local work kept"
+  **failed** for released-desktop pulls (F1); that failed result is kept and
+  was accepted by the plan owner on 2026-10-16 as a limitation (see "Accepted
+  limitation F1"). It is not a pass.
 - Plan "Release" step 2 is done: photo-location web, the web identity branch
   and the integrated desktop are merged to `main`, and `<merged main SHA>` is
   pushed. `fix/obsolete-desktop-sync-brake` is not merged. The four
@@ -448,7 +473,27 @@ All of the following must be true. Otherwise stop.
 
   The first two commands must exit 0, and the count must be 0.
 - Plan "Release" step 3 is done: the integrated desktop release artefacts
-  and the owner-approved upgrade notice are ready, but not published.
+  and the owner-approved upgrade notice are ready, but not published. The
+  notice carries the F1 warning (upgrade every installation before syncing;
+  an upgrade cannot necessarily recover fields an old-client pull already
+  overwrote).
+- **The owner's backups are verified before any deployment step.** For every
+  desktop installation that syncs to the account:
+  - the installation was quit before the backup, and the first "Controlled
+    window" line is ticked;
+  - its database backup exists outside the application's data directory, with
+    its path, size and SHA-256 recorded below, and a read-only
+    `PRAGMA integrity_check` on the backup copy returns `ok`;
+  - its unsynced local observations and measurements (rows whose `sync_status`
+    is not `synced`) are
+    listed from the backup copy, read-only, and that list is kept with the
+    backup.
+
+      Installation: ________ Backup path: ________ Size: ________
+      SHA-256: ________ integrity_check: ________ Unsynced rows listed: ________
+      Name: ____________ Date (UTC): ____________
+
+  If any installation has no verified backup, stop.
 - **Before merging:** in the Cloudflare dashboard, confirm that the
   `sporely-r2-upload` worker has no Git-connected automatic build. If it had
   one, the merge to `main` would itself deploy the worker and start an
