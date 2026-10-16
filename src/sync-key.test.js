@@ -106,6 +106,21 @@ test('syncRowDifferences keeps double-precision coordinates and integers exact',
   assert.deepEqual(syncRowDifferences({ ai_crop_x1: 0.1 }, { ai_crop_x1: 0.1000001 }, { table: 'observation_images' }), ['ai_crop_x1'])
 })
 
+test('syncRowDifferences accepts the server\'s extra_float_digits=0 output', () => {
+  // Supabase's postgresql.conf sets extra_float_digits = 0, so PostgREST
+  // returns double precision with 15 and real with 6 significant digits.
+  // Values from Stage 8b run w2b-1b-lost-obs (EXIF coordinates).
+  const opts = { table: 'observations' }
+  const sent = { gps_latitude: 62.34566944444445, gps_longitude: 8.765430555555556, gps_altitude: 123.4567, gps_accuracy: 4.123456789 }
+  const stored = { gps_latitude: 62.3456694444444, gps_longitude: 8.76543055555556, gps_altitude: 123.457, gps_accuracy: 4.12346 }
+  assert.deepEqual(syncRowDifferences(sent, stored, opts), [])
+  assert.deepEqual(syncRowDifferences({ ai_crop_x1: 0.2150000000000001 }, { ai_crop_x1: 0.215 }, { table: 'observation_images' }), [])
+  // A difference the server can show is still a difference.
+  assert.deepEqual(syncRowDifferences(sent, { ...stored, gps_latitude: 62.3456694444445 }, opts), ['gps_latitude'])
+  assert.deepEqual(syncRowDifferences(sent, { ...stored, gps_altitude: 123.458 }, opts), ['gps_altitude'])
+  assert.deepEqual(syncRowDifferences(sent, { ...stored, gps_accuracy: 4.12345 }, opts), ['gps_accuracy'])
+})
+
 test('fetchOwnRowBySyncKey filters by owner in the query and again on the result', async () => {
   const key = '1b4e28ba-2fa1-41d2-883f-0016d3cca427'
   const filters = []

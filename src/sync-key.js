@@ -103,14 +103,23 @@ function _isNumeric(value) {
 
 // Columns stored as `real` (float4), which round-trip a JS double with float4
 // precision. Every other number (double precision coordinates, integers)
-// must match exactly.
+// must match at double precision.
 export const SYNC_FLOAT4_FIELDS = Object.freeze({
   observations: Object.freeze(['gps_altitude', 'gps_accuracy']),
   observation_images: Object.freeze([]),
 })
 
+// Supabase runs Postgres with extra_float_digits = 0, so the server prints a
+// double with 15 and a real with 6 significant digits (DBL_DIG / FLT_DIG): a
+// stored 62.34566944444445 reads back as 62.3456694444444. A value equals the
+// stored one when it prints the same at that precision; any difference the
+// server can show still differs.
+function _sameFloat8(a, b) {
+  return a === b || a.toPrecision(15) === b.toPrecision(15)
+}
+
 function _sameFloat4(a, b) {
-  return Math.fround(a) === Math.fround(b)
+  return Math.fround(a) === Math.fround(b) || Math.fround(a).toPrecision(6) === b.toPrecision(6)
 }
 
 function _sameValue(sent, stored, float4 = false) {
@@ -118,7 +127,7 @@ function _sameValue(sent, stored, float4 = false) {
   if (stored === null || stored === undefined) return false
   if (typeof sent === 'boolean' || typeof stored === 'boolean') return sent === stored
   if ((typeof sent === 'number' || typeof stored === 'number') && _isNumeric(sent) && _isNumeric(stored)) {
-    return float4 ? _sameFloat4(Number(sent), Number(stored)) : Number(sent) === Number(stored)
+    return float4 ? _sameFloat4(Number(sent), Number(stored)) : _sameFloat8(Number(sent), Number(stored))
   }
   if (typeof sent === 'string' && typeof stored === 'string') {
     if (sent === stored) return true
