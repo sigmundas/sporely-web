@@ -182,7 +182,7 @@ No behaviour claim rests on U alone.
 | 13c | adopted row soft-deleted (image `deleted_at` tombstone) | deletion/restore flow; no resurrection | U+G |
 | 13c-p | an unlinked copy holds a key whose observation was hard-deleted (observations have no soft delete) | **accepted limitation:** re-uploaded once as a new row; no other row written; recorded, not a failure | G |
 | 13d | 409 from `23503`, or `23505` on another constraint | plain error, not adoption | U+P+G |
-| 14 | old clients (v0.8.13, v0.9.1, v0.9.15, v0.9.18, v0.9.25, `0520afd`, `ee6f2af`) against the key schema **with the brake** (database and media worker): create, edit and delete on an account holding keyed rows, then sync and restart | every row write refused `P0001` / `sporely_upgrade_required`, every media PUT/DELETE refused 426; zero cloud changes; downloads work; no sign-in prompt; credentials and unsynced local work kept. Accepted local effects: a locally deleted observation reappears on the next sync; v0.8.13 duplicates photos locally | G |
+| 14 | old clients (v0.8.13, v0.9.1, v0.9.15, v0.9.18, v0.9.25, `0520afd`, `ee6f2af`) against the key schema **with the brake** (database and media worker): create, edit and delete on an account holding keyed rows, then sync and restart | every row write refused `P0001` / `sporely_upgrade_required`, every media PUT/DELETE refused 426; zero cloud changes; downloads work; no sign-in prompt; credentials and unsynced local work kept. Accepted local effects: a locally deleted observation reappears on the next sync; v0.8.13 duplicates photos locally. **"Unsynced local work kept" failed in P1d Stage 6 (2026-10-16) on every build and is kept as a failed result** (F1; gate `95948f21f1e1414fa9afa58849dfada6`; runs `p1g-o-<build>-3sync`): the released client's own pull pairs an unsynced local observation with another installation's colliding keyless cloud row and overwrites its local fields; the local photo is kept and the cloud is unchanged. **Accepted by the user (2026-10-16) as a limitation of released desktops' own pull**, not a pass; every other condition held. Release precondition: "Release" step 3 | G |
 | 14b | an old client repairs a link onto a new-desktop row | refused; the row keeps a NULL link | P+G |
 | 14c | upgrade of a legacy profile that has already paired a local observation with another installation's cloud row (the v0.9.15 wrong-pairing state) | **Failed in P1c Stage 6 (2026-10-15) and kept as a failed result** (gate `56491780ae7348acabd6b9dbf4e709f2`; runs `p6-x14c-2-edit`, `p6-x14c-3-del`, `p6-c06-p2sync`): the upgraded desktop edited and deleted the other installation's row, images and media through the inherited link. **Reclassified by the user (2026-10-15) as an accepted limitation of inherited keyless links only**, not a pass: such a link cannot be told apart from a legitimate one, and keys cannot be added to existing rows, so until the link is corrected an edit or delete can affect the wrong cloud record. P1d re-runs the case to record that behaviour on its `T`, and still requires: no unsynced local work lost; nothing written to any row other than the paired observation and its own children. The exception does not extend to `sync_key` identities: every keyed row keeps the strict no-wrong-record-write requirements (rows 1–13d, 22 and 24). Release preconditions: "Release" steps 1 and 3 | G |
 | 14d | positive clients under the brake: the new desktop (create, edit, delete, media PUT/DELETE), the web app, an Android-WebView User-Agent, and the write stop | all allowed; the write stop still refuses a listed new-desktop version | P + worker unit + G |
@@ -234,10 +234,11 @@ Engine checked 2026-10-14: agent-sparring `ea8e70d`.
 | P1 (Stages 2–5 accepted; superseded at Stage 6) | sporely-py `feature/sync-key-desktop-n1` | 2–5 | accepted `ee6f2af`; accepted `79f5a35` |
 | W1b (complete) | sporely-web, same branch as W1 | 1b | `c094722`; accepted `0bb2782` |
 | P1c (superseded at Stage 6) | sporely-py `feature/sync-key-desktop-n1` | 6 | `79f5a35`; attempt kept at `backup/sync-key-p1c-attempt-1` |
-| P1d | sporely-py `feature/sync-key-desktop-n1` | 6–7 | accepted Stage 5 candidate `79f5a35`; sibling pin: W1b final candidate `0bb2782` |
-| W2 | sporely-web, same branch as W1 | 8 | W1b final candidate |
+| P1d (Stages 6–7 accepted) | sporely-py `feature/sync-key-desktop-n1` | 6–7 | `79f5a35`; accepted `3850b3f` (sibling pin `0bb2782`) |
+| W2 | sporely-web, same branch as W1 | 8 | W1b final candidate `0bb2782`; desktop coexistence input: accepted P1d candidate `3850b3f` |
 
 **Run order (revision of 2026-10-15):** W1, W1b and P1 Stages 2–5 are accepted and are not executed again; intake treats Stages 1, 1b and 2–5 as accepted records, not as stages. The remaining slices run in this order: P1d, then W2. Both start from accepted work: P1d from `79f5a35` with the web sibling pinned at the W1b final candidate `0bb2782`; W2 from `0bb2782`.
+- **Revision of 2026-10-16:** P1d's Stages 6 and 7 are accepted at `3850b3f`; intake treats them as accepted records, not as stages. W2 is the only remaining slice. It does not wait for the P1d run to be marked complete: that run stays open only on the photo-location user actions in "Outside these runs", which are not prerequisites of W2 (see "Dependencies and order"). W2 uses the accepted desktop candidate `3850b3f` as a fixed input for its coexistence case, verified by the same checks as "Outside these runs" step 1 (already recorded 2026-10-16).
 - The earlier P1 run stays paused at its first Stage 6 attempt and is superseded; its records are kept as history. P1c (second attempt) was superseded at Stage 6 by the row 14c decision; its run state is archived and its commits `79f5a35..a2d01a7` are kept at `backup/sync-key-p1c-attempt-1`. P1d continues the same branch from accepted `79f5a35` and may reuse either attempt's commits by cherry-pick; their evidence is not reused.
 - The first attempt's local commits (`79f5a35..d4445e0`, unpushed) are kept at the local ref `backup/sync-key-s6-attempt-1`. P1d may reuse them, in particular the image-adoption sample-field fix `6934c2e` and the scenario additions, by cherry-pick into its own reviewed commits. Its evidence is not reused: every case is re-run on P1d's final tested commit `T` (Stage 6 evidence convention).
 - Each implementation stage has one writer in its primary repository and never edits a sibling.
@@ -394,6 +395,8 @@ Unit tests: rows 2–5 and 10, plus a regression that fails on `ee6f2af`: two da
 
 ### Stage 6 — Two-desktop collision regression, ownership, recovery and the outstanding GUI scenarios on the integrated build
 
+**Accepted at `3850b3f` (slice P1d, 2026-10-16). Record only; not executed again.** Tested commit `ee6ab4e`; summary `docs/verification/2026-10-sync-key-n1-two-desktop.md`. Row 14 failed its "unsynced local work kept" condition (F1) and was accepted as a limitation; see "Decisions recorded 2026-10-16".
+
 Primary repository: sporely-py, slice P1d, from accepted `79f5a35`. Read-only sibling: sporely-web at the W1b final candidate. This is agent verification of the accepted Stage 5 code. A defect found here is fixed in this stage and re-verified, so the evidence comes from the final code.
 
 Set-up:
@@ -449,6 +452,8 @@ Evidence convention:
 
 ### Stage 7 — Independent security review of the desktop fix
 
+**Accepted at `3850b3f` (slice P1d, 2026-10-16; review only, no commit). Record only; not executed again.**
+
 Mode: `independent_review`. Primary repository: sporely-py at the accepted Stage 6 commit; sibling sporely-web at the W1b final candidate.
 
 The reviewer reads the whole Stage 6 section above (set-up, required cases, brake regressions, corrections, fault points and evidence convention) as the list it checks Stage 6's evidence against.
@@ -485,7 +490,7 @@ Verify:
   - a differing adopted row fails visibly without PATCH;
   - other `23505`, `23503` and 4xx answers are plain errors;
   - the `getRandomValues` fallback.
-- On the disposable target, matrix row 16 through `g4_web.mjs`, plus one coexistence case if the accepted P1 commit exists: web and the new desktop editing the same observation.
+- On the disposable target, matrix row 16 through `g4_web.mjs`, plus one coexistence case with the accepted P1d desktop candidate `3850b3f`: web and the new desktop editing the same observation.
 - `git diff --check`.
 
 ## Outside these runs (user actions; none is a gate or stage of this plan)
@@ -498,6 +503,8 @@ Verify:
    - `git -C sporely-py merge-base --is-ancestor be511bf <P1>`
    - `git -C sporely-py ls-remote origin refs/heads/feature/sync-key-desktop-n1` (must equal `<P1>`)
    - a check that `<P1>` equals the candidate recorded as accepted in the P1d run's final stage state.
+
+   Done 2026-10-16 for `<P1>` = `3850b3f`: both ancestry checks pass, the remote head equals `3850b3f`, and the Stage 7 state records `3850b3f` as accepted.
 2. With the user's separate authorization, the user or the coordinating agent fast-forwards `feature/ingestion-location-provenance-stage-4` from `ee6f2af` to `<P1>`. That branch is outside the push guard's allow-list.
 3. The user records the photo-location desktop check in its own run, citing `<P1>`, the web pin, the Stage 6 summary and the earlier `ee6f2af` evidence for carried-forward cases. The earlier failure stays in its history.
 4. The user prepares the two primary checkouts, then resumes the photo-location plan:
@@ -510,6 +517,14 @@ Verify:
 1. **Required** (precondition of the row 14c limitation), read-only and quick: confirm limited exposure with one aggregate query over production metadata. Count accounts with desktop cloud writes in the last 90 days, and accounts with more than one desktop device in `reference_client_devices`, with small counts suppressed. No per-account rows go into Claude. Release continues only if no account other than the owner's has desktop cloud-upload history. If any other account has, release stops and the row 14c decision goes back to the user.
 2. Merge the integrated branches to `main`: photo-location web, the web identity branch (including Stage 1b), and the integrated desktop. Do not merge `fix/obsolete-desktop-sync-brake`.
 3. Prepare the integrated desktop release artefacts and the upgrade notice the user approves. The notice tells users of older desktops to upgrade and not to keep syncing with old versions. Before the owner upgrades any of their own desktop installations: back up each installation's local database, then run a **read-only** reconciliation of its existing observation and image cloud links against the cloud, flagging conflicting or unverifiable associations for the owner. It never rewrites cloud links or production data automatically; any correction is the owner's separate decision. Reading production for it needs the owner's separate approval. These are private tools, not a product deliverable.
+
+   Further preconditions from the F1 decision (2026-10-16), for the owner's installations:
+   - back up each existing desktop database before upgrading;
+   - identify and preserve unsynced local observations and measurements;
+   - do not sync again with an obsolete desktop version, even on a single installation;
+   - upgrade and reconcile the installations before resuming desktop cloud synchronization.
+
+   The upgrade notice and release notes tell desktop users to upgrade every installation before syncing, and warn that a released desktop may overwrite unsynced local observation fields when local ids collide. They also state that an upgrade cannot necessarily recover fields already overwritten by an old-client pull, and that inherited incorrect links can still cause edits or deletes to affect the wrong cloud record until those links are corrected (row 14c).
 4. Deploy the media worker with the brake guard first, per the runbook (`/healthz` flag and 426 probe), with the real-worker smoke test of Stage 1b repeated against the deployed worker using a test account.
 5. Apply the migrations in version order: `20261012105630`, `20261013210000`, the write stop, then the brake. No keyed row can exist before this step: no released client mints keys, and steps 6–8 follow it.
 6. Publish the integrated desktop and the upgrade notice, so old desktops are not left without an upgrade.
@@ -551,6 +566,13 @@ Planned in a later revision of this plan, once desktop adoption after the releas
   Old Android builds' behaviour under refusal must be tested on a device first.
 - **Cleanup:** drop the `desktop_id` unique constraints; retire `portable_cloud_identity_pending` and the legacy-recovery marker; run the orphan-media audit; review any backup before its retention ends.
 - Matrix rows 16b, 17, 20b and 21 move to that revision.
+
+## Decisions recorded 2026-10-16
+
+- F1 (P1d Stage 6 gate `95948f21f1e1414fa9afa58849dfada6`, check `sync-key-old-client-local-work-preservation-resolution`): the brake protects cloud data, but obsolete desktop versions can still overwrite unsynced local observation fields during their own pull. This is existing legacy behaviour outside the new desktop and the brake. The owner is the only desktop cloud-sync user and accepts the residual risk rather than adding server-side restrictions on downloads. The failed row 14 result and its raw evidence are kept and never reclassified as a successful test. No additional server changes or compatibility tests for F1. The strengthened preconditions are in "Release" step 3.
+- Stage 6 was finalized from an earlier, shorter disposition. Its summary at `3850b3f` records the acceptance, the scope and the upgrade notice. The full owner preconditions are recorded here and in "Release" step 3, not in that summary.
+- W2 is re-compiled from this revision and starts without waiting for the P1d run to be marked complete. The photo-location steps in "Outside these runs" stay user actions with their own authorization; they do not block W2.
+- No production deployment or release is authorized.
 
 ## Decisions recorded 2026-10-15
 
