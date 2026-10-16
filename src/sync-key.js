@@ -101,19 +101,26 @@ function _isNumeric(value) {
     || (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value)))
 }
 
-// Columns stored as `real` (float4), which round-trip a JS double with float4
-// precision. Every other number (double precision coordinates, integers)
-// must match at double precision.
+// Columns stored as `real` (float4) and `double precision` (float8). Supabase
+// runs Postgres with extra_float_digits = 0, so the server prints a real with 6
+// and a double with 15 significant digits (FLT_DIG / DBL_DIG): a stored
+// 62.34566944444445 reads back as 62.3456694444444. A value in one of these
+// columns equals the stored one when it prints the same at that precision; any
+// difference the server can show still differs. Every other number (integers,
+// bigint, numeric) is returned as stored and must match exactly.
 export const SYNC_FLOAT4_FIELDS = Object.freeze({
   observations: Object.freeze(['gps_altitude', 'gps_accuracy']),
   observation_images: Object.freeze([]),
 })
 
-// Supabase runs Postgres with extra_float_digits = 0, so the server prints a
-// double with 15 and a real with 6 significant digits (DBL_DIG / FLT_DIG): a
-// stored 62.34566944444445 reads back as 62.3456694444444. A value equals the
-// stored one when it prints the same at that precision; any difference the
-// server can show still differs.
+export const SYNC_FLOAT8_FIELDS = Object.freeze({
+  observations: Object.freeze(['gps_latitude', 'gps_longitude', 'auto_threshold']),
+  observation_images: Object.freeze([
+    'ai_crop_x1', 'ai_crop_y1', 'ai_crop_x2', 'ai_crop_y2', 'resample_scale_factor',
+    'scale_bar_x1', 'scale_bar_y1', 'scale_bar_x2', 'scale_bar_y2', 'scale_microns_per_pixel',
+  ]),
+})
+
 function _sameFloat8(a, b) {
   return a === b || a.toPrecision(15) === b.toPrecision(15)
 }
@@ -122,12 +129,14 @@ function _sameFloat4(a, b) {
   return Math.fround(a) === Math.fround(b) || Math.fround(a).toPrecision(6) === b.toPrecision(6)
 }
 
-function _sameValue(sent, stored, float4 = false) {
+function _sameValue(sent, stored, precision = null) {
   if (sent === null || sent === undefined) return stored === null || stored === undefined
   if (stored === null || stored === undefined) return false
   if (typeof sent === 'boolean' || typeof stored === 'boolean') return sent === stored
   if ((typeof sent === 'number' || typeof stored === 'number') && _isNumeric(sent) && _isNumeric(stored)) {
-    return float4 ? _sameFloat4(Number(sent), Number(stored)) : _sameFloat8(Number(sent), Number(stored))
+    if (precision === 'float4') return _sameFloat4(Number(sent), Number(stored))
+    if (precision === 'float8') return _sameFloat8(Number(sent), Number(stored))
+    return Number(sent) === Number(stored)
   }
   if (typeof sent === 'string' && typeof stored === 'string') {
     if (sent === stored) return true
@@ -149,11 +158,13 @@ function _sameValue(sent, stored, float4 = false) {
 export function syncRowDifferences(sentPayload, row, { table = null, ignore = [] } = {}) {
   const skip = new Set(['id', 'sync_key', ...ignore])
   const float4 = new Set(SYNC_FLOAT4_FIELDS[table] || [])
+  const float8 = new Set(SYNC_FLOAT8_FIELDS[table] || [])
   const differing = []
   for (const [field, sent] of Object.entries(sentPayload || {})) {
     if (skip.has(field) || sent === undefined) continue
     if (!row || !Object.prototype.hasOwnProperty.call(row, field)) continue
-    if (!_sameValue(sent, row[field], float4.has(field))) differing.push(field)
+    const precision = float4.has(field) ? 'float4' : (float8.has(field) ? 'float8' : null)
+    if (!_sameValue(sent, row[field], precision)) differing.push(field)
   }
   return differing
 }

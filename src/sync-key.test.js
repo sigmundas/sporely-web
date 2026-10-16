@@ -121,6 +121,21 @@ test('syncRowDifferences accepts the server\'s extra_float_digits=0 output', () 
   assert.deepEqual(syncRowDifferences(sent, { ...stored, gps_accuracy: 4.12345 }, opts), ['gps_accuracy'])
 })
 
+test('syncRowDifferences rounds only float columns; numeric and integer columns stay exact', () => {
+  // numeric and bigint values are returned as stored, never rounded.
+  assert.deepEqual(syncRowDifferences(
+    { ai_selected_probability: 0.123456789012345 }, { ai_selected_probability: 0.1234567890123451 }, { table: 'observations' },
+  ), ['ai_selected_probability'])
+  assert.deepEqual(syncRowDifferences(
+    { stored_bytes: 1000000000000000 }, { stored_bytes: 1000000000000001 }, { table: 'observation_images' },
+  ), ['stored_bytes'])
+  // A double column outside this table's list is not rounded either.
+  assert.deepEqual(syncRowDifferences({ gps_latitude: 62.34566944444445 }, { gps_latitude: 62.3456694444444 }), ['gps_latitude'])
+  assert.deepEqual(syncRowDifferences(
+    { scale_microns_per_pixel: 0.12345678901234567 }, { scale_microns_per_pixel: 0.123456789012346 }, { table: 'observation_images' },
+  ), [])
+})
+
 test('fetchOwnRowBySyncKey filters by owner in the query and again on the result', async () => {
   const key = '1b4e28ba-2fa1-41d2-883f-0016d3cca427'
   const filters = []
