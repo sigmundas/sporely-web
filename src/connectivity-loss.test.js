@@ -214,7 +214,9 @@ test('enqueueObservation is IndexedDB-only (no supabase/network before the commi
   const chunk = sliceBetweenAnchors(
     queue,
     'async function _enqueueObservation(',
-    'export async function getQueuedObservations',
+    // The next declaration. The provenance-retry helper that follows is called
+    // from the sync loop, not from _enqueueObservation.
+    'async function _retryObservationInsertWithoutProvenance(',
     'sync-queue.js',
   )
   assert.equal(/supabase|fetch\(|getSharedAuthSession|fetchCloudPlanProfile/.test(chunk), false)
