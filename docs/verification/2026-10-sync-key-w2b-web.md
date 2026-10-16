@@ -4,9 +4,26 @@ Date: 2026-10-16. Plan: `docs/plans/active/2026-10-14-sync-key-identity.md`,
 Stage 8b. Verifies accepted Stage 8 (`46c9297`) on the disposable target only.
 No production access, deployment or merge.
 
-## Result
+## Status (second pass): incomplete; reruns pending
 
-All three items pass on web `307ef7f`, but only after one correction to Stage 8.
+Review sent this summary back. The results below are **not** accepted evidence
+for Stage 8b:
+
+- `307ef7f` rounded every number, including `numeric` and `bigint` columns.
+  `a6abde7` limits rounding to the listed `real` and `double precision` columns.
+- The web runs did not record which commit the browser served.
+- `w2b-1b-lost-obs-2` did not reuse the precision-sensitive fixture that
+  failed (`g4_geo_r4.jpg`).
+
+Every web case is to be rerun on `a6abde7` with
+`g4-evidence/w2b/served-tree-check.mjs` run right after each web run. The
+helper records the git HEAD, a clean-tree check, the served source hashes and
+a probe of the comparator the page resolves. This session could not run it
+(`node <helper>` needs approval). The runs below are kept as history only.
+
+## Result (first pass, superseded)
+
+All three items passed on web `307ef7f`, after one correction to Stage 8.
 
 **Defect found and fixed (`307ef7f`).** On this stack, a lost observation-insert
 response made the retry adopt its own row and then refuse it as "different
