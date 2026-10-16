@@ -1,6 +1,6 @@
 # Per-record sync keys — retire the shared `desktop_id` identity
 
-Status: revised 2026-10-14 after the user's scope decisions; amended 2026-10-15 (old-desktop compatibility, see "Decisions recorded 2026-10-15"). Stages 1–5 accepted; Stage 6 paused. Approving this plan authorizes the three implementation slices below and their candidate pushes to the designated branches. It authorizes no merge to `main`, no production operation and no gate result in any other run.
+Status: revised 2026-10-14 after the user's scope decisions; amended 2026-10-15 (old-desktop compatibility, see "Decisions recorded 2026-10-15") and 2026-10-16 (F1, see "Decisions recorded 2026-10-16"). Stages 1–7 accepted (desktop at `3850b3f`); Stage 8 (slice W2) remains. Approving this plan authorizes the remaining implementation slice W2 and its candidate pushes to the designated branch. It authorizes no merge to `main`, no production operation and no gate result in any other run.
 Date: 2026-10-14
 Scope: the permanent fix for the multi-desktop `desktop_id` collision, implemented and tested together with the photo-location feature as one integrated desktop release. In scope: the web identity contract and a write stop for faulty desktop builds; the desktop sync change; web/Android key creation. Deferred: the database cutover and the refusal of keyless inserts. Repositories: sporely-web and sporely-py.
 
