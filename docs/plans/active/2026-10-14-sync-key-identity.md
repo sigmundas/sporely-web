@@ -1,6 +1,6 @@
 # Per-record sync keys — retire the shared `desktop_id` identity
 
-Status: revised 2026-10-14 after the user's scope decisions; amended 2026-10-15 (old-desktop compatibility, see "Decisions recorded 2026-10-15") and 2026-10-16 (F1, see "Decisions recorded 2026-10-16"). Stages 1–7 accepted (desktop at `3850b3f`); Stage 8 (slice W2) remains. Approving this plan authorizes the remaining implementation slice W2 and its candidate pushes to the designated branch. It authorizes no merge to `main`, no production operation and no gate result in any other run.
+Status: revised 2026-10-14 after the user's scope decisions; amended 2026-10-15 (old-desktop compatibility, see "Decisions recorded 2026-10-15") and 2026-10-16 (F1, see "Decisions recorded 2026-10-16"). Stages 1–8 accepted (desktop at `3850b3f`, web at `46c9297`); Stage 8b (slice W3, verification only) remains. Approving this plan authorizes the remaining slice W3 and its candidate pushes to the designated branch. It authorizes no merge to `main`, no production operation and no gate result in any other run.
 Date: 2026-10-14
 Scope: the permanent fix for the multi-desktop `desktop_id` collision, implemented and tested together with the photo-location feature as one integrated desktop release. In scope: the web identity contract and a write stop for faulty desktop builds; the desktop sync change; web/Android key creation. Deferred: the database cutover and the refusal of keyless inserts. Repositories: sporely-web and sporely-py.
 
@@ -235,9 +235,11 @@ Engine checked 2026-10-14: agent-sparring `ea8e70d`.
 | W1b (complete) | sporely-web, same branch as W1 | 1b | `c094722`; accepted `0bb2782` |
 | P1c (superseded at Stage 6) | sporely-py `feature/sync-key-desktop-n1` | 6 | `79f5a35`; attempt kept at `backup/sync-key-p1c-attempt-1` |
 | P1d (Stages 6–7 accepted) | sporely-py `feature/sync-key-desktop-n1` | 6–7 | `79f5a35`; accepted `3850b3f` (sibling pin `0bb2782`) |
-| W2 | sporely-web, same branch as W1 | 8 | W1b final candidate `0bb2782`; desktop coexistence input: accepted P1d candidate `3850b3f` |
+| W2 (Stage 8 accepted) | sporely-web, same branch as W1 | 8 | `0bb2782`; accepted `46c9297` (desktop input `3850b3f`) |
+| W3 | sporely-web, same branch as W1 | 8b | accepted Stage 8 candidate `46c9297`; desktop input: accepted P1d candidate `3850b3f` |
 
 **Run order (revision of 2026-10-15):** W1, W1b and P1 Stages 2–5 are accepted and are not executed again; intake treats Stages 1, 1b and 2–5 as accepted records, not as stages. The remaining slices run in this order: P1d, then W2. Both start from accepted work: P1d from `79f5a35` with the web sibling pinned at the W1b final candidate `0bb2782`; W2 from `0bb2782`.
+- **Second revision of 2026-10-16:** W2's Stage 8 is accepted at `46c9297`; intake treats it as an accepted record, not as a stage. Its required disposable verification did not run, so W3 (Stage 8b) is the only remaining slice. W3 does not wait for the W2 run to be marked complete: that run stays open only on the release steps.
 - **Revision of 2026-10-16:** P1d's Stages 6 and 7 are accepted at `3850b3f`; intake treats them as accepted records, not as stages. W2 is the only remaining slice. It does not wait for the P1d run to be marked complete: that run stays open only on the photo-location user actions in "Outside these runs", which are not prerequisites of W2 (see "Dependencies and order"). W2 uses the accepted desktop candidate `3850b3f` as a fixed input for its coexistence case, verified by the same checks as "Outside these runs" step 1 (already recorded 2026-10-16).
 - The earlier P1 run stays paused at its first Stage 6 attempt and is superseded; its records are kept as history. P1c (second attempt) was superseded at Stage 6 by the row 14c decision; its run state is archived and its commits `79f5a35..a2d01a7` are kept at `backup/sync-key-p1c-attempt-1`. P1d continues the same branch from accepted `79f5a35` and may reuse either attempt's commits by cherry-pick; their evidence is not reused.
 - The first attempt's local commits (`79f5a35..d4445e0`, unpushed) are kept at the local ref `backup/sync-key-s6-attempt-1`. P1d may reuse them, in particular the image-adoption sample-field fix `6934c2e` and the scenario additions, by cherry-pick into its own reviewed commits. Its evidence is not reused: every case is re-run on P1d's final tested commit `T` (Stage 6 evidence convention).
@@ -474,6 +476,8 @@ A defect stops the plan; nothing is fixed in this stage.
 
 ### Stage 8 — Web and Android key creation and adoption
 
+**Accepted at `46c9297` (slice W2, 2026-10-16). Record only; not executed again.** The commit and its review record stay unchanged. Its required disposable verification (the last "Verify" item below) did **not** run: the browser service was down and the agent could not start it, and the web harness had no create/retry scenario. Only focused unit tests ran (126 of 127 passed; the one failure is the known baseline assertion). That verification is Stage 8b; it is not recorded as passed here.
+
 Primary repository: sporely-web, slice W2, starting at the W1b final candidate (which contains the brake). Implement "Web and Android" from the identity rules.
 
 The engine's review of this stage includes a security checklist:
@@ -492,6 +496,56 @@ Verify:
   - the `getRandomValues` fallback.
 - On the disposable target, matrix row 16 through `g4_web.mjs`, plus one coexistence case with the accepted P1d desktop candidate `3850b3f`: web and the new desktop editing the same observation.
 - `git diff --check`.
+
+### Stage 8b — Disposable verification of Stage 8 (verification only)
+
+Primary repository: sporely-web, slice W3, on `feature/sync-key-identity-web` from accepted `46c9297`. Read-only sibling: sporely-py at accepted `3850b3f`, used only for the coexistence case. Stage 8's commit and review record stay unchanged. This stage verifies the accepted code. It adds a verification summary, plus a fix only if it finds a defect.
+
+**Set-up** (done by the coordinator before the run, and checked from a session started the way the engine starts stage agents):
+- disposable stack `sporely-g3-verify` (API `127.0.0.1:55421`), with the brake applied;
+- the guarded stub media worker on `127.0.0.1:55425`;
+- a sandboxed Vite dev server serving this worktree at `https://127.0.0.1:55430`;
+- headless Chromium with CDP on `127.0.0.1:55431`; test account `owner@g3.test`.
+
+Harness, all in `sporely-worktrees/g4-evidence/tools/`:
+- `g4_web.mjs`:
+  - new reusable scenario `create_obs`: a real photo import through the UI, then the app's own queue and retry timer;
+  - optional `lose` rules drop a request or its response on the API origin;
+  - `reload_after_fault` covers the restart case;
+  - every API write is recorded with its status;
+  - see `CHANGE-2026-10-16-create-retry.md`;
+  - the existing `set_location` and `read_obs` find a card only on the first page of Finds → Mine.
+- `run.sh` for the new desktop at `3850b3f` (lineage worktree `py-n1`), and the read-only `psql` wrapper for the disposable database.
+
+The stage does not edit harness files. It may add its own helper scripts and fixtures under `g4-evidence/w2b/`. If a needed capability is missing, it reports that; it does not substitute a weaker check.
+
+**Verify only these three items**, on the disposable target. Database state before and after is the evidence; status codes alone are not:
+1. **Web create and edit with sync keys, retries and adoption** (matrix row 16):
+   - a plain create: the observation and image rows carry the queued `sync_key`s and `desktop_id` stays NULL;
+   - a lost observation-insert response: the retry gets `23505` on the named key index and adopts, leaving exactly one row and no PATCH of the adopted row beyond the conditional cover fill;
+   - a lost image-insert response: adopted, with exactly one image row;
+   - one lost-response case with a page reload before the retry: the queue persists and keeps the same keys;
+   - a web edit of a keyed observation: only that row changes and its `sync_key` does not.
+2. **Web/desktop coexistence with accepted desktop `3850b3f`:** web and the new desktop edit the same observation, in both directions (created on one side, edited on the other, then synced or pulled on both):
+   - no duplicates;
+   - no write to any other row;
+   - `sync_key` unchanged and no `desktop_id` written;
+   - the final state is visible to both clients.
+3. **Conditional cover updates against real PostgREST:**
+   - the cover fill sets `image_key`/`thumb_key` when both are NULL;
+   - when a cover is already present, the conditional update changes nothing and the existing cover stays. Test both a partial cover and a cover written concurrently, for example by the owner's own client or the desktop between the read and the update.
+
+Evidence:
+- each run records the web HEAD and the desktop commit; raw results stay under `g4-evidence/runs/w2b-*`;
+- the summary is `docs/verification/2026-10-sync-key-w2b-web.md` in sporely-web, citing runs per item.
+
+**Not repeated:** the desktop verification matrix, unrelated unit suites, `npm test`, builds, Capacitor sync.
+
+**If a defect is found:** fix it in this stage, then rerun the focused unit tests for the touched code and the affected Stage 8b cases, on the new tested commit. The sparrer independently reviews the correction. Earlier Stage 8b results that the fix cannot affect stay valid, cited with the commit they tested.
+
+**Review:** the sparrer independently reviews the raw results and whether coverage is sufficient for the three items. READY requires passing raw evidence for all three on the tested commit. Missing required evidence is never READY: it is sent back, or raised as NEEDS_YOU when the stage cannot obtain it.
+
+No production access, deployment or merge.
 
 ## Outside these runs (user actions; none is a gate or stage of this plan)
 
@@ -573,6 +627,7 @@ Planned in a later revision of this plan, once desktop adoption after the releas
 - Stage 6 was finalized from an earlier, shorter disposition. Its summary at `3850b3f` records the acceptance, the scope and the upgrade notice. The full owner preconditions are recorded here and in "Release" step 3, not in that summary.
 - W2 is re-compiled from this revision and starts without waiting for the P1d run to be marked complete. The photo-location steps in "Outside these runs" stay user actions with their own authorization; they do not block W2.
 - No production deployment or release is authorized.
+- Stage 8 (W2) was accepted by the engine although its required disposable verification had not run; the reviewer named it as outstanding and still returned READY. User decision: keep `46c9297` and its review record unchanged, and add a strictly bounded verification-only Stage 8b (slice W3) for the three missing items. The coordinator starts and checks the browser service and adds the reusable create/retry scenario first. The engine issue is recorded in agent-sparring `docs/plans/ready-with-missing-evidence.md`.
 
 ## Decisions recorded 2026-10-15
 
