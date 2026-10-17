@@ -551,7 +551,9 @@ async function _enqueueObservation(obsPayload, imageEntries) {
   }
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite')
+    // Strict: oncomplete fires only once the item is flushed to disk, so a
+    // caller may then drop its own copy. Engines without the option ignore it.
+    const tx = db.transaction(STORE_NAME, 'readwrite', { durability: 'strict' })
     const store = tx.objectStore(STORE_NAME)
     const req = store.add(queueItem)
 

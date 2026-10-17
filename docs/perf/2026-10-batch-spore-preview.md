@@ -1,6 +1,6 @@
 # Batch spore previews: database work and latency (local)
 
-Plan: `docs/plans/active/2026-10-10-batch-spore-preview-rpc.md`, Stage 2.
+Plan: `docs/plans/completed/2026-10-10-batch-spore-preview-rpc.md`, Stage 2.
 Date: 2026-10-11. **Local database only, synthetic fixtures.** No production
 connection was used and no production data was read.
 

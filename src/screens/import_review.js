@@ -9,7 +9,13 @@ import { nativeCaptureSourcePathFromNativePhoto } from '../native-capture-storag
 import { canPerformCloudMutation } from '../capabilities.js';
 import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
-import { saveImportSessions, clearImportSessions } from '../import-store.js';
+import {
+  saveImportSessions,
+  clearImportSessions,
+  clearImportSessionsStrict,
+  deleteImportSession,
+  describePersistError,
+} from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js';
 import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js';
@@ -150,14 +156,26 @@ const importAiBatchState = {
   defaultServiceLabel: '',
 };
 
+// Groups queued by the Queue All run in progress. They stay in `sessions`
+// until the loop ends, but a snapshot taken after a group was queued must not
+// write it back: its saved session may already have been deleted.
+let queuedInCurrentSave = new Set();
+
 function _persistSessions() {
   debugImagePipeline('persist import sessions', {
     sessionCount: sessions.length,
     sourceItemCount: sourceItems.length,
   })
-  const persist = _importAiDependency('persistSessions');
-  if (persist) persist(sessions);
-  else saveImportSessions(sessions);
+  const persist = _importAiDependency('persistSessions', saveImportSessions);
+  const snapshot = queuedInCurrentSave.size
+    ? sessions.filter(s => !queuedInCurrentSave.has(s.id))
+    : sessions;
+  // The sessions stay in memory either way; a failed write only means they
+  // would not survive the app being killed. Say so instead of staying silent.
+  return Promise.resolve(persist(snapshot)).then(ok => {
+    if (ok === false) _importAiDependency('showToast', showToast)(t('import.persistFailed'));
+    return ok !== false;
+  });
 }
 
 function _renderImportAiSessions() {
@@ -1590,36 +1608,45 @@ function _applyImportPhotoGapChange(value) {
   expandedSessionIds = new Set();
   _abortImportAiRuns();
   _buildSessionsFromSourceItems();
-  if (sessions.length === 1) {
-    const session = sessions[0];
-    _disposeSessionBlobUrls([session]);
-    sessions = [];
-    expandedSessionIds = new Set();
-    sourceItems = [];
-    clearImportSessions();
-    openImportedReview(session);
-    return;
-  }
+  // Groups merged into one stay in this persisted review. Handing the merged
+  // group to the single Review screen would clear pending_import without
+  // queueing it, and that screen does not persist imported reviews.
   if (!sessions.length) {
     clearImportSessions();
     navigate('home');
     return;
   }
   _persistSessions();
-  renderSessions();
+  _importAiDependency('renderSessions', renderSessions)();
   _prefillSessionLocations();
 }
 
+export function __applyImportPhotoGapChangeForTests(value) {
+  return _applyImportPhotoGapChange(value);
+}
+
+// Home and Cancel both discard the review. Groups with photos may be the only
+// copy of an unqueued import, so discarding them needs the user's consent;
+// declining leaves memory, the stored sessions and the screen untouched.
 function _cancelImport() {
   if (importAiBatchState.running) return;
+  const groupCount = sessions.filter(s => s.files?.length > 0).length;
+  if (groupCount > 0) {
+    const confirmDiscard = _importAiDependency('confirm', message => window.confirm(message));
+    if (!confirmDiscard(t('import.discardConfirm', { groups: tp('counts.group', groupCount) }))) return;
+  }
   _abortImportAiRuns();
   _disposeSessionBlobUrls();
-  clearImportSessions();
+  _importAiDependency('clearImportSessions', clearImportSessions)();
   sessions = [];
   expandedSessionIds = new Set();
   sourceItems = [];
   _resetImportAiBatchState();
-  navigate('home');
+  _importAiDependency('navigate', navigate)('home');
+}
+
+export function __cancelImportForTests() {
+  return _cancelImport();
 }
 
 // Restore a previously-saved import session (app was killed mid-review)
@@ -2572,11 +2599,31 @@ async function _openFileImportForSession(sid) {
     input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif'
   }
   input.onchange = async event => {
-    const files = Array.from(event.target.files || [])
+    const picked = Array.from(event.target.files || [])
+    if (!picked.length) return
+    const files = await _snapshotPickedFiles(picked)
+    if (files.length < picked.length) showToast(t('import.fileUnreadable'))
     if (!files.length) return
     await _addFilesToSession(sid, files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER })
   }
   input.click()
+}
+
+// A File from an <input type=file> in the Android WebView is a lazy reference
+// to a content:// document. Reading it again much later (session save, queue
+// write) can fail with a DOMException, so copy the bytes while the pick is
+// fresh. Files that cannot be read are reported and left out.
+async function _snapshotPickedFiles(files) {
+  const out = []
+  for (const file of files) {
+    try {
+      const bytes = await file.arrayBuffer()
+      out.push(new File([bytes], file.name || 'image.jpg', { type: file.type || '', lastModified: file.lastModified || Date.now() }))
+    } catch (err) {
+      console.warn('Picked file could not be read:', describePersistError(err))
+    }
+  }
+  return out
 }
 
 function _openSessionCropEditor(session, startIndex = 0) {
@@ -2605,6 +2652,17 @@ function _openSessionCropEditor(session, startIndex = 0) {
 }
 
 async function saveAll() {
+  queuedInCurrentSave = new Set();
+  try {
+    await _runSaveAll();
+  } finally {
+    // By now `sessions` no longer holds the queued groups (kept groups only,
+    // or none), so later snapshots need no filter.
+    queuedInCurrentSave = new Set();
+  }
+}
+
+async function _runSaveAll() {
   if (importAiBatchState.running) return;
   const saveBtn = document.getElementById('import-save-btn');
   saveBtn.disabled = true;
@@ -2619,6 +2677,7 @@ async function saveAll() {
   const allBlobUrls = sessions.flatMap(s => s.blobUrls);
   let savedCount = 0;
   const queuedSessions = [];
+  const failedSessionIds = new Set();
   let missingLocation = false;
 
   _setProgress(0, activeSessions.length, t('import.processing'));
@@ -2633,13 +2692,17 @@ async function saveAll() {
       const { obsPayload, imageEntries } = _buildImportObservationPayload(session, {
         userId: state.user.id,
       })
-      if (!obsPayload) continue
+      if (!obsPayload) {
+        // Nothing to queue: keep the group rather than drop it unqueued.
+        failedSessionIds.add(session.id);
+        continue
+      }
 
       queuedSessions.push({ session, obsPayload, imageEntries })
       if (!hasObservationLocation(obsPayload)) missingLocation = true
     } catch (err) {
       console.error('Failed to save session', session.id, err);
-      showToast(t('import.failedOneGroup'));
+      failedSessionIds.add(session.id);
     }
   }
 
@@ -2660,17 +2723,69 @@ async function saveAll() {
 
   // Local-first: enqueueObservation persists to IndexedDB only. A failure
   // here is a genuine LOCAL persistence problem (quota/serialization) —
-  // surface it per-group and keep the remaining groups going.
+  // surface it per-group and keep the remaining groups going. A group that
+  // was not queued stays in the review so it can be retried; it is never
+  // cleared, and its failure is never replaced by a success message.
+  //
+  // A queued group is removed from the stored sessions before the next group
+  // is queued, so a restart mid-loop restores only unqueued groups. The
+  // enqueue resolves only after its strict-durability transaction committed.
+  // The window between that commit and this delete committing is the accepted
+  // residual (a duplicate, never a loss); see
+  // docs/verification/2026-10-android-import-recovery.md.
+  const enqueue = _importAiDependency('enqueueObservation', enqueueObservation);
+  const removeStoredSession = _importAiDependency('deleteImportSession', deleteImportSession);
+  let deleteFailed = false;
   for (let i = 0; i < queuedSessions.length; i++) {
-    const { obsPayload, imageEntries } = queuedSessions[i];
+    const { session, obsPayload, imageEntries } = queuedSessions[i];
+    let queued = false;
     try {
-      await enqueueObservation(obsPayload, imageEntries);
+      await enqueue(obsPayload, imageEntries);
       savedCount++;
+      queued = true;
+      // Before the delete is requested: any snapshot from here on omits it.
+      queuedInCurrentSave.add(session.id);
     } catch (err) {
-      console.error('Failed to queue import group locally:', err);
-      showToast(t('import.failedOneGroup'));
+      failedSessionIds.add(session.id);
+      console.error('Failed to queue import group locally:', describePersistError(err));
+    }
+    if (queued) {
+      let removed = false;
+      try {
+        removed = await removeStoredSession(session.id);
+      } catch (err) {
+        console.error('Failed to remove queued import group from saved sessions:', describePersistError(err));
+      }
+      if (removed !== true) {
+        // Never re-queue: the group is queued. The rewrite or the strict
+        // clear below repairs the saved sessions; the user is told either way.
+        deleteFailed = true;
+        console.error('Queued import group is still in the saved sessions:', session.id);
+      }
     }
     _setProgress(i + 1, queuedSessions.length, t('import.processing'));
+  }
+
+  const toast = _importAiDependency('showToast', showToast);
+  const keptSessions = sessions.filter(s => failedSessionIds.has(s.id));
+  if (keptSessions.length) {
+    const doneSessions = sessions.filter(s => !keptSessions.includes(s));
+    const doneSourceIds = new Set(doneSessions.flatMap(s => s.sourceItemIds || []));
+    _disposeSessionBlobUrls(doneSessions);
+    sessions = keptSessions;
+    sourceItems = sourceItems.filter(item => !doneSourceIds.has(item.id));
+    expandedSessionIds = new Set([...expandedSessionIds].filter(id => keptSessions.some(s => s.id === id)));
+    _hideProgress();
+    saveBtn.disabled = false;
+    toast(savedCount > 0
+      ? t('import.partiallyQueued', { count: tp('counts.observation', savedCount), failed: keptSessions.length })
+      : t('import.notQueued', { failed: keptSessions.length }));
+    // A failed rewrite warns inside _persistSessions; a rewrite that repaired
+    // a failed delete still says so.
+    const rewritten = await _persistSessions();
+    if (rewritten && deleteFailed) toast(t('import.queuedCleanupRepaired', { count: tp('counts.observation', savedCount) }));
+    _importAiDependency('renderSessions', renderSessions)();
+    return;
   }
 
   allBlobUrls.forEach(url => URL.revokeObjectURL(url));
@@ -2678,18 +2793,40 @@ async function saveAll() {
   sessions = [];
   expandedSessionIds = new Set();
   sourceItems = [];
-  clearImportSessions();
-  if (savedCount > 0) showToast(t('import.saved', { count: tp('counts.observation', savedCount) }));
+  // Strict: a clear that silently failed would restore the whole queued batch
+  // on the next launch, inviting a second Queue All.
+  let cleared = true;
+  try {
+    await _importAiDependency('clearImportSessionsStrict', clearImportSessionsStrict)();
+  } catch (err) {
+    cleared = false;
+    console.error('Failed to clear saved import sessions after queueing:', describePersistError(err));
+  }
+  if (!cleared) toast(t('import.queuedClearFailed', { count: tp('counts.observation', savedCount) }));
+  else if (deleteFailed) toast(t('import.queuedCleanupRepaired', { count: tp('counts.observation', savedCount) }));
+  else if (savedCount > 0) toast(t('import.saved', { count: tp('counts.observation', savedCount) }));
   _hideProgress();
   saveBtn.disabled = false;
   // Post-save navigation may hit the network when COMPLETE; the
   // observations are already durably queued — never let this failure look
   // like a save failure.
   try {
-    await openFinds('mine', { resetSearch: true });
+    await _importAiDependency('openFinds', openFinds)('mine', { resetSearch: true });
   } catch (err) {
     console.warn('Post-save Finds navigation failed (observations are queued):', err);
   }
+}
+
+export function __persistSessionsForTests() {
+  return _persistSessions();
+}
+
+export function __saveAllForTests() {
+  return saveAll();
+}
+
+export function __getImportSessionsForTests() {
+  return sessions;
 }
 
 function _getScaledSize(width, height, maxEdge) {

@@ -24,6 +24,16 @@
          permission; remove it so Play Console does not flag the app as using ads. -->
     <uses-permission android:name="com.google.android.gms.permission.AD_ID" tools:node="remove" />
 
+    <!-- Android 11+ package visibility: NativeCameraPlugin.openSystemCamera()
+         checks resolveActivity() for IMAGE_CAPTURE, which returns null for a
+         camera app that is not declared here, so the system camera was never
+         found (G5 I2). -->
+    <queries>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
