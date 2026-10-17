@@ -87,9 +87,9 @@ A practical way to stop writes from a faulty newly released desktop build, witho
 - The check keys only on the request headers, never on the database role. Requests without the identity header are never affected: web, Android, released desktops, Edge Functions, migrations and plain SQL sessions. Every released desktop lacks that header, so the write stop can never block one, even if its version string were listed.
 - The migration creates the block table **empty** and inserts nothing. With an empty table nothing is blocked, including the new desktop.
 - RPC writes are covered even when the function runs as its owner, because the request's headers stay visible inside it.
-- Activation is one authorized production `INSERT` of the faulty version, and removal is one `DELETE`.
+- Activation is one authorized production `INSERT` of the faulty version, and removal is one `DELETE`. Activation is allowed only after every installation running that version is stopped or disconnected (runbook, "Emergency: activating the desktop write stop").
 - The new desktop treats the refusal like any `sporely_upgrade_required` answer: it stops uploading, keeps rows dirty and shows the banner.
-- Limit: media-worker requests are not blocked. A blocked build can still upload or delete media bytes, but it cannot write the rows that reference them. Rows are written first, so this costs orphan bytes at worst.
+- Limit (owner-accepted 2026-10-17, against a Codex CHANGES REQUESTED verdict; not a passed review): media-worker requests are not blocked. A blocked build can still upload media (orphan bytes at worst, since rows are written first) and **delete** media: the desktop removes an observation's media before its rows, so a blocked build can delete the media, be refused on the row deletion, and leave live rows referencing missing media. The write stop is not a safe complete stop by itself; activation requires the affected installations to be stopped or disconnected first, and otherwise worker-side enforcement (a later improvement) is required.
 
 ### Desktop (local keys accepted at `be511bf`; sync change in this plan)
 
@@ -588,7 +588,7 @@ No production access, deployment or merge.
    - a lost-response retry adopts.
 
    Publish Android.
-8. If the new desktop misbehaves, list its version in the write-block table.
+8. If the new desktop misbehaves, first stop or disconnect every installation running that version, then list its version in the write-block table (runbook, "Emergency: activating the desktop write stop"). If the installations cannot all be stopped, the database-only block is not a safe complete stop: do not rely on it alone.
 
 **Worker/database mismatch window.** Between steps 4 and 5 the worker refuses old desktops' media changes while the database still accepts their row writes. An old desktop syncing then can create an image-less row or orphan an observation's media (both reproduced in `identity-impl/brake-426/RESULTS.md`). Running the steps in one session shortens the window but does not remove it. The deployment is therefore controlled:
 - Before step 4, every desktop installation that syncs to the account is quit and stays closed until the new desktop is installed. The account owner is the only desktop cloud-sync user; other users use Android, which neither half of the brake affects.

@@ -1092,6 +1092,37 @@ After **every** worker deploy until the cutover, both checks from 2a are
 
 If either fails, deploy a tree that contains the guard at once.
 
+## Emergency: activating the desktop write stop
+
+The write stop (`private.sync_client_write_block`, migration
+`20261014120000`) refuses **database** writes from a listed new-desktop
+version. The media worker does not check it (owner-accepted limitation of
+2026-10-17; the Codex security review of `29b22d3` returned CHANGES
+REQUESTED on this point). A listed build can still delete media, and its
+observation delete removes media before rows, so it can leave live rows that
+reference missing media. Use the write stop only like this:
+
+1. **Stop or disconnect first.** Quit Sporely Desktop on every installation
+   running the affected version, or take those machines offline, and confirm
+   it. Today the owner controls every desktop that uses cloud sync.
+2. **If step 1 cannot be ensured, stop here.** The database-only block is
+   then not a safe complete stop and must not be presented as one.
+   Worker-side enforcement of the same version block is required first. It
+   is a planned later improvement and is not deployed in this release.
+3. **Activate:** one separately authorized production write, in a SQL session
+   as the database owner:
+
+       INSERT INTO private.sync_client_write_block (client_version, reason)
+       VALUES ('<x.y.z>', '<short reason>');
+
+4. **Check:** `SELECT client_version, created_at FROM private.sync_client_write_block;`
+   shows the row. Run the read-only media-health audit
+   (`tools/audit_cloud_media_health.py` in sporely-py, without `--repair`) for
+   the affected account, to find image rows that lost their media before the
+   block.
+5. **Remove** with one separately authorized `DELETE` of that row once a
+   fixed build is installed everywhere.
+
 ## Emergency procedure: narrow, never remove
 
 If the brake refuses a client that must keep working:
