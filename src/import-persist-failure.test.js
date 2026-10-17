@@ -57,7 +57,7 @@ function makeSession(id) {
 function harness({ failEnqueueFor = () => false, persistResult = true } = {}) {
   const queue = []
   const toasts = []
-  const calls = { cleared: 0, navigated: 0, persisted: [] }
+  const calls = { cleared: 0, navigated: 0, persisted: [], deleted: [] }
   __setImportAiTestHooks({
     enqueueObservation: async (obsPayload, imageEntries) => {
       if (failEnqueueFor(obsPayload, imageEntries)) {
@@ -67,6 +67,8 @@ function harness({ failEnqueueFor = () => false, persistResult = true } = {}) {
     },
     showToast: message => toasts.push(message),
     clearImportSessions: async () => { calls.cleared++ },
+    clearImportSessionsStrict: async () => { calls.cleared++ },
+    deleteImportSession: async id => { calls.deleted.push(id); return true },
     openFinds: async () => { calls.navigated++ },
     persistSessions: async sessions => {
       calls.persisted.push(sessions.map(s => s.id))

@@ -11,16 +11,35 @@ const DB_NAME = 'sporely'
 const DB_VERSION = 1
 const STORE = 'pending_import'
 
+// A blocked open (another connection holds an older version during an
+// upgrade) is a failure: waiting for it could stall every later write. If the
+// open later succeeds anyway, that late connection is closed at once.
 function _open() {
   return new Promise((resolve, reject) => {
+    let settled = false
     const req = indexedDB.open(DB_NAME, DB_VERSION)
     req.onupgradeneeded = ({ target: { result: db } }) => {
       if (!db.objectStoreNames.contains(STORE)) {
         db.createObjectStore(STORE, { keyPath: 'id' })
       }
     }
-    req.onsuccess = ({ target: { result } }) => resolve(result)
-    req.onerror = ({ target: { error } }) => reject(error)
+    req.onsuccess = ({ target: { result } }) => {
+      if (settled) {
+        result?.close?.()
+        return
+      }
+      settled = true
+      resolve(result)
+    }
+    req.onerror = ({ target: { error } }) => {
+      settled = true
+      reject(error)
+    }
+    req.onblocked = () => {
+      if (settled) return
+      settled = true
+      reject(Object.assign(new Error('IndexedDB open blocked'), { name: 'BlockedError' }))
+    }
   })
 }
 
@@ -28,8 +47,43 @@ function _txComplete(tx) {
   return new Promise((res, rej) => {
     tx.oncomplete = res
     tx.onerror = () => rej(tx.error)
-    tx.onabort = () => rej(tx.error)
+    tx.onabort = () => rej(tx.error || Object.assign(new Error('Transaction aborted'), { name: 'AbortError' }))
   })
+}
+
+// Every pending_import write runs through this FIFO chain so writes commit in
+// call order: a session snapshot taken before Queue All can never commit after
+// the per-group deletes or the final clear. Each operation settles its own
+// caller; the chain itself never rejects, so a failed, throwing or blocked
+// operation releases the next one.
+let _writeChain = Promise.resolve()
+
+export function _enqueueImportStoreWrite(operation) {
+  const run = _writeChain.then(() => operation())
+  _writeChain = run.then(() => {}, () => {})
+  return run
+}
+
+// Opens the store, runs `fill(store)` synchronously inside one readwrite
+// transaction and waits for it to commit. A synchronous throw from `fill`
+// (for example DataCloneError from put()) aborts the transaction so nothing
+// it did commits. The connection is closed on every path.
+async function _writeTransaction(fill) {
+  const db = await _open()
+  try {
+    const tx = db.transaction(STORE, 'readwrite')
+    const done = _txComplete(tx)
+    try {
+      fill(tx.objectStore(STORE))
+    } catch (err) {
+      done.catch(() => {})
+      try { tx.abort() } catch { /* already finished */ }
+      throw err
+    }
+    await done
+  } finally {
+    db.close()
+  }
 }
 
 function _blobType(blob, fallback = 'image/jpeg') {
@@ -40,11 +94,40 @@ function _blobType(blob, fallback = 'image/jpeg') {
 // Returns true when the sessions were written, false when the write failed.
 // Never throws: callers keep the in-memory sessions either way, and must
 // surface a false result to the user rather than treat it as saved.
-export async function saveImportSessions(sessions) {
+export function saveImportSessions(sessions) {
+  // Snapshot the sessions now, in call order; the bytes are read before the
+  // transaction opens (awaiting inside an IDB transaction auto-commits it).
+  const recordsPromise = _buildSessionRecords(sessions)
+  recordsPromise.catch(() => {})
+  return _enqueueImportStoreWrite(async () => {
+    const records = await recordsPromise
+    debugImagePipeline('save import sessions', {
+      sessionCount: records.length,
+      photoCount: records.reduce((sum, record) => sum + (Array.isArray(record.blobs) ? record.blobs.length : 0), 0),
+    })
+    await _writeTransaction(store => {
+      store.clear()
+      for (const r of records) store.put(r)
+    })
+    return true
+  }).catch(err => {
+    console.warn('saveImportSessions failed:', describePersistError(err))
+    return false
+  })
+}
+
+// Reads every session's fields and file lists synchronously, so the snapshot
+// is the state at call time; only the file bytes arrive later.
+function _buildSessionRecords(sessions) {
   try {
-    // Convert all blobs → ArrayBuffers before opening the transaction
-    // (awaiting inside an IDB transaction causes auto-commit)
-    const records = await Promise.all(sessions.map(async s => ({
+    return _sessionRecords(sessions)
+  } catch (err) {
+    return Promise.reject(err)
+  }
+}
+
+function _sessionRecords(sessions) {
+  return Promise.all(sessions.map(async s => ({
       id: s.id,
       ts: s.ts.getTime(),
       locationName: s.locationName || '',
@@ -90,32 +173,30 @@ export async function saveImportSessions(sessions) {
       gpsLon: s.gpsLon ?? null,
       gpsAltitude: s.gpsAltitude ?? null,
       gpsAccuracy: s.gpsAccuracy ?? null,
-      blobs: await Promise.all(s.files.map(f => f.arrayBuffer())),
       blobTypes: s.files.map(f => _blobType(f)),
-      aiBlobs: await Promise.all((s.aiFiles || s.files).map(f => f.arrayBuffer())),
       aiBlobTypes: (s.aiFiles || s.files).map(f => _blobType(f)),
+      ...await _readSessionBytes([...s.files], [...(s.aiFiles || s.files)]),
     })))
+}
 
-    debugImagePipeline('save import sessions', {
-      sessionCount: records.length,
-      photoCount: records.reduce((sum, record) => sum + (Array.isArray(record.blobs) ? record.blobs.length : 0), 0),
-    })
-
-    const db = await _open()
-    const tx = db.transaction(STORE, 'readwrite')
-    const store = tx.objectStore(STORE)
-    store.clear()
-    for (const r of records) store.put(r)
-    try {
-      await _txComplete(tx)
-    } finally {
-      db.close()
-    }
-    return true
-  } catch (err) {
-    console.warn('saveImportSessions failed:', describePersistError(err))
-    return false
+async function _readSessionBytes(files, aiFiles) {
+  return {
+    blobs: await Promise.all(files.map(f => f.arrayBuffer())),
+    aiBlobs: await Promise.all(aiFiles.map(f => f.arrayBuffer())),
   }
+}
+
+// Removes one group by its key path. Resolves true only once the delete has
+// committed, false on any failure (never throws).
+export function deleteImportSession(id) {
+  return _enqueueImportStoreWrite(async () => {
+    debugImagePipeline('delete import session')
+    await _writeTransaction(store => { store.delete(id) })
+    return true
+  }).catch(err => {
+    console.warn('deleteImportSession failed:', describePersistError(err))
+    return false
+  })
 }
 
 // DOMException stringifies to "[object DOMException]" in the Android WebView
@@ -129,13 +210,17 @@ export function describePersistError(err) {
 export async function loadImportSessions() {
   try {
     const db = await _open()
-    const tx = db.transaction(STORE, 'readonly')
-    const records = await new Promise((res, rej) => {
-      const req = tx.objectStore(STORE).getAll()
-      req.onsuccess = () => res(req.result)
-      req.onerror = () => rej(req.error)
-    })
-    db.close()
+    let records
+    try {
+      const tx = db.transaction(STORE, 'readonly')
+      records = await new Promise((res, rej) => {
+        const req = tx.objectStore(STORE).getAll()
+        req.onsuccess = () => res(req.result)
+        req.onerror = () => rej(req.error)
+      })
+    } finally {
+      db.close()
+    }
     if (!records?.length) return []
 
     debugImagePipeline('load import sessions', {
@@ -217,14 +302,9 @@ export async function clearImportSessions() {
 // Strict variant for privacy-sensitive callers (sign-out, account switch,
 // cold-start owner-mismatch purge). Throws on failure so the caller can
 // avoid clearing the owner marker until the purge actually succeeded.
-export async function clearImportSessionsStrict() {
-  debugImagePipeline('clear import sessions (strict)')
-  const db = await _open()
-  try {
-    const tx = db.transaction(STORE, 'readwrite')
-    tx.objectStore(STORE).clear()
-    await _txComplete(tx)
-  } finally {
-    db.close()
-  }
+export function clearImportSessionsStrict() {
+  return _enqueueImportStoreWrite(() => {
+    debugImagePipeline('clear import sessions (strict)')
+    return _writeTransaction(store => { store.clear() })
+  })
 }
