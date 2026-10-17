@@ -14,3 +14,12 @@ test('manifest declares an IMAGE_CAPTURE query for the system camera pre-check',
   assert.match(queries[1], /<action android:name="android\.media\.action\.IMAGE_CAPTURE"\s*\/>/)
   assert.ok(manifest.indexOf('<queries>') < manifest.indexOf('<application'), '<queries> is a direct child of <manifest>')
 })
+
+test('openSystemCamera asks for CAMERA before launching IMAGE_CAPTURE', () => {
+  // A declared-but-ungranted CAMERA permission makes the IMAGE_CAPTURE launch
+  // throw SecurityException ("with revoked permission android.permission.CAMERA").
+  assert.match(plugin, /@Permission\(strings = \{ Manifest\.permission\.CAMERA \}, alias = "camera"\)/)
+  const open = plugin.slice(plugin.indexOf('public void openSystemCamera'), plugin.indexOf('private void launchSystemCamera'))
+  assert.match(open, /getPermissionState\("camera"\) != PermissionState\.GRANTED[\s\S]*requestPermissionForAlias\("camera", call, "systemCameraPermissionCallback"\)/)
+  assert.match(open, /@PermissionCallback\s+private void systemCameraPermissionCallback[\s\S]*launchSystemCamera\(call\)[\s\S]*reject\("Camera permission denied"\)/)
+})
