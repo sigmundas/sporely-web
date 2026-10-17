@@ -167,7 +167,7 @@ test('sync queue reserves row before upload in the upload loop', () => {
   )
   const syncKeysIndex = indexOfAnchor(
     source,
-    'await syncObservationMediaKeys(obsId, path, { sortOrder: i })',
+    'await syncObservationMediaKeys(obsId, path, { sortOrder: i, fillOnly: true })',
     './sync-queue.js',
     uploadIndex,
   )
@@ -220,7 +220,7 @@ test('sync queue keeps old records compatible and persists new taxonomy identity
   // observation insert — is unchanged.
   const persistIndex = indexOfAnchor(
     source,
-    '_persistQueuedTaxonomyIdentity(obsId, queuedTaxonomySelection)',
+    '_persistQueuedTaxonomyIdentity(obsId, target, { resolveExternal: async selection => selection })',
     './sync-queue.js',
   )
 

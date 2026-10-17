@@ -2,9 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
-import { getVariantPath, imageExtensionForMimeType, buildObservationImageStoragePath } from './images.js'
+import { getVariantPath, imageExtensionForMimeType, buildObservationImageStoragePath, buildObservationImageRowPayload } from './images.js'
 import { classifyQueueSyncError } from './sync-queue.js'
 import { normalizeIngestMethod } from './observation-shapes.js'
+import * as syncKeyModule from './sync-key.js'
+import { toCloudVisibility } from './visibility.js'
+import { normalizeObservationGeography } from './observation-geography.js'
+import { sanitizeQueuedLocationProvenance } from './location-provenance.js'
 
 const source = fs.readFileSync(new URL('./sync-queue.js', import.meta.url), 'utf8')
 // Execute the production functions, replacing only external services/storage.
@@ -21,6 +25,9 @@ const functions = [
   '_blobToStoredBytes', '_normalizeQueuedImages', '_serializeQueuedImageForStorage',
   '_persistPreparedQueuedImage', '_queuedImageReservation', '_fetchRemoteObservationState',
   '_finalizeSyncedQueueItem', '_runSyncQueue',
+  '_needsQueuedSyncKeys', '_withQueuedSyncKeys', '_ensureQueuedSyncKeys', 'shouldAttemptRemoteRecovery',
+  'pickRecoveredRemoteObservationId', '_findRemoteObservationForQueueItem', '_adoptObservationBySyncKey',
+  '_verifyMissingQueuedReservation', '_fieldsWrittenAfterInsert',
 ].map(functionSource).join('\n')
 
 function fixture({ count = 1, thumb = true, savedId = true, unprepared = false, methods = null, remoteRows = true } = {}) {
@@ -49,7 +56,8 @@ function fixture({ count = 1, thumb = true, savedId = true, unprepared = false, 
   const noop = () => {}
   async function pass() {
     const context = vm.createContext({
-      Blob, ArrayBuffer, Uint8Array, console: { info: noop, warn: noop, error: noop },
+      Blob, ArrayBuffer, Uint8Array, crypto, console: { info: noop, warn: noop, error: noop },
+      ...syncKeyModule, buildObservationImageRowPayload, toCloudVisibility, normalizeObservationGeography, sanitizeQueuedLocationProvenance,
       isBlob: value => value instanceof Blob,
       normalizeIngestMethod,
       getVariantPath, imageExtensionForMimeType, buildObservationImageStoragePath, classifyQueueSyncError,

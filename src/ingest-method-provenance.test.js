@@ -19,6 +19,7 @@ setAuthState({ state: AUTH_STATE.AUTHENTICATED_COMPLETE, userId: 'test-user' })
 
 import { INGEST_METHOD, normalizeIngestMethod } from './observation-shapes.js'
 import { loadImportSessions, saveImportSessions } from './import-store.js'
+import { isSyncKey } from './sync-key.js'
 import {
   _buildImportObservationPayload,
   _buildImportSourceItem,
@@ -39,6 +40,7 @@ const queueContext = vm.createContext({
   Blob, ArrayBuffer, Uint8Array,
   isBlob: value => value instanceof Blob,
   normalizeIngestMethod,
+  isSyncKey,
 })
 vm.runInContext([
   '_isArrayBuffer', '_blobFromStoredBytes', '_blobToStoredBytes',

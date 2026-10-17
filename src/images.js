@@ -13,6 +13,7 @@ import {
 } from './cloud-media-policy.js'
 import { debugImagePipeline, isImagePipelineDebugEnabled } from './image-pipeline-debug.js'
 import { isBlob, normalizeIngestMethod } from './observation-shapes.js'
+import { SyncIdentityConflictError, ensureSyncKey, fetchOwnRowBySyncKey, isSyncKeyConflict, syncRowDifferences } from './sync-key.js'
 
 const DEFAULT_MEDIA_BASE_URL = 'https://media.sporely.no'
 const OBSERVATION_IMAGES_COMMUNITY_VIEW = 'observation_images_community_view'
@@ -1302,14 +1303,44 @@ export async function downloadObservationImageBlob(storagePath, options = {}) {
   throw new Error(`Image download failed: ${lastError?.message || originalPath}`)
 }
 
+// A 23505 on observation_images_user_sync_key_uidx: an earlier POST with this
+// key landed. Adopt that row (and its reserved storage_path) only when it is
+// under the same parent, not tombstoned and equal in content; never PATCH it.
+async function _adoptObservationImageBySyncKey(payload) {
+  const row = await fetchOwnRowBySyncKey(supabase, 'observation_images', {
+    userId: payload.user_id,
+    syncKey: payload.sync_key,
+  })
+  if (String(row.observation_id) !== String(payload.observation_id)) {
+    throw new SyncIdentityConflictError('observation_images', 'parent')
+  }
+  if (row.deleted_at) throw new SyncIdentityConflictError('observation_images', 'deleted')
+  const fields = syncRowDifferences(payload, row, { table: 'observation_images', ignore: ['storage_path'] })
+  if (fields.length) throw new SyncIdentityConflictError('observation_images', 'content', { fields })
+  return row
+}
+
 export async function insertObservationImage(observationImage) {
+  const syncKey = ensureSyncKey(observationImage?.sync_key)
+  try {
+    return await _insertObservationImage({ ...observationImage, sync_key: syncKey })
+  } catch (error) {
+    if (!isSyncKeyConflict(error, 'observation_images')) throw error
+    await _adoptObservationImageBySyncKey(buildObservationImageRowPayload({ ...observationImage, sync_key: syncKey }))
+    return true
+  }
+}
+
+async function _insertObservationImage(observationImage) {
   const cropRect = normalizeAiCropRect(observationImage?.aiCropRect)
   const cropSourceW = observationImage?.aiCropSourceW ?? null
   const cropSourceH = observationImage?.aiCropSourceH ?? null
   const aiCropIsCustom = observationImage?.aiCropIsCustom === true
+  // Every fallback payload below is built from basePayload, so each keeps sync_key.
   const basePayload = {
     observation_id: observationImage?.observation_id,
     user_id: observationImage?.user_id,
+    sync_key: observationImage.sync_key,
     storage_path: normalizeMediaKey(observationImage?.storage_path),
     image_type: observationImage?.image_type || 'field',
     sort_order: observationImage?.sort_order ?? 0,
@@ -1481,7 +1512,9 @@ export async function insertObservationImage(observationImage) {
   return false
 }
 
-export async function reserveObservationImage(observationImage) {
+// The observation_images row payload a reservation sends. Also used by the
+// sync queue to compare a pre-key row against what it would reserve.
+export function buildObservationImageRowPayload(observationImage) {
   const cropRect = normalizeAiCropRect(observationImage?.aiCropRect)
   const cropSourceW = observationImage?.aiCropSourceW ?? null
   const cropSourceH = observationImage?.aiCropSourceH ?? null
@@ -1489,6 +1522,7 @@ export async function reserveObservationImage(observationImage) {
   const payload = {
     observation_id: observationImage?.observation_id,
     user_id: observationImage?.user_id,
+    sync_key: observationImage?.sync_key,
     storage_path: normalizeMediaKey(observationImage?.storage_path),
     image_type: observationImage?.image_type || 'field',
     sort_order: observationImage?.sort_order ?? 0,
@@ -1512,6 +1546,29 @@ export async function reserveObservationImage(observationImage) {
   // insert is unchanged for them and NULL is stored.
   const ingestMethod = normalizeIngestMethod(observationImage?.ingestMethod)
   if (ingestMethod) payload.ingest_method = ingestMethod
+  return payload
+}
+
+// The caller's persisted key is used when given (the sync queue); a direct
+// upload gets a fresh one. Returns the reserved row, or the adopted row when
+// an earlier POST with the same key already landed: callers must upload to
+// the returned row's storage_path.
+export async function reserveObservationImage(observationImage) {
+  const payload = buildObservationImageRowPayload({
+    ...observationImage,
+    sync_key: ensureSyncKey(observationImage?.sync_key),
+  })
+  try {
+    return await _insertObservationImageReservation({ ...payload })
+  } catch (error) {
+    if (!isSyncKeyConflict(error, 'observation_images')) throw error
+    return _adoptObservationImageBySyncKey(payload)
+  }
+}
+
+// Every fallback strips only the missing column, so each keeps sync_key.
+async function _insertObservationImageReservation(payload) {
+  const ingestMethod = payload.ingest_method || null
   let { data, error } = await supabase
     .from('observation_images')
     .insert(payload)
@@ -1608,6 +1665,38 @@ export async function syncObservationMediaKeys(observationId, storagePath, optio
   const imageKey = normalizeMediaKey(storagePath)
   if (!imageKey) return false
   const thumbKey = getVariantPath(imageKey, 'thumb')
+
+  // fillOnly (the sync queue): the cover is written only while it is empty,
+  // decided by the UPDATE itself, so a value set by another client, even after
+  // this client last read the row, is never replaced. Both keys go in one
+  // UPDATE conditioned on both being NULL, so no mismatched pair is created
+  // and a partially set cover is left as it is. A target lacking one column
+  // gets the other key alone, under the same NULL condition.
+  if (options.fillOnly === true) {
+    const { error: pairError } = await supabase
+      .from('observations')
+      .update({ image_key: imageKey, thumb_key: thumbKey })
+      .eq('id', observationId)
+      .is('image_key', null)
+      .is('thumb_key', null)
+    if (!pairError) return true
+    if (!_isMissingColumnError(pairError, 'image_key') && !_isMissingColumnError(pairError, 'thumb_key')) {
+      console.warn('Observation media key fill failed:', pairError)
+      return false
+    }
+    for (const [field, value] of [['image_key', imageKey], ['thumb_key', thumbKey]]) {
+      const { error } = await supabase
+        .from('observations')
+        .update({ [field]: value })
+        .eq('id', observationId)
+        .is(field, null)
+      if (error && !_isMissingColumnError(error, field)) {
+        console.warn(`Observation ${field} fill failed:`, error)
+        return false
+      }
+    }
+    return true
+  }
 
   const { error: combinedError } = await supabase
     .from('observations')

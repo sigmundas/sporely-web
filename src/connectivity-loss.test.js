@@ -214,7 +214,9 @@ test('enqueueObservation is IndexedDB-only (no supabase/network before the commi
   const chunk = sliceBetweenAnchors(
     queue,
     'async function _enqueueObservation(',
-    'export async function getQueuedObservations',
+    // The next declaration. The provenance-retry helper that follows is called
+    // from the sync loop, not from _enqueueObservation.
+    'async function _retryObservationInsertWithoutProvenance(',
     'sync-queue.js',
   )
   assert.equal(/supabase|fetch\(|getSharedAuthSession|fetchCloudPlanProfile/.test(chunk), false)
@@ -255,7 +257,7 @@ test('processor: attempt marker persists BEFORE the insert; new ids are claimed'
   assert.match(chunk, /obsId = obsData\.id\s*\n\s*claimedRemoteIds\.add\(obsId\)/)
   // Recovery is gated and claim-aware.
   assert.match(chunk, /if \(!obsId && shouldAttemptRemoteRecovery\(item\)\)/)
-  assert.match(chunk, /_findRemoteObservationForQueueItem\(\{[\s\S]*?\}, claimedRemoteIds\)/)
+  assert.match(chunk, /_findRemoteObservationForQueueItem\(\{[\s\S]*?\}, claimedRemoteIds, repairedPayload, /)
   // The claimed set is seeded from EVERY item's persisted remote id.
   assert.match(queue, /const claimedRemoteIds = new Set\(\s*\n\s*items\.map\(other => other\?\.remoteObservationId\)\.filter\(Boolean\)/)
 })
