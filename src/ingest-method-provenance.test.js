@@ -287,7 +287,7 @@ function functionBody(relativePath, name) {
 
 const ENTRY_POINTS = [
   ['./screens/capture.js', 'capturePhoto', ['UNKNOWN', 'WEB_CAMERA']], // demo frame, then live stream
-  ['./screens/review.js', '_openCameraForReview', ['SPORELY_CAMERA']], // web branch → capture.js
+  ['./screens/review.js', '_openCameraForReview', ['SYSTEM_CAMERA', 'SPORELY_CAMERA']], // web branch → capture.js
   ['./screens/review.js', '_openPickerForReview', ['NATIVE_PICKER', 'WEB_FILE_PICKER']],
   ['./screens/find_detail.js', '_openCameraForDetail', ['SYSTEM_CAMERA', 'SPORELY_CAMERA']], // web branch keeps per-photo methods
   ['./screens/find_detail.js', '_openPickerForDetail', ['NATIVE_PICKER', 'WEB_FILE_PICKER']],
