@@ -9,7 +9,7 @@ import { nativeCaptureSourcePathFromNativePhoto } from '../native-capture-storag
 import { canPerformCloudMutation } from '../capabilities.js';
 import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
-import { saveImportSessions, clearImportSessions } from '../import-store.js';
+import { saveImportSessions, clearImportSessions, describePersistError } from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js';
 import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js';
@@ -155,9 +155,13 @@ function _persistSessions() {
     sessionCount: sessions.length,
     sourceItemCount: sourceItems.length,
   })
-  const persist = _importAiDependency('persistSessions');
-  if (persist) persist(sessions);
-  else saveImportSessions(sessions);
+  const persist = _importAiDependency('persistSessions', saveImportSessions);
+  // The sessions stay in memory either way; a failed write only means they
+  // would not survive the app being killed. Say so instead of staying silent.
+  return Promise.resolve(persist(sessions)).then(ok => {
+    if (ok === false) _importAiDependency('showToast', showToast)(t('import.persistFailed'));
+    return ok !== false;
+  });
 }
 
 function _renderImportAiSessions() {
@@ -2572,11 +2576,31 @@ async function _openFileImportForSession(sid) {
     input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif'
   }
   input.onchange = async event => {
-    const files = Array.from(event.target.files || [])
+    const picked = Array.from(event.target.files || [])
+    if (!picked.length) return
+    const files = await _snapshotPickedFiles(picked)
+    if (files.length < picked.length) showToast(t('import.fileUnreadable'))
     if (!files.length) return
     await _addFilesToSession(sid, files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER })
   }
   input.click()
+}
+
+// A File from an <input type=file> in the Android WebView is a lazy reference
+// to a content:// document. Reading it again much later (session save, queue
+// write) can fail with a DOMException, so copy the bytes while the pick is
+// fresh. Files that cannot be read are reported and left out.
+async function _snapshotPickedFiles(files) {
+  const out = []
+  for (const file of files) {
+    try {
+      const bytes = await file.arrayBuffer()
+      out.push(new File([bytes], file.name || 'image.jpg', { type: file.type || '', lastModified: file.lastModified || Date.now() }))
+    } catch (err) {
+      console.warn('Picked file could not be read:', describePersistError(err))
+    }
+  }
+  return out
 }
 
 function _openSessionCropEditor(session, startIndex = 0) {
@@ -2619,6 +2643,7 @@ async function saveAll() {
   const allBlobUrls = sessions.flatMap(s => s.blobUrls);
   let savedCount = 0;
   const queuedSessions = [];
+  const failedSessionIds = new Set();
   let missingLocation = false;
 
   _setProgress(0, activeSessions.length, t('import.processing'));
@@ -2639,7 +2664,7 @@ async function saveAll() {
       if (!hasObservationLocation(obsPayload)) missingLocation = true
     } catch (err) {
       console.error('Failed to save session', session.id, err);
-      showToast(t('import.failedOneGroup'));
+      failedSessionIds.add(session.id);
     }
   }
 
@@ -2660,17 +2685,39 @@ async function saveAll() {
 
   // Local-first: enqueueObservation persists to IndexedDB only. A failure
   // here is a genuine LOCAL persistence problem (quota/serialization) —
-  // surface it per-group and keep the remaining groups going.
+  // surface it per-group and keep the remaining groups going. A group that
+  // was not queued stays in the review so it can be retried; it is never
+  // cleared, and its failure is never replaced by a success message.
+  const enqueue = _importAiDependency('enqueueObservation', enqueueObservation);
   for (let i = 0; i < queuedSessions.length; i++) {
-    const { obsPayload, imageEntries } = queuedSessions[i];
+    const { session, obsPayload, imageEntries } = queuedSessions[i];
     try {
-      await enqueueObservation(obsPayload, imageEntries);
+      await enqueue(obsPayload, imageEntries);
       savedCount++;
     } catch (err) {
-      console.error('Failed to queue import group locally:', err);
-      showToast(t('import.failedOneGroup'));
+      failedSessionIds.add(session.id);
+      console.error('Failed to queue import group locally:', describePersistError(err));
     }
     _setProgress(i + 1, queuedSessions.length, t('import.processing'));
+  }
+
+  const toast = _importAiDependency('showToast', showToast);
+  const keptSessions = sessions.filter(s => failedSessionIds.has(s.id));
+  if (keptSessions.length) {
+    const doneSessions = sessions.filter(s => !keptSessions.includes(s));
+    const doneSourceIds = new Set(doneSessions.flatMap(s => s.sourceItemIds || []));
+    _disposeSessionBlobUrls(doneSessions);
+    sessions = keptSessions;
+    sourceItems = sourceItems.filter(item => !doneSourceIds.has(item.id));
+    expandedSessionIds = new Set([...expandedSessionIds].filter(id => keptSessions.some(s => s.id === id)));
+    _hideProgress();
+    saveBtn.disabled = false;
+    toast(savedCount > 0
+      ? t('import.partiallyQueued', { count: tp('counts.observation', savedCount), failed: keptSessions.length })
+      : t('import.notQueued', { failed: keptSessions.length }));
+    await _persistSessions();
+    _importAiDependency('renderSessions', renderSessions)();
+    return;
   }
 
   allBlobUrls.forEach(url => URL.revokeObjectURL(url));
@@ -2678,18 +2725,26 @@ async function saveAll() {
   sessions = [];
   expandedSessionIds = new Set();
   sourceItems = [];
-  clearImportSessions();
-  if (savedCount > 0) showToast(t('import.saved', { count: tp('counts.observation', savedCount) }));
+  await _importAiDependency('clearImportSessions', clearImportSessions)();
+  if (savedCount > 0) toast(t('import.saved', { count: tp('counts.observation', savedCount) }));
   _hideProgress();
   saveBtn.disabled = false;
   // Post-save navigation may hit the network when COMPLETE; the
   // observations are already durably queued — never let this failure look
   // like a save failure.
   try {
-    await openFinds('mine', { resetSearch: true });
+    await _importAiDependency('openFinds', openFinds)('mine', { resetSearch: true });
   } catch (err) {
     console.warn('Post-save Finds navigation failed (observations are queued):', err);
   }
+}
+
+export function __saveAllForTests() {
+  return saveAll();
+}
+
+export function __getImportSessionsForTests() {
+  return sessions;
 }
 
 function _getScaledSize(width, height, maxEdge) {

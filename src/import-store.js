@@ -37,6 +37,9 @@ function _blobType(blob, fallback = 'image/jpeg') {
   return type || fallback
 }
 
+// Returns true when the sessions were written, false when the write failed.
+// Never throws: callers keep the in-memory sessions either way, and must
+// surface a false result to the user rather than treat it as saved.
 export async function saveImportSessions(sessions) {
   try {
     // Convert all blobs → ArrayBuffers before opening the transaction
@@ -103,11 +106,24 @@ export async function saveImportSessions(sessions) {
     const store = tx.objectStore(STORE)
     store.clear()
     for (const r of records) store.put(r)
-    await _txComplete(tx)
-    db.close()
+    try {
+      await _txComplete(tx)
+    } finally {
+      db.close()
+    }
+    return true
   } catch (err) {
-    console.warn('saveImportSessions failed:', err)
+    console.warn('saveImportSessions failed:', describePersistError(err))
+    return false
   }
+}
+
+// DOMException stringifies to "[object DOMException]" in the Android WebView
+// console, which hides which operation failed. Log name and message.
+export function describePersistError(err) {
+  if (!err) return 'unknown error'
+  const name = err.name || err.constructor?.name || 'Error'
+  return `${name}: ${err.message || String(err)}`
 }
 
 export async function loadImportSessions() {
