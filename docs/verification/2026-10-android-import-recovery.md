@@ -23,6 +23,20 @@ No transaction spans both, so the contract is defined by ordering:
    does `deleteImportSession(id)` run, and it is awaited before the next
    group is queued. A rejected enqueue never deletes; the group stays in
    memory and in the store.
+1a. **No later snapshot writes a queued group back.** While Queue All runs,
+   queued groups stay in the in-memory `sessions` until the loop ends. A
+   `_persistSessions()` called during the loop (a geocode result, an AI
+   result, metadata hydration) would otherwise rewrite the store with a group
+   whose delete has already committed. If the process then died, the next launch
+   would restore that group and invite a second Queue All. Found at `c0ab5d6` by the
+   coordinator and fixed in the next candidate: each group's id goes into
+   `queuedInCurrentSave` as soon as its enqueue resolves, before its delete is
+   requested. Every `_persistSessions()` snapshot omits those ids, and the set
+   is reset when Queue All ends (`saveAll` `finally`). By then `sessions` holds
+   only kept groups, or none. Ids are stable because nothing regroups during
+   the loop: the progress overlay (`#import-progress`, `inset: 0`,
+   `z-index: 180`) covers the review, and the background callbacks only
+   persist.
 2. **Session writes commit in call order.** `saveImportSessions`,
    `deleteImportSession`, `clearImportSessions` and
    `clearImportSessionsStrict` all run through one module-level FIFO chain
@@ -135,6 +149,7 @@ and restored the fix. Results at the candidate:
 | T5 delete and rewrite fail | kept-group rewrite warning (`c35186f`) | kept path removed | T5 (with T2, T4, T9) |
 | T5 delete and strict clear fail | 4 strict clear in `try` | non-strict `clearImportSessions` | T5 (second case) |
 | T5 delete fails, rewrite repairs / strict clear repairs | 4 failed delete always surfaced | `deleteFailed` never set | both repaired-delete T5 cases |
+| T12 session write mid-loop after delete(A), death during enqueue(B) | 1a queued ids excluded from snapshots | snapshot = `sessions` (the `c0ab5d6` behaviour) | T12 (store held A, B, C) |
 | T11 regroup merges into one, restart | 8 merged group stays persisted | old single-review branch restored | T11 |
 | T6 slow write before Queue All | 3 FIFO chain | `Promise.resolve().then(op)` (no chain) | T6 (T7 and T8 also fail: their idle wait relies on the chain) |
 | T7 chain liveness | 3 chain swallows outcome | `_writeChain = run` | T7 alone (cascades to all later tests in the full file) |
@@ -151,17 +166,17 @@ timeout. A real open that stays blocked would hang the chain.
 ## Verification commands (candidate, before commit)
 
 - `node --test src/import-recovery.test.js src/import-persist-failure.test.js`:
-  20/20 pass.
+  21/21 pass.
 - Neighbours (`import-review`, `import-store`, `import-location-provenance`,
   `sync-queue`, `sync-queue-recovery`, `connectivity-loss`,
-  `ingest-method-provenance`) plus the two above: 127 tests, 126 pass, 1 fail.
+  `ingest-method-provenance`) plus the two above: 128 tests, 127 pass, 1 fail.
   The one failure is the known `connectivity-loss.test.js` "enqueueObservation
   is IndexedDB-only". It still fails for the same reason as at `c35186f`: its
   anchor range reaches `_retryObservationInsertWithoutProvenance`, which
   calls `supabase`. The strict-durability line does not change that result.
-- `npm test`: 1700 tests, 1650 pass, 11 fail. These are exactly the 11 baseline
+- `npm test`: 1701 tests, 1651 pass, 11 fail. These are exactly the 11 baseline
   failures (four taxonomy manifest checks, the `connectivity-loss` anchor
-  above, six Deno `.ts` files). Baseline was 1684/1634/11, and the 16 extra
+  above, six Deno `.ts` files). Baseline was 1684/1634/11, and the 17 extra
   tests are the new file.
 - `npx eslint` on the changed files: 0 errors, 2 warnings, both pre-existing
   (`gapUnit`, `imageMeta` in `import_review.js`).
@@ -201,11 +216,24 @@ is left unedited.
   `lastModified || Date.now()` turning a valid zero timestamp into "now".
 - Revoked thumbnails when the user declines the "save without location"
   prompt (files intact, preview only).
-- A hung (never-settling) `indexedDB.open` with no `onblocked`, or a file
-  `arrayBuffer()` that never settles, would still stall later session writes.
-  That includes the sign-out and owner-mismatch purge (`main.js`
-  `_purgeUserDrafts`, which awaits `clearImportSessionsStrict`). No engine
-  behaviour producing either is known: unreadable WebView files reject with
-  `NotReadableError`. Neither is handled beyond `onblocked`. The chain also
-  helps the purge: a session save started before sign-out can no longer
-  commit after the purge and leave the previous user's import behind.
+- **Operations that never settle can still stall the chain.** Required
+  change 3 covers operations that *fail*: they reject, throw or fire
+  `onblocked`, and each one settles its caller and releases the chain (T7).
+  An operation that *never settles* is different. Examples are an
+  `indexedDB.open` that fires none of success, error or blocked, or a file
+  `arrayBuffer()` that never resolves. Either one holds the chain, so later
+  session writes wait behind it. That includes the sign-out and owner-mismatch
+  purge (`main.js` `_purgeUserDrafts`, which awaits
+  `clearImportSessionsStrict`). The chain also helps that purge: a session save
+  started before sign-out can no longer commit after it and leave the previous
+  user's import behind.
+- **Why no timeout was added.** A timeout cannot cancel the operation it gives
+  up on. An IndexedDB open or transaction that finally proceeds after the
+  timeout would still commit, now out of order. That breaks the ordering
+  guarantee the chain exists for: a late snapshot would land after a delete
+  or a purge, which is the resurrection this stage removes. A timeout would
+  turn a visible stall into a silent ordering bug. No engine behaviour that
+  produces a never-settling open or byte read is known; unreadable WebView
+  files reject with `NotReadableError`. If one is ever observed, the fix
+  belongs with the synchronization redesign, for example a generation token
+  checked inside the transaction. A timeout on the chain is not the fix.

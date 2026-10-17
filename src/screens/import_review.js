@@ -156,15 +156,23 @@ const importAiBatchState = {
   defaultServiceLabel: '',
 };
 
+// Groups queued by the Queue All run in progress. They stay in `sessions`
+// until the loop ends, but a snapshot taken after a group was queued must not
+// write it back: its saved session may already have been deleted.
+let queuedInCurrentSave = new Set();
+
 function _persistSessions() {
   debugImagePipeline('persist import sessions', {
     sessionCount: sessions.length,
     sourceItemCount: sourceItems.length,
   })
   const persist = _importAiDependency('persistSessions', saveImportSessions);
+  const snapshot = queuedInCurrentSave.size
+    ? sessions.filter(s => !queuedInCurrentSave.has(s.id))
+    : sessions;
   // The sessions stay in memory either way; a failed write only means they
   // would not survive the app being killed. Say so instead of staying silent.
-  return Promise.resolve(persist(sessions)).then(ok => {
+  return Promise.resolve(persist(snapshot)).then(ok => {
     if (ok === false) _importAiDependency('showToast', showToast)(t('import.persistFailed'));
     return ok !== false;
   });
@@ -2644,6 +2652,17 @@ function _openSessionCropEditor(session, startIndex = 0) {
 }
 
 async function saveAll() {
+  queuedInCurrentSave = new Set();
+  try {
+    await _runSaveAll();
+  } finally {
+    // By now `sessions` no longer holds the queued groups (kept groups only,
+    // or none), so later snapshots need no filter.
+    queuedInCurrentSave = new Set();
+  }
+}
+
+async function _runSaveAll() {
   if (importAiBatchState.running) return;
   const saveBtn = document.getElementById('import-save-btn');
   saveBtn.disabled = true;
@@ -2724,6 +2743,8 @@ async function saveAll() {
       await enqueue(obsPayload, imageEntries);
       savedCount++;
       queued = true;
+      // Before the delete is requested: any snapshot from here on omits it.
+      queuedInCurrentSave.add(session.id);
     } catch (err) {
       failedSessionIds.add(session.id);
       console.error('Failed to queue import group locally:', describePersistError(err));
@@ -2794,6 +2815,10 @@ async function saveAll() {
   } catch (err) {
     console.warn('Post-save Finds navigation failed (observations are queued):', err);
   }
+}
+
+export function __persistSessionsForTests() {
+  return _persistSessions();
 }
 
 export function __saveAllForTests() {

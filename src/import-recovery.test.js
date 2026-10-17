@@ -30,6 +30,7 @@ import {
   __applyImportPhotoGapChangeForTests,
   __cancelImportForTests,
   __getImportSessionsForTests,
+  __persistSessionsForTests,
   __removeImportSourceItemsForTests,
   __saveAllForTests,
   __setImportAiSessionsForTests,
@@ -328,6 +329,34 @@ test('T3 process death while B is being queued: only B is stored and restored', 
   assert.deepEqual(idb.ids(), ['B'], 'queued A was removed before B was queued')
   const restored = await loadImportSessions()
   assert.deepEqual(restored.map(session => session.id), ['B'])
+})
+
+// ── T12 ─────────────────────────────────────────────────────────────────────
+test('T12 a session write during the Queue All loop does not resurrect an already queued group', async () => {
+  await saveImportSessions([makeSession('A'), makeSession('B'), makeSession('C')])
+  __setImportAiSessionsForTests([makeSession('A'), makeSession('B'), makeSession('C')])
+  let enqueueBStarted
+  const bStarted = new Promise(resolve => { enqueueBStarted = resolve })
+  harness({
+    enqueue: async (_payload, imageEntries) => {
+      if (!(await imageEntries[0].blob.text()).startsWith('B')) return
+      await storeIdle()
+      assert.deepEqual(idb.ids(), ['B', 'C'], 'delete(A) committed before B is queued')
+      // A UI callback (geocode, AI result, metadata hydration) persists the
+      // review while the loop is still running.
+      assert.equal(await __persistSessionsForTests(), true)
+      enqueueBStarted()
+      await new Promise(() => {}) // the process dies here: never settles
+    },
+  })
+
+  void __saveAllForTests()
+  await bStarted
+  await storeIdle()
+
+  assert.deepEqual(idb.ids(), ['B', 'C'], 'A stays out of the store')
+  const restored = await loadImportSessions()
+  assert.deepEqual(restored.map(session => session.id).sort(), ['B', 'C'], 'a restart restores only unqueued groups')
 })
 
 // ── T4 ──────────────────────────────────────────────────────────────────────
