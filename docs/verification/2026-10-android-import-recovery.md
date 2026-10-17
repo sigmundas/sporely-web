@@ -47,12 +47,24 @@ No transaction spans both, so the contract is defined by ordering:
    - A failed kept-group rewrite shows `import.persistFailed`, as in `c35186f`.
    - A failed strict clear after a fully successful batch shows
      `import.queuedClearFailed` instead of the success toast.
+   - A failed delete that the rewrite or the strict clear then repaired shows
+     `import.queuedCleanupRepaired`. On the all-queued path it replaces the
+     success toast.
 6. **Discarding needs consent.** Home and Cancel (`_cancelImport`) ask
    `import.discardConfirm` when at least one group has photos. Declining
    changes nothing: memory, store and screen stay as they are. With no groups
    there is no prompt. The `importAiBatchState.running` guard stays.
 7. A group whose payload cannot be built (`obsPayload` null) is now kept as
    failed instead of being dropped unqueued.
+8. **Regrouping never leaves the persisted review.** A photo-gap change
+   (`_applyImportPhotoGapChange`) that merges the groups into one used to
+   clear `pending_import`, empty memory and hand the group to the single
+   Review screen. That screen does not checkpoint imported reviews
+   (`review.js` `_checkpointReviewDraft`), so a restart lost the group. The
+   merged group now stays in the import review and is persisted like any
+   other regroup. The initial single-group import (`handleSelectedFiles` →
+   `openImportedReview`) is unchanged. Nothing has been persisted at that
+   point, and it removes nothing from `pending_import`.
 
 Restore after a restart (`main.js` → `loadImportSessions` →
 `restoreImportSessions`) is unchanged. It sees exactly the groups that are
@@ -86,10 +98,11 @@ owner decision.
   reappears after a restart, discard it instead of queuing it again."). It
   replaces the success toast. The kept-group path still uses
   `import.persistFailed`.
-- **Failed delete followed by a successful repair.** If a per-group delete
-  fails but the following rewrite or strict clear commits, the store ends
-  correct and only the log records the failed delete. No toast is shown, since
-  nothing is wrong any more. If the repair also fails, the user is warned (T5).
+- **Failed delete followed by a successful repair.** This revision changes
+  the first candidate (`3d6fce8`), which only logged it, after sparring. The
+  user now sees `import.queuedCleanupRepaired`. `import.persistFailed` is not
+  used here because its advice to queue again would be wrong for a queued
+  group.
 - **`durability` without try/catch.** WebIDL ignores unknown dictionary
   members, and engines that predate the option ignore an extra argument.
   Android System WebView has supported `durability` since Chromium 83. A
@@ -121,6 +134,8 @@ and restored the fix. Results at the candidate:
 | T4 Codex reproduction | 4 per-group delete | as row 2 | T4 |
 | T5 delete and rewrite fail | kept-group rewrite warning (`c35186f`) | kept path removed | T5 (with T2, T4, T9) |
 | T5 delete and strict clear fail | 4 strict clear in `try` | non-strict `clearImportSessions` | T5 (second case) |
+| T5 delete fails, rewrite repairs / strict clear repairs | 4 failed delete always surfaced | `deleteFailed` never set | both repaired-delete T5 cases |
+| T11 regroup merges into one, restart | 8 merged group stays persisted | old single-review branch restored | T11 |
 | T6 slow write before Queue All | 3 FIFO chain | `Promise.resolve().then(op)` (no chain) | T6 (T7 and T8 also fail: their idle wait relies on the chain) |
 | T7 chain liveness | 3 chain swallows outcome | `_writeChain = run` | T7 alone (cascades to all later tests in the full file) |
 | T7 blocked open | 1 `onblocked` → failure | `onblocked` handler removed | T7 |
@@ -136,17 +151,17 @@ timeout. A real open that stays blocked would hang the chain.
 ## Verification commands (candidate, before commit)
 
 - `node --test src/import-recovery.test.js src/import-persist-failure.test.js`:
-  17/17 pass.
+  20/20 pass.
 - Neighbours (`import-review`, `import-store`, `import-location-provenance`,
   `sync-queue`, `sync-queue-recovery`, `connectivity-loss`,
-  `ingest-method-provenance`) plus the two above: 124 tests, 123 pass, 1 fail.
+  `ingest-method-provenance`) plus the two above: 127 tests, 126 pass, 1 fail.
   The one failure is the known `connectivity-loss.test.js` "enqueueObservation
   is IndexedDB-only". It still fails for the same reason as at `c35186f`: its
   anchor range reaches `_retryObservationInsertWithoutProvenance`, which
   calls `supabase`. The strict-durability line does not change that result.
-- `npm test`: 1697 tests, 1647 pass, 11 fail. These are exactly the 11 baseline
+- `npm test`: 1700 tests, 1650 pass, 11 fail. These are exactly the 11 baseline
   failures (four taxonomy manifest checks, the `connectivity-loss` anchor
-  above, six Deno `.ts` files). Baseline was 1684/1634/11, and the 13 extra
+  above, six Deno `.ts` files). Baseline was 1684/1634/11, and the 16 extra
   tests are the new file.
 - `npx eslint` on the changed files: 0 errors, 2 warnings, both pre-existing
   (`gapUnit`, `imageMeta` in `import_review.js`).

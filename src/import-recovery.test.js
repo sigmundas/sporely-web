@@ -27,6 +27,7 @@ import {
 import { enqueueObservation } from './sync-queue.js'
 import {
   _buildImportSourceItem,
+  __applyImportPhotoGapChangeForTests,
   __cancelImportForTests,
   __getImportSessionsForTests,
   __removeImportSourceItemsForTests,
@@ -394,6 +395,83 @@ test('T5 all queued but the deletes and the strict clear fail: warned, not repor
   assert.equal(queue.length, 1)
   assert.deepEqual(toasts, [t('import.queuedClearFailed', { count: tp('counts.observation', 1) })])
   assert.deepEqual(idb.ids(), ['A'], 'the store really still holds A; the warning is truthful')
+})
+
+test('T5 a failed delete repaired by the kept-group rewrite is still reported', async () => {
+  await saveImportSessions([makeSession('A'), makeSession('B')])
+  __setImportAiSessionsForTests([makeSession('A'), makeSession('B')])
+  const { queue, toasts } = harness({
+    enqueue: async (_payload, imageEntries) => {
+      // Only deletes fail; the rewrite (clear + put) commits.
+      idb.faults.failCommit = (dbName, ops) => (ops.some(op => op[0] === 'delete') ? domError('UnknownError') : null)
+      if ((await imageEntries[0].blob.text()).startsWith('B')) throw enqueueFailure()
+    },
+  })
+
+  await __saveAllForTests()
+
+  assert.equal(queue.length, 1, 'A queued once and not re-queued')
+  assert.deepEqual(idb.ids(), ['B'], 'the rewrite repaired the store')
+  assert.ok(toasts.includes(t('import.queuedCleanupRepaired', { count: tp('counts.observation', 1) })), 'repaired delete failure surfaced')
+  assert.ok(!toasts.includes(t('import.persistFailed')), 'the rewrite itself did not fail')
+})
+
+test('T5 a failed delete repaired by the strict clear is reported instead of the success toast', async () => {
+  await saveImportSessions([makeSession('A')])
+  __setImportAiSessionsForTests([makeSession('A')])
+  const { queue, toasts } = harness({
+    enqueue: async () => {
+      idb.faults.failCommit = (dbName, ops) => (ops.some(op => op[0] === 'delete') ? domError('UnknownError') : null)
+    },
+  })
+
+  await __saveAllForTests()
+
+  assert.equal(queue.length, 1)
+  assert.deepEqual(idb.ids(), [], 'the strict clear repaired the store')
+  assert.deepEqual(toasts, [t('import.queuedCleanupRepaired', { count: tp('counts.observation', 1) })])
+})
+
+// ── T11 ─────────────────────────────────────────────────────────────────────
+test('T11 a photo-gap change that merges groups into one keeps it persisted across a restart', async () => {
+  const T0 = Date.parse('2026-10-12T09:00:00Z')
+  const photo = (label, captureTime) => _buildImportSourceItem(`gap-${label}`, { captureTime }, {
+    blob: new Blob([`M-${label}`], { type: 'image/jpeg' }),
+    aiBlob: new Blob([`ai-${label}`], { type: 'image/jpeg' }),
+    meta: { aiCropRect: null, aiCropSourceW: 100, aiCropSourceH: 100, aiCropIsCustom: false },
+  }, INGEST_METHOD.NATIVE_PICKER)
+  const navigations = []
+  harness({ navigate: screen => navigations.push(screen) })
+  // The photo-gap setting lives in localStorage; node has no usable one.
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const settings = new Map()
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem: key => settings.get(key) ?? null, setItem: (key, value) => settings.set(key, String(value)) },
+  })
+  try {
+    __applyImportPhotoGapChangeForTests(1)
+    const initial = __setImportSourceItemsForTests([photo('A', T0), photo('B', T0 + 5 * 60_000)])
+    assert.equal(initial.length, 2, 'two groups at a 1-minute gap')
+    assert.equal(await saveImportSessions(initial), true)
+
+    __applyImportPhotoGapChangeForTests(10)
+    await storeIdle()
+
+    const merged = __getImportSessionsForTests()
+    assert.equal(merged.length, 1, 'merged into one group in the import review')
+    assert.equal(merged[0].files.length, 2)
+    assert.deepEqual(navigations, [], 'not handed to another screen')
+
+    // Restart: the merged group is restored with both photos.
+    const restored = await loadImportSessions()
+    assert.equal(restored.length, 1)
+    assert.deepEqual(await Promise.all(restored[0].files.map(file => file.text())), ['M-A', 'M-B'])
+  } finally {
+    __setImportSourceItemsForTests([])
+    if (previousStorage) Object.defineProperty(globalThis, 'localStorage', previousStorage)
+    else delete globalThis.localStorage
+  }
 })
 
 // ── T6 ──────────────────────────────────────────────────────────────────────

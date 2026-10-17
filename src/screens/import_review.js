@@ -1600,24 +1600,21 @@ function _applyImportPhotoGapChange(value) {
   expandedSessionIds = new Set();
   _abortImportAiRuns();
   _buildSessionsFromSourceItems();
-  if (sessions.length === 1) {
-    const session = sessions[0];
-    _disposeSessionBlobUrls([session]);
-    sessions = [];
-    expandedSessionIds = new Set();
-    sourceItems = [];
-    clearImportSessions();
-    openImportedReview(session);
-    return;
-  }
+  // Groups merged into one stay in this persisted review. Handing the merged
+  // group to the single Review screen would clear pending_import without
+  // queueing it, and that screen does not persist imported reviews.
   if (!sessions.length) {
     clearImportSessions();
     navigate('home');
     return;
   }
   _persistSessions();
-  renderSessions();
+  _importAiDependency('renderSessions', renderSessions)();
   _prefillSessionLocations();
+}
+
+export function __applyImportPhotoGapChangeForTests(value) {
+  return _applyImportPhotoGapChange(value);
 }
 
 // Home and Cancel both discard the review. Groups with photos may be the only
@@ -2719,6 +2716,7 @@ async function saveAll() {
   // docs/verification/2026-10-android-import-recovery.md.
   const enqueue = _importAiDependency('enqueueObservation', enqueueObservation);
   const removeStoredSession = _importAiDependency('deleteImportSession', deleteImportSession);
+  let deleteFailed = false;
   for (let i = 0; i < queuedSessions.length; i++) {
     const { session, obsPayload, imageEntries } = queuedSessions[i];
     let queued = false;
@@ -2739,7 +2737,8 @@ async function saveAll() {
       }
       if (removed !== true) {
         // Never re-queue: the group is queued. The rewrite or the strict
-        // clear below repairs the saved sessions, and warns if it fails too.
+        // clear below repairs the saved sessions; the user is told either way.
+        deleteFailed = true;
         console.error('Queued import group is still in the saved sessions:', session.id);
       }
     }
@@ -2760,7 +2759,10 @@ async function saveAll() {
     toast(savedCount > 0
       ? t('import.partiallyQueued', { count: tp('counts.observation', savedCount), failed: keptSessions.length })
       : t('import.notQueued', { failed: keptSessions.length }));
-    await _persistSessions();
+    // A failed rewrite warns inside _persistSessions; a rewrite that repaired
+    // a failed delete still says so.
+    const rewritten = await _persistSessions();
+    if (rewritten && deleteFailed) toast(t('import.queuedCleanupRepaired', { count: tp('counts.observation', savedCount) }));
     _importAiDependency('renderSessions', renderSessions)();
     return;
   }
@@ -2780,6 +2782,7 @@ async function saveAll() {
     console.error('Failed to clear saved import sessions after queueing:', describePersistError(err));
   }
   if (!cleared) toast(t('import.queuedClearFailed', { count: tp('counts.observation', savedCount) }));
+  else if (deleteFailed) toast(t('import.queuedCleanupRepaired', { count: tp('counts.observation', savedCount) }));
   else if (savedCount > 0) toast(t('import.saved', { count: tp('counts.observation', savedCount) }));
   _hideProgress();
   saveBtn.disabled = false;
