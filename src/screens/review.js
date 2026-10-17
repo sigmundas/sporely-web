@@ -32,7 +32,7 @@ import { canPerformCloudMutation } from '../capabilities.js'
 import { openAiCropEditor } from '../ai-crop-editor.js'
 import { normalizeAiCropRect, shouldShowAiCropOverlay } from '../image_crop.js'
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js'
-import { getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js'
+import { getDefaultVisibility, getPhotoIdMode, resolvePhotoIdServices, getUseSystemCamera } from '../settings.js'
 import { normalizeVisibility, toCloudVisibility } from '../visibility.js'
 import { confirmPublishIfNeeded } from '../publish-notice.js'
 import { isAndroidNativeApp } from '../camera-actions.js'
@@ -2383,6 +2383,23 @@ async function _openCameraForReview() {
   if (isAndroidNativeApp()) {
     try {
       const screenPath = 'review:add-photo'
+      if (getUseSystemCamera()) {
+        // Same choice as the other camera buttons: the user picked the
+        // phone's camera app in Settings, so never open Sporely Cam here.
+        const systemCaptureSource = 'system camera'
+        playIrisShutter({ mode: 'quick' })
+        const result = await NativeCamera.openSystemCamera()
+        const photos = Array.isArray(result?.photos) ? result.photos : []
+        if (!photos.length) return
+        _setProgress(0, photos.length, t('import.readingFiles'))
+        const files = []
+        for (let i = 0; i < photos.length; i++) {
+          _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
+          files.push(await nativePickedPhotoToFile(photos[i], i, { captureSource: systemCaptureSource, screenPath }))
+        }
+        await _addFilesToReview(files, { nativePhotos: photos, captureSource: systemCaptureSource, screenPath, ingestMethod: INGEST_METHOD.SYSTEM_CAMERA })
+        return
+      }
       const captureSource = 'Sporely native camera'
       const reviewGps = _currentReviewNativeCameraGps()
       const gps = reviewGps && isUsableCoordinate(reviewGps.lat, reviewGps.lon)
