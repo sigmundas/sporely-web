@@ -43,8 +43,10 @@ import { getLocationLookup } from '../location.js'
 import { lookupCoordinateKey } from '../location-lookup.js'
 import {
   endCaptureLocationSession,
+  getCaptureSessionLocationOutcome,
   getCaptureSessionRequestToken,
   LOCATION_STATE_CHANGED_EVENT,
+  resetCaptureSessionLocationOutcome,
   requestFreshLocation,
   setLocationPreference,
   stopLocationWatch,
@@ -53,16 +55,28 @@ import { NO_LOCATION_PILL_TEXT, openLocationSettingsOrExplain } from '../locatio
 import { hideLocationFixSheet, initLocationFixSheet, showLocationFixSheet } from '../location-fix-sheet.js'
 import { debugImagePipeline } from '../image-pipeline-debug.js'
 import {
+  INGEST_METHOD,
   isBlob,
   isUsableCoordinate as sharedIsUsableCoordinate,
   normalizeCoordinatePair,
+  normalizeIngestMethod,
   normalizeObservationGps,
+  optionalFiniteNumber,
 } from '../observation-shapes.js'
 import {
   createDefaultObservationDraft,
   createDefaultObservationPayload,
 } from '../observation-defaults.js'
 import { clearReviewDraft, saveReviewDraft, updateReviewDraftFields } from '../review-draft-store.js'
+import {
+  LOCATION_SOURCE,
+  applyLocationProvenanceToPayload,
+  attachLatePhotoExifGps,
+  exifGpsSourceForIngest,
+  normalizeLocationSource,
+  photoExifGps,
+  resolveSaveLocationProvenance,
+} from '../location-provenance.js'
 import {
   finalizeNativeCaptureSources,
   nativeCaptureSourcePathForPhoto,
@@ -94,6 +108,8 @@ let reviewLocationStateListener = null
 let reviewLocationLastLookupKey = ''
 let reviewSaveLocationSessionBypassKey = null
 let reviewSaveInFlight = false
+// Outcome last written to the persisted review draft (G3: restored drafts).
+let reviewDraftLocationOutcome = null
 
 // The observation location is pinned to capture time: fixes taken more than
 // this long after the last photo are not used for the session fix, and
@@ -403,6 +419,7 @@ export function initReview() {
     reviewLocationStateListenerWindow = currentWindow
     reviewLocationStateListener = () => {
       if (state.currentScreen !== 'review') return
+      _syncReviewDraftLocationOutcome()
       _syncReviewLocationStateUi()
       _stopWatchIfCaptureWindowClosed()
     }
@@ -476,8 +493,11 @@ export function openImportedReview(session) {
         ...reviewCoords,
         accuracy: gpsAccuracy,
         altitude: gpsAltitude,
+        source: normalizeLocationSource(session?.gpsSource) || LOCATION_SOURCE.UNKNOWN,
       }
     : null
+  // An import never observed a GPS attempt; do not inherit a live outcome.
+  resetCaptureSessionLocationOutcome()
 
   const taxon = session?.taxon ? { ...session.taxon } : null
   state.capturedPhotos = (session?.files || []).map((blob, index) => ({
@@ -491,6 +511,7 @@ export function openImportedReview(session) {
     aiCropSourceW: session?.imageMeta?.[index]?.aiCropSourceW ?? null,
     aiCropSourceH: session?.imageMeta?.[index]?.aiCropSourceH ?? null,
     aiCropIsCustom: session?.imageMeta?.[index]?.aiCropIsCustom === true,
+    ingestMethod: normalizeIngestMethod(session?.imageMeta?.[index]?.ingestMethod),
     taxon: taxon ? { ...taxon } : null,
   }))
   state.batchCount = state.capturedPhotos.length
@@ -530,6 +551,8 @@ export function restoreReviewDraft(draft) {
   state.captureSessionLocation.fix = draft.sessionFix ? { ...draft.sessionFix } : null
   state.captureSessionLocation.captureWindowEndAt = draft.captureWindowEndAt ?? null
   state.captureSessionLocation.requestingFreshFix = false
+  resetCaptureSessionLocationOutcome(draft.sessionLocationOutcome ?? null)
+  reviewDraftLocationOutcome = getCaptureSessionLocationOutcome()
   state.captureDraft = createDefaultObservationDraft(draft.captureDraft || {})
   const locationInput = document.getElementById('location-name-input')
   if (locationInput && draft.locationName) locationInput.value = draft.locationName
@@ -546,6 +569,7 @@ function _metadataGps(metadataSession) {
   if (reviewGps) {
     return {
       ...reviewGps,
+      source: normalizeLocationSource(metadataSession?.gpsSource) || LOCATION_SOURCE.UNKNOWN,
       accuracy: _firstFiniteNumber(
         metadataSession?.gpsAccuracy,
         ...(metadataSession?.photoGps || []).map(gps => gps?.accuracy),
@@ -566,6 +590,7 @@ function _metadataGps(metadataSession) {
     ...coords,
     accuracy: _firstFiniteNumber(photoGps.accuracy),
     altitude: _firstFiniteNumber(photoGps.altitude),
+    source: normalizeLocationSource(photoGps.source) || LOCATION_SOURCE.UNKNOWN,
   }
 }
 
@@ -659,6 +684,26 @@ async function _awaitImportedReviewMetadata() {
   }
 }
 
+// Live photos may still be hydrating their original EXIF GPS; canonical
+// selection at save must see it. The promises never reject.
+export async function _awaitLivePhotoMetadata() {
+  if (_isImportedReview()) return
+  const pending = state.capturedPhotos.map(photo => photo?.metadataPromise).filter(Boolean)
+  if (pending.length) await Promise.allSettled(pending)
+}
+
+function _watchLivePhotoMetadata() {
+  if (_isImportedReview()) return
+  state.capturedPhotos.forEach(photo => {
+    if (!photo?.metadataPromise || photo._metadataWatched) return
+    photo._metadataWatched = true
+    void photo.metadataPromise.then(changed => {
+      if (!changed || state.currentScreen !== 'review' || !state.capturedPhotos.includes(photo)) return
+      buildReviewGrid()
+    })
+  })
+}
+
 function _reviewLocationLookup() {
   return state.reviewContext?.locationLookup || getLocationLookup() || null
 }
@@ -697,6 +742,7 @@ function _reviewDraftSnapshot() {
     sessionFix: state.captureSessionLocation.fix,
     captureDraft: { ...state.captureDraft },
     locationName: getLocationName() || '',
+    sessionLocationOutcome: getCaptureSessionLocationOutcome(),
   }
 }
 
@@ -707,11 +753,22 @@ function _checkpointReviewDraft() {
   const key = [
     _currentReviewSessionKey() || '',
     photos.length,
-    ...photos.map(photo => `${_photoTsMs(photo)}:${photo.aiCropIsCustom ? JSON.stringify(photo.aiCropRect) : ''}`),
+    ...photos.map(photo => `${_photoTsMs(photo)}:${photo.aiCropIsCustom ? JSON.stringify(photo.aiCropRect) : ''}:${photo.gps ? `${photo.gps.lat},${photo.gps.lon},${photo.gps.source ?? ''}` : ''}`),
   ].join('|')
   if (key === reviewDraftCheckpointKey) return
   reviewDraftCheckpointKey = key
+  reviewDraftLocationOutcome = getCaptureSessionLocationOutcome()
   void saveReviewDraft(_reviewDraftSnapshot())
+}
+
+// A GPS failure after the last photo checkpoint must still survive a restart,
+// so a restored draft that continues without location keeps that outcome.
+function _syncReviewDraftLocationOutcome() {
+  if (_isImportedReview() || !state.capturedPhotos.length || !reviewDraftCheckpointKey) return
+  const outcome = getCaptureSessionLocationOutcome()
+  if (outcome === reviewDraftLocationOutcome) return
+  reviewDraftLocationOutcome = outcome
+  void updateReviewDraftFields({ sessionLocationOutcome: outcome })
 }
 
 function _scheduleReviewDraftFieldSync() {
@@ -782,8 +839,9 @@ function _leadReviewPhotoGps() {
 function _preferMoreAccurateGps(preferred, other) {
   if (!preferred) return other
   if (!other) return preferred
-  const preferredAccuracy = Number(preferred.accuracy)
-  const otherAccuracy = Number(other.accuracy)
+  // Missing accuracy is unknown, never "perfect" (Number(null) === 0).
+  const preferredAccuracy = optionalFiniteNumber(preferred.accuracy) ?? NaN
+  const otherAccuracy = optionalFiniteNumber(other.accuracy) ?? NaN
   if (Number.isFinite(preferredAccuracy) && Number.isFinite(otherAccuracy)) {
     return otherAccuracy < preferredAccuracy ? other : preferred
   }
@@ -797,6 +855,8 @@ function _liveReviewCanonicalGps() {
   // window-restricted in geo.js, and per-photo GPS (EXIF or the at-shutter
   // snapshot) is taken at capture. Prefer whichever is more accurate,
   // tie-breaking on the session fix.
+  // Each candidate keeps the source recorded where it was acquired (geo.js
+  // tags accepted device fixes); an untagged restored fix stays unknown.
   return _preferMoreAccurateGps(state.captureSessionLocation.fix, _leadReviewPhotoGps())
 }
 
@@ -815,6 +875,8 @@ function _cloneReviewGps(gps) {
   return {
     ...normalized,
     timestamp: Number.isFinite(timestamp) ? timestamp : null,
+    // Untagged GPS (drafts written before provenance) stays unclassified.
+    source: normalizeLocationSource(gps?.source) || LOCATION_SOURCE.UNKNOWN,
   }
 }
 
@@ -854,7 +916,7 @@ function _clearReviewSaveLocationSuppression() {
   reviewSaveLocationSessionBypassKey = null
 }
 
-function _canonicalReviewSaveGps() {
+export function _canonicalReviewSaveGps() {
   return _currentReviewGps()
 }
 
@@ -886,11 +948,16 @@ async function _requestReviewSaveLocation() {
 async function _resolveReviewSaveLocation() {
   while (true) {
     if (state.currentScreen !== 'review') return { action: 'abort' }
-    if (_isImportedReview()) return { action: 'proceed', gps: _canonicalReviewSaveGps() }
+    // `decision` records why a save has no coordinates; an imported review
+    // never observed acquisition, so it has none (stored as a NULL pair).
+    if (_isImportedReview()) return { action: 'proceed', gps: _canonicalReviewSaveGps(), decision: null }
     const currentGps = _canonicalReviewSaveGps()
-    if (currentGps) return { action: 'proceed', gps: currentGps }
-    if (state.location.preference === 'disabled' || _isReviewSaveLocationSuppressed()) {
-      return { action: 'proceed', gps: null }
+    if (currentGps) return { action: 'proceed', gps: currentGps, decision: null }
+    if (state.location.preference === 'disabled') {
+      return { action: 'proceed', gps: null, decision: 'disabled' }
+    }
+    if (_isReviewSaveLocationSuppressed()) {
+      return { action: 'proceed', gps: null, decision: 'continue' }
     }
     // No locked location: show the sheet immediately — never sit through a
     // GPS timeout the user did not ask for. The progress overlay paints above
@@ -899,7 +966,7 @@ async function _resolveReviewSaveLocation() {
     const decision = await showLocationFixSheet()
     if (decision === 'continue') {
       _setReviewSaveLocationSuppressed()
-      return { action: 'proceed', gps: _canonicalReviewSaveGps() }
+      return { action: 'proceed', gps: _canonicalReviewSaveGps(), decision: 'continue' }
     }
     if (decision === 'settings') {
       void openLocationSettingsOrExplain()
@@ -908,8 +975,18 @@ async function _resolveReviewSaveLocation() {
     if (decision !== 'retry') return { action: 'abort' }
     _setProgress(0, 1, 'Finding location…')
     const freshGps = await _requestReviewSaveLocation()
-    if (freshGps) return { action: 'proceed', gps: freshGps }
+    if (freshGps) return { action: 'proceed', gps: freshGps, decision: null }
   }
+}
+
+// Map the save-time location decision to the frozen provenance transitions.
+// The session outcome is the current capture session's own (geo.js scopes it).
+export function _resolveReviewSaveProvenance(locationResult) {
+  return resolveSaveLocationProvenance({
+    gps: locationResult?.gps ?? null,
+    decision: locationResult?.decision ?? null,
+    sessionOutcome: getCaptureSessionLocationOutcome(),
+  })
 }
 
 export function _buildReviewObservationPayload() {
@@ -1189,6 +1266,7 @@ export function buildReviewGrid() {
   }
   _refreshCaptureLockWindow()
   _stopWatchIfCaptureWindowClosed()
+  _watchLivePhotoMetadata()
   _checkpointReviewDraft()
   const reviewCount = document.getElementById('review-count')
   const sharedTaxon = photos.find(photo => photo.taxon)?.taxon || null
@@ -2207,6 +2285,7 @@ async function saveObservationBatch() {
 
   try {
     await _awaitImportedReviewMetadata()
+    await _awaitLivePhotoMetadata()
     const photos = await Promise.all(
       state.capturedPhotos.map(async p => ({
         ...p,
@@ -2223,6 +2302,7 @@ async function saveObservationBatch() {
     obsPayload.gps_longitude = finalGps?.lon ?? null
     obsPayload.gps_altitude = finalGps?.altitude ?? null
     obsPayload.gps_accuracy = finalGps?.accuracy ?? null
+    applyLocationProvenanceToPayload(obsPayload, _resolveReviewSaveProvenance(locationResult))
 
     const imageEntries = photos
       .filter(photo => isBlob(photo.blob))
@@ -2232,6 +2312,7 @@ async function saveObservationBatch() {
         aiCropSourceW: photo.aiCropSourceW ?? null,
         aiCropSourceH: photo.aiCropSourceH ?? null,
         aiCropIsCustom: photo.aiCropIsCustom === true,
+        ingestMethod: normalizeIngestMethod(photo.ingestMethod),
       }))
 
     debugImagePipeline('review batch ready for queue', {
@@ -2319,6 +2400,8 @@ async function _openCameraForReview() {
       })
       playIrisShutter({ mode: 'quick' })
       const result = await NativeCamera.capturePhotos(gps ? { gps } : {})
+      // Sporely Cam writes exactly this location into EXIF; keep its source.
+      const writtenGpsSource = gps ? reviewGps.source : null
       const photos = Array.isArray(result?.photos) ? result.photos : []
       debugImagePipeline('android native camera capture returned', {
         screenPath,
@@ -2345,7 +2428,7 @@ async function _openCameraForReview() {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath })
+      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath, ingestMethod: INGEST_METHOD.SPORELY_CAMERA, writtenGpsSource })
     } catch (err) {
       if (isPickerCancel(err)) return
       showToast(`Sporely Cam: ${err?.message || err}`)
@@ -2387,7 +2470,7 @@ async function _openPickerForReview() {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath })
+      await _addFilesToReview(files, { nativePhotos: photos, captureSource, screenPath, ingestMethod: INGEST_METHOD.NATIVE_PICKER })
       return
     } catch (err) {
       if (isPickerCancel(err)) return
@@ -2405,7 +2488,7 @@ async function _openPickerForReview() {
   input.onchange = async (e) => {
     const files = Array.from(e.target.files || [])
     if (!files.length) return
-    await _addFilesToReview(files)
+    await _addFilesToReview(files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER })
   }
   input.click()
 }
@@ -2414,6 +2497,10 @@ async function _addFilesToReview(files, options = {}) {
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : []
   const captureSource = options.captureSource || 'Sporely native camera'
   const screenPath = options.screenPath || 'review:add-photo'
+  // Set by the caller's actual entry point; `captureSource` above is only a
+  // debug label and is not provenance.
+  const ingestMethod = normalizeIngestMethod(options.ingestMethod) || INGEST_METHOD.UNKNOWN
+  const exifGpsSource = exifGpsSourceForIngest(ingestMethod, options.writtenGpsSource)
   const supportedSelection = _filterUnsupportedBrowserFiles(files, nativePhotos)
   const supportedFiles = supportedSelection.files
   const supportedNativePhotos = supportedSelection.nativePhotos
@@ -2435,13 +2522,14 @@ async function _addFilesToReview(files, options = {}) {
     const item = withTimes[idx]
     _setProgress(doneCount, supportedFiles.length, t('import.convertingFile', { current: doneCount + 1, total: supportedFiles.length }))
     const processed = await processFile(item.file, { nativePhoto: item.nativePhoto, captureSource, screenPath })
-    const gps = isUsableCoordinate(item.lat, item.lon) ? { lat: item.lat, lon: item.lon, altitude: item.altitude, accuracy: item.accuracy } : null
+    const gps = photoExifGps(item, exifGpsSource)
 
     const newPhoto = {
       blob: processed.blob,
       aiBlob: processed.aiBlob || processed.blob,
       blobPromise: null,
       gps,
+      gpsFromExif: !!gps,
       ts: new Date(item.captureTime),
       emoji: '🖼️',
       aiCropRect: processed.meta?.aiCropRect || null,
@@ -2449,9 +2537,12 @@ async function _addFilesToReview(files, options = {}) {
       aiCropSourceH: processed.meta?.aiCropSourceH ?? null,
       aiCropIsCustom: processed.meta?.aiCropIsCustom === true,
       taxon: state.capturedPhotos[0]?.taxon || null,
+      ingestMethod,
       // Sporely Cam only; null for picker imports and the system camera.
       nativeSourcePath: nativeCaptureSourcePathFromNativePhoto(item.nativePhoto),
     }
+    // Late original EXIF for native photos (awaited by Save).
+    newPhoto.metadataPromise = attachLatePhotoExifGps(newPhoto, item.metadataPromise, exifGpsSource)
     state.capturedPhotos.push(newPhoto)
     doneCount++
   }

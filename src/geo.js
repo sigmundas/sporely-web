@@ -1,5 +1,6 @@
 import { state } from './state.js'
 import { setLocationPreference as persistLocationPreference } from './settings.js'
+import { LOCATION_SOURCE, locationOutcomeFromGeoError, normalizeSessionLocationOutcome } from './location-provenance.js'
 
 export const LOCATION_FIX_MAX_AGE_MS = 5 * 60 * 1000
 export const LOCATION_CLOCK_SKEW_MS = 10 * 1000
@@ -29,6 +30,9 @@ function _normalizePreference(value) {
 }
 
 function _finiteNumber(value) {
+  // Absent is unknown, not 0 (Number(null) === 0 would make an unmeasured
+  // accuracy look perfect).
+  if (value === null || value === undefined || value === '') return null
   const number = Number(value)
   return Number.isFinite(number) ? number : null
 }
@@ -67,6 +71,8 @@ function _cloneFix(fix) {
     accuracy: fix.accuracy ?? null,
     altitude: fix.altitude ?? null,
     timestamp: fix.timestamp,
+    // Location provenance travels with the fix it describes.
+    ...(fix.source !== undefined ? { source: fix.source } : {}),
   }
 }
 
@@ -87,6 +93,70 @@ function _cloneCaptureSessionLocation() {
 
 function _captureSessionRequestIsCurrent(token) {
   return token == null || (liveCaptureSession.active && token === liveCaptureSession.requestToken)
+}
+
+// Location provenance: the latest meaningful acquisition outcome of the
+// CURRENT capture session (state.captureSessionLocation.outcome). The
+// generation changes only when a session starts or ends, so an asynchronous
+// failure from an earlier session (including untokened requests) can never
+// be attributed to a later one. Global state.location.error is not used.
+let locationOutcomeGeneration = 0
+
+// Within one session several acquisition attempts can overlap (a background
+// request still pending while the user taps "Try again"). Each attempt —
+// request, watch, standalone permission check, preference/unsupported
+// observation — takes a monotonically increasing id when it starts; only the
+// newest attempt may record a failure outcome or reset acquisition state, so a
+// superseded attempt completing late cannot replace the accepted retry's
+// outcome. A superseded attempt's SUCCESS is still a real device fix and stays
+// eligible for the session fix (better-fix and capture-window rules apply).
+let latestLocationAttempt = 0
+
+function _beginLocationAttempt() {
+  latestLocationAttempt += 1
+  return latestLocationAttempt
+}
+
+function _attemptIsCurrent(attemptId) {
+  return attemptId === undefined || attemptId === latestLocationAttempt
+}
+
+function _recordSessionLocationOutcome(error, generation = locationOutcomeGeneration, attemptId = undefined) {
+  if (generation !== locationOutcomeGeneration) return
+  if (!_attemptIsCurrent(attemptId)) return
+  if (!state.captureSessionLocation.sessionStartAt) return
+  const outcome = locationOutcomeFromGeoError(error)
+  if (outcome) state.captureSessionLocation.outcome = outcome
+}
+
+// A request belongs to the session generation current when it STARTED. Once a
+// session starts or ends, its continuations (permission queries, position
+// callbacks, timers) may no longer touch session fix, outcome or acquisition
+// state. `undefined` means a synchronous caller acting on the current session.
+function _sessionScopeIsCurrent(generation) {
+  return generation === undefined || generation === locationOutcomeGeneration
+}
+
+function _requestIsCurrent(requestToken, generation) {
+  return _captureSessionRequestIsCurrent(requestToken) && _sessionScopeIsCurrent(generation)
+}
+
+function _resetSessionLocationOutcome(outcome = null) {
+  locationOutcomeGeneration += 1
+  state.captureSessionLocation.outcome = normalizeSessionLocationOutcome(outcome)
+}
+
+/**
+ * Start a fresh outcome scope for a review session that did not begin through
+ * beginCaptureLocationSession (imported review, restored draft). In-flight
+ * results from the previous session are ignored from here on.
+ */
+export function resetCaptureSessionLocationOutcome(outcome = null) {
+  _resetSessionLocationOutcome(outcome)
+}
+
+export function getCaptureSessionLocationOutcome() {
+  return normalizeSessionLocationOutcome(state.captureSessionLocation.outcome)
 }
 
 function _emitLocationStateChanged() {
@@ -209,6 +279,7 @@ function _captureSessionAcceptsFixTimestamp(fixTimestamp, options = {}) {
 
 function _updateCaptureSessionFixFromAcceptedFix(fix, options = {}) {
   if (!state.captureSessionLocation.sessionStartAt) return false
+  if (!_sessionScopeIsCurrent(options.sessionGeneration)) return false
   const fixTimestamp = _finiteNumber(fix?.timestamp)
   if (!_captureSessionAcceptsFixTimestamp(fixTimestamp, options)) {
     return false
@@ -216,7 +287,8 @@ function _updateCaptureSessionFixFromAcceptedFix(fix, options = {}) {
   if (!_isBetterSessionFix(fix, state.captureSessionLocation.fix)) {
     return false
   }
-  state.captureSessionLocation.fix = _cloneFix(fix)
+  // Tagged where it is acquired: only a fix accepted here is device GPS.
+  state.captureSessionLocation.fix = { ..._cloneFix(fix), source: LOCATION_SOURCE.DEVICE_GPS }
   state.captureSessionLocation.requestingFreshFix = false
   return true
 }
@@ -373,7 +445,7 @@ function _clearFreshFixAcquisitionTimer() {
   }
 }
 
-function _armFreshFixAcquisitionTimer(watchId, timeoutMs = LOCATION_FRESH_FIX_ACQUISITION_TIMEOUT_MS) {
+function _armFreshFixAcquisitionTimer(watchId, timeoutMs = LOCATION_FRESH_FIX_ACQUISITION_TIMEOUT_MS, outcomeGeneration = locationOutcomeGeneration, outcomeAttempt = undefined) {
   _clearFreshFixAcquisitionTimer()
   const normalized = Number(timeoutMs)
   if (!Number.isFinite(normalized) || normalized <= 0) return
@@ -381,6 +453,7 @@ function _armFreshFixAcquisitionTimer(watchId, timeoutMs = LOCATION_FRESH_FIX_AC
     _freshFixAcquisitionTimer = null
     // A different (or no) watch is active now — a newer session owns the UI.
     if (watchId == null || state.location.watchId !== watchId) return
+    if (!_sessionScopeIsCurrent(outcomeGeneration) || !_attemptIsCurrent(outcomeAttempt)) return
     // A fix arrived (or another terminal state resolved the UI) — nothing to do.
     const stillLocating = state.location.status === 'locating'
       || state.captureSessionLocation.requestingFreshFix === true
@@ -388,7 +461,7 @@ function _armFreshFixAcquisitionTimer(watchId, timeoutMs = LOCATION_FRESH_FIX_AC
     if (_sessionFixIsCurrent(state.captureSessionLocation.fix)) return
     // Standard timeout surface: clears requestingFreshFix, emits the state
     // change, and leaves the watch running for a late same-session fix.
-    _setWatchErrorState(_createTimeoutError())
+    _setWatchErrorState(_createTimeoutError(), outcomeGeneration, outcomeAttempt)
   }, normalized)
 }
 
@@ -505,6 +578,7 @@ function _setUnsupportedState() {
   state.location.permission = 'unknown'
   state.location.status = 'unavailable'
   state.location.error = _createUnsupportedError()
+  _recordSessionLocationOutcome(state.location.error, locationOutcomeGeneration, _beginLocationAttempt())
   state.captureSessionLocation.requestingFreshFix = false
   _applyUnsupportedPolicy()
   _clearWatchId()
@@ -512,13 +586,19 @@ function _setUnsupportedState() {
   return _cloneLocationState()
 }
 
-function _setDeniedState(error = _createDeniedError()) {
+function _setDeniedState(error = _createDeniedError(), outcomeGeneration = locationOutcomeGeneration, outcomeAttempt = undefined) {
+  // The permission itself is a device-global fact; a stale or superseded
+  // continuation may report it but must not touch the acquisition status or
+  // the newer attempt's fix, watch or outcome.
   state.location.permission = 'denied'
-  state.location.status = 'error'
-  state.location.error = error
-  state.captureSessionLocation.requestingFreshFix = false
-  _applyPermissionDeniedPolicy()
-  _clearWatchId()
+  if (_sessionScopeIsCurrent(outcomeGeneration) && _attemptIsCurrent(outcomeAttempt)) {
+    state.location.status = 'error'
+    state.location.error = error
+    _recordSessionLocationOutcome(error, outcomeGeneration, outcomeAttempt)
+    state.captureSessionLocation.requestingFreshFix = false
+    _applyPermissionDeniedPolicy()
+    _clearWatchId()
+  }
   _emitLocationStateChanged()
   return _cloneLocationState()
 }
@@ -526,6 +606,7 @@ function _setDeniedState(error = _createDeniedError()) {
 function _setDisabledState() {
   state.location.status = 'idle'
   state.location.error = _createDisabledError()
+  _recordSessionLocationOutcome(state.location.error, locationOutcomeGeneration, _beginLocationAttempt())
   state.location.fix = null
   state.captureSessionLocation.requestingFreshFix = false
   state.captureSessionLocation.fix = null
@@ -534,9 +615,12 @@ function _setDisabledState() {
   return _cloneLocationState()
 }
 
-function _setWatchErrorState(error) {
+function _setWatchErrorState(error, outcomeGeneration = locationOutcomeGeneration, outcomeAttempt = undefined) {
+  // A superseded attempt (older session or older same-session attempt) must
+  // not replace the newer attempt's outcome or acquisition state.
+  if (!_sessionScopeIsCurrent(outcomeGeneration) || !_attemptIsCurrent(outcomeAttempt)) return _cloneLocationState()
   const classified = _classifyGeolocationError(error)
-  if (classified.kind === 'permission-denied') return _setDeniedState(classified)
+  if (classified.kind === 'permission-denied') return _setDeniedState(classified, outcomeGeneration, outcomeAttempt)
 
   if (_sessionFixIsCurrent(state.captureSessionLocation.fix)) {
     state.location.status = 'fix'
@@ -551,17 +635,20 @@ function _setWatchErrorState(error) {
   state.location.status = classified.status
   state.location.error = classified
   state.captureSessionLocation.requestingFreshFix = false
+  _recordSessionLocationOutcome(classified, outcomeGeneration, outcomeAttempt)
   _pruneStaleGlobalFix()
   _emitLocationStateChanged()
   return _cloneLocationState()
 }
 
-function _setTerminalWatchError(error) {
+function _setTerminalWatchError(error, outcomeGeneration = locationOutcomeGeneration, outcomeAttempt = undefined) {
   _clearWatchId()
-  return _setWatchErrorState(error)
+  return _setWatchErrorState(error, outcomeGeneration, outcomeAttempt)
 }
 
 function _callWatchPosition(options = {}) {
+  const outcomeGeneration = options.sessionGeneration ?? locationOutcomeGeneration
+  const outcomeAttempt = options.attemptId
   const watchPosition = globalThis.navigator?.geolocation?.watchPosition
   if (typeof watchPosition !== 'function') {
     return { supported: false, watchId: null, terminalError: _createUnsupportedError() }
@@ -584,23 +671,23 @@ function _callWatchPosition(options = {}) {
 
   const success = position => {
     if (settled) return
-    if (!_captureSessionRequestIsCurrent(requestToken)) {
+    if (!_requestIsCurrent(requestToken, outcomeGeneration)) {
       settled = true
       safeClear()
       return
     }
-    const fix = _acceptFix(position, { ...options, requestStartedAt })
+    const fix = _acceptFix(position, { ...options, requestStartedAt, sessionGeneration: outcomeGeneration })
     if (!fix) {
       settled = true
       terminalError = _createInvalidFixError()
       safeClear()
-      _setWatchErrorState(terminalError)
+      _setWatchErrorState(terminalError, outcomeGeneration, outcomeAttempt)
     }
   }
 
   const error = geolocationError => {
     if (settled) return
-    if (!_captureSessionRequestIsCurrent(requestToken)) {
+    if (!_requestIsCurrent(requestToken, outcomeGeneration)) {
       settled = true
       safeClear()
       return
@@ -608,7 +695,7 @@ function _callWatchPosition(options = {}) {
     settled = true
     terminalError = geolocationError
     safeClear()
-    _setTerminalWatchError(geolocationError)
+    _setTerminalWatchError(geolocationError, outcomeGeneration, outcomeAttempt)
   }
 
   try {
@@ -627,7 +714,7 @@ function _callWatchPosition(options = {}) {
     settled = true
     terminalError = err
     safeClear()
-    _setTerminalWatchError(err)
+    _setTerminalWatchError(err, outcomeGeneration, outcomeAttempt)
   }
 
   return {
@@ -638,6 +725,8 @@ function _callWatchPosition(options = {}) {
 }
 
 function _requestCurrentPositionOnce(options = {}) {
+  const outcomeGeneration = options.sessionGeneration ?? locationOutcomeGeneration
+  const outcomeAttempt = options.attemptId
   const getCurrentPosition = globalThis.navigator?.geolocation?.getCurrentPosition
   if (typeof getCurrentPosition !== 'function') return null
 
@@ -660,13 +749,13 @@ function _requestCurrentPositionOnce(options = {}) {
 
   const success = position => {
     if (settled) return
-    if (!_captureSessionRequestIsCurrent(requestToken)) {
+    if (!_requestIsCurrent(requestToken, outcomeGeneration)) {
       finish(_cloneLocationState())
       return
     }
-    const fix = _acceptFix(position, { ...options, requestStartedAt })
+    const fix = _acceptFix(position, { ...options, requestStartedAt, sessionGeneration: outcomeGeneration })
     if (!fix) {
-      finish(_setWatchErrorState(_createInvalidFixError()))
+      finish(_setWatchErrorState(_createInvalidFixError(), outcomeGeneration, outcomeAttempt))
       return
     }
     finish(_cloneLocationState())
@@ -674,22 +763,22 @@ function _requestCurrentPositionOnce(options = {}) {
 
   const error = geolocationError => {
     if (settled) return
-    if (!_captureSessionRequestIsCurrent(requestToken)) {
+    if (!_requestIsCurrent(requestToken, outcomeGeneration)) {
       finish(_cloneLocationState())
       return
     }
-    finish(_setWatchErrorState(geolocationError))
+    finish(_setWatchErrorState(geolocationError, outcomeGeneration, outcomeAttempt))
   }
 
   const timeoutMs = _normalizeTimeoutMs(options.timeoutMs)
   timeoutHandle = timeoutMs >= 0
     ? setTimeout(() => {
         if (settled) return
-        if (!_captureSessionRequestIsCurrent(requestToken)) {
+        if (!_requestIsCurrent(requestToken, outcomeGeneration)) {
           finish(_cloneLocationState())
           return
         }
-        finish(_setWatchErrorState(_createTimeoutError()))
+        finish(_setWatchErrorState(_createTimeoutError(), outcomeGeneration, outcomeAttempt))
       }, timeoutMs)
     : null
 
@@ -705,13 +794,15 @@ function _requestCurrentPositionOnce(options = {}) {
       },
     )
   } catch (err) {
-    finish(_setWatchErrorState(err))
+    finish(_setWatchErrorState(err, outcomeGeneration, outcomeAttempt))
   }
 
   return promise
 }
 
 function _requestCurrentPositionWithWatchFallback(options = {}) {
+  const outcomeGeneration = options.sessionGeneration ?? locationOutcomeGeneration
+  const outcomeAttempt = options.attemptId
   const watchPosition = globalThis.navigator?.geolocation?.watchPosition
   if (typeof watchPosition !== 'function') {
     return Promise.resolve(_setUnsupportedState())
@@ -746,15 +837,15 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
 
   const success = position => {
     if (settled) return
-    if (!_captureSessionRequestIsCurrent(requestToken)) {
+    if (!_requestIsCurrent(requestToken, outcomeGeneration)) {
       clearWatchSafely()
       finish(_cloneLocationState())
       return
     }
-    const fix = _acceptFix(position, { ...options, requestStartedAt })
+    const fix = _acceptFix(position, { ...options, requestStartedAt, sessionGeneration: outcomeGeneration })
     if (!fix) {
       clearWatchSafely()
-      finish(_setWatchErrorState(_createInvalidFixError()))
+      finish(_setWatchErrorState(_createInvalidFixError(), outcomeGeneration, outcomeAttempt))
       return
     }
     clearWatchSafely()
@@ -763,13 +854,13 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
 
   const error = geolocationError => {
     if (settled) return
-    if (!_captureSessionRequestIsCurrent(requestToken)) {
+    if (!_requestIsCurrent(requestToken, outcomeGeneration)) {
       clearWatchSafely()
       finish(_cloneLocationState())
       return
     }
     clearWatchSafely()
-    finish(_setWatchErrorState(geolocationError))
+    finish(_setWatchErrorState(geolocationError, outcomeGeneration, outcomeAttempt))
   }
 
   try {
@@ -790,7 +881,7 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
     }
     if (settled) return promise
   } catch (err) {
-    finish(_setWatchErrorState(err))
+    finish(_setWatchErrorState(err, outcomeGeneration, outcomeAttempt))
     return promise
   }
 
@@ -798,13 +889,13 @@ function _requestCurrentPositionWithWatchFallback(options = {}) {
   timeoutHandle = timeoutMs >= 0
     ? setTimeout(() => {
         if (settled) return
-        if (!_captureSessionRequestIsCurrent(requestToken)) {
+        if (!_requestIsCurrent(requestToken, outcomeGeneration)) {
           clearWatchSafely()
           finish(_cloneLocationState())
           return
         }
         clearWatchSafely()
-        finish(_setWatchErrorState(_createTimeoutError()))
+        finish(_setWatchErrorState(_createTimeoutError(), outcomeGeneration, outcomeAttempt))
       }, timeoutMs)
     : null
 
@@ -816,7 +907,11 @@ export function getLocationFix({ allowStale = false, maxAgeMs = LOCATION_FIX_MAX
   return _cloneFix(state.location.fix)
 }
 
-export async function checkLocationCapabilityAndPermission() {
+export async function checkLocationCapabilityAndPermission(options = {}) {
+  const sessionGeneration = options.sessionGeneration ?? locationOutcomeGeneration
+  // A standalone check is its own attempt; inside a request/watch it is that
+  // attempt's permission continuation.
+  const attemptId = options.attemptId ?? _beginLocationAttempt()
   if (!_supportsGeolocation()) {
     return _setUnsupportedState()
   }
@@ -825,11 +920,16 @@ export async function checkLocationCapabilityAndPermission() {
   const permission = _updatePermissionSnapshot(await _queryPermissionState())
 
   if (permission === 'denied') {
-    return _setDeniedState()
+    // The query started in `sessionGeneration`; a session change during the
+    // await makes it stale for session state.
+    return _setDeniedState(_createDeniedError(), sessionGeneration, attemptId)
   }
 
   _pruneStaleGlobalFix()
-  if (state.location.watchId == null) {
+  // Only the owning (current) attempt may reset acquisition status; a
+  // superseded permission continuation must not clobber a newer attempt's
+  // locating/timeout state.
+  if (state.location.watchId == null && _sessionScopeIsCurrent(sessionGeneration) && _attemptIsCurrent(attemptId)) {
     state.location.status = state.location.fix ? 'fix' : 'idle'
     state.location.error = null
   }
@@ -842,10 +942,21 @@ export async function startLocationWatch(options = {}) {
     return _stateAfterAcquireBlocked()
   }
 
-  const snapshot = await checkLocationCapabilityAndPermission()
+  // An already-running watch is reused below without starting an attempt, so
+  // it must not supersede in-flight attempts.
+  if (state.location.watchId != null && options.force !== true) {
+    return _cloneLocationState()
+  }
+  const sessionGeneration = locationOutcomeGeneration
+  const attemptId = _beginLocationAttempt()
+  const snapshot = await checkLocationCapabilityAndPermission({ sessionGeneration, attemptId })
   if (snapshot.capability === 'unsupported' || snapshot.permission === 'denied') {
     return snapshot
   }
+  // The session this watch was requested for has ended or been replaced, or a
+  // newer attempt superseded this one while its permission check was pending:
+  // it must not start acquisition or reclaim acquisition state.
+  if (!_sessionScopeIsCurrent(sessionGeneration) || !_attemptIsCurrent(attemptId)) return _cloneLocationState()
 
   if (state.location.watchId != null && options.force !== true) {
     return _cloneLocationState()
@@ -863,6 +974,8 @@ export async function startLocationWatch(options = {}) {
   const watchStart = _callWatchPosition({
     acceptedFixMaxAgeMs: options.acceptedFixMaxAgeMs,
     captureSessionRequestToken: options.captureSessionRequestToken ?? null,
+    sessionGeneration,
+    attemptId,
     positionOptions: {
       enableHighAccuracy: options.enableHighAccuracy !== false,
       maximumAge: options.maximumAgeMs !== undefined ? _normalizeMaxAgeMs(options.maximumAgeMs) : 0,
@@ -888,6 +1001,8 @@ export async function startLocationWatch(options = {}) {
     _armFreshFixAcquisitionTimer(
       watchStart.watchId,
       options.acquisitionTimeoutMs ?? LOCATION_FRESH_FIX_ACQUISITION_TIMEOUT_MS,
+      sessionGeneration,
+      attemptId,
     )
   }
 
@@ -899,10 +1014,16 @@ export async function requestFreshLocation(options = {}) {
     return _stateAfterAcquireBlocked()
   }
 
-  const snapshot = await checkLocationCapabilityAndPermission()
+  const sessionGeneration = locationOutcomeGeneration
+  const attemptId = _beginLocationAttempt()
+  const snapshot = await checkLocationCapabilityAndPermission({ sessionGeneration, attemptId })
   if (snapshot.capability === 'unsupported' || snapshot.permission === 'denied') {
     return snapshot
   }
+  // The session this request was made for has ended or been replaced, or a
+  // newer attempt superseded this one while its permission check was pending:
+  // it must not start acquisition or reclaim acquisition state.
+  if (!_sessionScopeIsCurrent(sessionGeneration) || !_attemptIsCurrent(attemptId)) return _cloneLocationState()
 
   state.captureSessionLocation.requestingFreshFix = true
   state.location.status = 'locating'
@@ -915,6 +1036,8 @@ export async function requestFreshLocation(options = {}) {
     timeoutMs: options.timeoutMs,
     enableHighAccuracy: options.enableHighAccuracy,
     captureSessionRequestToken: options.captureSessionRequestToken ?? null,
+    sessionGeneration,
+    attemptId,
   })
 
   if (currentPositionRequest) return currentPositionRequest
@@ -925,6 +1048,8 @@ export async function requestFreshLocation(options = {}) {
     timeoutMs: options.timeoutMs,
     enableHighAccuracy: options.enableHighAccuracy,
     captureSessionRequestToken: options.captureSessionRequestToken ?? null,
+    sessionGeneration,
+    attemptId,
   })
 }
 
@@ -948,6 +1073,9 @@ export function beginCaptureLocationSession(options = {}) {
   if (!state.captureSessionLocation.sessionStartAt) {
     state.sessionStart = sessionStart
     state.captureSessionLocation.sessionStartAt = sessionStart
+    // New session: no outcome is carried over. Re-beginning the SAME session
+    // (preflight "continue" after a denial) keeps the observed outcome.
+    _resetSessionLocationOutcome()
   }
   state.captureSessionLocation.fix = null
   state.captureSessionLocation.requestingFreshFix = false
@@ -1031,6 +1159,7 @@ export function endCaptureLocationSession() {
   state.captureSessionLocation.fix = null
   state.captureSessionLocation.requestingFreshFix = false
   state.captureSessionLocation.captureWindowEndAt = null
+  _resetSessionLocationOutcome()
   _emitLocationStateChanged()
   return _cloneCaptureSessionLocation()
 }

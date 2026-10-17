@@ -16,6 +16,7 @@ import {
   __setNativeCameraForTests,
   __setNativePhotoPipelineForTests,
 } from './import_review.js'
+import { _awaitLivePhotoMetadata, _canonicalReviewSaveGps, _resolveReviewSaveProvenance } from './review.js'
 
 const defaultLocationState = () => ({
   preference: 'ask',
@@ -382,10 +383,21 @@ test('Android native New Find launches the camera immediately; GPS request runs 
   initCaptureLocationSheet()
 
   const nativeCamera = _makeNativeCameraMock()
+  // The camera stays open (session alive) until the user returns. Returning
+  // instantly would end the session and, correctly, drop the GPS request it
+  // started for that session (Stage 3 stale-session guard).
+  let closeCamera = null
+  const cameraClosed = new Promise(resolve => { closeCamera = resolve })
+  nativeCamera.capturePhotos = async options => {
+    nativeCamera.calls.capturePhotos.push(options)
+    await cameraClosed
+    return { photos: [] }
+  }
   __setNativeCameraForTests(nativeCamera)
 
   const openPromise = openNativeCamera()
   await new Promise(resolve => setImmediate(resolve))
+  await _waitFor(() => runtime.calls.getCurrentPosition === 1)
 
   // capturePhotos ran without waiting for the fix; the fix request is in flight.
   assert.equal(nativeCamera.calls.capturePhotos.length, 1)
@@ -394,6 +406,7 @@ test('Android native New Find launches the camera immediately; GPS request runs 
   assert.equal(runtime.calls.getCurrentPositionOptions[0].maximumAge, 0)
   assert.ok(typeof currentPositionSuccess === 'function', 'GPS request is still pending')
 
+  closeCamera()
   await openPromise
 })
 
@@ -410,6 +423,8 @@ test('granted location starts session, begins acquisition, then launches native 
     nativeCamera.calls.capturePhotos.push(options)
     sawSessionActive = state.captureSessionLocation.sessionStartAt instanceof Date
       && state.location.watchId === 4242
+    // The user is in the camera while the parallel GPS request starts.
+    await _waitFor(() => runtime.calls.getCurrentPosition === 1)
     return { photos: [] }
   }
 
@@ -683,6 +698,7 @@ test('Sporely Cam captures carry their private cache source path into review, on
 
   assert.equal(state.currentScreen, 'review')
   assert.deepEqual(state.capturedPhotos.map(photo => photo.nativeSourcePath), [pathA, pathB])
+  assert.deepEqual(state.capturedPhotos.map(photo => photo.ingestMethod), ['sporely_camera', 'sporely_camera'])
   await new Promise(resolve => setTimeout(resolve, 20))
 })
 
@@ -704,6 +720,7 @@ test('System camera photos are not tracked as Sporely Cam cache sources', async 
     assert.equal(state.currentScreen, 'review')
     assert.equal(state.capturedPhotos.length, 1)
     assert.equal(state.capturedPhotos[0].nativeSourcePath, null)
+    assert.equal(state.capturedPhotos[0].ingestMethod, 'system_camera')
   } finally {
     setUseSystemCamera(false)
   }
@@ -747,4 +764,139 @@ test('import review taxon dropdown and selection use the national display label'
   assert.equal((block.match(/const display = formatTaxonLabel\(r\);/g) || []).length, 2)
   assert.match(block, /session\.taxon = \{ \.\.\.r, displayName: display \}/)
   assert.doesNotMatch(block, /formatDisplayName\(/)
+})
+
+// ── Stage 3: native New Find carries each photo's own original GPS ──────────
+
+function _livePipeline({ exif = () => null, hydration = () => null } = {}) {
+  __setNativePhotoPipelineForTests({
+    async nativePickedPhotoToFile(photo, index) {
+      return new File([new Blob([`bytes-${index}`], { type: 'image/jpeg' })], photo.name || `p${index}.jpg`, {
+        type: 'image/jpeg',
+        lastModified: Date.now(),
+      })
+    },
+    async processFile(file) {
+      return { blob: file, aiBlob: file, meta: { aiCropRect: null, aiCropSourceW: 4000, aiCropSourceH: 3000, aiCropIsCustom: false } }
+    },
+    async captureNativePhotoExif(photo) { return exif(photo) },
+    createNativeMetadataHydrationPromise(photo) { return hydration(photo) },
+  })
+}
+
+async function _openSystemCameraWith({ deliverFix = null, exif, hydration }) {
+  _makeRuntime({ deliverFix })
+  initCapture()
+  initCaptureLocationSheet()
+  setLocationPreference('enabled')
+  setUseSystemCamera(true)
+  const nativeCamera = _makeNativeCameraMock({ result: { photos: [{ name: 'sys.jpg', mimeType: 'image/jpeg' }] } })
+  __setNativeCameraForTests(nativeCamera)
+  _livePipeline({ exif, hydration })
+  try {
+    await openNativeCamera()
+  } finally {
+    setUseSystemCamera(false)
+  }
+  return nativeCamera
+}
+
+async function _savePair(decision = null) {
+  await _awaitLivePhotoMetadata()
+  const gps = _canonicalReviewSaveGps()
+  return { gps, provenance: _resolveReviewSaveProvenance({ gps, decision }) }
+}
+
+test('system camera: usable original EXIF without a device fix saves image_exif/acquired', async () => {
+  await _openSystemCameraWith({ exif: () => ({ lat: 59.91, lon: 10.75, accuracy: 6, altitude: null }) })
+  assert.equal(state.capturedPhotos.length, 1)
+  assert.equal(state.capturedPhotos[0].gps.source, 'image_exif')
+  const { gps, provenance } = await _savePair()
+  assert.equal(gps.lat, 59.91)
+  assert.deepEqual(provenance, { source: 'image_exif', status: 'acquired' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+})
+
+test('system camera: missing EXIF and no fix leaves no coordinates; continuing keeps the session timeout', async () => {
+  await _openSystemCameraWith({ exif: () => ({ lat: null, lon: null }) })
+  const { gps, provenance } = await _savePair('continue')
+  assert.equal(gps, null)
+  assert.deepEqual(provenance, { source: 'none', status: 'timeout' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+})
+
+test('system camera: late original EXIF competes with the device fix in canonical selection', async () => {
+  for (const [deviceAccuracy, exifAccuracy, expected] of [[20, 5, 'image_exif'], [3, 30, 'device_gps']]) {
+    let resolveLate = null
+    const late = new Promise(resolve => { resolveLate = resolve })
+    await _openSystemCameraWith({
+      deliverFix: { lat: 63.42, lon: 10.4, accuracy: deviceAccuracy, altitude: null },
+      exif: () => ({ lat: null, lon: null }),
+      hydration: () => late,
+    })
+    // Before hydration only the device fix exists.
+    assert.equal(_canonicalReviewSaveGps().source, 'device_gps')
+    // Hydration lands after Save starts; Save must wait for it.
+    setTimeout(() => resolveLate({ lat: 63.43, lon: 10.41, accuracy: exifAccuracy, altitude: null }), 15)
+    const { provenance } = await _savePair()
+    assert.deepEqual(provenance, { source: expected, status: 'acquired' }, `device ±${deviceAccuracy} vs EXIF ±${exifAccuracy}`)
+    stopLocationWatch()
+    endCaptureLocationSession()
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+})
+
+test('Sporely Cam EXIF written from the handed device fix stays device_gps, not image_exif', async () => {
+  const fix = { lat: 61.1, lon: 9.1, accuracy: 4, altitude: null }
+  _makeRuntime({ deliverFix: fix })
+  initCapture()
+  initCaptureLocationSheet()
+  setLocationPreference('enabled')
+  const nativeCamera = _makeNativeCameraMock({ result: { photos: [{ name: 'cam.jpg', mimeType: 'image/jpeg' }] } })
+  __setNativeCameraForTests(nativeCamera)
+  // Sporely Cam writes exactly the handed GPS into EXIF.
+  _livePipeline({ exif: () => ({ lat: fix.lat, lon: fix.lon, accuracy: fix.accuracy, altitude: null }) })
+  await openNativeCamera()
+  assert.equal(nativeCamera.calls.capturePhotos[0].gps.latitude, fix.lat)
+  assert.equal(state.capturedPhotos[0].gpsFromExif, true)
+  assert.equal(state.capturedPhotos[0].gps.source, 'device_gps')
+  const { provenance } = await _savePair()
+  assert.deepEqual(provenance, { source: 'device_gps', status: 'acquired' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+})
+
+test('system camera EXIF without accuracy does not beat a measured device fix (immediate or late)', async () => {
+  const deviceFix = { lat: 63.42, lon: 10.4, accuracy: 3, altitude: null }
+  await _openSystemCameraWith({
+    deliverFix: deviceFix,
+    exif: () => ({ lat: 63.5, lon: 10.5, accuracy: null, altitude: null }),
+  })
+  assert.equal(state.capturedPhotos[0].gps.source, 'image_exif')
+  assert.equal(state.capturedPhotos[0].gps.accuracy, null)
+  let { gps, provenance } = await _savePair()
+  assert.deepEqual(provenance, { source: 'device_gps', status: 'acquired' })
+  assert.equal(gps.accuracy, 3)
+  stopLocationWatch()
+  endCaptureLocationSession()
+  await new Promise(resolve => setTimeout(resolve, 20))
+
+  let resolveLate = null
+  await _openSystemCameraWith({
+    deliverFix: deviceFix,
+    exif: () => ({ lat: null, lon: null }),
+    hydration: () => new Promise(resolve => { resolveLate = resolve }),
+  })
+  setTimeout(() => resolveLate({ lat: 63.5, lon: 10.5, accuracy: undefined, altitude: null }), 10)
+  ;({ provenance } = await _savePair())
+  assert.equal(state.capturedPhotos[0].gps.source, 'image_exif', 'late EXIF applied to the photo')
+  assert.deepEqual(provenance, { source: 'device_gps', status: 'acquired' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+})
+
+test('without a device fix, EXIF lacking accuracy is still selected (with NULL accuracy)', async () => {
+  await _openSystemCameraWith({ exif: () => ({ lat: 59.9, lon: 10.7, accuracy: null, altitude: null }) })
+  const { gps, provenance } = await _savePair()
+  assert.deepEqual(provenance, { source: 'image_exif', status: 'acquired' })
+  assert.equal(gps.accuracy, null)
+  await new Promise(resolve => setTimeout(resolve, 20))
 })

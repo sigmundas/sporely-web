@@ -9,7 +9,8 @@
 // OUTSIDE the IDB transaction to avoid auto-commit. Every operation degrades
 // gracefully (warn, never throw) — persistence failures must not block saves.
 import { debugImagePipeline } from './image-pipeline-debug.js'
-import { isBlob } from './observation-shapes.js'
+import { isBlob, normalizeIngestMethod } from './observation-shapes.js'
+import { normalizeLocationSource, normalizeSessionLocationOutcome } from './location-provenance.js'
 
 const DB_NAME = 'sporely-review-drafts'
 const DB_VERSION = 1
@@ -56,6 +57,8 @@ function _cloneGps(gps) {
     accuracy: gps.accuracy ?? null,
     altitude: gps.altitude ?? null,
     timestamp: gps.timestamp ?? null,
+    // Additive: drafts written before provenance restore as null (unknown).
+    source: normalizeLocationSource(gps.source),
   }
 }
 
@@ -90,6 +93,7 @@ export async function saveReviewDraft(draft) {
       sessionFix: _cloneGps(draft.sessionFix),
       captureDraft: draft.captureDraft ? { ...draft.captureDraft } : null,
       locationName: draft.locationName || '',
+      sessionLocationOutcome: normalizeSessionLocationOutcome(draft.sessionLocationOutcome),
       photos: entries.map(({ photo }) => ({
         ts: _tsMs(photo.ts),
         gps: _cloneGps(photo.gps),
@@ -99,6 +103,9 @@ export async function saveReviewDraft(draft) {
         aiCropSourceW: photo.aiCropSourceW ?? null,
         aiCropSourceH: photo.aiCropSourceH ?? null,
         aiCropIsCustom: photo.aiCropIsCustom === true,
+        // Additive field: drafts written before it restore as null (NULL),
+        // so no schema-version bump (which would discard them) is needed.
+        ingestMethod: normalizeIngestMethod(photo.ingestMethod),
         // Sporely Cam cache source, kept so a restored draft still exports/
         // deletes the private JPEG when the user eventually saves.
         nativeSourcePath: typeof photo.nativeSourcePath === 'string' ? photo.nativeSourcePath : null,
@@ -138,6 +145,9 @@ export async function updateReviewDraftFields(fields) {
     }
     if (fields?.captureDraft) record.captureDraft = { ...fields.captureDraft }
     if (fields?.locationName !== undefined) record.locationName = fields.locationName || ''
+    if (fields?.sessionLocationOutcome !== undefined) {
+      record.sessionLocationOutcome = normalizeSessionLocationOutcome(fields.sessionLocationOutcome)
+    }
     record.savedAt = Date.now()
     const writeTx = db.transaction(STORE, 'readwrite')
     writeTx.objectStore(STORE).put(record)
@@ -188,6 +198,7 @@ export async function loadReviewDraftStrict() {
       sessionFix: _cloneGps(record.sessionFix),
       captureDraft: record.captureDraft ? { ...record.captureDraft } : null,
       locationName: record.locationName || '',
+      sessionLocationOutcome: normalizeSessionLocationOutcome(record.sessionLocationOutcome),
       photos: record.blobs.map((buffer, index) => {
         const meta = record.photos?.[index] || {}
         const blob = new Blob([buffer], { type: record.blobTypes?.[index] || 'image/jpeg' })
@@ -206,6 +217,7 @@ export async function loadReviewDraftStrict() {
           aiCropSourceW: meta.aiCropSourceW ?? null,
           aiCropSourceH: meta.aiCropSourceH ?? null,
           aiCropIsCustom: meta.aiCropIsCustom === true,
+          ingestMethod: normalizeIngestMethod(meta.ingestMethod),
           nativeSourcePath: typeof meta.nativeSourcePath === 'string' ? meta.nativeSourcePath : null,
         }
       }),

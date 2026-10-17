@@ -9,7 +9,8 @@ import { endCameraTimingRun, markCameraStep } from '../camera-timing.js'
 import { clearIrisShutter, startPendingIrisShutter } from '../iris-shutter.js'
 import { resetReviewAiState } from './review.js'
 import { createDefaultObservationDraft } from '../observation-defaults.js'
-import { isBlob } from '../observation-shapes.js'
+import { INGEST_METHOD, isBlob } from '../observation-shapes.js'
+import { withLocationSource } from '../location-provenance.js'
 import {
   beginCaptureLocationSession,
   checkLocationCapabilityAndPermission,
@@ -95,6 +96,13 @@ export function initCapture() {
     document.getElementById('camera-denied').style.display = 'none'
     startCamera()
   })
+}
+
+// Photo GPS snapshot of the session fix, keeping the source geo.js recorded
+// when it accepted the fix (a restored untagged fix stays unknown).
+function _sessionFixSnapshot() {
+  const fix = state.captureSessionLocation.fix
+  return withLocationSource(fix, fix?.source)
 }
 
 function _normalizeCaptureLocationState() {
@@ -827,13 +835,15 @@ async function capturePhoto() {
       state.capturedPhotos.push({
         blob: null,
         blobPromise,
-        gps: state.captureSessionLocation.fix,
+        gps: _sessionFixSnapshot(),
         ts: new Date(),
         emoji,
         aiCropRect: null,
         aiCropSourceW: 800,
         aiCropSourceH: 600,
         aiCropIsCustom: false,
+        // Synthetic demo frame: never classified as a real camera capture.
+        ingestMethod: INGEST_METHOD.UNKNOWN,
       })
 
       state.batchCount++
@@ -954,13 +964,14 @@ async function capturePhoto() {
       state.capturedPhotos.push({
         blob,
         blobPromise: Promise.resolve(blob),
-        gps: state.captureSessionLocation.fix,
+        gps: _sessionFixSnapshot(),
         ts: new Date(),
         emoji: '📸',
         aiCropRect: getDefaultAiCropRect(acceptedWidth, acceptedHeight),
         aiCropSourceW: acceptedWidth,
         aiCropSourceH: acceptedHeight,
         aiCropIsCustom: false,
+        ingestMethod: INGEST_METHOD.WEB_CAMERA,
       })
 
       state.batchCount++

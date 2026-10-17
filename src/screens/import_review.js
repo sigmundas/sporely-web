@@ -9,7 +9,13 @@ import { nativeCaptureSourcePathFromNativePhoto } from '../native-capture-storag
 import { canPerformCloudMutation } from '../capabilities.js';
 import { openFinds } from './finds.js';
 import { openImportedReview } from './review.js';
-import { saveImportSessions, clearImportSessions } from '../import-store.js';
+import {
+  saveImportSessions,
+  clearImportSessions,
+  clearImportSessionsStrict,
+  deleteImportSession,
+  describePersistError,
+} from '../import-store.js';
 import { openAiCropEditor } from '../ai-crop-editor.js';
 import { revokeDebugObjectUrl, shouldCaptureDebugPreviewUrls } from '../debug-activity.js';
 import { getDefaultIdService, getDefaultVisibility, getPhotoGapMinutes, setPhotoGapMinutes, getUseSystemCamera, NATIVE_CAMERA_JPEG_QUALITY, getPhotoIdMode, resolvePhotoIdServices } from '../settings.js';
@@ -29,6 +35,16 @@ import {
 } from '../geo.js';
 import { resetReviewAiState } from './review.js';
 import {
+  LOCATION_SOURCE,
+  applyLocationProvenanceToPayload,
+  attachLatePhotoExifGps,
+  exifGpsSourceForIngest,
+  photoExifGps,
+  normalizeLocationSource,
+  resolveSaveLocationProvenance,
+  withLocationSource,
+} from '../location-provenance.js';
+import {
   isPreflightCurrent,
   nextPreflightToken,
   prepareNewFindLocation,
@@ -38,13 +54,22 @@ import {
 let _NativeCameraOverride = null;
 let _nativePhotoToFileOverride = null;
 let _processFileOverride = null;
+let _nativeExifOverride = null;
+let _nativeHydrationOverride = null;
 let importAiTestDependencies = null;
 export function __setNativeCameraForTests(mock) {
   _NativeCameraOverride = mock || null;
 }
-export function __setNativePhotoPipelineForTests({ nativePickedPhotoToFile: nptf, processFile: pf } = {}) {
+export function __setNativePhotoPipelineForTests({
+  nativePickedPhotoToFile: nptf,
+  processFile: pf,
+  captureNativePhotoExif: exif,
+  createNativeMetadataHydrationPromise: hydration,
+} = {}) {
   _nativePhotoToFileOverride = typeof nptf === 'function' ? nptf : null;
   _processFileOverride = typeof pf === 'function' ? pf : null;
+  _nativeExifOverride = typeof exif === 'function' ? exif : null;
+  _nativeHydrationOverride = typeof hydration === 'function' ? hydration : null;
 }
 export function __setImportAiTestHooks(overrides = null) {
   importAiTestDependencies = overrides && typeof overrides === 'object' ? { ...overrides } : null;
@@ -62,12 +87,32 @@ function _nativePickedPhotoToFile(...args) {
 function _processFileForCapture(...args) {
   return (_processFileOverride || processFile)(...args);
 }
+// The photo's own original EXIF; a read failure means "no EXIF GPS", never a
+// failed capture.
+async function _readLiveNativePhotoExif(photo, file, options) {
+  try {
+    return await (_nativeExifOverride || captureNativePhotoExif)(photo, file, options);
+  } catch (error) {
+    console.warn('Native camera EXIF read failed:', error);
+    return null;
+  }
+}
+function _liveNativeMetadataHydration(photo, file) {
+  try {
+    return (_nativeHydrationOverride || createNativeMetadataHydrationPromise)(photo, file);
+  } catch (error) {
+    console.warn('Native camera metadata hydration failed:', error);
+    return null;
+  }
+}
 import { debugImagePipeline } from '../image-pipeline-debug.js';
 import { getIdentifyNoMatchMessage, getIdentifyUnavailableMessage, ID_SERVICE_INATURALIST } from '../identify.js';
 import {
+  INGEST_METHOD,
   isBlob,
   isUsableCoordinate,
   hasObservationLocation,
+  normalizeIngestMethod,
   normalizeObservationGps,
 } from '../observation-shapes.js';
 import {
@@ -111,14 +156,26 @@ const importAiBatchState = {
   defaultServiceLabel: '',
 };
 
+// Groups queued by the Queue All run in progress. They stay in `sessions`
+// until the loop ends, but a snapshot taken after a group was queued must not
+// write it back: its saved session may already have been deleted.
+let queuedInCurrentSave = new Set();
+
 function _persistSessions() {
   debugImagePipeline('persist import sessions', {
     sessionCount: sessions.length,
     sourceItemCount: sourceItems.length,
   })
-  const persist = _importAiDependency('persistSessions');
-  if (persist) persist(sessions);
-  else saveImportSessions(sessions);
+  const persist = _importAiDependency('persistSessions', saveImportSessions);
+  const snapshot = queuedInCurrentSave.size
+    ? sessions.filter(s => !queuedInCurrentSave.has(s.id))
+    : sessions;
+  // The sessions stay in memory either way; a failed write only means they
+  // would not survive the app being killed. Say so instead of staying silent.
+  return Promise.resolve(persist(snapshot)).then(ok => {
+    if (ok === false) _importAiDependency('showToast', showToast)(t('import.persistFailed'));
+    return ok !== false;
+  });
 }
 
 function _renderImportAiSessions() {
@@ -558,6 +615,7 @@ function _buildImportObservationPayload(session, options = {}) {
     altitude: normalized.gpsAltitude,
     accuracy: normalized.gpsAccuracy,
   })
+  const leadGpsSource = normalizeLocationSource(normalized.gpsSource) || LOCATION_SOURCE.UNKNOWN
   const leadPhoto = {
     ts: normalized.ts || new Date(),
   }
@@ -593,16 +651,26 @@ function _buildImportObservationPayload(session, options = {}) {
     ...(taxonomySelection ? { [QUEUED_TAXONOMY_SELECTION_KEY]: taxonomySelection } : {}),
     ..._sessionObservationGeography(normalized),
   })
+  // Coordinates carry the source of the photo they were taken from. Without
+  // coordinates nothing is stamped here: only the save confirmation (an
+  // explicit skip) may add none/skipped.
+  applyLocationProvenanceToPayload(obsPayload, resolveSaveLocationProvenance({
+    gps: leadGps ? { ...leadGps, source: leadGpsSource } : null,
+  }))
 
+  // Pair each blob with its own metadata BEFORE dropping non-blob slots;
+  // indexing imageMeta after filtering would shift metadata onto the wrong
+  // photo.
   const imageEntries = normalized.files
-    .filter(blob => isBlob(blob))
     .map((blob, index) => ({
       blob,
       aiCropRect: normalized.imageMeta[index]?.aiCropRect || null,
       aiCropSourceW: normalized.imageMeta[index]?.aiCropSourceW ?? null,
       aiCropSourceH: normalized.imageMeta[index]?.aiCropSourceH ?? null,
       aiCropIsCustom: normalized.imageMeta[index]?.aiCropIsCustom === true,
+      ingestMethod: normalizeIngestMethod(normalized.imageMeta[index]?.ingestMethod),
     }))
+    .filter(entry => isBlob(entry.blob))
 
   return {
     obsPayload,
@@ -1259,6 +1327,40 @@ function _groupSourceItems(items, gapMs) {
   return grouped;
 }
 
+// One import photo: its blob, AI blob and metadata (crop + ingestMethod)
+// stay on a single object through sorting, grouping, removal and restore.
+function _buildImportSourceItem(id, item, processed, ingestMethod, overrides = {}) {
+  const normalizedIngestMethod = normalizeIngestMethod(ingestMethod) || INGEST_METHOD.UNKNOWN;
+  return {
+    id,
+    // Source of this photo's own EXIF GPS (Sporely Cam: the fix Sporely wrote).
+    gpsSource: exifGpsSourceForIngest(normalizedIngestMethod, item.writtenGpsSource),
+    blob: processed.blob,
+    aiBlob: processed.aiBlob || processed.blob,
+    meta: { ...processed.meta, ingestMethod: normalizedIngestMethod },
+    metadataPromise: item.metadataPromise || null,
+    captureTime: item.captureTime,
+    lat: item.lat ?? null,
+    lon: item.lon ?? null,
+    altitude: item.altitude ?? null,
+    accuracy: item.accuracy ?? null,
+    dbg: item.dbg || null,
+    ...overrides,
+  };
+}
+
+function _sortByCaptureTime(items) {
+  return items.sort((a, b) => a.captureTime - b.captureTime);
+}
+
+// Drop rejected photos by source-item id and regroup the survivors. Each
+// survivor keeps its own blob/meta object, so per-photo metadata cannot shift.
+function _removeSourceItemsAndRegroup(removeIds) {
+  const ids = new Set(removeIds || []);
+  sourceItems = sourceItems.filter(item => !ids.has(item.id));
+  _buildSessionsFromSourceItems();
+}
+
 function _groupKey(items) {
   return (items || []).map(item => item.id).join('|');
 }
@@ -1293,11 +1395,12 @@ function _buildSessionsFromSourceItems() {
       imageMeta: group.map(item => item.meta),
       metadataPromises: group.map(item => item.metadataPromise || null),
       photoTimes: group.map(item => item.captureTime),
-      photoGps: group.map(item => ({ lat: item.lat, lon: item.lon, altitude: item.altitude ?? null, accuracy: item.accuracy ?? null })),
+      photoGps: group.map(item => ({ lat: item.lat, lon: item.lon, altitude: item.altitude ?? null, accuracy: item.accuracy ?? null, source: normalizeLocationSource(item.gpsSource) })),
       photoDebug: group.map(item => item.dbg || null),
       ts: new Date(group[0].captureTime),
       gpsLat: exifGps?.lat ?? null,
       gpsLon: exifGps?.lon ?? null,
+      gpsSource: exifGps ? normalizeLocationSource(exifGps.gpsSource) : null,
       gpsAltitude: sessionAltitude,
       gpsAccuracy: sessionAccuracy,
       locationName: previous?.locationName || '',
@@ -1334,6 +1437,7 @@ function _flattenSourceItemsFromSessions(savedSessions) {
         aiCropSourceW: null,
         aiCropSourceH: null,
         aiCropIsCustom: false,
+        ingestMethod: null,
       },
       metadataPromise: session.metadataPromises?.[index] || null,
       captureTime: session.photoTimes?.[index] || session.ts?.getTime?.() || Date.now(),
@@ -1341,9 +1445,20 @@ function _flattenSourceItemsFromSessions(savedSessions) {
       lon: session.photoGps?.[index]?.lon ?? null,
       altitude: session.photoGps?.[index]?.altitude ?? null,
       accuracy: session.photoGps?.[index]?.accuracy ?? null,
+      gpsSource: normalizeLocationSource(session.photoGps?.[index]?.source),
       dbg: session.photoDebug?.[index] || null,
     }))
   );
+}
+
+// The user explicitly confirmed saving these groups without a location.
+// Imports never attempt GPS, so there is no failure to preserve: none/skipped.
+// Groups that only have a place name were not part of that confirmation.
+function _stampConfirmedImportSkips(queuedSessions) {
+  queuedSessions.forEach(({ obsPayload }) => {
+    if (!obsPayload || hasObservationLocation(obsPayload)) return
+    applyLocationProvenanceToPayload(obsPayload, resolveSaveLocationProvenance({ decision: 'continue' }))
+  })
 }
 
 function _ensureSessionImageMeta(session) {
@@ -1355,6 +1470,7 @@ function _ensureSessionImageMeta(session) {
       aiCropSourceW: null,
       aiCropSourceH: null,
       aiCropIsCustom: false,
+      ingestMethod: null,
     });
   }
   return session.imageMeta;
@@ -1408,8 +1524,11 @@ function _applyMetadataToSession(session, index, metadata) {
   session.photoGps[index] = nextPhotoGps
 
   if (hasGps && (session.gpsLat === null || session.gpsLon === null)) {
+    // Late EXIF wins the session location only here, so only here does the
+    // session take this photo's source.
     session.gpsLat = lat
     session.gpsLon = lon
+    session.gpsSource = normalizeLocationSource(nextPhotoGps.source)
     if (session.gpsAltitude == null && Number.isFinite(altitude)) session.gpsAltitude = altitude
     if (session.gpsAccuracy == null && Number.isFinite(accuracy)) session.gpsAccuracy = accuracy
     changed = true
@@ -1489,36 +1608,45 @@ function _applyImportPhotoGapChange(value) {
   expandedSessionIds = new Set();
   _abortImportAiRuns();
   _buildSessionsFromSourceItems();
-  if (sessions.length === 1) {
-    const session = sessions[0];
-    _disposeSessionBlobUrls([session]);
-    sessions = [];
-    expandedSessionIds = new Set();
-    sourceItems = [];
-    clearImportSessions();
-    openImportedReview(session);
-    return;
-  }
+  // Groups merged into one stay in this persisted review. Handing the merged
+  // group to the single Review screen would clear pending_import without
+  // queueing it, and that screen does not persist imported reviews.
   if (!sessions.length) {
     clearImportSessions();
     navigate('home');
     return;
   }
   _persistSessions();
-  renderSessions();
+  _importAiDependency('renderSessions', renderSessions)();
   _prefillSessionLocations();
 }
 
+export function __applyImportPhotoGapChangeForTests(value) {
+  return _applyImportPhotoGapChange(value);
+}
+
+// Home and Cancel both discard the review. Groups with photos may be the only
+// copy of an unqueued import, so discarding them needs the user's consent;
+// declining leaves memory, the stored sessions and the screen untouched.
 function _cancelImport() {
   if (importAiBatchState.running) return;
+  const groupCount = sessions.filter(s => s.files?.length > 0).length;
+  if (groupCount > 0) {
+    const confirmDiscard = _importAiDependency('confirm', message => window.confirm(message));
+    if (!confirmDiscard(t('import.discardConfirm', { groups: tp('counts.group', groupCount) }))) return;
+  }
   _abortImportAiRuns();
   _disposeSessionBlobUrls();
-  clearImportSessions();
+  _importAiDependency('clearImportSessions', clearImportSessions)();
   sessions = [];
   expandedSessionIds = new Set();
   sourceItems = [];
   _resetImportAiBatchState();
-  navigate('home');
+  _importAiDependency('navigate', navigate)('home');
+}
+
+export function __cancelImportForTests() {
+  return _cancelImport();
 }
 
 // Restore a previously-saved import session (app was killed mid-review)
@@ -1614,14 +1742,23 @@ export async function openNativeCamera() {
 
   try {
     let result
+    let ingestMethod
+    // Sporely Cam writes exactly `gps` into its EXIF; the system camera writes
+    // its own original GPS (image_exif).
+    let writtenGpsSource = null
     if (getUseSystemCamera()) {
+      ingestMethod = INGEST_METHOD.SYSTEM_CAMERA
       playIrisShutter({ mode: 'quick' })
       markCameraStep('nativeCamera.openSystemCamera:start')
       result = await _nativeCamera().openSystemCamera()
       markCameraStep('nativeCamera.openSystemCamera:end')
     } else {
+      ingestMethod = INGEST_METHOD.SPORELY_CAMERA
       const options = { jpegQuality: NATIVE_CAMERA_JPEG_QUALITY }
-      if (gps) options.gps = gps
+      if (gps) {
+        options.gps = gps
+        writtenGpsSource = normalizeLocationSource(sessionFix?.source) || LOCATION_SOURCE.UNKNOWN
+      }
       debugImagePipeline('android native camera capture requested', {
         screenPath: 'new-find:native-camera',
         captureSource: 'Sporely native camera',
@@ -1651,7 +1788,7 @@ export async function openNativeCamera() {
     // hadn't resolved by the time capturePhotos returned; no second request
     // is needed here.)
     markCameraStep('handleNativePhotoResultAsLive:start')
-    await _handleNativePhotoResultAsLive(result)
+    await _handleNativePhotoResultAsLive(result, ingestMethod, { writtenGpsSource })
     markCameraStep('handleNativePhotoResultAsLive:end')
   } catch (err) {
     if (isPickerCancel(err)) {
@@ -1681,7 +1818,9 @@ async function _requestInitialNativeCameraLocation() {
   }
 }
 
-async function _handleNativePhotoResultAsLive(result) {
+// `ingestMethod` comes from the camera branch the caller actually opened;
+// the `captureSource` label below is debug-only.
+async function _handleNativePhotoResultAsLive(result, ingestMethod = INGEST_METHOD.UNKNOWN, { writtenGpsSource = null } = {}) {
   const photos = Array.isArray(result?.photos) ? result.photos
     : Array.isArray(result?.files) ? result.files
       : []
@@ -1693,12 +1832,12 @@ async function _handleNativePhotoResultAsLive(result) {
   _setProgress(0, photos.length, t('import.readingFiles'))
 
   const files = []
+  const exifs = []
   for (let i = 0; i < photos.length; i++) {
     _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }))
-    files.push(await _nativePickedPhotoToFile(photos[i], i, {
-      captureSource: 'Sporely native camera',
-      screenPath: 'new-find:native-camera',
-    }))
+    const debugOptions = { captureSource: 'Sporely native camera', screenPath: 'new-find:native-camera' }
+    files.push(await _nativePickedPhotoToFile(photos[i], i, debugOptions))
+    exifs.push(await _readLiveNativePhotoExif(photos[i], files[i], debugOptions))
   }
 
   const processed = []
@@ -1711,22 +1850,38 @@ async function _handleNativePhotoResultAsLive(result) {
 
   const sessionFix = state.captureSessionLocation.fix
   const capturedAt = new Date()
-  state.capturedPhotos = processed.map((entry, index) => ({
-    blob: entry.blob,
-    aiBlob: entry.aiBlob || entry.blob,
-    blobPromise: Promise.resolve(entry.blob),
-    gps: sessionFix ? { ...sessionFix } : null,
-    ts: capturedAt,
-    emoji: '📸',
-    aiCropRect: entry.meta?.aiCropRect || null,
-    aiCropSourceW: entry.meta?.aiCropSourceW ?? null,
-    aiCropSourceH: entry.meta?.aiCropSourceH ?? null,
-    aiCropIsCustom: entry.meta?.aiCropIsCustom === true,
-    // Sporely Cam only (null for the system camera): the private cache JPEG
-    // that review Save exports/deletes once the queue owns the bytes.
-    nativeSourcePath: nativeCaptureSourcePathFromNativePhoto(photos[index]),
-    _nativePhotoIndex: index,
-  }))
+  const normalizedIngestMethod = normalizeIngestMethod(ingestMethod) || INGEST_METHOD.UNKNOWN
+  const exifGpsSource = exifGpsSourceForIngest(normalizedIngestMethod, writtenGpsSource)
+  state.capturedPhotos = processed.map((entry, index) => {
+    // The photo's own original GPS competes with the session fix in canonical
+    // selection at save; without it the photo keeps the session snapshot.
+    const exifGps = photoExifGps(exifs[index], exifGpsSource)
+    const photo = {
+      blob: entry.blob,
+      aiBlob: entry.aiBlob || entry.blob,
+      blobPromise: Promise.resolve(entry.blob),
+      gps: exifGps || withLocationSource(sessionFix, sessionFix?.source),
+      gpsFromExif: !!exifGps,
+      ts: capturedAt,
+      emoji: '📸',
+      aiCropRect: entry.meta?.aiCropRect || null,
+      aiCropSourceW: entry.meta?.aiCropSourceW ?? null,
+      aiCropSourceH: entry.meta?.aiCropSourceH ?? null,
+      aiCropIsCustom: entry.meta?.aiCropIsCustom === true,
+      ingestMethod: normalizedIngestMethod,
+      // Sporely Cam only (null for the system camera): the private cache JPEG
+      // that review Save exports/deletes once the queue owns the bytes.
+      nativeSourcePath: nativeCaptureSourcePathFromNativePhoto(photos[index]),
+      _nativePhotoIndex: index,
+    }
+    // Late original EXIF (review Save awaits it before choosing a location).
+    photo.metadataPromise = attachLatePhotoExifGps(
+      photo,
+      _liveNativeMetadataHydration(photos[index], files[index]),
+      exifGpsSource,
+    )
+    return photo
+  })
   state.batchCount = state.capturedPhotos.length
   state.captureDraft = createDefaultObservationDraft()
   state.reviewContext = null
@@ -1751,7 +1906,7 @@ async function _handleNativePhotoResult(result) {
     fileCount: files.length,
     fileSizes: files.map(file => file?.size || 0),
   })
-  await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos });
+  await _handleSelectedFilesWithFeedback(files, { nativePhotos: photos, ingestMethod: INGEST_METHOD.NATIVE_PICKER });
 }
 
 export async function openFileImportPicker() {
@@ -1784,7 +1939,7 @@ export async function openFileImportPicker() {
         }],
       });
       const files = await Promise.all(handles.map(handle => handle.getFile()));
-      await _handleSelectedFilesWithFeedback(files);
+      await _handleSelectedFilesWithFeedback(files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER });
       return;
     } catch (err) {
       if (err?.name !== 'AbortError') {
@@ -1801,12 +1956,14 @@ export async function openFileImportPicker() {
 export async function handleFileSelect(event) {
   const files = Array.from(event.target.files || []);
   if (event.target) event.target.value = '';
-  await _handleSelectedFilesWithFeedback(files);
+  // Both import inputs are plain browser file pickers (no `capture`).
+  await _handleSelectedFilesWithFeedback(files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER });
 }
 
 async function handleSelectedFiles(files, options = {}) {
   if (!files.length) return;
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
+  const ingestMethod = normalizeIngestMethod(options.ingestMethod) || INGEST_METHOD.UNKNOWN;
   const supportedSelection = _filterUnsupportedBrowserFiles(files, nativePhotos);
   const supportedFiles = supportedSelection.files;
   const supportedNativePhotos = supportedSelection.nativePhotos;
@@ -1842,7 +1999,7 @@ async function handleSelectedFiles(files, options = {}) {
   }));
 
   // Sort by actual capture time
-  withTimes.sort((a, b) => a.captureTime - b.captureTime);
+  _sortByCaptureTime(withTimes);
 
   // Convert to JPEG sequentially — avoids exhausting mobile memory with parallel decodes.
   _disposeSessionBlobUrls();
@@ -1854,19 +2011,7 @@ async function handleSelectedFiles(files, options = {}) {
     const item = withTimes[idx];
     _setProgress(doneCount, supportedFiles.length, t('import.convertingFile', { current: doneCount + 1, total: supportedFiles.length }));
     const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
-    sourceItems.push({
-      id: `i${idx}`,
-      blob: processed.blob,
-      aiBlob: processed.aiBlob || processed.blob,
-      meta: processed.meta,
-      metadataPromise: item.metadataPromise || null,
-      captureTime: item.captureTime,
-      lat: item.lat ?? null,
-      lon: item.lon ?? null,
-      altitude: item.altitude ?? null,
-      accuracy: item.accuracy ?? null,
-      dbg: item.dbg || null,
-    });
+    sourceItems.push(_buildImportSourceItem(`i${idx}`, item, processed, ingestMethod));
     doneCount++;
   }
 
@@ -2039,10 +2184,8 @@ export function renderSessions() {
       const sid = btn.dataset.sid;
       const session = sessionById(sid);
       if (session) {
-        const removeIds = new Set(session.sourceItemIds || []);
-        sourceItems = sourceItems.filter(item => !removeIds.has(item.id));
         expandedSessionIds.delete(sid);
-        _buildSessionsFromSourceItems();
+        _removeSourceItemsAndRegroup(session.sourceItemIds || []);
         if (!sessions.length) clearImportSessions();
         else _persistSessions();
         renderSessions();
@@ -2059,11 +2202,8 @@ export function renderSessions() {
       const session = sessionById(sid);
       if (!session) return;
       const removeId = session.sourceItemIds?.[idx];
-      if (removeId) {
-        sourceItems = sourceItems.filter(item => item.id !== removeId);
-      }
       if (session.files.length <= 1) expandedSessionIds.delete(sid);
-      _buildSessionsFromSourceItems();
+      _removeSourceItemsAndRegroup(removeId ? [removeId] : []);
       if (!sessions.length) clearImportSessions();
       else _persistSessions();
       renderSessions();
@@ -2459,11 +2599,31 @@ async function _openFileImportForSession(sid) {
     input.accept = '.jpg,.jpeg,.png,.webp,.avif,.heic,.heif,image/jpeg,image/png,image/webp,image/avif,image/heic,image/heif'
   }
   input.onchange = async event => {
-    const files = Array.from(event.target.files || [])
+    const picked = Array.from(event.target.files || [])
+    if (!picked.length) return
+    const files = await _snapshotPickedFiles(picked)
+    if (files.length < picked.length) showToast(t('import.fileUnreadable'))
     if (!files.length) return
-    await _addFilesToSession(sid, files)
+    await _addFilesToSession(sid, files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER })
   }
   input.click()
+}
+
+// A File from an <input type=file> in the Android WebView is a lazy reference
+// to a content:// document. Reading it again much later (session save, queue
+// write) can fail with a DOMException, so copy the bytes while the pick is
+// fresh. Files that cannot be read are reported and left out.
+async function _snapshotPickedFiles(files) {
+  const out = []
+  for (const file of files) {
+    try {
+      const bytes = await file.arrayBuffer()
+      out.push(new File([bytes], file.name || 'image.jpg', { type: file.type || '', lastModified: file.lastModified || Date.now() }))
+    } catch (err) {
+      console.warn('Picked file could not be read:', describePersistError(err))
+    }
+  }
+  return out
 }
 
 function _openSessionCropEditor(session, startIndex = 0) {
@@ -2492,6 +2652,17 @@ function _openSessionCropEditor(session, startIndex = 0) {
 }
 
 async function saveAll() {
+  queuedInCurrentSave = new Set();
+  try {
+    await _runSaveAll();
+  } finally {
+    // By now `sessions` no longer holds the queued groups (kept groups only,
+    // or none), so later snapshots need no filter.
+    queuedInCurrentSave = new Set();
+  }
+}
+
+async function _runSaveAll() {
   if (importAiBatchState.running) return;
   const saveBtn = document.getElementById('import-save-btn');
   saveBtn.disabled = true;
@@ -2506,6 +2677,7 @@ async function saveAll() {
   const allBlobUrls = sessions.flatMap(s => s.blobUrls);
   let savedCount = 0;
   const queuedSessions = [];
+  const failedSessionIds = new Set();
   let missingLocation = false;
 
   _setProgress(0, activeSessions.length, t('import.processing'));
@@ -2520,13 +2692,17 @@ async function saveAll() {
       const { obsPayload, imageEntries } = _buildImportObservationPayload(session, {
         userId: state.user.id,
       })
-      if (!obsPayload) continue
+      if (!obsPayload) {
+        // Nothing to queue: keep the group rather than drop it unqueued.
+        failedSessionIds.add(session.id);
+        continue
+      }
 
       queuedSessions.push({ session, obsPayload, imageEntries })
       if (!hasObservationLocation(obsPayload)) missingLocation = true
     } catch (err) {
       console.error('Failed to save session', session.id, err);
-      showToast(t('import.failedOneGroup'));
+      failedSessionIds.add(session.id);
     }
   }
 
@@ -2542,21 +2718,74 @@ async function saveAll() {
       saveBtn.disabled = false;
       return;
     }
+    _stampConfirmedImportSkips(queuedSessions)
   }
 
   // Local-first: enqueueObservation persists to IndexedDB only. A failure
   // here is a genuine LOCAL persistence problem (quota/serialization) —
-  // surface it per-group and keep the remaining groups going.
+  // surface it per-group and keep the remaining groups going. A group that
+  // was not queued stays in the review so it can be retried; it is never
+  // cleared, and its failure is never replaced by a success message.
+  //
+  // A queued group is removed from the stored sessions before the next group
+  // is queued, so a restart mid-loop restores only unqueued groups. The
+  // enqueue resolves only after its strict-durability transaction committed.
+  // The window between that commit and this delete committing is the accepted
+  // residual (a duplicate, never a loss); see
+  // docs/verification/2026-10-android-import-recovery.md.
+  const enqueue = _importAiDependency('enqueueObservation', enqueueObservation);
+  const removeStoredSession = _importAiDependency('deleteImportSession', deleteImportSession);
+  let deleteFailed = false;
   for (let i = 0; i < queuedSessions.length; i++) {
-    const { obsPayload, imageEntries } = queuedSessions[i];
+    const { session, obsPayload, imageEntries } = queuedSessions[i];
+    let queued = false;
     try {
-      await enqueueObservation(obsPayload, imageEntries);
+      await enqueue(obsPayload, imageEntries);
       savedCount++;
+      queued = true;
+      // Before the delete is requested: any snapshot from here on omits it.
+      queuedInCurrentSave.add(session.id);
     } catch (err) {
-      console.error('Failed to queue import group locally:', err);
-      showToast(t('import.failedOneGroup'));
+      failedSessionIds.add(session.id);
+      console.error('Failed to queue import group locally:', describePersistError(err));
+    }
+    if (queued) {
+      let removed = false;
+      try {
+        removed = await removeStoredSession(session.id);
+      } catch (err) {
+        console.error('Failed to remove queued import group from saved sessions:', describePersistError(err));
+      }
+      if (removed !== true) {
+        // Never re-queue: the group is queued. The rewrite or the strict
+        // clear below repairs the saved sessions; the user is told either way.
+        deleteFailed = true;
+        console.error('Queued import group is still in the saved sessions:', session.id);
+      }
     }
     _setProgress(i + 1, queuedSessions.length, t('import.processing'));
+  }
+
+  const toast = _importAiDependency('showToast', showToast);
+  const keptSessions = sessions.filter(s => failedSessionIds.has(s.id));
+  if (keptSessions.length) {
+    const doneSessions = sessions.filter(s => !keptSessions.includes(s));
+    const doneSourceIds = new Set(doneSessions.flatMap(s => s.sourceItemIds || []));
+    _disposeSessionBlobUrls(doneSessions);
+    sessions = keptSessions;
+    sourceItems = sourceItems.filter(item => !doneSourceIds.has(item.id));
+    expandedSessionIds = new Set([...expandedSessionIds].filter(id => keptSessions.some(s => s.id === id)));
+    _hideProgress();
+    saveBtn.disabled = false;
+    toast(savedCount > 0
+      ? t('import.partiallyQueued', { count: tp('counts.observation', savedCount), failed: keptSessions.length })
+      : t('import.notQueued', { failed: keptSessions.length }));
+    // A failed rewrite warns inside _persistSessions; a rewrite that repaired
+    // a failed delete still says so.
+    const rewritten = await _persistSessions();
+    if (rewritten && deleteFailed) toast(t('import.queuedCleanupRepaired', { count: tp('counts.observation', savedCount) }));
+    _importAiDependency('renderSessions', renderSessions)();
+    return;
   }
 
   allBlobUrls.forEach(url => URL.revokeObjectURL(url));
@@ -2564,18 +2793,40 @@ async function saveAll() {
   sessions = [];
   expandedSessionIds = new Set();
   sourceItems = [];
-  clearImportSessions();
-  if (savedCount > 0) showToast(t('import.saved', { count: tp('counts.observation', savedCount) }));
+  // Strict: a clear that silently failed would restore the whole queued batch
+  // on the next launch, inviting a second Queue All.
+  let cleared = true;
+  try {
+    await _importAiDependency('clearImportSessionsStrict', clearImportSessionsStrict)();
+  } catch (err) {
+    cleared = false;
+    console.error('Failed to clear saved import sessions after queueing:', describePersistError(err));
+  }
+  if (!cleared) toast(t('import.queuedClearFailed', { count: tp('counts.observation', savedCount) }));
+  else if (deleteFailed) toast(t('import.queuedCleanupRepaired', { count: tp('counts.observation', savedCount) }));
+  else if (savedCount > 0) toast(t('import.saved', { count: tp('counts.observation', savedCount) }));
   _hideProgress();
   saveBtn.disabled = false;
   // Post-save navigation may hit the network when COMPLETE; the
   // observations are already durably queued — never let this failure look
   // like a save failure.
   try {
-    await openFinds('mine', { resetSearch: true });
+    await _importAiDependency('openFinds', openFinds)('mine', { resetSearch: true });
   } catch (err) {
     console.warn('Post-save Finds navigation failed (observations are queued):', err);
   }
+}
+
+export function __persistSessionsForTests() {
+  return _persistSessions();
+}
+
+export function __saveAllForTests() {
+  return saveAll();
+}
+
+export function __getImportSessionsForTests() {
+  return sessions;
 }
 
 function _getScaledSize(width, height, maxEdge) {
@@ -2660,7 +2911,7 @@ async function _openCameraForSession(sid) {
           _setProgress(i, photos.length, t('import.importingFile', { current: i + 1, total: photos.length }));
           files.push(await nativePickedPhotoToFile(photos[i], i));
         }
-        await _addFilesToSession(sid, files, { nativePhotos: photos });
+        await _addFilesToSession(sid, files, { nativePhotos: photos, ingestMethod: INGEST_METHOD.SYSTEM_CAMERA });
         return;
       }
 
@@ -2701,7 +2952,12 @@ async function _openCameraForSession(sid) {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addFilesToSession(sid, files, { nativePhotos: photos });
+      // Sporely Cam writes exactly this device fix into the photo's EXIF.
+      await _addFilesToSession(sid, files, {
+        nativePhotos: photos,
+        ingestMethod: INGEST_METHOD.SPORELY_CAMERA,
+        writtenGpsSource: gps ? LOCATION_SOURCE.DEVICE_GPS : null,
+      });
     } catch (err) {
       if (isPickerCancel(err)) return;
       showToast(`Sporely Cam: ${err?.message || err}`);
@@ -2715,7 +2971,9 @@ async function _openCameraForSession(sid) {
     input.onchange = async (e) => {
       const files = Array.from(e.target.files || []);
       if (!files.length) return;
-      await _addFilesToSession(sid, files);
+      // A `capture` file input may open a camera app or a file chooser
+      // depending on the browser; the entry point cannot be classified.
+      await _addFilesToSession(sid, files, { ingestMethod: INGEST_METHOD.UNKNOWN });
     };
     input.click();
   }
@@ -2748,7 +3006,7 @@ async function _openPickerForSession(sid) {
         fileCount: files.length,
         fileSizes: files.map(file => file?.size || 0),
       })
-      await _addFilesToSession(sid, files, { nativePhotos: photos });
+      await _addFilesToSession(sid, files, { nativePhotos: photos, ingestMethod: INGEST_METHOD.NATIVE_PICKER });
       return;
     } catch (err) {
       if (isPickerCancel(err)) return;
@@ -2766,7 +3024,7 @@ async function _openPickerForSession(sid) {
   input.onchange = async (e) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    await _addFilesToSession(sid, files);
+    await _addFilesToSession(sid, files, { ingestMethod: INGEST_METHOD.WEB_FILE_PICKER });
   };
   input.click();
 }
@@ -2775,6 +3033,7 @@ async function _addFilesToSession(sid, files, options = {}) {
   const session = sessionById(sid);
   if (!session || !files.length) return;
   const nativePhotos = Array.isArray(options.nativePhotos) ? options.nativePhotos : [];
+  const ingestMethod = normalizeIngestMethod(options.ingestMethod) || INGEST_METHOD.UNKNOWN;
   _setProgress(0, files.length, t('import.readingTimestamps'));
   
   const withTimes = await Promise.all(files.map(async (f, idx) => {
@@ -2792,19 +3051,9 @@ async function _addFilesToSession(sid, files, options = {}) {
     const item = withTimes[idx];
     _setProgress(doneCount, files.length, t('import.convertingFile', { current: doneCount + 1, total: files.length }));
     const processed = await processFile(item.file, { nativePhoto: item.nativePhoto });
-    const newItem = {
-      id: `i_add_${Date.now()}_${idx}`,
-      blob: processed.blob,
-      aiBlob: processed.aiBlob || processed.blob,
-      meta: processed.meta,
-      metadataPromise: item.metadataPromise || null,
+    const newItem = _buildImportSourceItem(`i_add_${Date.now()}_${idx}`, { ...item, writtenGpsSource: options.writtenGpsSource }, processed, ingestMethod, {
       captureTime: session.ts.getTime(), // Force to match session so it is not ripped out by photo gap
-      lat: item.lat ?? null,
-      lon: item.lon ?? null,
-      altitude: item.altitude ?? null,
-      accuracy: item.accuracy ?? null,
-      dbg: item.dbg || null,
-    };
+    });
     sourceItems.push(newItem);
     session.sourceItemIds.push(newItem.id);
     session.files.push(newItem.blob);
@@ -2813,12 +3062,13 @@ async function _addFilesToSession(sid, files, options = {}) {
     session.imageMeta.push(newItem.meta);
     session.metadataPromises.push(newItem.metadataPromise);
     session.photoTimes.push(newItem.captureTime);
-    session.photoGps.push({ lat: newItem.lat, lon: newItem.lon, altitude: newItem.altitude, accuracy: newItem.accuracy });
+    session.photoGps.push({ lat: newItem.lat, lon: newItem.lon, altitude: newItem.altitude, accuracy: newItem.accuracy, source: newItem.gpsSource });
     session.photoDebug.push(newItem.dbg);
     
     if (session.gpsLat === null && isUsableCoordinate(newItem.lat, newItem.lon)) {
       session.gpsLat = newItem.lat;
       session.gpsLon = newItem.lon;
+      session.gpsSource = newItem.gpsSource;
       session.gpsAltitude = newItem.altitude;
       session.gpsAccuracy = newItem.accuracy;
     }
@@ -2875,6 +3125,19 @@ export function __abortImportAiRunsForTests() {
   _abortImportAiRuns()
 }
 
+// Drives the production grouping over a given source-item list (as built by
+// handleSelectedFiles / restoreImportSessions) and returns the sessions.
+export function __setImportSourceItemsForTests(items = []) {
+  sourceItems = Array.isArray(items) ? items : []
+  _buildSessionsFromSourceItems()
+  return sessions
+}
+
+export function __removeImportSourceItemsForTests(removeIds = []) {
+  _removeSourceItemsAndRegroup(removeIds)
+  return sessions
+}
+
 export {
   _abortImportAiRuns,
   _ensureSessionAiState,
@@ -2882,6 +3145,11 @@ export {
   _sessionAiResultState,
   _buildSessionAiIdentificationRuns,
   _buildImportObservationPayload,
+  _buildImportSourceItem,
+  _flattenSourceItemsFromSessions,
+  _applyMetadataToSession,
+  _stampConfirmedImportSkips,
+  _sortByCaptureTime,
   _storeSessionAiServiceResult,
   _sessionServiceNeedsRerun,
   _applySessionAiPrediction,

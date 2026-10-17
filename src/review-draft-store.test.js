@@ -209,3 +209,66 @@ test('store failures degrade gracefully instead of throwing', async () => {
     globalThis.indexedDB = previousIndexedDb
   }
 })
+
+test('review draft keeps each photo paired with its ingest method across restart', _withIndexedDbStub(async () => {
+  const photo = (label, ingestMethod, blob = new Blob([label], { type: 'image/jpeg' })) => ({
+    blob, blobPromise: null, gps: null, ts: new Date(1784700000000), emoji: '📸', taxon: null,
+    aiCropRect: null, aiCropSourceW: null, aiCropSourceH: null, aiCropIsCustom: false, ingestMethod,
+  })
+  await saveReviewDraft(_makeDraft({
+    photos: [
+      photo('lost-early', 'native_picker', null), // no bytes: dropped from the draft
+      photo('A', 'web_camera'),
+      photo('lost-interior', 'system_camera', null),
+      photo('C', 'sporely_camera'),
+      photo('D', 'not-a-method'),
+    ],
+  }))
+  const restored = await loadReviewDraft()
+  const pairs = await Promise.all(restored.photos.map(async p => [await p.blob.text(), p.ingestMethod]))
+  assert.deepEqual(pairs, [['A', 'web_camera'], ['C', 'sporely_camera'], ['D', null]])
+}))
+
+test('a review draft written before provenance restores with a null ingest method', _withIndexedDbStub(async () => {
+  await saveReviewDraft(_makeDraft())
+  const restored = await loadReviewDraft()
+  assert.deepEqual(restored.photos.map(p => p.ingestMethod), [null, null])
+}))
+
+test('review draft persists photo GPS source and the session location outcome', _withIndexedDbStub(async () => {
+  const draft = _makeDraft()
+  draft.photos[0].gps = { lat: 60, lon: 10, accuracy: 4, altitude: null, timestamp: 1, source: 'image_exif' }
+  draft.photos[1].gps = { lat: 61, lon: 11, accuracy: 9, altitude: null, timestamp: 2 }
+  draft.sessionLocationOutcome = 'timeout'
+  await saveReviewDraft(draft)
+  let restored = await loadReviewDraft()
+  assert.deepEqual(restored.photos.map(p => p.gps?.source ?? null), ['image_exif', null])
+  assert.equal(restored.sessionLocationOutcome, 'timeout')
+
+  // A later GPS outcome is merged without rewriting photos; skipped/garbage
+  // is never a carried outcome.
+  await updateReviewDraftFields({ sessionLocationOutcome: 'denied' })
+  restored = await loadReviewDraft()
+  assert.equal(restored.sessionLocationOutcome, 'denied')
+  assert.equal(restored.photos.length, 2)
+  await updateReviewDraftFields({ sessionLocationOutcome: 'skipped' })
+  assert.equal((await loadReviewDraft()).sessionLocationOutcome, null)
+}))
+
+test('a review draft written before location provenance restores with no outcome', _withIndexedDbStub(async () => {
+  await saveReviewDraft(_makeDraft())
+  const restored = await loadReviewDraft()
+  assert.equal(restored.sessionLocationOutcome, null)
+}))
+
+test('review draft persists the session fix source; an untagged legacy fix restores without one', _withIndexedDbStub(async () => {
+  const draft = _makeDraft()
+  draft.sessionFix = { lat: 60, lon: 10, accuracy: 4, altitude: null, timestamp: 1, source: 'device_gps' }
+  await saveReviewDraft(draft)
+  assert.equal((await loadReviewDraft()).sessionFix.source, 'device_gps')
+
+  const legacy = _makeDraft()
+  legacy.sessionFix = { lat: 60, lon: 10, accuracy: 4, altitude: null, timestamp: 1 }
+  await saveReviewDraft(legacy)
+  assert.equal((await loadReviewDraft()).sessionFix.source, null)
+}))

@@ -16,6 +16,7 @@ import {
   _renderDetailUnavailableState,
   _setDetailAiActiveService,
   buildDetailLocationPatch,
+  buildDetailLocationRequest,
   detailLocationActionMode,
   detailAiState,
   deleteDetailImageRecord,
@@ -1410,6 +1411,37 @@ test('a hand-placed location drops the accuracy and altitude it can no longer cl
     Object.keys(patch).sort(),
     ['gps_accuracy', 'gps_altitude', 'gps_latitude', 'gps_longitude'],
   )
+})
+
+test('a hand-placed location is an aware manual/acquired write through set_observation_location', async () => {
+  const { buildSetObservationLocationArgs } = await import('../location-provenance.js')
+  const request = buildDetailLocationRequest(42, buildDetailLocationPatch(63.44, 10.4), 'owner-1')
+  assert.deepEqual(buildSetObservationLocationArgs(request), {
+    p_observation_id: 42,
+    p_gps_latitude: 63.44,
+    p_gps_longitude: 10.4,
+    p_gps_altitude: null,
+    p_gps_accuracy: null,
+    p_location_source: 'manual',
+    p_location_status: 'acquired',
+  })
+  // The picker save goes through the RPC helper, never a plain coordinate
+  // PATCH (which the server answers by dropping attribution).
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+  const start = source.indexOf('async function _persistDetailLocation(')
+  const body = source.slice(start, source.indexOf('\n}\n', start))
+  assert.match(body, /await setObservationLocation\(supabase, buildDetailLocationRequest\(observationId, patch, state\.user\.id\)\)/)
+  assert.doesNotMatch(body, /\.update\(/)
+})
+
+test('adding photos to an existing find never writes the find location or its provenance', () => {
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+  for (const name of ['_openCameraForDetail', '_openPickerForDetail']) {
+    const start = source.indexOf(`function ${name}(`)
+    assert.ok(start >= 0, name)
+    const body = source.slice(start, source.indexOf('\n}\n', start))
+    assert.doesNotMatch(body, /gps_latitude|location_source|location_status|set_observation_location|setObservationLocation/, name)
+  }
 })
 
 test('coordinates the app would refuse to render produce no patch at all', () => {

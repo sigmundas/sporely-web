@@ -1,5 +1,6 @@
 package com.sporelab.sporely;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
@@ -11,15 +12,24 @@ import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 import org.json.JSONArray;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
-@CapacitorPlugin(name = "NativeCamera")
+// The app declares CAMERA (for the in-app camera), so Android refuses an
+// ACTION_IMAGE_CAPTURE launch with a SecurityException until CAMERA is
+// granted. The "camera" alias lets openSystemCamera() ask first (G5 I2).
+@CapacitorPlugin(
+    name = "NativeCamera",
+    permissions = { @Permission(strings = { Manifest.permission.CAMERA }, alias = "camera") }
+)
 public class NativeCameraPlugin extends Plugin {
 
     private String systemCameraFilePath;
@@ -130,6 +140,23 @@ public class NativeCameraPlugin extends Plugin {
 
     @PluginMethod
     public void openSystemCamera(PluginCall call) {
+        if (getPermissionState("camera") != PermissionState.GRANTED) {
+            requestPermissionForAlias("camera", call, "systemCameraPermissionCallback");
+            return;
+        }
+        launchSystemCamera(call);
+    }
+
+    @PermissionCallback
+    private void systemCameraPermissionCallback(PluginCall call) {
+        if (getPermissionState("camera") == PermissionState.GRANTED) {
+            launchSystemCamera(call);
+        } else {
+            call.reject("Camera permission denied");
+        }
+    }
+
+    private void launchSystemCamera(PluginCall call) {
         Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
         if (intent.resolveActivity(getContext().getPackageManager()) != null) {
             try {
