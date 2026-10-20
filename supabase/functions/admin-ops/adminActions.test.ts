@@ -6,12 +6,14 @@ import {
   buildProfileStorageKeys,
   buildRestoreCutoffIso,
   buildTombstoneDeleteTargets,
+  callRpcWithRetry,
   calculateProfileStorageUsageWithClient,
   fetchMediaStorageBreakdown,
   getRestoreWindowDays,
   handleAdminAction,
   isTombstonePurgeEnabled,
   purgeSingleTombstoneRow,
+  runRetiredKeySweep,
   TOMBSTONE_PURGE_DISABLED,
   MediaStorageBreakdown,
   R2MultiBucketClient,
@@ -507,7 +509,7 @@ Deno.test('purge disable: per-row check runs before any R2 call or row write', a
   const row = { id: 7, status: 'eligible', delete_targets: ['user/a.webp', 'user/thumb_a.webp'] }
   const result = await purgeSingleTombstoneRow({ adminClient, env: {} }, row, r2Client as any)
   assertEquals(result.status, 'skipped')
-  assertEquals(result.error, TOMBSTONE_PURGE_DISABLED)
+  assertEquals((result as any).error, TOMBSTONE_PURGE_DISABLED)
   assertEquals(calls, [])
 })
 
@@ -525,21 +527,141 @@ Deno.test('purge disable: the batch action refuses before selection, R2 prefligh
   assertEquals(calls, [])
 })
 
-Deno.test('purge enabled: per-row path still reaches R2 (flag does not block normal purge)', async () => {
+// Fake admin client: scripted rpc responses per function, recorded calls.
+function fakeAdmin(rpcScript: Record<string, Array<{ data?: unknown; error?: unknown }>>) {
   const calls: string[] = []
-  const r2Client = {
+  const updates: Array<Record<string, unknown>> = []
+  return {
+    calls,
+    updates,
+    client: {
+      async rpc(name: string, args: Record<string, unknown>) {
+        calls.push(`rpc:${name}:${JSON.stringify(args)}`)
+        const queue = rpcScript[name] || []
+        return queue.length > 1 ? queue.shift()! : (queue[0] ?? { data: null, error: { message: `unscripted ${name}` } })
+      },
+      from(table: string) {
+        return {
+          update(payload: Record<string, unknown>) {
+            updates.push({ table, ...payload })
+            return { eq: async () => ({ error: null }) }
+          },
+        }
+      },
+    },
+  }
+}
+
+function fakeR2(options: { fail?: boolean } = {}) {
+  const deleted: string[][] = []
+  return {
+    deleted,
     async deleteObjects(keys: Iterable<string>) {
-      calls.push(`r2:${[...keys].join(',')}`)
-      throw Object.assign(new Error('temporary'), { status: 503 })
+      const list = [...keys]
+      deleted.push(list)
+      if (options.fail) throw Object.assign(new Error('temporary'), { status: 503 })
+      return { logicalBytes: 42, targets: [] }
     },
   }
-  const adminClient = {
-    from(_table: string) {
-      return { update() { return { eq: async () => ({ error: null }) } } }
-    },
+}
+
+const ENABLED = { ADMIN_TOMBSTONE_PURGE_ENABLED: 'true' }
+const PURGE_ROW = { id: 8, status: 'eligible', delete_targets: ['user/b.webp', 'user/thumb_b.webp'] }
+
+Deno.test('claim-aware purge: deletes exactly the keys the claim returns, then finalizes', async () => {
+  const admin = fakeAdmin({
+    claim_tombstoned_image_purge: [{ data: { status: 'claimed', retirement_id: 5, delete_keys: ['user/b.webp', 'user/cards_b.webp', 'user/thumb_thumb_b.webp'] }, error: null }],
+    finalize_observation_image_purge: [{ data: [{ quota_changed: true }], error: null }],
+  })
+  const r2 = fakeR2()
+  const result: any = await purgeSingleTombstoneRow({ adminClient: admin.client, env: ENABLED }, PURGE_ROW, r2 as any)
+  assertEquals(result.status, 'purged')
+  assertEquals(r2.deleted, [['user/b.webp', 'user/cards_b.webp', 'user/thumb_thumb_b.webp']])
+  assertEquals(admin.calls[0].startsWith('rpc:claim_tombstoned_image_purge:'), true)
+  assertEquals(JSON.parse(admin.calls[0].split(':').slice(2).join(':')).p_restore_window_days, 30)
+  assertEquals(admin.calls[1].startsWith('rpc:finalize_observation_image_purge:'), true)
+  assertEquals(typeof result.claim_id, 'string')
+})
+
+Deno.test('claim-aware purge: a claim refusal sets purge_error with no R2 call', async () => {
+  for (const status of ['media_key_shared', 'not_eligible']) {
+    const admin = fakeAdmin({ claim_tombstoned_image_purge: [{ data: { status }, error: null }] })
+    const r2 = fakeR2()
+    const result: any = await purgeSingleTombstoneRow({ adminClient: admin.client, env: ENABLED }, PURGE_ROW, r2 as any)
+    assertEquals(result.status, 'error')
+    assertEquals(result.purge_error, status)
+    assertEquals(r2.deleted, [])
+    assertEquals(admin.updates.map(u => u.purge_error), [status])
   }
-  const row = { id: 8, status: 'eligible', delete_targets: ['user/b.webp'] }
-  const result = await purgeSingleTombstoneRow({ adminClient, env: { ADMIN_TOMBSTONE_PURGE_ENABLED: 'true' } }, row, r2Client as any)
-  assertEquals(calls, ['r2:user/b.webp'])
+})
+
+Deno.test('claim-aware purge: already_claimed is skipped for the sweep, no R2 call', async () => {
+  const admin = fakeAdmin({ claim_tombstoned_image_purge: [{ data: { status: 'already_claimed', retirement_id: 3 }, error: null }] })
+  const r2 = fakeR2()
+  const result: any = await purgeSingleTombstoneRow({ adminClient: admin.client, env: ENABLED }, PURGE_ROW, r2 as any)
+  assertEquals([result.status, result.skip_reason, result.retirement_id], ['skipped', 'already_claimed', 3])
+  assertEquals(r2.deleted, [])
+  assertEquals(admin.updates, [])
+})
+
+Deno.test('claim-aware purge: R2 failure after the claim keeps the claim and records the error', async () => {
+  const admin = fakeAdmin({ claim_tombstoned_image_purge: [{ data: { status: 'claimed', delete_keys: ['user/b.webp'] }, error: null }] })
+  const result: any = await purgeSingleTombstoneRow({ adminClient: admin.client, env: ENABLED }, PURGE_ROW, fakeR2({ fail: true }) as any)
   assertEquals(result.status, 'error')
+  assertEquals(admin.calls.some(c => c.startsWith('rpc:finalize_observation_image_purge')), false)
+})
+
+Deno.test('rpc retry: 40P01 / 55P03 retried up to 3 attempts, other errors not retried', async () => {
+  const sleeps: number[] = []
+  const sleep = async (ms: number) => { sleeps.push(ms) }
+  const admin = fakeAdmin({ f: [{ error: { code: '40P01' } }, { error: { code: '55P03' } }, { data: 'ok', error: null }] })
+  const ok = await callRpcWithRetry(admin.client, 'f', {}, { sleep })
+  assertEquals([ok.data, ok.attempts, sleeps.length], ['ok', 3, 2])
+  assertEquals(sleeps.every(ms => ms >= 100 && ms <= 400), true)
+  const failing = fakeAdmin({ f: [{ error: { code: '40001' } }] })
+  const out = await callRpcWithRetry(failing.client, 'f', {}, { sleep })
+  assertEquals([out.attempts, out.error?.code], [3, '40001'])
+  const other = fakeAdmin({ f: [{ error: { code: 'P0001' } }] })
+  assertEquals((await callRpcWithRetry(other.client, 'f', {}, { sleep })).attempts, 1)
+})
+
+Deno.test('sweep: deletes stored keys, finalizes purges, reports guard failures, records only finished rows', async () => {
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [
+      { retirement_id: 1, image_id: 10, reason: 'release', status: 'ok', delete_keys: ['u/a.webp', 'u/thumb_a.webp'] },
+      { retirement_id: 2, image_id: 11, reason: 'purge', status: 'ok', delete_keys: ['u/p.webp'] },
+      { retirement_id: 3, image_id: 12, reason: 'release', status: 'guard_failed', delete_keys: ['u/g.webp'], blocking_references: [{ table: 'observations' }] },
+    ], error: null }],
+    finalize_observation_image_purge: [{ data: [{ quota_changed: true }], error: null }],
+    record_retired_key_sweep: [{ data: 3, error: null }],
+  })
+  const r2 = fakeR2()
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: r2 as any }))
+  assertEquals(r2.deleted, [['u/a.webp', 'u/thumb_a.webp'], ['u/p.webp']])
+  assertEquals(result.counts, { swept: 2, guard_failed: 1, errors: 0, finalized: 1 })
+  const recordCall = admin.calls.find(c => c.startsWith('rpc:record_retired_key_sweep'))!
+  assertEquals(JSON.parse(recordCall.split(':').slice(2).join(':')).p_retirement_ids, [1, 2, 3])
+})
+
+Deno.test('sweep: an R2 failure leaves the record unrecorded for the next sweep', async () => {
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 9, image_id: 1, reason: 'release', status: 'ok', delete_keys: ['u/x.webp'] }], error: null }],
+    record_retired_key_sweep: [{ data: 0, error: null }],
+  })
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: fakeR2({ fail: true }) as any }))
+  assertEquals(result.counts.errors, 1)
+  assertEquals(admin.calls.some(c => c.startsWith('rpc:record_retired_key_sweep')), false)
+})
+
+Deno.test('sweep: refused while purge is disabled', async () => {
+  const { calls, adminClient } = purgeSpyClients()
+  const response = await handleAdminAction({
+    adminClient,
+    adminUser: { id: 'admin', email: null },
+    authHeader: '',
+    requestBody: { action: 'sweep_retired_media_keys', reason: 'test' },
+    env: {},
+  })
+  assertEquals(response.status, 409)
+  assertEquals(calls, [])
 })
