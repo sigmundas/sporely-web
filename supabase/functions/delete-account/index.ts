@@ -98,6 +98,7 @@ Deno.serve(async req => {
       worker,
       r2Keys: new Set<string>(),
       r2: createPrefixR2Client(Deno.env.toObject()),
+      signOutEverywhere: () => admin.auth.admin.signOut(authHeader.replace(/^Bearer\s+/i, ''), 'global'),
     })
 
     if (result.ok) {

@@ -8,6 +8,7 @@
 // STAGE ORDER (children before parents; R2 objects before DB rows; auth
 // user last):
 //
+//   0. sign_out_everywhere       — admin.auth.admin.signOut(token, 'global').
 //   1. media_snapshot            — record R2 media keys BEFORE any DB row
 //                                   is deleted. Reads BOTH
 //                                   observation_images.storage_path (which
@@ -92,6 +93,7 @@
  *   admin: any,
  *   worker: { deleteKey: (key: string) => Promise<MediaWorkerResult> },
  *   r2Keys: Set<string>,
+ *   signOutEverywhere?: () => Promise<{ error?: { message: string } | null }>,
  *   r2?: {
  *     listObjects: (prefix: string) => Promise<{ ok: boolean, objects?: Array<{ bucket: string, key: string }>, error?: string }>,
  *     deleteObjects: (objects: Array<{ bucket: string, key: string }>) => Promise<{ ok: boolean, error?: string }>,
@@ -123,6 +125,30 @@ export async function requireSuccess(label, op) {
 
 /** @type {readonly Stage[]} */
 export const STAGES = Object.freeze([
+  {
+    // Revoke every session of the account first (global sign-out), so no
+    // other device keeps writing while the account is erased. A partial
+    // failure later is retried after a fresh sign-in; the write fence (the
+    // account-deletion marker) refuses content writes meanwhile.
+    name: 'sign_out_everywhere',
+    apply: async ctx => {
+      if (typeof ctx.signOutEverywhere !== 'function') {
+        return { ok: false, error: 'global sign-out is not configured' }
+      }
+      try {
+        const result = await ctx.signOutEverywhere()
+        if (result?.error) {
+          const msg = String(result.error.message || '').toLowerCase()
+          // An already-revoked session is the expected state on a retry.
+          if (msg.includes('not found') || msg.includes('session_not_found')) return { ok: true }
+          return { ok: false, error: `global sign-out: ${result.error.message}` }
+        }
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
   {
     name: 'media_snapshot',
     apply: async ctx => {

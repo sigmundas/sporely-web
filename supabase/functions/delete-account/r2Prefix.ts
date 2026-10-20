@@ -6,9 +6,10 @@
 // by every function of the project:
 //   R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_S3_ENDPOINT   (required)
 //   R2_BUCKET_NAME          legacy public bucket (default 'sporely-media')
-//   R2_PRIVATE_BUCKET_NAME  private bucket; MUST be set whenever the Worker
-//                           has PRIVATE_MEDIA_BUCKET bound, or private
-//                           objects are not listed and not deleted.
+//   R2_PRIVATE_BUCKET_NAME  REQUIRED: the private bucket name, or the literal
+//                           'none' when the Worker has no PRIVATE_MEDIA_BUCKET
+//                           bound. Unset or empty fails closed, so a missing
+//                           setting can never silently skip private objects.
 // The token needs List, Read and Delete on both buckets. Without the
 // required values this returns undefined and the plan fails closed at
 // delete_r2_prefix (the account is not deleted).
@@ -22,7 +23,9 @@ export function createPrefixR2Client(env: Record<string, string | undefined>) {
   const endpoint = String(env.R2_S3_ENDPOINT ?? '').trim().replace(/\/+$/, '')
   if (!accessKeyId || !secretAccessKey || !endpoint) return undefined
   const legacy = String(env.R2_BUCKET_NAME ?? '').trim() || 'sporely-media'
-  const privateBucket = String(env.R2_PRIVATE_BUCKET_NAME ?? '').trim()
+  const privateSetting = String(env.R2_PRIVATE_BUCKET_NAME ?? '').trim()
+  if (!privateSetting) return undefined
+  const privateBucket = privateSetting.toLowerCase() === 'none' ? '' : privateSetting
   const buckets = [...new Set([legacy, privateBucket].filter(Boolean))]
   const client = new S3Client({ region: 'auto', endpoint, credentials: { accessKeyId, secretAccessKey } })
 
