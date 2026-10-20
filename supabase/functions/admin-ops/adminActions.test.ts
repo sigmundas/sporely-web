@@ -665,3 +665,42 @@ Deno.test('sweep: refused while purge is disabled', async () => {
   assertEquals(response.status, 409)
   assertEquals(calls, [])
 })
+
+Deno.test('sweep: a purge whose image row is gone or already purged is deleted and recorded without finalize', async () => {
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [
+      { retirement_id: 21, image_id: 1, reason: 'purge', status: 'ok', delete_keys: ['u/gone.webp'], image_exists: false, image_purged_at: null },
+      { retirement_id: 22, image_id: 2, reason: 'purge', status: 'ok', delete_keys: ['u/done.webp'], image_exists: true, image_purged_at: '2026-10-01T00:00:00Z' },
+    ], error: null }],
+    record_retired_key_sweep: [{ data: 2, error: null }],
+  })
+  const r2 = fakeR2()
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: r2 as any }))
+  assertEquals(r2.deleted, [['u/gone.webp'], ['u/done.webp']])
+  assertEquals(admin.calls.some(c => c.startsWith('rpc:finalize_observation_image_purge')), false)
+  assertEquals(result.counts, { swept: 2, guard_failed: 0, errors: 0, finalized: 0 })
+  const recordCall = admin.calls.find(c => c.startsWith('rpc:record_retired_key_sweep'))!
+  assertEquals(JSON.parse(recordCall.split(':').slice(2).join(':')).p_retirement_ids, [21, 22])
+})
+
+Deno.test('sweep: always-failing records do not stop later batches (the database rotates them)', async () => {
+  const failing = Array.from({ length: 2 }, (_, i) => ({ retirement_id: 30 + i, image_id: 1, reason: 'release', status: 'ok', delete_keys: [`u/fail${i}.webp`] }))
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [
+      { data: failing, error: null },
+      { data: [{ retirement_id: 40, image_id: 2, reason: 'release', status: 'ok', delete_keys: ['u/new.webp'] }], error: null },
+    ],
+    record_retired_key_sweep: [{ data: 1, error: null }],
+  })
+  const client = {
+    async deleteObjects(keys: Iterable<string>) {
+      const list = [...keys]
+      if (list[0].includes('fail')) throw Object.assign(new Error('temporary'), { status: 503 })
+      return { logicalBytes: 1, targets: [] }
+    },
+  }
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 2, batches: 3 }, async () => ({ ok: true, client: client as any }))
+  assertEquals([result.counts.errors, result.counts.swept], [2, 1])
+  const recordCall = admin.calls.find(c => c.startsWith('rpc:record_retired_key_sweep'))!
+  assertEquals(JSON.parse(recordCall.split(':').slice(2).join(':')).p_retirement_ids, [40])
+})

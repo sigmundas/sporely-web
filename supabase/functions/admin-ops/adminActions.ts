@@ -1343,8 +1343,9 @@ const SWEEP_MAX_BATCHES = 10
 
 // Repeatable sweep of retired media keys (Stage 0a item 6/8): claim a batch
 // of retirement records (the database re-checks references under the key
-// locks), delete exactly their stored delete_keys, finalize interrupted
-// purges, then record the batch. Never computes keys itself.
+// locks and moves every handed-out record to the back of the queue through
+// last_attempted_at), delete exactly their stored delete_keys, finalize
+// interrupted purges, then record the finished ones. Never computes keys.
 async function sweepRetiredMediaKeys(context: AdminActionContext): Promise<AdminActionResponse> {
   if (!isTombstonePurgeEnabled(context.env)) {
     return actionFailureResponse(409, TOMBSTONE_PURGE_DISABLED, 'Tombstone purge (and the retired-key sweep) is disabled on the server')
@@ -1410,7 +1411,11 @@ export async function runRetiredKeySweep(
           const deletion = await r2Client.deleteObjects(keys)
           logicalBytes = Number(deletion?.logicalBytes || 0)
         }
-        if (record.reason === 'purge') {
+        // Finalize only a purge whose image row still exists and is not yet
+        // purged. A row removed by account deletion or an observation hard
+        // delete (ON DELETE CASCADE), or one already purged, needs no
+        // finalize: its keys are deleted and the record counts as done.
+        if (record.reason === 'purge' && record.image_exists !== false && !record.image_purged_at) {
           const finalized = await callRpcWithRetry(context.adminClient, 'finalize_observation_image_purge', {
             p_image_id: record.image_id,
             p_purged_at: new Date().toISOString(),
