@@ -21,8 +21,8 @@
 #      image_key / thumb_key, observations cover, mosaics storage_key,
 #      calibrations image_storage_path), against a release AND a purge claim:
 #      B must wait on the advisory key lock
-#   4/9 a foreign-owned measurement attaching the key (service role; the
-#      authenticated RLS path was closed by 20260925160000)
+#   4/9 another user attaching the key is refused by the end-user
+#      owner-prefix check without taking any key lock
 #   10 forged claim through a test-only RPC that sets sporely.purge_claim
 #   11 REPEATABLE READ / SERIALIZABLE sessions get sporely_requires_read_committed
 # A race fails on any error other than the expected refusal, a 40P01/55P03
@@ -132,7 +132,7 @@ uuid_for() { printf '6c0a0000-0000-4000-8000-%012d' "$1"; }
 op() {
   local name=$1 k=$2 d; d=$(fx "$2" d)
   case "$name" in
-    release) echo "$as_owner SELECT 'rel-status', public.release_observation_image_bytes('$(uuid_for "$k")', $(fx $k i1), '$d/f.webp', NULL, 'owner_sync')->>'status'; RESET ROLE;" ;;
+    release) echo "$as_owner SELECT 'rel-status', r->>'status', r->>'replayed' FROM public.release_observation_image_bytes('$(uuid_for "$k")', $(fx $k i1), '$d/f.webp', NULL, 'owner_sync') AS r; RESET ROLE;" ;;
     release2) echo "$as_owner SELECT 'rel2-status', public.release_observation_image_bytes(gen_random_uuid(), $(fx $k i2), '$d/thumb_f.webp', NULL, 'owner_sync')->>'status'; RESET ROLE;" ;;
     claim) echo "$as_service SELECT 'claim-status', public.claim_tombstoned_image_purge('$(uuid_for "$k")', $(fx $k t))->>'status'; RESET ROLE;" ;;
     claim2) echo "$as_service SELECT 'claim2-status', public.claim_tombstoned_image_purge(gen_random_uuid(), $(fx $k t))->>'status'; RESET ROLE;" ;;
@@ -149,7 +149,7 @@ op() {
     att_cover) echo "$as_owner UPDATE public.observations SET image_key = '$d/${3:-f}.webp', thumb_key = '$d/thumb_${3:-f}.webp' WHERE id = $(fx $k o2); RESET ROLE;" ;;
     att_mosaic) echo "$as_owner UPDATE public.spore_measurement_mosaics SET storage_key = '$d/cards_${3:-f}.webp' WHERE id = $(fx $k s2); RESET ROLE;" ;;
     att_calibration) echo "$as_owner UPDATE public.calibrations SET image_storage_path = '$d/preview_${3:-f}.webp' WHERE id = $(fx $k c); RESET ROLE;" ;;
-    att_foreign_meas) echo "$as_service INSERT INTO public.spore_measurements(image_id,user_id,length_um,image_key) VALUES ($(fx $k i1),'$B_UID',2,'$d/thumb_${3:-f}.webp'); RESET ROLE;" ;;
+    att_foreign_cal) echo "SELECT set_config('request.jwt.claims','{\"sub\":\"$B_UID\",\"role\":\"authenticated\"}',true); SET LOCAL ROLE authenticated; INSERT INTO public.calibrations(user_id,objective_key,calibration_date,microns_per_pixel,image_storage_path) VALUES ('$B_UID','rcb$k',current_date,1,'$d/thumb_${3:-f}.webp'); RESET ROLE;" ;;
     *) fail "unknown op $name" ;;
   esac
 }
@@ -247,6 +247,12 @@ for order in patch_first release_first; do
     sleep 0.3
     run_session "$LOG.$k.a" "BEGIN; $(op touch_paused $k) COMMIT;" & pid_a=$!
   fi
+  # A real wait or a 40P01 must happen: poll for a lock wait meanwhile.
+  c3wait=no
+  for _ in $(seq 1 40); do
+    if [ "$(P -c "select count(*) from pg_stat_activity where (query like '%rel-status%' or query like '%touched%') and wait_event_type='Lock' and pid <> pg_backend_pid()")" -ge 1 ]; then c3wait=yes; break; fi
+    sleep 0.1
+  done
   wait $pid_h || true
   wait $pid_a || { cat "$LOG.$k.a"; fail "case 3 ($order): PATCH failed after retries"; }
   wait $pid_b || { cat "$LOG.$k.b"; fail "case 3 ($order): release failed after retries"; }
@@ -254,7 +260,8 @@ for order in patch_first release_first; do
   [ "$(q "select notes from public.observation_images where id=$(fx $k i1)")" = touched ] || fail "case 3 ($order): PATCH lost"
   [ "$(retirements $(fx $k i1))" = 1 ] || fail "case 3 ($order): registry"
   retried=$( (ls "$LOG.$k".*.attempt* 2>/dev/null || true) | wc -l | tr -d ' ')
-  echo "ok case 3 ($order): both effects applied (retried attempts: $retried)"
+  [ "$c3wait" = yes ] || [ "$retried" -ge 1 ] || fail "case 3 ($order): neither a lock wait nor a retried 40P01 was observed"
+  echo "ok case 3 ($order): both effects applied (lock wait: $c3wait, retried attempts: $retried)"
 done
 
 # --- Case 5: purge claim vs owner restore vs a second claim.
@@ -281,7 +288,7 @@ echo "ok case 6: shared family -> both media_key_shared, no registry rows"
 
 # --- Case 7: lost-response retry by the same UUID; new UUID after promotion.
 k=$((k+1)); seed $k; race $k release release lock
-out_has $k "rel-status|released" a; out_has $k "rel-status|released" b
+out_has $k "rel-status|released|false" a; out_has $k "rel-status|released|true" b
 [ "$(retirements $(fx $k i1))" = 1 ] || fail "case 7: one record"
 before=$(q "select updated_at from public.observation_images where id=$(fx $k i1)")
 replay=$(P -c "BEGIN; $as_owner SELECT public.release_observation_image_bytes('$(uuid_for $k)', $(fx $k i1), '$(fx $k d)/f.webp', NULL, 'owner_sync'); RESET ROLE; COMMIT;" | grep replayed)
@@ -298,8 +305,7 @@ echo "ok case 7: concurrent same-UUID replay, stored keys, no writes; new UUID -
 # against a release (family of f) and against a purge claim (family of t).
 for target in release claim; do
   fam=f; [ $target = claim ] && fam=t
-  for att in att_img_storage att_img_original att_img_insert att_meas_image att_meas_thumb att_cover att_mosaic att_calibration att_foreign_meas; do
-    [ $target = claim ] && [ $att = att_foreign_meas ] && continue
+  for att in att_img_storage att_img_original att_img_insert att_meas_image att_meas_thumb att_cover att_mosaic att_calibration; do
     img_key=i1; [ $target = claim ] && img_key=t
     # retire first: the attach waits on the advisory key lock and is refused.
     k=$((k+1)); seed $k
@@ -307,15 +313,27 @@ for target in release claim; do
     [ "$(retirements $(fx $k $img_key))" = 1 ] || fail "case 8 $target/$att: registry missing"
     # attach first: the retirement waits on the advisory key lock and refuses.
     k=$((k+1)); seed $k
-    # (A foreign measurement on the released image also touches its
-    # observation, so the release then waits on that row, not the key lock.)
-    wk=advisory; [ $att = att_foreign_meas ] && wk=lock
-    race $k "$att" "$target" $wk "$fam"
+    race $k "$att" "$target" advisory "$fam"
     if [ $target = release ]; then out_has $k "rel-status|media_key_shared" b; else out_has $k "claim-status|media_key_shared" b; fi
     [ "$(retirements $(fx $k $img_key))" = 0 ] || fail "case 8 $target/$att: registry row after refusal"
     echo "ok case 8: $target vs $att, both orders"
   done
 done
+
+# --- Case 4/9: another user can no longer attach the key (the end-user
+# owner-prefix check runs before any key lock), so it neither
+# waits on nor blocks a held release. A planted foreign reference not
+# blocking a release is covered in media_key_retirement_test.sql.
+k=$((k+1)); seed $k
+P -c "BEGIN; $(op release $k | sed 's/RESET ROLE;//') SELECT pg_sleep(2); COMMIT;" > "$LOG.$k.a" 2>&1 & pid_a=$!
+sleep 0.5
+start=$(date +%s)
+out=$(P -c "BEGIN; $(op att_foreign_cal $k) COMMIT;" 2>&1 || true)
+echo "$out" | grep -q sporely_media_key_foreign || { echo "$out"; fail "case 9: foreign attach not refused"; }
+[ $(( $(date +%s) - start )) -le 1 ] || fail "case 9: foreign attach waited on the release"
+wait $pid_a || { cat "$LOG.$k.a"; fail "case 9: release failed"; }
+grep -q "rel-status|released" "$LOG.$k.a" || { cat "$LOG.$k.a"; fail "case 9: release status"; }
+echo "ok case 9: foreign attach refused without waiting; release unaffected"
 
 # --- Case 10: forged claim through a test-only RPC that sets the GUC.
 k=$((k+1)); seed $k
