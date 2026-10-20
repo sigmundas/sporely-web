@@ -1,4 +1,4 @@
-# Plan: "Delete cloud copy" keeps a metadata-only spore anchor (option b), revision 6
+# Plan: "Delete cloud copy" keeps a metadata-only spore anchor (option b), revision 7
 
 Repos:
 - sporely-web: Stage 0a (database), 0b (Worker), 0c (header enforcement, later), and the admin-ops purge.
@@ -158,13 +158,13 @@ Planning only. Nothing implemented, committed or run against production.
 Client lifecycle: marker with `rpc_attempted` → RPC (or re-read) → R2 delete → local state.
 
 ## §L Canonical lock order (single definition; every new code path follows it)
-1. **Observation row**: `SELECT … FROM observations WHERE id = $obs FOR UPDATE`.
+1. **Observation row**: `SELECT … FROM observations WHERE id = $obs FOR NO KEY UPDATE` (the new paths change no key columns; NO KEY UPDATE conflicts with every UPDATE and with other NO KEY UPDATE locks, but not with FK KEY SHARE checks).
 2. **Per-user cascade lock**: `pg_advisory_xact_lock(hashtextextended(user_id::text, 42))`. This is the lock the existing visibility cascade `_media_bump_child_images_on_obs` takes (media_authorization.sql:558-562).
    - The cascade runs as an AFTER trigger on observations, so its order is observation row → user lock 42 → image rows.
    - New paths take lock 42 AFTER the observation row, which matches the cascade.
    - Taking it before the observation row would create a cycle with the cascade, so that is forbidden.
-3. **Image rows**, sorted by id: `SELECT … FROM observation_images WHERE id = ANY($ids) ORDER BY id FOR UPDATE`.
-4. **Measurement rows of those images**, sorted by id (only paths that update them).
+3. **Image rows**, sorted by id: `SELECT … FROM observation_images WHERE id = ANY($ids) ORDER BY id FOR NO KEY UPDATE`.
+4. **Measurement rows of those images**, sorted by id, `FOR NO KEY UPDATE` (release and claim: both clear the owner's measurement keys).
 5. **Media-key advisory locks**: `private.lock_media_key_roots(roots)`. DISTINCT roots, ordered by `(hashtextextended(root, 7311), root)`, each with `pg_advisory_xact_lock(hashtextextended(root, 7311))`. Equal hashes simply re-acquire the same lock.
 
 Guard trigger on single-row writes (`private.media_key_retirement_guard`, BEFORE INSERT/UPDATE):
@@ -493,7 +493,7 @@ Deviations from the plan text, found against the real code:
 - `finalize_observation_image_purge` is now SECURITY DEFINER with an empty search_path
   (still service_role only).
 - The authenticated foreign-measurement RLS gap is closed (20260925160000); foreign-owned
-  measurements are seeded through the service role in the tests.
+  measurements are seeded through the service role in the tests (superseded by review round 1 below).
 - The admin_database_health classifier gets one rule for the two registry tables.
 
 Open for review / next stages:
@@ -503,3 +503,44 @@ Open for review / next stages:
   they must pass `supabase/tests/fixtures/media_key_family_fixture.json`.
 - Security review (sporely-security-reviewer) of the SECURITY DEFINER functions, grants,
   guard and admin-ops before any deploy.
+
+### Review round 1 (candidate 289fffa: NEEDS CHANGES), fixed in follow-up commits
+
+- B1 cross-owner references: the guard now refuses, for end-user callers (auth.uid() set;
+  service_role and migrations are exempt because existing server paths and test fixtures
+  write legacy non-prefixed keys) and before any key lock or registry read, a new or changed key that is not under the row owner's `<uid>/` prefix
+  (HINT `sporely_media_key_foreign`, SQLSTATE 42501, same refusal whether or not the key is
+  retired). Release, claim and sweep count only references whose row owner owns the key's
+  prefix (`private.media_key_owned_references`). A planted foreign measurement or cover no
+  longer blocks a release; it is left untouched. Plan cases 4/9 change accordingly: a foreign
+  attach is refused outright and never waits.
+- Sweep: `last_attempted_at` (set with clock_timestamp for every handed-out record) drives
+  the order, so failing records rotate to the back. The sweep returns `image_exists` and
+  `image_purged_at`; admin-ops skips finalize for a gone or purged row and records it as done.
+- Claim: locks, exempts and clears the owner's measurements of the image and the owning
+  cover exactly like the release, so measured tombstones are purgeable.
+- `statement_timeout` removed (inert); `lock_timeout` kept. Guard and registry triggers are
+  `ENABLE ALWAYS`. Keys with `.`/`..` segments, `%2F`/`%5C` (any case) or a backslash are
+  refused for end-user writes (`sporely_media_key_invalid`); release and claim return `key_invalid` for
+  a malformed stored key from any writer (trusted roles stay exempt in the guard: existing
+  fixtures seed legacy traversal keys to test read-side defences). **The Worker must
+  apply the same rule in Stage 0b** (fixture field `valid`).
+- Release/claim take `FOR NO KEY UPDATE` row locks (§L updated above).
+
+### Deploy prechecks (read-only production queries the user runs before 0a)
+
+1. Btree cap (2704 bytes): `max(octet_length(col))` for observation_images.storage_path,
+   original_storage_path; spore_measurements.image_key, thumb_key; observations.image_key,
+   thumb_key; spore_measurement_mosaics.storage_key; calibrations.image_storage_path.
+2. Existing cross-owner references: per column, `count(*) WHERE col IS NOT NULL AND NOT
+   starts_with(btrim(btrim(col), '/'), user_id::text || '/')`. They no longer block, but list them.
+3. Tombstones that would still refuse a claim: tombstoned, unpurged images whose key roots are
+   referenced by an owned row other than the image, the owner's measurements of it and its
+   observation's cover (run after deploying the functions, or as the equivalent join).
+4. The eight `CREATE INDEX` statements are not CONCURRENTLY: writes to the five tables block
+   while they build inside the migration transaction. Check table sizes and pick a quiet window.
+
+### Open items (need a user decision)
+
+- Privacy erasure of registry rows after account deletion (rows keep `user_id`, never deleted).
+  Not implemented.
