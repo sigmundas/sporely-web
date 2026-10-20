@@ -200,9 +200,20 @@ BEGIN
 
   -- Malformed mosaics. Since 20261011100000 a client cannot write these:
   -- mosaic ids are GENERATED ALWAYS and the write guards reject keys outside
-  -- '<user_id>/'. A trusted role (auth.uid() IS NULL, as in this block) still
-  -- can, and older rows may predate the guards. get_public_observation still
-  -- returns them with the legacy url; the batch must fail closed (NULL mosaic).
+  -- '<user_id>/'. Since 20261020120000 the media-key guard refuses them for
+  -- every role too (asserted here), so these legacy rows, which may predate
+  -- the guards in production, are planted with that one trigger disabled.
+  -- get_public_observation still returns them with the legacy url; the batch
+  -- must fail closed (NULL mosaic).
+  BEGIN
+    INSERT INTO public.spore_measurement_mosaics
+      (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version)
+    VALUES (obs, owner_id, owner_id::text || '/../' || stranger_id::text || '/x.webp', 32, 32, 32, 9);
+    RAISE EXCEPTION 'media-key guard accepted a path-traversal mosaic key';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM LIKE 'media-key guard accepted%' THEN RAISE; END IF;
+  END;
+  ALTER TABLE public.spore_measurement_mosaics DISABLE TRIGGER zzy_media_key_retirement_guard;
   FOREACH label IN ARRAY ARRAY[
     'mosaic_nonpositive_id', 'mosaic_foreign_namespace', 'mosaic_path_traversal',
     'mosaic_owner_mismatch'
@@ -239,6 +250,7 @@ BEGIN
         VALUES (obs, stranger_id, stranger_id::text || '/mosaic-theirs.webp', 32, 32, 32, 2);
     END CASE;
   END LOOP;
+  ALTER TABLE public.spore_measurement_mosaics ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
 
   -- Observation-level gates and spore_data_visibility values. Each of these
   -- gets one public spore-bearing image so a leaked point would show.
@@ -266,7 +278,8 @@ BEGIN
             'microscope')
     RETURNING id INTO img_meta;
     INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type, thumb_key)
-    VALUES (img_meta, CASE WHEN label = 'banned_owner' THEN banned_id ELSE owner_id END, 8, 6, 'spore', 'x/' || label);
+    VALUES (img_meta, CASE WHEN label = 'banned_owner' THEN banned_id ELSE owner_id END, 8, 6, 'spore',
+            CASE WHEN label = 'banned_owner' THEN banned_id ELSE owner_id END::text || '/x/' || label);
     INSERT INTO public.spore_measurement_mosaics
       (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version)
     VALUES (obs, CASE WHEN label = 'banned_owner' THEN banned_id ELSE owner_id END,

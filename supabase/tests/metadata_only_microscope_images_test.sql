@@ -113,7 +113,7 @@ BEGIN
   INSERT INTO public.spore_measurement_mosaics (
     observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version
   )
-  VALUES (obs_id, owner_user_id, 'mosaic/meta-test-v1.webp', 256, 128, 128, 1)
+  VALUES (obs_id, owner_user_id, owner_user_id::text || '/mosaic/meta-test-v1.webp', 256, 128, 128, 1)
   RETURNING id INTO mosaic_id;
 
   INSERT INTO public.spore_measurement_mosaic_tiles (

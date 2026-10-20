@@ -154,7 +154,7 @@ BEGIN
   VALUES (
     public_exact_id,
     visible_user_id,
-    'rpc/public-exact.webp',
+    visible_user_id::text || '/rpc/public-exact.webp',
     'microscope',
     0,
     4000,
@@ -200,7 +200,7 @@ BEGIN
   VALUES (
     public_exact_id,
     visible_user_id,
-    'rpc/public-unsafe.webp',
+    visible_user_id::text || '/rpc/public-unsafe.webp',
     'microscope',
     1,
     4000,
@@ -258,7 +258,7 @@ BEGIN
   RETURNING id INTO private_id;
 
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
-  VALUES (private_id, visible_user_id, 'rpc/private.webp', 'field')
+  VALUES (private_id, visible_user_id, visible_user_id::text || '/rpc/private.webp', 'field')
   RETURNING id INTO private_image_id;
 
   INSERT INTO public.observations (
@@ -290,7 +290,7 @@ BEGIN
   RETURNING id INTO draft_id;
 
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
-  VALUES (draft_id, visible_user_id, 'rpc/draft.webp', 'field')
+  VALUES (draft_id, visible_user_id, visible_user_id::text || '/rpc/draft.webp', 'field')
   RETURNING id INTO draft_image_id;
 
   INSERT INTO public.observations (
@@ -410,7 +410,7 @@ BEGIN
   RETURNING id INTO null_spore_visibility_id;
 
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
-  VALUES (null_spore_visibility_id, visible_user_id, 'rpc/null-spore.webp', 'microscope')
+  VALUES (null_spore_visibility_id, visible_user_id, visible_user_id::text || '/rpc/null-spore.webp', 'microscope')
   RETURNING id INTO null_spore_image_id;
 
   INSERT INTO public.observation_images (
@@ -430,7 +430,7 @@ BEGIN
   VALUES (
     facets_public_id,
     visible_user_id,
-    'rpc/facets-public.webp',
+    visible_user_id::text || '/rpc/facets-public.webp',
     'microscope',
     0,
     2400,
@@ -545,7 +545,7 @@ BEGIN
   VALUES (
     deleted_microscopy_id,
     visible_user_id,
-    'rpc/deleted.webp',
+    visible_user_id::text || '/rpc/deleted.webp',
     'microscope',
     now()
   )
@@ -556,7 +556,7 @@ BEGIN
   RETURNING id INTO purged_microscopy_id;
 
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type, purged_at)
-  VALUES (purged_microscopy_id, visible_user_id, 'rpc/purged.webp', 'microscope', now())
+  VALUES (purged_microscopy_id, visible_user_id, visible_user_id::text || '/rpc/purged.webp', 'microscope', now())
   RETURNING id INTO purged_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
@@ -575,7 +575,7 @@ BEGIN
   RETURNING id INTO amanita_private_spore_id;
 
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
-  VALUES (amanita_private_spore_id, visible_user_id, 'rpc/amanita-priv.webp', 'microscope')
+  VALUES (amanita_private_spore_id, visible_user_id, visible_user_id::text || '/rpc/amanita-priv.webp', 'microscope')
   RETURNING id INTO amanita_private_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
@@ -593,7 +593,7 @@ BEGIN
   RETURNING id INTO amanita_se_id;
 
   INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
-  VALUES (amanita_se_id, visible_user_id, 'rpc/amanita-se.webp', 'microscope')
+  VALUES (amanita_se_id, visible_user_id, visible_user_id::text || '/rpc/amanita-se.webp', 'microscope')
   RETURNING id INTO amanita_se_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
@@ -615,7 +615,7 @@ BEGIN
     observation_id, user_id, storage_path, image_type, contrast, mount_medium, sample_type
   )
   VALUES (
-    amanita_koh_id, visible_user_id, 'rpc/amanita-koh.webp', 'microscope', 'DIC', 'KOH', 'fresh'
+    amanita_koh_id, visible_user_id, visible_user_id::text || '/rpc/amanita-koh.webp', 'microscope', 'DIC', 'KOH', 'fresh'
   )
   RETURNING id INTO amanita_koh_image_id;
 
@@ -642,7 +642,7 @@ BEGIN
     observation_id, user_id, storage_path, image_type, sample_type
   )
   VALUES (
-    mixed_prep_id, visible_user_id, 'rpc/mixed-fresh.webp', 'microscope', 'fresh'
+    mixed_prep_id, visible_user_id, visible_user_id::text || '/rpc/mixed-fresh.webp', 'microscope', 'fresh'
   )
   RETURNING id INTO mixed_fresh_image_id;
 
@@ -656,7 +656,7 @@ BEGIN
     observation_id, user_id, storage_path, image_type, sample_source
   )
   VALUES (
-    mixed_prep_id, visible_user_id, 'rpc/mixed-sp.webp', 'microscope', 'spore_print'
+    mixed_prep_id, visible_user_id, visible_user_id::text || '/rpc/mixed-sp.webp', 'microscope', 'spore_print'
   )
   RETURNING id INTO mixed_sp_image_id;
 
@@ -677,7 +677,7 @@ BEGIN
     common_crop_width_um, common_crop_height_um
   )
   VALUES (
-    public_exact_id, visible_user_id, 'mosaic/public-exact-v1.webp',
+    public_exact_id, visible_user_id, visible_user_id::text || '/mosaic/public-exact-v1.webp',
     256, 128, 128, 1,
     128, 128,
     20.0, 20.0
@@ -1166,7 +1166,7 @@ BEGIN
   IF rpc_row."sporeMosaic" IS NULL THEN
     RAISE EXCEPTION 'sporeMosaic: expected metadata for public observation with mosaic row';
   END IF;
-  IF (rpc_row."sporeMosaic"->>'url') IS DISTINCT FROM 'https://media.sporely.no/mosaic/public-exact-v1.webp' THEN
+  IF (rpc_row."sporeMosaic"->>'url') IS DISTINCT FROM 'https://media.sporely.no/' || visible_user_id::text || '/mosaic/public-exact-v1.webp' THEN
     RAISE EXCEPTION 'sporeMosaic: url mismatch, got %', rpc_row."sporeMosaic"->>'url';
   END IF;
   IF (rpc_row."sporeMosaic"->>'width')::int    IS DISTINCT FROM 256
@@ -2187,7 +2187,7 @@ BEGIN
     observation_id, user_id, storage_key, width_px, height_px,
     tile_size_px, version
   ) VALUES (
-    context_split_id, visible_user_id, 'mosaic/context-split-v1.webp',
+    context_split_id, visible_user_id, visible_user_id::text || '/mosaic/context-split-v1.webp',
     128, 128, 128, 1
   ) RETURNING id INTO context_split_mosaic_id;
 
@@ -2251,7 +2251,7 @@ BEGIN
     observation_id, user_id, storage_key, width_px, height_px,
     tile_size_px, version
   ) VALUES (
-    context_dic_id, visible_user_id, 'mosaic/context-dic-v1.webp',
+    context_dic_id, visible_user_id, visible_user_id::text || '/mosaic/context-dic-v1.webp',
     128, 128, 128, 1
   ) RETURNING id INTO context_dic_mosaic_id;
 
