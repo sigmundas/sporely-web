@@ -9,6 +9,8 @@
 // user last):
 //
 //   0. sign_out_everywhere       — admin.auth.admin.signOut(token, 'global').
+//   0b. begin_account_deletion   — rpc begin_account_deletion: write the
+//                                   account-deletion marker (write fence).
 //   1. media_snapshot            — record R2 media keys BEFORE any DB row
 //                                   is deleted. Reads BOTH
 //                                   observation_images.storage_path (which
@@ -143,6 +145,23 @@ export const STAGES = Object.freeze([
           if (msg.includes('not found') || msg.includes('session_not_found')) return { ok: true }
           return { ok: false, error: `global sign-out: ${result.error.message}` }
         }
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
+  {
+    // Write the account-deletion marker right after the sign-out, so the
+    // database write fence (media-key guard) covers the whole run. The same
+    // marker delete_reference_library_for_account writes later; idempotent.
+    name: 'begin_account_deletion',
+    apply: async ctx => {
+      try {
+        await requireSuccess(
+          'rpc begin_account_deletion',
+          ctx.admin.rpc('begin_account_deletion', { p_user_id: ctx.uid }),
+        )
         return { ok: true }
       } catch (err) {
         return { ok: false, error: err.message }

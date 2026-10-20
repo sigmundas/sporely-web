@@ -18,6 +18,7 @@ const SIGN_OUT = async () => ({ error: null })
 
 const EXPECTED_ORDER = [
   'sign_out_everywhere',
+  'begin_account_deletion',
   'media_snapshot',
   'mosaic_media_snapshot',
   'calibration_media_snapshot',
@@ -840,4 +841,11 @@ test('a rerun after a partial failure completes (already signed out, marker kept
   })
   assert.equal(retry.ok, true)
   assert.equal(admin._calls.filter(c => c.op === 'delete_reference_library_for_account').length, 2)
+})
+
+test('the deletion marker is written right after sign-out, before any snapshot or delete', async () => {
+  const admin = fakeAdmin()
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, true)
+  assert.deepEqual(admin._calls[0], { table: '<rpc>', op: 'begin_account_deletion', params: { p_user_id: UID } })
 })
