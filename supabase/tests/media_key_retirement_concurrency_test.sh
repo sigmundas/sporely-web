@@ -49,7 +49,25 @@ B_UID=00000000-0000-4000-8000-0000006c0a02
 [ "$(P -c "select count(*) from pg_namespace where nspname='test_barriers'")" = 0 ] \
   || fail "test_barriers already exists"
 
+# Remove this run's committed fixtures through the same path account
+# deletion uses (marker, content, registry erasure, profile, auth user), so
+# the rest of the suite runs unaffected in any order.
+erase_fixture_user() {
+  P >/dev/null <<SQL
+INSERT INTO private.reference_account_deletions(user_id) SELECT '$1' WHERE EXISTS (SELECT 1 FROM auth.users WHERE id = '$1') ON CONFLICT DO NOTHING;
+DELETE FROM public.spore_measurements WHERE user_id = '$1';
+DELETE FROM public.spore_measurement_mosaics WHERE user_id = '$1';
+DELETE FROM public.observation_images WHERE user_id = '$1';
+DELETE FROM public.observations WHERE user_id = '$1';
+DELETE FROM public.calibrations WHERE user_id = '$1';
+SELECT public.erase_account_media_retirements('$1') WHERE EXISTS (SELECT 1 FROM auth.users WHERE id = '$1');
+DELETE FROM public.profiles WHERE id = '$1';
+DELETE FROM auth.users WHERE id = '$1';
+SQL
+}
 cleanup() {
+  erase_fixture_user "$A_UID" || true
+  erase_fixture_user "$B_UID" || true
   P -c "DROP SCHEMA IF EXISTS test_barriers CASCADE" >/dev/null 2>&1 || true
   P -c "SELECT pg_advisory_unlock_all()" >/dev/null 2>&1 || true
 }

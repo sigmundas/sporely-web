@@ -18,7 +18,27 @@ case "$API_URL" in http://127.0.0.1:*|http://localhost:*) ;; *) echo "refusing n
 : "${ANON_KEY:?}" "${SERVICE_ROLE_KEY:?}" "${JWT_SECRET:?}"
 P() { docker exec -i "$DB" psql -U postgres -v ON_ERROR_STOP=1 -qAt "$@"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# Remove this run's committed fixtures through the same path account
+# deletion uses (marker, content, registry erasure, profile, auth user), so
+# the rest of the suite runs unaffected in any order.
+erase_fixture_user() {
+  P >/dev/null <<SQL
+INSERT INTO private.reference_account_deletions(user_id) SELECT '$1' WHERE EXISTS (SELECT 1 FROM auth.users WHERE id = '$1') ON CONFLICT DO NOTHING;
+DELETE FROM public.spore_measurements WHERE user_id = '$1';
+DELETE FROM public.spore_measurement_mosaics WHERE user_id = '$1';
+DELETE FROM public.observation_images WHERE user_id = '$1';
+DELETE FROM public.observations WHERE user_id = '$1';
+DELETE FROM public.calibrations WHERE user_id = '$1';
+SELECT public.erase_account_media_retirements('$1') WHERE EXISTS (SELECT 1 FROM auth.users WHERE id = '$1');
+DELETE FROM public.profiles WHERE id = '$1';
+DELETE FROM auth.users WHERE id = '$1';
+SQL
+}
+cleanup() {
+  erase_fixture_user "$A_UID" || true
+}
 A_UID=00000000-0000-4000-8000-0000006d0a01
+trap cleanup EXIT
 
 # An authenticated user JWT signed with the local secret.
 USER_JWT=$(A_UID="$A_UID" JWT_SECRET="$JWT_SECRET" node -e '
