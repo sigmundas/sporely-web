@@ -506,12 +506,11 @@ Open for review / next stages:
 
 ### Review round 1 (candidate 289fffa: NEEDS CHANGES), fixed in follow-up commits
 
-- B1 cross-owner references: the guard now refuses, for end-user callers (auth.uid() set;
-  service_role and migrations are exempt because existing server paths and test fixtures
-  write legacy non-prefixed keys) and before any key lock or registry read, a new or changed key that is not under the row owner's `<uid>/` prefix
+- B1 cross-owner references: the guard now refuses, for EVERY role (round 3; no exemption)
+  and before any key lock or registry read, a new or changed key that is not under the row owner's `<uid>/` prefix
   (HINT `sporely_media_key_foreign`, SQLSTATE 42501, same refusal whether or not the key is
-  retired). Release, claim and sweep count only references whose row owner owns the key's
-  prefix (`private.media_key_owned_references`). A planted foreign measurement or cover no
+  retired). Release, claim and sweep count every reference of the image or record owner, whatever
+  its prefix, and ignore other owners' rows (`private.media_key_owner_references`, round 4). A planted foreign measurement or cover no
   longer blocks a release; it is left untouched. Plan cases 4/9 change accordingly: a foreign
   attach is refused outright and never waits.
 - Sweep: `last_attempted_at` (set with clock_timestamp for every handed-out record) drives
@@ -520,11 +519,10 @@ Open for review / next stages:
 - Claim: locks, exempts and clears the owner's measurements of the image and the owning
   cover exactly like the release, so measured tombstones are purgeable.
 - `statement_timeout` removed (inert); `lock_timeout` kept. Guard and registry triggers are
-  `ENABLE ALWAYS`. Keys with `.`/`..` segments, `%2F`/`%5C` (any case) or a backslash are
-  refused for end-user writes (`sporely_media_key_invalid`); release and claim return `key_invalid` for
-  a malformed stored key from any writer (trusted roles stay exempt in the guard: existing
-  fixtures seed legacy traversal keys to test read-side defences). **The Worker must
-  apply the same rule in Stage 0b** (fixture field `valid`).
+  `ENABLE ALWAYS`. Keys with `.`/`..` segments, any `%` (round 4) or a backslash are refused for
+  every role's new or changed keys (`sporely_media_key_invalid`); release and claim return
+  `key_invalid` for a malformed stored key. **The Worker must apply the same rule in Stage 0b**
+  (fixture field `valid`).
 - Release/claim take `FOR NO KEY UPDATE` row locks (§L updated above).
 
 ### Deploy prechecks (read-only production queries the user runs before 0a)
@@ -532,8 +530,12 @@ Open for review / next stages:
 1. Btree cap (2704 bytes): `max(octet_length(col))` for observation_images.storage_path,
    original_storage_path; spore_measurements.image_key, thumb_key; observations.image_key,
    thumb_key; spore_measurement_mosaics.storage_key; calibrations.image_storage_path.
-2. Existing cross-owner references: per column, `count(*) WHERE col IS NOT NULL AND NOT
-   starts_with(btrim(btrim(col), '/'), user_id::text || '/')`. They no longer block, but list them.
+2. **HARD GATE.** Keys outside their row owner's prefix: per column of the five tables,
+   `count(*) WHERE col IS NOT NULL AND NOT starts_with(btrim(btrim(col), '/'), user_id::text || '/')`.
+   0a may deploy only when every count is zero, or when each such row is listed and the user has
+   accepted it. Such rows are never retired: release and claim return `key_foreign` and keep the
+   bytes, and the sweep refuses records with keys outside their prefix. They also escape
+   prefix-based account deletion (see the GDPR gaps below).
 3. Tombstones that would still refuse a claim: tombstoned, unpurged images whose key roots are
    referenced by an owned row other than the image, the owner's measurements of it and its
    observation's cover (run after deploying the functions, or as the equivalent join).
@@ -590,8 +592,9 @@ erasure):
   can attach a key under the erased prefix again (tested for authenticated, service_role and owner).
 - Env and secrets for delete-account: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_S3_ENDPOINT`
   (required; without them the run fails closed at `delete_r2_prefix`), `R2_BUCKET_NAME` (default
-  `sporely-media`) and `R2_PRIVATE_BUCKET_NAME`, which must be set whenever the Worker binds
-  PRIVATE_MEDIA_BUCKET. The token needs List, Read and Delete on both buckets. Edge-function secrets
+  `sporely-media`) and `R2_PRIVATE_BUCKET_NAME` (REQUIRED, round 4: the private bucket name, or the
+  literal `none` when the Worker binds no PRIVATE_MEDIA_BUCKET; unset or empty fails closed before
+  any erasure). The token needs List, Read and Delete on both buckets. Edge-function secrets
   are project-wide, so admin-ops' values apply.
 
 GDPR inventory: personal data that remains after a completed account deletion (not changed this round):
@@ -607,9 +610,45 @@ GDPR inventory: personal data that remains after a completed account deletion (n
 - Comments and moderation: `comment_moderation.hidden_by`, `reports.dismissed_by` and
   `resolved_by` (admin ids) keep admin uuids.
 - Edge-function and Worker logs, R2 access logs: outside the database.
+- Round 4 additions:
+  - Supabase backups and PITR: deleted data stays in backups until they expire. **The retention
+    policy must be stated** (plan tier, PITR window), plus whether a restore re-runs pending erasures.
+  - `auth.audit_log_entries`: GoTrue keeps the account's login, logout and deletion events with
+    the uid and email in the payload; Supabase-managed retention.
+  - CDN and edge caches on media.sporely.no: public media may stay cached after R2 deletion. A
+    cache purge of `<uid>/` on account deletion is needed (not implemented).
+  - Postgres, PostgREST and auth logs (Supabase log retention) contain uids, IPs and request paths.
+  - Email (auth mail) and CAPTCHA processors: provider-side records under their own retention.
+  - Other users' copies: other users' `observation_reference_uses.snapshot_json` cannot reference
+    the deleted user's sets. The FK is `(user_id, reference_measurement_set_id)` against the user's
+    own sets (20260828143513_add_normalized_reference_library.sql:113-132). Shared default-on
+    contributions are different: `private.shared_reference_contributions.envelope_json` keeps the
+    measurement content the user wrote (owner_id ON DELETE SET NULL,
+    20260830183210_add_shared_reference_contributions.sql:12/37), and other users' curated forks
+    from them (20261002150000) copy it. That content is text the deleted user wrote (reference
+    values, raw text and notes). It is anonymised, not erased: a user decision.
+  - Legacy R2 objects outside `<uid>/` (keys counted by precheck 2) are NOT removed by prefix
+    deletion; only the snapshot pass reaches the ones still referenced. Remediation: a separate,
+    one-off cleanup that inventories R2 objects outside every `<uid>/` prefix and maps or deletes
+    them. Out of scope here.
+  - Desktop local caches (the SQLite database and image folders on the user's computers) are the
+    user's own responsibility; the server cannot erase them. State this in the account-deletion UI
+    and privacy text.
+
+Round 4: account-deletion write fence. Once `private.reference_account_deletions` has a row for the
+owner, the guard refuses every top-level INSERT and UPDATE of that owner's rows in the five tables,
+for every role (HINT `sporely_account_deleting`). It checks this before any early return. Nested
+trigger writes (pg_trigger_depth() > 1, such as the child-touch update during delete-account's own
+deletes) carry no keys and pass. delete-account starts with `sign_out_everywhere`
+(`admin.auth.admin.signOut(token, 'global')`). A retry after a partial failure needs a fresh sign-in;
+the marker persists, so the rerun completes.
+
+Stage 0b items:
+- The Worker refuses uploads when the account-deletion marker exists, at both points where it
+  checks retirement.
+- A periodic admin-ops sweep deletes top-level R2 prefixes that have no matching auth user.
 
 Residual risks and open items:
 - A still-valid access token can upload through the Worker after `verify_r2_prefix_empty` and before
-  the token expires. The Worker must refuse uploads for an account whose deletion has started
-  (Stage 0b), or a later sweep of orphan prefixes is needed.
+  the token expires. The 0b Worker fence and the orphan-prefix sweep above close it.
 - Admin-log retention and erasure policy (the inventory above): user decision.
