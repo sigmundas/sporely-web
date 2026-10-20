@@ -27,7 +27,7 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 
-SELECT plan(87);
+SELECT plan(88);
 
 -- ---------------------------------------------------------------
 -- Helpers.
@@ -154,7 +154,7 @@ SELECT is((SELECT (j ->> 'schema_version')::int FROM empty_res), 1, 'schema_vers
 SELECT is((SELECT j ->> 'min_desktop_version' FROM empty_res), '0.9.26', 'default min_desktop_version is 0.9.26');
 SELECT is((SELECT j -> 'write_block' FROM empty_res), '{"count": 0, "rows": []}'::jsonb, 'no data: empty write_block');
 SELECT is((SELECT j #> '{sync_key,duplicate_groups}' FROM empty_res),
-  '{"total": 0, "truncated": false, "rows": []}'::jsonb, 'no data: no duplicate groups');
+  '{"total": 0, "truncated": false, "rows": [], "by_table_rule": []}'::jsonb, 'no data: no duplicate groups');
 SELECT is((SELECT j -> 'media_metadata' FROM empty_res),
   '{"live_with_bytes_no_path": 0, "recorded_primary_bytes": 0}'::jsonb, 'no data: media metadata zero');
 SELECT is(
@@ -267,6 +267,14 @@ INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, s
   ((SELECT v FROM fx WHERE k = 'i1'), '00000000-0000-4000-8000-00000005a002', 10.0, 5.0, NULL, 11, '2026-01-01'),
   ((SELECT v FROM fx WHERE k = 'i1'), '00000000-0000-4000-8000-00000005a002', 10.0, 5.0, gen_random_uuid(), NULL, '2026-01-01'),
   ((SELECT v FROM fx WHERE k = 'i1'), '00000000-0000-4000-8000-00000005a002', 11.0, 6.0, gen_random_uuid(), 13, '2026-01-01');
+-- On the deleted image i3: a keyless + keyed twin, keyed one with desktop_id.
+-- Not live, so neither counted nor grouped. The keyless one is measured after
+-- the cutoff and still raises nothing (measured_at is client-supplied).
+INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, sync_key, desktop_id, measured_at)
+SELECT i.id, i.user_id, 20.0, 9.0, k.key, k.did, now()
+  FROM public.observation_images i,
+       (VALUES (NULL::uuid, NULL::integer), (gen_random_uuid(), 21)) AS k(key, did)
+ WHERE i.storage_path = 'p/i3.webp';
 
 -- Repair runs: 6 taxon identity runs (5 listed), 1 retired-resolution run.
 INSERT INTO private.taxon_identity_repair_runs (release_id, plan_sha256, candidate_count, promoted_count, outcome_counts, applied_at)
@@ -336,8 +344,13 @@ SELECT is((SELECT j #> '{sync_key,tables,1}' FROM res),
   '{"table": "observation_images", "live_rows": 122, "null_sync_key": 65, "null_sync_key_after_cutoff": 1, "keyed_with_desktop_id": 1}'::jsonb,
   'observation_images coverage: deleted and purged rows excluded; cutoff edge counted, 1us before not');
 SELECT is((SELECT j #> '{sync_key,tables,2}' FROM res),
-  '{"table": "spore_measurements", "live_rows": 3, "null_sync_key": 1, "null_sync_key_after_cutoff": 0, "keyed_with_desktop_id": 1}'::jsonb,
-  'spore_measurements coverage');
+  '{"table": "spore_measurements", "live_rows": 3, "null_sync_key": 1, "null_sync_key_after_cutoff": null, "keyed_with_desktop_id": 1}'::jsonb,
+  'spore_measurements coverage: measurements on a deleted image excluded; after-cutoff is null (not measurable)');
+SELECT is((SELECT j #> '{sync_key,duplicate_groups,by_table_rule}' FROM res),
+  '[{"table": "observation_images", "rule": "keyed_keyless_twin", "count": 52},
+    {"table": "observation_images", "rule": "shared_key", "count": 1},
+    {"table": "spore_measurements", "rule": "keyed_keyless_twin", "count": 1}]'::jsonb,
+  'by_table_rule counts the measurement twin although the truncated list omits it; deleted-image twin not counted');
 
 -- Duplicate groups: 1 shared_key + 52 image twins + 1 measurement twin = 54.
 SELECT is((SELECT (j #>> '{sync_key,duplicate_groups,total}')::int FROM res), 54, 'duplicate group total = 54');

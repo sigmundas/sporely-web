@@ -37,7 +37,10 @@
 -- null_sync_key_after_cutoff counts keyless rows created on or after
 -- 2026-10-13 00:00 UTC, the sync_key migration date (20261013210000); no
 -- deployment doc records a more precise production deploy time.
--- spore_measurements has no created_at, so measured_at is used there.
+-- spore_measurements has no server-set creation time (measured_at is
+-- client-supplied), so its null_sync_key_after_cutoff is null and raises no
+-- warning. Measurements are live when their image is live (not deleted or
+-- purged).
 
 CREATE OR REPLACE FUNCTION public.admin_sync_health(
   p_min_desktop_version text DEFAULT '0.9.26'
@@ -200,7 +203,8 @@ BEGIN
 
   -- -------------------------------------------------------------
   -- sync_key coverage. Live images: deleted_at and purged_at both NULL.
-  -- Observations and measurements are hard-deleted, so every row is live.
+  -- Observations are hard-deleted, so every row is live. A measurement is
+  -- live when its image is live.
   -- -------------------------------------------------------------
   SELECT pg_catalog.jsonb_agg(t.j ORDER BY t.ord) INTO v_tables
     FROM (
@@ -225,9 +229,14 @@ BEGIN
                'table', 'spore_measurements',
                'live_rows', count(*),
                'null_sync_key', count(*) FILTER (WHERE m.sync_key IS NULL),
-               'null_sync_key_after_cutoff', count(*) FILTER (WHERE m.sync_key IS NULL AND m.measured_at >= c_sync_key_cutoff),
+               -- No server-set creation time: measured_at is client-supplied
+               -- (desktop pushes it), so a backdated keyless row would hide.
+               -- null = "not measurable", never 0.
+               'null_sync_key_after_cutoff', NULL::bigint,
                'keyed_with_desktop_id', count(*) FILTER (WHERE m.sync_key IS NOT NULL AND m.desktop_id IS NOT NULL))
         FROM public.spore_measurements m
+        JOIN public.observation_images i ON i.id = m.image_id
+       WHERE i.deleted_at IS NULL AND i.purged_at IS NULL
     ) t;
 
   -- -------------------------------------------------------------
@@ -247,7 +256,8 @@ BEGIN
     SELECT m.id, m.user_id, m.image_id, i.observation_id, m.sync_key,
            m.measurement_type, m.length_um, m.width_um
       FROM public.spore_measurements m
-      LEFT JOIN public.observation_images i ON i.id = m.image_id
+      JOIN public.observation_images i ON i.id = m.image_id
+     WHERE i.deleted_at IS NULL AND i.purged_at IS NULL
   ),
   groups AS (
     SELECT 'observation_images'::text AS tbl, 'shared_key'::text AS rule, li.user_id,
@@ -298,7 +308,12 @@ BEGIN
                       'ids', pg_catalog.to_jsonb(l.ids[1:c_ids_limit]),
                       'ids_truncated', pg_catalog.cardinality(l.ids) > c_ids_limit)
                     ORDER BY CASE l.rule WHEN 'shared_key' THEN 0 ELSE 1 END, l.tbl, l.user_id, l.ids[1])
-               FROM listed l), '[]'::jsonb)),
+               FROM listed l), '[]'::jsonb),
+           -- Per (table, rule) counts, so groups cut by the list cap still show.
+           'by_table_rule', coalesce((
+             SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                      'table', c.tbl, 'rule', c.rule, 'count', c.n) ORDER BY c.tbl, c.rule)
+               FROM (SELECT g.tbl, g.rule, count(*) AS n FROM groups g GROUP BY g.tbl, g.rule) c), '[]'::jsonb)),
          pg_catalog.jsonb_build_object(
            'shared_key', (SELECT count(*) FROM groups g WHERE g.rule = 'shared_key'),
            'keyed_keyless_twin', (SELECT count(*) FROM groups g WHERE g.rule = 'keyed_keyless_twin'))
@@ -377,6 +392,7 @@ BEGIN
         'message', pg_catalog.format('%s %s row(s) carry both sync_key and desktop_id.',
           r.e ->> 'keyed_with_desktop_id', r.e ->> 'table'));
     END IF;
+    -- A null count (spore_measurements) is not measurable and never fires.
     IF (r.e ->> 'null_sync_key_after_cutoff')::bigint > 0 THEN
       v_warnings := v_warnings || pg_catalog.jsonb_build_object(
         'key', 'null_sync_key_after_cutoff.' || (r.e ->> 'table'), 'severity', 'watch',
