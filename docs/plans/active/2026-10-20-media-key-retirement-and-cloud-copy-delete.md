@@ -453,3 +453,53 @@ Unchanged scope:
 - Q-r3-3: the adoption threshold for 0c.
 - Q-r4-1: should the restore window cutoff used by the purge claim live in SQL (one source) instead of the admin-ops environment (`getPurgeCutoffAt`)? Recommended: pass it as a parameter, validated against a minimum in SQL.
 - Q-r4-2: RESOLVED (revision 5). No hooks in production functions. Harness-held locks plus a test-only trigger schema in local test databases.
+
+## Current stage / handoff (2026-10-20, Step 0 + Stage 0a implemented; not deployed)
+
+Branch `feature/media-key-retirement` (base `origin/main` 292beb3). Nothing was applied
+to production; no deploy, push to the database or function deploy happened.
+
+Done:
+- Step 0: `ADMIN_TOMBSTONE_PURGE_ENABLED` (fail closed: purge runs only when it is exactly
+  `true`), checked at action start before the R2 preflight and per row in
+  `purgeSingleTombstoneRow` before any R2 call or row write. Edge-function env is fixed per
+  invocation, so the per-row check stops a run only through a fresh deploy/secret change;
+  drain evidence (action log, max runtime) is still required before 0a.
+- Stage 0a migration `supabase/migrations/20261020120000_media_key_retirement.sql`.
+- Stage 0a item 8 (claim-aware admin-ops purge and `sweep_retired_media_keys`), behind the
+  same flag. Deploy it only at rollout step 4.
+- Tests: `supabase/tests/media_key_retirement_test.sql`,
+  `media_key_family_fixture_test.sh` + `fixtures/media_key_family_fixture.json`,
+  `js/media-key-fixture.test.js` (today's Worker `deriveThumbKey` against the fixture),
+  `media_key_retirement_concurrency_test.sh`, `media_key_retirement_rest_test.sh`,
+  admin-ops Deno tests.
+
+Deviations from the plan text, found against the real code:
+- Index expressions are evaluated as the writing role: `private.media_key_root` is
+  self-contained (pg_catalog only) and granted EXECUTE to authenticated and service_role.
+  No USAGE on schema `private` is granted. All other helpers have no grants.
+- The guard trigger is `zzy_media_key_retirement_guard`, so the non-mutating
+  `zzz_sync_identity_guard_*` stays last (sync_key_identity_test asserts that).
+- The mosaics index is not partial (`storage_key` is NOT NULL; the planner cannot match the
+  partial predicate).
+- §K: a name made only of prefixes keeps its last prefix (strip while longer than the
+  prefix); needed for root(member) = root(key). JS/Python must follow the fixture.
+- Claim takes `p_restore_window_days` (default 30, refused below 30): Q-r4-1 recommended answer.
+- Sweep record takes retirement ids (`record_retired_key_sweep(p_retirement_ids bigint[])`),
+  not roots. guard_failed records are recorded too so the queue rotates.
+- Isolation check: the guard checks READ COMMITTED only when it has work (a changed key,
+  a restore or a claim-column change), not on every write.
+- Release refuses a row with no stored keys as `row_changed`.
+- `finalize_observation_image_purge` is now SECURITY DEFINER with an empty search_path
+  (still service_role only).
+- The authenticated foreign-measurement RLS gap is closed (20260925160000); foreign-owned
+  measurements are seeded through the service role in the tests.
+- The admin_database_health classifier gets one rule for the two registry tables.
+
+Open for review / next stages:
+- Registry rows keep `user_id` after account deletion (no FK, never deleted): privacy review.
+- Release does not change profile storage quota; byte accounting stays with the Worker delete.
+- Stage 0b (Worker), Stage 1 (sporely-py) and the JS/Python §K implementations are pending;
+  they must pass `supabase/tests/fixtures/media_key_family_fixture.json`.
+- Security review (sporely-security-reviewer) of the SECURITY DEFINER functions, grants,
+  guard and admin-ops before any deploy.
