@@ -533,8 +533,10 @@ Open for review / next stages:
 2. **HARD GATE.** Keys outside their row owner's prefix: per column of the five tables,
    `count(*) WHERE col IS NOT NULL AND NOT starts_with(btrim(btrim(col), '/'), user_id::text || '/')`.
    0a may deploy only when every count is zero, or when each such row is listed and the user has
-   accepted it. Such rows are never retired: release and claim return `key_foreign` and keep the
-   bytes, and the sweep refuses records with keys outside their prefix. They also escape
+   accepted it. Round 5: non-zero rows now only cause refusals, never deletion. Release and claim
+   return `key_foreign` for an image whose own keys are outside its owner's prefix; another owner's
+   legacy row carrying the key (outside that row's own prefix) gives `media_key_shared`; the sweep
+   refuses records with keys outside their prefix. In every case the bytes are kept. They also escape
    prefix-based account deletion (see the GDPR gaps below).
 3. Tombstones that would still refuse a claim: tombstoned, unpurged images whose key roots are
    referenced by an owned row other than the image, the owner's measurements of it and its
@@ -619,14 +621,18 @@ GDPR inventory: personal data that remains after a completed account deletion (n
     cache purge of `<uid>/` on account deletion is needed (not implemented).
   - Postgres, PostgREST and auth logs (Supabase log retention) contain uids, IPs and request paths.
   - Email (auth mail) and CAPTCHA processors: provider-side records under their own retention.
-  - Other users' copies: other users' `observation_reference_uses.snapshot_json` cannot reference
-    the deleted user's sets. The FK is `(user_id, reference_measurement_set_id)` against the user's
+  - Other users' copies (corrected in round 5): other users' `observation_reference_uses.snapshot_json`
+    cannot reference the deleted user's sets. The FK is `(user_id, reference_measurement_set_id)` against the user's
     own sets (20260828143513_add_normalized_reference_library.sql:113-132). Shared default-on
-    contributions are different: `private.shared_reference_contributions.envelope_json` keeps the
-    measurement content the user wrote (owner_id ON DELETE SET NULL,
-    20260830183210_add_shared_reference_contributions.sql:12/37), and other users' curated forks
-    from them (20261002150000) copy it. That content is text the deleted user wrote (reference
-    values, raw text and notes). It is anonymised, not erased: a user decision.
+    contributions are handled by the profile-delete trigger
+    `private.anonymize_shared_reference_contributions_for_profile`
+    (20260930224506_fail_closed_reference_sharing_consent.sql:882-913). It withdraws each
+    contribution (`account_deleted`), nulls `owner_id` and `source_measurement_set_id`, and rewrites
+    the envelope contributor to "Deleted user".
+    - What remains: the envelope content (reference values, raw text, notes), revisions,
+      `content_hash`, timestamps, and other users' curated forks (20261002150000).
+    - This is pseudonymisation, not anonymisation, wherever the free text can identify the person.
+      Whether to keep or erase it is a user decision.
   - Legacy R2 objects outside `<uid>/` (keys counted by precheck 2) are NOT removed by prefix
     deletion; only the snapshot pass reaches the ones still referenced. Remediation: a separate,
     one-off cleanup that inventories R2 objects outside every `<uid>/` prefix and maps or deletes
@@ -642,6 +648,15 @@ trigger writes (pg_trigger_depth() > 1, such as the child-touch update during de
 deletes) carry no keys and pass. delete-account starts with `sign_out_everywhere`
 (`admin.auth.admin.signOut(token, 'global')`). A retry after a partial failure needs a fresh sign-in;
 the marker persists, so the rerun completes.
+
+Round 5: the marker is written by a new first stage `begin_account_deletion` (right after
+`sign_out_everywhere`; `public.begin_account_deletion`, service_role, idempotent, under the same
+7301 advisory lock as delete_reference_library_for_account). I chose this over moving the
+reference-library stage, which also deletes the user's reference graph and has its own ordering. The
+fence now also checks `OLD.user_id`. Nested trigger writes (depth > 1) pass only when key-neutral:
+INSERT, a changed key, a restore or a claim-column change is refused at any depth.
+An abandoned deletion leaves the account permanently fenced. There is no silent recovery: the user
+must retry the deletion, or an admin must clear the marker.
 
 Stage 0b items:
 - The Worker refuses uploads when the account-deletion marker exists, at both points where it
