@@ -158,10 +158,14 @@ export const STAGES = Object.freeze([
     name: 'begin_account_deletion',
     apply: async ctx => {
       try {
-        await requireSuccess(
+        const result = await requireSuccess(
           'rpc begin_account_deletion',
           ctx.admin.rpc('begin_account_deletion', { p_user_id: ctx.uid }),
         )
+        // Only a written fence counts; e.g. not_found must stop the run.
+        if (result?.status !== 'fenced') {
+          return { ok: false, error: `begin_account_deletion: ${result?.status || 'no status'}` }
+        }
         return { ok: true }
       } catch (err) {
         return { ok: false, error: err.message }

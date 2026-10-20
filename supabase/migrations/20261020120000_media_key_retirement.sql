@@ -519,12 +519,16 @@ BEGIN
   -- every key the row carries.
   FOREACH v_col IN ARRAY v_cols LOOP
     v_val := private.media_key_normalize(v_new ->> v_col);
+    -- A user_id change re-attaches every key of the row to the new owner,
+    -- so all its keys count as changed.
     IF v_val IS NOT NULL
-       AND (TG_OP = 'INSERT' OR v_restore OR (v_new -> v_col) IS DISTINCT FROM (v_old -> v_col)) THEN
+       AND (TG_OP = 'INSERT' OR v_restore OR (v_new -> v_col) IS DISTINCT FROM (v_old -> v_col)
+            OR (v_new -> 'user_id') IS DISTINCT FROM (v_old -> 'user_id')) THEN
       v_keys := v_keys || v_val;
     END IF;
     IF v_val IS NOT NULL
-       AND (TG_OP = 'INSERT' OR (v_new -> v_col) IS DISTINCT FROM (v_old -> v_col)) THEN
+       AND (TG_OP = 'INSERT' OR (v_new -> v_col) IS DISTINCT FROM (v_old -> v_col)
+            OR (v_new -> 'user_id') IS DISTINCT FROM (v_old -> 'user_id')) THEN
       v_changed := v_changed || v_val;
     END IF;
   END LOOP;

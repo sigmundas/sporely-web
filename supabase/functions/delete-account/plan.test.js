@@ -200,6 +200,7 @@ function fakeAdmin(overrides = {}) {
       calls.push({ table: '<rpc>', op: name, params })
       const override = overrides.rpcResponses?.[name]
       if (override) return Promise.resolve(override(params))
+      if (name === 'begin_account_deletion') return Promise.resolve({ data: { status: 'fenced' }, error: null })
       return Promise.resolve({ data: null, error: null })
     },
     storage: {
@@ -848,4 +849,12 @@ test('the deletion marker is written right after sign-out, before any snapshot o
   const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, true)
   assert.deepEqual(admin._calls[0], { table: '<rpc>', op: 'begin_account_deletion', params: { p_user_id: UID } })
+})
+
+test('begin_account_deletion must report fenced; not_found stops the run before any snapshot', async () => {
+  const admin = fakeAdmin({ rpcResponses: { begin_account_deletion: () => ({ data: { status: 'not_found' }, error: null }) } })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, false)
+  assert.equal(result.stage, 'begin_account_deletion')
+  assert.equal(admin._calls.length, 1)
 })

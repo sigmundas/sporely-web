@@ -810,6 +810,15 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('service_role', NULL, format('SELECT public.claim_tombstoned_image_purge(gen_random_uuid(), %s)', pg_temp.fxi('lgv.img')))), 'media_key_shared', 'foreign legacy row blocks the claim');
 END $$;
 
+-- A user_id change re-checks every key of the row against the new owner.
+DO $$
+BEGIN
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('UPDATE public.calibrations SET user_id = %L WHERE id = (SELECT min(id) FROM public.calibrations WHERE user_id = %L AND image_storage_path IS NULL) RETURNING ''moved''', pg_temp.fx('B'), pg_temp.fx('A'))), 'ok:moved', 'key-less user_id change allowed');
+  INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel, image_storage_path)
+  VALUES (pg_temp.fx('A')::uuid, 'uidchg', current_date, 1, pg_temp.fx('A') || '/uid/cal.webp');
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format($q$UPDATE public.calibrations SET user_id = %L WHERE objective_key = 'uidchg'$q$, pg_temp.fx('B'))), 'ERR:42501:sporely_media_key_foreign', 'service_role user_id change with an old-owner key refused');
+END $$;
+
 -- ---------------------------------------------------------------
 -- 9. Account erasure of the registry.
 -- ---------------------------------------------------------------
