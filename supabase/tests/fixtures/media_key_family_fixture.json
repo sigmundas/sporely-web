@@ -20,11 +20,13 @@
       "preview_"
     ],
     "strip_while_longer_than_prefix": true,
+    "invalid": "a . or .. segment, %2F or %5C (any case), or a backslash; guard, release and claim refuse such keys",
     "family_sort": "C collation / code point"
   },
   "cases": [
     {
       "key": "u/o/f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -41,6 +43,7 @@
     },
     {
       "key": "u/o/thumb_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -66,6 +69,7 @@
     },
     {
       "key": "u/o/small_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -90,6 +94,7 @@
     },
     {
       "key": "u/o/medium_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -114,6 +119,7 @@
     },
     {
       "key": "u/o/cards_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_cards_f.webp",
@@ -138,6 +144,7 @@
     },
     {
       "key": "u/o/preview_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -162,6 +169,7 @@
     },
     {
       "key": "u/o/thumb_small_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -187,6 +195,7 @@
     },
     {
       "key": "u/o/thumb_medium_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -212,6 +221,7 @@
     },
     {
       "key": "u/o/thumb_cards_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -237,6 +247,7 @@
     },
     {
       "key": "u/o/thumb_preview_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -262,6 +273,7 @@
     },
     {
       "key": "u/o/small_thumb_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -289,6 +301,7 @@
     },
     {
       "key": "u/o/thumb_small_thumb_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -315,6 +328,7 @@
     },
     {
       "key": "u/o/thumb_thumb_f.webp",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -341,6 +355,7 @@
     },
     {
       "key": "u/o/small_photo.webp",
+      "valid": true,
       "root": "u/o/photo.webp",
       "family": [
         "u/o/cards_photo.webp",
@@ -365,6 +380,7 @@
     },
     {
       "key": "u/originals/12/IMG_1.jpg",
+      "valid": true,
       "root": "u/originals/12/IMG_1.jpg",
       "family": [
         "u/originals/12/IMG_1.jpg"
@@ -372,6 +388,7 @@
     },
     {
       "key": "u/originals/12/thumb_IMG_1.jpg",
+      "valid": true,
       "root": "u/originals/12/thumb_IMG_1.jpg",
       "family": [
         "u/originals/12/thumb_IMG_1.jpg"
@@ -379,6 +396,7 @@
     },
     {
       "key": " /u/o/f.webp/ ",
+      "valid": true,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -395,6 +413,7 @@
     },
     {
       "key": "f.webp",
+      "valid": true,
       "root": "f.webp",
       "family": [
         "cards_f.webp",
@@ -411,6 +430,7 @@
     },
     {
       "key": "thumb_f.webp",
+      "valid": true,
       "root": "f.webp",
       "family": [
         "cards_f.webp",
@@ -436,6 +456,7 @@
     },
     {
       "key": "small_f.webp",
+      "valid": true,
       "root": "f.webp",
       "family": [
         "cards_f.webp",
@@ -460,6 +481,7 @@
     },
     {
       "key": "u/o/thumb_",
+      "valid": true,
       "root": "u/o/thumb_",
       "family": [
         "u/o/cards_thumb_",
@@ -476,6 +498,7 @@
     },
     {
       "key": "u/o/thumb_small_",
+      "valid": true,
       "root": "u/o/small_",
       "family": [
         "u/o/cards_small_",
@@ -500,12 +523,99 @@
       ]
     },
     {
+      "key": "u/o/../f.webp",
+      "valid": false,
+      "root": "u/o/../f.webp",
+      "family": [
+        "u/o/../cards_f.webp",
+        "u/o/../f.webp",
+        "u/o/../medium_f.webp",
+        "u/o/../preview_f.webp",
+        "u/o/../small_f.webp",
+        "u/o/../thumb_cards_f.webp",
+        "u/o/../thumb_f.webp",
+        "u/o/../thumb_medium_f.webp",
+        "u/o/../thumb_preview_f.webp",
+        "u/o/../thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/./f.webp",
+      "valid": false,
+      "root": "u/./f.webp",
+      "family": [
+        "u/./cards_f.webp",
+        "u/./f.webp",
+        "u/./medium_f.webp",
+        "u/./preview_f.webp",
+        "u/./small_f.webp",
+        "u/./thumb_cards_f.webp",
+        "u/./thumb_f.webp",
+        "u/./thumb_medium_f.webp",
+        "u/./thumb_preview_f.webp",
+        "u/./thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/%2Ff.webp",
+      "valid": false,
+      "root": "u/o/%2Ff.webp",
+      "family": [
+        "u/o/%2Ff.webp",
+        "u/o/cards_%2Ff.webp",
+        "u/o/medium_%2Ff.webp",
+        "u/o/preview_%2Ff.webp",
+        "u/o/small_%2Ff.webp",
+        "u/o/thumb_%2Ff.webp",
+        "u/o/thumb_cards_%2Ff.webp",
+        "u/o/thumb_medium_%2Ff.webp",
+        "u/o/thumb_preview_%2Ff.webp",
+        "u/o/thumb_small_%2Ff.webp"
+      ]
+    },
+    {
+      "key": "u/o/%5cf.webp",
+      "valid": false,
+      "root": "u/o/%5cf.webp",
+      "family": [
+        "u/o/%5cf.webp",
+        "u/o/cards_%5cf.webp",
+        "u/o/medium_%5cf.webp",
+        "u/o/preview_%5cf.webp",
+        "u/o/small_%5cf.webp",
+        "u/o/thumb_%5cf.webp",
+        "u/o/thumb_cards_%5cf.webp",
+        "u/o/thumb_medium_%5cf.webp",
+        "u/o/thumb_preview_%5cf.webp",
+        "u/o/thumb_small_%5cf.webp"
+      ]
+    },
+    {
+      "key": "u/o/a\\b.webp",
+      "valid": false,
+      "root": "u/o/a\\b.webp",
+      "family": [
+        "u/o/a\\b.webp",
+        "u/o/cards_a\\b.webp",
+        "u/o/medium_a\\b.webp",
+        "u/o/preview_a\\b.webp",
+        "u/o/small_a\\b.webp",
+        "u/o/thumb_a\\b.webp",
+        "u/o/thumb_cards_a\\b.webp",
+        "u/o/thumb_medium_a\\b.webp",
+        "u/o/thumb_preview_a\\b.webp",
+        "u/o/thumb_small_a\\b.webp"
+      ]
+    },
+    {
       "key": "",
+      "valid": true,
       "root": null,
       "family": []
     },
     {
       "key": null,
+      "valid": true,
       "root": null,
       "family": []
     }

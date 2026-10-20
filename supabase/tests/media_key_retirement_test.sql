@@ -145,6 +145,8 @@ BEGIN
     ('private.media_key_require_read_committed()', 'postgres'),
     ('private.media_key_registry_immutable()', 'postgres'),
     ('private.media_key_references(text[])', 'postgres'),
+    ('private.media_key_owned_references(text[])', 'postgres'),
+    ('private.media_key_is_valid(text)', 'postgres'),
     ('private.media_key_retirement_guard()', 'postgres'),
     ('private.media_key_retirement_replay(uuid,uuid,bigint,text)', 'postgres'),
     ('private.release_observation_image_bytes_core(uuid,bigint,text,text,text)', 'postgres'),
@@ -196,6 +198,10 @@ BEGIN
   END LOOP;
 
   PERFORM pg_temp.eq((SELECT count(*) FROM pg_namespace WHERE nspname = 'test_barriers'), 0::bigint, 'test_barriers schema absent');
+  PERFORM pg_temp.eq((SELECT string_agg(DISTINCT tgenabled::text, ',') FROM pg_trigger
+                       WHERE tgname IN ('zzy_media_key_retirement_guard', 'media_key_retirements_immutable', 'media_key_retirements_no_truncate',
+                                        'retired_media_key_roots_immutable', 'retired_media_key_roots_no_truncate')), 'A', 'guard and registry triggers ENABLE ALWAYS');
+  PERFORM pg_temp.eq((SELECT count(*) FROM pg_trigger WHERE tgname = 'zzy_media_key_retirement_guard'), 5::bigint, 'five guard triggers');
 END $$;
 
 -- ---------------------------------------------------------------
@@ -263,21 +269,21 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, pg_temp.fxi('relfield.img'), a || '/rf/field.webp'))), 'not_microscope', 'not_microscope');
   PERFORM pg_temp.seed('reldel', 'A', a || '/rd/del.webp', NULL, 'microscope', 1);
   PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, pg_temp.fxi('reldel.img'), a || '/rd/del.webp'))), 'deleted', 'deleted');
-  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements), 0::bigint, 'no record after refusals');
+  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements WHERE user_id = pg_temp.fx('A')::uuid), 0::bigint, 'no record after refusals');
 
-  -- Foreign-owned measurement on this image (exists today through service
-  -- role or pre-RLS-fix rows) blocks the release.
+  -- Cross-owner references. A new one from an end user is refused with one
+  -- error whether or not the key is retired (no oracle). One planted behind
+  -- the guard's back (as a pre-guard row would be) does not block the release.
+  PERFORM pg_temp.seed('relcover', 'B', b || '/c/other.webp');
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', b::uuid, format($q$UPDATE public.observations SET thumb_key = %L WHERE id = %s$q$, a || '/r1/thumb_photo.webp', pg_temp.fxi('relcover.obs'))), 'ERR:42501:sporely_media_key_foreign', 'foreign cover refused');
+  ALTER TABLE public.spore_measurements DISABLE TRIGGER zzy_media_key_retirement_guard;
+  ALTER TABLE public.observations DISABLE TRIGGER zzy_media_key_retirement_guard;
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, image_key)
   VALUES (v_img, b::uuid, 9, a || '/r1/thumb_photo.webp') RETURNING id INTO v_mb;
-  PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(%L, %s, %L, %L, 'owner_sync')$q$, v_uuid, v_img, k, orig))), 'media_key_shared', 'foreign measurement -> media_key_shared');
-  DELETE FROM public.spore_measurements WHERE id = v_mb;
-
-  -- Another observation's cover blocks it too.
-  PERFORM pg_temp.seed('relcover', 'B', b || '/c/other.webp');
   UPDATE public.observations SET thumb_key = a || '/r1/thumb_photo.webp' WHERE id = pg_temp.fxi('relcover.obs');
-  PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(%L, %s, %L, %L, 'owner_sync')$q$, v_uuid, v_img, k, orig))), 'media_key_shared', 'other cover -> media_key_shared');
-  UPDATE public.observations SET thumb_key = NULL WHERE id = pg_temp.fxi('relcover.obs');
-  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements), 0::bigint, 'no record after shared refusals');
+  ALTER TABLE public.spore_measurements ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+  ALTER TABLE public.observations ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+  INSERT INTO fx VALUES ('rel.foreign_meas', v_mb::text);
 
   -- Apply.
   v_out := pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(%L, %s, %L, %L, 'public_microscopy')$q$, v_uuid, v_img, k, orig));
@@ -288,11 +294,13 @@ BEGIN
   PERFORM pg_temp.eq(ARRAY(SELECT jsonb_array_elements_text(v_res -> 'delete_keys')), v_expected, 'delete_keys = family(storage) ∪ family(original)');
   PERFORM pg_temp.eq((SELECT delete_keys FROM private.media_key_retirements WHERE operation_id = v_uuid), v_expected, 'stored delete_keys');
   PERFORM pg_temp.eq(orig = ANY (v_expected) AND (a || '/r1/thumb_photo.webp') = ANY (v_expected) AND k = ANY (v_expected), true, 'family contents');
-  PERFORM pg_temp.eq((SELECT array_agg(key_root ORDER BY key_root COLLATE "C") FROM private.retired_media_key_roots), ARRAY[a || '/originals/r1/photo.jpg', a || '/r1/photo.webp'], 'retired roots');
+  PERFORM pg_temp.eq((SELECT array_agg(key_root ORDER BY key_root COLLATE "C") FROM private.retired_media_key_roots WHERE user_id = pg_temp.fx('A')::uuid), ARRAY[a || '/originals/r1/photo.jpg', a || '/r1/photo.webp'], 'retired roots');
   PERFORM pg_temp.eq((SELECT row(storage_path, original_storage_path, upload_mode, source_width, stored_bytes, metadata_purpose)::text
                         FROM public.observation_images WHERE id = v_img), row(NULL::text, NULL::text, NULL::text, NULL::int, NULL::bigint, 'public_microscopy'::text)::text, 'image cleared');
   PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.spore_measurements WHERE id = v_m1), row(NULL::text, a || '/r1/measure_crop.webp')::text, 'owner measurement family key cleared, other kept');
   PERFORM pg_temp.eq((SELECT image_key FROM public.spore_measurements WHERE id = v_m2), a || '/r1/measure_other.webp', 'unrelated measurement untouched');
+  PERFORM pg_temp.eq((SELECT image_key FROM public.spore_measurements WHERE id = v_mb), a || '/r1/thumb_photo.webp', 'foreign planted measurement did not block and is untouched');
+  PERFORM pg_temp.eq((SELECT thumb_key FROM public.observations WHERE id = pg_temp.fxi('relcover.obs')), a || '/r1/thumb_photo.webp', 'foreign planted cover did not block and is untouched');
   PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.observations WHERE id = v_obs), row(NULL::text, NULL::text)::text, 'cover cleared');
 
   -- Replay by the same UUID: stored keys, no writes.
@@ -303,7 +311,7 @@ BEGIN
   PERFORM pg_temp.eq((v_res ->> 'replayed')::boolean, true, 'replayed');
   PERFORM pg_temp.eq(ARRAY(SELECT jsonb_array_elements_text(v_res -> 'delete_keys')), v_expected, 'replay keys');
   PERFORM pg_temp.eq((SELECT updated_at FROM public.observation_images WHERE id = v_img), v_updated, 'replay wrote nothing');
-  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements), 1::bigint, 'one record');
+  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements WHERE user_id = pg_temp.fx('A')::uuid), 1::bigint, 'one record');
   -- New UUID after the release: the paths moved on.
   PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, %L, 'owner_sync')$q$, v_img, k, orig))), 'row_changed', 'new UUID -> row_changed');
   -- Same UUID for another image: conflict; another user replaying: conflict.
@@ -322,13 +330,13 @@ DO $$
 DECLARE
   a text := pg_temp.fx('A');
   k text := pg_temp.fx('A') || '/s1/shared.webp';
-  v_before bigint := (SELECT count(*) FROM private.media_key_retirements);
+  v_before bigint := (SELECT count(*) FROM private.media_key_retirements WHERE user_id = pg_temp.fx('A')::uuid);
 BEGIN
   PERFORM pg_temp.seed('sh1', 'A', k);
   PERFORM pg_temp.seed('sh2', 'A', pg_temp.fx('A') || '/s1/thumb_shared.webp');
   PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, pg_temp.fxi('sh1.img'), k))), 'media_key_shared', 'shared 1');
   PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, pg_temp.fxi('sh2.img'), a || '/s1/thumb_shared.webp'))), 'media_key_shared', 'shared 2');
-  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements), v_before, 'no record for shared');
+  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements WHERE user_id = pg_temp.fx('A')::uuid), v_before, 'no record for shared');
 END $$;
 
 -- ---------------------------------------------------------------
@@ -409,6 +417,59 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, v_sql, '{"user-agent":"python-requests/2.32","x-sporely-sync-identity":"3"}'), 'ok:ok', 'brake identity 3');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, v_sql, '{"user-agent":"python-requests/2.32","x-sporely-sync-identity":"1"}'), 'ERR:P0001:sporely_upgrade_required', 'brake identity 1');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, v_sql, '{"user-agent":"python-requests/2.32"}'), 'ERR:P0001:sporely_upgrade_required', 'brake no identity');
+END $$;
+
+-- ---------------------------------------------------------------
+-- 5b. Cross-owner attachment refused on every column for B (authenticated),
+--     identically for a retired and a live key of A
+--     (no retirement oracle); malformed keys refused.
+-- ---------------------------------------------------------------
+DO $$
+DECLARE
+  a text := pg_temp.fx('A');
+  b text := pg_temp.fx('B');
+  v_obs bigint := pg_temp.fxi('relcover.obs');
+  v_img bigint := pg_temp.fxi('relcover.img');
+  v_meas bigint;
+  v_mosaic bigint;
+  v_cal bigint;
+  v_role text;
+  v_sql text;
+  v_retired text;
+  v_live text;
+  v_bad text;
+BEGIN
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um) VALUES (v_img, b::uuid, 1) RETURNING id INTO v_meas;
+  INSERT INTO public.spore_measurement_mosaics (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version)
+  VALUES (v_obs, b::uuid, b || '/c/spore_mosaic_v1_00.webp', 1, 1, 1, 1) RETURNING id INTO v_mosaic;
+  INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel)
+  VALUES (b::uuid, 'mkrb', current_date, 1) RETURNING id INTO v_cal;
+  FOREACH v_role IN ARRAY ARRAY['authenticated'] LOOP
+    FOREACH v_sql IN ARRAY ARRAY[
+      format('UPDATE public.observation_images SET storage_path = %%L WHERE id = %s', v_img),
+      format('UPDATE public.observation_images SET original_storage_path = %%L WHERE id = %s', v_img),
+      format('UPDATE public.spore_measurements SET image_key = %%L WHERE id = %s', v_meas),
+      format('UPDATE public.spore_measurements SET thumb_key = %%L WHERE id = %s', v_meas),
+      format('UPDATE public.observations SET image_key = %%L WHERE id = %s', v_obs),
+      format('UPDATE public.observations SET thumb_key = %%L WHERE id = %s', v_obs),
+      format('UPDATE public.spore_measurement_mosaics SET storage_key = %%L WHERE id = %s', v_mosaic),
+      format('UPDATE public.calibrations SET image_storage_path = %%L WHERE id = %s', v_cal)
+    ] LOOP
+      v_retired := pg_temp.run(v_role, b::uuid, format(v_sql, pg_temp.fx('rel.key')));
+      v_live := pg_temp.run(v_role, b::uuid, format(v_sql, a || '/att/live.webp'));
+      PERFORM pg_temp.eq(v_retired LIKE 'ERR:42501:%', true, v_role || ' foreign retired key: ' || v_sql || ' -> ' || v_retired);
+      PERFORM pg_temp.eq(regexp_replace(v_retired, '\([^)]*\)', '()', 'g'), regexp_replace(v_live, '\([^)]*\)', '()', 'g'), v_role || ' same refusal for retired and live foreign key: ' || v_sql);
+      PERFORM pg_temp.eq(v_retired NOT LIKE '%released%', true, v_role || ' no retirement hint: ' || v_sql);
+      IF v_sql NOT LIKE '%observation_images%' AND v_sql NOT LIKE '%mosaics%' THEN
+        PERFORM pg_temp.eq(v_retired, 'ERR:42501:sporely_media_key_foreign', v_role || ' guard refusal: ' || v_sql);
+      END IF;
+    END LOOP;
+  END LOOP;
+  -- Malformed keys (own prefix) are refused.
+  FOREACH v_bad IN ARRAY ARRAY[a || '/x/../f.webp', a || '/./f.webp', a || '/x/%2Ff.webp', a || '/x/%5cf.webp', a || E'/x/a\\b.webp'] LOOP
+    PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observations SET image_key = %L WHERE id = %s', v_bad, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_media_key_invalid', 'invalid key ' || v_bad);
+    PERFORM pg_temp.eq(private.media_key_is_valid(v_bad), false, 'is_valid ' || v_bad);
+  END LOOP;
 END $$;
 
 -- ---------------------------------------------------------------
@@ -516,6 +577,25 @@ SELECT pg_temp.eq(private.claim_tombstoned_image_purge_core(gen_random_uuid(), p
 RELEASE SAVEPOINT mkr_claim;
 SELECT pg_temp.eq((SELECT purge_claimed_at IS NOT NULL FROM public.observation_images WHERE id = pg_temp.fxi('pgsp.img')), true, 'savepoint claim kept');
 
+-- A measured tombstone (the desktop copies the image key into its
+-- measurements) and its cover are cleared by the claim and do not block it.
+DO $$
+DECLARE
+  a text := pg_temp.fx('A');
+  k text := pg_temp.fx('A') || '/pm/meas.webp';
+  v_m bigint;
+  v_res jsonb;
+BEGIN
+  PERFORM pg_temp.seed('pgm', 'A', k, NULL, 'microscope', 40);
+  INSERT INTO public.spore_measurements (image_id, user_id, length_um, image_key, thumb_key)
+  VALUES (pg_temp.fxi('pgm.img'), a::uuid, 3, k, a || '/pm/thumb_meas.webp') RETURNING id INTO v_m;
+  UPDATE public.observations SET image_key = k, thumb_key = a || '/pm/thumb_meas.webp' WHERE id = pg_temp.fxi('pgm.obs');
+  v_res := private.claim_tombstoned_image_purge_core(gen_random_uuid(), pg_temp.fxi('pgm.img'));
+  PERFORM pg_temp.eq(v_res ->> 'status', 'claimed', 'measured tombstone claims');
+  PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.spore_measurements WHERE id = v_m), row(NULL::text, NULL::text)::text, 'claim cleared measurement keys');
+  PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.observations WHERE id = pg_temp.fxi('pgm.obs')), row(NULL::text, NULL::text)::text, 'claim cleared cover');
+END $$;
+
 -- media_key_shared on a claim: a live row shares the tombstone's key.
 DO $$
 DECLARE
@@ -574,7 +654,7 @@ BEGIN
   END LOOP;
   PERFORM pg_temp.eq(v_seen, 1, 'sweep saw the interrupted purge');
   PERFORM pg_temp.eq(public.record_retired_key_sweep(v_ids), cardinality(v_ids), 'record count');
-  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements WHERE last_swept_at IS NULL), 0::bigint, 'all swept');
+  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements WHERE last_swept_at IS NULL AND user_id = pg_temp.fx('A')::uuid), 0::bigint, 'all swept');
   PERFORM pg_temp.eq((SELECT q.quota_changed FROM public.finalize_observation_image_purge(v_img, now(), 10) q), true, 'finalize after interrupted purge');
   PERFORM pg_temp.eq((SELECT q.quota_changed FROM public.finalize_observation_image_purge(v_img, now(), 10) q), false, 'finalize idempotent');
   PERFORM pg_temp.eq((SELECT storage_path FROM public.observation_images WHERE id = v_img), pg_temp.fx('pg.key'), 'tombstone keeps its paths');
@@ -601,6 +681,33 @@ BEGIN
     END IF;
   END LOOP;
   PERFORM pg_temp.eq(v_seen, 2, 'guard failures reported');
+END $$;
+
+-- Sweep reports a gone or purged image row, and rotates records so a batch
+-- that always fails cannot starve newer ones.
+DO $$
+DECLARE
+  r record;
+  v_gone bigint;
+  v_first bigint[];
+  v_second bigint[];
+BEGIN
+  PERFORM pg_temp.seed('swg', 'A', pg_temp.fx('A') || '/swg/x.webp', NULL, 'microscope', 40);
+  PERFORM private.claim_tombstoned_image_purge_core(gen_random_uuid(), pg_temp.fxi('swg.img'));
+  v_gone := pg_temp.fxi('swg.img');
+  DELETE FROM public.observations WHERE id = pg_temp.fxi('swg.obs');  -- cascades to the image row
+  PERFORM pg_temp.eq((SELECT count(*) FROM public.observation_images WHERE id = v_gone), 0::bigint, 'image row gone');
+  FOR r IN SELECT * FROM public.claim_retired_key_sweep(500) LOOP
+    IF r.image_id = v_gone THEN
+      PERFORM pg_temp.eq(r.image_exists, false, 'gone row reported');
+    ELSIF r.image_id = pg_temp.fxi('pg.img') THEN
+      PERFORM pg_temp.eq(r.image_exists AND r.image_purged_at IS NOT NULL, true, 'purged row reported');
+    END IF;
+  END LOOP;
+  -- Starvation: without recording anything, successive batches advance.
+  v_first := ARRAY(SELECT retirement_id FROM public.claim_retired_key_sweep(2));
+  v_second := ARRAY(SELECT retirement_id FROM public.claim_retired_key_sweep(2));
+  PERFORM pg_temp.eq(v_first && v_second, false, 'unrecorded records rotate to the back');
 END $$;
 
 -- ---------------------------------------------------------------

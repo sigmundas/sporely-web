@@ -17,7 +17,7 @@ const byKey = new Map(fixture.cases.filter(c => c.key).map(c => [c.key.trim().re
 test('§K fixture: Worker deriveThumbKey stays in the SQL family and root', () => {
   let checked = 0
   for (const c of fixture.cases) {
-    if (!c.key || !c.key.trim() || c.root === null) continue
+    if (!c.key || !c.key.trim() || c.root === null || c.valid === false) continue
     if (c.key.split('/').includes('originals')) continue // originals are never thumbed
     const normalized = c.key.trim().replace(/^\/+|\/+$/g, '')
     const thumb = deriveThumbKey(normalized)

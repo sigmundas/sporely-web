@@ -205,6 +205,25 @@ BEGIN
 END
 $$;
 
+-- §K key syntax: refuse '.' / '..' segments, percent-encoded '/' or '\'
+-- (%2F, %5C, any case) and a literal backslash. The Worker must apply the
+-- same rule (Stage 0b).
+CREATE FUNCTION private.media_key_is_valid(p_key text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = ''
+AS $$
+  SELECT s.n IS NULL OR NOT (
+       '.' = ANY (pg_catalog.string_to_array(s.n, '/'))
+    OR '..' = ANY (pg_catalog.string_to_array(s.n, '/'))
+    OR s.n ~* '%2f|%5c'
+    OR pg_catalog.strpos(s.n, E'\\') > 0
+  )
+  FROM (SELECT NULLIF(pg_catalog.btrim(pg_catalog.btrim(p_key), '/'), '') AS n) s
+$$;
+
 -- =============================================================
 -- 2. Registry.
 -- =============================================================
@@ -217,14 +236,17 @@ CREATE TABLE private.media_key_retirements (
   operation_id uuid NOT NULL UNIQUE,
   delete_keys text[] NOT NULL,
   retired_at timestamptz NOT NULL DEFAULT now(),
-  last_swept_at timestamptz
+  last_swept_at timestamptz,
+  last_attempted_at timestamptz
 );
 
 COMMENT ON TABLE private.media_key_retirements IS
-  'Media-key retirement records (20261020120000). One immutable row per release or purge claim with its exact delete_keys. Never deleted; only last_swept_at changes.';
+  'Media-key retirement records (20261020120000). One immutable row per release or purge claim with its exact delete_keys. Never deleted; only last_swept_at and last_attempted_at change.';
 
+-- Sweep order: never-attempted first, then least recently attempted, so
+-- records that keep failing rotate to the back and cannot starve the queue.
 CREATE INDEX media_key_retirements_sweep_order_idx
-  ON private.media_key_retirements (last_swept_at NULLS FIRST, id);
+  ON private.media_key_retirements (last_attempted_at NULLS FIRST, id);
 CREATE INDEX media_key_retirements_image_id_idx
   ON private.media_key_retirements (image_id);
 
@@ -262,7 +284,8 @@ AS $$
 BEGIN
   IF TG_OP = 'UPDATE'
      AND TG_TABLE_NAME = 'media_key_retirements'
-     AND (pg_catalog.to_jsonb(NEW) - 'last_swept_at') = (pg_catalog.to_jsonb(OLD) - 'last_swept_at') THEN
+     AND (pg_catalog.to_jsonb(NEW) - 'last_swept_at' - 'last_attempted_at')
+       = (pg_catalog.to_jsonb(OLD) - 'last_swept_at' - 'last_attempted_at') THEN
     RETURN NEW;
   END IF;
   RAISE EXCEPTION 'private.% is append-only (% refused)', TG_TABLE_NAME, TG_OP
@@ -282,6 +305,11 @@ CREATE TRIGGER retired_media_key_roots_immutable
 CREATE TRIGGER retired_media_key_roots_no_truncate
   BEFORE TRUNCATE ON private.retired_media_key_roots
   FOR EACH STATEMENT EXECUTE FUNCTION private.media_key_registry_immutable();
+
+ALTER TABLE private.media_key_retirements ENABLE ALWAYS TRIGGER media_key_retirements_immutable;
+ALTER TABLE private.media_key_retirements ENABLE ALWAYS TRIGGER media_key_retirements_no_truncate;
+ALTER TABLE private.retired_media_key_roots ENABLE ALWAYS TRIGGER retired_media_key_roots_immutable;
+ALTER TABLE private.retired_media_key_roots ENABLE ALWAYS TRIGGER retired_media_key_roots_no_truncate;
 
 -- =============================================================
 -- 3. Server-owned purge-claim columns.
@@ -305,6 +333,7 @@ RETURNS TABLE (
   tbl text,
   row_id bigint,
   col text,
+  key text,
   owner_id uuid,
   parent_image_id bigint,
   is_deleted boolean,
@@ -314,47 +343,70 @@ LANGUAGE sql
 STABLE
 SET search_path = ''
 AS $$
-  SELECT 'observation_images', i.id, 'storage_path', i.user_id, i.id,
+  SELECT 'observation_images', i.id, 'storage_path', i.storage_path, i.user_id, i.id,
          i.deleted_at IS NOT NULL, i.purge_claimed_at IS NOT NULL
     FROM public.observation_images i
    WHERE i.storage_path IS NOT NULL
      AND private.media_key_root(i.storage_path) = ANY (p_roots)
   UNION ALL
-  SELECT 'observation_images', i.id, 'original_storage_path', i.user_id, i.id,
+  SELECT 'observation_images', i.id, 'original_storage_path', i.original_storage_path, i.user_id, i.id,
          i.deleted_at IS NOT NULL, i.purge_claimed_at IS NOT NULL
     FROM public.observation_images i
    WHERE i.original_storage_path IS NOT NULL
      AND private.media_key_root(i.original_storage_path) = ANY (p_roots)
   UNION ALL
-  SELECT 'spore_measurements', m.id, 'image_key', m.user_id, m.image_id, false, false
+  SELECT 'spore_measurements', m.id, 'image_key', m.image_key, m.user_id, m.image_id, false, false
     FROM public.spore_measurements m
    WHERE m.image_key IS NOT NULL
      AND private.media_key_root(m.image_key) = ANY (p_roots)
   UNION ALL
-  SELECT 'spore_measurements', m.id, 'thumb_key', m.user_id, m.image_id, false, false
+  SELECT 'spore_measurements', m.id, 'thumb_key', m.thumb_key, m.user_id, m.image_id, false, false
     FROM public.spore_measurements m
    WHERE m.thumb_key IS NOT NULL
      AND private.media_key_root(m.thumb_key) = ANY (p_roots)
   UNION ALL
-  SELECT 'observations', o.id, 'image_key', o.user_id, NULL::bigint, false, false
+  SELECT 'observations', o.id, 'image_key', o.image_key, o.user_id, NULL::bigint, false, false
     FROM public.observations o
    WHERE o.image_key IS NOT NULL
      AND private.media_key_root(o.image_key) = ANY (p_roots)
   UNION ALL
-  SELECT 'observations', o.id, 'thumb_key', o.user_id, NULL::bigint, false, false
+  SELECT 'observations', o.id, 'thumb_key', o.thumb_key, o.user_id, NULL::bigint, false, false
     FROM public.observations o
    WHERE o.thumb_key IS NOT NULL
      AND private.media_key_root(o.thumb_key) = ANY (p_roots)
   UNION ALL
-  SELECT 'spore_measurement_mosaics', s.id, 'storage_key', s.user_id, NULL::bigint, false, false
+  SELECT 'spore_measurement_mosaics', s.id, 'storage_key', s.storage_key, s.user_id, NULL::bigint, false, false
     FROM public.spore_measurement_mosaics s
    WHERE s.storage_key IS NOT NULL
      AND private.media_key_root(s.storage_key) = ANY (p_roots)
   UNION ALL
-  SELECT 'calibrations', c.id, 'image_storage_path', c.user_id, NULL::bigint, false, false
+  SELECT 'calibrations', c.id, 'image_storage_path', c.image_storage_path, c.user_id, NULL::bigint, false, false
     FROM public.calibrations c
    WHERE c.image_storage_path IS NOT NULL
      AND private.media_key_root(c.image_storage_path) = ANY (p_roots)
+$$;
+
+-- A reference counts only when its row owner owns the key's prefix: a row
+-- can never legitimately reference another owner's bytes, and the guard
+-- refuses new foreign-prefix keys. This stops a foreign row from blocking
+-- another user's release, claim or sweep.
+CREATE FUNCTION private.media_key_owned_references(p_roots text[])
+RETURNS TABLE (
+  tbl text,
+  row_id bigint,
+  col text,
+  owner_id uuid,
+  parent_image_id bigint,
+  is_deleted boolean,
+  is_purge_claimed boolean
+)
+LANGUAGE sql
+STABLE
+SET search_path = ''
+AS $$
+  SELECT r.tbl, r.row_id, r.col, r.owner_id, r.parent_image_id, r.is_deleted, r.is_purge_claimed
+    FROM private.media_key_references(p_roots) r
+   WHERE pg_catalog.starts_with(private.media_key_normalize(r.key), r.owner_id::text || '/')
 $$;
 
 -- =============================================================
@@ -374,6 +426,7 @@ DECLARE
   v_col text;
   v_val text;
   v_keys text[] := ARRAY[]::text[];
+  v_changed text[] := ARRAY[]::text[];
   v_roots text[];
   v_restore boolean := false;
   v_claim_change boolean := false;
@@ -415,6 +468,10 @@ BEGIN
        AND (TG_OP = 'INSERT' OR v_restore OR (v_new -> v_col) IS DISTINCT FROM (v_old -> v_col)) THEN
       v_keys := v_keys || v_val;
     END IF;
+    IF v_val IS NOT NULL
+       AND (TG_OP = 'INSERT' OR (v_new -> v_col) IS DISTINCT FROM (v_old -> v_col)) THEN
+      v_changed := v_changed || v_val;
+    END IF;
   END LOOP;
 
   IF pg_catalog.cardinality(v_keys) = 0 AND NOT v_restore AND NOT v_claim_change THEN
@@ -422,6 +479,27 @@ BEGIN
   END IF;
 
   PERFORM private.media_key_require_read_committed();
+
+  -- For an end-user caller (auth.uid() set) every new or changed key must be
+  -- well-formed and live under the row owner's prefix. (Trusted roles may
+  -- still write legacy rows; release and claim refuse a malformed stored key
+  -- with key_invalid, so such a key is never retired or deleted.) Both are checked before any key lock or registry read, so a
+  -- foreign key neither waits on nor reveals another owner's retirement
+  -- state: it always gets this one refusal. Trusted server roles (no
+  -- auth.uid(): service_role, migrations) are not prefix-checked: existing
+  -- server paths and fixtures write legacy keys; release, claim and sweep
+  -- ignore any reference whose owner does not own the key's prefix.
+  FOREACH v_val IN ARRAY v_changed LOOP
+    IF auth.uid() IS NOT NULL AND NOT private.media_key_is_valid(v_val) THEN
+      RAISE EXCEPTION 'This media key is not a valid Sporely storage key. Nothing was changed in the cloud.'
+        USING ERRCODE = 'P0001', HINT = 'sporely_media_key_invalid';
+    END IF;
+    IF auth.uid() IS NOT NULL
+       AND ((v_new ->> 'user_id') IS NULL OR NOT pg_catalog.starts_with(v_val, (v_new ->> 'user_id') || '/')) THEN
+      RAISE EXCEPTION 'A media key must live under the row owner''s storage prefix. Nothing was changed in the cloud.'
+        USING ERRCODE = '42501', HINT = 'sporely_media_key_foreign';
+    END IF;
+  END LOOP;
 
   IF v_claim_change THEN
     -- Only NULL -> non-NULL of both columns together, on a tombstoned row,
@@ -486,6 +564,13 @@ CREATE TRIGGER zzy_media_key_retirement_guard
   BEFORE INSERT OR UPDATE ON public.calibrations
   FOR EACH ROW EXECUTE FUNCTION private.media_key_retirement_guard();
 
+-- ALWAYS: session_replication_role = replica must not bypass the guard.
+ALTER TABLE public.observation_images ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+ALTER TABLE public.spore_measurements ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+ALTER TABLE public.observations ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+ALTER TABLE public.spore_measurement_mosaics ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+ALTER TABLE public.calibrations ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+
 -- =============================================================
 -- 6. Release and purge claim.
 -- =============================================================
@@ -538,7 +623,6 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 SET lock_timeout = '5s'
-SET statement_timeout = '15s'
 AS $$
 DECLARE
   v_uid uuid := auth.uid();
@@ -573,21 +657,21 @@ BEGIN
   END IF;
 
   -- §L.1 observation row.
-  SELECT o.user_id INTO v_obs_owner FROM public.observations o WHERE o.id = v_obs_id FOR UPDATE;
+  SELECT o.user_id INTO v_obs_owner FROM public.observations o WHERE o.id = v_obs_id FOR NO KEY UPDATE;
   IF NOT FOUND OR v_obs_owner IS DISTINCT FROM v_uid THEN
     RETURN pg_catalog.jsonb_build_object('status', 'not_found', 'image_id', p_image_id);
   END IF;
   -- §L.2 per-user cascade lock (as _media_bump_child_images_on_obs).
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(v_obs_owner::text, 42));
   -- §L.3 image row.
-  SELECT * INTO v_img FROM public.observation_images i WHERE i.id = p_image_id FOR UPDATE;
+  SELECT * INTO v_img FROM public.observation_images i WHERE i.id = p_image_id FOR NO KEY UPDATE;
   IF NOT FOUND OR v_img.user_id IS DISTINCT FROM v_uid OR v_img.observation_id IS DISTINCT FROM v_obs_id THEN
     RETURN pg_catalog.jsonb_build_object('status', 'not_found', 'image_id', p_image_id);
   END IF;
   -- §L.4 the owner's measurement rows of this image, by id.
   PERFORM 1 FROM public.spore_measurements m
     WHERE m.image_id = p_image_id AND m.user_id = v_img.user_id
-    ORDER BY m.id FOR UPDATE;
+    ORDER BY m.id FOR NO KEY UPDATE;
   -- §L.5 key roots of the stored keys.
   v_roots := ARRAY(
     SELECT DISTINCT private.media_key_root(k)
@@ -605,6 +689,10 @@ BEGIN
   IF v_img.deleted_at IS NOT NULL OR v_img.purged_at IS NOT NULL THEN
     RETURN pg_catalog.jsonb_build_object('status', 'deleted', 'image_id', p_image_id);
   END IF;
+  IF EXISTS (SELECT 1 FROM pg_catalog.unnest(ARRAY[v_img.storage_path, v_img.original_storage_path]) AS k
+              WHERE k IS NOT NULL AND NOT private.media_key_is_valid(k)) THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'key_invalid', 'image_id', p_image_id);
+  END IF;
   IF v_img.image_type IS DISTINCT FROM 'microscope' THEN
     RETURN pg_catalog.jsonb_build_object('status', 'not_microscope', 'image_id', p_image_id);
   END IF;
@@ -621,7 +709,7 @@ BEGIN
   -- transaction clears: the image itself, the owner's measurements of this
   -- image, and the owning observation's cover.
   IF EXISTS (
-    SELECT 1 FROM private.media_key_references(v_roots) ref
+    SELECT 1 FROM private.media_key_owned_references(v_roots) ref
      WHERE NOT (ref.tbl = 'observation_images' AND ref.row_id = p_image_id)
        AND NOT (ref.tbl = 'spore_measurements' AND ref.parent_image_id = p_image_id AND ref.owner_id = v_img.user_id)
        AND NOT (ref.tbl = 'observations' AND ref.row_id = v_obs_id)
@@ -695,7 +783,6 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 SET lock_timeout = '5s'
-SET statement_timeout = '15s'
 AS $$
 DECLARE
   v_resp jsonb;
@@ -724,15 +811,20 @@ BEGIN
   IF NOT FOUND THEN
     RETURN pg_catalog.jsonb_build_object('status', 'not_found', 'image_id', p_image_id);
   END IF;
-  -- §L.1, §L.2, §L.3, §L.5 (no measurement rows are updated).
-  SELECT o.user_id INTO v_obs_owner FROM public.observations o WHERE o.id = v_obs_id FOR UPDATE;
+  -- §L.1 .. §L.5. The owner's measurements of this image are locked and,
+  -- like the owning cover, cleared when they point into the family (the
+  -- desktop copies the image key into its measurements' image_key/thumb_key).
+  SELECT o.user_id INTO v_obs_owner FROM public.observations o WHERE o.id = v_obs_id FOR NO KEY UPDATE;
   IF FOUND THEN
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(v_obs_owner::text, 42));
   END IF;
-  SELECT * INTO v_img FROM public.observation_images i WHERE i.id = p_image_id FOR UPDATE;
+  SELECT * INTO v_img FROM public.observation_images i WHERE i.id = p_image_id FOR NO KEY UPDATE;
   IF NOT FOUND THEN
     RETURN pg_catalog.jsonb_build_object('status', 'not_found', 'image_id', p_image_id);
   END IF;
+  PERFORM 1 FROM public.spore_measurements m
+    WHERE m.image_id = p_image_id AND m.user_id = v_img.user_id
+    ORDER BY m.id FOR NO KEY UPDATE;
   v_roots := ARRAY(
     SELECT DISTINCT private.media_key_root(k)
       FROM pg_catalog.unnest(ARRAY[v_img.storage_path, v_img.original_storage_path]) AS k
@@ -754,10 +846,19 @@ BEGIN
      OR v_img.deleted_at > pg_catalog.now() - pg_catalog.make_interval(days => v_days) THEN
     RETURN pg_catalog.jsonb_build_object('status', 'not_eligible', 'image_id', p_image_id);
   END IF;
+  IF EXISTS (SELECT 1 FROM pg_catalog.unnest(ARRAY[v_img.storage_path, v_img.original_storage_path]) AS k
+              WHERE k IS NOT NULL AND NOT private.media_key_is_valid(k)) THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'key_invalid', 'image_id', p_image_id);
+  END IF;
 
+  -- Same exemption as the release: the row itself, the owner's measurements
+  -- of this image and the owning observation's cover, which this
+  -- transaction clears. Any other owned reference refuses.
   IF EXISTS (
-    SELECT 1 FROM private.media_key_references(v_roots) ref
+    SELECT 1 FROM private.media_key_owned_references(v_roots) ref
      WHERE NOT (ref.tbl = 'observation_images' AND ref.row_id = p_image_id)
+       AND NOT (ref.tbl = 'spore_measurements' AND ref.parent_image_id = p_image_id AND ref.owner_id = v_img.user_id)
+       AND NOT (ref.tbl = 'observations' AND ref.row_id = v_obs_id)
   ) THEN
     RETURN pg_catalog.jsonb_build_object('status', 'media_key_shared', 'image_id', p_image_id);
   END IF;
@@ -783,6 +884,22 @@ BEGIN
      SET purge_claimed_at = pg_catalog.now(),
          purge_retirement_id = v_ret_id
    WHERE i.id = p_image_id;
+
+  UPDATE public.spore_measurements m
+     SET image_key = CASE WHEN private.media_key_root(m.image_key) = ANY (v_roots) THEN NULL ELSE m.image_key END,
+         thumb_key = CASE WHEN private.media_key_root(m.thumb_key) = ANY (v_roots) THEN NULL ELSE m.thumb_key END
+   WHERE m.image_id = p_image_id
+     AND m.user_id = v_img.user_id
+     AND (private.media_key_root(m.image_key) = ANY (v_roots)
+          OR private.media_key_root(m.thumb_key) = ANY (v_roots));
+
+  UPDATE public.observations o
+     SET image_key = CASE WHEN private.media_key_root(o.image_key) = ANY (v_roots) THEN NULL ELSE o.image_key END,
+         thumb_key = CASE WHEN private.media_key_root(o.thumb_key) = ANY (v_roots) THEN NULL ELSE o.thumb_key END
+   WHERE o.id = v_obs_id
+     AND o.user_id = v_img.user_id
+     AND (private.media_key_root(o.image_key) = ANY (v_roots)
+          OR private.media_key_root(o.thumb_key) = ANY (v_roots));
 
   RETURN pg_catalog.jsonb_build_object(
     'status', 'claimed',
@@ -882,13 +999,14 @@ RETURNS TABLE (
   reason text,
   delete_keys text[],
   status text,
-  blocking_references jsonb
+  blocking_references jsonb,
+  image_exists boolean,
+  image_purged_at timestamptz
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 SET lock_timeout = '5s'
-SET statement_timeout = '15s'
 AS $$
 DECLARE
   v_limit integer := LEAST(GREATEST(COALESCE(p_limit, 50), 1), 500);
@@ -901,9 +1019,12 @@ BEGIN
 
   v_ids := ARRAY(
     SELECT r.id FROM private.media_key_retirements r
-     ORDER BY r.last_swept_at NULLS FIRST, r.id
+     ORDER BY r.last_attempted_at NULLS FIRST, r.id
      LIMIT v_limit
   );
+  -- Every handed-out record moves to the back of the queue, whether or not
+  -- the caller finishes it, so failing records cannot starve newer ones.
+  UPDATE private.media_key_retirements r SET last_attempted_at = pg_catalog.clock_timestamp() WHERE r.id = ANY (v_ids);
   -- One sorted acquisition over every batch root (§L.5), never per record.
   PERFORM private.lock_media_key_roots(ARRAY(
     SELECT private.media_key_root(k)
@@ -914,13 +1035,13 @@ BEGIN
   FOR v_rec IN
     SELECT r.* FROM private.media_key_retirements r
      WHERE r.id = ANY (v_ids)
-     ORDER BY r.last_swept_at NULLS FIRST, r.id
+     ORDER BY r.id
   LOOP
     v_roots := ARRAY(SELECT DISTINCT private.media_key_root(k) FROM pg_catalog.unnest(v_rec.delete_keys) AS k);
     SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
              'table', ref.tbl, 'id', ref.row_id, 'column', ref.col))
       INTO v_refs
-      FROM private.media_key_references(v_roots) ref
+      FROM private.media_key_owned_references(v_roots) ref
      WHERE NOT (v_rec.reason = 'purge'
                 AND ref.tbl = 'observation_images'
                 AND ref.row_id = v_rec.image_id
@@ -933,7 +1054,14 @@ BEGIN
     delete_keys := v_rec.delete_keys;
     status := CASE WHEN v_refs IS NULL THEN 'ok' ELSE 'guard_failed' END;
     blocking_references := v_refs;
+    -- The image row can be gone (account deletion, observation hard delete)
+    -- or already purged: the caller then deletes the keys but skips finalize.
+    SELECT true, i.purged_at INTO image_exists, image_purged_at
+      FROM public.observation_images i WHERE i.id = v_rec.image_id;
+    image_exists := coalesce(image_exists, false);
     RETURN NEXT;
+    image_exists := NULL;
+    image_purged_at := NULL;
   END LOOP;
 END
 $$;
@@ -944,7 +1072,6 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 SET lock_timeout = '5s'
-SET statement_timeout = '15s'
 AS $$
 DECLARE
   v_count integer;
@@ -1029,7 +1156,9 @@ RETURNS TABLE (
   reason text,
   delete_keys text[],
   status text,
-  blocking_references jsonb
+  blocking_references jsonb,
+  image_exists boolean,
+  image_purged_at timestamptz
 )
 LANGUAGE sql
 SECURITY DEFINER
@@ -1063,6 +1192,8 @@ REVOKE EXECUTE ON FUNCTION
   private.media_key_require_read_committed(),
   private.media_key_registry_immutable(),
   private.media_key_references(text[]),
+  private.media_key_owned_references(text[]),
+  private.media_key_is_valid(text),
   private.media_key_retirement_guard(),
   private.media_key_retirement_replay(uuid, uuid, bigint, text),
   private.release_observation_image_bytes_core(uuid, bigint, text, text, text),

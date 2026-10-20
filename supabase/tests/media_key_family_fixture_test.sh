@@ -2,7 +2,7 @@
 # §K cross-language fixture, SQL side (20261020120000_media_key_retirement.sql).
 #
 # Reads supabase/tests/fixtures/media_key_family_fixture.json and asserts, for
-# every case, that private.media_key_root and private.media_key_family return
+# every case, that private.media_key_is_valid matches "valid", that private.media_key_root and private.media_key_family return
 # exactly the fixture's root and family, that root is a fixed point, that every
 # family member has the same root as the key (originals excepted: their family
 # is the key itself), and that the root is in the family.
@@ -30,6 +30,9 @@ BEGIN
     v_root := private.media_key_root(v_key);
     v_family := private.media_key_family(v_key);
     v_expected_family := ARRAY(SELECT jsonb_array_elements_text(c -> 'family'));
+    IF private.media_key_is_valid(v_key) IS DISTINCT FROM (c ->> 'valid')::boolean THEN
+      RAISE EXCEPTION 'is_valid(%) = %, fixture %', v_key, private.media_key_is_valid(v_key), c ->> 'valid';
+    END IF;
     IF v_root IS DISTINCT FROM (c ->> 'root') THEN
       RAISE EXCEPTION 'root(%) = %, fixture %', v_key, v_root, c ->> 'root';
     END IF;
