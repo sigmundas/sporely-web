@@ -1,0 +1,513 @@
+{
+  "description": "§K media-key root/family fixture (plan 2026-10-20 media-key retirement). Shared by the SQL test now; the Worker (JS, Stage 0b) and desktop (Python, Stage 1) implementations must produce identical root and family for every case.",
+  "rules": {
+    "prefixes": [
+      "thumb_",
+      "small_",
+      "medium_",
+      "cards_",
+      "preview_"
+    ],
+    "variant_prefixes": [
+      "thumb_",
+      "thumb_small_",
+      "thumb_medium_",
+      "thumb_cards_",
+      "thumb_preview_",
+      "small_",
+      "medium_",
+      "cards_",
+      "preview_"
+    ],
+    "strip_while_longer_than_prefix": true,
+    "family_sort": "C collation / code point"
+  },
+  "cases": [
+    {
+      "key": "u/o/f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/small_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/thumb_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_thumb_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_thumb_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_thumb_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_thumb_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_thumb_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_thumb_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_thumb_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_thumb_f.webp",
+        "u/o/thumb_thumb_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/small_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_small_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_small_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_small_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_small_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_small_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_small_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_small_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/medium_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_medium_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_medium_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_medium_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_medium_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_medium_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_medium_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_medium_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_medium_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/cards_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_cards_f.webp",
+        "u/o/cards_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_cards_f.webp",
+        "u/o/medium_f.webp",
+        "u/o/preview_cards_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/small_cards_f.webp",
+        "u/o/small_f.webp",
+        "u/o/thumb_cards_cards_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_cards_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_preview_cards_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_small_cards_f.webp",
+        "u/o/thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/preview_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_preview_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_preview_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_preview_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_preview_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_preview_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_preview_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_preview_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_preview_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/thumb_small_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_thumb_small_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_thumb_small_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_thumb_small_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_thumb_small_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_thumb_small_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_thumb_small_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_thumb_small_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_thumb_small_f.webp",
+        "u/o/thumb_thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/thumb_medium_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_thumb_medium_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_thumb_medium_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_thumb_medium_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_thumb_medium_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_thumb_medium_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_thumb_medium_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_thumb_medium_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_thumb_medium_f.webp",
+        "u/o/thumb_thumb_medium_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/thumb_cards_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_thumb_cards_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_thumb_cards_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_thumb_cards_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_thumb_cards_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_thumb_cards_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_thumb_cards_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_thumb_cards_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_thumb_cards_f.webp",
+        "u/o/thumb_thumb_cards_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/thumb_preview_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_thumb_preview_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_thumb_preview_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_thumb_preview_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_thumb_preview_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_thumb_preview_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_thumb_preview_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_thumb_preview_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_thumb_preview_f.webp",
+        "u/o/thumb_thumb_preview_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/small_thumb_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_small_thumb_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_small_thumb_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_small_thumb_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_small_thumb_f.webp",
+        "u/o/small_thumb_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_small_thumb_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_small_thumb_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_small_thumb_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_small_thumb_f.webp",
+        "u/o/thumb_small_thumb_f.webp",
+        "u/o/thumb_thumb_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/thumb_small_thumb_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_thumb_small_thumb_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_thumb_small_thumb_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_thumb_small_thumb_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_thumb_small_thumb_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_thumb_small_thumb_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_thumb_small_thumb_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_thumb_small_thumb_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_thumb_f.webp",
+        "u/o/thumb_small_thumb_small_thumb_f.webp",
+        "u/o/thumb_thumb_small_thumb_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/thumb_thumb_f.webp",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/cards_thumb_thumb_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/medium_thumb_thumb_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/preview_thumb_thumb_f.webp",
+        "u/o/small_f.webp",
+        "u/o/small_thumb_thumb_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_cards_thumb_thumb_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_medium_thumb_thumb_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_preview_thumb_thumb_f.webp",
+        "u/o/thumb_small_f.webp",
+        "u/o/thumb_small_thumb_thumb_f.webp",
+        "u/o/thumb_thumb_f.webp",
+        "u/o/thumb_thumb_thumb_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/small_photo.webp",
+      "root": "u/o/photo.webp",
+      "family": [
+        "u/o/cards_photo.webp",
+        "u/o/cards_small_photo.webp",
+        "u/o/medium_photo.webp",
+        "u/o/medium_small_photo.webp",
+        "u/o/photo.webp",
+        "u/o/preview_photo.webp",
+        "u/o/preview_small_photo.webp",
+        "u/o/small_photo.webp",
+        "u/o/small_small_photo.webp",
+        "u/o/thumb_cards_photo.webp",
+        "u/o/thumb_cards_small_photo.webp",
+        "u/o/thumb_medium_photo.webp",
+        "u/o/thumb_medium_small_photo.webp",
+        "u/o/thumb_photo.webp",
+        "u/o/thumb_preview_photo.webp",
+        "u/o/thumb_preview_small_photo.webp",
+        "u/o/thumb_small_photo.webp",
+        "u/o/thumb_small_small_photo.webp"
+      ]
+    },
+    {
+      "key": "u/originals/12/IMG_1.jpg",
+      "root": "u/originals/12/IMG_1.jpg",
+      "family": [
+        "u/originals/12/IMG_1.jpg"
+      ]
+    },
+    {
+      "key": "u/originals/12/thumb_IMG_1.jpg",
+      "root": "u/originals/12/thumb_IMG_1.jpg",
+      "family": [
+        "u/originals/12/thumb_IMG_1.jpg"
+      ]
+    },
+    {
+      "key": " /u/o/f.webp/ ",
+      "root": "u/o/f.webp",
+      "family": [
+        "u/o/cards_f.webp",
+        "u/o/f.webp",
+        "u/o/medium_f.webp",
+        "u/o/preview_f.webp",
+        "u/o/small_f.webp",
+        "u/o/thumb_cards_f.webp",
+        "u/o/thumb_f.webp",
+        "u/o/thumb_medium_f.webp",
+        "u/o/thumb_preview_f.webp",
+        "u/o/thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "f.webp",
+      "root": "f.webp",
+      "family": [
+        "cards_f.webp",
+        "f.webp",
+        "medium_f.webp",
+        "preview_f.webp",
+        "small_f.webp",
+        "thumb_cards_f.webp",
+        "thumb_f.webp",
+        "thumb_medium_f.webp",
+        "thumb_preview_f.webp",
+        "thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "thumb_f.webp",
+      "root": "f.webp",
+      "family": [
+        "cards_f.webp",
+        "cards_thumb_f.webp",
+        "f.webp",
+        "medium_f.webp",
+        "medium_thumb_f.webp",
+        "preview_f.webp",
+        "preview_thumb_f.webp",
+        "small_f.webp",
+        "small_thumb_f.webp",
+        "thumb_cards_f.webp",
+        "thumb_cards_thumb_f.webp",
+        "thumb_f.webp",
+        "thumb_medium_f.webp",
+        "thumb_medium_thumb_f.webp",
+        "thumb_preview_f.webp",
+        "thumb_preview_thumb_f.webp",
+        "thumb_small_f.webp",
+        "thumb_small_thumb_f.webp",
+        "thumb_thumb_f.webp"
+      ]
+    },
+    {
+      "key": "small_f.webp",
+      "root": "f.webp",
+      "family": [
+        "cards_f.webp",
+        "cards_small_f.webp",
+        "f.webp",
+        "medium_f.webp",
+        "medium_small_f.webp",
+        "preview_f.webp",
+        "preview_small_f.webp",
+        "small_f.webp",
+        "small_small_f.webp",
+        "thumb_cards_f.webp",
+        "thumb_cards_small_f.webp",
+        "thumb_f.webp",
+        "thumb_medium_f.webp",
+        "thumb_medium_small_f.webp",
+        "thumb_preview_f.webp",
+        "thumb_preview_small_f.webp",
+        "thumb_small_f.webp",
+        "thumb_small_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/thumb_",
+      "root": "u/o/thumb_",
+      "family": [
+        "u/o/cards_thumb_",
+        "u/o/medium_thumb_",
+        "u/o/preview_thumb_",
+        "u/o/small_thumb_",
+        "u/o/thumb_",
+        "u/o/thumb_cards_thumb_",
+        "u/o/thumb_medium_thumb_",
+        "u/o/thumb_preview_thumb_",
+        "u/o/thumb_small_thumb_",
+        "u/o/thumb_thumb_"
+      ]
+    },
+    {
+      "key": "u/o/thumb_small_",
+      "root": "u/o/small_",
+      "family": [
+        "u/o/cards_small_",
+        "u/o/cards_thumb_small_",
+        "u/o/medium_small_",
+        "u/o/medium_thumb_small_",
+        "u/o/preview_small_",
+        "u/o/preview_thumb_small_",
+        "u/o/small_",
+        "u/o/small_small_",
+        "u/o/small_thumb_small_",
+        "u/o/thumb_cards_small_",
+        "u/o/thumb_cards_thumb_small_",
+        "u/o/thumb_medium_small_",
+        "u/o/thumb_medium_thumb_small_",
+        "u/o/thumb_preview_small_",
+        "u/o/thumb_preview_thumb_small_",
+        "u/o/thumb_small_",
+        "u/o/thumb_small_small_",
+        "u/o/thumb_small_thumb_small_",
+        "u/o/thumb_thumb_small_"
+      ]
+    },
+    {
+      "key": "",
+      "root": null,
+      "family": []
+    },
+    {
+      "key": null,
+      "root": null,
+      "family": []
+    }
+  ]
+}
