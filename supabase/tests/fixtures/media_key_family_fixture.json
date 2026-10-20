@@ -20,7 +20,7 @@
       "preview_"
     ],
     "strip_while_longer_than_prefix": true,
-    "invalid": "a . or .. segment, %2F or %5C (any case), or a backslash; guard, release and claim refuse such keys",
+    "invalid": "a . or .. segment, ANY % (every percent encoding), or a backslash; guard, release and claim refuse such keys",
     "family_sort": "C collation / code point"
   },
   "cases": [
@@ -588,6 +588,57 @@
         "u/o/thumb_medium_%5cf.webp",
         "u/o/thumb_preview_%5cf.webp",
         "u/o/thumb_small_%5cf.webp"
+      ]
+    },
+    {
+      "key": "u/o/%2e%2e/f.webp",
+      "valid": false,
+      "root": "u/o/%2e%2e/f.webp",
+      "family": [
+        "u/o/%2e%2e/cards_f.webp",
+        "u/o/%2e%2e/f.webp",
+        "u/o/%2e%2e/medium_f.webp",
+        "u/o/%2e%2e/preview_f.webp",
+        "u/o/%2e%2e/small_f.webp",
+        "u/o/%2e%2e/thumb_cards_f.webp",
+        "u/o/%2e%2e/thumb_f.webp",
+        "u/o/%2e%2e/thumb_medium_f.webp",
+        "u/o/%2e%2e/thumb_preview_f.webp",
+        "u/o/%2e%2e/thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/%2E/f.webp",
+      "valid": false,
+      "root": "u/o/%2E/f.webp",
+      "family": [
+        "u/o/%2E/cards_f.webp",
+        "u/o/%2E/f.webp",
+        "u/o/%2E/medium_f.webp",
+        "u/o/%2E/preview_f.webp",
+        "u/o/%2E/small_f.webp",
+        "u/o/%2E/thumb_cards_f.webp",
+        "u/o/%2E/thumb_f.webp",
+        "u/o/%2E/thumb_medium_f.webp",
+        "u/o/%2E/thumb_preview_f.webp",
+        "u/o/%2E/thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/100%.webp",
+      "valid": false,
+      "root": "u/o/100%.webp",
+      "family": [
+        "u/o/100%.webp",
+        "u/o/cards_100%.webp",
+        "u/o/medium_100%.webp",
+        "u/o/preview_100%.webp",
+        "u/o/small_100%.webp",
+        "u/o/thumb_100%.webp",
+        "u/o/thumb_cards_100%.webp",
+        "u/o/thumb_medium_100%.webp",
+        "u/o/thumb_preview_100%.webp",
+        "u/o/thumb_small_100%.webp"
       ]
     },
     {

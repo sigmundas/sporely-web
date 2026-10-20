@@ -145,7 +145,7 @@ BEGIN
     ('private.media_key_require_read_committed()', 'postgres'),
     ('private.media_key_registry_immutable()', 'postgres'),
     ('private.media_key_references(text[])', 'postgres'),
-    ('private.media_key_owned_references(text[])', 'postgres'),
+    ('private.media_key_owner_references(text[],uuid)', 'postgres'),
     ('private.media_key_is_valid(text)', 'postgres'),
     ('private.media_key_registry_erasable(uuid)', 'postgres'),
     ('private.erase_account_media_retirements_core(uuid)', 'postgres'),
@@ -669,11 +669,11 @@ BEGIN
   -- (owner-only, rolled back), as a Worker write before retirement would.
   ALTER TABLE public.observations DISABLE TRIGGER zzy_media_key_retirement_guard;
   UPDATE public.observations SET thumb_key = a || '/p1/thumb_tomb.webp' WHERE id = pg_temp.fxi('pglive.obs');
-  ALTER TABLE public.observations ENABLE TRIGGER zzy_media_key_retirement_guard;
+  ALTER TABLE public.observations ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
   -- The deleted (not claimed) copy of a released key is reported as well.
   ALTER TABLE public.observation_images DISABLE TRIGGER zzy_media_key_retirement_guard;
   UPDATE public.observation_images SET storage_path = pg_temp.fx('rel.key') WHERE id = pg_temp.fxi('reldel.img');
-  ALTER TABLE public.observation_images ENABLE TRIGGER zzy_media_key_retirement_guard;
+  ALTER TABLE public.observation_images ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
   v_seen := 0;
   FOR r IN SELECT * FROM public.claim_retired_key_sweep(500) LOOP
     IF r.image_id = v_img AND r.reason = 'purge' AND r.user_id = a::uuid THEN
@@ -749,6 +749,51 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------
+-- 8b. Legacy keys outside the owner's prefix (reviewer probe): release and
+--     claim refuse with key_foreign and keep the bytes; the sweep refuses a
+--     record with a key outside its own prefix.
+-- ---------------------------------------------------------------
+DO $$
+DECLARE
+  a text := pg_temp.fx('A');
+  v_obs bigint;
+  v_i1 bigint;
+  v_i2 bigint;
+  v_t bigint;
+  v_ret bigint;
+  r record;
+  v_seen boolean := false;
+BEGIN
+  ALTER TABLE public.observation_images DISABLE TRIGGER zzy_media_key_retirement_guard;
+  INSERT INTO public.observations (user_id, date, visibility, is_draft, spore_data_visibility)
+  VALUES (a::uuid, current_date, 'public', false, 'public') RETURNING id INTO v_obs;
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
+  VALUES (v_obs, a::uuid, 'legacy/shared.webp', 'microscope') RETURNING id INTO v_i1;
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type)
+  VALUES (v_obs, a::uuid, 'legacy/shared.webp', 'microscope') RETURNING id INTO v_i2;
+  INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type, deleted_at)
+  VALUES (v_obs, a::uuid, 'legacy/tomb.webp', 'microscope', now() - interval '40 days') RETURNING id INTO v_t;
+  ALTER TABLE public.observation_images ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+
+  PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, 'legacy/shared.webp', NULL, 'owner_sync')$q$, v_i1))), 'key_foreign', 'legacy key release refused');
+  PERFORM pg_temp.eq((SELECT count(*) FROM public.observation_images WHERE storage_path = 'legacy/shared.webp'), 2::bigint, 'legacy bytes kept on both rows');
+  PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('service_role', NULL, format('SELECT public.claim_tombstoned_image_purge(gen_random_uuid(), %s)', v_t))), 'key_foreign', 'legacy key claim refused');
+  PERFORM pg_temp.eq((SELECT purge_claimed_at FROM public.observation_images WHERE id = v_t), NULL::timestamptz, 'legacy tombstone unclaimed');
+  PERFORM pg_temp.eq((SELECT count(*) FROM private.retired_media_key_roots WHERE key_root LIKE 'legacy/%'), 0::bigint, 'no legacy root retired');
+
+  INSERT INTO private.media_key_retirements (user_id, image_id, reason, operation_id, delete_keys)
+  VALUES (a::uuid, v_i1, 'release', gen_random_uuid(), ARRAY[a || '/ok/x.webp', 'legacy/x.webp']) RETURNING id INTO v_ret;
+  FOR r IN SELECT * FROM public.claim_retired_key_sweep(500) LOOP
+    IF r.retirement_id = v_ret THEN
+      PERFORM pg_temp.eq(r.status, 'guard_failed', 'sweep refuses a key outside the record prefix');
+      PERFORM pg_temp.eq(r.blocking_references @> '[{"reason":"key_outside_owner_prefix"}]'::jsonb, true, 'reason reported');
+      v_seen := true;
+    END IF;
+  END LOOP;
+  PERFORM pg_temp.eq(v_seen, true, 'sweep saw the bad record');
+END $$;
+
+-- ---------------------------------------------------------------
 -- 9. Account erasure of the registry.
 -- ---------------------------------------------------------------
 RESET enable_seqscan;
@@ -768,6 +813,10 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('SELECT public.erase_account_media_retirements(%L)', a)) LIKE 'ERR:42501:%', true, 'authenticated cannot erase');
   PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', a)), 'ERR:P0001:sporely_account_not_erasable', 'erase refused without marker and with content');
   INSERT INTO private.reference_account_deletions (user_id) VALUES (a::uuid) ON CONFLICT DO NOTHING;
+  -- Write fence: once the marker exists, no top-level write of A's rows passes.
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format($q$UPDATE public.observations SET notes = 'late' WHERE id = %s$q$, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_account_deleting', 'authenticated write fenced');
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format($q$INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel) VALUES (%L, 'fence', current_date, 1)$q$, a)), 'ERR:P0001:sporely_account_deleting', 'service_role write fenced');
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, pg_temp.fxi('att.img'), a || '/att/live.webp')), 'ERR:P0001:sporely_account_deleting', 'release fenced');
   PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', a)), 'ERR:P0001:sporely_account_not_erasable', 'erase refused while content remains');
   PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('DELETE FROM private.media_key_retirements WHERE user_id = %L', a)), 'ERR:P0001:sporely_media_key_registry_immutable', 'direct delete refused while content remains');
 
@@ -799,6 +848,10 @@ BEGIN
   END LOOP;
   PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel, image_storage_path) VALUES (%L, %L, current_date, 1, %L)', a, 'erx', a || '/c/x.webp')) LIKE 'ERR:23503:%', true, 'no row can carry the erased uid');
 END $$;
+
+SELECT pg_temp.eq((SELECT string_agg(DISTINCT tgenabled::text, ',') FROM pg_trigger
+                    WHERE tgname IN ('zzy_media_key_retirement_guard', 'media_key_retirements_immutable', 'media_key_retirements_no_truncate',
+                                     'retired_media_key_roots_immutable', 'retired_media_key_roots_no_truncate')), 'A', 'triggers still ENABLE ALWAYS at the end');
 
 SELECT 'PASS: media_key_retirement_test';
 

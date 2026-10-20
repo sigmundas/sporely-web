@@ -205,8 +205,8 @@ BEGIN
 END
 $$;
 
--- §K key syntax: refuse '.' / '..' segments, percent-encoded '/' or '\'
--- (%2F, %5C, any case) and a literal backslash. The Worker must apply the
+-- §K key syntax: refuse '.' / '..' segments, ANY '%' (every percent
+-- encoding, e.g. %2F, %5C, %2e) and a literal backslash. The Worker must apply the
 -- same rule (Stage 0b).
 CREATE FUNCTION private.media_key_is_valid(p_key text)
 RETURNS boolean
@@ -218,7 +218,7 @@ AS $$
   SELECT s.n IS NULL OR NOT (
        '.' = ANY (pg_catalog.string_to_array(s.n, '/'))
     OR '..' = ANY (pg_catalog.string_to_array(s.n, '/'))
-    OR s.n ~* '%2f|%5c'
+    OR pg_catalog.strpos(s.n, '%') > 0
     OR pg_catalog.strpos(s.n, E'\\') > 0
   )
   FROM (SELECT NULLIF(pg_catalog.btrim(pg_catalog.btrim(p_key), '/'), '') AS n) s
@@ -419,11 +419,12 @@ AS $$
      AND private.media_key_root(c.image_storage_path) = ANY (p_roots)
 $$;
 
--- A reference counts only when its row owner owns the key's prefix: a row
--- can never legitimately reference another owner's bytes, and the guard
--- refuses new foreign-prefix keys. This stops a foreign row from blocking
--- another user's release, claim or sweep.
-CREATE FUNCTION private.media_key_owned_references(p_roots text[])
+-- References that can block p_owner's release, claim or sweep: EVERY row of
+-- p_owner, whatever the key's prefix (a legacy key outside '<uid>/' still
+-- counts). Rows of other owners are ignored: release and claim retire only
+-- keys under the owner's own prefix (key_foreign otherwise), which no other
+-- owner may legitimately reference, and the guard refuses new ones.
+CREATE FUNCTION private.media_key_owner_references(p_roots text[], p_owner uuid)
 RETURNS TABLE (
   tbl text,
   row_id bigint,
@@ -439,7 +440,7 @@ SET search_path = ''
 AS $$
   SELECT r.tbl, r.row_id, r.col, r.owner_id, r.parent_image_id, r.is_deleted, r.is_purge_claimed
     FROM private.media_key_references(p_roots) r
-   WHERE pg_catalog.starts_with(private.media_key_normalize(r.key), r.owner_id::text || '/')
+   WHERE r.owner_id = p_owner
 $$;
 
 -- =============================================================
@@ -467,6 +468,19 @@ DECLARE
 BEGIN
   IF TG_OP = 'UPDATE' THEN
     v_old := pg_catalog.to_jsonb(OLD);
+  END IF;
+
+  -- Account-deletion write fence: once delete-account has written the
+  -- server-owned marker, no top-level INSERT or UPDATE of the owner's rows is
+  -- accepted from any role, so erasure is not raced by new content. Nested
+  -- writes of other triggers (pg_trigger_depth() > 1, e.g. the child-touch
+  -- UPDATE of observations.updated_at while delete-account deletes images)
+  -- carry no keys and are allowed. Checked before every early return.
+  IF pg_catalog.pg_trigger_depth() = 1
+     AND EXISTS (SELECT 1 FROM private.reference_account_deletions d
+                  WHERE d.user_id = (v_new ->> 'user_id')::uuid) THEN
+    RAISE EXCEPTION 'This account is being deleted. Nothing was changed in the cloud.'
+      USING ERRCODE = 'P0001', HINT = 'sporely_account_deleting';
   END IF;
 
   v_cols := CASE TG_TABLE_NAME
@@ -723,6 +737,13 @@ BEGIN
               WHERE k IS NOT NULL AND NOT private.media_key_is_valid(k)) THEN
     RETURN pg_catalog.jsonb_build_object('status', 'key_invalid', 'image_id', p_image_id);
   END IF;
+  -- Only keys under the image owner's own prefix are ever retired; a legacy
+  -- key elsewhere keeps its bytes (and is listed by deploy precheck 2).
+  IF EXISTS (SELECT 1 FROM pg_catalog.unnest(ARRAY[v_img.storage_path, v_img.original_storage_path]) AS k
+              WHERE k IS NOT NULL
+                AND NOT pg_catalog.starts_with(private.media_key_normalize(k), v_img.user_id::text || '/')) THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'key_foreign', 'image_id', p_image_id);
+  END IF;
   IF v_img.image_type IS DISTINCT FROM 'microscope' THEN
     RETURN pg_catalog.jsonb_build_object('status', 'not_microscope', 'image_id', p_image_id);
   END IF;
@@ -739,7 +760,7 @@ BEGIN
   -- transaction clears: the image itself, the owner's measurements of this
   -- image, and the owning observation's cover.
   IF EXISTS (
-    SELECT 1 FROM private.media_key_owned_references(v_roots) ref
+    SELECT 1 FROM private.media_key_owner_references(v_roots, v_img.user_id) ref
      WHERE NOT (ref.tbl = 'observation_images' AND ref.row_id = p_image_id)
        AND NOT (ref.tbl = 'spore_measurements' AND ref.parent_image_id = p_image_id AND ref.owner_id = v_img.user_id)
        AND NOT (ref.tbl = 'observations' AND ref.row_id = v_obs_id)
@@ -880,12 +901,19 @@ BEGIN
               WHERE k IS NOT NULL AND NOT private.media_key_is_valid(k)) THEN
     RETURN pg_catalog.jsonb_build_object('status', 'key_invalid', 'image_id', p_image_id);
   END IF;
+  -- Only keys under the image owner's own prefix are ever retired; a legacy
+  -- key elsewhere keeps its bytes (and is listed by deploy precheck 2).
+  IF EXISTS (SELECT 1 FROM pg_catalog.unnest(ARRAY[v_img.storage_path, v_img.original_storage_path]) AS k
+              WHERE k IS NOT NULL
+                AND NOT pg_catalog.starts_with(private.media_key_normalize(k), v_img.user_id::text || '/')) THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'key_foreign', 'image_id', p_image_id);
+  END IF;
 
   -- Same exemption as the release: the row itself, the owner's measurements
   -- of this image and the owning observation's cover, which this
   -- transaction clears. Any other owned reference refuses.
   IF EXISTS (
-    SELECT 1 FROM private.media_key_owned_references(v_roots) ref
+    SELECT 1 FROM private.media_key_owner_references(v_roots, v_img.user_id) ref
      WHERE NOT (ref.tbl = 'observation_images' AND ref.row_id = p_image_id)
        AND NOT (ref.tbl = 'spore_measurements' AND ref.parent_image_id = p_image_id AND ref.owner_id = v_img.user_id)
        AND NOT (ref.tbl = 'observations' AND ref.row_id = v_obs_id)
@@ -1071,7 +1099,7 @@ BEGIN
     SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
              'table', ref.tbl, 'id', ref.row_id, 'column', ref.col))
       INTO v_refs
-      FROM private.media_key_owned_references(v_roots) ref
+      FROM private.media_key_owner_references(v_roots, v_rec.user_id) ref
      WHERE NOT (v_rec.reason = 'purge'
                 AND ref.tbl = 'observation_images'
                 AND ref.row_id = v_rec.image_id
@@ -1082,6 +1110,12 @@ BEGIN
     image_id := v_rec.image_id;
     reason := v_rec.reason;
     delete_keys := v_rec.delete_keys;
+    IF EXISTS (SELECT 1 FROM pg_catalog.unnest(v_rec.delete_keys) AS k
+                WHERE NOT private.media_key_is_valid(k)
+                   OR NOT pg_catalog.starts_with(private.media_key_normalize(k), v_rec.user_id::text || '/')) THEN
+      v_refs := coalesce(v_refs, '[]'::jsonb) || pg_catalog.jsonb_build_array(
+        pg_catalog.jsonb_build_object('reason', 'key_outside_owner_prefix'));
+    END IF;
     status := CASE WHEN v_refs IS NULL THEN 'ok' ELSE 'guard_failed' END;
     blocking_references := v_refs;
     -- The image row can be gone (account deletion, observation hard delete)
@@ -1257,7 +1291,7 @@ REVOKE EXECUTE ON FUNCTION
   private.media_key_require_read_committed(),
   private.media_key_registry_immutable(),
   private.media_key_references(text[]),
-  private.media_key_owned_references(text[]),
+  private.media_key_owner_references(text[], uuid),
   private.media_key_is_valid(text),
   private.media_key_retirement_guard(),
   private.media_key_retirement_replay(uuid, uuid, bigint, text),
