@@ -544,3 +544,72 @@ Open for review / next stages:
 
 - Privacy erasure of registry rows after account deletion (rows keep `user_id`, never deleted).
   Not implemented.
+
+### Review round 3 (user decisions of 2026-10-20)
+
+Owner-prefix and malformed-key checks apply to EVERY role (option a), only to new or changed
+keys. There is no exemption mechanism; no migration needed one. Nine existing test files that
+wrote unprefixed or `../` keys were changed:
+- Seven now use owner-prefixed fixture values: admin_sync_health, child_parent_updated_at_triggers,
+  metadata_only_microscope_images, observation_microscopy_presentations,
+  public_observation_rpc_validation (including the one expected URL), sample_source_public_rpc_validation,
+  and public_observation_spore_previews (the `x/` thumb keys).
+- Three tests exist to prove read-side defences against legacy malformed rows: media_authorization,
+  mosaic_storage_key_ownership and public_observation_spore_previews. They now first assert that the
+  guard refuses the malformed write, then plant the legacy row with only
+  `zzy_media_key_retirement_guard` disabled (owner-only DDL inside the test transaction). Their
+  read-side assertions are unchanged. mosaic_storage_key_ownership has one extra pgTAP assertion
+  (plan 38 -> 39).
+
+Account deletion erases all of the user's media and registry rows (GDPR storage limitation and
+erasure):
+- Order in supabase/functions/delete-account/plan.js:
+  1. snapshot the image, mosaic and calibration keys;
+  2. `delete_r2_prefix`: list and delete everything under `<uid>/` in every configured bucket
+     through the S3 API (r2Prefix.ts);
+  3. snapshot-based Worker deletes;
+  4. the existing DB stages;
+  5. `delete_r2_prefix_second_pass`;
+  6. `verify_r2_prefix_empty`;
+  7. `erase_media_retirements`;
+  8. profile, then auth user.
+
+  Any failure stops before the auth user is deleted. The prefix is derived only from a UUID-shaped
+  uid, so it can never widen to a whole bucket.
+- Erasure mechanism: `private.media_key_registry_erasable(uid)` is true only when the server-owned
+  account-deletion marker `private.reference_account_deletions` exists and no row of the user
+  remains in observations, observation_images, spore_measurements, spore_measurement_mosaics or
+  calibrations.
+  - Who writes the marker: only the service-role-only `delete_reference_library_for_account` stage
+    writes it, and it cascades away with the auth user.
+  - The DELETE exception sits in the immutability trigger itself: a data condition, not a GUC.
+  - `public.erase_account_media_retirements` (service_role) refuses otherwise
+    (`sporely_account_not_erasable`). TRUNCATE and every other DELETE stay refused.
+- Why erasing is safe: no row can carry the deleted uid (FKs to profiles/auth.users). The guard
+  refuses any new or changed key outside the writing row owner's prefix for every role, so nothing
+  can attach a key under the erased prefix again (tested for authenticated, service_role and owner).
+- Env and secrets for delete-account: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_S3_ENDPOINT`
+  (required; without them the run fails closed at `delete_r2_prefix`), `R2_BUCKET_NAME` (default
+  `sporely-media`) and `R2_PRIVATE_BUCKET_NAME`, which must be set whenever the Worker binds
+  PRIVATE_MEDIA_BUCKET. The token needs List, Read and Delete on both buckets. Edge-function secrets
+  are project-wide, so admin-ops' values apply.
+
+GDPR inventory: personal data that remains after a completed account deletion (not changed this round):
+- `public.admin_action_log` (20260623170000_admin_moderation_actions.sql:1). `target_id`,
+  `request_payload`, `before_snapshot` and `result_snapshot` keep user ids and storage keys for
+  purge, sweep, ban, report and storage-recalculation actions (adminActions.ts:139/161/196/266;
+  rows carry user_id, storage_path and delete_targets). There is no FK and no erasure.
+- `private.reference_curation_events` (20260829141735_add_curated_reference_library.sql:194):
+  `target_id` and other uuid columns without a cascade; `actor_user_id` is SET NULL via profiles.
+- private.reference_curation_* (`target_id`, `reporter_id`, `claimed_by`, `accepted_by`) and
+  curated_reference_* (`created_by`, `updated_by`): SET NULL where an FK exists. Columns without an FK
+  keep the uuid; that needs an audit.
+- Comments and moderation: `comment_moderation.hidden_by`, `reports.dismissed_by` and
+  `resolved_by` (admin ids) keep admin uuids.
+- Edge-function and Worker logs, R2 access logs: outside the database.
+
+Residual risks and open items:
+- A still-valid access token can upload through the Worker after `verify_r2_prefix_empty` and before
+  the token expires. The Worker must refuse uploads for an account whose deletion has started
+  (Stage 0b), or a later sweep of orphan prefixes is needed.
+- Admin-log retention and erasure policy (the inventory above): user decision.
