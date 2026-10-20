@@ -122,6 +122,11 @@ async function previewPurgeTombstonedImages(context: AdminActionContext): Promis
 }
 
 async function purgeExpiredTombstonedImages(context: AdminActionContext): Promise<AdminActionResponse> {
+  // Step 0 (media-key retirement plan): backend-enforced purge disable. Checked
+  // here before the R2 preflight, and again per row in purgeSingleTombstoneRow.
+  if (!isTombstonePurgeEnabled(context.env)) {
+    return actionFailureResponse(409, TOMBSTONE_PURGE_DISABLED, 'Tombstone purge is disabled on the server')
+  }
   const selection = await loadTombstoneSelection(context.adminClient, context.requestBody, context.env)
   const previewRows = selection.rows.map(row =>
     buildTombstonePreviewRow(row, selection.restoreWindowDays, getMediaPublicBaseUrl(context.env)),
@@ -1132,13 +1137,23 @@ function summarizeTombstoneRows(rows: Array<Record<string, unknown>>) {
   return counts
 }
 
-async function purgeSingleTombstoneRow(
-  context: AdminActionContext,
+export async function purgeSingleTombstoneRow(
+  context: Pick<AdminActionContext, 'adminClient' | 'env'>,
   row: Record<string, unknown>,
-  r2Client: R2MultiBucketClient,
+  r2Client: Pick<R2MultiBucketClient, 'deleteObjects'>,
 ) {
   const now = new Date().toISOString()
   const rowId = row.id
+
+  // Re-checked for every row, before any R2 call or row write: the batch loop
+  // iterates preselected rows and would otherwise never see the disable.
+  if (!isTombstonePurgeEnabled(context.env)) {
+    return {
+      ...row,
+      status: 'skipped',
+      error: TOMBSTONE_PURGE_DISABLED,
+    }
+  }
   const deleteTargets = Array.isArray(row.delete_targets) ? row.delete_targets.map(value => normalizeMediaKey(value)) : []
 
   if (!deleteTargets.length) {
@@ -1332,6 +1347,16 @@ export function getRestoreWindowDays(
   const parsed = Number.parseInt(raw, 10)
   if (Number.isSafeInteger(parsed) && parsed > 0) return parsed
   return DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS
+}
+
+export const TOMBSTONE_PURGE_DISABLED = 'tombstone_purge_disabled'
+
+// Fail closed: the destructive tombstone purge runs only when the server-side
+// secret ADMIN_TOMBSTONE_PURGE_ENABLED is exactly "true". Absent, empty or any
+// other value disables it. Re-enable only after claim-aware admin-ops (plan
+// Stage 0a item 8 / rollout step 4) is deployed and verified.
+export function isTombstonePurgeEnabled(env: Record<string, string | undefined> | null | undefined): boolean {
+  return String(env?.ADMIN_TOMBSTONE_PURGE_ENABLED ?? '').trim() === 'true'
 }
 
 function getPurgeCutoffAt(restoreWindowDays: number) {

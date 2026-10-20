@@ -9,6 +9,10 @@ import {
   calculateProfileStorageUsageWithClient,
   fetchMediaStorageBreakdown,
   getRestoreWindowDays,
+  handleAdminAction,
+  isTombstonePurgeEnabled,
+  purgeSingleTombstoneRow,
+  TOMBSTONE_PURGE_DISABLED,
   MediaStorageBreakdown,
   R2MultiBucketClient,
 } from './adminActions.ts'
@@ -464,4 +468,78 @@ Deno.test('buildRestoreCutoffIso — derives ISO string from window days via sam
   if (diff < days44 || diff > days46) {
     throw new Error(`buildRestoreCutoffIso(45) out of range: diff=${diff}ms`)
   }
+})
+
+function purgeSpyClients() {
+  const calls: string[] = []
+  const adminClient = {
+    from(table: string) {
+      calls.push(`from:${table}`)
+      throw new Error(`unexpected table access: ${table}`)
+    },
+    rpc(name: string) {
+      calls.push(`rpc:${name}`)
+      throw new Error(`unexpected rpc: ${name}`)
+    },
+  }
+  const r2Client = {
+    async deleteObjects(keys: Iterable<string>) {
+      calls.push(`r2:${[...keys].join(',')}`)
+      throw new Error('R2 must not be called while purge is disabled')
+    },
+  }
+  return { calls, adminClient, r2Client }
+}
+
+Deno.test('purge disable: fail closed unless ADMIN_TOMBSTONE_PURGE_ENABLED is exactly true', () => {
+  assertEquals(isTombstonePurgeEnabled({}), false)
+  assertEquals(isTombstonePurgeEnabled(null), false)
+  assertEquals(isTombstonePurgeEnabled({ ADMIN_TOMBSTONE_PURGE_ENABLED: '' }), false)
+  assertEquals(isTombstonePurgeEnabled({ ADMIN_TOMBSTONE_PURGE_ENABLED: 'false' }), false)
+  assertEquals(isTombstonePurgeEnabled({ ADMIN_TOMBSTONE_PURGE_ENABLED: '1' }), false)
+  assertEquals(isTombstonePurgeEnabled({ ADMIN_TOMBSTONE_PURGE_ENABLED: 'TRUE' }), false)
+  assertEquals(isTombstonePurgeEnabled({ ADMIN_TOMBSTONE_PURGE_ENABLED: 'true' }), true)
+  assertEquals(isTombstonePurgeEnabled({ ADMIN_TOMBSTONE_PURGE_ENABLED: ' true ' }), true)
+})
+
+Deno.test('purge disable: per-row check runs before any R2 call or row write', async () => {
+  const { calls, adminClient, r2Client } = purgeSpyClients()
+  const row = { id: 7, status: 'eligible', delete_targets: ['user/a.webp', 'user/thumb_a.webp'] }
+  const result = await purgeSingleTombstoneRow({ adminClient, env: {} }, row, r2Client as any)
+  assertEquals(result.status, 'skipped')
+  assertEquals(result.error, TOMBSTONE_PURGE_DISABLED)
+  assertEquals(calls, [])
+})
+
+Deno.test('purge disable: the batch action refuses before selection, R2 preflight or logging', async () => {
+  const { calls, adminClient } = purgeSpyClients()
+  const response = await handleAdminAction({
+    adminClient,
+    adminUser: { id: 'admin', email: null },
+    authHeader: '',
+    requestBody: { action: 'purge_expired_tombstoned_images', reason: 'test' },
+    env: { ADMIN_TOMBSTONE_PURGE_ENABLED: 'no' },
+  })
+  assertEquals(response.status, 409)
+  assertEquals((response.body as any).error?.code, TOMBSTONE_PURGE_DISABLED)
+  assertEquals(calls, [])
+})
+
+Deno.test('purge enabled: per-row path still reaches R2 (flag does not block normal purge)', async () => {
+  const calls: string[] = []
+  const r2Client = {
+    async deleteObjects(keys: Iterable<string>) {
+      calls.push(`r2:${[...keys].join(',')}`)
+      throw Object.assign(new Error('temporary'), { status: 503 })
+    },
+  }
+  const adminClient = {
+    from(_table: string) {
+      return { update() { return { eq: async () => ({ error: null }) } } }
+    },
+  }
+  const row = { id: 8, status: 'eligible', delete_targets: ['user/b.webp'] }
+  const result = await purgeSingleTombstoneRow({ adminClient, env: { ADMIN_TOMBSTONE_PURGE_ENABLED: 'true' } }, row, r2Client as any)
+  assertEquals(calls, ['r2:user/b.webp'])
+  assertEquals(result.status, 'error')
 })
