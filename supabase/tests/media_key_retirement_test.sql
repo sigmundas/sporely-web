@@ -150,6 +150,8 @@ BEGIN
     ('private.media_key_registry_erasable(uuid)', 'postgres'),
     ('private.erase_account_media_retirements_core(uuid)', 'postgres'),
     ('public.erase_account_media_retirements(uuid)', 'postgres,service_role'),
+    ('private.begin_account_deletion_core(uuid)', 'postgres'),
+    ('public.begin_account_deletion(uuid)', 'postgres,service_role'),
     ('private.media_key_retirement_guard()', 'postgres'),
     ('private.media_key_retirement_replay(uuid,uuid,bigint,text)', 'postgres'),
     ('private.release_observation_image_bytes_core(uuid,bigint,text,text,text)', 'postgres'),
@@ -276,7 +278,7 @@ BEGIN
 
   -- Cross-owner references. A new one is refused for every role with one
   -- error whether or not the key is retired (no oracle). One planted behind
-  -- the guard's back (as a pre-guard row would be) does not block the release.
+  -- the guard's back (as a pre-guard row would be) blocks the release.
   PERFORM pg_temp.seed('relcover', 'B', b || '/c/other.webp');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', b::uuid, format($q$UPDATE public.observations SET thumb_key = %L WHERE id = %s$q$, a || '/r1/thumb_photo.webp', pg_temp.fxi('relcover.obs'))), 'ERR:42501:sporely_media_key_foreign', 'foreign cover refused');
   PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format($q$INSERT INTO public.spore_measurements (image_id, user_id, length_um, image_key) VALUES (%s, %L, 9, %L)$q$, v_img, b, a || '/r1/thumb_photo.webp')), 'ERR:42501:sporely_media_key_foreign', 'service_role foreign measurement refused');
@@ -288,6 +290,15 @@ BEGIN
   ALTER TABLE public.spore_measurements ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
   ALTER TABLE public.observations ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
   INSERT INTO fx VALUES ('rel.foreign_meas', v_mb::text);
+  -- Another owner's legacy rows carrying A's key (outside their own prefix)
+  -- block A's release: the bytes are kept, never deleted.
+  PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(%L, %s, %L, %L, 'owner_sync')$q$, v_uuid, v_img, k, orig))), 'media_key_shared', 'foreign legacy rows block the release');
+  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements WHERE user_id = a::uuid), 0::bigint, 'no record while foreign legacy rows exist');
+  -- Remove them again (legacy cleanup) so the release can proceed.
+  DELETE FROM public.spore_measurements WHERE id = v_mb;
+  ALTER TABLE public.observations DISABLE TRIGGER zzy_media_key_retirement_guard;
+  UPDATE public.observations SET thumb_key = NULL WHERE id = pg_temp.fxi('relcover.obs');
+  ALTER TABLE public.observations ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
 
   -- Apply.
   v_out := pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(%L, %s, %L, %L, 'public_microscopy')$q$, v_uuid, v_img, k, orig));
@@ -303,8 +314,6 @@ BEGIN
                         FROM public.observation_images WHERE id = v_img), row(NULL::text, NULL::text, NULL::text, NULL::int, NULL::bigint, 'public_microscopy'::text)::text, 'image cleared');
   PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.spore_measurements WHERE id = v_m1), row(NULL::text, a || '/r1/measure_crop.webp')::text, 'owner measurement family key cleared, other kept');
   PERFORM pg_temp.eq((SELECT image_key FROM public.spore_measurements WHERE id = v_m2), a || '/r1/measure_other.webp', 'unrelated measurement untouched');
-  PERFORM pg_temp.eq((SELECT image_key FROM public.spore_measurements WHERE id = v_mb), a || '/r1/thumb_photo.webp', 'foreign planted measurement did not block and is untouched');
-  PERFORM pg_temp.eq((SELECT thumb_key FROM public.observations WHERE id = pg_temp.fxi('relcover.obs')), a || '/r1/thumb_photo.webp', 'foreign planted cover did not block and is untouched');
   PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.observations WHERE id = v_obs), row(NULL::text, NULL::text)::text, 'cover cleared');
 
   -- Replay by the same UUID: stored keys, no writes.
@@ -791,6 +800,14 @@ BEGIN
     END IF;
   END LOOP;
   PERFORM pg_temp.eq(v_seen, true, 'sweep saw the bad record');
+
+  -- Another owner's legacy calibration carrying A's tombstone key blocks the claim.
+  PERFORM pg_temp.seed('lgv', 'A', a || '/lgv/t.webp', NULL, 'microscope', 40);
+  ALTER TABLE public.calibrations DISABLE TRIGGER zzy_media_key_retirement_guard;
+  INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel, image_storage_path)
+  VALUES (pg_temp.fx('B')::uuid, 'lgv', current_date, 1, a || '/lgv/thumb_t.webp');
+  ALTER TABLE public.calibrations ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+  PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('service_role', NULL, format('SELECT public.claim_tombstoned_image_purge(gen_random_uuid(), %s)', pg_temp.fxi('lgv.img')))), 'media_key_shared', 'foreign legacy row blocks the claim');
 END $$;
 
 -- ---------------------------------------------------------------
@@ -812,8 +829,10 @@ BEGIN
 
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('SELECT public.erase_account_media_retirements(%L)', a)) LIKE 'ERR:42501:%', true, 'authenticated cannot erase');
   PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', a)), 'ERR:P0001:sporely_account_not_erasable', 'erase refused without marker and with content');
-  INSERT INTO private.reference_account_deletions (user_id) VALUES (a::uuid) ON CONFLICT DO NOTHING;
-  -- Write fence: once the marker exists, no top-level write of A's rows passes.
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('SELECT public.begin_account_deletion(%L)', a)) LIKE 'ERR:42501:%', true, 'authenticated cannot begin deletion');
+  PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('service_role', NULL, format('SELECT public.begin_account_deletion(%L)', a))), 'fenced', 'begin_account_deletion writes the marker');
+  PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('service_role', NULL, format('SELECT public.begin_account_deletion(%L)', a))), 'fenced', 'begin_account_deletion idempotent');
+  -- Write fence (after sign-out and marker, before any content delete): once the marker exists, no top-level write of A's rows passes.
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format($q$UPDATE public.observations SET notes = 'late' WHERE id = %s$q$, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_account_deleting', 'authenticated write fenced');
   PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format($q$INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel) VALUES (%L, 'fence', current_date, 1)$q$, a)), 'ERR:P0001:sporely_account_deleting', 'service_role write fenced');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, pg_temp.fxi('att.img'), a || '/att/live.webp')), 'ERR:P0001:sporely_account_deleting', 'release fenced');
@@ -826,6 +845,9 @@ BEGIN
   DELETE FROM public.observation_images WHERE user_id = a::uuid;
   DELETE FROM public.observations WHERE user_id = a::uuid;
   DELETE FROM public.calibrations WHERE user_id = a::uuid;
+  -- (Those deletes fired the child-touch and version-bump triggers on the
+  -- fenced owner's rows; key-neutral nested UPDATEs pass the fence.)
+  PERFORM pg_temp.eq((SELECT count(*) FROM public.observations WHERE user_id = a::uuid), 0::bigint, 'fenced content deleted');
   -- Planted foreign rows referencing A's keys belong to B and stay.
 
   v_out := substr(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', a)), 4)::jsonb;

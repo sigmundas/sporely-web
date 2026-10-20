@@ -421,7 +421,8 @@ $$;
 
 -- References that can block p_owner's release, claim or sweep: EVERY row of
 -- p_owner, whatever the key's prefix (a legacy key outside '<uid>/' still
--- counts). Rows of other owners are ignored: release and claim retire only
+-- counts), and any other owner's legacy row whose key is outside its own
+-- prefix. Other owners' rows with keys under their own prefix are ignored: release and claim retire only
 -- keys under the owner's own prefix (key_foreign otherwise), which no other
 -- owner may legitimately reference, and the guard refuses new ones.
 CREATE FUNCTION private.media_key_owner_references(p_roots text[], p_owner uuid)
@@ -441,6 +442,10 @@ AS $$
   SELECT r.tbl, r.row_id, r.col, r.owner_id, r.parent_image_id, r.is_deleted, r.is_purge_claimed
     FROM private.media_key_references(p_roots) r
    WHERE r.owner_id = p_owner
+      -- A legacy row of another owner whose key is not under that row's own
+      -- prefix (pre-guard data; the guard refuses new ones) also blocks:
+      -- such bytes are refused, never deleted.
+      OR NOT pg_catalog.starts_with(private.media_key_normalize(r.key), r.owner_id::text || '/')
 $$;
 
 -- =============================================================
@@ -465,20 +470,23 @@ DECLARE
   v_restore boolean := false;
   v_claim_change boolean := false;
   v_hit text;
+  v_fenced boolean;
 BEGIN
   IF TG_OP = 'UPDATE' THEN
     v_old := pg_catalog.to_jsonb(OLD);
   END IF;
 
   -- Account-deletion write fence: once delete-account has written the
-  -- server-owned marker, no top-level INSERT or UPDATE of the owner's rows is
-  -- accepted from any role, so erasure is not raced by new content. Nested
-  -- writes of other triggers (pg_trigger_depth() > 1, e.g. the child-touch
-  -- UPDATE of observations.updated_at while delete-account deletes images)
-  -- carry no keys and are allowed. Checked before every early return.
-  IF pg_catalog.pg_trigger_depth() = 1
-     AND EXISTS (SELECT 1 FROM private.reference_account_deletions d
-                  WHERE d.user_id = (v_new ->> 'user_id')::uuid) THEN
+  -- server-owned marker (begin_account_deletion, first stage after the global
+  -- sign-out), no top-level INSERT or UPDATE of the owner's rows (NEW or OLD
+  -- owner) is accepted from any role, so erasure is not raced by new content.
+  -- Nested writes of other triggers (pg_trigger_depth() > 1, e.g. the
+  -- child-touch UPDATE of observations.updated_at while delete-account deletes
+  -- images) pass only when key-neutral; see the second check below.
+  v_fenced := EXISTS (SELECT 1 FROM private.reference_account_deletions d
+                       WHERE d.user_id = (v_new ->> 'user_id')::uuid
+                          OR d.user_id = (v_old ->> 'user_id')::uuid);
+  IF v_fenced AND pg_catalog.pg_trigger_depth() = 1 THEN
     RAISE EXCEPTION 'This account is being deleted. Nothing was changed in the cloud.'
       USING ERRCODE = 'P0001', HINT = 'sporely_account_deleting';
   END IF;
@@ -520,6 +528,11 @@ BEGIN
       v_changed := v_changed || v_val;
     END IF;
   END LOOP;
+
+  IF v_fenced AND (TG_OP = 'INSERT' OR pg_catalog.cardinality(v_changed) > 0 OR v_restore OR v_claim_change) THEN
+    RAISE EXCEPTION 'This account is being deleted. Nothing was changed in the cloud.'
+      USING ERRCODE = 'P0001', HINT = 'sporely_account_deleting';
+  END IF;
 
   IF pg_catalog.cardinality(v_keys) = 0 AND NOT v_restore AND NOT v_claim_change THEN
     RETURN NEW;
@@ -1169,6 +1182,28 @@ BEGIN
 END
 $$;
 
+-- delete-account stage begin_account_deletion: write the account-deletion
+-- marker right after the global sign-out, so the write fence covers the whole
+-- run. Idempotent; the same marker delete_reference_library_for_account
+-- writes later (ON CONFLICT DO NOTHING there too), under the same lock.
+CREATE FUNCTION private.begin_account_deletion_core(p_user_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+SET lock_timeout = '5s'
+AS $$
+BEGIN
+  IF p_user_id IS NULL OR NOT EXISTS (SELECT 1 FROM auth.users u WHERE u.id = p_user_id) THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'not_found');
+  END IF;
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(p_user_id::text, 7301));
+  INSERT INTO private.reference_account_deletions (user_id) VALUES (p_user_id)
+  ON CONFLICT (user_id) DO NOTHING;
+  RETURN pg_catalog.jsonb_build_object('status', 'fenced');
+END
+$$;
+
 -- Account erasure of the registry (delete-account stage
 -- erase_media_retirements). Refuses unless media_key_registry_erasable.
 CREATE FUNCTION private.erase_account_media_retirements_core(p_user_id uuid)
@@ -1257,6 +1292,15 @@ AS $$
   SELECT * FROM private.claim_retired_key_sweep_core(p_limit)
 $$;
 
+CREATE FUNCTION public.begin_account_deletion(p_user_id uuid)
+RETURNS jsonb
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT private.begin_account_deletion_core(p_user_id)
+$$;
+
 CREATE FUNCTION public.erase_account_media_retirements(p_user_id uuid)
 RETURNS jsonb
 LANGUAGE sql
@@ -1303,6 +1347,8 @@ REVOKE EXECUTE ON FUNCTION
   private.media_key_registry_erasable(uuid),
   private.erase_account_media_retirements_core(uuid),
   public.erase_account_media_retirements(uuid),
+  private.begin_account_deletion_core(uuid),
+  public.begin_account_deletion(uuid),
   public.release_observation_image_bytes(uuid, bigint, text, text, text),
   public.media_key_is_retired(uuid, text),
   public.claim_tombstoned_image_purge(uuid, bigint, integer),
@@ -1322,6 +1368,7 @@ GRANT EXECUTE ON FUNCTION public.claim_tombstoned_image_purge(uuid, bigint, inte
 GRANT EXECUTE ON FUNCTION public.claim_retired_key_sweep(integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_retired_key_sweep(bigint[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.erase_account_media_retirements(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.begin_account_deletion(uuid) TO service_role;
 
 -- finalize_observation_image_purge keeps its 20260809130000 grants
 -- (service_role only); CREATE OR REPLACE preserves them.
