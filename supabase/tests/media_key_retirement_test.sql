@@ -147,6 +147,9 @@ BEGIN
     ('private.media_key_references(text[])', 'postgres'),
     ('private.media_key_owned_references(text[])', 'postgres'),
     ('private.media_key_is_valid(text)', 'postgres'),
+    ('private.media_key_registry_erasable(uuid)', 'postgres'),
+    ('private.erase_account_media_retirements_core(uuid)', 'postgres'),
+    ('public.erase_account_media_retirements(uuid)', 'postgres,service_role'),
     ('private.media_key_retirement_guard()', 'postgres'),
     ('private.media_key_retirement_replay(uuid,uuid,bigint,text)', 'postgres'),
     ('private.release_observation_image_bytes_core(uuid,bigint,text,text,text)', 'postgres'),
@@ -271,11 +274,12 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, pg_temp.fxi('reldel.img'), a || '/rd/del.webp'))), 'deleted', 'deleted');
   PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements WHERE user_id = pg_temp.fx('A')::uuid), 0::bigint, 'no record after refusals');
 
-  -- Cross-owner references. A new one from an end user is refused with one
+  -- Cross-owner references. A new one is refused for every role with one
   -- error whether or not the key is retired (no oracle). One planted behind
   -- the guard's back (as a pre-guard row would be) does not block the release.
   PERFORM pg_temp.seed('relcover', 'B', b || '/c/other.webp');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', b::uuid, format($q$UPDATE public.observations SET thumb_key = %L WHERE id = %s$q$, a || '/r1/thumb_photo.webp', pg_temp.fxi('relcover.obs'))), 'ERR:42501:sporely_media_key_foreign', 'foreign cover refused');
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format($q$INSERT INTO public.spore_measurements (image_id, user_id, length_um, image_key) VALUES (%s, %L, 9, %L)$q$, v_img, b, a || '/r1/thumb_photo.webp')), 'ERR:42501:sporely_media_key_foreign', 'service_role foreign measurement refused');
   ALTER TABLE public.spore_measurements DISABLE TRIGGER zzy_media_key_retirement_guard;
   ALTER TABLE public.observations DISABLE TRIGGER zzy_media_key_retirement_guard;
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, image_key)
@@ -421,7 +425,7 @@ END $$;
 
 -- ---------------------------------------------------------------
 -- 5b. Cross-owner attachment refused on every column for B (authenticated),
---     identically for a retired and a live key of A
+--     service_role and the owner role, identically for a retired and a live key of A
 --     (no retirement oracle); malformed keys refused.
 -- ---------------------------------------------------------------
 DO $$
@@ -444,7 +448,7 @@ BEGIN
   VALUES (v_obs, b::uuid, b || '/c/spore_mosaic_v1_00.webp', 1, 1, 1, 1) RETURNING id INTO v_mosaic;
   INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel)
   VALUES (b::uuid, 'mkrb', current_date, 1) RETURNING id INTO v_cal;
-  FOREACH v_role IN ARRAY ARRAY['authenticated'] LOOP
+  FOREACH v_role IN ARRAY ARRAY['authenticated', 'service_role', 'postgres'] LOOP
     FOREACH v_sql IN ARRAY ARRAY[
       format('UPDATE public.observation_images SET storage_path = %%L WHERE id = %s', v_img),
       format('UPDATE public.observation_images SET original_storage_path = %%L WHERE id = %s', v_img),
@@ -460,7 +464,7 @@ BEGIN
       PERFORM pg_temp.eq(v_retired LIKE 'ERR:42501:%', true, v_role || ' foreign retired key: ' || v_sql || ' -> ' || v_retired);
       PERFORM pg_temp.eq(regexp_replace(v_retired, '\([^)]*\)', '()', 'g'), regexp_replace(v_live, '\([^)]*\)', '()', 'g'), v_role || ' same refusal for retired and live foreign key: ' || v_sql);
       PERFORM pg_temp.eq(v_retired NOT LIKE '%released%', true, v_role || ' no retirement hint: ' || v_sql);
-      IF v_sql NOT LIKE '%observation_images%' AND v_sql NOT LIKE '%mosaics%' THEN
+      IF v_role <> 'authenticated' OR v_sql NOT LIKE '%observation_images%' AND v_sql NOT LIKE '%mosaics%' THEN
         PERFORM pg_temp.eq(v_retired, 'ERR:42501:sporely_media_key_foreign', v_role || ' guard refusal: ' || v_sql);
       END IF;
     END LOOP;
@@ -469,6 +473,7 @@ BEGIN
   FOREACH v_bad IN ARRAY ARRAY[a || '/x/../f.webp', a || '/./f.webp', a || '/x/%2Ff.webp', a || '/x/%5cf.webp', a || E'/x/a\\b.webp'] LOOP
     PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observations SET image_key = %L WHERE id = %s', v_bad, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_media_key_invalid', 'invalid key ' || v_bad);
     PERFORM pg_temp.eq(private.media_key_is_valid(v_bad), false, 'is_valid ' || v_bad);
+    PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('UPDATE public.observations SET image_key = %L WHERE id = %s', v_bad, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_media_key_invalid', 'service_role invalid key ' || v_bad);
   END LOOP;
 END $$;
 
@@ -713,6 +718,9 @@ END $$;
 -- ---------------------------------------------------------------
 -- 8. Reference checks use the expression indexes.
 -- ---------------------------------------------------------------
+-- Fresh statistics, so a tiny table does not tie with an older plain index.
+ANALYZE public.observation_images, public.spore_measurements, public.observations,
+        public.spore_measurement_mosaics, public.calibrations;
 SET LOCAL enable_seqscan = off;
 DO $$
 DECLARE
@@ -738,6 +746,58 @@ BEGIN
     EXIT WHEN v_plan LIKE '%retired_media_key_roots_key_root_idx%';
   END LOOP;
   PERFORM pg_temp.eq(v_plan LIKE '%retired_media_key_roots_key_root_idx%', true, 'guard read uses key_root index');
+END $$;
+
+-- ---------------------------------------------------------------
+-- 9. Account erasure of the registry.
+-- ---------------------------------------------------------------
+RESET enable_seqscan;
+DO $$
+DECLARE
+  a text := pg_temp.fx('A');
+  b text := pg_temp.fx('B');
+  v_b_ret bigint;
+  v_role text;
+  v_out jsonb;
+BEGIN
+  INSERT INTO private.media_key_retirements (user_id, image_id, reason, operation_id, delete_keys)
+  VALUES (b::uuid, -1, 'release', gen_random_uuid(), ARRAY[b || '/e/x.webp']) RETURNING id INTO v_b_ret;
+  INSERT INTO private.retired_media_key_roots (user_id, key_root, retirement_id) VALUES (b::uuid, b || '/e/x.webp', v_b_ret);
+  PERFORM pg_temp.eq((SELECT count(*) > 0 FROM private.media_key_retirements WHERE user_id = a::uuid), true, 'A has registry rows');
+
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('SELECT public.erase_account_media_retirements(%L)', a)) LIKE 'ERR:42501:%', true, 'authenticated cannot erase');
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', a)), 'ERR:P0001:sporely_account_not_erasable', 'erase refused without marker and with content');
+  INSERT INTO private.reference_account_deletions (user_id) VALUES (a::uuid) ON CONFLICT DO NOTHING;
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', a)), 'ERR:P0001:sporely_account_not_erasable', 'erase refused while content remains');
+  PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('DELETE FROM private.media_key_retirements WHERE user_id = %L', a)), 'ERR:P0001:sporely_media_key_registry_immutable', 'direct delete refused while content remains');
+
+  -- Remove A's content (as the delete-account DB stages do).
+  DELETE FROM public.spore_measurements WHERE user_id = a::uuid;
+  DELETE FROM public.spore_measurement_mosaics WHERE user_id = a::uuid;
+  DELETE FROM public.observation_images WHERE user_id = a::uuid;
+  DELETE FROM public.observations WHERE user_id = a::uuid;
+  DELETE FROM public.calibrations WHERE user_id = a::uuid;
+  -- Planted foreign rows referencing A's keys belong to B and stay.
+
+  v_out := substr(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', a)), 4)::jsonb;
+  PERFORM pg_temp.eq(v_out ->> 'status', 'erased', 'erase succeeds');
+  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements WHERE user_id = a::uuid)
+                     + (SELECT count(*) FROM private.retired_media_key_roots WHERE user_id = a::uuid), 0::bigint, 'A registry rows gone');
+  PERFORM pg_temp.eq(pg_temp.status(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', a))), 'erased', 'erase idempotent');
+  -- Everyone else stays immutable.
+  PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('DELETE FROM private.retired_media_key_roots WHERE user_id = %L', b)), 'ERR:P0001:sporely_media_key_registry_immutable', 'B roots still immutable');
+  PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('DELETE FROM private.media_key_retirements WHERE id = %s', v_b_ret)), 'ERR:P0001:sporely_media_key_registry_immutable', 'B record still immutable');
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', b)), 'ERR:P0001:sporely_account_not_erasable', 'B not erasable');
+  PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, 'TRUNCATE private.retired_media_key_roots'), 'ERR:P0001:sporely_media_key_registry_immutable', 'TRUNCATE still refused');
+
+  -- Finish the account deletion; then no role can attach a key under A's prefix.
+  DELETE FROM public.profiles WHERE id = a::uuid;
+  DELETE FROM auth.users WHERE id = a::uuid;
+  FOREACH v_role IN ARRAY ARRAY['authenticated', 'service_role', 'postgres'] LOOP
+    PERFORM pg_temp.eq(pg_temp.run(v_role, b::uuid, format('UPDATE public.observations SET image_key = %L WHERE id = %s', a || '/r1/photo.webp', pg_temp.fxi('relcover.obs'))), 'ERR:42501:sporely_media_key_foreign', v_role || ' cannot attach an erased prefix (cover)');
+    PERFORM pg_temp.eq(pg_temp.run(v_role, b::uuid, format('INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel, image_storage_path) VALUES (%L, %L, current_date, 1, %L)', b, 'er' || v_role, a || '/c/x.webp')), 'ERR:42501:sporely_media_key_foreign', v_role || ' cannot attach an erased prefix (calibration)');
+  END LOOP;
+  PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel, image_storage_path) VALUES (%L, %L, current_date, 1, %L)', a, 'erx', a || '/c/x.webp')) LIKE 'ERR:23503:%', true, 'no row can carry the erased uid');
 END $$;
 
 SELECT 'PASS: media_key_retirement_test';

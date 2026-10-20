@@ -276,12 +276,45 @@ REVOKE ALL ON SEQUENCE private.media_key_retirements_id_seq
 GRANT SELECT ON TABLE private.media_key_retirements, private.retired_media_key_roots
   TO service_role;
 
+-- Account erasure (GDPR storage limitation / erasure): the ONLY way registry
+-- rows may be deleted. A user's rows are erasable only when BOTH hold:
+--   * the server-owned account-deletion marker private.reference_account_deletions
+--     exists for the user. It is written only by the service-role-only
+--     delete_reference_library_for_account RPC, the account-deletion stage,
+--     and disappears with the auth user (ON DELETE CASCADE);
+--   * no row of the user remains in observations, observation_images,
+--     spore_measurements, spore_measurement_mosaics or calibrations.
+-- This is a data condition checked inside the trigger, not a session flag:
+-- no GUC or caller-supplied value can make another user's rows erasable.
+-- Why erasing is safe: no surviving row can carry the deleted uid (the five
+-- tables reference profiles/auth.users), and the guard refuses any new or
+-- changed key outside the writing row owner's prefix for every role, so no
+-- row can ever attach a key under the erased '<uid>/' prefix again; the
+-- retired roots of that prefix are therefore never needed afterwards.
+CREATE FUNCTION private.media_key_registry_erasable(p_user_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = ''
+AS $$
+  SELECT p_user_id IS NOT NULL
+     AND EXISTS (SELECT 1 FROM private.reference_account_deletions d WHERE d.user_id = p_user_id)
+     AND NOT EXISTS (SELECT 1 FROM public.observations x WHERE x.user_id = p_user_id)
+     AND NOT EXISTS (SELECT 1 FROM public.observation_images x WHERE x.user_id = p_user_id)
+     AND NOT EXISTS (SELECT 1 FROM public.spore_measurements x WHERE x.user_id = p_user_id)
+     AND NOT EXISTS (SELECT 1 FROM public.spore_measurement_mosaics x WHERE x.user_id = p_user_id)
+     AND NOT EXISTS (SELECT 1 FROM public.calibrations x WHERE x.user_id = p_user_id)
+$$;
+
 CREATE FUNCTION private.media_key_registry_immutable()
 RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = ''
 AS $$
 BEGIN
+  IF TG_OP = 'DELETE' AND private.media_key_registry_erasable(OLD.user_id) THEN
+    RETURN OLD;  -- account erasure only (see media_key_registry_erasable)
+  END IF;
   IF TG_OP = 'UPDATE'
      AND TG_TABLE_NAME = 'media_key_retirements'
      AND (pg_catalog.to_jsonb(NEW) - 'last_swept_at' - 'last_attempted_at')
@@ -480,22 +513,19 @@ BEGIN
 
   PERFORM private.media_key_require_read_committed();
 
-  -- For an end-user caller (auth.uid() set) every new or changed key must be
-  -- well-formed and live under the row owner's prefix. (Trusted roles may
-  -- still write legacy rows; release and claim refuse a malformed stored key
-  -- with key_invalid, so such a key is never retired or deleted.) Both are checked before any key lock or registry read, so a
+  -- Every new or changed key must be well-formed and live under the row
+  -- owner's prefix, for EVERY role (service_role and migrations included; no
+  -- exemption mechanism exists). Keys a write leaves unchanged are not
+  -- re-validated. Both checks run before any key lock or registry read, so a
   -- foreign key neither waits on nor reveals another owner's retirement
-  -- state: it always gets this one refusal. Trusted server roles (no
-  -- auth.uid(): service_role, migrations) are not prefix-checked: existing
-  -- server paths and fixtures write legacy keys; release, claim and sweep
-  -- ignore any reference whose owner does not own the key's prefix.
+  -- state: it always gets this one refusal. Release, claim and sweep also
+  -- ignore any legacy reference whose owner does not own the key's prefix.
   FOREACH v_val IN ARRAY v_changed LOOP
-    IF auth.uid() IS NOT NULL AND NOT private.media_key_is_valid(v_val) THEN
+    IF NOT private.media_key_is_valid(v_val) THEN
       RAISE EXCEPTION 'This media key is not a valid Sporely storage key. Nothing was changed in the cloud.'
         USING ERRCODE = 'P0001', HINT = 'sporely_media_key_invalid';
     END IF;
-    IF auth.uid() IS NOT NULL
-       AND ((v_new ->> 'user_id') IS NULL OR NOT pg_catalog.starts_with(v_val, (v_new ->> 'user_id') || '/')) THEN
+    IF (v_new ->> 'user_id') IS NULL OR NOT pg_catalog.starts_with(v_val, (v_new ->> 'user_id') || '/') THEN
       RAISE EXCEPTION 'A media key must live under the row owner''s storage prefix. Nothing was changed in the cloud.'
         USING ERRCODE = '42501', HINT = 'sporely_media_key_foreign';
     END IF;
@@ -1105,6 +1135,32 @@ BEGIN
 END
 $$;
 
+-- Account erasure of the registry (delete-account stage
+-- erase_media_retirements). Refuses unless media_key_registry_erasable.
+CREATE FUNCTION private.erase_account_media_retirements_core(p_user_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+SET lock_timeout = '5s'
+AS $$
+DECLARE
+  v_roots integer;
+  v_records integer;
+BEGIN
+  PERFORM private.media_key_require_read_committed();
+  IF NOT private.media_key_registry_erasable(p_user_id) THEN
+    RAISE EXCEPTION 'Media-key registry rows can be erased only for an account whose deletion is in progress and whose content is gone.'
+      USING ERRCODE = 'P0001', HINT = 'sporely_account_not_erasable';
+  END IF;
+  DELETE FROM private.retired_media_key_roots r WHERE r.user_id = p_user_id;
+  GET DIAGNOSTICS v_roots = ROW_COUNT;
+  DELETE FROM private.media_key_retirements r WHERE r.user_id = p_user_id;
+  GET DIAGNOSTICS v_records = ROW_COUNT;
+  RETURN pg_catalog.jsonb_build_object('status', 'erased', 'roots', v_roots, 'records', v_records);
+END
+$$;
+
 -- =============================================================
 -- 8. Public wrappers (SECURITY DEFINER, empty search_path).
 -- =============================================================
@@ -1167,6 +1223,15 @@ AS $$
   SELECT * FROM private.claim_retired_key_sweep_core(p_limit)
 $$;
 
+CREATE FUNCTION public.erase_account_media_retirements(p_user_id uuid)
+RETURNS jsonb
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT private.erase_account_media_retirements_core(p_user_id)
+$$;
+
 CREATE FUNCTION public.record_retired_key_sweep(p_retirement_ids bigint[])
 RETURNS integer
 LANGUAGE sql
@@ -1201,6 +1266,9 @@ REVOKE EXECUTE ON FUNCTION
   private.claim_retired_key_sweep_core(integer),
   private.record_retired_key_sweep_core(bigint[]),
   private.media_key_is_retired_core(uuid, text),
+  private.media_key_registry_erasable(uuid),
+  private.erase_account_media_retirements_core(uuid),
+  public.erase_account_media_retirements(uuid),
   public.release_observation_image_bytes(uuid, bigint, text, text, text),
   public.media_key_is_retired(uuid, text),
   public.claim_tombstoned_image_purge(uuid, bigint, integer),
@@ -1219,6 +1287,7 @@ GRANT EXECUTE ON FUNCTION public.media_key_is_retired(uuid, text) TO service_rol
 GRANT EXECUTE ON FUNCTION public.claim_tombstoned_image_purge(uuid, bigint, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_retired_key_sweep(integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.record_retired_key_sweep(bigint[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.erase_account_media_retirements(uuid) TO service_role;
 
 -- finalize_observation_image_purge keeps its 20260809130000 grants
 -- (service_role only); CREATE OR REPLACE preserves them.
