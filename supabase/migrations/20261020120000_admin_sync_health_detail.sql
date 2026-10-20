@@ -58,13 +58,13 @@ $$;
 
 -- Desktop devices seen in the last 30 days.
 CREATE OR REPLACE FUNCTION private.sync_health_desktop_devices()
-RETURNS TABLE (user_id uuid, device_id uuid, app_version text, last_seen_at timestamptz,
+RETURNS TABLE (user_id uuid, device_id uuid, app_version text, first_seen_at timestamptz, last_seen_at timestamptz,
                in_d7 boolean, parsed integer[])
 LANGUAGE sql
 STABLE
 SET search_path = ''
 AS $$
-  SELECT rcd.user_id, rcd.device_id, rcd.app_version, rcd.last_seen_at,
+  SELECT rcd.user_id, rcd.device_id, rcd.app_version, rcd.first_seen_at, rcd.last_seen_at,
          rcd.last_seen_at >= pg_catalog.now() - interval '7 days',
          private.sync_health_parse_version(rcd.app_version)
     FROM public.reference_client_devices rcd
@@ -680,19 +680,22 @@ BEGIN
     SELECT count(*) INTO v_total
       FROM private.sync_health_desktop_devices() d WHERE d.in_d7 AND d.parsed < v_min;
     SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
-             'device_id', t.device_id,
              'user_id', t.user_id,
              'username', t.username,
              'client', 'desktop_app',
              'app_version', t.app_version,
+             'first_seen_at', t.first_seen_at,
              'last_seen_at', t.last_seen_at)
-           ORDER BY t.last_seen_at DESC, t.device_id), '[]'::jsonb)
+           ORDER BY t.ord), '[]'::jsonb)
       INTO v_rows
-      FROM (SELECT d.device_id, d.user_id, p.username, d.app_version, d.last_seen_at
+      -- device_id is a per-install identifier: used only as the hidden
+      -- tiebreaker, never returned.
+      FROM (SELECT d.user_id, p.username, d.app_version, d.first_seen_at, d.last_seen_at,
+                   row_number() OVER (ORDER BY d.last_seen_at DESC, d.first_seen_at DESC, d.user_id, d.device_id) AS ord
               FROM private.sync_health_desktop_devices() d
               LEFT JOIN public.profiles p ON p.id = d.user_id
              WHERE d.in_d7 AND d.parsed < v_min
-             ORDER BY d.last_seen_at DESC, d.device_id
+             ORDER BY d.last_seen_at DESC, d.first_seen_at DESC, d.user_id, d.device_id
              LIMIT v_limit) t;
 
   ELSIF v_family = 'null_sync_key_after_cutoff' THEN

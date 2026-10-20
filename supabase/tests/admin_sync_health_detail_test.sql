@@ -22,7 +22,7 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 
-SELECT plan(80);
+SELECT plan(81);
 
 -- ---------------------------------------------------------------
 -- Helpers.
@@ -330,8 +330,8 @@ SELECT ok((SELECT NOT (e ? 'detail_key') FROM s, jsonb_array_elements(public.adm
 
 SELECT is((SELECT (j #> '{rows,0}') - 'created_at'::text FROM d WHERE key = 'write_block'),
   '{"client_version": "0.9.27", "reason": "stop"}'::jsonb, 'write_block row fields');
-SELECT is((SELECT (j #> '{rows,0}') - 'last_seen_at'::text FROM d WHERE key = 'below_min_desktop'),
-  jsonb_build_object('device_id', '00000000-0000-4000-8000-0000000e0001', 'user_id', '00000000-0000-4000-8000-00000005b002',
+SELECT is((SELECT (j #> '{rows,0}') - 'last_seen_at'::text - 'first_seen_at'::text FROM d WHERE key = 'below_min_desktop'),
+  jsonb_build_object('user_id', '00000000-0000-4000-8000-00000005b002',
                      'username', '<b>Tom & "J''s"</b>', 'client', 'desktop_app', 'app_version', '0.9.25'),
   'below_min_desktop lists only the d7 device below 0.9.26, with client and app_version');
 SELECT is((SELECT (j #> '{rows,0}') - 'created_at'::text FROM d WHERE key = 'null_sync_key_after_cutoff.observations.desktop'),
@@ -354,6 +354,9 @@ SELECT ok((SELECT bool_and(r ->> 'username' = '<b>Tom & "J''s"</b>')
   'usernames are returned raw (no HTML escaping) on every row');
 SELECT ok((SELECT bool_and(j::text !~ '(example\.test|email)') FROM d), 'no email appears in any detail output');
 SELECT ok((SELECT bool_and(NOT (r ? 'email')) FROM d, jsonb_array_elements(j -> 'rows') r), 'no row has an email field');
+SELECT ok((SELECT bool_and(NOT (r ? 'device_id')) FROM d, jsonb_array_elements(j -> 'rows') r)
+          AND (SELECT j::text !~ '0000000e000' FROM d WHERE key = 'below_min_desktop'),
+  'no detail row carries device_id (a per-install identifier)');
 
 -- Ordering: newest first, then by id.
 SELECT is(
@@ -361,7 +364,8 @@ SELECT is(
     WHERE key = 'null_sync_key_after_cutoff.observation_images.other'),
   (SELECT array_agg(id ORDER BY created_at DESC, id) FROM (
      SELECT i.id, i.created_at FROM public.observation_images i
-      WHERE i.sync_key IS NULL AND i.desktop_id IS NULL ORDER BY i.created_at DESC, i.id LIMIT 200) t),
+      WHERE i.deleted_at IS NULL AND i.purged_at IS NULL AND i.sync_key IS NULL AND i.desktop_id IS NULL
+        AND i.created_at >= '2026-10-13 00:00:00+00'::timestamptz ORDER BY i.created_at DESC, i.id LIMIT 200) t),
   'rows are ordered newest first, then by id ascending');
 
 -- ---------------------------------------------------------------
