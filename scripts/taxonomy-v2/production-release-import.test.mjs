@@ -164,12 +164,13 @@ const { writeFile: stage4wWrite } = await import('node:fs/promises');
 const STAGE4W_RELEASE = 'tax-2026.09.30-01';
 const dyntaxaRow = { external_id: 'urn:lsid:dyntaxa.se:Taxon:3423', external_name: 'Pholiotina rugosa', id_role: 'accepted', is_preferred: false, namespace: 'dyntaxa_taxon_id', note: 'authoritative_bridge:manual_approved_exact', source_system: 'dyntaxa', taxon_id: 83668 };
 const national = (sv) => Object.fromEntries(['no', 'sv'].flatMap(c => ['', '_source_system', '_namespace', '_external_id'].map(s => [`preferred_scientific_name_${c}${s}`, null])).concat(sv ? [['preferred_scientific_name_sv', 'Pholiotina rugosa'], ['preferred_scientific_name_sv_source_system', 'dyntaxa'], ['preferred_scientific_name_sv_namespace', 'dyntaxa_taxon_id'], ['preferred_scientific_name_sv_external_id', 'urn:lsid:dyntaxa.se:Taxon:3423']] : []));
-async function stage4wRelease(externalExtra, { withDyntaxa = true } = {}) {
+const APPROVED = { status: 'candidate_build_only', export_use: 'release', importable: true, decision: { content_release_id: STAGE4W_RELEASE, sqlite_sha256: 'b'.repeat(64), approved_by: 'test', approved_at: '2026-10-23T00:00:00Z', decision_reference: 'test' } };
+async function stage4wRelease(externalExtra, { withDyntaxa = true, approval = APPROVED, gz = 'a'.repeat(64) } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stage4w-release-'));
   const sha = bytes => stage4wHash('sha256').update(bytes).digest('hex');
   const taxon = (id, genus, epithet, rank, extra = {}) => ({ canonical_external_id: `COL-${id}`, canonical_scientific_name: epithet ? `${genus} ${epithet}` : genus, canonical_source_system: 'col_xr', family: 'Bolbitiaceae', genus, parent_taxon_id: null, source_system: 'col_xr', specific_epithet: epithet, taxon_id: id, taxon_rank: rank, taxonomic_status: 'accepted', ...national(false), ...extra });
   const data = {
-    'taxonomy_release.jsonl': [{ content_release_id: STAGE4W_RELEASE, taxonomy_schema_version: 2, scope_predicate_id: 'global_macrofungi_policy_v1', source_gz_sha256: 'a'.repeat(64) }],
+    'taxonomy_release.jsonl': [{ content_release_id: STAGE4W_RELEASE, taxonomy_schema_version: 2, scope_predicate_id: 'global_macrofungi_policy_v1', source_gz_sha256: gz }],
     'taxon.jsonl': [taxon(83668, 'Conocybe', 'rugosa', 'species', national(withDyntaxa)), taxon(617026, 'Conocybe', 'vexans', 'species'), taxon(900, 'Conocybe', '', 'genus')],
     'scientific_name.jsonl': [...(withDyntaxa ? [{ taxon_id: 83668, language_code: 'sci', scientific_name: 'Pholiotina rugosa', is_preferred_name: false, source: 'dyntaxa', note: 'manual_approved_exact' }] : []), { taxon_id: 83668, language_code: 'sci', scientific_name: 'Pholiotina rugosa', is_preferred_name: false, source: 'nortaxa', note: 'manual_approved_exact' }],
     'vernacular.jsonl': [{ taxon_id: 83668, language_code: 'nb', vernacular_name: 'slank ringkjeglesopp', is_preferred_name: true, source: 'nortaxa' }],
@@ -185,13 +186,13 @@ async function stage4wRelease(externalExtra, { withDyntaxa = true } = {}) {
     files.push({ name, bytes: bytes.length, sha256: sha(bytes), row_count: rows.length });
     total += bytes.length;
   }
-  const scope = Buffer.from(JSON.stringify({ release_id: STAGE4W_RELEASE, policy_sha256: 'p', source_hashes: { sqlite_gz_sha256: 'a'.repeat(64) } }));
+  const scope = Buffer.from(JSON.stringify({ release_id: STAGE4W_RELEASE, policy_sha256: 'p', source_hashes: { sqlite_gz_sha256: gz } }));
   await stage4wWrite(path.join(root, 'scope-manifest.json'), scope);
   const archive = Buffer.from('archive');
   await stage4wWrite(path.join(root, 'scoped-export.jsonl.gz'), archive);
   await stage4wWrite(path.join(root, `desktop-${STAGE4W_RELEASE}.sqlite3`), 'sqlite');
   await stage4wWrite(path.join(root, `desktop-${STAGE4W_RELEASE}.sqlite3.gz`), 'sqlite-gz');
-  await stage4wWrite(path.join(root, 'taxonomy_export_manifest.json'), JSON.stringify({ format: 'sporely-global-macrofungi-export-v1', release_id: STAGE4W_RELEASE, files, source_hashes: { sqlite_gz_sha256: 'a'.repeat(64) }, scope_manifest_sha256: sha(scope), policy_sha256: 'p', compressed_dataset_bytes: archive.length, compressed_dataset_sha256: sha(archive), uncompressed_dataset_bytes: total }));
+  await stage4wWrite(path.join(root, 'taxonomy_export_manifest.json'), JSON.stringify({ format: 'sporely-global-macrofungi-export-v1', release_id: STAGE4W_RELEASE, files, source_hashes: { sqlite_gz_sha256: gz }, scope_manifest_sha256: sha(scope), policy_sha256: 'p', compressed_dataset_bytes: archive.length, compressed_dataset_sha256: sha(archive), uncompressed_dataset_bytes: total, ...(approval === 'absent' ? {} : { release_approval: approval }) }));
   return root;
 }
 
@@ -238,4 +239,33 @@ test('Stage 4W: production preparation of a release without Dyntaxa is unchanged
     assert.ok(sql.includes("FROM (VALUES ('Conocybe rugosa'),('Pholiotina rugosa'),('Conocybe'),('slank ringkjeglesopp')) probe(query);"));
     assert.match(sql, /taxonomy_v2_national_name_errors\('tax-2026\.09\.30-01'\)/);
   } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+// Release approval: the scoped export manifest's release_approval marker.
+const VALIDATION_ONLY = { status: 'candidate_build_only', export_use: 'candidate_validation_only', importable: false };
+for (const [label, options, pattern] of [
+  ['a validation-only candidate export', { approval: VALIDATION_ONLY }, /not importable \(export_use: candidate_validation_only\)/],
+  ['an export without release_approval that is not a pinned pre-marker release', { approval: 'absent' }, /no release_approval and is not a pinned pre-marker release/],
+  ['a stripped marker on a pinned release ID with a different source', { approval: 'absent', gz: 'c'.repeat(64) }, /not a pinned pre-marker release/],
+  ['an approval bound to another release', { approval: { ...APPROVED, decision: { ...APPROVED.decision, content_release_id: 'tax-2026.10.23-01' } } }, /bound to a different release/],
+  ['an importable marker without a decision', { approval: { ...APPROVED, decision: undefined } }, /no bound release decision/],
+  ['a null marker', { approval: null }, /must be an object/],
+]) test(`release approval: production preparation refuses ${label}`, async () => {
+  const root = await stage4wRelease([], options);
+  const out = await mkdtemp(path.join(os.tmpdir(), 'approval-out-'));
+  try {
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE }), pattern);
+    assert.equal(existsSync(path.join(out, 'import.sql')), false);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+test('release approval: an approved export and a pinned pre-marker release both prepare', async () => {
+  for (const options of [{}, { approval: 'absent', gz: '593cd5379bffd53a81a54735ab0ad99b97e7ef890060d6483bed42e4150e907f' }]) {
+    const root = await stage4wRelease([], options);
+    const out = await mkdtemp(path.join(os.tmpdir(), 'approval-out-'));
+    try {
+      const prepared = await prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE });
+      assert.ok(existsSync(prepared.generated_sql_path));
+    } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+  }
 });
