@@ -23,6 +23,18 @@ const DATASET_FILES = [
   'taxon_redlist.jsonl',
 ];
 const TABLE_FILES = DATASET_FILES.slice(1);
+// Releases exported before the export manifest carried `release_approval`.
+// Only these may be imported without the marker (rollback to an earlier
+// release); any other export missing it is refused, so stripping the marker
+// from a candidate's manifest cannot bypass approval. Pinned by the source
+// gzip SHA-256 that verifyRelease cross-checks across the export manifest,
+// release metadata and scope manifest.
+//   tax-2026.10.07-01: sporely-py database/reference_data/generated/taxonomy_v2/tax-2026.10.07-01.freeze.json
+//   tax-2026.09.30-01: supabase/taxonomy-v3-tax-2026.09.30-01-post-activation-probes.sql
+const PRE_APPROVAL_MARKER_RELEASES = Object.freeze({
+  'tax-2026.10.07-01': 'bff40f0d5d70ec2be47fe415dfd4cfc623a7841553f8a7d928ed801117ca21c5',
+  'tax-2026.09.30-01': '593cd5379bffd53a81a54735ab0ad99b97e7ef890060d6483bed42e4150e907f',
+});
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const sqlText = value => `'${String(value).replaceAll("'", "''")}'`;
@@ -84,6 +96,25 @@ function chooseProbes(data) {
   };
 }
 
+function verifyReleaseApproval(manifest, releaseId, sourceGzSha256) {
+  if (!Object.hasOwn(manifest, 'release_approval')) {
+    assert(PRE_APPROVAL_MARKER_RELEASES[releaseId] === sourceGzSha256,
+      'export manifest has no release_approval and is not a pinned pre-marker release');
+    return;
+  }
+  const approval = manifest.release_approval;
+  assert(approval && typeof approval === 'object', 'release_approval must be an object');
+  assert(approval.importable === true, `release_approval is not importable (export_use: ${approval.export_use})`);
+  assert(approval.export_use === 'release', 'release_approval export_use must be release');
+  const decision = approval.decision;
+  assert(decision && typeof decision === 'object', 'release_approval has no bound release decision');
+  assert(decision.content_release_id === releaseId, 'release decision is bound to a different release');
+  assert(/^[0-9a-f]{64}$/.test(String(decision.sqlite_sha256 ?? '')), 'release decision has no SQLite SHA-256');
+  const sourceSqliteSha = manifest.source_hashes?.sqlite_sha256;
+  assert(/^[0-9a-f]{64}$/.test(String(sourceSqliteSha ?? '')), 'export manifest has no source_hashes.sqlite_sha256');
+  assert(sourceSqliteSha === decision.sqlite_sha256, 'release decision SQLite SHA-256 does not match the exported source');
+}
+
 async function verifyRelease(releaseDirectory, TARGET_RELEASE) {
   assert(RELEASE_ID_PATTERN.test(String(TARGET_RELEASE ?? '')), `release ID must look like tax-YYYY.MM.DD-NN, got ${TARGET_RELEASE}`);
   const root = await realpath(releaseDirectory);
@@ -127,6 +158,7 @@ async function verifyRelease(releaseDirectory, TARGET_RELEASE) {
   assert(scopeManifest.release_id === TARGET_RELEASE, 'scope manifest release ID mismatch');
   assert(scopeManifest.policy_sha256 === manifest.policy_sha256, 'scope policy hash mismatch');
   assert(scopeManifest.source_hashes?.sqlite_gz_sha256 === releaseMetadata.source_gz_sha256, 'scope source gzip hash mismatch');
+  verifyReleaseApproval(manifest, TARGET_RELEASE, releaseMetadata.source_gz_sha256);
 
   const archivePath = path.join(root, 'scoped-export.jsonl.gz');
   const archiveInfo = await stat(archivePath);
