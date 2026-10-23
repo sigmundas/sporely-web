@@ -110,6 +110,9 @@ function verifyReleaseApproval(manifest, releaseId, sourceGzSha256) {
   assert(decision && typeof decision === 'object', 'release_approval has no bound release decision');
   assert(decision.content_release_id === releaseId, 'release decision is bound to a different release');
   assert(/^[0-9a-f]{64}$/.test(String(decision.sqlite_sha256 ?? '')), 'release decision has no SQLite SHA-256');
+  const sourceSqliteSha = manifest.source_hashes?.sqlite_sha256;
+  assert(/^[0-9a-f]{64}$/.test(String(sourceSqliteSha ?? '')), 'export manifest has no source_hashes.sqlite_sha256');
+  assert(sourceSqliteSha === decision.sqlite_sha256, 'release decision SQLite SHA-256 does not match the exported source');
 }
 
 async function verifyRelease(releaseDirectory, TARGET_RELEASE) {
